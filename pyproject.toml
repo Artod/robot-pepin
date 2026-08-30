@@ -1,0 +1,9 @@
+[project]
+name = "pepin"
+version = "0.1.0"
+description = "Mobile home robot: a differential-drive IKEA cart with a 6-DoF arm, lidar, and a phone for a face"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "lerobot[feetech]>=0.6.0",
+]

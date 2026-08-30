@@ -1,0 +1,20 @@
+# Local assistant config
+.claude/
+CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OS
+.DS_Store
+
+# Local data and logs
+data/
+*.log
