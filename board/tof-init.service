@@ -1,0 +1,10 @@
+[Unit]
+Description=Assign unique I2C addresses to VL53L1X ToF sensors
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tof_init.sh
+
+[Install]
+WantedBy=multi-user.target
