@@ -6,3 +6,9 @@ connection: &servo-bus
   connector: serialdev,/dev/ttyACM0,1000000n81,local
   options:
     kickolduser: true
+
+connection: &lidar
+  accepter: tcp,3334
+  connector: serialdev,/dev/ttyUSB0,230400n81,local
+  options:
+    kickolduser: true
