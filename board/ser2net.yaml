@@ -1,0 +1,8 @@
+%YAML 1.1
+---
+# Pepin relay: raw TCP to serial bridges
+connection: &servo-bus
+  accepter: tcp,3333
+  connector: serialdev,/dev/ttyACM0,1000000n81,local
+  options:
+    kickolduser: true
