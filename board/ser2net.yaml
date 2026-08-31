@@ -3,12 +3,12 @@
 # Pepin relay: raw TCP to serial bridges
 connection: &servo-bus
   accepter: tcp,3333
-  connector: serialdev,/dev/ttyACM0,1000000n81,local
+  connector: serialdev,/dev/servo-bus,1000000n81,local
   options:
     kickolduser: true
 
 connection: &lidar
   accepter: tcp,3334
-  connector: serialdev,/dev/ttyUSB0,230400n81,local
+  connector: serialdev,/dev/lidar,230400n81,local
   options:
     kickolduser: true

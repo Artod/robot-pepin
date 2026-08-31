@@ -1,0 +1,5 @@
+# Persistent device names for Pepin's USB peripherals.
+# servo bus board: WCH CH343 usb-serial (1a86:55d3)
+# LD19 lidar UART adapter: Silabs CP2102 (10c4:ea60)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", SYMLINK+="servo-bus"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="lidar"
