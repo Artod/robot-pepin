@@ -1,0 +1,27 @@
+{
+  "bus": "/dev/i2c-2",
+  "frame": "robot-centric: left/right are the robot's own left/right",
+  "sensors": {
+    "front": {
+      "address": "0x30",
+      "xshut_gpio_line": 73,
+      "xshut_header_pin": 7,
+      "xshut_controllable": false,
+      "placement": "top shelf, center, facing forward"
+    },
+    "left": {
+      "address": "0x32",
+      "xshut_gpio_line": 70,
+      "xshut_header_pin": 11,
+      "xshut_controllable": true,
+      "placement": "lower left, tilted slightly down"
+    },
+    "right": {
+      "address": "0x31",
+      "xshut_gpio_line": 69,
+      "xshut_header_pin": 13,
+      "xshut_controllable": true,
+      "placement": "lower right, tilted slightly down"
+    }
+  }
+}
