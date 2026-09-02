@@ -19,3 +19,6 @@ venv/
 data/
 logs/
 *.log
+
+# One-off analyses and probes (readable locally, never published)
+scratch/
