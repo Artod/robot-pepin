@@ -5,7 +5,7 @@ import pytest
 
 from pepin.geometry import BaseConfig, BaseGeometry, WheelMotor
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 
 
 def test_repo_config_loads_with_known_motor_layout() -> None:

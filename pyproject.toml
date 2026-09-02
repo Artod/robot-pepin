@@ -38,6 +38,7 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["hardware: needs the live robot (run with --hardware)"]
 
 [tool.mypy]
 python_version = "3.12"
