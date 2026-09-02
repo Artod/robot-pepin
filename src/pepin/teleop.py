@@ -43,6 +43,12 @@ KEY_BINDINGS = {
     "\x1b[B": "backward",
     "\x1b[D": "left",
     "\x1b[C": "right",
+    # Same physical keys on a Russian layout, so driving does not depend on the input language.
+    "ц": "forward",
+    "ы": "backward",
+    "ф": "left",
+    "в": "right",
+    "й": "quit",
 }
 
 
@@ -73,10 +79,12 @@ class KeyReader:
     """Non-blocking single-key reads from the terminal (cbreak mode while open)."""
 
     def __init__(self) -> None:
+        """Binds to stdin; the terminal is only touched inside the ``with`` block."""
         self._fd = sys.stdin.fileno()
         self._saved: list[Any] | None = None
 
     def __enter__(self) -> KeyReader:
+        """Save the terminal settings and switch to cbreak: keys arrive without Enter."""
         self._saved = termios.tcgetattr(self._fd)
         tty.setcbreak(self._fd)
         return self
@@ -87,6 +95,7 @@ class KeyReader:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        """Restore the terminal, so a crash never leaves the shell in cbreak mode."""
         if self._saved is not None:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved)
 

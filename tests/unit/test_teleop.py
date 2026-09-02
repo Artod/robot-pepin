@@ -39,3 +39,10 @@ def test_turning_while_moving_keeps_the_linear_speed() -> None:
 def test_unknown_keys_are_ignored() -> None:
     s = DriveState()
     assert apply_key(s, "x") == s
+
+
+def test_russian_layout_drives_the_same_keys() -> None:
+    latin = apply_key(apply_key(DriveState(), "w"), "a")
+    cyrillic = apply_key(apply_key(DriveState(), "ц"), "ф")
+    assert cyrillic.twist == latin.twist
+    assert apply_key(DriveState(), "й").quit
