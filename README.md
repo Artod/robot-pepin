@@ -50,6 +50,24 @@ odometry and lidar sessions, and is wired for mapping and autonomous navigation 
 | Wheel track | ~505 mm |
 | Servos on a single bus | 10 (IDs 1-10) |
 
+## Mapping: before and after scan matching
+
+Two drives of the same flat, recorded with `scripts/drive.py` and replayed with
+`scripts/build_map.py`. Left: every scan placed where the wheel encoders say the
+robot was — carpet slip over-counts turns by ~14%, so the room smears into a
+ring. Right: each keyframe's pose corrected by a brute-force correlative matcher
+against the map built so far (`src/pepin/scanmatch.py`) — straight walls, a
+corridor, doorways.
+
+| Wheel odometry only | + correlative scan matching |
+| --- | --- |
+| ![lap2, odometry only](docs/figures/lap2_odometry_only.png) | ![lap2, scan matched](docs/figures/lap2_scan_matched.png) |
+| ![lap1, odometry only](docs/figures/lap1_odometry_only.png) | ![lap1, scan matched](docs/figures/lap1_scan_matched.png) |
+
+Occupied cells (p > 0.7) on lap2: 2457 → 1385; 364 of 389 keyframes improved on
+the odometry guess. Loop closure with a pose graph (`src/pepin/posegraph.py`) is
+the next step: the matcher is local and never revisits past poses.
+
 ## Hardware
 
 - IKEA RASKOG cart, differential drive: 2x Feetech STS3215 in continuous-rotation mode,
@@ -103,13 +121,14 @@ tests/       unit and hardware tiers
 
 ## Status and roadmap
 
-**September 2026 — hardware fully integrated and verified.** The base drives under
-keyboard control, odometry closes a forward/back run to within ~10 mm, and the lidar and
-servo bus are served over the air simultaneously. Odometry, lidar, and recording are in
-place as the foundation for what comes next:
+**September 2026 — hardware integrated, first maps built.** The base drives under
+keyboard control, odometry closes a forward/back run to within ~10 mm, the lidar and
+servo bus are served over the air simultaneously, and two recorded drives produce
+clean occupancy maps once scan matching corrects the wheel odometry (see above).
+Next:
 
-1. Occupancy mapping and scan matching
-2. Autonomous navigation
+1. Loop closure: pose-graph optimisation to remove the drift the local matcher cannot see
+2. Live localisation against a saved map, then autonomous navigation
 3. Mobile manipulation with the arm
 4. The phone face and voice
 
