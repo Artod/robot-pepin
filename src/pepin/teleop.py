@@ -2,6 +2,10 @@
 
 The mapping is a pure state machine so it can be unit-tested; the terminal
 plumbing is a thin context manager around cbreak mode.
+
+Driving straight is the common intent, so forward/backward also cancel any
+turn: they adjust the linear speed and zero the turn rate. Turning keys only
+adjust the turn rate and leave the linear speed alone.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ class DriveState:
     quit: bool = False
 
 
+# forward/backward also straighten out (angular -> 0); left/right keep the speed.
 KEY_BINDINGS = {
     "w": "forward",
     "s": "backward",
@@ -42,13 +47,17 @@ KEY_BINDINGS = {
 
 
 def apply_key(state: DriveState, key: str) -> DriveState:
-    """Return the state after one key press; unknown keys change nothing."""
+    """Return the state after one key press; unknown keys change nothing.
+
+    Forward/backward cancel the current turn rate; left/right keep the current
+    linear speed. Space stops, Q stops and quits.
+    """
     action = KEY_BINDINGS.get(key)
     t = state.twist
     if action == "forward":
-        return replace(state, twist=Twist(t.linear + state.linear_step, t.angular))
+        return replace(state, twist=Twist(t.linear + state.linear_step, 0.0))
     if action == "backward":
-        return replace(state, twist=Twist(t.linear - state.linear_step, t.angular))
+        return replace(state, twist=Twist(t.linear - state.linear_step, 0.0))
     if action == "left":
         return replace(state, twist=Twist(t.linear, t.angular + state.angular_step))
     if action == "right":

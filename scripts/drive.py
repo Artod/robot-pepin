@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 """Drive the base from the keyboard while recording odometry and lidar, with a live view.
 
-Keys: W/S change forward speed, A/D change turn rate, space stops, Q quits.
-The control loop runs at 20 Hz; lidar scans arrive from a background thread
-and are recorded and drawn in the robot's odometry frame. Every session is
-written to data/sessions/<timestamp>_<name>.jsonl for offline mapping.
+Keys: W/S change forward speed and straighten out, A/D change turn rate,
+space stops, Q quits. The control loop runs at 20 Hz; lidar scans arrive from
+a background thread and are recorded and drawn in the robot's odometry frame.
+Every session is written to data/sessions/<timestamp>_<name>.jsonl for offline
+mapping. Bus timeouts (wifi hiccups) only cost the affected ticks; a long
+outage stops the wheels and then aborts the session.
 
 Usage:
     uv run python scripts/drive.py --name lap1        # with the rerun viewer
@@ -12,6 +14,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import logging
 import math
 import queue
@@ -24,6 +27,7 @@ from pepin.base import DiffDriveBase
 from pepin.bus import verify_motors
 from pepin.feetech import FeetechTcpClient
 from pepin.geometry import BaseConfig
+from pepin.kinematics import Twist
 from pepin.lidar import LaserScan, LidarMount, LidarStream, TcpSource
 from pepin.log import setup_logging
 from pepin.odometry import DiffDriveOdometry, Pose2D
@@ -35,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 LOOP_HZ = 20
 STATUS_EVERY_S = 2.0
+BUS_STOP_AFTER_S = 1.0  # consecutive bus downtime after which the wheels are stopped
+BUS_GIVE_UP_AFTER_S = 10.0  # consecutive bus downtime after which the session aborts
 
 
 def lidar_thread(mount: LidarMount, scans: "queue.Queue[LaserScan]", stop: threading.Event) -> None:
@@ -119,18 +125,55 @@ def main() -> None:
             t0 = time.monotonic()
             next_status = t0
             latest_scan: LaserScan | None = None
+            bus_failures = 0
+            failing_since: float | None = None
+            stop_commanded = False
             while not state.quit:
                 tick = time.monotonic()
                 key = keys.read()
+                new_twist: Twist | None = None
                 if key is not None:
                     new_state = apply_key(state, key)
                     if new_state.twist != state.twist:
-                        base.set_twist(new_state.twist)
-                        rec.command(new_state.twist)
+                        new_twist = new_state.twist
                     state = new_state
-                travel = base.read_wheel_travel()
-                pose = odom.update(*travel)
-                rec.pose(pose, travel)
+                pose = odom.pose  # kept unchanged on a tick the bus does not answer
+                try:
+                    if new_twist is not None:
+                        base.set_twist(new_twist)
+                        rec.command(new_twist)
+                    travel = base.read_wheel_travel()
+                except TimeoutError as exc:
+                    # The encoders are absolute and the unwrapper tolerates gaps,
+                    # so a lost tick only costs resolution, not odometry validity.
+                    bus_failures += 1
+                    if failing_since is None:
+                        failing_since = tick
+                    down = tick - failing_since
+                    logger.warning(
+                        "bus timeout, tick skipped (%d total, down %.1f s): %s",
+                        bus_failures,
+                        down,
+                        exc,
+                    )
+                    if down >= BUS_GIVE_UP_AFTER_S:
+                        raise RuntimeError("bus unreachable") from exc
+                    if not stop_commanded and down >= BUS_STOP_AFTER_S:
+                        stop_commanded = True
+                        logger.warning("bus down %.1f s: commanding stop", down)
+                        with contextlib.suppress(TimeoutError):
+                            base.stop()
+                else:
+                    if failing_since is not None:
+                        logger.info(
+                            "bus recovered after %.1f s (%d ticks lost)",
+                            tick - failing_since,
+                            bus_failures,
+                        )
+                        failing_since = None
+                        stop_commanded = False
+                    pose = odom.update(*travel)
+                    rec.pose(pose, travel)
                 while not scans.empty():
                     latest_scan = scans.get_nowait()
                     rec.scan(latest_scan)
