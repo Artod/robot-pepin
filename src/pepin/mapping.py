@@ -33,6 +33,7 @@ class GridSpec:
 
     @property
     def shape(self) -> tuple[int, int]:
+        """Grid size in cells as (rows, cols) = (height, width), rounded up."""
         return (
             math.ceil(self.height_m / self.resolution_m),
             math.ceil(self.width_m / self.resolution_m),
@@ -51,6 +52,7 @@ class OccupancyGrid:
     """Log-odds occupancy grid; rows are y, columns are x."""
 
     def __init__(self, spec: GridSpec) -> None:
+        """Allocates the log-odds array for ``spec``; zero everywhere means "unknown"."""
         self.spec = spec
         self.log_odds: NDArray[np.float64] = np.zeros(spec.shape, dtype=np.float64)
 
@@ -61,11 +63,16 @@ class OccupancyGrid:
         return np.column_stack((rows, cols)).astype(np.int64)
 
     def _inside(self, cells: NDArray[np.int64]) -> NDArray[np.bool_]:
+        """Boolean mask of the (N, 2) cells that actually land on the grid."""
         rows, cols = self.spec.shape
         return (cells[:, 0] >= 0) & (cells[:, 0] < rows) & (cells[:, 1] >= 0) & (cells[:, 1] < cols)
 
     def integrate(self, pose: Pose2D, points_robot: NDArray[np.float64]) -> None:
-        """Add one scan taken at ``pose``: free space along each beam, a hit at its end."""
+        """Add one scan taken at ``pose``: free space along each beam, a hit at its end.
+
+        ``points_robot`` is (N, 2) meters in the robot frame; cells gain
+        +0.85 log-odds per hit, -0.4 per crossing, clamped to +-5.
+        """
         if len(points_robot) == 0:
             return
         hits = transform_to_world(points_robot, pose)

@@ -36,6 +36,7 @@ for _i in range(256):
 
 
 def crc8(data: bytes) -> int:
+    """CRC8 over ``data``; for a frame, pass its first 46 bytes and compare with the 47th."""
     crc = 0
     for byte in data:
         crc = _CRC_TABLE[crc ^ byte]
@@ -55,11 +56,17 @@ class FrameParser:
     """Extracts CRC-valid frames from a byte stream, resynchronising on junk."""
 
     def __init__(self) -> None:
+        """Starts with an empty buffer; ``frames`` and ``crc_failures`` count the stream health."""
         self._buf = bytearray()
         self.frames = 0
         self.crc_failures = 0
 
     def feed(self, data: bytes) -> list[LidarFrame]:
+        """Append raw bytes and return the frames they complete.
+
+        Bytes that do not parse are dropped, so joining the stream mid-frame or
+        losing a chunk costs one frame instead of desynchronising for good.
+        """
         self._buf += data
         frames: list[LidarFrame] = []
         while True:
@@ -81,6 +88,8 @@ class FrameParser:
 
 
 def _decode(raw: bytes) -> LidarFrame:
+    """One 47-byte frame into 12 points; per-point angles are interpolated linearly
+    between the frame's start and end angle (both in 0.01 deg units)."""
     speed, start_angle = struct.unpack_from("<HH", raw, 2)
     end_angle, timestamp = struct.unpack_from("<HH", raw, 42)
     step = ((end_angle - start_angle) % 36000) / (POINTS_PER_FRAME - 1)
@@ -110,12 +119,15 @@ class LidarMount:
 
     @classmethod
     def from_json(cls, path: str | Path) -> LidarMount:
+        """Load the mount calibration written by the alignment scripts (``config/lidar.json``)."""
         with open(path) as f:
             data = json.load(f)
         data["masked_sectors_deg"] = tuple(tuple(s) for s in data.get("masked_sectors_deg", ()))
         return cls(**data)
 
     def is_masked(self, sensor_angle_deg: float) -> bool:
+        """True inside a blocked sector (cart posts, the mast) — those returns are the
+        robot seeing itself. Sectors may wrap through zero, e.g. (350, 10)."""
         a = sensor_angle_deg % 360.0
         return any(
             (lo <= a <= hi) if lo <= hi else (a >= lo or a <= hi)
@@ -123,6 +135,8 @@ class LidarMount:
         )
 
     def to_robot_angle_rad(self, sensor_angle_deg: float) -> float:
+        """Sensor degrees to a robot-frame bearing in radians, CCW from forward:
+        undo the upside-down mount (mirror), then subtract the forward offset."""
         deg = (360.0 - sensor_angle_deg) if self.mirror else sensor_angle_deg
         return math.radians((deg - self.yaw_offset_deg) % 360.0)
 
@@ -138,7 +152,11 @@ class LaserScan:
     speed_rps: float
 
     def points_xy(self, mount: LidarMount) -> NDArray[np.float64]:
-        """Valid returns as (N, 2) Cartesian points in the robot frame, meters."""
+        """Valid returns as (N, 2) Cartesian points in the robot frame, meters.
+
+        NaN ranges are dropped and the sensor's mounting offset is added, so the
+        points are referred to the wheel-axle centre and can be mapped directly.
+        """
         ok = ~np.isnan(self.ranges)
         r, a = self.ranges[ok], self.angles[ok]
         return np.column_stack((mount.x_m + r * np.cos(a), mount.y_m + r * np.sin(a)))
@@ -148,6 +166,7 @@ class ScanAssembler:
     """Groups consecutive frames into revolutions, applying the mount geometry."""
 
     def __init__(self, mount: LidarMount) -> None:
+        """``mount`` supplies the mirroring, forward offset, range limits and masked sectors."""
         self._mount = mount
         self._angles: list[float] = []
         self._ranges: list[float] = []
@@ -178,6 +197,11 @@ class ScanAssembler:
         return completed
 
     def _finish(self, speed_dps: float) -> LaserScan | None:
+        """Close the accumulated revolution into a scan and start a fresh one.
+
+        Stamped with ``time.monotonic()`` at the wrap, spin speed averaged over the
+        revolution's frames. Returns None if nothing was accumulated yet.
+        """
         if not self._angles:
             return None
         scan = LaserScan(
@@ -194,25 +218,32 @@ class ScanAssembler:
 class ByteSource(Protocol):
     """Anything that yields raw lidar bytes: a serial port or a bridge socket."""
 
-    def read(self, max_bytes: int) -> bytes: ...
+    def read(self, max_bytes: int) -> bytes:
+        """Up to ``max_bytes`` of stream; empty when nothing arrived before the timeout."""
+        ...
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        """Release the port or socket."""
+        ...
 
 
 class TcpSource:
     """Raw bytes from the board's ser2net bridge."""
 
     def __init__(self, host: str, port: int, timeout_s: float = 0.5) -> None:
+        """Connects to ser2net at ``host:port``; ``timeout_s`` bounds a single read."""
         self._sock = socket.create_connection((host, port), timeout=2.0)
         self._sock.settimeout(timeout_s)
 
     def read(self, max_bytes: int) -> bytes:
+        """Whatever the socket has, up to ``max_bytes``; empty on timeout, not an error."""
         try:
             return self._sock.recv(max_bytes)
         except TimeoutError:
             return b""
 
     def close(self) -> None:
+        """Close the bridge socket; the sensor keeps spinning on the robot."""
         self._sock.close()
 
 
@@ -220,15 +251,18 @@ class SerialSource:
     """Raw bytes from a directly attached UART adapter."""
 
     def __init__(self, port: str, timeout_s: float = 0.5) -> None:
+        """Opens the tty at ``port`` at the LD19's fixed 230400 baud."""
         import serial  # pyserial; only needed for direct USB use
 
         self._ser = serial.Serial(port, BAUDRATE, timeout=timeout_s)
 
     def read(self, max_bytes: int) -> bytes:
+        """Up to ``max_bytes``, returning whatever arrived before the port timeout."""
         data: bytes = self._ser.read(max_bytes)
         return data
 
     def close(self) -> None:
+        """Close the serial port."""
         self._ser.close()
 
 
@@ -236,11 +270,18 @@ class LidarStream:
     """Iterates full-revolution scans from a byte source."""
 
     def __init__(self, source: ByteSource, mount: LidarMount) -> None:
+        """Wires a byte source to a parser and assembler; ``parser`` stays public so a
+        caller can watch the frame and CRC-failure counts while driving."""
         self._source = source
         self.parser = FrameParser()
         self._assembler = ScanAssembler(mount)
 
     def scans(self) -> Iterator[LaserScan]:
+        """Yield one :class:`LaserScan` per revolution, forever.
+
+        Each read blocks up to the source's own timeout, so a silent sensor costs
+        a slow poll rather than a busy loop.
+        """
         while True:
             for frame in self.parser.feed(self._source.read(4096)):
                 scan = self._assembler.feed(frame)
@@ -248,4 +289,5 @@ class LidarStream:
                     yield scan
 
     def close(self) -> None:
+        """Close the byte source; any partly assembled revolution is discarded."""
         self._source.close()

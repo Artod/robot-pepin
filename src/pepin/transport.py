@@ -26,6 +26,8 @@ class SerialBridge:
     """
 
     def __init__(self, tcp_port: int, link: str | Path, host: str = DEFAULT_HOST) -> None:
+        """``tcp_port`` is the ser2net port on ``host``; ``link`` is where the local pty
+        symlink will be created. Nothing is started until :meth:`open`."""
         if shutil.which("socat") is None:
             raise RuntimeError("socat is required for SerialBridge (brew install socat)")
         self._target = f"tcp:{host}:{tcp_port}"
@@ -34,6 +36,7 @@ class SerialBridge:
 
     @property
     def path(self) -> Path:
+        """Where the pty appears; only usable between :meth:`open` and :meth:`close`."""
         return self._link
 
     def open(self, timeout_s: float = 3.0, settle_s: float = 0.5) -> Path:
@@ -59,12 +62,14 @@ class SerialBridge:
         return self._link
 
     def close(self) -> None:
+        """Terminate the socat forwarder; the pty disappears with it."""
         if self._proc is not None and self._proc.poll() is None:
             self._proc.terminate()
             self._proc.wait(timeout=2)
         self._proc = None
 
     def __enter__(self) -> Path:
+        """Start the forwarder and hand back the pty path to open as a serial port."""
         return self.open()
 
     def __exit__(
@@ -73,4 +78,5 @@ class SerialBridge:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        """Tear the bridge down; the pty path becomes invalid."""
         self.close()

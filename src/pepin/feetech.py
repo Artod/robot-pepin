@@ -53,15 +53,18 @@ REGISTERS = {
 
 
 def checksum(body: bytes) -> int:
+    """Low byte of the inverted sum over ``id .. last parameter`` (the header is excluded)."""
     return (~sum(body)) & 0xFF
 
 
 def build_packet(motor_id: int, instruction: int, params: bytes = b"") -> bytes:
+    """One instruction packet ready for the wire, checksum appended."""
     body = bytes([motor_id, len(params) + 2, instruction]) + params
     return HEADER + body + bytes([checksum(body)])
 
 
 def encode_value(value: int, register: Register) -> bytes:
+    """Signed value to the register's little-endian bytes, sign in bit 15 where it applies."""
     raw = value
     if register.sign_magnitude:
         raw = (abs(value) & 0x7FFF) | (0x8000 if value < 0 else 0)
@@ -69,6 +72,7 @@ def encode_value(value: int, register: Register) -> bytes:
 
 
 def decode_value(data: bytes, register: Register) -> int:
+    """Register bytes back to a signed integer (ticks, or ticks/s for velocities)."""
     raw = int.from_bytes(data, "little")
     if register.sign_magnitude and raw & 0x8000:
         return -(raw & 0x7FFF)
@@ -77,6 +81,8 @@ def decode_value(data: bytes, register: Register) -> int:
 
 @dataclass(frozen=True)
 class StatusPacket:
+    """One servo reply: who answered, its error byte, and the raw parameter bytes."""
+
     motor_id: int
     error: int
     params: bytes
@@ -89,9 +95,11 @@ class PacketParser:
         self._buf = bytearray()
 
     def reset(self) -> None:
+        """Drop half-parsed bytes; after a flush they can only belong to a dead transaction."""
         self._buf.clear()
 
     def feed(self, data: bytes) -> list[StatusPacket]:
+        """Append received bytes and return every complete, checksum-valid reply in them."""
         self._buf += data
         packets: list[StatusPacket] = []
         while True:
@@ -133,6 +141,8 @@ class FeetechTcpClient:
         timeout_s: float = 0.2,
         retries: int = 2,
     ) -> None:
+        """``motors`` maps names to bus ids; ``timeout_s`` is the deadline for one reply
+        (~15 ms round trip over wifi) and ``retries`` the extra attempts before raising."""
         self._address = (host, port)
         self._names = dict(motors)
         self._ids = {motor_id: name for name, motor_id in motors.items()}
@@ -145,17 +155,21 @@ class FeetechTcpClient:
     # -- connection -------------------------------------------------------
 
     def connect(self) -> None:
+        """Open the bridge socket with Nagle disabled and drop whatever ser2net buffered."""
         self._sock = socket.create_connection(self._address, timeout=2.0)
         self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         time.sleep(0.1)
         self.flush()
 
     def close(self) -> None:
+        """Close the socket. The servos keep whatever velocity was last commanded, so
+        stop the wheels before calling this."""
         if self._sock is not None:
             self._sock.close()
             self._sock = None
 
     def __enter__(self) -> FeetechTcpClient:
+        """Connect on entry."""
         self.connect()
         return self
 
@@ -165,10 +179,12 @@ class FeetechTcpClient:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        """Close the socket on exit; motor state is the caller's business."""
         self.close()
 
     @property
     def _socket(self) -> socket.socket:
+        """The live socket, or ``ConnectionError`` if :meth:`connect` was never called."""
         if self._sock is None:
             raise ConnectionError("not connected")
         return self._sock
@@ -187,6 +203,11 @@ class FeetechTcpClient:
     # -- transactions -----------------------------------------------------
 
     def _collect(self, expected: set[int], deadline: float) -> dict[int, StatusPacket]:
+        """Read replies until every id in ``expected`` answered or ``deadline`` passes.
+
+        ``deadline`` is a ``time.monotonic()`` instant. Replies from other ids are
+        logged and dropped; a closed bridge raises instead of timing out silently.
+        """
         replies: dict[int, StatusPacket] = {}
         sock = self._socket
         while expected - replies.keys():
@@ -224,10 +245,12 @@ class FeetechTcpClient:
         raise AssertionError("unreachable")
 
     def _id(self, motor: str) -> int:
+        """Bus id of a motor named in the constructor's table."""
         return self._names[motor]
 
     @staticmethod
     def _raw_only(normalize: bool) -> None:
+        """Reject ``normalize=True``: there is no calibration table here to normalise against."""
         if normalize:
             raise ValueError(
                 "FeetechTcpClient speaks raw register units only; pass normalize=False"
@@ -236,6 +259,7 @@ class FeetechTcpClient:
     # -- MotorBus -----------------------------------------------------------
 
     def ping(self, motor: str, num_retry: int = 0) -> int | None:
+        """The servo's error byte (0 when healthy), or None if it stayed silent."""
         motor_id = self._id(motor)
         try:
             reply = self._transaction(build_packet(motor_id, INST_PING), {motor_id})
@@ -244,6 +268,7 @@ class FeetechTcpClient:
         return reply[motor_id].error
 
     def write(self, data_name: str, motor: str, value: int, *, normalize: bool = False) -> None:
+        """Write one control-table register on one motor in raw units, waiting for its ack."""
         self._raw_only(normalize)
         register = REGISTERS[data_name]
         motor_id = self._id(motor)
@@ -264,6 +289,11 @@ class FeetechTcpClient:
     def sync_read(
         self, data_name: str, motors: list[str], *, normalize: bool = True
     ) -> dict[str, int]:
+        """Read one register from several motors in a single round trip, keyed by motor name.
+
+        Raises ``TimeoutError`` if any motor stays silent through the retries, so the
+        caller never gets a partially stale set of encoder readings.
+        """
         self._raw_only(normalize)
         register = REGISTERS[data_name]
         ids = [self._id(name) for name in motors]
@@ -272,9 +302,11 @@ class FeetechTcpClient:
         return {self._ids[i]: decode_value(replies[i].params, register) for i in ids}
 
     def enable_torque(self, motors: list[str] | None = None) -> None:
+        """Energise the named motors (all of them by default); they hold against being pushed."""
         for name in motors or list(self._names):
             self.write("Torque_Enable", name, 1)
 
     def disable_torque(self, motors: list[str] | None = None) -> None:
+        """Release the named motors (all by default) so the wheels turn freely by hand."""
         for name in motors or list(self._names):
             self.write("Torque_Enable", name, 0)

@@ -33,16 +33,21 @@ class DiffDriveKinematics:
     """Converts between body twists and wheel rates for a two-wheel base."""
 
     def __init__(self, geometry: BaseGeometry) -> None:
+        """Caches the wheel radius, half track width and ticks-per-radian from ``geometry``."""
         self._r = geometry.wheel_radius_m
         self._half_track = geometry.track_width_m / 2.0
         self._ticks_per_rad = geometry.ticks_per_rev / (2.0 * math.pi)
 
     def twist_to_wheels(self, twist: Twist) -> WheelRates:
+        """Body twist to the two wheel rates in rad/s; a left turn speeds the right wheel up
+        and the left one down by ``angular * track_width / 2`` m/s each."""
         left = (twist.linear - twist.angular * self._half_track) / self._r
         right = (twist.linear + twist.angular * self._half_track) / self._r
         return WheelRates(left=left, right=right)
 
     def wheels_to_twist(self, rates: WheelRates) -> Twist:
+        """Measured wheel rates back to body motion: mean rim speed in m/s, and the
+        left/right speed difference over the track width as yaw rate in rad/s."""
         v_left = rates.left * self._r
         v_right = rates.right * self._r
         return Twist(

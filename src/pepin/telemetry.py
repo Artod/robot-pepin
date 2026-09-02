@@ -26,6 +26,7 @@ class LatencySummary:
     max_ms: float
 
     def __str__(self) -> str:
+        """One-line rendering for logs and shutdown reports."""
         return (
             f"{self.name}: n={self.count} median={self.median_ms:.1f}ms "
             f"p95={self.p95_ms:.1f}ms max={self.max_ms:.1f}ms"
@@ -36,16 +37,20 @@ class LatencyTracker:
     """Records durations of an operation over a rolling window."""
 
     def __init__(self, name: str, window: int = 512) -> None:
+        """``name`` labels the link being measured; ``window`` is how many recent
+        samples the statistics are computed over (older ones only feed the count)."""
         self.name = name
         self._samples: deque[float] = deque(maxlen=window)
         self._total = 0
 
     def add(self, seconds: float) -> None:
+        """Record one duration, in seconds."""
         self._samples.append(seconds)
         self._total += 1
 
     @contextmanager
     def measure(self) -> Iterator[None]:
+        """Time the enclosed block on the performance counter and record it, exception or not."""
         start = time.perf_counter()
         try:
             yield
@@ -58,6 +63,7 @@ class LatencyTracker:
         return self._total
 
     def summary(self) -> LatencySummary:
+        """Median, p95 and max over the current window, in milliseconds; zeros if unused."""
         if not self._samples:
             return LatencySummary(self.name, 0, 0.0, 0.0, 0.0)
         ordered = sorted(self._samples)

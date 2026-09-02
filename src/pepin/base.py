@@ -20,6 +20,7 @@ RIGHT = "right"
 
 
 def _clamp(value: float, limit: float) -> float:
+    """``value`` restricted to the symmetric interval [-limit, +limit]."""
     return max(-limit, min(limit, value))
 
 
@@ -27,6 +28,7 @@ class DiffDriveBase:
     """Commands the two drive wheels and reports how far each has travelled."""
 
     def __init__(self, bus: MotorBus, config: BaseConfig) -> None:
+        """``config`` fixes the geometry, the per-wheel sign convention and the speed limits."""
         self._bus = bus
         self._cfg = config
         self._kin = DiffDriveKinematics(config.geometry)
@@ -50,7 +52,11 @@ class DiffDriveBase:
         self._bus.disable_torque([LEFT, RIGHT])
 
     def set_twist(self, twist: Twist) -> None:
-        """Drive at the given body velocity, clamped to the configured limits."""
+        """Drive at the given body velocity (m/s, rad/s), clamped to the configured limits.
+
+        One unacknowledged broadcast write: the wheels hold this velocity until the
+        next command, so a stalled control loop leaves the base rolling.
+        """
         safe = Twist(
             linear=_clamp(twist.linear, self._cfg.max_speed_m_s),
             angular=_clamp(twist.angular, self._cfg.max_yaw_rate_rad_s),
@@ -63,6 +69,7 @@ class DiffDriveBase:
         self._bus.sync_write("Goal_Velocity", ticks, normalize=False)
 
     def stop(self) -> None:
+        """Command zero velocity to both wheels; torque stays on, so the base holds position."""
         self._bus.sync_write("Goal_Velocity", {LEFT: 0, RIGHT: 0}, normalize=False)
 
     def read_wheel_travel(self) -> tuple[float, float]:
@@ -79,6 +86,7 @@ class DiffDriveBase:
         )
 
     def __enter__(self) -> DiffDriveBase:
+        """Enter with the wheels powered and stopped."""
         self.enable()
         return self
 
@@ -88,4 +96,5 @@ class DiffDriveBase:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        """Stop and release the wheels, including when the body raised."""
         self.disable()

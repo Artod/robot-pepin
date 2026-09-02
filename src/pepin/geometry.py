@@ -25,6 +25,7 @@ class BaseGeometry:
 
     @property
     def wheel_radius_m(self) -> float:
+        """Rolling radius in meters — the lever arm between wheel rad/s and body m/s."""
         return self.wheel_diameter_m / 2.0
 
     @property
@@ -45,6 +46,7 @@ class WheelMotor:
     direction: int
 
     def __post_init__(self) -> None:
+        """Reject any ``direction`` other than +1 or -1: it is a sign, not a gain."""
         if self.direction not in (-1, 1):
             raise ValueError(f"direction must be +1 or -1, got {self.direction}")
 
@@ -61,6 +63,7 @@ class BaseConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BaseConfig:
+        """Build from parsed JSON; geometry and both wheels are required, limits optional."""
         return cls(
             geometry=BaseGeometry(**data["geometry"]),
             left=WheelMotor(**data["left"]),
@@ -71,5 +74,6 @@ class BaseConfig:
 
     @classmethod
     def from_json(cls, path: str | Path) -> BaseConfig:
+        """Load the base configuration from ``config/base.json`` or a copy of it."""
         with open(path) as f:
             return cls.from_dict(json.load(f))

@@ -21,7 +21,11 @@ from pepin.odometry import Pose2D, wrap_angle
 
 
 def relative_motion(before: Pose2D, after: Pose2D) -> Pose2D:
-    """Motion from ``before`` to ``after`` expressed in the ``before`` frame."""
+    """Motion from ``before`` to ``after`` expressed in the ``before`` frame.
+
+    The result reads as "x meters forward, y meters left, theta radians CCW",
+    which is what the search window and the keyframe test are sized against.
+    """
     dx, dy = after.x - before.x, after.y - before.y
     c, s = math.cos(before.theta), math.sin(before.theta)
     return Pose2D(c * dx + s * dy, -s * dx + c * dy, wrap_angle(after.theta - before.theta))
@@ -47,7 +51,11 @@ class SearchWindow:
     theta_step_deg: float = 0.25
 
     def widened_for(self, motion: Pose2D, factor: float = 1.5) -> SearchWindow:
-        """The same window, grown so that a large odometry step (a bus gap) still fits."""
+        """The same window, grown so that a large odometry step (a bus gap) still fits.
+
+        Half-extents become at least ``factor`` times the motion itself; step
+        sizes are untouched, so a wider window costs proportionally more scoring.
+        """
         return SearchWindow(
             xy_m=max(self.xy_m, factor * math.hypot(motion.x, motion.y)),
             xy_step_m=self.xy_step_m,
@@ -59,7 +67,11 @@ class SearchWindow:
 def should_keyframe(
     motion: Pose2D, min_distance_m: float = 0.03, min_turn_deg: float = 2.0
 ) -> bool:
-    """Match/integrate only after enough motion: sub-step drift is invisible to the search."""
+    """True once the robot moved far enough to be worth matching and integrating.
+
+    Below ``min_distance_m`` of travel and ``min_turn_deg`` of turn the pose
+    change is finer than the search step, so matching would only thicken walls.
+    """
     return (
         math.hypot(motion.x, motion.y) >= min_distance_m
         or abs(math.degrees(motion.theta)) >= math.radians(min_turn_deg) * 180 / math.pi
@@ -68,12 +80,15 @@ def should_keyframe(
 
 @dataclass(frozen=True)
 class MatchResult:
+    """Winning pose of a search, its score, and the score of the odometry guess."""
+
     pose: Pose2D
     score: float
     guess_score: float
 
     @property
     def improved(self) -> bool:
+        """True when the corrected pose explains the scan better than raw odometry did."""
         return self.score > self.guess_score
 
 
@@ -88,6 +103,8 @@ class CorrelativeMatcher:
     def __init__(
         self, grid: OccupancyGrid, window: SearchWindow | None = None, max_points: int = 200
     ) -> None:
+        """``window`` bounds the search around every guess; scans are thinned to at most
+        ``max_points`` beams, which is what caps the cost of one match."""
         self._grid = grid
         self._window = window or SearchWindow()
         self._max_points = max_points
@@ -98,6 +115,11 @@ class CorrelativeMatcher:
         self._field = None
 
     def _score_field(self) -> NDArray[np.float64]:
+        """The map blurred for scoring, cached until :meth:`invalidate`.
+
+        Occupied cells bleed into their 3x3 neighbourhood (0.6 orthogonal, 0.4
+        diagonal), free cells stay sharp and negative, so a wall attracts from ~1 cell away.
+        """
         if self._field is None:
             lo = self._grid.log_odds
             occupied = np.maximum(lo, 0.0)
@@ -117,19 +139,29 @@ class CorrelativeMatcher:
         return self._field
 
     def _subsample(self, points: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Every k-th beam, down to at most ``max_points``: the score surface barely
+        changes with beam count, the cost of the search scales with it linearly."""
         if len(points) <= self._max_points:
             return points
         step = math.ceil(len(points) / self._max_points)
         return points[::step]
 
     def score(self, pose: Pose2D, points: NDArray[np.float64]) -> float:
-        """Smoothed-map score of the scan placed at ``pose`` (0 off the map)."""
+        """How well robot-frame ``points`` (N, 2) in meters fit the map when placed at ``pose``.
+
+        Sums the smoothed map value under every point: positive on occupied
+        cells, negative on known-free ones, zero outside the grid. Higher is better.
+        """
         return float(self._scores(pose.theta, points, np.array([[pose.x, pose.y]]))[0])
 
     def _scores(
         self, theta: float, points: NDArray[np.float64], positions: NDArray[np.float64]
     ) -> NDArray[np.float64]:
-        """Scores for one heading and many (x, y) positions; shape (len(positions),)."""
+        """Vectorised :meth:`score` for one heading and many candidate origins.
+
+        ``points`` is (P, 2) robot-frame meters, ``positions`` (N, 2) world meters;
+        the scan is rotated once by ``theta`` and translated to each position.
+        """
         field = self._score_field()
         c, s = math.cos(theta), math.sin(theta)
         rotated = points @ np.array([[c, s], [-s, c]])  # (P, 2) in world orientation
@@ -147,6 +179,11 @@ class CorrelativeMatcher:
     def match(
         self, guess: Pose2D, points: NDArray[np.float64], window: SearchWindow | None = None
     ) -> MatchResult:
+        """Best pose for this scan on the grid of candidates around the odometry ``guess``.
+
+        ``points`` are the scan's robot-frame (P, 2) meters. Every candidate is
+        scored exhaustively; near-equal scores break toward ``guess``.
+        """
         window = window or self._window
         pts = self._subsample(points)
         n = round(window.xy_m / window.xy_step_m)
