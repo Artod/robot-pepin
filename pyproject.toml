@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "lerobot[feetech]>=0.6.0",
     "numpy>=1.26",
+    "rerun-sdk>=0.37.0",
 ]
 
 [dependency-groups]
