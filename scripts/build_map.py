@@ -5,7 +5,8 @@ Each scan is placed at the last recorded pose before it. With raw odometry
 poses this is the "before" map: drift shows as smeared walls. With --match,
 every scan's pose is corrected by scan matching against the map built so
 far (odometry only supplies the guess and the motion between scans): the
-"after" map.
+"after" map. With --loop the same front end also detects revisits and
+closes loops through the pose graph: the globally consistent map.
 
 Usage:
     uv run python scripts/build_map.py data/sessions/<session>.jsonl [--every 4] [--resolution 0.05]
@@ -29,6 +30,7 @@ from pepin.scanmatch import (
     relative_motion,
     should_keyframe,
 )
+from pepin.slam import GraphSlam
 
 logger = logging.getLogger(__name__)
 OUTPUT_DIR = Path("data/maps")
@@ -49,6 +51,9 @@ def main() -> None:
         "--match", action="store_true", help="correct each scan's pose by scan matching"
     )
     parser.add_argument(
+        "--loop", action="store_true", help="scan matching plus loop closure (graph SLAM)"
+    )
+    parser.add_argument(
         "--flip-angles",
         action="store_true",
         help="negate recorded scan angles (sessions recorded before the lidar mirror fix)",
@@ -67,7 +72,8 @@ def main() -> None:
         if args.track_width
         else None
     )
-    matcher = CorrelativeMatcher(grid) if args.match else None
+    matcher = CorrelativeMatcher(grid) if args.match and not args.loop else None
+    slam = GraphSlam(grid.spec) if args.loop else None
     corrected = Pose2D()  # pose of the last matched scan, in the map frame
     odom_at_last_scan = Pose2D()
     improved = 0
@@ -77,30 +83,51 @@ def main() -> None:
                 pose = odom.update(record["d_left"], record["d_right"])
             else:
                 pose = pose_from_record(record)
-            if matcher is None:
+            if matcher is None and slam is None:
                 path.append((pose.x, pose.y))
         elif record["topic"] == "scan" and i % args.every == 0:
             scan = scan_from_record(record)
             if args.flip_angles:
                 scan = replace(scan, angles=-scan.angles)
             points = scan.points_xy(mount)
-            if matcher is None:
+            if slam is not None:
+                if slam.process(pose, points) is not None:
+                    scans_used += 1
+            elif matcher is None:
                 grid.integrate(pose, points)
+                scans_used += 1
             else:
                 motion = relative_motion(odom_at_last_scan, pose)
                 if scans_used and not should_keyframe(motion):
                     continue  # sub-step drift is invisible to the search; wait for more motion
                 guess = apply_motion(corrected, motion)
-                result = matcher.match(guess, points, SearchWindow().widened_for(motion))
+                result = matcher.match_around(guess, points, motion, SearchWindow())
                 improved += result.improved
                 corrected, odom_at_last_scan = result.pose, pose
                 grid.integrate(corrected, points)
                 matcher.invalidate()
                 path.append((corrected.x, corrected.y))
-            scans_used += 1
+                scans_used += 1
+    loops: list[tuple[Pose2D, Pose2D]] = []
+    if slam is not None:
+        grid = slam.grid
+        path = [(k.pose.x, k.pose.y) for k in slam.keyframes]
+        loops = [
+            (slam.keyframes[c.edge.i].pose, slam.keyframes[c.edge.j].pose) for c in slam.closures
+        ]
+        logger.info(
+            "graph SLAM: %d keyframes, %d loop closures, graph error %.2f",
+            len(slam.keyframes),
+            len(slam.closures),
+            slam.graph.total_error(),
+        )
     if matcher is not None:
         logger.info("scan matching improved on the odometry guess for %d scans", improved)
     logger.info("integrated %d scans along a %d-pose path", scans_used, len(path))
+    logger.info(
+        "occupied cells (p > 0.7): %d — fewer means sharper walls",
+        int((grid.probability() > 0.7).sum()),
+    )
 
     import matplotlib
 
@@ -109,7 +136,7 @@ def main() -> None:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     suffix = f"_track{args.track_width:.3f}" if args.track_width else ""
-    suffix += "_matched" if args.match else "_odom"
+    suffix += "_loop" if args.loop else ("_matched" if args.match else "_odom")
     out = OUTPUT_DIR / f"{args.session.stem}{suffix}.png"
     fig, ax = plt.subplots(figsize=(10, 10))
     extent = (-half, half, -half, half)
@@ -117,6 +144,14 @@ def main() -> None:
     xs, ys = zip(*path, strict=True)
     ax.plot(xs, ys, color="tab:red", linewidth=0.8, label="odometry path")
     ax.plot(xs[0], ys[0], "go", label="start")
+    for n, (a, b) in enumerate(loops):
+        ax.plot(
+            [a.x, b.x],
+            [a.y, b.y],
+            color="lime",
+            linewidth=2,
+            label="loop closure" if n == 0 else None,
+        )
     ax.set_xlabel("x, m")
     ax.set_ylabel("y, m")
     ax.set_title(f"Occupancy map — {args.session.stem}{suffix}")

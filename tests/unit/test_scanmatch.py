@@ -82,7 +82,19 @@ def test_keyframe_needs_enough_motion() -> None:
     assert should_keyframe(Pose2D(0.0, 0.0, math.radians(3.0)))
 
 
-def test_window_widens_for_large_odometry_steps() -> None:
-    w = SearchWindow().widened_for(Pose2D(0.2, 0.0, math.radians(20.0)))
+def test_window_widens_for_large_odometry_steps_at_constant_cost() -> None:
+    base = SearchWindow()
+    w = base.widened_for(Pose2D(0.2, 0.0, math.radians(20.0)))
     assert w.xy_m == pytest.approx(0.3) and w.theta_deg == pytest.approx(30.0)
-    assert SearchWindow().widened_for(Pose2D(0.0, 0.0, 0.0)) == SearchWindow()
+    assert w.xy_m / w.xy_step_m == pytest.approx(base.xy_m / base.xy_step_m)
+    assert w.theta_deg / w.theta_step_deg == pytest.approx(base.theta_deg / base.theta_step_deg)
+    assert base.widened_for(Pose2D(0.0, 0.0, 0.0)) == base
+
+
+def test_match_around_recovers_after_a_large_turn() -> None:
+    truth = Pose2D(0.3, -0.2, 1.2)
+    matcher = CorrelativeMatcher(room_map())
+    guess = Pose2D(truth.x + 0.05, truth.y, truth.theta + math.radians(3.0))
+    big_turn = Pose2D(0.0, 0.0, math.radians(80.0))  # the odometry step that led here
+    result = matcher.match_around(guess, raycast_room(truth), big_turn, SearchWindow())
+    assert result.pose.theta == pytest.approx(truth.theta, abs=math.radians(0.51))

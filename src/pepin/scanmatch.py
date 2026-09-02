@@ -51,16 +51,19 @@ class SearchWindow:
     theta_step_deg: float = 0.25
 
     def widened_for(self, motion: Pose2D, factor: float = 1.5) -> SearchWindow:
-        """The same window, grown so that a large odometry step (a bus gap) still fits.
+        """The same window grown to fit a large odometry step, keeping the candidate count.
 
-        Half-extents become at least ``factor`` times the motion itself; step
-        sizes are untouched, so a wider window costs proportionally more scoring.
+        Ranges grow to ``factor`` times the step; the search steps grow by the
+        same ratio, so a 90-degree jump costs the same as a 6-degree one.
+        A fine pass around the coarse winner restores the resolution.
         """
+        xy = max(self.xy_m, factor * math.hypot(motion.x, motion.y))
+        theta = max(self.theta_deg, factor * abs(math.degrees(motion.theta)))
         return SearchWindow(
-            xy_m=max(self.xy_m, factor * math.hypot(motion.x, motion.y)),
-            xy_step_m=self.xy_step_m,
-            theta_deg=max(self.theta_deg, factor * abs(math.degrees(motion.theta))),
-            theta_step_deg=self.theta_step_deg,
+            xy_m=xy,
+            xy_step_m=self.xy_step_m * xy / self.xy_m,
+            theta_deg=theta,
+            theta_step_deg=self.theta_step_deg * theta / self.theta_deg,
         )
 
 
@@ -175,6 +178,43 @@ class CorrelativeMatcher:
         values[inside] = field[cells[inside, 0], cells[inside, 1]]
         result: NDArray[np.float64] = values.reshape(len(positions), -1).sum(axis=1)
         return result
+
+    def match_around(
+        self, guess: Pose2D, points: NDArray[np.float64], motion: Pose2D, window: SearchWindow
+    ) -> MatchResult:
+        """Match with a window sized to the odometry ``motion``: coarse pass, then fine.
+
+        Small steps use ``window`` directly. A large step (a bus gap, a
+        turn-in-place) widens the window with coarser steps first, and the
+        fine pass around that winner brings back the base resolution.
+        """
+        wide = window.widened_for(motion)
+        if wide == window:
+            return self.match(guess, points, window)
+        coarse = self.match(guess, points, wide)
+        return self.match(coarse.pose, points, window)
+
+    def inlier_fraction(
+        self, pose: Pose2D, points: NDArray[np.float64], min_field: float = 1.0
+    ) -> float:
+        """Share of scan points that land on confidently occupied cells when placed at ``pose``.
+
+        A match acceptance test: a correct pose puts most points on walls, a
+        wrong one scatters them into free or unknown space.
+        """
+        if len(points) == 0:
+            return 0.0
+        field = self._score_field()
+        c, s = math.cos(pose.theta), math.sin(pose.theta)
+        world = points @ np.array([[c, s], [-s, c]]) + np.array([pose.x, pose.y])
+        cells = self._grid.world_to_cell(world)
+        rows, cols = self._grid.spec.shape
+        inside = (
+            (cells[:, 0] >= 0) & (cells[:, 0] < rows) & (cells[:, 1] >= 0) & (cells[:, 1] < cols)
+        )
+        values = np.full(len(cells), -np.inf)
+        values[inside] = field[cells[inside, 0], cells[inside, 1]]
+        return float((values >= min_field).mean())
 
     def match(
         self, guess: Pose2D, points: NDArray[np.float64], window: SearchWindow | None = None
