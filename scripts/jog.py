@@ -29,7 +29,7 @@ NECK_PROFILE_SPEED = 400  # raw steps/s, ~35 deg/s
 
 
 def jog_wheel(bus: FeetechMotorsBus, degps: float, seconds: float) -> None:
-    raw = int(round(degps * STEPS_PER_DEG))
+    raw = round(degps * STEPS_PER_DEG)
     bus.disable_torque()
     bus.write("Operating_Mode", "target", OperatingMode.VELOCITY.value)
     bus.enable_torque()

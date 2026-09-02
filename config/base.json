@@ -1,0 +1,11 @@
+{
+  "geometry": {
+    "wheel_diameter_m": 0.125,
+    "track_width_m": 0.505,
+    "ticks_per_rev": 4096
+  },
+  "left": { "motor_id": 7, "direction": -1 },
+  "right": { "motor_id": 8, "direction": 1 },
+  "max_speed_m_s": 0.3,
+  "max_yaw_rate_rad_s": 1.0
+}
