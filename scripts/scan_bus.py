@@ -9,21 +9,27 @@ Usage:
 """
 
 import argparse
+import logging
 
 from lerobot.motors.feetech import FeetechMotorsBus
+
+from pepin.log import setup_logging
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scan a Feetech bus for motors.")
     parser.add_argument("--port", required=True, help="serial port of the servo bus board")
     args = parser.parse_args()
+    setup_logging("scan_bus")
 
     found = FeetechMotorsBus.scan_port(args.port)
     if not found:
-        print("No motors found. Check 12V power to the board and the servo cable.")
+        logger.info("No motors found. Check 12V power to the board and the servo cable.")
         return
     for baudrate, ids in found.items():
-        print(f"baud {baudrate}: IDs {sorted(ids)}")
+        logger.info("baud %s: IDs %s", baudrate, sorted(ids))
 
 
 if __name__ == "__main__":

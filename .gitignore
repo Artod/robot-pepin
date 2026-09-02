@@ -17,4 +17,5 @@ venv/
 
 # Local data and logs
 data/
+logs/
 *.log

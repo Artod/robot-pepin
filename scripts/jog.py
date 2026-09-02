@@ -15,11 +15,16 @@ torque released on exit, including on Ctrl+C.
 """
 
 import argparse
+import logging
 import sys
 import time
 
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus, OperatingMode
+
+from pepin.log import setup_logging
+
+logger = logging.getLogger(__name__)
 
 MODEL = "sts3215"
 STEPS_PER_DEG = 4096.0 / 360.0
@@ -34,13 +39,13 @@ def jog_wheel(bus: FeetechMotorsBus, degps: float, seconds: float) -> None:
     bus.write("Operating_Mode", "target", OperatingMode.VELOCITY.value)
     bus.enable_torque()
     try:
-        print(f"Spinning at {degps} deg/s ({raw} raw) for {seconds} s...")
+        logger.info("Spinning at %s deg/s (%d raw) for %s s...", degps, raw, seconds)
         bus.write("Goal_Velocity", "target", raw, normalize=False)
         time.sleep(seconds)
     finally:
         bus.write("Goal_Velocity", "target", 0, normalize=False)
         bus.disable_torque()
-        print("Stopped, torque released. Servo stays in velocity mode.")
+        logger.info("Stopped, torque released. Servo stays in velocity mode.")
 
 
 def jog_neck(bus: FeetechMotorsBus, delta: int) -> None:
@@ -49,7 +54,7 @@ def jog_neck(bus: FeetechMotorsBus, delta: int) -> None:
     bus.enable_torque()
     start = bus.read("Present_Position", "target", normalize=False)
     goal = start + delta
-    print(f"Present position {start}, moving to {goal} and back...")
+    logger.info("Present position %s, moving to %s and back...", start, goal)
     try:
         # In position mode Goal_Velocity acts as the profile (max) speed.
         bus.write("Goal_Velocity", "target", NECK_PROFILE_SPEED, normalize=False)
@@ -58,10 +63,10 @@ def jog_neck(bus: FeetechMotorsBus, delta: int) -> None:
         bus.write("Goal_Position", "target", start, normalize=False)
         time.sleep(1.5)
         end = bus.read("Present_Position", "target", normalize=False)
-        print(f"Back at {end} (started at {start}).")
+        logger.info("Back at %s (started at %s).", end, start)
     finally:
         bus.disable_torque()
-        print("Torque released.")
+        logger.info("Torque released.")
 
 
 def main() -> None:
@@ -77,6 +82,7 @@ def main() -> None:
         "--delta", type=int, default=100, help="neck: move size in raw steps (4096 per turn)"
     )
     args = parser.parse_args()
+    setup_logging("jog")
 
     if abs(args.degps) > MAX_WHEEL_DEGPS:
         sys.exit(f"Refusing wheel speed above {MAX_WHEEL_DEGPS} deg/s.")

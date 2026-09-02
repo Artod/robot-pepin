@@ -12,10 +12,15 @@ default baud rate (1 Mbps), whatever its current settings are.
 """
 
 import argparse
+import logging
 import sys
 
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
+
+from pepin.log import setup_logging
+
+logger = logging.getLogger(__name__)
 
 MODEL = "sts3215"
 
@@ -25,6 +30,7 @@ def main() -> None:
     parser.add_argument("--port", required=True, help="serial port of the servo bus board")
     parser.add_argument("--id", type=int, required=True, help="target motor ID (1-253)")
     args = parser.parse_args()
+    setup_logging("setup_motor_id")
 
     # Safety guard: lerobot's setup_motor() writes to the first motor that
     # answers, so an extra motor on the bus could get reflashed by accident.
@@ -36,20 +42,20 @@ def main() -> None:
         sys.exit(f"Expected exactly one motor on the bus, found: {listing}. Aborting.")
 
     initial_baudrate, initial_id = answers[0]
-    print(f"Found one motor: ID {initial_id} @ {initial_baudrate} baud.")
+    logger.info("Found one motor: ID %s @ %s baud.", initial_id, initial_baudrate)
 
     bus = FeetechMotorsBus(
         port=args.port,
         motors={"target": Motor(id=args.id, model=MODEL, norm_mode=MotorNormMode.RANGE_M100_100)},
     )
     bus.setup_motor("target", initial_baudrate=initial_baudrate, initial_id=initial_id)
-    print(f"Motor is now ID {args.id} @ {bus.default_baudrate} baud.")
+    logger.info("Motor is now ID %s @ %s baud.", args.id, bus.default_baudrate)
 
     verify = bus.broadcast_ping()
     if verify and args.id in verify:
-        print("Verification ping: OK")
+        logger.info("Verification ping: OK")
     else:
-        print(f"Verification ping FAILED, bus answered: {verify}")
+        logger.info("Verification ping FAILED, bus answered: %s", verify)
     bus.disconnect(disable_torque=False)
 
 

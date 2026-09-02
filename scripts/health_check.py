@@ -8,14 +8,18 @@ Usage:
     uv run python scripts/health_check.py
 """
 
+import logging
 import re
 import subprocess
 import sys
 import time
 
+from pepin.log import setup_logging
+
+logger = logging.getLogger(__name__)
+
 HOST = "root@pepin.local"
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", HOST]
-SERVO_TCP = "tcp:pepin.local:3333"
 LIDAR_TCP = "tcp:pepin.local:3334"
 EXPECTED_SERVOS = list(range(1, 11))
 TOF_SENSORS = {"front": 0x30, "right": 0x31, "left": 0x32}
@@ -32,6 +36,7 @@ RESULTS = []
 def report(system: str, ok: bool, detail: str) -> None:
     mark = "\033[32m GO \033[0m" if ok else "\033[31mFAIL\033[0m"
     print(f"  [{mark}] {system:<28} {detail}")
+    logger.info("[%s] %-28s %s", "GO" if ok else "FAIL", system, detail)
     RESULTS.append((system, ok, detail))
 
 
@@ -89,25 +94,18 @@ def check_bridge_ports() -> None:
 
 
 def check_servos() -> None:
-    proc = bridge("/tmp/health-servo", SERVO_TCP)
-    try:
-        from lerobot.motors.feetech import FeetechMotorsBus
+    from pepin.feetech import FeetechTcpClient
 
-        bus = FeetechMotorsBus(port="/tmp/health-servo", motors={})
-        bus.port_handler.baudrate = 115200  # pty ignores it; real baud fixed by ser2net
-        bus._connect(handshake=False)
-        found = sorted(bus.broadcast_ping() or [])
-        bus.port_handler.closePort()
+    motors = {str(i): i for i in EXPECTED_SERVOS}
+    try:
+        with FeetechTcpClient(HOST.split("@")[-1], 3333, motors) as bus:
+            found = [i for i in EXPECTED_SERVOS if bus.ping(str(i)) is not None]
         missing = [i for i in EXPECTED_SERVOS if i not in found]
         ok = not missing
-        detail = (
-            f"all {len(EXPECTED_SERVOS)} answer" if ok else f"missing IDs {missing}, found {found}"
-        )
+        detail = f"all {len(EXPECTED_SERVOS)} answer" if ok else f"missing IDs {missing}"
         report("servo bus (10 motors)", ok, detail)
     except Exception as e:
         report("servo bus (10 motors)", False, str(e)[:70])
-    finally:
-        proc.terminate()
 
 
 def check_lidar() -> None:
@@ -126,13 +124,13 @@ def check_lidar() -> None:
             text=True,
             timeout=30,
         )
-        m = re.search(r"Frames: (\d+) \((\d+)/s\), CRC pass: ([\d.]+)%", r.stdout)
+        # lidar_scan.py reports through logging, which writes to stderr.
+        out = r.stdout + r.stderr
+        m = re.search(r"Frames: (\d+) \((\d+)/s\), CRC pass: ([\d.]+)%", out)
         if m and int(m.group(1)) > 100 and float(m.group(3)) > 95:
             report("lidar (LD19)", True, f"{m.group(2)} frames/s, CRC {m.group(3)}%")
         else:
-            report(
-                "lidar (LD19)", False, (m.group(0) if m else r.stdout.strip()[-70:] or "no data")
-            )
+            report("lidar (LD19)", False, (m.group(0) if m else out.strip()[-70:] or "no data"))
     except Exception as e:
         report("lidar (LD19)", False, str(e)[:70])
     finally:
@@ -163,8 +161,10 @@ def check_cameras() -> None:
 
 
 def main() -> None:
+    setup_logging("health_check", console=False)
     print("PEPIN LAUNCH READINESS CHECK")
     print("=" * 60)
+    logger.info("PEPIN LAUNCH READINESS CHECK")
     t0 = time.time()
     if check_board():
         check_bridge_ports()
@@ -176,8 +176,10 @@ def main() -> None:
     print("=" * 60)
     if failed:
         print(f"  NO GO — {len(failed)} system(s) down: {', '.join(failed)}")
+        logger.info("NO GO — %d system(s) down: %s", len(failed), ", ".join(failed))
         sys.exit(1)
     print(f"  ALL SYSTEMS GO ({time.time() - t0:.1f}s)")
+    logger.info("ALL SYSTEMS GO (%.1fs)", time.time() - t0)
 
 
 if __name__ == "__main__":

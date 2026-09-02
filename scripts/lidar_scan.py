@@ -18,6 +18,7 @@ Usage:
 
 import argparse
 import glob
+import logging
 import math
 import struct
 import sys
@@ -25,6 +26,10 @@ import time
 from pathlib import Path
 
 import serial
+
+from pepin.log import setup_logging
+
+logger = logging.getLogger(__name__)
 
 BAUDRATE = 230400
 FRAME_LEN = 47
@@ -89,9 +94,10 @@ def main() -> None:
         "--raw", action="store_true", help="do not mirror angles for the upside-down mount"
     )
     args = parser.parse_args()
+    setup_logging("lidar_scan")
 
     port = args.port or autodetect_port()
-    print(f"Reading {port} at {BAUDRATE} baud for {args.seconds} s...")
+    logger.info("Reading %s at %d baud for %s s...", port, BAUDRATE, args.seconds)
 
     frames_ok = 0
     crc_pass = 0
@@ -124,14 +130,23 @@ def main() -> None:
 
     nonzero = [(a, d, i) for a, d, i in points if d > 0]
     nearest = min(nonzero, key=lambda p: p[1]) if nonzero else None
-    print(f"Frames: {frames_ok} ({frames_ok / args.seconds:.0f}/s), "
-          f"CRC pass: {100 * crc_pass / frames_ok:.1f}%")
-    print(f"Rotation: {sum(speeds) / len(speeds) / 360:.1f} rev/s")
-    print(f"Points: {len(points)} total, {100 * len(nonzero) / len(points):.1f}% nonzero")
+    logger.info(
+        "Frames: %d (%.0f/s), CRC pass: %.1f%%",
+        frames_ok,
+        frames_ok / args.seconds,
+        100 * crc_pass / frames_ok,
+    )
+    logger.info("Rotation: %.1f rev/s", sum(speeds) / len(speeds) / 360)
+    logger.info("Points: %d total, %.1f%% nonzero", len(points), 100 * len(nonzero) / len(points))
     if nonzero:
         dists = sorted(d for _, d, _ in nonzero)
-        print(f"Range: min {dists[0]} mm, median {dists[len(dists) // 2]} mm, max {dists[-1]} mm")
-        print(f"Nearest obstacle: {nearest[1]} mm at {nearest[0]:.1f} deg")
+        logger.info(
+            "Range: min %d mm, median %d mm, max %d mm",
+            dists[0],
+            dists[len(dists) // 2],
+            dists[-1],
+        )
+        logger.info("Nearest obstacle: %d mm at %.1f deg", nearest[1], nearest[0])
 
     try:
         import matplotlib
@@ -139,7 +154,7 @@ def main() -> None:
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
-        print("matplotlib not installed (dev dependency) — skipping the plot.")
+        logger.info("matplotlib not installed (dev dependency) — skipping the plot.")
         return
 
     fig, ax = plt.subplots(subplot_kw={"projection": "polar"}, figsize=(8, 8))
@@ -154,7 +169,7 @@ def main() -> None:
     ax.set_title(f"LD19 first light — {len(nonzero)} points, distance in meters")
     OUTPUT.parent.mkdir(exist_ok=True)
     fig.savefig(OUTPUT, dpi=120, bbox_inches="tight")
-    print(f"Plot saved to {OUTPUT}")
+    logger.info("Plot saved to %s", OUTPUT)
 
 
 if __name__ == "__main__":

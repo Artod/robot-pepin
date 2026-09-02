@@ -19,10 +19,15 @@ Usage:
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
+
+from pepin.log import setup_logging
+
+logger = logging.getLogger(__name__)
 
 MODEL = "sts3215"
 MOTORS = {"neck": 9, "head": 10}
@@ -33,6 +38,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Record neck/head homing and ranges.")
     parser.add_argument("--port", required=True, help="serial port of the servo bus board")
     args = parser.parse_args()
+    setup_logging("calibrate_neck")
 
     bus = FeetechMotorsBus(
         port=args.port,
@@ -49,9 +55,9 @@ def main() -> None:
         "then press Enter..."
     )
     homings = bus.set_half_turn_homings()
-    print(f"Homing offsets written: {homings}")
+    logger.info("Homing offsets written: %s", homings)
 
-    print(
+    logger.info(
         "Now move neck and head gently through their full SAFE range in all "
         "directions. Do not strain against hard stops. Press Enter when done."
     )
@@ -63,7 +69,8 @@ def main() -> None:
     }
     OUTPUT.parent.mkdir(exist_ok=True)
     OUTPUT.write_text(json.dumps(data, indent=2) + "\n")
-    print(f"Saved to {OUTPUT}")
+    logger.info("Ranges: %s", data)
+    logger.info("Saved to %s", OUTPUT)
     bus.disconnect(disable_torque=False)
 
 
