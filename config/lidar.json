@@ -1,0 +1,9 @@
+{
+  "mirror": true,
+  "yaw_offset_deg": 272.5,
+  "x_m": 0.005,
+  "y_m": 0.0,
+  "min_range_m": 0.05,
+  "max_range_m": 12.0,
+  "masked_sectors_deg": [[192, 218], [317, 343]]
+}
