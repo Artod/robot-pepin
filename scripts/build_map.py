@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import logging
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -124,6 +125,11 @@ def main() -> None:
     if matcher is not None:
         logger.info("scan matching improved on the odometry guess for %d scans", improved)
     logger.info("integrated %d scans along a %d-pose path", scans_used, len(path))
+    if len(path) > 1:
+        gap = math.hypot(path[-1][0] - path[0][0], path[-1][1] - path[0][1])
+        logger.info(
+            "end of path is %.2f m from the start (closure error if the drive returned)", gap
+        )
     logger.info(
         "occupied cells (p > 0.7): %d — fewer means sharper walls",
         int((grid.probability() > 0.7).sum()),
