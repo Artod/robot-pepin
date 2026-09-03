@@ -7,7 +7,8 @@ from synthetic import raycast_room
 
 from pepin.mapping import GridSpec
 from pepin.odometry import Pose2D
-from pepin.slam import GraphSlam, LoopClosureConfig
+from pepin.posegraph import Edge
+from pepin.slam import GraphSlam, LoopClosure, LoopClosureConfig
 
 SPEC = GridSpec(0.05, -4, -3, 8, 6)
 
@@ -45,13 +46,15 @@ def test_keyframes_follow_motion_and_skip_standing_still() -> None:
 
 def test_loop_closure_detected_and_end_pose_corrected() -> None:
     poses = square()
-    slam = GraphSlam(SPEC, loop=LoopClosureConfig(min_index_gap=16))
+    slam = GraphSlam(SPEC, loop=LoopClosureConfig(min_index_gap=16, min_path_m=3.0))
     drive(slam, poses)  # around the square with truthful odometry
     closures_before = len(slam.closures)  # the last side already revisits the start: legitimate
     # Come back to the start, but with odometry claiming a pose 0.25 m / 6 deg off.
     truth = poses[0]
     drifted = Pose2D(truth.x + 0.25, truth.y - 0.1, truth.theta + math.radians(6.0))
-    slam = GraphSlam(SPEC, loop=LoopClosureConfig(min_index_gap=16, cooldown_keyframes=0))
+    slam = GraphSlam(
+        SPEC, loop=LoopClosureConfig(min_index_gap=16, min_path_m=3.0, cooldown_keyframes=0)
+    )
     drive(slam, poses)
     slam.process(drifted, raycast_room(truth))
     assert len(slam.closures) >= max(1, closures_before)
@@ -67,3 +70,24 @@ def test_no_closure_against_recent_keyframes() -> None:
     drive(slam, square())
     slam.process(square()[0], raycast_room(square()[0]))
     assert not slam.closures
+
+
+def test_no_closure_without_enough_path_between_the_keyframes() -> None:
+    # A slow wiggle in place accumulates keyframes but no distance: never a revisit.
+    slam = GraphSlam(SPEC, loop=LoopClosureConfig(min_index_gap=5, min_path_m=3.0))
+    for i in range(20):
+        p = Pose2D(0.0, 0.0, math.radians(3.0 * i))
+        slam.process(p, raycast_room(p))
+    assert not slam.closures and len(slam.keyframes) == 20
+
+
+def test_inconsistent_closure_is_rolled_back() -> None:
+    slam = GraphSlam(SPEC, loop=LoopClosureConfig(min_index_gap=100))
+    drive(slam, square())
+    nodes_before = list(slam.graph.nodes)
+    edges_before = len(slam.graph.edges)
+    # Claim the last keyframe sits 2 m away from the first — contradicts every chain edge.
+    bogus = LoopClosure(Edge(len(nodes_before) - 1, 0, Pose2D(2.0, 0.0, 0.0)), inlier_fraction=0.9)
+    assert not slam._accept_closure(bogus)
+    assert len(slam.graph.edges) == edges_before
+    assert slam.graph.nodes == nodes_before

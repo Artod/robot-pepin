@@ -98,3 +98,15 @@ def test_match_around_recovers_after_a_large_turn() -> None:
     big_turn = Pose2D(0.0, 0.0, math.radians(80.0))  # the odometry step that led here
     result = matcher.match_around(guess, raycast_room(truth), big_turn, SearchWindow())
     assert result.pose.theta == pytest.approx(truth.theta, abs=math.radians(0.51))
+
+
+def test_inlier_fraction_ignores_unknown_space_but_needs_coverage() -> None:
+    truth = Pose2D(0.0, 0.0, 0.0)
+    matcher = CorrelativeMatcher(room_map())
+    pts = raycast_room(truth)
+    assert matcher.inlier_fraction(truth, pts) > 0.9
+    assert (
+        matcher.inlier_fraction(Pose2D(0.0, 0.0, 0.4), pts) < 0.5
+    )  # rotated: points in free space
+    empty = CorrelativeMatcher(OccupancyGrid(GridSpec(0.05, -4, -3, 8, 6)))
+    assert empty.inlier_fraction(truth, pts) == 0.0  # nothing known: cannot vouch for a match

@@ -49,15 +49,19 @@ class LoopClosureConfig:
     """When to look for a revisit and when to believe one."""
 
     min_index_gap: int = 30  # a revisit must be that many keyframes back, not the recent past
-    search_radius_m: float = 0.5  # candidate old keyframes within this distance of the estimate
-    local_map_halfwidth: int = 5  # keyframes on each side of the candidate that form its map
+    min_path_m: float = 3.0  # ...and the robot must have travelled at least this far in between
+    search_radius_m: float = 1.0  # candidate old keyframes within this distance of the estimate
+    local_map_halfwidth: int = 10  # keyframes on each side of the candidate that form its map
     coarse: SearchWindow = field(
-        default_factory=lambda: SearchWindow(0.3, 0.06, 15.0, 1.0)
-    )  # wide and cheap: 11x11 positions x 31 headings
+        default_factory=lambda: SearchWindow(1.0, 0.1, 15.0, 1.0)
+    )  # as wide as the search radius, cheap steps: 21x21 positions x 31 headings
     fine: SearchWindow = field(
         default_factory=lambda: SearchWindow(0.06, 0.02, 1.5, 0.25)
     )  # tight around the coarse winner
     min_inlier_fraction: float = 0.6
+    max_error_increase: float = (
+        1.0  # a closure that raises the graph error more than this is rejected
+    )
     cooldown_keyframes: int = 10  # after a closure, do not look for another one for a while
 
 
@@ -86,6 +90,7 @@ class GraphSlam:
         self.graph = PoseGraph()
         self.keyframes: list[Keyframe] = []
         self.closures: list[LoopClosure] = []
+        self._path_m: list[float] = []  # distance travelled up to each keyframe
         self._last_closure_index = -(10**9)
 
     @property
@@ -109,17 +114,17 @@ class GraphSlam:
         self, odom: Pose2D, pose: Pose2D, points: NDArray[np.float64], motion: Pose2D | None
     ) -> Keyframe:
         kf = Keyframe(len(self.keyframes), odom, pose, points)
+        step = math.hypot(motion.x, motion.y) if motion is not None else 0.0
+        self._path_m.append((self._path_m[-1] if self._path_m else 0.0) + step)
         self.keyframes.append(kf)
         node = self.graph.add_node(pose)
         if node > 0:
             prev = self.keyframes[-2]
             self.graph.add_edge(Edge(node - 1, node, relative_motion(prev.pose, pose), CHAIN_INFO))
         closure = self.detect_loop(kf)
-        if closure is not None:
-            self.graph.add_edge(closure.edge)
+        if closure is not None and self._accept_closure(closure):
             self.closures.append(closure)
             self._last_closure_index = kf.index
-            self.graph.optimize()
             self._adopt_graph_poses()
             self.rebuild_map()
             logger.info(
@@ -134,12 +139,41 @@ class GraphSlam:
             self._matcher.invalidate()
         return self.keyframes[-1]
 
+    def _accept_closure(self, closure: LoopClosure) -> bool:
+        """Add the loop edge and optimise; roll back if it makes the graph inconsistent.
+
+        A wrong closure with a confident weight bends the whole trajectory, so
+        a jump of the total error beyond ``max_error_increase`` is treated as
+        evidence against the closure, not against the rest of the graph.
+        """
+        before_nodes = list(self.graph.nodes)
+        before_error = self.graph.total_error()
+        self.graph.add_edge(closure.edge)
+        self.graph.optimize()
+        increase = self.graph.total_error() - before_error
+        if increase > self._loop.max_error_increase:
+            self.graph.edges.pop()
+            self.graph.nodes[:] = before_nodes
+            logger.info(
+                "loop rejected: keyframe %d -> %d raised graph error by %.1f",
+                closure.edge.i,
+                closure.edge.j,
+                increase,
+            )
+            return False
+        return True
+
     def detect_loop(self, kf: Keyframe) -> LoopClosure | None:
         """Try to match ``kf`` against the map around the nearest old keyframe; None if no fit."""
         cfg = self._loop
         if kf.index - self._last_closure_index < cfg.cooldown_keyframes:
             return None
-        old = self.keyframes[: max(0, kf.index - cfg.min_index_gap)]
+        travelled = self._path_m[kf.index]
+        old = [
+            k
+            for k in self.keyframes[: max(0, kf.index - cfg.min_index_gap)]
+            if travelled - self._path_m[k.index] >= cfg.min_path_m
+        ]
         if not old:
             return None
         nearest = min(old, key=lambda k: math.hypot(k.pose.x - kf.pose.x, k.pose.y - kf.pose.y))

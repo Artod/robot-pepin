@@ -195,12 +195,18 @@ class CorrelativeMatcher:
         return self.match(coarse.pose, points, window)
 
     def inlier_fraction(
-        self, pose: Pose2D, points: NDArray[np.float64], min_field: float = 1.0
+        self,
+        pose: Pose2D,
+        points: NDArray[np.float64],
+        min_field: float = 1.0,
+        min_known: float = 0.25,
     ) -> float:
-        """Share of scan points that land on confidently occupied cells when placed at ``pose``.
+        """Share of judgeable scan points that land on confidently occupied cells at ``pose``.
 
-        A match acceptance test: a correct pose puts most points on walls, a
-        wrong one scatters them into free or unknown space.
+        Only points falling on cells the map has observed (occupied or free)
+        are judged — unknown space cannot vote against a match. Returns 0.0
+        when fewer than ``min_known`` of the points are judgeable at all, so a
+        handful of lucky hits on a tiny local map cannot pass as a closure.
         """
         if len(points) == 0:
             return 0.0
@@ -212,9 +218,12 @@ class CorrelativeMatcher:
         inside = (
             (cells[:, 0] >= 0) & (cells[:, 0] < rows) & (cells[:, 1] >= 0) & (cells[:, 1] < cols)
         )
-        values = np.full(len(cells), -np.inf)
+        values = np.zeros(len(cells))
         values[inside] = field[cells[inside, 0], cells[inside, 1]]
-        return float((values >= min_field).mean())
+        known = values != 0.0
+        if known.mean() < min_known:
+            return 0.0
+        return float((values[known] >= min_field).mean())
 
     def match(
         self, guess: Pose2D, points: NDArray[np.float64], window: SearchWindow | None = None
