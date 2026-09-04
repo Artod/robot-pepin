@@ -41,6 +41,7 @@ class TofClient:
     """
 
     def __init__(self, host: str, port: int = TOF_PORT) -> None:
+        """Prepare a client for ``host:port``; nothing connects until :meth:`start`."""
         self._address = (host, port)
         self._latest: dict[str, float | None] = {"front": None, "left": None, "right": None}
         self._stamp = 0.0
@@ -50,11 +51,15 @@ class TofClient:
         self.connected = False
 
     def start(self) -> TofClient:
+        """Begin streaming in a daemon thread; returns self so it chains."""
         self._thread.start()
         return self
 
     def close(self) -> None:
+        """Ask the reader to stop and wait (up to 2 s) for it to release the socket."""
         self._stop.set()
+        if self._thread.is_alive() and threading.current_thread() is not self._thread:
+            self._thread.join(timeout=2.0)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -62,6 +67,10 @@ class TofClient:
                 self._stream()
             except OSError as exc:
                 logger.warning("tof stream lost (%s); reconnecting", exc)
+            except Exception:
+                # A malformed line must not kill the thread silently: with the
+                # reflex allowing stale data, a dead reader would disarm the stop rule.
+                logger.exception("tof stream: bad record; reconnecting")
             self.connected = False
             self._stop.wait(1.0)
 
