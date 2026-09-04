@@ -9,7 +9,8 @@ far dead reckoning drifts — and later the same grid takes corrected poses.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
@@ -90,6 +91,26 @@ class OccupancyGrid:
         hit_cells = hit_cells[self._inside(hit_cells)]
         np.add.at(self.log_odds, (hit_cells[:, 0], hit_cells[:, 1]), LOG_ODDS_HIT)
         np.clip(self.log_odds, -LOG_ODDS_CLAMP, LOG_ODDS_CLAMP, out=self.log_odds)
+
+    def save(self, path: str | Path) -> None:
+        """Write the grid (log-odds and geometry) to a compressed ``.npz`` file."""
+        np.savez_compressed(path, log_odds=self.log_odds, spec=np.array(astuple(self.spec)))
+
+    @classmethod
+    def load(cls, path: str | Path) -> OccupancyGrid:
+        """Read a grid saved with :meth:`save`."""
+        data = np.load(path)
+        res, x_min, y_min, width, height = (float(v) for v in data["spec"])
+        grid = cls(GridSpec(res, x_min, y_min, width, height))
+        grid.log_odds = data["log_odds"].astype(np.float64)
+        return grid
+
+    def occupied_xy(self, threshold: float = 0.7) -> NDArray[np.float64]:
+        """World (x, y) centres of cells whose occupancy probability exceeds ``threshold``."""
+        rows, cols = np.nonzero(self.probability() > threshold)
+        xs = self.spec.x_min_m + (cols + 0.5) * self.spec.resolution_m
+        ys = self.spec.y_min_m + (rows + 0.5) * self.spec.resolution_m
+        return np.column_stack((xs, ys))
 
     def probability(self) -> NDArray[np.float64]:
         """Occupancy probability per cell, 0.5 where nothing was observed."""

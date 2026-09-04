@@ -55,6 +55,9 @@ def main() -> None:
         "--loop", action="store_true", help="scan matching plus loop closure (graph SLAM)"
     )
     parser.add_argument(
+        "--save", action="store_true", help="also save the grid as data/maps/<session><mode>.npz"
+    )
+    parser.add_argument(
         "--flip-angles",
         action="store_true",
         help="negate recorded scan angles (sessions recorded before the lidar mirror fix)",
@@ -163,6 +166,9 @@ def main() -> None:
     ax.set_title(f"Occupancy map — {args.session.stem}{suffix}")
     ax.legend(loc="upper right")
     fig.savefig(out, dpi=120, bbox_inches="tight")
+    if args.save:
+        grid.save(out.with_suffix(".npz"))
+        logger.info("grid saved to %s", out.with_suffix(".npz"))
     logger.info("map saved to %s", out)
     print(out)
 
