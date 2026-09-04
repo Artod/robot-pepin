@@ -1,9 +1,14 @@
 [Unit]
 Description=Assign unique I2C addresses to VL53L1X ToF sensors
-After=multi-user.target
+# Runs once, early. pepin-tof.service Requires= this unit, so it must not order
+# itself after multi-user.target: that made an ordering cycle and systemd dropped
+# the ToF jobs at boot.
+After=local-fs.target
+Before=pepin-tof.service
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 ExecStart=/usr/local/bin/tof_init.sh
 
 [Install]

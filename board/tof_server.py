@@ -83,7 +83,15 @@ def serve(port: int, hz: float) -> None:
 
     def accept_loop() -> None:
         while True:
-            conn, peer = server.accept()
+            try:
+                conn, peer = server.accept()
+            except OSError as exc:
+                log(f"accept failed: {exc}")
+                time.sleep(0.5)
+                continue
+            # A client that vanished without closing (laptop off wifi) must not
+            # stall the sensor loop: sends time out and the client is dropped.
+            conn.settimeout(0.2)
             with lock:
                 clients.append(conn)
             log(f"client {peer[0]} connected")
