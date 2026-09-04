@@ -9,17 +9,24 @@ ahead and angles grow counter-clockwise, matching ``pepin.kinematics``.
 from __future__ import annotations
 
 import json
+import logging
 import math
+import queue
 import socket
 import struct
+import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 import numpy as np
 from numpy.typing import NDArray
+
+from pepin.transport import LIDAR_PORT
+
+logger = logging.getLogger(__name__)
 
 BAUDRATE = 230400
 FRAME_LEN = 47
@@ -294,3 +301,85 @@ class LidarStream:
     def close(self) -> None:
         """Close the byte source; any partly assembled revolution is discarded."""
         self._source.close()
+
+
+class LidarClient:
+    """Background reader of the lidar bridge, shaped like :class:`pepin.tof.TofClient`.
+
+    Owns the reconnect loop (the board reboots, ser2net drops us), queues whole
+    revolutions for :meth:`drain`, and keeps the newest scan so ``age_s`` makes
+    a dead stream visible instead of leaving the caller with an old picture.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        mount: LidarMount,
+        port: int = LIDAR_PORT,
+        *,
+        source_factory: Callable[[], ByteSource] | None = None,
+        retry_s: float = 2.0,
+    ) -> None:
+        """``source_factory`` replaces the TCP bridge (a replayed capture in tests)."""
+        self._factory: Callable[[], ByteSource] = source_factory or (lambda: TcpSource(host, port))
+        self._mount = mount
+        self._retry_s = retry_s
+        self._scans: queue.Queue[LaserScan] = queue.Queue()
+        self._latest: LaserScan | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self.reconnects = 0
+
+    def start(self) -> LidarClient:
+        """Begin reading in a daemon thread; returns self so it chains."""
+        self._thread.start()
+        return self
+
+    def close(self) -> None:
+        """Stop the reader and wait for it to release the bridge (up to 3 s)."""
+        self._stop.set()
+        if self._thread.is_alive() and threading.current_thread() is not self._thread:
+            self._thread.join(timeout=3.0)
+
+    def drain(self) -> list[LaserScan]:
+        """Every revolution received since the previous call, oldest first; never blocks."""
+        out: list[LaserScan] = []
+        while True:
+            try:
+                out.append(self._scans.get_nowait())
+            except queue.Empty:
+                return out
+
+    @property
+    def latest(self) -> LaserScan | None:
+        """Newest revolution, or None before the first one."""
+        with self._lock:
+            return self._latest
+
+    def age_s(self, now: float) -> float:
+        """Seconds since the newest revolution completed; infinite before the first."""
+        latest = self.latest
+        return now - latest.stamp if latest is not None else float("inf")
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                stream = LidarStream(self._factory(), self._mount)
+            except OSError as exc:
+                logger.warning("lidar bridge unreachable (%s); retrying", exc)
+                self._stop.wait(self._retry_s)
+                continue
+            try:
+                for scan in stream.scans():
+                    with self._lock:
+                        self._latest = scan
+                    self._scans.put(scan)
+                    if self._stop.is_set():
+                        break
+            except OSError as exc:
+                self.reconnects += 1
+                logger.warning("lidar stream lost (%s); reconnecting", exc)
+                self._stop.wait(self._retry_s)
+            finally:
+                stream.close()

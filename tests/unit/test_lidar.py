@@ -102,3 +102,49 @@ def test_tcp_source_raises_when_the_bridge_closes(monkeypatch) -> None:
     source = TcpSource("host", 1)
     with pytest.raises(ConnectionError):
         source.read(4096)
+
+
+# -- LidarClient over a replayed capture ----------------------------------------
+
+
+class ReplaySource:
+    """Serves the fixture in chunks, then dies like a closed bridge."""
+
+    def __init__(self) -> None:
+        self._data = SAMPLE.read_bytes()
+        self._pos = 0
+        self.closed = False
+
+    def read(self, max_bytes: int) -> bytes:
+        if self._pos >= len(self._data):
+            raise ConnectionError("bridge closed")
+        chunk = self._data[self._pos : self._pos + max_bytes]
+        self._pos += len(chunk)
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_lidar_client_drains_revolutions_and_reconnects_after_a_drop() -> None:
+    import time
+
+    from pepin.lidar import LidarClient
+
+    sources: list[ReplaySource] = []
+
+    def factory() -> ReplaySource:
+        sources.append(ReplaySource())
+        return sources[-1]
+
+    client = LidarClient("unused", LidarMount(), source_factory=factory, retry_s=0.01).start()
+    scans = []
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and (len(scans) < 5 or client.reconnects < 1):
+        scans.extend(client.drain())
+        time.sleep(0.01)
+    client.close()
+    assert len(scans) >= 5
+    assert client.reconnects >= 1 and len(sources) >= 2
+    assert client.latest is not None and client.age_s(time.monotonic()) < 5.0
+    assert sources[0].closed
