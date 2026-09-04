@@ -17,6 +17,9 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
 ]
+macos = [
+    "rumps>=0.4.0",
+]
 
 [build-system]
 requires = ["hatchling"]
