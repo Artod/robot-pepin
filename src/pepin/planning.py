@@ -40,14 +40,20 @@ _STEPS: tuple[tuple[int, int, float], ...] = (
 Cell = tuple[int, int]
 
 
-def inflate(occupied: NDArray[np.bool_], radius_cells: int) -> NDArray[np.bool_]:
-    """Binary dilation: grow every occupied cell into a disc of ``radius_cells`` cells."""
+def inflate(occupied: NDArray[np.bool_], radius_cells: float) -> NDArray[np.bool_]:
+    """Binary dilation: grow every occupied cell into a disc of ``radius_cells`` cells.
+
+    The radius is not rounded up to whole cells: 0.32 m on a 5 cm grid is a
+    6.4-cell disc, not a 7-cell (0.35 m) one — that extra cell is what closes
+    doorways and goals near walls.
+    """
     grown: NDArray[np.bool_] = np.array(occupied, dtype=bool, copy=True)
     if radius_cells <= 0:
         return grown
     rows, cols = occupied.shape
-    for dr in range(-radius_cells, radius_cells + 1):
-        for dc in range(-radius_cells, radius_cells + 1):
+    reach = math.ceil(radius_cells)
+    for dr in range(-reach, reach + 1):
+        for dc in range(-reach, reach + 1):
             if dr * dr + dc * dc > radius_cells * radius_cells:
                 continue
             dst = (slice(max(0, dr), rows + min(0, dr)), slice(max(0, dc), cols + min(0, dc)))
@@ -61,6 +67,9 @@ class PlannerConfig:
     """What the planner treats as impassable and how wide the robot is, in meters."""
 
     occupied_threshold: float = 0.65
+    # Hull plus margin. Must stay larger than SafetyBox.body_half_width_m (the hull):
+    # a path the planner accepts would otherwise be vetoed by the lidar guard next to
+    # every obstacle, and the robot would stand beside it twitching instead of passing.
     robot_radius_m: float = 0.30
     unknown_is_free: bool = False
 
@@ -81,8 +90,9 @@ class GridPlanner:
         obstacles: NDArray[np.bool_] = probability >= self.config.occupied_threshold
         if not self.config.unknown_is_free:
             obstacles |= np.abs(probability - 0.5) <= UNKNOWN_TOLERANCE
-        radius_cells = math.ceil(self.config.robot_radius_m / self.spec.resolution_m)
+        radius_cells = self.config.robot_radius_m / self.spec.resolution_m
         self._radius_cells = radius_cells
+        self._raw: NDArray[np.bool_] = obstacles  # before inflation: what is really there
         self._static: NDArray[np.bool_] = inflate(obstacles, radius_cells)
         self.blocked: NDArray[np.bool_] = self._static  # static plus the last plan's live obstacles
 
@@ -97,9 +107,15 @@ class GridPlanner:
         ``obstacles_xy`` are live sensor hits (map frame, meters) that are not
         in the map — a person, a moved chair: they are inflated like walls
         for this plan only. Straight runs are collapsed, so consecutive
-        waypoints are turns. A start inside the inflation zone is nudged to
-        the nearest free cell.
+        waypoints are turns.
+
+        The robot's own footprint is exempt from inflation: something 10 cm
+        from the hull would otherwise block the very cell the robot stands on
+        and no plan could exist. Inside one robot radius of the start only the
+        raw obstacle cells count, so the path leaves in any direction that does
+        not cross the thing itself; full inflation applies from there on.
         """
+        raw = self._raw
         self.blocked = self._static
         if obstacles_xy is not None and len(obstacles_xy):
             live = np.zeros_like(self._static)
@@ -107,10 +123,13 @@ class GridPlanner:
             rows, cols = live.shape
             ok = (hits[:, 0] >= 0) & (hits[:, 0] < rows) & (hits[:, 1] >= 0) & (hits[:, 1] < cols)
             live[hits[ok, 0], hits[ok, 1]] = True
+            raw = raw | live
             self.blocked = self._static | inflate(live, self._radius_cells)
         start, goal = self._cell(start_xy), self._cell(goal_xy)
         if start is None or goal is None or self.blocked[goal]:
             return None
+        if self.blocked[start]:
+            self.blocked = self._clear_footprint(self.blocked, raw, start)
         if self.blocked[start]:
             rescued = self._nearest_free(start)
             if rescued is None:
@@ -137,6 +156,22 @@ class GridPlanner:
             self.spec.x_min_m + (col + 0.5) * self.spec.resolution_m,
             self.spec.y_min_m + (row + 0.5) * self.spec.resolution_m,
         )
+
+    def _clear_footprint(
+        self, blocked: NDArray[np.bool_], raw: NDArray[np.bool_], start: Cell
+    ) -> NDArray[np.bool_]:
+        """Copy of ``blocked``; within one robot radius of ``start`` only raw obstacles block."""
+        rows, cols = blocked.shape
+        r = self._radius_cells
+        reach = math.ceil(r)
+        r0, r1 = max(0, start[0] - reach), min(rows, start[0] + reach + 1)
+        c0, c1 = max(0, start[1] - reach), min(cols, start[1] + reach + 1)
+        rr, cc = np.ogrid[r0:r1, c0:c1]
+        disc = (rr - start[0]) ** 2 + (cc - start[1]) ** 2 <= r * r
+        cleared = blocked.copy()
+        window = cleared[r0:r1, c0:c1]
+        window[disc] = raw[r0:r1, c0:c1][disc]
+        return cleared
 
     def _nearest_free(self, cell: Cell) -> Cell | None:
         """Closest free cell within ``START_RESCUE_CELLS``, or ``None`` if the robot is boxed in."""

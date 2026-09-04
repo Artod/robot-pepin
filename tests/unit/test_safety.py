@@ -24,3 +24,32 @@ def test_a_couple_of_stray_points_are_noise() -> None:
 
 def test_empty_scan_is_clear() -> None:
     assert nearest_ahead(np.zeros((0, 2))) is None
+
+
+# -- Reflex: hysteresis and direction -----------------------------------------
+
+
+def test_reflex_side_hit_blocks_forward_and_turning_toward_it_only() -> None:
+    from pepin.safety import Reflex
+    from pepin.tof import ReflexConfig, TofRanges
+
+    reflex = Reflex(ReflexConfig(side_stop_m=0.30))
+    left_hand = TofRanges(None, 0.25, None, 0.0)
+    d = reflex.step(Twist(0.15, 0.5), left_hand)  # forward and turning left
+    assert d.blocked and d.twist == Twist(0.0, 0.0)
+    d = reflex.step(Twist(0.15, -0.5), left_hand)  # turning right is the way out
+    assert d.blocked and d.twist == Twist(0.0, -0.5)
+    d = reflex.step(Twist(-0.1, 0.0), left_hand)  # backing away is always allowed
+    assert not d.blocked
+
+
+def test_reflex_releases_only_after_the_range_opens_by_the_margin() -> None:
+    from pepin.safety import Reflex
+    from pepin.tof import ReflexConfig, TofRanges
+
+    reflex = Reflex(ReflexConfig(front_stop_m=0.22), release_margin_m=0.08)
+    forward = Twist(0.15, 0.0)
+    assert reflex.step(forward, TofRanges(0.21, None, None, 0.0)).blocked
+    assert reflex.step(forward, TofRanges(0.26, None, None, 0.0)).blocked  # still inside the band
+    assert not reflex.step(forward, TofRanges(0.31, None, None, 0.0)).blocked
+    assert not reflex.step(forward, TofRanges(0.26, None, None, 0.0)).blocked  # not re-tripped

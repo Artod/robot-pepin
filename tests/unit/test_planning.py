@@ -16,7 +16,7 @@ UNKNOWN = 0.0
 WALL_COL = 30
 GAP_ROWS = slice(26, 34)
 WALL_X = 3.05
-ROBOT_RADIUS_M = 0.15  # two cells of inflation
+ROBOT_RADIUS_M = 0.20  # exactly two cells of inflation on the 10 cm grid
 GAP_LOW_Y = 2.8  # first free row centre in the gap after inflation, minus half a cell
 GAP_HIGH_Y = 3.2
 
@@ -89,11 +89,13 @@ def test_blocked_or_outside_endpoints_give_no_path() -> None:
     assert planner.plan((-1.0, 1.0), (5.5, 1.0)) is None  # start off the grid
 
 
-def test_start_inside_the_inflation_zone_is_nudged_to_free_ground() -> None:
+def test_start_inside_the_inflation_zone_plans_from_its_own_cell() -> None:
+    """The footprint is exempt from inflation: the path starts where the robot is, not nudged."""
     planner = GridPlanner(_room(), PlannerConfig(robot_radius_m=ROBOT_RADIUS_M))
     path = planner.plan((0.25, 2.0), (1.5, 2.0))  # start two cells from the left wall
     assert path is not None
-    assert path[0] == pytest.approx((0.35, 2.05))
+    assert path[0] == pytest.approx((0.25, 2.05))
+    assert path[-1] == pytest.approx((1.55, 2.05))
 
 
 def test_unknown_cells_block_unless_declared_free() -> None:
@@ -140,3 +142,20 @@ def test_live_obstacle_forces_a_detour_and_can_block_completely() -> None:
     crowd = np.array([[WALL_X, y] for y in np.arange(2.4, 3.61, 0.1)])
     assert planner.plan((0.5, 3.0), (5.5, 3.0), obstacles_xy=crowd) is None
     assert planner.plan((0.5, 3.0), (5.5, 3.0)) is not None  # the live layer does not stick
+
+
+def test_start_next_to_a_live_obstacle_still_gets_a_plan() -> None:
+    """Inflation must not swallow the robot's own cell: a hand at the hull is not a wall."""
+    from test_localization import room_map
+
+    planner = GridPlanner(room_map(), PlannerConfig(robot_radius_m=0.30))
+    start, goal = (-1.0, 0.0), (1.0, 0.0)
+    hand = np.array([[-0.95, 0.20]])  # 20 cm to the left of the start, inside the inflation disc
+    path = planner.plan(start, goal, obstacles_xy=hand)
+    assert path is not None
+    assert path[-1] == pytest.approx(goal, abs=0.05)
+    # The path leaves the footprint without crossing the hand itself.
+    for (x0, y0), (x1, y1) in itertools.pairwise(path):
+        for t in np.linspace(0.0, 1.0, 50):
+            px, py = x0 + t * (x1 - x0), y0 + t * (y1 - y0)
+            assert math.hypot(px - hand[0, 0], py - hand[0, 1]) > 0.05
