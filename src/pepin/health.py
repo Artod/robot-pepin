@@ -59,25 +59,49 @@ class HealthReport:
         return [p.system for p in self.probes if not p.ok]
 
 
+SSH_TIMED_OUT = 124  # returncode _ssh reports when the command hung, like coreutils timeout(1)
+
+
 def _ssh(host: str, cmd: str, timeout: int = 15) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", f"root@{host}", cmd],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    """Run ``cmd`` on the board as root; a hung ssh comes back as returncode 124, never raises."""
+    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", f"root@{host}", cmd]
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, SSH_TIMED_OUT, "", "ssh timeout")
+
+
+def busy_bridge_ports(host: str) -> set[int]:
+    """Bridge ports that already have a client — a drive in progress.
+
+    ser2net runs with ``kickolduser``: connecting to a busy port would throw the
+    driver off the servo bus, so the probes report those ports as in use instead.
+    """
+    r = _ssh(host, "ss -Htn state established '( sport = :3333 or sport = :3334 )'")
+    return _parse_local_ports(r.stdout)
+
+
+def _parse_local_ports(ss_output: str) -> set[int]:
+    """Local port numbers from ``ss -tn state established`` lines (Recv-Q Send-Q Local Peer)."""
+    ports: set[int] = set()
+    for line in ss_output.splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            port = parts[2].rsplit(":", 1)[-1]
+            if port.isdigit():
+                ports.add(int(port))
+    return ports
 
 
 def probe_board(host: str, report: HealthReport) -> Probe:
     """ssh reachability plus vitals (uptime, CPU temperature, memory, disk, wifi power save)."""
-    try:
-        r = _ssh(
-            host,
-            "echo ok && uptime && cat /sys/class/thermal/thermal_zone0/temp && "
-            "free -m | awk '/Mem:/{print $7}' && df -h / | awk 'NR==2{print $5}' && "
-            "iw dev wlan0 get power_save",
-        )
-    except subprocess.TimeoutExpired:
+    r = _ssh(
+        host,
+        "echo ok && uptime && cat /sys/class/thermal/thermal_zone0/temp && "
+        "free -m | awk '/Mem:/{print $7}' && df -h / | awk 'NR==2{print $5}' && "
+        "iw dev wlan0 get power_save",
+    )
+    if r.returncode == SSH_TIMED_OUT:
         return Probe("board", False, "ssh timeout")
     if r.returncode != 0 or "ok" not in r.stdout:
         return Probe("board", False, "unreachable")
@@ -91,7 +115,9 @@ def probe_board(host: str, report: HealthReport) -> Probe:
         v.mem_free_mb = int(lines[3])
     if len(lines) > 4:
         v.disk_used_pct = lines[4]
-    v.wifi_power_save_off = "off" in lines[-1]
+    # Line 5 is `iw ... get power_save`; if iw printed nothing the flag stays unknown
+    # rather than being read off the disk-usage line.
+    v.wifi_power_save_off = ("off" in lines[5]) if len(lines) > 5 else None
     temp = f"{v.cpu_temp_c:.0f}C" if v.cpu_temp_c is not None else "?"
     return Probe("board", True, f"up {v.uptime}, cpu {temp}, {v.mem_free_mb} MB free")
 
@@ -175,7 +201,12 @@ def probe_tof(host: str, wait_s: float = 1.5) -> Probe:
     def fmt(value: float | None) -> str:
         return "none" if value is None else f"{value:.2f}m"
 
-    return Probe("tof", True, f"front {fmt(r.front)}, left {fmt(r.left)}, right {fmt(r.right)}")
+    # The server keeps streaming when every sensor failed to initialise (all null),
+    # so a live stream alone is not health.
+    any_range = any(v is not None for v in (r.front, r.left, r.right))
+    return Probe(
+        "tof", any_range, f"front {fmt(r.front)}, left {fmt(r.left)}, right {fmt(r.right)}"
+    )
 
 
 def probe_cameras(host: str, grab_frames: bool) -> list[Probe]:
@@ -225,7 +256,11 @@ def probe_tof_ids(host: str) -> list[Probe]:
 def run_health(
     host: str, full: bool = False, on_probe: Callable[[Probe], None] | None = None
 ) -> HealthReport:
-    """Run the quick tier (or the full one) and return the report; ``on_probe`` streams results."""
+    """Run the quick tier (or the full one) and return the report; ``on_probe`` streams results.
+
+    Safe to run during a drive: bridge ports that already have a client are
+    reported as in use, never probed (probing would kick the driver off them).
+    """
     report = HealthReport()
     t0 = time.monotonic()
 
@@ -238,8 +273,10 @@ def run_health(
     add(board)
     if board.ok:
         add(probe_bridges(host))
-        add(probe_servos(host))
-        add(probe_lidar(host))
+        busy = busy_bridge_ports(host)
+        in_use = "in use by a driver — not probed"
+        add(Probe("servo bus", True, in_use) if SERVO_BUS_PORT in busy else probe_servos(host))
+        add(Probe("lidar", True, in_use) if LIDAR_PORT in busy else probe_lidar(host))
         add(probe_tof(host))
         if full:
             for p in probe_tof_ids(host):

@@ -61,7 +61,16 @@ class CameraRecorder:
         )
         self._local.parent.mkdir(parents=True, exist_ok=True)
         fetched = subprocess.run(
-            ["scp", "-q", f"root@{self._host}:{self._remote}", str(self._local)],
+            [
+                "scp",
+                "-q",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=8",
+                f"root@{self._host}:{self._remote}",
+                str(self._local),
+            ],
             capture_output=True,
             timeout=600,
         )

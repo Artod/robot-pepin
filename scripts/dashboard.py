@@ -3,9 +3,11 @@
 
 Panels: the lidar scan around the robot (optionally over a saved map), the
 overview camera, ToF ranges and lidar rate over time, board vitals, and a
-text log. Read-only — it never commands the servo bus, so it can run next to
-drive.py or navigate.py. Battery voltage and heading have no sensor yet and
-are shown as such.
+text log. Read-only — it never commands the servo bus. It can run next to
+drive.py or navigate.py: when a drive already holds the lidar bridge the
+dashboard leaves it alone (ser2net would otherwise hand the lidar to the
+newcomer and blind the driver) and shows camera, ToF and vitals only.
+Battery voltage and heading have no sensor yet and are shown as such.
 
 Usage:
     uv run python scripts/dashboard.py [--map data/maps/<map>.npz] [--camera-fps 5]
@@ -22,8 +24,8 @@ from pathlib import Path
 import rerun as rr
 import rerun.blueprint as rrb
 
-from pepin.health import BoardVitals, HealthReport, probe_board
-from pepin.lidar import LaserScan, LidarMount, LidarStream, TcpSource
+from pepin.health import BoardVitals, HealthReport, busy_bridge_ports, probe_board
+from pepin.lidar import LidarClient, LidarMount
 from pepin.log import setup_logging
 from pepin.mapping import OccupancyGrid
 from pepin.telemetry import LatencyTracker
@@ -33,29 +35,6 @@ from pepin.transport import LIDAR_PORT, board_address
 logger = logging.getLogger(__name__)
 CAMERA_URL = "http://{host}:8080/snapshot"
 VITALS_EVERY_S = 10.0
-
-
-def lidar_thread(
-    host: str, mount: LidarMount, scans: "queue.Queue[LaserScan]", stop: threading.Event
-) -> None:
-    """Scans into the queue; reconnects if the bridge drops."""
-    while not stop.is_set():
-        try:
-            stream = LidarStream(TcpSource(host, LIDAR_PORT), mount)
-        except OSError as exc:
-            logger.warning("lidar bridge unreachable (%s); retrying", exc)
-            stop.wait(2.0)
-            continue
-        try:
-            for scan in stream.scans():
-                scans.put(scan)
-                if stop.is_set():
-                    break
-        except ConnectionError as exc:
-            logger.warning("lidar stream lost (%s); reconnecting", exc)
-            stop.wait(2.0)
-        finally:
-            stream.close()
 
 
 def camera_thread(
@@ -131,10 +110,14 @@ def main() -> None:
         static=True,
     )
 
-    scans: queue.Queue[LaserScan] = queue.Queue()
     frames: queue.Queue[bytes] = queue.Queue()
     stop = threading.Event()
-    threading.Thread(target=lidar_thread, args=(host, mount, scans, stop), daemon=True).start()
+    lidar: LidarClient | None = None
+    if LIDAR_PORT in busy_bridge_ports(host):
+        logger.warning("lidar bridge in use by a drive script; the scan panel stays empty")
+        rr.log("log", rr.TextLog("lidar in use by a drive — not connecting", level="WARN"))
+    else:
+        lidar = LidarClient(host, mount).start()
     if not args.no_camera:
         threading.Thread(
             target=camera_thread, args=(host, args.camera_fps, frames, stop), daemon=True
@@ -149,11 +132,12 @@ def main() -> None:
         while args.headless is None or time.monotonic() - t0 < args.headless:
             now = time.monotonic()
             rr.set_time("t", duration=now - t0)
-            while not scans.empty():
-                scan = scans.get_nowait()
+            for scan in lidar.drain() if lidar is not None else []:
+                # Revolution period from the scan stamps, not from how fast this
+                # loop noticed them: a stalled loop must not read as a fast lidar.
                 if last_scan_t is not None:
-                    scan_rate.add(now - last_scan_t)
-                last_scan_t = now
+                    scan_rate.add(scan.stamp - last_scan_t)
+                last_scan_t = scan.stamp
                 pts = scan.points_xy(mount)
                 rr.log("world/scan", rr.Points2D(pts, colors=[255, 200, 0], radii=0.012))
                 rr.log("rates/lidar_rev_per_s", rr.Scalars(scan.speed_rps))

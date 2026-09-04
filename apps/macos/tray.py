@@ -126,14 +126,18 @@ class TrayApp(rumps.App):
 
     def _drain(self, _timer: Any) -> None:
         """Main-thread tick: apply the newest result, or show that a poll is in flight."""
-        latest: Poll | None = None
-        while not self._results.empty():
-            latest = self._results.get_nowait()
-        if latest is not None:
-            self._show(latest)
-            self._notify(latest)
-        elif self._polling:
-            self.title = TITLE_BUSY
+        try:
+            latest: Poll | None = None
+            while not self._results.empty():
+                latest = self._results.get_nowait()
+            if latest is not None:
+                self._show(latest)
+                self._notify(latest)
+            elif self._polling:
+                self.title = TITLE_BUSY
+        except Exception:
+            # The rumps timer keeps ticking; a menu-building bug must be visible in the log.
+            log.exception("menu update failed")
 
     def _show(self, poll: Poll | None) -> None:
         """Rebuild title and menu from one poll result (``None`` before the first poll)."""
