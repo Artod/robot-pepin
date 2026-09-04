@@ -81,3 +81,24 @@ def test_real_capture_yields_about_ten_revolutions_per_second() -> None:
     assert 8 <= len(scans) <= 11
     # The first scan is partial by nature (the stream starts mid-revolution).
     assert all(400 < len(s.angles) < 520 for s in scans[1:])
+
+
+def test_tcp_source_raises_when_the_bridge_closes(monkeypatch) -> None:
+    import socket
+
+    from pepin.lidar import TcpSource
+
+    class Closed:
+        def settimeout(self, value: float) -> None:
+            pass
+
+        def recv(self, n: int) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: Closed())
+    source = TcpSource("host", 1)
+    with pytest.raises(ConnectionError):
+        source.read(4096)

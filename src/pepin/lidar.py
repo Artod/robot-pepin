@@ -236,11 +236,14 @@ class TcpSource:
         self._sock.settimeout(timeout_s)
 
     def read(self, max_bytes: int) -> bytes:
-        """Whatever the socket has, up to ``max_bytes``; empty on timeout, not an error."""
+        """Bytes received, b"" on a quiet timeout; raises ConnectionError once the bridge closes."""
         try:
-            return self._sock.recv(max_bytes)
+            data = self._sock.recv(max_bytes)
         except TimeoutError:
             return b""
+        if not data:
+            raise ConnectionError("lidar bridge closed the connection (device not ready?)")
+        return data
 
     def close(self) -> None:
         """Close the bridge socket; the sensor keeps spinning on the robot."""
