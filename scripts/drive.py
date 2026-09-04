@@ -6,7 +6,9 @@ space stops, Q quits. The control loop runs at 20 Hz; lidar scans arrive from
 a background thread and are recorded and drawn in the robot's odometry frame.
 Every session is written to data/sessions/<timestamp>_<name>.jsonl for offline
 mapping. Bus timeouts (wifi hiccups) only cost the affected ticks; a long
-outage stops the wheels and then aborts the session.
+outage stops the wheels and then aborts the session. Forward motion needs a
+lidar scan younger than a second and a clear box ahead; the ToF reflex stops
+the cart for anything low the lidar cannot see.
 
 Usage:
     uv run python scripts/drive.py --name lap1        # with the rerun viewer
@@ -14,22 +16,19 @@ Usage:
 """
 
 import argparse
-import contextlib
 import logging
 import math
-import queue
-import threading
 import time
 from pathlib import Path
 
 import numpy as np
 
-from pepin.base import DiffDriveBase
+from pepin.base import BusWatchdog, DiffDriveBase
 from pepin.bus import verify_motors
 from pepin.feetech import FeetechTcpClient
 from pepin.geometry import BaseConfig
 from pepin.kinematics import Twist
-from pepin.lidar import LaserScan, LidarMount, LidarStream, TcpSource
+from pepin.lidar import LaserScan, LidarClient, LidarMount
 from pepin.localization import Localizer
 from pepin.log import setup_logging
 from pepin.mapping import OccupancyGrid
@@ -38,38 +37,15 @@ from pepin.recording import SessionRecorder
 from pepin.safety import guard_forward
 from pepin.teleop import DriveState, KeyReader, apply_key
 from pepin.tof import TOF_PORT, TofClient, apply_reflex
-from pepin.transport import LIDAR_PORT, SERVO_BUS_PORT, board_address
+from pepin.transport import SERVO_BUS_PORT, board_address
 from pepin.video import CameraRecorder
 
 logger = logging.getLogger(__name__)
 
 LOOP_HZ = 20
 STATUS_EVERY_S = 2.0
-BUS_STOP_AFTER_S = 1.0  # consecutive bus downtime after which the wheels are stopped
-BUS_GIVE_UP_AFTER_S = 10.0  # consecutive bus downtime after which the session aborts
-
-
-def lidar_thread(
-    host: str, mount: LidarMount, scans: "queue.Queue[LaserScan]", stop: threading.Event
-) -> None:
-    """Feed scans into the queue; reconnect with a warning if the bridge drops (board booting)."""
-    while not stop.is_set():
-        try:
-            stream = LidarStream(TcpSource(host, LIDAR_PORT), mount)
-        except OSError as exc:
-            logger.warning("lidar bridge unreachable (%s); retrying", exc)
-            stop.wait(2.0)
-            continue
-        try:
-            for scan in stream.scans():
-                scans.put(scan)
-                if stop.is_set():
-                    break
-        except ConnectionError as exc:
-            logger.warning("lidar stream lost (%s); reconnecting", exc)
-            stop.wait(2.0)
-        finally:
-            stream.close()
+SCAN_TIMEOUT_S = 1.0  # no lidar scan for this long => no forward motion
+REPRIME_AFTER_S = 0.5  # a bus outage longer than this may hide half a wheel turn: re-prime
 
 
 class Viewer:
@@ -165,9 +141,7 @@ def main() -> None:
     mount = LidarMount.from_json("config/lidar.json")
     motors = DiffDriveBase.motor_ids(base_cfg)
 
-    scans: queue.Queue[LaserScan] = queue.Queue()
-    stop = threading.Event()
-    threading.Thread(target=lidar_thread, args=(host, mount, scans, stop), daemon=True).start()
+    lidar = LidarClient(host, mount).start()
     grid = OccupancyGrid.load(args.map) if args.map else None
     localizer = (
         Localizer(grid, Pose2D(args.init[0], args.init[1], math.radians(args.init[2])))
@@ -192,9 +166,8 @@ def main() -> None:
             t0 = time.monotonic()
             next_status = t0
             latest_scan: LaserScan | None = None
-            bus_failures = 0
-            failing_since: float | None = None
-            stop_commanded = False
+            watchdog = BusWatchdog()
+            blind_warned = 0.0
             while not state.quit:
                 tick = time.monotonic()
                 key = keys.read()
@@ -209,14 +182,25 @@ def main() -> None:
                     if new_twist is not None:
                         base.set_twist(new_twist)
                         rec.command(new_twist)
-                    if latest_scan is not None and state.twist.linear > 0:
-                        guarded, blocker = guard_forward(state.twist, latest_scan.points_xy(mount))
-                        if blocker is not None:
+                    if state.twist.linear > 0:
+                        if latest_scan is None or tick - latest_scan.stamp > SCAN_TIMEOUT_S:
+                            # Never drive forward blind: a dead lidar thread or a booting
+                            # board must not leave the cart trusting an old scan.
+                            guarded = Twist(0.0, state.twist.angular)
+                            if tick - blind_warned > 2.0:
+                                logger.warning("no fresh lidar scan — forward blocked")
+                                blind_warned = tick
+                        else:
+                            guarded, blocker = guard_forward(
+                                state.twist, latest_scan.points_xy(mount)
+                            )
+                            if blocker is not None:
+                                logger.warning(
+                                    "lidar guard: obstacle %.2f m ahead, forward blocked", blocker
+                                )
+                        if guarded != state.twist:
                             base.set_twist(guarded)
                             rec.command(guarded)
-                            logger.warning(
-                                "lidar guard: obstacle %.2f m ahead, forward blocked", blocker
-                            )
                             state = DriveState(
                                 twist=guarded,
                                 linear_step=state.linear_step,
@@ -245,40 +229,24 @@ def main() -> None:
                             )
                     travel = base.read_wheel_travel()
                 except TimeoutError as exc:
-                    # The encoders are absolute and the unwrapper tolerates gaps,
-                    # so a lost tick only costs resolution, not odometry validity.
-                    bus_failures += 1
-                    if failing_since is None:
-                        failing_since = tick
-                    down = tick - failing_since
-                    logger.warning(
-                        "bus timeout, tick skipped (%d total, down %.1f s): %s",
-                        bus_failures,
-                        down,
-                        exc,
-                    )
-                    if down >= BUS_GIVE_UP_AFTER_S:
-                        raise RuntimeError("bus unreachable") from exc
-                    if not stop_commanded and down >= BUS_STOP_AFTER_S:
-                        stop_commanded = True
-                        logger.warning("bus down %.1f s: commanding stop", down)
-                        with contextlib.suppress(TimeoutError):
-                            base.stop()
+                    watchdog.handle(base, tick, exc)
                 else:
-                    if failing_since is not None:
+                    down = watchdog.recovered(tick)
+                    if down is not None:
                         logger.info(
-                            "bus recovered after %.1f s (%d ticks lost)",
-                            tick - failing_since,
-                            bus_failures,
+                            "bus recovered after %.1f s (%d ticks lost)", down, watchdog.failures
                         )
-                        failing_since = None
-                        stop_commanded = False
+                        if down > REPRIME_AFTER_S:
+                            # The unwrapper is blind past half a wheel turn: drop the gap
+                            # rather than fold it into a bogus backward step.
+                            base.reprime()
+                            travel = (0.0, 0.0)
                     pose = odom.update(*travel)
                     rec.pose(pose, travel)
-                if localizer is not None and scans.empty():
+                new_scans = lidar.drain()
+                if localizer is not None and not new_scans:
                     localizer.predict(pose)
-                while not scans.empty():
-                    latest_scan = scans.get_nowait()
+                for latest_scan in new_scans:
                     rec.scan(latest_scan)
                     if localizer is not None:
                         loc = localizer.update(pose, latest_scan.points_xy(mount))
@@ -325,7 +293,7 @@ def main() -> None:
                     )
                 time.sleep(max(0.0, 1.0 / LOOP_HZ - (time.monotonic() - tick)))
         rec.note("session end")
-    stop.set()
+    lidar.close()
     if tof is not None:
         tof.close()
     if camera is not None:
