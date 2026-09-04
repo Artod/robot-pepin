@@ -133,3 +133,55 @@ def test_normalized_values_are_refused(client) -> None:
     c, _ = client
     with pytest.raises(ValueError):
         c.sync_read("Present_Position", ["left"])
+
+
+# -- link loss ----------------------------------------------------------------
+
+
+class ResetSocket(FakeSocket):
+    """Dies the way ser2net kicks a client: the first recv raises ConnectionResetError."""
+
+    def recv(self, size: int) -> bytes:
+        raise ConnectionResetError(54, "Connection reset by peer")
+
+
+class ClosedSocket(FakeSocket):
+    """Peer closed politely: recv returns b"" forever."""
+
+    def recv(self, size: int) -> bytes:
+        return b""
+
+
+def test_link_loss_reconnects_and_the_retry_succeeds(client) -> None:
+    c, _ = client
+    c._sock = ResetSocket()  # type: ignore[assignment]
+    fresh = FakeSocket()
+    fresh.rx = [status(7, bytes([0x10, 0x00]))]
+    c.connect = lambda: setattr(c, "_sock", fresh)  # type: ignore[method-assign]
+    assert c.sync_read("Present_Position", ["left"], normalize=False) == {"left": 16}
+    assert fresh.sent, "the retry must go out on the new socket"
+
+
+def test_link_loss_without_a_board_is_reported_as_a_timeout(client) -> None:
+    c, _ = client
+    c._sock = ResetSocket()  # type: ignore[assignment]
+
+    def refuse() -> None:
+        raise ConnectionRefusedError("board down")
+
+    c.connect = refuse  # type: ignore[method-assign]
+    with pytest.raises(TimeoutError, match="link lost"):
+        c.sync_read("Present_Position", ["left"], normalize=False)
+
+
+def test_orderly_close_is_not_a_successful_flush(client) -> None:
+    c, _ = client
+    c._sock = ClosedSocket()  # type: ignore[assignment]
+    with pytest.raises(ConnectionError):
+        c.flush()
+
+
+def test_parser_survives_a_header_with_an_impossible_length() -> None:
+    parser = PacketParser()
+    assert parser.feed(bytes.fromhex("ff ff ff 00")) == []
+    assert parser.feed(bytes.fromhex("ff ff ff 00") + REPLY_8) == [StatusPacket(8, 0, b"")]

@@ -112,6 +112,12 @@ class PacketParser:
             del self._buf[:start]
             if len(self._buf) < 4:
                 break
+            if self._buf[3] < 2:
+                # A status packet carries at least the error byte and the checksum;
+                # a smaller length byte is line noise that happened to look like a header.
+                logger.debug("dropping frame with impossible length %d", self._buf[3])
+                del self._buf[:2]
+                continue
             total = 4 + self._buf[3]
             if len(self._buf) < total:
                 break
@@ -130,6 +136,11 @@ class FeetechTcpClient:
 
     Values are always raw register units — no calibration or normalisation
     happens here, which is why ``normalize=True`` is rejected loudly.
+
+    A lost link (ser2net kicked us for another client, wifi reset) is reopened
+    once per attempt; if that fails too it surfaces as ``TimeoutError`` exactly
+    like a silent bus, so a control loop needs one failure path, not two.
+    One transaction at a time: not thread-safe.
     """
 
     def __init__(
@@ -146,6 +157,8 @@ class FeetechTcpClient:
         self._address = (host, port)
         self._names = dict(motors)
         self._ids = {motor_id: name for name, motor_id in motors.items()}
+        if len(self._ids) != len(motors):
+            raise ValueError(f"two motors share one bus id: {motors}")
         self._timeout = timeout_s
         self._retries = retries
         self._sock: socket.socket | None = None
@@ -190,15 +203,38 @@ class FeetechTcpClient:
         return self._sock
 
     def flush(self) -> None:
-        """Drop anything unread: in a request/reply protocol it can only be stale."""
+        """Drop anything unread: in a request/reply protocol it can only be stale.
+
+        Raises ``ConnectionError`` if the bridge has closed the connection.
+        """
+        self._drain(0.005)
+
+    def _drain(self, quiet_s: float) -> None:
+        """Discard incoming bytes until the line has been silent for ``quiet_s``.
+
+        Status packets carry no request id, so after a timed-out request the
+        line must be quiet for a full reply window before the retry goes out —
+        otherwise a late reply answers the wrong request.
+        """
         sock = self._socket
-        sock.settimeout(0.005)
+        sock.settimeout(quiet_s)
         try:
             while sock.recv(4096):
                 pass
+            raise ConnectionError("bus bridge closed the connection")
         except (TimeoutError, BlockingIOError):
             pass
         self._parser.reset()
+
+    def _reconnect(self) -> None:
+        """Best effort: drop the dead socket and open a fresh one; failure is only logged."""
+        self.close()
+        try:
+            self.connect()
+        except OSError as exc:
+            logger.warning("bus reconnect failed: %s", exc)
+            return
+        logger.info("bus link re-established")
 
     # -- transactions -----------------------------------------------------
 
@@ -223,18 +259,36 @@ class FeetechTcpClient:
                 raise ConnectionError("bridge closed the connection")
             for packet in self._parser.feed(data):
                 if packet.motor_id in expected:
+                    if packet.error:
+                        logger.warning(
+                            "servo %d reports error byte 0x%02x", packet.motor_id, packet.error
+                        )
                     replies[packet.motor_id] = packet
                 else:
                     logger.debug("ignoring reply from unexpected id %d", packet.motor_id)
         return replies
 
     def _transaction(self, packet: bytes, expected: set[int]) -> dict[int, StatusPacket]:
-        """Send one packet and wait for a reply from every expected id, with retries."""
+        """Send one packet and wait for a reply from every expected id, with retries.
+
+        Raises ``TimeoutError`` when ids stay silent through the retries, and also
+        when the link is lost and cannot be reopened — one failure path for callers.
+        """
+        late_reply_possible = False
         for attempt in range(1, self._retries + 2):
-            self.flush()
-            start = time.perf_counter()
-            self._socket.sendall(packet)
-            replies = self._collect(expected, time.monotonic() + self._timeout)
+            try:
+                self._drain(self._timeout if late_reply_possible else 0.005)
+                sock = self._socket
+                sock.settimeout(self._timeout)
+                start = time.perf_counter()
+                sock.sendall(packet)
+                replies = self._collect(expected, time.monotonic() + self._timeout)
+            except ConnectionError as exc:
+                logger.warning("bus link lost (%s), attempt %d", exc, attempt)
+                if attempt > self._retries:
+                    raise TimeoutError(f"bus link lost: {exc}") from exc
+                self._reconnect()
+                continue
             self.latency.add(time.perf_counter() - start)
             missing = expected - replies.keys()
             if not missing:
@@ -242,6 +296,7 @@ class FeetechTcpClient:
             if attempt > self._retries:
                 raise TimeoutError(f"no reply from ids {sorted(missing)} after {attempt} attempts")
             logger.warning("no reply from ids %s (attempt %d), retrying", sorted(missing), attempt)
+            late_reply_possible = True
         raise AssertionError("unreachable")
 
     def _id(self, motor: str) -> int:
@@ -283,8 +338,19 @@ class FeetechTcpClient:
             bytes([self._id(name)]) + encode_value(value, register)
             for name, value in values.items()
         )
-        self.flush()
-        self._socket.sendall(build_packet(BROADCAST_ID, INST_SYNC_WRITE, params))
+        packet = build_packet(BROADCAST_ID, INST_SYNC_WRITE, params)
+        for attempt in (1, 2):
+            try:
+                self.flush()
+                sock = self._socket
+                sock.settimeout(self._timeout)
+                sock.sendall(packet)
+                return
+            except ConnectionError as exc:
+                logger.warning("bus link lost during write (%s), attempt %d", exc, attempt)
+                if attempt == 2:
+                    raise TimeoutError(f"bus link lost: {exc}") from exc
+                self._reconnect()
 
     def sync_read(
         self, data_name: str, motors: list[str], *, normalize: bool = True

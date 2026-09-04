@@ -96,3 +96,30 @@ def test_context_manager_enables_then_stops_and_releases(bus: FakeBus) -> None:
         base.set_twist(Twist(0.1, 0.0))
     assert bus.torque == [("on", [LEFT, RIGHT]), ("off", [LEFT, RIGHT])]
     assert bus.writes[-1] == ("Goal_Velocity", {LEFT: 0, RIGHT: 0})
+
+
+# -- BusWatchdog -------------------------------------------------------------
+
+
+def test_watchdog_skips_then_stops_then_aborts() -> None:
+    from pepin.base import BusWatchdog
+
+    dog = BusWatchdog(stop_after_s=1.0, give_up_after_s=10.0)
+    assert dog.failed(100.0) == "skip"  # first miss: just skip the tick
+    assert dog.failed(100.5) == "skip"
+    assert dog.failed(101.0) == "stop"  # one second down: command a stop, once
+    assert dog.failed(101.5) == "skip"
+    assert dog.failed(110.0) == "abort"
+    assert dog.failures == 5
+
+
+def test_watchdog_recovery_reports_the_outage_and_rearms_the_stop() -> None:
+    from pepin.base import BusWatchdog
+
+    dog = BusWatchdog()
+    assert dog.recovered(0.0) is None  # nothing was wrong
+    dog.failed(10.0)
+    dog.failed(11.0)  # -> stop
+    assert dog.recovered(11.4) == pytest.approx(1.4)
+    assert dog.failed(20.0) == "skip"  # a new outage starts from scratch
+    assert dog.failed(21.0) == "stop"

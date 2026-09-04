@@ -57,6 +57,8 @@ def verify_motors(
             before_attempt()
         try:
             return bus.ping(motor) is not None
+        except ConnectionError:
+            raise  # a dead bridge is not a wiring fault; say so instead of "not answering"
         except Exception:
             return False
 
