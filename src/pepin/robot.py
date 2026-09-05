@@ -21,6 +21,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import TracebackType
 
+import numpy as np
+from numpy.typing import NDArray
+
 from pepin.base_link import BASE_PORT, BaseClient, BaseState
 from pepin.feeds import Feed, Sense
 from pepin.footprint import Footprint
@@ -216,11 +219,22 @@ class Robot:
         sense = Sense(
             now=now,
             odom_pose=state.pose,
-            scans=[scan.points_xy(self.mount) for scan in scans],
+            scans=[self._points(scan) for scan in scans],
             scan_age_s=self.lidar.age_s(now) if self.lidar is not None else float("inf"),
             tof=self.tof.ranges(now) if self.tof is not None else None,
         )
         return Observation(state, sense, scans)
+
+    def _points(self, scan: LaserScan) -> NDArray[np.float64]:
+        """Robot-frame points of one revolution without the robot's own structure.
+
+        A return inside the physical hull cannot be an object (it would be a
+        collision); it is a post, the arm or a cable in the lidar's view.
+        Dropping them here, by geometry, keeps every consumer honest without
+        anyone hand-tuning masked sectors as the robot grows.
+        """
+        points = scan.points_xy(self.mount)
+        return points[~self.config.footprint.inside(points, margin_m=0.0)]
 
     def drive(self, twist: Twist) -> None:
         """Send the body velocity to the board (also its deadman heartbeat)."""

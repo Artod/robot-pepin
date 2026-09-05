@@ -52,6 +52,7 @@ class PathFollower:
         self._cfg = config or ControllerConfig()
         self._index = 0
         self._facing = False  # turning in place toward the next waypoint
+        self._turn_sign = 0.0  # +1 left / -1 right, chosen when the turn began; 0 = not chosen
 
     @property
     def goal(self) -> tuple[float, float]:
@@ -66,6 +67,15 @@ class PathFollower:
     @facing.setter
     def facing(self, value: bool) -> None:
         self._facing = value
+
+    @property
+    def turn_sign(self) -> float:
+        """Direction of the turn in progress (+1 left, -1 right, 0 none); inherited on a replan."""
+        return self._turn_sign
+
+    @turn_sign.setter
+    def turn_sign(self, value: float) -> None:
+        self._turn_sign = value
 
     def _advance(self, pose: Pose2D) -> tuple[float, float]:
         """Skip waypoints already within the look-ahead, never past the final one."""
@@ -91,8 +101,16 @@ class PathFollower:
             self._facing = abs(heading_error) > cfg.resume_driving_rad
         elif abs(heading_error) > cfg.face_before_driving_rad:
             self._facing = True
+            self._turn_sign = 1.0 if heading_error >= 0 else -1.0
         if self._facing:
+            if abs(heading_error) > math.pi / 2:
+                # A target straight behind: the error's sign flips with every wobble of the
+                # pose estimate and the cart would dither left-right. Keep the direction the
+                # turn began with until the target is in the front half-plane.
+                sign = self._turn_sign or (1.0 if heading_error >= 0 else -1.0)
+                yaw = sign * min(cfg.max_yaw_rate_rad_s, cfg.yaw_gain * abs(heading_error))
             return ControlOutput(Twist(0.0, yaw), (tx, ty), done=False)
+        self._turn_sign = 0.0
         # Slow down as the heading error grows and as the goal approaches.
         speed = cfg.cruise_speed_m_s * (
             1.0 - abs(heading_error) / cfg.face_before_driving_rad * 0.5

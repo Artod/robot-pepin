@@ -7,7 +7,6 @@ the menu, so no AppKit call ever happens off the main thread.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import queue
 import shutil
@@ -24,7 +23,6 @@ from AppKit import (
     NSFont,
     NSFontAttributeName,
     NSForegroundColorAttributeName,
-    NSImage,
     NSMutableAttributedString,
 )
 
@@ -37,9 +35,10 @@ LOGS_DIR = REPO_ROOT / "logs"
 UV = shutil.which("uv") or "/opt/homebrew/bin/uv"
 INTERVALS_S: tuple[int | None, ...] = (30, 60, None)
 IDLE_WAIT_S = 3600.0
-# The status item is a monochrome template icon (an SF Symbol, so it matches the other
-# menu-bar items in either appearance); the title next to it is empty when all is well.
-ICON_SYMBOL = "cpu"
+# The status item is a monochrome template icon (a robot head drawn black on transparent;
+# macOS renders it white or black to match the other items); the title next to it is
+# empty when all is well.
+ICON = Path(__file__).with_name("icon_template.png")
 TITLE_OK, TITLE_WARN, TITLE_DEAD, TITLE_BUSY = None, "⚠", "✕", "…"
 
 log = logging.getLogger("tray")
@@ -102,8 +101,7 @@ class TrayApp(rumps.App):
     """Menu-bar app showing the last health report and offering a manual refresh."""
 
     def __init__(self) -> None:
-        super().__init__("Pepin", title=TITLE_BUSY, quit_button=None)
-        self._use_symbol_icon(ICON_SYMBOL)
+        super().__init__("Pepin", title=TITLE_BUSY, icon=str(ICON), template=True, quit_button=None)
         self._results: queue.Queue[Poll] = queue.Queue()
         self._wake = threading.Event()
         self._interval_s: int | None = INTERVALS_S[0]
@@ -116,20 +114,6 @@ class TrayApp(rumps.App):
         threading.Thread(target=self._worker, name="health-poll", daemon=True).start()
         self._timer = rumps.Timer(self._drain, 1)
         self._timer.start()
-
-    def _use_symbol_icon(self, name: str) -> None:
-        """Status-bar icon from an SF Symbol as a template image (white on dark, black on light).
-
-        rumps only loads icons from files, so the NSImage is handed to it directly.
-        """
-        image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
-        if image is None:
-            log.warning("SF Symbol %r not available; keeping a text title", name)
-            return
-        image.setTemplate_(True)
-        self._icon_nsimage = image  # what rumps' icon setter would have produced from a file
-        with contextlib.suppress(AttributeError):  # not running yet: applied at start
-            self._nsapp.setStatusBarIcon()
 
     def _worker(self) -> None:
         """Poll loop: run on the interval or on demand, hand results to the queue."""

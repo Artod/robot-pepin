@@ -48,10 +48,12 @@ class Footprint:
         """Farthest hull corner from the axle centre: what a turn in place sweeps."""
         return math.hypot(self.rear_m, self.half_width_m)
 
-    def inside(self, points_robot: NDArray[np.float64]) -> NDArray[np.bool_]:
-        """Mask of points (N, 2) that lie within the hull plus its margin."""
+    def inside(
+        self, points_robot: NDArray[np.float64], margin_m: float | None = None
+    ) -> NDArray[np.bool_]:
+        """Mask of points (N, 2) within the hull plus ``margin_m`` (default: the hull's own)."""
         x, y = points_robot[:, 0], points_robot[:, 1]
-        m = self.margin_m
+        m = self.margin_m if margin_m is None else margin_m
         return (
             (x >= -self.rear_m - m) & (x <= self.front_m + m) & (np.abs(y) <= self.half_width_m + m)
         )
@@ -77,9 +79,16 @@ def time_to_contact(
 
     The points are the newest scan in the robot frame; the hull is rolled
     along the arc the twist describes and the points are viewed from each
-    future pose. Standing still never touches anything.
+    future pose. Standing still never touches anything. Points already inside
+    the hull at the start are not contacts the motion causes — they are the
+    robot's own structure seen by the lidar, or something it is already
+    against — so only points entering the hull count; with them counted, every
+    twist would "touch" and the robot could never move again.
     """
-    if len(points_robot) == 0 or (twist.linear == 0.0 and twist.angular == 0.0):
+    if twist.linear == 0.0 and twist.angular == 0.0:
+        return None
+    points_robot = points_robot[~footprint.inside(points_robot)]
+    if len(points_robot) == 0:
         return None
     # No point of the hull moves more than half a centimetre per step: two
     # adjacent beams on a chair leg by the rear corner are only ~8 mm apart and

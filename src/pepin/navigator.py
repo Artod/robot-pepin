@@ -325,6 +325,7 @@ class Navigator:
         follower = PathFollower(fresh, self.cfg.controller)
         if self._follower is not None:
             follower.facing = self._follower.facing  # a replan must not restart the turn
+            follower.turn_sign = self._follower.turn_sign
         self._follower = follower
         return True
 

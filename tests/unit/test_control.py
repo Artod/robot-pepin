@@ -63,3 +63,15 @@ def test_turning_in_place_finishes_before_driving_resumes() -> None:
     assert (
         fresh.step(Pose2D(0.0, 0.0, math.radians(20.0))).twist.linear > 0.0
     )  # never turned: drives
+
+
+def test_a_target_straight_behind_is_turned_to_in_one_direction() -> None:
+    """The heading error flips sign with pose jitter at 180 deg; the turn must not dither."""
+    follower = PathFollower([(-2.0, 0.0)])
+    signs = set()
+    for k in range(40):
+        jitter = math.radians(1.5) * (1 if k % 2 else -1)  # the localiser wobbles +-1.5 deg
+        out = follower.step(Pose2D(0.0, 0.01 * (1 if k % 3 else -1), jitter))
+        assert out.twist.linear == 0.0 and out.twist.angular != 0.0
+        signs.add(out.twist.angular > 0)
+    assert len(signs) == 1
