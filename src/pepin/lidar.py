@@ -319,11 +319,19 @@ class LidarClient:
         *,
         source_factory: Callable[[], ByteSource] | None = None,
         retry_s: float = 2.0,
+        reconnect: bool = True,
     ) -> None:
-        """``source_factory`` replaces the TCP bridge (a replayed capture in tests)."""
+        """``source_factory`` replaces the TCP bridge (a replayed capture in tests).
+
+        ``reconnect=False`` is for passive viewers: ser2net hands the port to the
+        newest client (``kickolduser``), so a viewer that reconnected after being
+        kicked would blind the driver that kicked it, every two seconds, forever.
+        """
         self._factory: Callable[[], ByteSource] = source_factory or (lambda: TcpSource(host, port))
         self._mount = mount
         self._retry_s = retry_s
+        self._reconnect = reconnect
+        self.silence_s = 3.0  # an open bridge that sends nothing is treated as lost
         self._scans: queue.Queue[LaserScan] = queue.Queue()
         self._latest: LaserScan | None = None
         self._lock = threading.Lock()
@@ -365,21 +373,46 @@ class LidarClient:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                stream = LidarStream(self._factory(), self._mount)
+                source = self._factory()
             except OSError as exc:
                 logger.warning("lidar bridge unreachable (%s); retrying", exc)
                 self._stop.wait(self._retry_s)
                 continue
+            logger.info("lidar stream connected")
             try:
-                for scan in stream.scans():
-                    with self._lock:
-                        self._latest = scan
-                    self._scans.put(scan)
-                    if self._stop.is_set():
-                        break
+                self._read_until_lost(source)
             except OSError as exc:
+                if not self._reconnect:
+                    logger.warning("lidar stream lost (%s); another client owns it now", exc)
+                    return
                 self.reconnects += 1
                 logger.warning("lidar stream lost (%s); reconnecting", exc)
                 self._stop.wait(self._retry_s)
+            except Exception:
+                # A parser or assembler bug must not leave a silent, dead thread behind.
+                self.reconnects += 1
+                logger.exception("lidar reader crashed; reconnecting")
+                self._stop.wait(self._retry_s)
             finally:
-                stream.close()
+                source.close()
+
+    def _read_until_lost(self, source: ByteSource) -> None:
+        """Parse the byte stream into revolutions until the bridge closes or goes silent."""
+        parser, assembler = FrameParser(), ScanAssembler(self._mount)
+        last_data = time.monotonic()
+        while not self._stop.is_set():
+            data = source.read(4096)
+            now = time.monotonic()
+            if not data:
+                if now - last_data > self.silence_s:
+                    raise ConnectionError(
+                        f"no lidar bytes for {self.silence_s:.0f} s (bridge open)"
+                    )
+                continue
+            last_data = now
+            for frame in parser.feed(data):
+                scan = assembler.feed(frame)
+                if scan is not None:
+                    with self._lock:
+                        self._latest = scan
+                    self._scans.put(scan)

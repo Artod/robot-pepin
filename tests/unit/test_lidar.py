@@ -148,3 +148,55 @@ def test_lidar_client_drains_revolutions_and_reconnects_after_a_drop() -> None:
     assert client.reconnects >= 1 and len(sources) >= 2
     assert client.latest is not None and client.age_s(time.monotonic()) < 5.0
     assert sources[0].closed
+
+
+def test_passive_lidar_client_steps_aside_when_kicked() -> None:
+    import time
+
+    from pepin.lidar import LidarClient
+
+    sources: list[ReplaySource] = []
+
+    def factory() -> ReplaySource:
+        sources.append(ReplaySource())
+        return sources[-1]
+
+    client = LidarClient(
+        "unused", LidarMount(), source_factory=factory, retry_s=0.01, reconnect=False
+    )
+    client.start()
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and client._thread.is_alive():
+        time.sleep(0.01)
+    assert not client._thread.is_alive(), "a passive client must stop after the bridge closes"
+    assert len(sources) == 1 and client.reconnects == 0
+    assert client.latest is not None  # what it saw before being kicked is kept
+
+
+def test_lidar_client_reconnects_when_the_bridge_is_open_but_silent() -> None:
+    import time
+
+    from pepin.lidar import LidarClient
+
+    class SilentSource:
+        def read(self, max_bytes: int) -> bytes:
+            time.sleep(0.005)
+            return b""
+
+        def close(self) -> None:
+            pass
+
+    opened: list[SilentSource] = []
+
+    def factory() -> SilentSource:
+        opened.append(SilentSource())
+        return opened[-1]
+
+    client = LidarClient("unused", LidarMount(), source_factory=factory, retry_s=0.01)
+    client.silence_s = 0.05
+    client.start()
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and client.reconnects < 2:
+        time.sleep(0.01)
+    client.close()
+    assert client.reconnects >= 2 and len(opened) >= 2
