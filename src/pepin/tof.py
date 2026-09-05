@@ -104,6 +104,9 @@ class ReflexConfig:
     blocked_when_stale: bool = False
     # Below the sensor's own minimum range a value is a failure code, not an object.
     min_valid_m: float = 0.04
+    # True only if the left/right sensors are aimed at the flanks; then a side hit also
+    # forbids turning toward it. Ours look forward (config/tof.json yaw 0), so it is off.
+    side_sensors_look_sideways: bool = False
 
 
 @dataclass(frozen=True)

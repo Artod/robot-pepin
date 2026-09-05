@@ -143,13 +143,12 @@ class GridPlanner:
         # someone standing there, and the tolerance below handles it.
         if start is None or goal is None or self._raw[goal]:
             return None
+        goals = [goal]
         if self.blocked[goal]:
-            # In the inflation zone (a wall, or someone standing there): stop as near as allowed.
+            # In the inflation zone (a wall, or someone standing there): stop as near as
+            # allowed — at the nearest free cell that is also reachable.
             reach = round(self.config.goal_tolerance_m / self.spec.resolution_m)
-            near_goal = self._nearest_free(goal, reach)
-            if near_goal is None:
-                return None
-            goal = near_goal
+            goals = self._free_cells_near(goal, reach)[:8]
         if self.blocked[start]:
             self.blocked = self._clear_footprint(self.blocked, raw, start)
         if self.blocked[start]:
@@ -157,7 +156,11 @@ class GridPlanner:
             if rescued is None:
                 return None
             start = rescued
-        cells = self._astar(start, goal)
+        cells = None
+        for candidate in goals:
+            cells = self._astar(start, candidate)
+            if cells is not None:
+                break
         if cells is None:
             return None
         return [self._world(cell) for cell in _drop_collinear(self._shortcut(cells))]
@@ -213,18 +216,36 @@ class GridPlanner:
         return out
 
     def _line_free(self, a: Cell, b: Cell) -> bool:
-        """True when the straight segment between two cell centres crosses no blocked cell."""
+        """True when the straight segment between two cell centres crosses no blocked cell.
+
+        Consecutive samples that step diagonally must also have both orthogonal
+        neighbours free — the same corner rule as A*, or the shortcut would squeeze
+        between two blocked cells that touch only at a corner.
+        """
         steps = max(abs(b[0] - a[0]), abs(b[1] - a[1])) * 2
-        for k in range(1, steps):
+        prev = a
+        for k in range(1, steps + 1):
             t = k / steps
-            row = round(a[0] + t * (b[0] - a[0]))
-            col = round(a[1] + t * (b[1] - a[1]))
-            if self.blocked[row, col]:
+            cell = (round(a[0] + t * (b[0] - a[0])), round(a[1] + t * (b[1] - a[1])))
+            if self.blocked[cell]:
                 return False
+            dr, dc = cell[0] - prev[0], cell[1] - prev[1]
+            if (
+                dr
+                and dc
+                and (self.blocked[prev[0] + dr, prev[1]] or self.blocked[prev[0], prev[1] + dc])
+            ):
+                return False
+            prev = cell
         return True
 
     def _nearest_free(self, cell: Cell, reach: int = START_RESCUE_CELLS) -> Cell | None:
         """Closest free cell within ``reach`` cells of ``cell``, or ``None`` if there is none."""
+        near = self._free_cells_near(cell, reach)
+        return near[0] if near else None
+
+    def _free_cells_near(self, cell: Cell, reach: int) -> list[Cell]:
+        """Free cells within ``reach`` cells of ``cell``, nearest first."""
         rows, cols = self.blocked.shape
         offsets = [
             (dr, dc)
@@ -233,11 +254,12 @@ class GridPlanner:
             if dr * dr + dc * dc <= reach * reach
         ]
         offsets.sort(key=lambda o: o[0] * o[0] + o[1] * o[1])
+        found: list[Cell] = []
         for dr, dc in offsets:
             row, col = cell[0] + dr, cell[1] + dc
             if 0 <= row < rows and 0 <= col < cols and not self.blocked[row, col]:
-                return (row, col)
-        return None
+                found.append((row, col))
+        return found
 
     def _astar(self, start: Cell, goal: Cell) -> list[Cell] | None:
         """8-connected A* with an octile heuristic; diagonals may not cut blocked corners."""

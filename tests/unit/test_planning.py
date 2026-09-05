@@ -206,3 +206,18 @@ def test_goal_next_to_a_wall_is_served_from_the_nearest_reachable_cell() -> None
     assert path[-1][1] > goal[1]  # pulled away from the wall, not into it
     assert math.hypot(path[-1][0] - goal[0], path[-1][1] - goal[1]) <= 0.5
     assert planner.plan((1.0, 2.0), (1.0, 0.05)) is None  # inside the wall itself: refused
+
+
+def test_shortcut_does_not_squeeze_between_cells_that_touch_at_a_corner() -> None:
+    grid = OccupancyGrid(
+        GridSpec(resolution_m=0.1, x_min_m=0.0, y_min_m=0.0, width_m=2.0, height_m=2.0)
+    )
+    grid.log_odds[:] = FREE
+    grid.log_odds[9, 10] = OCCUPIED  # two blocked cells sharing only a corner
+    grid.log_odds[10, 9] = OCCUPIED
+    planner = GridPlanner(grid, PlannerConfig(robot_radius_m=0.0))
+    assert not planner._line_free((9, 9), (10, 10))
+    path = planner.plan((0.95, 0.95), (1.85, 1.85))
+    assert path is not None
+    for (x1, y1), (x2, y2) in itertools.pairwise(path):
+        assert not (x1 < 1.0 < x2 and y1 < 1.0 < y2 and abs((x2 - x1) - (y2 - y1)) < 1e-9)

@@ -99,18 +99,23 @@ class Viewer:
             rr.log("world/scan", rr.Points2D(world, colors=[255, 200, 0], radii=0.01))
 
 
-def guarded_command(intent: Twist, obs: Observation, mount: LidarMount) -> tuple[Twist, str]:
-    """The twist allowed to reach the wheels, and why it differs from the intent ("" if same)."""
+def guarded_command(
+    intent: Twist, obs: Observation, latest_scan: LaserScan | None, mount: LidarMount
+) -> tuple[Twist, str]:
+    """The twist allowed to reach the wheels, and why it differs from the intent ("" if same).
+
+    The box guard runs on every tick against the newest revolution (the loop is
+    20 Hz, the lidar 10 Hz): a guard that only fired on ticks with a fresh scan
+    let a blocked command through every other tick.
+    """
     command = intent
     sense = obs.sense
     if command.linear > 0:
-        if not sense.scans and sense.scan_age_s > SCAN_TIMEOUT_S:
+        if latest_scan is None or sense.scan_age_s > SCAN_TIMEOUT_S:
             return Twist(0.0, command.angular), "no fresh lidar scan — forward blocked"
-        points = sense.scans[-1] if sense.scans else None
-        if points is not None:
-            command, blocker = guard_forward(command, points)
-            if blocker is not None:
-                return command, f"lidar guard: obstacle {blocker:.2f} m ahead, forward blocked"
+        command, blocker = guard_forward(command, latest_scan.points_xy(mount))
+        if blocker is not None:
+            return command, f"lidar guard: obstacle {blocker:.2f} m ahead, forward blocked"
     if sense.tof is not None:
         decision = apply_reflex(command, sense.tof)
         if decision.blocked:
@@ -187,7 +192,7 @@ def main() -> None:
                     rec.pose(pose, (obs.state.d_left_m, obs.state.d_right_m))
                     if obs.scans:
                         latest_scan = obs.scans[-1]
-                    command, reason = guarded_command(state.twist, obs, robot.mount)
+                    command, reason = guarded_command(state.twist, obs, latest_scan, robot.mount)
                     if reason and reason != last_reason:
                         logger.warning(reason)
                     last_reason = reason

@@ -268,11 +268,12 @@ def main() -> None:
         ),
     )
     if nav.plan is None:
-        raise SystemExit(
-            f"no path from {args.init[:2]} to {goal} — is the start clear of walls and the goal "
-            "inside known free space?"
+        logger.warning(
+            "no path from the given start %s yet; the first scan may correct it", args.init
         )
-    logger.info("plan: %d waypoints, %.2f m", len(nav.plan), path_length(nav.plan))
+        print(f"no path from {args.init[:2]} to {goal} yet — the first scan may fix the start pose")
+    else:
+        logger.info("plan: %d waypoints, %.2f m", len(nav.plan), path_length(nav.plan))
 
     print("resolving the board...", end=" ", flush=True)
     host = board_address()

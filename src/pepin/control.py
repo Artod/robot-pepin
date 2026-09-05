@@ -30,7 +30,7 @@ class ControllerConfig:
     face_before_driving_rad: float = math.radians(35.0)
     # Once turning in place, keep turning until this close: flipping between "turn" and
     # "drive" right at the threshold made the robot weave after every turn.
-    resume_driving_rad: float = math.radians(10.0)
+    resume_driving_rad: float = math.radians(15.0)  # > max_yaw_rate x ~0.25 s telemetry lag
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,17 @@ class PathFollower:
 
     @property
     def goal(self) -> tuple[float, float]:
+        """The last waypoint."""
         return self._path[-1]
+
+    @property
+    def facing(self) -> bool:
+        """True while turning in place; a replacement follower inherits it across a replan."""
+        return self._facing
+
+    @facing.setter
+    def facing(self, value: bool) -> None:
+        self._facing = value
 
     def _advance(self, pose: Pose2D) -> tuple[float, float]:
         """Skip waypoints already within the look-ahead, never past the final one."""

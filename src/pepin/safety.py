@@ -66,11 +66,23 @@ class Reflex:
     away and turning away are always allowed, so the planner can steer out.
     """
 
-    def __init__(self, config: ReflexConfig | None = None, release_margin_m: float = 0.08) -> None:
-        """``config`` holds the stop distances; ``release_margin_m`` the hysteresis band."""
+    def __init__(
+        self,
+        config: ReflexConfig | None = None,
+        release_margin_m: float = 0.08,
+        release_after_none: int = 5,
+    ) -> None:
+        """``config`` holds the stop distances; ``release_margin_m`` the hysteresis band.
+
+        ``release_after_none``: a tripped sensor that reports "no return" is only
+        released after that many frames in a row — the VL53L1X reports no return
+        both for an empty room and for a failure at very close range.
+        """
         self._cfg = config or ReflexConfig()
         self._margin = release_margin_m
+        self._release_after_none = release_after_none
         self._tripped: set[str] = set()
+        self._none_streak: dict[str, int] = {}
 
     @property
     def tripped(self) -> frozenset[str]:
@@ -88,21 +100,31 @@ class Reflex:
         values = {"front": ranges.front, "left": ranges.left, "right": ranges.right}
         for name, value in values.items():
             limit = limits[name] + (self._margin if name in self._tripped else 0.0)
-            if value is not None and cfg.min_valid_m <= value < limit:
+            if value is None:
+                self._none_streak[name] = self._none_streak.get(name, 0) + 1
+                if self._none_streak[name] >= self._release_after_none:
+                    self._tripped.discard(name)
+                continue
+            self._none_streak[name] = 0
+            if cfg.min_valid_m <= value < limit:
                 self._tripped.add(name)
             else:
                 self._tripped.discard(name)
         linear, angular = command.linear, command.angular
         if self._tripped and linear > 0.0:
             linear = 0.0
-        if "left" in self._tripped and angular > 0.0:
-            angular = 0.0  # turning left sweeps the front-left corner into it
-        if "right" in self._tripped and angular < 0.0:
-            angular = 0.0
+        if cfg.side_sensors_look_sideways:
+            # Only meaningful for sensors aimed at the flanks; ours all look forward.
+            if "left" in self._tripped and angular > 0.0:
+                angular = 0.0  # turning left sweeps the front-left corner into it
+            if "right" in self._tripped and angular < 0.0:
+                angular = 0.0
         trimmed = Twist(linear, angular)
         if trimmed == command:
             return ReflexDecision(command, blocked=False)
         reason = ", ".join(
-            f"{n} {values[n]:.2f} m" for n in ("front", "left", "right") if n in self._tripped
+            f"{n} {values[n]:.2f} m" if values[n] is not None else f"{n} no return (held)"
+            for n in ("front", "left", "right")
+            if n in self._tripped
         )
         return ReflexDecision(trimmed, True, reason)

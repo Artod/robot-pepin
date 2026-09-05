@@ -174,7 +174,7 @@ class Navigator:
         twist, veto = self._guard(out.twist, sense)
         # A vetoed forward wish means the plan runs into something the map lacks:
         # the next tick replans with the live obstacles instead of pushing.
-        self._vetoed_forward = bool(veto) and out.twist.linear > 0.0
+        self._vetoed_forward = bool(veto)  # any trimmed command: retry the plan soon
         return Decision(twist, pose, confidence, veto=veto, target=out.target, plan_changed=changed)
 
     # -- the five stages ----------------------------------------------------
@@ -185,9 +185,9 @@ class Navigator:
             self.localizer.predict(sense.odom_pose)
             return self.localizer.pose
         for points in sense.scans:
-            if not self._initialised:
-                self._initialised = True
-                if self.cfg.initial_search is not None and len(points) >= 50:
+            if not self._initialised and len(points) >= 50:
+                self._initialised = True  # a short spin-up revolution must not use up the attempt
+                if self.cfg.initial_search is not None:
                     self.localizer.initialize(points, self.cfg.initial_search)
             pose = self.localizer.update(sense.odom_pose, points)
             self._latest_points = points
@@ -199,7 +199,7 @@ class Navigator:
 
     def _remember_tof(self, sense: Sense, pose: Pose2D) -> None:
         """Close ToF returns become obstacle-layer points, so low things get routed around too."""
-        if sense.tof is None or sense.tof.age_s > self.cfg.reflex.max_age_s:
+        if sense.tof is None or sense.tof.age_s > self.cfg.reflex.max_age_s or self.localizer.lost:
             return
         hits = [
             self.cfg.tof_mounts[name].hit_xy(r)
@@ -256,7 +256,10 @@ class Navigator:
         if fresh == self.plan:
             return False
         self.plan = fresh
-        self._follower = PathFollower(fresh, self.cfg.controller)
+        follower = PathFollower(fresh, self.cfg.controller)
+        if self._follower is not None:
+            follower.facing = self._follower.facing  # a replan must not restart the turn
+        self._follower = follower
         return True
 
     def _guard(self, twist: Twist, sense: Sense) -> tuple[Twist, str]:
