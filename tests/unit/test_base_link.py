@@ -2,8 +2,9 @@
 
 import json
 
-from pepin.base_link import BaseClient, decode_state, encode
+from pepin.base_link import BaseClient, decode_state
 from pepin.kinematics import Twist
+from pepin.streams import encode
 
 
 def test_state_message_round_trips_and_ages_on_the_laptop_clock() -> None:

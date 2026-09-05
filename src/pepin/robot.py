@@ -22,12 +22,11 @@ from pathlib import Path
 from types import TracebackType
 
 from pepin.base_link import BASE_PORT, BaseClient, BaseState
-from pepin.feeds import Feed
+from pepin.feeds import Feed, Sense
 from pepin.footprint import Footprint
 from pepin.geometry import BaseConfig
 from pepin.kinematics import Twist
 from pepin.lidar import LaserScan, LidarClient, LidarMount
-from pepin.navigator import Sense
 from pepin.tof import TOF_PORT, TofClient, TofMount, load_mounts
 from pepin.transport import LIDAR_PORT, board_address
 from pepin.video import CameraRecorder

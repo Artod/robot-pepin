@@ -16,7 +16,7 @@ import socket
 import struct
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -255,52 +255,6 @@ class TcpSource:
     def close(self) -> None:
         """Close the bridge socket; the sensor keeps spinning on the robot."""
         self._sock.close()
-
-
-class SerialSource:
-    """Raw bytes from a directly attached UART adapter."""
-
-    def __init__(self, port: str, timeout_s: float = 0.5) -> None:
-        """Opens the tty at ``port`` at the LD19's fixed 230400 baud."""
-        import serial  # pyserial; only needed for direct USB use
-
-        self._ser = serial.Serial(port, BAUDRATE, timeout=timeout_s)
-
-    def read(self, max_bytes: int) -> bytes:
-        """Up to ``max_bytes``, returning whatever arrived before the port timeout."""
-        data: bytes = self._ser.read(max_bytes)
-        return data
-
-    def close(self) -> None:
-        """Close the serial port."""
-        self._ser.close()
-
-
-class LidarStream:
-    """Iterates full-revolution scans from a byte source."""
-
-    def __init__(self, source: ByteSource, mount: LidarMount) -> None:
-        """Wires a byte source to a parser and assembler; ``parser`` stays public so a
-        caller can watch the frame and CRC-failure counts while driving."""
-        self._source = source
-        self.parser = FrameParser()
-        self._assembler = ScanAssembler(mount)
-
-    def scans(self) -> Iterator[LaserScan]:
-        """Yield one :class:`LaserScan` per revolution, forever.
-
-        Each read blocks up to the source's own timeout, so a silent sensor costs
-        a slow poll rather than a busy loop.
-        """
-        while True:
-            for frame in self.parser.feed(self._source.read(4096)):
-                scan = self._assembler.feed(frame)
-                if scan is not None:
-                    yield scan
-
-    def close(self) -> None:
-        """Close the byte source; any partly assembled revolution is discarded."""
-        self._source.close()
 
 
 class LidarClient:

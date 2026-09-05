@@ -58,3 +58,7 @@ class DiffDriveKinematics:
     def rad_s_to_ticks_s(self, rad_s: float) -> int:
         """Wheel rate to the servo's native velocity unit (encoder ticks per second)."""
         return round(rad_s * self._ticks_per_rad)
+
+
+STOP = Twist(0.0, 0.0)
+"""The one twist every guard falls back to."""

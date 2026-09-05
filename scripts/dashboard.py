@@ -25,23 +25,23 @@ import rerun as rr
 import rerun.blueprint as rrb
 
 from pepin.health import BoardVitals, HealthReport, busy_bridge_ports, probe_board
-from pepin.lidar import LidarClient, LidarMount
+from pepin.lidar import LidarClient
 from pepin.log import setup_logging
 from pepin.mapping import OccupancyGrid
+from pepin.robot import RobotConfig
 from pepin.telemetry import LatencyTracker
 from pepin.tof import TOF_PORT, TofClient
 from pepin.transport import LIDAR_PORT, board_address
 
 logger = logging.getLogger(__name__)
-CAMERA_URL = "http://{host}:8080/snapshot"
+CAMERA_URL = "http://{host}:{port}/snapshot"
 VITALS_EVERY_S = 10.0
 
 
 def camera_thread(
-    host: str, fps: float, frames: "queue.Queue[bytes]", stop: threading.Event
+    url: str, fps: float, frames: "queue.Queue[bytes]", stop: threading.Event
 ) -> None:
     """Snapshots from the board's MJPEG server at a modest rate."""
-    url = CAMERA_URL.format(host=host)
     period = 1.0 / fps
     while not stop.is_set():
         started = time.monotonic()
@@ -88,7 +88,8 @@ def main() -> None:
     args = parser.parse_args()
     setup_logging("dashboard")
     host = board_address()
-    mount = LidarMount.from_json("config/lidar.json")
+    config = RobotConfig.load()
+    mount = config.lidar_mount
 
     rr.init("pepin-dashboard", spawn=args.headless is None, default_blueprint=blueprint())
     if args.headless is not None:
@@ -118,12 +119,21 @@ def main() -> None:
         rr.log("log", rr.TextLog("lidar in use by a drive — not connecting", level="WARN"))
     else:
         # Passive: if a drive starts and takes the bridge, stay off it (do not fight back).
-        lidar = LidarClient(host, mount, reconnect=False).start()
+        lidar = LidarClient(
+            host, mount, port=config.port("lidar", LIDAR_PORT), reconnect=False
+        ).start()
     if not args.no_camera:
         threading.Thread(
-            target=camera_thread, args=(host, args.camera_fps, frames, stop), daemon=True
+            target=camera_thread,
+            args=(
+                CAMERA_URL.format(host=host, port=config.port("camera_http", 8080)),
+                args.camera_fps,
+                frames,
+                stop,
+            ),
+            daemon=True,
         ).start()
-    tof = TofClient(host, TOF_PORT).start()
+    tof = TofClient(host, config.port("tof", TOF_PORT)).start()
 
     t0 = time.monotonic()
     scan_rate = LatencyTracker("scan period")

@@ -19,9 +19,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from pepin.kinematics import Twist
-
-STOP = Twist(0.0, 0.0)
+from pepin.kinematics import STOP, Twist
 
 
 @dataclass(frozen=True)

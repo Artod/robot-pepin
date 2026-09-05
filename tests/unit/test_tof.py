@@ -1,7 +1,8 @@
 import pytest
 
 from pepin.kinematics import Twist
-from pepin.tof import ReflexConfig, TofRanges, apply_reflex
+from pepin.safety import ReflexConfig, apply_reflex
+from pepin.tof import TofRanges
 
 FRESH = 0.05
 
@@ -68,7 +69,8 @@ def test_config_mounts_load_for_all_three_sensors() -> None:
 
 def test_sub_minimum_ranges_are_failure_codes_not_obstacles() -> None:
     from pepin.kinematics import Twist
-    from pepin.tof import ReflexConfig, TofRanges, apply_reflex
+    from pepin.safety import ReflexConfig, apply_reflex
+    from pepin.tof import TofRanges
 
     forward = Twist(0.15, 0.0)
     ghost = TofRanges(front=0.02, left=None, right=None, age_s=0.0)  # VL53L1X "no target" tell

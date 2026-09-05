@@ -20,26 +20,25 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
 
 from pepin.control import ControllerConfig, PathFollower
+from pepin.feeds import Sense
 from pepin.footprint import Footprint, FootprintGuard
-from pepin.kinematics import Twist
+from pepin.kinematics import STOP, Twist
 from pepin.localization import Localizer
 from pepin.mapping import OccupancyGrid, transform_to_world
 from pepin.odometry import Pose2D
 from pepin.planning import GridPlanner, PlannerConfig
-from pepin.safety import Reflex
+from pepin.safety import Reflex, ReflexConfig
 from pepin.scanmatch import SearchWindow
-from pepin.tof import ReflexConfig, TofMount, TofRanges
+from pepin.tof import TofMount
 
 logger = logging.getLogger(__name__)
-
-STOP = Twist(0.0, 0.0)
 
 
 @dataclass(frozen=True)
@@ -71,17 +70,6 @@ class NavigatorConfig:
     reflex: ReflexConfig = field(default_factory=lambda: ReflexConfig(blocked_when_stale=True))
     footprint: Footprint = field(default_factory=Footprint)  # the hull the guard sweeps
     guard_horizon_s: float = 0.6  # how far ahead the hull sweep looks
-
-
-@dataclass(frozen=True)
-class Sense:
-    """One tick of sensor input, already in the robot's own units and frame."""
-
-    now: float  # time.monotonic() of this tick
-    odom_pose: Pose2D  # wheel odometry, integrated by the caller
-    scans: Sequence[NDArray[np.float64]]  # robot-frame (N, 2) point sets since the last tick
-    scan_age_s: float  # seconds since the newest scan ever received; inf before the first
-    tof: TofRanges | None  # None when running without the ToF sensors
 
 
 @dataclass(frozen=True)

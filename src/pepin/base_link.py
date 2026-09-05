@@ -20,7 +20,6 @@ Wire format, one JSON object per line in both directions::
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -50,11 +49,6 @@ class BaseState:
     bus_p95_ms: float  # board-local servo round trip, 95th percentile
     stamp_s: float  # board clock (time.monotonic there) when the message was made
     age_s: float  # laptop clock: seconds since this message arrived
-
-
-def encode(message: dict[str, Any]) -> bytes:
-    """One message as a JSON line ready for the socket."""
-    return (json.dumps(message, separators=(",", ":")) + "\n").encode()
 
 
 def decode_state(message: dict[str, Any], received_at: float) -> BaseState:

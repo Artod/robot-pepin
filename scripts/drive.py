@@ -31,8 +31,8 @@ from pepin.mapping import OccupancyGrid, transform_to_world
 from pepin.odometry import Pose2D
 from pepin.recording import SessionRecorder
 from pepin.robot import Observation, Robot, RobotConfig
+from pepin.safety import Reflex, ReflexConfig
 from pepin.teleop import DriveState, KeyReader, apply_key
-from pepin.tof import apply_reflex
 from pepin.transport import board_address
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,7 @@ def guarded_command(
     obs: Observation,
     latest_scan: LaserScan | None,
     guard: FootprintGuard,
+    reflex: Reflex,
     mount: LidarMount,
 ) -> tuple[Twist, str]:
     """The twist allowed to reach the wheels, and why it differs from the intent ("" if same).
@@ -122,7 +123,7 @@ def guarded_command(
         if reason:
             return command, f"lidar: {reason}"
     if sense.tof is not None:
-        decision = apply_reflex(command, sense.tof)
+        decision = reflex.step(command, sense.tof)
         if decision.blocked:
             return decision.twist, f"reflex: {decision.reason}"
     return command, ""
@@ -170,6 +171,7 @@ def main() -> None:
             raise SystemExit(str(exc)) from exc
         viewer = Viewer(enabled=not args.no_viz, grid=grid)
         guard = FootprintGuard(config.footprint)
+        reflex = Reflex(ReflexConfig())  # teleop: a stale ToF does not hold a human's command
         print("W/S speed  A/D turn  space stop  Q quit  Ctrl-C stop")
         try:
             with SessionRecorder("data/sessions", args.name) as rec, KeyReader() as keys:
@@ -199,7 +201,7 @@ def main() -> None:
                     if obs.scans:
                         latest_scan = obs.scans[-1]
                     command, reason = guarded_command(
-                        state.twist, obs, latest_scan, guard, robot.mount
+                        state.twist, obs, latest_scan, guard, reflex, robot.mount
                     )
                     if reason and reason != last_reason:
                         logger.warning(reason)

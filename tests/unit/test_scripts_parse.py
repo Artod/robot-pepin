@@ -1,8 +1,7 @@
-"""Every entry-point script must at least build its argument parser.
+"""Every entry point answers --help: its imports resolve and its parser builds.
 
-Scripts are not type-checked (argparse namespaces defeat mypy anyway), so a
-misnamed option only shows up at launch time on the robot. ``--help`` exits
-before touching hardware and catches import errors and parser mistakes.
+The servo bench tools (jog, calibrate_neck, scan_bus, setup_motor_id) import
+lerobot, which pulls torch; they are left out to keep the unit tier fast.
 """
 
 import subprocess
@@ -11,13 +10,18 @@ from pathlib import Path
 
 import pytest
 
-SCRIPTS = ["drive.py", "navigate.py", "build_map.py", "base_smoke.py"]  # health_check takes no args
+REPO = Path(__file__).resolve().parents[2]
+BENCH = {"jog.py", "calibrate_neck.py", "scan_bus.py", "setup_motor_id.py"}
+SCRIPTS = sorted(p.name for p in (REPO / "scripts").glob("*.py") if p.name not in BENCH)
 
 
 @pytest.mark.parametrize("script", SCRIPTS)
-def test_script_help_exits_cleanly(script: str) -> None:
-    path = Path(__file__).resolve().parents[2] / "scripts" / script
+def test_script_answers_help(script: str) -> None:
     result = subprocess.run(
-        [sys.executable, str(path), "--help"], capture_output=True, text=True, timeout=60
+        [sys.executable, str(REPO / "scripts" / script), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=REPO,
     )
-    assert result.returncode == 0, result.stderr[-500:]
+    assert result.returncode == 0, result.stderr[-600:]

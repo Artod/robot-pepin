@@ -34,14 +34,12 @@ from pepin.base_link import BASE_PORT, DEADMAN_S
 from pepin.bus import MotorBus, verify_motors
 from pepin.feetech import FeetechTcpClient
 from pepin.geometry import BaseConfig
-from pepin.kinematics import Twist
+from pepin.kinematics import STOP, Twist
 from pepin.odometry import DiffDriveOdometry
 from pepin.streams import JsonLinesServer
 from pepin.telemetry import LatencyTracker
 
 logger = logging.getLogger(__name__)
-
-STOP = Twist(0.0, 0.0)
 
 
 class BaseServerCore:

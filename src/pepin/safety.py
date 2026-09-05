@@ -1,60 +1,67 @@
-"""Near-field safety from the lidar: is anything inside the box the robot is about to drive into?
+"""Near-field safety: the ToF stop rule that trims a command right before it reaches the wheels.
 
-The map may not contain a table leg seen only from a few angles; the live
-scan does. This check is independent of the map and of the ToF sensors and
-costs nothing: a rectangle in front of the robot, a few array compares.
+The planner routes around what the map and the lidar know; this is the last
+line, fed by the three ToF sensors that look where the lidar cannot (low, in
+front). It is pure decision logic over ranges and a twist; the hull sweep
+against the lidar lives in :mod:`pepin.footprint`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
-from numpy.typing import NDArray
-
 from pepin.kinematics import Twist
-from pepin.tof import ReflexConfig, ReflexDecision, TofRanges
+from pepin.tof import TofRanges
 
 
 @dataclass(frozen=True)
-class SafetyBox:
-    """Bumper: the rectangle just ahead of the hull, measured from the axle centre (m).
+class ReflexConfig:
+    """Distances (m) below which forward motion is refused, and how stale data may be."""
 
-    The drive wheels are the front of the robot: outer wheel edges at +-0.275 m
-    (0.55 m over the wheels), the wheel fronts 0.06 m ahead of the axle, the
-    cart's front plane at 0.03 m; the body reaches 0.30 m back. The planner's
-    inflation radius carries the margin; this box only says "you are about to
-    touch it", so it must stay inside that radius or every path the planner
-    accepts gets vetoed beside every obstacle.
+    front_stop_m: float = 0.22
+    # Side sensors sit level at 0.16 m; their 27-degree cone would only reach the floor
+    # at ~0.67 m, so anything nearer than this is a real object beside the front wheels.
+    side_stop_m: float = 0.30
+    max_age_s: float = 0.5
+    blocked_when_stale: bool = False
+    # Below the sensor's own minimum range a value is a failure code, not an object.
+    min_valid_m: float = 0.04
+    # True only if the left/right sensors are aimed at the flanks; then a side hit also
+    # forbids turning toward it. Ours look forward (config/tof.json yaw 0), so it is off.
+    side_sensors_look_sideways: bool = False
+
+
+@dataclass(frozen=True)
+class ReflexDecision:
+    """What the reflex allows: the (possibly zeroed) twist and why."""
+
+    twist: Twist
+    blocked: bool
+    reason: str = ""
+
+
+def apply_reflex(
+    command: Twist, ranges: TofRanges, config: ReflexConfig | None = None
+) -> ReflexDecision:
+    """Zero the forward speed when something is closer than the stop distance ahead.
+
+    Only forward motion is blocked: backing away from an obstacle must stay
+    possible. Turning in place is always allowed.
     """
-
-    length_m: float = 0.25
-    body_half_width_m: float = 0.27
-    min_points: int = 3  # fewer hits inside the box are treated as noise
-
-
-def nearest_ahead(points_robot: NDArray[np.float64], box: SafetyBox | None = None) -> float | None:
-    """Distance to the nearest scan point inside the box ahead, or None when the box is clear."""
-    box = box or SafetyBox()
-    if len(points_robot) == 0:
-        return None
-    x, y = points_robot[:, 0], points_robot[:, 1]
-    inside = (x > 0.0) & (x <= box.length_m) & (np.abs(y) <= box.body_half_width_m)
-    if inside.sum() < box.min_points:
-        return None
-    return float(x[inside].min())
-
-
-def guard_forward(
-    command: Twist, points_robot: NDArray[np.float64], box: SafetyBox | None = None
-) -> tuple[Twist, float | None]:
-    """Zero the forward speed if the lidar sees something in the box; returns (twist, blocker)."""
-    if command.linear <= 0.0:
-        return command, None
-    blocker = nearest_ahead(points_robot, box)
-    if blocker is None:
-        return command, None
-    return Twist(0.0, command.angular), blocker
+    config = config or ReflexConfig()
+    if command.linear <= 0:
+        return ReflexDecision(command, blocked=False)
+    if ranges.age_s > config.max_age_s:
+        if config.blocked_when_stale:
+            return ReflexDecision(Twist(0.0, command.angular), True, "no fresh ToF data")
+        return ReflexDecision(command, blocked=False)
+    front = ranges.front
+    if front is not None and config.min_valid_m <= front < config.front_stop_m:
+        return ReflexDecision(Twist(0.0, command.angular), True, f"front {front:.2f} m")
+    for name, value in (("left", ranges.left), ("right", ranges.right)):
+        if value is not None and config.min_valid_m <= value < config.side_stop_m:
+            return ReflexDecision(Twist(0.0, command.angular), True, f"{name} {value:.2f} m")
+    return ReflexDecision(command, blocked=False)
 
 
 class Reflex:

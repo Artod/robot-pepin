@@ -11,7 +11,15 @@ depending on the sensor. Adding a sensor means adding a Feed and one field to
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
+
+import numpy as np
+from numpy.typing import NDArray
+
+from pepin.odometry import Pose2D
+from pepin.tof import TofRanges
 
 
 class Feed(Protocol):
@@ -30,3 +38,14 @@ class Feed(Protocol):
     def age_s(self, now: float | None = None) -> float:
         """Seconds since the newest reading; infinite before the first."""
         ...
+
+
+@dataclass(frozen=True)
+class Sense:
+    """One tick of sensor input, already in the robot's own units and frame."""
+
+    now: float  # time.monotonic() of this tick
+    odom_pose: Pose2D  # wheel odometry, integrated by the caller
+    scans: Sequence[NDArray[np.float64]]  # robot-frame (N, 2) point sets since the last tick
+    scan_age_s: float  # seconds since the newest scan ever received; inf before the first
+    tof: TofRanges | None  # None when running without the ToF sensors

@@ -1,10 +1,10 @@
 """Near-field time-of-flight ranges from the board and the stop reflex built on them.
 
 The lidar sees one horizontal slice of the world; the three VL53L1X
-sensors look where it cannot (low, in front) and feed two things: a reflex
-that refuses to drive into something close, and an obstacle layer for
-navigation (through :class:`TofMount`, which says where each return lands
-in the robot frame). Localisation never uses them.
+sensors look where it cannot (low, in front). This module is the driver side:
+the stream client and where each sensor sits (:class:`TofMount`). The stop
+rule built on the ranges lives in :mod:`pepin.safety`. Localisation never
+uses them.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pepin.kinematics import Twist
 from pepin.streams import Connector, JsonLinesClient
 
 TOF_PORT = 3335
@@ -63,7 +62,7 @@ def load_mounts(path: str | Path) -> dict[str, TofMount]:
 
 
 class TofClient(JsonLinesClient):
-    """The board's range stream (:mod:`board.tof_server`) as a :class:`pepin.feeds.Feed`.
+    """The board's range stream (:mod:`pepin.tof_server`) as a :class:`pepin.feeds.Feed`.
 
     ``ranges()`` never blocks; its ``age_s`` is infinite until the first record,
     so a dead stream is visible instead of silently reading "nothing close".
@@ -90,53 +89,3 @@ class TofClient(JsonLinesClient):
             return TofRanges(
                 self._latest["front"], self._latest["left"], self._latest["right"], self.age_s(now)
             )
-
-
-@dataclass(frozen=True)
-class ReflexConfig:
-    """Distances (m) below which forward motion is refused, and how stale data may be."""
-
-    front_stop_m: float = 0.22
-    # Side sensors sit level at 0.16 m; their 27-degree cone would only reach the floor
-    # at ~0.67 m, so anything nearer than this is a real object beside the front wheels.
-    side_stop_m: float = 0.30
-    max_age_s: float = 0.5
-    blocked_when_stale: bool = False
-    # Below the sensor's own minimum range a value is a failure code, not an object.
-    min_valid_m: float = 0.04
-    # True only if the left/right sensors are aimed at the flanks; then a side hit also
-    # forbids turning toward it. Ours look forward (config/tof.json yaw 0), so it is off.
-    side_sensors_look_sideways: bool = False
-
-
-@dataclass(frozen=True)
-class ReflexDecision:
-    """What the reflex allows: the (possibly zeroed) twist and why."""
-
-    twist: Twist
-    blocked: bool
-    reason: str = ""
-
-
-def apply_reflex(
-    command: Twist, ranges: TofRanges, config: ReflexConfig | None = None
-) -> ReflexDecision:
-    """Zero the forward speed when something is closer than the stop distance ahead.
-
-    Only forward motion is blocked: backing away from an obstacle must stay
-    possible. Turning in place is always allowed.
-    """
-    config = config or ReflexConfig()
-    if command.linear <= 0:
-        return ReflexDecision(command, blocked=False)
-    if ranges.age_s > config.max_age_s:
-        if config.blocked_when_stale:
-            return ReflexDecision(Twist(0.0, command.angular), True, "no fresh ToF data")
-        return ReflexDecision(command, blocked=False)
-    front = ranges.front
-    if front is not None and config.min_valid_m <= front < config.front_stop_m:
-        return ReflexDecision(Twist(0.0, command.angular), True, f"front {front:.2f} m")
-    for name, value in (("left", ranges.left), ("right", ranges.right)):
-        if value is not None and config.min_valid_m <= value < config.side_stop_m:
-            return ReflexDecision(Twist(0.0, command.angular), True, f"{name} {value:.2f} m")
-    return ReflexDecision(command, blocked=False)
