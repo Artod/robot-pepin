@@ -31,12 +31,13 @@ from pepin.control import ControllerConfig, PathFollower
 from pepin.feeds import Sense
 from pepin.footprint import Footprint, FootprintGuard
 from pepin.kinematics import STOP, Twist
+from pepin.local_planner import LocalPlanner, LocalPlannerConfig
 from pepin.localization import Localizer
 from pepin.mapping import OccupancyGrid, transform_to_world
 from pepin.odometry import Pose2D
 from pepin.planning import GridPlanner, PlannerConfig
 from pepin.safety import Reflex, ReflexConfig
-from pepin.scanmatch import SearchWindow
+from pepin.scanmatch import SearchWindow, relative_motion
 from pepin.tof import TofMount
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,8 @@ class NavigatorConfig:
     # Autonomous mode: stale ToF data holds the robot instead of being ignored.
     reflex: ReflexConfig = field(default_factory=lambda: ReflexConfig(blocked_when_stale=True))
     footprint: Footprint = field(default_factory=Footprint)  # the hull the guard sweeps
+    # Steer around what the map does not know instead of stopping; None = stop and replan only.
+    local: LocalPlannerConfig | None = field(default_factory=LocalPlannerConfig)
     guard_horizon_s: float = 0.6  # how far ahead the hull sweep looks
     guard_min_points: int = (
         2  # lidar returns inside the hull that count as contact (1 = trust every beam)
@@ -139,6 +142,13 @@ class Navigator:
         self.guard = FootprintGuard(
             self.cfg.footprint, self.cfg.guard_horizon_s, self.cfg.guard_min_points
         )
+        self.local = (
+            LocalPlanner(
+                self.cfg.footprint, self.cfg.controller, self.cfg.local, self.cfg.guard_min_points
+            )
+            if self.cfg.local is not None
+            else None
+        )
         self.paused = False
         self.plan: list[tuple[float, float]] | None = None
         self._follower: PathFollower | None = None
@@ -197,11 +207,18 @@ class Navigator:
         if out.done:
             self._done = True
             return Decision(STOP, pose, confidence, plan_changed=changed, done=True)
-        twist, veto = self.guard_twist(out.twist, sense)
-        # A vetoed forward wish means the plan runs into something the map lacks:
+        wish, steer = out.twist, ""
+        if self.local is not None and out.target is not None and self._latest_points is not None:
+            rel = relative_motion(pose, Pose2D(out.target[0], out.target[1], 0.0))
+            wish, steer = self.local.steer(wish, (rel.x, rel.y), self._latest_points)
+        twist, veto = self.guard_twist(wish, sense)
+        reasons = "; ".join(r for r in (steer, veto) if r)
+        # A steered or vetoed wish means the plan runs into something the map lacks:
         # the next tick replans with the live obstacles instead of pushing.
-        self._vetoed_forward = bool(veto)  # any trimmed command: retry the plan soon
-        return Decision(twist, pose, confidence, veto=veto, target=out.target, plan_changed=changed)
+        self._vetoed_forward = bool(reasons)
+        return Decision(
+            twist, pose, confidence, veto=reasons, target=out.target, plan_changed=changed
+        )
 
     # -- the five stages ----------------------------------------------------
 

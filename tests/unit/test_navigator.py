@@ -208,3 +208,23 @@ def test_arrival_is_sticky_across_a_pause() -> None:
     nav.paused = False
     later = nav.step(Sense(4.0, start, [raycast_room(start)], 0.0, None))  # a replan was due
     assert later.done and later.twist == STOP and later.target is None
+
+
+def test_a_person_stepping_in_close_ahead_is_passed_not_pushed() -> None:
+    """The person appears 0.9 m ahead; the cart backs off, turns and passes (it used to jam)."""
+    start, goal = Pose2D(-2.0, 0.0, 0.0), (2.0, 0.0)
+    nav = Navigator(room_map(), start, goal, NavigatorConfig(controller=FAST))
+    pose, closest, done, stops = start, math.inf, False, 0
+    for i in range(int(40 / DT)):
+        now = (i + 1) * DT
+        visible = math.hypot(pose.x - PERSON[0], pose.y - PERSON[1]) < 0.9 or pose.x > 0
+        d = nav.step(Sense(now, pose, [scan(pose, visible)], 0.0, TofRanges(None, None, None, 0.0)))
+        if d.done:
+            done = True
+            break
+        stops += d.twist == STOP
+        pose = apply_motion(pose, Pose2D(d.twist.linear * DT, 0.0, d.twist.angular * DT))
+        if visible:
+            closest = min(closest, math.hypot(pose.x - PERSON[0], pose.y - PERSON[1]))
+    assert done, f"jammed at {pose} after {stops} stop ticks"
+    assert closest > PERSON_RADIUS + 0.25, f"passed within {closest:.2f} m of the person"

@@ -40,6 +40,20 @@ _STEPS: tuple[tuple[int, int, float], ...] = (
 Cell = tuple[int, int]
 
 
+def _inflate_sparse(occupied: NDArray[np.bool_], radius_cells: float) -> NDArray[np.bool_]:
+    """:func:`inflate` for a mask with few set cells: works on their bounding box only."""
+    hits = np.argwhere(occupied)
+    if len(hits) == 0:
+        return np.zeros_like(occupied)
+    reach = math.ceil(radius_cells)
+    rows, cols = occupied.shape
+    r0, c0 = np.maximum(hits.min(axis=0) - reach, 0)
+    r1, c1 = np.minimum(hits.max(axis=0) + reach + 1, (rows, cols))
+    grown = np.zeros_like(occupied)
+    grown[r0:r1, c0:c1] = inflate(occupied[r0:r1, c0:c1], radius_cells)
+    return grown
+
+
 def inflate(occupied: NDArray[np.bool_], radius_cells: float) -> NDArray[np.bool_]:
     """Binary dilation: grow every occupied cell into a disc of ``radius_cells`` cells.
 
@@ -73,6 +87,12 @@ class PlannerConfig:
     # place next to a wall can still brush a rear corner (0.41 m swing). Must stay larger
     # than SafetyBox.body_half_width_m or the guard vetoes every path beside an obstacle.
     robot_radius_m: float = 0.35
+    # Beyond the hard radius, cells nearer than this to an obstacle cost extra: the hull
+    # sweeps its corners out to ~0.44 m in a turn, so a path hugging the 0.35 m edge makes
+    # every turn a graze and the local planner a nervous wreck. When there is room the
+    # path keeps this distance; where there is none (a doorway) it still goes through.
+    keep_away_m: float = 0.44
+    keep_away_cost: float = 1.5  # extra cost per step inside the keep-away band (0 = off)
     unknown_is_free: bool = False
     # A live hit this close to a mapped obstacle is that obstacle seen again (with the
     # localiser's error), not something new: it must not thicken the walls.
@@ -106,10 +126,23 @@ class GridPlanner:
         self._built_version = self.grid.version
         self._raw: NDArray[np.bool_] = obstacles  # before inflation: what is really there
         self._static: NDArray[np.bool_] = inflate(obstacles, self._radius_cells)
+        self._keep_away_cells = self.config.keep_away_m / self.spec.resolution_m
+        self._penalty_static: NDArray[np.float64] = self._band_penalty(obstacles, self._static)
+        self._penalty = self._penalty_static
         self._explained: NDArray[np.bool_] = inflate(
             obstacles, self.config.explained_m / self.spec.resolution_m
         )
         self.blocked: NDArray[np.bool_] = self._static  # static plus the last plan's live obstacles
+
+    def _band_penalty(
+        self, obstacles: NDArray[np.bool_], blocked: NDArray[np.bool_], sparse: bool = False
+    ) -> NDArray[np.float64]:
+        """Extra step cost in the keep-away band around ``obstacles`` (outside ``blocked``)."""
+        if self.config.keep_away_cost <= 0 or self._keep_away_cells <= self._radius_cells:
+            return np.zeros(obstacles.shape)
+        grow = _inflate_sparse if sparse else inflate
+        band = grow(obstacles, self._keep_away_cells) & ~blocked
+        return np.asarray(band, dtype=np.float64) * self.config.keep_away_cost
 
     def plan(
         self,
@@ -134,6 +167,7 @@ class GridPlanner:
             self._rebuild()
         raw = self._raw
         self.blocked = self._static
+        self._penalty = self._penalty_static
         if obstacles_xy is not None and len(obstacles_xy):
             live = np.zeros_like(self._static)
             hits = self.grid.world_to_cell(obstacles_xy)
@@ -143,7 +177,10 @@ class GridPlanner:
             unexplained = ~self._explained[hits[:, 0], hits[:, 1]]
             live[hits[unexplained, 0], hits[unexplained, 1]] = True
             raw = raw | live
-            self.blocked = self._static | inflate(live, self._radius_cells)
+            self.blocked = self._static | _inflate_sparse(live, self._radius_cells)
+            self._penalty = np.maximum(
+                self._penalty_static, self._band_penalty(live, self.blocked, sparse=True)
+            )
         start, goal = self._cell(start_xy), self._cell(goal_xy)
         # Only a goal inside a *mapped* obstacle is refused; a live hit on the goal cell is
         # someone standing there, and the tolerance below handles it.
@@ -215,14 +252,17 @@ class GridPlanner:
         i = 0
         while i < len(cells) - 1:
             j = len(cells) - 1
-            while j > i + 1 and not self._line_free(cells[i], cells[j]):
+            while j > i + 1 and not self._line_free(
+                cells[i], cells[j], max(self._penalty[c] for c in cells[i : j + 1])
+            ):
                 j -= 1
             out.append(cells[j])
             i = j
         return out
 
-    def _line_free(self, a: Cell, b: Cell) -> bool:
-        """True when the straight segment between two cell centres crosses no blocked cell.
+    def _line_free(self, a: Cell, b: Cell, max_penalty: float = math.inf) -> bool:
+        """True when the straight segment between two cell centres crosses no blocked cell
+        and no cell dearer than ``max_penalty`` (the detour A* chose is not undone).
 
         Consecutive samples that step diagonally must also have both orthogonal
         neighbours free — the same corner rule as A*, or the shortcut would squeeze
@@ -233,7 +273,7 @@ class GridPlanner:
         for k in range(1, steps + 1):
             t = k / steps
             cell = (round(a[0] + t * (b[0] - a[0])), round(a[1] + t * (b[1] - a[1])))
-            if self.blocked[cell]:
+            if self.blocked[cell] or self._penalty[cell] > max_penalty + 1e-9:
                 return False
             dr, dc = cell[0] - prev[0], cell[1] - prev[1]
             if (
@@ -288,7 +328,7 @@ class GridPlanner:
                     continue
                 if dr and dc and (self.blocked[row + dr, col] or self.blocked[row, col + dc]):
                     continue
-                candidate = cost + step
+                candidate = cost + step * (1.0 + self._penalty[nr, nc])
                 if candidate < best.get((nr, nc), math.inf):
                     best[(nr, nc)] = candidate
                     came_from[(nr, nc)] = cell

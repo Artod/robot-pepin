@@ -237,3 +237,29 @@ def test_the_planner_follows_a_map_that_grows_while_driving() -> None:
     for _ in range(6):
         grid.integrate(seen_from, raycast_room(seen_from, pillar=(0.0, -2.0, 0.2, 2.0)))
     assert planner.plan((-2.0, 0.0), (2.0, 0.0)) is None
+
+
+def test_the_path_keeps_its_turning_distance_from_an_obstacle_when_there_is_room() -> None:
+    """A lone post in the open: the path stays ~0.44 m off it, not on the 0.35 m inflation edge."""
+    from test_localization import room_map
+
+    grid = room_map()
+    post = np.array([[0.0, 0.05], [0.0, -0.05], [0.05, 0.0], [-0.05, 0.0]])
+
+    def clearance(config: PlannerConfig) -> float:
+        path = GridPlanner(grid, config).plan((-2.0, 0.0), (2.0, 0.0), obstacles_xy=post)
+        assert path is not None
+        # sample the polyline densely and take the closest approach to the post
+        pts = np.vstack([np.linspace(path[i], path[i + 1], 50) for i in range(len(path) - 1)])
+        return float(np.hypot(pts[:, 0], pts[:, 1]).min())
+
+    hugging = clearance(PlannerConfig(robot_radius_m=0.35, keep_away_cost=0.0))
+    roomy = clearance(PlannerConfig(robot_radius_m=0.35))
+    assert 0.33 < hugging < 0.42
+    assert roomy > hugging + 0.05 and roomy > 0.42
+
+
+def test_the_keep_away_band_never_closes_a_doorway() -> None:
+    """Where the only way through is inside the band, the path still exists."""
+    planner = GridPlanner(_room(), PlannerConfig(robot_radius_m=ROBOT_RADIUS_M))
+    assert planner.plan((1.0, 2.0), (5.0, 2.0)) is not None
