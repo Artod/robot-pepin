@@ -7,12 +7,13 @@ the camera — and each copy drifted. :meth:`Robot.connect` does it once from
 loop asks :meth:`Robot.observe` for one :class:`Observation` per tick: the
 board's odometry state plus a :class:`pepin.navigator.Sense` built from every
 feed's newest reading. Nothing in here waits on the network. A feed switched
-off in the config simply never appears; a required feed that goes quiet shows
-up as a large age and the navigator holds.
+off in the config never appears; a required feed that goes quiet shows up as
+a large age and the navigator holds.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 """The repo's config directory, found from this file so scripts work from any cwd."""
 
+KNOWN_FEEDS = ("lidar", "tof", "camera")
 BASE_TIMEOUT_S = 1.0  # no word from the base server for this long: the board has stopped anyway
 
 
@@ -58,9 +60,18 @@ class RobotConfig:
 
     @classmethod
     def load(cls, config_dir: Path = CONFIG_DIR) -> RobotConfig:
-        """Read robot.json, base.json, lidar.json and tof.json from ``config_dir``."""
+        """Read robot.json, base.json, lidar.json and tof.json from ``config_dir``.
+
+        A feed missing from robot.json is on (the safe default: sensors run
+        unless switched off); a misspelt feed name is an error, not a silently
+        ignored sensor.
+        """
         robot = json.loads((config_dir / "robot.json").read_text())
-        feeds = {name: FeedConfig(**entry) for name, entry in robot.get("feeds", {}).items()}
+        entries = robot.get("feeds", {})
+        unknown = sorted(set(entries) - set(KNOWN_FEEDS))
+        if unknown:
+            raise ValueError(f"robot.json: unknown feeds {unknown}; known: {list(KNOWN_FEEDS)}")
+        feeds = {name: FeedConfig(**entries.get(name, {})) for name in KNOWN_FEEDS}
         return cls(
             base=BaseConfig.from_json(str(config_dir / "base.json")),
             lidar_mount=LidarMount.from_json(str(config_dir / "lidar.json")),
@@ -117,20 +128,33 @@ class Robot:
     def connect(
         cls, config: RobotConfig, *, host: str | None = None, video_name: str | None = None
     ) -> Robot:
-        """Resolve the board; start the base link, every enabled feed and, if asked, the camera."""
+        """Resolve the board; start the base link, every enabled feed and, if asked, the camera.
+
+        If anything fails to start, what already started is closed again.
+        """
         host = host or board_address()
-        link = BaseClient(host, config.port("base", BASE_PORT)).start()
-        lidar = (
-            LidarClient(host, config.lidar_mount, port=config.port("lidar", LIDAR_PORT)).start()
-            if config.enabled("lidar")
-            else None
-        )
-        tof = (
-            TofClient(host, config.port("tof", TOF_PORT)).start() if config.enabled("tof") else None
-        )
-        camera = CameraRecorder(host, video_name) if video_name else None
-        if camera is not None:
-            camera.start()
+        link: BaseClient | None = None
+        lidar: LidarClient | None = None
+        tof: TofClient | None = None
+        camera: CameraRecorder | None = None
+        try:
+            link = BaseClient(host, config.port("base", BASE_PORT)).start()
+            if config.enabled("lidar"):
+                lidar = LidarClient(host, config.lidar_mount, port=config.port("lidar", LIDAR_PORT))
+                lidar.start()
+            if config.enabled("tof"):
+                tof = TofClient(host, config.port("tof", TOF_PORT)).start()
+            if video_name and config.enabled("camera"):
+                camera = CameraRecorder(host, video_name)
+                camera.start()
+            elif video_name:
+                logger.warning("camera feed is disabled in robot.json; not recording")
+        except Exception:
+            for part in (lidar, tof, link):
+                if part is not None:
+                    with contextlib.suppress(Exception):
+                        part.close()
+            raise
         logger.info(
             "robot at %s: lidar %s, tof %s, camera %s",
             host,
@@ -165,11 +189,15 @@ class Robot:
         return state
 
     def observe(self, now: float) -> Observation | None:
-        """Everything new since the last tick, or None when the board has gone quiet."""
+        """Everything new since the last tick, or None when the board has gone quiet.
+
+        The lidar queue is drained even then, so a base outage never leaves a
+        backlog of revolutions for the first good tick to chew through.
+        """
+        scans = self.lidar.drain() if self.lidar is not None else []
         state = self.link.state(now)
         if state is None or state.age_s > BASE_TIMEOUT_S:
             return None
-        scans = self.lidar.drain() if self.lidar is not None else []
         sense = Sense(
             now=now,
             odom_pose=state.pose,
@@ -188,12 +216,19 @@ class Robot:
         self.link.stop()
 
     def close(self) -> None:
-        """Stop the wheels, then release every feed and the camera; safe to call twice."""
-        self.link.stop()
-        for feed in self.feeds.values():
-            feed.close()
-        if self.camera is not None:
-            self.camera.stop()
+        """Stop the wheels, then release every feed and the camera; one failure skips nothing."""
+        with contextlib.suppress(Exception):
+            self.link.stop()
+        try:
+            for name, feed in self.feeds.items():
+                try:
+                    feed.close()
+                except Exception:
+                    logger.exception("closing the %s feed failed", name)
+        finally:
+            if self.camera is not None:
+                with contextlib.suppress(Exception):
+                    self.camera.stop()
 
     def __enter__(self) -> Robot:
         return self

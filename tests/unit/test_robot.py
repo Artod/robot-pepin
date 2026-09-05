@@ -111,3 +111,36 @@ def test_close_stops_the_wheels_first_then_releases_the_feeds() -> None:
     with Robot(cfg, "h", link, lidar, None):  # type: ignore[arg-type]
         pass
     assert link.commands[0] == "stop" and "close" in link.commands and lidar.closed
+
+
+def test_observe_drains_the_lidar_even_while_the_base_is_quiet() -> None:
+    class CountingLidar(FakeLidar):
+        def __init__(self) -> None:
+            super().__init__()
+            self.drained = 0
+
+        def drain(self):  # type: ignore[no-untyped-def]
+            self.drained += 1
+            return []
+
+    cfg = RobotConfig.load(CONFIG_DIR)
+    lidar = CountingLidar()
+    robot = Robot(cfg, "h", FakeLink(state(5.0)), lidar, None)  # type: ignore[arg-type]
+    assert robot.observe(now=10.0) is None
+    assert lidar.drained == 1  # no backlog builds up during a base outage
+
+
+def test_config_rejects_misspelt_feeds_and_defaults_missing_ones_to_on(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import json
+    import shutil
+
+    import pytest
+
+    for name in ("base.json", "lidar.json", "tof.json"):
+        shutil.copy(CONFIG_DIR / name, tmp_path / name)
+    (tmp_path / "robot.json").write_text(json.dumps({"feeds": {"lidarr": {"enabled": False}}}))
+    with pytest.raises(ValueError, match="lidarr"):
+        RobotConfig.load(tmp_path)
+    (tmp_path / "robot.json").write_text(json.dumps({"feeds": {"tof": {"enabled": False}}}))
+    cfg = RobotConfig.load(tmp_path)
+    assert cfg.enabled("lidar") and not cfg.enabled("tof") and cfg.enabled("camera")

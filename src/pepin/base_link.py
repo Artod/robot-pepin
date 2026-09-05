@@ -14,7 +14,8 @@ Wire format, one JSON object per line in both directions::
                      {"cmd": "stop"}                              stop now
                      {"cmd": "ping"}                              which servos answer on the bus
     board -> laptop  {"type": "state", ...}                       see :class:`BaseState`, ~20 Hz
-                     {"type": "pong", "servos": {"7": true, ...}}
+                     {"type": "pong", "servos": {"left": true, "servo3": false, ...}}
+                     {"type": "pong", "busy": true}                   moving: servos not pinged
 """
 
 from __future__ import annotations
@@ -115,11 +116,13 @@ class BaseClient(JsonLinesClient):
         self.send({"cmd": "stop"})
 
     def ping(self, timeout_s: float = 3.0) -> dict[str, bool] | None:
-        """Which servos answer on the board's bus, or None if the board did not reply in time."""
+        """Servos answering on the bus; {} while driving; None when the board did not reply."""
         self._pong_ready.clear()
         self.send({"cmd": "ping"})
         if not self._pong_ready.wait(timeout_s) or self._pong is None:
             return None
+        if self._pong.get("busy"):
+            return {}  # the wheels are moving; the board does not ping servos then
         return {str(k): bool(v) for k, v in self._pong.get("servos", {}).items()}
 
     def _ingest(self, message: dict[str, Any]) -> None:

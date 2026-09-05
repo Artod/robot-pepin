@@ -64,3 +64,18 @@ def test_send_while_down_is_dropped_not_raised() -> None:
     client.send({"cmd": "twist"})  # never started: no socket
     assert client.age_s() == float("inf")
     assert not client.connected
+
+
+def test_a_garbage_line_costs_the_line_not_the_stream() -> None:
+    sockets: list[ScriptedSocket] = []
+
+    def connector(address):  # type: ignore[no-untyped-def]
+        sockets.append(ScriptedSocket([b"not json at all\n", b'{"ok": true}\n']))
+        return sockets[-1]
+
+    client = Collector(connector).start()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not client.messages:
+        time.sleep(0.01)
+    client.close()
+    assert client.messages[:1] == [{"ok": True}]

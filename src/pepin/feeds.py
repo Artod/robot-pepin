@@ -11,10 +11,9 @@ depending on the sensor. Adding a sensor means adding a Feed and one field to
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol
 
 
-@runtime_checkable
 class Feed(Protocol):
     """A background reader with a freshness clock."""
 

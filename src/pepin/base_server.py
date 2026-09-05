@@ -8,8 +8,10 @@ state to every connected laptop client as JSON lines (:mod:`pepin.base_link`).
 Safety lives here, not on the laptop: a deadman stops the wheels when no
 twist has arrived for half a second (wifi froze, the script crashed, the
 laptop went to sleep); the wheels are armed (torque on) only while someone
-is driving and released ten seconds after the last command, so the cart can
-always be pushed by hand when idle.
+is driving and released ten seconds after the last motion, so the cart can
+always be pushed by hand when idle. Nothing that talks to a laptop runs on
+the tick thread: each client has its own reader and writer threads, and a
+laptop that stops reading is dropped, not waited for.
 
 Run on the board::
 
@@ -22,12 +24,14 @@ The pure logic is :class:`BaseServerCore` (unit-tested against a fake bus);
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import queue
 import socket
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 from pepin.base import LEFT, RIGHT, BusWatchdog, DiffDriveBase, with_suppressed_timeout
@@ -70,7 +74,8 @@ class BaseServerCore:
         self.armed = False
         self.deadman = False
         self.bus_ok = True
-        self._last_command_at: float | None = None
+        self._last_command_at: float | None = None  # any twist: feeds the deadman
+        self._last_motion_at: float | None = None  # a non-zero twist: feeds the idle release
         self._acc = [0.0, 0.0]  # wheel travel since the last snapshot
         self._primed = False
 
@@ -86,13 +91,22 @@ class BaseServerCore:
             self._last_command_at = now
             self.deadman = False
             twist = Twist(float(message.get("v", 0.0)), float(message.get("w", 0.0)))
-            if not self.armed and (twist.linear or twist.angular):
-                self._arm()
+            if twist.linear or twist.angular:
+                self._last_motion_at = now
+                if not self.armed:
+                    self._arm()
             self._apply(twist)
         elif cmd == "stop":
             self._last_command_at = now
             self._apply(STOP)
+        elif cmd == "release":
+            # The last client left: stop, but leave the deadman clock alone.
+            self._apply(STOP)
         elif cmd == "ping":
+            if self.moving:
+                # Pinging a dozen servos blocks the bus for up to 0.4 s per silent id;
+                # never while the wheels turn (the deadman and the encoders live here).
+                return {"type": "pong", "busy": True}
             answers = {name: self._bus.ping(name) is not None for name in self._servo_names}
             return {"type": "pong", "servos": answers}
         else:
@@ -100,7 +114,11 @@ class BaseServerCore:
         return None
 
     def tick(self, now: float) -> None:
-        """One control period: encoders -> odometry, then the deadman and the idle disarm."""
+        """One control period: encoders -> odometry, then the deadman and the idle disarm.
+
+        Raises ``RuntimeError`` when the servos have been silent for the
+        watchdog's give-up time: the service exits and systemd restarts it.
+        """
         try:
             travel = self._base.read_wheel_travel()
         except TimeoutError as exc:
@@ -111,7 +129,9 @@ class BaseServerCore:
                 with_suppressed_timeout(self._base.stop)
                 self.twist = STOP
             elif verdict == "abort":
-                logger.error("servos silent for %.0f s: %s", self._watchdog.give_up_after_s, exc)
+                raise RuntimeError(
+                    f"servos silent for {self._watchdog.give_up_after_s:.0f} s: {exc}"
+                ) from exc
             return
         if self._watchdog.recovered(now) is not None:
             self._base.reprime()  # an unseen half turn must not alias into a jump
@@ -123,12 +143,13 @@ class BaseServerCore:
         self._odom.update(*travel)
         self._acc[0] += travel[0]
         self._acc[1] += travel[1]
-        idle = now - self._last_command_at if self._last_command_at is not None else None
-        if idle is not None and self.moving and idle > self._deadman_s:
-            logger.warning("deadman: no command for %.1f s, stopping", idle)
+        last_cmd, last_motion = self._last_command_at, self._last_motion_at
+        if self.moving and last_cmd is not None and now - last_cmd > self._deadman_s:
+            logger.warning("deadman: no command for %.1f s, stopping", now - last_cmd)
             self._apply(STOP)
             self.deadman = True
-        if idle is not None and self.armed and not self.moving and idle > self._disarm_after_s:
+        idle = self.armed and not self.moving and last_motion is not None
+        if idle and last_motion is not None and now - last_motion > self._disarm_after_s:
             self._disarm()
 
     def snapshot(self, now: float) -> dict[str, Any]:
@@ -155,7 +176,7 @@ class BaseServerCore:
         return message
 
     def release(self) -> None:
-        """Stop and free the wheels (shutdown, or the last client left)."""
+        """Stop and free the wheels (shutdown)."""
         with_suppressed_timeout(lambda: self._apply(STOP))
         if self.armed:
             with_suppressed_timeout(self._disarm)
@@ -176,43 +197,103 @@ class BaseServerCore:
         self.twist = STOP
 
 
-def serve(core: BaseServerCore, port: int, tick_hz: float, publish_hz: float) -> None:
-    """Sockets and clock around the core: accept, tick, publish state, stop when left alone."""
-    server = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)  # dual-stack
-    server.bind(("::", port))
-    server.listen(4)
-    logger.info("base server listening on %d", port)
-    clients: list[socket.socket] = []
-    lock = threading.Lock()
-    inbox: queue.Queue[tuple[socket.socket, dict[str, Any]]] = queue.Queue()
+Inbox = "queue.Queue[tuple[ClientConn, dict[str, Any]]]"
 
-    def reader(conn: socket.socket) -> None:
+
+class ClientConn:
+    """One laptop connection: a reader thread into the shared inbox, a writer with a bounded outbox.
+
+    Sends never run on the tick thread. A laptop that stops reading fills its
+    outbox (about a second of state) and is dropped; the wheels keep their 50 Hz.
+    """
+
+    def __init__(
+        self,
+        conn: socket.socket,
+        peer: str,
+        inbox: queue.Queue[tuple[ClientConn, dict[str, Any]]],
+        on_close: Callable[[ClientConn], None],
+    ) -> None:
+        self.conn = conn
+        self.peer = peer
+        self._inbox = inbox
+        self._on_close = on_close
+        self._outbox: queue.Queue[bytes] = queue.Queue(maxsize=24)
+        self._lock = threading.Lock()
+        self.alive = True
+        threading.Thread(target=self._read, daemon=True, name=f"client-{peer}-r").start()
+        threading.Thread(target=self._write, daemon=True, name=f"client-{peer}-w").start()
+
+    def post(self, line: bytes) -> None:
+        """Queue one line for this client; a full outbox means a dead or frozen laptop."""
+        try:
+            self._outbox.put_nowait(line)
+        except queue.Full:
+            logger.warning("client %s is not reading; dropping it", self.peer)
+            self.close()
+
+    def close(self) -> None:
+        """Shut the socket (unblocks the reader), stop the writer, tell the server; idempotent."""
+        with self._lock:
+            if not self.alive:
+                return
+            self.alive = False
+        with contextlib.suppress(OSError):
+            self.conn.shutdown(socket.SHUT_RDWR)
+        self.conn.close()
+        with contextlib.suppress(queue.Full):
+            self._outbox.put_nowait(b"")  # wakes the writer so it can exit
+        self._on_close(self)
+
+    def _read(self) -> None:
         buffer = b""
         try:
-            while True:
-                try:
-                    chunk = conn.recv(4096)
-                except TimeoutError:
-                    continue  # the socket timeout is for our sends; a quiet client is fine
+            while self.alive:
+                chunk = self.conn.recv(4096)
                 if not chunk:
                     break
                 buffer += chunk
                 *lines, buffer = buffer.split(b"\n")
                 for line in lines:
                     if line.strip():
-                        inbox.put((conn, json.loads(line)))
+                        self._inbox.put((self, json.loads(line)))
         except (OSError, ValueError) as exc:
-            logger.info("client reader ended: %s", exc)
+            logger.info("client %s reader ended: %s", self.peer, exc)
+        self.close()
+
+    def _write(self) -> None:
+        while True:
+            line = self._outbox.get()
+            if not line or not self.alive:
+                return
+            try:
+                self.conn.sendall(line)
+            except OSError as exc:
+                logger.info("client %s writer ended: %s", self.peer, exc)
+                self.close()
+                return
+
+
+def serve(core: BaseServerCore, port: int, tick_hz: float, publish_hz: float) -> None:
+    """Sockets and clock around the core: accept, tick, publish state, release when left alone."""
+    server = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)  # dual-stack
+    server.bind(("::", port))
+    server.listen(4)
+    logger.info("base server listening on %d", port)
+    clients: list[ClientConn] = []
+    lock = threading.Lock()
+    inbox: queue.Queue[tuple[ClientConn, dict[str, Any]]] = queue.Queue()
+
+    def on_close(client: ClientConn) -> None:
         with lock:
-            if conn in clients:
-                clients.remove(conn)
-        conn.close()
-        with lock:
+            if client in clients:
+                clients.remove(client)
             alone = not clients
+        logger.info("client %s gone", client.peer)
         if alone:
-            inbox.put((conn, {"cmd": "stop"}))  # nobody is driving any more
+            inbox.put((client, {"cmd": "release"}))  # nobody is driving any more
 
     def accept_loop() -> None:
         while True:
@@ -222,11 +303,10 @@ def serve(core: BaseServerCore, port: int, tick_hz: float, publish_hz: float) ->
                 logger.warning("accept failed: %s", exc)
                 time.sleep(0.5)
                 continue
-            conn.settimeout(0.2)  # a vanished laptop must not stall the tick
+            client = ClientConn(conn, peer[0], inbox, on_close)
             with lock:
-                clients.append(conn)
+                clients.append(client)
             logger.info("client %s connected", peer[0])
-            threading.Thread(target=reader, args=(conn,), daemon=True).start()
 
     threading.Thread(target=accept_loop, daemon=True).start()
     period, publish_every = 1.0 / tick_hz, 1.0 / publish_hz
@@ -236,35 +316,23 @@ def serve(core: BaseServerCore, port: int, tick_hz: float, publish_hz: float) ->
             started = time.monotonic()
             while True:
                 try:
-                    conn, message = inbox.get_nowait()
+                    client, message = inbox.get_nowait()
                 except queue.Empty:
                     break
                 reply = core.command(message, started)
-                if reply is not None:
-                    _send(conn, encode(reply), clients, lock)
+                if reply is not None and client.alive:
+                    client.post(encode(reply))
             core.tick(started)
             if started >= next_publish:
                 next_publish = started + publish_every
                 line = encode(core.snapshot(started))
                 with lock:
                     targets = list(clients)
-                for conn in targets:
-                    _send(conn, line, clients, lock)
+                for client in targets:
+                    client.post(line)
             time.sleep(max(0.0, period - (time.monotonic() - started)))
     finally:
         core.release()
-
-
-def _send(
-    conn: socket.socket, line: bytes, clients: list[socket.socket], lock: threading.Lock
-) -> None:
-    try:
-        conn.sendall(line)
-    except OSError:
-        with lock:
-            if conn in clients:
-                clients.remove(conn)
-        conn.close()
 
 
 def main() -> None:

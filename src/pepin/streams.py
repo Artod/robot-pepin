@@ -22,6 +22,7 @@ from typing import Any, Self
 logger = logging.getLogger(__name__)
 
 Connector = Callable[[tuple[str, int]], socket.socket]
+_DONTWAIT = getattr(socket, "MSG_DONTWAIT", 0)
 
 
 def tcp_connect(address: tuple[str, int]) -> socket.socket:
@@ -34,9 +35,10 @@ class JsonLinesClient:
 
     Subclasses implement :meth:`_ingest` (decode, store under their own lock)
     and expose typed accessors. ``age_s`` is the freshness of the newest
-    message; ``send`` posts a message back and drops it, with a throttled
-    warning, while the link is down. ``connector`` is replaceable so tests can
-    feed a scripted socket.
+    message; ``send`` posts a message back without ever blocking the caller
+    and drops it, with a throttled warning, while the link is down. An
+    unreadable or unexpected line costs that line, not the connection.
+    ``connector`` is replaceable so tests can feed a scripted socket.
     """
 
     def __init__(
@@ -69,9 +71,9 @@ class JsonLinesClient:
     def close(self) -> None:
         """Ask the reader to stop and wait (up to 2 s) for the socket to be released."""
         self._stop.set()
+        self._drop_socket()  # unblocks a reader stuck in recv
         if self._thread.is_alive() and threading.current_thread() is not self._thread:
             self._thread.join(timeout=2.0)
-        self._drop_socket()
 
     def age_s(self, now: float | None = None) -> float:
         """Seconds since the newest message arrived; infinite before the first."""
@@ -79,19 +81,25 @@ class JsonLinesClient:
         return now - self._stamp if self._stamp else float("inf")
 
     def send(self, message: dict[str, Any]) -> None:
-        """Post one message to the board; dropped (and logged, throttled) while the link is down."""
+        """Post one message to the board without blocking; dropped (logged) when it cannot go."""
+        payload = (json.dumps(message, separators=(",", ":")) + "\n").encode()
         with self._send_lock:
             sock = self._sock
             if sock is None:
-                now = time.monotonic()
-                if now - self._warned_down > 2.0:
-                    logger.warning("%s link down: message %s dropped", self.name, message)
-                    self._warned_down = now
+                self._warn_dropped(message)
                 return
             try:
-                sock.sendall((json.dumps(message, separators=(",", ":")) + "\n").encode())
+                sent = sock.send(payload, _DONTWAIT)
+            except BlockingIOError:
+                self._warn_dropped(message)  # send buffer full: the link is stalling, not dead
+                return
             except OSError as exc:
                 logger.warning("%s link send failed (%s); reconnecting", self.name, exc)
+                self._drop_socket_locked()
+                return
+            if sent != len(payload):
+                # A partial line would corrupt the framing on the board: start over.
+                logger.warning("%s link send was partial; reconnecting", self.name)
                 self._drop_socket_locked()
 
     def feed(self, message: dict[str, Any]) -> None:
@@ -105,12 +113,19 @@ class JsonLinesClient:
 
     # -- internals ----------------------------------------------------------
 
+    def _warn_dropped(self, message: dict[str, Any]) -> None:
+        now = time.monotonic()
+        if now - self._warned_down > 2.0:
+            logger.warning("%s link down: message %s dropped", self.name, message.get("cmd", "?"))
+            self._warned_down = now
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
                 self._stream()
             except OSError as exc:
-                logger.warning("%s stream lost (%s); reconnecting", self.name, exc)
+                if not self._stop.is_set():
+                    logger.warning("%s stream lost (%s); reconnecting", self.name, exc)
             except Exception:
                 logger.exception("%s reader crashed; reconnecting", self.name)
             self._drop_socket()
@@ -118,6 +133,9 @@ class JsonLinesClient:
 
     def _stream(self) -> None:
         sock = self._connector(self._address)
+        if self._stop.is_set():
+            sock.close()
+            return
         sock.settimeout(1.0)
         with self._send_lock:
             self._sock = sock
@@ -135,7 +153,19 @@ class JsonLinesClient:
             *lines, buffer = buffer.split(b"\n")
             for line in lines:
                 if line.strip():
-                    self.feed(json.loads(line))
+                    self._deliver(line)
+
+    def _deliver(self, line: bytes) -> None:
+        """One wire line into ``feed``; bad lines are logged and skipped, the stream stays up."""
+        try:
+            message = json.loads(line)
+        except ValueError:
+            logger.warning("%s: unreadable line dropped (%d bytes)", self.name, len(line))
+            return
+        try:
+            self.feed(message)
+        except Exception:
+            logger.exception("%s: message rejected: %.120s", self.name, line)
 
     def _drop_socket(self) -> None:
         with self._send_lock:

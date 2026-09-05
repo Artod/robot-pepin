@@ -333,7 +333,7 @@ class LidarClient:
         self._reconnect = reconnect
         self.silence_s = 3.0  # an open bridge that sends nothing is treated as lost
         self.connected = False
-        self._scans: queue.Queue[LaserScan] = queue.Queue()
+        self._scans: queue.Queue[LaserScan] = queue.Queue(maxsize=50)  # ~5 s; older is useless
         self._latest: LaserScan | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -419,4 +419,6 @@ class LidarClient:
                 if scan is not None:
                     with self._lock:
                         self._latest = scan
+                    if self._scans.full():
+                        self._scans.get_nowait()  # nobody is draining: keep the newest
                     self._scans.put(scan)

@@ -150,6 +150,8 @@ def probe_servos(host: str) -> Probe:
             answers = link.ping(timeout_s=4.0)
             if answers is None:
                 return Probe("servo bus", False, "base server did not answer the ping")
+            if not answers:
+                return Probe("servo bus", True, "driving — servos not pinged")
             missing_names = sorted(k for k, ok in answers.items() if not ok)
             detail = (
                 f"all {len(answers)} answer (via base server)"
