@@ -81,6 +81,27 @@ class Localizer:
             theta_step_deg=base.theta_step_deg * theta / base.theta_deg,
         )
 
+    def initialize(self, points: NDArray[np.float64], window: SearchWindow) -> float:
+        """Search ``window`` around the start pose once, before moving, and adopt the best fit.
+
+        A robot placed on its mark by hand is off by decimetres and degrees,
+        beyond the tracking window; without this the whole run is offset.
+        Returns the inlier fraction of the adopted pose; a poor fit (below
+        ``recovery_min_inliers``) keeps the given start and lets tracking try.
+        """
+        coarse = self._matcher.match(self.pose, points, window)
+        fine = self._matcher.match(coarse.pose, points, self._window)
+        confidence = self._matcher.inlier_fraction(fine.pose, points)
+        if confidence >= self._recovery_min_inliers:
+            logger.info("initial fix %s, inliers %.2f", fine.pose, confidence)
+            self.pose = fine.pose
+        else:
+            logger.warning(
+                "initial fix rejected (inliers %.2f); keeping the start pose", confidence
+            )
+        self.confidence = confidence
+        return confidence
+
     def predict(self, odom: Pose2D) -> Pose2D:
         """Advance the pose by odometry alone (between scans); the next scan corrects it."""
         motion = Pose2D() if self._last_odom is None else relative_motion(self._last_odom, odom)

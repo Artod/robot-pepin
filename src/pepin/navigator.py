@@ -33,6 +33,7 @@ from pepin.mapping import OccupancyGrid, transform_to_world
 from pepin.odometry import Pose2D
 from pepin.planning import GridPlanner, PlannerConfig
 from pepin.safety import Reflex, SafetyBox, guard_forward
+from pepin.scanmatch import SearchWindow
 from pepin.tof import ReflexConfig, TofMount, TofRanges
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,13 @@ class NavigatorConfig:
     # only sensors with a measured mount can place a hit.
     tof_hit_max_m: float = 0.35
     tof_mounts: Mapping[str, TofMount] = field(default_factory=dict)
+    # Before the first move, search this far around the given start pose: a robot placed
+    # on its mark by hand is off by decimetres and degrees, beyond the tracking window.
+    initial_search: SearchWindow | None = field(
+        default_factory=lambda: SearchWindow(
+            xy_m=0.6, xy_step_m=0.06, theta_deg=40.0, theta_step_deg=4.0
+        )
+    )
     planner: PlannerConfig = field(default_factory=PlannerConfig)
     controller: ControllerConfig = field(default_factory=ControllerConfig)
     # Autonomous mode: stale ToF data holds the robot instead of being ignored.
@@ -140,6 +148,7 @@ class Navigator:
         self._last_plan_at = -float("inf")
         self._vetoed_forward = False
         self._no_path_since: float | None = None
+        self._initialised = False
         self._replan(start, now=0.0)
 
     @property
@@ -176,6 +185,10 @@ class Navigator:
             self.localizer.predict(sense.odom_pose)
             return self.localizer.pose
         for points in sense.scans:
+            if not self._initialised:
+                self._initialised = True
+                if self.cfg.initial_search is not None and len(points) >= 50:
+                    self.localizer.initialize(points, self.cfg.initial_search)
             pose = self.localizer.update(sense.odom_pose, points)
             self._latest_points = points
             # A lost localiser would smear real walls into phantom obstacles: remember nothing.

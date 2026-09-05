@@ -104,3 +104,15 @@ def test_predict_moves_the_pose_by_odometry_between_scans() -> None:
     assert est.x == pytest.approx(0.2, abs=0.05)
     est = loc.update(Pose2D(0.4, 0.0, 0.0), raycast_room(Pose2D(0.4, 0.0, 0.0)))
     assert est.x == pytest.approx(0.4, abs=0.05)
+
+
+def test_initial_fix_recovers_a_hand_placed_start_offset() -> None:
+    """Placed 30 cm / 25 deg off the mark: the wide first search finds the truth before moving."""
+    from pepin.scanmatch import SearchWindow
+
+    truth = Pose2D(0.30, -0.20, math.radians(25.0))
+    loc = Localizer(room_map(), Pose2D(0.0, 0.0, 0.0))
+    confidence = loc.initialize(raycast_room(truth), SearchWindow(0.6, 0.06, 40.0, 4.0))
+    assert confidence >= 0.6
+    assert math.hypot(loc.pose.x - truth.x, loc.pose.y - truth.y) < 0.06
+    assert abs(loc.pose.theta - truth.theta) < math.radians(3.0)

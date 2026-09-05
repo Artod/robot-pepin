@@ -48,3 +48,18 @@ def test_speed_is_capped_by_config() -> None:
     cfg = ControllerConfig(cruise_speed_m_s=0.1, max_yaw_rate_rad_s=0.3)
     out = PathFollower([(2.0, 0.3)], cfg).step(Pose2D())
     assert out.twist.linear <= 0.1 and abs(out.twist.angular) <= 0.3
+
+
+def test_turning_in_place_finishes_before_driving_resumes() -> None:
+    """Hysteresis: past 35 deg we turn in place; we only start driving again under 10 deg."""
+    follower = PathFollower([(2.0, 0.0)])
+    turning = follower.step(Pose2D(0.0, 0.0, math.radians(60.0)))
+    assert turning.twist.linear == 0.0 and turning.twist.angular < 0.0
+    still_turning = follower.step(Pose2D(0.0, 0.0, math.radians(20.0)))  # inside 35, above 10
+    assert still_turning.twist.linear == 0.0
+    driving = follower.step(Pose2D(0.0, 0.0, math.radians(5.0)))
+    assert driving.twist.linear > 0.0
+    fresh = PathFollower([(2.0, 0.0)])
+    assert (
+        fresh.step(Pose2D(0.0, 0.0, math.radians(20.0))).twist.linear > 0.0
+    )  # never turned: drives

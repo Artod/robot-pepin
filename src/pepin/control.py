@@ -28,6 +28,9 @@ class ControllerConfig:
     lookahead_m: float = 0.30
     goal_tolerance_m: float = 0.12
     face_before_driving_rad: float = math.radians(35.0)
+    # Once turning in place, keep turning until this close: flipping between "turn" and
+    # "drive" right at the threshold made the robot weave after every turn.
+    resume_driving_rad: float = math.radians(10.0)
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,7 @@ class PathFollower:
         self._path = list(path)
         self._cfg = config or ControllerConfig()
         self._index = 0
+        self._facing = False  # turning in place toward the next waypoint
 
     @property
     def goal(self) -> tuple[float, float]:
@@ -73,7 +77,11 @@ class PathFollower:
         yaw = max(
             -cfg.max_yaw_rate_rad_s, min(cfg.max_yaw_rate_rad_s, cfg.yaw_gain * heading_error)
         )
-        if abs(heading_error) > cfg.face_before_driving_rad:
+        if self._facing:
+            self._facing = abs(heading_error) > cfg.resume_driving_rad
+        elif abs(heading_error) > cfg.face_before_driving_rad:
+            self._facing = True
+        if self._facing:
             return ControlOutput(Twist(0.0, yaw), (tx, ty), done=False)
         # Slow down as the heading error grows and as the goal approaches.
         speed = cfg.cruise_speed_m_s * (
