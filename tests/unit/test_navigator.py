@@ -7,6 +7,7 @@ from synthetic import raycast_room
 from test_localization import room_map
 
 from pepin.control import ControllerConfig
+from pepin.mapping import transform_to_world
 from pepin.navigator import Navigator, NavigatorConfig, Sense
 from pepin.odometry import Pose2D
 from pepin.scanmatch import apply_motion, relative_motion
@@ -89,3 +90,35 @@ def test_holds_still_without_lidar_and_resumes() -> None:
     assert blind.twist.linear == 0.0 and blind.twist.angular == 0.0
     seeing = nav.step(Sense(1.1, start, [raycast_room(start)], 0.0, None))
     assert not seeing.hold and seeing.twist.linear > 0.0
+
+
+def test_close_tof_return_becomes_an_obstacle_where_the_sensor_looks() -> None:
+    from pepin.tof import TofMount
+
+    start = Pose2D(-2.0, 0.0, 0.0)
+    cfg = NavigatorConfig(tof_mounts={"left": TofMount(0.027, 0.148, 0.0, 0.16)})
+    nav = Navigator(room_map(), start, (2.0, 0.0), cfg)
+    nav.step(Sense(1.0, start, [raycast_room(start)], 0.0, TofRanges(None, 0.25, None, 0.0)))
+    hits = nav._hits.points(1.0)
+    assert hits is not None
+    # The hit is placed with the localised pose, so measure from it, not from the truth.
+    expected = transform_to_world(np.array([[0.027 + 0.25, 0.148]]), nav.pose)[0]
+    assert np.min(np.hypot(hits[:, 0] - expected[0], hits[:, 1] - expected[1])) < 1e-6
+    far = Navigator(room_map(), start, (2.0, 0.0), cfg)
+    far.step(Sense(1.0, start, [], 0.0, TofRanges(None, 0.60, None, 0.0)))
+    assert far._hits.points(1.0) is None  # beyond tof_hit_max_m: the lidar's job
+
+
+def test_obstacle_memory_forgets_by_time_not_by_message_count() -> None:
+    from pepin.navigator import ObstacleMemory
+
+    memory = ObstacleMemory(horizon_s=1.0)
+    for k in range(50):  # a chatty sensor: 50 messages within 0.25 s
+        memory.add(0.0 + k * 0.005, np.array([[1.0, float(k)]]))
+    memory.add(0.6, np.array([[2.0, 2.0]]))  # a slower sensor, later
+    pts = memory.points(0.7)
+    assert pts is not None and len(pts) == 51  # nothing drowned out
+    assert (
+        memory.points(1.3) is not None and len(memory.points(1.3)) == 1
+    )  # only the 0.6 s entry left
+    assert memory.points(2.0) is None

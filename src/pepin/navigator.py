@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -33,7 +33,7 @@ from pepin.mapping import OccupancyGrid, transform_to_world
 from pepin.odometry import Pose2D
 from pepin.planning import GridPlanner, PlannerConfig
 from pepin.safety import Reflex, SafetyBox, guard_forward
-from pepin.tof import ReflexConfig, TofRanges
+from pepin.tof import ReflexConfig, TofMount, TofRanges
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +47,13 @@ class NavigatorConfig:
     scan_timeout_s: float = 1.0  # no lidar scan for this long: hold still
     replan_every_s: float = 3.0  # routine replan cadence while driving
     retry_every_s: float = 0.5  # replan cadence while blocked or boxed in
-    obstacle_memory_scans: int = 10  # ~1 s of lidar: a person who moved on frees the path
+    no_path_patience_s: float = 2.0  # keep the previous plan this long before holding
+    obstacle_memory_s: float = 1.0  # live obstacles are forgotten after this: a person moves on
     obstacle_range_m: float = 1.5  # lidar points nearer than this join the live obstacle layer
+    # ToF returns nearer than this join the layer too (farther ones are the lidar's job);
+    # only sensors with a measured mount can place a hit.
+    tof_hit_max_m: float = 0.35
+    tof_mounts: Mapping[str, TofMount] = field(default_factory=dict)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
     controller: ControllerConfig = field(default_factory=ControllerConfig)
     # Autonomous mode: stale ToF data holds the robot instead of being ignored.
@@ -81,6 +86,36 @@ class Decision:
     done: bool = False  # the goal is reached; the caller stops the loop
 
 
+class ObstacleMemory:
+    """What any sensor saw recently, as map-frame points, forgotten after ``horizon_s``.
+
+    Time-based on purpose: a memory of "the last N scans" fills up with whichever
+    sensor reports fastest (ToF at 20 Hz drowned the lidar at 10 Hz) and forgets
+    a person only when enough messages, not seconds, have passed.
+    """
+
+    def __init__(self, horizon_s: float) -> None:
+        self._horizon_s = horizon_s
+        self._entries: deque[tuple[float, NDArray[np.float64]]] = deque()
+
+    def add(self, now: float, points_world: NDArray[np.float64]) -> None:
+        """Remember ``points_world`` (N, 2) seen at ``now``; empty sets are ignored."""
+        if len(points_world):
+            self._entries.append((now, points_world))
+        self._expire(now)
+
+    def points(self, now: float) -> NDArray[np.float64] | None:
+        """Every point still inside the horizon at ``now``, stacked; None when nothing is left."""
+        self._expire(now)
+        if not self._entries:
+            return None
+        return np.vstack([pts for _, pts in self._entries])
+
+    def _expire(self, now: float) -> None:
+        while self._entries and now - self._entries[0][0] > self._horizon_s:
+            self._entries.popleft()
+
+
 class Navigator:
     """Localiser, obstacle memory, planner, follower and guards behind one ``step``."""
 
@@ -100,10 +135,11 @@ class Navigator:
         self.paused = False
         self.plan: list[tuple[float, float]] | None = None
         self._follower: PathFollower | None = None
-        self._hits: deque[NDArray[np.float64]] = deque(maxlen=self.cfg.obstacle_memory_scans)
+        self._hits = ObstacleMemory(self.cfg.obstacle_memory_s)
         self._latest_points: NDArray[np.float64] | None = None
         self._last_plan_at = -float("inf")
         self._vetoed_forward = False
+        self._no_path_since: float | None = None
         self._replan(start, now=0.0)
 
     @property
@@ -114,6 +150,7 @@ class Navigator:
     def step(self, sense: Sense) -> Decision:
         """Consume one tick of sensor data and decide the body twist for it."""
         pose = self._localise(sense)
+        self._remember_tof(sense, pose)
         confidence = self.localizer.confidence
         hold = self._hold_reason(sense)
         changed = False
@@ -141,10 +178,25 @@ class Navigator:
         for points in sense.scans:
             pose = self.localizer.update(sense.odom_pose, points)
             self._latest_points = points
-            if len(points):
+            # A lost localiser would smear real walls into phantom obstacles: remember nothing.
+            if len(points) and not self.localizer.lost:
                 near = points[np.hypot(points[:, 0], points[:, 1]) < self.cfg.obstacle_range_m]
-                self._hits.append(transform_to_world(near, pose))
+                self._hits.add(sense.now, transform_to_world(near, pose))
         return self.localizer.pose
+
+    def _remember_tof(self, sense: Sense, pose: Pose2D) -> None:
+        """Close ToF returns become obstacle-layer points, so low things get routed around too."""
+        if sense.tof is None or sense.tof.age_s > self.cfg.reflex.max_age_s:
+            return
+        hits = [
+            self.cfg.tof_mounts[name].hit_xy(r)
+            for name, r in sense.tof.by_name().items()
+            if r is not None
+            and self.cfg.reflex.min_valid_m <= r < self.cfg.tof_hit_max_m
+            and name in self.cfg.tof_mounts
+        ]
+        if hits:
+            self._hits.add(sense.now, transform_to_world(np.array(hits), pose))
 
     def _hold_reason(self, sense: Sense) -> str:
         """Why the robot must not move this tick, or "" when it may."""
@@ -166,17 +218,32 @@ class Navigator:
         return since >= self.cfg.replan_every_s
 
     def _replan(self, pose: Pose2D, now: float) -> bool:
-        """Plan from ``pose`` around the remembered obstacles; True when the plan changed."""
-        obstacles = np.vstack(self._hits) if self._hits else None
+        """Plan from ``pose`` around the remembered obstacles; True when the plan changed.
+
+        A momentary "no path" (a person crossing, a mislocalised scan) keeps the
+        previous plan for ``no_path_patience_s``; only a persistent one drops it,
+        which makes the caller hold still.
+        """
+        obstacles = self._hits.points(now)
         fresh = self.planner.plan((pose.x, pose.y), self.goal, obstacles_xy=obstacles)
         self._last_plan_at = now
         self._vetoed_forward = False
+        if fresh is None:
+            if self._no_path_since is None:
+                self._no_path_since = now
+            patient = now - self._no_path_since < self.cfg.no_path_patience_s
+            if patient and self._follower is not None:
+                logger.info("no path right now; keeping the previous plan")
+                return False
+            logger.warning("no path from %s to %s around the current obstacles", pose, self.goal)
+            changed = self.plan is not None
+            self.plan, self._follower = None, None
+            return changed
+        self._no_path_since = None
         if fresh == self.plan:
             return False
-        if fresh is None:
-            logger.warning("no path from %s to %s around the current obstacles", pose, self.goal)
         self.plan = fresh
-        self._follower = PathFollower(fresh, self.cfg.controller) if fresh else None
+        self._follower = PathFollower(fresh, self.cfg.controller)
         return True
 
     def _guard(self, twist: Twist, sense: Sense) -> tuple[Twist, str]:
