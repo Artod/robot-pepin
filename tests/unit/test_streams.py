@@ -79,3 +79,30 @@ def test_a_garbage_line_costs_the_line_not_the_stream() -> None:
         time.sleep(0.01)
     client.close()
     assert client.messages[:1] == [{"ok": True}]
+
+
+def test_server_inbox_broadcast_and_farewell_over_localhost() -> None:
+    import socket
+
+    from pepin.streams import JsonLinesServer
+
+    server = JsonLinesServer(0, on_last_client_left={"cmd": "release"}).start()
+    a = socket.create_connection(("127.0.0.1", server.port), timeout=2.0)
+    a.sendall(b'{"cmd": "twist", "v": 0.1}\n')
+    deadline = time.monotonic() + 2.0
+    got: list = []
+    while time.monotonic() < deadline and not got:
+        got = server.commands()
+        time.sleep(0.01)
+    assert got and got[0][1] == {"cmd": "twist", "v": 0.1} and got[0][0] is not None
+    server.broadcast({"type": "state", "x": 1.0})
+    a.settimeout(2.0)
+    assert b'"x":1.0' in a.recv(4096)
+    a.close()
+    deadline = time.monotonic() + 2.0
+    farewell: list = []
+    while time.monotonic() < deadline and not farewell:
+        farewell = server.commands()
+        time.sleep(0.01)
+    assert farewell and farewell[0] == (None, {"cmd": "release"})
+    server.close()

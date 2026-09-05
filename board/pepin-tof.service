@@ -4,7 +4,9 @@ After=tof-init.service network.target
 Requires=tof-init.service
 
 [Service]
-ExecStart=/opt/pepin/bin/python /opt/pepin/tof_server.py --port 3335
+WorkingDirectory=/opt/pepin
+Environment=PYTHONPATH=/opt/pepin
+ExecStart=/opt/pepin/bin/python -m pepin.tof_server --port 3335
 Restart=on-failure
 RestartSec=2
 

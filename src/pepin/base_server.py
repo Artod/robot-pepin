@@ -18,29 +18,25 @@ Run on the board::
     python -m pepin.base_server --config /opt/pepin/config/base.json
 
 The pure logic is :class:`BaseServerCore` (unit-tested against a fake bus);
-:func:`serve` adds the sockets and the clock.
+:func:`serve` adds the clock, :class:`pepin.streams.JsonLinesServer` the sockets.
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
-import json
 import logging
-import queue
-import socket
 import threading
 import time
-from collections.abc import Callable
 from typing import Any
 
 from pepin.base import LEFT, RIGHT, BusWatchdog, DiffDriveBase, with_suppressed_timeout
-from pepin.base_link import BASE_PORT, DEADMAN_S, encode
+from pepin.base_link import BASE_PORT, DEADMAN_S
 from pepin.bus import MotorBus, verify_motors
 from pepin.feetech import FeetechTcpClient
 from pepin.geometry import BaseConfig
 from pepin.kinematics import Twist
 from pepin.odometry import DiffDriveOdometry
+from pepin.streams import JsonLinesServer
 from pepin.telemetry import LatencyTracker
 
 logger = logging.getLogger(__name__)
@@ -197,142 +193,31 @@ class BaseServerCore:
         self.twist = STOP
 
 
-Inbox = "queue.Queue[tuple[ClientConn, dict[str, Any]]]"
-
-
-class ClientConn:
-    """One laptop connection: a reader thread into the shared inbox, a writer with a bounded outbox.
-
-    Sends never run on the tick thread. A laptop that stops reading fills its
-    outbox (about a second of state) and is dropped; the wheels keep their 50 Hz.
-    """
-
-    def __init__(
-        self,
-        conn: socket.socket,
-        peer: str,
-        inbox: queue.Queue[tuple[ClientConn, dict[str, Any]]],
-        on_close: Callable[[ClientConn], None],
-    ) -> None:
-        self.conn = conn
-        self.peer = peer
-        self._inbox = inbox
-        self._on_close = on_close
-        self._outbox: queue.Queue[bytes] = queue.Queue(maxsize=24)
-        self._lock = threading.Lock()
-        self.alive = True
-        threading.Thread(target=self._read, daemon=True, name=f"client-{peer}-r").start()
-        threading.Thread(target=self._write, daemon=True, name=f"client-{peer}-w").start()
-
-    def post(self, line: bytes) -> None:
-        """Queue one line for this client; a full outbox means a dead or frozen laptop."""
-        try:
-            self._outbox.put_nowait(line)
-        except queue.Full:
-            logger.warning("client %s is not reading; dropping it", self.peer)
-            self.close()
-
-    def close(self) -> None:
-        """Shut the socket (unblocks the reader), stop the writer, tell the server; idempotent."""
-        with self._lock:
-            if not self.alive:
-                return
-            self.alive = False
-        with contextlib.suppress(OSError):
-            self.conn.shutdown(socket.SHUT_RDWR)
-        self.conn.close()
-        with contextlib.suppress(queue.Full):
-            self._outbox.put_nowait(b"")  # wakes the writer so it can exit
-        self._on_close(self)
-
-    def _read(self) -> None:
-        buffer = b""
-        try:
-            while self.alive:
-                chunk = self.conn.recv(4096)
-                if not chunk:
-                    break
-                buffer += chunk
-                *lines, buffer = buffer.split(b"\n")
-                for line in lines:
-                    if line.strip():
-                        self._inbox.put((self, json.loads(line)))
-        except (OSError, ValueError) as exc:
-            logger.info("client %s reader ended: %s", self.peer, exc)
-        self.close()
-
-    def _write(self) -> None:
-        while True:
-            line = self._outbox.get()
-            if not line or not self.alive:
-                return
-            try:
-                self.conn.sendall(line)
-            except OSError as exc:
-                logger.info("client %s writer ended: %s", self.peer, exc)
-                self.close()
-                return
-
-
-def serve(core: BaseServerCore, port: int, tick_hz: float, publish_hz: float) -> None:
-    """Sockets and clock around the core: accept, tick, publish state, release when left alone."""
-    server = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)  # dual-stack
-    server.bind(("::", port))
-    server.listen(4)
-    logger.info("base server listening on %d", port)
-    clients: list[ClientConn] = []
-    lock = threading.Lock()
-    inbox: queue.Queue[tuple[ClientConn, dict[str, Any]]] = queue.Queue()
-
-    def on_close(client: ClientConn) -> None:
-        with lock:
-            if client in clients:
-                clients.remove(client)
-            alone = not clients
-        logger.info("client %s gone", client.peer)
-        if alone:
-            inbox.put((client, {"cmd": "release"}))  # nobody is driving any more
-
-    def accept_loop() -> None:
-        while True:
-            try:
-                conn, peer = server.accept()
-            except OSError as exc:
-                logger.warning("accept failed: %s", exc)
-                time.sleep(0.5)
-                continue
-            client = ClientConn(conn, peer[0], inbox, on_close)
-            with lock:
-                clients.append(client)
-            logger.info("client %s connected", peer[0])
-
-    threading.Thread(target=accept_loop, daemon=True).start()
+def serve(
+    core: BaseServerCore,
+    server: JsonLinesServer,
+    tick_hz: float,
+    publish_hz: float,
+    stop: threading.Event | None = None,
+) -> None:
+    """Clock around the core: apply commands, tick, publish state; release when left alone."""
     period, publish_every = 1.0 / tick_hz, 1.0 / publish_hz
     next_publish = time.monotonic()
     try:
-        while True:
+        while stop is None or not stop.is_set():
             started = time.monotonic()
-            while True:
-                try:
-                    client, message = inbox.get_nowait()
-                except queue.Empty:
-                    break
+            for client, message in server.commands():
                 reply = core.command(message, started)
-                if reply is not None and client.alive:
-                    client.post(encode(reply))
+                if reply is not None:
+                    server.reply(client, reply)
             core.tick(started)
             if started >= next_publish:
                 next_publish = started + publish_every
-                line = encode(core.snapshot(started))
-                with lock:
-                    targets = list(clients)
-                for client in targets:
-                    client.post(line)
+                server.broadcast(core.snapshot(started))
             time.sleep(max(0.0, period - (time.monotonic() - started)))
     finally:
         core.release()
+        server.close()
 
 
 def main() -> None:
@@ -362,7 +247,8 @@ def main() -> None:
     with FeetechTcpClient(args.bus_host, args.bus_port, motors, retries=1) as bus:
         verify_motors(bus, [LEFT, RIGHT])
         core = BaseServerCore(bus, config, servo_names=list(motors), latency=bus.latency)
-        serve(core, args.port, args.tick_hz, args.publish_hz)
+        server = JsonLinesServer(args.port, on_last_client_left={"cmd": "release"}).start()
+        serve(core, server, args.tick_hz, args.publish_hz)
 
 
 if __name__ == "__main__":

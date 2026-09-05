@@ -97,3 +97,46 @@ def test_release_from_a_leaving_client_stops_without_touching_the_deadman_clock(
     core.command({"cmd": "release"}, now=1.2)
     assert not core.moving and bus.writes[-1] == ("Goal_Velocity", {LEFT: 0, RIGHT: 0})
     assert core._last_command_at == 1.0
+
+
+def test_serve_end_to_end_over_localhost() -> None:
+    """A real client drives the served core: states flow, a twist moves it, leaving releases it."""
+    import threading
+    import time
+
+    from pepin.base_link import BaseClient
+    from pepin.base_server import serve
+    from pepin.kinematics import Twist
+    from pepin.streams import JsonLinesServer
+
+    core, _ = make_core()
+    server = JsonLinesServer(0, on_last_client_left={"cmd": "release"}).start()
+    stop = threading.Event()
+    worker = threading.Thread(target=serve, args=(core, server, 50.0, 20.0, stop), daemon=True)
+    worker.start()
+    client = BaseClient("127.0.0.1", server.port).start()
+    first = client.wait_for_state(3.0)
+    assert first is not None and not first.moving
+    client.set_twist(Twist(0.1, 0.0))
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not core.moving:
+        time.sleep(0.01)
+    assert core.moving and core.armed
+    assert client.ping(timeout_s=2.0) == {}  # moving: the roster is not pinged
+    client.stop()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and core.moving:
+        time.sleep(0.01)
+    servos = client.ping(timeout_s=2.0)
+    assert servos is not None and servos.get("left") is True
+    client.set_twist(Twist(0.1, 0.0))
+    while time.monotonic() < deadline + 2.0 and not core.moving:
+        time.sleep(0.01)
+    client.close()  # the only client leaves: the core must release the wheels
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and core.moving:
+        time.sleep(0.01)
+    assert not core.moving
+    stop.set()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive() and not core.armed
