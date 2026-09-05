@@ -173,3 +173,38 @@ def test_without_a_goal_the_navigator_holds() -> None:
     nav = Navigator(room_map(), start)
     assert nav.plan is None
     assert nav.step(Sense(1.0, start, [raycast_room(start)], 0.0, None)).hold == "no goal"
+
+
+def test_an_empty_revolution_does_not_count_as_a_view_of_the_room() -> None:
+    """All-NaN scans (glass, masked sectors) must not refresh the guard's points nor the clock."""
+    start = Pose2D(-2.0, 0.0, 0.0)
+    nav = Navigator(room_map(), start, (2.0, 0.0))
+    assert not nav.step(Sense(1.0, start, [raycast_room(start)], 0.0, None)).hold
+    empty = np.zeros((0, 2))
+    assert not nav.step(Sense(1.5, start, [empty], 0.0, None)).hold  # still fresh from t=1.0
+    blind = nav.step(Sense(2.5, start, [empty], 0.0, None))
+    assert blind.hold.startswith("no lidar scan for 1.5")
+
+
+def test_a_scan_older_than_the_timeout_is_not_matched() -> None:
+    """A revolution kept across a base outage while the lidar was dead is not evidence."""
+    start = Pose2D(-2.0, 0.0, 0.0)
+    nav = Navigator(room_map(), start, (2.0, 0.0))
+    nav.step(Sense(1.0, start, [raycast_room(start)], 0.0, None))
+    before = nav.pose
+    elsewhere = Pose2D(-1.0, 0.5, 0.3)  # a scan from somewhere else, claimed to be 5 s old
+    d = nav.step(Sense(6.0, start, [raycast_room(elsewhere)], 5.0, None))
+    assert d.hold.startswith("no lidar scan for 5.0") and nav.pose == before
+
+
+def test_arrival_is_sticky_across_a_pause() -> None:
+    """Paused at the goal and resumed: no fresh follower, no lunge toward a cell centre."""
+    start = Pose2D(1.9, 0.0, 0.0)
+    nav = Navigator(room_map(), start, (2.0, 0.0), NavigatorConfig(controller=FAST))
+    d = nav.step(Sense(1.0, start, [raycast_room(start)], 0.0, None))
+    assert d.done
+    nav.paused = True
+    assert nav.step(Sense(1.5, start, [raycast_room(start)], 0.0, None)).hold == "paused"
+    nav.paused = False
+    later = nav.step(Sense(4.0, start, [raycast_room(start)], 0.0, None))  # a replan was due
+    assert later.done and later.twist == STOP and later.target is None

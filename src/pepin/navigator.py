@@ -19,6 +19,7 @@ rules in the same order:
 from __future__ import annotations
 
 import logging
+import math
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -148,6 +149,7 @@ class Navigator:
         self._last_plan_at = -float("inf")
         self._vetoed_forward = False
         self._no_path_since: float | None = None
+        self._done = False  # at the goal; sticky until the robot is well away from it
         self._initialised = False
         if goal is not None:
             self._replan(start, now=0.0)
@@ -166,6 +168,8 @@ class Navigator:
         self.goal = goal
         self.plan, self._follower = None, None
         self._plan_dirty = True
+        self._done = False
+        self._vetoed_forward = False
         self._last_plan_at = -float("inf")
         self._no_path_since = None
         logger.info("new goal %s", goal)
@@ -177,13 +181,21 @@ class Navigator:
         confidence = self.localizer.confidence
         hold = self._hold_reason(sense)
         changed, self._plan_dirty = self._plan_dirty, False
-        if not hold and self._replan_due(sense.now):
+        if hold:
+            return Decision(STOP, pose, confidence, hold=hold, plan_changed=changed)
+        if self._done and self._near_goal(pose):
+            # Arrival is sticky: a replan after a pause or a blip would otherwise hand
+            # out a fresh follower whose last waypoint sits a cell off the goal — a lunge.
+            return Decision(STOP, pose, confidence, plan_changed=changed, done=True)
+        self._done = False
+        if self._replan_due(sense.now):
             changed = self._replan(pose, sense.now) or changed
-        if hold or self._follower is None:
-            reason = hold or "no path around the obstacles; waiting"
+        if self._follower is None:
+            reason = "no path around the obstacles; waiting"
             return Decision(STOP, pose, confidence, hold=reason, plan_changed=changed)
         out = self._follower.step(pose)
         if out.done:
+            self._done = True
             return Decision(STOP, pose, confidence, plan_changed=changed, done=True)
         twist, veto = self.guard_twist(out.twist, sense)
         # A vetoed forward wish means the plan runs into something the map lacks:
@@ -193,9 +205,21 @@ class Navigator:
 
     # -- the five stages ----------------------------------------------------
 
+    def _near_goal(self, pose: Pose2D) -> bool:
+        """Within twice the arrival tolerance of the goal: still "there" despite jitter."""
+        if self.goal is None:
+            return False
+        tolerance = 2.0 * self.cfg.controller.goal_tolerance_m
+        return math.hypot(self.goal[0] - pose.x, self.goal[1] - pose.y) <= tolerance
+
     def _localise(self, sense: Sense) -> Pose2D:
-        """Fold odometry and new scans into the pose; nearby points join the obstacle memory."""
-        if not sense.scans:
+        """Fold odometry and new scans into the pose; nearby points join the obstacle memory.
+
+        Scans older than the timeout (a revolution kept across a base outage
+        while the lidar itself was dead) are not trusted: they would be matched
+        against an odometry step they never saw.
+        """
+        if not sense.scans or sense.scan_age_s > self.cfg.scan_timeout_s:
             self.localizer.predict(sense.odom_pose)
             return self.localizer.pose
         for points in sense.scans:
@@ -206,7 +230,8 @@ class Navigator:
                         points, self.cfg.initial_search, global_fallback=self.cfg.global_search
                     )
             pose = self.localizer.update(sense.odom_pose, points)
-            self._latest_points, self._latest_points_at = points, sense.now
+            if len(points):  # an all-NaN revolution (glass) is not a view of the room
+                self._latest_points, self._latest_points_at = points, sense.now
             # A lost localiser would smear real walls into phantom obstacles: remember nothing.
             if len(points) and not self.localizer.lost:
                 near = points[np.hypot(points[:, 0], points[:, 1]) < self.cfg.obstacle_range_m]
@@ -229,10 +254,10 @@ class Navigator:
 
     def _hold_reason(self, sense: Sense) -> str:
         """Why the robot must not move this tick, or "" when it may."""
-        if self.paused:
-            return "paused"
         if self.goal is None:
             return "no goal"
+        if self.paused:
+            return "paused"
         # The transport's age and our own: a revolution that arrived but never
         # reached this navigator (a base outage swallowed it) must not count as seen.
         scan_age = max(sense.scan_age_s, sense.now - self._latest_points_at)

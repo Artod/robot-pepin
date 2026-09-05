@@ -104,6 +104,7 @@ class Driver:
         self._goal: tuple[float, float] | None = None
         self._goal_name: str | None = None
         self._face: float | None = None
+        self._faced = False  # the heading was reached once; jitter must not restart the turn
         self._mode = Mode.IDLE
         self._last: Status | None = None
 
@@ -123,6 +124,7 @@ class Driver:
         else:
             xy, self._goal_name, self._face = (float(goal[0]), float(goal[1])), None, None
         self._goal = xy
+        self._faced = False
         self.navigator.set_goal(xy)
         self.navigator.paused = False
         self._mode = Mode.DRIVING
@@ -144,7 +146,9 @@ class Driver:
     def cancel(self) -> None:
         """Forget the goal and stop."""
         self._goal, self._goal_name, self._face = None, None, None
+        self._faced = False
         self.navigator.set_goal(None)
+        self.navigator.paused = False
         self._mode = Mode.IDLE
         self.robot.stop()
 
@@ -185,6 +189,8 @@ class Driver:
         """The board is quiet: nothing to command (its deadman already stopped the wheels)."""
         if self._mode not in (Mode.IDLE, Mode.NO_BASE):
             logger.warning("no word from the base server; its deadman has the wheels")
+            if self.recorder is not None:
+                self.recorder.write("nav", {"mode": str(Mode.NO_BASE), "reason": "no telemetry"})
         self._mode = Mode.NO_BASE if self._goal is not None else Mode.IDLE
         pose = self.navigator.pose
         return Status(
@@ -196,14 +202,15 @@ class Driver:
     def _act(self, obs: Observation, decision: Decision) -> Status:
         twist, reason = self._command(decision, obs.sense)
         if self.recorder is not None:
-            self._record(obs, decision, twist)
+            self._record(obs, decision, twist, reason)
         if decision.plan_changed and self._on_plan is not None:
             self._on_plan(self.navigator.plan)
         self.robot.drive(twist)  # also the board's deadman heartbeat
         state = obs.state
+        target = decision.target if self._mode is Mode.DRIVING else None
         return Status(
             self._mode, decision.pose, decision.confidence, self._goal, self._goal_name,
-            self._distance(decision.pose), decision.target, reason, twist,
+            self._distance(decision.pose), target, reason, twist,
             state.age_s, state.deadman, state.bus_ok,
         )  # fmt: skip
 
@@ -212,22 +219,20 @@ class Driver:
         if self._goal is None:
             self._mode = Mode.IDLE
             return STOP, ""
-        if self._mode is Mode.ARRIVED:
-            return STOP, ""
         if self.navigator.paused:
             self._mode = Mode.PAUSED
             return STOP, "paused"
         if decision.hold:
             self._mode = Mode.HOLDING
             return STOP, decision.hold
-        if decision.done or self._mode is Mode.FACING:
+        if decision.done:  # sticky in the navigator, so a blip cannot un-arrive us
             return self._arrive(decision.pose, sense)
         self._mode = Mode.DRIVING
         return decision.twist, decision.veto
 
     def _arrive(self, pose: Pose2D, sense: Sense) -> tuple[Twist, str]:
         """At the place: turn to its preferred heading if it has one, then report arrival."""
-        if self._face is not None:
+        if self._face is not None and not self._faced:
             error = wrap_angle(self._face - pose.theta)
             if abs(error) > FACE_TOLERANCE_RAD:
                 self._mode = Mode.FACING
@@ -235,14 +240,18 @@ class Driver:
                 twist, veto = self.navigator.guard_twist(Twist(0.0, yaw), sense)
                 why = f"facing {math.degrees(self._face):.0f} deg"
                 return twist, f"{why} ({veto})" if veto else why
-        if self._mode is not Mode.ARRIVED:
+            self._faced = True
+        if self._mode in (Mode.DRIVING, Mode.HOLDING, Mode.FACING):
             logger.info("arrived at %s %s", self._goal_name or "", self._goal)
         self._mode = Mode.ARRIVED
-        self.navigator.paused = True
         return STOP, ""
 
-    def _record(self, obs: Observation, decision: Decision, twist: Twist) -> None:
-        """Session topics for offline replay: odometry, scans, localised pose, ToF, the command."""
+    def _record(self, obs: Observation, decision: Decision, twist: Twist, reason: str) -> None:
+        """Session topics for offline replay: odometry, scans, localised pose, ToF, the command.
+
+        ``nav`` carries the mode, the reason and the follower's wish next to what
+        was actually sent, so a replay can tell a guard stop from a planned one.
+        """
         rec = self.recorder
         assert rec is not None
         rec.pose(obs.state.pose, (obs.state.d_left_m, obs.state.d_right_m))
@@ -256,6 +265,15 @@ class Driver:
         if obs.sense.tof is not None:
             r = obs.sense.tof
             rec.write("tof", {"front": r.front, "left": r.left, "right": r.right, "age": r.age_s})
+        rec.write(
+            "nav",
+            {
+                "mode": str(self._mode),
+                "reason": reason,
+                "wanted_linear": decision.twist.linear,
+                "wanted_angular": decision.twist.angular,
+            },
+        )
         rec.command(twist)
 
     def _distance(self, pose: Pose2D) -> float | None:
