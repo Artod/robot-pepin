@@ -9,8 +9,8 @@ rules in the same order:
 3. hold still when paused, blind (no scan) or lost;
 4. (re)plan when there is no plan, on the routine cadence, or right after a
    guard vetoed the forward motion — the plan then routes around the obstacle;
-5. follow the plan, then let the guards trim the command: lidar box ahead,
-   ToF reflex with hysteresis.
+5. follow the plan, then let the guards trim the command: a sweep of the real
+   hull through the command against the newest scan, then the ToF reflex.
 
 :meth:`Navigator.step` never touches hardware: one tick of sensor data in, one
 :class:`Decision` out. The caller owns the wheels, the recorder and the screen.
@@ -27,12 +27,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from pepin.control import ControllerConfig, PathFollower
+from pepin.footprint import Footprint, FootprintGuard
 from pepin.kinematics import Twist
 from pepin.localization import Localizer
 from pepin.mapping import OccupancyGrid, transform_to_world
 from pepin.odometry import Pose2D
 from pepin.planning import GridPlanner, PlannerConfig
-from pepin.safety import Reflex, SafetyBox, guard_forward
+from pepin.safety import Reflex
 from pepin.scanmatch import SearchWindow
 from pepin.tof import ReflexConfig, TofMount, TofRanges
 
@@ -57,6 +58,8 @@ class NavigatorConfig:
     tof_mounts: Mapping[str, TofMount] = field(default_factory=dict)
     # Before the first move, search this far around the given start pose: a robot placed
     # on its mark by hand is off by decimetres and degrees, beyond the tracking window.
+    # When even the initial window fits poorly, search the whole map (any placement).
+    global_search: bool = True
     initial_search: SearchWindow | None = field(
         default_factory=lambda: SearchWindow(
             xy_m=0.6, xy_step_m=0.06, theta_deg=40.0, theta_step_deg=4.0
@@ -66,7 +69,8 @@ class NavigatorConfig:
     controller: ControllerConfig = field(default_factory=ControllerConfig)
     # Autonomous mode: stale ToF data holds the robot instead of being ignored.
     reflex: ReflexConfig = field(default_factory=lambda: ReflexConfig(blocked_when_stale=True))
-    safety_box: SafetyBox = field(default_factory=SafetyBox)
+    footprint: Footprint = field(default_factory=Footprint)  # the hull the guard sweeps
+    guard_horizon_s: float = 0.6  # how far ahead the hull sweep looks
 
 
 @dataclass(frozen=True)
@@ -140,6 +144,7 @@ class Navigator:
         self.localizer = Localizer(grid, start)
         self.planner = GridPlanner(grid, self.cfg.planner)
         self.reflex = Reflex(self.cfg.reflex)
+        self.guard = FootprintGuard(self.cfg.footprint, self.cfg.guard_horizon_s)
         self.paused = False
         self.plan: list[tuple[float, float]] | None = None
         self._follower: PathFollower | None = None
@@ -155,6 +160,13 @@ class Navigator:
     def pose(self) -> Pose2D:
         """Current localised pose."""
         return self.localizer.pose
+
+    def set_goal(self, goal: tuple[float, float]) -> None:
+        """Change the destination mid-run (a person, a voice command); the next tick replans."""
+        self.goal = goal
+        self._last_plan_at = -float("inf")
+        self._no_path_since = None
+        logger.info("new goal %s", goal)
 
     def step(self, sense: Sense) -> Decision:
         """Consume one tick of sensor data and decide the body twist for it."""
@@ -188,7 +200,9 @@ class Navigator:
             if not self._initialised and len(points) >= 50:
                 self._initialised = True  # a short spin-up revolution must not use up the attempt
                 if self.cfg.initial_search is not None:
-                    self.localizer.initialize(points, self.cfg.initial_search)
+                    self.localizer.initialize(
+                        points, self.cfg.initial_search, global_fallback=self.cfg.global_search
+                    )
             pose = self.localizer.update(sense.odom_pose, points)
             self._latest_points = points
             # A lost localiser would smear real walls into phantom obstacles: remember nothing.
@@ -263,12 +277,12 @@ class Navigator:
         return True
 
     def _guard(self, twist: Twist, sense: Sense) -> tuple[Twist, str]:
-        """Lidar box ahead, then the ToF reflex; returns the trimmed twist and what was trimmed."""
+        """Hull sweep against the newest scan, then the ToF reflex; the trimmed twist and why."""
         vetoes = []
         if self._latest_points is not None:
-            twist, blocker = guard_forward(twist, self._latest_points, self.cfg.safety_box)
-            if blocker is not None:
-                vetoes.append(f"lidar: obstacle {blocker:.2f} m ahead")
+            twist, reason = self.guard.apply(twist, self._latest_points)
+            if reason:
+                vetoes.append(f"lidar: {reason}")
         if sense.tof is not None:
             decision = self.reflex.step(twist, sense.tof)
             if decision.blocked:

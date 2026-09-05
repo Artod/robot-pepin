@@ -16,7 +16,13 @@ from numpy.typing import NDArray
 
 from pepin.mapping import OccupancyGrid
 from pepin.odometry import Pose2D
-from pepin.scanmatch import CorrelativeMatcher, SearchWindow, apply_motion, relative_motion
+from pepin.scanmatch import (
+    CorrelativeMatcher,
+    MatchResult,
+    SearchWindow,
+    apply_motion,
+    relative_motion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,7 @@ class Localizer:
         recovery: SearchWindow | None = None,
         min_points: int = 50,
     ) -> None:
+        self._grid = grid
         self._matcher = CorrelativeMatcher(grid)
         self._window = window or SearchWindow()
         self._recovery = recovery or SearchWindow(0.2, 0.02, 10.0, 0.5)
@@ -81,26 +88,54 @@ class Localizer:
             theta_step_deg=base.theta_step_deg * theta / base.theta_deg,
         )
 
-    def initialize(self, points: NDArray[np.float64], window: SearchWindow) -> float:
+    def initialize(
+        self, points: NDArray[np.float64], window: SearchWindow, global_fallback: bool = True
+    ) -> float:
         """Search ``window`` around the start pose once, before moving, and adopt the best fit.
 
         A robot placed on its mark by hand is off by decimetres and degrees,
-        beyond the tracking window; without this the whole run is offset.
+        beyond the tracking window; without this the whole run is offset. If
+        even the wide window fits poorly and ``global_fallback`` is on, the
+        whole map is searched (the robot may have been put down anywhere).
         Returns the inlier fraction of the adopted pose; a poor fit (below
         ``recovery_min_inliers``) keeps the given start and lets tracking try.
         """
         coarse = self._matcher.match(self.pose, points, window)
         fine = self._matcher.match(coarse.pose, points, self._window)
         confidence = self._matcher.inlier_fraction(fine.pose, points)
+        if confidence < self._recovery_min_inliers and global_fallback:
+            logger.info("start fits poorly (inliers %.2f); searching the whole map", confidence)
+            fine, confidence = self._global_search(points)
         if confidence >= self._recovery_min_inliers:
             logger.info("initial fix %s, inliers %.2f", fine.pose, confidence)
             self.pose = fine.pose
         else:
-            logger.warning(
-                "initial fix rejected (inliers %.2f); keeping the start pose", confidence
-            )
+            logger.warning("initial fix rejected (inliers %.2f); keeping the start", confidence)
         self.confidence = confidence
         return confidence
+
+    def _global_search(self, points: NDArray[np.float64]) -> tuple[MatchResult, float]:
+        """Coarse-to-fine search over the whole grid: any position, any heading, once.
+
+        The coarse pass uses a 0.2 m / 15 degree lattice on a thinned scan (a
+        few seconds at most); the winner is refined with a medium and then the
+        tracking window. Look-alike rooms are a real risk in a flat, so the
+        caller still applies the inlier threshold before trusting the result.
+        """
+        spec = self._grid.spec
+        centre = Pose2D(spec.x_min_m + spec.width_m / 2, spec.y_min_m + spec.height_m / 2, 0.0)
+        thinned = points[:: max(1, len(points) // 120)]
+        whole_map = SearchWindow(
+            xy_m=max(spec.width_m, spec.height_m) / 2,
+            xy_step_m=0.2,
+            theta_deg=180.0,
+            theta_step_deg=15.0,
+        )
+        coarse = self._matcher.match(centre, thinned, whole_map)
+        medium = SearchWindow(xy_m=0.3, xy_step_m=0.05, theta_deg=15.0, theta_step_deg=2.0)
+        refined = self._matcher.match(coarse.pose, points, medium)
+        fine = self._matcher.match(refined.pose, points, self._window)
+        return fine, self._matcher.inlier_fraction(fine.pose, points)
 
     def predict(self, odom: Pose2D) -> Pose2D:
         """Advance the pose by odometry alone (between scans); the next scan corrects it."""

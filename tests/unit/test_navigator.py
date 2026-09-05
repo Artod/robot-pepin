@@ -122,3 +122,13 @@ def test_obstacle_memory_forgets_by_time_not_by_message_count() -> None:
         memory.points(1.3) is not None and len(memory.points(1.3)) == 1
     )  # only the 0.6 s entry left
     assert memory.points(2.0) is None
+
+
+def test_set_goal_replans_toward_the_new_place() -> None:
+    start = Pose2D(-2.0, 0.0, 0.0)
+    nav = Navigator(room_map(), start, (2.0, 0.0), NavigatorConfig(retry_every_s=0.0))
+    assert nav.plan is not None and nav.plan[-1][0] > 1.5
+    nav.set_goal((-1.0, 1.0))
+    decision = nav.step(Sense(1.0, start, [raycast_room(start)], 0.0, None))
+    assert decision.plan_changed and nav.plan is not None
+    assert abs(nav.plan[-1][1] - 1.0) < 0.1 and abs(nav.plan[-1][0] + 1.0) < 0.1

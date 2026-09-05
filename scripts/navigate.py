@@ -26,6 +26,7 @@ from pepin.log import setup_logging
 from pepin.mapping import OccupancyGrid, transform_to_world
 from pepin.navigator import Decision, Navigator, NavigatorConfig
 from pepin.odometry import Pose2D
+from pepin.places import resolve_goal
 from pepin.planning import PlannerConfig, path_length
 from pepin.recording import SessionRecorder
 from pepin.robot import Observation, Robot, RobotConfig
@@ -111,7 +112,13 @@ def parse_args() -> argparse.Namespace:
         description="Autonomous point-to-point navigation on a saved map."
     )
     parser.add_argument("--map", type=Path, required=True, help="occupancy grid .npz")
-    parser.add_argument("--goal", nargs=2, type=float, required=True, metavar=("X", "Y"))
+    parser.add_argument(
+        "--goal",
+        nargs="+",
+        required=True,
+        metavar="X Y | NAME",
+        help="map coordinates, or a place named with scripts/places.py",
+    )
     parser.add_argument(
         "--init",
         nargs=3,
@@ -254,7 +261,12 @@ def main() -> None:
     if args.no_tof:
         config = config.without("tof")
     grid = OccupancyGrid.load(args.map)
-    goal = (args.goal[0], args.goal[1])
+    try:
+        goal, place = resolve_goal(args.goal, args.map)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if place is not None:
+        logger.info("goal %r -> %s", place.name, goal)
     start = Pose2D(args.init[0], args.init[1], math.radians(args.init[2]))
     nav = Navigator(
         grid,
@@ -262,6 +274,7 @@ def main() -> None:
         goal,
         NavigatorConfig(
             tof_mounts=config.tof_mounts if config.enabled("tof") else {},
+            footprint=config.footprint,
             planner=PlannerConfig(
                 occupied_threshold=args.occupied, robot_radius_m=args.robot_radius
             ),

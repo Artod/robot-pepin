@@ -116,3 +116,15 @@ def test_initial_fix_recovers_a_hand_placed_start_offset() -> None:
     assert confidence >= 0.6
     assert math.hypot(loc.pose.x - truth.x, loc.pose.y - truth.y) < 0.06
     assert abs(loc.pose.theta - truth.theta) < math.radians(3.0)
+
+
+def test_a_robot_put_down_anywhere_is_found_by_the_global_search() -> None:
+    """1.2 m and 60 deg off the assumed start: beyond the wide window, the whole map is searched."""
+    from pepin.scanmatch import SearchWindow
+
+    truth = Pose2D(1.2, -0.8, math.radians(60.0))
+    loc = Localizer(room_map(), Pose2D(0.0, 0.0, 0.0))
+    confidence = loc.initialize(raycast_room(truth), SearchWindow(0.6, 0.06, 40.0, 4.0))
+    assert confidence >= 0.6
+    assert math.hypot(loc.pose.x - truth.x, loc.pose.y - truth.y) < 0.08
+    assert abs(loc.pose.theta - truth.theta) < math.radians(4.0)
