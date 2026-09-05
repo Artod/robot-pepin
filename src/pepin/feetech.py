@@ -151,6 +151,7 @@ class FeetechTcpClient:
         *,
         timeout_s: float = 0.2,
         retries: int = 2,
+        reconnect: bool = True,
     ) -> None:
         """``motors`` maps names to bus ids; ``timeout_s`` is the deadline for one reply
         (~15 ms round trip over wifi) and ``retries`` the extra attempts before raising."""
@@ -161,6 +162,8 @@ class FeetechTcpClient:
             raise ValueError(f"two motors share one bus id: {motors}")
         self._timeout = timeout_s
         self._retries = retries
+        # Probes pass False: a client kicked off ser2net by a driver must not take the port back.
+        self._reconnect_enabled = reconnect
         self._sock: socket.socket | None = None
         self._parser = PacketParser()
         self.latency = LatencyTracker("feetech.transaction")
@@ -273,11 +276,16 @@ class FeetechTcpClient:
 
         Raises ``TimeoutError`` when ids stay silent through the retries, and also
         when the link is lost and cannot be reopened — one failure path for callers.
+
+        A reply that arrives after its deadline is dropped by the next pre-send
+        flush or, if it slips through, answers the retry of the *same* request;
+        control loops poll one register, so that costs one slightly stale reading,
+        never a wait. Waiting a full reply window between attempts (as this once
+        did) froze the 20 Hz loop for over a second per lost packet.
         """
-        late_reply_possible = False
         for attempt in range(1, self._retries + 2):
             try:
-                self._drain(self._timeout if late_reply_possible else 0.005)
+                self.flush()
                 sock = self._socket
                 sock.settimeout(self._timeout)
                 start = time.perf_counter()
@@ -285,7 +293,7 @@ class FeetechTcpClient:
                 replies = self._collect(expected, time.monotonic() + self._timeout)
             except ConnectionError as exc:
                 logger.warning("bus link lost (%s), attempt %d", exc, attempt)
-                if attempt > self._retries:
+                if attempt > self._retries or not self._reconnect_enabled:
                     raise TimeoutError(f"bus link lost: {exc}") from exc
                 self._reconnect()
                 continue
@@ -296,7 +304,6 @@ class FeetechTcpClient:
             if attempt > self._retries:
                 raise TimeoutError(f"no reply from ids {sorted(missing)} after {attempt} attempts")
             logger.warning("no reply from ids %s (attempt %d), retrying", sorted(missing), attempt)
-            late_reply_possible = True
         raise AssertionError("unreachable")
 
     def _id(self, motor: str) -> int:
@@ -348,7 +355,7 @@ class FeetechTcpClient:
                 return
             except ConnectionError as exc:
                 logger.warning("bus link lost during write (%s), attempt %d", exc, attempt)
-                if attempt == 2:
+                if attempt == 2 or not self._reconnect_enabled:
                     raise TimeoutError(f"bus link lost: {exc}") from exc
                 self._reconnect()
 
@@ -365,6 +372,13 @@ class FeetechTcpClient:
         ids = [self._id(name) for name in motors]
         params = bytes([register.address, register.size, *ids])
         replies = self._transaction(build_packet(BROADCAST_ID, INST_SYNC_READ, params), set(ids))
+        for i in ids:
+            if len(replies[i].params) != register.size:
+                # A reply to some other request (a ping, a different register) must not be
+                # decoded as a position: it would read as a jump in the odometry.
+                raise TimeoutError(
+                    f"malformed reply from id {i}: {len(replies[i].params)} bytes for {data_name}"
+                )
         return {self._ids[i]: decode_value(replies[i].params, register) for i in ids}
 
     def enable_torque(self, motors: list[str] | None = None) -> None:

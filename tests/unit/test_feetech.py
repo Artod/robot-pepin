@@ -185,3 +185,21 @@ def test_parser_survives_a_header_with_an_impossible_length() -> None:
     parser = PacketParser()
     assert parser.feed(bytes.fromhex("ff ff ff 00")) == []
     assert parser.feed(bytes.fromhex("ff ff ff 00") + REPLY_8) == [StatusPacket(8, 0, b"")]
+
+
+def test_probe_client_does_not_take_the_port_back(client) -> None:
+    c, _ = client
+    c._reconnect_enabled = False
+    c._sock = ResetSocket()  # type: ignore[assignment]
+    reconnected = []
+    c.connect = lambda: reconnected.append(True)  # type: ignore[method-assign]
+    with pytest.raises(TimeoutError, match="link lost"):
+        c.sync_read("Present_Position", ["left"], normalize=False)
+    assert not reconnected
+
+
+def test_reply_of_the_wrong_size_is_not_decoded_as_a_position(client) -> None:
+    c, fake = client
+    fake.rx = [status(7, b"")]  # a ping-style reply arriving where a 2-byte position was expected
+    with pytest.raises(TimeoutError, match="malformed"):
+        c.sync_read("Present_Position", ["left"], normalize=False)
