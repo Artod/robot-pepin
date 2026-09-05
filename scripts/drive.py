@@ -22,6 +22,7 @@ import math
 import time
 from pathlib import Path
 
+from pepin.footprint import FootprintGuard
 from pepin.kinematics import Twist
 from pepin.lidar import LaserScan, LidarMount
 from pepin.localization import Localizer
@@ -30,7 +31,6 @@ from pepin.mapping import OccupancyGrid, transform_to_world
 from pepin.odometry import Pose2D
 from pepin.recording import SessionRecorder
 from pepin.robot import Observation, Robot, RobotConfig
-from pepin.safety import guard_forward
 from pepin.teleop import DriveState, KeyReader, apply_key
 from pepin.tof import apply_reflex
 from pepin.transport import board_address
@@ -100,22 +100,27 @@ class Viewer:
 
 
 def guarded_command(
-    intent: Twist, obs: Observation, latest_scan: LaserScan | None, mount: LidarMount
+    intent: Twist,
+    obs: Observation,
+    latest_scan: LaserScan | None,
+    guard: FootprintGuard,
+    mount: LidarMount,
 ) -> tuple[Twist, str]:
     """The twist allowed to reach the wheels, and why it differs from the intent ("" if same).
 
-    The box guard runs on every tick against the newest revolution (the loop is
-    20 Hz, the lidar 10 Hz): a guard that only fired on ticks with a fresh scan
-    let a blocked command through every other tick.
+    The hull sweep runs on every tick against the newest revolution (the loop
+    is 20 Hz, the lidar 10 Hz), so a blocked command never slips through on
+    the ticks without a fresh scan. No scan for a second: no forward motion.
     """
     command = intent
     sense = obs.sense
-    if command.linear > 0:
-        if latest_scan is None or sense.scan_age_s > SCAN_TIMEOUT_S:
+    if latest_scan is None or sense.scan_age_s > SCAN_TIMEOUT_S:
+        if command.linear > 0:
             return Twist(0.0, command.angular), "no fresh lidar scan — forward blocked"
-        command, blocker = guard_forward(command, latest_scan.points_xy(mount))
-        if blocker is not None:
-            return command, f"lidar guard: obstacle {blocker:.2f} m ahead, forward blocked"
+    else:
+        command, reason = guard.apply(command, latest_scan.points_xy(mount))
+        if reason:
+            return command, f"lidar: {reason}"
     if sense.tof is not None:
         decision = apply_reflex(command, sense.tof)
         if decision.blocked:
@@ -164,6 +169,7 @@ def main() -> None:
         except RuntimeError as exc:
             raise SystemExit(str(exc)) from exc
         viewer = Viewer(enabled=not args.no_viz, grid=grid)
+        guard = FootprintGuard(config.footprint)
         print("W/S speed  A/D turn  space stop  Q quit  Ctrl-C stop")
         try:
             with SessionRecorder("data/sessions", args.name) as rec, KeyReader() as keys:
@@ -192,7 +198,9 @@ def main() -> None:
                     rec.pose(pose, (obs.state.d_left_m, obs.state.d_right_m))
                     if obs.scans:
                         latest_scan = obs.scans[-1]
-                    command, reason = guarded_command(state.twist, obs, latest_scan, robot.mount)
+                    command, reason = guarded_command(
+                        state.twist, obs, latest_scan, guard, robot.mount
+                    )
                     if reason and reason != last_reason:
                         logger.warning(reason)
                     last_reason = reason

@@ -17,12 +17,13 @@ import contextlib
 import json
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import TracebackType
 
 from pepin.base_link import BASE_PORT, BaseClient, BaseState
 from pepin.feeds import Feed
+from pepin.footprint import Footprint
 from pepin.geometry import BaseConfig
 from pepin.kinematics import Twist
 from pepin.lidar import LaserScan, LidarClient, LidarMount
@@ -57,6 +58,7 @@ class RobotConfig:
     tof_mounts: Mapping[str, TofMount]
     feeds: Mapping[str, FeedConfig]
     ports: Mapping[str, int]
+    footprint: Footprint = field(default_factory=Footprint)
 
     @classmethod
     def load(cls, config_dir: Path = CONFIG_DIR) -> RobotConfig:
@@ -67,6 +69,7 @@ class RobotConfig:
         ignored sensor.
         """
         robot = json.loads((config_dir / "robot.json").read_text())
+        base_raw = json.loads((config_dir / "base.json").read_text())
         entries = robot.get("feeds", {})
         unknown = sorted(set(entries) - set(KNOWN_FEEDS))
         if unknown:
@@ -78,6 +81,11 @@ class RobotConfig:
             tof_mounts=load_mounts(config_dir / "tof.json"),
             feeds=feeds,
             ports={str(k): int(v) for k, v in robot.get("ports", {}).items()},
+            footprint=(
+                Footprint.from_config(base_raw["footprint"])
+                if "footprint" in base_raw
+                else Footprint()
+            ),
         )
 
     def enabled(self, feed: str) -> bool:
