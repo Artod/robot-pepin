@@ -1,0 +1,15 @@
+{
+  "feeds": {
+    "lidar": {"enabled": true, "required": true},
+    "tof": {"enabled": true, "required": true},
+    "camera": {"enabled": true, "required": false}
+  },
+  "ports": {
+    "servo_bus": 3333,
+    "lidar": 3334,
+    "tof": 3335,
+    "base": 3336,
+    "camera_http": 8080
+  },
+  "notes": "feeds: enabled=false keeps a sensor out of the loop entirely (a broken one, or a bench run); required=false means driving may continue without it. Ports are the board's services (ser2net bridges, tof_server, base_server, ustreamer)."
+}
