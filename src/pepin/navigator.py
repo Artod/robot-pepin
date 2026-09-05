@@ -70,6 +70,9 @@ class NavigatorConfig:
     reflex: ReflexConfig = field(default_factory=lambda: ReflexConfig(blocked_when_stale=True))
     footprint: Footprint = field(default_factory=Footprint)  # the hull the guard sweeps
     guard_horizon_s: float = 0.6  # how far ahead the hull sweep looks
+    guard_min_points: int = (
+        2  # lidar returns inside the hull that count as contact (1 = trust every beam)
+    )
 
 
 @dataclass(frozen=True)
@@ -123,35 +126,46 @@ class Navigator:
         self,
         grid: OccupancyGrid,
         start: Pose2D,
-        goal: tuple[float, float],
+        goal: tuple[float, float] | None = None,
         config: NavigatorConfig | None = None,
     ) -> None:
-        """Plans the first path immediately; ``plan`` is None if the goal is unreachable."""
+        """With a goal, plans the first path at once (``plan`` stays None if it is unreachable)."""
         self.cfg = config or NavigatorConfig()
         self.goal = goal
         self.localizer = Localizer(grid, start)
         self.planner = GridPlanner(grid, self.cfg.planner)
         self.reflex = Reflex(self.cfg.reflex)
-        self.guard = FootprintGuard(self.cfg.footprint, self.cfg.guard_horizon_s)
+        self.guard = FootprintGuard(
+            self.cfg.footprint, self.cfg.guard_horizon_s, self.cfg.guard_min_points
+        )
         self.paused = False
         self.plan: list[tuple[float, float]] | None = None
         self._follower: PathFollower | None = None
         self._hits = ObstacleMemory(self.cfg.obstacle_memory_s)
         self._latest_points: NDArray[np.float64] | None = None
+        self._latest_points_at = -float("inf")  # sense.now when they were consumed
+        self._plan_dirty = False  # the caller must redraw even if no new plan came out
         self._last_plan_at = -float("inf")
         self._vetoed_forward = False
         self._no_path_since: float | None = None
         self._initialised = False
-        self._replan(start, now=0.0)
+        if goal is not None:
+            self._replan(start, now=0.0)
 
     @property
     def pose(self) -> Pose2D:
         """Current localised pose."""
         return self.localizer.pose
 
-    def set_goal(self, goal: tuple[float, float]) -> None:
-        """Change the destination mid-run (a person, a voice command); the next tick replans."""
+    def set_goal(self, goal: tuple[float, float] | None) -> None:
+        """Change the destination mid-run (a person, a voice command); the next tick replans.
+
+        The old plan is dropped at once: with it kept, an unreachable new goal
+        would leave the robot driving the previous route for the patience period.
+        """
         self.goal = goal
+        self.plan, self._follower = None, None
+        self._plan_dirty = True
         self._last_plan_at = -float("inf")
         self._no_path_since = None
         logger.info("new goal %s", goal)
@@ -162,16 +176,16 @@ class Navigator:
         self._remember_tof(sense, pose)
         confidence = self.localizer.confidence
         hold = self._hold_reason(sense)
-        changed = False
+        changed, self._plan_dirty = self._plan_dirty, False
         if not hold and self._replan_due(sense.now):
-            changed = self._replan(pose, sense.now)
+            changed = self._replan(pose, sense.now) or changed
         if hold or self._follower is None:
             reason = hold or "no path around the obstacles; waiting"
             return Decision(STOP, pose, confidence, hold=reason, plan_changed=changed)
         out = self._follower.step(pose)
         if out.done:
             return Decision(STOP, pose, confidence, plan_changed=changed, done=True)
-        twist, veto = self._guard(out.twist, sense)
+        twist, veto = self.guard_twist(out.twist, sense)
         # A vetoed forward wish means the plan runs into something the map lacks:
         # the next tick replans with the live obstacles instead of pushing.
         self._vetoed_forward = bool(veto)  # any trimmed command: retry the plan soon
@@ -192,7 +206,7 @@ class Navigator:
                         points, self.cfg.initial_search, global_fallback=self.cfg.global_search
                     )
             pose = self.localizer.update(sense.odom_pose, points)
-            self._latest_points = points
+            self._latest_points, self._latest_points_at = points, sense.now
             # A lost localiser would smear real walls into phantom obstacles: remember nothing.
             if len(points) and not self.localizer.lost:
                 near = points[np.hypot(points[:, 0], points[:, 1]) < self.cfg.obstacle_range_m]
@@ -217,10 +231,15 @@ class Navigator:
         """Why the robot must not move this tick, or "" when it may."""
         if self.paused:
             return "paused"
-        if sense.scan_age_s > self.cfg.scan_timeout_s:
-            if sense.scan_age_s == float("inf"):
+        if self.goal is None:
+            return "no goal"
+        # The transport's age and our own: a revolution that arrived but never
+        # reached this navigator (a base outage swallowed it) must not count as seen.
+        scan_age = max(sense.scan_age_s, sense.now - self._latest_points_at)
+        if scan_age > self.cfg.scan_timeout_s:
+            if scan_age == float("inf"):
                 return "no lidar scan yet"
-            return f"no lidar scan for {sense.scan_age_s:.1f} s"
+            return f"no lidar scan for {scan_age:.1f} s"
         if self.localizer.lost:
             return f"localiser lost (confidence {self.localizer.confidence:.2f})"
         return ""
@@ -239,8 +258,11 @@ class Navigator:
         previous plan for ``no_path_patience_s``; only a persistent one drops it,
         which makes the caller hold still.
         """
+        goal = self.goal
+        if goal is None:
+            return False
         obstacles = self._hits.points(now)
-        fresh = self.planner.plan((pose.x, pose.y), self.goal, obstacles_xy=obstacles)
+        fresh = self.planner.plan((pose.x, pose.y), goal, obstacles_xy=obstacles)
         self._last_plan_at = now
         self._vetoed_forward = False
         if fresh is None:
@@ -264,16 +286,21 @@ class Navigator:
         self._follower = follower
         return True
 
-    def _guard(self, twist: Twist, sense: Sense) -> tuple[Twist, str]:
-        """Hull sweep against the newest scan, then the ToF reflex; the trimmed twist and why."""
+    def guard_twist(self, twist: Twist, sense: Sense) -> tuple[Twist, str]:
+        """The ToF reflex, then the hull sweep on what it left: the trimmed twist and why.
+
+        The reflex goes first because it changes the motion (a front stop turns
+        an arc into a rotation in place, which swings the rear corners) and
+        nothing may reach the wheels that the sweep has not checked.
+        """
         vetoes = []
-        if self._latest_points is not None:
-            twist, reason = self.guard.apply(twist, self._latest_points)
-            if reason:
-                vetoes.append(f"lidar: {reason}")
         if sense.tof is not None:
             decision = self.reflex.step(twist, sense.tof)
             if decision.blocked:
                 vetoes.append(f"tof: {decision.reason}")
                 twist = decision.twist
+        if self._latest_points is not None:
+            twist, reason = self.guard.apply(twist, self._latest_points)
+            if reason:
+                vetoes.append(f"lidar: {reason}")
         return twist, "; ".join(vetoes)

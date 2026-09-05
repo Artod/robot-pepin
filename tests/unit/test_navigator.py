@@ -7,6 +7,8 @@ from synthetic import raycast_room
 from test_localization import room_map
 
 from pepin.control import ControllerConfig
+from pepin.footprint import time_to_contact
+from pepin.kinematics import STOP, Twist
 from pepin.mapping import transform_to_world
 from pepin.navigator import Navigator, NavigatorConfig, Sense
 from pepin.odometry import Pose2D
@@ -132,3 +134,42 @@ def test_set_goal_replans_toward_the_new_place() -> None:
     decision = nav.step(Sense(1.0, start, [raycast_room(start)], 0.0, None))
     assert decision.plan_changed and nav.plan is not None
     assert abs(nav.plan[-1][1] - 1.0) < 0.1 and abs(nav.plan[-1][0] + 1.0) < 0.1
+
+
+def test_reflex_stop_is_swept_before_it_reaches_the_wheels() -> None:
+    """A front ToF stop turns an arc into a turn in place; that turn must be judged too."""
+    start = Pose2D(-2.0, 0.0, 0.0)
+    nav = Navigator(room_map(), start, (2.0, 0.0), NavigatorConfig(controller=FAST))
+    by_rear_left_corner = np.array([[-0.37, 0.24], [-0.365, 0.237], [-0.367, 0.242]])  # a leg
+    points = np.vstack([raycast_room(start), by_rear_left_corner])
+    sense = Sense(1.0, start, [points], 0.0, TofRanges(0.15, None, None, 0.0))
+    nav.step(sense)
+    arc = Twist(0.15, 0.6)
+    assert nav.guard.apply(arc, points)[1] == ""  # the arc alone clears the cluster
+    twist, veto = nav.guard_twist(arc, sense)
+    assert "tof" in veto and "lidar" in veto
+    assert time_to_contact(points, twist, nav.guard.footprint, nav.guard.horizon_s) is None
+
+
+def test_a_new_unreachable_goal_stops_the_old_route_at_once() -> None:
+    start = Pose2D(-2.0, 0.0, 0.0)
+    nav = Navigator(room_map(), start, (2.0, 0.0), NavigatorConfig(controller=FAST))
+    assert nav.step(Sense(1.0, start, [raycast_room(start)], 0.0, None)).twist != STOP
+    nav.set_goal((3.8, 2.8))  # behind the wall
+    d = nav.step(Sense(1.05, start, [raycast_room(start)], 0.0, None))
+    assert d.twist == STOP and d.hold and d.plan_changed and nav.plan is None
+
+
+def test_a_revolution_the_navigator_never_saw_does_not_count_as_fresh() -> None:
+    start = Pose2D(-2.0, 0.0, 0.0)
+    nav = Navigator(room_map(), start, (2.0, 0.0))
+    assert not nav.step(Sense(1.0, start, [raycast_room(start)], 0.0, None)).hold
+    stale = nav.step(Sense(3.0, start, [], 0.0, None))  # the transport says fresh, we saw nothing
+    assert stale.hold.startswith("no lidar scan for")
+
+
+def test_without_a_goal_the_navigator_holds() -> None:
+    start = Pose2D(-2.0, 0.0, 0.0)
+    nav = Navigator(room_map(), start)
+    assert nav.plan is None
+    assert nav.step(Sense(1.0, start, [raycast_room(start)], 0.0, None)).hold == "no goal"

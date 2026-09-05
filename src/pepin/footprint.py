@@ -21,6 +21,8 @@ from numpy.typing import NDArray
 
 from pepin.kinematics import STOP, Twist
 
+HULL_STEP_M = 0.005  # how far any point of the hull may move between two sweep samples
+
 
 @dataclass(frozen=True)
 class Footprint:
@@ -79,7 +81,12 @@ def time_to_contact(
     """
     if len(points_robot) == 0 or (twist.linear == 0.0 and twist.angular == 0.0):
         return None
-    steps = max(1, round(horizon_s / dt))
+    # No point of the hull moves more than half a centimetre per step: two
+    # adjacent beams on a chair leg by the rear corner are only ~8 mm apart and
+    # sit inside the hull together for a few hundredths of a second in a turn.
+    fastest = max(abs(twist.linear), abs(twist.angular) * footprint.swing_radius_m)
+    steps = max(1, math.ceil(horizon_s / min(dt, HULL_STEP_M / fastest)))
+    dt = horizon_s / steps
     for k in range(1, steps + 1):
         t = k * dt
         x, y, theta = pose_after(twist, t)
@@ -100,14 +107,21 @@ class FootprintGuard:
     whenever the rear is clear.
     """
 
-    def __init__(self, footprint: Footprint | None = None, horizon_s: float = 0.6) -> None:
-        """``footprint`` defaults to the measured cart; ``horizon_s`` is how far ahead to look."""
+    def __init__(
+        self, footprint: Footprint | None = None, horizon_s: float = 0.6, min_points: int = 2
+    ) -> None:
+        """``footprint`` defaults to the measured cart; ``horizon_s`` is how far ahead to look.
+
+        ``min_points`` is how many returns inside the hull count as contact:
+        2 ignores a lone noisy beam, 1 trusts every return (a thin chair leg).
+        """
         self.footprint = footprint or Footprint()
         self.horizon_s = horizon_s
+        self.min_points = min_points
 
     def apply(self, command: Twist, points_robot: NDArray[np.float64]) -> tuple[Twist, str]:
         """The safe variant of ``command`` and why it changed ("" when it did not)."""
-        if time_to_contact(points_robot, command, self.footprint, self.horizon_s) is None:
+        if self._contact(points_robot, command) is None:
             return command, ""
         candidates = (
             (Twist(command.linear * 0.5, command.angular), "slowed: hull would touch"),
@@ -117,6 +131,11 @@ class FootprintGuard:
         for candidate, reason in candidates:
             if candidate in (command, STOP):
                 continue
-            if time_to_contact(points_robot, candidate, self.footprint, self.horizon_s) is None:
+            if self._contact(points_robot, candidate) is None:
                 return candidate, reason
         return STOP, "hold: hull would touch whichever way"
+
+    def _contact(self, points_robot: NDArray[np.float64], twist: Twist) -> float | None:
+        return time_to_contact(
+            points_robot, twist, self.footprint, self.horizon_s, min_points=self.min_points
+        )

@@ -109,24 +109,27 @@ def guarded_command(
 ) -> tuple[Twist, str]:
     """The twist allowed to reach the wheels, and why it differs from the intent ("" if same).
 
-    The hull sweep runs on every tick against the newest revolution (the loop
-    is 20 Hz, the lidar 10 Hz), so a blocked command never slips through on
-    the ticks without a fresh scan. No scan for a second: no forward motion.
+    The ToF reflex goes first (it may turn a drive into a turn in place), then
+    the hull sweep against the newest revolution runs on every tick (the loop
+    is 20 Hz, the lidar 10 Hz), so nothing unchecked reaches the wheels. No
+    scan for a second: no forward motion.
     """
-    command = intent
+    command, vetoes = intent, []
     sense = obs.sense
-    if latest_scan is None or sense.scan_age_s > SCAN_TIMEOUT_S:
-        if command.linear > 0:
-            return Twist(0.0, command.angular), "no fresh lidar scan — forward blocked"
-    else:
-        command, reason = guard.apply(command, latest_scan.points_xy(mount))
-        if reason:
-            return command, f"lidar: {reason}"
     if sense.tof is not None:
         decision = reflex.step(command, sense.tof)
         if decision.blocked:
-            return decision.twist, f"reflex: {decision.reason}"
-    return command, ""
+            command = decision.twist
+            vetoes.append(f"tof: {decision.reason}")
+    if latest_scan is None or sense.scan_age_s > SCAN_TIMEOUT_S:
+        if command.linear > 0:
+            command = Twist(0.0, command.angular)
+            vetoes.append("no fresh lidar scan — forward blocked")
+    else:
+        command, reason = guard.apply(command, latest_scan.points_xy(mount))
+        if reason:
+            vetoes.append(f"lidar: {reason}")
+    return command, "; ".join(vetoes)
 
 
 def main() -> None:
