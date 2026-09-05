@@ -137,13 +137,39 @@ def probe_bridges(host: str) -> Probe:
 
 
 def probe_servos(host: str) -> Probe:
-    """Addressed ping of every servo through the TCP bus client (read-only)."""
+    """Which servos answer: via the base server when it runs, else pinged directly (read-only)."""
+    from pepin.base_link import BaseClient
     from pepin.feetech import FeetechTcpClient
 
+    link = BaseClient(host).start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not link.connected:
+            time.sleep(0.05)
+        if link.connected:
+            answers = link.ping(timeout_s=4.0)
+            if answers is None:
+                return Probe("servo bus", False, "base server did not answer the ping")
+            missing_names = sorted(k for k, ok in answers.items() if not ok)
+            detail = (
+                f"all {len(answers)} answer (via base server)"
+                if not missing_names
+                else f"missing {missing_names}"
+            )
+            return Probe("servo bus", not missing_names, detail)
+    finally:
+        link.close()
+    # No base server (bench mode): talk to ser2net directly.
     motors = {str(i): i for i in EXPECTED_SERVOS}
     try:
-        with FeetechTcpClient(host, SERVO_BUS_PORT, motors) as bus:
+        # reconnect=False: if a driver takes the port from us mid-probe we must not take
+        # it back (ser2net would kick the driver again); we just report and step aside.
+        with FeetechTcpClient(host, SERVO_BUS_PORT, motors, reconnect=False) as bus:
             missing = [i for i in EXPECTED_SERVOS if bus.ping(str(i)) is None]
+    except TimeoutError as exc:
+        if "link lost" in str(exc):
+            return Probe("servo bus", True, "taken over by a driver mid-probe — not probed")
+        return Probe("servo bus", False, str(exc)[:60])
     except OSError as exc:
         return Probe("servo bus", False, str(exc)[:60])
     return Probe(
@@ -168,8 +194,9 @@ def probe_lidar(host: str, seconds: float = 1.0) -> Probe:
         while time.monotonic() < deadline:
             for frame in parser.feed(source.read(4096)):
                 speeds.append(frame.speed_dps)
-    except ConnectionError as exc:
-        return Probe("lidar", False, str(exc)[:60])
+    except ConnectionError:
+        # The bridge closed on us: a driver took the port (kickolduser). Leave it alone.
+        return Probe("lidar", True, "taken over by a driver mid-probe — not probed")
     finally:
         source.close()
     if parser.frames < 100 * seconds:
@@ -273,9 +300,12 @@ def run_health(
     add(board)
     if board.ok:
         add(probe_bridges(host))
-        busy = busy_bridge_ports(host)
+        # Re-check right before each bridge probe: a drive can start between two probes,
+        # and the probes themselves also step aside if they get kicked mid-way.
         in_use = "in use by a driver — not probed"
+        busy = busy_bridge_ports(host)
         add(Probe("servo bus", True, in_use) if SERVO_BUS_PORT in busy else probe_servos(host))
+        busy = busy_bridge_ports(host)
         add(Probe("lidar", True, in_use) if LIDAR_PORT in busy else probe_lidar(host))
         add(probe_tof(host))
         if full:

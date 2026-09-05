@@ -117,7 +117,8 @@ def main() -> None:
         logger.warning("lidar bridge in use by a drive script; the scan panel stays empty")
         rr.log("log", rr.TextLog("lidar in use by a drive — not connecting", level="WARN"))
     else:
-        lidar = LidarClient(host, mount).start()
+        # Passive: if a drive starts and takes the bridge, stay off it (do not fight back).
+        lidar = LidarClient(host, mount, reconnect=False).start()
     if not args.no_camera:
         threading.Thread(
             target=camera_thread, args=(host, args.camera_fps, frames, stop), daemon=True
