@@ -184,19 +184,21 @@ def main() -> None:
     print(host)
     video_name = f"{time.strftime('%Y%m%d_%H%M%S')}_{args.name}" if args.video else None
     print("connecting to the robot (base link, lidar, tof, camera)...", flush=True)
+    session: Path | None = None
     with Robot.connect(config, host=host, video_name=video_name) as robot:
         try:
-            first = robot.wait_ready()
-        except RuntimeError as exc:
-            raise SystemExit(str(exc)) from exc
-        servos = robot.link.ping()
-        if servos is not None and not all(servos.values()):
-            silent = sorted(k for k, ok in servos.items() if not ok)
-            logger.warning("servos not answering on the board: %s", silent)
-        logger.info("base server up: bus_p95 %.0f ms, armed=%s", first.bus_p95_ms, first.armed)
-        viewer = Viewer(enabled=not args.no_viz, grid=grid)
-        try:
+            try:
+                first = robot.wait_ready()
+            except RuntimeError as exc:
+                raise SystemExit(str(exc)) from exc
+            servos = robot.link.ping()
+            if servos is not None and not all(servos.values()):
+                silent = sorted(k for k, ok in servos.items() if not ok)
+                logger.warning("servos not answering on the board: %s", silent)
+            logger.info("base server up: bus_p95 %.0f ms, armed=%s", first.bus_p95_ms, first.armed)
+            viewer = Viewer(enabled=not args.no_viz, grid=grid)
             with SessionRecorder("data/sessions", args.name) as rec, KeyReader() as keys:
+                session = rec.path
                 driver = Driver(
                     robot,
                     grid,
@@ -216,7 +218,12 @@ def main() -> None:
         except KeyboardInterrupt:
             logger.info("interrupted by the user")
             print("\ninterrupted — stopping the wheels")
+            if session is not None:
+                print(f"session saved: {session}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:  # before the robot was connected: nothing to stop
+        print("\ninterrupted")

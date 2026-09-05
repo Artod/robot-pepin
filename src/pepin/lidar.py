@@ -8,6 +8,7 @@ ahead and angles grow counter-clockwise, matching ``pepin.kinematics``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -334,6 +335,12 @@ class LidarClient:
                 logger.warning("lidar bridge unreachable (%s); retrying", exc)
                 self._stop.wait(self._retry_s)
                 continue
+            if self._stop.is_set():
+                # Closed while connecting: with kickolduser this fresh socket would
+                # kick whoever owns the lidar now. Hand it straight back.
+                with contextlib.suppress(Exception):
+                    source.close()
+                return
             logger.info("lidar stream connected")
             self.connected = True
             try:

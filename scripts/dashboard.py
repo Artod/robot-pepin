@@ -189,6 +189,8 @@ def main() -> None:
     finally:
         stop.set()
         tof.close()
+        if lidar is not None:
+            lidar.close()
 
 
 if __name__ == "__main__":

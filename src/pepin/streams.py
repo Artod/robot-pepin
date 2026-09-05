@@ -203,7 +203,7 @@ class ClientConn:
         self,
         conn: socket.socket,
         peer: str,
-        inbox: queue.Queue[tuple[ClientConn, dict[str, Any]]],
+        inbox: queue.Queue[tuple[ClientConn | None, dict[str, Any]]],
         on_close: Callable[[ClientConn], None],
         outbox_size: int = 24,
     ) -> None:
@@ -214,8 +214,16 @@ class ClientConn:
         self._outbox: queue.Queue[bytes] = queue.Queue(maxsize=outbox_size)
         self._lock = threading.Lock()
         self.alive = True
-        threading.Thread(target=self._read, daemon=True, name=f"client-{peer}-r").start()
-        threading.Thread(target=self._write, daemon=True, name=f"client-{peer}-w").start()
+
+    def start(self) -> ClientConn:
+        """Begin reading and writing; the server calls this once the client is on its list.
+
+        Started any earlier, a client that dies at once would be removed from
+        the list before it was added, then added dead and never cleaned up.
+        """
+        threading.Thread(target=self._read, daemon=True, name=f"client-{self.peer}-r").start()
+        threading.Thread(target=self._write, daemon=True, name=f"client-{self.peer}-w").start()
+        return self
 
     def post(self, line: bytes) -> None:
         """Queue one line for this client; a full outbox means a dead or frozen peer."""
@@ -360,9 +368,18 @@ class JsonLinesServer:
         while True:
             try:
                 conn, peer = self._server.accept()
-            except OSError:
-                return  # closed
-            client = ClientConn(conn, peer[0], self._inbox, self._on_close)  # type: ignore[arg-type]
+            except OSError as exc:
+                if self._server.fileno() == -1:
+                    return  # closed by close()
+                # A connection reset before accept, too many files, a signal: the
+                # listener itself is fine and giving up here would leave a server
+                # that looks alive but never takes another client.
+                logger.warning("accept failed (%s); still listening", exc)
+                time.sleep(0.05)
+                continue
+            address = str(peer[0]) if peer else "?"  # reset-before-accept yields no address
+            client = ClientConn(conn, address, self._inbox, self._on_close)
             with self._lock:
                 self._clients.append(client)
-            logger.info("client %s connected", peer[0])
+            client.start()
+            logger.info("client %s connected", address)

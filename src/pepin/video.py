@@ -71,26 +71,38 @@ class CameraRecorder:
         if not self.started:
             return None
         # SIGINT to our own ffmpeg only (by pid): a second recorder on the board must survive.
-        subprocess.run(
-            [*self._ssh, f"kill -INT $(cat {self._pidfile}) 2>/dev/null; sleep 1.5"],
-            capture_output=True,
-            timeout=20,
-        )
+        try:
+            subprocess.run(
+                [*self._ssh, f"kill -INT $(cat {self._pidfile}) 2>/dev/null; sleep 1.5"],
+                capture_output=True,
+                timeout=20,
+            )
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            logger.warning(
+                "could not reach the board to stop ffmpeg; the file stays at %s", self._remote
+            )
+            return None
         self._local.parent.mkdir(parents=True, exist_ok=True)
-        fetched = subprocess.run(
-            [
-                "scp",
-                "-q",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=8",
-                f"root@{self._host}:{self._remote}",
-                str(self._local),
-            ],
-            capture_output=True,
-            timeout=600,
-        )
+        try:
+            fetched = subprocess.run(
+                [
+                    "scp",
+                    "-q",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=8",
+                    f"root@{self._host}:{self._remote}",
+                    str(self._local),
+                ],
+                capture_output=True,
+                timeout=600,
+            )
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            logger.warning(
+                "video fetch interrupted; the file stays on the board at %s", self._remote
+            )
+            return None
         if fetched.returncode != 0:
             logger.warning("could not fetch the video: %s", fetched.stderr.decode()[:120])
             return None

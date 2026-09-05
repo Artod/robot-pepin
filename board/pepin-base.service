@@ -9,6 +9,7 @@ Environment=PYTHONPATH=/opt/pepin
 ExecStart=/opt/pepin/bin/python -m pepin.base_server --config /opt/pepin/config/base.json
 Restart=on-failure
 RestartSec=2
+TimeoutStopSec=5
 
 [Install]
 WantedBy=multi-user.target

@@ -167,3 +167,20 @@ def test_malformed_client_lines_do_not_stop_the_wheel_loop() -> None:
     stop.set()
     worker.join(timeout=2.0)
     assert not worker.is_alive()
+
+
+def test_sigterm_sets_the_stop_event_so_the_wheels_are_released() -> None:
+    """systemd stops the service with SIGTERM; serve() must get to its finally."""
+    import os
+    import signal
+
+    from pepin.base_server import stop_on_sigterm
+
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        stop = stop_on_sigterm()
+        assert not stop.is_set()
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert stop.wait(2.0)
+    finally:
+        signal.signal(signal.SIGTERM, previous)

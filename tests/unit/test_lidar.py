@@ -200,3 +200,36 @@ def test_lidar_client_reconnects_when_the_bridge_is_open_but_silent() -> None:
         time.sleep(0.01)
     client.close()
     assert client.reconnects >= 2 and len(opened) >= 2
+
+
+def test_lidar_client_closed_while_connecting_hands_the_bridge_straight_back() -> None:
+    """close() during a slow connect must not leave a fresh socket that kicks the new owner."""
+    import threading
+
+    from pepin.lidar import LidarClient
+
+    class Source:
+        closed = False
+        reads = 0
+
+        def read(self, n: int) -> bytes:
+            self.reads += 1
+            return b""
+
+        def close(self) -> None:
+            self.closed = True
+
+    source = Source()
+    connecting, go = threading.Event(), threading.Event()
+
+    def factory() -> Source:
+        connecting.set()
+        go.wait(1.0)
+        return source
+
+    client = LidarClient("unused", LidarMount(), source_factory=factory, retry_s=0.01).start()  # type: ignore[arg-type]
+    assert connecting.wait(1.0)
+    client._stop.set()  # what close() does first; the join would wait for the factory
+    go.set()
+    client.close()
+    assert source.closed and source.reads == 0 and not client.connected

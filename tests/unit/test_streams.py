@@ -106,3 +106,31 @@ def test_server_inbox_broadcast_and_farewell_over_localhost() -> None:
         time.sleep(0.01)
     assert farewell and farewell[0] == (None, {"cmd": "release"})
     server.close()
+
+
+def test_connections_reset_at_once_neither_kill_the_listener_nor_linger_as_clients() -> None:
+    """A laptop that connects and dies immediately (wifi blip, a port scan) is forgotten cleanly."""
+    import socket
+    import struct
+
+    from pepin.streams import JsonLinesServer
+
+    server = JsonLinesServer(0).start()
+    for _ in range(5):
+        s = socket.create_connection(("127.0.0.1", server.port), timeout=2.0)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))  # RST, not FIN
+        s.close()
+    a = socket.create_connection(("127.0.0.1", server.port), timeout=2.0)
+    a.sendall(b'{"cmd": "ping"}\n')
+    deadline = time.monotonic() + 2.0
+    got: list = []
+    while time.monotonic() < deadline and not got:
+        got = server.commands()
+        time.sleep(0.01)
+    assert got and got[0][1] == {"cmd": "ping"}  # the listener still takes clients
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and server.client_count != 1:
+        time.sleep(0.01)
+    assert server.client_count == 1  # the dead ones did not stay on the roster
+    a.close()
+    server.close()

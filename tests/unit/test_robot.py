@@ -144,3 +144,30 @@ def test_config_rejects_misspelt_feeds_and_defaults_missing_ones_to_on(tmp_path)
     (tmp_path / "robot.json").write_text(json.dumps({"feeds": {"tof": {"enabled": False}}}))
     cfg = RobotConfig.load(tmp_path)
     assert cfg.enabled("lidar") and not cfg.enabled("tof") and cfg.enabled("camera")
+
+
+def test_ctrl_c_while_connecting_closes_what_already_started(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import pepin.robot as robot_module
+
+    class Link(FakeLink):
+        def start(self):  # type: ignore[no-untyped-def]
+            return self
+
+    class InterruptedLidar:
+        def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        def start(self) -> None:
+            raise KeyboardInterrupt
+
+    link = Link(None)
+    monkeypatch.setattr(robot_module, "BaseClient", lambda *a, **k: link)
+    monkeypatch.setattr(robot_module, "LidarClient", InterruptedLidar)
+    config = RobotConfig.load(CONFIG_DIR).without("tof").without("camera")
+    try:
+        Robot.connect(config, host="127.0.0.1")
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("the interrupt must propagate")
+    assert link.commands == ["close"]

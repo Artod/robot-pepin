@@ -84,7 +84,12 @@ class KeyReader:
         self._saved: list[Any] | None = None
 
     def __enter__(self) -> KeyReader:
-        """Save the terminal settings and switch to cbreak: keys arrive without Enter."""
+        """Save the terminal settings and switch to cbreak: keys arrive without Enter.
+
+        Without a terminal (a pipe, an IDE run panel) no key is ever pending.
+        """
+        if not sys.stdin.isatty():
+            return self
         self._saved = termios.tcgetattr(self._fd)
         tty.setcbreak(self._fd)
         return self
@@ -101,7 +106,7 @@ class KeyReader:
 
     def read(self) -> str | None:
         """Return one key (arrow keys as their full escape sequence) or None if none is pending."""
-        if not select.select([self._fd], [], [], 0)[0]:
+        if self._saved is None or not select.select([self._fd], [], [], 0)[0]:
             return None
         key = sys.stdin.read(1)
         if key == "\x1b" and select.select([self._fd], [], [], 0.01)[0]:

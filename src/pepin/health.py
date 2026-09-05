@@ -8,6 +8,7 @@ Every probe returns a :class:`Probe`; nothing here moves the robot.
 
 from __future__ import annotations
 
+import socket
 import subprocess
 import time
 from collections.abc import Callable
@@ -69,6 +70,17 @@ def _ssh(host: str, cmd: str, timeout: int = 15) -> subprocess.CompletedProcess[
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(argv, SSH_TIMED_OUT, "", "ssh timeout")
+
+
+def port_refused(host: str, port: int, timeout_s: float = 2.0) -> bool:
+    """True only when nothing listens on ``host:port``; a timeout counts as "someone may"."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return False
+    except ConnectionRefusedError:
+        return True
+    except OSError:
+        return False
 
 
 def busy_bridge_ports(host: str) -> set[int]:
@@ -147,7 +159,7 @@ def probe_bridges(host: str) -> Probe:
 
 def probe_servos(host: str) -> Probe:
     """Which servos answer: via the base server when it runs, else pinged directly (read-only)."""
-    from pepin.base_link import BaseClient
+    from pepin.base_link import BASE_PORT, BaseClient
     from pepin.feetech import FeetechTcpClient
 
     link = BaseClient(host).start()
@@ -170,6 +182,10 @@ def probe_servos(host: str) -> Probe:
             return Probe("servo bus", not missing_names, detail)
     finally:
         link.close()
+    if not port_refused(host, BASE_PORT):
+        # Listening but quiet (starting up, or its accept loop is stuck): touching :3333
+        # now would kick the base server off the bus mid-drive. Report, do not probe.
+        return Probe("servo bus", False, "base server listening but silent — bus not probed")
     # No base server (bench mode): talk to ser2net directly.
     motors = {str(i): i for i in EXPECTED_SERVOS}
     try:

@@ -46,3 +46,15 @@ def test_russian_layout_drives_the_same_keys() -> None:
     cyrillic = apply_key(apply_key(DriveState(), "ц"), "ф")
     assert cyrillic.twist == latin.twist
     assert apply_key(DriveState(), "й").quit
+
+
+def test_key_reader_without_a_terminal_reads_nothing_and_raises_nothing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import os
+    import sys
+
+    from pepin.teleop import KeyReader
+
+    with open(os.devnull) as fake_stdin:
+        monkeypatch.setattr(sys, "stdin", fake_stdin)
+        with KeyReader() as keys:
+            assert keys.read() is None

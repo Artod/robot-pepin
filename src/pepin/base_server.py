@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import threading
 import time
 from typing import Any
@@ -223,6 +224,17 @@ def serve(
         server.close()
 
 
+def stop_on_sigterm() -> threading.Event:
+    """An event that SIGTERM sets: systemd stops us with it, and the wheels must be released.
+
+    Without this the default handler kills the process outright, ``serve``'s
+    ``finally`` never runs and the servos keep their last velocity.
+    """
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    return stop
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Own the wheels on the board; serve them over TCP."
@@ -251,7 +263,7 @@ def main() -> None:
         verify_motors(bus, [LEFT, RIGHT])
         core = BaseServerCore(bus, config, servo_names=list(motors), latency=bus.latency)
         server = JsonLinesServer(args.port, on_last_client_left={"cmd": "release"}).start()
-        serve(core, server, args.tick_hz, args.publish_hz)
+        serve(core, server, args.tick_hz, args.publish_hz, stop_on_sigterm())
 
 
 if __name__ == "__main__":

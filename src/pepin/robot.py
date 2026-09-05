@@ -157,7 +157,7 @@ class Robot:
                 camera.start()
             elif video_name:
                 logger.warning("camera feed is disabled in robot.json; not recording")
-        except Exception:
+        except BaseException:  # a Ctrl-C here must close what already started, too
             if camera is not None:
                 with contextlib.suppress(Exception):
                     camera.stop()

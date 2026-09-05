@@ -169,14 +169,14 @@ def main() -> None:
     print("connecting to the robot (base link, lidar, tof, camera)...", flush=True)
     with Robot.connect(config, host=host, video_name=video_name) as robot:
         try:
-            first = robot.wait_ready()
-        except RuntimeError as exc:
-            raise SystemExit(str(exc)) from exc
-        viewer = Viewer(enabled=not args.no_viz, grid=grid)
-        guard = FootprintGuard(config.footprint)
-        reflex = Reflex(ReflexConfig())  # teleop: a stale ToF does not hold a human's command
-        print("W/S speed  A/D turn  space stop  Q quit  Ctrl-C stop")
-        try:
+            try:
+                first = robot.wait_ready()
+            except RuntimeError as exc:
+                raise SystemExit(str(exc)) from exc
+            viewer = Viewer(enabled=not args.no_viz, grid=grid)
+            guard = FootprintGuard(config.footprint)
+            reflex = Reflex(ReflexConfig())  # teleop: a stale ToF does not hold a human's command
+            print("W/S speed  A/D turn  space stop  Q quit  Ctrl-C stop")
             with SessionRecorder("data/sessions", args.name) as rec, KeyReader() as keys:
                 rec.note(f"session {args.name} start")
                 t0 = time.monotonic()
@@ -263,4 +263,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:  # before the robot was connected: nothing to stop
+        print("\ninterrupted")
