@@ -3,8 +3,6 @@
 A home robot on an IKEA RASKOG cart: differential drive, a 6-DoF arm, a 360-degree
 lidar, and a phone for a face — with the brain on a laptop and a thin relay on board.
 
-_Demo video placeholder: a driving clip goes here once the first mapping run is recorded._
-
 ## What it is
 
 Pepin is a full-stack mobile manipulator built from parts you can buy: a steel kitchen
@@ -14,8 +12,10 @@ network. Everything else (kinematics, odometry, scan processing, control) runs o
 laptop over wifi, so the robot's software stack is developed, profiled, and debugged on
 a real machine instead of a microcontroller.
 
-The result is a robot that drives under keyboard control today, records synchronized
-odometry and lidar sessions, and is wired for mapping and autonomous navigation next.
+The result is a robot that maps a flat with a lidar (loop closure to 5 cm over a
+33 m lap), localises on the saved map, and drives itself to a named place around
+whatever the sensors see on the way — with the real-time part living on the
+board, so a wifi hiccup never touches the wheels.
 
 ## Architecture
 
@@ -26,12 +26,13 @@ odometry and lidar sessions, and is wired for mapping and autonomous navigation 
 
   ┌──────────────┐         wifi          ┌──────────────────────┐
   │   Laptop     │  ◄──── TCP ────►      │ Orange Pi Zero 3     │
-  │  "the brain" │                       │ Armbian + ser2net    │
-  │              │                       │  :servo bus  (TTL)   │
-  │ kinematics   │                       │  :lidar      (LD19)  │
-  │ odometry     │                       │  USB cameras         │
-  │ lidar scans  │                       │  I2C ToF sensors     │
-  │ teleop + viz │                       └──────────┬───────────┘
+  │  "the brain" │   JSON lines both     │ Armbian              │
+  │              │   ways, ~20 Hz        │  base server: wheels │
+  │ localisation │                       │   odometry, deadman  │
+  │ planning     │                       │  ser2net: lidar      │
+  │ obstacles    │                       │  ToF server (I2C)    │
+  │ guards + viz │                       │  camera streamer     │
+  └──────────────┘                       └──────────┬───────────┘
   └──────────────┘                                  │
                                     ┌───────────────┼───────────────┐
                                  drive base      6-DoF arm       2-DoF neck
@@ -92,18 +93,28 @@ Earlier, smaller drives of the same flat:
 
 ## Software
 
-Python 3.12+, `uv`, src layout, package `pepin`.
+Python 3.12+, `uv`, src layout, package `pepin`. One package runs on both machines:
+the board needs only the standard library.
 
+- **Board side**: `pepin.base_server` owns the wheels (encoders and twists at 50 Hz over
+  loopback to the servo bridge, a 0.5 s deadman, torque released when idle) and
+  `pepin.tof_server` streams the three ToF ranges; both on one shared JSON-lines
+  server. ser2net bridges the servo bus and the lidar; ustreamer serves the camera.
+  See `board/README.md`.
 - **Feetech bus client, written from scratch** for a lossy link: framing, checksums,
-  per-request deadlines, retries, and latency telemetry over raw TCP.
-- **Diff-drive kinematics and wheel-encoder odometry** using the exact arc model.
-- **LD19 driver**: frame parsing, per-revolution scan assembly, mount geometry with
-  mirroring and masked sectors.
-- **Teleop**: keyboard driving with a live [rerun.io](https://rerun.io) view.
-- **Session recording** to JSON lines for offline mapping.
-- **Launch-readiness health check** that polls every subsystem before a run.
-- Per-run file logging; ruff, mypy strict, pytest split into unit and hardware tiers,
-  and a pre-commit hook that runs all of it in under a second.
+  per-request deadlines, retries, reconnect, latency telemetry.
+- **Feeds**: the lidar reader, the ToF reader and the base link share one shape
+  (`start/close/age_s`, never block the caller); `Robot.connect()` assembles them from
+  `config/robot.json`, where a sensor is switched off with a flag, not a code edit.
+- **Mapping**: log-odds occupancy grid, correlative scan matching, SE(2) pose graph with
+  loop closure (`build_map.py`, `render_slam.py`).
+- **Navigation**: localisation on the frozen map (a whole-map search fixes a hand-placed
+  start), A* with footprint inflation and a live obstacle layer, a carrot follower, a
+  sweep of the real hull through every command against the newest scan, the ToF reflex,
+  named places (`--goal kitchen`) as the seam for a higher-level layer.
+- **Ops**: launch-readiness health check, a macOS menu-bar monitor, a rerun dashboard,
+  head-camera recording per drive, per-run logs with the git SHA; ruff, mypy strict,
+  pytest split into unit and hardware tiers, a pre-commit hook that runs it all.
 
 ## Quick start
 
@@ -111,35 +122,42 @@ Python 3.12+, `uv`, src layout, package `pepin`.
 uv sync
 git config core.hooksPath .githooks
 
-uv run pytest                                # unit tier, no robot needed
-uv run python scripts/health_check.py        # poll every subsystem
-uv run python scripts/drive.py --name lap1   # keyboard driving + recording
+uv run pytest                                          # unit tier, no robot needed
+uv run python scripts/health_check.py --quick          # is everything on the board alive?
+uv run python scripts/drive.py --name lap4 --video     # keyboard driving + recording
+uv run python scripts/build_map.py data/sessions/<session>.jsonl --loop --save
+uv run python scripts/places.py data/maps/<map>.npz add kitchen -1.5 2.0
+uv run python scripts/navigate.py --map data/maps/<map>.npz --goal kitchen --video
 ```
 
 ## Repo layout
 
 ```
-src/pepin/   laptop-side package: bus, feetech, lidar, kinematics, odometry,
-             teleop, recording, telemetry, geometry, logging
-board/       Orange Pi configs: ser2net, udev rules, ToF boot init
-config/      robot geometry and sensor maps (JSON)
-scripts/     bring-up and operations: health_check, drive, base_smoke, lidar_scan,
-             jog, calibrate_neck, scan_bus, setup_motor_id
+src/pepin/   drivers and links: feetech, bus, transport, lidar, tof, streams, base_link,
+             base_server, tof_server, feeds, robot
+             estimation: kinematics, odometry, geometry, mapping, scanmatch, posegraph,
+             slam, localization
+             navigation: planning, control, footprint, safety, navigator, places
+             ops: health, video, recording, telemetry, log
+board/       Orange Pi: ser2net, udev rules, ToF boot init, systemd units, README
+config/      robot geometry, sensor mounts and feeds (JSON)
+scripts/     entry points: navigate, drive, build_map, render_slam, dashboard,
+             health_check, places, and the servo bench tools
+apps/macos/  menu-bar health monitor
 tests/       unit and hardware tiers
 ```
 
 ## Status and roadmap
 
-**September 2026 — hardware integrated, first maps built.** The base drives under
-keyboard control, odometry closes a forward/back run to within ~10 mm, the lidar and
-servo bus are served over the air simultaneously, and two recorded drives produce
-clean occupancy maps once scan matching corrects the wheel odometry, and a pose graph
-closes a 33 m loop to 5 cm (see above).
+**September 2026 — the robot drives itself to a named place on its own map.** The
+wheel loop runs on the board; the laptop localises, plans around live obstacles and
+guards every command with the real hull outline. Two recorded drives produce clean
+occupancy maps and a pose graph closes a 33 m loop to 5 cm (see above).
 Next:
 
-1. Live localisation against a saved map, then autonomous navigation
-2. Mobile manipulation with the arm
-3. The phone face and voice
+1. A footprint-aware local planner (velocity sampling) so avoidance is a manoeuvre, not a stop
+2. Mobile manipulation with the arm, the neck joining the same base server
+3. The phone face and voice: a language layer that asks for places by name
 
 ## Credits
 
