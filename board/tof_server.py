@@ -23,6 +23,7 @@ import VL53L1X  # pimoroni driver around ST's ULD API, talks to /dev/i2c-<bus>
 SENSORS = {"front": 0x30, "right": 0x31, "left": 0x32}
 I2C_BUS = 2
 RANGING_MODE = 1  # 1 short (1.3 m, fastest), 2 medium (3 m), 3 long (4 m)
+MIN_RANGE_MM = 40  # below the sensor's own minimum: noise, not an object
 TIMING_BUDGET_MS = 50
 INTER_MEASUREMENT_MS = 66  # ~15 Hz per sensor
 
@@ -56,7 +57,11 @@ class RangeReader:
                 continue
             try:
                 mm = sensor.get_distance()
-                record[name] = mm if mm > 0 else None
+                status = sensor.get_range_status()
+                # Only status 0 is a measurement. The failure statuses (sigma, signal,
+                # phase wrap-around) arrive with a 15-25 mm range that would read as
+                # "something two centimetres ahead" and stop the robot for nothing.
+                record[name] = mm if status == 0 and mm >= MIN_RANGE_MM else None
             except Exception:
                 record[name] = None
         return record
