@@ -2,17 +2,18 @@
 """Drive the base from the keyboard while recording odometry and lidar, with a live view.
 
 Keys: W/S change forward speed and straighten out, A/D change turn rate,
-space stops, Q quits. The control loop runs at 20 Hz; lidar scans arrive from
-a background thread and are recorded and drawn in the robot's odometry frame.
-Every session is written to data/sessions/<timestamp>_<name>.jsonl for offline
-mapping. Bus timeouts (wifi hiccups) only cost the affected ticks; a long
-outage stops the wheels and then aborts the session. Forward motion needs a
-lidar scan younger than a second and a clear box ahead; the ToF reflex stops
-the cart for anything low the lidar cannot see.
+space stops, Q quits. The wheels belong to the board's base server
+(:mod:`pepin.base_link`): this loop sends the wanted twist twenty times a
+second and reads the odometry the board integrated; if the messages stop,
+the board's deadman stops the cart. Forward motion needs a lidar scan younger
+than a second and a clear box ahead; the ToF reflex stops the cart for
+anything low the lidar cannot see. Every session is written to
+data/sessions/<timestamp>_<name>.jsonl for offline mapping.
 
 Usage:
     uv run python scripts/drive.py --name lap1        # with the rerun viewer
     uv run python scripts/drive.py --name lap1 --no-viz
+    uv run python scripts/drive.py --name lap4 --map data/maps/<map>.npz   # + live localisation
 """
 
 import argparse
@@ -21,23 +22,19 @@ import math
 import time
 from pathlib import Path
 
-import numpy as np
-
-from pepin.base import BusWatchdog, DiffDriveBase
-from pepin.bus import verify_motors
-from pepin.feetech import FeetechTcpClient
+from pepin.base_link import BaseClient
 from pepin.geometry import BaseConfig
 from pepin.kinematics import Twist
 from pepin.lidar import LaserScan, LidarClient, LidarMount
 from pepin.localization import Localizer
 from pepin.log import setup_logging
-from pepin.mapping import OccupancyGrid
-from pepin.odometry import DiffDriveOdometry, Pose2D
+from pepin.mapping import OccupancyGrid, transform_to_world
+from pepin.odometry import Pose2D
 from pepin.recording import SessionRecorder
 from pepin.safety import guard_forward
 from pepin.teleop import DriveState, KeyReader, apply_key
 from pepin.tof import TOF_PORT, TofClient, apply_reflex
-from pepin.transport import SERVO_BUS_PORT, board_address
+from pepin.transport import board_address
 from pepin.video import CameraRecorder
 
 logger = logging.getLogger(__name__)
@@ -45,7 +42,7 @@ logger = logging.getLogger(__name__)
 LOOP_HZ = 20
 STATUS_EVERY_S = 2.0
 SCAN_TIMEOUT_S = 1.0  # no lidar scan for this long => no forward motion
-REPRIME_AFTER_S = 0.5  # a bus outage longer than this may hide half a wheel turn: re-prime
+BASE_TIMEOUT_S = 1.0  # no word from the base server for this long => the board has stopped anyway
 
 
 class Viewer:
@@ -84,6 +81,7 @@ class Viewer:
         )
 
     def update(self, t: float, pose: Pose2D, scan: LaserScan | None, mount: LidarMount) -> None:
+        """Odometry path, heading arrow and the newest scan at time ``t``."""
         if not self.enabled:
             return
         rr = self._rr
@@ -100,10 +98,30 @@ class Viewer:
             ),
         )
         if scan is not None:
-            local = scan.points_xy(mount)
-            c, s = math.cos(pose.theta), math.sin(pose.theta)
-            world = local @ np.array([[c, s], [-s, c]]) + np.array([pose.x, pose.y])
+            world = transform_to_world(scan.points_xy(mount), pose)
             rr.log("world/scan", rr.Points2D(world, colors=[255, 200, 0], radii=0.01))
+
+
+def guarded_command(
+    intent: Twist,
+    scan: LaserScan | None,
+    scan_age_s: float,
+    mount: LidarMount,
+    tof: TofClient | None,
+) -> tuple[Twist, str]:
+    """The twist allowed to reach the wheels, and why it differs from the intent ("" if same)."""
+    command = intent
+    if command.linear > 0:
+        if scan is None or scan_age_s > SCAN_TIMEOUT_S:
+            return Twist(0.0, command.angular), "no fresh lidar scan — forward blocked"
+        command, blocker = guard_forward(command, scan.points_xy(mount))
+        if blocker is not None:
+            return command, f"lidar guard: obstacle {blocker:.2f} m ahead, forward blocked"
+    if tof is not None:
+        decision = apply_reflex(command, tof.ranges())
+        if decision.blocked:
+            return decision.twist, f"reflex: {decision.reason}"
+    return command, ""
 
 
 def main() -> None:
@@ -127,129 +145,87 @@ def main() -> None:
     )
     args = parser.parse_args()
     setup_logging("drive", console=False)  # the terminal is the key-input UI
+    print("resolving the board...", end=" ", flush=True)
     host = board_address()
-    logger.info("board at %s", host)
+    print(host)
     camera = (
         CameraRecorder(host, f"{time.strftime('%Y%m%d_%H%M%S')}_{args.name}")
         if args.video
         else None
     )
     if camera is not None:
+        print("starting the camera recorder (ssh)...", flush=True)
         camera.start()
 
-    base_cfg = BaseConfig.from_json("config/base.json")
+    BaseConfig.from_json("config/base.json")  # fail early if the config is broken
     mount = LidarMount.from_json("config/lidar.json")
-    motors = DiffDriveBase.motor_ids(base_cfg)
-
-    lidar = LidarClient(host, mount).start()
     grid = OccupancyGrid.load(args.map) if args.map else None
     localizer = (
         Localizer(grid, Pose2D(args.init[0], args.init[1], math.radians(args.init[2])))
         if grid is not None
         else None
     )
-    viewer = Viewer(enabled=not args.no_viz, grid=grid)
+    print("connecting to the base server...", flush=True)
+    link = BaseClient(host).start()
+    lidar = LidarClient(host, mount).start()
     tof = None if args.no_tof else TofClient(host, TOF_PORT).start()
-
-    print("W/S speed  A/D turn  space stop  Q quit")
-    with (
-        FeetechTcpClient(host, SERVO_BUS_PORT, motors) as bus,
-        SessionRecorder("data/sessions", args.name) as rec,
-        KeyReader() as keys,
-    ):
-        verify_motors(bus, list(motors))
-        odom = DiffDriveOdometry(base_cfg.geometry)
-        state = DriveState()
-        rec.note(f"session {args.name} start")
-        with DiffDriveBase(bus, base_cfg) as base:
-            base.read_wheel_travel()  # prime encoders
+    viewer = Viewer(enabled=not args.no_viz, grid=grid)
+    try:
+        first = link.wait_for_state(timeout_s=5.0)
+        if first is None:
+            raise SystemExit(
+                "no telemetry from the base server — on the board: systemctl status pepin-base"
+            )
+        print("W/S speed  A/D turn  space stop  Q quit")
+        with SessionRecorder("data/sessions", args.name) as rec, KeyReader() as keys:
+            rec.note(f"session {args.name} start")
             t0 = time.monotonic()
             next_status = t0
-            latest_scan: LaserScan | None = None
-            watchdog = BusWatchdog()
-            blind_warned = 0.0
+            pose = first.pose
+            state = DriveState()
+            last_sent: Twist | None = None
+            last_reason = ""
+            link_warned = 0.0
             while not state.quit:
                 tick = time.monotonic()
                 key = keys.read()
-                new_twist: Twist | None = None
                 if key is not None:
-                    new_state = apply_key(state, key)
-                    if new_state.twist != state.twist:
-                        new_twist = new_state.twist
-                    state = new_state
-                pose = odom.pose  # kept unchanged on a tick the bus does not answer
-                try:
-                    if new_twist is not None:
-                        base.set_twist(new_twist)
-                        rec.command(new_twist)
-                    if state.twist.linear > 0:
-                        if latest_scan is None or tick - latest_scan.stamp > SCAN_TIMEOUT_S:
-                            # Never drive forward blind: a dead lidar thread or a booting
-                            # board must not leave the cart trusting an old scan.
-                            guarded = Twist(0.0, state.twist.angular)
-                            if tick - blind_warned > 2.0:
-                                logger.warning("no fresh lidar scan — forward blocked")
-                                blind_warned = tick
-                        else:
-                            guarded, blocker = guard_forward(
-                                state.twist, latest_scan.points_xy(mount)
-                            )
-                            if blocker is not None:
-                                logger.warning(
-                                    "lidar guard: obstacle %.2f m ahead, forward blocked", blocker
-                                )
-                        if guarded != state.twist:
-                            base.set_twist(guarded)
-                            rec.command(guarded)
-                            state = DriveState(
-                                twist=guarded,
-                                linear_step=state.linear_step,
-                                angular_step=state.angular_step,
-                            )
-                    if tof is not None:
-                        ranges = tof.ranges()
-                        rec.write(
-                            "tof",
-                            {
-                                "front": ranges.front,
-                                "left": ranges.left,
-                                "right": ranges.right,
-                                "age": ranges.age_s,
-                            },
-                        )
-                        decision = apply_reflex(state.twist, ranges)
-                        if decision.blocked and state.twist.linear > 0:
-                            base.set_twist(decision.twist)
-                            rec.command(decision.twist)
-                            logger.warning("reflex stop: %s", decision.reason)
-                            state = DriveState(
-                                twist=decision.twist,
-                                linear_step=state.linear_step,
-                                angular_step=state.angular_step,
-                            )
-                    travel = base.read_wheel_travel()
-                except TimeoutError as exc:
-                    watchdog.handle(base, tick, exc)
+                    state = apply_key(state, key)
+
+                base = link.state(tick)
+                if base is None or base.age_s > BASE_TIMEOUT_S:
+                    if tick - link_warned > 2.0:
+                        logger.warning("no word from the base server; the board has stopped")
+                        link_warned = tick
                 else:
-                    down = watchdog.recovered(tick)
-                    if down is not None:
-                        logger.info(
-                            "bus recovered after %.1f s (%d ticks lost)", down, watchdog.failures
-                        )
-                        if down > REPRIME_AFTER_S:
-                            # The unwrapper is blind past half a wheel turn: drop the gap
-                            # rather than fold it into a bogus backward step.
-                            base.reprime()
-                            travel = (0.0, 0.0)
-                    pose = odom.update(*travel)
-                    rec.pose(pose, travel)
+                    pose = base.pose
+                    rec.pose(pose, (base.d_left_m, base.d_right_m))
+
+                latest_scan = lidar.latest
+                command, reason = guarded_command(
+                    state.twist, latest_scan, lidar.age_s(tick), mount, tof
+                )
+                if reason and reason != last_reason:
+                    logger.warning(reason)
+                last_reason = reason
+                # Every tick, even unchanged: the board's deadman wants a heartbeat.
+                link.set_twist(command)
+                if command != last_sent:
+                    rec.command(command)
+                    last_sent = command
+                if tof is not None:
+                    r = tof.ranges()
+                    rec.write(
+                        "tof", {"front": r.front, "left": r.left, "right": r.right, "age": r.age_s}
+                    )
+
                 new_scans = lidar.drain()
                 if localizer is not None and not new_scans:
                     localizer.predict(pose)
-                for latest_scan in new_scans:
-                    rec.scan(latest_scan)
+                for scan in new_scans:
+                    rec.scan(scan)
                     if localizer is not None:
-                        loc = localizer.update(pose, latest_scan.points_xy(mount))
+                        loc = localizer.update(pose, scan.points_xy(mount))
                         rec.write(
                             "loc",
                             {
@@ -263,43 +239,36 @@ def main() -> None:
                 viewer.update(tick - t0, pose, latest_scan, mount)
                 if tick >= next_status:
                     next_status = tick + STATUS_EVERY_S
-                    print(
-                        f"\rv={state.twist.linear:+.2f} w={state.twist.angular:+.2f} | "
-                        f"x={pose.x:+.2f} y={pose.y:+.2f} th={math.degrees(pose.theta):+.0f}deg | "
+                    line = (
+                        f"v={command.linear:+.2f} w={command.angular:+.2f} | "
+                        f"x={pose.x:+.2f} y={pose.y:+.2f} th={math.degrees(pose.theta):+.0f}deg"
+                        + (f" | {reason}" if reason else "")
                         + (
-                            f"tof f={tof.ranges().front} l={tof.ranges().left} "
-                            f"r={tof.ranges().right} age={tof.ranges().age_s:.1f}s | "
-                            if tof is not None
-                            else ""
-                        )
-                        + (
-                            f"map x={localizer.pose.x:+.2f} y={localizer.pose.y:+.2f} "
-                            f"th={math.degrees(localizer.pose.theta):+.0f}deg "
-                            f"conf={localizer.confidence:.2f} | "
+                            f" | map x={localizer.pose.x:+.2f} y={localizer.pose.y:+.2f} "
+                            f"conf={localizer.confidence:.2f}"
                             if localizer is not None
                             else ""
                         )
-                        + f"{bus.latency.summary()}   ",
-                        end="",
-                        flush=True,
+                        + (
+                            f" | base age={base.age_s * 1000:.0f}ms bus_p95={base.bus_p95_ms:.0f}ms"
+                            if base is not None
+                            else " | base: no telemetry"
+                        )
                     )
-                    logger.info(
-                        "pose x=%.3f y=%.3f th=%.3f twist=%s %s",
-                        pose.x,
-                        pose.y,
-                        pose.theta,
-                        state.twist,
-                        bus.latency.summary(),
-                    )
+                    print(f"\r{line}   ", end="", flush=True)
+                    logger.info("tick: %s", line)
                 time.sleep(max(0.0, 1.0 / LOOP_HZ - (time.monotonic() - tick)))
-        rec.note("session end")
-    lidar.close()
-    if tof is not None:
-        tof.close()
-    if camera is not None:
-        camera.stop()
-    print(f"\nsession saved: {rec.path} ({rec.records} records)")
-    logger.info("session saved: %s (%d records)", rec.path, rec.records)
+            rec.note("session end")
+            print(f"\nsession saved: {rec.path} ({rec.records} records)")
+            logger.info("session saved: %s (%d records)", rec.path, rec.records)
+    finally:
+        link.stop()
+        link.close()
+        lidar.close()
+        if tof is not None:
+            tof.close()
+        if camera is not None:
+            camera.stop()
 
 
 if __name__ == "__main__":
