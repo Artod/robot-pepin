@@ -332,6 +332,7 @@ class LidarClient:
         self._retry_s = retry_s
         self._reconnect = reconnect
         self.silence_s = 3.0  # an open bridge that sends nothing is treated as lost
+        self.connected = False
         self._scans: queue.Queue[LaserScan] = queue.Queue()
         self._latest: LaserScan | None = None
         self._lock = threading.Lock()
@@ -365,8 +366,9 @@ class LidarClient:
         with self._lock:
             return self._latest
 
-    def age_s(self, now: float) -> float:
+    def age_s(self, now: float | None = None) -> float:
         """Seconds since the newest revolution completed; infinite before the first."""
+        now = time.monotonic() if now is None else now
         latest = self.latest
         return now - latest.stamp if latest is not None else float("inf")
 
@@ -379,6 +381,7 @@ class LidarClient:
                 self._stop.wait(self._retry_s)
                 continue
             logger.info("lidar stream connected")
+            self.connected = True
             try:
                 self._read_until_lost(source)
             except OSError as exc:
@@ -394,6 +397,7 @@ class LidarClient:
                 logger.exception("lidar reader crashed; reconnecting")
                 self._stop.wait(self._retry_s)
             finally:
+                self.connected = False
                 source.close()
 
     def _read_until_lost(self, source: ByteSource) -> None:

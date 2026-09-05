@@ -2,24 +2,22 @@
 
 The lidar sees one horizontal slice of the world; the three VL53L1X
 sensors look where it cannot (low, in front) and feed two things: a reflex
-that refuses to drive into something close, and — later — an obstacle
-layer for navigation. Localisation never uses them.
+that refuses to drive into something close, and an obstacle layer for
+navigation (through :class:`TofMount`, which says where each return lands
+in the robot frame). Localisation never uses them.
 """
 
 from __future__ import annotations
 
 import json
-import logging
 import math
-import socket
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pepin.kinematics import Twist
-
-logger = logging.getLogger(__name__)
+from pepin.streams import Connector, JsonLinesClient
 
 TOF_PORT = 3335
 
@@ -64,81 +62,33 @@ def load_mounts(path: str | Path) -> dict[str, TofMount]:
     }
 
 
-class TofClient:
-    """Reads the board's JSON-lines range stream in a background thread, reconnecting on loss.
+class TofClient(JsonLinesClient):
+    """The board's range stream (:mod:`board.tof_server`) as a :class:`pepin.feeds.Feed`.
 
-    ``ranges()`` never blocks; ``age_s`` tells the caller how stale the data
-    is (infinite until the first record), so a dead stream is visible instead
-    of silently reporting "nothing close".
+    ``ranges()`` never blocks; its ``age_s`` is infinite until the first record,
+    so a dead stream is visible instead of silently reading "nothing close".
     """
 
-    def __init__(self, host: str, port: int = TOF_PORT) -> None:
+    def __init__(
+        self, host: str, port: int = TOF_PORT, *, connector: Connector | None = None
+    ) -> None:
         """Prepare a client for ``host:port``; nothing connects until :meth:`start`."""
-        self._address = (host, port)
+        super().__init__(host, port, name="tof", connector=connector)
         self._latest: dict[str, float | None] = {"front": None, "left": None, "right": None}
-        self._stamp = 0.0
         self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self.connected = False
 
-    def start(self) -> TofClient:
-        """Begin streaming in a daemon thread; returns self so it chains."""
-        self._thread.start()
-        return self
-
-    def close(self) -> None:
-        """Ask the reader to stop and wait (up to 2 s) for it to release the socket."""
-        self._stop.set()
-        if self._thread.is_alive() and threading.current_thread() is not self._thread:
-            self._thread.join(timeout=2.0)
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            try:
-                self._stream()
-            except OSError as exc:
-                logger.warning("tof stream lost (%s); reconnecting", exc)
-            except Exception:
-                # A malformed line must not kill the thread silently: with the
-                # reflex allowing stale data, a dead reader would disarm the stop rule.
-                logger.exception("tof stream: bad record; reconnecting")
-            self.connected = False
-            self._stop.wait(1.0)
-
-    def _stream(self) -> None:
-        sock = socket.create_connection(self._address, timeout=2.0)
-        sock.settimeout(1.0)
-        self.connected = True
-        logger.info("tof stream connected to %s:%d", *self._address)
-        buffer = b""
-        with sock:
-            while not self._stop.is_set():
-                try:
-                    chunk = sock.recv(4096)
-                except TimeoutError:
-                    continue
-                if not chunk:
-                    raise ConnectionError("stream closed")
-                buffer += chunk
-                *lines, buffer = buffer.split(b"\n")
-                for line in lines:
-                    if line.strip():
-                        self._ingest(json.loads(line))
-
-    def _ingest(self, record: dict[str, float | None]) -> None:
+    def _ingest(self, record: dict[str, Any]) -> None:
+        """One board record: millimetres per sensor, -1 or null for no return."""
         with self._lock:
             for name in ("front", "left", "right"):
                 mm = record.get(name)
-                self._latest[name] = None if mm is None or mm <= 0 else mm / 1000.0
-            self._stamp = time.monotonic()
+                self._latest[name] = None if mm is None or mm <= 0 else float(mm) / 1000.0
 
-    def ranges(self) -> TofRanges:
+    def ranges(self, now: float | None = None) -> TofRanges:
         """Latest ranges in meters plus their age; ``age_s`` is infinite before the first record."""
         with self._lock:
-            age = time.monotonic() - self._stamp if self._stamp else float("inf")
             return TofRanges(
-                self._latest["front"], self._latest["left"], self._latest["right"], age
+                self._latest["front"], self._latest["left"], self._latest["right"], self.age_s(now)
             )
 
 

@@ -40,7 +40,7 @@ def test_client_parses_split_chunks(monkeypatch) -> None:
     from pepin.tof import TofClient
 
     c = TofClient("localhost")
-    c._ingest({"t": 1.0, "front": 250, "left": 442, "right": -1})
+    c.feed({"t": 1.0, "front": 250, "left": 442, "right": -1})
     r = c.ranges()
     assert r.front == 0.25 and r.left == 0.442 and r.right is None and r.age_s < 1.0
 
