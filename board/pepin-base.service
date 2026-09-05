@@ -1,0 +1,14 @@
+[Unit]
+Description=Pepin base server: wheels, odometry and deadman next to the UART (TCP 3336)
+After=ser2net.service network.target
+Requires=ser2net.service
+
+[Service]
+WorkingDirectory=/opt/pepin
+Environment=PYTHONPATH=/opt/pepin
+ExecStart=/opt/pepin/bin/python -m pepin.base_server --config /opt/pepin/config/base.json
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
