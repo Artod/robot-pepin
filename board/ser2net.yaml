@@ -9,8 +9,11 @@ connection: &servo-bus
   options:
     kickolduser: true
 
-connection: &lidar
-  accepter: tcp,3334
-  connector: serialdev(nouucplock),/dev/lidar,230400n81,local
-  options:
-    kickolduser: true
+# The lidar is owned by the ROS 2 container (ldlidar_node) on the ros2-nav2 branch; a second
+# reader on the same tty splits the byte stream and breaks both. Re-enable only for bench work
+# with the container stopped.
+# connection: &lidar
+#   accepter: tcp,3334
+#   connector: serialdev(nouucplock),/dev/lidar,230400n81,local
+#   options:
+#     kickolduser: true

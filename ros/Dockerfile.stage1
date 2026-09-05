@@ -1,0 +1,26 @@
+# Stage 1 only: the apt layer and the lidar driver, so the long download starts before our
+# package exists. Identical to the top of ros/Dockerfile; docker reuses these layers.
+FROM ros:jazzy-ros-base
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-jazzy-navigation2 \
+        ros-jazzy-nav2-bringup \
+        ros-jazzy-slam-toolbox \
+        ros-jazzy-foxglove-bridge \
+        ros-jazzy-rmw-cyclonedds-cpp \
+        ros-jazzy-tf2-tools \
+        ros-jazzy-rqt-graph \
+        python3-colcon-common-extensions \
+        git build-essential \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /ws
+RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
+        https://github.com/Myzhar/ldrobot-lidar-ros2.git src/ldrobot-lidar-ros2 \
+    && . /opt/ros/jazzy/setup.sh \
+    && apt-get update && apt-get install -y --no-install-recommends libudev-dev \
+    && rosdep update --rosdistro jazzy \
+    && rosdep install --from-paths src --ignore-src -y --rosdistro jazzy \
+    && colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    # the driver builds the vendor SDK as libldlidar.so but never installs it: put it beside the component
+    && cp build/ldlidar_component/libldlidar.so install/ldlidar_component/lib/ \
+    && rm -rf /var/lib/apt/lists/* build log
