@@ -1,27 +1,46 @@
 {
   "bus": "/dev/i2c-2",
-  "frame": "robot-centric: left/right are the robot's own left/right",
+  "frame": "robot frame: origin on the floor midway between the wheel contact points, x forward, y left, yaw counter-clockwise from x; a hit at range r lands at (x_m + r cos yaw, y_m + r sin yaw)",
   "sensors": {
     "front": {
       "address": "0x30",
       "xshut_gpio_line": 73,
       "xshut_header_pin": 7,
       "xshut_controllable": false,
-      "placement": "top shelf, center, facing forward"
+      "placement": "top shelf front, centre, level, facing forward",
+      "mount": {
+        "x_m": 0.027,
+        "y_m": 0.0,
+        "yaw_deg": 0.0,
+        "height_m": 0.27
+      }
     },
     "left": {
       "address": "0x32",
       "xshut_gpio_line": 70,
       "xshut_header_pin": 11,
       "xshut_controllable": true,
-      "placement": "lower left, tilted slightly down"
+      "placement": "lower shelf front, left, level, facing forward",
+      "mount": {
+        "x_m": 0.027,
+        "y_m": 0.148,
+        "yaw_deg": 0.0,
+        "height_m": 0.16
+      }
     },
     "right": {
       "address": "0x31",
       "xshut_gpio_line": 69,
       "xshut_header_pin": 13,
       "xshut_controllable": true,
-      "placement": "lower right, tilted slightly down"
+      "placement": "lower shelf front, right, level, facing forward",
+      "mount": {
+        "x_m": 0.027,
+        "y_m": -0.155,
+        "yaw_deg": 0.0,
+        "height_m": 0.165
+      }
     }
-  }
+  },
+  "notes": "mount: measured 2026-09-04 with a tape (+-1 cm). null would mean not measured: such a sensor feeds the reflex only. The VL53L1X sees a ~27 deg cone, so a level sensor at 0.16 m would reach the floor at ~0.67 m at the cone edge."
 }

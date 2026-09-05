@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import socket
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from pepin.kinematics import Twist
 
@@ -30,6 +32,36 @@ class TofRanges:
     left: float | None
     right: float | None
     age_s: float
+
+    def by_name(self) -> dict[str, float | None]:
+        """The three ranges keyed by sensor name, for code that iterates over sensors."""
+        return {"front": self.front, "left": self.left, "right": self.right}
+
+
+@dataclass(frozen=True)
+class TofMount:
+    """Where a sensor sits and looks, in the robot frame (origin between the wheels, x forward)."""
+
+    x_m: float
+    y_m: float
+    yaw_deg: float  # beam direction: 0 forward, +90 left
+    height_m: float
+
+    def hit_xy(self, range_m: float) -> tuple[float, float]:
+        """Robot-frame point a return at ``range_m`` corresponds to."""
+        yaw = math.radians(self.yaw_deg)
+        return (self.x_m + range_m * math.cos(yaw), self.y_m + range_m * math.sin(yaw))
+
+
+def load_mounts(path: str | Path) -> dict[str, TofMount]:
+    """Sensor mounts from ``config/tof.json``; sensors whose ``mount`` is null are left out."""
+    with open(path) as f:
+        sensors = json.load(f)["sensors"]
+    return {
+        name: TofMount(m["x_m"], m["y_m"], m["yaw_deg"], m["height_m"])
+        for name, entry in sensors.items()
+        if (m := entry.get("mount")) is not None
+    }
 
 
 class TofClient:
@@ -115,9 +147,13 @@ class ReflexConfig:
     """Distances (m) below which forward motion is refused, and how stale data may be."""
 
     front_stop_m: float = 0.22
-    side_stop_m: float = 0.30  # down-tilted sensors read the floor at ~0.44 m; nearer = obstacle
+    # Side sensors sit level at 0.16 m; their 27-degree cone would only reach the floor
+    # at ~0.67 m, so anything nearer than this is a real object beside the front wheels.
+    side_stop_m: float = 0.30
     max_age_s: float = 0.5
     blocked_when_stale: bool = False
+    # Below the sensor's own minimum range a value is a failure code, not an object.
+    min_valid_m: float = 0.04
 
 
 @dataclass(frozen=True)
@@ -144,9 +180,10 @@ def apply_reflex(
         if config.blocked_when_stale:
             return ReflexDecision(Twist(0.0, command.angular), True, "no fresh ToF data")
         return ReflexDecision(command, blocked=False)
-    if ranges.front is not None and ranges.front < config.front_stop_m:
-        return ReflexDecision(Twist(0.0, command.angular), True, f"front {ranges.front:.2f} m")
+    front = ranges.front
+    if front is not None and config.min_valid_m <= front < config.front_stop_m:
+        return ReflexDecision(Twist(0.0, command.angular), True, f"front {front:.2f} m")
     for name, value in (("left", ranges.left), ("right", ranges.right)):
-        if value is not None and value < config.side_stop_m:
+        if value is not None and config.min_valid_m <= value < config.side_stop_m:
             return ReflexDecision(Twist(0.0, command.angular), True, f"{name} {value:.2f} m")
     return ReflexDecision(command, blocked=False)
