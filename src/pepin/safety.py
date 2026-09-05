@@ -20,10 +20,12 @@ from pepin.tof import ReflexConfig, ReflexDecision, TofRanges
 class SafetyBox:
     """Bumper: the rectangle just ahead of the hull, measured from the axle centre (m).
 
-    Outer wheel edges sit at about +-0.27 m (0.505 m track), the hull's front
-    at about 0.22 m. The planner's inflation radius carries the margin; this
-    box only says "you are about to touch it", so it must stay inside that
-    radius or every path the planner accepts gets vetoed beside every obstacle.
+    The drive wheels are the front of the robot: outer wheel edges at +-0.275 m
+    (0.55 m over the wheels), the wheel fronts 0.06 m ahead of the axle, the
+    cart's front plane at 0.03 m; the body reaches 0.30 m back. The planner's
+    inflation radius carries the margin; this box only says "you are about to
+    touch it", so it must stay inside that radius or every path the planner
+    accepts gets vetoed beside every obstacle.
     """
 
     length_m: float = 0.25
@@ -86,7 +88,7 @@ class Reflex:
         values = {"front": ranges.front, "left": ranges.left, "right": ranges.right}
         for name, value in values.items():
             limit = limits[name] + (self._margin if name in self._tripped else 0.0)
-            if value is not None and value < limit:
+            if value is not None and cfg.min_valid_m <= value < limit:
                 self._tripped.add(name)
             else:
                 self._tripped.discard(name)

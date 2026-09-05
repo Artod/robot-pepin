@@ -4,8 +4,21 @@
     "track_width_m": 0.505,
     "ticks_per_rev": 4096
   },
-  "left": { "motor_id": 7, "direction": -1 },
-  "right": { "motor_id": 8, "direction": 1 },
+  "left": {
+    "motor_id": 7,
+    "direction": -1
+  },
+  "right": {
+    "motor_id": 8,
+    "direction": 1
+  },
   "max_speed_m_s": 0.3,
-  "max_yaw_rate_rad_s": 1.0
+  "max_yaw_rate_rad_s": 1.0,
+  "footprint": {
+    "frame": "robot frame: origin between the drive-wheel contact points, x forward",
+    "front_m": 0.0625,
+    "rear_m": 0.3,
+    "half_width_m": 0.275,
+    "note": "measured 2026-09-04: drive wheels are the front axle, casters at the rear; 0.55 m over the wheels, 0.30 m from the axle to the rear edge, wheel fronts 0.045 m ahead of the cart's front plane (x=0.027)"
+  }
 }

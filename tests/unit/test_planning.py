@@ -159,3 +159,50 @@ def test_start_next_to_a_live_obstacle_still_gets_a_plan() -> None:
         for t in np.linspace(0.0, 1.0, 50):
             px, py = x0 + t * (x1 - x0), y0 + t * (y1 - y0)
             assert math.hypot(px - hand[0, 0], py - hand[0, 1]) > 0.05
+
+
+def test_open_floor_path_is_one_straight_leg_not_a_staircase() -> None:
+    """Start and goal offset diagonally by an odd ratio: A* zig-zags, the shortcut does not."""
+    grid = OccupancyGrid(
+        GridSpec(resolution_m=0.1, x_min_m=0.0, y_min_m=0.0, width_m=4.0, height_m=3.0)
+    )
+    grid.log_odds[:] = FREE
+    planner = GridPlanner(grid, PlannerConfig(robot_radius_m=0.0))
+    path = planner.plan((0.25, 0.25), (3.75, 1.45))
+    assert path is not None
+    assert len(path) == 2, path
+
+
+def test_live_hits_on_mapped_walls_do_not_change_the_plan() -> None:
+    """Wall points seen by the lidar (with localiser error) are the map, not new obstacles."""
+    planner = GridPlanner(_room(), PlannerConfig(robot_radius_m=ROBOT_RADIUS_M))
+    start, goal = (0.5, 1.0), (5.5, 1.0)
+    plain = planner.plan(start, goal)
+    wall_seen_again = np.array([[WALL_X + 0.05, y] for y in np.arange(0.2, 2.5, 0.1)])
+    assert planner.plan(start, goal, obstacles_xy=wall_seen_again) == plain
+    person = np.array([[3.05, 3.0]])  # inside the gap: genuinely new
+    assert planner.plan(start, goal, obstacles_xy=person) is None  # the gap is the only way
+
+
+def test_goal_covered_by_a_live_hit_is_served_from_the_nearest_free_cell() -> None:
+    grid = OccupancyGrid(
+        GridSpec(resolution_m=0.1, x_min_m=0.0, y_min_m=0.0, width_m=4.0, height_m=3.0)
+    )
+    grid.log_odds[:] = FREE
+    planner = GridPlanner(grid, PlannerConfig(robot_radius_m=0.2))
+    goal = (3.0, 1.5)
+    someone_there = np.array([[3.05, 1.55]])
+    path = planner.plan((0.5, 1.5), goal, obstacles_xy=someone_there)
+    assert path is not None
+    assert 0.1 <= math.hypot(path[-1][0] - goal[0], path[-1][1] - goal[1]) <= 0.5
+
+
+def test_goal_next_to_a_wall_is_served_from_the_nearest_reachable_cell() -> None:
+    """A goal 25 cm from a wall with a 35 cm radius: stop as close as the footprint allows."""
+    planner = GridPlanner(_room(), PlannerConfig(robot_radius_m=0.35))
+    goal = (1.0, 0.25)  # 25 cm above the bottom wall
+    path = planner.plan((1.0, 2.0), goal)
+    assert path is not None
+    assert path[-1][1] > goal[1]  # pulled away from the wall, not into it
+    assert math.hypot(path[-1][0] - goal[0], path[-1][1] - goal[1]) <= 0.5
+    assert planner.plan((1.0, 2.0), (1.0, 0.05)) is None  # inside the wall itself: refused

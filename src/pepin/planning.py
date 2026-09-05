@@ -67,11 +67,19 @@ class PlannerConfig:
     """What the planner treats as impassable and how wide the robot is, in meters."""
 
     occupied_threshold: float = 0.65
-    # Hull plus margin. Must stay larger than SafetyBox.body_half_width_m (the hull):
-    # a path the planner accepts would otherwise be vetoed by the lidar guard next to
-    # every obstacle, and the robot would stand beside it twitching instead of passing.
-    robot_radius_m: float = 0.30
+    # The robot is not centred on its axle (see config/base.json "footprint"): it reaches
+    # 0.30 m behind the wheels, 0.06 m ahead, +-0.275 m to the sides. A disc of 0.35 m
+    # around the axle gives 5-8 cm of side and rear clearance while driving; turning in
+    # place next to a wall can still brush a rear corner (0.41 m swing). Must stay larger
+    # than SafetyBox.body_half_width_m or the guard vetoes every path beside an obstacle.
+    robot_radius_m: float = 0.35
     unknown_is_free: bool = False
+    # A live hit this close to a mapped obstacle is that obstacle seen again (with the
+    # localiser's error), not something new: it must not thicken the walls.
+    explained_m: float = 0.15
+    # A goal inside the inflation zone (next to a wall, or where someone stands) is served
+    # by the nearest free cell this close; only a goal inside an obstacle itself is refused.
+    goal_tolerance_m: float = 0.5
 
 
 class GridPlanner:
@@ -94,6 +102,9 @@ class GridPlanner:
         self._radius_cells = radius_cells
         self._raw: NDArray[np.bool_] = obstacles  # before inflation: what is really there
         self._static: NDArray[np.bool_] = inflate(obstacles, radius_cells)
+        self._explained: NDArray[np.bool_] = inflate(
+            obstacles, self.config.explained_m / self.spec.resolution_m
+        )
         self.blocked: NDArray[np.bool_] = self._static  # static plus the last plan's live obstacles
 
     def plan(
@@ -122,12 +133,23 @@ class GridPlanner:
             hits = self.grid.world_to_cell(obstacles_xy)
             rows, cols = live.shape
             ok = (hits[:, 0] >= 0) & (hits[:, 0] < rows) & (hits[:, 1] >= 0) & (hits[:, 1] < cols)
-            live[hits[ok, 0], hits[ok, 1]] = True
+            hits = hits[ok]
+            unexplained = ~self._explained[hits[:, 0], hits[:, 1]]
+            live[hits[unexplained, 0], hits[unexplained, 1]] = True
             raw = raw | live
             self.blocked = self._static | inflate(live, self._radius_cells)
         start, goal = self._cell(start_xy), self._cell(goal_xy)
-        if start is None or goal is None or self.blocked[goal]:
+        # Only a goal inside a *mapped* obstacle is refused; a live hit on the goal cell is
+        # someone standing there, and the tolerance below handles it.
+        if start is None or goal is None or self._raw[goal]:
             return None
+        if self.blocked[goal]:
+            # In the inflation zone (a wall, or someone standing there): stop as near as allowed.
+            reach = round(self.config.goal_tolerance_m / self.spec.resolution_m)
+            near_goal = self._nearest_free(goal, reach)
+            if near_goal is None:
+                return None
+            goal = near_goal
         if self.blocked[start]:
             self.blocked = self._clear_footprint(self.blocked, raw, start)
         if self.blocked[start]:
@@ -138,7 +160,7 @@ class GridPlanner:
         cells = self._astar(start, goal)
         if cells is None:
             return None
-        return [self._world(cell) for cell in _drop_collinear(cells)]
+        return [self._world(cell) for cell in _drop_collinear(self._shortcut(cells))]
 
     def _cell(self, xy: tuple[float, float]) -> Cell | None:
         """World (x, y) to a (row, col) cell, or ``None`` when it falls off the grid."""
@@ -173,10 +195,37 @@ class GridPlanner:
         window[disc] = raw[r0:r1, c0:c1][disc]
         return cleared
 
-    def _nearest_free(self, cell: Cell) -> Cell | None:
-        """Closest free cell within ``START_RESCUE_CELLS``, or ``None`` if the robot is boxed in."""
+    def _shortcut(self, cells: list[Cell]) -> list[Cell]:
+        """Greedy string-pulling: jump to the farthest cell reachable in a straight free line.
+
+        A* on 8 neighbours returns staircases of 45-degree steps; a follower with
+        a short look-ahead would weave along them. Straight legs between free
+        line-of-sight vertices drive straight.
+        """
+        out = [cells[0]]
+        i = 0
+        while i < len(cells) - 1:
+            j = len(cells) - 1
+            while j > i + 1 and not self._line_free(cells[i], cells[j]):
+                j -= 1
+            out.append(cells[j])
+            i = j
+        return out
+
+    def _line_free(self, a: Cell, b: Cell) -> bool:
+        """True when the straight segment between two cell centres crosses no blocked cell."""
+        steps = max(abs(b[0] - a[0]), abs(b[1] - a[1])) * 2
+        for k in range(1, steps):
+            t = k / steps
+            row = round(a[0] + t * (b[0] - a[0]))
+            col = round(a[1] + t * (b[1] - a[1]))
+            if self.blocked[row, col]:
+                return False
+        return True
+
+    def _nearest_free(self, cell: Cell, reach: int = START_RESCUE_CELLS) -> Cell | None:
+        """Closest free cell within ``reach`` cells of ``cell``, or ``None`` if there is none."""
         rows, cols = self.blocked.shape
-        reach = START_RESCUE_CELLS
         offsets = [
             (dr, dc)
             for dr in range(-reach, reach + 1)

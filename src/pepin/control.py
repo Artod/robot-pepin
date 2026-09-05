@@ -21,11 +21,11 @@ class ControllerConfig:
     """Speeds, gains and tolerances in SI units."""
 
     cruise_speed_m_s: float = 0.15
-    max_yaw_rate_rad_s: float = 0.8
+    max_yaw_rate_rad_s: float = 0.6  # a 0.2 s bus stall at 0.8 rad/s overshot turns by 10 deg
     yaw_gain: float = 1.5  # rad/s per rad of heading error
-    # Short on purpose: waypoints are the turns of a path that hugs inflated obstacles,
-    # and chasing a point 30 cm ahead cut those corners into the obstacle zone.
-    lookahead_m: float = 0.15
+    # Paths come as straight legs (line-of-sight shortcut), so a 30 cm carrot no longer
+    # cuts corners into obstacles; a shorter one made the robot weave about the line.
+    lookahead_m: float = 0.30
     goal_tolerance_m: float = 0.12
     face_before_driving_rad: float = math.radians(35.0)
 
