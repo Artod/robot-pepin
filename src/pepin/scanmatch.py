@@ -112,18 +112,24 @@ class CorrelativeMatcher:
         self._window = window or SearchWindow()
         self._max_points = max_points
         self._field: NDArray[np.float64] | None = None
+        self._field_version = -1
 
     def invalidate(self) -> None:
-        """Call after the map changed; the score field is rebuilt lazily."""
+        """Force a rebuild of the score field; only needed after editing ``log_odds`` by hand.
+
+        Scans added through ``OccupancyGrid.integrate`` bump the grid's version
+        and the field follows on its own (a map built while driving works).
+        """
         self._field = None
 
     def _score_field(self) -> NDArray[np.float64]:
-        """The map blurred for scoring, cached until :meth:`invalidate`.
+        """The map blurred for scoring, rebuilt whenever the grid's version changes.
 
         Occupied cells bleed into their 3x3 neighbourhood (0.6 orthogonal, 0.4
         diagonal), free cells stay sharp and negative, so a wall attracts from ~1 cell away.
         """
-        if self._field is None:
+        if self._field is None or self._field_version != self._grid.version:
+            self._field_version = self._grid.version
             lo = self._grid.log_odds
             occupied = np.maximum(lo, 0.0)
             spread = occupied.copy()
@@ -210,6 +216,28 @@ class CorrelativeMatcher:
         """
         if len(points) == 0:
             return 0.0
+        values = self._values_at(pose, points)
+        known = values != 0.0
+        if known.mean() < min_known:
+            return 0.0
+        return float((values[known] >= min_field).mean())
+
+    def contradiction_fraction(
+        self, pose: Pose2D, points: NDArray[np.float64], max_field: float = -1.0
+    ) -> float:
+        """Share of scan points that land on cells the map knows to be free at ``pose``.
+
+        The inlier fraction says how much of the scan a pose explains; this says
+        how much of it the map denies. Twins (a symmetric room) explain the same
+        share, but the wrong twin puts the one asymmetric chair on open floor.
+        """
+        if len(points) == 0:
+            return 0.0
+        values = self._values_at(pose, points)
+        return float((values <= max_field).mean())
+
+    def _values_at(self, pose: Pose2D, points: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Score-field value under every point of the scan placed at ``pose``; 0 off the grid."""
         field = self._score_field()
         c, s = math.cos(pose.theta), math.sin(pose.theta)
         world = points @ np.array([[c, s], [-s, c]]) + np.array([pose.x, pose.y])
@@ -220,10 +248,7 @@ class CorrelativeMatcher:
         )
         values = np.zeros(len(cells))
         values[inside] = field[cells[inside, 0], cells[inside, 1]]
-        known = values != 0.0
-        if known.mean() < min_known:
-            return 0.0
-        return float((values[known] >= min_field).mean())
+        return values
 
     def match(
         self, guess: Pose2D, points: NDArray[np.float64], window: SearchWindow | None = None
@@ -235,25 +260,78 @@ class CorrelativeMatcher:
         """
         window = window or self._window
         pts = self._subsample(points)
+        pose, score = self._peak(*self._lattice(guess, pts, window))
+        return MatchResult(pose=pose, score=score, guess_score=self.score(guess, pts))
+
+    def match_two(
+        self,
+        guess: Pose2D,
+        points: NDArray[np.float64],
+        window: SearchWindow | None = None,
+        apart_steps: int = 3,
+    ) -> tuple[MatchResult, MatchResult]:
+        """The best candidate, and the best one at least ``apart_steps`` lattice steps from it.
+
+        Two peaks that score alike mean the scan fits two places (a symmetric
+        room, look-alike rooms); the caller decides whether to trust the winner.
+        """
+        window = window or self._window
+        pts = self._subsample(points)
+        scores, positions, headings = self._lattice(guess, pts, window)
+        best_pose, best_score = self._peak(scores, positions, headings)
+        far_xy = (
+            np.abs(positions - [best_pose.x, best_pose.y]).max(axis=1)
+            >= apart_steps * window.xy_step_m - 1e-9
+        )
+        turned = headings - best_pose.theta
+        far_theta = (
+            np.abs(np.arctan2(np.sin(turned), np.cos(turned)))
+            >= math.radians(apart_steps * window.theta_step_deg) - 1e-9
+        )
+        rival_pose, rival_score = self._peak(
+            scores, positions, headings, far_theta[:, None] | far_xy[None, :]
+        )
+        guess_score = self.score(guess, pts)
+        return (
+            MatchResult(pose=best_pose, score=best_score, guess_score=guess_score),
+            MatchResult(pose=rival_pose, score=rival_score, guess_score=guess_score),
+        )
+
+    def _lattice(
+        self, guess: Pose2D, pts: NDArray[np.float64], window: SearchWindow
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        """Score every candidate of ``window`` around ``guess``.
+
+        Returns (T, P) scores over headings x positions, the (P, 2) positions and
+        the (T,) headings. A slight penalty on distance from the guess breaks
+        ties on flat score surfaces toward it.
+        """
         n = round(window.xy_m / window.xy_step_m)
         offsets = np.arange(-n, n + 1) * window.xy_step_m
         xy_offsets = np.array([(dx, dy) for dx in offsets for dy in offsets])
         m = round(window.theta_deg / window.theta_step_deg)
         theta_offsets = np.radians(np.arange(-m, m + 1) * window.theta_step_deg)
-        # Slight preference for staying near the guess breaks ties on flat score surfaces.
         xy_penalty = 1e-3 * np.abs(xy_offsets).sum(axis=1) / window.xy_step_m
         theta_penalty = 1e-3 * np.abs(theta_offsets) / math.radians(window.theta_step_deg)
-
         positions = np.array([[guess.x, guess.y]]) + xy_offsets
-        best_score, best_pose = -math.inf, guess
+        scores = np.empty((len(theta_offsets), len(positions)))
         for k, dtheta in enumerate(theta_offsets):
-            scores = (
+            scores[k] = (
                 self._scores(guess.theta + dtheta, pts, positions) - xy_penalty - theta_penalty[k]
             )
-            i = int(np.argmax(scores))
-            if scores[i] > best_score:
-                best_score = float(scores[i])
-                best_pose = Pose2D(
-                    positions[i, 0], positions[i, 1], wrap_angle(guess.theta + dtheta)
-                )
-        return MatchResult(pose=best_pose, score=best_score, guess_score=self.score(guess, pts))
+        return scores, positions, guess.theta + theta_offsets
+
+    @staticmethod
+    def _peak(
+        scores: NDArray[np.float64],
+        positions: NDArray[np.float64],
+        headings: NDArray[np.float64],
+        mask: NDArray[np.bool_] | None = None,
+    ) -> tuple[Pose2D, float]:
+        """The highest-scoring candidate (among those where ``mask`` is True) and its score."""
+        field = scores if mask is None else np.where(mask, scores, -np.inf)
+        k, i = np.unravel_index(int(np.argmax(field)), field.shape)
+        pose = Pose2D(
+            float(positions[i, 0]), float(positions[i, 1]), wrap_angle(float(headings[k]))
+        )
+        return pose, float(field[k, i])

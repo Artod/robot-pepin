@@ -13,17 +13,23 @@ from pepin.odometry import Pose2D
 from pepin.scanmatch import apply_motion, relative_motion
 
 SPEC = GridSpec(0.05, -4, -3, 8, 6)
+MAPPING_POSES = (Pose2D(0, 0, 0), Pose2D(1, 0.5, 0.7), Pose2D(-1, -0.5, -2.0), Pose2D(0.5, -1, 2.5))
+PILLAR = (-2.0, 1.0, -1.6, 1.4)  # a box in one corner: the furnished room has no 180-degree twin
 
 
 def room_map() -> OccupancyGrid:
+    """The empty rectangle: identical to itself turned by 180 degrees."""
     grid = OccupancyGrid(SPEC)
-    for pose in (
-        Pose2D(0, 0, 0),
-        Pose2D(1, 0.5, 0.7),
-        Pose2D(-1, -0.5, -2.0),
-        Pose2D(0.5, -1, 2.5),
-    ):
+    for pose in MAPPING_POSES:
         grid.integrate(pose, raycast_room(pose))
+    return grid
+
+
+def furnished_room_map() -> OccupancyGrid:
+    """The rectangle with a box in one corner, so a scan fits exactly one place."""
+    grid = OccupancyGrid(SPEC)
+    for pose in MAPPING_POSES:
+        grid.integrate(pose, raycast_room(pose, pillar=PILLAR))
     return grid
 
 
@@ -123,8 +129,35 @@ def test_a_robot_put_down_anywhere_is_found_by_the_global_search() -> None:
     from pepin.scanmatch import SearchWindow
 
     truth = Pose2D(1.2, -0.8, math.radians(60.0))
-    loc = Localizer(room_map(), Pose2D(0.0, 0.0, 0.0))
-    confidence = loc.initialize(raycast_room(truth), SearchWindow(0.6, 0.06, 40.0, 4.0))
-    assert confidence >= 0.6
+    loc = Localizer(furnished_room_map(), Pose2D(0.0, 0.0, 0.0))
+    scan = raycast_room(truth, pillar=PILLAR)
+    confidence = loc.initialize(scan, SearchWindow(0.6, 0.06, 40.0, 4.0))
+    assert confidence >= 0.6 and not loc.lost
     assert math.hypot(loc.pose.x - truth.x, loc.pose.y - truth.y) < 0.08
     assert abs(loc.pose.theta - truth.theta) < math.radians(4.0)
+
+
+def test_a_symmetric_room_refuses_the_global_fix_instead_of_guessing() -> None:
+    """The empty rectangle fits the scan equally well turned by 180 degrees: say so, hold."""
+    from pepin.scanmatch import SearchWindow
+
+    truth = Pose2D(1.2, -0.8, math.radians(60.0))
+    start = Pose2D(0.0, 0.0, 0.0)
+    loc = Localizer(room_map(), start)
+    confidence = loc.initialize(raycast_room(truth), SearchWindow(0.6, 0.06, 40.0, 4.0))
+    assert confidence == 0.0 and loc.pose == start and loc.lost
+
+
+def test_the_matcher_follows_a_map_that_keeps_growing() -> None:
+    """Online mapping: scans integrated after the matcher was built change its scores."""
+    from pepin.scanmatch import CorrelativeMatcher
+
+    grid = room_map()
+    matcher = CorrelativeMatcher(grid)
+    pose = Pose2D(-1.0, 0.0, 0.0)
+    with_wall = raycast_room(pose, pillar=(0.0, -2.0, 0.2, 2.0))  # a wall across the room
+    before = matcher.inlier_fraction(pose, with_wall)
+    for _ in range(6):
+        grid.integrate(pose, with_wall)
+    assert grid.version == 4 + 6
+    assert matcher.inlier_fraction(pose, with_wall) > before + 0.2

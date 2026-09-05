@@ -56,6 +56,7 @@ class OccupancyGrid:
         """Allocates the log-odds array for ``spec``; zero everywhere means "unknown"."""
         self.spec = spec
         self.log_odds: NDArray[np.float64] = np.zeros(spec.shape, dtype=np.float64)
+        self.version = 0  # bumped by every integrate(); caches built from the grid key on it
 
     def world_to_cell(self, xy: NDArray[np.float64]) -> NDArray[np.int64]:
         """(N, 2) world points to (N, 2) integer [row, col]; may fall outside the grid."""
@@ -91,6 +92,7 @@ class OccupancyGrid:
         hit_cells = hit_cells[self._inside(hit_cells)]
         np.add.at(self.log_odds, (hit_cells[:, 0], hit_cells[:, 1]), LOG_ODDS_HIT)
         np.clip(self.log_odds, -LOG_ODDS_CLAMP, LOG_ODDS_CLAMP, out=self.log_odds)
+        self.version += 1
 
     def save(self, path: str | Path) -> None:
         """Write the grid (log-odds and geometry) to a compressed ``.npz`` file."""

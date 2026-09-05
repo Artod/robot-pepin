@@ -15,7 +15,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from pepin.mapping import OccupancyGrid
-from pepin.odometry import Pose2D
+from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import (
     CorrelativeMatcher,
     MatchResult,
@@ -25,6 +25,10 @@ from pepin.scanmatch import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A rival global fix is a real twin only if the map denies it no more than this
+# share of the scan beyond the winner (about four beams of a 180-beam scan).
+TWIN_DENIAL_MARGIN = 0.02
 
 
 class Localizer:
@@ -97,8 +101,10 @@ class Localizer:
         beyond the tracking window; without this the whole run is offset. If
         even the wide window fits poorly and ``global_fallback`` is on, the
         whole map is searched (the robot may have been put down anywhere).
-        Returns the inlier fraction of the adopted pose; a poor fit (below
-        ``recovery_min_inliers``) keeps the given start and lets tracking try.
+        Returns the inlier fraction of the adopted pose. A poor or ambiguous fit
+        (below ``recovery_min_inliers``) keeps the given start and marks the
+        localiser lost at once, so the navigator holds instead of driving off
+        an unconfirmed guess.
         """
         coarse = self._matcher.match(self.pose, points, window)
         fine = self._matcher.match(coarse.pose, points, self._window)
@@ -111,16 +117,21 @@ class Localizer:
             self.pose = fine.pose
         else:
             logger.warning("initial fix rejected (inliers %.2f); keeping the start", confidence)
+            self.weak_scans = self._lost_after
         self.confidence = confidence
         return confidence
 
     def _global_search(self, points: NDArray[np.float64]) -> tuple[MatchResult, float]:
         """Coarse-to-fine search over the whole grid: any position, any heading, once.
 
-        The coarse pass uses a 0.2 m / 15 degree lattice on a thinned scan (a
-        few seconds at most); the winner is refined with a medium and then the
-        tracking window. Look-alike rooms are a real risk in a flat, so the
-        caller still applies the inlier threshold before trusting the result.
+        The coarse pass uses a 0.2 m / 15 degree lattice on a thinned scan
+        (well under a second); its two best peaks are each refined with a
+        medium and then the tracking window. When the runner-up explains the
+        scan nearly as well (within ``recovery_margin``) *and* the map denies
+        it no more than the winner (no extra points on known-free floor), the
+        scan fits two places — a symmetric room, look-alike rooms — and the fix
+        is refused with confidence 0: "tell me where I am" beats driving off
+        from the wrong twin.
         """
         spec = self._grid.spec
         centre = Pose2D(spec.x_min_m + spec.width_m / 2, spec.y_min_m + spec.height_m / 2, 0.0)
@@ -131,9 +142,32 @@ class Localizer:
             theta_deg=180.0,
             theta_step_deg=15.0,
         )
-        coarse = self._matcher.match(centre, thinned, whole_map)
+        coarse, rival = self._matcher.match_two(centre, thinned, whole_map)
+        best, best_confidence = self._refine(coarse.pose, points)
+        second, second_confidence = self._refine(rival.pose, points)
+        apart = math.hypot(best.pose.x - second.pose.x, best.pose.y - second.pose.y) > 0.5 or abs(
+            wrap_angle(best.pose.theta - second.pose.theta)
+        ) > math.radians(30.0)
+        explains_alike = second_confidence >= best_confidence - self._recovery_margin
+        denied = self._matcher.contradiction_fraction(second.pose, points)
+        denied_best = self._matcher.contradiction_fraction(best.pose, points)
+        if apart and explains_alike and denied <= denied_best + TWIN_DENIAL_MARGIN:
+            logger.warning(
+                "the scan fits two places alike: %s (inliers %.2f, denied %.2f) and %s "
+                "(%.2f, %.2f); no fix without a start pose",
+                best.pose, best_confidence, denied_best, second.pose, second_confidence, denied,
+            )  # fmt: skip
+            return best, 0.0
+        logger.info(
+            "global fix %s (inliers %.2f, denied %.2f); runner-up %s (%.2f, %.2f)",
+            best.pose, best_confidence, denied_best, second.pose, second_confidence, denied,
+        )  # fmt: skip
+        return best, best_confidence
+
+    def _refine(self, pose: Pose2D, points: NDArray[np.float64]) -> tuple[MatchResult, float]:
+        """A coarse candidate sharpened with a medium and then the tracking window."""
         medium = SearchWindow(xy_m=0.3, xy_step_m=0.05, theta_deg=15.0, theta_step_deg=2.0)
-        refined = self._matcher.match(coarse.pose, points, medium)
+        refined = self._matcher.match(pose, points, medium)
         fine = self._matcher.match(refined.pose, points, self._window)
         return fine, self._matcher.inlier_fraction(fine.pose, points)
 

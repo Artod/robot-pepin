@@ -221,3 +221,19 @@ def test_shortcut_does_not_squeeze_between_cells_that_touch_at_a_corner() -> Non
     assert path is not None
     for (x1, y1), (x2, y2) in itertools.pairwise(path):
         assert not (x1 < 1.0 < x2 and y1 < 1.0 < y2 and abs((x2 - x1) - (y2 - y1)) < 1e-9)
+
+
+def test_the_planner_follows_a_map_that_grows_while_driving() -> None:
+    """Online mapping: a wall integrated after the planner was built blocks the next plan."""
+    from synthetic import raycast_room
+    from test_localization import room_map
+
+    from pepin.odometry import Pose2D
+
+    grid = room_map()
+    planner = GridPlanner(grid, PlannerConfig(robot_radius_m=0.30))
+    assert planner.plan((-2.0, 0.0), (2.0, 0.0)) is not None
+    seen_from = Pose2D(-1.0, 0.0, 0.0)
+    for _ in range(6):
+        grid.integrate(seen_from, raycast_room(seen_from, pillar=(0.0, -2.0, 0.2, 2.0)))
+    assert planner.plan((-2.0, 0.0), (2.0, 0.0)) is None

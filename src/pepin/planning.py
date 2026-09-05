@@ -90,18 +90,22 @@ class GridPlanner:
     """
 
     def __init__(self, grid: OccupancyGrid, config: PlannerConfig | None = None) -> None:
+        """Builds the inflated masks from ``grid``; they are rebuilt whenever the grid changes."""
         self.grid = grid
-        """Builds the inflated blocked mask once; the grid is not kept in sync afterwards."""
         self.spec = grid.spec
         self.config = config or PlannerConfig()
-        probability = grid.probability()
+        self._radius_cells = self.config.robot_radius_m / self.spec.resolution_m
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        """Obstacle, inflated and "explained" masks from the grid as it is now."""
+        probability = self.grid.probability()
         obstacles: NDArray[np.bool_] = probability >= self.config.occupied_threshold
         if not self.config.unknown_is_free:
             obstacles |= np.abs(probability - 0.5) <= UNKNOWN_TOLERANCE
-        radius_cells = self.config.robot_radius_m / self.spec.resolution_m
-        self._radius_cells = radius_cells
+        self._built_version = self.grid.version
         self._raw: NDArray[np.bool_] = obstacles  # before inflation: what is really there
-        self._static: NDArray[np.bool_] = inflate(obstacles, radius_cells)
+        self._static: NDArray[np.bool_] = inflate(obstacles, self._radius_cells)
         self._explained: NDArray[np.bool_] = inflate(
             obstacles, self.config.explained_m / self.spec.resolution_m
         )
@@ -126,6 +130,8 @@ class GridPlanner:
         raw obstacle cells count, so the path leaves in any direction that does
         not cross the thing itself; full inflation applies from there on.
         """
+        if self.grid.version != self._built_version:  # the map grew (online mapping)
+            self._rebuild()
         raw = self._raw
         self.blocked = self._static
         if obstacles_xy is not None and len(obstacles_xy):

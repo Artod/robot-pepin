@@ -156,8 +156,11 @@ occupancy maps and a pose graph closes a 33 m loop to 5 cm (see above).
 Next:
 
 1. A footprint-aware local planner (velocity sampling) so avoidance is a manoeuvre, not a stop
-2. Mobile manipulation with the arm, the neck joining the same base server
-3. The phone face and voice: a language layer that asks for places by name
+2. Mapping while driving: the planner and the scan matcher already follow a grid that
+   keeps growing, so the next step is frontier exploration on a map the robot builds
+   itself, and places named from what the camera sees instead of a hand-written file
+3. Mobile manipulation with the arm, the neck joining the same base server
+4. The phone face and voice: a language layer that asks for places by name
 
 ## Credits
 
