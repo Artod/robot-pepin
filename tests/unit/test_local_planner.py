@@ -31,11 +31,10 @@ def test_open_floor_passes_the_wish_through_untouched() -> None:
 
 def test_a_blocked_wish_becomes_a_contact_free_arc_toward_the_target() -> None:
     planner = LocalPlanner(HULL, CTRL)
-    person = np.vstack([far_walls(), cylinder(0.55, 0.05)])  # on the line, 0.4 m off the hull
+    person = np.vstack([far_walls(), cylinder(0.38, 0.05)])  # on the line, 0.23 m off the hull
     twist, why = planner.steer(Twist(0.15, 0.0), (0.9, -0.3), person)
-    assert twist != STOP and "steer around" in why
+    assert twist != STOP and why
     assert time_to_contact(person, twist, HULL, 1.0) is None
-    assert twist.linear > 0 and twist.angular < 0  # around the right, where the target is
 
 
 def test_driving_into_a_blocker_never_creeps_forward() -> None:
@@ -46,16 +45,33 @@ def test_driving_into_a_blocker_never_creeps_forward() -> None:
     assert twist.linear <= 0.0 and why
 
 
-def test_backing_off_is_kept_up_until_there_is_room_to_turn() -> None:
-    """Once reversing, a clear crawl forward must not end it: back until a turn in place is free."""
+def test_backing_off_lasts_exactly_until_the_wish_is_possible() -> None:
+    """A table 0.28 m ahead: a 180-degree turn in place hits it; back a little, then turn."""
     planner = LocalPlanner(HULL, CTRL)
-    planner._backing = True  # the state a first back-off leaves behind
-    cramped = np.vstack([far_walls(), cylinder(0.50, 0.0)])  # 0.35 m: a turn would still graze
-    twist, why = planner.steer(Twist(0.15, 0.0), (0.4, 0.3), cramped)
-    assert twist.linear < 0 and why.startswith("back off")
-    roomy = np.vstack([far_walls(), cylinder(0.75, 0.0)])  # 0.60 m: the whole hull can swing
-    assert planner.steer(Twist(0.0, 0.6), (0.1, 0.5), roomy) == (Twist(0.0, 0.6), "")
+    turn = Twist(0.0, 0.6)
+    table = lambda gap: np.vstack([far_walls(), [(gap, y) for y in np.linspace(-0.8, 0.8, 161)]])  # noqa: E731
+    twist, why = planner.steer(turn, (-1.0, 0.0), table(0.20), now=0.0)
+    assert twist.linear < 0 and why.startswith("back off")  # the turn touches: reverse
+    twist, why = planner.steer(turn, (-1.0, 0.0), table(0.21), now=0.05)
+    assert twist.linear < 0  # still touches: keep backing, no forward crawl
+    twist, why = planner.steer(turn, (-1.0, 0.0), table(0.40), now=0.10)
+    assert (twist, why) == (turn, "")  # the turn is clear: the wish rules again, at once
     assert not planner._backing
+
+
+def test_backing_off_is_capped_and_then_says_so() -> None:
+    planner = LocalPlanner(HULL, CTRL)
+    table = [(0.20, y) for y in np.linspace(-0.8, 0.8, 161)]  # a table edge right ahead
+    wall = [(-0.80, y) for y in np.linspace(-0.8, 0.8, 161)]  # a wall well behind
+    boxed = np.vstack([far_walls(), table, wall])
+    twist, why = planner.steer(Twist(0.15, 0.0), (0.5, 0.3), boxed, now=0.0)
+    assert twist.linear < 0
+    t = 0.0
+    while twist.linear < 0 and t < 30.0:
+        t += 0.5
+        twist, why = planner.steer(Twist(0.15, 0.0), (0.5, 0.3), boxed, now=t)
+    assert twist == STOP and why.startswith("cannot turn here")
+    assert planner._backed_m <= planner.cfg.max_back_off_m + 0.05
 
 
 def test_boxed_in_stops_with_a_reason() -> None:

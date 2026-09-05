@@ -96,7 +96,9 @@ class PlannerConfig:
     unknown_is_free: bool = False
     # A live hit this close to a mapped obstacle is that obstacle seen again (with the
     # localiser's error), not something new: it must not thicken the walls.
-    explained_m: float = 0.15
+    # 0.30 because the flat's map and its scans disagree by 10-15 cm along whole walls
+    # (a loop-closed map's residual); with 0.15 those walls came back as live obstacles.
+    explained_m: float = 0.30
     # A goal inside the inflation zone (next to a wall, or where someone stands) is served
     # by the nearest free cell this close; only a goal inside an obstacle itself is refused.
     goal_tolerance_m: float = 0.5

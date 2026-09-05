@@ -34,6 +34,10 @@ class LocalPlannerConfig:
     # would count as "clear" while inching into the obstacle. Every candidate must be
     # viable for a hull's length of travel.
     min_travel_m: float = 0.15
+    min_turn_rad: float = (
+        0.5  # ...and a turn for a real turn: a crawl-slow spin "clears" the same way
+    )
+    max_horizon_s: float = 3.0  # the rules above stop here: a 0.02 rad/s wish is not a 25 s plan
     # Speeds from cruise down to cruise / linear_samples. Two on purpose: a lattice with
     # a crawl in it "clears" a crawl into the obstacle and glues the cart to it.
     linear_samples: int = 2
@@ -44,8 +48,11 @@ class LocalPlannerConfig:
     # Reverse candidates run at this share of cruise (0 = none). They rank last by the
     # costs above and are chosen only when every forward arc and turn touches: the cart
     # is wider than it is long, so 0.26 m from an object it can turn only ~25 deg and the
-    # way out is backwards first.
+    # way out is backwards first — but only as far as it takes for the wish to become
+    # possible, and never more than max_back_off_m (the cart has casters at the rear;
+    # a long reverse onto a carpet edge lifted a drive wheel once).
     reverse_fraction: float = 0.5
+    max_back_off_m: float = 0.25
 
 
 class LocalPlanner:
@@ -70,41 +77,56 @@ class LocalPlanner:
         yaws = np.linspace(-self._max_yaw, self._max_yaw, self.cfg.angular_samples)
         self._lattice = [Twist(float(v), float(w)) for v in speeds for w in yaws]
         self._lattice += [Twist(0.0, float(w)) for w in yaws if w != 0.0]  # turn in place
+        # Reverse is a separate, last-resort list: ranked with the rest, "backwards" wins
+        # on progress whenever the target is behind, and the cart backed into a carpet
+        # edge twice while a forward arc or the other turn direction was free.
         self._reverse: list[Twist] = []
         if self.cfg.reverse_fraction > 0:
             back = -self._cruise * self.cfg.reverse_fraction
             self._reverse = [Twist(back, float(w)) for w in yaws[:: max(1, len(yaws) // 3)]]
             self._reverse.append(Twist(back, 0.0))
-            self._lattice += self._reverse
-        self._backing = False  # committed to backing off until there is room to turn
+        self._backing = False  # committed to backing off until the wish is possible again
+        self._backed_m = 0.0  # distance reversed under the current commitment
+        self._last_now: float | None = None
 
     def steer(
         self,
         wish: Twist,
         target_robot: tuple[float, float],
         points_robot: NDArray[np.float64],
+        now: float | None = None,
     ) -> tuple[Twist, str]:
         """The wish if it is contact-free; otherwise the cheapest contact-free arc, or STOP.
 
-        ``target_robot`` is the lookahead point in the robot frame. The reason is
-        "" when the wish went through, else what was chosen and why.
+        ``target_robot`` is the lookahead point in the robot frame; ``now`` (s) lets
+        the planner measure how far it has reversed. The reason is "" when the wish
+        went through, else what was chosen and why.
         """
+        dt = 0.05 if now is None or self._last_now is None else max(0.0, now - self._last_now)
+        self._last_now = now
+        wish_clear = self._clear(wish, points_robot)
         if self._backing:
-            # Once backing off, keep backing until a turn in place is free: alternating
-            # a centimetre back with a centimetre forward glues the cart to the obstacle.
-            if self._turn_room(points_robot) >= 0.0:
+            # Once backing off, keep backing until the wish itself is possible again:
+            # alternating a centimetre back with a centimetre forward glues the cart to
+            # the obstacle, and "room to turn everywhere" is never true beside furniture.
+            if wish_clear:
                 self._backing = False
+            elif self._backed_m >= self.cfg.max_back_off_m:
+                self._backing = False
+                return STOP, f"cannot turn here: backed off {self._backed_m:.2f} m, still touching"
             else:
-                return self._best(self._reverse, wish, target_robot, points_robot, "back off")
-        # Intervene only in trouble: the wish would touch, or the cart is already too close
-        # to turn and the wish brings it closer still. Everywhere else the follower rules,
-        # so a good path is driven exactly as planned.
-        x, y, _ = pose_after(wish, self.cfg.horizon_s)
-        room_now, room_then = self._turn_room(points_robot), self._turn_room(points_robot, x, y)
-        closing_in = room_now < 0.0 and room_then < room_now - 1e-3
-        if not closing_in and self._clear(wish, points_robot):
+                twist, why = self._best(self._reverse, wish, target_robot, points_robot, "back off")
+                self._backed_m += max(0.0, -twist.linear) * dt
+                return twist, why
+        # Intervene only in trouble: everywhere else the follower rules, so a good
+        # path is driven exactly as planned. Forward arcs and turns first; reverse only
+        # when none of them is possible.
+        if wish_clear:
             return wish, ""
-        return self._best(self._lattice, wish, target_robot, points_robot, "steer around")
+        twist, why = self._best(self._lattice, wish, target_robot, points_robot, "steer around")
+        if twist == STOP and self._reverse:
+            twist, why = self._best(self._reverse, wish, target_robot, points_robot, "back off")
+        return twist, why
 
     def _best(
         self,
@@ -119,8 +141,8 @@ class LocalPlanner:
         for candidate in ranked:
             if candidate == wish or not self._clear(candidate, points_robot):
                 continue
-            if candidate.linear < 0:
-                verb, self._backing = "back off", True
+            if candidate.linear < 0 and not self._backing:
+                self._backing, self._backed_m, verb = True, 0.0, "back off"
             return candidate, f"{verb}: v {candidate.linear:+.2f} w {candidate.angular:+.2f}"
         return STOP, "boxed in: every arc touches"
 
@@ -137,6 +159,9 @@ class LocalPlanner:
         horizon = self.cfg.horizon_s
         if twist.linear != 0.0:
             horizon = max(horizon, self.cfg.min_travel_m / abs(twist.linear))
+        if twist.angular != 0.0:
+            horizon = max(horizon, self.cfg.min_turn_rad / abs(twist.angular))
+        horizon = min(horizon, self.cfg.max_horizon_s)
         return (
             time_to_contact(
                 points_robot, twist, self.footprint, horizon, min_points=self._min_points

@@ -161,3 +161,20 @@ def test_the_matcher_follows_a_map_that_keeps_growing() -> None:
         grid.integrate(pose, with_wall)
     assert grid.version == 4 + 6
     assert matcher.inlier_fraction(pose, with_wall) > before + 0.2
+
+
+def test_a_robot_pushed_by_hand_while_lost_relocalises_from_the_whole_map() -> None:
+    """Odometry saw nothing; the local recovery window cannot reach; the global search can."""
+
+    truth = Pose2D(-1.0, 0.5, 0.3)
+    loc = Localizer(furnished_room_map(), truth)
+    odom = Pose2D(0.0, 0.0, 0.0)
+    for _ in range(3):
+        loc.update(odom, raycast_room(truth, pillar=PILLAR))
+    assert loc.confidence > 0.6
+    pushed = Pose2D(1.3, -0.9, math.radians(140.0))  # carried across the room, odometry frozen
+    for _ in range(40):
+        loc.update(odom, raycast_room(pushed, pillar=PILLAR))
+    assert not loc.lost
+    assert math.hypot(loc.pose.x - pushed.x, loc.pose.y - pushed.y) < 0.10
+    assert abs(loc.pose.theta - pushed.theta) < math.radians(5.0)

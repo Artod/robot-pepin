@@ -14,7 +14,7 @@ import math
 import numpy as np
 from numpy.typing import NDArray
 
-from pepin.mapping import OccupancyGrid
+from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import (
     CorrelativeMatcher,
@@ -29,6 +29,40 @@ logger = logging.getLogger(__name__)
 # A rival global fix is a real twin only if the map denies it no more than this
 # share of the scan beyond the winner (about four beams of a 180-beam scan).
 TWIN_DENIAL_MARGIN = 0.02
+# Lost for this many scans in a row (about two seconds) and the local recovery has not
+# helped: search the whole map again, and again every so many scans after that.
+GLOBAL_RETRY_EVERY = 20
+# The whole-map search runs on the grid pooled this many times coarser (0.05 m -> 0.2 m),
+# with headings this far apart: at 3 m a 5-degree error moves a point one coarse cell.
+GLOBAL_POOL_FACTOR = 4
+GLOBAL_THETA_STEP_DEG = 5.0
+# A global fix must place most of the scan on cells the map knows: a pose outside the
+# walls, with a sliver of the scan on them and the rest in the unknown, is no fix at all.
+GLOBAL_MIN_KNOWN = 0.6
+
+
+def pooled(grid: OccupancyGrid, factor: int) -> OccupancyGrid:
+    """The grid ``factor`` times coarser, every cell the max log-odds of its block.
+
+    Max-pooling makes a coarse score an upper bound of the fine one (Olson's
+    multi-resolution correlative matching): a pose whose true basin falls between
+    two coarse lattice points still scores high instead of vanishing between them.
+    """
+    spec = grid.spec
+    rows, cols = spec.shape
+    r, c = rows // factor, cols // factor
+    coarse = OccupancyGrid(
+        GridSpec(
+            spec.resolution_m * factor,
+            spec.x_min_m,
+            spec.y_min_m,
+            c * spec.resolution_m * factor,
+            r * spec.resolution_m * factor,
+        )
+    )
+    blocks = grid.log_odds[: r * factor, : c * factor].reshape(r, factor, c, factor)
+    coarse.log_odds[:] = blocks.max(axis=(1, 3))
+    return coarse
 
 
 class Localizer:
@@ -50,17 +84,21 @@ class Localizer:
         lost_below: float = 0.25,
         lost_after: int = 5,
         recovery_min_inliers: float = 0.6,
+        relocalise_min_inliers: float = 0.5,  # mid-run: this flat's true pose scores 0.5-0.65
         recovery_margin: float = 0.15,
         recovery: SearchWindow | None = None,
         min_points: int = 50,
     ) -> None:
         self._grid = grid
         self._matcher = CorrelativeMatcher(grid)
+        self._coarse_matcher: CorrelativeMatcher | None = None
+        self._coarse_version = -1
         self._window = window or SearchWindow()
         self._recovery = recovery or SearchWindow(0.2, 0.02, 10.0, 0.5)
         self._lost_below = lost_below
         self._lost_after = lost_after
-        self._recovery_min_inliers = recovery_min_inliers
+        self._recovery_min_inliers = recovery_min_inliers  # for the first fix, before moving
+        self._relocalise_min_inliers = relocalise_min_inliers  # for a fix while lost mid-run
         self._recovery_margin = recovery_margin
         self._min_points = min_points  # a degenerate scan must not move the pose
         self.pose = initial
@@ -138,11 +176,11 @@ class Localizer:
         thinned = points[:: max(1, len(points) // 120)]
         whole_map = SearchWindow(
             xy_m=max(spec.width_m, spec.height_m) / 2,
-            xy_step_m=0.2,
+            xy_step_m=spec.resolution_m * GLOBAL_POOL_FACTOR,
             theta_deg=180.0,
-            theta_step_deg=15.0,
+            theta_step_deg=GLOBAL_THETA_STEP_DEG,
         )
-        coarse, rival = self._matcher.match_two(centre, thinned, whole_map)
+        coarse, rival = self._coarse().match_two(centre, thinned, whole_map)
         best, best_confidence = self._refine(coarse.pose, points)
         second, second_confidence = self._refine(rival.pose, points)
         apart = math.hypot(best.pose.x - second.pose.x, best.pose.y - second.pose.y) > 0.5 or abs(
@@ -166,10 +204,18 @@ class Localizer:
 
     def _refine(self, pose: Pose2D, points: NDArray[np.float64]) -> tuple[MatchResult, float]:
         """A coarse candidate sharpened with a medium and then the tracking window."""
-        medium = SearchWindow(xy_m=0.3, xy_step_m=0.05, theta_deg=15.0, theta_step_deg=2.0)
+        medium = SearchWindow(xy_m=0.3, xy_step_m=0.05, theta_deg=8.0, theta_step_deg=1.0)
         refined = self._matcher.match(pose, points, medium)
         fine = self._matcher.match(refined.pose, points, self._window)
-        return fine, self._matcher.inlier_fraction(fine.pose, points)
+        confidence = self._matcher.inlier_fraction(fine.pose, points, min_known=GLOBAL_MIN_KNOWN)
+        return fine, confidence
+
+    def _coarse(self) -> CorrelativeMatcher:
+        """Matcher on the pooled grid for the whole-map search; rebuilt when the map grows."""
+        if self._coarse_matcher is None or self._coarse_version != self._grid.version:
+            self._coarse_matcher = CorrelativeMatcher(pooled(self._grid, GLOBAL_POOL_FACTOR))
+            self._coarse_version = self._grid.version
+        return self._coarse_matcher
 
     def predict(self, odom: Pose2D) -> Pose2D:
         """Advance the pose by odometry alone (between scans); the next scan corrects it."""
@@ -206,11 +252,25 @@ class Localizer:
             far = self._matcher.match(coarse.pose, points, self._window)
             far_confidence = self._matcher.inlier_fraction(far.pose, points)
             if (
-                far_confidence >= self._recovery_min_inliers
+                far_confidence >= self._relocalise_min_inliers
                 and far_confidence >= confidence + self._recovery_margin
             ):
                 logger.info("relocalised: inliers %.2f vs %.2f locally", far_confidence, confidence)
                 pose, confidence = far.pose, far_confidence
+            elif (self.weak_scans - self._lost_after) % GLOBAL_RETRY_EVERY == 0:
+                # A slipped wheel, a push by hand: odometry lied by more than any window
+                # sized to it. The robot stands still while lost, so the whole-map search
+                # (a few hundred ms) is affordable here; a twin refuses itself (0.0).
+                anywhere, anywhere_confidence = self._global_search(points)
+                if (
+                    anywhere_confidence >= self._relocalise_min_inliers
+                    and anywhere_confidence >= confidence + self._recovery_margin
+                ):
+                    logger.info(
+                        "relocalised globally at %s: inliers %.2f vs %.2f locally",
+                        anywhere.pose, anywhere_confidence, confidence,
+                    )  # fmt: skip
+                    pose, confidence = anywhere.pose, anywhere_confidence
 
         self.pose = pose
         self.confidence = confidence

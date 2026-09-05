@@ -210,7 +210,7 @@ class Navigator:
         wish, steer = out.twist, ""
         if self.local is not None and out.target is not None and self._latest_points is not None:
             rel = relative_motion(pose, Pose2D(out.target[0], out.target[1], 0.0))
-            wish, steer = self.local.steer(wish, (rel.x, rel.y), self._latest_points)
+            wish, steer = self.local.steer(wish, (rel.x, rel.y), self._latest_points, sense.now)
         twist, veto = self.guard_twist(wish, sense)
         reasons = "; ".join(r for r in (steer, veto) if r)
         # A steered or vetoed wish means the plan runs into something the map lacks:
