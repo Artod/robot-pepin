@@ -205,7 +205,12 @@ def serve(
         while stop is None or not stop.is_set():
             started = time.monotonic()
             for client, message in server.commands():
-                reply = core.command(message, started)
+                try:
+                    reply = core.command(message, started)
+                except Exception:  # one malformed command must not take the wheels down
+                    who = client.peer if client is not None else "?"
+                    logger.exception("bad command %r from %s; ignored", message, who)
+                    continue
                 if reply is not None:
                     server.reply(client, reply)
             core.tick(started)

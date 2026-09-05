@@ -130,8 +130,10 @@ def test_serve_end_to_end_over_localhost() -> None:
     servos = client.ping(timeout_s=2.0)
     assert servos is not None and servos.get("left") is True
     client.set_twist(Twist(0.1, 0.0))
-    while time.monotonic() < deadline + 2.0 and not core.moving:
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not core.moving:
         time.sleep(0.01)
+    assert core.moving
     client.close()  # the only client leaves: the core must release the wheels
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline and core.moving:
@@ -140,3 +142,28 @@ def test_serve_end_to_end_over_localhost() -> None:
     stop.set()
     worker.join(timeout=2.0)
     assert not worker.is_alive() and not core.armed
+
+
+def test_malformed_client_lines_do_not_stop_the_wheel_loop() -> None:
+    import socket
+    import threading
+    import time
+
+    from pepin.base_server import serve
+    from pepin.streams import JsonLinesServer
+
+    core, _ = make_core()
+    server = JsonLinesServer(0).start()
+    stop = threading.Event()
+    worker = threading.Thread(target=serve, args=(core, server, 50.0, 20.0, stop), daemon=True)
+    worker.start()
+    with socket.create_connection(("127.0.0.1", server.port), timeout=2.0) as raw:
+        raw.sendall(b'[1, 2]\n"hi"\nnot json at all\n{"cmd": "twist", "v": "fast", "w": 0}\n')
+        raw.sendall(b'{"cmd": "twist", "v": 0.1, "w": 0.0}\n')
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not core.moving:
+            time.sleep(0.01)
+        assert core.moving and worker.is_alive()
+    stop.set()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()

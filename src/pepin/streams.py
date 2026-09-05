@@ -248,11 +248,17 @@ class ClientConn:
                 buffer += chunk
                 *lines, buffer = buffer.split(b"\n")
                 for line in lines:
-                    if line.strip():
-                        try:
-                            self._inbox.put((self, json.loads(line)))
-                        except ValueError:
-                            logger.warning("client %s sent an unreadable line; ignored", self.peer)
+                    if not line.strip():
+                        continue
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        logger.warning("client %s sent an unreadable line; ignored", self.peer)
+                        continue
+                    if isinstance(message, dict):
+                        self._inbox.put((self, message))
+                    else:
+                        logger.warning("client %s sent a non-object line; ignored", self.peer)
         except OSError as exc:
             logger.info("client %s reader ended: %s", self.peer, exc)
         self.close()

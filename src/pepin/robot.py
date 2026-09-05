@@ -75,7 +75,7 @@ class RobotConfig:
             raise ValueError(f"robot.json: unknown feeds {unknown}; known: {list(KNOWN_FEEDS)}")
         feeds = {name: FeedConfig(**entries.get(name, {})) for name in KNOWN_FEEDS}
         return cls(
-            base=BaseConfig.from_json(str(config_dir / "base.json")),
+            base=BaseConfig.from_dict(base_raw),
             lidar_mount=LidarMount.from_json(str(config_dir / "lidar.json")),
             tof_mounts=load_mounts(config_dir / "tof.json"),
             feeds=feeds,
@@ -129,6 +129,7 @@ class Robot:
         self.link = link
         self.lidar = lidar
         self.tof = tof
+        self._stashed: list[LaserScan] = []  # revolutions seen while the base was quiet
         self.camera = camera
 
     @classmethod
@@ -157,6 +158,9 @@ class Robot:
             elif video_name:
                 logger.warning("camera feed is disabled in robot.json; not recording")
         except Exception:
+            if camera is not None:
+                with contextlib.suppress(Exception):
+                    camera.stop()
             for part in (lidar, tof, link):
                 if part is not None:
                     with contextlib.suppress(Exception):
@@ -199,12 +203,16 @@ class Robot:
         """Everything new since the last tick, or None when the board has gone quiet.
 
         The lidar queue is drained even then, so a base outage never leaves a
-        backlog of revolutions for the first good tick to chew through.
+        backlog of revolutions for the first good tick to chew through; the
+        newest one is kept, because the deadman has the robot standing still
+        and that revolution still says what is around it.
         """
-        scans = self.lidar.drain() if self.lidar is not None else []
+        scans = self._stashed + (self.lidar.drain() if self.lidar is not None else [])
         state = self.link.state(now)
         if state is None or state.age_s > BASE_TIMEOUT_S:
+            self._stashed = scans[-1:]
             return None
+        self._stashed = []
         sense = Sense(
             now=now,
             odom_pose=state.pose,
