@@ -82,14 +82,23 @@ def busy_bridge_ports(host: str) -> set[int]:
 
 
 def _parse_local_ports(ss_output: str) -> set[int]:
-    """Local port numbers from ``ss -tn state established`` lines (Recv-Q Send-Q Local Peer)."""
+    """Local ports with a client that is *not* the board itself, from ``ss -tn state established``.
+
+    Lines are ``Recv-Q Send-Q Local:port Peer:port``. The base server holds the
+    servo bridge over loopback permanently; that is ownership, not a driver
+    on the laptop, so loopback peers do not count.
+    """
     ports: set[int] = set()
     for line in ss_output.splitlines():
         parts = line.split()
-        if len(parts) >= 3:
-            port = parts[2].rsplit(":", 1)[-1]
-            if port.isdigit():
-                ports.add(int(port))
+        if len(parts) < 4:
+            continue
+        peer = parts[3]
+        if peer.startswith(("127.", "[::1]", "[::ffff:127.")):
+            continue
+        port = parts[2].rsplit(":", 1)[-1]
+        if port.isdigit():
+            ports.add(int(port))
     return ports
 
 
