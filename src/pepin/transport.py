@@ -7,12 +7,16 @@ lerobot's motor bus wants a local tty path, so :class:`SerialBridge` uses
 
 from __future__ import annotations
 
+import logging
+import os
 import shutil
 import socket
 import subprocess
 import time
 from pathlib import Path
 from types import TracebackType
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = "pepin.local"
 SERVO_BUS_PORT = 3333
@@ -30,8 +34,9 @@ def ipv4_from_arp(mac: str = BOARD_MAC, arp_output: str | None = None) -> str | 
     """The IPv4 the LAN currently associates with ``mac``, from the ARP table, or None."""
     if arp_output is None:
         try:
+            # -n: no reverse DNS per entry; without it macOS takes ~5 s to print the table.
             arp_output = subprocess.run(
-                ["arp", "-a"], capture_output=True, text=True, timeout=5
+                ["arp", "-an"], capture_output=True, text=True, timeout=5
             ).stdout
         except (OSError, subprocess.SubprocessError):
             return None
@@ -41,39 +46,50 @@ def ipv4_from_arp(mac: str = BOARD_MAC, arp_output: str | None = None) -> str | 
             continue
         ip = line.split("(")[1].split(")")[0]
         found = line.split(" at ")[1].split()[0]
-        if ":" in found and _normalize_mac(found) == wanted:
-            return ip
+        try:
+            if ":" in found and _normalize_mac(found) == wanted:
+                return ip
+        except ValueError:
+            continue  # "(incomplete)" and other non-MAC tokens
     return None
 
 
-def board_address(host: str = DEFAULT_HOST, attempts: int = 4, pause_s: float = 1.0) -> str:
-    """Resolve the board to an IPv4 address once, with retries, and remember it.
+def board_address(host: str = DEFAULT_HOST, attempts: int = 2, pause_s: float = 1.0) -> str:
+    """Resolve the board to an IPv4 address once, fast paths first, and remember it.
 
-    mDNS on macOS is flaky: slow, "unknown host" for a while, or IPv6
-    link-local only — and a bare fe80:: address is useless to ssh and TCP
-    without an interface scope. So: IPv4 from the name, else IPv4 from the
-    ARP table by the board's MAC, else the cached last-known address.
+    Order: ``PEPIN_HOST`` in the environment (a typed IP wins), then the ARP
+    table by the board's MAC (the LAN's own word, instant), then the cached
+    last-known address, and only then mDNS — which on macOS is slow, answers
+    "unknown host" for a while after a reboot, or returns an IPv6 link-local
+    address that is useless to ssh and TCP. One session spent 44 s here.
     """
+    started = time.monotonic()
+
+    def remember(address: str, how: str) -> str:
+        _CACHE.parent.mkdir(parents=True, exist_ok=True)
+        _CACHE.write_text(address)
+        logger.info("board at %s via %s (%.1f s)", address, how, time.monotonic() - started)
+        return address
+
+    forced = os.environ.get("PEPIN_HOST")
+    if forced:
+        return remember(forced, "PEPIN_HOST")
+    from_arp = ipv4_from_arp()
+    if from_arp:
+        return remember(from_arp, "arp")
+    if _CACHE.exists():
+        cached = _CACHE.read_text().strip()
+        if cached and ":" not in cached:
+            return remember(cached, "cache")
     for _attempt in range(attempts):
         try:
             infos = socket.getaddrinfo(host, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
         except socket.gaierror:
             infos = []
-        addresses = [str(info[4][0]) for info in infos]
-        if not addresses:
-            from_arp = ipv4_from_arp()
-            if from_arp:
-                addresses = [from_arp]
-        if addresses:
-            _CACHE.parent.mkdir(parents=True, exist_ok=True)
-            _CACHE.write_text(addresses[0])
-            return addresses[0]
+        if infos:
+            return remember(str(infos[0][4][0]), "mdns")
         time.sleep(pause_s)
-    if _CACHE.exists():
-        cached = _CACHE.read_text().strip()
-        if cached and ":" not in cached:
-            return cached
-    raise ConnectionError(f"cannot resolve {host} to IPv4 and no cached address is known")
+    raise ConnectionError(f"cannot resolve {host}: not in ARP, no cache, mDNS silent")
 
 
 class SerialBridge:
