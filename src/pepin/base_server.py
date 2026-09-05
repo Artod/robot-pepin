@@ -235,6 +235,35 @@ def stop_on_sigterm() -> threading.Event:
     return stop
 
 
+def connect_bus(
+    host: str,
+    port: int,
+    motors: dict[str, int],
+    stop: threading.Event,
+    retry_s: float = 2.0,
+) -> FeetechTcpClient | None:
+    """Open the servo bus and check both wheels answer; keep trying until they do.
+
+    At boot ser2net, the USB adapter or the servo power may come up after us,
+    and a crash loop (systemd restarting a process that exits at once) is not a
+    state anyone can read. Returns None only when ``stop`` is set meanwhile.
+    """
+    attempt = 0
+    while not stop.is_set():
+        bus = FeetechTcpClient(host, port, motors, retries=1)
+        try:
+            bus.connect()
+            verify_motors(bus, [LEFT, RIGHT])
+            return bus
+        except (OSError, RuntimeError, ValueError) as exc:
+            bus.close()
+            attempt += 1
+            if attempt in (1, 5) or attempt % 30 == 0:  # first, then rarely: not a log flood
+                logger.warning("servo bus not ready (%s); retrying every %.0f s", exc, retry_s)
+            stop.wait(retry_s)
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Own the wheels on the board; serve them over TCP."
@@ -259,11 +288,14 @@ def main() -> None:
     for motor_id in range(first, last + 1):
         if motor_id not in motors.values():
             motors[f"servo{motor_id}"] = motor_id
-    with FeetechTcpClient(args.bus_host, args.bus_port, motors, retries=1) as bus:
-        verify_motors(bus, [LEFT, RIGHT])
+    stop = stop_on_sigterm()
+    bus = connect_bus(args.bus_host, args.bus_port, motors, stop)
+    if bus is None:
+        return  # stopped before the bus ever answered
+    with bus:
         core = BaseServerCore(bus, config, servo_names=list(motors), latency=bus.latency)
         server = JsonLinesServer(args.port, on_last_client_left={"cmd": "release"}).start()
-        serve(core, server, args.tick_hz, args.publish_hz, stop_on_sigterm())
+        serve(core, server, args.tick_hz, args.publish_hz, stop)
 
 
 if __name__ == "__main__":

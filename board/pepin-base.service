@@ -2,6 +2,8 @@
 Description=Pepin base server: wheels, odometry and deadman next to the UART (TCP 3336)
 After=ser2net.service network.target
 Requires=ser2net.service
+# Never give up restarting: the bus may be powered minutes after the board.
+StartLimitIntervalSec=0
 
 [Service]
 WorkingDirectory=/opt/pepin

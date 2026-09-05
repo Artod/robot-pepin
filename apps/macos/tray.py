@@ -7,6 +7,7 @@ the menu, so no AppKit call ever happens off the main thread.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import queue
 import shutil
@@ -18,6 +19,14 @@ from pathlib import Path
 from typing import Any
 
 import rumps
+from AppKit import (
+    NSColor,
+    NSFont,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
+    NSImage,
+    NSMutableAttributedString,
+)
 
 from pepin.health import HealthReport, Probe, run_health
 from pepin.log import setup_logging
@@ -28,7 +37,10 @@ LOGS_DIR = REPO_ROOT / "logs"
 UV = shutil.which("uv") or "/opt/homebrew/bin/uv"
 INTERVALS_S: tuple[int | None, ...] = (30, 60, None)
 IDLE_WAIT_S = 3600.0
-TITLE_OK, TITLE_WARN, TITLE_DEAD, TITLE_BUSY = "🤖", "🤖⚠", "🤖✕", "🤖…"
+# The status item is a monochrome template icon (an SF Symbol, so it matches the other
+# menu-bar items in either appearance); the title next to it is empty when all is well.
+ICON_SYMBOL = "cpu"
+TITLE_OK, TITLE_WARN, TITLE_DEAD, TITLE_BUSY = None, "⚠", "✕", "…"
 
 log = logging.getLogger("tray")
 
@@ -49,14 +61,30 @@ class Poll:
         return all(p.ok for p in self.report.probes if p.system == "board")
 
 
+def _noop(_sender: Any) -> None:
+    """Callback for informational lines: with none, macOS greys the line out as disabled."""
+
+
 def _line(text: str) -> Any:
-    """An informational menu line: no callback, so macOS greys it out."""
-    return rumps.MenuItem(text)
+    """An informational menu line in full-strength text (clicking it just closes the menu)."""
+    return rumps.MenuItem(text, callback=_noop)
 
 
-def _probe_line(probe: Probe) -> str:
-    """One probe as a menu line: ``✓ servo bus — all 10 answer``."""
-    return f"{'✓' if probe.ok else '✗'} {probe.system} — {probe.detail}"
+def _probe_line(probe: Probe) -> Any:
+    """One probe as a menu line: a green check or a red cross, then ``system — detail``."""
+    glyph = "✓" if probe.ok else "✗"
+    item = _line(f"{glyph} {probe.system} — {probe.detail}")
+    color = NSColor.systemGreenColor() if probe.ok else NSColor.systemRedColor()
+    title = NSMutableAttributedString.alloc().initWithString_(item.title)
+    title.addAttribute_value_range_(
+        NSFontAttributeName, NSFont.menuFontOfSize_(0), (0, len(item.title))
+    )
+    title.addAttribute_value_range_(
+        NSForegroundColorAttributeName, NSColor.labelColor(), (0, len(item.title))
+    )
+    title.addAttribute_value_range_(NSForegroundColorAttributeName, color, (0, len(glyph)))
+    item._menuitem.setAttributedTitle_(title)
+    return item
 
 
 def _vitals_lines(report: HealthReport) -> list[str]:
@@ -75,6 +103,7 @@ class TrayApp(rumps.App):
 
     def __init__(self) -> None:
         super().__init__("Pepin", title=TITLE_BUSY, quit_button=None)
+        self._use_symbol_icon(ICON_SYMBOL)
         self._results: queue.Queue[Poll] = queue.Queue()
         self._wake = threading.Event()
         self._interval_s: int | None = INTERVALS_S[0]
@@ -87,6 +116,20 @@ class TrayApp(rumps.App):
         threading.Thread(target=self._worker, name="health-poll", daemon=True).start()
         self._timer = rumps.Timer(self._drain, 1)
         self._timer.start()
+
+    def _use_symbol_icon(self, name: str) -> None:
+        """Status-bar icon from an SF Symbol as a template image (white on dark, black on light).
+
+        rumps only loads icons from files, so the NSImage is handed to it directly.
+        """
+        image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
+        if image is None:
+            log.warning("SF Symbol %r not available; keeping a text title", name)
+            return
+        image.setTemplate_(True)
+        self._icon_nsimage = image  # what rumps' icon setter would have produced from a file
+        with contextlib.suppress(AttributeError):  # not running yet: applied at start
+            self._nsapp.setStatusBarIcon()
 
     def _worker(self) -> None:
         """Poll loop: run on the interval or on demand, hand results to the queue."""
@@ -147,8 +190,8 @@ class TrayApp(rumps.App):
         self.menu.update(self._items(poll))
 
     @staticmethod
-    def _title_for(poll: Poll | None) -> str:
-        """One or two glyphs: polling, unreachable, degraded, or all go."""
+    def _title_for(poll: Poll | None) -> str | None:
+        """A glyph next to the icon: polling, unreachable, degraded — or nothing when all go."""
         if poll is None:
             return TITLE_BUSY
         if not poll.reachable:
@@ -159,7 +202,7 @@ class TrayApp(rumps.App):
         """The whole menu: header, probes, vitals, battery note, actions."""
         items: list[Any] = [_line(self._header(poll)), rumps.separator]
         if poll is not None and poll.report is not None:
-            items += [_line(_probe_line(p)) for p in poll.report.probes]
+            items += [_probe_line(p) for p in poll.report.probes]
             items += [rumps.separator, *(_line(text) for text in _vitals_lines(poll.report))]
         elif poll is not None:
             items += [_line(f"✗ board — {poll.error}"), rumps.separator]

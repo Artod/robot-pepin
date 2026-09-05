@@ -1,14 +1,16 @@
 %YAML 1.1
 ---
-# Pepin relay: raw TCP to serial bridges
+# Pepin relay: raw TCP to serial bridges.
+# nouucplock: ser2net is the only user of these devices; its UUCP lock files live on the
+# SD card, survive a power cut and locked ser2net out of its own port at the next boot.
 connection: &servo-bus
   accepter: tcp,3333
-  connector: serialdev,/dev/servo-bus,1000000n81,local
+  connector: serialdev(nouucplock),/dev/servo-bus,1000000n81,local
   options:
     kickolduser: true
 
 connection: &lidar
   accepter: tcp,3334
-  connector: serialdev,/dev/lidar,230400n81,local
+  connector: serialdev(nouucplock),/dev/lidar,230400n81,local
   options:
     kickolduser: true

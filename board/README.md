@@ -56,9 +56,13 @@ Notes that cost an evening each:
 
 - `tof-init.service` must not order itself after `multi-user.target` (it is wanted
   by it): that ordering cycle made systemd drop the ToF service at boot.
-- `/var/lock` is on the SD card on this image, so a UUCP lock file survives an
-  unclean shutdown and ser2net then refuses the serial port; the drop-in clears
-  stale locks before ser2net starts.
+- `/var/lock` is on the SD card on this image, so a UUCP lock file survives a
+  power cut and ser2net then refuses the serial port — once with its own pid in
+  the file, reused across the reboot ("Port in use by pid 1003"), which no
+  stale-lock check catches. `ser2net.yaml` disables the locks (`nouucplock`);
+  the drop-in still sweeps both lock styles before ser2net starts.
+- The base server waits for the servo bus instead of exiting: the servos may
+  be powered minutes after the board, and a crash loop is not a state.
 - `tof_init.sh` documents the pinctrl quirk: a released GPIO line keeps its last
   driven level, so XSHUT must be driven high explicitly.
 - The wifi power-save flag and the wifi chip's runtime power management are both
