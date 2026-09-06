@@ -1,0 +1,56 @@
+# robot_localization EKF: wheel odometry fused with the gyro, in the plane.
+#
+# Why: on carpet the wheels over-report rotation by 10-25% whenever the cart turns in place
+# (measured 2026-09-06 across three drives; it varies by direction and run, so no track-width
+# constant fixes it). Distance from the wheels is honest to 3%. So the wheels give x, y and
+# forward speed, the gyro gives the yaw rate, and the filter publishes odom -> base_link
+# instead of the base bridge doing so from the wheels alone (the bridge keeps publishing /odom).
+ekf_filter_node:
+  ros__parameters:
+    frequency: 20.0
+    sensor_timeout: 0.5
+    two_d_mode: true
+    publish_tf: true
+    publish_acceleration: false
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+    # /odom from the wheels: position and forward speed only; its yaw is the thing we distrust.
+    odom0: odom
+    odom0_config: [true, true, false,
+                   false, false, false,
+                   true, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+    # /imu/data_raw from the MPU6050: yaw rate. No orientation (the chip gives none), no
+    # accelerations (double-integrated they drift metres in seconds at our speeds).
+    imu0: imu/data_raw
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_remove_gravitational_acceleration: true
+    imu0_queue_size: 20
+    # Process noise: trust the gyro's yaw more than the wheels' (vyaw small), let x/y follow the wheels.
+    process_noise_covariance: [0.02, 0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.02, 0.0, 0.0, 0.0, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.1, 0.0, 0.0, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0, 0.1, 0.0, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0, 0.0, 0.1, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0, 0.0, 0.0, 0.03, 0.0,  0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.02, 0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.1, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0, 0.1, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0, 0.0, 0.1, 0.0, 0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0, 0.0, 0.0, 0.1, 0.0,  0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0,
+                               0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0, 0.0,  0.1, 0.0, 0.0,
+                               0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.1, 0.0,
+                               0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.1]

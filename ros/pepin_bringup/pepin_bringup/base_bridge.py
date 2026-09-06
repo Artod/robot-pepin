@@ -56,8 +56,10 @@ class BaseBridge(Node):
         resend_hz = float(self.declare_parameter("resend_hz", 5.0).value)  # deadman is 0.5 s
         # Hard ceiling for whatever arrives on /cmd_vel — teleop's q key ran the cart at 0.6 m/s
         # and slam_toolbox lost the map; the planner's limits live in nav2_params.yaml.
-        self._max_linear = float(self.declare_parameter("max_linear_m_s", 0.15).value)
+        self._max_linear = float(self.declare_parameter("max_linear_m_s", 0.25).value)
         self._max_angular = float(self.declare_parameter("max_angular_rad_s", 0.6).value)
+        # False when an EKF (robot_localization) owns odom -> base_link; /odom is still published.
+        self._publish_tf = bool(self.declare_parameter("publish_tf", True).value)
 
         self._pose_covariance = odometry_pose_covariance()
         self._twist_covariance = odometry_twist_covariance()
@@ -114,7 +116,8 @@ class BaseBridge(Node):
         transform.transform.translation.y = state.y
         transform.transform.rotation.z = qz
         transform.transform.rotation.w = qw
-        self._tf.sendTransform(transform)
+        if self._publish_tf:
+            self._tf.sendTransform(transform)
 
     def _on_twist(self, message: Twist) -> None:
         """A /cmd_vel message: down to the board now, and kept as what the resend repeats."""

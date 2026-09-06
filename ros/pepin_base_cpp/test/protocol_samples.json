@@ -1,0 +1,252 @@
+{
+  "note": "Generated from the real Python wire format; see scratch/gen_protocol_samples.py. Lines include their trailing newline: a C++ encoder must reproduce them byte for byte, and a C++ parser must produce the fields under 'parsed'.",
+  "requests": [
+    {
+      "name": "twist_forward",
+      "v": 0.15,
+      "w": 0.0,
+      "line": "{\"cmd\":\"twist\",\"v\":0.15,\"w\":0.0}\n"
+    },
+    {
+      "name": "twist_arc",
+      "v": 0.12,
+      "w": -0.25,
+      "line": "{\"cmd\":\"twist\",\"v\":0.12,\"w\":-0.25}\n"
+    },
+    {
+      "name": "twist_spin",
+      "v": 0.0,
+      "w": 0.6,
+      "line": "{\"cmd\":\"twist\",\"v\":0.0,\"w\":0.6}\n"
+    },
+    {
+      "name": "stop",
+      "line": "{\"cmd\":\"stop\"}\n"
+    }
+  ],
+  "states": [
+    {
+      "name": "idle",
+      "line": "{\"type\":\"state\",\"t\":1000.0,\"x\":0.0,\"y\":0.0,\"theta\":0.0,\"dl\":0.0,\"dr\":0.0,\"v\":0.0,\"w\":0.0,\"moving\":false,\"armed\":false,\"deadman\":false,\"bus_ok\":true,\"bus_p95_ms\":0.0}\n",
+      "parsed": {
+        "stamp_s": 1000.0,
+        "x": 0.0,
+        "y": 0.0,
+        "theta": 0.0,
+        "d_left_m": 0.0,
+        "d_right_m": 0.0,
+        "v": 0.0,
+        "w": 0.0,
+        "moving": false,
+        "armed": false,
+        "deadman": false,
+        "bus_ok": true,
+        "bus_p95_ms": 0.0
+      }
+    },
+    {
+      "name": "driving",
+      "line": "{\"type\":\"state\",\"t\":1000.6,\"x\":0.040016597897081695,\"y\":0.0008019448756254232,\"theta\":0.04007524808351237,\"dl\":0.030008499163012854,\"dr\":0.05004612320476904,\"v\":0.12,\"w\":-0.25,\"moving\":true,\"armed\":true,\"deadman\":false,\"bus_ok\":true,\"bus_p95_ms\":0.0}\n",
+      "parsed": {
+        "stamp_s": 1000.6,
+        "x": 0.040016597897081695,
+        "y": 0.0008019448756254232,
+        "theta": 0.04007524808351237,
+        "d_left_m": 0.030008499163012854,
+        "d_right_m": 0.05004612320476904,
+        "v": 0.12,
+        "w": -0.25,
+        "moving": true,
+        "armed": true,
+        "deadman": false,
+        "bus_ok": true,
+        "bus_p95_ms": 0.0
+      }
+    },
+    {
+      "name": "deadman",
+      "line": "{\"type\":\"state\",\"t\":1001.2,\"x\":0.040016597897081695,\"y\":0.0008019448756254232,\"theta\":0.04007524808351237,\"dl\":0.0,\"dr\":0.0,\"v\":0.0,\"w\":0.0,\"moving\":false,\"armed\":true,\"deadman\":true,\"bus_ok\":true,\"bus_p95_ms\":0.0}\n",
+      "parsed": {
+        "stamp_s": 1001.2,
+        "x": 0.040016597897081695,
+        "y": 0.0008019448756254232,
+        "theta": 0.04007524808351237,
+        "d_left_m": 0.0,
+        "d_right_m": 0.0,
+        "v": 0.0,
+        "w": 0.0,
+        "moving": false,
+        "armed": true,
+        "deadman": true,
+        "bus_ok": true,
+        "bus_p95_ms": 0.0
+      }
+    }
+  ],
+  "not_states": [
+    {
+      "name": "pong",
+      "line": "{\"type\":\"pong\",\"servos\":{\"left\":true}}\n",
+      "parsed": null
+    },
+    {
+      "name": "tof_line",
+      "line": "{\"t\":1.0,\"front\":300,\"left\":null}\n",
+      "parsed": null
+    },
+    {
+      "name": "truncated_state",
+      "line": "{\"type\":\"state\",\"t\":1.0,\"x\":0.0}\n",
+      "parsed": null
+    }
+  ],
+  "optional_bus_p95": {
+    "line": "{\"type\":\"state\",\"t\":1000.0,\"x\":0.0,\"y\":0.0,\"theta\":0.0,\"dl\":0.0,\"dr\":0.0,\"v\":0.0,\"w\":0.0,\"moving\":false,\"armed\":false,\"deadman\":false,\"bus_ok\":true}\n",
+    "parsed_bus_p95_ms": 0.0
+  },
+  "reader": [
+    {
+      "name": "split_across_chunks",
+      "chunks": [
+        "{\"type\":\"state\",\"t\":",
+        "1000.6,\"x\":0.0400165",
+        "97897081695,\"y\":0.0008019448756254232,\"theta\":0.04007524808351237,\"dl\":0.030008499163012854,\"dr\":0.05004612320476904,\"v\":0.12,\"w\":-0.25,\"moving\":true,\"armed\":true,\"deadman\":false,\"bus_ok\":true,\"bus_p95_ms\":0.0}\n"
+      ],
+      "objects": [
+        [],
+        [],
+        [
+          {
+            "type": "state",
+            "t": 1000.6,
+            "x": 0.040016597897081695,
+            "y": 0.0008019448756254232,
+            "theta": 0.04007524808351237,
+            "dl": 0.030008499163012854,
+            "dr": 0.05004612320476904,
+            "v": 0.12,
+            "w": -0.25,
+            "moving": true,
+            "armed": true,
+            "deadman": false,
+            "bus_ok": true,
+            "bus_p95_ms": 0.0
+          }
+        ]
+      ]
+    },
+    {
+      "name": "two_lines_and_a_half",
+      "chunks": [
+        "{\"a\":1}\n{\"a\":2}\n{\"a\":3",
+        "}\n"
+      ],
+      "objects": [
+        [
+          {
+            "a": 1
+          },
+          {
+            "a": 2
+          }
+        ],
+        [
+          {
+            "a": 3
+          }
+        ]
+      ]
+    },
+    {
+      "name": "garbage_between_objects",
+      "chunks": [
+        "not json\n[1,2]\n\"text\"\n\n{\"a\":1}\n"
+      ],
+      "objects": [
+        [
+          {
+            "a": 1
+          }
+        ]
+      ]
+    }
+  ],
+  "covariance": {
+    "pose": [
+      0.001,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.001,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.001,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.001,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.001,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.01
+    ],
+    "twist": [
+      0.001,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.001,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.001,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.001,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.001,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.01
+    ]
+  }
+}

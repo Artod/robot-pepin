@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 # ROS 2 Jazzy + Nav2 for the Orange Pi Zero 3 (arm64, Armbian Debian trixie host -> Ubuntu 24.04 inside).
 # Build on the board:  docker build -t pepin-ros ros/     Run: ros/run.sh
-FROM ros:jazzy-ros-base
+# Pinned by digest: a moved tag rebuilds every layer (an hour on this board) without warning.
+# Refresh on purpose: ssh root@10.0.0.187 docker image inspect ros:jazzy-ros-base --format '{{index .RepoDigests 0}}'
+FROM ros:jazzy-ros-base@sha256:2589a8fba5257307857890173c069852c2abf913a0be7970f172478baecb09e4
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -37,9 +39,18 @@ RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
     && cp build/ldlidar_component/libldlidar.so install/ldlidar_component/lib/ \
     && rm -rf /var/lib/apt/lists/* build log
 
-# Our bridge package (base server <-> /cmd_vel, /odom, TF; ToF -> Range).
+# Our bridge packages: the Python one (base server <-> /cmd_vel, /odom, TF; ToF -> Range) and
+# the C++ base bridge, same protocol at a tenth of the RAM (robot.launch.py picks one).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        nlohmann-json3-dev \
+        ros-jazzy-robot-localization \
+    && rm -rf /var/lib/apt/lists/*
 COPY pepin_bringup /ws/src/pepin_bringup
-RUN . /opt/ros/jazzy/setup.sh && colcon build --packages-select pepin_bringup \
+COPY pepin_base_cpp /ws/src/pepin_base_cpp
+RUN . /opt/ros/jazzy/setup.sh \
+    && colcon build --packages-select pepin_bringup pepin_base_cpp \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release \
     && rm -rf build log
 
 # Operator tools run inside the container (goal client, snapshots, latency probe).

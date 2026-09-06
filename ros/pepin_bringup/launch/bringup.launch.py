@@ -20,7 +20,11 @@ from launch.substitutions import LaunchConfiguration
 def generate_launch_description() -> LaunchDescription:
     launch_dir = os.path.join(get_package_share_directory("pepin_bringup"), "launch")
     robot = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(launch_dir, "robot.launch.py"))
+        PythonLaunchDescriptionSource(os.path.join(launch_dir, "robot.launch.py")),
+        launch_arguments={
+            "base_bridge_cpp": LaunchConfiguration("base_bridge_cpp"),
+            "imu": LaunchConfiguration("imu"),
+        }.items(),
     )
     nav = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(launch_dir, "nav.launch.py")),
@@ -34,6 +38,8 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("nav", default_value="false"),
             DeclareLaunchArgument("slam", default_value="false"),  # never together with nav
+            DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
+            DeclareLaunchArgument("imu", default_value="false"),
             robot,
             nav,
             slam,

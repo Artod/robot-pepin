@@ -30,6 +30,7 @@ Foxglove Studio  <-- ws 8765 -->  docker: foxglove_bridge, ldlidar_node -> laser
 | `ros/Dockerfile` | Jazzy base + nav2, nav2-bringup, slam-toolbox, foxglove-bridge, CycloneDDS; LD19 driver ([Myzhar/ldrobot-lidar-ros2](https://github.com/Myzhar/ldrobot-lidar-ros2)) built from source; our `pepin_bringup` |
 | `ros/run.sh` | `docker run` with host networking, the lidar device and `ros/maps`, `ros/params` mounted |
 | `ros/pepin_bringup/` | ament_python package: `base_bridge`, `tof_bridge`, launch files |
+| `ros/pepin_base_cpp/` | ament_cmake package: the same base bridge in C++ (`base_bridge_cpp:=true`), ~25 MB instead of ~190 MB |
 | `ros/params/` | Nav2 parameters for this cart (footprint, speeds, rates for a weak CPU) |
 | `ros/maps/` | Converted maps (`<name>.pgm` + `<name>.yaml`) |
 | `ros/tools/npz_to_map.py` | Our occupancy grid -> map_server format |

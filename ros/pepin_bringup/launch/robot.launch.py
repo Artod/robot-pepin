@@ -16,18 +16,26 @@ Arguments:
 - ``lidar_port`` (default /dev/lidar), ``lidar_debug`` (default false),
 - ``foxglove`` (default true) and ``foxglove_port`` (default 8765),
 - ``tof`` (default false): the ToF bridge, once Nav2 has a layer that reads it.
+- ``base_bridge_cpp`` (default false): run the C++ base bridge (``pepin_base_cpp``, ~25 MB)
+  instead of the Python one. Same node, parameters and wire protocol; the default flips
+  once it has driven the cart.
+- ``imu`` (default false): read the MPU6050 on /dev/i2c-2 inside the C++ bridge and publish
+  /imu/data_raw. Needs ``base_bridge_cpp:=true``; the Python bridge has no IMU.
 """
 
 import math
 
-from launch import LaunchContext, LaunchDescription
+from launch import Condition, LaunchContext, LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
 LASER_X, LASER_Y, LASER_Z = 0.005, 0.0, 0.20
+# The MPU6050 sits flat on the chassis over base_link, Z up and its X arrow forward:
+# no rotation, only the height of the deck it is glued to.
+IMU_X, IMU_Y, IMU_Z = 0.0, 0.0, 0.10
 HULL = {"min_x": -0.30, "max_x": 0.0625, "min_y": -0.275, "max_y": 0.275}
 
 
@@ -121,6 +129,38 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
             parameters=[{"autostart": True, "node_names": ["ldlidar_node"], "bond_timeout": 0.0}],
         ),
     ]
+    if LaunchConfiguration("imu").perform(context).lower() == "true":
+        components.append(
+            ComposableNode(
+                package="tf2_ros",
+                plugin="tf2_ros::StaticTransformBroadcasterNode",
+                name="base_to_imu",
+                parameters=[
+                    {
+                        "frame_id": "base_link",
+                        "child_frame_id": "imu_link",
+                        "translation.x": IMU_X,
+                        "translation.y": IMU_Y,
+                        "translation.z": IMU_Z,
+                        "rotation.x": 0.0,
+                        "rotation.y": 0.0,
+                        "rotation.z": 0.0,
+                        "rotation.w": 1.0,
+                    }
+                ],
+            )
+        )
+    if LaunchConfiguration("base_bridge_cpp").perform(context).lower() == "true":
+        imu_on = LaunchConfiguration("imu").perform(context).lower() == "true"
+        components.append(
+            ComposableNode(
+                package="pepin_base_cpp",
+                plugin="pepin::BaseBridge",
+                name="base_bridge",
+                # With the IMU the EKF owns odom -> base_link; the bridge then publishes /odom only.
+                parameters=[{"imu_enable": imu_on, "publish_tf": not imu_on}],
+            )
+        )
     if LaunchConfiguration("foxglove").perform(context).lower() == "true":
         components.append(
             ComposableNode(
@@ -142,9 +182,37 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
     return [container]
 
 
+def base_bridge(
+    package: str,
+    condition: Condition,
+    parameters: list | None = None,  # type: ignore[type-arg]
+) -> Node:
+    """The base bridge from ``package`` (the Python or the C++ build), niced above Nav2."""
+    return Node(
+        package=package,
+        executable="base_bridge",
+        output="screen",
+        prefix="nice -n -5",
+        parameters=parameters or [],
+        condition=condition,
+    )
+
+
 def generate_launch_description() -> LaunchDescription:
-    base = Node(
-        package="pepin_bringup", executable="base_bridge", output="screen", prefix="nice -n -5"
+    use_cpp = LaunchConfiguration("base_bridge_cpp")
+    base = base_bridge("pepin_bringup", UnlessCondition(use_cpp))
+    # Only the C++ bridge reads the IMU: the Python one has no such parameter.
+    imu = LaunchConfiguration("imu")
+    # Wheels + gyro fused in the plane (ros/params/ekf.yaml): the wheels over-report rotation
+    # on carpet, the gyro does not; the filter publishes odom -> base_link instead of the bridge.
+    ekf = Node(
+        package="robot_localization",
+        executable="ekf_node",
+        name="ekf_filter_node",
+        output="screen",
+        prefix="nice -n -5",
+        parameters=["/params/ekf.yaml"],
+        condition=IfCondition(imu),
     )
     # Off by default for now: a rclpy process costs ~140 MB and Nav2 does not read Range yet.
     tof = Node(
@@ -162,8 +230,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("foxglove", default_value="true"),
             DeclareLaunchArgument("foxglove_port", default_value="8765"),
             DeclareLaunchArgument("tof", default_value="false"),
+            DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
+            DeclareLaunchArgument("imu", default_value="false"),
             OpaqueFunction(function=sensors_container),
             base,
+            ekf,
             tof,
         ]
     )

@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>pepin_base_cpp</name>
+  <version>0.1.0</version>
+  <description>
+    C++ base bridge: the board's base server (wheel odometry out, twists in) as /odom,
+    the odom-&gt;base_link transform and a /cmd_vel sink. Same wire protocol, parameters and
+    behaviour as pepin_bringup's Python base_bridge, at a tenth of its memory — the board
+    is a 1.5 GB Orange Pi Zero 3 and every rclpy process costs ~190 MB there.
+  </description>
+  <maintainer email="gartod@gmail.com">Artem Belousov</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_components</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>nlohmann-json-dev</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
