@@ -1,9 +1,9 @@
 amcl:
   ros__parameters:
-    alpha1: 0.2
+    alpha1: 0.6  # rotation noise from rotation: the wheels over-report turns by 10-25% on carpet
     alpha2: 0.2
     alpha3: 0.2
-    alpha4: 0.2
+    alpha4: 0.4  # rotation noise from translation: one wheel slipping while driving straight
     alpha5: 0.2
     base_frame_id: "base_link"
     beam_skip_distance: 0.5
@@ -16,7 +16,7 @@ amcl:
     laser_max_range: 12.0
     laser_min_range: -1.0
     laser_model_type: "likelihood_field"
-    max_beams: 90
+    max_beams: 120
     max_particles: 1000
     min_particles: 300
     odom_frame_id: "odom"
@@ -31,9 +31,9 @@ amcl:
     save_pose_rate: 0.5
     sigma_hit: 0.15
     tf_broadcast: true
-    transform_tolerance: 2.0  # scans arrive 1-2 s late under load; better late than dropped
-    update_min_a: 0.2
-    update_min_d: 0.25
+    transform_tolerance: 0.5  # scans arrive within 0.03 s now; 2.0 let a stale pose pass as current
+    update_min_a: 0.05  # correct with the laser every 3 degrees, not every 11
+    update_min_d: 0.05  # and every 5 cm, not every 25: the wheels cannot be trusted for 25 cm
     # Sharper beam model than the defaults (z_hit 0.5 / z_rand 0.5): with half the weight on
     # 'random' the likelihood is flat and the pose drifted 0.5 m over a 5 m round trip.
     z_hit: 0.8
