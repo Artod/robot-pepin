@@ -8,8 +8,23 @@
 #   ros/goto.sh relocalize       whole-map search now (after a carry or a push)
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
+. "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
 case "${1:-}" in
-  where) exec ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh ros2 service call /where_am_i std_srvs/srv/Trigger" ;;
-  relocalize) exec ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh ros2 service call /relocalize std_srvs/srv/Trigger" ;;
+  where) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/call.py /where_am_i"; exit ;;
+  relocalize) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/call.py /relocalize 90"; exit ;;
 esac
-exec ssh -t "root@$BOARD" "docker exec -e PYTHONUNBUFFERED=1 pepin-ros /pepin_entrypoint.sh python3 /tools/goto_ros.py $*"
+# -t + -it: Ctrl-C travels through both ptys to goto_ros.py, which cancels the task on the board
+STAMP=$(date +%Y%m%d_%H%M%S)
+REC="/maps/rec/${STAMP}_goto.jsonl"
+finish() {  # everything recorded, always: the scans, odometry and AMCL poses of the goal, and the board log
+    watch_stop
+    ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f session_logger.py" 2>/dev/null || true
+    mkdir -p "$(dirname "$0")/maps/rec"
+    ssh "root@$BOARD" "docker logs --since 10m pepin-ros 2>&1" > "$(dirname "$0")/maps/rec/${STAMP}_goto_board.log" 2>/dev/null || true
+    rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.jsonl" "$(dirname "$0")/maps/rec/" 2>/dev/null || true
+    echo "recorded: ros/maps/rec/${STAMP}_goto.jsonl + _board.log"
+}
+trap finish EXIT
+ssh "root@$BOARD" "docker exec -d pepin-ros /pepin_entrypoint.sh python3 /tools/session_logger.py $REC"
+watch_start
+ssh -t "root@$BOARD" "docker exec -it -e PYTHONUNBUFFERED=1 pepin-ros /pepin_entrypoint.sh python3 /tools/goto_ros.py $*"

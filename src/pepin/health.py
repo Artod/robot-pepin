@@ -61,11 +61,27 @@ class HealthReport:
 
 
 SSH_TIMED_OUT = 124  # returncode _ssh reports when the command hung, like coreutils timeout(1)
+# One handshake per ten minutes instead of one per probe: sshd on the board takes ~3 s to accept a
+# session, and a health pass makes eight of them (measured 2026-09-06: 24 s -> ~4 s).
+SSH_MULTIPLEX = (
+    "-o", "ControlMaster=auto",
+    "-o", "ControlPath=/tmp/pepin-ssh-%C",
+    "-o", "ControlPersist=10m",
+)  # fmt: skip
 
 
 def _ssh(host: str, cmd: str, timeout: int = 15) -> subprocess.CompletedProcess[str]:
     """Run ``cmd`` on the board as root; a hung ssh comes back as returncode 124, never raises."""
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", f"root@{host}", cmd]
+    argv = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=6",
+        *SSH_MULTIPLEX,
+        f"root@{host}",
+        cmd,
+    ]
     try:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:

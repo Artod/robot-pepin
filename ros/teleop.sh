@@ -11,6 +11,7 @@
 # 0.15 m/s in the bridge no matter what q does. The base's deadman stops the wheels within 0.5 s.
 set -uo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
+. "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MAPNAME="${1:-}"
 TELEOP="docker exec -it pepin-ros /pepin_entrypoint.sh ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p speed:=0.12 -p turn:=0.5 -p repeat_rate:=5.0"

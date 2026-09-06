@@ -4,8 +4,11 @@
 # Usage: ros/sync.sh [--no-restart]
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
+. "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
 HERE="$(cd "$(dirname "$0")" && pwd)"
-rsync -a --delete --exclude '__pycache__' --exclude 'pepin_src' "$HERE/" "root@$BOARD:/root/pepin-ros/"
+# maps/rec and logs are written BY the board and fetched to the laptop; pushing them back would ship
+# hundreds of MB of camera video over WiFi onto the SD card (it did, 2026-09-06: a 4-minute sync).
+rsync -a --delete --exclude '__pycache__' --exclude 'pepin_src' --exclude 'maps/rec' --exclude 'logs' "$HERE/" "root@$BOARD:/root/pepin-ros/"
 ssh "root@$BOARD" "mkdir -p /root/pepin-ros/pepin_src/pepin"
 rsync -a --delete --exclude '__pycache__' "$HERE/../src/pepin/" "root@$BOARD:/root/pepin-ros/pepin_src/pepin/"
 if [ "${1:-}" != "--no-restart" ]; then

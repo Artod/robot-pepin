@@ -12,13 +12,18 @@ LIDAR="$(readlink -f /dev/lidar 2>/dev/null || echo /dev/ttyUSB0)"
 SITE=/ws/install/pepin_bringup/lib/python3.12/site-packages/pepin_bringup
 TTY=""
 [ -t 0 ] && TTY="-it"  # a terminal when run by hand; none under systemd
+I2C=""
+# The IMU (0x68) and the ToF sensors (0x30-0x32) share this bus; docker run refuses to start
+# when a --device is missing, so a board without it simply gets no bus.
+[ -e /dev/i2c-2 ] && I2C="--device /dev/i2c-2"
 # shellcheck disable=SC2086
 exec docker run --rm $TTY \
     --network host --ipc host --cap-add SYS_NICE \
-    --device "$LIDAR:/dev/lidar" \
+    --device "$LIDAR:/dev/lidar" $I2C \
     -v "$HERE/pepin_bringup/pepin_bringup:$SITE:ro" \
     -v "$HERE/pepin_bringup/launch:/ws/install/pepin_bringup/share/pepin_bringup/launch:ro" \
     -v "$HERE/tools:/tools:ro" \
+    -v "$HERE/entrypoint.sh:/pepin_entrypoint.sh:ro" \
     -v "$HERE/pepin_src:/ws/pepin_src:ro" \
     -v "$HERE/params:/params:ro" \
     -v "$HERE/maps:/maps" \

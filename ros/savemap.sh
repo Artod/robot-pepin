@@ -3,6 +3,7 @@
 # Usage: ros/savemap.sh NAME
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
+. "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
 NAME="${1:?map name}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 if ! ssh "root@$BOARD" "docker logs pepin-ros 2>&1 | grep -q 'slam_toolbox\]: Activating'"; then

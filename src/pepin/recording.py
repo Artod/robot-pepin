@@ -116,3 +116,55 @@ def scan_from_record(record: dict[str, Any]) -> LaserScan:
 def pose_from_record(record: dict[str, Any]) -> Pose2D:
     """Rebuild a :class:`Pose2D` from a ``pose`` record (meters, radians)."""
     return Pose2D(x=record["x"], y=record["y"], theta=record["theta"])
+
+
+def scan_record_from_ros(
+    stamp: float,
+    angle_min: float,
+    angle_increment: float,
+    ranges: list[float],
+    intensities: list[float],
+    range_min: float,
+    range_max: float,
+    scan_time: float,
+    *,
+    mount_yaw_rad: float,
+    mount_x_m: float,
+    hull: tuple[float, float, float] = (-0.30, 0.0625, 0.275),
+) -> dict[str, Any]:
+    """A ``scan`` record from the fields of a ROS ``sensor_msgs/LaserScan``.
+
+    The driver reports counter-clockwise angles for an upright sensor; ours hangs
+    upside down and turned by ``mount_yaw_rad``, so the robot-frame angle is
+    ``-a - yaw`` (verified: scan-to-map fit 0.62-0.67 against a map built by the
+    Python stack). Returns inside the cart's own hull (``hull`` = x_back, x_front,
+    half_width, around the sensor's ``mount_x_m``) are written as ``null``, like
+    the masked sectors of the old stack; NaN intensities become 0.
+    """
+    two_pi = 2.0 * math.pi
+    x_back, x_front, half_width = hull
+    angles: list[float] = []
+    out_ranges: list[float | None] = []
+    for i, r in enumerate(ranges):
+        robot = (-(angle_min + i * angle_increment) - mount_yaw_rad) % two_pi
+        angles.append(round(robot, 4))
+        ok = math.isfinite(r) and range_min < r < range_max
+        if ok:
+            x, y = mount_x_m + r * math.cos(robot), r * math.sin(robot)
+            if x_back <= x <= x_front and abs(y) <= half_width:
+                ok = False
+        out_ranges.append(round(r, 3) if ok else None)
+    n = len(intensities)
+    out_intensities = [
+        int(intensities[i]) if i < n and math.isfinite(intensities[i]) else 0
+        for i in range(len(ranges))
+    ]
+    speed = round(1.0 / scan_time, 2) if scan_time > 1e-3 else 10.0
+    return {
+        "t": stamp,
+        "topic": "scan",
+        "angles": angles,
+        "ranges": out_ranges,
+        "intensities": out_intensities,
+        "speed_rps": speed,
+    }

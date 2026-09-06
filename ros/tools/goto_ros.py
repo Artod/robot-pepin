@@ -78,6 +78,15 @@ def main() -> None:
             result, "FAILED"
         )
         print(f"result: {name} after {time.monotonic() - started:.0f} s")
+    except KeyboardInterrupt:
+        # The goal lives on the board's action server, not in this client: dying silently
+        # would leave Nav2 driving toward it (2026-09-05: Ctrl-C on the laptop, robot kept going).
+        print("\ninterrupted: cancelling the navigation task...", flush=True)
+        nav.cancelTask()
+        deadline = time.monotonic() + 5.0
+        while not nav.isTaskComplete() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        print("cancelled" if nav.isTaskComplete() else "cancel NOT confirmed — use ros/stop.sh")
     finally:
         nav.destroy_node()
         rclpy.shutdown()
