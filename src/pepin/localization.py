@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 # A rival global fix is a real twin only if the map denies it no more than this
 # share of the scan beyond the winner (about four beams of a 180-beam scan).
 TWIN_DENIAL_MARGIN = 0.02
+TWIN_PRIOR_RADIUS_M = 1.5  # a twin this close to the previous belief is the one we keep
 # Lost for this many scans in a row (about two seconds) and the local recovery has not
 # helped: search the whole map again, and again every so many scans after that.
 GLOBAL_RETRY_EVERY = 20
@@ -36,6 +37,7 @@ GLOBAL_RETRY_EVERY = 20
 # with headings this far apart: at 3 m a 5-degree error moves a point one coarse cell.
 GLOBAL_POOL_FACTOR = 4
 GLOBAL_THETA_STEP_DEG = 5.0
+GLOBAL_PEAKS = 8  # coarse peaks refined on the fine grid before the winner is chosen
 # A global fix must place most of the scan on cells the map knows: a pose outside the
 # walls, with a sliver of the scan on them and the rest in the unknown, is no fix at all.
 GLOBAL_MIN_KNOWN = 0.6
@@ -85,7 +87,7 @@ class Localizer:
         lost_after: int = 5,
         recovery_min_inliers: float = 0.6,
         relocalise_min_inliers: float = 0.5,  # mid-run: this flat's true pose scores 0.5-0.65
-        recovery_margin: float = 0.15,
+        recovery_margin: float = 0.08,
         recovery: SearchWindow | None = None,
         min_points: int = 50,
     ) -> None:
@@ -164,12 +166,21 @@ class Localizer:
         points: NDArray[np.float64],
         theta_step_deg: float = GLOBAL_THETA_STEP_DEG,
         thin_to: int = 120,
+        prior: Pose2D | None = None,
     ) -> tuple[MatchResult, float]:
         """Coarse-to-fine search over the whole grid: any position, any heading, once.
 
+        ``prior`` is where the robot was believed to be; when the scan fits two
+        places alike, the twin within ``TWIN_PRIOR_RADIUS_M`` of it wins instead
+        of refusing (2026-09-06: the base itself was refused for a 0.53 look-alike
+        six metres away while the belief sat on the base).
+
         The coarse pass uses a 0.2 m / 15 degree lattice on a thinned scan
-        (well under a second); its two best peaks are each refined with a
-        medium and then the tracking window. When the runner-up explains the
+        (well under a second); its best peaks (``GLOBAL_PEAKS``, well apart)
+        are each refined with a medium and then the tracking window, and the
+        fine results are ranked: a max-pooled grid over-scores speckle fields,
+        so the coarse winner is not trusted before the fine grid has spoken.
+        When the runner-up explains the
         scan nearly as well (within ``recovery_margin``) *and* the map denies
         it no more than the winner (no extra points on known-free floor), the
         scan fits two places — a symmetric room, look-alike rooms — and the fix
@@ -185,9 +196,10 @@ class Localizer:
             theta_deg=180.0,
             theta_step_deg=theta_step_deg,
         )
-        coarse, rival = self._coarse().match_two(centre, thinned, whole_map)
-        best, best_confidence = self.refine(coarse.pose, points)
-        second, second_confidence = self.refine(rival.pose, points)
+        peaks = self._coarse().match_top(centre, thinned, GLOBAL_PEAKS, whole_map)
+        refined = sorted((self.refine(peak.pose, points) for peak in peaks), key=lambda r: -r[1])
+        best, best_confidence = refined[0]
+        second, second_confidence = refined[1] if len(refined) > 1 else refined[0]
         apart = math.hypot(best.pose.x - second.pose.x, best.pose.y - second.pose.y) > 0.5 or abs(
             wrap_angle(best.pose.theta - second.pose.theta)
         ) > math.radians(30.0)
@@ -195,6 +207,23 @@ class Localizer:
         denied = self._matcher.contradiction_fraction(second.pose, points)
         denied_best = self._matcher.contradiction_fraction(best.pose, points)
         if apart and explains_alike and denied <= denied_best + TWIN_DENIAL_MARGIN:
+            if prior is not None:
+                near_best = math.hypot(best.pose.x - prior.x, best.pose.y - prior.y)
+                near_second = math.hypot(second.pose.x - prior.x, second.pose.y - prior.y)
+                if min(near_best, near_second) <= TWIN_PRIOR_RADIUS_M < max(near_best, near_second):
+                    chosen, chosen_confidence = (
+                        (best, best_confidence)
+                        if near_best < near_second
+                        else (second, second_confidence)
+                    )
+                    logger.info(
+                        "twins (%.2f vs %.2f); kept %s, %.1f m from the prior",
+                        best_confidence,
+                        second_confidence,
+                        chosen.pose,
+                        min(near_best, near_second),
+                    )
+                    return chosen, chosen_confidence
             logger.warning(
                 "the scan fits two places alike: %s (inliers %.2f, denied %.2f) and %s "
                 "(%.2f, %.2f); no fix without a start pose",

@@ -297,6 +297,44 @@ class CorrelativeMatcher:
             MatchResult(pose=rival_pose, score=rival_score, guess_score=guess_score),
         )
 
+    def match_top(
+        self,
+        guess: Pose2D,
+        points: NDArray[np.float64],
+        k: int,
+        window: SearchWindow | None = None,
+        apart_steps: int = 3,
+    ) -> list[MatchResult]:
+        """The ``k`` best candidates, each at least ``apart_steps`` lattice steps from the
+        ones before it (non-maximum suppression), best first.
+
+        A coarse lattice on a max-pooled grid over-scores clutter: a speckle field
+        looks like a wall to it. Refining several peaks instead of one lets the
+        fine grid, which sees the speckles for what they are, pick the real place.
+        """
+        window = window or self._window
+        pts = self._subsample(points)
+        scores, positions, headings = self._lattice(guess, pts, window)
+        guess_score = self.score(guess, pts)
+        mask = np.ones(scores.shape, dtype=bool)
+        peaks: list[MatchResult] = []
+        for _ in range(k):
+            if not mask.any():
+                break
+            pose, score = self._peak(scores, positions, headings, mask)
+            peaks.append(MatchResult(pose=pose, score=score, guess_score=guess_score))
+            near_xy = (
+                np.abs(positions - [pose.x, pose.y]).max(axis=1)
+                < apart_steps * window.xy_step_m - 1e-9
+            )
+            turned = headings - pose.theta
+            near_theta = (
+                np.abs(np.arctan2(np.sin(turned), np.cos(turned)))
+                < math.radians(apart_steps * window.theta_step_deg) - 1e-9
+            )
+            mask &= ~(near_theta[:, None] & near_xy[None, :])
+        return peaks
+
     def _lattice(
         self, guess: Pose2D, pts: NDArray[np.float64], window: SearchWindow
     ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:

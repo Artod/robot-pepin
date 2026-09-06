@@ -23,6 +23,7 @@ from numpy.typing import NDArray
 
 from pepin.mapping import OccupancyGrid
 
+MIN_OCCUPIED_NEIGHBOURS = 2  # an occupied cell needs this many occupied neighbours to be kept
 # Pixel values map_server reads as occupied / free / unknown in trinary mode.
 PGM_OCCUPIED = 0
 PGM_FREE = 254
@@ -53,11 +54,31 @@ class MapImage:
         return self.pixels.shape[1], self.pixels.shape[0]
 
 
+def despeckle(
+    occupied: NDArray[np.bool_], min_neighbours: int = MIN_OCCUPIED_NEIGHBOURS
+) -> NDArray[np.bool_]:
+    """Drop occupied cells with fewer than ``min_neighbours`` occupied 8-neighbours.
+
+    Walls and furniture are connected; the lone dots are phantom returns (rays
+    through a window, a person walking by). Left in, they stop the planner for
+    nothing and, max-pooled, they look like a solid wall to the whole-map search.
+    A one-cell-wide wall loses one cell at each tip; a price worth paying.
+    """
+    padded = np.pad(occupied.astype(np.int8), 1)
+    neighbours = sum(
+        padded[1 + dr : padded.shape[0] - 1 + dr, 1 + dc : padded.shape[1] - 1 + dc]
+        for dr in (-1, 0, 1)
+        for dc in (-1, 0, 1)
+        if (dr, dc) != (0, 0)
+    )
+    return occupied & (neighbours >= min_neighbours)
+
+
 def trinary(probability: NDArray[np.float64]) -> NDArray[np.uint8]:
     """Occupancy probabilities to the three map_server pixel values, rows unchanged."""
     pixels = np.full(probability.shape, PGM_UNKNOWN, dtype=np.uint8)
     pixels[probability <= FREE_PROBABILITY] = PGM_FREE
-    pixels[probability >= OCCUPIED_PROBABILITY] = PGM_OCCUPIED
+    pixels[despeckle(probability >= OCCUPIED_PROBABILITY)] = PGM_OCCUPIED
     return pixels
 
 

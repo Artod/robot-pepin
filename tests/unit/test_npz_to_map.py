@@ -22,6 +22,7 @@ REPO = Path(__file__).resolve().parents[2]
 RESOLUTION = 0.05
 X_MIN, Y_MIN = -1.0, -0.5
 OCCUPIED_CELL = (12, 26)  # (row, col) in grid order: row 0 is y_min
+WALL_ROWS = slice(11, 14)  # a lone occupied cell is speckle and gets dropped; a wall stays
 FREE_ROWS, FREE_COLS = slice(10, 13), slice(22, 25)
 UNKNOWN_CELL = (2, 2)
 MARGIN_CELLS = 10  # 0.5 m at 0.05 m/cell
@@ -43,10 +44,10 @@ tool = _load_tool()
 
 
 def _grid() -> OccupancyGrid:
-    """A 2.0 x 1.0 m grid with one occupied cell, a free block, unknown elsewhere."""
+    """A 2.0 x 1.0 m grid with a three-cell wall, a free block, unknown elsewhere."""
     grid = OccupancyGrid(GridSpec(RESOLUTION, X_MIN, Y_MIN, 2.0, 1.0))
     grid.log_odds[FREE_ROWS, FREE_COLS] = -5.0
-    grid.log_odds[OCCUPIED_CELL] = 5.0
+    grid.log_odds[WALL_ROWS, OCCUPIED_CELL[1]] = 5.0  # OCCUPIED_CELL is its middle cell
     return grid
 
 
@@ -128,3 +129,15 @@ def test_a_map_without_observations_is_not_cropped_away(tmp_path: Path) -> None:
     assert pixels.shape == (20, 40)
     assert (pixels == 205).all()
     assert yaml.safe_load(yaml_path.read_text())["origin"] == pytest.approx([X_MIN, Y_MIN, 0.0])
+
+
+def test_despeckle_drops_lone_cells_and_keeps_walls() -> None:
+    tool = _load_tool()
+    occupied = np.zeros((8, 8), dtype=bool)
+    occupied[1, 1] = True  # a phantom return on its own
+    occupied[4, 2:6] = True  # a wall segment
+    occupied[6, 6] = occupied[6, 7] = True  # a pair: one neighbour each, still speckle
+    kept = tool.despeckle(occupied)
+    assert kept[4, 3:5].all()  # the wall's body stays; its two tips (one neighbour each) erode
+    assert not kept[1, 1] and not kept[6, 6] and not kept[6, 7]
+    assert kept.sum() == 2
