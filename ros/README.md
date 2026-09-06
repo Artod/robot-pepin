@@ -16,7 +16,7 @@ What stays from the Python stack:
 
 ```
 laptop (Mac)                      board (Orange Pi Zero 3, 1.5 GB + zram)
-Foxglove Studio  <-- ws 8765 -->  docker: foxglove_bridge, ldlidar_node (/ldlidar_node/scan), base_bridge
+Foxglove Studio  <-- ws 8765 -->  docker: foxglove_bridge, ldlidar_node -> laser_filters box filter (/scan), base_bridge
                                           (/odom, tf), tof_bridge, Nav2 (amcl, costmaps,
                                           planner, controller, bt_navigator), slam_toolbox
                                   host:   pepin-base.service (:3336), pepin-tof.service (:3335),
@@ -34,6 +34,14 @@ Foxglove Studio  <-- ws 8765 -->  docker: foxglove_bridge, ldlidar_node (/ldlida
 | `ros/maps/` | Converted maps (`<name>.pgm` + `<name>.yaml`) |
 | `ros/tools/npz_to_map.py` | Our occupancy grid -> map_server format |
 
+## Iterate without rebuilding
+
+`ros/sync.sh` rsyncs `ros/` and `src/pepin` to the board and restarts the sensors container;
+`ros/nav.sh [MAP]` starts Nav2 inside it. The container mounts the code from the host (see
+`run.sh`), so Python nodes, launch files, params, maps and tools change in ~20 s. Only a
+Dockerfile change (apt packages, the C++ driver) needs `ros/build.sh`, which stops the container
+first and uses BuildKit's apt cache.
+
 ## Build and run (on the board)
 
 ```bash
@@ -47,13 +55,19 @@ ssh root@pepin.local '/root/pepin-ros/run.sh ros2 launch pepin_bringup nav.launc
 ```
 
 Laptop: install Foxglove Studio (`brew install --cask foxglove-studio`), open a connection
-to `ws://pepin.local:8765`, add the 3D panel with `/map`, `/ldlidar_node/scan`, `/tf`, the costmaps and
+to `ws://pepin.local:8765`, add the 3D panel with `/map`, `/scan`, `/tf`, the costmaps and
 `/plan`; send a goal with the "Publish" panel on `/goal_pose` (`geometry_msgs/PoseStamped`,
 frame `map`).
 
+## At boot
+
+`board/pepin-ros.service` starts the sensors container (`robot.launch.py`) after the base and ToF
+servers; Nav2 (`nav.launch.py`) is started on demand inside it. Build or rebuild the image with
+`ros/build.sh` (syncs `ros/` and `src/pepin` to the board).
+
 ## Bring-up checklist (in this order, each step visible in Foxglove)
 
-1. `robot.launch.py` alone: `/ldlidar_node/scan` at ~10 Hz, `/odom` at 20 Hz, TF `odom -> base_link -> laser`.
+1. `robot.launch.py` alone: `/scan` at ~10 Hz (the hull box filter's output), `/odom` at 20 Hz, TF `odom -> base_link -> laser`.
    Push the cart forward by hand: `/odom` x grows. Turn it left: theta grows.
 2. Laser orientation: a wall in front of the cart must draw at +x in `base_link`. Our lidar
    is mounted upside down and the LD19 counts angles clockwise; the static transform in the

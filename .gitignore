@@ -22,3 +22,5 @@ logs/
 
 # One-off analyses and probes (readable locally, never published)
 scratch/
+ros/pepin_src/
+ros/maps/rec/

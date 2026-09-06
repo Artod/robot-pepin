@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-colcon-common-extensions \
         git build-essential \
     && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-jazzy-laser-filters ros-jazzy-teleop-twist-keyboard \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /ws
 RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
         https://github.com/Myzhar/ldrobot-lidar-ros2.git src/ldrobot-lidar-ros2 \

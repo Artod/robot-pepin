@@ -143,18 +143,33 @@ def probe_board(host: str, report: HealthReport) -> Probe:
     return Probe("board", True, f"up {v.uptime}, cpu {temp}, {v.mem_free_mb} MB free")
 
 
+def ros_container_status(host: str) -> str | None:
+    """``docker ps`` status of the ROS 2 container (``Up 12 minutes``); None when not running."""
+    r = _ssh(host, "docker ps --filter name=pepin-ros --format '{{.Status}}' 2>/dev/null")
+    status = r.stdout.strip().splitlines()
+    return status[0] if status and status[0].startswith("Up") else None
+
+
 def probe_bridges(host: str) -> Probe:
-    """ser2net ports and the udev device names for the servo bus and the lidar."""
+    """The servo-bus bridge and both udev devices; the lidar bridge only when ROS does not own it.
+
+    On the ros2-nav2 branch the lidar tty belongs to the ROS container (a second reader
+    would split the byte stream), so ser2net serves :3333 alone and that is the healthy state.
+    """
     r = _ssh(
-        host, "ss -tln | grep -cE ':3333|:3334'; ls /dev/servo-bus /dev/lidar 2>/dev/null | wc -l"
+        host,
+        "ss -tln | grep -c ':3333'; ss -tln | grep -c ':3334'; "
+        "ls /dev/servo-bus /dev/lidar 2>/dev/null | wc -l",
     )
     parts = r.stdout.split()
-    ok = len(parts) == 2 and parts[0] == "2" and parts[1] == "2"
-    return Probe(
-        "bridges",
-        ok,
-        "ser2net 3333+3334, /dev/servo-bus + /dev/lidar" if ok else "port or device missing",
-    )
+    if len(parts) != 3 or parts[0] != "1" or parts[2] != "2":
+        return Probe("bridges", False, "servo-bus port or a device missing")
+    if parts[1] == "1":
+        return Probe("bridges", True, "ser2net 3333+3334, /dev/servo-bus + /dev/lidar")
+    ros = ros_container_status(host)
+    if ros is None:
+        return Probe("bridges", False, "lidar bridge off and no ROS container running")
+    return Probe("bridges", True, f"ser2net 3333; lidar owned by ROS ({ros.lower()})")
 
 
 def probe_servos(host: str) -> Probe:
@@ -213,6 +228,19 @@ def probe_lidar(host: str, seconds: float = 1.0) -> Probe:
     try:
         source = TcpSource(host, LIDAR_PORT, timeout_s=0.5)
     except OSError as exc:
+        ros = ros_container_status(host)
+        if ros is not None:
+            # The ROS driver holds the tty; check that it really does (one open fd on /dev/lidar).
+            fds = _ssh(
+                host, "docker exec pepin-ros sh -c 'ls -l /proc/*/fd 2>/dev/null | grep -c lidar'"
+            )
+            held = fds.stdout.strip().isdigit() and int(fds.stdout.strip()) >= 1
+            detail = (
+                f"driver in ROS container ({ros.lower()})"
+                if held
+                else "ROS container up, driver not holding the tty"
+            )
+            return Probe("lidar", held, detail)
         return Probe("lidar", False, str(exc)[:60])
     parser = FrameParser()
     deadline = time.monotonic() + seconds

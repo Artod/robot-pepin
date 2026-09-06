@@ -9,15 +9,15 @@ goes quiet for ``cmd_timeout_s`` we send one stop and shut up; the deadman is
 the real safety net, this is the polite version that does not rely on it.
 
 Nothing here can kill the node: the socket lives in :class:`JsonLineLink` on
-its own thread and reconnects forever, and state lines cross to the ROS thread
-through a queue, which is drained (and published) at 100 Hz.
+its own thread and reconnects forever. State lines are published straight from
+that reader thread (rclpy publishers are thread-safe): no queue, no drain timer,
+no CPU spent polling — on the board's A53 a 25 Hz Python timer alone cost a
+fifth of a core.
 """
 
 from __future__ import annotations
 
-import contextlib
 import math
-import queue
 import threading
 import time
 from typing import Any
@@ -39,8 +39,7 @@ from pepin_bringup.protocol import (
     parse_state,
 )
 
-_DRAIN_HZ = 25.0  # the ROS thread empties the state queue this often (states come at 20 Hz)
-_QUEUE_MAX = 200  # ~10 s of 20 Hz state; older ones are dropped if the executor ever stalls
+_STATUS_HZ = 2.0  # how often link up/down transitions are logged
 
 
 class BaseBridge(Node):
@@ -55,10 +54,13 @@ class BaseBridge(Node):
         self._base_frame = str(self.declare_parameter("base_frame", "base_link").value)
         self._cmd_timeout_s = float(self.declare_parameter("cmd_timeout_s", 0.5).value)
         resend_hz = float(self.declare_parameter("resend_hz", 5.0).value)  # deadman is 0.5 s
+        # Hard ceiling for whatever arrives on /cmd_vel — teleop's q key ran the cart at 0.6 m/s
+        # and slam_toolbox lost the map; the planner's limits live in nav2_params.yaml.
+        self._max_linear = float(self.declare_parameter("max_linear_m_s", 0.15).value)
+        self._max_angular = float(self.declare_parameter("max_angular_rad_s", 0.6).value)
 
         self._pose_covariance = odometry_pose_covariance()
         self._twist_covariance = odometry_twist_covariance()
-        self._states: queue.Queue[BaseState] = queue.Queue(maxsize=_QUEUE_MAX)
         self._lock = threading.Lock()
         self._command: tuple[float, float] | None = None
         self._command_at = 0.0
@@ -69,9 +71,9 @@ class BaseBridge(Node):
         self.create_subscription(Twist, "cmd_vel", self._on_twist, 10)
         self.create_subscription(TwistStamped, "cmd_vel_stamped", self._on_twist_stamped, 10)
 
-        self._link = JsonLineLink(host, port, self._enqueue_state, name="base server")
+        self._link = JsonLineLink(host, port, self._on_state_line, name="base server")
         self._link.start()
-        self.create_timer(1.0 / _DRAIN_HZ, self._publish_pending)
+        self.create_timer(1.0 / _STATUS_HZ, self._log_link_status)
         self.create_timer(1.0 / resend_hz, self._resend_command)
 
     def shutdown(self) -> None:
@@ -79,28 +81,11 @@ class BaseBridge(Node):
         self._link.send(encode_stop())
         self._link.stop()
 
-    def _enqueue_state(self, message: dict[str, Any]) -> None:
-        """Reader thread: hand a state line to the ROS thread; anything else (pong) is ignored."""
+    def _on_state_line(self, message: dict[str, Any]) -> None:
+        """Reader thread: publish a state line at once; anything else (a pong) is ignored."""
         state = parse_state(message)
-        if state is None:
-            return
-        try:
-            self._states.put_nowait(state)
-        except queue.Full:
-            with contextlib.suppress(queue.Empty):
-                self._states.get_nowait()  # the newest odometry is the one worth keeping
-            with contextlib.suppress(queue.Full):
-                self._states.put_nowait(state)
-
-    def _publish_pending(self) -> None:
-        """ROS thread: publish every state the reader queued, then report link changes."""
-        while True:
-            try:
-                state = self._states.get_nowait()
-            except queue.Empty:
-                break
+        if state is not None:
             self._publish_state(state)
-        self._log_link_status()
 
     def _publish_state(self, state: BaseState) -> None:
         """One state line as a nav_msgs/Odometry on /odom and an odom->base_link transform."""
@@ -140,7 +125,9 @@ class BaseBridge(Node):
         self._accept_command(message.twist.linear.x, message.twist.angular.z)
 
     def _accept_command(self, v: float, w: float) -> None:
-        """Forward a twist immediately and remember it until it goes stale."""
+        """Forward a twist at once (clamped to the ceiling); remember it until it goes stale."""
+        v = max(-self._max_linear, min(self._max_linear, v))
+        w = max(-self._max_angular, min(self._max_angular, w))
         with self._lock:
             self._command = (v, w)
             self._command_at = time.monotonic()

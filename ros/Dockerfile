@@ -1,9 +1,11 @@
+# syntax=docker/dockerfile:1
 # ROS 2 Jazzy + Nav2 for the Orange Pi Zero 3 (arm64, Armbian Debian trixie host -> Ubuntu 24.04 inside).
 # Build on the board:  docker build -t pepin-ros ros/     Run: ros/run.sh
 FROM ros:jazzy-ros-base
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-navigation2 \
         ros-jazzy-nav2-bringup \
         ros-jazzy-slam-toolbox \
@@ -13,6 +15,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-rqt-graph \
         python3-colcon-common-extensions \
         git build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Scan filtering: the lidar sees the cart's own rear posts; a box filter over the hull removes
+# them once for every consumer (costmaps clear the footprint anyway, the collision monitor does not).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        ros-jazzy-laser-filters ros-jazzy-teleop-twist-keyboard \
     && rm -rf /var/lib/apt/lists/*
 
 # LD19 lidar driver (maintained fork; the vendor's is unmaintained), built from source.
@@ -32,6 +41,13 @@ RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
 COPY pepin_bringup /ws/src/pepin_bringup
 RUN . /opt/ros/jazzy/setup.sh && colcon build --packages-select pepin_bringup \
     && rm -rf build log
+
+# Operator tools run inside the container (goal client, snapshots, latency probe).
+COPY tools /tools
+# Our pure-numpy localisation library (the whole-map search the relocalizer uses); ros/build.sh
+# copies src/pepin here before building.
+COPY pepin_src /ws/pepin_src
+ENV PYTHONPATH=/ws/pepin_src
 
 ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ENV ROS_DOMAIN_ID=7

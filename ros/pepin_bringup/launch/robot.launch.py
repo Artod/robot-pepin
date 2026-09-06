@@ -1,92 +1,157 @@
-"""Sensors and bridges: lidar, base (odom + cmd_vel), ToF, static transforms, Foxglove bridge.
+"""Sensors and bridges in as few processes as the board can afford.
 
-Nothing here plans or moves the robot on its own; it is the layer every other
-launch file (Nav2, SLAM) sits on. Arguments:
+One component container (high CPU priority) holds the LD19 driver, the hull
+box filter that turns its scan into /scan, the static base_link->laser
+transform, the lifecycle manager that activates the driver, and the Foxglove
+bridge. A separate Python process runs ``base_bridge`` (odometry, TF, /cmd_vel
+to the wheels). Every extra ROS process costs ~140 MB on this 1.5 GB board, so
+composition is not a nicety here.
 
-- ``laser_roll`` (default pi): our LD19 hangs upside down; the driver emits a
+Arguments:
+
+- ``laser_roll`` (default pi): the LD19 hangs upside down; the driver emits a
   standard counter-clockwise scan for an upright sensor, so a roll of pi mirrors
   it back. If a wall in front of the cart draws mirrored left/right, pass 0.0.
 - ``laser_yaw`` (default -1.5272 rad = -87.5 deg, from config/lidar.json).
-- ``lidar_port`` (default /dev/lidar), ``foxglove_port`` (default 8765),
-  ``lidar_debug`` (default false: the driver logs every frame when true).
+- ``lidar_port`` (default /dev/lidar), ``lidar_debug`` (default false),
+- ``foxglove`` (default true) and ``foxglove_port`` (default 8765),
+- ``tof`` (default false): the ToF bridge, once Nav2 has a layer that reads it.
 """
 
-from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+import math
+
+from launch import LaunchContext, LaunchDescription
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
-LASER_X, LASER_Y, LASER_Z = "0.005", "0.0", "0.20"
+LASER_X, LASER_Y, LASER_Z = 0.005, 0.0, 0.20
+HULL = {"min_x": -0.30, "max_x": 0.0625, "min_y": -0.275, "max_y": 0.275}
 
 
-def generate_launch_description() -> LaunchDescription:
-    laser_roll = LaunchConfiguration("laser_roll")
-    laser_yaw = LaunchConfiguration("laser_yaw")
-    lidar_port = LaunchConfiguration("lidar_port")
-    foxglove_port = LaunchConfiguration("foxglove_port")
+def quaternion(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
+    """x, y, z, w of the rotation Rz(yaw) Ry(pitch) Rx(roll)."""
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    return (
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    )
 
-    # The driver ships as a composable lifecycle component, not an executable.
-    lidar = ComposableNodeContainer(
-        name="ldlidar_container",
+
+def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
+    """Build the container once the launch arguments have values (the quaternion needs numbers)."""
+    roll = float(LaunchConfiguration("laser_roll").perform(context))
+    yaw = float(LaunchConfiguration("laser_yaw").perform(context))
+    qx, qy, qz, qw = quaternion(roll, 0.0, yaw)
+    debug = LaunchConfiguration("lidar_debug").perform(context).lower() == "true"
+    port = int(LaunchConfiguration("foxglove_port").perform(context))
+    components = [
+        ComposableNode(
+            package="ldlidar_component",
+            plugin="ldlidar::LdLidarComponent",
+            name="ldlidar_node",
+            parameters=[
+                {
+                    "general.debug_mode": debug,
+                    "comm.serial_port": LaunchConfiguration("lidar_port").perform(context),
+                    "comm.baudrate": 230400,
+                    "comm.timeout_msec": 1000,
+                    "lidar.model": "LD19",
+                    "lidar.rot_verse": "CCW",
+                    "lidar.units": "M",
+                    "lidar.frame_id": "laser",
+                    "lidar.bins": 455,  # fixed size: slam_toolbox wants it
+                    "lidar.range_min": 0.05,
+                    "lidar.range_max": 12.0,
+                    "lidar.enable_angle_crop": False,
+                }
+            ],
+            # No remap on the driver: it gates publishing on count_subscribers() of its own
+            # topic name. The filter below subscribes to it and republishes /scan.
+            extra_arguments=[{"use_intra_process_comms": False}],
+        ),
+        ComposableNode(
+            package="laser_filters",
+            plugin="ScanToScanFilterChain",
+            name="scan_filter",
+            parameters=[
+                {
+                    "filter1.name": "hull",
+                    "filter1.type": "laser_filters/LaserScanBoxFilter",
+                    "filter1.params.box_frame": "base_link",
+                    "filter1.params.min_x": HULL["min_x"],
+                    "filter1.params.max_x": HULL["max_x"],
+                    "filter1.params.min_y": HULL["min_y"],
+                    "filter1.params.max_y": HULL["max_y"],
+                    "filter1.params.min_z": -1.0,
+                    "filter1.params.max_z": 1.0,
+                    "filter1.params.invert": False,
+                }
+            ],
+            remappings=[("scan", "/ldlidar_node/scan"), ("scan_filtered", "/scan")],
+        ),
+        ComposableNode(
+            package="tf2_ros",
+            plugin="tf2_ros::StaticTransformBroadcasterNode",
+            name="base_to_laser",
+            parameters=[
+                {
+                    "frame_id": "base_link",
+                    "child_frame_id": "laser",
+                    "translation.x": LASER_X,
+                    "translation.y": LASER_Y,
+                    "translation.z": LASER_Z,
+                    "rotation.x": qx,
+                    "rotation.y": qy,
+                    "rotation.z": qz,
+                    "rotation.w": qw,
+                }
+            ],
+        ),
+        ComposableNode(
+            package="nav2_lifecycle_manager",
+            plugin="nav2_lifecycle_manager::LifecycleManager",
+            name="lifecycle_manager_sensors",
+            parameters=[{"autostart": True, "node_names": ["ldlidar_node"], "bond_timeout": 0.0}],
+        ),
+    ]
+    if LaunchConfiguration("foxglove").perform(context).lower() == "true":
+        components.append(
+            ComposableNode(
+                package="foxglove_bridge",
+                plugin="foxglove_bridge::FoxgloveBridge",
+                name="foxglove_bridge",
+                parameters=[{"port": port, "send_buffer_limit": 10000000}],
+            )
+        )
+    container = ComposableNodeContainer(
+        name="sensors_container",
         namespace="",
         package="rclcpp_components",
         executable="component_container_isolated",
         output="screen",
-        composable_node_descriptions=[
-            ComposableNode(
-                package="ldlidar_component",
-                plugin="ldlidar::LdLidarComponent",
-                name="ldlidar_node",
-                parameters=[
-                    {
-                        "general.debug_mode": LaunchConfiguration("lidar_debug"),
-                        "comm.serial_port": lidar_port,
-                        "comm.baudrate": 230400,
-                        "comm.timeout_msec": 1000,
-                        "lidar.model": "LD19",
-                        "lidar.rot_verse": "CCW",
-                        "lidar.units": "M",
-                        "lidar.frame_id": "laser",
-                        "lidar.bins": 455,  # fixed size: slam_toolbox wants it
-                        "lidar.range_min": 0.05,
-                        "lidar.range_max": 12.0,
-                        "lidar.enable_angle_crop": False,
-                    }
-                ],
-                # No remap: the driver gates publishing on count_subscribers() of its own
-                # topic name, and a remapped name left it convinced nobody listens. Nav2 is
-                # pointed at /ldlidar_node/scan in ros/params/nav2_params.yaml instead.
-                extra_arguments=[{"use_intra_process_comms": False}],
-            )
-        ],
+        prefix="nice -n -10",  # sensing first: a starved driver ships scans seconds late
+        composable_node_descriptions=components,
     )
-    # The driver is a lifecycle node: this brings it to active and keeps it there.
-    lidar_manager = Node(
-        package="nav2_lifecycle_manager",
-        executable="lifecycle_manager",
-        name="lifecycle_manager_sensors",
+    return [container]
+
+
+def generate_launch_description() -> LaunchDescription:
+    base = Node(
+        package="pepin_bringup", executable="base_bridge", output="screen", prefix="nice -n -5"
+    )
+    # Off by default for now: a rclpy process costs ~140 MB and Nav2 does not read Range yet.
+    tof = Node(
+        package="pepin_bringup",
+        executable="tof_bridge",
         output="screen",
-        parameters=[{"autostart": True, "node_names": ["ldlidar_node"], "bond_timeout": 0.0}],
-    )
-    base = Node(package="pepin_bringup", executable="base_bridge", output="screen")
-    tof = Node(package="pepin_bringup", executable="tof_bridge", output="screen")
-    laser_tf = Node(
-        package="tf2_ros",
-        executable="static_transform_publisher",
-        name="base_to_laser",
-        arguments=[
-            *("--x", LASER_X, "--y", LASER_Y, "--z", LASER_Z),
-            *("--roll", laser_roll, "--pitch", "0.0", "--yaw", laser_yaw),
-            *("--frame-id", "base_link", "--child-frame-id", "laser"),
-        ],
-    )
-    foxglove = Node(
-        package="foxglove_bridge",
-        executable="foxglove_bridge",
-        name="foxglove_bridge",
-        output="screen",
-        parameters=[{"port": foxglove_port, "send_buffer_limit": 10000000}],
+        condition=IfCondition(LaunchConfiguration("tof")),
     )
     return LaunchDescription(
         [
@@ -94,12 +159,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("laser_yaw", default_value="-1.5272"),
             DeclareLaunchArgument("lidar_port", default_value="/dev/lidar"),
             DeclareLaunchArgument("lidar_debug", default_value="false"),
+            DeclareLaunchArgument("foxglove", default_value="true"),
             DeclareLaunchArgument("foxglove_port", default_value="8765"),
-            lidar,
-            lidar_manager,
+            DeclareLaunchArgument("tof", default_value="false"),
+            OpaqueFunction(function=sensors_container),
             base,
             tof,
-            laser_tf,
-            foxglove,
         ]
     )

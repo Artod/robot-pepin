@@ -29,6 +29,7 @@ talk to the servo bus directly (`scripts/base_smoke.py`, `jog.py`,
 | `board/tof-init.service` | `/etc/systemd/system/tof-init.service` |
 | `board/pepin-tof.service` | `/etc/systemd/system/pepin-tof.service` |
 | `board/pepin-base.service` | `/etc/systemd/system/pepin-base.service` |
+| `board/pepin-ros.service` | `/etc/systemd/system/pepin-ros.service` (branch ros2-nav2: the ROS container at boot) |
 | `board/ser2net-stale-locks.conf` | `/etc/systemd/system/ser2net.service.d/stale-locks.conf` |
 | `board/wifi-runtime-pm-on.conf` | `/etc/systemd/system/wifi-powersave-off.service.d/runtime-pm-on.conf` |
 | `src/pepin/` (the package, stdlib only on the board) | `/opt/pepin/pepin/` |

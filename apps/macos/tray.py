@@ -12,6 +12,7 @@ import queue
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -33,13 +34,15 @@ from pepin.transport import board_address
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOGS_DIR = REPO_ROOT / "logs"
 UV = shutil.which("uv") or "/opt/homebrew/bin/uv"
-INTERVALS_S: tuple[int | None, ...] = (30, 60, None)
-IDLE_WAIT_S = 3600.0
+# Adaptive polling: every 30 s for the first minutes after start or after a manual refresh
+# (the robot is being brought up, things change), then every 5 minutes. The menu keeps the
+# last report with its time stamp; "Refresh now" polls at once and goes back to the fast cadence.
+FAST_S, SLOW_S, FAST_FOR_S = 30.0, 300.0, 300.0
 # The status item is a monochrome template icon (a robot head drawn black on transparent;
 # macOS renders it white or black to match the other items); the title next to it is
 # empty when all is well.
 ICON = Path(__file__).with_name("icon_template.png")
-TITLE_OK, TITLE_WARN, TITLE_DEAD, TITLE_BUSY = None, "⚠", "✕", "…"
+TITLE_OK, TITLE_WARN, TITLE_DEAD = None, "⚠", "✕"  # polling shows inside the menu, not in the bar
 
 log = logging.getLogger("tray")
 
@@ -101,10 +104,10 @@ class TrayApp(rumps.App):
     """Menu-bar app showing the last health report and offering a manual refresh."""
 
     def __init__(self) -> None:
-        super().__init__("Pepin", title=TITLE_BUSY, icon=str(ICON), template=True, quit_button=None)
+        super().__init__("Pepin", title=None, icon=str(ICON), template=True, quit_button=None)
         self._results: queue.Queue[Poll] = queue.Queue()
         self._wake = threading.Event()
-        self._interval_s: int | None = INTERVALS_S[0]
+        self._fast_until = time.monotonic() + FAST_FOR_S
         self._forced = False
         self._polling = True
         self._host: str | None = None
@@ -119,15 +122,14 @@ class TrayApp(rumps.App):
         """Poll loop: run on the interval or on demand, hand results to the queue."""
         while True:
             self._wake.clear()
-            if self._interval_s is not None or self._forced:
-                self._forced = False
-                self._polling = True
-                try:
-                    result = self._poll_once()
-                finally:
-                    self._polling = False  # cleared before the result lands, so the title updates
-                self._results.put(result)
-            self._wake.wait(self._interval_s if self._interval_s is not None else IDLE_WAIT_S)
+            self._forced = False
+            self._polling = True
+            try:
+                result = self._poll_once()
+            finally:
+                self._polling = False  # cleared before the result lands, so the menu updates
+            self._results.put(result)
+            self._wake.wait(FAST_S if time.monotonic() < self._fast_until else SLOW_S)
 
     def _poll_once(self) -> Poll:
         """Resolve the board address if it is not known yet, then run the quick health tier."""
@@ -160,8 +162,8 @@ class TrayApp(rumps.App):
             if latest is not None:
                 self._show(latest)
                 self._notify(latest)
-            elif self._polling:
-                self.title = TITLE_BUSY
+            elif self._polling and self._last is not None:
+                self._show(self._last)  # same report, header says a refresh is in flight
         except Exception:
             # The rumps timer keeps ticking; a menu-building bug must be visible in the log.
             log.exception("menu update failed")
@@ -177,7 +179,7 @@ class TrayApp(rumps.App):
     def _title_for(poll: Poll | None) -> str | None:
         """A glyph next to the icon: polling, unreachable, degraded — or nothing when all go."""
         if poll is None:
-            return TITLE_BUSY
+            return None
         if not poll.reachable:
             return TITLE_DEAD
         return TITLE_OK if poll.report is not None and poll.report.all_go else TITLE_WARN
@@ -192,12 +194,11 @@ class TrayApp(rumps.App):
             items += [_line(f"✗ board — {poll.error}"), rumps.separator]
         return [*items, _line("Battery: no sensor"), rumps.separator, *self._actions()]
 
-    @staticmethod
-    def _header(poll: Poll | None) -> str:
+    def _header(self, poll: Poll | None) -> str:
         """``Pepin · ALL GO (12.3s) · updated 12:34:56`` and its NO GO / unreachable variants."""
         if poll is None:
-            return "Pepin · polling…"
-        stamp = f"updated {poll.at:%H:%M:%S}"
+            return "Pepin · first poll running…"
+        stamp = f"updated {poll.at:%H:%M:%S}" + (" · refreshing…" if self._polling else "")
         if poll.report is None:
             return f"Pepin · UNREACHABLE · {stamp}"
         if poll.report.all_go:
@@ -206,10 +207,10 @@ class TrayApp(rumps.App):
 
     def _actions(self) -> list[Any]:
         """Refresh, poll interval, dashboard, logs, quit."""
-        every = "off" if self._interval_s is None else f"{self._interval_s} s"
+        cadence = "30 s" if time.monotonic() < self._fast_until else "5 min"
         return [
             rumps.MenuItem("Refresh now", callback=self._on_refresh),
-            rumps.MenuItem(f"Poll every: {every}", callback=self._on_interval),
+            _line(f"Polling every {cadence} (30 s for 5 min after start or a refresh)"),
             rumps.MenuItem("Open dashboard", callback=self._on_dashboard),
             rumps.MenuItem("Open logs folder", callback=self._on_logs),
             rumps.separator,
@@ -233,17 +234,9 @@ class TrayApp(rumps.App):
         self._was_all_go = all_go
 
     def _on_refresh(self, _sender: Any) -> None:
-        """Ask the worker for a poll right now."""
+        """Poll right now and go back to the fast cadence for a while."""
         self._forced = True
-        self.title = TITLE_BUSY
-        self._wake.set()
-
-    def _on_interval(self, _sender: Any) -> None:
-        """Cycle the poll interval 30 s -> 60 s -> off and poll once on the new setting."""
-        index = INTERVALS_S.index(self._interval_s)
-        self._interval_s = INTERVALS_S[(index + 1) % len(INTERVALS_S)]
-        log.info("poll interval set to %s", self._interval_s)
-        self._show(self._last)
+        self._fast_until = time.monotonic() + FAST_FOR_S
         self._wake.set()
 
     def _on_dashboard(self, _sender: Any) -> None:

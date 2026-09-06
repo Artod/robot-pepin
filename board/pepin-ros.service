@@ -1,0 +1,23 @@
+[Unit]
+Description=Pepin ROS 2 stack (sensors, bridges, Foxglove; Nav2 started separately) in Docker
+After=docker.service pepin-base.service pepin-tof.service
+Requires=docker.service
+Wants=pepin-base.service pepin-tof.service
+
+[Service]
+# PEPIN_NAV=true in /etc/default/pepin-ros starts Nav2 at boot too (one launch process for both).
+EnvironmentFile=-/etc/default/pepin-ros
+Environment=PEPIN_NAV=false
+Environment=PEPIN_SLAM=false
+Environment=PEPIN_MAP=/maps/20260903_182653_lap3_loop.yaml
+# One container per boot; --rm so a stale one never blocks the name. The image is built by ros/build.sh.
+ExecStartPre=-/usr/bin/docker rm -f pepin-ros
+# run.sh mounts the code from /root/pepin-ros (see it): edits reach the robot via ros/sync.sh, no rebuild.
+ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} map:=${PEPIN_MAP}
+ExecStop=/usr/bin/docker stop -t 5 pepin-ros
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

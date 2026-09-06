@@ -149,7 +149,7 @@ class Localizer:
         confidence = self._matcher.inlier_fraction(fine.pose, points)
         if confidence < self._recovery_min_inliers and global_fallback:
             logger.info("start fits poorly (inliers %.2f); searching the whole map", confidence)
-            fine, confidence = self._global_search(points)
+            fine, confidence = self.global_search(points)
         if confidence >= self._recovery_min_inliers:
             logger.info("initial fix %s, inliers %.2f", fine.pose, confidence)
             self.pose = fine.pose
@@ -159,7 +159,12 @@ class Localizer:
         self.confidence = confidence
         return confidence
 
-    def _global_search(self, points: NDArray[np.float64]) -> tuple[MatchResult, float]:
+    def global_search(
+        self,
+        points: NDArray[np.float64],
+        theta_step_deg: float = GLOBAL_THETA_STEP_DEG,
+        thin_to: int = 120,
+    ) -> tuple[MatchResult, float]:
         """Coarse-to-fine search over the whole grid: any position, any heading, once.
 
         The coarse pass uses a 0.2 m / 15 degree lattice on a thinned scan
@@ -173,16 +178,16 @@ class Localizer:
         """
         spec = self._grid.spec
         centre = Pose2D(spec.x_min_m + spec.width_m / 2, spec.y_min_m + spec.height_m / 2, 0.0)
-        thinned = points[:: max(1, len(points) // 120)]
+        thinned = points[:: max(1, len(points) // thin_to)]
         whole_map = SearchWindow(
             xy_m=max(spec.width_m, spec.height_m) / 2,
             xy_step_m=spec.resolution_m * GLOBAL_POOL_FACTOR,
             theta_deg=180.0,
-            theta_step_deg=GLOBAL_THETA_STEP_DEG,
+            theta_step_deg=theta_step_deg,
         )
         coarse, rival = self._coarse().match_two(centre, thinned, whole_map)
-        best, best_confidence = self._refine(coarse.pose, points)
-        second, second_confidence = self._refine(rival.pose, points)
+        best, best_confidence = self.refine(coarse.pose, points)
+        second, second_confidence = self.refine(rival.pose, points)
         apart = math.hypot(best.pose.x - second.pose.x, best.pose.y - second.pose.y) > 0.5 or abs(
             wrap_angle(best.pose.theta - second.pose.theta)
         ) > math.radians(30.0)
@@ -202,7 +207,7 @@ class Localizer:
         )  # fmt: skip
         return best, best_confidence
 
-    def _refine(self, pose: Pose2D, points: NDArray[np.float64]) -> tuple[MatchResult, float]:
+    def refine(self, pose: Pose2D, points: NDArray[np.float64]) -> tuple[MatchResult, float]:
         """A coarse candidate sharpened with a medium and then the tracking window."""
         medium = SearchWindow(xy_m=0.3, xy_step_m=0.05, theta_deg=8.0, theta_step_deg=1.0)
         refined = self._matcher.match(pose, points, medium)
@@ -261,7 +266,7 @@ class Localizer:
                 # A slipped wheel, a push by hand: odometry lied by more than any window
                 # sized to it. The robot stands still while lost, so the whole-map search
                 # (a few hundred ms) is affordable here; a twin refuses itself (0.0).
-                anywhere, anywhere_confidence = self._global_search(points)
+                anywhere, anywhere_confidence = self.global_search(points)
                 if (
                     anywhere_confidence >= self._relocalise_min_inliers
                     and anywhere_confidence >= confidence + self._recovery_margin

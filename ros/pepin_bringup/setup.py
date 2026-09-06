@@ -25,6 +25,7 @@ setup(
         "console_scripts": [
             "base_bridge = pepin_bringup.base_bridge:main",
             "tof_bridge = pepin_bringup.tof_bridge:main",
+            "relocalizer = pepin_bringup.relocalizer:main",
         ],
     },
 )
