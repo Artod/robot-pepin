@@ -16,6 +16,7 @@ transform looked up once; poses are in ``map``.
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
@@ -23,10 +24,13 @@ from typing import Any
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from action_msgs.msg import GoalStatus, GoalStatusArray
+from geometry_msgs.msg import PoseArray, PoseStamped, PoseWithCovarianceStamped
+from nav2_msgs.msg import ParticleCloud
 from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
+from nav_msgs.msg import Path
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float32
 from std_srvs.srv import Trigger
@@ -38,6 +42,30 @@ from pepin.odometry import Pose2D
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
 
 OCCUPIED_LOG_ODDS, FREE_LOG_ODDS = 4.0, -4.0
+MAX_BACKOFF_S = 60.0  # a robot that cannot find itself must not saturate the board searching
+DUMP_DIR = (
+    "/maps/rec"  # every failed whole-map search leaves its scan here, for the offline autopsy
+)
+
+
+def backoff_wait(cooldown_s: float, failed_searches: int) -> float:
+    """Seconds to wait before the next search: the cooldown doubled per failure, capped."""
+    return min(cooldown_s * 2.0**failed_searches, MAX_BACKOFF_S)
+
+
+class _RosLogHandler(logging.Handler):
+    """Forwards the Python-side localizer's log lines to the node's ROS logger."""
+
+    def __init__(self, node: Node) -> None:
+        super().__init__()
+        self._node = node
+
+    def emit(self, record: logging.LogRecord) -> None:
+        text = f"[{record.name}] {record.getMessage()}"
+        if record.levelno >= logging.WARNING:
+            self._node.get_logger().warning(text)
+        else:
+            self._node.get_logger().info(text)
 
 
 def yaw_of(q: Any) -> float:
@@ -71,13 +99,19 @@ class Relocalizer(Node):
         super().__init__("relocalizer")
         self._scan_topic = str(self.declare_parameter("scan_topic", "/scan").value)
         self._lost_fit = float(self.declare_parameter("lost_fit", 0.35).value)
-        self._lost_checks = int(self.declare_parameter("lost_checks", 3).value)
+        self._lost_checks = int(self.declare_parameter("lost_checks", 5).value)
         self._min_inliers = float(self.declare_parameter("min_global_inliers", 0.5).value)
         self._cooldown_s = float(self.declare_parameter("cooldown_s", 8.0).value)
         self._check_period_s = float(self.declare_parameter("check_period_s", 1.0).value)
 
+        self._failed_searches = 0  # each failure doubles the wait before the next search
+        self._last_odom: Pose2D | None = None  # odom->base_link at the previous check
+        self._navigating = False  # a NavigateToPose goal is executing
         self._grid: OccupancyGrid | None = None
         self._matcher: CorrelativeMatcher | None = None
+        logging.getLogger("pepin").addHandler(
+            _RosLogHandler(self)
+        )  # localizer reasons in the ROS log
         self._localizer: Localizer | None = None
         self._points: np.ndarray | None = None
         self._laser_tf: tuple[float, float, float, bool] | None = None  # x, y, yaw, mirrored
@@ -99,6 +133,17 @@ class Relocalizer(Node):
         self.create_subscription(LaserScan, self._scan_topic, self._on_scan, 5)
         self._fit_pub = self.create_publisher(Float32, "localization_fit", 5)
         self._pose_pub = self.create_publisher(PoseWithCovarianceStamped, "/initialpose", 5)
+        # Eyes for the operator: AMCL's particles as arrows and its pose history as a line.
+        # nav2_msgs/ParticleCloud is unknown to Foxglove; PoseArray and Path are not.
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._particles_pub = self.create_publisher(PoseArray, "/particle_poses", 1)
+        self._trail_pub = self.create_publisher(Path, "/amcl_path", latched)
+        self._trail = Path()
+        self._trail.header.frame_id = "map"
+        self.create_subscription(
+            ParticleCloud, "/particle_cloud", self._on_particles, qos_profile_sensor_data
+        )
+        self.create_subscription(PoseWithCovarianceStamped, "/amcl_pose", self._on_amcl_pose, 10)
         self.create_service(Trigger, "relocalize", self._on_relocalize)
         self.create_service(Trigger, "where_am_i", self._on_where)
         self._tf = Buffer()
@@ -142,7 +187,52 @@ class Relocalizer(Node):
             f"laser mount: x {self._laser_tf[0]:.3f} yaw {math.degrees(self._laser_tf[2]):.1f} deg"
             f"{' upside down' if mirrored else ''}"
         )
+        self.create_subscription(
+            GoalStatusArray, "/navigate_to_pose/_action/status", self._on_nav_status, 10
+        )
         return True
+
+    def _on_particles(self, msg: ParticleCloud) -> None:
+        """Every AMCL particle set, thinned to 300 arrows, as a PoseArray for the 3D view."""
+        step = max(1, len(msg.particles) // 300)
+        out = PoseArray()
+        out.header = msg.header
+        out.poses = [particle.pose for particle in msg.particles[::step]]
+        self._particles_pub.publish(out)
+
+    def _on_amcl_pose(self, msg: PoseWithCovarianceStamped) -> None:
+        """Append AMCL's pose to the trail (last 600 poses) and republish it, latched."""
+        stamped = PoseStamped()
+        stamped.header = msg.header
+        stamped.pose = msg.pose.pose
+        self._trail.poses.append(stamped)
+        del self._trail.poses[:-600]
+        self._trail.header.stamp = msg.header.stamp
+        self._trail_pub.publish(self._trail)
+
+    def _on_nav_status(self, msg: GoalStatusArray) -> None:
+        """Remember whether Nav2 is executing a goal: no automatic re-seeding while it drives."""
+        self._navigating = any(
+            s.status in (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING)
+            for s in msg.status_list
+        )
+
+    def _moving(self) -> bool:
+        """Did base_link move in the odom frame since the previous check (1 cm or 1 degree)?"""
+        try:
+            t = self._tf.lookup_transform("odom", "base_link", rclpy.time.Time())
+        except Exception:
+            return False
+        now = Pose2D(
+            t.transform.translation.x, t.transform.translation.y, yaw_of(t.transform.rotation)
+        )
+        before, self._last_odom = self._last_odom, now
+        if before is None:
+            return False
+        turned = abs(
+            math.atan2(math.sin(now.theta - before.theta), math.cos(now.theta - before.theta))
+        )
+        return math.hypot(now.x - before.x, now.y - before.y) > 0.01 or turned > math.radians(1.0)
 
     def _amcl_pose(self) -> Pose2D | None:
         try:
@@ -164,13 +254,49 @@ class Relocalizer(Node):
             return
         self.fit = self._matcher.inlier_fraction(pose, self._points)
         self._fit_pub.publish(Float32(data=float(self.fit)))
-        if self._searching or time.monotonic() - self._last_reseed < self._cooldown_s:
-            return  # a search is running, or AMCL has not applied the new pose yet
+        wait = backoff_wait(self._cooldown_s, self._failed_searches)
+        if self._searching or time.monotonic() - self._last_reseed < wait:
+            return  # a search is running, AMCL is applying a seed, or we are backing off
+        if self._moving() or self._navigating:
+            # A driving robot scores low for honest reasons (scan and pose a few ms apart, AMCL
+            # mid-correction), and a robot wedged at its start scores low too; re-seeding either
+            # from a whole-map search teleports its belief (2026-09-06: two 3 m jumps during one
+            # lap while the wheels stood still, the goal then "succeeded" in the wrong room).
+            # While Nav2 executes a goal, AMCL and the costmaps are in charge; a lost robot fails
+            # its goal and can be re-seeded afterwards or on request (/relocalize).
+            self._poor_streak = 0
+            return
         self._poor_streak = self._poor_streak + 1 if self.fit < self._lost_fit else 0
         if self._poor_streak >= self._lost_checks:
             self.get_logger().warning(f"fit {self.fit:.2f} for {self._poor_streak} s: searching")
             self._searching = True
             threading.Thread(target=self._search_and_seed, daemon=True).start()
+
+    def _dump_failure(
+        self, points: Any, current: Pose2D | None, best: Pose2D | None, confidence: float
+    ) -> None:
+        """Write the scan and the verdict of a failed search as JSON (a few tens of kB)."""
+        try:
+            import json
+            import os
+
+            os.makedirs(DUMP_DIR, exist_ok=True)
+            path = f"{DUMP_DIR}/reloc_fail_{time.strftime('%Y%m%d_%H%M%S')}.json"
+            with open(path, "w") as f:
+                json.dump(
+                    {
+                        "points": np.round(points, 3).tolist(),
+                        "current": None
+                        if current is None
+                        else [current.x, current.y, current.theta],
+                        "best": None if best is None else [best.x, best.y, best.theta],
+                        "confidence": confidence,
+                    },
+                    f,
+                )
+            self.get_logger().info(f"search dumped to {path}")
+        except OSError as exc:
+            self.get_logger().warning(f"could not dump the failed search: {exc}")
 
     def _search_and_seed(self) -> None:
         """Worker thread: the search must not block the executor (scan and service callbacks)."""
@@ -194,7 +320,7 @@ class Relocalizer(Node):
         if found is None or confidence < self._min_inliers or confidence < current_fit + 0.1:
             stage = "whole map"
             found, confidence = self._localizer.global_search(
-                points, theta_step_deg=10.0, thin_to=90
+                points, theta_step_deg=10.0, thin_to=90, prior=current
             )
         took = time.monotonic() - started
         self._last_reseed = time.monotonic()  # grace starts now: AMCL needs a moment to apply it
@@ -204,8 +330,11 @@ class Relocalizer(Node):
                 f"no better pose ({stage}, {took:.1f} s): "
                 f"best {confidence:.2f} vs now {current_fit:.2f}"
             )
+            self._failed_searches += 1
             self.get_logger().warning(text)
+            self._dump_failure(points, current, found.pose if found else None, confidence)
             return text
+        self._failed_searches = 0
         self._seed(found.pose)
         text = (
             f"relocalised ({stage}, {took:.1f} s) to ({found.pose.x:+.2f}, {found.pose.y:+.2f}, "
