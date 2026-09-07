@@ -31,12 +31,12 @@ pepin_render() {  # "[proc] [LEVEL] [epoch] [node]: text" -> "HH:MM:SS LEVEL nod
 }
 watch_start() {
     ( ssh "root@$BOARD" "docker logs -f --since 3s pepin-ros 2>&1" \
-        | grep --line-buffered -E "$PEPIN_WATCH_KEEP" | grep --line-buffered -vE "$PEPIN_WATCH_DROP" | pepin_render ) &
+        | grep --line-buffered -E "$PEPIN_WATCH_KEEP" | grep --line-buffered -vE "$PEPIN_WATCH_DROP" | pepin_render ) 2>/dev/null &
     PEPIN_WATCH_PID=$!
     disown "$PEPIN_WATCH_PID" 2>/dev/null || true
 }
 watch_stop() {  # never blocks: a stuck viewer must not delay the stop that follows it
     [ -n "${PEPIN_WATCH_PID:-}" ] || return 0
-    pkill -P "$PEPIN_WATCH_PID" 2>/dev/null; kill "$PEPIN_WATCH_PID" 2>/dev/null
+    { pkill -P "$PEPIN_WATCH_PID"; kill "$PEPIN_WATCH_PID"; wait "$PEPIN_WATCH_PID"; } 2>/dev/null
     PEPIN_WATCH_PID=""
 }

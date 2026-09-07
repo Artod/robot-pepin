@@ -4,7 +4,7 @@ set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
 HERE="$(cd "$(dirname "$0")" && pwd)"
-rsync -a --delete --exclude '__pycache__' --exclude 'pepin_src' --exclude 'maps/rec' --exclude 'logs' "$HERE/" "root@$BOARD:/root/pepin-ros/"
+rsync -a --delete --exclude '__pycache__' --exclude 'pepin_src' --exclude 'maps/rec' --exclude 'logs' --exclude 'maps/*.places.yaml' --exclude 'maps/last_pose.json' "$HERE/" "root@$BOARD:/root/pepin-ros/"
 ssh "root@$BOARD" "mkdir -p /root/pepin-ros/pepin_src/pepin"
 rsync -a --delete --exclude "__pycache__" "$HERE/../src/pepin/" "root@$BOARD:/root/pepin-ros/pepin_src/pepin/"
 # Stop the robot's container first: a build next to Nav2 drove the board into swap (load 100).

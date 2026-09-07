@@ -51,7 +51,7 @@ class SessionLogger(Node):
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self.create_subscription(LaserScan, "/ldlidar_node/scan", self._on_scan, qos)
         self.create_subscription(Odometry, "/odom", self._on_odom, 20)
-        self.create_subscription(PoseWithCovarianceStamped, "/amcl_pose", self._on_amcl, 10)
+        self.create_subscription(PoseWithCovarianceStamped, "/tracker_pose", self._on_amcl, 10)
         self.get_logger().info(f"logging to {path}")
 
     def _write(self, record: dict) -> None:
@@ -94,7 +94,7 @@ class SessionLogger(Node):
         self.poses += 1
 
     def _on_amcl(self, msg: PoseWithCovarianceStamped) -> None:
-        """AMCL's belief in the map frame; the covariance trace stands in for a confidence."""
+        """The localizer's belief in the map frame; covariance trace as a stand-in confidence."""
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         q = msg.pose.pose.orientation
         theta = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
