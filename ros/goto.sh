@@ -22,17 +22,26 @@ esac
 # -t + -it: Ctrl-C travels through both ptys to goto_ros.py, which cancels the task on the board
 STAMP=$(date +%Y%m%d_%H%M%S)
 REC="/maps/rec/${STAMP}_goto.jsonl"
-finish() {  # everything recorded, always: the scans, odometry and AMCL poses of the goal, and the board log
+LOG="/maps/rec/${STAMP}_goto.log"   # goto_ros' own words, kept on the board next to the recording
+INTERRUPTED=0
+trap 'INTERRUPTED=1' INT
+finish() {  # everything recorded, always: scans, odometry, tracked pose, the goal's own log, the board log
     watch_stop
+    if [ "$INTERRUPTED" = 1 ]; then
+        echo; echo "Ctrl-C: cancelling the navigation task on the board..."
+        "$(dirname "$0")/stop.sh"
+    elif ssh "root@$BOARD" "docker exec pepin-ros pgrep -f '^python3 /tools/goto_ros.py' >/dev/null" 2>/dev/null; then
+        echo; echo "!! the link to the board dropped but the drive goes on there; ros/stop.sh stops it, ros/watch.sh shows it"
+    fi
     ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f session_logger.py" 2>/dev/null || true
     mkdir -p "$(dirname "$0")/maps/rec"
     ssh "root@$BOARD" "docker logs --since 10m pepin-ros 2>&1" > "$(dirname "$0")/maps/rec/${STAMP}_goto_board.log" 2>/dev/null || true
-    rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.jsonl" "$(dirname "$0")/maps/rec/" 2>/dev/null || true
-    echo "recorded: ros/maps/rec/${STAMP}_goto.jsonl + _board.log"
+    rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$(dirname "$0")/maps/rec/" 2>/dev/null || true
+    echo "recorded: ros/maps/rec/${STAMP}_goto.jsonl + _goto.log + _board.log"
 }
 trap finish EXIT
 ssh "root@$BOARD" "docker exec -d pepin-ros /pepin_entrypoint.sh python3 /tools/session_logger.py $REC"
+# The goal lives on the board (a WiFi hiccup must not become a cancel); this terminal only watches.
+ssh "root@$BOARD" "touch /root/pepin-ros$LOG; docker exec -d -e PYTHONUNBUFFERED=1 pepin-ros /pepin_entrypoint.sh sh -c 'python3 /tools/goto_ros.py --places $PLACES $* > $LOG 2>&1; echo GOTO_EXIT=\$? >> $LOG'"
 watch_start
-# With a terminal: ptys on both hops so Ctrl-C reaches goto_ros; without one (a script, Claude): plain pipes.
-if [ -t 0 ]; then TTY_SSH="-t"; TTY_DOCKER="-it"; else TTY_SSH=""; TTY_DOCKER="-i"; fi
-ssh $TTY_SSH "root@$BOARD" "docker exec $TTY_DOCKER -e PYTHONUNBUFFERED=1 pepin-ros /pepin_entrypoint.sh python3 /tools/goto_ros.py --places $PLACES $*"
+ssh "root@$BOARD" "tail -n +1 -F /root/pepin-ros$LOG 2>/dev/null | sed -u '/^GOTO_EXIT=/q'" 2>/dev/null || true

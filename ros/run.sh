@@ -17,7 +17,8 @@ I2C=""
 # when a --device is missing, so a board without it simply gets no bus.
 [ -e /dev/i2c-2 ] && I2C="--device /dev/i2c-2"
 # shellcheck disable=SC2086
-exec docker run --rm $TTY \
+# Not auto-removed: a stopped container keeps its log until the unit's ExecStartPre has saved it.
+exec docker run $TTY \
     --network host --ipc host --cap-add SYS_NICE \
     --device "$LIDAR:/dev/lidar" $I2C \
     -v "$HERE/pepin_bringup/pepin_bringup:$SITE:ro" \

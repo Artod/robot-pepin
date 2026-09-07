@@ -26,13 +26,13 @@ from pathlib import Path
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
-from std_msgs.msg import Float32
+from nav_msgs.msg import Odometry
+from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
-LOST_FIT, LOST_FOR_S = (
-    0.30,
-    3.0,
-)  # scan-to-map fit below this for this long: stop, do not drive blind
+LOST_FIT, LOST_FOR_S = 0.30, 15.0  # fit below this for this long...
+LOST_TRAVEL_M = 1.0  # ...while the wheels carried it this far: that is driving blind. Spinning on a
+# stuck wheel with a lost fit is not — the recoveries (odom frame) can still work it free.
 
 
 def pose(nav: BasicNavigator, x: float, y: float, yaw_deg: float) -> PoseStamped:
@@ -44,6 +44,14 @@ def pose(nav: BasicNavigator, x: float, y: float, yaw_deg: float) -> PoseStamped
     p.pose.orientation.z = math.sin(math.radians(yaw_deg) / 2.0)
     p.pose.orientation.w = math.cos(math.radians(yaw_deg) / 2.0)
     return p
+
+
+def note(nav: BasicNavigator, text: str) -> None:
+    """Say it here and on /pepin/note, which the relocalizer copies into the board log."""
+    print(text, flush=True)
+    pub = nav.create_publisher(String, "/pepin/note", 1)
+    pub.publish(String(data=text))
+    time.sleep(0.2)  # let the message leave before a cancel or an exit
 
 
 def where_am_i(nav: BasicNavigator) -> tuple[float, float, float, float] | None:
@@ -214,14 +222,26 @@ def main() -> None:
             print("not localized: not driving. Stand the robot still for 5 s and try again.")
             sys.exit(1)
         lost_since: list[float | None] = [None]
+        odom_xy: list[tuple[float, float] | None] = [None]
+        lost_at_xy: list[tuple[float, float] | None] = [None]
 
         def on_fit(msg: Float32) -> None:
             if msg.data < LOST_FIT:
-                lost_since[0] = lost_since[0] or time.monotonic()
+                if lost_since[0] is None:
+                    lost_since[0], lost_at_xy[0] = time.monotonic(), odom_xy[0]
             else:
                 lost_since[0] = None
 
+        def on_odom(msg: Odometry) -> None:
+            odom_xy[0] = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+
+        def travelled_while_lost() -> float:
+            if lost_at_xy[0] is None or odom_xy[0] is None:
+                return 0.0
+            return math.hypot(odom_xy[0][0] - lost_at_xy[0][0], odom_xy[0][1] - lost_at_xy[0][1])
+
         nav.create_subscription(Float32, "/localization_fit", on_fit, 10)
+        nav.create_subscription(Odometry, "/odom", on_odom, 10)
         nav.goToPose(pose(nav, x, y, yaw))
         print(
             f"goal {name + ' ' if name else ''}({x:.2f}, {y:.2f}) yaw {yaw:.0f} deg accepted",
@@ -232,8 +252,16 @@ def main() -> None:
         while not nav.isTaskComplete():
             fb = nav.getFeedback()
             now = time.monotonic()
-            if lost_since[0] is not None and now - lost_since[0] > LOST_FOR_S:
-                print("localization lost for 3 s: stopping instead of driving blind", flush=True)
+            if (
+                lost_since[0] is not None
+                and now - lost_since[0] > LOST_FOR_S
+                and travelled_while_lost() > LOST_TRAVEL_M
+            ):
+                note(
+                    nav,
+                    f"goto: localization lost for {now - lost_since[0]:.0f} s while the wheels "
+                    f"travelled {travelled_while_lost():.1f} m: cancelling, not driving blind",
+                )
                 nav.cancelTask()
                 break
             if fb is not None and now - last >= 2.0:
@@ -253,7 +281,7 @@ def main() -> None:
     except KeyboardInterrupt:
         # The goal lives on the board's action server, not in this client: dying silently
         # would leave Nav2 driving toward it (2026-09-05: Ctrl-C on the laptop, robot kept going).
-        print("\ninterrupted: cancelling the navigation task...", flush=True)
+        note(nav, "goto: interrupted by the operator, cancelling the goal")
         nav.cancelTask()
         deadline = time.monotonic() + 5.0
         while not nav.isTaskComplete() and time.monotonic() < deadline:
