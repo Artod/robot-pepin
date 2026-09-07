@@ -137,15 +137,24 @@ def test_a_robot_put_down_anywhere_is_found_by_the_global_search() -> None:
     assert abs(loc.pose.theta - truth.theta) < math.radians(4.0)
 
 
-def test_a_symmetric_room_refuses_the_global_fix_instead_of_guessing() -> None:
+def test_a_symmetric_room_refuses_the_global_fix_without_a_prior() -> None:
     """The empty rectangle fits the scan equally well turned by 180 degrees: say so, hold."""
+    truth = Pose2D(1.2, -0.8, math.radians(60.0))
+    loc = Localizer(room_map(), Pose2D())
+    _, confidence = loc.global_search(raycast_room(truth))
+    assert confidence == 0.0
+
+
+def test_a_symmetric_room_picks_the_twin_nearer_the_start_pose() -> None:
+    """With a start pose to go by, the twin nearer to it wins instead of a refusal."""
     from pepin.scanmatch import SearchWindow
 
     truth = Pose2D(1.2, -0.8, math.radians(60.0))
-    start = Pose2D(0.0, 0.0, 0.0)
+    start = Pose2D(1.0, -0.5, math.radians(40.0))  # the operator's rough guess, near the truth
     loc = Localizer(room_map(), start)
     confidence = loc.initialize(raycast_room(truth), SearchWindow(0.6, 0.06, 40.0, 4.0))
-    assert confidence == 0.0 and loc.pose == start and loc.lost
+    assert confidence > 0.5 and not loc.lost
+    assert math.hypot(loc.pose.x - truth.x, loc.pose.y - truth.y) < 0.15
 
 
 def test_the_matcher_follows_a_map_that_keeps_growing() -> None:

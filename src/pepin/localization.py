@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 # A rival global fix is a real twin only if the map denies it no more than this
 # share of the scan beyond the winner (about four beams of a 180-beam scan).
 TWIN_DENIAL_MARGIN = 0.02
-TWIN_PRIOR_RADIUS_M = 1.5  # a twin this close to the previous belief is the one we keep
+TWIN_MARGIN = 0.10  # a runner-up within 10% of the winner's field score explains the scan alike
+DENIAL_WEIGHT = 0.5  # of the denied share, charged against the field score of a global candidate
 # Lost for this many scans in a row (about two seconds) and the local recovery has not
 # helped: search the whole map again, and again every so many scans after that.
 GLOBAL_RETRY_EVERY = 20
@@ -37,7 +38,11 @@ GLOBAL_RETRY_EVERY = 20
 # with headings this far apart: at 3 m a 5-degree error moves a point one coarse cell.
 GLOBAL_POOL_FACTOR = 4
 GLOBAL_THETA_STEP_DEG = 5.0
-GLOBAL_PEAKS = 8  # coarse peaks refined on the fine grid before the winner is chosen
+GLOBAL_PEAKS = 6  # exhaustive peaks refined on the fine grid before the winner is chosen
+GLOBAL_FFT_THETA_STEP_DEG = 9.0  # exhaustive pass heading step; refine's +-6 deg window closes it
+GLOBAL_FFT_POOL = (
+    2  # exhaustive pass on a 0.1 m grid; pool 3 let a speckle field crowd the truth out
+)
 # A global fix must place most of the scan on cells the map knows: a pose outside the
 # walls, with a sliver of the scan on them and the rest in the unknown, is no fix at all.
 GLOBAL_MIN_KNOWN = 0.6
@@ -90,9 +95,12 @@ class Localizer:
         recovery_margin: float = 0.08,
         recovery: SearchWindow | None = None,
         min_points: int = 50,
+        max_points: int = 200,  # beams per match; what caps the cost of one scan
+        global_retry: bool = True,  # False: a lost tracker searches locally only
     ) -> None:
         self._grid = grid
-        self._matcher = CorrelativeMatcher(grid)
+        self._matcher = CorrelativeMatcher(grid, max_points=max_points)
+        self._global_retry = global_retry
         self._coarse_matcher: CorrelativeMatcher | None = None
         self._coarse_version = -1
         self._window = window or SearchWindow()
@@ -151,7 +159,7 @@ class Localizer:
         confidence = self._matcher.inlier_fraction(fine.pose, points)
         if confidence < self._recovery_min_inliers and global_fallback:
             logger.info("start fits poorly (inliers %.2f); searching the whole map", confidence)
-            fine, confidence = self.global_search(points)
+            fine, confidence = self.global_search(points, prior=self.pose)
         if confidence >= self._recovery_min_inliers:
             logger.info("initial fix %s, inliers %.2f", fine.pose, confidence)
             self.pose = fine.pose
@@ -171,7 +179,7 @@ class Localizer:
         """Coarse-to-fine search over the whole grid: any position, any heading, once.
 
         ``prior`` is where the robot was believed to be; when the scan fits two
-        places alike, the twin within ``TWIN_PRIOR_RADIUS_M`` of it wins instead
+        places alike, the twin nearer to it wins instead
         of refusing (2026-09-06: the base itself was refused for a 0.53 look-alike
         six metres away while the belief sat on the base).
 
@@ -196,24 +204,55 @@ class Localizer:
             theta_deg=180.0,
             theta_step_deg=theta_step_deg,
         )
-        peaks = self._coarse().match_top(centre, thinned, GLOBAL_PEAKS, whole_map)
-        refined = sorted((self.refine(peak.pose, points) for peak in peaks), key=lambda r: -r[1])
-        best, best_confidence = refined[0]
-        second, second_confidence = refined[1] if len(refined) > 1 else refined[0]
+        # Exhaustive over the whole grid at every heading (FFT correlation on the fine grid);
+        # the pooled lattice it replaces once ranked the truth 5th and missed it on real maps.
+        peaks = self._matcher.match_everywhere(
+            points,
+            theta_step_deg=GLOBAL_FFT_THETA_STEP_DEG,
+            top_k=GLOBAL_PEAKS,
+            pool=GLOBAL_FFT_POOL,
+        )
+        if not peaks:
+            peaks = self._coarse().match_top(centre, thinned, GLOBAL_PEAKS, whole_map)
+        # Ranked by the field score (how exactly the scan sits on the walls): the inlier
+        # fraction saturates one cell off a wall and let a look-alike 5 m away tie with the
+        # truth at the cluttered base (0.56 vs 0.58) where the field score said 1.69 vs 2.16.
+        refined = sorted(
+            (self.refine(peak.pose, points) for peak in peaks),
+            key=lambda r: -self._rank(r[0].pose, points),
+        )
+        distinct: list[tuple[MatchResult, float]] = []  # several peaks refine into one basin
+        for candidate in refined:
+            if not any(
+                math.hypot(
+                    candidate[0].pose.x - kept[0].pose.x, candidate[0].pose.y - kept[0].pose.y
+                )
+                < 0.3
+                and abs(wrap_angle(candidate[0].pose.theta - kept[0].pose.theta))
+                < math.radians(15.0)
+                for kept in distinct
+            ):
+                distinct.append(candidate)
+        best, best_confidence = distinct[0]
+        second, second_confidence = distinct[1] if len(distinct) > 1 else distinct[0]
         apart = math.hypot(best.pose.x - second.pose.x, best.pose.y - second.pose.y) > 0.5 or abs(
             wrap_angle(best.pose.theta - second.pose.theta)
         ) > math.radians(30.0)
-        explains_alike = second_confidence >= best_confidence - self._recovery_margin
+        best_sharp = self._rank(best.pose, points)
+        second_sharp = self._rank(second.pose, points)
+        explains_alike = second_sharp >= best_sharp * (1.0 - TWIN_MARGIN)
         denied = self._matcher.contradiction_fraction(second.pose, points)
         denied_best = self._matcher.contradiction_fraction(best.pose, points)
         if apart and explains_alike and denied <= denied_best + TWIN_DENIAL_MARGIN:
             if prior is not None:
                 near_best = math.hypot(best.pose.x - prior.x, best.pose.y - prior.y)
                 near_second = math.hypot(second.pose.x - prior.x, second.pose.y - prior.y)
-                if min(near_best, near_second) <= TWIN_PRIOR_RADIUS_M < max(near_best, near_second):
+                # The twin nearer the previous belief is the better bet; a wrong pick shows up as
+                # a poor fit within seconds and is searched again, a refusal helps nobody.
+                if True:
                     chosen, chosen_confidence = (
                         (best, best_confidence)
-                        if near_best < near_second
+                        if near_best <= near_second
                         else (second, second_confidence)
                     )
                     logger.info(
@@ -238,11 +277,20 @@ class Localizer:
 
     def refine(self, pose: Pose2D, points: NDArray[np.float64]) -> tuple[MatchResult, float]:
         """A coarse candidate sharpened with a medium and then the tracking window."""
-        medium = SearchWindow(xy_m=0.3, xy_step_m=0.05, theta_deg=8.0, theta_step_deg=1.0)
+        medium = SearchWindow(xy_m=0.2, xy_step_m=0.05, theta_deg=6.0, theta_step_deg=1.5)
         refined = self._matcher.match(pose, points, medium)
         fine = self._matcher.match(refined.pose, points, self._window)
         confidence = self._matcher.inlier_fraction(fine.pose, points, min_known=GLOBAL_MIN_KNOWN)
         return fine, confidence
+
+    def _rank(self, pose: Pose2D, points: NDArray[np.float64]) -> float:
+        """How a global candidate is ranked: how exactly the scan sits on walls, minus a mild
+        charge for points the map puts on open floor. Mild on purpose: at a cluttered spot the
+        true pose denies 40% of the scan (furniture moved since the map), a look-alike 30%, and
+        a heavy charge would crown the look-alike; the sharpness term must stay decisive."""
+        return self._matcher.field_score(pose, points) - DENIAL_WEIGHT * (
+            self._matcher.contradiction_fraction(pose, points)
+        )
 
     def _coarse(self) -> CorrelativeMatcher:
         """Matcher on the pooled grid for the whole-map search; rebuilt when the map grows."""
@@ -291,7 +339,10 @@ class Localizer:
             ):
                 logger.info("relocalised: inliers %.2f vs %.2f locally", far_confidence, confidence)
                 pose, confidence = far.pose, far_confidence
-            elif (self.weak_scans - self._lost_after) % GLOBAL_RETRY_EVERY == 0:
+            elif (
+                self._global_retry
+                and (self.weak_scans - self._lost_after) % GLOBAL_RETRY_EVERY == 0
+            ):
                 # A slipped wheel, a push by hand: odometry lied by more than any window
                 # sized to it. The robot stands still while lost, so the whole-map search
                 # (a few hundred ms) is affordable here; a twin refuses itself (0.0).

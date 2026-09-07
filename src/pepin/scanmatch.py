@@ -222,6 +222,17 @@ class CorrelativeMatcher:
             return 0.0
         return float((values[known] >= min_field).mean())
 
+    def field_score(self, pose: Pose2D, points: NDArray[np.float64]) -> float:
+        """How exactly the scan sits on walls at ``pose``: the mean positive field value under
+        the points, 1.0 when every point lands on an occupied cell. Sharper than the inlier
+        fraction, which counts a point one cell off a wall the same as one on it."""
+        if len(points) == 0:
+            return 0.0
+        top = float(np.maximum(self._score_field(), 0.0).max())
+        if top <= 0.0:
+            return 0.0
+        return float(np.maximum(self._values_at(pose, points), 0.0).mean() / top)
+
     def contradiction_fraction(
         self, pose: Pose2D, points: NDArray[np.float64], max_field: float = -1.0
     ) -> float:
@@ -334,6 +345,93 @@ class CorrelativeMatcher:
             )
             mask &= ~(near_theta[:, None] & near_xy[None, :])
         return peaks
+
+    def match_everywhere(
+        self,
+        points: NDArray[np.float64],
+        theta_step_deg: float = 5.0,
+        top_k: int = 8,
+        pool: int = 1,
+        max_range_m: float = 6.0,
+    ) -> list[MatchResult]:
+        """Every position on the whole grid at every heading, exhaustively, best first.
+
+        For one heading the score of all positions at once is a cross-correlation
+        of the score field with the scan's cell offsets, done with FFTs, so the
+        cost is a handful of transforms per heading instead of a pose lattice:
+        exact over the map where a coarse-to-fine lottery could miss the truth
+        (Olson's correlative matching, computed as Cartographer does it in one
+        go). Walls attract, known-free floor repels, unknown is silent. The
+        winners are ``top_k`` local maxima at least 3 cells or one heading apart;
+        their ``score`` is the mean field value under the scan (comparable between
+        headings, not to ``match``'s score). ``pool`` mean-pools the field first
+        (``pool`` = 2 quarters the transforms; the refine that follows recovers the
+        lost resolution; a mean keeps walls and shrinks lone speckle cells, where a
+        max would turn a speckle field into a wall), ``max_range_m`` drops far
+        returns that only enlarge the transforms.
+        """
+        # Walls attract, everything else is silent here: the free-floor penalty of the fine
+        # field is judged afterwards as "denial", where it cannot drown a true pose whose room
+        # has gained a chair since the map was made.
+        field = np.maximum(self._score_field(), 0.0)
+        if pool > 1:  # mean-pool: a wall keeps half its weight, a lone speckle cell a quarter
+            rows0, cols0 = field.shape
+            r0, c0 = rows0 // pool, cols0 // pool
+            field = field[: r0 * pool, : c0 * pool].reshape(r0, pool, c0, pool).mean(axis=(1, 3))
+        rows, cols = field.shape
+        res = self._grid.spec.resolution_m * pool
+        pts = points[np.isfinite(points).all(axis=1)]
+        pts = pts[
+            np.hypot(pts[:, 0], pts[:, 1]) <= max_range_m
+        ]  # far returns: little discrimination, big transforms
+        if len(pts) == 0:
+            return []
+        reach = int(np.ceil(np.abs(pts).max() / res)) + 1
+        shape = (rows + 2 * reach, cols + 2 * reach)
+        padded = np.zeros(shape)
+        padded[reach : reach + rows, reach : reach + cols] = field
+        field_f = np.fft.rfft2(padded)
+        headings = np.arange(-180.0, 180.0, theta_step_deg)
+        candidates: list[tuple[float, int, int, float]] = []
+        for deg in headings:
+            theta = math.radians(float(deg))
+            c, s = math.cos(theta), math.sin(theta)
+            world = pts @ np.array([[c, s], [-s, c]])
+            d_col = np.floor(world[:, 0] / res).astype(int) % shape[1]
+            d_row = np.floor(world[:, 1] / res).astype(int) % shape[0]
+            image = np.zeros(shape)
+            np.add.at(image, (d_row, d_col), 1.0)
+            corr = np.fft.irfft2(field_f * np.conj(np.fft.rfft2(image)), s=shape)
+            scores = corr[reach : reach + rows, reach : reach + cols] / len(pts)
+            for _ in range(3):  # a few local maxima per heading, suppressed within 3 cells
+                flat = int(np.argmax(scores))
+                r, cidx = int(flat // scores.shape[1]), int(flat % scores.shape[1])
+                value = float(scores[r, cidx])
+                if value <= 0.0:
+                    break
+                candidates.append((value, r, cidx, theta))
+                scores[max(0, r - 3) : r + 4, max(0, cidx - 3) : cidx + 4] = -np.inf
+        candidates.sort(key=lambda x: -x[0])
+        spec = self._grid.spec
+        results: list[MatchResult] = []
+        for value, r, cidx, theta in candidates:
+            pose = Pose2D(
+                spec.x_min_m + (cidx + 0.5) * res, spec.y_min_m + (r + 0.5) * res, wrap_angle(theta)
+            )
+            if any(
+                math.hypot(pose.x - q.pose.x, pose.y - q.pose.y) < 3 * res
+                and abs(wrap_angle(pose.theta - q.pose.theta)) < math.radians(theta_step_deg) + 1e-9
+                for q in results
+            ):
+                continue
+            # At most two hypotheses per place (a spot and its turned twin): a clutter field
+            # scores at every heading and would otherwise fill the list on its own.
+            if sum(math.hypot(pose.x - q.pose.x, pose.y - q.pose.y) < 1.0 for q in results) >= 2:
+                continue
+            results.append(MatchResult(pose=pose, score=value, guess_score=0.0))
+            if len(results) >= top_k:
+                break
+        return results
 
     def _lattice(
         self, guess: Pose2D, pts: NDArray[np.float64], window: SearchWindow
