@@ -1,6 +1,8 @@
 [Unit]
 Description=Pepin ROS 2 stack (sensors, bridges, Foxglove; Nav2 started separately) in Docker
-After=docker.service pepin-base.service pepin-tof.service
+After=docker.service pepin-base.service pepin-tof.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
 Requires=docker.service
 Wants=pepin-base.service pepin-tof.service
 
@@ -12,19 +14,23 @@ Environment=PEPIN_SLAM=false
 Environment=PEPIN_MAP=/maps/20260903_182653_lap3_loop.yaml
 Environment=PEPIN_CPP_BRIDGE=false
 Environment=PEPIN_IMU=false
+Environment=PEPIN_TOF=false
 # One container per boot; --rm so a stale one never blocks the name. The image is built by ros/build.sh.
+# No RTC on this board: it boots with yesterday's clock and NTP jumps it hours forward a minute
+# later; every "seconds since the last reading" check in Nav2 then sees stale data and the first
+# goal dies (2026-09-07 11:45). Wait for the sync, but never forever: an offline robot still starts.
+ExecStartPre=-/bin/sh -c 'for i in $$(seq 1 90); do [ "$$(timedatectl show -p NTPSynchronized --value)" = yes ] && exit 0; sleep 1; done; echo "clock not synced after 90 s, starting anyway"'
 # The previous container's log is the only record of what Nav2 did; keep it before the rm.
 ExecStartPre=-/bin/sh -c 'mkdir -p /root/pepin-ros/logs && /usr/bin/docker logs pepin-ros > /root/pepin-ros/logs/$$(date +%%Y%%m%%d_%%H%%M%%S).log 2>&1'
 ExecStartPre=-/usr/bin/docker rm -f pepin-ros
 # run.sh mounts the code from /root/pepin-ros (see it): edits reach the robot via ros/sync.sh, no rebuild.
-ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU}
+ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} tof:=${PEPIN_TOF}
 # ros2 launch needs more than 5 s to bring a dozen nodes down on this board; a SIGKILL (137)
 # after the grace period is still a normal stop, not a failure.
 ExecStop=/usr/bin/docker stop -t 15 pepin-ros
 SuccessExitStatus=137
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target

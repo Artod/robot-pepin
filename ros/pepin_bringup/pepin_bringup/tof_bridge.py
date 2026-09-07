@@ -4,7 +4,8 @@ The lidar sees one horizontal slice of the room; these three look where it
 cannot — low and in front, at the height of a shoe, a cable, a cat. The board
 publishes all three at ~15 Hz in millimetres and says ``null`` when a sensor
 got no return; ROS wants metres and, by convention, ``+inf`` for "nothing
-within max_range", which is what a costmap plugin expects to see.
+within max_range"; a reading equal to max_range means "nothing seen", which is
+what Nav2's range layer clears the cone on.
 
 The mounts default to the numbers measured on the robot (config/tof.json,
 2026-09-04, +-1 cm) and are published once as static transforms from
@@ -21,6 +22,7 @@ from typing import Any
 
 import rclpy
 from geometry_msgs.msg import TransformStamped
+from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Range
@@ -33,6 +35,7 @@ from pepin_bringup.protocol import TOF_NAMES, parse_tof
 _FIELD_OF_VIEW_RAD = 0.47
 _MIN_RANGE_M = 0.04
 _MAX_RANGE_M = 1.3
+_CROSSTALK_M = 0.12  # nearer than this is the sensor seeing its own surroundings
 
 # Mount defaults, from config/tof.json: (x_m, y_m, z_m, yaw_rad) in base_link — x forward,
 # y left, z up from the floor. All three look straight ahead, so every yaw is zero.
@@ -107,15 +110,25 @@ class TofBridge(Node):
         self._log_link_status()
 
     def _publish_range(self, name: str, distance_m: float | None) -> None:
-        """One sensor's reading as a sensor_msgs/Range; no return becomes ``+inf``."""
+        """One sensor's reading as a sensor_msgs/Range; no return becomes ``max_range``."""
         message = Range()
-        message.header.stamp = self.get_clock().now().to_msg()
+        # Stamped 60 ms ago: the reading is at least that old (tof server -> TCP -> here), and
+        # a stamp behind the newest odom->base_link transform never makes the costmap wait.
+        message.header.stamp = (self.get_clock().now() - Duration(seconds=0.06)).to_msg()
         message.header.frame_id = f"tof_{name}"
         message.radiation_type = Range.INFRARED
         message.field_of_view = _FIELD_OF_VIEW_RAD
         message.min_range = _MIN_RANGE_M
         message.max_range = _MAX_RANGE_M
-        message.range = float("inf") if distance_m is None else distance_m
+        # Below 12 cm the VL53L1X reports crosstalk from whatever sits at its window (the front
+        # sensor flickered 0.05 <-> 1.3 m with nothing there, 2026-09-06); such a reading is
+        # published below min_range, which the costmap layer drops: neither a mark nor a clear.
+        if distance_m is None:
+            message.range = _MAX_RANGE_M
+        elif distance_m < _CROSSTALK_M:
+            message.range = -1.0
+        else:
+            message.range = distance_m
         self._range_pubs[name].publish(message)
 
     def _log_link_status(self) -> None:

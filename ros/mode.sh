@@ -31,12 +31,12 @@ T0=$(date +%s)
 already_nav=$(ssh "root@$BOARD" "grep -c 'PEPIN_NAV=true' /etc/default/pepin-ros 2>/dev/null; docker ps --format '{{.Names}}' | grep -c '^pepin-ros\$'" | tr '\n' ' ')
 if [ "$MODE" = nav ] && [ "$already_nav" = "1 1 " ]; then
     # Nav2 is already up: swap the map under it (about 5 s) instead of restarting the stack (about 60 s).
-    ssh "root@$BOARD" "{ grep -E '^PEPIN_(CPP_BRIDGE|IMU)=' /etc/default/pepin-ros 2>/dev/null; printf 'PEPIN_NAV=%s\\nPEPIN_SLAM=%s\\nPEPIN_MAP=%s\\n' $NAV $SLAM '$MAP'; } > /etc/default/pepin-ros.new && mv /etc/default/pepin-ros.new /etc/default/pepin-ros"
+    ssh "root@$BOARD" "{ grep -E '^PEPIN_(CPP_BRIDGE|IMU|TOF)=' /etc/default/pepin-ros 2>/dev/null; printf 'PEPIN_NAV=%s\\nPEPIN_SLAM=%s\\nPEPIN_MAP=%s\\n' $NAV $SLAM '$MAP'; } > /etc/default/pepin-ros.new && mv /etc/default/pepin-ros.new /etc/default/pepin-ros"
     ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh timeout 60 python3 /tools/load_map.py '$MAP'" || exit 1
     echo "map swapped in $(( $(date +%s) - T0 )) s, no restart"
     exit 0
 fi
-ssh "root@$BOARD" "{ grep -E '^PEPIN_(CPP_BRIDGE|IMU)=' /etc/default/pepin-ros 2>/dev/null; printf 'PEPIN_NAV=%s\\nPEPIN_SLAM=%s\\nPEPIN_MAP=%s\\n' $NAV $SLAM '$MAP'; } > /etc/default/pepin-ros.new && mv /etc/default/pepin-ros.new /etc/default/pepin-ros; systemctl restart pepin-ros"
+ssh "root@$BOARD" "{ grep -E '^PEPIN_(CPP_BRIDGE|IMU|TOF)=' /etc/default/pepin-ros 2>/dev/null; printf 'PEPIN_NAV=%s\\nPEPIN_SLAM=%s\\nPEPIN_MAP=%s\\n' $NAV $SLAM '$MAP'; } > /etc/default/pepin-ros.new && mv /etc/default/pepin-ros.new /etc/default/pepin-ros; systemctl restart pepin-ros"
 echo -n "mode $MODE requested; restarting the stack..."
 READY=$([ "$MODE" = slam ] && echo 'slam_toolbox\\]: Activating' || { [ "$MODE" = nav ] && echo 'lifecycle_manager_navigation.*Managed nodes are active' || echo 'lifecycle_manager_sensors.*Managed nodes are active'; })
 for i in $(seq 1 60); do
