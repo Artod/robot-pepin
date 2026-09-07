@@ -30,7 +30,7 @@ amcl:
     robot_model_type: "nav2_amcl::DifferentialMotionModel"
     save_pose_rate: 0.5
     sigma_hit: 0.15
-    tf_broadcast: true
+    tf_broadcast: false  # the relocalizer's scan-matching tracker owns map -> odom
     transform_tolerance: 0.5  # scans arrive within 0.03 s now; 2.0 let a stale pose pass as current
     update_min_a: 0.05  # correct with the laser every 3 degrees, not every 11
     update_min_d: 0.05  # and every 5 cm, not every 25: the wheels cannot be trusted for 25 cm
@@ -95,7 +95,7 @@ controller_server:
     # Progress checker parameters
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.5
+      required_movement_radius: 0.15  # 0.5 aborted every goal closer than half a metre
       movement_time_allowance: 10.0
     # Goal checker parameters
     #precise_goal_checker:

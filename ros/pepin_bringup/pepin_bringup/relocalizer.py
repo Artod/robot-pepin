@@ -16,8 +16,10 @@ transform looked up once; poses are in ``map``.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 import threading
 import time
 from typing import Any
@@ -25,16 +27,18 @@ from typing import Any
 import numpy as np
 import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
-from geometry_msgs.msg import PoseArray, PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseArray, PoseStamped, PoseWithCovarianceStamped, TransformStamped
 from nav2_msgs.msg import ParticleCloud
 from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from nav_msgs.msg import Path
+from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float32
 from std_srvs.srv import Trigger
-from tf2_ros import Buffer, TransformListener
+from tf2_ros import Buffer, TransformBroadcaster, TransformListener
 
 from pepin.localization import Localizer
 from pepin.mapping import GridSpec, OccupancyGrid
@@ -46,6 +50,16 @@ MAX_BACKOFF_S = 60.0  # a robot that cannot find itself must not saturate the bo
 DUMP_DIR = (
     "/maps/rec"  # every failed whole-map search leaves its scan here, for the offline autopsy
 )
+LAST_POSE_FILE = "/maps/last_pose.json"  # where the robot stood when the stack last ran
+LAST_POSE_MAX_AGE_S = 3600.0
+
+
+def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
+    """The map -> odom transform (x, y, yaw) that puts the robot, seen at ``odom`` in the odom
+    frame, at ``pose`` in the map frame: T_map_odom = T_map_base * inv(T_odom_base)."""
+    yaw = math.atan2(math.sin(pose.theta - odom.theta), math.cos(pose.theta - odom.theta))
+    c, s = math.cos(yaw), math.sin(yaw)
+    return pose.x - (c * odom.x - s * odom.y), pose.y - (s * odom.x + c * odom.y), yaw
 
 
 def backoff_wait(cooldown_s: float, failed_searches: int) -> float:
@@ -98,13 +112,28 @@ class Relocalizer(Node):
     def __init__(self) -> None:
         super().__init__("relocalizer")
         self._scan_topic = str(self.declare_parameter("scan_topic", "/scan").value)
-        self._lost_fit = float(self.declare_parameter("lost_fit", 0.35).value)
-        self._lost_checks = int(self.declare_parameter("lost_checks", 5).value)
+        self._lost_fit = float(self.declare_parameter("lost_fit", 0.45).value)
+        self._lost_checks = int(self.declare_parameter("lost_checks", 3).value)
         self._min_inliers = float(self.declare_parameter("min_global_inliers", 0.5).value)
         self._cooldown_s = float(self.declare_parameter("cooldown_s", 8.0).value)
         self._check_period_s = float(self.declare_parameter("check_period_s", 1.0).value)
+        # Tracking: every scan corrects the pose by scan matching around the wheels' prediction
+        # and this node owns map -> odom (AMCL then only paints particles). The wheels are trusted
+        # for one scan interval, 0.1 s, where even a 25% yaw error is a fraction of a degree.
+        self._track = bool(self.declare_parameter("track", True).value)
+        self._tf_future_s = float(self.declare_parameter("tf_future_s", 0.5).value)
+        self._tracker_initialised = False
+        self._tracker_initialising = False
+        self._track_busy_until = 0.0
+        self._min_match_gap_s = float(self.declare_parameter("min_match_gap_s", 0.15).value)
+        self._last_match_at = 0.0
+        self._last_scan_age_s = 0.0
+        self._track_stats = [0, 0.0, 0.0]  # scans, total match seconds, worst match seconds
+        self._last_map_odom = (0.0, 0.0, 0.0)  # the belief until the first fix: the base
+        self._map_id = ""
 
         self._failed_searches = 0  # each failure doubles the wait before the next search
+        self._last_fit = 0.0
         self._last_odom: Pose2D | None = None  # odom->base_link at the previous check
         self._navigating = False  # a NavigateToPose goal is executing
         self._grid: OccupancyGrid | None = None
@@ -130,9 +159,20 @@ class Relocalizer(Node):
             reliability=ReliabilityPolicy.RELIABLE,
         )
         self.create_subscription(OccupancyGridMsg, "/map", self._on_map, latched)
-        self.create_subscription(LaserScan, self._scan_topic, self._on_scan, 5)
+        # Depth 1: a match takes 40 ms and scans come every 100 ms; a deeper queue let the tracker
+        # fall half a second behind reality and lose the lock in every turn (2026-09-06).
+        self.create_subscription(
+            LaserScan,
+            self._scan_topic,
+            self._on_scan,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
+        )
         self._fit_pub = self.create_publisher(Float32, "localization_fit", 5)
         self._pose_pub = self.create_publisher(PoseWithCovarianceStamped, "/initialpose", 5)
+        self._tf_pub = TransformBroadcaster(self)
+        self._tracker_pub = self.create_publisher(PoseWithCovarianceStamped, "/tracker_pose", 5)
+        self.create_timer(30.0, self._report_tracking)
+        self.create_timer(2.0, self._remember_pose)
         # Eyes for the operator: AMCL's particles as arrows and its pose history as a line.
         # nav2_msgs/ParticleCloud is unknown to Foxglove; PoseArray and Path are not.
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -156,8 +196,27 @@ class Relocalizer(Node):
     def _on_map(self, msg: OccupancyGridMsg) -> None:
         self._grid = grid_from_msg(msg)
         self._matcher = CorrelativeMatcher(self._grid)
-        self._localizer = Localizer(self._grid, Pose2D())
+        # lost_after huge: update() must never run a whole-map search in the executor thread on
+        # this board (10-20 s); the 1 Hz watcher below does that in a worker and re-seeds.
+        # Tracking window sized for this board: 7x7 positions x 13 headings x 120 beams is about
+        # 60 ms per scan on an A53 (the laptop default, 9x9x49x200, took 360 ms: 2 Hz).
+        origin = msg.info.origin.position
+        self._map_id = f"{msg.info.width}x{msg.info.height}@{origin.x:.2f},{origin.y:.2f}"
+        self._localizer = Localizer(
+            self._grid,
+            self._last_known_pose(),  # a restart is not a trip back to the base
+            window=SearchWindow(xy_m=0.09, xy_step_m=0.03, theta_deg=6.0, theta_step_deg=1.0),
+            # Lost (five weak scans): a wider, coarser local search every scan re-locks after a
+            # slip; the whole map stays the worker's job (global_retry False).
+            recovery=SearchWindow(xy_m=0.25, xy_step_m=0.05, theta_deg=12.0, theta_step_deg=1.5),
+            max_points=120,
+            recovery_min_inliers=0.5,  # this flat's true pose scores 0.5-0.65 on its maps
+            lost_after=5,
+            global_retry=False,
+        )
+        self._tracker_initialised = False
         self.get_logger().info(f"map received: {msg.info.width}x{msg.info.height} cells")
+        self._tracker_initialised = False  # a new map: find ourselves on it again
 
     def _on_scan(self, msg: LaserScan) -> None:
         if self._laser_tf is None and not self._lookup_laser(msg.header.frame_id):
@@ -172,6 +231,170 @@ class Relocalizer(Node):
             py = -py
         c, s = math.cos(lyaw), math.sin(lyaw)
         self._points = np.column_stack((lx + c * px - s * py, ly + s * px + c * py))
+        if self._track:
+            self._track_scan(msg.header.stamp)
+
+    def _track_scan(self, stamp: Any) -> None:
+        """Predict with the wheels since the last scan, correct with this one, own map -> odom."""
+        loc, points = self._localizer, self._points
+        if loc is None or points is None:
+            return
+        if not self._tracker_initialised:
+            if not self._tracker_initialising and not self._searching:
+                self._tracker_initialising = True
+                threading.Thread(
+                    target=self._initialise_tracker, args=(points,), daemon=True
+                ).start()
+            self._send_map_odom(stamp)  # keep the frame alive with the last belief meanwhile
+            return
+        now = time.monotonic()
+        if (
+            self._searching
+            or now < self._track_busy_until
+            or now - self._last_match_at < self._min_match_gap_s
+        ):
+            self._send_map_odom(stamp)
+            return
+        self._last_match_at = now
+        self._last_scan_age_s = (
+            self.get_clock().now().nanoseconds * 1e-9 - Time.from_msg(stamp).nanoseconds * 1e-9
+        )
+        odom = self._odom_pose(stamp)
+        if odom is None:
+            self._send_map_odom(stamp)
+            return
+        t0 = time.perf_counter()
+        pose = loc.update(odom, points)
+        took = time.perf_counter() - t0
+        stats = self._track_stats
+        stats[0], stats[1], stats[2] = stats[0] + 1, stats[1] + took, max(stats[2], took)
+        if took > 0.12:
+            self._track_busy_until = now + took  # skip about as long as we just spent
+        self._last_map_odom = map_to_odom(pose, odom)
+        self._send_map_odom(stamp)
+        self._publish_tracker_pose(pose, loc.confidence, stamp)
+
+    def _last_known_pose(self) -> Pose2D:
+        """The pose saved by the previous run if it is recent and was good, else the map origin."""
+        try:
+            with open(LAST_POSE_FILE) as f:
+                saved = json.load(f)
+            age = time.time() - float(saved["time"])
+            same_map = saved.get("map") == self._map_id  # a pose means nothing on another map
+            if same_map and age <= LAST_POSE_MAX_AGE_S and float(saved.get("fit", 0.0)) >= 0.55:
+                pose = Pose2D(float(saved["x"]), float(saved["y"]), float(saved["theta"]))
+                self.get_logger().info(
+                    f"starting from the last known pose ({pose.x:+.2f}, {pose.y:+.2f}, "
+                    f"{math.degrees(pose.theta):+.0f} deg), saved {age:.0f} s ago"
+                )
+                return pose
+        except (OSError, KeyError, ValueError, TypeError):
+            pass
+        return Pose2D()
+
+    def _remember_pose(self) -> None:
+        """Every 2 s: write the tracked pose and its fit, so the next start knows where we are."""
+        loc = self._localizer
+        if loc is None or not self._tracker_initialised or self.fit < 0.55:
+            return
+        record = {
+            "x": loc.pose.x,
+            "y": loc.pose.y,
+            "theta": loc.pose.theta,
+            "fit": self.fit,
+            "time": time.time(),
+            "map": self._map_id,
+        }
+        try:
+            with open(LAST_POSE_FILE + ".tmp", "w") as f:
+                json.dump(record, f)
+            os.replace(LAST_POSE_FILE + ".tmp", LAST_POSE_FILE)
+        except OSError:
+            pass
+
+    def _initialise_tracker(self, points: Any) -> None:
+        """Worker thread: a wide local search around the start, the whole map if that fails."""
+        loc = self._localizer
+        assert loc is not None
+        try:
+            # The whole map first, always: a saved or assumed start pose is only a tie-breaker.
+            # A local window around a stale pose once locked onto a look-alike heading at the base.
+            found, confidence = loc.global_search(points, prior=loc.pose)
+            if confidence >= 0.5:
+                loc.pose = found.pose
+                loc.confidence = confidence
+                loc.weak_scans = 0
+            else:
+                confidence = loc.initialize(
+                    points, SearchWindow(0.6, 0.06, 40.0, 4.0), global_fallback=False
+                )
+            self.get_logger().info(
+                f"tracker initialised at ({loc.pose.x:+.2f}, {loc.pose.y:+.2f}, "
+                f"{math.degrees(loc.pose.theta):+.0f} deg): fit {confidence:.2f}"
+            )
+            self._seed(loc.pose)  # AMCL follows, for the particle picture
+            self._tracker_initialised = True
+        finally:
+            self._tracker_initialising = False
+
+    def _odom_pose(self, stamp: Any) -> Pose2D | None:
+        """odom -> base_link at the scan's time, or the newest one when that is not there yet."""
+        try:
+            t = self._tf.lookup_transform(
+                "odom", "base_link", Time.from_msg(stamp), timeout=Duration(seconds=0.03)
+            )
+        except Exception:
+            try:
+                t = self._tf.lookup_transform("odom", "base_link", Time())
+            except Exception:
+                return None
+        return Pose2D(
+            t.transform.translation.x, t.transform.translation.y, yaw_of(t.transform.rotation)
+        )
+
+    def _send_map_odom(self, stamp: Any) -> None:
+        """Broadcast the current map -> odom, dated a little into the future like AMCL does."""
+        x, y, yaw = self._last_map_odom
+        msg = TransformStamped()
+        # Dated from the clock, not the scan: the transform is valid now and for the next half
+        # second, so a controller asking for "now" between two scans is never left extrapolating.
+        future = self.get_clock().now() + Duration(seconds=self._tf_future_s)
+        msg.header.stamp = future.to_msg()
+        msg.header.frame_id = "map"
+        msg.child_frame_id = "odom"
+        msg.transform.translation.x = x
+        msg.transform.translation.y = y
+        msg.transform.rotation.z = math.sin(yaw / 2.0)
+        msg.transform.rotation.w = math.cos(yaw / 2.0)
+        self._tf_pub.sendTransform(msg)
+
+    def _publish_tracker_pose(self, pose: Pose2D, confidence: float, stamp: Any) -> None:
+        """The tracked pose for the operator's view and the trail; sigma grows as the fit drops."""
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = stamp
+        msg.header.frame_id = "map"
+        msg.pose.pose.position.x = pose.x
+        msg.pose.pose.position.y = pose.y
+        msg.pose.pose.orientation.z = math.sin(pose.theta / 2.0)
+        msg.pose.pose.orientation.w = math.cos(pose.theta / 2.0)
+        sigma = 0.05 + 0.3 * (1.0 - confidence)
+        cov = [0.0] * 36
+        cov[0] = cov[7] = sigma**2
+        cov[35] = (math.radians(3.0) + math.radians(20.0) * (1.0 - confidence)) ** 2
+        msg.pose.covariance = cov
+        self._tracker_pub.publish(msg)
+        self._append_trail(msg)
+
+    def _report_tracking(self) -> None:
+        """Every 30 s: how many scans were matched and how long a match takes on this board."""
+        n, total, worst = self._track_stats
+        if n:
+            self.get_logger().info(
+                f"tracker: {n} scans in 30 s, match {total / n * 1000:.0f} ms mean, "
+                f"{worst * 1000:.0f} ms worst, fit {self.fit:.2f}, "
+                f"scan age at match {self._last_scan_age_s * 1000:.0f} ms"
+            )
+        self._track_stats = [0, 0.0, 0.0]
 
     def _lookup_laser(self, frame: str) -> bool:
         """The static base_link <- laser transform, as x, y, yaw and whether roll is pi."""
@@ -201,7 +424,12 @@ class Relocalizer(Node):
         self._particles_pub.publish(out)
 
     def _on_amcl_pose(self, msg: PoseWithCovarianceStamped) -> None:
-        """Append AMCL's pose to the trail (last 600 poses) and republish it, latched."""
+        """AMCL's pose feeds the trail only when AMCL, not this node, owns the localisation."""
+        if not self._track:
+            self._append_trail(msg)
+
+    def _append_trail(self, msg: PoseWithCovarianceStamped) -> None:
+        """Append a pose to the trail (last 600 poses) and republish it, latched."""
         stamped = PoseStamped()
         stamped.header = msg.header
         stamped.pose = msg.pose.pose
@@ -266,7 +494,11 @@ class Relocalizer(Node):
             # its goal and can be re-seeded afterwards or on request (/relocalize).
             self._poor_streak = 0
             return
+        collapsed = self._last_fit >= 0.5 and self.fit < 0.30  # carried or turned by hand
+        self._last_fit = self.fit
         self._poor_streak = self._poor_streak + 1 if self.fit < self._lost_fit else 0
+        if collapsed:
+            self._poor_streak = self._lost_checks  # do not wait: search on this very check
         if self._poor_streak >= self._lost_checks:
             self.get_logger().warning(f"fit {self.fit:.2f} for {self._poor_streak} s: searching")
             self._searching = True
@@ -277,9 +509,6 @@ class Relocalizer(Node):
     ) -> None:
         """Write the scan and the verdict of a failed search as JSON (a few tens of kB)."""
         try:
-            import json
-            import os
-
             os.makedirs(DUMP_DIR, exist_ok=True)
             path = f"{DUMP_DIR}/reloc_fail_{time.strftime('%Y%m%d_%H%M%S')}.json"
             with open(path, "w") as f:
@@ -313,15 +542,13 @@ class Relocalizer(Node):
         current = self._amcl_pose()
         current_fit = self._matcher.inlier_fraction(current, points) if current else 0.0
         started = time.monotonic()
-        stage, found, confidence = "nearby", None, 0.0
-        if current is not None:
-            coarse = self._matcher.match(current, points, self._near)
-            found, confidence = self._localizer.refine(coarse.pose, points)
-        if found is None or confidence < self._min_inliers or confidence < current_fit + 0.1:
-            stage = "whole map"
-            found, confidence = self._localizer.global_search(
-                points, theta_step_deg=10.0, thin_to=90, prior=current
-            )
+        # Always the whole map: a "nearby first" shortcut accepted a 0.66 impostor two metres from
+        # a carried robot (2026-09-06 18:14) and the whole-map stage never ran. The previous belief
+        # only breaks ties between look-alikes.
+        stage = "whole map"
+        found, confidence = self._localizer.global_search(
+            points, theta_step_deg=10.0, thin_to=90, prior=current
+        )
         took = time.monotonic() - started
         self._last_reseed = time.monotonic()  # grace starts now: AMCL needs a moment to apply it
         self._poor_streak = 0
@@ -344,6 +571,10 @@ class Relocalizer(Node):
         return text
 
     def _seed(self, pose: Pose2D) -> None:
+        """Adopt ``pose``: the tracker jumps there and AMCL is told through /initialpose."""
+        if self._localizer is not None:
+            self._localizer.pose = pose
+            self._localizer.weak_scans = 0
         msg = PoseWithCovarianceStamped()
         msg.header.frame_id = "map"
         msg.header.stamp = self.get_clock().now().to_msg()

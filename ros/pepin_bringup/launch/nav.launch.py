@@ -30,9 +30,6 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[params, {"yaml_filename": map_file}],
         ),
         ComposableNode(
-            package="nav2_amcl", plugin="nav2_amcl::AmclNode", name="amcl", parameters=[params]
-        ),
-        ComposableNode(
             package="nav2_controller",
             plugin="nav2_controller::ControllerServer",
             name="controller_server",
@@ -69,7 +66,7 @@ def generate_launch_description() -> LaunchDescription:
             package="nav2_lifecycle_manager",
             plugin="nav2_lifecycle_manager::LifecycleManager",
             name="lifecycle_manager_localization",
-            parameters=[{"autostart": True, "node_names": ["map_server", "amcl"]}],
+            parameters=[{"autostart": True, "node_names": ["map_server"]}],
         ),
         ComposableNode(
             package="nav2_lifecycle_manager",
