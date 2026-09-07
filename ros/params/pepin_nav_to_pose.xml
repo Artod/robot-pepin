@@ -7,7 +7,7 @@
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+    <RecoveryNode number_of_retries="20" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
@@ -40,9 +40,29 @@
               <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
               <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
             </Sequence>
+            <!-- Tried in turn, one per failed attempt, twenty attempts before giving up: a wheel
+                 on a carpet edge or a caster set sideways needs variety and persistence, not a
+                 spin and a shrug. Every move is short and collision-checked against the costmap. -->
             <BackUp backup_dist="0.30" backup_speed="0.10" error_code_id="{backup_code_id}"/>
+            <Sequence name="Rock">
+              <BackUp backup_dist="0.15" backup_speed="0.10" error_code_id="{backup_code_id}"/>
+              <DriveOnHeading dist_to_travel="0.25" speed="0.20" time_allowance="6"/>
+            </Sequence>
             <Spin spin_dist="1.57" error_code_id="{spin_error_code}"/>
-            <Wait wait_duration="1.0"/>
+            <Sequence name="RockLeft">
+              <Spin spin_dist="0.5" error_code_id="{spin_error_code}"/>
+              <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="6"/>
+            </Sequence>
+            <Sequence name="RockRight">
+              <Spin spin_dist="-0.5" error_code_id="{spin_error_code}"/>
+              <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="6"/>
+            </Sequence>
+            <Sequence name="LongRetreat">
+              <BackUp backup_dist="0.50" backup_speed="0.15" error_code_id="{backup_code_id}"/>
+              <Wait wait_duration="1.0"/>
+            </Sequence>
+            <DriveOnHeading dist_to_travel="0.30" speed="0.25" time_allowance="6"/>
+            <Spin spin_dist="-1.57" error_code_id="{spin_error_code}"/>
           </RoundRobin>
         </ReactiveFallback>
       </Sequence>

@@ -40,7 +40,13 @@ def generate_launch_description() -> LaunchDescription:
                 "resolution": 0.05,
                 "max_laser_range": 12.0,
                 "minimum_travel_distance": 0.15,
-                "minimum_travel_heading": 0.15,
+                # Turns in place must reach the mapper: by default slam_toolbox forwards a scan
+                # on translation alone and dead-reckons every turn by the wheels, which over-report
+                # rotation by 10-25% here. That was the 40 deg bend in every map before 2026-09-06.
+                "minimum_travel_heading": 0.1,
+                "check_min_dist_and_heading_precisely": True,
+                "minimum_time_interval": 0.0,  # was 0.5 s: keyframes capped at 2 Hz
+                "use_scan_barycenter": True,
                 "map_update_interval": 2.0,
                 "transform_publish_period": 0.05,
                 "do_loop_closing": True,

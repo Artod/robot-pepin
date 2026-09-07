@@ -36,7 +36,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Float32
+from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformBroadcaster, TransformListener
 
@@ -44,9 +44,10 @@ from pepin.localization import Localizer
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
+from pepin.slip import scan_changed, slipping
 
 OCCUPIED_LOG_ODDS, FREE_LOG_ODDS = 4.0, -4.0
-MAX_BACKOFF_S = 60.0  # a robot that cannot find itself must not saturate the board searching
+MAX_BACKOFF_S = 20.0  # a robot that cannot find itself must not saturate the board searching
 DUMP_DIR = (
     "/maps/rec"  # every failed whole-map search leaves its scan here, for the offline autopsy
 )
@@ -60,6 +61,17 @@ def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
     yaw = math.atan2(math.sin(pose.theta - odom.theta), math.cos(pose.theta - odom.theta))
     c, s = math.cos(yaw), math.sin(yaw)
     return pose.x - (c * odom.x - s * odom.y), pose.y - (s * odom.x + c * odom.y), yaw
+
+
+def _relative(before: Pose2D, after: Pose2D) -> Pose2D:
+    """The step from ``before`` to ``after`` in the frame of ``before`` (an odometry increment)."""
+    c, s = math.cos(before.theta), math.sin(before.theta)
+    dx, dy = after.x - before.x, after.y - before.y
+    return Pose2D(
+        c * dx + s * dy,
+        -s * dx + c * dy,
+        math.atan2(math.sin(after.theta - before.theta), math.cos(after.theta - before.theta)),
+    )
 
 
 def backoff_wait(cooldown_s: float, failed_searches: int) -> float:
@@ -112,9 +124,9 @@ class Relocalizer(Node):
     def __init__(self) -> None:
         super().__init__("relocalizer")
         self._scan_topic = str(self.declare_parameter("scan_topic", "/scan").value)
-        self._lost_fit = float(self.declare_parameter("lost_fit", 0.45).value)
+        self._lost_fit = float(self.declare_parameter("lost_fit", 0.55).value)
         self._lost_checks = int(self.declare_parameter("lost_checks", 3).value)
-        self._min_inliers = float(self.declare_parameter("min_global_inliers", 0.5).value)
+        self._min_inliers = float(self.declare_parameter("min_global_inliers", 0.45).value)
         self._cooldown_s = float(self.declare_parameter("cooldown_s", 8.0).value)
         self._check_period_s = float(self.declare_parameter("check_period_s", 1.0).value)
         # Tracking: every scan corrects the pose by scan matching around the wheels' prediction
@@ -130,6 +142,11 @@ class Relocalizer(Node):
         self._last_scan_age_s = 0.0
         self._track_stats = [0, 0.0, 0.0]  # scans, total match seconds, worst match seconds
         self._last_map_odom = (0.0, 0.0, 0.0)  # the belief until the first fix: the base
+        self._last_ranges: np.ndarray | None = (
+            None  # the previous scan's ranges, for slip detection
+        )
+        self._track_odom: Pose2D | None = None  # odom pose at the previous tracked scan
+        self._slip_streak = 0
         self._map_id = ""
 
         self._failed_searches = 0  # each failure doubles the wait before the next search
@@ -143,6 +160,9 @@ class Relocalizer(Node):
         )  # localizer reasons in the ROS log
         self._localizer: Localizer | None = None
         self._points: np.ndarray | None = None
+        self._ranges: np.ndarray | None = (
+            None  # raw beam ranges of the newest scan (NaN = no return)
+        )
         self._laser_tf: tuple[float, float, float, bool] | None = None  # x, y, yaw, mirrored
         self._poor_streak = 0
         self._last_reseed = -1e9
@@ -171,8 +191,12 @@ class Relocalizer(Node):
         self._pose_pub = self.create_publisher(PoseWithCovarianceStamped, "/initialpose", 5)
         self._tf_pub = TransformBroadcaster(self)
         self._tracker_pub = self.create_publisher(PoseWithCovarianceStamped, "/tracker_pose", 5)
+        self._slip_pub = self.create_publisher(Bool, "/slip", 5)  # wheels move, the world does not
         self.create_timer(30.0, self._report_tracking)
         self.create_timer(2.0, self._remember_pose)
+        self.create_subscription(
+            String, "/pepin/note", lambda m: self.get_logger().info(f"note: {m.data}"), 5
+        )
         # Eyes for the operator: AMCL's particles as arrows and its pose history as a line.
         # nav2_msgs/ParticleCloud is unknown to Foxglove; PoseArray and Path are not.
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -205,13 +229,13 @@ class Relocalizer(Node):
         self._localizer = Localizer(
             self._grid,
             self._last_known_pose(),  # a restart is not a trip back to the base
-            window=SearchWindow(xy_m=0.09, xy_step_m=0.03, theta_deg=6.0, theta_step_deg=1.0),
+            window=SearchWindow(xy_m=0.09, xy_step_m=0.03, theta_deg=9.0, theta_step_deg=1.5),
             # Lost (five weak scans): a wider, coarser local search every scan re-locks after a
             # slip; the whole map stays the worker's job (global_retry False).
-            recovery=SearchWindow(xy_m=0.25, xy_step_m=0.05, theta_deg=12.0, theta_step_deg=1.5),
+            recovery=SearchWindow(xy_m=0.25, xy_step_m=0.05, theta_deg=20.0, theta_step_deg=2.0),
             max_points=120,
             recovery_min_inliers=0.5,  # this flat's true pose scores 0.5-0.65 on its maps
-            lost_after=5,
+            lost_after=3,
             global_retry=False,
         )
         self._tracker_initialised = False
@@ -224,6 +248,7 @@ class Relocalizer(Node):
         assert self._laser_tf is not None
         lx, ly, lyaw, mirrored = self._laser_tf
         ranges = np.asarray(msg.ranges, dtype=np.float64)
+        self._ranges = np.where((ranges > 0.05) & (ranges < msg.range_max), ranges, np.nan)
         ok = np.isfinite(ranges) & (ranges > 0.05) & (ranges < msg.range_max)
         angles = msg.angle_min + np.arange(len(ranges)) * msg.angle_increment
         px, py = ranges[ok] * np.cos(angles[ok]), ranges[ok] * np.sin(angles[ok])
@@ -263,8 +288,23 @@ class Relocalizer(Node):
         if odom is None:
             self._send_map_odom(stamp)
             return
+        # Slip: the wheels claim a step but the scan is the same picture as a tenth of a second ago.
+        # Then the wheel step is a lie; the pose is corrected from where it was, and Nav2's progress
+        # checker (map frame) sees the truth: no progress -> a recovery instead of a 60 s wheelspin.
+        changed = True
+        if self._last_ranges is not None and self._ranges is not None:
+            changed, _ = scan_changed(self._last_ranges, self._ranges)
+        step = Pose2D() if self._track_odom is None else _relative(self._track_odom, odom)
+        slip = slipping(step, changed)
+        self._last_ranges, self._track_odom = self._ranges, odom
+        self._slip_streak = self._slip_streak + 1 if slip else 0
+        if self._slip_streak == 3:
+            self.get_logger().warning(
+                "wheels turning, world standing still: slip, wheel step ignored"
+            )
+        self._slip_pub.publish(Bool(data=slip))
         t0 = time.perf_counter()
-        pose = loc.update(odom, points)
+        pose = loc.update(odom, points, trust_odometry=not slip)
         took = time.perf_counter() - t0
         stats = self._track_stats
         stats[0], stats[1], stats[2] = stats[0] + 1, stats[1] + took, max(stats[2], took)
@@ -499,6 +539,7 @@ class Relocalizer(Node):
         self._poor_streak = self._poor_streak + 1 if self.fit < self._lost_fit else 0
         if collapsed:
             self._poor_streak = self._lost_checks  # do not wait: search on this very check
+            self._failed_searches = 0  # a new carry is a new question, not a repeat of the old one
         if self._poor_streak >= self._lost_checks:
             self.get_logger().warning(f"fit {self.fit:.2f} for {self._poor_streak} s: searching")
             self._searching = True
@@ -546,8 +587,13 @@ class Relocalizer(Node):
         # a carried robot (2026-09-06 18:14) and the whole-map stage never ran. The previous belief
         # only breaks ties between look-alikes.
         stage = "whole map"
+        credible = current is not None and current_fit >= 0.4  # a stale belief must not break ties
         found, confidence = self._localizer.global_search(
-            points, theta_step_deg=10.0, thin_to=90, prior=current
+            points,
+            theta_step_deg=10.0,
+            thin_to=90,
+            prior=current if credible else None,
+            refuse_twins=credible,
         )
         took = time.monotonic() - started
         self._last_reseed = time.monotonic()  # grace starts now: AMCL needs a moment to apply it
