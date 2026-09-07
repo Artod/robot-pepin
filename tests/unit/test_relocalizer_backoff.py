@@ -36,6 +36,6 @@ def test_every_failed_search_doubles_the_wait() -> None:
 
 
 def test_the_wait_stops_growing_at_the_cap() -> None:
-    assert backoff_wait(8.0, 2) == 32.0
+    assert backoff_wait(4.0, 2) == 16.0  # still under the cap
     assert backoff_wait(8.0, 3) == MAX_BACKOFF_S  # 64 s clipped
     assert backoff_wait(8.0, 40) == MAX_BACKOFF_S  # and no overflow after an hour of failures

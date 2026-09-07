@@ -175,6 +175,7 @@ class Localizer:
         theta_step_deg: float = GLOBAL_THETA_STEP_DEG,
         thin_to: int = 120,
         prior: Pose2D | None = None,
+        refuse_twins: bool = True,
     ) -> tuple[MatchResult, float]:
         """Coarse-to-fine search over the whole grid: any position, any heading, once.
 
@@ -244,6 +245,12 @@ class Localizer:
         denied = self._matcher.contradiction_fraction(second.pose, points)
         denied_best = self._matcher.contradiction_fraction(best.pose, points)
         if apart and explains_alike and denied <= denied_best + TWIN_DENIAL_MARGIN:
+            if not refuse_twins:  # a lost robot prefers the better-ranked guess to no guess at all
+                logger.info(
+                    "twins (%.2f vs %.2f); taking the better-ranked %s, the tracker will tell",
+                    best_confidence, second_confidence, best.pose,
+                )  # fmt: skip
+                return best, best_confidence
             if prior is not None:
                 near_best = math.hypot(best.pose.x - prior.x, best.pose.y - prior.y)
                 near_second = math.hypot(second.pose.x - prior.x, second.pose.y - prior.y)
@@ -311,9 +318,19 @@ class Localizer:
         self.pose = apply_motion(self.pose, motion)
         return self.pose
 
-    def update(self, odom: Pose2D, points: NDArray[np.float64]) -> Pose2D:
-        """Advance by the odometry step since the last call, then correct with the scan."""
-        motion = Pose2D() if self._last_odom is None else relative_motion(self._last_odom, odom)
+    def update(
+        self, odom: Pose2D, points: NDArray[np.float64], trust_odometry: bool = True
+    ) -> Pose2D:
+        """Advance by the odometry step since the last call, then correct with the scan.
+
+        ``trust_odometry=False`` discards the wheel step (slipping wheels): the pose is
+        corrected from where it was, and the step is still consumed so it is never re-applied.
+        """
+        motion = (
+            Pose2D()
+            if self._last_odom is None or not trust_odometry
+            else relative_motion(self._last_odom, odom)
+        )
         self._last_odom = odom
         self._drift = Pose2D(  # motion since the last good fit; reset below when the scan fits
             self._drift.x + abs(motion.x),
