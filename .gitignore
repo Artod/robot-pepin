@@ -24,3 +24,6 @@ logs/
 scratch/
 ros/pepin_src/
 ros/maps/rec/
+ros/maps/*.posegraph
+ros/maps/*.data
+ros/maps/*_throttle*
