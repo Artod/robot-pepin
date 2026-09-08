@@ -389,7 +389,9 @@ global_costmap:
         # when there is no other way. A pillar with soft edges, not a wall.
         cost_scaling_factor: 2.0
         inflation_radius: 0.55
-      always_send_full_costmap: False
+      # The planner's own map, publishable: without it neither Foxglove nor a probe can see why
+      # a plan was refused, and NavFn refusing from a parked pose is exactly what needs looking at.
+      always_send_full_costmap: True
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.
 # If you'd rather set it in the yaml, remove the default "map" value in the tb3_simulation_launch.py
@@ -432,10 +434,14 @@ planner_server:
       max_planning_time: 3.0  # four A53 cores: a plan that takes longer is not worth having
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 2.0
-      reverse_penalty: 2.5  # reversing is allowed but has to earn it
+      reverse_penalty: 3.5  # allowed, but a reverse has to save real distance to be chosen
       change_penalty: 0.05
       non_straight_penalty: 1.05
-      rotation_penalty: 5.0  # a turn in place is cheap for this cart but slow for the clock
+      # 1.0, not 5.0. Penalising a turn in place pushes the search onto the control set's arcs,
+      # and the tightest arc nav2 ships is a 0.5 m radius — in a flat that is a wide, silly swing
+      # past furniture. This cart pivots on the spot for free (drive wheels at the front), so an
+      # in-place turn should cost about what a straight step costs.
+      rotation_penalty: 1.0
       cost_penalty: 2.0  # keep away from the inflation, the same instinct as the cost above
       retrospective_penalty: 0.015
       lookup_table_size: 20.0
