@@ -29,19 +29,23 @@
           <ClearEntireCostmap name="ForgetGlobalGhosts" service_name="global_costmap/clear_entirely_global_costmap"/>
         </RateController>
         <RateController hz="1.0">
-          <RecoveryNode number_of_retries="2" name="ComputePathToPose">
+          <RecoveryNode number_of_retries="3" name="ComputePathToPose">
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
-            <!-- A planner that checks the whole footprint refuses to start when the hull sits
-                 inside the inflation's inscribed band, and the cart parks that close: measured at
-                 home on 2026-09-08, a mapped obstacle 0.10 m ahead of base_link (0.04 m off the
-                 bumper) put cost 99 on the hull outline and the lattice planner answered "Start
-                 occupied" — the goal died before a wheel turned. Clearing cannot help, because
-                 nothing there is stale. Twelve centimetres of retreat can, and it is the same
-                 move a person makes when parked nose-in. -->
+            <!-- No WouldAPlannerRecoveryHelp here, deliberately. That condition answers FAILURE
+                 for START_OCCUPIED, which is precisely the code a footprint-checking planner
+                 returns when the cart is parked close to something — so the whole branch was
+                 skipped and the goal died in four seconds without a wheel turning (runs 0023 and
+                 0025, "Goal failed" 65 ms after "Start occupied"). A planner failure gets the
+                 same three answers a person would try: forget what may be stale, retreat, or
+                 turn so the hull sits differently. Any one of them is enough, so they are a
+                 fallback, not a sequence: a retreat blocked by a wall must not end the goal. -->
             <Sequence>
-              <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
               <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
-              <BackUp backup_dist="0.12" backup_speed="0.05" time_allowance="8" error_code_id="{backup_code_id}"/>
+              <Fallback>
+                <BackUp backup_dist="0.15" backup_speed="0.05" time_allowance="10" error_code_id="{backup_code_id}"/>
+                <Spin spin_dist="0.5" time_allowance="8" error_code_id="{spin_code_id}"/>
+                <Wait wait_duration="1"/>
+              </Fallback>
             </Sequence>
           </RecoveryNode>
         </RateController>

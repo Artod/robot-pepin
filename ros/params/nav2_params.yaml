@@ -327,6 +327,16 @@ global_costmap:
       # the planner cannot enter — a robot must always be able to plan its way out of where it
       # already stands.
       footprint: "[[0.0625, 0.275], [0.0625, -0.275], [-0.30, -0.275], [-0.30, 0.275]]"
+      # Three centimetres SMALLER than the cart, for the planner only, and this is what lets it
+      # start from a wall. The inflation layer stamps INSCRIBED cost within one inscribed radius
+      # of every lethal cell — 0.0625 m here, because base_link sits that far behind the front
+      # edge — and Smac refuses a pose whose outline touches that band. Parked 0.04 m off a table
+      # the band covered the cart's own hull and the goal died with "Start occupied" before a
+      # wheel turned. Shrinking the polygon the PLANNER reasons with moves both the band and the
+      # outline apart, so a start is refused only when the real hull is genuinely overlapped. The
+      # local costmap and the controller keep the exact shape, so nothing about collision safety
+      # changes: the plan is three centimetres optimistic, the wheels are not.
+      footprint_padding: -0.03
       resolution: 0.05
       track_unknown_space: true
       # The ToF are in here too, not just in the local costmap: a plan is what routes around an
