@@ -104,13 +104,20 @@ class CorrelativeMatcher:
     """
 
     def __init__(
-        self, grid: OccupancyGrid, window: SearchWindow | None = None, max_points: int = 200
+        self,
+        grid: OccupancyGrid,
+        window: SearchWindow | None = None,
+        max_points: int = 200,
+        interpolate: bool = False,
     ) -> None:
         """``window`` bounds the search around every guess; scans are thinned to at most
-        ``max_points`` beams, which is what caps the cost of one match."""
+        ``max_points`` beams, which is what caps the cost of one match. ``interpolate`` makes the
+        answer continuous between candidates instead of quantised by the step (see ``_refined``).
+        """
         self._grid = grid
         self._window = window or SearchWindow()
         self._max_points = max_points
+        self._interpolate = interpolate
         self._field: NDArray[np.float64] | None = None
         self._field_version = -1
 
@@ -289,12 +296,14 @@ class CorrelativeMatcher:
         window = window or self._window
         pts = self._subsample(points)
         scores, positions, headings = self._lattice(guess, pts, window)
-        best_pose, best_score = self._peak(scores, positions, headings)
+        # Suppression measures from the winning candidate, never from its interpolated pose:
+        # picking rivals is lattice work, and half a step of shift must not move the mask.
+        field, k, i = self._winner(scores)
+        best_pose, best_score = self._refined(field, positions, headings, k, i), float(field[k, i])
         far_xy = (
-            np.abs(positions - [best_pose.x, best_pose.y]).max(axis=1)
-            >= apart_steps * window.xy_step_m - 1e-9
+            np.abs(positions - positions[i]).max(axis=1) >= apart_steps * window.xy_step_m - 1e-9
         )
-        turned = headings - best_pose.theta
+        turned = headings - headings[k]
         far_theta = (
             np.abs(np.arctan2(np.sin(turned), np.cos(turned)))
             >= math.radians(apart_steps * window.theta_step_deg) - 1e-9
@@ -332,13 +341,16 @@ class CorrelativeMatcher:
         for _ in range(k):
             if not mask.any():
                 break
-            pose, score = self._peak(scores, positions, headings, mask)
-            peaks.append(MatchResult(pose=pose, score=score, guess_score=guess_score))
+            field, ki, pi = self._winner(scores, mask)
+            pose = self._refined(field, positions, headings, ki, pi)
+            peaks.append(
+                MatchResult(pose=pose, score=float(field[ki, pi]), guess_score=guess_score)
+            )
             near_xy = (
-                np.abs(positions - [pose.x, pose.y]).max(axis=1)
+                np.abs(positions - positions[pi]).max(axis=1)
                 < apart_steps * window.xy_step_m - 1e-9
             )
-            turned = headings - pose.theta
+            turned = headings - headings[ki]
             near_theta = (
                 np.abs(np.arctan2(np.sin(turned), np.cos(turned)))
                 < math.radians(apart_steps * window.theta_step_deg) - 1e-9
@@ -458,16 +470,68 @@ class CorrelativeMatcher:
         return scores, positions, guess.theta + theta_offsets
 
     @staticmethod
+    def _apex(before: float, at: float, after: float) -> float:
+        """Where a parabola through three scores peaks, in lattice steps from the middle one.
+
+        Returns 0.0 when the three do not describe a maximum, and never leaves the winning cell.
+        """
+        denominator = before - 2.0 * at + after
+        if not np.isfinite(denominator) or denominator >= -1e-12:
+            return 0.0
+        return float(np.clip(0.5 * (before - after) / denominator, -0.5, 0.5))
+
+    @staticmethod
+    def _winner(
+        scores: NDArray[np.float64], mask: NDArray[np.bool_] | None = None
+    ) -> tuple[NDArray[np.float64], int, int]:
+        """The masked score field and the (heading, position) indices of its best candidate."""
+        field = scores if mask is None else np.where(mask, scores, -np.inf)
+        k, i = divmod(int(np.argmax(field)), field.shape[1])
+        return field, k, i
+
+    def _refined(
+        self,
+        field: NDArray[np.float64],
+        positions: NDArray[np.float64],
+        headings: NDArray[np.float64],
+        k: int,
+        i: int,
+    ) -> Pose2D:
+        """The winning candidate's pose, shifted off the lattice when this matcher interpolates.
+
+        The score surface is smooth between candidates but sampled only on the lattice, so an
+        argmax can be no finer than the step: a tracker built on it corrected the heading in
+        1.5 degree jumps and the robot weaved (2026-09-07: 95% of its corrections landed exactly
+        on the lattice). A parabola through the three scores around the winner in each axis
+        recovers the fraction between them. Off by default, because a pose graph *selects* among
+        candidates and was tuned against the lattice, while a tracker wants a continuous answer.
+        """
+        x, y, theta = float(positions[i, 0]), float(positions[i, 1]), float(headings[k])
+        if not self._interpolate:
+            return Pose2D(x, y, wrap_angle(theta))
+        side = round(math.sqrt(len(positions)))  # the xy lattice is square: dx outer, dy inner
+        ix, iy = divmod(i, side)
+        if 0 < k < len(headings) - 1:
+            step = float(headings[k + 1] - headings[k])
+            theta += step * self._apex(field[k - 1, i], field[k, i], field[k + 1, i])
+        if side * side == len(positions):
+            if 0 < ix < side - 1:
+                step = float(positions[(ix + 1) * side + iy, 0] - positions[i, 0])
+                x += step * self._apex(
+                    field[k, (ix - 1) * side + iy], field[k, i], field[k, (ix + 1) * side + iy]
+                )
+            if 0 < iy < side - 1:
+                step = float(positions[i + 1, 1] - positions[i, 1])
+                y += step * self._apex(field[k, i - 1], field[k, i], field[k, i + 1])
+        return Pose2D(x, y, wrap_angle(theta))
+
     def _peak(
+        self,
         scores: NDArray[np.float64],
         positions: NDArray[np.float64],
         headings: NDArray[np.float64],
         mask: NDArray[np.bool_] | None = None,
     ) -> tuple[Pose2D, float]:
-        """The highest-scoring candidate (among those where ``mask`` is True) and its score."""
-        field = scores if mask is None else np.where(mask, scores, -np.inf)
-        k, i = np.unravel_index(int(np.argmax(field)), field.shape)
-        pose = Pose2D(
-            float(positions[i, 0]), float(positions[i, 1]), wrap_angle(float(headings[k]))
-        )
-        return pose, float(field[k, i])
+        """The best candidate (among those where ``mask`` is True) and its score."""
+        field, k, i = self._winner(scores, mask)
+        return self._refined(field, positions, headings, k, i), float(field[k, i])

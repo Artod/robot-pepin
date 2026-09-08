@@ -57,8 +57,9 @@ def test_degenerate_scan_leaves_the_odometry_prediction_in_place() -> None:
     loc = Localizer(room_map(), Pose2D())
     loc.update(Pose2D(), raycast_room(Pose2D()))
     garbage = np.array([[0.3, 0.3], [0.4, -0.2], [-0.3, 0.1]])  # three points cannot fix a pose
+    before = loc.pose  # a good scan may have nudged the pose a fraction of a cell off the truth
     est = loc.update(Pose2D(0.1, 0.0, 0.0), garbage)
-    assert est.x == pytest.approx(0.1, abs=1e-9) and loc.confidence == 0.0
+    assert est.x == pytest.approx(before.x + 0.1, abs=1e-9) and loc.confidence == 0.0
 
 
 def test_grid_round_trips_through_npz(tmp_path) -> None:

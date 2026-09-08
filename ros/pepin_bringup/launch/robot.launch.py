@@ -28,7 +28,7 @@ import math
 from launch import Condition, LaunchContext, LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition, UnlessCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
@@ -134,7 +134,7 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
             ComposableNode(
                 package="tf2_ros",
                 plugin="tf2_ros::StaticTransformBroadcasterNode",
-                name="base_to_imu",
+                name="base_to_imu",  # documentation only: the bridge publishes in base_link
                 parameters=[
                     {
                         "frame_id": "base_link",
@@ -142,10 +142,13 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
                         "translation.x": IMU_X,
                         "translation.y": IMU_Y,
                         "translation.z": IMU_Z,
-                        "rotation.x": 0.0,
+                        # The GY-521 sits with its Y axis up (gravity reads +9.8 on Y,
+                        # 2026-09-07): roll +90 deg maps the chip's Y onto base_link's Z,
+                        # so its Y gyro is our yaw rate.
+                        "rotation.x": 0.7071068,
                         "rotation.y": 0.0,
                         "rotation.z": 0.0,
-                        "rotation.w": 1.0,
+                        "rotation.w": 0.7071068,
                     }
                 ],
             )
@@ -200,11 +203,14 @@ def base_bridge(
 
 def generate_launch_description() -> LaunchDescription:
     use_cpp = LaunchConfiguration("base_bridge_cpp")
-    base = base_bridge("pepin_bringup", UnlessCondition(use_cpp))
+    # The Python bridge keeps the transform: without the C++ bridge there is no EKF to own it.
+    base = base_bridge("pepin_bringup", UnlessCondition(use_cpp), [{"publish_tf": True}])
     # Only the C++ bridge reads the IMU: the Python one has no such parameter.
     imu = LaunchConfiguration("imu")
     # Wheels + gyro fused in the plane (ros/params/ekf.yaml): the wheels over-report rotation
     # on carpet, the gyro does not; the filter publishes odom -> base_link instead of the bridge.
+    # The EKF owns odom -> base_link only when the C++ bridge is what feeds it: with the Python
+    # bridge there is no /imu/data_raw to fuse and both would broadcast the same transform.
     ekf = Node(
         package="robot_localization",
         executable="ekf_node",
@@ -212,7 +218,9 @@ def generate_launch_description() -> LaunchDescription:
         output="screen",
         prefix="nice -n -5",
         parameters=["/params/ekf.yaml"],
-        condition=IfCondition(imu),
+        condition=IfCondition(
+            PythonExpression(["'", imu, "' == 'true' and '", use_cpp, "' == 'true'"])
+        ),
     )
     # Off by default for now: a rclpy process costs ~140 MB and Nav2 does not read Range yet.
     tof = Node(

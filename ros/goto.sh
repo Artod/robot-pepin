@@ -22,10 +22,16 @@ esac
 # -t + -it: Ctrl-C travels through both ptys to goto_ros.py, which cancels the task on the board
 STAMP=$(date +%Y%m%d_%H%M%S)
 REC="/maps/rec/${STAMP}_goto.jsonl"
+CAM="$(dirname "$0")/maps/rec/${STAMP}_goto_cam.mkv"
+mkdir -p "$(dirname "$0")/maps/rec"
+# The head camera, always: any goal may be the clip for the tweet (mjpeg copied as-is, no CPU).
+ffmpeg -loglevel error -y -f mjpeg -use_wallclock_as_timestamps 1 -i "http://$BOARD:8080/stream" -c copy "$CAM" &
+FFPID=$!
 LOG="/maps/rec/${STAMP}_goto.log"   # goto_ros' own words, kept on the board next to the recording
 INTERRUPTED=0
 trap 'INTERRUPTED=1' INT
 finish() {  # everything recorded, always: scans, odometry, tracked pose, the goal's own log, the board log
+    kill -INT $FFPID 2>/dev/null; wait $FFPID 2>/dev/null
     watch_stop
     if [ "$INTERRUPTED" = 1 ]; then
         echo; echo "Ctrl-C: cancelling the navigation task on the board..."
@@ -33,11 +39,17 @@ finish() {  # everything recorded, always: scans, odometry, tracked pose, the go
     elif ssh "root@$BOARD" "docker exec pepin-ros pgrep -f '^python3 /tools/goto_ros.py' >/dev/null" 2>/dev/null; then
         echo; echo "!! the link to the board dropped but the drive goes on there; ros/stop.sh stops it, ros/watch.sh shows it"
     fi
-    ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f session_logger.py" 2>/dev/null || true
-    mkdir -p "$(dirname "$0")/maps/rec"
-    ssh "root@$BOARD" "docker logs --since 10m pepin-ros 2>&1" > "$(dirname "$0")/maps/rec/${STAMP}_goto_board.log" 2>/dev/null || true
-    rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$(dirname "$0")/maps/rec/" 2>/dev/null || true
-    echo "recorded: ros/maps/rec/${STAMP}_goto.jsonl + _goto.log + _board.log"
+    # Every cleanup step leaves its exit code in a trace file: a silent failure here once cost a run's
+    # files (2026-09-07 13:23: the logger kept running, nothing was fetched, no error shown).
+    local rec trace
+    rec="$(dirname "$0")/maps/rec"; trace="$rec/${STAMP}_goto_finish.log"
+    mkdir -p "$rec"
+    ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f 'session_logger.py $REC'" >> "$trace" 2>&1; echo "logger stopped: $?" >> "$trace"
+    ssh "root@$BOARD" "docker logs --since 10m pepin-ros 2>&1" > "$rec/${STAMP}_goto_board.log" 2>> "$trace"; echo "board log: $? $(wc -c < "$rec/${STAMP}_goto_board.log") bytes" >> "$trace"
+    sleep 1
+    rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$rec/" >> "$trace" 2>&1 || { sleep 2; rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$rec/" >> "$trace" 2>&1; }
+    echo "fetched: $?" >> "$trace"
+    echo "recorded: $(ls "$rec" | grep -c "^${STAMP}_goto") files ros/maps/rec/${STAMP}_goto* (jsonl, log, board log, camera; cleanup trace in _goto_finish.log)"
 }
 trap finish EXIT
 ssh "root@$BOARD" "docker exec -d pepin-ros /pepin_entrypoint.sh python3 /tools/session_logger.py $REC"

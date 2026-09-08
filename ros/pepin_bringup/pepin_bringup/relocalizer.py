@@ -234,6 +234,11 @@ class Relocalizer(Node):
             # slip; the whole map stays the worker's job (global_retry False).
             recovery=SearchWindow(xy_m=0.25, xy_step_m=0.05, theta_deg=20.0, theta_step_deg=2.0),
             max_points=120,
+            # Half of each match's residual per scan: one match carries about a degree of
+            # noise, and at full gain that noise reaches the wheels through map -> odom ten
+            # times a second (the robot weaved, 2026-09-07). Only the residual is damped, so
+            # the motion itself never lags; a residual too big to be noise is taken whole.
+            correction_gain=0.5,
             recovery_min_inliers=0.5,  # this flat's true pose scores 0.5-0.65 on its maps
             lost_after=3,
             global_retry=False,

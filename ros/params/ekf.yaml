@@ -16,9 +16,12 @@ ekf_filter_node:
     odom_frame: odom
     base_link_frame: base_link
     world_frame: odom
-    # /odom from the wheels: position and forward speed only; its yaw is the thing we distrust.
+    # /odom from the wheels: the FORWARD SPEED only. Its x and y were integrated with the wheel
+    # heading, so fusing them as an absolute position drags the filter back onto the trajectory
+    # the gyro exists to correct — the heading comes out right and the path is still drawn along
+    # the wrong one (found 2026-09-08). Speed plus gyro yaw rate is honest dead reckoning.
     odom0: odom
-    odom0_config: [true, true, false,
+    odom0_config: [false, false, false,
                    false, false, false,
                    true, false, false,
                    false, false, false,
@@ -36,7 +39,6 @@ ekf_filter_node:
                   false, false, false]
     imu0_differential: false
     imu0_relative: false
-    imu0_remove_gravitational_acceleration: true
     imu0_queue_size: 20
     # Process noise: trust the gyro's yaw more than the wheels' (vyaw small), let x/y follow the wheels.
     process_noise_covariance: [0.02, 0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,

@@ -194,7 +194,9 @@ def test_a_scan_older_than_the_timeout_is_not_matched() -> None:
     before = nav.pose
     elsewhere = Pose2D(-1.0, 0.5, 0.3)  # a scan from somewhere else, claimed to be 5 s old
     d = nav.step(Sense(6.0, start, [raycast_room(elsewhere)], 5.0, None))
-    assert d.hold.startswith("no lidar scan for 5.0") and nav.pose == before
+    assert d.hold.startswith("no lidar scan for 5.0")
+    assert math.hypot(nav.pose.x - before.x, nav.pose.y - before.y) < 1e-9
+    assert abs(nav.pose.theta - before.theta) < 1e-9
 
 
 def test_arrival_is_sticky_across_a_pause() -> None:

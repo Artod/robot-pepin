@@ -27,7 +27,7 @@ import time
 
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
@@ -52,6 +52,7 @@ class SessionLogger(Node):
         self.create_subscription(LaserScan, "/ldlidar_node/scan", self._on_scan, qos)
         self.create_subscription(Odometry, "/odom", self._on_odom, 20)
         self.create_subscription(PoseWithCovarianceStamped, "/tracker_pose", self._on_amcl, 10)
+        self.create_subscription(Path, "/plan", self._on_plan, 5)
         self.get_logger().info(f"logging to {path}")
 
     def _write(self, record: dict) -> None:
@@ -92,6 +93,21 @@ class SessionLogger(Node):
             }
         )
         self.poses += 1
+
+    def _on_plan(self, msg: Path) -> None:
+        """Nav2's global plan as a polyline (at most 200 points), so a replay can draw it."""
+        step = max(1, len(msg.poses) // 200)
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self._write(
+            {
+                "t": stamp if stamp > 0 else time.time(),
+                "topic": "plan",
+                "points": [
+                    [round(p.pose.position.x, 3), round(p.pose.position.y, 3)]
+                    for p in msg.poses[::step]
+                ],
+            }
+        )
 
     def _on_amcl(self, msg: PoseWithCovarianceStamped) -> None:
         """The localizer's belief in the map frame; covariance trace as a stand-in confidence."""

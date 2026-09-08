@@ -97,10 +97,18 @@ class Localizer:
         min_points: int = 50,
         max_points: int = 200,  # beams per match; what caps the cost of one scan
         global_retry: bool = True,  # False: a lost tracker searches locally only
+        correction_gain: float = 1.0,  # share of each match's residual applied (see ``_blend``)
+        jump_m: float = 0.15,  # a residual past this is not noise: taken whole
+        jump_deg: float = 6.0,
     ) -> None:
         self._grid = grid
-        self._matcher = CorrelativeMatcher(grid, max_points=max_points)
+        # The tracker wants a continuous correction: quantised to the search step it corrects the
+        # heading in 1.5 degree jumps and the robot weaves. A pose graph selects, and does not.
+        self._matcher = CorrelativeMatcher(grid, max_points=max_points, interpolate=True)
         self._global_retry = global_retry
+        self._correction_gain = correction_gain
+        self._jump_m = jump_m
+        self._jump_deg = jump_deg
         self._coarse_matcher: CorrelativeMatcher | None = None
         self._coarse_version = -1
         self._window = window or SearchWindow()
@@ -318,6 +326,27 @@ class Localizer:
         self.pose = apply_motion(self.pose, motion)
         return self.pose
 
+    def _blend(self, prediction: Pose2D, matched: Pose2D) -> Pose2D:
+        """Move from the prediction toward the match by ``correction_gain`` of the way.
+
+        One match is a noisy measurement (about 1 degree and 1 cm of noise with 120 beams on a
+        5 cm map), and the pose it corrects is published as a transform the controller steers by:
+        at full gain that noise reaches the wheels ten times a second and the robot weaves. The
+        residual being corrected is odometry error, which grows slowly, so a fraction of it per
+        scan converges in a few tenths of a second and filters the noise. Only the residual is
+        damped — the motion itself is already in the prediction, so nothing lags behind the robot.
+        A residual too large to be noise (a push, a carry, a re-seed) is taken whole.
+        """
+        dx, dy = matched.x - prediction.x, matched.y - prediction.y
+        dtheta = wrap_angle(matched.theta - prediction.theta)
+        jump = math.hypot(dx, dy) > self._jump_m or abs(dtheta) > math.radians(self._jump_deg)
+        gain = 1.0 if jump else self._correction_gain
+        return Pose2D(
+            prediction.x + gain * dx,
+            prediction.y + gain * dy,
+            wrap_angle(prediction.theta + gain * dtheta),
+        )
+
     def update(
         self, odom: Pose2D, points: NDArray[np.float64], trust_odometry: bool = True
     ) -> Pose2D:
@@ -374,7 +403,7 @@ class Localizer:
                     )  # fmt: skip
                     pose, confidence = anywhere.pose, anywhere_confidence
 
-        self.pose = pose
+        self.pose = self._blend(prediction, pose)
         self.confidence = confidence
         if confidence < self._lost_below:
             self.weak_scans += 1

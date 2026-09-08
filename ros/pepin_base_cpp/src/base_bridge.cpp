@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <memory>
@@ -83,7 +84,11 @@ public:
     imu_device_ = declare_parameter<std::string>("imu_device", "/dev/i2c-2");
     imu_address_ = static_cast<int>(declare_parameter<int>("imu_address", 0x68));
     imu_rate_hz_ = declare_parameter<double>("imu_rate_hz", 50.0);
-    imu_frame_ = declare_parameter<std::string>("imu_frame", "imu_link");
+    // Published in the robot's own frame: the mounting rotation is applied here (see
+    // to_base_axes), not left to a static transform the filter may or may not apply.
+    imu_frame_ = declare_parameter<std::string>("imu_frame", "base_link");
+    const auto up = declare_parameter<std::string>("imu_up_axis", "y");
+    imu_up_axis_ = up.empty() ? 'z' : static_cast<char>(std::tolower(up[0]));
     imu_bias_s_ = declare_parameter<double>("imu_bias_s", 2.0);
 
     pose_covariance_ = odometry_pose_covariance();
@@ -244,12 +249,13 @@ private:
   {
     std::string error;
     if (!imu_.open_device(imu_device_, imu_address_, imu_rate_hz_, error)) {
-      RCLCPP_WARN(get_logger(), "no IMU (%s): the bridge runs on wheel odometry", error.c_str());
+      RCLCPP_ERROR(get_logger(), "no IMU (%s): the bridge runs on wheel odometry", error.c_str());
       return;
     }
     RCLCPP_INFO(
-      get_logger(), "IMU on %s at %d Hz, WHO_AM_I 0x%02x", imu_device_.c_str(),
-      static_cast<int>(imu_rate_hz_), static_cast<unsigned>(imu_.who_am_i()));
+      get_logger(), "IMU on %s at %d Hz, WHO_AM_I 0x%02x, %c axis up, published in %s",
+      imu_device_.c_str(), static_cast<int>(imu_rate_hz_),
+      static_cast<unsigned>(imu_.who_am_i()), imu_up_axis_, imu_frame_.c_str());
     imu_publisher_ = create_publisher<sensor_msgs::msg::Imu>("imu/data_raw", 10);
     imu_running_ = true;
     imu_thread_ = std::thread([this] {read_imu();});
@@ -323,18 +329,46 @@ private:
   }
 
   /// One conversion as sensor_msgs/Imu, gyro bias removed, no orientation claimed.
+  /// One reading turned from the chip's axes into the robot's, per ``imu_up_axis``.
+  ///
+  /// The board is bolted with its Y axis pointing up, so the yaw rate the filter needs sits on the
+  /// chip's Y. Publishing raw in an ``imu_link`` frame and leaving the rotation to a static
+  /// transform did not work: robot_localization kept the rate on Y, and two_d_mode then zeroed it,
+  /// so the filter never turned at all (measured 2026-09-08: gyro 27.9 deg/s, filter 0.0). The
+  /// mounting is the driver's business — here the reading comes out in base_link axes and nothing
+  /// downstream has to know how the chip is screwed on.
+  static void to_base_axes(char up, double x, double y, double z, double out[3])
+  {
+    switch (up) {
+      case 'x':  // chip X up: base (x, y, z) <- (-z, y, x)
+        out[0] = -z; out[1] = y; out[2] = x;
+        break;
+      case 'y':  // chip Y up: base (x, y, z) <- (x, -z, y)
+        out[0] = x; out[1] = -z; out[2] = y;
+        break;
+      default:  // chip Z up already
+        out[0] = x; out[1] = y; out[2] = z;
+        break;
+    }
+  }
+
   void publish_imu(const ImuSample & sample, double bias_x, double bias_y, double bias_z)
   {
     sensor_msgs::msg::Imu message;
     message.header.stamp = now();
     message.header.frame_id = imu_frame_;
     message.orientation_covariance[0] = -1.0;  // the ROS way to say "no orientation here"
-    message.angular_velocity.x = sample.gyro_x - bias_x;
-    message.angular_velocity.y = sample.gyro_y - bias_y;
-    message.angular_velocity.z = sample.gyro_z - bias_z;
-    message.linear_acceleration.x = sample.accel_x;
-    message.linear_acceleration.y = sample.accel_y;
-    message.linear_acceleration.z = sample.accel_z;
+    double gyro[3];
+    double accel[3];
+    to_base_axes(imu_up_axis_, sample.gyro_x - bias_x, sample.gyro_y - bias_y,
+      sample.gyro_z - bias_z, gyro);
+    to_base_axes(imu_up_axis_, sample.accel_x, sample.accel_y, sample.accel_z, accel);
+    message.angular_velocity.x = gyro[0];
+    message.angular_velocity.y = gyro[1];
+    message.angular_velocity.z = gyro[2];
+    message.linear_acceleration.x = accel[0];
+    message.linear_acceleration.y = accel[1];
+    message.linear_acceleration.z = accel[2];
     for (std::size_t axis = 0; axis < 3; ++axis) {
       const std::size_t diagonal = axis * 4;  // 0, 4, 8 of a row-major 3x3
       message.angular_velocity_covariance[diagonal] = kGyroStdDev * kGyroStdDev;
@@ -352,6 +386,7 @@ private:
   double max_angular_ = 0.6;
   std::string imu_device_;
   std::string imu_frame_;
+  char imu_up_axis_ = 'z';  // which chip axis points up: the mounting, in one letter
   int imu_address_ = 0x68;
   double imu_rate_hz_ = 50.0;
   double imu_bias_s_ = 2.0;

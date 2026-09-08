@@ -307,6 +307,22 @@ def probe_tof(host: str, wait_s: float = 1.5) -> Probe:
     )
 
 
+def probe_imu(host: str) -> Probe:
+    """The MPU6050 answers on the board's I2C bus 2 (0x68, next to the three ToF sensors)."""
+    r = _ssh(host, "i2cdetect -y 2", timeout=8)
+    if r.returncode != 0:
+        return Probe(
+            "imu",
+            False,
+            "i2c bus 2 not readable" if r.returncode != SSH_TIMED_OUT else "ssh timeout",
+        )
+    row = next((line for line in r.stdout.splitlines() if line.startswith("60:")), "")
+    present = " 68 " in f"{row} " or row.endswith(" 68")
+    return Probe(
+        "imu", present, "MPU6050 at 0x68 on i2c-2" if present else "nothing at 0x68 on i2c-2"
+    )
+
+
 def probe_cameras(host: str, grab_frames: bool) -> list[Probe]:
     """Camera device presence, optionally a real MJPEG frame per camera."""
     probes = []
@@ -379,6 +395,7 @@ def run_health(
         busy = busy_bridge_ports(host)
         add(Probe("lidar", True, in_use) if LIDAR_PORT in busy else probe_lidar(host))
         add(probe_tof(host))
+        add(probe_imu(host))
         if full:
             for p in probe_tof_ids(host):
                 add(p)

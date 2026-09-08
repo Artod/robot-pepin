@@ -21,8 +21,17 @@ def test_identical_scans_did_not_change() -> None:
 
 def test_a_shifted_world_reads_as_changed() -> None:
     ranges = _scan()
-    changed, delta = scan_changed(ranges, ranges + 0.10)
-    assert changed and abs(delta - 0.10) < 1e-9
+    changed, share = scan_changed(ranges, ranges + 0.10)
+    assert changed and share == 1.0
+
+
+def test_a_straight_step_moves_a_quarter_of_the_beams_and_counts_as_motion() -> None:
+    # 4 cm forward: beams looking along the motion shorten by ~4 cm, sideways ones barely change
+    angles = np.linspace(-math.pi, math.pi, 455, endpoint=False)
+    before = np.full(455, 2.0)
+    after = before - 0.04 * np.cos(angles)
+    changed, share = scan_changed(before, after)
+    assert changed and 0.2 < share < 0.8
 
 
 def test_noise_below_the_threshold_is_not_motion() -> None:
@@ -36,8 +45,8 @@ def test_a_blind_scan_never_counts_as_slip() -> None:
     ranges = _scan()
     mostly_nan = np.full_like(ranges, np.nan)
     mostly_nan[:20] = ranges[:20]
-    changed, delta = scan_changed(ranges, mostly_nan)
-    assert changed and math.isinf(delta)
+    changed, share = scan_changed(ranges, mostly_nan)
+    assert changed and math.isinf(share)
     assert not slipping(Pose2D(0.1, 0.0, 0.0), changed)
 
 

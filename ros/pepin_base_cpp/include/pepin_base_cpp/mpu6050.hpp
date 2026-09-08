@@ -143,8 +143,9 @@ private:
       return false;
     }
     who_am_i_ = value;
-    // 0x68 MPU6050, 0x70 MPU6500, 0x71 MPU9250 — same register map for what we use.
-    if (value != 0x68 && value != 0x70 && value != 0x71) {
+    // 0x68 MPU6050, 0x70 MPU6500, 0x71 MPU9250, 0x72 the GY-521 clone on this cart (2026-09-07)
+    // — the same register map for what we use.
+    if (value != 0x68 && value != 0x70 && value != 0x71 && value != 0x72) {
       error = "WHO_AM_I is " + hex_byte(value) + ", not an MPU6050";
       close_device();
       return false;
