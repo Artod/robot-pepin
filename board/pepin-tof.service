@@ -6,6 +6,10 @@ Requires=tof-init.service
 [Service]
 WorkingDirectory=/opt/pepin
 Environment=PYTHONPATH=/opt/pepin
+# Re-address the three sensors before every start: they boot at the same factory address and
+# a restart that finds them in a strange state used to leave them answering 'hardware fail'
+# for good (2026-09-08). Five seconds of XSHUT sequencing makes a restart deterministic.
+ExecStartPre=/usr/local/bin/tof_init.sh
 ExecStart=/opt/pepin/bin/python -m pepin.tof_server --port 3335
 Restart=on-failure
 RestartSec=2

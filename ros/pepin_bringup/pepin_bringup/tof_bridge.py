@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import math
 import queue
+import time
 from typing import Any
 
 import rclpy
@@ -28,8 +29,9 @@ from rclpy.node import Node
 from sensor_msgs.msg import Range
 from tf2_ros import StaticTransformBroadcaster
 
+from pepin.tof_horizon import trusted_max_range
 from pepin_bringup.link import JsonLineLink
-from pepin_bringup.protocol import TOF_NAMES, parse_tof
+from pepin_bringup.protocol import TOF_NAMES, parse_tof, parse_tof_status
 
 # VL53L1X: a ~27 deg cone, 4 cm dead zone, 1.3 m in short mode (the mode the board runs).
 _FIELD_OF_VIEW_RAD = 0.47
@@ -46,7 +48,15 @@ _MOUNTS: dict[str, tuple[float, float, float, float]] = {
 }
 
 _DRAIN_HZ = 15.0  # readings come at ~15 Hz; a faster timer only burns the A53
+_SILENCE_WARN_S = 20.0  # a sensor with nothing valid for this long is reported, not trusted
+_STATUS_REPORT_S = 15.0  # how often the run's log gets the raw sensor verdicts
 _QUEUE_MAX = 100
+
+
+def _status_key(item: tuple[int | None, int]) -> tuple[int, int]:
+    """Sort statuses with the unknown one last."""
+    status, _count = item
+    return (1, 0) if status is None else (0, status)
 
 
 class TofBridge(Node):
@@ -63,6 +73,20 @@ class TofBridge(Node):
             name: self.create_publisher(Range, f"tof/{name}", 10) for name in TOF_NAMES
         }
         self._readings: queue.Queue[dict[str, float | None]] = queue.Queue(maxsize=_QUEUE_MAX)
+        # Each sensor is believed only as far as its cone stays off the floor: the two low ones
+        # graze the carpet at 0.67 m, and the right sensor's steady 0.60-0.70 m returns (with
+        # nothing there for the lidar) were being marked into the costmap as a wall, 2026-09-08.
+        self._ceiling = {
+            name: trusted_max_range(_MOUNTS[name][2], _FIELD_OF_VIEW_RAD, _MAX_RANGE_M)
+            for name in TOF_NAMES
+        }
+        self._last_valid = dict.fromkeys(TOF_NAMES, time.monotonic())  # judged from startup
+        self._warned = dict.fromkeys(TOF_NAMES, False)
+        self._status_counts: dict[str, dict[int | None, int]] = {n: {} for n in TOF_NAMES}
+        self.create_timer(_STATUS_REPORT_S, self._report_status)
+        self.get_logger().info(
+            "tof ceilings: " + ", ".join(f"{n} {self._ceiling[n]:.2f} m" for n in TOF_NAMES)
+        )
         self._static_tf = StaticTransformBroadcaster(self)
         self._static_tf.sendTransform([self._mount_transform(name) for name in TOF_NAMES])
 
@@ -95,8 +119,29 @@ class TofBridge(Node):
 
     def _enqueue_ranges(self, message: dict[str, Any]) -> None:
         """Reader thread: hand one line of ranges to the ROS thread, dropping it if it is behind."""
+        for name, status in parse_tof_status(message).items():
+            counts = self._status_counts[name]
+            counts[status] = counts.get(status, 0) + 1
         with contextlib.suppress(queue.Full):
             self._readings.put_nowait(parse_tof(message))
+
+    def _report_status(self) -> None:
+        """Put the raw VL53L1X verdicts in the run's own log, so a dead sensor is visible there.
+
+        0 = measured, 1 = sigma too high, 2 = signal too weak (usually "nothing in range"),
+        4 = out of bounds, 7 = wraparound, none = the sensor did not answer at all.
+        """
+        report = []
+        for name in TOF_NAMES:
+            counts = self._status_counts[name]
+            total = sum(counts.values()) or 1
+            share = ", ".join(
+                f"{status}:{100 * n // total}%"
+                for status, n in sorted(counts.items(), key=_status_key)
+            )
+            report.append(f"{name} [{share}]")
+            self._status_counts[name] = {}
+        self.get_logger().info("tof status " + "; ".join(report))
 
     def _publish_pending(self) -> None:
         """ROS thread: publish every reading the reader queued, then report link changes."""
@@ -110,7 +155,11 @@ class TofBridge(Node):
         self._log_link_status()
 
     def _publish_range(self, name: str, distance_m: float | None) -> None:
-        """One sensor's reading as a sensor_msgs/Range; no return becomes ``max_range``."""
+        """One sensor's reading as a sensor_msgs/Range; no return becomes its own ``max_range``.
+
+        A reading past the sensor's floor horizon is reported as "nothing seen" rather than as an
+        obstacle: past that distance the cone is looking at the carpet.
+        """
         message = Range()
         # Stamped 60 ms ago: the reading is at least that old (tof server -> TCP -> here), and
         # a stamp behind the newest odom->base_link transform never makes the costmap wait.
@@ -119,17 +168,36 @@ class TofBridge(Node):
         message.radiation_type = Range.INFRARED
         message.field_of_view = _FIELD_OF_VIEW_RAD
         message.min_range = _MIN_RANGE_M
-        message.max_range = _MAX_RANGE_M
+        message.max_range = self._ceiling[name]
         # Below 12 cm the VL53L1X reports crosstalk from whatever sits at its window (the front
         # sensor flickered 0.05 <-> 1.3 m with nothing there, 2026-09-06); such a reading is
         # published below min_range, which the costmap layer drops: neither a mark nor a clear.
-        if distance_m is None:
-            message.range = _MAX_RANGE_M
+        if distance_m is None or distance_m > self._ceiling[name]:
+            message.range = self._ceiling[name]
         elif distance_m < _CROSSTALK_M:
             message.range = -1.0
         else:
             message.range = distance_m
+            self._last_valid[name] = time.monotonic()
+            self._warned[name] = False
         self._range_pubs[name].publish(message)
+        self._warn_if_silent(name)
+
+    def _warn_if_silent(self, name: str) -> None:
+        """Say once when a sensor has produced no valid measurement for a long time.
+
+        It cannot be silenced automatically — a sensor staring at an empty room reports nothing
+        valid too, and its 'nothing there' is what clears the costmap. But a dead one looks
+        exactly like this in the log (front: 801 of 802 frames invalid, 2026-09-08), so the run's
+        own log must say it.
+        """
+        idle = time.monotonic() - self._last_valid[name]
+        if idle > _SILENCE_WARN_S and not self._warned[name]:
+            self._warned[name] = True
+            self.get_logger().warning(
+                f"tof {name}: nothing inside its trusted range ({self._ceiling[name]:.2f} m) "
+                f"for {idle:.0f} s — it can only clear the costmap, never mark it"
+            )
 
     def _log_link_status(self) -> None:
         """Say it once whenever the link comes up or goes down."""

@@ -16,7 +16,7 @@
       }
     },
     "left": {
-      "address": "0x32",
+      "address": "0x31",
       "xshut_gpio_line": 70,
       "xshut_header_pin": 11,
       "xshut_controllable": true,
@@ -29,7 +29,7 @@
       }
     },
     "right": {
-      "address": "0x31",
+      "address": "0x32",
       "xshut_gpio_line": 69,
       "xshut_header_pin": 13,
       "xshut_controllable": true,
@@ -42,5 +42,5 @@
       }
     }
   },
-  "notes": "mount: measured 2026-09-04 with a tape (+-1 cm). null would mean not measured: such a sensor feeds the reflex only. The VL53L1X sees a ~27 deg cone, so a level sensor at 0.16 m would reach the floor at ~0.67 m at the cone edge."
+  "notes": "mount: measured 2026-09-04 with a tape (+-1 cm). null would mean not measured: such a sensor feeds the reflex only. The VL53L1X sees a ~27 deg cone, so a level sensor at 0.16 m would reach the floor at ~0.67 m at the cone edge. 2026-09-08: left/right addresses swapped \u2014 0x31 is the sensor on the cart's left, verified by holding a hand in front of each."
 }

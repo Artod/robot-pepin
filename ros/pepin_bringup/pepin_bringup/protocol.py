@@ -88,6 +88,12 @@ def parse_tof(message: dict[str, Any]) -> dict[str, float | None]:
     return ranges
 
 
+def parse_tof_status(message: dict[str, Any]) -> dict[str, int | None]:
+    """The VL53L1X range status per sensor: 0 is a measurement, anything else says why not."""
+    status = message.get("status") or {}
+    return {name: status.get(name) for name in TOF_NAMES}
+
+
 def encode_twist(v: float, w: float) -> bytes:
     """One ``twist`` command line: ``v`` m/s forward, ``w`` rad/s counter-clockwise."""
     return _line({"cmd": "twist", "v": float(v), "w": float(w)})
