@@ -157,7 +157,21 @@ controller_server:
       use_interpolation: true
 
     FollowPathReversing:
-      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      # A shim in front of the same RPP, and the reason is a hole in RPP itself: turning in place
+      # and reversing are mutually exclusive there, so the reversing twin could not pivot at all —
+      # sent home from the printer with the goal behind it, the cart simply drove the whole way
+      # backwards, because turning round was not a move it had. The shim rotates on the spot until
+      # the cart faces its path, then hands over; reversing stays available for the segments where
+      # the plan really asks for it.
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      angular_dist_threshold: 0.6  # more than 34 degrees off the path: turn to face it first
+      forward_sampling_distance: 0.5
+      rotate_to_heading_angular_vel: 0.5
+      max_angular_accel: 1.5
+      simulate_ahead_time: 0.5  # the shim checks its own rotation and gives way if it is blocked
+      rotate_to_goal_heading: false
+      closed_loop: false
       desired_linear_vel: 0.20
       lookahead_dist: 0.45
       min_lookahead_dist: 0.30
@@ -434,7 +448,7 @@ planner_server:
       max_planning_time: 3.0  # four A53 cores: a plan that takes longer is not worth having
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 2.0
-      reverse_penalty: 3.5  # allowed, but a reverse has to save real distance to be chosen
+      reverse_penalty: 5.0  # a reverse must save real distance; turning round is the norm
       change_penalty: 0.05
       non_straight_penalty: 1.05
       # 1.0, not 5.0. Penalising a turn in place pushes the search onto the control set's arcs,
