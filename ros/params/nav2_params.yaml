@@ -122,10 +122,10 @@ controller_server:
       # differential-drive cart at 0.15 m/s does not need model-predictive sampling.
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 0.20
-      lookahead_dist: 0.45
-      min_lookahead_dist: 0.30
+      lookahead_dist: 0.55
+      min_lookahead_dist: 0.40
       max_lookahead_dist: 0.60
-      lookahead_time: 1.5
+      lookahead_time: 2.5
       use_velocity_scaled_lookahead_dist: true
       rotate_to_heading_angular_vel: 0.5
       transform_tolerance: 0.2
@@ -165,7 +165,11 @@ controller_server:
       # the plan really asks for it.
       plugin: "nav2_rotation_shim_controller::RotationShimController"
       primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      angular_dist_threshold: 0.6  # more than 34 degrees off the path: turn to face it first
+      # 1.0 rad, not 0.6. A new plan arrives every 1.3 s, and the shim engages whenever the
+      # fresh path leaves at more than this angle — at 34 degrees it stopped and re-aimed
+      # constantly, which is the "prицеливается" shuffle. It should only interrupt for a genuine
+      # misalignment, and 57 degrees is that.
+      angular_dist_threshold: 1.0
       forward_sampling_distance: 0.5
       rotate_to_heading_angular_vel: 0.5
       max_angular_accel: 1.5
@@ -173,10 +177,10 @@ controller_server:
       rotate_to_goal_heading: false
       closed_loop: false
       desired_linear_vel: 0.20
-      lookahead_dist: 0.45
-      min_lookahead_dist: 0.30
+      lookahead_dist: 0.55
+      min_lookahead_dist: 0.40
       max_lookahead_dist: 0.60
-      lookahead_time: 1.5
+      lookahead_time: 2.5
       use_velocity_scaled_lookahead_dist: true
       rotate_to_heading_angular_vel: 0.5
       transform_tolerance: 0.2
@@ -456,9 +460,14 @@ planner_server:
       # unplannable, and the tree answered by reversing further into the same unmapped ground.
       allow_unknown: true
       tolerance: 0.30
-      max_iterations: 200000
+      max_iterations: 100000
       max_on_approach_iterations: 500
-      max_planning_time: 3.0  # four A53 cores: a plan that takes longer is not worth having
+      max_planning_time: 1.5  # it is asked once a second; a later answer is a stale answer
+      # The obstacle heuristic is a full Dijkstra over the costmap and the goal barely moves
+      # during a drive, so recomputing it on every replan was the single biggest cost — measured
+      # 542 ms a plan, with the planner falling silent for 26.8 s in run 0034 and the tree filling
+      # the gap with fifteen recovery manoeuvres.
+      cache_obstacle_heuristic: true
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 2.0
       reverse_penalty: 5.0  # a reverse must save real distance; turning round is the norm
@@ -472,7 +481,6 @@ planner_server:
       cost_penalty: 2.0  # keep away from the inflation, the same instinct as the cost above
       retrospective_penalty: 0.015
       lookup_table_size: 20.0
-      cache_obstacle_heuristic: false
       allow_reverse_expansion: true
       smooth_path: true
       smoother:
