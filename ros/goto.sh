@@ -51,9 +51,12 @@ finish() {  # everything recorded, always: scans, odometry, tracked pose, the go
     echo "fetched: $?" >> "$trace"
     echo "recorded: $(ls "$rec" | grep -c "^${STAMP}_goto") files ros/maps/rec/${STAMP}_goto* (jsonl, log, board log, camera; cleanup trace in _goto_finish.log)"
 }
-trap finish EXIT
+trap finish EXIT HUP TERM  # a closed terminal must still stop the logger and fetch the run
+# Any recorder left over from a run whose cleanup never ran would keep a core busy: clear it first.
+ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f session_logger.py >/dev/null 2>&1; true"
 ssh "root@$BOARD" "docker exec -d pepin-ros /pepin_entrypoint.sh python3 /tools/session_logger.py $REC"
 # The goal lives on the board (a WiFi hiccup must not become a cancel); this terminal only watches.
 ssh "root@$BOARD" "touch /root/pepin-ros$LOG; docker exec -d -e PYTHONUNBUFFERED=1 pepin-ros /pepin_entrypoint.sh sh -c 'python3 /tools/goto_ros.py --places $PLACES $* > $LOG 2>&1; echo GOTO_EXIT=\$? >> $LOG'"
+echo "laptop: the goal was sent at $(date +%H:%M:%S.%2N)"
 watch_start
 ssh "root@$BOARD" "tail -n +1 -F /root/pepin-ros$LOG 2>/dev/null | sed -u '/^GOTO_EXIT=/q'" 2>/dev/null || true

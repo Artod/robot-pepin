@@ -168,14 +168,19 @@ def arrival(nav: BasicNavigator, x: float, y: float, yaw_deg: float) -> str:
 
 def main() -> None:
     args = sys.argv[1:]
+    name: str | None = None
     places_path = Path("/maps/places.yaml")
     if len(args) >= 2 and args[0] == "--places":
         places_path, args = Path(args[1]), args[2:]
     if not args:
         print(__doc__)
         sys.exit(2)
+    startup = time.monotonic()
     rclpy.init()
     nav = BasicNavigator()
+    print(
+        f"startup: rclpy and the navigator ready at +{time.monotonic() - startup:.1f} s", flush=True
+    )
     try:
         if args[0] == "mark":
             print(mark_place(nav, places_path, args[1]))
@@ -217,10 +222,17 @@ def main() -> None:
         nav.waitUntilNav2Active(
             localizer="robot_localization"
         )  # no AMCL, the tracker owns the frame
+        print(f"startup: Nav2 answered at +{time.monotonic() - startup:.1f} s", flush=True)
         print(describe(x, y, yaw, home), flush=True)
+        checked = time.monotonic()
         if not ensure_localized(nav):
             print("not localized: not driving. Stand the robot still for 5 s and try again.")
             sys.exit(1)
+        print(
+            f"startup: localization checked in {time.monotonic() - checked:.1f} s, "
+            f"{time.monotonic() - startup:.1f} s since this client began",
+            flush=True,
+        )
         lost_since: list[float | None] = [None]
         odom_xy: list[tuple[float, float] | None] = [None]
         lost_at_xy: list[tuple[float, float] | None] = [None]

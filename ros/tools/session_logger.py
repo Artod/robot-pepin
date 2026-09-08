@@ -26,7 +26,7 @@ import sys
 import time
 
 import rclpy
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -35,6 +35,15 @@ from sensor_msgs.msg import LaserScan
 from pepin.recording import scan_record_from_ros
 
 FSYNC_EVERY_S = 2.0
+
+
+def _stop_if_stale(node: "SessionLogger", started: float, limit: float) -> None:
+    """End a recording that outlived its run; its owner normally stops it with SIGINT."""
+    if time.monotonic() - started > limit:
+        node.get_logger().warning(
+            f"recording longer than {limit:.0f} s and nobody stopped it: closing"
+        )
+        raise SystemExit(0)
 
 
 class SessionLogger(Node):
@@ -53,6 +62,7 @@ class SessionLogger(Node):
         self.create_subscription(Odometry, "/odom", self._on_odom, 20)
         self.create_subscription(PoseWithCovarianceStamped, "/tracker_pose", self._on_amcl, 10)
         self.create_subscription(Path, "/plan", self._on_plan, 5)
+        self.create_subscription(Twist, "/cmd_vel", self._on_cmd, 20)
         self.get_logger().info(f"logging to {path}")
 
     def _write(self, record: dict) -> None:
@@ -94,6 +104,17 @@ class SessionLogger(Node):
         )
         self.poses += 1
 
+    def _on_cmd(self, msg: Twist) -> None:
+        """What the controller asked the wheels for: the only record of the command side."""
+        self._write(
+            {
+                "t": time.time(),
+                "topic": "cmd",
+                "linear": round(msg.linear.x, 4),
+                "angular": round(msg.angular.z, 4),
+            }
+        )
+
     def _on_plan(self, msg: Path) -> None:
         """Nav2's global plan as a polyline (at most 200 points), so a replay can draw it."""
         step = max(1, len(msg.poses) // 200)
@@ -127,9 +148,16 @@ class SessionLogger(Node):
         )
 
 
+MAX_SECONDS = 900.0  # a recording nobody stops is a bug, not a feature: two orphans wrote for
+# forty minutes on 2026-09-08 and ate a core each on a board that was already at load 10.
+
+
 def main() -> None:
     rclpy.init()
     node = SessionLogger(sys.argv[1])
+    limit = float(sys.argv[2]) if len(sys.argv) > 2 else MAX_SECONDS
+    started = time.monotonic()
+    node.create_timer(5.0, lambda: _stop_if_stale(node, started, limit))
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

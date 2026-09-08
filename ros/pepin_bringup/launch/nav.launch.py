@@ -13,7 +13,7 @@ Command chain: controller/behaviors -> cmd_vel_nav -> velocity_smoother -> /cmd_
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
@@ -101,11 +101,23 @@ def generate_launch_description() -> LaunchDescription:
     )
     # Kidnapped-robot recovery: whole-map search re-seeds AMCL when the scan stops fitting.
     relocalizer = Node(package="pepin_bringup", executable="relocalizer", output="screen")
+    # Waits for orders on a socket so a goal costs a socket write, not a client boot.
+    # Its places book follows the map in use: /maps/flat3.yaml -> /maps/flat3.places.yaml.
+    places = PythonExpression(
+        ["'", LaunchConfiguration("map"), "'.rsplit('.', 1)[0] + '.places.yaml'"]
+    )
+    goals = Node(
+        package="pepin_bringup",
+        executable="goal_server",
+        output="screen",
+        parameters=[{"places": places}],
+    )
     return LaunchDescription(
         [
             DeclareLaunchArgument("map", default_value="/maps/20260903_182653_lap3_loop.yaml"),
             DeclareLaunchArgument("params_file", default_value="/params/nav2_params.yaml"),
             container,
             relocalizer,
+            goals,
         ]
     )

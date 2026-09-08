@@ -36,7 +36,12 @@ LASER_X, LASER_Y, LASER_Z = 0.005, 0.0, 0.20
 # The MPU6050 sits flat on the chassis over base_link, Z up and its X arrow forward:
 # no rotation, only the height of the deck it is glued to.
 IMU_X, IMU_Y, IMU_Z = 0.0, 0.0, 0.10
-HULL = {"min_x": -0.30, "max_x": 0.0625, "min_y": -0.275, "max_y": 0.275}
+# The cart's own body, with 5 cm of margin: returns just outside the exact hull are its own
+# posts and cables, they travel with it, and the costmap turned them into a wall that made
+# every in-place turn "a collision ahead" (measured 2026-09-08: |y| 0.28-0.34 m in 41-71%
+# of the scans on the home legs). Anything real at 5 cm from the body is inside the swing
+# circle anyway and is handled by the ToF sensors and the inflation.
+HULL = {"min_x": -0.35, "max_x": 0.11, "min_y": -0.325, "max_y": 0.325}
 
 
 def quaternion(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:

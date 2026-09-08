@@ -281,42 +281,6 @@ class CorrelativeMatcher:
         pose, score = self._peak(*self._lattice(guess, pts, window))
         return MatchResult(pose=pose, score=score, guess_score=self.score(guess, pts))
 
-    def match_two(
-        self,
-        guess: Pose2D,
-        points: NDArray[np.float64],
-        window: SearchWindow | None = None,
-        apart_steps: int = 3,
-    ) -> tuple[MatchResult, MatchResult]:
-        """The best candidate, and the best one at least ``apart_steps`` lattice steps from it.
-
-        Two peaks that score alike mean the scan fits two places (a symmetric
-        room, look-alike rooms); the caller decides whether to trust the winner.
-        """
-        window = window or self._window
-        pts = self._subsample(points)
-        scores, positions, headings = self._lattice(guess, pts, window)
-        # Suppression measures from the winning candidate, never from its interpolated pose:
-        # picking rivals is lattice work, and half a step of shift must not move the mask.
-        field, k, i = self._winner(scores)
-        best_pose, best_score = self._refined(field, positions, headings, k, i), float(field[k, i])
-        far_xy = (
-            np.abs(positions - positions[i]).max(axis=1) >= apart_steps * window.xy_step_m - 1e-9
-        )
-        turned = headings - headings[k]
-        far_theta = (
-            np.abs(np.arctan2(np.sin(turned), np.cos(turned)))
-            >= math.radians(apart_steps * window.theta_step_deg) - 1e-9
-        )
-        rival_pose, rival_score = self._peak(
-            scores, positions, headings, far_theta[:, None] | far_xy[None, :]
-        )
-        guess_score = self.score(guess, pts)
-        return (
-            MatchResult(pose=best_pose, score=best_score, guess_score=guess_score),
-            MatchResult(pose=rival_pose, score=rival_score, guess_score=guess_score),
-        )
-
     def match_top(
         self,
         guess: Pose2D,

@@ -41,7 +41,7 @@ def main() -> None:
     seconds = float(args[args.index("--seconds") + 1]) if "--seconds" in args else 10.0
     rclpy.init()
     node = rclpy.create_node("yaw_check")
-    gyro = {"sum": 0.0, "t": None}
+    gyro: dict[str, float | None] = {"sum": 0.0, "t": None}
     wheels: list[float] = []
     ekf: list[float] = []
     tracker: list[float] = []
@@ -49,7 +49,7 @@ def main() -> None:
     def on_imu(msg: Imu) -> None:
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         if gyro["t"] is not None:
-            gyro["sum"] += msg.angular_velocity.z * (stamp - gyro["t"])  # already in base axes
+            gyro["sum"] = (gyro["sum"] or 0.0) + msg.angular_velocity.z * (stamp - gyro["t"])
         gyro["t"] = stamp
 
     node.create_subscription(Imu, "/imu/data_raw", on_imu, 50)
@@ -77,7 +77,7 @@ def main() -> None:
             publisher.publish(Twist())
         rclpy.spin_once(node, timeout_sec=0.05)
     publisher.publish(Twist())
-    print(f"gyro integrated : {math.degrees(gyro['sum']):+7.1f} deg")
+    print(f"gyro integrated : {math.degrees(gyro['sum'] or 0.0):+7.1f} deg")
     print(f"wheel odometry  : {turned(wheels)}")
     print(f"EKF odom->base  : {turned(ekf)}")
     print(f"tracker in map  : {turned(tracker)}")

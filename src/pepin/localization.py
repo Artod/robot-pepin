@@ -264,20 +264,19 @@ class Localizer:
                 near_second = math.hypot(second.pose.x - prior.x, second.pose.y - prior.y)
                 # The twin nearer the previous belief is the better bet; a wrong pick shows up as
                 # a poor fit within seconds and is searched again, a refusal helps nobody.
-                if True:
-                    chosen, chosen_confidence = (
-                        (best, best_confidence)
-                        if near_best <= near_second
-                        else (second, second_confidence)
-                    )
-                    logger.info(
-                        "twins (%.2f vs %.2f); kept %s, %.1f m from the prior",
-                        best_confidence,
-                        second_confidence,
-                        chosen.pose,
-                        min(near_best, near_second),
-                    )
-                    return chosen, chosen_confidence
+                chosen, chosen_confidence = (
+                    (best, best_confidence)
+                    if near_best <= near_second
+                    else (second, second_confidence)
+                )
+                logger.info(
+                    "twins (%.2f vs %.2f); kept %s, %.1f m from the prior",
+                    best_confidence,
+                    second_confidence,
+                    chosen.pose,
+                    min(near_best, near_second),
+                )
+                return chosen, chosen_confidence
             logger.warning(
                 "the scan fits two places alike: %s (inliers %.2f, denied %.2f) and %s "
                 "(%.2f, %.2f); no fix without a start pose",
@@ -313,6 +312,19 @@ class Localizer:
             self._coarse_matcher = CorrelativeMatcher(pooled(self._grid, GLOBAL_POOL_FACTOR))
             self._coarse_version = self._grid.version
         return self._coarse_matcher
+
+    def adopt(self, pose: Pose2D, confidence: float) -> None:
+        """Take ``pose`` as the truth: a re-seed from a whole-map search, or the operator's word.
+
+        The one door for writing the belief from outside. It clears everything the old belief
+        implied — the lost counter and the drift that widens the recovery window — because a
+        re-seed that left the drift behind kept searching as if the robot were still lost.
+        """
+        self.pose = pose
+        self.confidence = confidence
+        self.weak_scans = 0
+        self._drift = Pose2D()
+        self._last_odom = None  # the next update measures its step from the next reading
 
     def predict(self, odom: Pose2D) -> Pose2D:
         """Advance the pose by odometry alone (between scans); the next scan corrects it."""

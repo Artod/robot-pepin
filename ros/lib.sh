@@ -37,6 +37,9 @@ watch_start() {
 }
 watch_stop() {  # never blocks: a stuck viewer must not delay the stop that follows it
     [ -n "${PEPIN_WATCH_PID:-}" ] || return 0
-    { pkill -P "$PEPIN_WATCH_PID"; kill "$PEPIN_WATCH_PID"; wait "$PEPIN_WATCH_PID"; } 2>/dev/null
+    # Kill the ssh that streams the log by its command line as well as by pid: it is a grandchild
+    # of this shell, and killing the subshell alone left it printing into the terminal for minutes.
+    { pkill -P "$PEPIN_WATCH_PID"; kill "$PEPIN_WATCH_PID"; } 2>/dev/null
+    pkill -f "docker logs -f --since 3s pepin-ros" 2>/dev/null
     PEPIN_WATCH_PID=""
 }

@@ -46,6 +46,33 @@ markers = ["hardware: needs the live robot (run with --hardware)"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src/pepin"]
+# The ROS nodes are type-checked too: a node that referenced a field deleted in a refactor
+# only failed on the robot (2026-09-08), and mypy sees that without rclpy being installed.
+files = ["src/pepin", "ros/pepin_bringup/pepin_bringup", "ros/tools"]
 strict = true
 ignore_missing_imports = true
+
+# The ROS nodes are glue over an untyped rclpy: check them for real mistakes (a field that no
+# longer exists, a wrong assignment) without demanding generics on every ROS type.
+[[tool.mypy.overrides]]
+module = [
+    "pepin_bringup.*",
+    "base_bridge",
+    "bench_global_search",
+    "call",
+    "draw_snapshot",
+    "goto_ros",
+    "load_map",
+    "npz_to_map",
+    "relocalizer",
+    "scan_latency",
+    "session_logger",
+    "snapshot_ros",
+    "tof_bridge",
+    "topic_rate",
+    "yaw_check",
+]
+disallow_subclassing_any = false
+disallow_any_generics = false
+disallow_untyped_calls = false
+disallow_untyped_defs = false

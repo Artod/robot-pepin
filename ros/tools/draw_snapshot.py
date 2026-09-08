@@ -30,6 +30,7 @@ def main() -> None:
     grid = np.array(m["data"], dtype=np.int16).reshape(h, w)  # row 0 = y_min
     img = Image.new("RGB", (w * z, h * z), (255, 255, 255))
     px = img.load()
+    assert px is not None  # a just-created image always has pixel access
     for r in range(h):
         for c in range(w):
             v = grid[r, c]
@@ -58,15 +59,17 @@ def main() -> None:
         draw.line([to_px(x, y) for x, y in d["plan"]], fill=(255, 140, 0), width=max(2, z // 2))
     fit = None
     if "scan" in d and "map_to_laser" in d:
-        s, t = d["scan"], d["map_to_laser"]
-        c, sn = math.cos(t["yaw"]), math.sin(t["yaw"])
-        on_wall = total = 0
+        s, laser = d["scan"], d["map_to_laser"]
+        cos_yaw, sin_yaw = math.cos(laser["yaw"]), math.sin(laser["yaw"])
+        on_wall = 0
+        total = 0
         for i, rng in enumerate(s["ranges"]):
             if rng is None or rng < 0.05:
                 continue
             a = s["angle_min"] + i * s["inc"]
             lx, ly = rng * math.cos(a), rng * math.sin(a)
-            wx, wy = t["x"] + c * lx - sn * ly, t["y"] + sn * lx + c * ly
+            wx = laser["x"] + cos_yaw * lx - sin_yaw * ly
+            wy = laser["y"] + sin_yaw * lx + cos_yaw * ly
             col, row = int((wx - ox) / res), int((wy - oy) / res)
             total += 1
             if 0 <= row < h and 0 <= col < w:

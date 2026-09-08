@@ -188,3 +188,16 @@ def test_a_robot_pushed_by_hand_while_lost_relocalises_from_the_whole_map() -> N
     assert not loc.lost
     assert math.hypot(loc.pose.x - pushed.x, loc.pose.y - pushed.y) < 0.10
     assert abs(loc.pose.theta - pushed.theta) < math.radians(5.0)
+
+
+def test_adopting_a_pose_clears_what_the_old_belief_implied() -> None:
+    """A re-seed that kept the drift kept searching as if the robot were still lost."""
+    loc = Localizer(room_map(), Pose2D(), lost_after=2)
+    garbage = np.array([[0.3, 0.3], [0.4, -0.2], [-0.3, 0.1]])
+    loc.update(Pose2D(), garbage)
+    loc.update(Pose2D(0.8, 0.0, math.radians(90.0)), garbage)  # motion while blind: drift grows
+    loc.update(Pose2D(1.6, 0.0, math.radians(180.0)), garbage)
+    assert loc.lost and loc._recovery_window().xy_m > loc._recovery.xy_m
+    loc.adopt(Pose2D(1.0, 2.0, 0.5), 0.8)
+    assert loc.pose == Pose2D(1.0, 2.0, 0.5) and loc.confidence == 0.8
+    assert not loc.lost and loc._recovery_window().xy_m == loc._recovery.xy_m
