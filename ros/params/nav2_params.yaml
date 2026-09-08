@@ -274,14 +274,14 @@ global_costmap:
       transform_tolerance: 1.0
       global_frame: map
       robot_base_frame: base_link
-      # A radius here, not the true polygon, and this is the whole point. Nav2 derives the
-      # inscribed radius from the footprint, and ours is 0.0625 m (base_link sits that far behind
-      # the front edge), so the band the inflation layer marks impassable was 6 cm wide: NavFn
-      # would happily route the CENTRE of a 0.55 m wide cart 10 cm past a chair leg, and the plan
-      # led straight through whatever the ToF had just marked. A 0.30 m disc makes every obstacle
-      # a pillar the plan must go round by the cart's own half-width. The local costmap keeps the
-      # real polygon, so collision checks stay exact — the planner is the one that needs slack.
-      robot_radius: 0.30
+      # The true polygon, NOT a 0.30 m disc. The disc was tried on 2026-09-08 to stop NavFn
+      # routing the centre of a 0.55 m cart past a chair leg, and it made the cart unplannable
+      # wherever it parks: every cell within 0.30 m of anything becomes impassable, the START
+      # cell included, so "Failed to create plan" fired four times in a row next to the sofa and
+      # the tree answered with a reverse. Clearance is bought with cost below, never with a band
+      # the planner cannot enter — a robot must always be able to plan its way out of where it
+      # already stands.
+      footprint: "[[0.0625, 0.275], [0.0625, -0.275], [-0.30, -0.275], [-0.30, 0.275]]"
       resolution: 0.05
       track_unknown_space: true
       # The ToF are in here too, not just in the local costmap: a plan is what routes around an
@@ -351,10 +351,12 @@ global_costmap:
         map_subscribe_transient_local: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # Gentler and wider than the local one on purpose: past the 0.30 m impassable band this is
-        # only a preference, and it is what pulls a plan to the middle of a corridor instead of
-        # scraping the wall. Nothing here forbids anything — NavFn walks cost 0-252 for a price.
-        cost_scaling_factor: 3.0
+        # Wide and shallow, and this is the planner's whole clearance mechanism: an obstacle keeps
+        # a high price out to half a metre (cost 167 at 0.20 m, 157 at 0.30 m, 118 at 0.50 m
+        # against 0 for free space), and NavFn pays 50 + 0.8*cost per cell, so it will route three
+        # times as far around a chair leg rather than shave it — yet it can always squeeze through
+        # when there is no other way. A pillar with soft edges, not a wall.
+        cost_scaling_factor: 2.0
         inflation_radius: 0.55
       always_send_full_costmap: False
 

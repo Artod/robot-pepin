@@ -49,14 +49,18 @@ def test_an_auxiliary_sensor_cannot_stall_the_costmap() -> None:
         assert costmap[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
 
 
-def test_the_planner_routes_around_obstacles_by_the_cart_s_own_width() -> None:
-    """2026-09-08: NavFn's impassable band is the inscribed radius, and ours is 6 cm — a plan led
-    the centre of a 0.55 m cart straight past a chair leg. The planner gets a disc, the controller
-    keeps the true polygon."""
+def test_the_planner_can_always_plan_out_of_where_the_cart_stands() -> None:
+    """2026-09-08: a 0.30 m planning disc made the START cell impassable beside the sofa and the
+    planner failed four times in a row. Clearance is bought with cost, never with a band the
+    planner cannot enter."""
     planner_map = _p("global_costmap")
-    assert planner_map.get("robot_radius", 0.0) >= 0.28, "the plan may pass within a hull's width"
-    assert "footprint" not in planner_map, "a polygon here restores the 6 cm band"
-    assert "footprint" in _p("local_costmap"), "collision checks must use the real shape"
+    assert "robot_radius" not in planner_map, "a planning disc makes a parked cart unplannable"
+    assert "footprint" in planner_map and "footprint" in _p("local_costmap")
+    # The cost must carry far enough to be worth a detour: cost_scaling_factor is the decay per
+    # metre beyond the inscribed radius, so a SMALLER number reaches further.
+    inflation = planner_map["inflation_layer"]
+    assert inflation["inflation_radius"] >= 0.5
+    assert inflation["cost_scaling_factor"] <= 2.5
 
 
 def test_a_tof_return_is_marked_across_its_whole_cone() -> None:
