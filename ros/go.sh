@@ -6,6 +6,8 @@
 #   ros/go.sh mark NAME                 remember this spot under NAME
 #   ros/go.sh where | places | cancel
 # Ctrl-C closes the connection and cancels the goal.
+# A drive brings its own tape home: the board's jsonl (scans, odometry, tracked pose), the
+# container log, and the head camera — any goal may turn out to be the clip worth posting.
 set -uo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"
@@ -20,4 +22,28 @@ case "${1:-}" in
     *)      REQUEST="{\"cmd\":\"go\",\"place\":\"$1\"}" ;;
 esac
 trap 'ssh "root@$BOARD" "printf %s\\\\n {\\\"cmd\\\":\\\"cancel\\\"} | timeout 3 bash -c \"exec 3<>/dev/tcp/127.0.0.1/$PORT; cat >&3\"" 2>/dev/null' INT
-ssh "root@$BOARD" "exec 3<>/dev/tcp/127.0.0.1/$PORT; printf '%s\n' '$REQUEST' >&3; cat <&3"
+CAM=""; FFPID=""
+case "$REQUEST" in '{"cmd":"go"'*)
+    CAM="$(mktemp -u)_cam.mkv"  # mjpeg copied as-is: no re-encoding, no CPU taken from the drive
+    ffmpeg -loglevel error -y -f mjpeg -use_wallclock_as_timestamps 1 \
+           -i "http://$BOARD:8080/stream" -c copy "$CAM" & FFPID=$!
+    trap 'kill -INT $FFPID 2>/dev/null' EXIT
+    ;;
+esac
+REPLY_FILE=$(mktemp)
+ssh "root@$BOARD" "exec 3<>/dev/tcp/127.0.0.1/$PORT; printf '%s\n' '$REQUEST' >&3; cat <&3" | tee "$REPLY_FILE"
+[ -n "$FFPID" ] && { kill -INT "$FFPID" 2>/dev/null; wait "$FFPID" 2>/dev/null; trap - EXIT; }
+# The run recorded itself on the board; bring it home so every drive is on the laptop too.
+RECORDING=$(grep -o '"recording": *"[^"]*"' "$REPLY_FILE" | tail -1 | cut -d'"' -f4)
+rm -f "$REPLY_FILE"
+if [ -n "$RECORDING" ]; then
+    HERE="$(cd "$(dirname "$0")" && pwd)"; mkdir -p "$HERE/maps/rec"
+    STAMP=$(basename "$RECORDING" .jsonl)
+    ssh "root@$BOARD" "docker logs --since 15m pepin-ros 2>&1" > "$HERE/maps/rec/${STAMP}_board.log" 2>/dev/null
+    rsync -aq "root@$BOARD:/root/pepin-ros${RECORDING}" "$HERE/maps/rec/" 2>/dev/null
+    # An empty file means the camera server was down; a missing clip must not look like a recorded one.
+    if [ -n "$CAM" ] && [ -s "$CAM" ]; then mv "$CAM" "$HERE/maps/rec/${STAMP}_cam.mkv"; fi
+    # The run's number is how Artem names a drive out loud ("look at run 37"), so print it loud.
+    echo "=== run #${STAMP%%_*} === ros/maps/rec/${STAMP}.{jsonl,_board.log$([ -f "$HERE/maps/rec/${STAMP}_cam.mkv" ] && echo ,_cam.mkv)}"
+fi
+rm -f "$CAM" 2>/dev/null

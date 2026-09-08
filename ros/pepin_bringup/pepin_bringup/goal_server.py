@@ -35,6 +35,8 @@ from rclpy.node import Node
 from std_msgs.msg import Float32
 from std_srvs.srv import Trigger
 
+from pepin_bringup.run_recorder import RunRecorder
+
 PORT = 3337
 GOOD_FIT = 0.45  # below this the robot is told to find itself before it drives
 
@@ -53,6 +55,7 @@ class GoalServer(Node):
         self.fit = 0.0
         self.create_subscription(Float32, "localization_fit", self._on_fit, 10)
         self._goal_handle: Any = None
+        self._recorder = RunRecorder(self, self._record_dir)
         self._lock = threading.Lock()
         threading.Thread(target=self._serve, daemon=True).start()
         self.get_logger().info(f"goal server ready on port {self._port}")
@@ -70,6 +73,22 @@ class GoalServer(Node):
         done = threading.Event()
         future.add_done_callback(lambda _future: done.set())
         return future.result() if done.wait(timeout) else None
+
+    # -- the run's recording ---------------------------------------------------
+
+    def start_recording(self, name: str) -> Path:
+        """Open this run's tape and return its path; the seconds before the goal are already on it.
+
+        The recorder is this node, not a child process: rclpy takes about four seconds to come up
+        on this board, so a per-goal recorder missed exactly the first turn of every drive.
+        """
+        path = self._recorder.start(name)
+        self.get_logger().info(f"run {self._recorder.number}: recording {path}")
+        return path
+
+    def stop_recording(self) -> None:
+        """Close the run's tape (flushed and synced); harmless when no run is open."""
+        self._recorder.stop()
 
     # -- the socket ------------------------------------------------------------
 
@@ -187,52 +206,59 @@ class GoalServer(Node):
         goal.pose = self._pose_msg(x, y, yaw_deg)
         started = time.monotonic()
         feedback: dict[str, Any] = {}
-        send = self._client.send_goal_async(
-            goal,
-            lambda f: feedback.update(
-                distance=f.feedback.distance_remaining, recoveries=f.feedback.number_of_recoveries
-            ),
-        )
-        handle = self._wait(send, 10.0)
-        if handle is None or not handle.accepted:
-            self._send(connection, {"event": "error", "detail": "the goal was refused"})
-            return
-        with self._lock:
-            self._goal_handle = handle
-        self._send(
-            connection,
-            {
-                "event": "accepted",
-                "place": name,
-                "x": x,
-                "y": y,
-                "yaw_deg": yaw_deg,
-                "sent_in_ms": round((time.monotonic() - started) * 1000),
-            },
-        )
-        result_future = handle.get_result_async()
-        last = 0.0
-        while rclpy.ok() and not result_future.done():
-            time.sleep(0.05)  # the node's own spin serves the action; this thread only reports
-            now = time.monotonic()
-            if feedback and now - last > 1.0:
-                last = now
-                self._send(
-                    connection, {"event": "feedback", "t": round(now - started, 1), **feedback}
-                )
-        with self._lock:
-            self._goal_handle = None
-        outcome = result_future.result()
-        status = getattr(outcome, "status", 0) if outcome else 0
-        self._send(
-            connection,
-            {
-                "event": "done",
-                "status": int(status),
-                "seconds": round(time.monotonic() - started, 1),
-                "arrival": self._pose_now(),
-            },
-        )
+        record = self.start_recording(name or f"{x:.0f}_{y:.0f}")
+        try:
+            send = self._client.send_goal_async(
+                goal,
+                lambda f: feedback.update(
+                    distance=f.feedback.distance_remaining,
+                    recoveries=f.feedback.number_of_recoveries,
+                ),
+            )
+            handle = self._wait(send, 10.0)
+            if handle is None or not handle.accepted:
+                self._send(connection, {"event": "error", "detail": "the goal was refused"})
+                return
+            with self._lock:
+                self._goal_handle = handle
+            self._send(
+                connection,
+                {
+                    "event": "accepted",
+                    "place": name,
+                    "x": x,
+                    "y": y,
+                    "yaw_deg": yaw_deg,
+                    "sent_in_ms": round((time.monotonic() - started) * 1000),
+                },
+            )
+            result_future = handle.get_result_async()
+            last = 0.0
+            while rclpy.ok() and not result_future.done():
+                time.sleep(0.05)  # the node's own spin serves the action; this thread only reports
+                now = time.monotonic()
+                if feedback and now - last > 1.0:
+                    last = now
+                    self._send(
+                        connection, {"event": "feedback", "t": round(now - started, 1), **feedback}
+                    )
+            with self._lock:
+                self._goal_handle = None
+            outcome = result_future.result()
+            status = getattr(outcome, "status", 0) if outcome else 0
+            self.stop_recording()  # closed before the answer: the caller fetches it on reading
+            self._send(
+                connection,
+                {
+                    "event": "done",
+                    "status": int(status),
+                    "seconds": round(time.monotonic() - started, 1),
+                    "arrival": self._pose_now(),
+                    "recording": str(record),
+                },
+            )
+        finally:  # a refused goal or a broken connection must not leave a recorder running
+            self.stop_recording()
 
     def _target_of(self, request: dict[str, Any]) -> tuple[float, float, float, str | None] | None:
         """The goal asked for: a named place, or plain coordinates."""
@@ -285,6 +311,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        node.stop_recording()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

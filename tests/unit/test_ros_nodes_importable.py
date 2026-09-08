@@ -32,3 +32,40 @@ def test_the_tracker_node_keeps_its_decisions_out_of_itself() -> None:
         for alias in n.names
     }
     assert {"LostWatch", "Localizer"} <= imports, "the node must use the tested pieces, not copies"
+
+
+def _self_names(tree: ast.Module) -> dict[str, tuple[set[str], set[str]]]:
+    """Per class in the file: the private ``self._x`` names it defines, and the ones it uses."""
+    found: dict[str, tuple[set[str], set[str]]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        defined = {
+            f.name for f in node.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        used: set[str] = set()
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Attribute):
+                continue
+            if not (isinstance(inner.value, ast.Name) and inner.value.id == "self"):
+                continue
+            if not inner.attr.startswith("_") or inner.attr.startswith("__"):
+                continue  # only our own helpers; the rclpy base owns the public API
+            (defined if isinstance(inner.ctx, ast.Store) else used).add(inner.attr)
+        bases = {b.id for b in node.bases if isinstance(b, ast.Name)}
+        for base in bases & found.keys():
+            defined |= found[base][0]
+        found[node.name] = (defined, used)
+    return found
+
+
+def test_every_node_has_the_private_members_it_uses() -> None:
+    """`self._open_run(...)` with no `def _open_run` reached the robot twice this week.
+
+    rclpy cannot be imported here, so nothing else notices until the node dies on the board with
+    an AttributeError mid-goal. This is that noticing, in a millisecond.
+    """
+    for path in ROS_PYTHON:
+        for name, (defined, used) in _self_names(ast.parse(path.read_text())).items():
+            missing = used - defined
+            assert not missing, f"{path.name}:{name} uses {sorted(missing)} but never defines them"
