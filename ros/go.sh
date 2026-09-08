@@ -5,6 +5,7 @@
 #   ros/go.sh -1.0 0.3 [YAW_DEG]        drive to map coordinates
 #   ros/go.sh mark NAME                 remember this spot under NAME
 #   ros/go.sh where | places | cancel
+#   ros/go.sh planner navfn|lattice   swap the planner (and the controller that can follow it)
 # Ctrl-C closes the connection and cancels the goal.
 # A drive brings its own tape home: the board's jsonl (scans, odometry, tracked pose), the
 # container log, and the head camera — any goal may turn out to be the clip worth posting.
@@ -13,11 +14,12 @@ BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"
 PORT=3337
 case "${1:-}" in
-    "") echo "usage: ros/go.sh printer | home | X Y [YAW] | mark NAME | where | places | cancel"; exit 2 ;;
+    "") echo "usage: ros/go.sh printer | home | X Y [YAW] | mark NAME | where | places | cancel | planner navfn|lattice"; exit 2 ;;
     mark)   REQUEST="{\"cmd\":\"mark\",\"name\":\"${2:?a name}\"}" ;;
     where)  REQUEST='{"cmd":"where"}' ;;
     places) REQUEST='{"cmd":"places"}' ;;
     cancel) REQUEST='{"cmd":"cancel"}' ;;
+    planner) REQUEST="{\"cmd\":\"planner\",\"name\":\"${2:?navfn or lattice}\"}" ;;
     -*|[0-9]*) REQUEST="{\"cmd\":\"go\",\"x\":$1,\"y\":${2:?y},\"yaw_deg\":${3:-0}}" ;;
     *)      REQUEST="{\"cmd\":\"go\",\"place\":\"$1\"}" ;;
 esac

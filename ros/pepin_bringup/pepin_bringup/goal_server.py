@@ -32,13 +32,20 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from std_msgs.msg import Float32
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
 from pepin_bringup.run_recorder import RunRecorder
 
 PORT = 3337
 GOOD_FIT = 0.45  # below this the robot is told to find itself before it drives
+# Which controller can follow which planner's paths: a lattice plan may reverse, and only the
+# reversing twin of RPP can drive that. Picked as a pair, never separately.
+PLANNERS = {
+    "navfn": ("GridBased", "FollowPath"),
+    "lattice": ("Lattice", "FollowPathReversing"),
+}
 
 
 class GoalServer(Node):
@@ -54,6 +61,11 @@ class GoalServer(Node):
         self._where = self.create_client(Trigger, "where_am_i")
         self.fit = 0.0
         self.create_subscription(Float32, "localization_fit", self._on_fit, 10)
+        # Latched: the behaviour tree reads its selector once, whenever it next ticks.
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._planner_pick = self.create_publisher(String, "planner_selector", latched)
+        self._controller_pick = self.create_publisher(String, "controller_selector", latched)
+        self.planner = "navfn"
         self._goal_handle: Any = None
         self._recorder = RunRecorder(self, self._record_dir)
         self._lock = threading.Lock()
@@ -131,9 +143,14 @@ class GoalServer(Node):
         if command == "places":
             self._send(connection, {"event": "places", "places": self.places()})
         elif command == "where":
-            self._send(connection, {"event": "where", "fit": self.fit, **self._pose_now()})
+            self._send(
+                connection,
+                {"event": "where", "fit": self.fit, "planner": self.planner, **self._pose_now()},
+            )
         elif command == "mark":
             self._send(connection, self.mark(str(request.get("name", ""))))
+        elif command == "planner":
+            self._send(connection, self.pick_planner(str(request.get("name", ""))))
         elif command == "cancel":
             self._send(connection, {"event": "cancelled", "had_goal": self.cancel()})
         elif command == "go":
@@ -180,6 +197,18 @@ class GoalServer(Node):
         }
         self._places_path.write_text(json.dumps(places, indent=2, sort_keys=True) + "\n")
         return {"event": "marked", "name": name, **places[name]}
+
+    def pick_planner(self, name: str) -> dict[str, Any]:
+        """Choose the planner and the controller that can follow it; both, or neither."""
+        pair = PLANNERS.get(name.lower())
+        if pair is None:
+            return {"event": "error", "detail": f"planner must be one of {sorted(PLANNERS)}"}
+        planner, controller = pair
+        self._planner_pick.publish(String(data=planner))
+        self._controller_pick.publish(String(data=controller))
+        self.planner = name.lower()
+        self.get_logger().info(f"planner {planner} with controller {controller}")
+        return {"event": "planner", "planner": planner, "controller": controller}
 
     def cancel(self) -> bool:
         """Stop the running goal, if any; True when there was one."""
