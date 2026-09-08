@@ -35,10 +35,55 @@ def test_stuck_is_declared_within_seconds_and_short_goals_stay_reachable() -> No
     assert checker["movement_time_allowance"] <= 6.0
 
 
+def test_turning_in_place_counts_as_progress() -> None:
+    """2026-09-08: a 70 deg pivot at the base was called 'no progress' and answered by reversing."""
+    checker = _p("controller_server")["progress_checker"]
+    assert checker["plugin"].endswith("PoseProgressChecker")
+    assert 0.0 < checker["required_movement_angle"] <= 0.6
+
+
 def test_an_auxiliary_sensor_cannot_stall_the_costmap() -> None:
     # 2026-09-07: the range layer went stale once (clock jump) and every goal died for 13 minutes.
-    layer = _p("local_costmap")["range_layer"]
-    assert layer["no_readings_timeout"] == 0.0
+    costmap = _p("local_costmap")
+    for sensor in ("front", "left", "right"):
+        assert costmap[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
+
+
+def test_the_planner_routes_around_obstacles_by_the_cart_s_own_width() -> None:
+    """2026-09-08: NavFn's impassable band is the inscribed radius, and ours is 6 cm — a plan led
+    the centre of a 0.55 m cart straight past a chair leg. The planner gets a disc, the controller
+    keeps the true polygon."""
+    planner_map = _p("global_costmap")
+    assert planner_map.get("robot_radius", 0.0) >= 0.28, "the plan may pass within a hull's width"
+    assert "footprint" not in planner_map, "a polygon here restores the 6 cm band"
+    assert "footprint" in _p("local_costmap"), "collision checks must use the real shape"
+
+
+def test_a_tof_return_is_marked_across_its_whole_cone() -> None:
+    """One cell is a mark the planner squeezes past; the sensor cannot say where in the cone."""
+    for costmap in ("local_costmap", "global_costmap"):
+        for sensor in ("front", "left", "right"):
+            layer = _p(costmap)[f"tof_{sensor}_layer"]
+            assert layer["inflate_cone"] == 1.0
+            assert layer["phi"] <= 0.5, "phi must model the real 27 degree cone"
+
+
+def test_each_tof_owns_its_own_layer() -> None:
+    """2026-09-08: one shared layer let the dead front sensor clear the side sensors' marks."""
+    for costmap in ("local_costmap", "global_costmap"):
+        layers = [name for name in _p(costmap)["plugins"] if name.startswith("tof_")]
+        assert len(layers) == 3, f"{costmap}: the three ToF must not share a probability grid"
+        for sensor, layer in zip(("front", "left", "right"), layers, strict=True):
+            assert _p(costmap)[layer]["topics"] == [f"/tof/{sensor}"]
+
+
+def test_a_pivot_the_cart_cannot_make_is_preferred_less_than_an_arc() -> None:
+    """The rear corners sweep 0.407 m; RPP checks 7.03 deg per step, so the speed sets the sweep."""
+    follow = _p("controller_server")["FollowPath"]
+    assert follow["rotate_to_heading_angular_vel"] <= 0.5
+    assert follow["rotate_to_heading_min_angle"] >= 1.0
+    # A Spin judged over 2 s of yaw needs the whole swing circle and is refused before it starts.
+    assert _p("behavior_server")["simulate_ahead_time"] <= 1.0
 
 
 def test_the_behavior_tree_backs_up_first_and_keeps_trying() -> None:

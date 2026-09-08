@@ -11,6 +11,23 @@
       <PipelineSequence name="NavigateWithReplanning">
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+        <!-- The local costmap must be a picture of NOW, not a memory of everything that ever
+             stood here. Its obstacle layer only forgets a cell when a laser beam passes through
+             it, and our tracker keeps correcting map->odom, so every wall gets re-marked a few
+             centimetres away each time: run 0002 carried 388 lethal cells that no scan of the
+             whole run supported, 82 of them within 0.8 m of the cart, and they are what the
+             controller kept refusing to drive into. The lidar refills the real ones in 0.1 s. -->
+        <RateController hz="1.0">
+          <ClearEntireCostmap name="ForgetStaleObstacles" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RateController>
+        <!-- The same forgetting for the planner's costmap, slower. The ToF layers live here too now
+             (that is how a plan routes around what they see), but nothing ever re-observes a cell
+             the cart has driven past, so without this every ToF return would leave a permanent
+             cairn across the flat. Five seconds is long enough for the 1 Hz planner to use a mark
+             and short enough that a ghost never outlives the thing that made it. -->
+        <RateController hz="0.2">
+          <ClearEntireCostmap name="ForgetGlobalGhosts" service_name="global_costmap/clear_entirely_global_costmap"/>
+        </RateController>
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
@@ -20,11 +37,17 @@
             </Sequence>
           </RecoveryNode>
         </RateController>
-        <RecoveryNode number_of_retries="1" name="FollowPath">
+        <RecoveryNode number_of_retries="2" name="FollowPath">
           <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+          <!-- Back up before anything else, right where the controller failed: base_link sits 0.30 m
+               ahead of the rear corners, so the cart sweeps 0.41 m when it turns in place. Parked
+               0.20 m from the printer it cannot legally rotate at all, and no tuning changes that
+               arithmetic — 0.35 m of retreat makes the turn free. This branch fires on the
+               controller's own error, seconds before the global round robin would get there. -->
           <Sequence>
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
             <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <BackUp backup_dist="0.35" backup_speed="0.08" time_allowance="12" error_code_id="{backup_code_id}"/>
           </Sequence>
         </RecoveryNode>
       </PipelineSequence>
