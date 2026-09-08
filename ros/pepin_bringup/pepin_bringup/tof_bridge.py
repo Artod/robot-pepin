@@ -49,6 +49,12 @@ _MOUNTS: dict[str, tuple[float, float, float, float]] = {
 
 _DRAIN_HZ = 15.0  # readings come at ~15 Hz; a faster timer only burns the A53
 _SILENCE_WARN_S = 20.0  # a sensor with nothing valid for this long is reported, not trusted
+# How many invalid frames in a row before a sensor is allowed to say "nothing there". The range
+# layer clears its whole cone on a max reading, so ONE dropped frame erased a mark that had just
+# been made: the front sensor called only 8% of its frames a measurement while a hand was in
+# front of it, and the mark it wrote was rubbed out ten times a second — the cart slowed and
+# carried on. A real empty room stays empty for far longer than three frames (0.2 s).
+_CLEAR_AFTER_MISSES = 3
 _STATUS_REPORT_S = 15.0  # how often the run's log gets the raw sensor verdicts
 _QUEUE_MAX = 100
 
@@ -81,6 +87,7 @@ class TofBridge(Node):
             for name in TOF_NAMES
         }
         self._last_valid = dict.fromkeys(TOF_NAMES, time.monotonic())  # judged from startup
+        self._misses = dict.fromkeys(TOF_NAMES, _CLEAR_AFTER_MISSES)  # start out saying "clear"
         self._warned = dict.fromkeys(TOF_NAMES, False)
         self._status_counts: dict[str, dict[int | None, int]] = {n: {} for n in TOF_NAMES}
         self.create_timer(_STATUS_REPORT_S, self._report_status)
@@ -173,11 +180,15 @@ class TofBridge(Node):
         # sensor flickered 0.05 <-> 1.3 m with nothing there, 2026-09-06); such a reading is
         # published below min_range, which the costmap layer drops: neither a mark nor a clear.
         if distance_m is None or distance_m > self._ceiling[name]:
+            self._misses[name] += 1
+            if self._misses[name] < _CLEAR_AFTER_MISSES:
+                return  # too early to call it clear: publishing max range would erase the mark
             message.range = self._ceiling[name]
         elif distance_m < _CROSSTALK_M:
-            message.range = -1.0
+            message.range = -1.0  # below min_range: the layer neither marks nor clears
         else:
             message.range = distance_m
+            self._misses[name] = 0
             self._last_valid[name] = time.monotonic()
             self._warned[name] = False
         self._range_pubs[name].publish(message)
