@@ -41,11 +41,17 @@
                  fallback, not a sequence: a retreat blocked by a wall must not end the goal. -->
             <Sequence>
               <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
-              <Fallback>
+              <!-- RoundRobin, not Fallback: a Fallback always stops at the first child that
+                   succeeds, so a retreat that worked was repeated on every retry and walked the
+                   cart backwards across the room (run 0027, four reverses and a lost tracker).
+                   Each retry gets a DIFFERENT answer instead, and waiting comes first because the
+                   commonest reason a start looks occupied is a pose the tracker is still fixing —
+                   it searches the whole map by itself when the fit drops. -->
+              <RoundRobin name="PlannerRecoveryActions">
+                <Wait wait_duration="2"/>
                 <BackUp backup_dist="0.15" backup_speed="0.05" time_allowance="10" error_code_id="{backup_code_id}"/>
                 <Spin spin_dist="0.5" time_allowance="8" error_code_id="{spin_code_id}"/>
-                <Wait wait_duration="1"/>
-              </Fallback>
+              </RoundRobin>
             </Sequence>
           </RecoveryNode>
         </RateController>

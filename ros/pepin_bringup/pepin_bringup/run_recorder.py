@@ -74,6 +74,13 @@ class RunRecorder:
         # goals on this board (measured 2026-09-08, load average 8.4). A drive gets them from
         # the moment its tape opens, which is before the goal is even sent.
         self._during_run: list[Any] = []
+        # rclpy subscriptions may be created and destroyed ONLY on the thread that spins the
+        # executor. Doing it from the socket thread killed the node mid-run with "cannot use
+        # Destroyable because destruction was requested" — the executor was building its wait set
+        # out of the very objects being torn down (run 0027). So the socket thread asks, and this
+        # timer, which runs where the executor runs, does it.
+        self._pending: str | None = None
+        node.create_timer(0.1, self._apply_pending)
 
     @property
     def recording(self) -> bool:
@@ -85,23 +92,31 @@ class RunRecorder:
         self.number = next_run_number(self._directory)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         path = self._tape.start(self._directory / f"{self.number:04d}_{stamp}_{name}.jsonl")
-        self._during_run = [
-            self._node.create_subscription(
-                LaserScan, "/ldlidar_node/scan", self._on_scan, self._scan_qos
-            ),
-            self._node.create_subscription(PathMsg, "/plan", self._on_plan, 5),
-            self._node.create_subscription(
-                OccupancyGrid, "/local_costmap/costmap", self._on_costmap, 1
-            ),
-        ]
+        self._pending = "listen"
         return path
 
     def stop(self) -> None:
         """Close the run's tape and give the board back the cores the lidar stream was costing."""
-        for subscription in self._during_run:
-            self._node.destroy_subscription(subscription)
-        self._during_run = []
+        self._pending = "deafen"
         self._tape.stop()
+
+    def _apply_pending(self) -> None:
+        """Executor thread: attach or drop the subscriptions a run needs, as asked by start/stop."""
+        want, self._pending = self._pending, None
+        if want == "listen" and not self._during_run:
+            self._during_run = [
+                self._node.create_subscription(
+                    LaserScan, "/ldlidar_node/scan", self._on_scan, self._scan_qos
+                ),
+                self._node.create_subscription(PathMsg, "/plan", self._on_plan, 5),
+                self._node.create_subscription(
+                    OccupancyGrid, "/local_costmap/costmap", self._on_costmap, 1
+                ),
+            ]
+        elif want == "deafen" and self._during_run:
+            for subscription in self._during_run:
+                self._node.destroy_subscription(subscription)
+            self._during_run = []
 
     def _keep(self, topic: str) -> bool:
         """True when this record is worth building: everything during a run, a sketch when idle."""

@@ -451,7 +451,10 @@ planner_server:
       plugin: "nav2_smac_planner::SmacPlannerLattice"
       # The control set nav2 ships for a differential drive at our own costmap resolution.
       lattice_filepath: "/opt/ros/jazzy/share/nav2_smac_planner/sample_primitives/5cm_resolution/0.5m_turning_radius/diff/output.json"
-      allow_unknown: false
+      # A cell nobody has ever seen is not a wall. With this false, a footprint touching one
+      # unmapped cell — a shadow under the furniture, the edge of the surveyed area — made the pose
+      # unplannable, and the tree answered by reversing further into the same unmapped ground.
+      allow_unknown: true
       tolerance: 0.30
       max_iterations: 200000
       max_on_approach_iterations: 500

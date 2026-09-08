@@ -65,7 +65,12 @@ class GoalServer(Node):
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._planner_pick = self.create_publisher(String, "planner_selector", latched)
         self._controller_pick = self.create_publisher(String, "controller_selector", latched)
+        # Remembered across restarts: a container that comes back with a different planner than
+        # the one being tested makes every comparison a lie.
+        self._planner_path = self._record_dir.parent / "planner.txt"
         self.planner = "navfn"
+        with contextlib.suppress(OSError):
+            self.pick_planner(self._planner_path.read_text().strip())
         self._goal_handle: Any = None
         self._recorder = RunRecorder(self, self._record_dir)
         self._lock = threading.Lock()
@@ -207,6 +212,8 @@ class GoalServer(Node):
         self._planner_pick.publish(String(data=planner))
         self._controller_pick.publish(String(data=controller))
         self.planner = name.lower()
+        with contextlib.suppress(OSError):
+            self._planner_path.write_text(f"{self.planner}\n")
         self.get_logger().info(f"planner {planner} with controller {controller}")
         return {"event": "planner", "planner": planner, "controller": controller}
 
