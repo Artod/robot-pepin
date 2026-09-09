@@ -329,7 +329,14 @@ global_costmap:
       # collision — the timidity was a padding default, not caution.
       footprint_padding: 0.0
       resolution: 0.05
-      track_unknown_space: true
+      # false: a cell the survey never covered counts as FLOOR, not as a void. The map does not
+      # cover every corner of the flat — in run 0042, 227 of 327 tracked poses stood on cells with
+      # no data — and with unknown tracked as NO_INFORMATION the planner alternately refused to
+      # move and needed allow_unknown to route at all, while the tree filled the confusion with
+      # recoveries. The map is a fixed input; what is actually in front of the cart comes from the
+      # lidar's own obstacle layer at 10 Hz and from the ToF, both of which mark into this costmap
+      # in real time. So unsurveyed ground is driven on sensor evidence instead of being feared.
+      track_unknown_space: false
       # The ToF are in here too, not just in the local costmap: a plan is what routes around an
       # obstacle, and a sensor whose returns never reach the planner can only ever stop the robot.
       plugins: ["static_layer", "obstacle_layer", "tof_front_layer", "tof_left_layer", "tof_right_layer", "inflation_layer"]
