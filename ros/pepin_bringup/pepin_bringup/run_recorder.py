@@ -51,7 +51,7 @@ class RunRecorder:
     # While no run is open the tape only keeps a sketch: turning every scan into a record costs
     # 40% of a core on this board (measured 2026-09-08, load average 9 with the controller loop
     # down to 3 Hz), and a prelude does not need 10 Hz. During a run nothing is thinned.
-    IDLE_PERIOD_S: ClassVar[dict[str, float]] = {"scan": 0.5, "tof": 0.25, "pose": 0.2, "loc": 0.2}
+    IDLE_PERIOD_S: ClassVar[dict[str, float]] = {"pose": 0.2, "loc": 0.2}
 
     def __init__(self, node: Node, directory: Path, tape: RunTape | None = None) -> None:
         self._node = node
@@ -65,10 +65,6 @@ class RunRecorder:
         node.create_subscription(Odometry, "/odom", self._on_odom, 20)
         node.create_subscription(PoseWithCovarianceStamped, "/tracker_pose", self._on_loc, 10)
         node.create_subscription(Twist, "/cmd_vel", self._on_cmd, 20)
-        for sensor in ("front", "left", "right"):
-            node.create_subscription(
-                Range, f"/tof/{sensor}", lambda msg, s=sensor: self._on_tof(s, msg), 10
-            )
         # Only while a run is open: rclpy turns every LaserScan into Python objects BEFORE our
         # callback can decline it, and that deserialisation alone cost 38% of a core between
         # goals on this board (measured 2026-09-08, load average 8.4). A drive gets them from
@@ -111,6 +107,15 @@ class RunRecorder:
                 self._node.create_subscription(PathMsg, "/plan", self._on_plan, 5),
                 self._node.create_subscription(
                     OccupancyGrid, "/local_costmap/costmap", self._on_costmap, 1
+                ),
+                # The ToF too: three sensors at 14 Hz are 42 messages a second that rclpy
+                # deserialises before the tape can decline them — a third of a core between
+                # goals, for a prelude nobody reads. A drive gets them from its first moment.
+                *(
+                    self._node.create_subscription(
+                        Range, f"/tof/{sensor}", lambda msg, s=sensor: self._on_tof(s, msg), 10
+                    )
+                    for sensor in ("front", "left", "right")
                 ),
             ]
         elif want == "deafen" and self._during_run:
