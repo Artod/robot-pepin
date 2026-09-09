@@ -37,7 +37,7 @@ case "$REQUEST" in '{"cmd":"go"'*)
     trap 'printf q >&4 2>/dev/null; sleep 1; kill -INT $FFPID 2>/dev/null' EXIT
     ;;
 esac
-REPLY_FILE=$(mktemp)
+REPLY_FILE=$(mktemp); REPLY_COPY=$(mktemp)
 ssh "root@$BOARD" "exec 3<>/dev/tcp/127.0.0.1/$PORT; printf '%s\n' '$REQUEST' >&3; cat <&3" | tee "$REPLY_FILE"
 if [ -n "$FFPID" ]; then
     printf q >&4 2>/dev/null; exec 4>&-          # ffmpeg finishes the file and exits quietly
@@ -46,7 +46,7 @@ if [ -n "$FFPID" ]; then
 fi
 # The run recorded itself on the board; bring it home so every drive is on the laptop too.
 RECORDING=$(grep -o '"recording": *"[^"]*"' "$REPLY_FILE" | tail -1 | cut -d'"' -f4)
-rm -f "$REPLY_FILE"
+cp "$REPLY_FILE" "$REPLY_COPY"; rm -f "$REPLY_FILE"
 if [ -n "$RECORDING" ]; then
     HERE="$(cd "$(dirname "$0")" && pwd)"; mkdir -p "$HERE/maps/rec"
     STAMP=$(basename "$RECORDING" .jsonl)
@@ -58,15 +58,16 @@ if [ -n "$RECORDING" ]; then
     # it refuses, and that substitution is invisible from the outside — so say it out loud, every
     # run, rather than letting a good drive be credited to the wrong planner.
     LOG="$HERE/maps/rec/${STAMP}_board.log"
+    CHOSEN=$(grep -o '"planner": *"[^"]*"' "$REPLY_COPY" 2>/dev/null | tail -1 | cut -d'"' -f4)
     FELL_BACK=$(grep -c "plugin failed to plan" "$LOG" 2>/dev/null || echo 0)
     PLANS=$(grep -c "Passing new path" "$LOG" 2>/dev/null || echo 0)
     if [ "$FELL_BACK" -gt 0 ]; then
-        WHO="the chosen planner refused $FELL_BACK time(s), NavFn took over"
+        WHO="${CHOSEN:-?} refused $FELL_BACK time(s), NavFn took over ($PLANS plans)"
     else
-        WHO="planned entirely by the chosen planner ($PLANS plans)"
+        WHO="planned by ${CHOSEN:-?} throughout ($PLANS plans)"
     fi
     # The run's number is how Artem names a drive out loud ("look at run 37"), so print it loud.
     echo "=== run #${STAMP%%_*} === $WHO"
     echo "    ros/maps/rec/${STAMP}.{jsonl,_board.log$([ -f "$HERE/maps/rec/${STAMP}_cam.mkv" ] && echo ,_cam.mkv)}"
 fi
-rm -f "$CAM" 2>/dev/null
+rm -f "$CAM" "$REPLY_COPY" 2>/dev/null

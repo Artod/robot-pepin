@@ -67,7 +67,10 @@ class GoalServer(Node):
         self._controller_pick = self.create_publisher(String, "controller_selector", latched)
         # Remembered across restarts: a container that comes back with a different planner than
         # the one being tested makes every comparison a lie.
-        self._planner_path = self._record_dir.parent / "planner.txt"
+        # Under maps/rec, which sync.sh excludes: kept in maps/ the file was deleted by the very
+        # next deploy (rsync --delete), so every restart silently went back to the default planner
+        # and a drive was credited to a planner that never ran.
+        self._planner_path = self._record_dir / ".planner"
         self.planner = "navfn"
         with contextlib.suppress(OSError):
             self.pick_planner(self._planner_path.read_text().strip())
