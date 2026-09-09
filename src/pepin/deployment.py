@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 SIDES = ("all", "board", "laptop")
 
 # Nav2 lifecycle nodes by side. "all" is the union: one machine, as before the split.
-BOARD_NAV_NODES = ("controller_server", "behavior_server", "bt_navigator", "velocity_smoother")
+# In bring-up order: the tree last, because loading it needs the planner side's costmap service.
+BOARD_NAV_NODES = ("controller_server", "behavior_server", "velocity_smoother", "bt_navigator")
 LAPTOP_NAV_NODES = ("planner_server",)
 MAP_NODES = ("map_server",)  # the map is served from the board: the tracker needs it there
 
@@ -87,3 +88,40 @@ class LinkWatch:
     @property
     def alive(self) -> bool:
         return self._last_beat is not None and not self._cut
+
+
+# Lifecycle transitions and states (lifecycle_msgs), by name so a test needs no ROS.
+TRANSITION_CONFIGURE = 1
+TRANSITION_ACTIVATE = 3
+
+
+def autostart_for(side: str) -> bool:
+    """Whether the navigation lifecycle manager on ``side`` activates its nodes by itself.
+
+    A whole stack does. The board half does not: its tree cannot load until the planner side's
+    global costmap answers, and a bring-up that fails once is aborted for good by the manager
+    (2026-09-09, "Action server is inactive"). The laptop brings the board up instead, node by
+    node, when it is there to answer — see :func:`next_transition`.
+    """
+    return side != "board"
+
+
+def next_transition(states: dict[str, str]) -> tuple[str, int] | None:
+    """The one lifecycle transition to send next so the board's Nav2 comes up, or ``None``.
+
+    ``states`` maps each board node to its lifecycle state label. Nodes are walked in
+    :data:`BOARD_NAV_NODES` order and the first that is not active gets its next step:
+    unconfigured -> configure, inactive -> activate. A node in transit (activating, ...) or
+    missing answers ``None``: wait and ask again. Sending one step at a time and re-reading the
+    states makes the bring-up idempotent — a half-failed earlier attempt is simply continued.
+    """
+    for node in BOARD_NAV_NODES:
+        state = states.get(node)
+        if state == "active":
+            continue
+        if state == "unconfigured":
+            return node, TRANSITION_CONFIGURE
+        if state == "inactive":
+            return node, TRANSITION_ACTIVATE
+        return None
+    return None

@@ -21,10 +21,13 @@ and the face will one day need — a frame that stays true, a body that fits thr
 a name for every place in the flat, a recording of every drive — is being built here first,
 on an IKEA cart with two servos for wheels.
 
-The whole autonomy runs on the robot. There is no laptop in the control loop: the board is an
-Orange Pi Zero 3 with four Cortex-A53 cores and 1.5 GB of RAM, and it carries ROS 2 Jazzy,
-Nav2, an EKF, the scan-matching tracker and the run recorder at once. The laptop watches
-through Foxglove and sends one line of JSON when it wants the robot to go somewhere.
+Everything that closes a loop runs on the robot: the board is an Orange Pi Zero 3 with four
+Cortex-A53 cores and 1.5 GB of RAM, and it carries ROS 2 Jazzy, the EKF, the scan-matching
+tracker, the local costmap, the controller and the behaviour tree. The laptop is never in the
+stop reflex. It can take the rest — the planner with its global costmap, the goal server and the
+run recorder — over one TCP link (`zenoh-bridge-ros2dds`), the daily mode; a stack that runs
+whole on the board is one flag away. Either way the operator watches through Foxglove and sends
+one line of JSON when the robot should go somewhere.
 
 ## Numbers
 
@@ -54,7 +57,7 @@ Measured on the robot, on the board, during real drives.
          events, tape path)              │        │              │ /plan
                                          │        │              ▼
  Foxglove ◄── ws 8765 ── foxglove_bridge │        │        controller_server   RPP 10 Hz
-                                         │        │        local costmap 3x3 m @ 5 cm, 3 Hz
+                                         │        │        local costmap 3x3 m @ 5 cm, 5 Hz
  rsync   ◄── camera clip (curl on board) │        │              │ /cmd_vel_nav
  rsync   ◄── run .jsonl, board log ──────┼─ run_recorder         ▼
                                          │        ▲        velocity_smoother   10 Hz
@@ -93,7 +96,7 @@ that could be a separate node and is not saves about 140 MB on a 1.5 GB board.
 | Tracker timing report | every 30 s |
 | Controller (Regulated Pure Pursuit) | 10 Hz |
 | Velocity smoother | 10 Hz |
-| Local costmap | update 3 Hz, publish 1 Hz |
+| Local costmap | update 5 Hz, publish 1 Hz |
 | Global costmap | update 2 Hz, publish 1 Hz |
 | Planner | up to 2 Hz |
 | ToF, per sensor | 14 Hz |
@@ -224,7 +227,7 @@ first, and one such cell refused every command, including the one that drives aw
 the printer, run 0087). 8 cm is 1.5 cells at 5 cm, so a mark just outside the band never shares a
 cell with the outline, and anything beyond is still a wall.
 
-**Local costmap**: 3×3 m rolling window at 5 cm, updated at 3 Hz in the *map* frame (a slipping
+**Local costmap**: 3×3 m rolling window at 5 cm, updated at 5 Hz in the *map* frame (a slipping
 wheel feeds `odom` a metre of motion the robot never made). Layers: the lidar obstacle layer,
 then one range layer *per ToF sensor* — one shared layer let the front sensor clear the marks the
 side sensors had just written wherever the cones overlap — then inflation at 0.45 m / 5.0.
@@ -425,9 +428,18 @@ docs/          figures
 furniture, recovers from being carried or pushed by searching the whole map for itself, and
 records every drive with its scans, poses, plan, costmap, log and video.
 
-**Next**: making the thin-client split the daily mode — the planner and the recorder on the
-laptop over zenoh while the board keeps the reflexes — and goals named from what the camera sees
-instead of from a hand-written places book.
+**Stop reflex**, measured: a person who stepped in 0.51 m ahead at 0.30 m/s was passed to the
+controller within 0.3 s and the cart stopped 0.14 m short; the budget is now a 5 Hz local
+costmap, a 1.5 s collision look-ahead (0.45 m) and 1.5 m/s² braking, so the refusal comes at
+the first sight of the obstacle.
+
+**Thin client**: `ros/thin.sh on` leaves the board its reflexes and `ros/laptop.sh` starts the
+planner, the goal server and the recorder on the laptop; the laptop brings the board's Nav2 up
+node by node once its own costmap answers, and the board's link watch stops a drive 2.5 s after
+the laptop's heartbeat goes silent. The bridge is a systemd unit that follows the board's stack.
+
+**Next**: goals named from what the camera sees instead of from a hand-written places book, and
+the split's tape recorded on the board so a run's scans never depend on the link.
 
 ## Credits
 

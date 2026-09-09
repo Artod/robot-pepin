@@ -22,7 +22,7 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
-from pepin.deployment import SIDES, nav_nodes, runs_here
+from pepin.deployment import SIDES, autostart_for, nav_nodes, runs_here
 
 
 def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
@@ -89,7 +89,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             # One manager per side, named by side: a manager only bonds with the nodes it
             # started, so the board's never waits for a planner that lives on the laptop.
             name=f"lifecycle_manager_navigation_{side}",
-            parameters=[{"autostart": True, "node_names": list(nav_nodes(side))}],
+            parameters=[{"autostart": autostart_for(side), "node_names": list(nav_nodes(side))}],
         )
     )
     container = ComposableNodeContainer(
@@ -120,7 +120,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 package="pepin_bringup",
                 executable="goal_server",
                 output="screen",
-                parameters=[{"places": places}],
+                parameters=[{"places": places, "side": side}],
             )
         )
     if runs_here(side, "link_watch"):

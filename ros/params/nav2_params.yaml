@@ -147,7 +147,9 @@ controller_server:
       # (pepin.footprint.CONTACT_BAND_M), so what the cart is parked against never lands in the
       # outline's own cells, while anything further is still a wall.
       use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 0.9  # 0.27 m of look-ahead at 0.30 m/s
+      # 0.45 m of look-ahead at 0.30 m/s (capped at the carrot). At 0.9 s the refusal came only
+      # 0.20 m before a person who appeared at 0.51 m; the cart stopped 0.14 m short (run 0142).
+      max_allowed_time_to_collision_up_to_carrot: 1.5
       use_regulated_linear_velocity_scaling: true
       use_fixed_curvature_lookahead: false
       use_cost_regulated_linear_velocity_scaling: true
@@ -204,7 +206,9 @@ controller_server:
       # (pepin.footprint.CONTACT_BAND_M), so what the cart is parked against never lands in the
       # outline's own cells, while anything further is still a wall.
       use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 0.9  # 0.27 m of look-ahead at 0.30 m/s
+      # 0.45 m of look-ahead at 0.30 m/s (capped at the carrot). At 0.9 s the refusal came only
+      # 0.20 m before a person who appeared at 0.51 m; the cart stopped 0.14 m short (run 0142).
+      max_allowed_time_to_collision_up_to_carrot: 1.5
       use_regulated_linear_velocity_scaling: true
       use_fixed_curvature_lookahead: false
       use_cost_regulated_linear_velocity_scaling: true
@@ -234,7 +238,7 @@ local_costmap:
       # 3 Hz, not 5: raising it did shorten the delay before a ToF return became cost, but it
       # pushed the board's load average from 6.5 to 9.6 and the controller loop is already the
       # thing that starves. The free half of that latency came from mark_threshold instead.
-      update_frequency: 3.0
+      update_frequency: 5.0  # the stop reflex's slowest link: a mark waits for this tick
       publish_frequency: 1.0
       transform_tolerance: 0.3  # a sensor stamped 'now' waits at most this long for odom->base_link
       # map, not odom: the progress checker judges movement in this frame, and a wheel slipping on
@@ -756,7 +760,7 @@ velocity_smoother:
     # cusp a crawl the progress checker timed out on (review 2026-09-09).
     min_velocity: [-0.15, 0.0, -0.6]
     max_accel: [0.5, 0.0, 1.0]  # full speed in 0.6 s; braking twice as hard as that
-    max_decel: [-1.0, 0.0, -2.0]
+    max_decel: [-1.5, 0.0, -2.0]  # 0.3 m/s to 0 in 0.2 s and 3 cm
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

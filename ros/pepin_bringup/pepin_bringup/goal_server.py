@@ -30,6 +30,7 @@ from typing import Any
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from lifecycle_msgs.srv import ChangeState, GetState
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -37,7 +38,12 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import Float32, Header, String
 from std_srvs.srv import Trigger
 
-from pepin.deployment import HEARTBEAT_HZ, HEARTBEAT_TOPIC
+from pepin.deployment import (
+    BOARD_NAV_NODES,
+    HEARTBEAT_HZ,
+    HEARTBEAT_TOPIC,
+    next_transition,
+)
 from pepin.tape import camera_clip_path
 from pepin.watch import DRIVE_FIT, BlindDriveWatch
 from pepin_bringup.run_recorder import RunRecorder
@@ -91,6 +97,24 @@ class GoalServer(Node):
         # stops. Harmless on one machine, where nothing listens.
         self._beat = self.create_publisher(Header, HEARTBEAT_TOPIC, 10)
         self.create_timer(1.0 / HEARTBEAT_HZ, self._heartbeat)
+        # The laptop half brings the board's Nav2 up (pepin.deployment.next_transition): the
+        # board's tree cannot load before this side's costmap service exists, and the board's
+        # own manager gives up after one failure. Every few seconds: read the four states, send
+        # the one transition that is due, read again. Idempotent, so a restart on either side
+        # simply continues.
+        self._side = str(self.declare_parameter("side", "all").value)
+        self._board_state: dict[str, str] = {}
+        self._board_up_logged = False
+        if self._side == "laptop":
+            self._state_clients = {
+                node: self.create_client(GetState, f"/{node}/get_state") for node in BOARD_NAV_NODES
+            }
+            self._change_clients = {
+                node: self.create_client(ChangeState, f"/{node}/change_state")
+                for node in BOARD_NAV_NODES
+            }
+            self._bringup_busy = False
+            self.create_timer(3.0, self._bring_board_up)
         self._recorder = RunRecorder(self, self._record_dir)
         self._camera: subprocess.Popen[bytes] | None = None  # curl copying the stream during a run
         self._camera_clip: Path | None = None
@@ -100,6 +124,59 @@ class GoalServer(Node):
 
     def _heartbeat(self) -> None:
         self._beat.publish(Header(stamp=self.get_clock().now().to_msg(), frame_id="laptop"))
+
+    def _bring_board_up(self) -> None:
+        """Every 3 s on the laptop: read the board's lifecycle states and send the due step."""
+        if self._bringup_busy:
+            return
+        self._bringup_busy = True
+        pending = set(BOARD_NAV_NODES)
+        for node, client in self._state_clients.items():
+            if not client.service_is_ready():
+                self._board_state.pop(node, None)
+                pending.discard(node)
+                continue
+            future = client.call_async(GetState.Request())
+            future.add_done_callback(lambda f, n=node: self._board_state_read(n, f, pending))
+        if not pending:
+            self._bringup_busy = False
+
+    def _board_state_read(self, node: str, future: Any, pending: set[str]) -> None:
+        try:
+            self._board_state[node] = str(future.result().current_state.label)
+        except Exception:  # a dropped call: the next round asks again
+            self._board_state.pop(node, None)
+        pending.discard(node)
+        if pending:
+            return
+        step = next_transition(self._board_state)
+        if step is None:
+            self._bringup_busy = False
+            if all(self._board_state.get(n) == "active" for n in BOARD_NAV_NODES):
+                if not self._board_up_logged:
+                    self.get_logger().info("board Nav2 is up")
+                    self._board_up_logged = True
+            else:
+                self._board_up_logged = False
+            return
+        node, transition = step
+        self._board_up_logged = False
+        request = ChangeState.Request()
+        request.transition.id = transition
+        self.get_logger().info(f"board bring-up: {node} <- transition {transition}")
+        future = self._change_clients[node].call_async(request)
+        future.add_done_callback(lambda f: self._board_transition_done(node, transition, f))
+
+    def _board_transition_done(self, node: str, transition: int, future: Any) -> None:
+        try:
+            ok = bool(future.result().success)
+        except Exception:
+            ok = False
+        if not ok:
+            self.get_logger().warning(
+                f"board bring-up: {node} refused transition {transition}; asking again in 3 s"
+            )
+        self._bringup_busy = False
 
     def _on_fit(self, msg: Float32) -> None:
         self.fit = float(msg.data)

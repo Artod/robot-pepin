@@ -17,7 +17,7 @@
              centimetres away each time: run 0002 carried 388 lethal cells that no scan of the
              whole run supported, 82 of them within 0.8 m of the cart, and they are what the
              controller kept refusing to drive into. The lidar refills the real ones in 0.1 s. -->
-        <RateController hz="1.0">
+        <RateController hz="0.2">
           <ClearEntireCostmap name="ForgetStaleObstacles" service_name="local_costmap/clear_entirely_local_costmap"/>
         </RateController>
         <!-- The same forgetting for the planner's costmap, slower. The ToF layers live here too now

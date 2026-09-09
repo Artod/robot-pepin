@@ -103,7 +103,7 @@ case "$REQUEST" in '{"cmd":"go"'*)
         4) [ "$VERDICT" -eq 0 ] && WHY="reached" ;;
         5) VERDICT=1; WHY="cancelled" ;;
         6) VERDICT=1; WHY="aborted by Nav2" ;;
-        none) VERDICT=1; WHY="no done event (connection lost?)" ;;
+        none) VERDICT=1; [ "$WHY" = ok ] && WHY="no done event (connection lost?)" ;;  # a refusal keeps its reason
         *) VERDICT=1; WHY="Nav2 status $STATUS" ;;
     esac
     echo "=== verdict: $WHY (exit $VERDICT) ===" ;;

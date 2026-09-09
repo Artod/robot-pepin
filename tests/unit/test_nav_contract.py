@@ -349,3 +349,31 @@ def test_the_nav2_footprint_is_the_hull() -> None:
     for costmap in ("local_costmap", "global_costmap"):
         polygon = [tuple(p) for p in ast.literal_eval(_p(costmap)["footprint"])]
         assert polygon == HULL.polygon(), costmap
+
+
+def test_the_stop_reflex_has_a_budget() -> None:
+    """A person who appeared 0.51 m ahead at 0.30 m/s was passed to the controller 0.3 s later,
+    refused only 0.20 m before contact and stopped 0.14 m short (run 0142). The reflex lives on
+    the board: local costmap tick, RPP's projection, the smoother's braking, and the tree must
+    not wipe a fresh mark every second."""
+    local = _p("local_costmap")
+    assert local["update_frequency"] >= 5.0
+    follow = _p("controller_server")["FollowPath"]
+    v = follow["desired_linear_vel"]
+    assert follow["max_allowed_time_to_collision_up_to_carrot"] * v >= 0.40, "look 0.4 m ahead"
+    assert _p("velocity_smoother")["max_decel"][0] <= -1.5
+    tree = ET.parse(REPO / "ros/params/pepin_nav_to_pose.xml")
+    forget = next(
+        n
+        for n in tree.iter("RateController")
+        if any(c.get("name") == "ForgetStaleObstacles" for c in n)
+    )
+    assert float(forget.get("hz")) <= 0.25, "a fresh ToF mark was wiped 0.1 s after it appeared"
+
+
+def test_the_board_half_does_not_autostart_and_the_laptop_knows_its_side() -> None:
+    launch = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
+    assert '"autostart": autostart_for(side)' in launch
+    assert '"side": side' in launch, "the goal server must know it is the laptop half"
+    server = (REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text()
+    assert "next_transition(" in server and "ChangeState" in server

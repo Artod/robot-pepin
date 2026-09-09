@@ -53,3 +53,29 @@ def test_no_drive_no_cut_and_no_laptop_no_cut() -> None:
     )
     watch.beat(now=0.0)
     assert not watch.should_cut(navigating=False, now=100.0), "standing still needs no plan"
+
+
+def test_the_board_half_is_brought_up_by_the_laptop_one_step_at_a_time() -> None:
+    from pepin.deployment import (
+        BOARD_NAV_NODES,
+        TRANSITION_ACTIVATE,
+        TRANSITION_CONFIGURE,
+        autostart_for,
+        next_transition,
+    )
+
+    assert autostart_for("all") and autostart_for("laptop") and not autostart_for("board")
+    assert BOARD_NAV_NODES[-1] == "bt_navigator", "the tree loads last: it needs the planner side"
+    fresh = dict.fromkeys(BOARD_NAV_NODES, "unconfigured")
+    assert next_transition(fresh) == ("controller_server", TRANSITION_CONFIGURE)
+    half = {**fresh, "controller_server": "active", "behavior_server": "inactive"}
+    assert next_transition(half) == (
+        "behavior_server",
+        TRANSITION_ACTIVATE,
+    )  # a failed try continues
+    almost = dict.fromkeys(BOARD_NAV_NODES, "active")
+    almost["bt_navigator"] = "inactive"
+    assert next_transition(almost) == ("bt_navigator", TRANSITION_ACTIVATE)
+    assert next_transition(dict.fromkeys(BOARD_NAV_NODES, "active")) is None
+    assert next_transition({**almost, "bt_navigator": "activating"}) is None  # in transit: wait
+    assert next_transition({}) is None  # nobody answered: wait, do not guess
