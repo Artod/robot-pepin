@@ -44,7 +44,7 @@ GOOD_FIT = 0.45  # below this the robot is told to find itself before it drives
 # planner no longer expands in reverse, so there is nothing a reversing controller would add.
 PLANNERS = {
     "navfn": ("GridBased", "FollowPath"),
-    "lattice": ("Lattice", "FollowPath"),
+    "lattice": ("Lattice", "FollowPathReversing"),
 }
 
 

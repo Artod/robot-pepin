@@ -30,7 +30,17 @@
         </RateController>
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="3" name="ComputePathToPose">
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+            <!-- The chosen planner, and NavFn behind it. The lattice plans in the cart's own
+                 motions, which is what makes a drive look deliberate, but it footprint-checks
+                 its start pose and refuses from places NavFn walks out of — a cell the survey
+                 never covered, a hull inside the inflation of a wall it is parked against. NavFn
+                 clears its own start cell by construction and cannot refuse. So the good planner
+                 is tried first and the one that always answers stands behind it: the cart is
+                 never stranded by the planner it happens to be using. -->
+            <Fallback>
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
+            </Fallback>
             <!-- No WouldAPlannerRecoveryHelp here, deliberately. That condition answers FAILURE
                  for START_OCCUPIED, which is precisely the code a footprint-checking planner
                  returns when the cart is parked close to something — so the whole branch was

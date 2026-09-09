@@ -27,14 +27,23 @@ trap 'ssh "root@$BOARD" "printf %s\\\\n {\\\"cmd\\\":\\\"cancel\\\"} | timeout 3
 CAM=""; FFPID=""
 case "$REQUEST" in '{"cmd":"go"'*)
     CAM="$(mktemp -u)_cam.mkv"  # mjpeg copied as-is: no re-encoding, no CPU taken from the drive
+    # Stopped by writing "q" to its stdin, not by a signal: SIGINT makes ffmpeg abandon the file
+    # and print "Error during demuxing: Immediate exit requested", which looks like a failed run
+    # and is not one. The fifo's write end is held open so ffmpeg never sees an early EOF.
+    CAM_FIFO="$(mktemp -u)"; mkfifo "$CAM_FIFO"
     ffmpeg -loglevel error -y -f mjpeg -use_wallclock_as_timestamps 1 \
-           -i "http://$BOARD:8080/stream" -c copy "$CAM" & FFPID=$!
-    trap 'kill -INT $FFPID 2>/dev/null' EXIT
+           -i "http://$BOARD:8080/stream" -c copy "$CAM" < "$CAM_FIFO" & FFPID=$!
+    exec 4>"$CAM_FIFO"
+    trap 'printf q >&4 2>/dev/null; sleep 1; kill -INT $FFPID 2>/dev/null' EXIT
     ;;
 esac
 REPLY_FILE=$(mktemp)
 ssh "root@$BOARD" "exec 3<>/dev/tcp/127.0.0.1/$PORT; printf '%s\n' '$REQUEST' >&3; cat <&3" | tee "$REPLY_FILE"
-[ -n "$FFPID" ] && { kill -INT "$FFPID" 2>/dev/null; wait "$FFPID" 2>/dev/null; trap - EXIT; }
+if [ -n "$FFPID" ]; then
+    printf q >&4 2>/dev/null; exec 4>&-          # ffmpeg finishes the file and exits quietly
+    for _ in 1 2 3 4 5 6; do kill -0 "$FFPID" 2>/dev/null || break; sleep 0.5; done
+    kill -INT "$FFPID" 2>/dev/null; wait "$FFPID" 2>/dev/null; rm -f "$CAM_FIFO"; trap - EXIT
+fi
 # The run recorded itself on the board; bring it home so every drive is on the laptop too.
 RECORDING=$(grep -o '"recording": *"[^"]*"' "$REPLY_FILE" | tail -1 | cut -d'"' -f4)
 rm -f "$REPLY_FILE"
