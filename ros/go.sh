@@ -40,7 +40,11 @@ case "$REQUEST" in '{"cmd":"go"'*)
     ;;
 esac
 REPLY_FILE=$(mktemp); REPLY_COPY=$(mktemp)
-ssh "root@$BOARD" "exec 3<>/dev/tcp/127.0.0.1/$PORT; printf '%s\n' '$REQUEST' >&3; cat <&3" | tee "$REPLY_FILE"
+# The first line of a drive names the run and the planner in plain words, before the JSON:
+# a drive whose planner has to be guessed afterwards is a drive that cannot be compared.
+ssh "root@$BOARD" "exec 3<>/dev/tcp/127.0.0.1/$PORT; printf '%s\n' '$REQUEST' >&3; cat <&3" \
+  | tee "$REPLY_FILE" \
+  | awk '{print; fflush()} /"event": "accepted"/ { match($0, /"run": [0-9]+/); r=substr($0, RSTART+7, RLENGTH-7); match($0, /"planner": "[^"]+"/); p=substr($0, RSTART+12, RLENGTH-13); match($0, /"place": "[^"]+"/); pl=substr($0, RSTART+10, RLENGTH-11); print "=== run #" r " · planner " p " -> " pl " ==="; fflush() }' 
 if [ -n "$FFPID" ]; then
     printf q >&4 2>/dev/null; exec 4>&-          # ffmpeg finishes the file and exits quietly
     for _ in 1 2 3 4 5 6; do kill -0 "$FFPID" 2>/dev/null || break; sleep 0.5; done

@@ -274,6 +274,8 @@ class GoalServer(Node):
                 connection,
                 {
                     "event": "accepted",
+                    "run": self._recorder.number,
+                    "planner": PLANNERS[self.planner][0],
                     "place": name,
                     "x": x,
                     "y": y,
@@ -310,6 +312,9 @@ class GoalServer(Node):
                 self._wait(result_future, 10.0)
                 if self._find_myself(connection) and resume:
                     self._send(connection, {"event": "resuming", "fit": self.fit})
+                    self.get_logger().info(
+                        f"resuming the goal after relocalising (fit {self.fit:.2f})"
+                    )
                     self._go(request, connection, resume=False)
                 return
             outcome = result_future.result()
@@ -347,17 +352,26 @@ class GoalServer(Node):
         return None
 
     def _find_myself(self, connection: socket.socket) -> bool:
-        """A weak fit before driving buys one whole-map search; blind driving is never allowed."""
+        """A weak fit before (or during) a drive buys one whole-map search; blind driving is never
+        allowed. The tracker may already be searching on its own — then its answer is awaited
+        rather than asked for twice — and its fit is published once a second, so the verdict
+        waits for a fresh reading instead of reading a stale one (run 0054: relocalised at 0.61,
+        judged "still lost" at the 0.31 published a moment earlier, never resumed)."""
         self._send(connection, {"event": "searching", "fit": self.fit})
+        self.get_logger().info(f"searching the whole map (fit {self.fit:.2f})")
         if not self._relocalize.wait_for_service(timeout_sec=2.0):
             self._send(connection, {"event": "error", "detail": "the tracker is not up"})
             return False
         result = self._wait(self._relocalize.call_async(Trigger.Request()), 60.0)
-        self._send(
-            connection, {"event": "searched", "detail": result.message if result else "no answer"}
-        )
+        detail = result.message if result else "no answer"
+        deadline = time.monotonic() + 6.0  # a candidate needs a second search: a few seconds
+        while self.fit < GOOD_FIT and time.monotonic() < deadline:
+            time.sleep(0.2)
+        self._send(connection, {"event": "searched", "detail": detail, "fit": self.fit})
         if self.fit >= GOOD_FIT:
+            self.get_logger().info(f"found myself: fit {self.fit:.2f}")
             return True
+        self.get_logger().warning(f"still lost after the search: fit {self.fit:.2f}")
         self._send(connection, {"event": "error", "detail": f"still lost (fit {self.fit:.2f})"})
         return False
 
