@@ -41,8 +41,8 @@ class RangeHold:
         self._hold_s = hold_s
         self._last: dict[str, tuple[float, float]] = {}  # name -> (range, when)
 
-    def publish(self, name: str, seen: float | None, ceiling: float, now: float) -> float | None:
-        """The range to put on the wire now, or None to say nothing at all.
+    def publish(self, name: str, seen: float | None, ceiling: float, now: float) -> float:
+        """The range to put on the wire now.
 
         ``seen`` is a real return (metres) or None; anything above ``ceiling`` counts as none.
         Returns the return itself, the held one while it is fresh, and ``ceiling`` ("nothing")

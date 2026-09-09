@@ -37,11 +37,11 @@ from std_msgs.msg import Float32, Header, String
 from std_srvs.srv import Trigger
 
 from pepin.deployment import HEARTBEAT_HZ, HEARTBEAT_TOPIC
-from pepin.watch import BlindDriveWatch
+from pepin.watch import DRIVE_FIT, BlindDriveWatch
 from pepin_bringup.run_recorder import RunRecorder
 
 PORT = 3337
-GOOD_FIT = 0.45  # below this the robot is told to find itself before it drives
+GOOD_FIT = DRIVE_FIT  # below this the robot is told to find itself before it drives (pepin.watch)
 # The planner to select, and the controller that follows it. One controller now: the lattice
 # planner no longer expands in reverse, so there is nothing a reversing controller would add.
 PLANNERS = {
@@ -248,10 +248,18 @@ class GoalServer(Node):
             handle.cancel_goal_async()
         return was_driving
 
-    def _go(self, request: dict[str, Any], connection: socket.socket, resume: bool = True) -> None:
+    def _go(
+        self,
+        request: dict[str, Any],
+        connection: socket.socket,
+        resume: bool = True,
+        record: Path | None = None,
+    ) -> None:
         """Send one goal and stream its progress until it ends or the caller hangs up.
 
-        ``resume``: a drive stopped for being lost is sent again after a relocalisation, once.
+        ``resume``: a drive stopped for being lost is sent again after a relocalisation, once —
+        as a continuation of the same drive: ``record`` is the tape already open, so the resumed
+        leg keeps the run's number and file instead of becoming a second run.
         """
         target = self._target_of(request)
         if target is None:
@@ -268,8 +276,14 @@ class GoalServer(Node):
         started = time.monotonic()
         feedback: dict[str, Any] = {}
         with self._lock:
+            if self._driving and record is None:
+                self._send(
+                    connection, {"event": "error", "detail": "already driving: cancel first"}
+                )
+                return
             self._driving = True
-        record = self.start_recording(name or f"{x:.0f}_{y:.0f}")
+        if record is None:
+            record = self.start_recording(name or f"{x:.0f}_{y:.0f}")
         self.get_logger().info(
             f"run {self._recorder.number}: planner {PLANNERS[self.planner][0]} "
             f"-> {name or 'coordinates'} ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg)"
@@ -356,8 +370,10 @@ class GoalServer(Node):
                 },
             )
         finally:  # a refused goal or a broken connection must not leave a recorder running
-            self.stop_recording()
-            if resume:  # the outermost call owns the flag; a resumed leg is part of the same drive
+            if (
+                resume
+            ):  # the outermost call owns the tape and the flag; a resumed leg is the same drive
+                self.stop_recording()
                 with self._lock:
                     self._driving = False
 

@@ -45,7 +45,7 @@ from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow, relative_motion
 from pepin.slip import scan_changed, slipping
-from pepin.watch import LostWatch
+from pepin.watch import LostWatch, Verdict
 
 OCCUPIED_LOG_ODDS, FREE_LOG_ODDS = 4.0, -4.0
 DUMP_DIR = (
@@ -110,11 +110,16 @@ class Relocalizer(Node):
         self._scan_topic = str(self.declare_parameter("scan_topic", "/scan").value)
         self._min_inliers = float(self.declare_parameter("min_global_inliers", 0.45).value)
         self._check_period_s = float(self.declare_parameter("check_period_s", 1.0).value)
-        self._watch = LostWatch(
+        self._watch_args = dict(
             lost_fit=float(self.declare_parameter("lost_fit", 0.55).value),
             lost_checks=int(self.declare_parameter("lost_checks", 3).value),
-            cooldown_s=float(self.declare_parameter("cooldown_s", 8.0).value),
+            cooldown_s=float(self.declare_parameter("search_cooldown_s", 8.0).value),
         )
+        self._watch = LostWatch(**self._watch_args)  # type: ignore[arg-type]
+        # One lock for the episode: the claim of _searching, every _watch call and the
+        # _pending_seed swap. The worker, the executor's timers and the service thread all
+        # touch these, and the single-threaded executor was the only thing serialising them.
+        self._episode = threading.Lock()
         # Tracking: every scan corrects the pose by scan matching around the wheels' prediction
         # and this node owns map -> odom (AMCL then only paints particles). The wheels are trusted
         # for one scan interval, 0.1 s, where even a 25% yaw error is a fraction of a degree.
@@ -203,6 +208,9 @@ class Relocalizer(Node):
 
     def _on_map(self, msg: OccupancyGridMsg) -> None:
         self._grid = grid_from_msg(msg)
+        with self._episode:  # a candidate found on the old map is evidence about nothing here
+            self._watch = LostWatch(**self._watch_args)  # type: ignore[arg-type]
+            self._pending_seed = None
         self._matcher = CorrelativeMatcher(self._grid)
         # lost_after huge: update() must never run a whole-map search in the executor thread on
         # this board (10-20 s); the 1 Hz watcher below does that in a worker and re-seeds.
@@ -361,8 +369,8 @@ class Relocalizer(Node):
                 f"{math.degrees(loc.pose.theta):+.0f} deg); first search proposes {where} "
                 f"at fit {confidence:.2f}"
             )
-            if confidence >= self._min_inliers:
-                self._watch.proposed(found.pose, time.monotonic(), scan=scan)
+            with self._episode:
+                self._watch.answer(found.pose, confidence, 0.0, scan, time.monotonic())
             self._tracker_initialised = True
         finally:
             self._tracker_initialising = False
@@ -568,7 +576,8 @@ class Relocalizer(Node):
         The worker computes; the executor applies. A search runs for seconds, and a map swap in
         the middle used to hand the new localizer a pose measured on the old map.
         """
-        pending, self._pending_seed = self._pending_seed, None
+        with self._episode:
+            pending, self._pending_seed = self._pending_seed, None
         if pending is None:
             return
         map_id, pose, confidence = pending
@@ -582,7 +591,8 @@ class Relocalizer(Node):
         try:
             self._relocalize()
         finally:
-            self._searching = False
+            with self._episode:
+                self._searching = False
 
     def _relocalize(self) -> str:
         """One whole-map search on the newest scan; the watch decides what its answer is worth."""
@@ -595,7 +605,6 @@ class Relocalizer(Node):
         # Always the whole map: a "nearby first" shortcut accepted a 0.66 impostor two metres from
         # a carried robot (2026-09-06 18:14) and the whole-map stage never ran. The previous belief
         # only breaks ties between look-alikes.
-        stage = "whole map"
         credible = current is not None and current_fit >= 0.4  # a stale belief must not break ties
         found, confidence = self._localizer.global_search(
             points,
@@ -605,56 +614,36 @@ class Relocalizer(Node):
             refuse_twins=credible,
         )
         took = time.monotonic() - started
-        if not self._watch.confirmed:
-            return self._second_opinion(found, confidence, current_fit, took, scan)
-        if confidence < self._min_inliers or confidence < current_fit + 0.1:
-            text = (
-                f"no better pose ({stage}, {took:.1f} s): "
-                f"best {confidence:.2f} vs now {current_fit:.2f}"
-            )
-            self._watch.searched(found=False, now=time.monotonic())
-            self.get_logger().warning(text)
-            self._dump_failure(points, current, found.pose if found else None, confidence)
-            return text
-        self._watch.searched(found=True, now=time.monotonic())
-        self._watch.proposed(found.pose, time.monotonic(), scan=scan)  # a candidate, not a move
-        text = (
-            f"candidate ({stage}, {took:.1f} s): ({found.pose.x:+.2f}, {found.pose.y:+.2f}, "
-            f"{math.degrees(found.pose.theta):+.0f} deg) fit {confidence:.2f} vs now "
-            f"{current_fit:.2f}; asking once more before moving"
-        )
-        self.get_logger().info(text)
-        return text
-
-    def _second_opinion(
-        self, found: Any, confidence: float, current_fit: float, took: float, scan: int
-    ) -> str:
-        """A fresh search while a candidate is pending; the watch decides, this only obeys."""
-        answer = found.pose if found is not None and confidence >= self._min_inliers else None
-        verdict = self._watch.second_opinion(answer, time.monotonic(), scan=scan)
-        if verdict == "replay":
-            return "same scan as the candidate: no second opinion yet"
+        answer = found.pose if found is not None else None
+        with self._episode:
+            verdict = self._watch.answer(answer, confidence, current_fit, scan, time.monotonic())
+            if verdict.verdict is Verdict.APPLY and verdict.pose is not None:
+                self._pending_seed = (self._map_id, verdict.pose, verdict.confidence)
         where = (
             "nothing"
             if answer is None
             else f"({answer.x:+.2f}, {answer.y:+.2f}, {math.degrees(answer.theta):+.0f} deg)"
         )
-        if verdict == "apply" and answer is not None:
-            self._pending_seed = (self._map_id, answer, confidence)  # the one move
-            text = (
-                f"agreed by a second search ({took:.1f} s): moving to {where}, fit {confidence:.2f}"
-            )
-            self.get_logger().info(text)
-            return "relocalised, " + text
-        if verdict == "hold":
-            text = f"second search disagrees ({took:.1f} s): candidate {where}, asking again"
-            self.get_logger().warning(text)
-            return text
-        text = (
-            f"searches keep disagreeing: the scan fits two places alike, last {where}; "
-            f"tracking at fit {current_fit:.2f} until the robot moves"
+        fits = f"fit {confidence:.2f} vs now {current_fit:.2f}"
+        text = {
+            Verdict.NOTHING: f"no better pose ({took:.1f} s): {fits}",
+            Verdict.CANDIDATE: f"candidate ({took:.1f} s): {where} {fits}; asking once more",
+            Verdict.REPLAY: "same scan as the candidate: no second opinion yet",
+            Verdict.HOLD: f"second search disagrees ({took:.1f} s): candidate {where}",
+            Verdict.APPLY: f"relocalised, agreed by a second search ({took:.1f} s): to {where}",
+            Verdict.GIVEN_UP: (
+                f"searches keep disagreeing: the scan fits two places alike, last {where}; "
+                f"tracking at fit {current_fit:.2f} until the robot moves"
+            ),
+        }[verdict.verdict]
+        if verdict.verdict is Verdict.NOTHING:
+            self._dump_failure(points, current, answer, confidence)
+        log = (
+            self.get_logger().info
+            if verdict.verdict in (Verdict.CANDIDATE, Verdict.APPLY)
+            else self.get_logger().warning
         )
-        self.get_logger().warning(text)
+        log(text)
         return text
 
     def _seed(self, pose: Pose2D, confidence: float) -> None:
@@ -686,10 +675,11 @@ class Relocalizer(Node):
         if self._localizer is None or self._points is None:
             res.success, res.message = False, "no map or no scan yet"
             return res
-        if self._searching:
-            res.success, res.message = True, "a search is already running"
-            return res
-        self._searching = True
+        with self._episode:
+            if self._searching:
+                res.success, res.message = True, "a search is already running"
+                return res
+            self._searching = True
         threading.Thread(target=self._search_and_seed, daemon=True).start()
         res.success = True
         res.message = (

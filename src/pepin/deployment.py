@@ -9,7 +9,7 @@ recorder. The split is data, so a test can hold it and the launch file merely re
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 SIDES = ("all", "board", "laptop")
 
@@ -37,7 +37,7 @@ def runs_here(side: str, node: str) -> bool:
     """Whether a named piece runs on ``side``: Nav2 nodes, the map, the tracker, the goal server."""
     if node in MAP_NODES or node == "relocalizer":
         return side in ("all", "board")
-    if node in ("goal_server", "link_heartbeat"):
+    if node == "goal_server":  # it carries the laptop's heartbeat too
         return side in ("all", "laptop")
     if node == "link_watch":
         return side == "board"  # only a split stack has a link to watch
@@ -56,8 +56,8 @@ class LinkWatch:
     """
 
     patience_s: float = 2.5
-    _last_beat: float | None = None
-    _cut: bool = False
+    _last_beat: float | None = field(default=None, init=False)
+    _cut: bool = field(default=False, init=False)
 
     def beat(self, now: float) -> None:
         """A heartbeat arrived."""
@@ -65,15 +65,18 @@ class LinkWatch:
         self._cut = False
 
     def should_cut(self, navigating: bool, now: float) -> bool:
-        """True exactly once when a running drive has had no heartbeat for the patience."""
+        """True while a running drive has had no heartbeat for the patience and the cut has not
+        been sent yet. It does not consume itself: a node that could not reach the cancel
+        service must be told again on the next tick, so ``cut_sent`` latches, not this."""
         if not navigating or self._cut:
             return False
         if self._last_beat is None:
             return False  # never heard the laptop: the stack is not split, nothing to watch
-        if now - self._last_beat <= self.patience_s:
-            return False
+        return now - self._last_beat > self.patience_s
+
+    def cut_sent(self) -> None:
+        """The cancel went out: this outage is handled until the next heartbeat."""
         self._cut = True
-        return True
 
     @property
     def alive(self) -> bool:

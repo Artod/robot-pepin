@@ -12,8 +12,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 NET=pepin-net
-MAP="${PEPIN_MAP:-$(ssh "root@$BOARD" "grep -oE 'PEPIN_MAP=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2)}"
-MAP="${MAP:-/maps/flat3_straight.yaml}"
+# The map here chooses the places book, so it must be the board's map, not merely a valid one.
+MAP="${PEPIN_MAP:-$(ssh "root@$BOARD" "grep -oE 'PEPIN_MAP=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2 || true)}"
+[ -n "$MAP" ] || { echo "the board does not say which map it runs (ros/mode.sh nav MAP first)"; exit 1; }
 case "${1:-start}" in
     stop)
         docker rm -f pepin-laptop pepin-zenoh >/dev/null 2>&1 || true; echo "laptop side stopped"; exit 0 ;;

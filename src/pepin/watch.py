@@ -9,13 +9,44 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from pepin.odometry import Pose2D, wrap_angle
+
+# The one fit scale everything reads. All are inlier fractions of a scan against the map, and
+# their order is the design: a drive is stopped below BLIND, an unconfirmed fix may not report
+# more than the CAP, a drive may start from DRIVE, and standing still below LOST for a while asks
+# the whole map. Pinned by a test, because six of these once lived in three files, unordered.
+BLIND_FIT = 0.30
+PROVISIONAL_FIT_CAP = 0.35
+DRIVE_FIT = 0.50
+LOST_FIT = 0.55
+ADMIT_FIT = 0.45  # a whole-map answer below this is no answer
+ADMIT_MARGIN = 0.10  # ...and it must beat what the tracker already has by this much
 
 AGREE_M = 0.5  # two fixes this close...
 AGREE_DEG = 30.0  # ...and this aligned are the same place
 CONFIRM_TRIES = 4  # fresh searches allowed to agree before the fix is given up as a twin
-PROVISIONAL_FIT_CAP = 0.35  # what an unconfirmed fix may report: below every "good enough" gate
+
+
+class Verdict(StrEnum):
+    """What a whole-map answer is worth. APPLY is the only one that moves the tracker."""
+
+    NOTHING = "nothing"  # no usable answer: not admitted, or no better than the tracker
+    CANDIDATE = "candidate"  # a first answer, held; ask again on a fresh scan
+    REPLAY = "replay"  # the same scan as the candidate: nothing learned
+    HOLD = "hold"  # a second answer that disagrees: it is the candidate now
+    APPLY = "apply"  # two searches agree: move, once
+    GIVEN_UP = "given_up"  # they keep disagreeing: a twin the scan cannot settle
+
+
+@dataclass(frozen=True)
+class Answer:
+    """A verdict and, when it is APPLY, the pose and confidence to adopt."""
+
+    verdict: Verdict
+    pose: Pose2D | None = None
+    confidence: float = 0.0
 
 
 @dataclass
@@ -29,8 +60,10 @@ class LostWatch:
     itself does not saturate a board that is also driving.
     """
 
-    lost_fit: float = 0.55
+    lost_fit: float = LOST_FIT
     lost_checks: int = 3
+    admit_fit: float = ADMIT_FIT
+    admit_margin: float = ADMIT_MARGIN
     cooldown_s: float = 8.0
     max_backoff_s: float = 20.0
     collapse_from: float = 0.5  # a fit at least this good...
@@ -109,42 +142,51 @@ class LostWatch:
         self._candidate, self._confirm_tries = None, 0
         self._quiet_until = max(self._quiet_until, now + self.cooldown_s)
 
-    def proposed(self, pose: Pose2D, now: float, scan: int = -1) -> None:
-        """A search's first answer: held, checked again at once, applied only if agreed with.
+    def answer(
+        self, pose: Pose2D | None, confidence: float, current_fit: float, scan: int, now: float
+    ) -> Answer:
+        """The one door for a whole-map search's result; every admission rule lives here.
 
-        ``scan`` is the identity of the scan it was found on: a later answer computed on the
-        very same scan is a replay, not a second opinion, and is refused by ``second_opinion``.
+        ``scan`` is the identity of the scan the search ran on. An answer is admitted only if
+        it fits at least ``admit_fit`` and beats the tracker's own ``current_fit`` by
+        ``admit_margin``; the first admitted answer is a CANDIDATE and moves nothing; a later
+        search on a fresh scan that agrees is APPLY (the pose to adopt travels with it), one
+        that disagrees becomes the candidate (HOLD), one on the candidate's own scan is a REPLAY;
+        after ``CONFIRM_TRIES`` disagreements the question is GIVEN_UP. Two searches a second
+        apart on a standing robot prove stability, not truth: a twin that fits alike keeps
+        fitting alike, which is why the tracker's own recovery (``observe`` drops a candidate
+        when the fit is healthy) and motion remain the stronger evidence.
         """
-        self._candidate, self._confirm_tries = pose, 0
-        self._candidate_scan = scan
-        self._quiet_until = now
-
-    def second_opinion(self, found: Pose2D | None, now: float, scan: int = -1) -> str:
-        """A fresh search's answer while a candidate is pending.
-
-        ``"apply"``: it agrees with the candidate — adopt ``found`` now, the fix is confirmed.
-        ``"hold"``: it does not — ``found`` becomes the candidate, nothing moves. ``"given_up"``:
-        the searches keep disagreeing, a twin the scan cannot settle; quiet until the robot
-        moves or the tracker itself gives up. ``"replay"``: ``scan`` is the candidate's own
-        scan — a search run again on the same data (the /relocalize service used to loop on the
-        executor thread with the scan frozen) — nothing is learned and nothing changes.
-        """
-        assert self._candidate is not None
-        if scan != -1 and scan == self._candidate_scan:
-            return "replay"  # the same scan cannot agree with itself; wait for a fresh one
+        admitted = (
+            pose is not None
+            and confidence >= self.admit_fit
+            and confidence >= current_fit + self.admit_margin
+        )
+        if self._candidate is None:
+            if not admitted:
+                self._failures += 1
+                self._quiet_until = now + self.wait_s()
+                return Answer(Verdict.NOTHING)
+            assert pose is not None
+            self._failures = 0
+            self._candidate, self._candidate_scan, self._confirm_tries = pose, scan, 0
+            self._quiet_until = now  # ask again at once
+            return Answer(Verdict.CANDIDATE, pose, confidence)
+        if scan == self._candidate_scan:
+            return Answer(Verdict.REPLAY)
         self._confirm_tries += 1
-        if found is not None and self.agrees(self._candidate, found):
+        if admitted and pose is not None and self.agrees(self._candidate, pose):
             self._candidate, self._confirm_tries = None, 0
             self._quiet_until = now + self.cooldown_s
-            return "apply"
+            return Answer(Verdict.APPLY, pose, confidence)
         if self._confirm_tries >= CONFIRM_TRIES:
             self._candidate, self._confirm_tries = None, 0
             self._failures += 1
             self._quiet_until = now + self.wait_s()
-            return "given_up"
-        if found is not None:
-            self._candidate, self._candidate_scan = found, scan
-        return "hold"
+            return Answer(Verdict.GIVEN_UP)
+        if admitted and pose is not None:
+            self._candidate, self._candidate_scan = pose, scan
+        return Answer(Verdict.HOLD, pose, confidence)
 
     @staticmethod
     def agrees(a: Pose2D, b: Pose2D) -> bool:

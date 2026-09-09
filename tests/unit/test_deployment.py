@@ -24,6 +24,7 @@ def test_the_reflexes_stay_on_the_board_and_the_planner_leaves() -> None:
     assert runs_here("board", "relocalizer") and runs_here("board", "map_server")
     assert runs_here("laptop", "goal_server") and not runs_here("board", "goal_server")
     assert runs_here("board", "link_watch") and not runs_here("all", "link_watch")
+    assert not runs_here("board", "goal_server"), "the heartbeat rides with the goal server"
 
 
 def test_an_unknown_side_is_refused_loudly() -> None:
@@ -37,7 +38,9 @@ def test_a_lost_link_cuts_a_running_drive_once_and_only_after_the_patience() -> 
     watch.beat(now=0.0)
     assert not watch.should_cut(navigating=True, now=2.0)
     assert watch.should_cut(navigating=True, now=3.0), "silent past the patience: cut"
-    assert not watch.should_cut(navigating=True, now=4.0), "fires once per outage"
+    assert watch.should_cut(navigating=True, now=3.5), "still asking until the cancel was sent"
+    watch.cut_sent()
+    assert not watch.should_cut(navigating=True, now=4.0), "once per outage, once it was sent"
     watch.beat(now=5.0)
     assert not watch.should_cut(navigating=True, now=6.0)
     assert watch.should_cut(navigating=True, now=9.0), "a second outage cuts again"

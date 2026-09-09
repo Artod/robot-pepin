@@ -17,6 +17,7 @@ import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from action_msgs.srv import CancelGoal
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Header
 
 from pepin.deployment import HEARTBEAT_TOPIC, LinkWatch
@@ -30,8 +31,13 @@ class LinkWatchNode(Node):
         self._watch = LinkWatch(patience_s=float(self.declare_parameter("patience_s", 2.5).value))
         self._navigating = False
         self.create_subscription(Header, HEARTBEAT_TOPIC, self._on_beat, 10)
+        latched = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )  # the action's status is offered latched: the current one arrives on connection
         self.create_subscription(
-            GoalStatusArray, "/navigate_to_pose/_action/status", self._on_status, 10
+            GoalStatusArray, "/navigate_to_pose/_action/status", self._on_status, latched
         )
         self._cancel = self.create_client(CancelGoal, "/navigate_to_pose/_action/cancel_goal")
         self.create_timer(0.5, self._check)

@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -74,6 +75,7 @@ class RunTape:
         self._sync = sync
         self._buffer: deque[tuple[float, Mapping[str, Any]]] = deque()
         self._stream: TextIO | None = None
+        self._lock = threading.Lock()  # add() runs on the executor, start/stop on a socket thread
         self._started = 0.0
         self._last_sync = 0.0
         self.written = 0
@@ -85,6 +87,10 @@ class RunTape:
 
     def add(self, record: Mapping[str, Any]) -> None:
         """Take one record: written straight through during a run, remembered otherwise."""
+        with self._lock:
+            self._add(record)
+
+    def _add(self, record: Mapping[str, Any]) -> None:
         now = self._clock()
         if self._stream is None:
             self._buffer.append((now, record))
@@ -93,7 +99,7 @@ class RunTape:
                 self._buffer.popleft()
             return
         if now - self._started > self._max_run_s:
-            self.stop()
+            self._stop()
             self._buffer.append((now, record))
             return
         self._write(record)
@@ -103,7 +109,11 @@ class RunTape:
 
     def start(self, path: Path) -> Path:
         """Open ``path`` and put the remembered seconds in it; returns the path written to."""
-        self.stop()
+        with self._lock:
+            self._stop()
+            return self._start(path)
+
+    def _start(self, path: Path) -> Path:
         self._stream = self._opener(path)
         self._started = self._last_sync = self._clock()
         self.written = 0
@@ -114,6 +124,10 @@ class RunTape:
 
     def stop(self) -> None:
         """Close the run's file (flushed and synced); harmless when nothing is being recorded."""
+        with self._lock:
+            self._stop()
+
+    def _stop(self) -> None:
         stream, self._stream = self._stream, None
         if stream is None:
             return

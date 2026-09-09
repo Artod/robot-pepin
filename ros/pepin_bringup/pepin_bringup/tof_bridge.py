@@ -73,7 +73,9 @@ class TofBridge(Node):
         self._range_pubs = {
             name: self.create_publisher(Range, f"tof/{name}", 10) for name in TOF_NAMES
         }
-        self._readings: queue.Queue[dict[str, float | None]] = queue.Queue(maxsize=_QUEUE_MAX)
+        self._readings: queue.Queue[tuple[dict[str, float | None], dict[str, int | None]]] = (
+            queue.Queue(maxsize=_QUEUE_MAX)
+        )
         # Each sensor is believed only as far as its cone stays off the floor: the two low ones
         # graze the carpet at 0.67 m, and the right sensor's steady 0.60-0.70 m returns (with
         # nothing there for the lidar) were being marked into the costmap as a wall, 2026-09-08.
@@ -131,11 +133,12 @@ class TofBridge(Node):
 
     def _enqueue_ranges(self, message: dict[str, Any]) -> None:
         """Reader thread: hand one line of ranges to the ROS thread, dropping it if it is behind."""
-        for name, status in parse_tof_status(message).items():
+        statuses = parse_tof_status(message)
+        for name, status in statuses.items():
             counts = self._status_counts[name]
             counts[status] = counts.get(status, 0) + 1
         with contextlib.suppress(queue.Full):
-            self._readings.put_nowait(parse_tof(message))
+            self._readings.put_nowait((parse_tof(message), statuses))
 
     def _report_status(self) -> None:
         """Put the raw VL53L1X verdicts in the run's own log, so a dead sensor is visible there.
@@ -159,14 +162,14 @@ class TofBridge(Node):
         """ROS thread: publish every reading the reader queued, then report link changes."""
         while True:
             try:
-                ranges = self._readings.get_nowait()
+                ranges, statuses = self._readings.get_nowait()
             except queue.Empty:
                 break
             for name, distance_m in ranges.items():
-                self._publish_range(name, distance_m)
+                self._publish_range(name, distance_m, statuses.get(name))
         self._log_link_status()
 
-    def _publish_range(self, name: str, distance_m: float | None) -> None:
+    def _publish_range(self, name: str, distance_m: float | None, status: int | None) -> None:
         """One sensor's reading as a sensor_msgs/Range; no return becomes its own ``max_range``.
 
         A reading past the sensor's floor horizon is reported as "nothing seen" rather than as an
@@ -185,7 +188,11 @@ class TofBridge(Node):
         # sensor flickered 0.05 <-> 1.3 m with nothing there, 2026-09-06); such a reading is
         # published below min_range, which the costmap layer drops: neither a mark nor a clear.
         now = time.monotonic()
-        if distance_m is not None and distance_m < _CROSSTALK_M:
+        if status is None or status == 255:
+            # A sensor that has left the bus is not an empty room: below min_range the layer
+            # neither marks nor clears, which is the honest "I do not know".
+            message.range = -1.0
+        elif distance_m is not None and distance_m < _CROSSTALK_M:
             message.range = -1.0  # below min_range: the layer neither marks nor clears
         else:
             message.range = self._hold.publish(name, distance_m, self._ceiling[name], now)
