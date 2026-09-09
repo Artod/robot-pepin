@@ -61,8 +61,11 @@ if [ -n "$RECORDING" ]; then
     # run, rather than letting a good drive be credited to the wrong planner.
     LOG="$HERE/maps/rec/${STAMP}_board.log"
     CHOSEN=$(grep -o '"planner": *"[^"]*"' "$REPLY_COPY" 2>/dev/null | tail -1 | cut -d'"' -f4)
-    FELL_BACK=$(grep -c "plugin failed to plan" "$LOG" 2>/dev/null || echo 0)
-    PLANS=$(grep -c "Passing new path" "$LOG" 2>/dev/null || echo 0)
+    # Only this run's lines: the fetched log spans fifteen minutes, and counting the previous
+    # runs' refusals credited NavFn with a drive Theta* had done entirely (runs 0049-0051).
+    THIS_RUN=$(awk '/Begin navigating/{n=NR} {l[NR]=$0} END{for(i=n;i<=NR;i++) print l[i]}' "$LOG" 2>/dev/null)
+    FELL_BACK=$(printf '%s\n' "$THIS_RUN" | grep -c "plugin failed to plan" || true)
+    PLANS=$(printf '%s\n' "$THIS_RUN" | grep -c "Passing new path" || true)
     if [ "$FELL_BACK" -gt 0 ]; then
         WHO="${CHOSEN:-?} refused $FELL_BACK time(s), NavFn took over ($PLANS plans)"
     else
@@ -78,7 +81,9 @@ rm -f "$CAM" 2>/dev/null
 # failed or refused one. Nav2 status 4 is SUCCEEDED; anything else, or no "done" at all, is not.
 VERDICT=0
 case "$REQUEST" in '{"cmd":"go"'*)
-    grep -q '"event": "done", "run": [0-9]*, "planner": "[a-z]*", "status": 4' "$REPLY_COPY" 2>/dev/null || VERDICT=1 ;;
+    # keyed on the two fields, not on their order: a reordered event once made every reached
+    # goal exit 1 and "trip" stop after the printer (runs 0049-0051)
+    grep '"event": "done"' "$REPLY_COPY" 2>/dev/null | grep -q '"status": 4' || VERDICT=1 ;;
 esac
 rm -f "$REPLY_COPY" 2>/dev/null
 exit $VERDICT

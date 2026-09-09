@@ -292,6 +292,8 @@ class GoalServer(Node):
                 connection,
                 {
                     "event": "done",
+                    "run": self._recorder.number,
+                    "planner": self.planner,
                     "status": int(status),
                     "seconds": round(time.monotonic() - started, 1),
                     "arrival": self._pose_now(),
