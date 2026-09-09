@@ -99,16 +99,24 @@ class LostWatch:
         """How long to stay quiet after a search: the cooldown doubled per failure, capped."""
         return min(self.cooldown_s * 2.0 ** min(self._failures, 16), self.max_backoff_s)
 
-    def observe(self, fit: float, moving: bool, navigating: bool, now: float) -> bool:
+    def observe(
+        self, fit: float, moving: bool, navigating: bool, now: float, occluded: bool = False
+    ) -> bool:
         """One check, once a second: True when the whole map should be searched right now.
 
-        A moving robot and a robot under a goal are never re-seeded: their fit dips for honest
-        reasons (a scan and a pose milliseconds apart, a correction in progress), and a search
-        that teleports the belief mid-drive is worse than a poor fit.
+        ``fit`` is the tracker's OWN fit, never :meth:`reported_fit`: the capped provisional
+        number fed back here kept a candidate alive at fit 0.76 and searched the map every
+        second for half an hour (2026-09-09 18:00). A moving robot and a robot under a goal are
+        never re-seeded: their fit dips for honest reasons (a scan and a pose milliseconds
+        apart, a correction in progress). ``occluded`` — a large share of the scan is things the
+        map does not know (a person beside the cart) — explains a low fit without the pose being
+        wrong: no search, no streak, and a pending candidate is not asked about either.
         """
+        if fit != fit:  # NaN: no match yet
+            fit = 0.0
         collapsed = self._last_fit >= self.collapse_from and fit < self.collapse_to
         self._last_fit = fit
-        if moving or navigating:
+        if moving or navigating or occluded:
             self._streak = 0
             return False
         if not self.confirmed:

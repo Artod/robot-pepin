@@ -177,3 +177,29 @@ def test_a_dip_in_the_fit_does_not_stop_a_drive() -> None:
         assert not blind.observe(0.1, now=t)
     assert not blind.observe(0.6, now=3.0), "recovered: the clock restarts"
     assert not blind.observe(0.1, now=6.0)
+
+
+def test_a_healthy_tracker_drops_a_pending_candidate_and_stops_searching() -> None:
+    """The failure of 2026-09-09 18:00: a twin candidate pended, the capped reported fit (0.35)
+    was fed back to observe(), and the map was searched every second at a true fit of 0.76.
+    observe() judges the tracker's own fit: at 0.76 the candidate is dropped, nothing is asked."""
+    w = LostWatch(lost_fit=0.55, lost_checks=3, cooldown_s=8.0)
+    w.answer(Pose2D(-13.4, 2.0, -2.3), 0.75, 0.40, scan=1, now=0.0)  # a twin, admitted
+    assert not w.confirmed
+    assert abs(w.reported_fit(0.76) - 0.35) < 1e-9  # the outside world sees "unconfirmed"
+    assert w.observe(0.76, moving=False, navigating=False, now=1.0) is False
+    assert w.confirmed  # dropped: a healthy lock beats any one-scan search
+    for t in range(2, 20):
+        assert w.observe(0.76, moving=False, navigating=False, now=float(t)) is False
+
+
+def test_an_occluded_scan_is_not_lost() -> None:
+    """A person beside the cart takes a quarter of the scan and the fit falls; that is not a
+    wrong pose. Occluded checks never search and never count towards being lost."""
+    w = LostWatch(lost_fit=0.55, lost_checks=3, cooldown_s=8.0)
+    for t in range(10):
+        assert w.observe(0.30, moving=False, navigating=False, now=float(t), occluded=True) is False
+    assert w.observe(float("nan"), moving=False, navigating=False, now=11.0, occluded=True) is False
+    # the same three low checks unoccluded do ask for a search
+    hits = [w.observe(0.30, moving=False, navigating=False, now=20.0 + t) for t in range(3)]
+    assert hits == [False, False, True]

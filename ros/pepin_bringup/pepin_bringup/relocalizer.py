@@ -35,12 +35,14 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool, Float32, String
+from sensor_msgs.msg import LaserScan, PointCloud2
+from sensor_msgs_py import point_cloud2
+from std_msgs.msg import Bool, Float32, Header, String
 from std_srvs.srv import Trigger
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformBroadcaster
 
+from pepin.dynamic import StaticMask, berth_for, dynamic_marks, occlusion_split, to_map
 from pepin.localization import Localizer
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D, wrap_angle
@@ -55,6 +57,9 @@ DUMP_DIR = (
 )
 LAST_POSE_FILE = "/maps/last_pose.json"  # where the robot stood when the stack last ran
 LAST_POSE_MAX_AGE_S = 3600.0
+
+
+OCCLUDED_SHARE = 0.25  # a quarter of the scan on things the map does not know
 
 
 def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
@@ -154,6 +159,18 @@ class Relocalizer(Node):
         self._gate = ScanGate(max_wait_s=0.5)
         self._motion = MotionFilter(min_m=0.005, min_deg=0.3, max_gap_s=1.0)
         self._rested = 0  # scans left unmatched because the cart stood still (per report)
+        # What the map does not explain (a person, a moved chair) is published as lethal rings for
+        # both costmaps: the point planners' berth around new objects (pepin.dynamic).
+        self._static_mask: StaticMask | None = None
+        self._dynamic_pub = self.create_publisher(PointCloud2, "/dynamic_obstacles", 5)
+        self._dynamic_count = 0  # marks published since the last report
+        self._berth = berth_for("GridBased")  # until the goal server says who plans
+        self.create_subscription(
+            String,
+            "planner_selector",
+            self._on_planner,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
         self._deskew_failed = 0  # scans matched raw because the history had a hole (per report)
 
         self._last_odom: Pose2D | None = None  # odom->base_link at the previous check
@@ -239,6 +256,7 @@ class Relocalizer(Node):
             self._watch = LostWatch(**self._watch_args)  # type: ignore[arg-type]
             self._pending_seed = None
         self._matcher = CorrelativeMatcher(self._grid)
+        self._static_mask = StaticMask(self._grid)
         # lost_after huge: update() must never run a whole-map search in the executor thread on
         # this board (10-20 s); the 1 Hz watcher below does that in a worker and re-seeds.
         # Tracking window sized for this board: 7x7 positions x 13 headings x 120 beams is about
@@ -329,6 +347,7 @@ class Relocalizer(Node):
         odom = self._history.at(scan.stamp)
         if odom is None:  # cannot happen past the gate; a guard, not a fallback
             return
+        self._publish_dynamic(scan.points, loc.pose, scan.stamp)
         if not self._motion.due(odom, scan.stamp):
             self._rested += 1  # standing still: the last match still holds
             return
@@ -430,6 +449,40 @@ class Relocalizer(Node):
         finally:
             self._tracker_initialising = False
 
+    def _occluded(self, pose: Pose2D) -> bool:
+        """A person beside the cart: the NEAR scan is mostly things the map does not know while
+        the walls beyond still fit the pose. A wrong pose fails the far test and is not occluded
+        (the first version judged the whole scan and hid a twin behind "occluded", 18:07)."""
+        points, matcher = self._points, self._matcher
+        if self._static_mask is None or matcher is None or points is None or len(points) < 20:
+            return False
+        world = to_map(points, pose)
+        near_share, far = occlusion_split(points, self._static_mask.explains(world))
+        if near_share <= OCCLUDED_SHARE or far.sum() < 20:
+            return False
+        return matcher.inlier_fraction(pose, points[far]) >= self._watch.lost_fit
+
+    def _on_planner(self, msg: String) -> None:
+        """The berth around new objects depends on who plans: a footprint planner brings the
+        hull itself, a point planner needs it in the ring (pepin.dynamic.berth_for)."""
+        self._berth = berth_for(msg.data)
+        self.get_logger().info(
+            f"planner {msg.data}: dynamic rings {self._berth.ring_m:.2f} m, "
+            f"none within {self._berth.near_m:.2f} m"
+        )
+
+    def _publish_dynamic(self, points: Any, pose: Pose2D, stamp_s: float) -> None:
+        """Lethal rings around the returns the map does not explain, in the map frame."""
+        if self._static_mask is None:
+            return
+        marks = dynamic_marks(points, pose, self._static_mask, self._berth)
+        self._dynamic_count += len(marks)
+        header = Header()
+        header.stamp = Time(nanoseconds=int(stamp_s * 1e9)).to_msg()
+        header.frame_id = "map"
+        xyz = [(float(x), float(y), 0.0) for x, y in marks]
+        self._dynamic_pub.publish(point_cloud2.create_cloud_xyz32(header, xyz))
+
     def _send_map_odom(self) -> None:
         """Broadcast the current map -> odom, dated a little into the future like AMCL does."""
         x, y, yaw = self._last_map_odom
@@ -475,6 +528,7 @@ class Relocalizer(Node):
         self.get_logger().info(
             f"tracker: {gate.summary()}, rested {self._rested}, deskew failed "
             f"{self._deskew_failed}; {matched}, fit {self.fit:.2f}, "
+            f"dynamic marks {self._dynamic_count}, "
             f"scan age at match {self._last_scan_age_s * 1000:.0f} ms"
         )
         if gate.expired:
@@ -483,7 +537,7 @@ class Relocalizer(Node):
                 "and matched nothing"
             )
         self._track_stats = [0, 0.0, 0.0]
-        self._rested = self._deskew_failed = 0
+        self._rested = self._deskew_failed = self._dynamic_count = 0
 
     def _lookup_laser(self, frame: str) -> bool:
         """The static base_link <- laser transform, as x, y, yaw and whether roll is pi."""
@@ -589,15 +643,23 @@ class Relocalizer(Node):
         self._fit_pub.publish(Float32(data=float(self._watch.reported_fit(self.fit))))
         if self._searching or not self._tracker_initialised:
             return
-        # reported_fit maps NaN (no match yet) to 0.0 itself; an inverted ternary here once fed
-        # the watch 0.0 for every HEALTHY fit and the tracker searched the map every 25 s.
+        # The watch gets the tracker's OWN fit. reported_fit() is for the outside world: capped
+        # at 0.35 while a candidate pends, and fed back here it kept a twin candidate alive at
+        # fit 0.76 and ran a whole-map search every second for half an hour (18:00 today).
+        occluded = self._occluded(pose)
         if self._watch.observe(
-            self._watch.reported_fit(self.fit),
+            self.fit,
             moving=moving,
             navigating=self._navigating,
             now=time.monotonic(),
+            occluded=occluded,
         ):
             self.get_logger().warning(f"fit {self.fit:.2f}: searching the whole map")
+        elif occluded and self.fit < self._watch.lost_fit:
+            self.get_logger().info(
+                f"fit {self.fit:.2f} but the scan is mostly things the map does not know: "
+                "occluded, not lost"
+            )
             self._searching = True
             threading.Thread(target=self._search_and_seed, daemon=True).start()
 
@@ -692,12 +754,12 @@ class Relocalizer(Node):
         }[verdict.verdict]
         if verdict.verdict is Verdict.NOTHING:
             self._dump_failure(points, current, answer, confidence)
-        log = (
-            self.get_logger().info
-            if verdict.verdict in (Verdict.CANDIDATE, Verdict.APPLY)
-            else self.get_logger().warning
-        )
-        log(text)
+        # Two call sites on purpose: rclpy keys a logger call's severity on its source line and
+        # raises "Logger severity cannot be changed between calls" when one line logs both.
+        if verdict.verdict in (Verdict.CANDIDATE, Verdict.APPLY):
+            self.get_logger().info(text)
+        else:
+            self.get_logger().warning(text)
         return text
 
     def _seed(self, pose: Pose2D, confidence: float) -> None:
