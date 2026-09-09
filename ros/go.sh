@@ -70,4 +70,13 @@ if [ -n "$RECORDING" ]; then
     echo "=== run #${STAMP%%_*} === $WHO"
     echo "    ros/maps/rec/${STAMP}.{jsonl,_board.log$([ -f "$HERE/maps/rec/${STAMP}_cam.mkv" ] && echo ,_cam.mkv)}"
 fi
-rm -f "$CAM" "$REPLY_COPY" 2>/dev/null
+rm -f "$CAM" 2>/dev/null
+# The exit status is the drive's verdict, not the last cleanup command's: a chained
+# "ros/go.sh printer && ros/go.sh home" must run home after a reached goal and stop after a
+# failed or refused one. Nav2 status 4 is SUCCEEDED; anything else, or no "done" at all, is not.
+VERDICT=0
+case "$REQUEST" in '{"cmd":"go"'*)
+    grep -q '"event": "done", "run": [0-9]*, "planner": "[a-z]*", "status": 4' "$REPLY_COPY" 2>/dev/null || VERDICT=1 ;;
+esac
+rm -f "$REPLY_COPY" 2>/dev/null
+exit $VERDICT

@@ -118,3 +118,37 @@ class OccupancyGrid:
         """Occupancy probability per cell, 0.5 where nothing was observed."""
         probability: NDArray[np.float64] = 1.0 / (1.0 + np.exp(-self.log_odds))
         return probability
+
+
+OCCUPIED_LOG_ODDS = 4.0
+FREE_LOG_ODDS = -4.0
+
+
+def grid_from_pgm(yaml_path: str | Path) -> OccupancyGrid:
+    """A map_server map (yaml + trinary pgm) as the log-odds grid the tracker searches.
+
+    The same three values the robot gets over /map: a wall pixel (0) becomes occupied, a free
+    pixel (254) free, and the unknown grey (205) stays 0 — never free. Calling 205 free once
+    moved every relocalisation score by 0.3 in an offline replica.
+    """
+    import yaml
+
+    path = Path(yaml_path)
+    meta = yaml.safe_load(path.read_text())
+    with open(path.parent / meta["image"], "rb") as f:
+        magic = f.readline()
+        if magic.strip() != b"P5":
+            raise ValueError(f"{meta['image']}: not a binary pgm")
+        line = f.readline()
+        while line.startswith(b"#"):
+            line = f.readline()
+        width, height = (int(v) for v in line.split())
+        f.readline()  # maxval
+        pixels = np.frombuffer(f.read(), dtype=np.uint8).reshape(height, width)[::-1]
+    res = float(meta["resolution"])
+    ox, oy = float(meta["origin"][0]), float(meta["origin"][1])
+    grid = OccupancyGrid(GridSpec(res, ox, oy, width * res, height * res))
+    grid.log_odds[:] = np.where(
+        pixels < 64, OCCUPIED_LOG_ODDS, np.where(pixels > 250, FREE_LOG_ODDS, 0.0)
+    )
+    return grid

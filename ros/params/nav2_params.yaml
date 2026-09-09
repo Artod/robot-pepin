@@ -495,7 +495,11 @@ planner_server:
       # instead of every 3.5th, because a short one fails more often and each try costs.
       analytic_expansion_ratio: 8.0
       analytic_expansion_max_length: 0.5
-      reverse_penalty: 2.5  # reversing is allowed but has to earn it
+      # 4.0 now that it counts: with the analytic expansion confined to half a metre the
+      # primitive search writes the route, and this is the price of a metre in reverse there.
+      # Run 0047 still planned an 0.87 m reverse leg at 2.5; the search must find turning round
+      # cheaper than that.
+      reverse_penalty: 4.0
       change_penalty: 0.05
       non_straight_penalty: 1.05
       rotation_penalty: 5.0  # a turn in place is cheap for this cart but slow for the clock
