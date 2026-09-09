@@ -36,6 +36,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
+from pepin.watch import BlindDriveWatch
 from pepin_bringup.run_recorder import RunRecorder
 
 PORT = 3337
@@ -231,8 +232,11 @@ class GoalServer(Node):
         handle.cancel_goal_async()
         return True
 
-    def _go(self, request: dict[str, Any], connection: socket.socket) -> None:
-        """Send one goal and stream its progress until it ends or the caller hangs up."""
+    def _go(self, request: dict[str, Any], connection: socket.socket, resume: bool = True) -> None:
+        """Send one goal and stream its progress until it ends or the caller hangs up.
+
+        ``resume``: a drive stopped for being lost is sent again after a relocalisation, once.
+        """
         target = self._target_of(request)
         if target is None:
             self._send(connection, {"event": "error", "detail": "no such place"})
@@ -248,6 +252,10 @@ class GoalServer(Node):
         started = time.monotonic()
         feedback: dict[str, Any] = {}
         record = self.start_recording(name or f"{x:.0f}_{y:.0f}")
+        self.get_logger().info(
+            f"run {self._recorder.number}: planner {PLANNERS[self.planner][0]} "
+            f"-> {name or 'coordinates'} ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg)"
+        )
         try:
             send = self._client.send_goal_async(
                 goal,
@@ -275,9 +283,21 @@ class GoalServer(Node):
             )
             result_future = handle.get_result_async()
             last = 0.0
+            blind = BlindDriveWatch()
+            stopped_lost = False
             while rclpy.ok() and not result_future.done():
                 time.sleep(0.05)  # the node's own spin serves the action; this thread only reports
                 now = time.monotonic()
+                if blind.observe(self.fit, now):  # a blind drive is stopped, not finished
+                    stopped_lost = True
+                    self._send(
+                        connection, {"event": "lost", "fit": self.fit, "t": round(now - started, 1)}
+                    )
+                    self.get_logger().warning(
+                        f"lost mid-drive (fit {self.fit:.2f}): stopping to relocalise"
+                    )
+                    handle.cancel_goal_async()
+                    break
                 if feedback and now - last > 1.0:
                     last = now
                     self._send(
@@ -285,6 +305,13 @@ class GoalServer(Node):
                     )
             with self._lock:
                 self._goal_handle = None
+            if stopped_lost:
+                # Stopped on purpose: find ourselves standing still, then the same goal, once.
+                self._wait(result_future, 10.0)
+                if self._find_myself(connection) and resume:
+                    self._send(connection, {"event": "resuming", "fit": self.fit})
+                    self._go(request, connection, resume=False)
+                return
             outcome = result_future.result()
             status = getattr(outcome, "status", 0) if outcome else 0
             self.stop_recording()  # closed before the answer: the caller fetches it on reading

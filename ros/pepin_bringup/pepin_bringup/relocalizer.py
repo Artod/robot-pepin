@@ -357,7 +357,7 @@ class Relocalizer(Node):
                 f"tracker initialised at ({loc.pose.x:+.2f}, {loc.pose.y:+.2f}, "
                 f"{math.degrees(loc.pose.theta):+.0f} deg): fit {confidence:.2f}"
             )
-            self._seed(loc.pose, provisional=loc.pose)  # a start-up fix is a guess too
+            self._seed(loc.pose)  # AMCL follows, for the particle picture
             self._tracker_initialised = True
         finally:
             self._tracker_initialising = False
@@ -552,7 +552,7 @@ class Relocalizer(Node):
         if map_id != self._map_id:
             self.get_logger().warning("a search finished on the old map: its fix is dropped")
             return
-        self._seed(pose, provisional=pose)
+        self._seed(pose)
         self.fit = confidence
 
     def _search_and_seed(self) -> None:
@@ -595,10 +595,11 @@ class Relocalizer(Node):
             self._dump_failure(points, current, found.pose if found else None, confidence)
             return text
         self._watch.searched(found=True, now=time.monotonic())
-        self._pending_seed = (self._map_id, found.pose, confidence)
+        self._watch.proposed(found.pose, time.monotonic())  # a candidate, not a move
         text = (
-            f"relocalised ({stage}, {took:.1f} s) to ({found.pose.x:+.2f}, {found.pose.y:+.2f}, "
-            f"{math.degrees(found.pose.theta):+.0f} deg): fit {current_fit:.2f} -> {confidence:.2f}"
+            f"candidate ({stage}, {took:.1f} s): ({found.pose.x:+.2f}, {found.pose.y:+.2f}, "
+            f"{math.degrees(found.pose.theta):+.0f} deg) fit {confidence:.2f} vs now "
+            f"{current_fit:.2f}; asking once more before moving"
         )
         self.get_logger().info(text)
         return text
@@ -606,8 +607,7 @@ class Relocalizer(Node):
     def _second_opinion(
         self, found: Any, confidence: float, current_fit: float, took: float
     ) -> str:
-        """A fresh search while the last fix is provisional: agree and it is confirmed, disagree
-        and the new answer is held instead, keep disagreeing and the question is given up."""
+        """A fresh search while a candidate is pending; the watch decides, this only obeys."""
         answer = found.pose if found is not None and confidence >= self._min_inliers else None
         verdict = self._watch.second_opinion(answer, time.monotonic())
         where = (
@@ -615,15 +615,16 @@ class Relocalizer(Node):
             if answer is None
             else f"({answer.x:+.2f}, {answer.y:+.2f}, {math.degrees(answer.theta):+.0f} deg)"
         )
-        if verdict == "confirmed":
-            text = f"confirmed by a second search ({took:.1f} s): {where}, fit {confidence:.2f}"
+        if verdict == "apply" and answer is not None:
+            self._pending_seed = (self._map_id, answer, confidence)  # the one move
+            text = (
+                f"agreed by a second search ({took:.1f} s): moving to {where}, fit {confidence:.2f}"
+            )
             self.get_logger().info(text)
             return "relocalised, " + text
-        if verdict == "replaced":
-            text = f"second search disagrees ({took:.1f} s): now holding {where}, asking again"
+        if verdict == "hold":
+            text = f"second search disagrees ({took:.1f} s): candidate {where}, asking again"
             self.get_logger().warning(text)
-            if answer is not None:
-                self._pending_seed = (self._map_id, answer, confidence)
             return text
         text = (
             f"searches keep disagreeing: the scan fits two places alike, last {where}; "
@@ -632,16 +633,11 @@ class Relocalizer(Node):
         self.get_logger().warning(text)
         return text
 
-    def _seed(self, pose: Pose2D, provisional: Pose2D | None = None) -> None:
-        """Adopt ``pose``: the tracker jumps there and AMCL is told through /initialpose.
-
-        ``provisional`` marks a pose found by a search rather than given by a hand: the watch
-        then asks the whole map again on the next scan and the fix counts only once two
-        searches agree. A flat is full of look-alikes, and one scan cannot tell them apart.
-        """
+    def _seed(self, pose: Pose2D) -> None:
+        """Adopt ``pose``: the tracker jumps there and AMCL is told through /initialpose."""
         if self._localizer is not None:
             self._localizer.adopt(pose, self.fit)
-        self._watch.seeded(time.monotonic(), provisional=provisional)
+        self._watch.seeded(time.monotonic())
         msg = PoseWithCovarianceStamped()
         msg.header.frame_id = "map"
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -665,6 +661,10 @@ class Relocalizer(Node):
             res.success, res.message = False, "a search is already running"
             return res
         res.message = self._relocalize()
+        tries = 0
+        while not self._watch.confirmed and self._points is not None and tries < 4:
+            tries += 1  # a candidate needs a second search to agree; run them here, back to back
+            res.message = self._relocalize()
         res.success = res.message.startswith("relocalised")
         return res
 

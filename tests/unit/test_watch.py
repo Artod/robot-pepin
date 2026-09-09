@@ -1,7 +1,10 @@
-"""When the whole map is searched, and when it must not be."""
+"""When the whole map is searched, and what may be done with the answer."""
 
 from pepin.odometry import Pose2D
-from pepin.watch import PROVISIONAL_FIT_CAP, LostWatch
+from pepin.watch import PROVISIONAL_FIT_CAP, BlindDriveWatch, LostWatch
+
+BASE = Pose2D(-9.5, 2.4, 0.9)
+CORNER = Pose2D(-13.5, 2.0, -2.3)  # the look-alike four metres away, 2026-09-09
 
 
 def test_a_healthy_fit_never_triggers_a_search() -> None:
@@ -29,48 +32,64 @@ def test_a_collapse_asks_at_once_and_forgives_the_backoff() -> None:
     watch = LostWatch()
     watch.observe(0.7, moving=False, navigating=False, now=1.0)
     for _ in range(3):
-        watch.searched(found=False, now=1.0)
-    assert watch.wait_s() > watch.cooldown_s  # failures have made it patient
-    assert watch.observe(0.1, moving=False, navigating=False, now=100.0)  # carried: ask now
-    assert watch.wait_s() == watch.cooldown_s  # and start counting failures afresh
+        watch.searched(found=False, now=2.0)  # three failures: the backoff is long
+    assert watch.wait_s() > watch.cooldown_s
+    assert watch.observe(0.1, moving=False, navigating=False, now=60.0), "a carry asks at once"
+    assert watch.wait_s() == watch.cooldown_s, "a new carry is a new question"
 
 
-def test_each_failed_search_doubles_the_wait_up_to_the_cap() -> None:
-    watch = LostWatch(cooldown_s=2.0, max_backoff_s=10.0)
-    watch.searched(found=False, now=0.0)
-    assert watch.wait_s() == 4.0
-    watch.searched(found=False, now=0.0)
-    assert watch.wait_s() == 8.0
-    watch.searched(found=False, now=0.0)
-    assert watch.wait_s() == 10.0  # capped
-    watch.searched(found=True, now=0.0)
-    assert watch.wait_s() == 2.0  # a fix clears the debt
-
-
-def test_nothing_is_asked_while_the_quiet_period_runs() -> None:
-    watch = LostWatch(cooldown_s=5.0)
-    watch.searched(found=False, now=10.0)  # quiet until 20 s (cooldown doubled once)
-    for t in (10.5, 12.0, 19.9):
-        assert not watch.observe(0.1, moving=False, navigating=False, now=t)
-    # The quiet period ends; three poor checks are needed again before it asks.
-    assert not watch.observe(0.1, moving=False, navigating=False, now=20.1)
-    assert not watch.observe(0.1, moving=False, navigating=False, now=21.0)
-    assert watch.observe(0.1, moving=False, navigating=False, now=22.0)
-
-
-def test_a_fix_from_a_search_is_provisional_until_a_second_search_agrees() -> None:
-    """One scan is a guess: on 2026-09-09 a scan at the base fitted a corner four metres away
-    almost as well, the search chose the corner, and the tracker settled there for good."""
+def test_a_search_s_answer_is_a_candidate_and_moves_nothing() -> None:
+    """The first version seeded every answer; the map spun between two look-alikes."""
     watch = LostWatch()
-    watch.seeded(now=1.0, provisional=Pose2D(-13.5, 2.0, -2.3))
+    watch.proposed(CORNER, now=1.0)
     assert not watch.confirmed
     assert watch.reported_fit(0.72) <= PROVISIONAL_FIT_CAP, "an unconfirmed fix must not look good"
-    assert watch.observe(0.72, moving=False, navigating=False, now=1.5), "asked again at once"
-    assert watch.second_opinion(Pose2D(-9.5, 2.3, 0.9), now=3.0) == "replaced"
-    assert not watch.confirmed
-    assert watch.second_opinion(Pose2D(-9.6, 2.4, 0.8), now=5.0) == "confirmed"
+    assert watch.observe(0.2, moving=False, navigating=False, now=1.5), "asked again at once"
+
+
+def test_only_a_second_search_that_agrees_moves_the_tracker_and_only_once() -> None:
+    watch = LostWatch()
+    watch.proposed(CORNER, now=1.0)
+    assert watch.second_opinion(BASE, now=3.0) == "hold"  # disagrees: nothing moves
+    assert watch.second_opinion(CORNER, now=5.0) == "hold"  # back to the corner: still nothing
+    assert watch.second_opinion(Pose2D(-13.4, 2.1, -2.2), now=7.0) == "apply"  # agrees: one move
     assert watch.confirmed
     assert watch.reported_fit(0.72) == 0.72
+
+
+def test_the_exact_sequence_of_the_night_moves_exactly_once() -> None:
+    """From the board log: corner, base, corner, base. Four seeds then; one now, and at the base."""
+    watch = LostWatch()
+    answers = [CORNER, BASE, CORNER, BASE]
+    moves = []
+    watch.proposed(answers[0], now=0.0)
+    for k, found in enumerate(answers[1:], start=1):
+        if watch.second_opinion(found, now=float(k)) == "apply":
+            moves.append(found)
+            break
+    assert len(moves) <= 1
+
+
+def test_a_tracker_that_recovers_by_itself_is_never_overridden() -> None:
+    """Run 0052: a healthy lock (0.62 and up) is better evidence than a one-scan search."""
+    watch = LostWatch()
+    watch.proposed(CORNER, now=1.0)
+    assert not watch.observe(0.65, moving=False, navigating=False, now=2.0)
+    assert watch.confirmed, "the candidate is dropped, the tracker stays"
+    assert watch.reported_fit(0.65) == 0.65
+
+
+def test_searches_that_never_agree_are_given_up_not_looped_forever() -> None:
+    watch = LostWatch()
+    watch.proposed(Pose2D(0, 0, 0), now=0.0)
+    verdicts = []
+    for k in range(1, 10):  # every answer somewhere else: a scan that fits two places alike
+        verdicts.append(watch.second_opinion(Pose2D(5.0 * k, 0, 0), now=float(k)))
+        if verdicts[-1] == "given_up":
+            break
+    assert verdicts[-1] == "given_up" and len(verdicts) <= 4 and watch.confirmed
+    assert "apply" not in verdicts
+    assert not watch.observe(0.2, moving=False, navigating=False, now=10.0), "quiet after giving up"
 
 
 def test_a_hand_s_seed_is_trusted_at_once() -> None:
@@ -80,13 +99,17 @@ def test_a_hand_s_seed_is_trusted_at_once() -> None:
     assert not watch.observe(0.9, moving=False, navigating=False, now=2.0)
 
 
-def test_searches_that_never_agree_are_given_up_not_looped_forever() -> None:
-    watch = LostWatch()
-    watch.seeded(now=0.0, provisional=Pose2D(0, 0, 0))
-    verdicts = []
-    for k in range(1, 10):  # every answer somewhere else: a scan that fits two places alike
-        verdicts.append(watch.second_opinion(Pose2D(5.0 * k, 0, 0), now=float(k)))
-        if verdicts[-1] == "given_up":
-            break
-    assert verdicts[-1] == "given_up" and len(verdicts) <= 4 and watch.confirmed
-    assert not watch.observe(0.7, moving=False, navigating=False, now=10.0), "quiet after giving up"
+def test_a_blind_drive_is_stopped_after_the_patience_and_not_before() -> None:
+    """Run 0052 drove a minute at fit 0.05-0.29 and arrived drunk."""
+    blind = BlindDriveWatch()
+    assert not blind.observe(0.1, now=0.0)
+    assert not blind.observe(0.1, now=3.9)
+    assert blind.observe(0.1, now=4.1)
+
+
+def test_a_dip_in_the_fit_does_not_stop_a_drive() -> None:
+    blind = BlindDriveWatch()
+    for t in (0.0, 1.0, 2.0):
+        assert not blind.observe(0.1, now=t)
+    assert not blind.observe(0.6, now=3.0), "recovered: the clock restarts"
+    assert not blind.observe(0.1, now=6.0)

@@ -35,12 +35,13 @@ class LostWatch:
     max_backoff_s: float = 20.0
     collapse_from: float = 0.5  # a fit at least this good...
     collapse_to: float = 0.30  # ...falling below this is a carry, not noise
-    # A whole-map fix is provisional until a second search on a fresh scan lands on the same
-    # place. A flat is full of look-alikes: on 2026-09-09 a scan at the base fitted the base at
-    # 0.71 and a corner four metres away at 0.69, the search run during the carry chose the
-    # corner, and the tracker settled there at 0.72 — above every "lost" threshold — so nobody
-    # ever asked again. One scan is a guess; two that agree are a fix.
-    _provisional: Pose2D | None = field(default=None, init=False)
+    # A whole-map search proposes; it never moves the tracker by itself. Its answer is held as a
+    # CANDIDATE and applied only when a later search lands on the same place — one teleport per
+    # episode, never a flip-flop. A flat is full of look-alikes: on 2026-09-09 a scan at the base
+    # fitted the base at 0.71 and a corner four metres away at 0.69, the search run mid-carry
+    # chose the corner and the tracker settled there at 0.72; then, with the first version of
+    # this rule, every disagreeing answer was seeded and the map spun between the two.
+    _candidate: Pose2D | None = field(default=None, init=False)
     _confirm_tries: int = field(default=0, init=False)
     _streak: int = field(default=0, init=False)
     _last_fit: float = field(default=0.0, init=False)
@@ -49,11 +50,11 @@ class LostWatch:
 
     @property
     def confirmed(self) -> bool:
-        """False while the last whole-map fix is still waiting for a second opinion."""
-        return self._provisional is None
+        """False while a search's answer is waiting for a second search to agree."""
+        return self._candidate is None
 
     def reported_fit(self, fit: float) -> float:
-        """The fit the outside world may see: capped while a fix is unconfirmed, so nothing
+        """The fit the outside world may see: capped while a candidate is pending, so nothing
         downstream mistakes a lucky look-alike for a localised robot."""
         return fit if self.confirmed else min(fit, PROVISIONAL_FIT_CAP)
 
@@ -74,7 +75,13 @@ class LostWatch:
             self._streak = 0
             return False
         if not self.confirmed:
-            return True  # a provisional fix is checked on every scan, cooldown or not
+            if fit >= self.lost_fit:
+                # The tracker found its own feet while a candidate waited: a healthy lock is
+                # better evidence than any one-scan search, so the candidate is dropped and the
+                # tracker is never overridden.
+                self._candidate, self._confirm_tries = None, 0
+                return False
+            return True  # a pending candidate is checked on the very next scan, cooldown or not
         if now < self._quiet_until:
             return False
         if collapsed:
@@ -91,40 +98,40 @@ class LostWatch:
         self._failures = 0 if found else self._failures + 1
         self._quiet_until = now + self.wait_s()
 
-    def seeded(self, now: float, provisional: Pose2D | None = None) -> None:
-        """A pose was adopted: from a hand (no ``provisional``) it is trusted and the tracker gets
-        a moment; from a whole-map search it is provisional until a fresh search agrees."""
+    def seeded(self, now: float) -> None:
+        """A pose was adopted (a hand, a restart, or an agreed candidate): give the tracker a
+        moment before judging it again."""
         self._streak = 0
-        if provisional is None:
-            self._provisional = None
-            self._confirm_tries = 0
-            self._quiet_until = max(self._quiet_until, now + self.cooldown_s)
-            return
-        self._provisional = provisional
-        self._confirm_tries = 0
-        self._quiet_until = now  # ask again at once
+        self._candidate, self._confirm_tries = None, 0
+        self._quiet_until = max(self._quiet_until, now + self.cooldown_s)
+
+    def proposed(self, pose: Pose2D, now: float) -> None:
+        """A search's first answer: held, checked again at once, applied only if agreed with."""
+        self._candidate, self._confirm_tries = pose, 0
+        self._quiet_until = now
 
     def second_opinion(self, found: Pose2D | None, now: float) -> str:
-        """What to do with a fresh search's answer while a fix is provisional.
+        """A fresh search's answer while a candidate is pending.
 
-        Returns ``"confirmed"`` when it agrees with the provisional fix, ``"replaced"`` when the
-        new answer is the one to hold (and check) instead, and ``"given_up"`` when the searches
-        keep disagreeing — a twin the scan cannot settle; the robot has to move before asking.
+        ``"apply"``: it agrees with the candidate — adopt ``found`` now, the fix is confirmed.
+        ``"hold"``: it does not — ``found`` becomes the candidate, nothing moves. ``"given_up"``:
+        the searches keep disagreeing, a twin the scan cannot settle; quiet until the robot
+        moves or the tracker itself gives up.
         """
-        assert self._provisional is not None
+        assert self._candidate is not None
         self._confirm_tries += 1
-        if found is not None and self.agrees(self._provisional, found):
-            self._provisional = None
+        if found is not None and self.agrees(self._candidate, found):
+            self._candidate, self._confirm_tries = None, 0
             self._quiet_until = now + self.cooldown_s
-            return "confirmed"
+            return "apply"
         if self._confirm_tries >= CONFIRM_TRIES:
-            self._provisional = None
+            self._candidate, self._confirm_tries = None, 0
             self._failures += 1
             self._quiet_until = now + self.wait_s()
             return "given_up"
         if found is not None:
-            self._provisional = found
-        return "replaced"
+            self._candidate = found
+        return "hold"
 
     @staticmethod
     def agrees(a: Pose2D, b: Pose2D) -> bool:
@@ -132,3 +139,26 @@ class LostWatch:
         return math.hypot(a.x - b.x, a.y - b.y) <= AGREE_M and abs(
             wrap_angle(a.theta - b.theta)
         ) <= math.radians(AGREE_DEG)
+
+
+@dataclass
+class BlindDriveWatch:
+    """Stops a drive whose tracker has lost its lock: below ``lost_fit`` for ``patience_s``.
+
+    The tracker never re-searches while a goal runs (a teleport mid-drive is worse than a poor
+    fit), so a drive that loses its lock keeps driving on a wrong map — run 0052 spent a minute
+    at fit 0.05-0.29 and arrived drunk. Better to stop, search standing still, and go again.
+    """
+
+    lost_fit: float = 0.30
+    patience_s: float = 4.0
+    _lost_since: float | None = field(default=None, init=False)
+
+    def observe(self, fit: float, now: float) -> bool:
+        """True the moment the fit has been poor for longer than the patience."""
+        if fit >= self.lost_fit:
+            self._lost_since = None
+            return False
+        if self._lost_since is None:
+            self._lost_since = now
+        return now - self._lost_since > self.patience_s
