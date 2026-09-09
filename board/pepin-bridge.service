@@ -1,0 +1,28 @@
+[Unit]
+Description=Pepin zenoh bridge: the board's ROS graph over one TCP link to the laptop (side=board only)
+# The bridge must come up AFTER the stack and go down and up WITH it: started first, it watches
+# three thousand DDS entities disappear and reappear as the stack restarts and its zenoh runtime
+# wedges — the container stays "Up", the REST admin answers nothing, no session is accepted, and
+# every sample stops (2026-09-09, the whole "thin client is dead" episode). PartOf makes a
+# restart of pepin-ros restart this unit too, in order.
+After=pepin-ros.service
+BindsTo=pepin-ros.service
+PartOf=pepin-ros.service
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=-/etc/default/pepin-ros
+Environment=PEPIN_SIDE=all
+# Only a split stack has a link to bridge; on side=all the unit exits at once, cleanly.
+ExecStartPre=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || { echo "side=$PEPIN_SIDE: no bridge"; exit 0; }'
+# Wait for the graph to settle: the tracker is the last node up.
+ExecStartPre=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || exit 0; for i in $(seq 1 60); do /usr/bin/docker exec pepin-ros /pepin_entrypoint.sh ros2 node list 2>/dev/null | grep -q relocalizer && exit 0; sleep 2; done; echo "stack not up after 120 s, starting the bridge anyway"'
+ExecStartPre=-/usr/bin/docker rm -f zenoh-bridge
+ExecStart=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || exec sleep infinity; exec /usr/bin/docker run --rm --name zenoh-bridge --network host -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.5.1 -d 7 -l tcp/0.0.0.0:7447 --rest-http-port 8000'
+ExecStop=-/usr/bin/docker stop -t 5 zenoh-bridge
+Restart=on-failure
+RestartSec=5
+
+[Install]
+# Enabled = pulled in by the stack: every start of pepin-ros starts the bridge after it.
+WantedBy=pepin-ros.service

@@ -302,14 +302,23 @@ def test_a_blocked_retreat_gives_up_within_seconds() -> None:
     import xml.etree.ElementTree as ET
 
     tree = ET.parse(REPO / "ros/params/pepin_nav_to_pose.xml")
-    moves = [(n, "backup_dist", "backup_speed") for n in tree.iter("BackUp")]
-    moves += [(n, "dist_to_travel", "speed") for n in tree.iter("DriveOnHeading")]
+    smoother = _p("velocity_smoother")
+    reverse_cap = abs(smoother["min_velocity"][0])  # every BackUp is clamped to this
+    moves = [(n, "backup_dist", "backup_speed", reverse_cap) for n in tree.iter("BackUp")]
+    moves += [
+        (n, "dist_to_travel", "speed", smoother["max_velocity"][0])
+        for n in tree.iter("DriveOnHeading")
+    ]
     assert moves
-    for node, dist_key, speed_key in moves:
-        nominal = float(node.get(dist_key)) / float(node.get(speed_key))
+    for node, dist_key, speed_key, cap in moves:
+        speed = min(float(node.get(speed_key)), cap)  # what the wheels really get
+        nominal = float(node.get(dist_key)) / speed
         allowance = node.get("time_allowance")
         assert allowance is not None, f"{node.tag} {node.attrib} relies on the 10 s default"
         assert nominal < float(allowance) <= 2.0 * nominal + 2.0, (node.attrib, nominal)
+    for spin in tree.iter("Spin"):
+        assert spin.get("time_allowance") is not None, f"Spin {spin.attrib} relies on the default"
+    assert reverse_cap >= 0.15, "a retreat at 0.075 m/s timed out every progress check"
 
 
 def test_new_objects_get_a_berth_in_both_costmaps() -> None:

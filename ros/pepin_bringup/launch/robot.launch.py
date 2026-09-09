@@ -42,7 +42,8 @@ IMU_X, IMU_Y, IMU_Z = 0.0, 0.0, 0.10
 # The cart's own body, with 5 cm of margin: returns just outside the exact hull are its own
 # posts and cables, they travel with it, and the costmap turned them into a wall that made
 # every in-place turn "a collision ahead" (measured 2026-09-08: |y| 0.28-0.34 m in 41-71%
-# of the scans on the home legs). Anything real at 5 cm from the body is inside the swing
+# of the scans on the home legs). Anything real at the contact band around the hull is inside the
+# swing
 # circle anyway and is handled by the ToF sensors and the inflation.
 HULL = (
     hull_box()

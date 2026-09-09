@@ -23,10 +23,17 @@ case "${1:-start}" in
 esac
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 docker rm -f pepin-laptop pepin-zenoh >/dev/null 2>&1 || true
+# The board's bridge must be alive before this side connects: its REST admin answers when its
+# zenoh runtime does (a wedged bridge stays "Up" and answers nothing — 2026-09-09).
+for _ in $(seq 1 30); do
+    curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' && break
+    sleep 2
+done
+curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' || { echo "the board's bridge does not answer on :8000 (ros/thin.sh on, then wait for it)"; exit 1; }
 # ROS_DISTRO matters: without it the bridge assumes Iron. Router mode on both sides, this one
 # connecting to the board's: the pairing measured to pass samples (peer mode here did not).
 docker run -d --name pepin-zenoh --network "$NET" -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.5.1 \
-    -e "tcp/$BOARD:7447" -d 7 >/dev/null
+    -e "tcp/$BOARD:7447" -d 7 --rest-http-port 8000 >/dev/null
 # The library is copied into the build context the same way sync.sh does for the board.
 mkdir -p "$HERE/pepin_src" && rsync -a --delete --exclude __pycache__ "$HERE/../src/pepin/" "$HERE/pepin_src/pepin/"
 SITE=/ws/install/pepin_bringup/lib/python3.12/site-packages/pepin_bringup

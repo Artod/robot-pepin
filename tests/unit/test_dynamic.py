@@ -4,12 +4,22 @@ import math
 
 import numpy as np
 
-from pepin.dynamic import StaticMask, berth_for, dedupe, dynamic_marks, rings, to_map
+from pepin.dynamic import (
+    COSTMAP_CELL_M,
+    StaticMask,
+    berth_for,
+    dedupe,
+    dynamic_marks,
+    ring_points,
+    rings,
+    to_map,
+)
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D
 
 POINT = berth_for("GridBased")
 RING_M, NEAR_M = POINT.ring_m, POINT.near_m
+PER_CENTRE = 1 + ring_points(RING_M)  # the centre itself, then the ring closing around it
 
 
 def room() -> OccupancyGrid:
@@ -40,7 +50,9 @@ def test_a_person_in_the_room_becomes_a_lethal_ring_and_the_wall_does_not() -> N
     near_legs = np.hypot(marks[:, 0] - legs_map[:, 0].mean(), marks[:, 1] - legs_map[:, 1].mean())
     centres = marks[near_legs < 0.10]
     assert 1 <= len(centres) <= 3, "three returns 5 cm apart are one object, or nearly"
-    assert len(marks) == len(centres) * 13, "each centre carries its ring; the wall carries none"
+    assert len(marks) == len(centres) * PER_CENTRE, (
+        "each centre carries its ring; the wall carries none"
+    )
     ring = marks[near_legs >= 0.10]
     to_centre = np.hypot(
         ring[:, None, 0] - centres[None, :, 0], ring[:, None, 1] - centres[None, :, 1]
@@ -55,7 +67,17 @@ def test_what_stands_beside_a_parked_cart_gets_no_ring() -> None:
     beside = np.array([[0.30, 0.30]])  # 42 cm away: the contact band and the footprint handle it
     assert len(dynamic_marks(beside, pose, mask, POINT)) == 0
     farther = np.array([[NEAR_M + 0.05, 0.0]])
-    assert len(dynamic_marks(farther, pose, mask, POINT)) == 13
+    assert len(dynamic_marks(farther, pose, mask, POINT)) == PER_CENTRE
+
+
+def test_a_ring_leaves_no_gap_a_point_planner_could_walk_through() -> None:
+    """A point planner is stopped by lethal cells, never by the gaps between them: twelve marks
+    on a 0.41 m ring stand 0.22 m apart and the plan goes straight between two of them."""
+    ring = rings(np.zeros((1, 2)), RING_M)[1:]
+    step = np.hypot(*(ring - np.roll(ring, 1, axis=0)).T)
+    assert step.max() <= COSTMAP_CELL_M + 1e-9
+    assert ring_points(RING_M) == len(ring) > 12
+    assert ring_points(0.001) == 12, "a tiny ring still gets a full dozen"
 
 
 def test_helpers() -> None:

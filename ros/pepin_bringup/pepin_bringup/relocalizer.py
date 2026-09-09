@@ -49,7 +49,7 @@ from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow, relative_motion
 from pepin.slip import scan_changed, slipping
 from pepin.timeline import MotionFilter, OdomHistory, ScanGate, deskew, timed_scan_from_ros
-from pepin.watch import LostWatch, Verdict
+from pepin.watch import DRIVE_FIT, LOST_FIT, LostWatch, Verdict
 
 OCCUPIED_LOG_ODDS, FREE_LOG_ODDS = 4.0, -4.0
 DUMP_DIR = (
@@ -60,6 +60,7 @@ LAST_POSE_MAX_AGE_S = 3600.0
 
 
 OCCLUDED_SHARE = 0.25  # a quarter of the scan on things the map does not know
+MIN_JUDGEABLE_POINTS = 20  # fewer returns than this say nothing about occlusion or fit
 
 
 def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
@@ -118,7 +119,7 @@ class Relocalizer(Node):
         self._min_inliers = float(self.declare_parameter("min_global_inliers", 0.45).value)
         self._check_period_s = float(self.declare_parameter("check_period_s", 1.0).value)
         self._watch_args = dict(
-            lost_fit=float(self.declare_parameter("lost_fit", 0.55).value),
+            lost_fit=float(self.declare_parameter("lost_fit", LOST_FIT).value),
             lost_checks=int(self.declare_parameter("lost_checks", 3).value),
             cooldown_s=float(self.declare_parameter("search_cooldown_s", 8.0).value),
         )
@@ -392,7 +393,7 @@ class Relocalizer(Node):
                 saved = json.load(f)
             age = time.time() - float(saved["time"])
             same_map = saved.get("map") == self._map_id  # a pose means nothing on another map
-            if same_map and age <= LAST_POSE_MAX_AGE_S and float(saved.get("fit", 0.0)) >= 0.55:
+            if same_map and age <= LAST_POSE_MAX_AGE_S and float(saved.get("fit", 0.0)) >= LOST_FIT:
                 pose = Pose2D(float(saved["x"]), float(saved["y"]), float(saved["theta"]))
                 self.get_logger().info(
                     f"starting from the last known pose ({pose.x:+.2f}, {pose.y:+.2f}, "
@@ -406,7 +407,7 @@ class Relocalizer(Node):
     def _remember_pose(self) -> None:
         """Every 2 s: write the tracked pose and its fit, so the next start knows where we are."""
         loc = self._localizer
-        if loc is None or not self._tracker_initialised or self.fit < 0.55:
+        if loc is None or not self._tracker_initialised or self.fit < LOST_FIT:
             return
         record = {
             "x": loc.pose.x,
@@ -454,11 +455,16 @@ class Relocalizer(Node):
         the walls beyond still fit the pose. A wrong pose fails the far test and is not occluded
         (the first version judged the whole scan and hid a twin behind "occluded", 18:07)."""
         points, matcher = self._points, self._matcher
-        if self._static_mask is None or matcher is None or points is None or len(points) < 20:
+        if (
+            self._static_mask is None
+            or matcher is None
+            or points is None
+            or len(points) < MIN_JUDGEABLE_POINTS
+        ):
             return False
         world = to_map(points, pose)
         near_share, far = occlusion_split(points, self._static_mask.explains(world))
-        if near_share <= OCCLUDED_SHARE or far.sum() < 20:
+        if near_share <= OCCLUDED_SHARE or far.sum() < MIN_JUDGEABLE_POINTS:
             return False
         return matcher.inlier_fraction(pose, points[far]) >= self._watch.lost_fit
 
@@ -472,8 +478,13 @@ class Relocalizer(Node):
         )
 
     def _publish_dynamic(self, points: Any, pose: Pose2D, stamp_s: float) -> None:
-        """Lethal rings around the returns the map does not explain, in the map frame."""
-        if self._static_mask is None:
+        """Lethal rings around the returns the map does not explain, in the map frame.
+
+        Only from a pose the tracker trusts: with the pose off by more than the static mask's
+        margin the whole scan is "news", and the rings would paint the costmaps lethal exactly
+        when localisation is already in trouble (review, 2026-09-09).
+        """
+        if self._static_mask is None or self.fit < DRIVE_FIT:
             return
         marks = dynamic_marks(points, pose, self._static_mask, self._berth)
         self._dynamic_count += len(marks)
@@ -647,21 +658,29 @@ class Relocalizer(Node):
         # at 0.35 while a candidate pends, and fed back here it kept a twin candidate alive at
         # fit 0.76 and ran a whole-map search every second for half an hour (18:00 today).
         occluded = self._occluded(pose)
-        if self._watch.observe(
-            self.fit,
-            moving=moving,
-            navigating=self._navigating,
-            now=time.monotonic(),
-            occluded=occluded,
-        ):
+        # Under the episode lock, like every other _watch call and every claim of _searching:
+        # the worker answers a search on its own thread and the two share this state.
+        with self._episode:
+            search = (
+                self._watch.observe(
+                    self.fit,
+                    moving=moving,
+                    navigating=self._navigating,
+                    now=time.monotonic(),
+                    occluded=occluded,
+                )
+                and not self._searching
+            )
+            if search:
+                self._searching = True
+        if search:
             self.get_logger().warning(f"fit {self.fit:.2f}: searching the whole map")
+            threading.Thread(target=self._search_and_seed, daemon=True).start()
         elif occluded and self.fit < self._watch.lost_fit:
             self.get_logger().info(
                 f"fit {self.fit:.2f} but the scan is mostly things the map does not know: "
                 "occluded, not lost"
             )
-            self._searching = True
-            threading.Thread(target=self._search_and_seed, daemon=True).start()
 
     def _dump_failure(
         self, points: Any, current: Pose2D | None, best: Pose2D | None, confidence: float
@@ -767,7 +786,8 @@ class Relocalizer(Node):
         if self._localizer is not None:
             self._localizer.adopt(pose, confidence)
         self.fit = confidence
-        self._watch.seeded(time.monotonic())
+        with self._episode:  # the worker may be inside _watch.answer() right now
+            self._watch.seeded(time.monotonic())
         msg = PoseWithCovarianceStamped()
         msg.header.frame_id = "map"
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -812,7 +832,7 @@ class Relocalizer(Node):
         res.message = (
             f"x {pose.x:+.2f} m, y {pose.y:+.2f} m, yaw {math.degrees(pose.theta):+.0f} deg;"
             f" scan-to-map fit {self._watch.reported_fit(self.fit):.2f}"
-            f" (good > 0.5, lost < {self._watch.lost_fit})"
+            f" (good > {DRIVE_FIT}, lost < {self._watch.lost_fit})"
             + ("" if self._watch.confirmed else "; UNCONFIRMED: waiting for a second search")
         )
         return res

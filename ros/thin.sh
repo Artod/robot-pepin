@@ -8,12 +8,14 @@ BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"
 case "${1:-}" in
     on)
+        # The bridge is a systemd unit tied to the stack (board/pepin-bridge.service): it starts
+        # after the stack's last node is up and restarts with it. Started by hand before the stack
+        # it wedged silently (2026-09-09).
         ssh "root@$BOARD" "sed -i '/^PEPIN_SIDE=/d' /etc/default/pepin-ros; echo PEPIN_SIDE=board >> /etc/default/pepin-ros;
-            docker rm -f zenoh-bridge >/dev/null 2>&1; docker run -d --name zenoh-bridge --network host --restart unless-stopped -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.5.1 -d 7 -l tcp/0.0.0.0:7447 >/dev/null;
-            systemctl restart pepin-ros && sleep 8 && systemctl is-active pepin-ros"
-        echo "board on side=board; now: ros/laptop.sh" ;;
+            systemctl enable pepin-bridge >/dev/null 2>&1; systemctl daemon-reload; systemctl restart pepin-ros && sleep 8 && systemctl is-active pepin-ros pepin-bridge | tr '\\n' ' '"
+        echo; echo "board on side=board; the bridge follows the stack; now: ros/laptop.sh" ;;
     off)
-        ssh "root@$BOARD" "sed -i '/^PEPIN_SIDE=/d' /etc/default/pepin-ros; docker rm -f zenoh-bridge >/dev/null 2>&1; systemctl restart pepin-ros && sleep 8 && systemctl is-active pepin-ros"
+        ssh "root@$BOARD" "sed -i '/^PEPIN_SIDE=/d' /etc/default/pepin-ros; systemctl disable --now pepin-bridge >/dev/null 2>&1; docker rm -f zenoh-bridge >/dev/null 2>&1; systemctl restart pepin-ros && sleep 8 && systemctl is-active pepin-ros"
         echo "board on side=all (whole stack on the robot)" ;;
     *)
         ssh "root@$BOARD" "grep -oE 'PEPIN_SIDE=.*' /etc/default/pepin-ros || echo PEPIN_SIDE=all" ;;

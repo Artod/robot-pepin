@@ -35,13 +35,14 @@ Measured on the robot, on the board, during real drives.
 | Scan match against the map, on the board | 37–40 ms mean |
 | Scan-to-odometry wait (EKF latency) | 43–50 ms mean |
 | Heading-rate residual vs commanded, p90 | 6 °/s (26 °/s before the timeline module) |
-| Cross-track error, p90 | 4 cm |
+| Cross-track error, p90 | 6 cm under Hybrid-A*, 4 cm under the point planners |
 | Top speed | 0.30 m/s — the base's own cap, and the wheels reach it |
 | A 2.5 m printer → home leg | 16–21 s |
+| A 3.9 m leg to the printer, Hybrid-A* | 34 s, 1% of it turning in place — 35% under the point planners |
 | Localisation confidence | 0.68–0.70 standing, 0.84 driving |
 | Loop closure over a 33 m lap (mapping) | 5 cm |
 | Goal tolerance | 0.10 m / 0.20 rad |
-| Unit tests | 361, mypy strict, 86% coverage floor |
+| Unit tests | 376, mypy strict, 86% coverage floor |
 
 ## Architecture
 
@@ -49,12 +50,12 @@ Measured on the robot, on the board, during real drives.
  LAPTOP                                  │ BOARD — Orange Pi Zero 3 (4x Cortex-A53, 1.5 GB)
                                          │ one Docker container: ROS 2 Jazzy + Nav2 1.3.12
  ros/go.sh printer ─── TCP 3337 ─────────┼─► goal_server ──► bt_navigator ──► planner_server
-        (JSON lines: run number,         │        │              │            global costmap 0.5 Hz
+        (JSON lines: run number,         │        │              │            global costmap 2 Hz
          events, tape path)              │        │              │ /plan
                                          │        │              ▼
  Foxglove ◄── ws 8765 ── foxglove_bridge │        │        controller_server   RPP 10 Hz
                                          │        │        local costmap 3x3 m @ 5 cm, 3 Hz
- rsync   ◄── camera clip (curl on the board) │        │              │ /cmd_vel_nav
+ rsync   ◄── camera clip (curl on board) │        │              │ /cmd_vel_nav
  rsync   ◄── run .jsonl, board log ──────┼─ run_recorder         ▼
                                          │        ▲        velocity_smoother   10 Hz
                                          │        │              │ /cmd_vel
@@ -93,7 +94,7 @@ that could be a separate node and is not saves about 140 MB on a 1.5 GB board.
 | Controller (Regulated Pure Pursuit) | 10 Hz |
 | Velocity smoother | 10 Hz |
 | Local costmap | update 3 Hz, publish 1 Hz |
-| Global costmap | 0.5 Hz |
+| Global costmap | update 2 Hz, publish 1 Hz |
 | Planner | up to 2 Hz |
 | ToF, per sensor | 14 Hz |
 | Wheel loop on the board | 50 Hz, 0.5 s deadman |
@@ -108,14 +109,12 @@ One command, end to end:
    an ssh-and-import client used to cost.
 2. **The goal server** looks the name up in the map's own places book (`<map>.places.yaml`),
    takes the next run number, opens the tape — which already holds the last 15 s of every topic,
-   so the file begins *before* the command did — and sends the pose to Nav2. It answers with one
-   JSON line per event: accepted, feedback, arrival, done.
-3. **The behaviour tree** asks the selected planner for a path, with NavFn standing behind it:
-   a footprint-checking planner can refuse to plan from a cart parked against a table, and NavFn
-   cannot, so the robot is never stranded by the planner it happens to be using. Stale cells are
-   forgotten on a timer (local 1 Hz, global 0.1 Hz), and a failure is answered by backing up,
-   clearing, spinning and waiting in a round robin — a different answer on each retry, twenty
-   retries before giving up.
+   so the file begins *before* the command did — starts the camera clip beside it, and sends the
+   pose to Nav2. It answers with one JSON line per event: accepted, feedback, arrival, done.
+3. **The behaviour tree** asks the selected planner for a path — that planner and no other. Stale
+   cells are forgotten on a timer (local 1 Hz, global 0.1 Hz); a refused plan is answered by
+   retreating 0.15 m, then by three seconds of waiting, then by a spin, one answer per retry and
+   five retries, and a failed drive by a longer round robin — twenty attempts before giving up.
 4. **Regulated Pure Pursuit** follows the path at 10 Hz, slowing on curvature and on costmap cost.
 5. **The velocity smoother** limits acceleration, and **the C++ base bridge** turns `/cmd_vel`
    into a twist on a TCP socket.
@@ -199,7 +198,7 @@ live while teleoperating.
 
 **LD19 lidar**, 10 Hz, 455 beams, mounted upside down at 0.20 m with a yaw of −87.5°. The driver
 emits a counter-clockwise scan for an upright sensor, so the static transform carries a roll of
-π to mirror it back. A box filter removes the cart's own hull plus 5 cm of margin — those
+π to mirror it back. A box filter removes the cart's own hull plus the contact band — those
 returns are its posts and cables, they travel with it, and the costmap used to turn them into a
 wall that made every in-place turn a collision.
 
@@ -216,34 +215,79 @@ the cart timid — a centimetre of phantom hull in front of a bumper that is onl
 `base_link` turned "parked against the table" into "in collision". Bumper-to-furniture parking is
 the working case, not the edge case.
 
+**An 8 cm contact band** around that polygon is hidden from the costmaps by both sensors that
+could fill it: the lidar's box filter cuts it out, and the ToF publish anything inside it below
+their own `min_range`, which the range layer neither marks nor clears
+(`pepin.footprint.CONTACT_BAND_M`). What the cart is parked against is contact, not an obstacle —
+a mark inside the band lands in the very cells of the footprint outline that the controller checks
+first, and one such cell refused every command, including the one that drives away (231 s beside
+the printer, run 0087). 8 cm is 1.5 cells at 5 cm, so a mark just outside the band never shares a
+cell with the outline, and anything beyond is still a wall.
+
 **Local costmap**: 3×3 m rolling window at 5 cm, updated at 3 Hz in the *map* frame (a slipping
 wheel feeds `odom` a metre of motion the robot never made). Layers: the lidar obstacle layer,
 then one range layer *per ToF sensor* — one shared layer let the front sensor clear the marks the
-side sensors had just written wherever the cones overlap — then inflation at 0.35 m / 5.0.
+side sensors had just written wherever the cones overlap — then inflation at 0.45 m / 5.0.
 
-**Global costmap**: the static map at 0.5 Hz, inflation 0.55 m / 2.0, and the ToF layers are in
-here too, because a plan is what routes *around* an obstacle and a sensor whose returns never
+**Global costmap**: the static map at 2 Hz — at 0.5 the plan still ran through a person for two
+seconds after they walked in — inflation 0.55 m / 2.0, and the ToF layers are in here too,
+because a plan is what routes *around* an obstacle and a sensor whose returns never
 reach the planner can only ever stop the robot. `track_unknown_space` is false and planners may
 cross unknown cells: the survey does not cover every corner of the flat, and a cell nobody
 looked at is floor until the lidar says otherwise — a robot must always be able to plan its way
 out of where it already stands.
 
+**What the map cannot explain gets a berth** (`src/pepin/dynamic.py`). The tracker already holds
+the pose and the map, so it is what spots new objects: on every matched scan, returns that no
+mapped obstacle accounts for — a person, a moved chair, a bag on the floor — go out on
+`/dynamic_obstacles` as lethal rings, a second observation source in both costmaps. Marking only;
+the lidar's own rays clear those cells when the object leaves. The ring is sized for the planner
+in charge: 0.25 m under a footprint planner, which is a toe's 0.20 m of reach past the shin the
+lidar sees plus a hand's width, and 0.41 m under a point planner, which is that reach plus the
+21 cm of half-width its 6 cm disc leaves out. Nothing nearer than the ring plus the hull's own
+circumscribed radius is ringed at all — a ring drawn across the cart's outline would refuse its
+every command (run 0087) — and mapped furniture is never ringed, so the cart still parks against
+it.
+
 ## Planning and control
 
-**Planners are selectable per run** — `ros/go.sh planner navfn|theta|smac|lattice`:
+**Hybrid-A\*** plans the cart, not a point, and that is why it drives. `base_link` sits at the
+front axle, so the hull reaches 6.25 cm ahead of it and 27.5 cm to either side; Nav2's point
+planners — NavFn, Smac 2D, Theta\* — keep their path the inflation's inscribed radius from a lethal
+cell and no farther, which on this shape is 6 cm. The plan read as clear while it routed the
+centre of a 55 cm cart past a standing person's shins at 6 cm, and a wheel took their toes.
+Widening that band is not the fix: it makes every start parked against furniture unplannable, and
+parked against furniture is the working case here. Smac's Hybrid-A\* checks the true polygon at its
+own heading on every expansion, so the width is in the plan itself and a docked start stays legal.
+
+It searches a Reeds-Shepp motion model with a 0.20 m minimum turning radius: arcs instead of
+pivots, and a plan may leave a dock with a short reverse cusp — which is why it runs with its own
+controller, `FollowPathRS`, the same RPP with `allow_reversing` on, since plain RPP will not drive
+a cusp. A 3.9 m leg to the printer took 34 s with 1% of the time spent turning in place, against
+35% under the point planners.
+
+**The rest stay selectable per run** — `ros/go.sh planner navfn|theta|smac|lattice|hybrid` picks
+the planner and the controller that can follow it, and the board remembers the choice across a
+restart, so no drive is credited to a planner that never ran:
 
 | Plugin | What it gives |
 | --- | --- |
-| `GridBased` — NavFn (default) | grid search, never refuses a start cell, the fallback behind every other one |
+| `Hybrid` — Smac Hybrid-A* (in use) | the true polygon checked at every expansion, Reeds-Shepp arcs, a reverse out of a dock |
+| `GridBased` — NavFn | grid search, a point robot, never refuses a start cell |
 | `Smac2D` | A* with costmap cost in the metric and a smoother after |
 | `ThetaStar` | any-angle: long straight segments, which is what a cart that turns in place wants |
 | `SmacPlannerLattice` | a state lattice on the diff-drive control set — real motions, including turning on the spot |
 
 **Behaviour tree** (`ros/params/pepin_nav_to_pose.xml`): the stock replanning-and-recovery tree
-with the planner wrapped in a fallback to NavFn, stale-costmap clearing on a timer, and the
-recovery round robin reordered so the cart backs up before it tries to spin — a cart wedged
-between the sofa and the table cannot spin, and the spin is exactly the move that slips the
-wheels on carpet.
+with three changes. The chosen planner is the **only** planner — NavFn used to stand behind it and
+took over whenever Hybrid-A* refused, and Hybrid refuses exactly when the cart does not fit: NavFn
+then squeezed a 12 cm disc through the gap and the wheel went over the toes five times in one leg
+(run 0113). A refusal now buys a recovery, or a wait for the person to move, never a smaller
+robot: retreat 0.15 m, then wait three seconds, then spin, one answer per retry and five retries
+before the goal goes to the outer round robin. Retreat comes first because a start the planner
+refuses is a cart parked on the map's own furniture, which waiting does not move — and because a
+cart wedged between the sofa and the table cannot spin, while the spin is exactly the move that
+slips the wheels on carpet. Stale costmap cells are cleared on a timer, local and global.
 
 **Progress** is judged by `PoseProgressChecker`: 0.15 m *or* 0.5 rad within 6 s. A legal pivot in
 place is progress; a translation-only checker aborted goals mid-turn. Goal tolerance is 0.10 m
@@ -251,14 +295,18 @@ and 0.20 rad.
 
 **Controller: Regulated Pure Pursuit** at 10 Hz — a fraction of MPPI's CPU on four A53 cores, and
 enough for a cart at 0.30 m/s. Lookahead 0.40–0.80 m, velocity-scaled. Speed is regulated by
-curvature and by costmap cost, with the controller's cost model matched exactly to the local
-inflation layer (0.30 m / 5.0) so it reads its own clearance correctly instead of crawling past
-walls for no reason. The controller carries no veto of its own (`use_collision_detection` is
-off): its stock check judges the current pose first, and one lethal cell against the footprint
-outline — a printer corner 5 cm away after a pivot — refused every command, including the one
-that drives away. Obstacles are cost: the planner routes around lethal cells, the regulated speed
-crawls near them, and the recovery behaviours keep their own collision checks, each with a time
-allowance of about twice its nominal duration so a blocked retreat fails instead of pushing.
+curvature and by costmap cost, with the controller's cost model carrying the local inflation
+layer's own scaling factor (5.0) so it reads its own clearance correctly instead of crawling past
+walls for no reason. **It keeps its own collision check** (`use_collision_detection: true`), and
+that took two failures to settle: RPP judges the current pose first, so one lethal cell against
+the footprint outline refuses every command including the one that drives away, and turning the
+check off cured that and drove the cart into a person standing in its path (runs 0090–0091) —
+the planner replans at 1–2 Hz and cost regulation only crawls, neither stops. The check stays;
+the deadlock is gone at its source, the contact band that keeps what the cart is parked against
+out of the outline's own cells. Beyond that band obstacles are cost: the planner routes around
+lethal cells, the regulated speed crawls near them, and the recovery behaviours keep their own
+collision checks, each with a time allowance of about twice its nominal duration so a blocked
+retreat fails instead of pushing.
 `rotate_to_heading_min_angle` is 1.2 rad: anything under 69° is driven out
 as an arc rather than pivoted, because `base_link` sits 0.30 m ahead of the rear corners and a
 pivot sweeps 0.41 m — the arc is what a person does in a tight corner. Pivots, when they happen,
@@ -280,10 +328,13 @@ the commanded twist. The costmap matters: it is the proof of what the robot itse
 which cells it held for occupied when it refused to move.
 
 `ros/go.sh` brings the run home: the tape, a slice of the board's container log, and the camera
-clip — captured on the board itself by the goal server (a plain copy of ustreamer's MJPEG stream,
-no re-encoding, no laptop in the loop) and wrapped into mkv on the laptop. It ends with a verdict line naming the run number and which planner actually
-drove — the tree can substitute NavFn invisibly, and a good drive credited to the wrong planner
-is worse than no measurement.
+clip. The clip is captured **on the board**, by the goal server that opened the tape — `curl`
+copying ustreamer's MJPEG stream to a file beside it, a few percent of a core and no re-encoding;
+the laptop only wraps that local file into mkv afterwards. Pulling the stream from the laptop was
+the old way, and one macOS network policy turned it into "No route to host" in one terminal and
+not another: a recording must not depend on which window started the drive. The script ends with
+a verdict line naming the run number, whether the goal was reached, and which planner planned it —
+a good drive credited to the wrong planner is worse than no measurement.
 
 ## Hardware
 
@@ -315,7 +366,8 @@ short shell scripts, one job each, no client to boot.
 
 **The Python library** (`src/pepin`, Python 3.12, numpy) is imported by the ROS package and never
 imports it back. It holds the board servers, the algorithms (scan matching, occupancy mapping,
-pose graph, localisation, the timeline, slip detection, ToF horizon, places) and the tape. Every
+pose graph, localisation, the timeline, slip detection, ToF horizon, the hull and the berth
+around new objects, places) and the tape. Every
 decision that can be pure is pure, which is why it can be tested without a robot: the unit tests
 need no hardware and run on every commit. `ruff`, `mypy --strict` and a pre-commit hook with an 86% coverage floor
 run on every commit; hardware tests live in `tests/hardware` behind `--hardware`.
@@ -339,7 +391,7 @@ ros/go.sh printer                       # go to a named place; Ctrl-C cancels
 ros/go.sh -1.0 0.3 90                   # ...or to map coordinates, with a heading
 ros/go.sh mark sofa                     # name the spot the robot is standing on
 ros/go.sh where | places | cancel
-ros/go.sh planner theta                 # swap the planner for the next run
+ros/go.sh planner hybrid                # swap the planner (and its controller) for the next run
 ros/go.sh trip                          # printer, then home
 ros/stop.sh                             # the red button: wheels stopped within a second
 
@@ -356,7 +408,7 @@ with `/map`, `/scan`, `/tf`, both costmaps and `/plan`.
 ```
 src/pepin/     the Python library: board servers (base, ToF), drivers and links, and the
                algorithms — mapping, scanmatch, posegraph, slam, localization, timeline,
-               watch, slip, tof_horizon, places, tape, deployment
+               watch, slip, tof_horizon, dynamic, footprint, places, tape, deployment
 ros/           the ROS 2 side: pepin_bringup (base/ToF bridges, relocalizer, goal server,
                run recorder, link watch, launch files), pepin_base_cpp, params/, maps/,
                tools/, Dockerfile, and the shell scripts that drive the robot

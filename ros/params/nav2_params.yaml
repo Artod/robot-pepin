@@ -151,8 +151,8 @@ controller_server:
       use_regulated_linear_velocity_scaling: true
       use_fixed_curvature_lookahead: false
       use_cost_regulated_linear_velocity_scaling: true
-      # RPP recomputes the distance to an obstacle from the cost it reads, so these two must
-      # match the local costmap's inflation layer exactly; on the defaults (3.0 / 0.6) it was
+      # RPP recomputes the distance to an obstacle from the cost it reads, so the scaling factor
+      # must equal the local inflation layer's and the distance must not exceed its radius; on the defaults (3.0 / 0.6) it was
       # mis-reading its own clearance and crawling near walls for no reason.
       inflation_cost_scaling_factor: 5.0
       cost_scaling_dist: 0.40
@@ -167,7 +167,7 @@ controller_server:
       # to 1.2 rad means anything under 69 deg is driven out as an arc instead of pivoted on the
       # spot — which is what a person does in a tight corner.
       rotate_to_heading_min_angle: 1.2
-      max_angular_accel: 1.0  # the velocity smoother allows 1.0; a rotation braking against
+      max_angular_accel: 1.0  # what the velocity smoother allows; braking harder overshoots the heading
       max_robot_pose_search_dist: 10.0
 
     FollowPathRS:
@@ -208,8 +208,8 @@ controller_server:
       use_regulated_linear_velocity_scaling: true
       use_fixed_curvature_lookahead: false
       use_cost_regulated_linear_velocity_scaling: true
-      # RPP recomputes the distance to an obstacle from the cost it reads, so these two must
-      # match the local costmap's inflation layer exactly; on the defaults (3.0 / 0.6) it was
+      # RPP recomputes the distance to an obstacle from the cost it reads, so the scaling factor
+      # must equal the local inflation layer's and the distance must not exceed its radius; on the defaults (3.0 / 0.6) it was
       # mis-reading its own clearance and crawling near walls for no reason.
       inflation_cost_scaling_factor: 5.0
       cost_scaling_dist: 0.40
@@ -224,7 +224,7 @@ controller_server:
       # to 1.2 rad means anything under 69 deg is driven out as an arc instead of pivoted on the
       # spot — which is what a person does in a tight corner.
       rotate_to_heading_min_angle: 1.2
-      max_angular_accel: 1.0  # the velocity smoother allows 1.0; a rotation braking against
+      max_angular_accel: 1.0  # what the velocity smoother allows; braking harder overshoots the heading
       max_robot_pose_search_dist: 10.0
 
 
@@ -351,7 +351,7 @@ local_costmap:
           clearing: False
           min_obstacle_height: -1.0
           max_obstacle_height: 1.0
-          obstacle_max_range: 6.0
+          obstacle_max_range: 2.0  # no farther than the scan raytraces (2.5): a ring nobody can clear is a wall
           obstacle_min_range: 0.0
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
@@ -421,7 +421,7 @@ global_costmap:
           clearing: False
           min_obstacle_height: -1.0
           max_obstacle_height: 1.0
-          obstacle_max_range: 6.0
+          obstacle_max_range: 2.0  # no farther than the scan raytraces (2.5): a ring nobody can clear is a wall
           obstacle_min_range: 0.0
       tof_front_layer:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
@@ -523,7 +523,7 @@ planner_server:
     # plan may legally start by backing out of a corner, which is the manoeuvre this stack has
     # never been able to express.
     planner_plugins: ["GridBased", "Lattice", "ThetaStar", "Smac2D", "Hybrid"]
-    costmap_update_timeout: 1.0  # the global costmap updates at 2 Hz now
+    costmap_update_timeout: 1.5  # the global costmap updates at 2 Hz now
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
       # 0.25, and the reasoning is the opposite of what it looks like. A mark stands against
@@ -553,7 +553,7 @@ planner_server:
       # that is what it checks. Reeds-Shepp: it may back out of a dock inside the plan itself
       # (a cusp RPP follows with allow_reversing); reverse_penalty keeps that to where it is
       # needed and the analytic expansion is short so no reverse arc crosses a room (the
-      # lattice's mistake). Turning radius 0.25 m is a comfort choice for a cart that can pivot:
+      # lattice's mistake). The turning radius is a comfort choice for a cart that can pivot:
       # arcs RPP tracks at 0.3 m/s, no rotate-in-place at the start.
       plugin: "nav2_smac_planner::SmacPlannerHybrid"
       tolerance: 0.25
@@ -752,7 +752,9 @@ velocity_smoother:
     scale_velocities: False
     feedback: "OPEN_LOOP"
     max_velocity: [0.30, 0.0, 0.6]
-    min_velocity: [-0.075, 0.0, -0.6]
+    # Reverse at half speed: the rear is unsensed, but 0.075 made every BackUp and every Hybrid
+    # cusp a crawl the progress checker timed out on (review 2026-09-09).
+    min_velocity: [-0.15, 0.0, -0.6]
     max_accel: [0.5, 0.0, 1.0]  # full speed in 0.6 s; braking twice as hard as that
     max_decel: [-1.0, 0.0, -2.0]
     odom_topic: "odom"

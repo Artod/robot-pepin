@@ -79,3 +79,20 @@ def test_the_tracker_pairs_every_scan_with_the_pose_of_its_own_moment() -> None:
     assert "timeout=" not in src, "a transform wait inside a callback: the old fallback path"
     assert "ScanGate(" in src and "deskew(" in src and "OdomHistory(" in src
     assert "/odometry/filtered" in src
+
+
+def test_the_whole_map_search_starts_only_when_the_watch_says_so() -> None:
+    """The search thread must be started inside the branch the watch's observe() opens — an edit
+    once left it in the 'occluded' branch instead: no search when lost, a search when occluded."""
+    src = next(p for p in ROS_PYTHON if p.name == "relocalizer.py").read_text()
+    tree = ast.parse(src)
+    check = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_check")
+    starts = [
+        n
+        for n in ast.walk(check)
+        if isinstance(n, ast.If)
+        and "_search_and_seed" in ast.unparse(n.body)
+        and "_search_and_seed" not in ast.unparse(n.orelse)
+    ]
+    assert starts, "the search thread is not started in the branch that decides to search"
+    assert "observe(" in ast.unparse(check), "the decision is the watch's observe()"

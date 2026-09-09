@@ -6,10 +6,10 @@ a 55 cm wide hull — so the plan passed a standing person's shins at 6 cm and a
 toes (2026-09-09). Widening the band strands every start parked against furniture, which is the
 working case here. So the width is added where it is needed and nowhere else: lidar returns
 that the static map does not explain (a person, a moved chair, a bag) are marked into the
-costmaps as lethal rings of :data:`RING_M` radius, a berth the point planners cannot enter.
+costmaps as lethal rings of :attr:`Berth.ring_m` radius, a berth the point planners cannot enter.
 Mapped furniture keeps its 6 cm and the cart still parks against it.
 
-Points within :data:`NEAR_M` of the robot get no ring: whatever stands beside a parked cart is
+Points within :attr:`Berth.near_m` of the robot get no ring: whatever stands beside a parked cart is
 handled by the contact band and the controller's own footprint check, and a ring landing on the
 cart's outline would refuse its departure (run 0087).
 """
@@ -26,8 +26,12 @@ from pepin.footprint import HULL, Footprint
 from pepin.mapping import OccupancyGrid
 from pepin.odometry import Pose2D
 
-RING_POINTS = 12  # how many lethal cells draw one ring; 12 leaves no gap at 5 cm cells
+COSTMAP_CELL_M = 0.05  # the Nav2 costmaps' resolution (test_nav_contract pins the YAML to it)
+RING_MIN_POINTS = 12  # the fewest marks any ring is drawn with; a big ring needs many more
 STATIC_M = 0.15  # a return within this distance of a mapped occupied cell is the map, not news
+MAX_NEWS_POINTS = (
+    60  # a person is a handful of returns; hundreds mean the pose is wrong, not the room
+)
 DEDUPE_M = 0.10  # returns closer together than this are one object
 
 
@@ -81,10 +85,22 @@ def dedupe(points: NDArray[np.float64], cell_m: float = DEDUPE_M) -> NDArray[np.
     return points[np.sort(first)]
 
 
+def ring_points(radius_m: float, cell_m: float = COSTMAP_CELL_M) -> int:
+    """How many marks close a ring of ``radius_m``: no two of them more than ``cell_m`` apart.
+
+    A point planner is stopped by lethal cells, not by the gaps between them: twelve marks on a
+    0.41 m ring stand 0.22 m apart, four costmap cells of clear floor the plan walks straight
+    through, which is the opposite of a berth.
+    """
+    return max(RING_MIN_POINTS, math.ceil(2.0 * math.pi * radius_m / cell_m))
+
+
 def rings(
-    centres: NDArray[np.float64], radius_m: float, n: int = RING_POINTS
+    centres: NDArray[np.float64], radius_m: float, n: int | None = None
 ) -> NDArray[np.float64]:
-    """Each centre with ``n`` points on a circle of ``radius_m`` around it, as (M, 2)."""
+    """Each centre, plus ``n`` points closing a circle of ``radius_m`` around it, as (M, 2)."""
+    if n is None:
+        n = ring_points(radius_m, COSTMAP_CELL_M)
     if len(centres) == 0:
         return np.zeros((0, 2), dtype=np.float64)
     angles = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
@@ -100,9 +116,14 @@ def dynamic_marks(
     map frame; empty when the scan agrees with the map."""
     if len(points_base) == 0:
         return np.zeros((0, 2), dtype=np.float64)
-    far = np.hypot(points_base[:, 0], points_base[:, 1]) >= berth.near_m
+    ranges = np.hypot(points_base[:, 0], points_base[:, 1])
+    far = ranges >= berth.near_m
     world = to_map(points_base[far], pose)
-    news = world[~mask.explains(world)]
+    unexplained = ~mask.explains(world)
+    news = world[unexplained]
+    if len(news) > MAX_NEWS_POINTS:  # the nearest first: what is close is what the wheels meet
+        nearest = np.argsort(ranges[far][unexplained])[:MAX_NEWS_POINTS]
+        news = news[nearest]
     return rings(dedupe(news), berth.ring_m)
 
 
@@ -129,7 +150,6 @@ def occlusion_split(
 
 TOE_REACH_M = 0.20  # a foot reaches this far past the shin the lidar sees at 0.20 m
 HAND_M = 0.05  # the margin a planner that knows the hull passes a person with
-COSTMAP_CELL_M = 0.05  # the Nav2 costmaps' resolution (test_nav_contract pins the YAML to it)
 FOOTPRINT_PLANNERS = ("Hybrid", "Lattice")  # Nav2 plugin ids that check the polygon
 
 

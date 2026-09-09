@@ -63,9 +63,8 @@ if [ -n "$RECORDING" ]; then
     else
         echo "no camera clip for this run (the stream gave nothing on the board)"
     fi
-    # Which planner actually drove. The tree tries the selected one and falls back to NavFn when
-    # it refuses, and that substitution is invisible from the outside — so say it out loud, every
-    # run, rather than letting a good drive be credited to the wrong planner.
+    # Which planner drove and how often it refused: the tree has no fallback planner any more (a
+    # refusal is a recovery, never a smaller robot), so a refusal count is the drive's own story.
     LOG="$HERE/maps/rec/${STAMP}_board.log"
     CHOSEN=$(grep -o '"planner": *"[^"]*"' "$REPLY_COPY" 2>/dev/null | tail -1 | cut -d'"' -f4)
     # Only this run's lines: the fetched log spans fifteen minutes, and counting the previous
@@ -74,7 +73,7 @@ if [ -n "$RECORDING" ]; then
         FELL_BACK=$(printf '%s\n' "$THIS_RUN" | grep -c "plugin failed to plan" || true)
         PLANS=$(printf '%s\n' "$THIS_RUN" | grep -c "Passing new path" || true)
         if [ "$FELL_BACK" -gt 0 ]; then
-            WHO="${CHOSEN:-?} refused $FELL_BACK time(s), NavFn took over ($PLANS plans)"
+            WHO="${CHOSEN:-?} refused $FELL_BACK time(s), recovered ($PLANS plans)"
         else
             WHO="planned by ${CHOSEN:-?} throughout ($PLANS plans)"
         fi
