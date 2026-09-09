@@ -15,6 +15,7 @@ dev = [
     "matplotlib>=3.11.1",
     "mypy>=1.11",
     "pytest>=8",
+    "pytest-cov>=7.1.0",
     "ruff>=0.6",
 ]
 macos = [

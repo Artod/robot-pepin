@@ -25,3 +25,36 @@ def test_script_answers_help(script: str) -> None:
         cwd=REPO,
     )
     assert result.returncode == 0, result.stderr[-600:]
+
+
+def test_go_sh_survives_a_camera_that_died_before_the_drive_ended(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """go.sh once captured the camera itself and stopped ffmpeg by writing "q" into a fifo; when
+    ffmpeg was already dead that write raised SIGPIPE in the shell's builtin printf and killed the
+    script before its verdict, so `trip` stopped after the printer (runs 0086, 0088). The clip is
+    captured on the board now and go.sh only converts a local file, but the guard stays, and the
+    two shell variants below show why: the guarded pattern lives, the old one dies silently."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[2] / "ros/go.sh").read_text()
+    assert "trap '' PIPE" in src
+    assert "ffmpeg" in src and "stream" not in src.split("ffmpeg")[1].split("\n")[0], (
+        "the laptop must not capture the camera stream itself: the board does (goal_server)"
+    )
+    setup = (
+        'set -uo pipefail; mkfifo "$1/f"; sleep 30 < "$1/f" & R=$!; exec 4>"$1/f"; '
+        "kill $R; wait $R 2>/dev/null; "
+    )
+    variants = {
+        "guarded": (
+            "trap '' PIPE; " + setup + "/usr/bin/printf q >&4 2>/dev/null; echo alive",
+            "alive",
+        ),
+        "old": (setup + "printf q >&4 2>/dev/null; echo alive", ""),
+    }
+    for name, (script, expect) in variants.items():
+        d = tmp_path / name
+        d.mkdir()
+        out = subprocess.run(
+            ["bash", "-c", script, "_", str(d)], capture_output=True, text=True, timeout=20
+        ).stdout.strip()
+        assert out == expect, (name, out)

@@ -9,5 +9,7 @@ uv run ruff check . --quiet
 uv run ruff format --check . --quiet
 echo "pre-commit: mypy"
 uv run mypy --no-error-summary
-echo "pre-commit: unit tests"
-uv run pytest tests/unit -q --no-header -p no:cacheprovider
+echo "pre-commit: unit tests + coverage floor ($(cat tests/coverage_floor.txt)%)"
+# The floor only ever goes up: raise tests/coverage_floor.txt when coverage rises, never lower it.
+uv run pytest tests/unit -q --no-header -p no:cacheprovider \
+    --cov=src/pepin --cov-report=term:skip-covered --cov-fail-under="$(cat tests/coverage_floor.txt)"

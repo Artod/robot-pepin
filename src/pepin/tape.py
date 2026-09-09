@@ -138,3 +138,12 @@ class RunTape:
         assert self._stream is not None
         self._stream.write(json.dumps(record, separators=(",", ":")) + "\n")
         self.written += 1
+
+
+def camera_clip_path(tape: Path) -> Path:
+    """Where a run's camera clip lives: next to its tape, ``<run>_cam.mjpeg``.
+
+    The clip is captured on the board (a plain copy of the MJPEG stream, no re-encoding) and
+    fetched with the tape, so a laptop that cannot reach the camera still gets the video.
+    """
+    return tape.with_name(tape.stem + "_cam.mjpeg")

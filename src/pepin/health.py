@@ -403,3 +403,26 @@ def run_health(
             add(p)
     report.duration_s = time.monotonic() - t0
     return report
+
+
+# -- polling cadence for the menu-bar app -------------------------------------------------------
+
+FAST_POLL_S, SLOW_POLL_S, FAST_FOR_S = 30.0, 300.0, 300.0
+
+
+def next_poll_s(all_go: bool | None, fast_for_left_s: float) -> float:
+    """Seconds until the next health poll.
+
+    30 s while things are changing: right after start or a manual refresh, and after ANY result
+    that is not ALL GO — a red result must be re-checked soon, not shown for five minutes. The
+    slow 5 min cadence is only for a robot that has been all go for a while. (A ten-second Wi-Fi
+    flap once painted the tray red until the next slow poll, 2026-09-09.)
+    """
+    if all_go is not True or fast_for_left_s > 0:
+        return FAST_POLL_S
+    return SLOW_POLL_S
+
+
+def is_stale(age_s: float, cadence_s: float) -> bool:
+    """A result older than twice its cadence says nothing about now and must be marked so."""
+    return age_s > 2.0 * cadence_s

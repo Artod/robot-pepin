@@ -158,3 +158,12 @@ def test_a_lost_counter_falls_back_to_the_files_on_disk(tmp_path: Path) -> None:
 def test_the_counter_directory_is_made_when_it_is_missing(tmp_path: Path) -> None:
     assert next_run_number(tmp_path / "rec") == 1
     assert (tmp_path / "rec" / ".run_seq").exists()
+
+
+def test_the_camera_clip_sits_next_to_its_tape() -> None:
+    from pathlib import Path
+
+    from pepin.tape import camera_clip_path
+
+    tape = Path("/maps/rec/0104_20260909_181000_home.jsonl")
+    assert camera_clip_path(tape) == Path("/maps/rec/0104_20260909_181000_home_cam.mjpeg")

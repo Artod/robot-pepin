@@ -27,22 +27,31 @@ from AppKit import (
     NSMutableAttributedString,
 )
 
-from pepin.health import HealthReport, Probe, run_health
+from pepin.health import (
+    FAST_FOR_S,
+    FAST_POLL_S,
+    SLOW_POLL_S,
+    HealthReport,
+    Probe,
+    is_stale,
+    next_poll_s,
+    run_health,
+)
 from pepin.log import setup_logging
 from pepin.transport import board_address
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOGS_DIR = REPO_ROOT / "logs"
 UV = shutil.which("uv") or "/opt/homebrew/bin/uv"
-# Adaptive polling: every 30 s for the first minutes after start or after a manual refresh
-# (the robot is being brought up, things change), then every 5 minutes. The menu keeps the
-# last report with its time stamp; "Refresh now" polls at once and goes back to the fast cadence.
-FAST_S, SLOW_S, FAST_FOR_S = 30.0, 300.0, 300.0
+# Adaptive polling (pepin.health.next_poll_s): every 30 s after start, after a manual refresh
+# and after any result that is not ALL GO; every 5 minutes once the robot has been all go for a
+# while. The menu keeps the last report with its time stamp and says how old it is; a result
+# older than twice its cadence is marked stale in the bar.
 # The status item is a monochrome template icon (a robot head drawn black on transparent;
 # macOS renders it white or black to match the other items); the title next to it is
 # empty when all is well.
 ICON = Path(__file__).with_name("icon_template.png")
-TITLE_OK, TITLE_WARN, TITLE_DEAD = None, "⚠", "✕"  # polling shows inside the menu, not in the bar
+TITLE_OK, TITLE_WARN, TITLE_DEAD, TITLE_STALE = None, "⚠", "✕", "?"  # polling shows in the menu
 
 log = logging.getLogger("tray")
 
@@ -113,6 +122,7 @@ class TrayApp(rumps.App):
         self._host: str | None = None
         self._last: Poll | None = None
         self._was_all_go: bool | None = None
+        self._cadence_s = FAST_POLL_S
         self._show(None)
         threading.Thread(target=self._worker, name="health-poll", daemon=True).start()
         self._timer = rumps.Timer(self._drain, 1)
@@ -129,7 +139,9 @@ class TrayApp(rumps.App):
             finally:
                 self._polling = False  # cleared before the result lands, so the menu updates
             self._results.put(result)
-            self._wake.wait(FAST_S if time.monotonic() < self._fast_until else SLOW_S)
+            all_go = result.report.all_go if result.report is not None else None
+            self._cadence_s = next_poll_s(all_go, self._fast_until - time.monotonic())
+            self._wake.wait(self._cadence_s)
 
     def _poll_once(self) -> Poll:
         """Resolve the board address if it is not known yet, then run the quick health tier."""
@@ -164,6 +176,8 @@ class TrayApp(rumps.App):
                 self._notify(latest)
             elif self._polling and self._last is not None:
                 self._show(self._last)  # same report, header says a refresh is in flight
+            elif self._last is not None and self._age_s(self._last) % 60 < 1.0:
+                self._show(self._last)  # once a minute: the age in the header, stale in the bar
         except Exception:
             # The rumps timer keeps ticking; a menu-building bug must be visible in the log.
             log.exception("menu update failed")
@@ -176,10 +190,15 @@ class TrayApp(rumps.App):
         self.menu.update(self._items(poll))
 
     @staticmethod
-    def _title_for(poll: Poll | None) -> str | None:
-        """A glyph next to the icon: polling, unreachable, degraded — or nothing when all go."""
+    def _age_s(poll: Poll) -> float:
+        return (datetime.now() - poll.at).total_seconds()
+
+    def _title_for(self, poll: Poll | None) -> str | None:
+        """A glyph next to the icon: stale, unreachable, degraded — or nothing when all go."""
         if poll is None:
             return None
+        if is_stale(self._age_s(poll), self._cadence_s):
+            return TITLE_STALE
         if not poll.reachable:
             return TITLE_DEAD
         return TITLE_OK if poll.report is not None and poll.report.all_go else TITLE_WARN
@@ -198,7 +217,12 @@ class TrayApp(rumps.App):
         """``Pepin · ALL GO (12.3s) · updated 12:34:56`` and its NO GO / unreachable variants."""
         if poll is None:
             return "Pepin · first poll running…"
-        stamp = f"updated {poll.at:%H:%M:%S}" + (" · refreshing…" if self._polling else "")
+        age = self._age_s(poll)
+        ago = f"{age:.0f} s ago" if age < 90 else f"{age / 60:.0f} min ago"
+        stale = " · STALE" if is_stale(age, self._cadence_s) else ""
+        stamp = f"updated {poll.at:%H:%M:%S} ({ago}){stale}" + (
+            " · refreshing…" if self._polling else ""
+        )
         if poll.report is None:
             return f"Pepin · UNREACHABLE · {stamp}"
         if poll.report.all_go:
@@ -207,10 +231,17 @@ class TrayApp(rumps.App):
 
     def _actions(self) -> list[Any]:
         """Refresh, poll interval, dashboard, logs, quit."""
-        cadence = "30 s" if time.monotonic() < self._fast_until else "5 min"
+        cadence = (
+            f"{self._cadence_s:.0f} s"
+            if self._cadence_s < 120
+            else f"{self._cadence_s / 60:.0f} min"
+        )
         return [
             rumps.MenuItem("Refresh now", callback=self._on_refresh),
-            _line(f"Polling every {cadence} (30 s for 5 min after start or a refresh)"),
+            _line(
+                f"Polling every {cadence} ({FAST_POLL_S:.0f} s after a refresh or any NO GO, "
+                f"{SLOW_POLL_S / 60:.0f} min when all go)"
+            ),
             rumps.MenuItem("Open dashboard", callback=self._on_dashboard),
             rumps.MenuItem("Open logs folder", callback=self._on_logs),
             rumps.separator,
