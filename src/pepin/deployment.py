@@ -46,6 +46,8 @@ def runs_here(side: str, node: str) -> bool:
         return side in ("all", "board")
     if node == "goal_server":  # it carries the laptop's heartbeat too
         return side in ("all", "laptop")
+    if node == "run_recorder":  # the tape is written where the sensors are
+        return side in ("all", "board")
     if node == "link_watch":
         return side == "board"  # only a split stack has a link to watch
     return node in nav_nodes(side)

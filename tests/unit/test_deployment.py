@@ -79,3 +79,11 @@ def test_the_board_half_is_brought_up_by_the_laptop_one_step_at_a_time() -> None
     assert next_transition(dict.fromkeys(BOARD_NAV_NODES, "active")) is None
     assert next_transition({**almost, "bt_navigator": "activating"}) is None  # in transit: wait
     assert next_transition({}) is None  # nobody answered: wait, do not guess
+
+
+def test_the_tape_is_written_where_the_sensors_are() -> None:
+    from pepin.deployment import runs_here
+
+    assert runs_here("all", "run_recorder") and runs_here("board", "run_recorder")
+    assert not runs_here("laptop", "run_recorder")
+    assert runs_here("laptop", "goal_server") and not runs_here("board", "goal_server")

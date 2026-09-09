@@ -109,6 +109,12 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     if runs_here(side, "relocalizer"):
         # Kidnapped-robot recovery: the whole map is searched when the scan stops fitting.
         actions.append(Node(package="pepin_bringup", executable="relocalizer", output="screen"))
+    if runs_here(side, "run_recorder"):
+        # As a module, like link_watch: the image's console scripts are generated at build time
+        # and the sources are mounted over them, so a new executable would need a rebuild.
+        actions.append(
+            ExecuteProcess(cmd=["python3", "-m", "pepin_bringup.run_recorder"], output="screen")
+        )
     if runs_here(side, "goal_server"):
         # Waits for orders on a socket so a goal costs a socket write, not a client boot.
         # Its places book follows the map in use: /maps/flat3.yaml -> /maps/flat3.places.yaml.

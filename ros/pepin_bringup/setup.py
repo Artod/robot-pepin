@@ -27,6 +27,7 @@ setup(
             "tof_bridge = pepin_bringup.tof_bridge:main",
             "relocalizer = pepin_bringup.relocalizer:main",
             "goal_server = pepin_bringup.goal_server:main",
+            "run_recorder = pepin_bringup.run_recorder:main",
         ],
     },
 )

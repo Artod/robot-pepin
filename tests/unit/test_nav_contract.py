@@ -377,3 +377,15 @@ def test_the_board_half_does_not_autostart_and_the_laptop_knows_its_side() -> No
     assert '"side": side' in launch, "the goal server must know it is the laptop half"
     server = (REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text()
     assert "next_transition(" in server and "ChangeState" in server
+
+
+def test_the_recorder_is_its_own_node_on_the_board_side() -> None:
+    """The split's first tapes were written on the laptop and had no scans: the recorder lives
+    where the sensors are, and the goal server only sends it a command."""
+    launch = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
+    assert 'runs_here(side, "run_recorder")' in launch and "pepin_bringup.run_recorder" in launch
+    setup = (REPO / "ros/pepin_bringup/setup.py").read_text()
+    assert "run_recorder = pepin_bringup.run_recorder:main" in setup
+    server = (REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text()
+    assert "RunRecorder(" not in server and "curl" not in server
+    assert "RUN_COMMAND_TOPIC" in server and "RUN_STATUS_TOPIC" in server

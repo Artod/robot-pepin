@@ -13,6 +13,7 @@ refused to move (a question a run could not answer before, and the one every sta
 from __future__ import annotations
 
 import math
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, ClassVar
@@ -21,11 +22,20 @@ from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from nav_msgs.msg import Path as PathMsg
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import Imu, LaserScan, Range
+from std_msgs.msg import String
 
 from pepin.recording import scan_record_from_ros
-from pepin.tape import RunTape, next_run_number
+from pepin.runlink import (
+    IDLE,
+    RECORDING,
+    RUN_COMMAND_TOPIC,
+    RUN_STATUS_TOPIC,
+    RunStatus,
+    parse_command,
+)
+from pepin.tape import RunTape, camera_clip_path, next_run_number
 
 MOUNT_YAW_RAD = math.radians(87.5)  # the head is turned; the mount is upside down (mirrored)
 MOUNT_X_M = 0.005
@@ -274,3 +284,111 @@ class RunRecorder:
                 "confidence": round(1.0 / (1.0 + cov[0] + cov[7] + cov[35]), 3),
             }
         )
+
+
+CAMERA_STREAM = "http://127.0.0.1:8080/stream"  # ustreamer on the board's host network
+
+
+class RunRecorderNode(Node):
+    """Records every drive where its sensors are, on the goal server's word.
+
+    The goal server (on the board or on the laptop) publishes one command on
+    ``pepin/run``; this node opens or closes the numbered tape, copies the camera stream next
+    to it, and answers on the latched ``pepin/run_status`` with the run's number and path.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("run_recorder")
+        self._record_dir = Path(str(self.declare_parameter("record_dir", "/maps/rec").value))
+        self._recorder = RunRecorder(self, self._record_dir)
+        self._camera: subprocess.Popen[bytes] | None = None  # curl copying the stream
+        self._camera_clip: Path | None = None
+        latched = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self._status_pub = self.create_publisher(String, RUN_STATUS_TOPIC, latched)
+        self.create_subscription(String, RUN_COMMAND_TOPIC, self._on_command, 10)
+        self._say(RunStatus(IDLE))
+        self.get_logger().info(f"run recorder ready: tapes in {self._record_dir}")
+
+    def _say(self, status: RunStatus) -> None:
+        self._status_pub.publish(String(data=status.to_json()))
+
+    def _on_command(self, msg: String) -> None:
+        parsed = parse_command(msg.data)
+        if parsed is None:
+            self.get_logger().warning(f"run command not understood: {msg.data[:80]}")
+            return
+        cmd, name = parsed
+        if cmd == "start" and name is not None:
+            if self._recorder.recording:
+                self.stop()
+            path = self._recorder.start(name)
+            self._start_camera(path)
+            self.get_logger().info(f"run {self._recorder.number}: recording {path}")
+            self._say(RunStatus(RECORDING, self._recorder.number, str(path), name))
+        else:
+            self.stop()
+
+    def stop(self) -> None:
+        """Close the tape (flushed and synced) and the clip; harmless when no run is open."""
+        was = self._recorder.recording
+        self._recorder.stop()
+        self._stop_camera()
+        if was:
+            self.get_logger().info(f"run {self._recorder.number}: closed")
+        self._say(RunStatus(IDLE, self._recorder.number, None, None))
+
+    def _start_camera(self, tape: Path) -> None:
+        """Copy the camera's MJPEG stream next to the tape: no laptop in the loop.
+
+        curl writes the stream as-is (a few percent of a core); the laptop converts after.
+        """
+        self._stop_camera()
+        clip = camera_clip_path(tape)
+        self._camera_clip = clip
+        try:
+            self._camera = subprocess.Popen(
+                ["curl", "-s", "-m", "1800", CAMERA_STREAM, "-o", str(clip)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            self._camera = None
+            self.get_logger().warning(f"camera clip not started: {exc}")
+
+    def _stop_camera(self) -> None:
+        """End the clip; a stream that was never reachable leaves an empty file, removed here."""
+        proc, self._camera = self._camera, None
+        if proc is None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        clip, self._camera_clip = self._camera_clip, None
+        if clip is not None and clip.exists() and clip.stat().st_size == 0:
+            clip.unlink()
+
+
+def main() -> None:
+    import rclpy
+
+    rclpy.init()
+    node = RunRecorderNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.stop()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

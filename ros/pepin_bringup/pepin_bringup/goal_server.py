@@ -22,7 +22,6 @@ import contextlib
 import json
 import math
 import socket
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -44,15 +43,21 @@ from pepin.deployment import (
     HEARTBEAT_TOPIC,
     next_transition,
 )
-from pepin.tape import camera_clip_path
+from pepin.runlink import (
+    RUN_COMMAND_TOPIC,
+    RUN_STATUS_TOPIC,
+    RunLink,
+    RunStatus,
+    start_command,
+    stop_command,
+)
 from pepin.watch import DRIVE_FIT, BlindDriveWatch
-from pepin_bringup.run_recorder import RunRecorder
 
 PORT = 3337
 GOOD_FIT = DRIVE_FIT  # below this the robot is told to find itself before it drives (pepin.watch)
 # The planner to select, and the controller that follows it. One controller now: the lattice
 # planner no longer expands in reverse, so there is nothing a reversing controller would add.
-CAMERA_STREAM = "http://127.0.0.1:8080/stream"  # ustreamer on the board's host network
+RECORDER_PATIENCE_S = 3.0  # how long a drive waits for the recorder's word before going anyway
 
 PLANNERS = {
     "navfn": ("GridBased", "FollowPath"),
@@ -115,9 +120,17 @@ class GoalServer(Node):
             }
             self._bringup_busy = False
             self.create_timer(3.0, self._bring_board_up)
-        self._recorder = RunRecorder(self, self._record_dir)
-        self._camera: subprocess.Popen[bytes] | None = None  # curl copying the stream during a run
-        self._camera_clip: Path | None = None
+        # The recorder is a node where the sensors are (run_recorder, on the board): one command
+        # opens a tape, the latched status names it (pepin.runlink).
+        self._runs = RunLink()
+        self._run_word = threading.Event()  # set on every status heard
+        self._run_pub = self.create_publisher(String, RUN_COMMAND_TOPIC, 10)
+        self.create_subscription(
+            String,
+            RUN_STATUS_TOPIC,
+            self._on_run_status,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
         self._lock = threading.Lock()
         threading.Thread(target=self._serve, daemon=True).start()
         self.get_logger().info(f"goal server ready on port {self._port}")
@@ -194,58 +207,47 @@ class GoalServer(Node):
 
     # -- the run's recording ---------------------------------------------------
 
-    def start_recording(self, name: str) -> Path:
-        """Open this run's tape and return its path; the seconds before the goal are already on it.
+    def _on_run_status(self, msg: String) -> None:
+        status = RunStatus.from_json(msg.data)
+        if status is not None:
+            self._runs.observe(status)
+            self._run_word.set()
 
-        The recorder is this node, not a child process: rclpy takes about four seconds to come up
-        on this board, so a per-goal recorder missed exactly the first turn of every drive.
+    def _await_recorder(self, done: Any) -> bool:
+        """Wait up to RECORDER_PATIENCE_S for the recorder's status to satisfy ``done``."""
+        deadline = time.monotonic() + RECORDER_PATIENCE_S
+        while not done():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            self._run_word.clear()
+            self._run_word.wait(left)
+        return True
+
+    def start_recording(self, name: str) -> Path | None:
+        """Ask the recorder for this run's tape: its path once confirmed, None if nobody answered.
+
+        A drive is not held hostage by its recorder: after RECORDER_PATIENCE_S it goes anyway,
+        loudly, with no recording named in its events.
         """
-        path = self._recorder.start(name)
-        self.get_logger().info(f"run {self._recorder.number}: recording {path}")
-        self._start_camera(path)
+        self._run_pub.publish(String(data=start_command(name)))
+        if not self._await_recorder(lambda: self._runs.started(name)):
+            self.get_logger().warning(
+                f"no recorder confirmed run '{name}' in {RECORDER_PATIENCE_S:.0f} s: "
+                "driving unrecorded"
+            )
+            return None
+        path = Path(str(self._runs.recording))
+        self.get_logger().info(f"run {self._runs.run}: recording {path}")
         return path
 
     def stop_recording(self) -> None:
-        """Close the run's tape (flushed and synced); harmless when no run is open."""
-        self._recorder.stop()
-        self._stop_camera()
-
-    def _start_camera(self, tape: Path) -> None:
-        """Copy the camera's MJPEG stream next to the tape, on the board: no laptop in the loop.
-
-        The laptop used to run ffmpeg against the stream and a macOS network policy turned that
-        into 'No route to host' for one terminal and not another; a run must not depend on it.
-        curl writes the stream as-is (a few percent of a core); the laptop converts after.
-        """
-        self._stop_camera()
-        clip = camera_clip_path(tape)
-        self._camera_clip = clip
-        try:
-            self._camera = subprocess.Popen(
-                ["curl", "-s", "-m", "1800", CAMERA_STREAM, "-o", str(clip)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError as exc:
-            self._camera = None
-            self.get_logger().warning(f"camera clip not started: {exc}")
-
-    def _stop_camera(self) -> None:
-        """End the clip; a stream that was never reachable leaves an empty file, removed here."""
-        proc, self._camera = self._camera, None
-        if proc is None:
+        """Close the run's tape (the recorder flushes and syncs it); harmless when none is open."""
+        if self._runs.stopped():
             return
-        proc.terminate()
-        try:
-            proc.wait(timeout=3.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        clip, self._camera_clip = self._camera_clip, None
-        if clip is not None and clip.exists() and clip.stat().st_size == 0:
-            clip.unlink()
-            self.get_logger().warning("camera stream gave nothing: no clip for this run")
-
-    # -- the socket ------------------------------------------------------------
+        self._run_pub.publish(String(data=stop_command()))
+        if not self._await_recorder(self._runs.stopped):
+            self.get_logger().warning("the recorder did not confirm the tape closed")
 
     def _serve(self) -> None:
         """One connection at a time: read a command, stream its events back, close."""
@@ -406,7 +408,7 @@ class GoalServer(Node):
         if record is None:
             record = self.start_recording(name or f"{x:.0f}_{y:.0f}")
         self.get_logger().info(
-            f"run {self._recorder.number}: planner {PLANNERS[self.planner][0]} "
+            f"run {self._runs.run}: planner {PLANNERS[self.planner][0]} "
             f"-> {name or 'coordinates'} ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg)"
         )
         try:
@@ -427,11 +429,10 @@ class GoalServer(Node):
                 connection,
                 {
                     "event": "accepted",
-                    "run": self._recorder.number,
+                    "run": self._runs.run,
                     "planner": PLANNERS[self.planner][0],
-                    "recording": str(
-                        record
-                    ),  # early: a drive that never reaches "done" is still fetched
+                    # early: a drive that never reaches "done" is still fetched
+                    "recording": None if record is None else str(record),
                     "place": name,
                     "x": x,
                     "y": y,
@@ -482,12 +483,12 @@ class GoalServer(Node):
                 connection,
                 {
                     "event": "done",
-                    "run": self._recorder.number,
+                    "run": self._runs.run,
                     "planner": self.planner,
                     "status": int(status),
                     "seconds": round(time.monotonic() - started, 1),
                     "arrival": self._pose_now(),
-                    "recording": str(record),
+                    "recording": None if record is None else str(record),
                 },
             )
         finally:  # a refused goal or a broken connection must not leave a recorder running
