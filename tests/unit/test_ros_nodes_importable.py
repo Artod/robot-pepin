@@ -69,3 +69,13 @@ def test_every_node_has_the_private_members_it_uses() -> None:
         for name, (defined, used) in _self_names(ast.parse(path.read_text())).items():
             missing = used - defined
             assert not missing, f"{path.name}:{name} uses {sorted(missing)} but never defines them"
+
+
+def test_the_tracker_pairs_every_scan_with_the_pose_of_its_own_moment() -> None:
+    """The tracker never waits for a transform inside a callback and never falls back to the
+    newest pose: scans go through pepin.timeline's gate and are deskewed with its history. The
+    fallback cost 1-2 degrees of false correction per scan in every pivot (runs 0080-0083)."""
+    src = next(p for p in ROS_PYTHON if p.name == "relocalizer.py").read_text()
+    assert "timeout=" not in src, "a transform wait inside a callback: the old fallback path"
+    assert "ScanGate(" in src and "deskew(" in src and "OdomHistory(" in src
+    assert "/odometry/filtered" in src
