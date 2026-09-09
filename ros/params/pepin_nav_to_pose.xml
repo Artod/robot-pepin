@@ -65,7 +65,7 @@
           <Sequence>
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
             <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
-            <BackUp backup_dist="0.35" backup_speed="0.08" time_allowance="12" error_code_id="{backup_code_id}"/>
+            <BackUp backup_dist="0.25" backup_speed="0.08" time_allowance="12" error_code_id="{backup_code_id}"/>
           </Sequence>
         </RecoveryNode>
       </PipelineSequence>

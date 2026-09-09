@@ -50,17 +50,31 @@ def test_an_auxiliary_sensor_cannot_stall_the_costmap() -> None:
 
 
 def test_the_planner_can_always_plan_out_of_where_the_cart_stands() -> None:
-    """2026-09-08: a 0.30 m planning disc made the START cell impassable beside the sofa and the
-    planner failed four times in a row. Clearance is bought with cost, never with a band the
-    planner cannot enter."""
-    planner_map = _p("global_costmap")
-    assert "robot_radius" not in planner_map, "a planning disc makes a parked cart unplannable"
-    assert "footprint" in planner_map and "footprint" in _p("local_costmap")
-    # The cost must carry far enough to be worth a detour: cost_scaling_factor is the decay per
-    # metre beyond the inscribed radius, so a SMALLER number reaches further.
-    inflation = planner_map["inflation_layer"]
-    assert inflation["inflation_radius"] >= 0.5
-    assert inflation["cost_scaling_factor"] <= 2.5
+    """A planning disc made the START cell impassable beside the sofa and the planner failed four
+    times in a row (2026-09-08). Clearance is bought with cost, never with a body the cart has not
+    got: no disc, no negative padding, the real polygon in both costmaps."""
+    for costmap in ("global_costmap", "local_costmap"):
+        parameters = _p(costmap)
+        assert "robot_radius" not in parameters, (
+            f"{costmap}: a disc makes a parked cart unplannable"
+        )
+        assert "footprint" in parameters, f"{costmap} must carry the real shape"
+        assert parameters["footprint_padding"] == 0.0, (
+            f"{costmap}: padding is a phantom hull — nav2's 0.01 default put a centimetre in front "
+            "of a bumper that is 0.0625 m from base_link, and a pose touching a table read as a "
+            "collision"
+        )
+
+
+def test_arriving_means_arriving() -> None:
+    """A manipulator will have to reach an object on the table, so 'reached' must mean reached:
+    the checker used to accept 0.15 m, which is 2.4x the whole bumper offset."""
+    checker = _p("controller_server")["general_goal_checker"]
+    assert checker["xy_goal_tolerance"] <= 0.07
+    assert checker["yaw_goal_tolerance"] <= 0.20
+    # NavFn silently re-targets the nearest reachable cell inside its own tolerance and the
+    # controller then measures success against that shifted path end.
+    assert _p("planner_server")["GridBased"]["tolerance"] <= 0.10
 
 
 def test_a_tof_return_is_marked_across_its_whole_cone() -> None:

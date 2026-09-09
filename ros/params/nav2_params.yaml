@@ -89,10 +89,11 @@ controller_server:
     failure_tolerance: 1.0
     progress_checker_plugins: ["progress_checker"]
     goal_checker_plugins: ["general_goal_checker"] # "precise_goal_checker"
-    # FollowPath is the baseline. FollowPathReversing is its twin for the lattice planner: a plan
-    # that reverses can only be followed by a controller allowed to reverse, and in RPP that flag
-    # is mutually exclusive with turning in place — so it is a second plugin, not a parameter.
-    controller_plugins: ["FollowPath", "FollowPathReversing"]
+    # One controller for both planners. A second one wrapped in a RotationShim was added on the
+    # premise that RPP cannot both reverse and turn in place; that is false in nav2 1.3.12
+    # (shouldRotateToPath adds pi when reversing). The shim then re-aimed the cart at every fresh
+    # plan, and with no reversing left in the plans there is nothing for it to do.
+    controller_plugins: ["FollowPath"]
     use_realtime_priority: false
 
     # Progress checker parameters
@@ -115,8 +116,8 @@ controller_server:
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.15
-      yaw_goal_tolerance: 0.30
+      xy_goal_tolerance: 0.06  # 0.15 is 2.4x the whole bumper offset: a mark could be 'reached' 15 cm short
+      yaw_goal_tolerance: 0.20  # 0.30 rad swings a front corner 8 cm sideways
     FollowPath:
       # Regulated Pure Pursuit: a fraction of MPPI's CPU on the board's A53 cores, and a
       # differential-drive cart at 0.15 m/s does not need model-predictive sampling.
@@ -152,55 +153,8 @@ controller_server:
       # to 1.2 rad means anything under 69 deg is driven out as an arc instead of pivoted on the
       # spot — which is what a person does in a tight corner.
       rotate_to_heading_min_angle: 1.2
-      max_angular_accel: 1.5
+      max_angular_accel: 1.0  # the velocity smoother allows 1.0; a rotation braking against
       max_robot_pose_search_dist: 10.0
-      use_interpolation: true
-
-    FollowPathReversing:
-      # A shim in front of the same RPP, and the reason is a hole in RPP itself: turning in place
-      # and reversing are mutually exclusive there, so the reversing twin could not pivot at all —
-      # sent home from the printer with the goal behind it, the cart simply drove the whole way
-      # backwards, because turning round was not a move it had. The shim rotates on the spot until
-      # the cart faces its path, then hands over; reversing stays available for the segments where
-      # the plan really asks for it.
-      plugin: "nav2_rotation_shim_controller::RotationShimController"
-      primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      # 1.0 rad, not 0.6. A new plan arrives every 1.3 s, and the shim engages whenever the
-      # fresh path leaves at more than this angle — at 34 degrees it stopped and re-aimed
-      # constantly, which is the "prицеливается" shuffle. It should only interrupt for a genuine
-      # misalignment, and 57 degrees is that.
-      angular_dist_threshold: 1.0
-      forward_sampling_distance: 0.5
-      rotate_to_heading_angular_vel: 0.5
-      max_angular_accel: 1.5
-      simulate_ahead_time: 0.5  # the shim checks its own rotation and gives way if it is blocked
-      rotate_to_goal_heading: false
-      closed_loop: false
-      desired_linear_vel: 0.20
-      lookahead_dist: 0.55
-      min_lookahead_dist: 0.40
-      max_lookahead_dist: 0.60
-      lookahead_time: 2.5
-      use_velocity_scaled_lookahead_dist: true
-      rotate_to_heading_angular_vel: 0.5
-      transform_tolerance: 0.2
-      min_approach_linear_velocity: 0.08
-      approach_velocity_scaling_dist: 0.3  # brake later: the crawl to the goal felt endless
-      use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 0.7
-      use_regulated_linear_velocity_scaling: true
-      use_fixed_curvature_lookahead: false
-      use_cost_regulated_linear_velocity_scaling: true
-      inflation_cost_scaling_factor: 5.0
-      cost_scaling_dist: 0.30
-      regulated_linear_scaling_min_radius: 0.6
-      regulated_linear_scaling_min_speed: 0.06
-      use_rotate_to_heading: false  # mutually exclusive with allow_reversing
-      rotate_to_heading_min_angle: 1.2
-      max_angular_accel: 1.5
-      max_robot_pose_search_dist: 10.0
-      use_interpolation: true
-      allow_reversing: true
 
 local_costmap:
   local_costmap:
@@ -220,6 +174,13 @@ local_costmap:
       rolling_window: true
       width: 3
       height: 3
+      # 0.0, deliberately, and this is what lets the cart touch furniture. Nav2's DEFAULT
+      # footprint_padding is 0.01, and it was silently in force: /local_costmap/published_footprint
+      # measured 0.5700 x 0.3825 with an inscribed radius of 0.0725 m, i.e. a centimetre of phantom
+      # hull in front of a bumper that is only 0.0625 m ahead of base_link. That phantom is the
+      # polygon every collision check uses, so a pose with the bumper against a table read as a
+      # collision — the timidity was a padding default, not caution.
+      footprint_padding: 0.0
       resolution: 0.05
       footprint: "[[0.0625, 0.275], [0.0625, -0.275], [-0.30, -0.275], [-0.30, 0.275]]"
       plugins: ["obstacle_layer", "tof_front_layer", "tof_left_layer", "tof_right_layer", "inflation_layer"]
@@ -331,16 +292,13 @@ global_costmap:
       # the planner cannot enter — a robot must always be able to plan its way out of where it
       # already stands.
       footprint: "[[0.0625, 0.275], [0.0625, -0.275], [-0.30, -0.275], [-0.30, 0.275]]"
-      # Three centimetres SMALLER than the cart, for the planner only, and this is what lets it
-      # start from a wall. The inflation layer stamps INSCRIBED cost within one inscribed radius
-      # of every lethal cell — 0.0625 m here, because base_link sits that far behind the front
-      # edge — and Smac refuses a pose whose outline touches that band. Parked 0.04 m off a table
-      # the band covered the cart's own hull and the goal died with "Start occupied" before a
-      # wheel turned. Shrinking the polygon the PLANNER reasons with moves both the band and the
-      # outline apart, so a start is refused only when the real hull is genuinely overlapped. The
-      # local costmap and the controller keep the exact shape, so nothing about collision safety
-      # changes: the plan is three centimetres optimistic, the wheels are not.
-      footprint_padding: -0.03
+      # 0.0, deliberately, and this is what lets the cart touch furniture. Nav2's DEFAULT
+      # footprint_padding is 0.01, and it was silently in force: /local_costmap/published_footprint
+      # measured 0.5700 x 0.3825 with an inscribed radius of 0.0725 m, i.e. a centimetre of phantom
+      # hull in front of a bumper that is only 0.0625 m ahead of base_link. That phantom is the
+      # polygon every collision check uses, so a pose with the bumper against a table read as a
+      # collision — the timidity was a padding default, not caution.
+      footprint_padding: 0.0
       resolution: 0.05
       track_unknown_space: true
       # The ToF are in here too, not just in the local costmap: a plan is what routes around an
@@ -415,11 +373,23 @@ global_costmap:
         # against 0 for free space), and NavFn pays 50 + 0.8*cost per cell, so it will route three
         # times as far around a chair leg rather than shave it — yet it can always squeeze through
         # when there is no other way. A pillar with soft edges, not a wall.
+        # Back to the local costmap's numbers. At 0.55 m / 2.0 a cell half a metre from a wall
+        # still carried cost 98, and NavFn pays COST_NEUTRAL + 0.8 * cost for it — 128 against 50
+        # for free space — so every route in the flat bent away from every wall. That is the
+        # wandering; the gradient should die where the hull's own clearance ends.
+        # 0.55 / 2.0, and these two numbers are not a preference — they are the only pair
+        # measured to work. Bisected live on 2026-09-08: at 0.45 / 5.0 the lattice planner
+        # answered "no valid path found" to every one of the four marks in 20-40 ms, and putting
+        # exactly these back made all four succeed again. They also clear Smac's own requirement
+        # that the inflation reach the circumscribed radius (0.407 m), without which it refuses
+        # its potential-field shortcut and says so at startup. NavFn pays for the gentler
+        # gradient by bending away from walls; NavFn is the fallback, not the daily driver.
         cost_scaling_factor: 2.0
         inflation_radius: 0.55
-      # The planner's own map, publishable: without it neither Foxglove nor a probe can see why
-      # a plan was refused, and NavFn refusing from a parked pose is exactly what needs looking at.
-      always_send_full_costmap: True
+      # False: the map is 239x215 cells, so publishing it whole at 0.5 Hz spends 50 kB/s on a
+      # board whose control loop already drops to 3 Hz. Turn it on when a refused plan needs
+      # looking at. The local one stays on — 3600 cells is genuinely free.
+      always_send_full_costmap: False
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.
 # If you'd rather set it in the yaml, remove the default "map" value in the tb3_simulation_launch.py
@@ -448,7 +418,10 @@ planner_server:
     costmap_update_timeout: 2.5  # the global costmap updates at 0.5 Hz; 1.0 timed out every plan
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
-      tolerance: 0.3
+      # 0.05: when the goal cell is impassable NavFn silently re-targets the nearest reachable cell
+      # inside this square and the controller measures success against that shifted path end, so
+      # 0.30 was a 30 cm licence to stop short of a mark.
+      tolerance: 0.05
       use_astar: false
       allow_unknown: false
     Lattice:
@@ -459,7 +432,7 @@ planner_server:
       # unmapped cell — a shadow under the furniture, the edge of the surveyed area — made the pose
       # unplannable, and the tree answered by reversing further into the same unmapped ground.
       allow_unknown: true
-      tolerance: 0.30
+      tolerance: 0.10
       max_iterations: 100000
       max_on_approach_iterations: 500
       max_planning_time: 1.5  # it is asked once a second; a later answer is a stale answer
@@ -469,19 +442,25 @@ planner_server:
       # the gap with fifteen recovery manoeuvres.
       cache_obstacle_heuristic: true
       analytic_expansion_ratio: 3.5
-      analytic_expansion_max_length: 2.0
-      reverse_penalty: 5.0  # a reverse must save real distance; turning round is the norm
+      analytic_expansion_max_length: 3.0  # nav2: never below 4-5x the turning radius
+      reverse_penalty: 2.0  # the nav2 default; moot now that no expansion reverses
       change_penalty: 0.05
       non_straight_penalty: 1.05
-      # 1.0, not 5.0. Penalising a turn in place pushes the search onto the control set's arcs,
-      # and the tightest arc nav2 ships is a 0.5 m radius — in a flat that is a wide, silly swing
-      # past furniture. This cart pivots on the spot for free (drive wheels at the front), so an
-      # in-place turn should cost about what a straight step costs.
-      rotation_penalty: 1.0
+      # Back to the nav2 default. At 1.0 an in-place bin turn cost 1.0 against 2.96 for a 0.15 m
+      # straight step, so the search inserted a pivot wherever a heading bin was convenient — up
+      # to 22 zero-length segments in one plan of run 0033, and every one of them is a full stop
+      # on the real cart. That stutter is what reads as "aiming".
+      rotation_penalty: 5.0
       cost_penalty: 2.0  # keep away from the inflation, the same instinct as the cost above
       retrospective_penalty: 0.015
       lookup_table_size: 20.0
-      allow_reverse_expansion: true
+      # false, the nav2 default, and the single most important line here. It does not merely add
+      # reverse primitives: it switches BOTH the analytic expansion and the distance heuristic
+      # from Dubins to ReedsShepp(0.5 m), and Reeds-Shepp writes cusps — reverse, aim, forward —
+      # into essentially every plan. That is where "why does it back up and aim instead of just
+      # turning and driving" came from. Dubins cannot reverse; the control set keeps its in-place
+      # rotations, so the cart still turns round on the spot.
+      allow_reverse_expansion: false
       smooth_path: true
       smoother:
         max_iterations: 1000
@@ -512,8 +491,8 @@ behavior_server:
       plugin: "nav2_behaviors::Spin"
     backup:
       plugin: "nav2_behaviors::BackUp"
-      # rear casters: a long fast reverse onto a carpet edge lifted a drive wheel once
-      backup_speed: 0.05
+      # No backup_speed here: BackUp takes its speed from the action goal, so this key was inert.
+      # The tree's own BackUp nodes carry the speed (0.05-0.15) that the rear casters can take.
     drive_on_heading:
       plugin: "nav2_behaviors::DriveOnHeading"
     wait:
@@ -532,7 +511,7 @@ behavior_server:
     simulate_ahead_time: 1.0
     max_rotational_vel: 0.6
     min_rotational_vel: 0.25
-    rotational_acc_lim: 1.5
+    rotational_acc_lim: 1.0  # ...1.5 overshoots its heading and the next tick corrects it
 
 waypoint_follower:
   ros__parameters:

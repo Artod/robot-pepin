@@ -40,11 +40,11 @@ from pepin_bringup.run_recorder import RunRecorder
 
 PORT = 3337
 GOOD_FIT = 0.45  # below this the robot is told to find itself before it drives
-# Which controller can follow which planner's paths: a lattice plan may reverse, and only the
-# reversing twin of RPP can drive that. Picked as a pair, never separately.
+# The planner to select, and the controller that follows it. One controller now: the lattice
+# planner no longer expands in reverse, so there is nothing a reversing controller would add.
 PLANNERS = {
     "navfn": ("GridBased", "FollowPath"),
-    "lattice": ("Lattice", "FollowPathReversing"),
+    "lattice": ("Lattice", "FollowPath"),
 }
 
 
