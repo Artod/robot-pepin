@@ -54,7 +54,19 @@ if [ -n "$RECORDING" ]; then
     rsync -aq "root@$BOARD:/root/pepin-ros${RECORDING}" "$HERE/maps/rec/" 2>/dev/null
     # An empty file means the camera server was down; a missing clip must not look like a recorded one.
     if [ -n "$CAM" ] && [ -s "$CAM" ]; then mv "$CAM" "$HERE/maps/rec/${STAMP}_cam.mkv"; fi
+    # Which planner actually drove. The tree tries the selected one and falls back to NavFn when
+    # it refuses, and that substitution is invisible from the outside — so say it out loud, every
+    # run, rather than letting a good drive be credited to the wrong planner.
+    LOG="$HERE/maps/rec/${STAMP}_board.log"
+    FELL_BACK=$(grep -c "plugin failed to plan" "$LOG" 2>/dev/null || echo 0)
+    PLANS=$(grep -c "Passing new path" "$LOG" 2>/dev/null || echo 0)
+    if [ "$FELL_BACK" -gt 0 ]; then
+        WHO="the chosen planner refused $FELL_BACK time(s), NavFn took over"
+    else
+        WHO="planned entirely by the chosen planner ($PLANS plans)"
+    fi
     # The run's number is how Artem names a drive out loud ("look at run 37"), so print it loud.
-    echo "=== run #${STAMP%%_*} === ros/maps/rec/${STAMP}.{jsonl,_board.log$([ -f "$HERE/maps/rec/${STAMP}_cam.mkv" ] && echo ,_cam.mkv)}"
+    echo "=== run #${STAMP%%_*} === $WHO"
+    echo "    ros/maps/rec/${STAMP}.{jsonl,_board.log$([ -f "$HERE/maps/rec/${STAMP}_cam.mkv" ] && echo ,_cam.mkv)}"
 fi
 rm -f "$CAM" 2>/dev/null
