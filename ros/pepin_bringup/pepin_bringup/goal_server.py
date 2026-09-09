@@ -45,6 +45,7 @@ GOOD_FIT = 0.45  # below this the robot is told to find itself before it drives
 PLANNERS = {
     "navfn": ("GridBased", "FollowPath"),
     "lattice": ("Lattice", "FollowPathReversing"),
+    "theta": ("ThetaStar", "FollowPath"),
 }
 
 
