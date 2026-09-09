@@ -113,3 +113,30 @@ def test_a_dip_in_the_fit_does_not_stop_a_drive() -> None:
         assert not blind.observe(0.1, now=t)
     assert not blind.observe(0.6, now=3.0), "recovered: the clock restarts"
     assert not blind.observe(0.1, now=6.0)
+
+
+def test_a_search_replayed_on_the_same_scan_is_not_a_second_opinion() -> None:
+    """The /relocalize service used to loop on the executor thread with the scan frozen, so its
+    'second search' was the first one to the millimetre and every candidate was rubber-stamped."""
+    watch = LostWatch()
+    watch.proposed(CORNER, now=1.0, scan=7)
+    assert watch.second_opinion(CORNER, now=2.0, scan=7) == "replay"
+    assert not watch.confirmed, "nothing was learned"
+    assert watch.second_opinion(CORNER, now=3.0, scan=8) == "apply", "a fresh scan may agree"
+
+
+def test_a_held_candidate_remembers_the_scan_it_came_from() -> None:
+    watch = LostWatch()
+    watch.proposed(CORNER, now=1.0, scan=1)
+    assert watch.second_opinion(BASE, now=2.0, scan=2) == "hold"
+    assert watch.second_opinion(BASE, now=3.0, scan=2) == "replay", "scan 2 is now the candidate's"
+    assert watch.second_opinion(BASE, now=4.0, scan=3) == "apply"
+
+
+def test_no_match_yet_is_reported_as_zero_not_nan() -> None:
+    """Every downstream gate compares with '<', and NaN passes them all: a tracker that had not
+    matched yet let a drive start blind."""
+    watch = LostWatch()
+    assert watch.reported_fit(float("nan")) == 0.0
+    watch.proposed(CORNER, now=1.0)
+    assert watch.reported_fit(float("nan")) == 0.0

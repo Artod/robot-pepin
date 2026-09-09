@@ -30,6 +30,7 @@ def generate_launch_description() -> LaunchDescription:
     nav = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(launch_dir, "nav.launch.py")),
         condition=IfCondition(LaunchConfiguration("nav")),
+        launch_arguments={"side": LaunchConfiguration("side")}.items(),
     )
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(launch_dir, "slam.launch.py")),
@@ -38,6 +39,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument("nav", default_value="false"),
+            DeclareLaunchArgument("side", default_value="all"),  # all | board | laptop
             DeclareLaunchArgument("slam", default_value="false"),  # never together with nav
             DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
             DeclareLaunchArgument("imu", default_value="false"),

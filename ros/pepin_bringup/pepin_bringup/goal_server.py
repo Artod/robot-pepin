@@ -33,9 +33,10 @@ from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Float32, Header, String
 from std_srvs.srv import Trigger
 
+from pepin.deployment import HEARTBEAT_HZ, HEARTBEAT_TOPIC
 from pepin.watch import BlindDriveWatch
 from pepin_bringup.run_recorder import RunRecorder
 
@@ -78,10 +79,17 @@ class GoalServer(Node):
         with contextlib.suppress(OSError):
             self.pick_planner(self._planner_path.read_text().strip())
         self._goal_handle: Any = None
+        # The laptop's pulse: on a split stack the board's link watch cancels a drive when this
+        # stops. Harmless on one machine, where nothing listens.
+        self._beat = self.create_publisher(Header, HEARTBEAT_TOPIC, 10)
+        self.create_timer(1.0 / HEARTBEAT_HZ, self._heartbeat)
         self._recorder = RunRecorder(self, self._record_dir)
         self._lock = threading.Lock()
         threading.Thread(target=self._serve, daemon=True).start()
         self.get_logger().info(f"goal server ready on port {self._port}")
+
+    def _heartbeat(self) -> None:
+        self._beat.publish(Header(stamp=self.get_clock().now().to_msg(), frame_id="laptop"))
 
     def _on_fit(self, msg: Float32) -> None:
         self.fit = float(msg.data)
@@ -364,7 +372,7 @@ class GoalServer(Node):
             return False
         result = self._wait(self._relocalize.call_async(Trigger.Request()), 60.0)
         detail = result.message if result else "no answer"
-        deadline = time.monotonic() + 6.0  # a candidate needs a second search: a few seconds
+        deadline = time.monotonic() + 15.0  # an episode is two whole-map searches, 4-7 s each here
         while self.fit < GOOD_FIT and time.monotonic() < deadline:
             time.sleep(0.2)
         self._send(connection, {"event": "searched", "detail": detail, "fit": self.fit})

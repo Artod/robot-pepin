@@ -42,6 +42,7 @@ class LostWatch:
     # chose the corner and the tracker settled there at 0.72; then, with the first version of
     # this rule, every disagreeing answer was seeded and the map spun between the two.
     _candidate: Pose2D | None = field(default=None, init=False)
+    _candidate_scan: int = field(default=-1, init=False)  # the scan the candidate was found on
     _confirm_tries: int = field(default=0, init=False)
     _streak: int = field(default=0, init=False)
     _last_fit: float = field(default=0.0, init=False)
@@ -55,7 +56,10 @@ class LostWatch:
 
     def reported_fit(self, fit: float) -> float:
         """The fit the outside world may see: capped while a candidate is pending, so nothing
-        downstream mistakes a lucky look-alike for a localised robot."""
+        downstream mistakes a lucky look-alike for a localised robot. NaN — no match yet — is
+        reported as 0.0: every gate compares with ``<``, and NaN passes them all silently."""
+        if fit != fit:  # NaN
+            return 0.0
         return fit if self.confirmed else min(fit, PROVISIONAL_FIT_CAP)
 
     def wait_s(self) -> float:
@@ -105,20 +109,29 @@ class LostWatch:
         self._candidate, self._confirm_tries = None, 0
         self._quiet_until = max(self._quiet_until, now + self.cooldown_s)
 
-    def proposed(self, pose: Pose2D, now: float) -> None:
-        """A search's first answer: held, checked again at once, applied only if agreed with."""
+    def proposed(self, pose: Pose2D, now: float, scan: int = -1) -> None:
+        """A search's first answer: held, checked again at once, applied only if agreed with.
+
+        ``scan`` is the identity of the scan it was found on: a later answer computed on the
+        very same scan is a replay, not a second opinion, and is refused by ``second_opinion``.
+        """
         self._candidate, self._confirm_tries = pose, 0
+        self._candidate_scan = scan
         self._quiet_until = now
 
-    def second_opinion(self, found: Pose2D | None, now: float) -> str:
+    def second_opinion(self, found: Pose2D | None, now: float, scan: int = -1) -> str:
         """A fresh search's answer while a candidate is pending.
 
         ``"apply"``: it agrees with the candidate — adopt ``found`` now, the fix is confirmed.
         ``"hold"``: it does not — ``found`` becomes the candidate, nothing moves. ``"given_up"``:
         the searches keep disagreeing, a twin the scan cannot settle; quiet until the robot
-        moves or the tracker itself gives up.
+        moves or the tracker itself gives up. ``"replay"``: ``scan`` is the candidate's own
+        scan — a search run again on the same data (the /relocalize service used to loop on the
+        executor thread with the scan frozen) — nothing is learned and nothing changes.
         """
         assert self._candidate is not None
+        if scan != -1 and scan == self._candidate_scan:
+            return "replay"  # the same scan cannot agree with itself; wait for a fresh one
         self._confirm_tries += 1
         if found is not None and self.agrees(self._candidate, found):
             self._candidate, self._confirm_tries = None, 0
@@ -130,7 +143,7 @@ class LostWatch:
             self._quiet_until = now + self.wait_s()
             return "given_up"
         if found is not None:
-            self._candidate = found
+            self._candidate, self._candidate_scan = found, scan
         return "hold"
 
     @staticmethod

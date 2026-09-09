@@ -42,7 +42,14 @@ esac
 REPLY_FILE=$(mktemp); REPLY_COPY=$(mktemp)
 # The first line of a drive names the run and the planner in plain words, before the JSON:
 # a drive whose planner has to be guessed afterwards is a drive that cannot be compared.
-ssh "root@$BOARD" "exec 3<>/dev/tcp/127.0.0.1/$PORT; printf '%s\n' '$REQUEST' >&3; cat <&3" \
+# A goal server on this laptop (ros/laptop.sh) is asked directly; otherwise the board's, over ssh.
+if (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then
+    ASK="exec 3<>/dev/tcp/127.0.0.1/$PORT; printf '%s\\n' '$REQUEST' >&3; cat <&3"
+    TALK=(bash -c "$ASK")
+else
+    TALK=(ssh "root@$BOARD" "exec 3<>/dev/tcp/127.0.0.1/$PORT; printf '%s\\n' '$REQUEST' >&3; cat <&3")
+fi
+"${TALK[@]}" \
   | tee "$REPLY_FILE" \
   | awk '{print; fflush()} /"event": "accepted"/ { match($0, /"run": [0-9]+/); r=substr($0, RSTART+7, RLENGTH-7); match($0, /"planner": "[^"]+"/); p=substr($0, RSTART+12, RLENGTH-13); match($0, /"place": "[^"]+"/); pl=substr($0, RSTART+10, RLENGTH-11); print "=== run #" r " · planner " p " -> " pl " ==="; fflush() }' 
 if [ -n "$FFPID" ]; then
