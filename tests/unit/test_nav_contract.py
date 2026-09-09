@@ -8,6 +8,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
@@ -155,19 +156,35 @@ def test_the_recoveries_are_not_gated_by_a_condition_that_refuses_the_real_codes
     assert planner_branch.find(".//WouldAPlannerRecoveryHelp") is None
 
 
-def test_the_planner_tries_the_chosen_planner_then_navfn() -> None:
+def test_the_chosen_planner_is_the_only_planner() -> None:
+    """No NavFn fallback: when the footprint planner says the cart does not fit, a point planner
+    used to squeeze a 12 cm disc through the gap over the toes (run 0113). A refusal goes to the
+    recovery round robin and waits for the world to change."""
     tree = ET.parse(REPO / "ros/params/pepin_nav_to_pose.xml")
     branch = tree.find(".//RecoveryNode[@name='ComputePathToPose']")
     assert branch is not None
-    fallback = next(iter(branch))
-    assert fallback.tag == "Fallback"
-    assert [c.get("planner_id") for c in fallback] == ["{selected_planner}", "GridBased"]
+    first = next(iter(branch))
+    assert first.tag == "ComputePathToPose" and first.get("planner_id") == "{selected_planner}"
+    assert not [n for n in tree.iter("ComputePathToPose") if n.get("planner_id") == "GridBased"]
+    assert int(branch.get("number_of_retries")) >= 5, "a blocked path is waited out, not given up"
 
 
-def test_the_planner_s_inflation_pair_is_the_one_measured_to_work() -> None:
-    """0.45 / 5.0 made the lattice answer 'no valid path' to every goal; 0.55 / 2.0 is measured."""
+def test_the_planners_buy_a_berth_with_cost_not_with_walls() -> None:
+    """NavFn and Smac2D plan a point robot the size of the inscribed band (6 cm: base_link sits at
+    the front edge of a 55 cm cart) and passed a person's shins at 6 cm (2026-09-09). A wall-sized
+    band would strand every docked start, so the berth is cost: expensive to cross, still
+    crossable when there is no other way. nav2's NavFn has no cost weight, so Smac2D carries it.
+    The global costmap keeps the tuned inflation pair and follows a moving person at 2 Hz."""
+    assert _p("planner_server")["Smac2D"]["cost_travel_multiplier"] >= 5.0
+    assert "cost_factor" not in _p("planner_server")["GridBased"], "nav2's NavFn has no such knob"
     inflation = _p("global_costmap")["inflation_layer"]
-    assert inflation["inflation_radius"] == 0.55 and inflation["cost_scaling_factor"] == 2.0
+    assert (inflation["inflation_radius"], inflation["cost_scaling_factor"]) == (0.55, 2.0)
+    assert _p("global_costmap")["update_frequency"] >= 2.0
+    follow = _p("controller_server")["FollowPath"]
+    assert follow["max_allowed_time_to_collision_up_to_carrot"] >= 0.7
+    local = _p("local_costmap")["inflation_layer"]
+    assert follow["inflation_cost_scaling_factor"] == local["cost_scaling_factor"]
+    assert follow["cost_scaling_dist"] <= local["inflation_radius"]
 
 
 def test_the_tof_layers_never_stall_either_costmap() -> None:
@@ -176,6 +193,150 @@ def test_the_tof_layers_never_stall_either_costmap() -> None:
             assert _p(costmap)[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
 
 
-def test_one_controller_and_the_lattice_never_plans_a_reverse_for_it() -> None:
-    assert _p("controller_server")["controller_plugins"] == ["FollowPath"]
+def test_two_controllers_and_only_the_footprint_planner_may_plan_a_reverse() -> None:
+    """FollowPath never reverses and may pivot; FollowPathRS follows the cusps of a Hybrid-A*
+    plan and, as RPP demands, gives up rotate-to-heading for it. The lattice stays forward-only."""
+    cs = _p("controller_server")
+    assert cs["controller_plugins"] == ["FollowPath", "FollowPathRS"]
+    assert cs["FollowPath"].get("allow_reversing", False) is False
+    assert cs["FollowPathRS"]["allow_reversing"] is True
+    assert cs["FollowPathRS"]["use_rotate_to_heading"] is False
+    same = {
+        k: v
+        for k, v in cs["FollowPathRS"].items()
+        if k not in ("allow_reversing", "use_rotate_to_heading")
+    }
+    base = {
+        k: v
+        for k, v in cs["FollowPath"].items()
+        if k not in ("allow_reversing", "use_rotate_to_heading")
+    }
+    assert same == base, (
+        "the reversing twin drifted from FollowPath (no YAML anchors: rcl cannot parse them)"
+    )
     assert _p("planner_server")["Lattice"]["allow_reverse_expansion"] is False
+
+
+def test_every_planner_the_goal_server_offers_exists_with_its_controller() -> None:
+    import ast
+
+    src = (REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text()
+    tree = ast.parse(src)
+    catalogue = next(
+        ast.literal_eval(n.value)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "PLANNERS"
+    )
+    planners = _p("planner_server")["planner_plugins"]
+    controllers = _p("controller_server")["controller_plugins"]
+    for name, (planner, controller) in catalogue.items():
+        assert planner in planners, (name, planner)
+        assert controller in controllers, (name, controller)
+    assert catalogue["hybrid"] == ("Hybrid", "FollowPathRS")
+    assert "hybrid" in (REPO / "ros/go.sh").read_text()
+
+
+def test_the_footprint_planner_plans_the_cart_and_backs_out_only_briefly() -> None:
+    """Hybrid-A* checks the true polygon at every heading (the point planners' 6 cm band is not
+    the cart). Reeds-Shepp lets it leave a dock in reverse inside the plan; the analytic
+    expansion is kept short so no reverse arc ever crosses a room (the lattice, run 0027)."""
+    h = _p("planner_server")["Hybrid"]
+    assert h["plugin"].endswith("SmacPlannerHybrid")
+    assert h["motion_model_for_search"] == "REEDS_SHEPP"
+    assert h["reverse_penalty"] >= 2.0
+    assert h["analytic_expansion_max_length"] <= 1.0
+    assert 0.2 <= h["minimum_turning_radius"] <= 0.4
+    assert h["allow_unknown"] is True
+
+
+def test_the_cart_drives_at_the_base_s_full_speed_and_nothing_clips_it() -> None:
+    """One speed cap, the base's own: the controller asks for it, the smoother lets it through,
+    and the velocity-scaled lookahead has room for it. Every tape until 2026-09-09 sat at 0.20 m/s
+    because two Nav2 numbers said so while the wheels had never been asked for more."""
+    import json
+
+    from pepin.deployment import BASE_MAX_ANGULAR_RAD_S, BASE_MAX_LINEAR_M_S
+
+    cfg = json.loads((REPO / "config/base.json").read_text())
+    base = cfg["max_speed_m_s"]
+    assert (base, cfg["max_yaw_rate_rad_s"]) == (BASE_MAX_LINEAR_M_S, BASE_MAX_ANGULAR_RAD_S)
+    launch = (REPO / "ros/pepin_bringup/launch/robot.launch.py").read_text()
+    assert '"max_linear_m_s": BASE_MAX_LINEAR_M_S' in launch, "the C++ bridge keeps its 0.25 cap"
+    follow = _p("controller_server")["FollowPath"]
+    smoother = _p("velocity_smoother")
+    assert follow["desired_linear_vel"] == smoother["max_velocity"][0], (
+        "two caps: one wins silently"
+    )
+    assert follow["desired_linear_vel"] <= base, "the base clamps anything above its own cap"
+    assert follow["desired_linear_vel"] >= 0.30, "the base allows 0.30 m/s: ask for it"
+    assert follow["max_lookahead_dist"] >= follow["lookahead_time"] * follow["desired_linear_vel"]
+    assert smoother["max_accel"][0] >= 0.5 and smoother["max_decel"][0] <= -1.0
+
+
+def test_the_controller_stops_for_what_stands_in_its_path_and_never_for_what_it_touches() -> None:
+    """RPP's collision check is on — with it off the cart drove into a person (runs 0090-0091).
+    Its current-pose rule deadlocked the cart parked against the printer (run 0087); that is
+    removed at the source: an 8 cm contact band around the hull that neither the lidar's hull
+    filter nor the ToF ranges may mark, so nothing the cart is parked against ever lands in the
+    outline's own costmap cells."""
+    from pepin.footprint import CONTACT_BAND_M, HULL, hull_box
+
+    assert _p("controller_server")["FollowPath"]["use_collision_detection"] is True
+    resolution = _p("local_costmap")["resolution"]
+    assert 1.5 * resolution <= CONTACT_BAND_M, "a mark just outside the band must not share a cell"
+    launch = (REPO / "ros/pepin_bringup/launch/robot.launch.py").read_text()
+    assert re.search(r"HULL = \(?\s*hull_box\(", launch), (
+        "the lidar hull filter must use the contact band"
+    )
+    bridge = (REPO / "ros/pepin_bringup/pepin_bringup/tof_bridge.py").read_text()
+    assert "_MIN_RANGE_M = CONTACT_BAND_M" in bridge, "ToF readings inside the band must be dropped"
+    box = hull_box()
+    assert box["max_x"] == pytest.approx(HULL.front_m + CONTACT_BAND_M)
+    assert _p("controller_server")["failure_tolerance"] >= 3.0, "a person needs time to step aside"
+
+
+def test_a_blocked_retreat_gives_up_within_seconds() -> None:
+    """The rear is unsensed: a BackUp that has not covered its distance in about twice its
+    nominal time is pushing something and must fail, not push for the default 10 s (run 0087:
+    10-20 s per push into a box)."""
+    import xml.etree.ElementTree as ET
+
+    tree = ET.parse(REPO / "ros/params/pepin_nav_to_pose.xml")
+    moves = [(n, "backup_dist", "backup_speed") for n in tree.iter("BackUp")]
+    moves += [(n, "dist_to_travel", "speed") for n in tree.iter("DriveOnHeading")]
+    assert moves
+    for node, dist_key, speed_key in moves:
+        nominal = float(node.get(dist_key)) / float(node.get(speed_key))
+        allowance = node.get("time_allowance")
+        assert allowance is not None, f"{node.tag} {node.attrib} relies on the 10 s default"
+        assert nominal < float(allowance) <= 2.0 * nominal + 2.0, (node.attrib, nominal)
+
+
+def test_new_objects_get_a_berth_in_both_costmaps() -> None:
+    """The rings around unexplained returns are derived from the hull, never typed twice: a point
+    planner's ring makes up the width its 6 cm band lacks plus the toes, a footprint planner's
+    only the toes; nothing is ringed so close that a ring could touch the cart's own outline.
+    Both costmaps mark the rings and never raytrace-clear through them."""
+    from pepin.dynamic import COSTMAP_CELL_M, berth_for, near_exclusion_m, point_planner_ring_m
+    from pepin.footprint import HULL
+
+    point = berth_for("GridBased")
+    assert point.ring_m == point_planner_ring_m(HULL) >= HULL.half_width_m - HULL.inscribed_radius_m
+    assert point.near_m == near_exclusion_m(point.ring_m, HULL)
+    for costmap in ("local_costmap", "global_costmap"):
+        params = _p(costmap)
+        assert params["resolution"] == COSTMAP_CELL_M
+        layer = params["obstacle_layer"]
+        assert "dynamic" in layer["observation_sources"].split()
+        assert layer["dynamic"]["marking"] is True and layer["dynamic"]["clearing"] is False
+
+
+def test_the_nav2_footprint_is_the_hull() -> None:
+    """Nav2 carries the polygon as a string in two costmaps; both are pepin.footprint.HULL."""
+    import ast
+
+    from pepin.footprint import HULL
+
+    for costmap in ("local_costmap", "global_costmap"):
+        polygon = [tuple(p) for p in ast.literal_eval(_p(costmap)["footprint"])]
+        assert polygon == HULL.polygon(), costmap

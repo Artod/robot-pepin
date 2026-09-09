@@ -86,14 +86,14 @@ controller_server:
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
-    failure_tolerance: 1.0
+    failure_tolerance: 3.0  # a person in the path gets three seconds to step aside before recoveries
     progress_checker_plugins: ["progress_checker"]
     goal_checker_plugins: ["general_goal_checker"] # "precise_goal_checker"
     # One controller for both planners. A second one wrapped in a RotationShim was added on the
     # premise that RPP cannot both reverse and turn in place; that is false in nav2 1.3.12
     # (shouldRotateToPath adds pi when reversing). The shim then re-aimed the cart at every fresh
     # plan, and with no reversing left in the plans there is nothing for it to do.
-    controller_plugins: ["FollowPath"]
+    controller_plugins: ["FollowPath", "FollowPathRS"]
     use_realtime_priority: false
 
     # Progress checker parameters
@@ -124,18 +124,30 @@ controller_server:
       # Regulated Pure Pursuit: a fraction of MPPI's CPU on the board's A53 cores, and a
       # differential-drive cart at 0.15 m/s does not need model-predictive sampling.
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.20
+      # The base's own cap (config/base.json); every tape until 2026-09-09 sat at the old 0.20
+      # cap while the wheels had never been asked for more. The smoother below carries the same
+      # number; the contract test keeps the two equal and under the base's.
+      desired_linear_vel: 0.30
       lookahead_dist: 0.55
       min_lookahead_dist: 0.40
-      max_lookahead_dist: 0.60
+      max_lookahead_dist: 0.80  # lookahead_time x desired_linear_vel, else the scaling is clipped
       lookahead_time: 2.5
       use_velocity_scaled_lookahead_dist: true
       rotate_to_heading_angular_vel: 0.5
       transform_tolerance: 0.2
       min_approach_linear_velocity: 0.08
       approach_velocity_scaling_dist: 0.3  # brake later: the crawl to the goal felt endless
+      # On. RPP checks the CURRENT pose first (isCollisionImminent): a footprint outline touching
+      # one lethal cell refuses every command, including driving away — parked bumper-to-printer,
+      # one pivot later the corner's cell held the printer and the cart was refused for 231 s
+      # (run 0087). Switching the check off cured that and drove the cart into a person standing
+      # in its path (runs 0090-0091): the planner replans at 1-2 Hz and the cost regulation only
+      # crawls, neither stops. So the check stays, and the deadlock is removed at its source: the
+      # lidar hull filter and the ToF min_range hide the 8 cm contact band around the hull
+      # (pepin.footprint.CONTACT_BAND_M), so what the cart is parked against never lands in the
+      # outline's own cells, while anything further is still a wall.
       use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 0.7
+      max_allowed_time_to_collision_up_to_carrot: 0.9  # 0.27 m of look-ahead at 0.30 m/s
       use_regulated_linear_velocity_scaling: true
       use_fixed_curvature_lookahead: false
       use_cost_regulated_linear_velocity_scaling: true
@@ -143,7 +155,7 @@ controller_server:
       # match the local costmap's inflation layer exactly; on the defaults (3.0 / 0.6) it was
       # mis-reading its own clearance and crawling near walls for no reason.
       inflation_cost_scaling_factor: 5.0
-      cost_scaling_dist: 0.30
+      cost_scaling_dist: 0.40
       regulated_linear_scaling_min_radius: 0.6
       regulated_linear_scaling_min_speed: 0.06
       use_rotate_to_heading: true
@@ -157,6 +169,64 @@ controller_server:
       rotate_to_heading_min_angle: 1.2
       max_angular_accel: 1.0  # the velocity smoother allows 1.0; a rotation braking against
       max_robot_pose_search_dist: 10.0
+
+    FollowPathRS:
+      # The same RPP with reversing allowed: the Hybrid-A* plan leaves a docked start with a
+      # short reverse arc (a cusp in the path) and RPP drives it only with allow_reversing.
+      # RPP refuses rotate_to_heading together with reversing, and a footprint-planned path
+      # starts along the heading anyway, so the pivots go with it. A verbatim copy of the
+      # block above except for those two keys: rcl's YAML parser knows no anchors, and the
+      # controller server died on one (the contract test keeps the copies equal).
+      allow_reversing: true
+      # Regulated Pure Pursuit: a fraction of MPPI's CPU on the board's A53 cores, and a
+      # differential-drive cart at 0.15 m/s does not need model-predictive sampling.
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      # The base's own cap (config/base.json); every tape until 2026-09-09 sat at the old 0.20
+      # cap while the wheels had never been asked for more. The smoother below carries the same
+      # number; the contract test keeps the two equal and under the base's.
+      desired_linear_vel: 0.30
+      lookahead_dist: 0.55
+      min_lookahead_dist: 0.40
+      max_lookahead_dist: 0.80  # lookahead_time x desired_linear_vel, else the scaling is clipped
+      lookahead_time: 2.5
+      use_velocity_scaled_lookahead_dist: true
+      rotate_to_heading_angular_vel: 0.5
+      transform_tolerance: 0.2
+      min_approach_linear_velocity: 0.08
+      approach_velocity_scaling_dist: 0.3  # brake later: the crawl to the goal felt endless
+      # On. RPP checks the CURRENT pose first (isCollisionImminent): a footprint outline touching
+      # one lethal cell refuses every command, including driving away — parked bumper-to-printer,
+      # one pivot later the corner's cell held the printer and the cart was refused for 231 s
+      # (run 0087). Switching the check off cured that and drove the cart into a person standing
+      # in its path (runs 0090-0091): the planner replans at 1-2 Hz and the cost regulation only
+      # crawls, neither stops. So the check stays, and the deadlock is removed at its source: the
+      # lidar hull filter and the ToF min_range hide the 8 cm contact band around the hull
+      # (pepin.footprint.CONTACT_BAND_M), so what the cart is parked against never lands in the
+      # outline's own cells, while anything further is still a wall.
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 0.9  # 0.27 m of look-ahead at 0.30 m/s
+      use_regulated_linear_velocity_scaling: true
+      use_fixed_curvature_lookahead: false
+      use_cost_regulated_linear_velocity_scaling: true
+      # RPP recomputes the distance to an obstacle from the cost it reads, so these two must
+      # match the local costmap's inflation layer exactly; on the defaults (3.0 / 0.6) it was
+      # mis-reading its own clearance and crawling near walls for no reason.
+      inflation_cost_scaling_factor: 5.0
+      cost_scaling_dist: 0.40
+      regulated_linear_scaling_min_radius: 0.6
+      regulated_linear_scaling_min_speed: 0.06
+      use_rotate_to_heading: false
+      # Pivoting is the expensive move for this cart: base_link sits 0.30 m ahead of the rear
+      # corners, so turning in place sweeps 0.407 m while driving an arc sweeps barely more than
+      # the hull. RPP forward-simulates a pivot in fixed 7.03 deg steps (2 sin(res/2 / R) / w),
+      # so 0.6 rad/s checked 21.1 deg = 0.365 m of clearance and was refused 44 times beside a
+      # printer standing 0.35 m away; 0.5 rad/s checks 14.1 deg = 0.340 m. Raising the threshold
+      # to 1.2 rad means anything under 69 deg is driven out as an arc instead of pivoted on the
+      # spot — which is what a person does in a tight corner.
+      rotate_to_heading_min_angle: 1.2
+      max_angular_accel: 1.0  # the velocity smoother allows 1.0; a rotation braking against
+      max_robot_pose_search_dist: 10.0
+
 
 local_costmap:
   local_costmap:
@@ -255,11 +325,11 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 5.0  # steep: cost falls off fast beyond the hull
-        inflation_radius: 0.35  # a flat, not a warehouse: 0.45 made every doorway a wall
+        inflation_radius: 0.45  # the controller slows earlier near legs; only >= 253 is a wall
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
-        observation_sources: scan
+        observation_sources: scan dynamic
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -270,6 +340,19 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.0
           obstacle_min_range: 0.10
+        # Lethal rings around whatever the static map does not explain (pepin.dynamic): the point
+        # planners' berth around a person or a moved chair, since their inscribed band is 6 cm
+        # on this hull. Marking only: the lidar's own rays clear the cells when the object leaves.
+        dynamic:
+          topic: /dynamic_obstacles
+          data_type: "PointCloud2"
+          sensor_frame: base_link
+          marking: True
+          clearing: False
+          min_obstacle_height: -1.0
+          max_obstacle_height: 1.0
+          obstacle_max_range: 6.0
+          obstacle_min_range: 0.0
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
@@ -281,8 +364,8 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 0.5
-      publish_frequency: 0.5
+      update_frequency: 2.0  # a person walking in: 0.5 Hz left the plan through them for 2 s
+      publish_frequency: 1.0
       transform_tolerance: 1.0
       global_frame: map
       robot_base_frame: base_link
@@ -316,7 +399,7 @@ global_costmap:
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
-        observation_sources: scan
+        observation_sources: scan dynamic
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -327,6 +410,19 @@ global_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.0
           obstacle_min_range: 0.10
+        # Lethal rings around whatever the static map does not explain (pepin.dynamic): the point
+        # planners' berth around a person or a moved chair, since their inscribed band is 6 cm
+        # on this hull. Marking only: the lidar's own rays clear the cells when the object leaves.
+        dynamic:
+          topic: /dynamic_obstacles
+          data_type: "PointCloud2"
+          sensor_frame: base_link
+          marking: True
+          clearing: False
+          min_obstacle_height: -1.0
+          max_obstacle_height: 1.0
+          obstacle_max_range: 6.0
+          obstacle_min_range: 0.0
       tof_front_layer:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: True
@@ -393,6 +489,9 @@ global_costmap:
         # that the inflation reach the circumscribed radius (0.407 m), without which it refuses
         # its potential-field shortcut and says so at startup. NavFn pays for the gentler
         # gradient by bending away from walls; NavFn is the fallback, not the daily driver.
+        # 0.55 / 2.0: the pair the drives were tuned on. A wider radius (0.70 / 1.5) painted the
+        # whole passage and made the planner indifferent inside it; the berth around a person
+        # comes from the planners' cost weights (cost_factor, cost_travel_multiplier) instead.
         cost_scaling_factor: 2.0
         inflation_radius: 0.55
       # False: the map is 239x215 cells, so publishing it whole at 0.5 Hz spends 50 kB/s on a
@@ -423,8 +522,8 @@ planner_server:
     # motion primitives for a DIFFERENTIAL drive — it can turn in place and it can reverse, so a
     # plan may legally start by backing out of a corner, which is the manoeuvre this stack has
     # never been able to express.
-    planner_plugins: ["GridBased", "Lattice", "ThetaStar", "Smac2D"]
-    costmap_update_timeout: 2.5  # the global costmap updates at 0.5 Hz; 1.0 timed out every plan
+    planner_plugins: ["GridBased", "Lattice", "ThetaStar", "Smac2D", "Hybrid"]
+    costmap_update_timeout: 1.0  # the global costmap updates at 2 Hz now
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
       # 0.25, and the reasoning is the opposite of what it looks like. A mark stands against
@@ -436,12 +535,56 @@ planner_server:
       # last centimetres on the ToF, which is the honest way to serve the manipulator.
       tolerance: 0.25
       use_astar: false
+      # NavFn plans a robot the size of the inflation's inscribed band — 6 cm here, because
+      # base_link sits at the front edge of a 55 cm wide cart — and nav2's NavFn exposes no cost
+      # weight (ROS 1's cost_factor is a constant 0.8 here): it passed a person's shins at 6 cm and
+      # the wheel took their toes (2026-09-09). It stays the fallback planner; Smac2D, whose
+      # cost_travel_multiplier buys a berth with cost, is the one to drive with.
       # true, like the lattice. The cart was found standing on a cell the survey never covered
       # (map value 205, walls two cells away) after a drive into a corner, and with this false
       # EVERY planner refuses from there — "Failed to create plan" to all four marks — so the
       # robot is stranded by a gap in its own map. A cell nobody looked at is not a wall, and
       # driving back into surveyed ground is exactly what it must be able to do.
       allow_unknown: true
+    Hybrid:
+      # Smac Hybrid-A*: the only planner here that plans the CART, not a point. Every expansion
+      # is the true polygon at its heading against the costmap, so a person is passed at the
+      # hull's width and a docked start is legal — the front edge sits 6 cm from base_link and
+      # that is what it checks. Reeds-Shepp: it may back out of a dock inside the plan itself
+      # (a cusp RPP follows with allow_reversing); reverse_penalty keeps that to where it is
+      # needed and the analytic expansion is short so no reverse arc crosses a room (the
+      # lattice's mistake). Turning radius 0.25 m is a comfort choice for a cart that can pivot:
+      # arcs RPP tracks at 0.3 m/s, no rotate-in-place at the start.
+      plugin: "nav2_smac_planner::SmacPlannerHybrid"
+      tolerance: 0.25
+      downsample_costmap: false
+      downsampling_factor: 1
+      allow_unknown: true
+      max_iterations: 200000
+      max_on_approach_iterations: 500
+      max_planning_time: 3.0
+      motion_model_for_search: "REEDS_SHEPP"
+      angle_quantization_bins: 32
+      minimum_turning_radius: 0.20  # 0.25 drew a car's sweep out of the dock and onto the carpet
+      reverse_penalty: 3.0
+      change_penalty: 0.2
+      non_straight_penalty: 1.2
+      cost_penalty: 2.0
+      retrospective_penalty: 0.015
+      analytic_expansion_ratio: 3.5
+      analytic_expansion_max_length: 1.0
+      analytic_expansion_max_cost: 200.0
+      analytic_expansion_max_cost_override: false
+      lookup_table_size: 20.0
+      cache_obstacle_heuristic: true
+      smooth_path: true
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+        do_refinement: true
+        refinement_num: 2
     Lattice:
       # These numbers are the ones from the first lattice drive, the one that worked. Everything
       # tuned on top of them over the following two hours made it worse, and the audit says why:
@@ -517,7 +660,7 @@ planner_server:
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 2.0
-      cost_travel_multiplier: 2.0
+      cost_travel_multiplier: 5.0  # the same berth-through-cost as NavFn's cost_factor above
       use_final_approach_orientation: false
       smoother:
         max_iterations: 1000
@@ -608,10 +751,10 @@ velocity_smoother:
     stamp_smoothed_velocity_with_smoothing_time: False
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.20, 0.0, 0.6]
+    max_velocity: [0.30, 0.0, 0.6]
     min_velocity: [-0.075, 0.0, -0.6]
-    max_accel: [0.3, 0.0, 1.0]
-    max_decel: [-0.6, 0.0, -2.0]
+    max_accel: [0.5, 0.0, 1.0]  # full speed in 0.6 s; braking twice as hard as that
+    max_decel: [-1.0, 0.0, -2.0]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

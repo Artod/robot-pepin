@@ -29,13 +29,16 @@ from rclpy.node import Node
 from sensor_msgs.msg import Range
 from tf2_ros import StaticTransformBroadcaster
 
+from pepin.footprint import CONTACT_BAND_M
 from pepin.tof_horizon import RangeHold, trusted_max_range
 from pepin_bringup.link import JsonLineLink
 from pepin_bringup.protocol import TOF_NAMES, parse_tof, parse_tof_status
 
 # VL53L1X: a ~27 deg cone, 4 cm dead zone, 1.3 m in short mode (the mode the board runs).
 _FIELD_OF_VIEW_RAD = 0.47
-_MIN_RANGE_M = 0.04
+# Readings inside the contact band are dropped by the range layer (below min_range): a printer
+# 5 cm from the bumper is what the cart parked against, not a wall to refuse.
+_MIN_RANGE_M = CONTACT_BAND_M
 _MAX_RANGE_M = 1.3
 _CROSSTALK_M = 0.12  # nearer than this is the sensor seeing its own surroundings
 

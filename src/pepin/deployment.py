@@ -21,6 +21,12 @@ MAP_NODES = ("map_server",)  # the map is served from the board: the tracker nee
 HEARTBEAT_TOPIC = "laptop/heartbeat"
 HEARTBEAT_HZ = 2.0
 
+# The base's speed caps (config/base.json, the base server's own clamp). The C++ bridge on the
+# board clamps /cmd_vel too, at 0.25 m/s by default: for half a day every tape sat at 0.20 and
+# the bridge would have cut anything faster — one cap, the base's, passed to it at launch.
+BASE_MAX_LINEAR_M_S = 0.30
+BASE_MAX_ANGULAR_RAD_S = 1.0
+
 
 def nav_nodes(side: str) -> tuple[str, ...]:
     """The Nav2 lifecycle nodes the navigation manager on ``side`` must bring up."""

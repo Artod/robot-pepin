@@ -30,7 +30,7 @@
           <ClearEntireCostmap name="ForgetGlobalGhosts" service_name="global_costmap/clear_entirely_global_costmap"/>
         </RateController>
         <RateController hz="1.0">
-          <RecoveryNode number_of_retries="3" name="ComputePathToPose">
+          <RecoveryNode number_of_retries="5" name="ComputePathToPose">
             <!-- The chosen planner, and NavFn behind it. The lattice plans in the cart's own
                  motions, which is what makes a drive look deliberate, but it footprint-checks
                  its start pose and refuses from places NavFn walks out of — a cell the survey
@@ -38,10 +38,12 @@
                  clears its own start cell by construction and cannot refuse. So the good planner
                  is tried first and the one that always answers stands behind it: the cart is
                  never stranded by the planner it happens to be using. -->
-            <Fallback>
-              <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
-              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
-            </Fallback>
+            <!-- The chosen planner is the only planner. The NavFn fallback that used to sit here
+                 took over whenever Hybrid-A* refused — and Hybrid refuses exactly when the cart
+                 does not fit: NavFn then squeezed a 12 cm disc through the gap and the wheel went
+                 over the toes (run 0113, five times in one leg). A refusal is a recovery below,
+                 a wait for the person to move, never a smaller robot. -->
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
             <!-- No WouldAPlannerRecoveryHelp here, deliberately. That condition answers FAILURE
                  for START_OCCUPIED, which is precisely the code a footprint-checking planner
                  returns when the cart is parked close to something — so the whole branch was
@@ -59,8 +61,11 @@
                    commonest reason a start looks occupied is a pose the tracker is still fixing —
                    it searches the whole map by itself when the fit drops. -->
               <RoundRobin name="PlannerRecoveryActions">
-                <Wait wait_duration="2"/>
-                <BackUp backup_dist="0.15" backup_speed="0.05" time_allowance="10" error_code_id="{backup_code_id}"/>
+                <!-- Retreat first: a start the planner refuses is a cart parked on the map's own
+                     furniture (the front edge inside one cell of it), and two seconds of waiting
+                     do not move it. -->
+                <BackUp backup_dist="0.15" backup_speed="0.05" time_allowance="5" error_code_id="{backup_code_id}"/>
+                <Wait wait_duration="3"/>
                 <Spin spin_dist="0.5" time_allowance="8" error_code_id="{spin_code_id}"/>
               </RoundRobin>
             </Sequence>
@@ -76,7 +81,7 @@
           <Sequence>
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
             <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
-            <BackUp backup_dist="0.25" backup_speed="0.08" time_allowance="12" error_code_id="{backup_code_id}"/>
+            <BackUp backup_dist="0.25" backup_speed="0.08" time_allowance="5" error_code_id="{backup_code_id}"/>
           </Sequence>
         </RecoveryNode>
       </PipelineSequence>
@@ -95,25 +100,27 @@
             <!-- Tried in turn, one per failed attempt, twenty attempts before giving up: a wheel
                  on a carpet edge or a caster set sideways needs variety and persistence, not a
                  spin and a shrug. Every move is short and collision-checked against the costmap. -->
-            <BackUp backup_dist="0.30" backup_speed="0.10" error_code_id="{backup_code_id}"/>
+            <!-- time_allowance on every move: the rear is unsensed, and a retreat that has not covered its
+                 distance in twice its nominal time is pushing something (a box, run 0087: 10-20 s per push). -->
+            <BackUp backup_dist="0.30" backup_speed="0.10" time_allowance="5" error_code_id="{backup_code_id}"/>
             <Sequence name="Rock">
-              <BackUp backup_dist="0.15" backup_speed="0.10" error_code_id="{backup_code_id}"/>
-              <DriveOnHeading dist_to_travel="0.25" speed="0.20" time_allowance="6"/>
+              <BackUp backup_dist="0.15" backup_speed="0.10" time_allowance="4" error_code_id="{backup_code_id}"/>
+              <DriveOnHeading dist_to_travel="0.25" speed="0.20" time_allowance="4"/>
             </Sequence>
             <Spin spin_dist="1.57" error_code_id="{spin_error_code}"/>
             <Sequence name="RockLeft">
               <Spin spin_dist="0.5" error_code_id="{spin_error_code}"/>
-              <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="6"/>
+              <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="4"/>
             </Sequence>
             <Sequence name="RockRight">
               <Spin spin_dist="-0.5" error_code_id="{spin_error_code}"/>
-              <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="6"/>
+              <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="4"/>
             </Sequence>
             <Sequence name="LongRetreat">
-              <BackUp backup_dist="0.50" backup_speed="0.15" error_code_id="{backup_code_id}"/>
+              <BackUp backup_dist="0.50" backup_speed="0.15" time_allowance="6" error_code_id="{backup_code_id}"/>
               <Wait wait_duration="1.0"/>
             </Sequence>
-            <DriveOnHeading dist_to_travel="0.30" speed="0.25" time_allowance="6"/>
+            <DriveOnHeading dist_to_travel="0.30" speed="0.25" time_allowance="4"/>
             <Spin spin_dist="-1.57" error_code_id="{spin_error_code}"/>
           </RoundRobin>
         </ReactiveFallback>

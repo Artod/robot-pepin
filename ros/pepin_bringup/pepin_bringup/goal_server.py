@@ -22,6 +22,7 @@ import contextlib
 import json
 import math
 import socket
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -37,6 +38,7 @@ from std_msgs.msg import Float32, Header, String
 from std_srvs.srv import Trigger
 
 from pepin.deployment import HEARTBEAT_HZ, HEARTBEAT_TOPIC
+from pepin.tape import camera_clip_path
 from pepin.watch import DRIVE_FIT, BlindDriveWatch
 from pepin_bringup.run_recorder import RunRecorder
 
@@ -44,11 +46,14 @@ PORT = 3337
 GOOD_FIT = DRIVE_FIT  # below this the robot is told to find itself before it drives (pepin.watch)
 # The planner to select, and the controller that follows it. One controller now: the lattice
 # planner no longer expands in reverse, so there is nothing a reversing controller would add.
+CAMERA_STREAM = "http://127.0.0.1:8080/stream"  # ustreamer on the board's host network
+
 PLANNERS = {
     "navfn": ("GridBased", "FollowPath"),
     "lattice": ("Lattice", "FollowPath"),  # experimental: see nav2_params.yaml
     "theta": ("ThetaStar", "FollowPath"),
     "smac": ("Smac2D", "FollowPath"),
+    "hybrid": ("Hybrid", "FollowPathRS"),  # footprint-aware; the reversing RPP
 }
 
 
@@ -87,6 +92,8 @@ class GoalServer(Node):
         self._beat = self.create_publisher(Header, HEARTBEAT_TOPIC, 10)
         self.create_timer(1.0 / HEARTBEAT_HZ, self._heartbeat)
         self._recorder = RunRecorder(self, self._record_dir)
+        self._camera: subprocess.Popen[bytes] | None = None  # curl copying the stream during a run
+        self._camera_clip: Path | None = None
         self._lock = threading.Lock()
         threading.Thread(target=self._serve, daemon=True).start()
         self.get_logger().info(f"goal server ready on port {self._port}")
@@ -118,11 +125,48 @@ class GoalServer(Node):
         """
         path = self._recorder.start(name)
         self.get_logger().info(f"run {self._recorder.number}: recording {path}")
+        self._start_camera(path)
         return path
 
     def stop_recording(self) -> None:
         """Close the run's tape (flushed and synced); harmless when no run is open."""
         self._recorder.stop()
+        self._stop_camera()
+
+    def _start_camera(self, tape: Path) -> None:
+        """Copy the camera's MJPEG stream next to the tape, on the board: no laptop in the loop.
+
+        The laptop used to run ffmpeg against the stream and a macOS network policy turned that
+        into 'No route to host' for one terminal and not another; a run must not depend on it.
+        curl writes the stream as-is (a few percent of a core); the laptop converts after.
+        """
+        self._stop_camera()
+        clip = camera_clip_path(tape)
+        self._camera_clip = clip
+        try:
+            self._camera = subprocess.Popen(
+                ["curl", "-s", "-m", "1800", CAMERA_STREAM, "-o", str(clip)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            self._camera = None
+            self.get_logger().warning(f"camera clip not started: {exc}")
+
+    def _stop_camera(self) -> None:
+        """End the clip; a stream that was never reachable leaves an empty file, removed here."""
+        proc, self._camera = self._camera, None
+        if proc is None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        clip, self._camera_clip = self._camera_clip, None
+        if clip is not None and clip.exists() and clip.stat().st_size == 0:
+            clip.unlink()
+            self.get_logger().warning("camera stream gave nothing: no clip for this run")
 
     # -- the socket ------------------------------------------------------------
 

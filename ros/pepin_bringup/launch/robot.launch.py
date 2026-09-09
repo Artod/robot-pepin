@@ -32,6 +32,9 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
+from pepin.deployment import BASE_MAX_ANGULAR_RAD_S, BASE_MAX_LINEAR_M_S
+from pepin.footprint import hull_box
+
 LASER_X, LASER_Y, LASER_Z = 0.005, 0.0, 0.20
 # The MPU6050 sits flat on the chassis over base_link, Z up and its X arrow forward:
 # no rotation, only the height of the deck it is glued to.
@@ -41,7 +44,9 @@ IMU_X, IMU_Y, IMU_Z = 0.0, 0.0, 0.10
 # every in-place turn "a collision ahead" (measured 2026-09-08: |y| 0.28-0.34 m in 41-71%
 # of the scans on the home legs). Anything real at 5 cm from the body is inside the swing
 # circle anyway and is handled by the ToF sensors and the inflation.
-HULL = {"min_x": -0.35, "max_x": 0.11, "min_y": -0.325, "max_y": 0.325}
+HULL = (
+    hull_box()
+)  # the hull plus the contact band: what the cart is parked against is not an obstacle
 
 
 def quaternion(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
@@ -166,7 +171,15 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 plugin="pepin::BaseBridge",
                 name="base_bridge",
                 # With the IMU the EKF owns odom -> base_link; the bridge then publishes /odom only.
-                parameters=[{"imu_enable": imu_on, "publish_tf": not imu_on}],
+                # The speed caps are the base's own, not the bridge's defaults (0.25 m/s).
+                parameters=[
+                    {
+                        "imu_enable": imu_on,
+                        "publish_tf": not imu_on,
+                        "max_linear_m_s": BASE_MAX_LINEAR_M_S,
+                        "max_angular_rad_s": BASE_MAX_ANGULAR_RAD_S,
+                    }
+                ],
             )
         )
     if LaunchConfiguration("foxglove").perform(context).lower() == "true":
