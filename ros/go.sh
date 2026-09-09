@@ -74,13 +74,16 @@ if [ -n "$RECORDING" ]; then
     CHOSEN=$(grep -o '"planner": *"[^"]*"' "$REPLY_COPY" 2>/dev/null | tail -1 | cut -d'"' -f4)
     # Only this run's lines: the fetched log spans fifteen minutes, and counting the previous
     # runs' refusals credited NavFn with a drive Theta* had done entirely (runs 0049-0051).
-    THIS_RUN=$(awk '/Begin navigating/{n=NR} {l[NR]=$0} END{for(i=n;i<=NR;i++) print l[i]}' "$LOG" 2>/dev/null)
-    FELL_BACK=$(printf '%s\n' "$THIS_RUN" | grep -c "plugin failed to plan" || true)
-    PLANS=$(printf '%s\n' "$THIS_RUN" | grep -c "Passing new path" || true)
-    if [ "$FELL_BACK" -gt 0 ]; then
-        WHO="${CHOSEN:-?} refused $FELL_BACK time(s), NavFn took over ($PLANS plans)"
+    if THIS_RUN=$(awk '/Begin navigating/{n=NR} {l[NR]=$0} END{if (!n) exit 1; for(i=n;i<=NR;i++) print l[i]}' "$LOG" 2>/dev/null); then
+        FELL_BACK=$(printf '%s\n' "$THIS_RUN" | grep -c "plugin failed to plan" || true)
+        PLANS=$(printf '%s\n' "$THIS_RUN" | grep -c "Passing new path" || true)
+        if [ "$FELL_BACK" -gt 0 ]; then
+            WHO="${CHOSEN:-?} refused $FELL_BACK time(s), NavFn took over ($PLANS plans)"
+        else
+            WHO="planned by ${CHOSEN:-?} throughout ($PLANS plans)"
+        fi
     else
-        WHO="planned by ${CHOSEN:-?} throughout ($PLANS plans)"
+        WHO="planner unknown: this run's start is not in the fetched log"  # never a made-up count
     fi
     # The run's number is how Artem names a drive out loud ("look at run 37"), so print it loud.
     echo "=== run #${STAMP%%_*} === $WHO"
@@ -91,6 +94,8 @@ rm -f "$CAM" 2>/dev/null
 # "ros/go.sh printer && ros/go.sh home" must run home after a reached goal and stop after a
 # failed or refused one. Nav2 status 4 is SUCCEEDED; anything else, or no "done" at all, is not.
 VERDICT=0
+[ -s "$REPLY_COPY" ] || VERDICT=1                                  # nobody answered
+grep -q '"event": "error"' "$REPLY_COPY" 2>/dev/null && VERDICT=1  # any command the server refused
 case "$REQUEST" in '{"cmd":"go"'*)
     # keyed on the two fields, not on their order: a reordered event once made every reached
     # goal exit 1 and "trip" stop after the printer (runs 0049-0051)

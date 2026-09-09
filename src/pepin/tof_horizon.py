@@ -24,3 +24,34 @@ def floor_horizon(height_m: float, fov_rad: float, margin: float = FLOOR_MARGIN)
 def trusted_max_range(height_m: float, fov_rad: float, sensor_max_m: float) -> float:
     """The sensor's own ceiling, lowered to where the floor enters its cone."""
     return min(sensor_max_m, floor_horizon(height_m, fov_rad))
+
+
+class RangeHold:
+    """What to publish for one ToF sensor: the last real return, held for ``hold_s`` after it stops.
+
+    The range layer clears its whole cone the instant a sensor reports max range, and a VL53L1X
+    with a person in front of it calls only half its frames a measurement — so a mark written
+    one frame was erased the next, and the cart slowed and carried on (run 0016). Three frames
+    of debounce (0.2 s) were shorter than the gaps between valid frames; a time window is not.
+    A real empty room stays empty far longer than a second, so clearing still happens, just late
+    enough to mean it.
+    """
+
+    def __init__(self, hold_s: float = 1.2) -> None:
+        self._hold_s = hold_s
+        self._last: dict[str, tuple[float, float]] = {}  # name -> (range, when)
+
+    def publish(self, name: str, seen: float | None, ceiling: float, now: float) -> float | None:
+        """The range to put on the wire now, or None to say nothing at all.
+
+        ``seen`` is a real return (metres) or None; anything above ``ceiling`` counts as none.
+        Returns the return itself, the held one while it is fresh, and ``ceiling`` ("nothing")
+        once the hold has expired.
+        """
+        if seen is not None and seen <= ceiling:
+            self._last[name] = (seen, now)
+            return seen
+        held = self._last.get(name)
+        if held is not None and now - held[1] <= self._hold_s:
+            return held[0]  # the evidence stands until it is old
+        return ceiling

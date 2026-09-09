@@ -75,7 +75,6 @@ class RunRecorder:
         # Destroyable because destruction was requested" — the executor was building its wait set
         # out of the very objects being torn down (run 0027). So the socket thread asks, and this
         # timer, which runs where the executor runs, does it.
-        self._pending: str | None = None
         node.create_timer(0.1, self._apply_pending)
 
     @property
@@ -87,18 +86,20 @@ class RunRecorder:
         """Open a numbered tape for this run; returns the path, prelude already in it."""
         self.number = next_run_number(self._directory)
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        path = self._tape.start(self._directory / f"{self.number:04d}_{stamp}_{name}.jsonl")
-        self._pending = "listen"
-        return path
+        return self._tape.start(self._directory / f"{self.number:04d}_{stamp}_{name}.jsonl")
 
     def stop(self) -> None:
         """Close the run's tape and give the board back the cores the lidar stream was costing."""
-        self._pending = "deafen"
         self._tape.stop()
 
     def _apply_pending(self) -> None:
-        """Executor thread: attach or drop the subscriptions a run needs, as asked by start/stop."""
-        want, self._pending = self._pending, None
+        """Executor thread: keep the run-only subscriptions in step with whether a tape is open.
+
+        Level-triggered on the tape's own state, not on a flag set from the socket thread: an
+        edge written there and cleared here could be lost, leaving a run with no scans, and a
+        tape that closed itself on its own limit left the subscriptions attached for good.
+        """
+        want = "listen" if self._tape.recording else "deafen"
         if want == "listen" and not self._during_run:
             self._during_run = [
                 self._node.create_subscription(

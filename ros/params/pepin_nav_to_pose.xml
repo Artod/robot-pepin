@@ -23,9 +23,10 @@
         <!-- The same forgetting for the planner's costmap, slower. The ToF layers live here too now
              (that is how a plan routes around what they see), but nothing ever re-observes a cell
              the cart has driven past, so without this every ToF return would leave a permanent
-             cairn across the flat. Five seconds is long enough for the 1 Hz planner to use a mark
-             and short enough that a ghost never outlives the thing that made it. -->
-        <RateController hz="0.2">
+             cairn across the flat. Ten seconds: the global costmap rebuilds at 0.5 Hz, so a wipe every five left the
+             planner working on an empty map for a couple of seconds each time; ten keeps a
+             ghost short-lived and the plan mostly whole. -->
+        <RateController hz="0.1">
           <ClearEntireCostmap name="ForgetGlobalGhosts" service_name="global_costmap/clear_entirely_global_costmap"/>
         </RateController>
         <RateController hz="1.0">
@@ -70,7 +71,7 @@
           <!-- Back up before anything else, right where the controller failed: base_link sits 0.30 m
                ahead of the rear corners, so the cart sweeps 0.41 m when it turns in place. Parked
                0.20 m from the printer it cannot legally rotate at all, and no tuning changes that
-               arithmetic — 0.35 m of retreat makes the turn free. This branch fires on the
+               arithmetic — 0.25 m of retreat makes the turn free. This branch fires on the
                controller's own error, seconds before the global round robin would get there. -->
           <Sequence>
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
@@ -79,11 +80,11 @@
           </Sequence>
         </RecoveryNode>
       </PipelineSequence>
+      <!-- No WouldA...RecoveryHelp gate in front of the round robin: those conditions answer
+           FAILURE for the codes a footprint-checking planner or a boxed-in controller actually
+           return (START_OCCUPIED among them), and the whole recovery was skipped for exactly the
+           situations it exists for. Every manoeuvre below is collision-checked on its own. -->
       <Sequence>
-        <Fallback>
-          <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
-          <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
-        </Fallback>
         <ReactiveFallback name="RecoveryFallback">
           <GoalUpdated/>
           <RoundRobin name="RecoveryActions">

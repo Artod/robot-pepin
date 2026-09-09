@@ -29,7 +29,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Range
 from tf2_ros import StaticTransformBroadcaster
 
-from pepin.tof_horizon import trusted_max_range
+from pepin.tof_horizon import RangeHold, trusted_max_range
 from pepin_bringup.link import JsonLineLink
 from pepin_bringup.protocol import TOF_NAMES, parse_tof, parse_tof_status
 
@@ -49,12 +49,7 @@ _MOUNTS: dict[str, tuple[float, float, float, float]] = {
 
 _DRAIN_HZ = 15.0  # readings come at ~15 Hz; a faster timer only burns the A53
 _SILENCE_WARN_S = 20.0  # a sensor with nothing valid for this long is reported, not trusted
-# How many invalid frames in a row before a sensor is allowed to say "nothing there". The range
-# layer clears its whole cone on a max reading, so ONE dropped frame erased a mark that had just
-# been made: the front sensor called only 8% of its frames a measurement while a hand was in
-# front of it, and the mark it wrote was rubbed out ten times a second — the cart slowed and
-# carried on. A real empty room stays empty for far longer than three frames (0.2 s).
-_CLEAR_AFTER_MISSES = 3
+_HOLD_S = 1.2  # a real return is held this long after it stops: see pepin.tof_horizon.RangeHold
 _STATUS_REPORT_S = 15.0  # how often the run's log gets the raw sensor verdicts
 _QUEUE_MAX = 100
 
@@ -82,20 +77,24 @@ class TofBridge(Node):
         # Each sensor is believed only as far as its cone stays off the floor: the two low ones
         # graze the carpet at 0.67 m, and the right sensor's steady 0.60-0.70 m returns (with
         # nothing there for the lidar) were being marked into the costmap as a wall, 2026-09-08.
+        # The mounts are resolved once, here, so the ceiling and the published frame agree: the
+        # ceiling used to come from the hard-coded height while the frame came from the
+        # parameter, and overriding one moved the other.
+        self._mounts = {name: self._resolve_mount(name) for name in TOF_NAMES}
         self._ceiling = {
-            name: trusted_max_range(_MOUNTS[name][2], _FIELD_OF_VIEW_RAD, _MAX_RANGE_M)
+            name: trusted_max_range(self._mounts[name][2], _FIELD_OF_VIEW_RAD, _MAX_RANGE_M)
             for name in TOF_NAMES
         }
+        self._hold = RangeHold(_HOLD_S)
+        self._static_tf = StaticTransformBroadcaster(self)
+        self._static_tf.sendTransform([self._mount_transform(name) for name in TOF_NAMES])
         self._last_valid = dict.fromkeys(TOF_NAMES, time.monotonic())  # judged from startup
-        self._misses = dict.fromkeys(TOF_NAMES, _CLEAR_AFTER_MISSES)  # start out saying "clear"
         self._warned = dict.fromkeys(TOF_NAMES, False)
         self._status_counts: dict[str, dict[int | None, int]] = {n: {} for n in TOF_NAMES}
         self.create_timer(_STATUS_REPORT_S, self._report_status)
         self.get_logger().info(
             "tof ceilings: " + ", ".join(f"{n} {self._ceiling[n]:.2f} m" for n in TOF_NAMES)
         )
-        self._static_tf = StaticTransformBroadcaster(self)
-        self._static_tf.sendTransform([self._mount_transform(name) for name in TOF_NAMES])
 
         self._link = JsonLineLink(host, port, self._enqueue_ranges, name="tof server")
         self._link.start()
@@ -105,13 +104,19 @@ class TofBridge(Node):
         """Close the link, on the way out."""
         self._link.stop()
 
+    def _resolve_mount(self, name: str) -> tuple[float, float, float, float]:
+        """The mount of sensor ``name``: the measured default, overridable by parameter."""
+        x, y, z, yaw = _MOUNTS[name]
+        return (
+            float(self.declare_parameter(f"{name}_x", x).value),
+            float(self.declare_parameter(f"{name}_y", y).value),
+            float(self.declare_parameter(f"{name}_z", z).value),
+            float(self.declare_parameter(f"{name}_yaw", yaw).value),
+        )
+
     def _mount_transform(self, name: str) -> TransformStamped:
         """Where sensor ``name`` sits on the robot, as a base_link -> tof_<name> transform."""
-        x, y, z, yaw = _MOUNTS[name]
-        x = float(self.declare_parameter(f"{name}_x", x).value)
-        y = float(self.declare_parameter(f"{name}_y", y).value)
-        z = float(self.declare_parameter(f"{name}_z", z).value)
-        yaw = float(self.declare_parameter(f"{name}_yaw", yaw).value)
+        x, y, z, yaw = self._mounts[name]
 
         transform = TransformStamped()
         transform.header.stamp = self.get_clock().now().to_msg()
@@ -179,18 +184,14 @@ class TofBridge(Node):
         # Below 12 cm the VL53L1X reports crosstalk from whatever sits at its window (the front
         # sensor flickered 0.05 <-> 1.3 m with nothing there, 2026-09-06); such a reading is
         # published below min_range, which the costmap layer drops: neither a mark nor a clear.
-        if distance_m is None or distance_m > self._ceiling[name]:
-            self._misses[name] += 1
-            if self._misses[name] < _CLEAR_AFTER_MISSES:
-                return  # too early to call it clear: publishing max range would erase the mark
-            message.range = self._ceiling[name]
-        elif distance_m < _CROSSTALK_M:
+        now = time.monotonic()
+        if distance_m is not None and distance_m < _CROSSTALK_M:
             message.range = -1.0  # below min_range: the layer neither marks nor clears
         else:
-            message.range = distance_m
-            self._misses[name] = 0
-            self._last_valid[name] = time.monotonic()
-            self._warned[name] = False
+            message.range = self._hold.publish(name, distance_m, self._ceiling[name], now)
+            if distance_m is not None and distance_m <= self._ceiling[name]:
+                self._last_valid[name] = now
+                self._warned[name] = False
         self._range_pubs[name].publish(message)
         self._warn_if_silent(name)
 

@@ -2,7 +2,7 @@
 
 import math
 
-from pepin.tof_horizon import floor_horizon, trusted_max_range
+from pepin.tof_horizon import RangeHold, floor_horizon, trusted_max_range
 
 FOV = 0.47  # the VL53L1X cone, radians
 
@@ -27,3 +27,25 @@ def test_an_unmeasured_mount_is_not_clamped() -> None:
     """A sensor whose height nobody wrote down keeps its own ceiling instead of a made-up one."""
     assert math.isinf(floor_horizon(0.0, FOV))
     assert trusted_max_range(0.0, FOV, 1.3) == 1.3
+
+
+def test_a_dropped_frame_does_not_erase_a_fresh_mark() -> None:
+    """Half the frames with a hand in front were invalid; the mark must survive the gaps."""
+    hold = RangeHold(hold_s=1.2)
+    assert hold.publish("front", 0.30, 0.96, now=0.0) == 0.30
+    assert hold.publish("front", None, 0.96, now=0.3) == 0.30, "held, not cleared"
+    assert hold.publish("front", None, 0.96, now=1.0) == 0.30
+    assert hold.publish("front", None, 0.96, now=1.5) == 0.96, "old evidence expires: clear"
+
+
+def test_a_return_past_the_ceiling_is_the_floor_and_counts_as_nothing() -> None:
+    hold = RangeHold(hold_s=1.0)
+    assert hold.publish("left", 0.65, 0.57, now=0.0) == 0.57
+    assert hold.publish("left", 0.40, 0.57, now=0.5) == 0.40
+
+
+def test_sensors_are_held_independently() -> None:
+    hold = RangeHold(hold_s=1.0)
+    hold.publish("left", 0.3, 0.57, now=0.0)
+    assert hold.publish("right", None, 0.59, now=0.1) == 0.59
+    assert hold.publish("left", None, 0.57, now=0.5) == 0.3

@@ -46,7 +46,7 @@ GOOD_FIT = 0.45  # below this the robot is told to find itself before it drives
 # planner no longer expands in reverse, so there is nothing a reversing controller would add.
 PLANNERS = {
     "navfn": ("GridBased", "FollowPath"),
-    "lattice": ("Lattice", "FollowPathReversing"),
+    "lattice": ("Lattice", "FollowPath"),  # experimental: see nav2_params.yaml
     "theta": ("ThetaStar", "FollowPath"),
     "smac": ("Smac2D", "FollowPath"),
 }
@@ -79,6 +79,9 @@ class GoalServer(Node):
         with contextlib.suppress(OSError):
             self.pick_planner(self._planner_path.read_text().strip())
         self._goal_handle: Any = None
+        self._driving = (
+            False  # from before send_goal until the drive is finally over: cancel() clears it
+        )
         # The laptop's pulse: on a split stack the board's link watch cancels a drive when this
         # stops. Harmless on one machine, where nothing listens.
         self._beat = self.create_publisher(Header, HEARTBEAT_TOPIC, 10)
@@ -232,13 +235,18 @@ class GoalServer(Node):
         return {"event": "planner", "planner": planner, "controller": controller}
 
     def cancel(self) -> bool:
-        """Stop the running goal, if any; True when there was one."""
+        """Stop the running drive, if any; True when there was one.
+
+        Clears ``_driving`` as well as the handle: during the lost -> relocalise -> resume window
+        there is no handle to cancel, and the flag is what stops the resume from re-sending the
+        goal the operator just cancelled.
+        """
         with self._lock:
             handle, self._goal_handle = self._goal_handle, None
-        if handle is None:
-            return False
-        handle.cancel_goal_async()
-        return True
+            was_driving, self._driving = self._driving, False
+        if handle is not None:
+            handle.cancel_goal_async()
+        return was_driving
 
     def _go(self, request: dict[str, Any], connection: socket.socket, resume: bool = True) -> None:
         """Send one goal and stream its progress until it ends or the caller hangs up.
@@ -259,6 +267,8 @@ class GoalServer(Node):
         goal.pose = self._pose_msg(x, y, yaw_deg)
         started = time.monotonic()
         feedback: dict[str, Any] = {}
+        with self._lock:
+            self._driving = True
         record = self.start_recording(name or f"{x:.0f}_{y:.0f}")
         self.get_logger().info(
             f"run {self._recorder.number}: planner {PLANNERS[self.planner][0]} "
@@ -284,6 +294,9 @@ class GoalServer(Node):
                     "event": "accepted",
                     "run": self._recorder.number,
                     "planner": PLANNERS[self.planner][0],
+                    "recording": str(
+                        record
+                    ),  # early: a drive that never reaches "done" is still fetched
                     "place": name,
                     "x": x,
                     "y": y,
@@ -318,7 +331,9 @@ class GoalServer(Node):
             if stopped_lost:
                 # Stopped on purpose: find ourselves standing still, then the same goal, once.
                 self._wait(result_future, 10.0)
-                if self._find_myself(connection) and resume:
+                with self._lock:
+                    still_wanted = self._driving
+                if still_wanted and self._find_myself(connection) and resume:
                     self._send(connection, {"event": "resuming", "fit": self.fit})
                     self.get_logger().info(
                         f"resuming the goal after relocalising (fit {self.fit:.2f})"
@@ -342,6 +357,9 @@ class GoalServer(Node):
             )
         finally:  # a refused goal or a broken connection must not leave a recorder running
             self.stop_recording()
+            if resume:  # the outermost call owns the flag; a resumed leg is part of the same drive
+                with self._lock:
+                    self._driving = False
 
     def _target_of(self, request: dict[str, Any]) -> tuple[float, float, float, str | None] | None:
         """The goal asked for: a named place, or plain coordinates."""

@@ -119,7 +119,17 @@ def test_the_behavior_tree_backs_up_first_and_keeps_trying() -> None:
 
 
 def test_the_operator_scripts_parse_and_keep_their_safety_lines() -> None:
-    for script in ("stop.sh", "goto.sh", "tour.sh", "lib.sh", "mode.sh", "feature.sh"):
+    for script in (
+        "stop.sh",
+        "goto.sh",
+        "go.sh",
+        "tour.sh",
+        "lib.sh",
+        "mode.sh",
+        "feature.sh",
+        "laptop.sh",
+        "thin.sh",
+    ):
         subprocess.run(["bash", "-n", str(REPO / "ros" / script)], check=True)
     stop = (REPO / "ros/stop.sh").read_text()
     assert "timeout 3" in stop and "pkill -9 -f" in stop and "systemctl restart pepin-ros" in stop
@@ -128,3 +138,44 @@ def test_the_operator_scripts_parse_and_keep_their_safety_lines() -> None:
     assert '"$HERE/stop.sh"' in goto or "stop.sh" in goto
     run = (REPO / "ros/run.sh").read_text()
     assert "--rm" not in run  # a stopped container must keep its log for the next start to save
+
+
+def test_the_recoveries_are_not_gated_by_a_condition_that_refuses_the_real_codes() -> None:
+    """START_OCCUPIED and a boxed-in controller are exactly what the round robin is for, and
+    WouldA*RecoveryHelp answers FAILURE for them."""
+    tree = ET.parse(REPO / "ros/params/pepin_nav_to_pose.xml")
+    recovery = tree.find(".//ReactiveFallback[@name='RecoveryFallback']")
+    assert recovery is not None
+    parent = next(p for p in tree.iter() if recovery in list(p))
+    assert not [c for c in parent if c.tag == "Fallback"], (
+        "a gate stands in front of the recoveries"
+    )
+    planner_branch = tree.find(".//RecoveryNode[@name='ComputePathToPose']")
+    assert planner_branch is not None
+    assert planner_branch.find(".//WouldAPlannerRecoveryHelp") is None
+
+
+def test_the_planner_tries_the_chosen_planner_then_navfn() -> None:
+    tree = ET.parse(REPO / "ros/params/pepin_nav_to_pose.xml")
+    branch = tree.find(".//RecoveryNode[@name='ComputePathToPose']")
+    assert branch is not None
+    fallback = next(iter(branch))
+    assert fallback.tag == "Fallback"
+    assert [c.get("planner_id") for c in fallback] == ["{selected_planner}", "GridBased"]
+
+
+def test_the_planner_s_inflation_pair_is_the_one_measured_to_work() -> None:
+    """0.45 / 5.0 made the lattice answer 'no valid path' to every goal; 0.55 / 2.0 is measured."""
+    inflation = _p("global_costmap")["inflation_layer"]
+    assert inflation["inflation_radius"] == 0.55 and inflation["cost_scaling_factor"] == 2.0
+
+
+def test_the_tof_layers_never_stall_either_costmap() -> None:
+    for costmap in ("local_costmap", "global_costmap"):
+        for sensor in ("front", "left", "right"):
+            assert _p(costmap)[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
+
+
+def test_one_controller_and_the_lattice_never_plans_a_reverse_for_it() -> None:
+    assert _p("controller_server")["controller_plugins"] == ["FollowPath"]
+    assert _p("planner_server")["Lattice"]["allow_reverse_expansion"] is False
