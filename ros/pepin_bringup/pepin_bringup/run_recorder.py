@@ -21,8 +21,8 @@ from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from nav_msgs.msg import Path as PathMsg
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import LaserScan, Range
+from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from sensor_msgs.msg import Imu, LaserScan, Range
 
 from pepin.recording import scan_record_from_ros
 from pepin.tape import RunTape, next_run_number
@@ -106,6 +106,12 @@ class RunRecorder:
                     LaserScan, "/ldlidar_node/scan", self._on_scan, self._scan_qos
                 ),
                 self._node.create_subscription(PathMsg, "/plan", self._on_plan, 5),
+                # What the tracker pairs scans with, and the gyro it is built from: without
+                # them a wobble of map -> odom cannot be told from wheel slip after the fact.
+                self._node.create_subscription(Odometry, "/odometry/filtered", self._on_ekf, 20),
+                self._node.create_subscription(
+                    Imu, "/imu/data_raw", self._on_imu, qos_profile_sensor_data
+                ),
                 self._node.create_subscription(
                     OccupancyGrid, "/local_costmap/costmap", self._on_costmap, 1
                 ),
@@ -166,6 +172,30 @@ class RunRecorder:
                 "y": round(msg.pose.pose.position.y, 4),
                 "theta": round(_yaw(msg.pose.pose.orientation), 5),
             }
+        )
+
+    def _on_ekf(self, msg: Odometry) -> None:
+        """The fused odometry (odom -> base_link) the tracker pairs scans with, pose and rates."""
+        if not self._keep("ekf"):
+            return
+        self._tape.add(
+            {
+                "t": _stamp(msg.header),
+                "topic": "ekf",
+                "x": round(msg.pose.pose.position.x, 4),
+                "y": round(msg.pose.pose.position.y, 4),
+                "theta": round(_yaw(msg.pose.pose.orientation), 5),
+                "vx": round(msg.twist.twist.linear.x, 4),
+                "wz": round(msg.twist.twist.angular.z, 4),
+            }
+        )
+
+    def _on_imu(self, msg: Imu) -> None:
+        """The gyro's yaw rate, raw: the heading truth the wheels are checked against."""
+        if not self._keep("imu"):
+            return
+        self._tape.add(
+            {"t": _stamp(msg.header), "topic": "imu", "wz": round(msg.angular_velocity.z, 4)}
         )
 
     def _on_plan(self, msg: PathMsg) -> None:
