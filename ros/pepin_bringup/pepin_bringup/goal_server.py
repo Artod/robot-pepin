@@ -46,6 +46,7 @@ PLANNERS = {
     "navfn": ("GridBased", "FollowPath"),
     "lattice": ("Lattice", "FollowPathReversing"),
     "theta": ("ThetaStar", "FollowPath"),
+    "smac": ("Smac2D", "FollowPath"),
 }
 
 

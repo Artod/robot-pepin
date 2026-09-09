@@ -450,7 +450,7 @@ planner_server:
     # motion primitives for a DIFFERENTIAL drive — it can turn in place and it can reverse, so a
     # plan may legally start by backing out of a corner, which is the manoeuvre this stack has
     # never been able to express.
-    planner_plugins: ["GridBased", "Lattice", "ThetaStar"]
+    planner_plugins: ["GridBased", "Lattice", "ThetaStar", "Smac2D"]
     costmap_update_timeout: 2.5  # the global costmap updates at 0.5 Hz; 1.0 timed out every plan
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
@@ -530,6 +530,25 @@ planner_server:
       w_heuristic_cost: 1.0
       allow_unknown: true
       use_final_approach_orientation: false
+    Smac2D:
+      # Smac's grid variant: A* over cells with the costmap's cost in the metric and a smoother
+      # after — the robot as a point, so it turns in place like NavFn and Theta* and never refuses
+      # a start. Here so the whole Smac family can be compared on the same drive, not by hearsay.
+      plugin: "nav2_smac_planner::SmacPlanner2D"
+      tolerance: 0.25
+      downsample_costmap: false
+      downsampling_factor: 1
+      allow_unknown: true
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 2.0
+      cost_travel_multiplier: 2.0
+      use_final_approach_orientation: false
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
 
 smoother_server:
   ros__parameters:
