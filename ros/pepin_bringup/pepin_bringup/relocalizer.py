@@ -505,7 +505,16 @@ class Relocalizer(Node):
         pose = self._tracked_pose()
         if pose is None:
             return
-        self.fit = self._matcher.inlier_fraction(pose, self._points)
+        # The tracker's OWN confidence — the inlier fraction of its last match, scan and pose
+        # from the same instant — not a re-evaluation of the TF pose against the latest scan.
+        # Those two are 100-200 ms apart, and at 0.5 rad/s that is 3-6 degrees: the re-evaluated
+        # fit collapsed to 0.19-0.31 during every pivot while the tracker itself sat at 0.90-0.95
+        # (run 0070, second by second), and a blind-drive rule built on the false number stopped
+        # healthy drives mid-turn and moved the belief by 0.4 m to "recover" from nothing.
+        if self._localizer is not None and self._moving():
+            self.fit = float(self._localizer.confidence)
+        else:
+            self.fit = self._matcher.inlier_fraction(pose, self._points)
         self._fit_pub.publish(Float32(data=float(self._watch.reported_fit(self.fit))))
         if self._searching:
             return
