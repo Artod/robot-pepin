@@ -10,6 +10,7 @@ the same file, so RTAB-Map knows where the pictures were taken from.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -139,6 +140,9 @@ class CameraStream(Node):
 
 
 def main() -> None:
+    # ustreamer's frames carry APP segments OpenCV's MJPEG decoder cannot parse; ffmpeg reports
+    # that on every frame at error level, which buries the launch's log. Fatal only.
+    os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "8")
     rclpy.init()
     node = CameraStream()
     try:
