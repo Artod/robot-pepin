@@ -160,6 +160,7 @@ LAPTOP_PUBLISHES = (
     "rtabmap/mapGraph",
     "rtabmap/mapPath",
     "rtabmap/info",
+    "depth_scan",  # the camera's depth folded onto the plane, for the board's local costmap
 )
 BOARD_SERVES = (
     "relocalize",
@@ -245,7 +246,13 @@ class BridgeIdentity:
 
 # Fully qualified names of the ROS nodes the laptop's SLAM launch creates
 # (ros/pepin_bringup/launch/vslam.launch.py): what its restart must see gone from the bridge.
-LAPTOP_SLAM_NODES = ("/camera_stream", "/depth_stream", "/rtabmap/rtabmap", "/foxglove_bridge")
+LAPTOP_SLAM_NODES = (
+    "/camera_stream",
+    "/depth_stream",
+    "/rtabmap/rtabmap",
+    "/rtabmap_frame",
+    "/foxglove_bridge",
+)
 
 
 def laptop_launch_nodes(launch: str) -> tuple[str, ...]:

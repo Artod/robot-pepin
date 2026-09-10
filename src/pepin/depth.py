@@ -132,3 +132,78 @@ def rotation_matrix(qx: float, qy: float, qz: float, qw: float) -> Array:
             [2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)],
         ]
     )
+
+
+def quaternion_from_matrix(rot: Array) -> tuple[float, float, float, float]:
+    """The unit quaternion (x, y, z, w) of a 3x3 rotation, for TF."""
+    m = np.asarray(rot, dtype=float)
+    trace = float(m[0, 0] + m[1, 1] + m[2, 2])
+    if trace > 0:
+        s = math.sqrt(trace + 1.0) * 2
+        return (m[2, 1] - m[1, 2]) / s, (m[0, 2] - m[2, 0]) / s, (m[1, 0] - m[0, 1]) / s, 0.25 * s
+    i = int(np.argmax([m[0, 0], m[1, 1], m[2, 2]]))
+    j, k = (i + 1) % 3, (i + 2) % 3
+    s = math.sqrt(1.0 + m[i, i] - m[j, j] - m[k, k]) * 2
+    q = [0.0, 0.0, 0.0, 0.0]
+    q[i] = 0.25 * s
+    q[j] = (m[j, i] + m[i, j]) / s
+    q[k] = (m[k, i] + m[i, k]) / s
+    q[3] = (m[k, j] - m[j, k]) / s
+    return q[0], q[1], q[2], q[3]
+
+
+def invert(rotation: Array, translation: Array) -> tuple[Array, Array]:
+    """The inverse rigid transform: (R^T, -R^T t)."""
+    rt = np.asarray(rotation, dtype=float).T
+    back: Array = -(rt @ np.asarray(translation, dtype=float))
+    return rt, back
+
+
+SCAN_HALF_FOV = math.radians(40.0)  # the tilted camera's bearings reach a little past its lens
+SCAN_STEP = math.radians(0.5)
+SCAN_KTH = 3  # the k-th nearest point of a bearing: a flying pixel at an edge does not mark
+
+
+def depth_to_scan(
+    depth: Array,
+    intr: Intrinsics,
+    cam: CameraPose,
+    *,
+    stride: int = 4,
+    min_z: float = 0.08,
+    max_z: float = 1.30,
+    max_range: float = 3.0,
+) -> tuple[float, float, Array]:
+    """The depth image as a planar scan in base_link: for every half-degree of bearing across the
+    camera's view, the range to the nearest thing standing between ``min_z`` and ``max_z`` above
+    the floor (a table top, a seat, a leg), ``inf`` where the view is clear out to ``max_range``.
+    Returns (angle_min, angle_increment, ranges), ready for a LaserScan the costmap can mark and
+    clear with. Every ``stride``-th pixel is used; the k-th nearest point per bearing marks."""
+    d = np.asarray(depth, dtype=float)[::stride, ::stride]
+    rows, cols = np.mgrid[0 : d.shape[0], 0 : d.shape[1]]
+    u = cols * stride + 0.5
+    v = rows * stride + 0.5
+    ok = np.isfinite(d) & (d > NEAR_M)
+    z_opt = d[ok]
+    forward = z_opt
+    left = -(u[ok] - intr.cx) / intr.fx * z_opt
+    up = -(v[ok] - intr.cy) / intr.fy * z_opt
+    c, s = math.cos(cam.pitch), math.sin(cam.pitch)
+    px = c * forward + s * up + cam.x
+    py = left + cam.y
+    pz = -s * forward + c * up + cam.z
+    keep = (pz > min_z) & (pz < max_z) & (px > 0.0)
+    px, py = px[keep], py[keep]
+    rng = np.hypot(px, py)
+    bearing = np.arctan2(py, px)
+    n_bins = round(2 * SCAN_HALF_FOV / SCAN_STEP) + 1
+    ranges = np.full(n_bins, np.inf)
+    within = (rng <= max_range) & (np.abs(bearing) <= SCAN_HALF_FOV)
+    bins = np.rint((bearing[within] + SCAN_HALF_FOV) / SCAN_STEP).astype(int)
+    order = np.lexsort((rng[within], bins))
+    bins_sorted, rng_sorted = bins[order], rng[within][order]
+    starts = np.flatnonzero(np.r_[True, bins_sorted[1:] != bins_sorted[:-1]])
+    counts = np.diff(np.r_[starts, bins_sorted.size])
+    enough = counts >= SCAN_KTH
+    ranges[bins_sorted[starts[enough]]] = rng_sorted[starts[enough] + SCAN_KTH - 1]
+    return -SCAN_HALF_FOV, SCAN_STEP, ranges

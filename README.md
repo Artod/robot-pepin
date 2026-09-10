@@ -455,21 +455,33 @@ and closes loops on what the camera sees, in its own `rtabmap` frame beside the 
 its grid grows in Foxglove while the cart drives on the static map.
 
 **Camera SLAM beside the tracker** (`ros/laptop.sh vslam`, on the laptop): RTAB-Map builds a
-pose graph from the lidar scans (ICP), the board's odometry and the camera. The camera does two
+pose graph from the lidar scans (ICP), the tracker's pose (its "odometry": a node lands where the
+lidar says the cart is, to a centimetre) and the camera. The camera does two
 things a 2D lidar cannot. It recognises places: a bag of ORB words names the node a frame looks
 like, ICP on the two scans gives the transform, and the graph closes the loop (nine closures on
 one printer-home-printer round trip). And it measures height: a monocular depth network (Depth
-Anything V2, metric, on the laptop's CPU at three frames a second) turns each frame into a depth
-image, and the lidar sets its scale — the scan projected into the image names the true depth at a
-hundred pixels a frame, the median ratio scales the frame (the network alone saw the room 1.5-2x
-too far). The camera is tilted 28 degrees down, measured, not set: the tilt at which the lidar's
-beams land on the surfaces the depth image shows. RTAB-Map fuses the depth with the scans into
-5 cm voxels: table tops, seats, cables on the floor enter the map the lidar's plane misses. The
-operator's Foxglove connects to the laptop (`ws://localhost:8765`) for the 3D view; the board's
-topics reach it over the bridge, so the cloud never crosses the WiFi.
+Anything V2, metric, on the laptop's CPU at three to four frames a second) turns each frame into
+a depth image, and the lidar sets its scale — the scan projected into the image names the true
+depth at a hundred pixels a frame, the median ratio scales the frame (the network alone saw the
+room 1.5-2x too far). The camera's tilt and field of view are measured against the lidar, not
+read off a datasheet: the tilt (26 degrees) and the field of view (78 degrees, the datasheet's 70
+placed the image's edges 4 degrees wrong) at which the lidar's beams land on the surfaces the
+depth image shows. Frames carry the board's capture
+time (ustreamer's own stamp, the lidar's clock), not the moment the laptop decoded them. RTAB-Map
+fuses the depth with the scans into 5 cm voxels: table tops, seats, cables on the floor enter the
+map the lidar's plane misses; its loop-closure correction is published as `odom -> rtabmap`, so
+the voxels and the cart stay together. The operator's Foxglove connects to the laptop
+(`ws://localhost:8765`, layout `ros/foxglove/pepin_3d.json`) for the 3D view; the board's topics
+reach it over the bridge, so the cloud never crosses the WiFi.
 
-**Next**: the voxel map into the costmap (obstacles at any height), localisation by picture at
-start-up and in the tracker's symmetric corners, and places named from what the camera sees.
+**The depth drives too**: the same depth, cut between 8 cm and 1.3 m above the floor and folded
+onto the plane, goes to the board as a laser scan (`/depth_scan`, ±40 degrees, three times a
+second, a few kilobytes) and is the local costmap's third observation source, marking and
+clearing like the lidar. A table top stops the cart the way a wall does.
+
+**Next**: the depth scan into the global costmap as well (a planner that routes through a table
+it never saw), localisation by picture at start-up and in the tracker's symmetric corners, and
+places named from what the camera sees.
 
 ## Credits
 

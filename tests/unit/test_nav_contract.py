@@ -483,7 +483,8 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
 
     for launch, half in (("nav.launch.py", "nav"), ("vslam.launch.py", "slam")):
         src = (REPO / "ros/pepin_bringup/launch" / launch).read_text()
-        assert "pepin_bringup.ghost_wait" in src and "OnProcessExit(target_action=ghost_wait" in src
+        assert "pepin_bringup.ghost_wait" in src
+        assert re.search(r"OnProcessExit\(\s*target_action=ghost_wait", src), launch
         assert f'laptop_launch_nodes("{half}")' in src, launch
     vslam = (REPO / "ros/pepin_bringup/launch/vslam.launch.py").read_text()
     assert 'name="rtabmap"' in vslam and 'namespace="rtabmap"' in vslam
@@ -495,6 +496,7 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
         "/camera_stream",
         "/depth_stream",
         "/rtabmap/rtabmap",
+        "/rtabmap_frame",
         "/foxglove_bridge",
     )
     nav = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
@@ -515,7 +517,9 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
     assert '("depth/image", "/camera/depth")' in vslam
     for key in ('"Grid/Sensor": "2"', '"Grid/3D": "true"', '"Grid/MaxObstacleHeight"'):
         assert key in vslam, key
-    assert "on_exit=[camera, depth, rtabmap, foxglove]" in vslam
+    gated = vslam[vslam.index("OnProcessExit(") :].split(")")[0]
+    for name in ("camera", "depth", "rtabmap", "frame", "foxglove"):
+        assert name in gated.split("on_exit=")[1], name
     node = (REPO / "ros/pepin_bringup/pepin_bringup/depth_stream.py").read_text()
     assert '"/camera/depth"' in node and "scale_from_samples" in node and "DepthScale" in node
     image = (REPO / "ros/Dockerfile.laptop").read_text()
@@ -533,9 +537,41 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
     room = json.loads((REPO / "ros/foxglove/pepin_3d.json").read_text())["configById"]["3D!room"]
     shown = {t for t, c in room["topics"].items() if c.get("visible")}
     assert "/rtabmap/cloud_map" in shown and "/rtabmap/mapPath" in shown and "/scan" in shown
-    assert not shown & {"/map", "/rtabmap/map", "/local_costmap/costmap", "/global_costmap/costmap"}
+    # the two floor grids that fought each other stay out; the local costmap is asked for
+    assert not shown & {"/map", "/rtabmap/map", "/global_costmap/costmap"}
     laptop = (REPO / "ros/laptop.sh").read_text()
     assert "-p 8765:8765" in laptop.split("docker run -d --name pepin-vslam")[1].split("\n")[0]
+
+
+def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph() -> None:
+    """The depth folded onto the plane goes to the board as /depth_scan and marks the local
+    costmap; the camera stamps frames with the board's capture time; map -> rtabmap comes
+    from RTAB-Map's own correction on the laptop, not from a fixed identity on the board."""
+    from pepin.deployment import LAPTOP_PUBLISHES
+
+    assert "depth_scan" in LAPTOP_PUBLISHES
+    params = (REPO / "ros/params/nav2_params.yaml").read_text()
+    local = params[params.index("local_costmap:") : params.index("global_costmap:")]
+    assert "observation_sources: scan dynamic depth_scan" in local
+    source = local[local.index("        depth_scan:") :]
+    for line in ("topic: /depth_scan", 'data_type: "LaserScan"', "inf_is_valid: True"):
+        assert line in source, line
+    node = (REPO / "ros/pepin_bringup/pepin_bringup/depth_stream.py").read_text()
+    assert '"/depth_scan"' in node and "depth_to_scan" in node
+    camera = (REPO / "ros/pepin_bringup/pepin_bringup/camera_stream.py").read_text()
+    assert "capture_time(headers)" in camera and "cv2.VideoCapture" not in camera
+    vslam = (REPO / "ros/pepin_bringup/launch/vslam.launch.py").read_text()
+    assert "pepin_bringup.rtabmap_frame" in vslam
+    nav = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
+    assert "odom_to_rtabmap" not in nav
+    frame = (REPO / "ros/pepin_bringup/pepin_bringup/rtabmap_frame.py").read_text()
+    assert '"/rtabmap/mapGraph"' in frame and '"map", "rtabmap"' in frame
+    assert '"odom_frame_id": "map"' in vslam  # RTAB-Map's odometry is the tracker's pose
+    import json
+
+    room = json.loads((REPO / "ros/foxglove/pepin_3d.json").read_text())["configById"]["3D!room"]
+    assert room["topics"]["/depth_scan"]["visible"]
+    assert room["topics"]["/local_costmap/costmap"]["visible"]
 
 
 def test_the_board_image_carries_no_lttng_tracer() -> None:

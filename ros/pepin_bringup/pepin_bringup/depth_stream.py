@@ -6,7 +6,10 @@ The lidar fixes that (``pepin.depth``): its scan, projected into the image throu
 static mounts, names the true depth at the pixels it hits, and the median ratio scales the
 frame. The scaled depth goes out on ``/camera/depth`` (32FC1 metres, the image's stamp and
 frame), where RTAB-Map builds a 3D map from it and later the costmap reads obstacles the lidar's
-plane misses. Frames that arrive while the network is busy are dropped: the newest one wins.
+plane misses. The same depth, cut between 8 cm and 1.3 m above the floor and folded onto the plane,
+goes out as ``/depth_scan`` (a LaserScan in base_link): the board's local costmap marks and
+clears with it like with the lidar, so a table top stops the cart the way a wall does. Frames
+that arrive while the network is busy are dropped: the newest one wins.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from pepin.depth import (
     CameraPose,
     DepthScale,
     Intrinsics,
+    depth_to_scan,
     project,
     rotation_matrix,
     scale_from_samples,
@@ -90,6 +94,8 @@ class DepthStream(Node):
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         newest = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(Image, "/camera/depth", reliable)
+        self._scan_pub = self.create_publisher(LaserScan, "/depth_scan", reliable)
+        self._scan_max_range = float(self.declare_parameter("scan_max_range", 3.0).value)
         self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
         self.create_subscription(Image, "/camera/image", self._on_image, newest)
         self.create_subscription(LaserScan, "/scan", self._on_scan, reliable)
@@ -162,7 +168,31 @@ class DepthStream(Node):
         out.step = msg.width * 4
         out.data = (depth * scale).astype(np.float32).tobytes()
         self._pub.publish(out)
+        self._scan_pub.publish(self._as_scan(depth * scale, msg))
         self._stats["frames"] += 1
+
+    def _as_scan(self, depth: Array, image: Image) -> LaserScan:
+        """The scaled depth folded onto the floor plane, in base_link, stamped like the image."""
+        angle_min, step, ranges = depth_to_scan(
+            depth, self._intr_or_nominal(image), self._camera, max_range=self._scan_max_range
+        )
+        scan = LaserScan()
+        scan.header.stamp = image.header.stamp
+        scan.header.frame_id = "base_link"
+        scan.angle_min, scan.angle_max = (
+            float(angle_min),
+            float(angle_min + step * (ranges.size - 1)),
+        )
+        scan.angle_increment = float(step)
+        scan.range_min, scan.range_max = 0.1, float(self._scan_max_range)
+        scan.ranges = [float(r) for r in ranges]
+        return scan
+
+    def _intr_or_nominal(self, image: Image) -> Intrinsics:
+        if self._intr is not None:
+            return self._intr
+        fx = image.width / (2 * 0.7)  # a 70-degree lens until the camera_info arrives
+        return Intrinsics(fx, fx, image.width / 2, image.height / 2, image.width, image.height)
 
     def _lidar_verdict(self, depth: Array, image: Image) -> tuple[float, int] | None:
         """What the newest scan says the frame's scale is: needs a fresh scan and both mounts."""

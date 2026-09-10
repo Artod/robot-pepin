@@ -3,7 +3,10 @@
 ustreamer on the board serves the AC310 as an MJPEG stream; nothing on the board decodes it (the
 board has no core to spare and no use for pixels). This node runs on the laptop, pulls the
 stream with OpenCV, and publishes ``/camera/image`` (bgr8) and ``/camera/camera_info`` with the
-optics of ``config/camera.json`` (nominal until calibrated), stamped when the frame was read.
+optics of ``config/camera.json`` (nominal until calibrated), stamped with the moment the board
+captured the frame (ustreamer's X-Timestamp, the clock that stamps the lidar): a frame stamped
+when the laptop decoded it was a few hundred milliseconds late, a picture placed ten degrees
+wrong while the cart turns.
 It also broadcasts the static ``base_link -> camera_link -> camera_optical`` transforms from
 the same file, so RTAB-Map knows where the pictures were taken from.
 """
@@ -13,6 +16,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 import cv2
@@ -20,6 +24,7 @@ import rclpy
 from geometry_msgs.msg import TransformStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
 from tf2_ros import StaticTransformBroadcaster
 
@@ -30,6 +35,7 @@ from pepin.camera import (
     optical_rotation,
     quaternion_from_rpy,
 )
+from pepin.mjpeg import capture_time, parts
 
 CONFIG = "/ws/config/camera.json"
 
@@ -64,6 +70,7 @@ class CameraStream(Node):
         self._static = StaticTransformBroadcaster(self)
         self._static.sendTransform([self._link_tf(), self._optical_tf()])
         self._frames = 0
+        self._unstamped = 0  # frames the board sent without a capture time
         self.create_timer(30.0, self._report)
         threading.Thread(target=self._pump, daemon=True).start()
         self.get_logger().info(f"camera stream from {self._cfg.stream}")
@@ -100,27 +107,36 @@ class CameraStream(Node):
 
     def _pump(self) -> None:
         """Read frames as they come; reconnect after a dropped stream (the board restarts too)."""
-        while rclpy.ok():
-            capture = cv2.VideoCapture(self._cfg.stream)
-            if not capture.isOpened():
-                self.get_logger().warning("camera stream not reachable; retrying in 3 s")
-                time.sleep(3.0)
-                continue
-            while rclpy.ok():
-                ok, frame = capture.read()
-                if not ok:
-                    self.get_logger().warning("camera stream ended; reconnecting")
-                    break
-                self._publish(frame)
-            capture.release()
+        import numpy as np
 
-    def _publish(self, frame: object) -> None:
+        while rclpy.ok():
+            try:
+                with urllib.request.urlopen(self._cfg.stream, timeout=5.0) as stream:
+                    for headers, body in parts(stream):
+                        if not rclpy.ok():
+                            return
+                        frame = cv2.imdecode(np.frombuffer(body, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if frame is None:
+                            continue
+                        self._publish(frame, capture_time(headers))
+                    self.get_logger().warning("camera stream ended; reconnecting")
+            except Exception as error:
+                self.get_logger().warning(f"camera stream not reachable ({error}); retrying in 3 s")
+                time.sleep(3.0)
+
+    def _publish(self, frame: object, taken_at: float | None) -> None:
         import numpy as np
 
         array = np.asarray(frame)
         if self._scale != 1.0:
             array = cv2.resize(array, self._size, interpolation=cv2.INTER_AREA)
-        stamp = self.get_clock().now().to_msg()
+        if taken_at is None:
+            self._unstamped += 1
+        stamp = (
+            Time(nanoseconds=round(taken_at * 1e9)).to_msg()
+            if taken_at is not None
+            else self.get_clock().now().to_msg()
+        )
         msg = Image()
         msg.header.stamp = stamp
         msg.header.frame_id = self._cfg.optical_frame

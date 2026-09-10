@@ -86,3 +86,42 @@ def test_a_quaternion_becomes_the_rotation_tf_means() -> None:
     assert rotation_matrix(0.0, 0.0, 0.0, 1.0) == pytest.approx(np.eye(3))
     quarter = rotation_matrix(0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4))
     assert quarter @ np.array([1.0, 0.0, 0.0]) == pytest.approx([0.0, 1.0, 0.0])  # +90 deg yaw
+
+
+def test_a_rotation_survives_the_trip_through_a_quaternion_and_inverts() -> None:
+    from pepin.depth import invert, quaternion_from_matrix, rotation_matrix
+
+    q = (0.1, -0.2, 0.3, math.sqrt(1 - 0.14))
+    rot = rotation_matrix(*q)
+    assert quaternion_from_matrix(rot) == pytest.approx(q, abs=1e-9)
+    back_rot, back_t = invert(rot, np.array([1.0, 2.0, 3.0]))
+    assert back_rot @ rot == pytest.approx(np.eye(3), abs=1e-12)
+    assert back_rot @ np.array([1.0, 2.0, 3.0]) + back_t == pytest.approx([0.0, 0.0, 0.0])
+
+
+def test_the_depth_image_becomes_a_scan_of_what_stands_above_the_floor() -> None:
+    """A tilted camera looking at a wall two metres ahead: the wall's pixels between 8 cm and
+    1.3 m mark the central bearings at 2 m, the floor pixels below it mark nothing."""
+    from pepin.depth import depth_to_scan
+
+    cam = CameraPose(0.0, 0.0, 1.23, math.radians(28.0))
+    rows, cols = np.mgrid[0:360, 0:640]
+    # each pixel's ray, in camera_link: forward = 1, left, up (per unit depth)
+    left = -(cols + 0.5 - INTR.cx) / INTR.fx
+    up = -(rows + 0.5 - INTR.cy) / INTR.fy
+    c, s = math.cos(cam.pitch), math.sin(cam.pitch)
+    fwd_base = c * 1.0 + s * up  # base x per unit optical depth
+    up_base = -s * 1.0 + c * up
+    depth = np.full((360, 640), np.inf)
+    wall = 2.0 / fwd_base  # optical depth at which the ray meets the wall plane x = 2 m
+    floor = -cam.z / up_base  # optical depth at which the ray meets the floor z = 0
+    floor[up_base >= 0] = np.inf
+    depth = np.where(wall < floor, wall, floor)
+    angle_min, step, ranges = depth_to_scan(depth, INTR, cam)
+    centre = round((0.0 - angle_min) / step)
+    assert ranges[centre] == pytest.approx(2.0, abs=0.02)
+    assert ranges[centre - 20] == pytest.approx(2.0 / math.cos(20 * step), abs=0.03)
+    assert np.isfinite(ranges).sum() > 100  # the wall spans most of the view
+    empty = depth_to_scan(np.full((360, 640), np.inf), INTR, cam)[2]
+    assert not np.isfinite(empty).any()
+    _ = left  # the ray geometry above is what the function inverts

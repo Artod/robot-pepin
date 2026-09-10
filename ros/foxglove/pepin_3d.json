@@ -60,9 +60,8 @@
           "alpha": 0.35
         },
         "/local_costmap/costmap": {
-          "visible": false,
-          "colorMode": "costmap",
-          "alpha": 0.45
+          "visible": true,
+          "colorMode": "costmap"
         },
         "/plan": {
           "visible": false,
@@ -119,6 +118,12 @@
           "visible": true,
           "pointSize": 6,
           "colorMode": "rgb"
+        },
+        "/depth_scan": {
+          "visible": true,
+          "pointSize": 4,
+          "colorMode": "flat",
+          "flatColor": "#ff3b3b"
         }
       },
       "layers": {

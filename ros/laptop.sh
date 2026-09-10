@@ -57,7 +57,9 @@ case "${1:-start}" in
 esac
 # Which half the board expects: on side=all (ros/thin.sh vision) the board drives by itself and
 # this side starts only the bridge — RTAB-Map and the camera come with "ros/laptop.sh vslam".
-SIDE="$(ssh "root@$BOARD" "grep -oE 'PEPIN_SIDE=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2)"
+# "|| true": with pipefail a slow ssh (the board's stack just restarted) would end this script
+# here, silently, before the bridge is touched (2026-09-10 20:02).
+SIDE="$(ssh -o ConnectTimeout=15 "root@$BOARD" "grep -oE 'PEPIN_SIDE=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2 || true)"
 SIDE="${SIDE:-all}"
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 stop_gently pepin-laptop; docker rm -f pepin-zenoh >/dev/null 2>&1 || true
@@ -70,6 +72,7 @@ done
 curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' || { echo "the board's bridge does not answer on :8000 (ros/thin.sh on, then wait for it)"; exit 1; }
 # ROS_DISTRO matters: without it the bridge assumes Iron. Router mode on both sides, this one
 # connecting to the board's: the pairing measured to pass samples (peer and client here did not).
+echo "laptop bridge: restarting with $(basename "$HERE/zenoh-bridge-laptop.json")"
 docker run -d --name pepin-zenoh --network "$NET" -p 8001:8000 -v "$HERE/zenoh-bridge-laptop.json:/config.json:ro" \
     -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.7.0 -c /config.json \
     -e "tcp/$BOARD:7447" -d 7 --rest-http-port 8000 >/dev/null

@@ -111,7 +111,7 @@
           "visible": false
         },
         "/rtabmap/mapPath": {
-          "visible": true,
+          "visible": false,
           "lineWidth": 0.05,
           "color": "#ffd500"
         },
@@ -119,6 +119,12 @@
           "visible": true,
           "pointSize": 5,
           "colorMode": "rgb"
+        },
+        "/depth_scan": {
+          "visible": true,
+          "pointSize": 4,
+          "colorMode": "flat",
+          "flatColor": "#ff3b3b"
         }
       },
       "layers": {
