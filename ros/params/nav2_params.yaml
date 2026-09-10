@@ -88,7 +88,11 @@ controller_server:
     min_theta_velocity_threshold: 0.001
     failure_tolerance: 3.0  # a person in the path gets three seconds to step aside before recoveries
     progress_checker_plugins: ["progress_checker"]
-    goal_checker_plugins: ["general_goal_checker"] # "precise_goal_checker"
+    # The drive ends when the position is met (xy_only, used by the tree's FollowPath); the goal
+    # server then turns the cart to the mark's heading with a Spin. RPP with reversing cannot
+    # rotate in place, and at a mark Hybrid-A* writes a 10 cm cusp plan whose carrot sits straight
+    # ahead: three printer approaches spent 35-61 s shuttling +-8 cm for the last 30 degrees.
+    goal_checker_plugins: ["general_goal_checker", "xy_only_goal_checker"]
     # One controller for both planners. A second one wrapped in a RotationShim was added on the
     # premise that RPP cannot both reverse and turn in place; that is false in nav2 1.3.12
     # (shouldRotateToPath adds pi when reversing). The shim then re-aimed the cart at every fresh
@@ -120,6 +124,11 @@ controller_server:
       # that the goal checker can still be satisfied at a path end the planner had to shift.
       xy_goal_tolerance: 0.10
       yaw_goal_tolerance: 0.20  # 0.30 rad swings a front corner 8 cm sideways
+    xy_only_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.10
+      yaw_goal_tolerance: 3.15  # any heading: the pivot to the mark's heading is the goal server's
     FollowPath:
       # Regulated Pure Pursuit: a fraction of MPPI's CPU on the board's A53 cores, and a
       # differential-drive cart at 0.15 m/s does not need model-predictive sampling.

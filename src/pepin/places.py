@@ -84,3 +84,10 @@ def resolve_goal(tokens: list[str], map_path: Path) -> tuple[tuple[float, float]
             f"(add one: uv run python scripts/places.py {map_path} add NAME X Y)"
         )
     return place.xy, place
+
+
+def heading_residual_deg(target_deg: float, current_deg: float) -> float:
+    """How far the cart must still turn to face ``target_deg`` from ``current_deg``, in
+    (-180, 180] degrees: positive is counter-clockwise, the Spin behaviour's convention."""
+    residual = (target_deg - current_deg + 180.0) % 360.0 - 180.0
+    return 180.0 if residual == -180.0 else residual

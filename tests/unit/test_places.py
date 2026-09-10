@@ -31,3 +31,13 @@ def test_goal_resolves_by_name_or_numbers_and_names_the_known_places(tmp_path: P
     with pytest.raises(ValueError, match="kitchen"):
         resolve_goal(["bedroom"], map_path)
     assert load_places(tmp_path / "other.npz") == {}
+
+
+def test_the_residual_heading_is_the_short_way_round() -> None:
+    from pepin.places import heading_residual_deg
+
+    assert heading_residual_deg(140.0, 100.0) == 40.0  # counter-clockwise
+    assert heading_residual_deg(-170.0, 170.0) == 20.0  # across the seam
+    assert heading_residual_deg(10.0, 50.0) == -40.0
+    assert heading_residual_deg(0.0, 180.0) == 180.0
+    assert heading_residual_deg(35.0, 35.0) == 0.0

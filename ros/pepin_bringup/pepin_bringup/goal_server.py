@@ -28,9 +28,10 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
+from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped
 from lifecycle_msgs.srv import ChangeState, GetState
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateToPose, Spin
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
@@ -43,6 +44,7 @@ from pepin.deployment import (
     HEARTBEAT_TOPIC,
     next_transition,
 )
+from pepin.places import heading_residual_deg
 from pepin.runlink import (
     RUN_COMMAND_TOPIC,
     RUN_STATUS_TOPIC,
@@ -57,6 +59,8 @@ PORT = 3337
 GOOD_FIT = DRIVE_FIT  # below this the robot is told to find itself before it drives (pepin.watch)
 # The planner to select, and the controller that follows it. One controller now: the lattice
 # planner no longer expands in reverse, so there is nothing a reversing controller would add.
+PIVOT_TOLERANCE_DEG = 11.5  # the goal checker's 0.20 rad: below this the heading is met
+PIVOT_ALLOWANCE_S = 15.0
 RECORDER_PATIENCE_S = (
     8.0  # the recorder answers over the bridge; 3 s once named a drive after the previous tape
 )
@@ -80,6 +84,7 @@ class GoalServer(Node):
         self._record_dir = Path(str(self.declare_parameter("record_dir", "/maps/rec").value))
         self._port = int(self.declare_parameter("port", PORT).value)
         self._client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        self._spin = ActionClient(self, Spin, "spin")
         self._relocalize = self.create_client(Trigger, "relocalize")
         self._where = self.create_client(Trigger, "where_am_i")
         self.fit = 0.0
@@ -489,6 +494,8 @@ class GoalServer(Node):
                 return
             outcome = result_future.result()
             status = getattr(outcome, "status", 0) if outcome else 0
+            if status == 4:  # position met: now the heading, on the tape still
+                self._pivot_to(yaw_deg, connection)
             self.stop_recording()  # closed before the answer: the caller fetches it on reading
             self._send(
                 connection,
@@ -509,6 +516,34 @@ class GoalServer(Node):
                 self.stop_recording()
                 with self._lock:
                     self._driving = False
+
+    def _pivot_to(self, yaw_deg: float, connection: socket.socket) -> None:
+        """Turn in place to the mark's heading once the drive has met the position.
+
+        The controller that can reverse (RPP, FollowPathRS) cannot rotate in place, and at a
+        mark Hybrid-A* writes a 10 cm cusp plan whose carrot sits straight ahead: three printer
+        approaches spent 35-61 s shuttling for the last 30 degrees. The drive therefore ends on
+        position alone and the behaviour server's Spin does the heading: 40 degrees in ~1.5 s.
+        """
+        residual = heading_residual_deg(yaw_deg, self._pose_now()["yaw_deg"])
+        if abs(residual) <= PIVOT_TOLERANCE_DEG:
+            return
+        event: dict[str, Any] = {"event": "pivot", "residual_deg": round(residual, 1)}
+        if not self._spin.wait_for_server(timeout_sec=2.0):
+            self._send(connection, event | {"status": 0, "detail": "no spin behaviour"})
+            return
+        goal = Spin.Goal()
+        goal.target_yaw = math.radians(residual)
+        goal.time_allowance = Duration(sec=int(PIVOT_ALLOWANCE_S))
+        handle = self._wait(self._spin.send_goal_async(goal), 5.0)
+        if handle is None or not handle.accepted:
+            self._send(connection, event | {"status": 0, "detail": "the spin was refused"})
+            return
+        outcome = self._wait(handle.get_result_async(), PIVOT_ALLOWANCE_S + 5.0)
+        status = getattr(outcome, "status", 0) if outcome else 0
+        after = heading_residual_deg(yaw_deg, self._pose_now()["yaw_deg"])
+        self._send(connection, event | {"status": int(status), "after_deg": round(after, 1)})
+        self.get_logger().info(f"pivot {residual:+.0f} deg: status {status}, {after:+.0f} deg left")
 
     def _target_of(self, request: dict[str, Any]) -> tuple[float, float, float, str | None] | None:
         """The goal asked for: a named place, or plain coordinates."""

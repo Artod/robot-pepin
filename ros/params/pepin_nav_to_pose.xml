@@ -65,7 +65,7 @@
           </RecoveryNode>
         </RateController>
         <RecoveryNode number_of_retries="2" name="FollowPath">
-          <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+          <FollowPath path="{path}" controller_id="{selected_controller}" goal_checker_id="xy_only_goal_checker" error_code_id="{follow_path_error_code}"/>
           <!-- Back up before anything else, right where the controller failed: base_link sits 0.30 m
                ahead of the rear corners, so the cart sweeps 0.41 m when it turns in place. Parked
                0.20 m from the printer it cannot legally rotate at all, and no tuning changes that

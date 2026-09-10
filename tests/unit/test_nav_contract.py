@@ -574,6 +574,22 @@ def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph(
     assert room["topics"]["/local_costmap/costmap"]["visible"]
 
 
+def test_the_drive_ends_on_position_and_the_goal_server_turns_to_the_heading() -> None:
+    """RPP with reversing cannot rotate in place: the tree's FollowPath judges xy only, and the
+    goal server pivots the residual heading with the behaviour server's Spin before "done"."""
+    params = yaml.safe_load((REPO / "ros/params/nav2_params.yaml").read_text())
+    controller = params["controller_server"]["ros__parameters"]
+    assert "xy_only_goal_checker" in controller["goal_checker_plugins"]
+    xy_only = controller["xy_only_goal_checker"]
+    assert xy_only["xy_goal_tolerance"] == controller["general_goal_checker"]["xy_goal_tolerance"]
+    assert xy_only["yaw_goal_tolerance"] >= 3.14
+    tree = (REPO / "ros/params/pepin_nav_to_pose.xml").read_text()
+    assert 'goal_checker_id="xy_only_goal_checker"' in tree
+    server = (REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text()
+    assert 'ActionClient(self, Spin, "spin")' in server and "_pivot_to(yaw_deg" in server
+    assert "PIVOT_TOLERANCE_DEG = 11.5" in server  # the general checker's 0.20 rad
+
+
 def test_the_board_image_carries_no_lttng_tracer() -> None:
     """lttng-ust, pulled in by the binary tracetools, costs 128 MB of resident memory per ROS
     process on load: with nine processes the 1.5 GB board lived in swap and froze under load
