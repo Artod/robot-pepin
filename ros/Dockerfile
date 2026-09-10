@@ -39,6 +39,21 @@ RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
     && cp build/ldlidar_component/libldlidar.so install/ldlidar_component/lib/ \
     && rm -rf /var/lib/apt/lists/* build log
 
+# ROS 2 Jazzy's binaries link every node against LTTng-UST through tracetools, and lttng-ust
+# 2.13 takes 128 MB of resident memory per process the moment it is loaded, tracing or not.
+# Nine ROS processes on a 1.5 GB board put 1.1 GB of untouched tracing buffers into swap and
+# the board froze under a spin (2026-09-10). tracetools rebuilt without LTTng replaces the
+# binary one, in the overlay and in /opt/ros/jazzy/lib both; nothing here traces. (Tracepoints
+# excluded, not "disabled": disabled makes the package header-only and the binaries need the
+# library with its ros_trace_* symbols, empty.)
+RUN git clone --depth 1 -b jazzy https://github.com/ros2/ros2_tracing.git src/ros2_tracing \
+    && . /opt/ros/jazzy/setup.sh \
+    && colcon build --packages-select tracetools \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DTRACETOOLS_TRACEPOINTS_EXCLUDED=ON \
+            -DTRACETOOLS_STATUS_CHECKING_TOOL=OFF \
+    && cp -f install/tracetools/lib/libtracetools.so /opt/ros/jazzy/lib/libtracetools.so \
+    && rm -rf build log src/ros2_tracing
+
 # Our bridge packages: the Python one (base server <-> /cmd_vel, /odom, TF; ToF -> Range) and
 # the C++ base bridge, same protocol at a tenth of the RAM (robot.launch.py picks one).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \

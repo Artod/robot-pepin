@@ -472,6 +472,18 @@ def test_the_laptop_half_restarts_with_the_board_s_bridge() -> None:
     assert "\nsettle_bridge" not in after and "        settle_bridge" not in after
 
 
+def test_the_board_image_carries_no_lttng_tracer() -> None:
+    """lttng-ust, pulled in by the binary tracetools, costs 128 MB of resident memory per ROS
+    process on load: with nine processes the 1.5 GB board lived in swap and froze under load
+    (2026-09-10). The image rebuilds tracetools without it and puts that build where every
+    consumer looks, so no future base image brings the tracer back unnoticed."""
+    dockerfile = (REPO / "ros/Dockerfile").read_text()
+    stage = dockerfile[dockerfile.index("ros2_tracing") :]
+    assert "-DTRACETOOLS_TRACEPOINTS_EXCLUDED=ON" in stage and "TRACETOOLS_DISABLED=ON" not in stage
+    assert "cp -f install/tracetools/lib/libtracetools.so /opt/ros/jazzy/lib/" in stage
+    assert dockerfile.index("ros2_tracing") < dockerfile.index("COPY pepin_bringup")
+
+
 def test_a_crashed_navigation_container_comes_back_by_itself() -> None:
     launch = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
     container = launch[launch.index("container = ComposableNodeContainer(") :]
