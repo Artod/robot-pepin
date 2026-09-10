@@ -24,10 +24,12 @@ on an IKEA cart with two servos for wheels.
 Everything that closes a loop runs on the robot: the board is an Orange Pi Zero 3 with four
 Cortex-A53 cores and 1.5 GB of RAM, and it carries ROS 2 Jazzy, the EKF, the scan-matching
 tracker, the local costmap, the controller and the behaviour tree. The laptop is never in the
-stop reflex. It can take the rest — the planner with its global costmap, the goal server and the
-run recorder — over one TCP link (`zenoh-bridge-ros2dds`), the daily mode; a stack that runs
-whole on the board is one flag away. Either way the operator watches through Foxglove and sends
-one line of JSON when the robot should go somewhere.
+stop reflex, and every drive's tape is written on the board. The laptop reaches the robot over
+one TCP link (`zenoh-bridge-ros2dds`): it can take the planner with its global costmap and the
+goal server, or — the daily mode — leave the whole drive to the board and run the camera SLAM
+beside it, since a Nav2 action does not survive the bridge and a map can wait a second. Either
+way the operator watches through Foxglove and sends one line of JSON when the robot should go
+somewhere.
 
 ## Numbers
 
@@ -45,6 +47,7 @@ Measured on the robot, on the board, during real drives.
 | Localisation confidence | 0.68–0.70 standing, 0.84 driving |
 | Loop closure over a 33 m lap (mapping) | 5 cm |
 | Goal tolerance | 0.10 m / 0.20 rad |
+| Board memory with the whole stack up | 590 MB used, 5 MB swap (1.08 GB and a full 734 MB swap before tracetools was rebuilt without LTTng) |
 | Unit tests | 376, mypy strict, 86% coverage floor |
 
 ## Architecture
@@ -433,13 +436,26 @@ controller within 0.3 s and the cart stopped 0.14 m short; the budget is now a 5
 costmap, a 1.5 s collision look-ahead (0.45 m) and 1.5 m/s² braking, so the refusal comes at
 the first sight of the obstacle.
 
-**Thin client**: `ros/thin.sh on` leaves the board its reflexes and `ros/laptop.sh` starts the
-planner, the goal server and the recorder on the laptop; the laptop brings the board's Nav2 up
-node by node once its own costmap answers, and the board's link watch stops a drive 2.5 s after
-the laptop's heartbeat goes silent. The bridge is a systemd unit that follows the board's stack.
+**Thin client**: `ros/thin.sh vision` keeps the whole drive on the board and opens the bridge
+for the laptop; `ros/thin.sh on` moves the planner and the goal server to the laptop, which then
+brings the board's Nav2 up node by node once its own costmap answers, while the board's link
+watch stops a drive 2.5 s after the laptop's heartbeat goes silent. The bridge is a systemd unit
+that follows the board's stack; the laptop's containers restart when that bridge is a new one,
+and each waits until the bridge has forgotten its previous incarnation before it starts its
+nodes — the bridge keys routes by node name, and a killed node lingers for its DDS lease.
 
-**Next**: goals named from what the camera sees instead of from a hand-written places book, and
-the split's tape recorded on the board so a run's scans never depend on the link.
+**The board's memory**: ROS 2 Jazzy's binaries load `liblttng-ust` into every node through
+`tracetools`, and it takes 128 MB per process before a single tracepoint fires; nine processes on
+a 1.5 GB board lived in a full zram swap and froze under load. The image rebuilds `tracetools`
+with its tracepoints excluded, and the stack now leaves 890 MB free.
+
+**Camera SLAM** (in progress): RTAB-Map runs on the laptop (`ros/laptop.sh vslam`) from the
+neck camera's MJPEG stream and the lidar scans over the bridge, registers with ICP on the scans
+and closes loops on what the camera sees, in its own `rtabmap` frame beside the tracker's map;
+its grid grows in Foxglove while the cart drives on the static map.
+
+**Next**: the SLAM's grid handed to the tracker as the map, a calibrated camera, and goals named
+from what the camera sees instead of from a hand-written places book.
 
 ## Credits
 
