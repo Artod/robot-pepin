@@ -8,13 +8,22 @@ the scans. It publishes its own frame (``rtabmap``) and never ``map -> odom``, s
 localisations coexist; its occupancy grid is the map the tracker will be handed one day.
 
 Arguments: ``board`` (the robot's address for the camera stream), ``database`` (RTAB-Map's
-database; deleted on start while the map is being learnt from scratch).
+database; deleted on start while the map is being learnt from scratch), ``bridge_admin`` (the
+laptop bridge's REST admin, asked whether it still lists this launch's previous incarnation).
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, Shutdown
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    RegisterEventHandler,
+    Shutdown,
+)
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+from pepin.deployment import laptop_launch_nodes
 
 RTABMAP = {
     # registration: ICP on the 2D scans in the plane; the camera only says "I have been here"
@@ -46,10 +55,71 @@ RTABMAP = {
 def generate_launch_description() -> LaunchDescription:
     board = LaunchConfiguration("board")
     database = LaunchConfiguration("database")
+    # The bridge keeps routes by node name: the nodes start only once it has forgotten the
+    # previous incarnation of this launch (pepin_bringup.ghost_wait), or RTAB-Map's /scan and
+    # map routes die with the ghost ten seconds after they were made (2026-09-10).
+    ghost_wait = ExecuteProcess(
+        cmd=[
+            "python3",
+            "-m",
+            "pepin_bringup.ghost_wait",
+            LaunchConfiguration("bridge_admin"),
+            *laptop_launch_nodes("slam"),
+        ],
+        output="screen",
+    )
+    camera = ExecuteProcess(
+        cmd=[
+            "python3",
+            "-m",
+            "pepin_bringup.camera_stream",
+            "--ros-args",
+            "-p",
+            ["board:=", board],
+        ],
+        output="screen",
+    )
+    rtabmap = Node(
+        package="rtabmap_slam",
+        executable="rtabmap",
+        name="rtabmap",
+        # Its outputs are relative names (map, mapGraph, mapPath, info): without a namespace
+        # its "map" landed on /map next to the board's static map and fed the laptop's
+        # global costmap a second, growing map (2026-09-10 01:00).
+        namespace="rtabmap",
+        output="screen",
+        arguments=["-d"],  # start from an empty database while the map is being learnt
+        parameters=[
+            {
+                "frame_id": "base_link",
+                "odom_frame_id": "odom",
+                "map_frame_id": "rtabmap",
+                "publish_tf": False,
+                "database_path": database,
+                "subscribe_depth": False,
+                "subscribe_rgb": True,
+                "subscribe_scan": True,
+                "approx_sync": True,
+                "sync_queue_size": 30,
+                "topic_queue_size": 10,
+                "wait_for_transform": 0.5,
+                "odom_sensor_sync": False,
+                # the grid is republished every second: the operator watches it grow
+                "map_always_update": True,
+                **RTABMAP,
+            }
+        ],
+        remappings=[
+            ("rgb/image", "/camera/image"),
+            ("rgb/camera_info", "/camera/camera_info"),
+            ("scan", "/scan"),
+        ],
+    )
     return LaunchDescription(
         [
             DeclareLaunchArgument("board", default_value="10.0.0.187"),
             DeclareLaunchArgument("database", default_value="/maps/rtabmap.db"),
+            DeclareLaunchArgument("bridge_admin", default_value="http://pepin-zenoh:8000"),
             # A new board bridge means new subscriptions are needed: the watch exits, the launch
             # shuts down, the container's restart policy brings this half back.
             ExecuteProcess(
@@ -57,52 +127,9 @@ def generate_launch_description() -> LaunchDescription:
                 output="screen",
                 on_exit=[Shutdown(reason="the board's bridge restarted")],
             ),
-            ExecuteProcess(
-                cmd=[
-                    "python3",
-                    "-m",
-                    "pepin_bringup.camera_stream",
-                    "--ros-args",
-                    "-p",
-                    ["board:=", board],
-                ],
-                output="screen",
-            ),
-            Node(
-                package="rtabmap_slam",
-                executable="rtabmap",
-                name="rtabmap",
-                # Its outputs are relative names (map, mapGraph, mapPath, info): without a namespace
-                # its "map" landed on /map next to the board's static map and fed the laptop's
-                # global costmap a second, growing map (2026-09-10 01:00).
-                namespace="rtabmap",
-                output="screen",
-                arguments=["-d"],  # start from an empty database while the map is being learnt
-                parameters=[
-                    {
-                        "frame_id": "base_link",
-                        "odom_frame_id": "odom",
-                        "map_frame_id": "rtabmap",
-                        "publish_tf": False,
-                        "database_path": database,
-                        "subscribe_depth": False,
-                        "subscribe_rgb": True,
-                        "subscribe_scan": True,
-                        "approx_sync": True,
-                        "sync_queue_size": 30,
-                        "topic_queue_size": 10,
-                        "wait_for_transform": 0.5,
-                        "odom_sensor_sync": False,
-                        # the grid is republished every second: the operator watches it grow
-                        "map_always_update": True,
-                        **RTABMAP,
-                    }
-                ],
-                remappings=[
-                    ("rgb/image", "/camera/image"),
-                    ("rgb/camera_info", "/camera/camera_info"),
-                    ("scan", "/scan"),
-                ],
+            ghost_wait,
+            RegisterEventHandler(
+                OnProcessExit(target_action=ghost_wait, on_exit=[camera, rtabmap])
             ),
         ]
     )

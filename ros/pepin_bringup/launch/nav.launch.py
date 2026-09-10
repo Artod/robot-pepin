@@ -7,7 +7,8 @@ composes map_server, AMCL, planner, controller, behaviors, bt_navigator and the
 velocity smoother into one container at a lower CPU priority than the sensor
 nodes (see robot.launch.py), so a busy planner never starves the lidar.
 
-Arguments: ``map`` (default the flat's lap3 map), ``params_file``, and ``side``:
+Arguments: ``map`` (default the flat's lap3 map), ``params_file``, ``bridge_admin`` (the laptop
+bridge's REST admin, for the laptop half's ghost wait) and ``side``:
 ``all`` (default) is the whole stack on one machine, as before; ``board`` and ``laptop`` are the
 two halves of the thin-client split — the board keeps the reflexes (controller, behaviours, tree,
 map, tracker) and gets a link watch, the laptop takes the planner and the goal server. The split
@@ -16,13 +17,20 @@ Command chain: controller/behaviors -> cmd_vel_nav -> velocity_smoother -> /cmd_
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, Shutdown
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    OpaqueFunction,
+    RegisterEventHandler,
+    Shutdown,
+)
+from launch.event_handlers import OnProcessExit
 from launch.launch_context import LaunchContext
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
-from pepin.deployment import SIDES, autostart_for, nav_nodes, runs_here
+from pepin.deployment import SIDES, autostart_for, laptop_launch_nodes, nav_nodes, runs_here
 
 
 def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
@@ -110,6 +118,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         parameters=[params],
         composable_node_descriptions=nodes,
     )
+    # The ROS nodes; the watches below are plain processes and start at once.
     actions: list = [container]  # type: ignore[type-arg]
     if runs_here(side, "relocalizer"):
         # Kidnapped-robot recovery: the whole map is searched when the scan stops fitting.
@@ -147,6 +156,23 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             )
         )
     if side == "laptop":
+        # The bridge keeps routes by node name: the nodes start only once it has forgotten the
+        # previous incarnation of this launch (pepin_bringup.ghost_wait), or their routes die
+        # with the ghost ten seconds after they were made (2026-09-10, RTAB-Map without /scan).
+        ghost_wait = ExecuteProcess(
+            cmd=[
+                "python3",
+                "-m",
+                "pepin_bringup.ghost_wait",
+                LaunchConfiguration("bridge_admin"),
+                *laptop_launch_nodes("nav"),
+            ],
+            output="screen",
+        )
+        actions = [
+            ghost_wait,
+            RegisterEventHandler(OnProcessExit(target_action=ghost_wait, on_exit=actions)),
+        ]
         # A new board bridge means new subscriptions are needed: the watch exits, the launch
         # shuts down, the container's restart policy brings this half back
         # (pepin_bringup.bridge_watch).
@@ -173,6 +199,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("params_file", default_value="/params/nav2_params.yaml"),
             DeclareLaunchArgument("side", default_value="all", choices=list(SIDES)),
             DeclareLaunchArgument("board", default_value="10.0.0.187"),
+            DeclareLaunchArgument("bridge_admin", default_value="http://pepin-zenoh:8000"),
             OpaqueFunction(function=_describe),
         ]
     )

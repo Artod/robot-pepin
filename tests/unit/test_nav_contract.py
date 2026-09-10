@@ -472,6 +472,31 @@ def test_the_laptop_half_restarts_with_the_board_s_bridge() -> None:
     assert "\nsettle_bridge" not in after and "        settle_bridge" not in after
 
 
+def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() -> None:
+    """The bridge keeps routes by node name: a half restarted within its predecessor's DDS lease
+    loses its routes when the ghost expires. Both laptop launches start their ROS nodes on the
+    ghost wait's exit, the names they wait for are the names they create, and laptop.sh lets a
+    container leave properly before replacing it."""
+    from pepin.deployment import laptop_launch_nodes
+
+    for launch, half in (("nav.launch.py", "nav"), ("vslam.launch.py", "slam")):
+        src = (REPO / "ros/pepin_bringup/launch" / launch).read_text()
+        assert "pepin_bringup.ghost_wait" in src and "OnProcessExit(target_action=ghost_wait" in src
+        assert f'laptop_launch_nodes("{half}")' in src, launch
+    vslam = (REPO / "ros/pepin_bringup/launch/vslam.launch.py").read_text()
+    assert 'name="rtabmap"' in vslam and 'namespace="rtabmap"' in vslam
+    camera = (REPO / "ros/pepin_bringup/pepin_bringup/camera_stream.py").read_text()
+    assert 'super().__init__("camera_stream")' in camera
+    assert laptop_launch_nodes("slam") == ("/camera_stream", "/rtabmap/rtabmap")
+    nav = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
+    goal = (REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text()
+    assert 'name=f"lifecycle_manager_navigation_{side}"' in nav
+    assert 'name=f"nav2_container_{side}"' in nav and 'super().__init__("goal_server")' in goal
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert "docker stop -t 15" in laptop and "docker rm -f pepin-vslam" not in laptop
+    assert "docker rm -f pepin-laptop" not in laptop
+
+
 def test_the_board_image_carries_no_lttng_tracer() -> None:
     """lttng-ust, pulled in by the binary tracetools, costs 128 MB of resident memory per ROS
     process on load: with nine processes the 1.5 GB board lived in swap and froze under load

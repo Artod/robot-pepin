@@ -241,3 +241,54 @@ class BridgeIdentity:
             return False
         first, self._zid = self._zid, zid
         return first is not None and first != zid
+
+
+# Fully qualified names of the ROS nodes the laptop's SLAM launch creates
+# (ros/pepin_bringup/launch/vslam.launch.py): what its restart must see gone from the bridge.
+LAPTOP_SLAM_NODES = ("/camera_stream", "/rtabmap/rtabmap")
+
+
+def laptop_launch_nodes(launch: str) -> tuple[str, ...]:
+    """Fully qualified names of the ROS nodes the laptop's ``launch`` ("nav" or "slam") creates.
+
+    The navigation half is the planner side's lifecycle nodes in their own container, its
+    manager, the global costmap the planner creates, and the goal server.
+    """
+    if launch == "slam":
+        return LAPTOP_SLAM_NODES
+    if launch == "nav":
+        return (
+            *(f"/{node}" for node in LAPTOP_NAV_NODES),
+            "/global_costmap/global_costmap",
+            "/lifecycle_manager_navigation_laptop",
+            "/nav2_container_laptop",
+            "/goal_server",
+        )
+    raise ValueError(f"launch must be 'nav' or 'slam', not {launch!r}")
+
+
+def lingering_nodes(admin_json: str, names: tuple[str, ...]) -> set[str]:
+    """Which of ``names`` the bridge still lists, from its REST admin reply for
+    ``@/local/ros2/node/**`` (keys read ``@/<zid>/ros2/node/<participant>/<node name>``).
+
+    The bridge keeps a route's local nodes by name, not by process. A container replaced within
+    the DDS lease of its killed predecessor (ten seconds) shows the bridge two /rtabmap/rtabmap;
+    when the ghost expires, the bridge drops the name from every route and the live node is left
+    with a deaf /scan route and no map route out (RTAB-Map fed only while some other subscriber
+    happened to exist, 2026-09-10). A launch waits until its own names are gone before it starts.
+    """
+    import json
+
+    try:
+        rows = json.loads(admin_json)
+    except ValueError:
+        return set()
+    seen: set[str] = set()
+    for row in rows if isinstance(rows, list) else []:
+        try:
+            tail = str(row["key"]).split("/ros2/node/", 1)[1]
+        except (TypeError, KeyError, IndexError):
+            continue
+        _participant, _, node = tail.partition("/")
+        seen.add(f"/{node}")
+    return set(names) & seen

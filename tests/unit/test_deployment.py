@@ -103,3 +103,27 @@ def test_the_laptop_notices_a_new_board_bridge() -> None:
     assert not seen.observe("a") and not seen.observe(None)
     assert seen.observe("b")  # a new bridge: restart
     assert not seen.observe("b")
+
+
+def test_a_launch_waits_until_the_bridge_has_forgotten_its_ghost() -> None:
+    """The bridge lists nodes as @/<zid>/ros2/node/<participant>/<name>; a launch asks which of
+    its own names are still there. A ghost of the SLAM half keeps the tracker's twin out."""
+    from pepin.deployment import LAPTOP_NAV_NODES, laptop_launch_nodes, lingering_nodes
+
+    reply = (
+        '[{"key":"@/6655/ros2/node/0110d87f/rtabmap/rtabmap","value":{}},'
+        '{"key":"@/6655/ros2/node/0110d87f/rtabmap/transform_listener_impl_aaaa","value":{}},'
+        '{"key":"@/6655/ros2/node/01105959/camera_stream","value":{}},'
+        '{"key":"@/6655/ros2/route/topic/sub/scan","value":{}}]'
+    )
+    assert lingering_nodes(reply, laptop_launch_nodes("slam")) == {
+        "/rtabmap/rtabmap",
+        "/camera_stream",
+    }
+    assert lingering_nodes(reply, laptop_launch_nodes("nav")) == set()
+    assert lingering_nodes("", laptop_launch_nodes("slam")) == set()
+    assert lingering_nodes('[{"value":1}, 3]', ("/x",)) == set()
+    assert set(laptop_launch_nodes("nav")) >= {f"/{n}" for n in LAPTOP_NAV_NODES}
+    assert "/goal_server" in laptop_launch_nodes("nav")
+    with pytest.raises(ValueError):
+        laptop_launch_nodes("board")

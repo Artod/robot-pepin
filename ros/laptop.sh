@@ -30,6 +30,10 @@ settle_bridge() {
     done
     echo "the board's bridge did not come back after its restart"
 }
+# A container's nodes get the time to leave DDS properly (RTAB-Map closes its database): a
+# killed node lingers in the bridge for its ten-second lease, and its successor's launch waits
+# that ghost out (pepin_bringup.ghost_wait) before it starts.
+stop_gently() { docker stop -t 15 "$@" >/dev/null 2>&1 || true; docker rm -f "$@" >/dev/null 2>&1 || true; }
 # The laptop image (ros/laptop-build.sh) carries RTAB-Map on top of the board's image.
 IMG=pepin-ros; docker image inspect pepin-laptop:latest >/dev/null 2>&1 && IMG=pepin-laptop
 MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/python3.12/site-packages/pepin_bringup:ro"
@@ -39,12 +43,13 @@ MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/pyth
         -v "$HERE/../config:/ws/config:ro")
 case "${1:-start}" in
     stop)
-        docker rm -f pepin-laptop pepin-vslam pepin-zenoh >/dev/null 2>&1 || true; echo "laptop side stopped"; exit 0 ;;
+        stop_gently pepin-laptop pepin-vslam; docker rm -f pepin-zenoh >/dev/null 2>&1 || true
+        echo "laptop side stopped"; exit 0 ;;
     logs)
         exec docker logs -f "pepin-${2:-laptop}" ;;
     vslam)
         # Camera + lidar SLAM beside the navigation half (ros/pepin_bringup/launch/vslam.launch.py).
-        docker rm -f pepin-vslam >/dev/null 2>&1 || true
+        stop_gently pepin-vslam
         docker run -d --name pepin-vslam --network "$NET" --restart unless-stopped "${MOUNTS[@]}" \
             -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
             "$IMG" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" >/dev/null
@@ -55,7 +60,7 @@ esac
 SIDE="$(ssh "root@$BOARD" "grep -oE 'PEPIN_SIDE=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2)"
 SIDE="${SIDE:-all}"
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
-docker rm -f pepin-laptop pepin-zenoh >/dev/null 2>&1 || true
+stop_gently pepin-laptop; docker rm -f pepin-zenoh >/dev/null 2>&1 || true
 # The board's bridge must be alive before this side connects: its REST admin answers when its
 # zenoh runtime does (a wedged bridge stays "Up" and answers nothing — 2026-09-09).
 for _ in $(seq 1 30); do
