@@ -1,0 +1,18 @@
+{
+  "overview": {
+    "stream": "http://{board}:8080/stream",
+    "width": 1280,
+    "height": 720,
+    "hfov_deg": 70.0,
+    "calibrated": false,
+    "mount": {
+      "x_m": 0.0,
+      "y_m": 0.0,
+      "z_m": 1.23,
+      "pitch_deg": 0.0,
+      "note": "measured 2026-09-09: lens 1.23 m above the floor, its front plane over the wheel axle, level, with the neck at its centre ticks (config/neck.json). The sensor sits a little behind the front plane; calibrate before trusting a centimetre."
+    },
+    "frames": {"link": "camera_link", "optical": "camera_optical"}
+  },
+  "notes": "hfov_deg is the nominal field of view of the AC310 until a checkerboard calibration replaces it (calibrated: true, with the intrinsics next to it)."
+}

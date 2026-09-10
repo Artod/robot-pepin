@@ -28,3 +28,4 @@ ros/maps/*.posegraph
 ros/maps/*.data
 ros/maps/*_throttle*
 .coverage
+ros/maps/rtabmap*.db*
