@@ -17,12 +17,12 @@ MAP="${PEPIN_MAP:-$(ssh "root@$BOARD" "grep -oE 'PEPIN_MAP=.*' /etc/default/pepi
 [ -n "$MAP" ] || { echo "the board does not say which map it runs (ros/mode.sh nav MAP first)"; exit 1; }
 # The library is copied into the build context the same way sync.sh does for the board.
 mkdir -p "$HERE/pepin_src" && rsync -a --delete --exclude __pycache__ "$HERE/../src/pepin/" "$HERE/pepin_src/pepin/"
-# A bridge route created after the board's bridge started delivers nothing (zenoh-bridge-ros2dds
-# 1.5.1: /tf and /scan went silent the moment their laptop subscribers were re-announced), while
-# every route the bridge creates at its own start works. So whenever this side's subscribers
-# change, the board's bridge is restarted and comes back knowing all of them.
+# The board's bridge is restarted once this side's bridge is up and BEFORE this side's containers
+# start: a subscription made against one bridge does not follow it through a restart (a costmap
+# kept a deaf transform listener for 139 s, run 0148), and a bridge restarted after the
+# containers breaks exactly those subscriptions. Later restarts of the board's bridge are handled
+# by pepin_bringup.bridge_watch inside each container.
 settle_bridge() {
-    sleep 20  # let this side's nodes declare their subscriptions first
     ssh "root@$BOARD" "systemctl restart pepin-bridge" 2>/dev/null
     for _ in $(seq 1 30); do
         curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' && return 0
@@ -45,12 +45,15 @@ case "${1:-start}" in
     vslam)
         # Camera + lidar SLAM beside the navigation half (ros/pepin_bringup/launch/vslam.launch.py).
         docker rm -f pepin-vslam >/dev/null 2>&1 || true
-        docker run -d --name pepin-vslam --network "$NET" "${MOUNTS[@]}" \
+        docker run -d --name pepin-vslam --network "$NET" --restart unless-stopped "${MOUNTS[@]}" \
             -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
             "$IMG" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" >/dev/null
-        settle_bridge
         echo "vslam up (RTAB-Map + camera stream): ros/laptop.sh logs vslam"; exit 0 ;;
 esac
+# Which half the board expects: on side=all (ros/thin.sh vision) the board drives by itself and
+# this side starts only the bridge — RTAB-Map and the camera come with "ros/laptop.sh vslam".
+SIDE="$(ssh "root@$BOARD" "grep -oE 'PEPIN_SIDE=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2)"
+SIDE="${SIDE:-all}"
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 docker rm -f pepin-laptop pepin-zenoh >/dev/null 2>&1 || true
 # The board's bridge must be alive before this side connects: its REST admin answers when its
@@ -61,13 +64,16 @@ for _ in $(seq 1 30); do
 done
 curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' || { echo "the board's bridge does not answer on :8000 (ros/thin.sh on, then wait for it)"; exit 1; }
 # ROS_DISTRO matters: without it the bridge assumes Iron. Router mode on both sides, this one
-# connecting to the board's: the pairing measured to pass samples (peer mode here did not).
+# connecting to the board's: the pairing measured to pass samples (peer and client here did not).
 docker run -d --name pepin-zenoh --network "$NET" -p 8001:8000 -v "$HERE/zenoh-bridge-laptop.json:/config.json:ro" \
     -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.7.0 -c /config.json \
     -e "tcp/$BOARD:7447" -d 7 --rest-http-port 8000 >/dev/null
+settle_bridge  # BEFORE the containers: their subscriptions must be made against the bridge they will live with
 SITE=/ws/install/pepin_bringup/lib/python3.12/site-packages/pepin_bringup
-docker run -d --name pepin-laptop --network "$NET" -p 3337:3337 "${MOUNTS[@]}" \
+if [ "$SIDE" != board ]; then
+    echo "board on side=$SIDE: it drives by itself; bridge up for the laptop's SLAM (ros/laptop.sh vslam)"; exit 0
+fi
+docker run -d --name pepin-laptop --network "$NET" -p 3337:3337 --restart unless-stopped "${MOUNTS[@]}" \
     -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
-    "$IMG" ros2 launch pepin_bringup nav.launch.py side:=laptop "map:=$MAP" >/dev/null
-settle_bridge
+    "$IMG" ros2 launch pepin_bringup nav.launch.py side:=laptop "map:=$MAP" "board:=$BOARD" >/dev/null
 echo "laptop side up: planner + goal server (port 3337 here), bridged to $BOARD; ros/laptop.sh logs"

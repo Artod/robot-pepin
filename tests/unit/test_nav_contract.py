@@ -454,3 +454,26 @@ def test_the_bridge_routes_only_what_the_split_needs_and_only_one_way() -> None:
         "zenoh-bridge-board.json" in unit
         and "zenoh-bridge-laptop.json" in (REPO / "ros/laptop.sh").read_text()
     )
+
+
+def test_the_laptop_half_restarts_with_the_board_s_bridge() -> None:
+    """A subscription does not follow a bridge through its restart: both laptop launches carry
+    the bridge watch (exit -> launch shutdown -> container restart), the containers restart on
+    their own, and the board's bridge is settled BEFORE the containers start, never after."""
+    for launch in ("nav.launch.py", "vslam.launch.py"):
+        src = (REPO / "ros/pepin_bringup/launch" / launch).read_text()
+        assert "pepin_bringup.bridge_watch" in src and "Shutdown(" in src, launch
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert laptop.count("--restart unless-stopped") == 2
+    assert laptop.index("settle_bridge  # BEFORE") < laptop.index(
+        "docker run -d --name pepin-laptop"
+    )
+    after = laptop.split("docker run -d --name pepin-laptop")[1]
+    assert "\nsettle_bridge" not in after and "        settle_bridge" not in after
+
+
+def test_a_crashed_navigation_container_comes_back_by_itself() -> None:
+    launch = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
+    container = launch[launch.index("container = ComposableNodeContainer(") :]
+    container = container[: container.index(")\n")]
+    assert "respawn=True" in container and "respawn_delay=" in container

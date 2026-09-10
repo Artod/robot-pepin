@@ -12,7 +12,7 @@ database; deleted on start while the map is being learnt from scratch).
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -50,6 +50,13 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("board", default_value="10.0.0.187"),
             DeclareLaunchArgument("database", default_value="/maps/rtabmap.db"),
+            # A new board bridge means new subscriptions are needed: the watch exits, the launch
+            # shuts down, the container's restart policy brings this half back.
+            ExecuteProcess(
+                cmd=["python3", "-m", "pepin_bringup.bridge_watch", board],
+                output="screen",
+                on_exit=[Shutdown(reason="the board's bridge restarted")],
+            ),
             ExecuteProcess(
                 cmd=[
                     "python3",

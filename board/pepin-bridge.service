@@ -15,16 +15,19 @@ StartLimitIntervalSec=0
 [Service]
 EnvironmentFile=-/etc/default/pepin-ros
 Environment=PEPIN_SIDE=all
-# Only a split stack has a link to bridge; on side=all the unit exits at once, cleanly.
-ExecStartPre=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || { echo "side=$PEPIN_SIDE: no bridge"; exit 0; }'
+Environment=PEPIN_BRIDGE=off
+# The bridge runs for a split stack (side=board) or when the laptop only watches and maps
+# (PEPIN_BRIDGE=on: RTAB-Map and the camera on the laptop, every drive on the board — actions
+# over the bridge crashed the navigation container, topics never did). Otherwise it exits.
+ExecStartPre=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || [ "$PEPIN_BRIDGE" = on ] || { echo "side=$PEPIN_SIDE, bridge=$PEPIN_BRIDGE: no bridge"; exit 0; }'
 # Wait for the graph to settle: the tracker is the last node up.
 # (pgrep, not "ros2 node list": the graph query itself takes tens of seconds on a busy board).
 # Then 20 s more: a route created while a topic's writers are still appearing binds to the
 # first one only — /tf routed nothing until the bridge was restarted with all three
 # writers declared (2026-09-10 00:05).
-ExecStartPre=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || exit 0; for i in $(seq 1 60); do /usr/bin/docker exec pepin-ros pgrep -f pepin_bringup.relocalizer >/dev/null 2>&1 && sleep 20 && exit 0; sleep 2; done; echo "stack not up after 120 s, starting the bridge anyway"'
+ExecStartPre=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || [ "$PEPIN_BRIDGE" = on ] || exit 0; for i in $(seq 1 60); do /usr/bin/docker exec pepin-ros pgrep -f pepin_bringup.relocalizer >/dev/null 2>&1 && sleep 20 && exit 0; sleep 2; done; echo "stack not up after 120 s, starting the bridge anyway"'
 ExecStartPre=-/usr/bin/docker rm -f zenoh-bridge
-ExecStart=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || exec sleep infinity; exec /usr/bin/docker run --rm --name zenoh-bridge --network host -v /root/pepin-ros/zenoh-bridge-board.json:/config.json:ro -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.7.0 -c /config.json -d 7 -l tcp/0.0.0.0:7447 --rest-http-port 8000'
+ExecStart=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || [ "$PEPIN_BRIDGE" = on ] || exec sleep infinity; exec /usr/bin/docker run --rm --name zenoh-bridge --network host -v /root/pepin-ros/zenoh-bridge-board.json:/config.json:ro -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.7.0 -c /config.json -d 7 -l tcp/0.0.0.0:7447 --rest-http-port 8000'
 ExecStop=-/usr/bin/docker stop -t 5 zenoh-bridge
 Restart=on-failure
 RestartSec=5

@@ -57,7 +57,9 @@ PORT = 3337
 GOOD_FIT = DRIVE_FIT  # below this the robot is told to find itself before it drives (pepin.watch)
 # The planner to select, and the controller that follows it. One controller now: the lattice
 # planner no longer expands in reverse, so there is nothing a reversing controller would add.
-RECORDER_PATIENCE_S = 3.0  # how long a drive waits for the recorder's word before going anyway
+RECORDER_PATIENCE_S = (
+    8.0  # the recorder answers over the bridge; 3 s once named a drive after the previous tape
+)
 BRINGUP_ROUND_S = 10.0  # a lifecycle query or transition that has not answered by then is abandoned
 
 PLANNERS = {

@@ -16,7 +16,7 @@ Command chain: controller/behaviors -> cmd_vel_nav -> velocity_smoother -> /cmd_
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, Shutdown
 from launch.launch_context import LaunchContext
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
@@ -99,6 +99,11 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         executable="component_container_isolated",
         output="screen",
         prefix="nice -n 5",  # planning yields to the sensor nodes (nice -10) under load
+        # A crash of one Nav2 node takes the whole container with it (SIGABRT at a goal,
+        # 2026-09-10 16:06: the board drove nothing until a stack restart). Respawned, the
+        # container is back in seconds and the laptop's bring-up activates its nodes again.
+        respawn=True,
+        respawn_delay=2.0,
         # The whole params file goes to the container process as well: the costmaps are
         # sub-nodes (/local_costmap/local_costmap) created inside controller/planner and
         # only see parameters given to the process, not the ones given to their parents.
@@ -141,6 +146,17 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 parameters=[{"places": places, "side": side}],
             )
         )
+    if side == "laptop":
+        # A new board bridge means new subscriptions are needed: the watch exits, the launch
+        # shuts down, the container's restart policy brings this half back
+        # (pepin_bringup.bridge_watch).
+        actions.append(
+            ExecuteProcess(
+                cmd=["python3", "-m", "pepin_bringup.bridge_watch", LaunchConfiguration("board")],
+                output="screen",
+                on_exit=[Shutdown(reason="the board's bridge restarted")],
+            )
+        )
     if runs_here(side, "link_watch"):
         # As a module, not a console script: a new entry point needs an image rebuild, a module
         # on the mounted package path does not.
@@ -156,6 +172,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("map", default_value="/maps/20260903_182653_lap3_loop.yaml"),
             DeclareLaunchArgument("params_file", default_value="/params/nav2_params.yaml"),
             DeclareLaunchArgument("side", default_value="all", choices=list(SIDES)),
+            DeclareLaunchArgument("board", default_value="10.0.0.187"),
             OpaqueFunction(function=_describe),
         ]
     )

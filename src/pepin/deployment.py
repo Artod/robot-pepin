@@ -208,3 +208,36 @@ def bridge_config(side: str) -> dict[str, object]:
     return {
         "plugins": {"ros2dds": {"allow": bridge_allow(side), "queries_timeout": {"default": 5.0}}}
     }
+
+
+def bridge_zid(admin_json: str) -> str | None:
+    """The zenoh id of a bridge from its REST admin reply for ``@/local/router``, or ``None``.
+
+    The id changes whenever the bridge process restarts — a board reboot, a stack restart — and
+    a laptop that keeps its old subscriptions past that moment is deaf (run 0148: no plan in
+    139 s because the laptop's costmap never saw the new bridge's transforms).
+    """
+    import json
+
+    try:
+        entries = json.loads(admin_json)
+        key = str(entries[0]["key"])
+    except (ValueError, TypeError, KeyError, IndexError):
+        return None
+    parts = key.split("/")
+    return parts[1] if len(parts) >= 3 and parts[0] == "@" and parts[2] == "router" else None
+
+
+class BridgeIdentity:
+    """Remembers which bridge the laptop last talked to; says when it is a different one."""
+
+    def __init__(self) -> None:
+        self._zid: str | None = None
+
+    def observe(self, zid: str | None) -> bool:
+        """True once: the first id seen after another one — the board's bridge was restarted.
+        An unreachable bridge (``None``) is not a change; the same id again is not either."""
+        if zid is None:
+            return False
+        first, self._zid = self._zid, zid
+        return first is not None and first != zid

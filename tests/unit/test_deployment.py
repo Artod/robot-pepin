@@ -87,3 +87,19 @@ def test_the_tape_is_written_where_the_sensors_are() -> None:
     assert runs_here("all", "run_recorder") and runs_here("board", "run_recorder")
     assert not runs_here("laptop", "run_recorder")
     assert runs_here("laptop", "goal_server") and not runs_here("board", "goal_server")
+
+
+def test_the_laptop_notices_a_new_board_bridge() -> None:
+    from pepin.deployment import BridgeIdentity, bridge_zid
+
+    reply = '[{"key":"@/41206010aba91e0f57df10a0e746e960/router","value":{"sessions":[]}}]'
+    assert bridge_zid(reply) == "41206010aba91e0f57df10a0e746e960"
+    assert (
+        bridge_zid("") is None and bridge_zid("[]") is None and bridge_zid('[{"key":"x"}]') is None
+    )
+    seen = BridgeIdentity()
+    assert not seen.observe(None)  # unreachable: not a change
+    assert not seen.observe("a")  # the first bridge seen
+    assert not seen.observe("a") and not seen.observe(None)
+    assert seen.observe("b")  # a new bridge: restart
+    assert not seen.observe("b")
