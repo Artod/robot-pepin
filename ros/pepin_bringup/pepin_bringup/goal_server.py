@@ -58,6 +58,7 @@ GOOD_FIT = DRIVE_FIT  # below this the robot is told to find itself before it dr
 # The planner to select, and the controller that follows it. One controller now: the lattice
 # planner no longer expands in reverse, so there is nothing a reversing controller would add.
 RECORDER_PATIENCE_S = 3.0  # how long a drive waits for the recorder's word before going anyway
+BRINGUP_ROUND_S = 10.0  # a lifecycle query or transition that has not answered by then is abandoned
 
 PLANNERS = {
     "navfn": ("GridBased", "FollowPath"),
@@ -119,6 +120,7 @@ class GoalServer(Node):
                 for node in BOARD_NAV_NODES
             }
             self._bringup_busy = False
+            self._bringup_since = 0.0
             self.create_timer(3.0, self._bring_board_up)
         # The recorder is a node where the sensors are (run_recorder, on the board): one command
         # opens a tape, the latched status names it (pepin.runlink).
@@ -140,9 +142,16 @@ class GoalServer(Node):
 
     def _bring_board_up(self) -> None:
         """Every 3 s on the laptop: read the board's lifecycle states and send the due step."""
+        now = time.monotonic()
         if self._bringup_busy:
-            return
+            # A call whose answer never comes (the board restarted under it, the bridge re-routing)
+            # must not hold the bring-up for good: after BRINGUP_ROUND_S the round is abandoned.
+            if now - self._bringup_since < BRINGUP_ROUND_S:
+                return
+            self.get_logger().warning("board bring-up: a round got no answer; asking afresh")
+            self._board_state.clear()
         self._bringup_busy = True
+        self._bringup_since = now
         pending = set(BOARD_NAV_NODES)
         for node, client in self._state_clients.items():
             if not client.service_is_ready():

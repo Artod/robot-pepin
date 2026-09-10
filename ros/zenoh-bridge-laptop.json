@@ -15,10 +15,10 @@
           "^/(behavior_server/change_state|behavior_server/get_state|bt_navigator/change_state|bt_navigator/get_state|controller_server/change_state|controller_server/get_state|relocalize|velocity_smoother/change_state|velocity_smoother/get_state|where_am_i)$"
         ],
         "action_servers": [
-          "^/(compute_path_to_pose)$"
+          "^/(compute_path_through_poses|compute_path_to_pose)$"
         ],
         "action_clients": [
-          "^/(navigate_to_pose)$"
+          "^/(navigate_through_poses|navigate_to_pose)$"
         ]
       },
       "queries_timeout": {

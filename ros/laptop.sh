@@ -64,7 +64,7 @@ curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' || { echo
 # connecting to the board's: the pairing measured to pass samples (peer mode here did not).
 docker run -d --name pepin-zenoh --network "$NET" -p 8001:8000 -v "$HERE/zenoh-bridge-laptop.json:/config.json:ro" \
     -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.7.0 -c /config.json \
-    -e "tcp/$BOARD:7447" -d 7 --rest-http-port 8000 -w >/dev/null
+    -e "tcp/$BOARD:7447" -d 7 --rest-http-port 8000 >/dev/null
 SITE=/ws/install/pepin_bringup/lib/python3.12/site-packages/pepin_bringup
 docker run -d --name pepin-laptop --network "$NET" -p 3337:3337 "${MOUNTS[@]}" \
     -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \

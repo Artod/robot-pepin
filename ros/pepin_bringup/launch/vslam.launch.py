@@ -65,6 +65,10 @@ def generate_launch_description() -> LaunchDescription:
                 package="rtabmap_slam",
                 executable="rtabmap",
                 name="rtabmap",
+                # Its outputs are relative names (map, mapGraph, mapPath, info): without a namespace
+                # its "map" landed on /map next to the board's static map and fed the laptop's
+                # global costmap a second, growing map (2026-09-10 01:00).
+                namespace="rtabmap",
                 output="screen",
                 arguments=["-d"],  # start from an empty database while the map is being learnt
                 parameters=[

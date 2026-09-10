@@ -24,7 +24,7 @@ ExecStartPre=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || { echo "side=$PEPIN_SIDE: 
 # writers declared (2026-09-10 00:05).
 ExecStartPre=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || exit 0; for i in $(seq 1 60); do /usr/bin/docker exec pepin-ros pgrep -f pepin_bringup.relocalizer >/dev/null 2>&1 && sleep 20 && exit 0; sleep 2; done; echo "stack not up after 120 s, starting the bridge anyway"'
 ExecStartPre=-/usr/bin/docker rm -f zenoh-bridge
-ExecStart=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || exec sleep infinity; exec /usr/bin/docker run --rm --name zenoh-bridge --network host -v /root/pepin-ros/zenoh-bridge-board.json:/config.json:ro -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.7.0 -c /config.json -d 7 -l tcp/0.0.0.0:7447 --rest-http-port 8000 -w'
+ExecStart=/bin/sh -c '[ "$PEPIN_SIDE" = board ] || exec sleep infinity; exec /usr/bin/docker run --rm --name zenoh-bridge --network host -v /root/pepin-ros/zenoh-bridge-board.json:/config.json:ro -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.7.0 -c /config.json -d 7 -l tcp/0.0.0.0:7447 --rest-http-port 8000'
 ExecStop=-/usr/bin/docker stop -t 5 zenoh-bridge
 Restart=on-failure
 RestartSec=5

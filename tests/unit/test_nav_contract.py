@@ -401,6 +401,7 @@ def test_the_camera_slam_lives_beside_the_tracker_never_over_it() -> None:
     )
     src = (REPO / "ros/pepin_bringup/launch/vslam.launch.py").read_text()
     assert '"publish_tf": False' in src and '"map_frame_id": "rtabmap"' in src
+    assert 'namespace="rtabmap"' in src, "its relative 'map' output must not land on /map"
     assert '"subscribe_scan": True' in src and '"Reg/Strategy": "1"' in src
     assert "pepin_bringup.camera_stream" in src and spec is not None
     laptop = (REPO / "ros/laptop.sh").read_text()

@@ -15,10 +15,10 @@
           "^/(global_costmap/clear_entirely_global_costmap)$"
         ],
         "action_servers": [
-          "^/(navigate_to_pose)$"
+          "^/(navigate_through_poses|navigate_to_pose)$"
         ],
         "action_clients": [
-          "^/(compute_path_to_pose)$"
+          "^/(compute_path_through_poses|compute_path_to_pose)$"
         ]
       },
       "queries_timeout": {

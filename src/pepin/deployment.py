@@ -167,8 +167,10 @@ BOARD_SERVES = (
     *(f"{node}/{srv}" for node in BOARD_NAV_NODES for srv in ("get_state", "change_state")),
 )
 LAPTOP_SERVES = ("global_costmap/clear_entirely_global_costmap",)
-BOARD_ACTIONS = ("navigate_to_pose",)
-LAPTOP_ACTIONS = ("compute_path_to_pose",)
+# Both navigators' trees load at activation and look for both planner actions: a missing
+# through-poses server failed the board's bring-up ("Action server ... not available").
+BOARD_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
+LAPTOP_ACTIONS = ("compute_path_to_pose", "compute_path_through_poses")
 
 
 _Names = tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]
