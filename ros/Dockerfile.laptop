@@ -1,9 +1,20 @@
 # The laptop half of the stack: the board's image plus what only a laptop should carry —
-# RTAB-Map (camera + lidar SLAM with appearance-based loop closure) and the image pipeline.
-# Built by ros/laptop-build.sh; the board never sees this image.
+# RTAB-Map (camera + lidar SLAM with appearance-based loop closure), the image pipeline, and
+# the monocular depth network that turns the camera into a depth sensor (CPU: 0.33 s a frame
+# on the Docker VM, enough for 1 Hz map nodes). Built by ros/laptop-build.sh; the board never
+# sees this image.
 FROM pepin-ros:latest
 RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
         ros-jazzy-rtabmap-ros ros-jazzy-rtabmap-slam ros-jazzy-rtabmap-viz \
         ros-jazzy-cv-bridge ros-jazzy-image-transport ros-jazzy-image-transport-plugins \
-        ros-jazzy-camera-calibration-parsers python3-opencv \
+        ros-jazzy-camera-calibration-parsers ros-jazzy-foxglove-bridge python3-opencv python3-pip \
     && rm -rf /var/lib/apt/lists/*
+# Depth Anything V2, metric indoor, small: the weights are fetched at build time so a launch
+# never depends on the internet (HF_HUB_OFFLINE keeps the library from trying).
+ARG DEPTH_MODEL=depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf
+ENV PEPIN_DEPTH_MODEL=$DEPTH_MODEL HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+RUN python3 -m pip install -q --break-system-packages --no-cache-dir torch torchvision \
+        --index-url https://download.pytorch.org/whl/cpu \
+    && python3 -m pip install -q --break-system-packages --no-cache-dir transformers pillow \
+    && HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 python3 -c "from transformers import AutoImageProcessor, AutoModelForDepthEstimation; \
+        AutoImageProcessor.from_pretrained('$DEPTH_MODEL'); AutoModelForDepthEstimation.from_pretrained('$DEPTH_MODEL')"

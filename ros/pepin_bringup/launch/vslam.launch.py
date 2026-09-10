@@ -2,7 +2,8 @@
 
 The board keeps its tracker on the static map (map -> odom, the reflexes' frame). This launch
 runs beside it, on the laptop, over the bridge: the neck camera's stream becomes images, and
-RTAB-Map fuses them with the lidar scans and the board's odometry (odom -> base_link from TF)
+a depth network scaled by the lidar turns them into depth images (pepin_bringup.depth_stream),
+and RTAB-Map fuses both with the lidar scans and the board's odometry (odom -> base_link from TF)
 into a pose graph — loop closures found by what the camera sees, transforms refined by ICP on
 the scans. It publishes its own frame (``rtabmap``) and never ``map -> odom``, so the two
 localisations coexist; its occupancy grid is the map the tracker will be handed one day.
@@ -32,17 +33,29 @@ RTABMAP = {
     "Icp/VoxelSize": "0.05",
     "Icp/MaxCorrespondenceDistance": "0.15",
     "Icp/PointToPlane": "false",
-    # the grid comes from the lidar, not from depth the camera does not have
-    "Grid/FromDepth": "false",
-    "Grid/RangeMax": "6.0",
+    # the grid comes from the lidar AND the camera's depth (pepin_bringup.depth_stream): the lidar
+    # keeps the plane exact, the depth adds what stands above it — table tops, seats, shelves.
+    # Grid/3D keeps the voxels so the operator sees the room in three dimensions (cloud_map).
+    "Grid/Sensor": "2",
+    "Grid/3D": "true",
+    "Grid/RangeMax": "5.0",
     "Grid/CellSize": "0.05",
-    "Grid/RayTracing": "true",
+    "Grid/RayTracing": "false",  # 3D ray tracing costs more than it clears at 1 Hz
+    "Grid/DepthDecimation": "4",  # 160x90 depth samples a frame: plenty for 5 cm voxels
+    "Grid/MaxGroundHeight": "0.08",
+    "Grid/MaxObstacleHeight": "1.6",
+    "Grid/NormalsSegmentation": "false",  # height decides ground vs obstacle; the floor is flat
     # graph: refine neighbour links with ICP, close loops with nearby nodes by space
     "RGBD/NeighborLinkRefining": "true",
     "RGBD/ProximityBySpace": "true",
     "RGBD/LinearUpdate": "0.05",
     "RGBD/AngularUpdate": "0.05",
     "RGBD/OptimizeFromGraphEnd": "false",
+    # A mono camera has no 3D features, so the visual registration RTAB-Map runs to seed a
+    # loop-closure transform always fails ("old=0" features, 299 hypotheses rejected in one
+    # session): the camera only names the node, and ICP on the two scans, started from
+    # identity, gives the transform — the hypothesis is a revisit of the same spot.
+    "RGBD/LoopClosureIdentityGuess": "true",
     "Rtabmap/DetectionRate": "1.0",
     # appearance: GFTT/ORB words, a few hundred per image
     "Kp/DetectorStrategy": "8",
@@ -67,6 +80,26 @@ def generate_launch_description() -> LaunchDescription:
             *laptop_launch_nodes("slam"),
         ],
         output="screen",
+    )
+    depth = ExecuteProcess(
+        cmd=[
+            "python3",
+            "-m",
+            "pepin_bringup.depth_stream",
+            "--ros-args",
+            "-p",
+            ["board:=", board],
+        ],
+        output="screen",
+    )
+    # The operator's Foxglove connects here for the 3D view: the cloud stays on the laptop and
+    # the board's topics arrive over the bridge, so nothing crosses the WiFi twice.
+    foxglove = Node(
+        package="foxglove_bridge",
+        executable="foxglove_bridge",
+        name="foxglove_bridge",
+        output="screen",
+        parameters=[{"port": 8765, "address": "0.0.0.0", "send_buffer_limit": 100_000_000}],
     )
     camera = ExecuteProcess(
         cmd=[
@@ -96,8 +129,8 @@ def generate_launch_description() -> LaunchDescription:
                 "map_frame_id": "rtabmap",
                 "publish_tf": False,
                 "database_path": database,
-                "subscribe_depth": False,
-                "subscribe_rgb": True,
+                "subscribe_depth": True,  # rgb + depth + camera_info from the camera nodes
+                "subscribe_rgb": False,
                 "subscribe_scan": True,
                 "approx_sync": True,
                 "sync_queue_size": 30,
@@ -112,6 +145,7 @@ def generate_launch_description() -> LaunchDescription:
         remappings=[
             ("rgb/image", "/camera/image"),
             ("rgb/camera_info", "/camera/camera_info"),
+            ("depth/image", "/camera/depth"),
             ("scan", "/scan"),
         ],
     )
@@ -129,7 +163,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             ghost_wait,
             RegisterEventHandler(
-                OnProcessExit(target_action=ghost_wait, on_exit=[camera, rtabmap])
+                OnProcessExit(target_action=ghost_wait, on_exit=[camera, depth, rtabmap, foxglove])
             ),
         ]
     )

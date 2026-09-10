@@ -406,6 +406,8 @@ def test_the_camera_slam_lives_beside_the_tracker_never_over_it() -> None:
     assert "pepin_bringup.camera_stream" in src and spec is not None
     laptop = (REPO / "ros/laptop.sh").read_text()
     assert "vslam.launch.py" in laptop and "config:/ws/config" in laptop
+    # a mono camera cannot seed a loop-closure transform: ICP from identity does
+    assert '"RGBD/LoopClosureIdentityGuess": "true"' in src
 
 
 def test_the_bridge_routes_only_what_the_split_needs_and_only_one_way() -> None:
@@ -487,7 +489,14 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
     assert 'name="rtabmap"' in vslam and 'namespace="rtabmap"' in vslam
     camera = (REPO / "ros/pepin_bringup/pepin_bringup/camera_stream.py").read_text()
     assert 'super().__init__("camera_stream")' in camera
-    assert laptop_launch_nodes("slam") == ("/camera_stream", "/rtabmap/rtabmap")
+    depth = (REPO / "ros/pepin_bringup/pepin_bringup/depth_stream.py").read_text()
+    assert 'super().__init__("depth_stream")' in depth and 'name="foxglove_bridge"' in vslam
+    assert laptop_launch_nodes("slam") == (
+        "/camera_stream",
+        "/depth_stream",
+        "/rtabmap/rtabmap",
+        "/foxglove_bridge",
+    )
     nav = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
     goal = (REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text()
     assert 'name=f"lifecycle_manager_navigation_{side}"' in nav
@@ -495,6 +504,38 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
     laptop = (REPO / "ros/laptop.sh").read_text()
     assert "docker stop -t 15" in laptop and "docker rm -f pepin-vslam" not in laptop
     assert "docker rm -f pepin-laptop" not in laptop
+
+
+def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
+    """The laptop turns the camera's frames into depth images (a network on CPU, the lidar sets
+    the scale), RTAB-Map builds its grid from the lidar and that depth in 3D, the cloud is drawn
+    by the operator's Foxglove connected to the laptop, and the image carries the weights."""
+    vslam = (REPO / "ros/pepin_bringup/launch/vslam.launch.py").read_text()
+    assert "pepin_bringup.depth_stream" in vslam and '"subscribe_depth": True' in vslam
+    assert '("depth/image", "/camera/depth")' in vslam
+    for key in ('"Grid/Sensor": "2"', '"Grid/3D": "true"', '"Grid/MaxObstacleHeight"'):
+        assert key in vslam, key
+    assert "on_exit=[camera, depth, rtabmap, foxglove]" in vslam
+    node = (REPO / "ros/pepin_bringup/pepin_bringup/depth_stream.py").read_text()
+    assert '"/camera/depth"' in node and "scale_from_samples" in node and "DepthScale" in node
+    image = (REPO / "ros/Dockerfile.laptop").read_text()
+    assert (
+        "whl/cpu" in image and "HF_HUB_OFFLINE=1" in image and "ros-jazzy-foxglove-bridge" in image
+    )
+    assert "Depth-Anything-V2-Metric-Indoor-Small-hf" in image
+    import json
+
+    layout = json.loads((REPO / "ros/foxglove/pepin_nav.json").read_text())
+    assert layout["configById"]["3D!nav"]["topics"]["/rtabmap/cloud_map"]["colorMode"] == "rgb"
+    # RTAB-Map's own grid fights the static map for the floor: off by default in the nav view
+    assert layout["configById"]["3D!nav"]["topics"]["/rtabmap/map"]["visible"] is False
+    # the 3D view: the cloud, the path, the scan and the robot; no grid lies over the voxels
+    room = json.loads((REPO / "ros/foxglove/pepin_3d.json").read_text())["configById"]["3D!room"]
+    shown = {t for t, c in room["topics"].items() if c.get("visible")}
+    assert "/rtabmap/cloud_map" in shown and "/rtabmap/mapPath" in shown and "/scan" in shown
+    assert not shown & {"/map", "/rtabmap/map", "/local_costmap/costmap", "/global_costmap/costmap"}
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert "-p 8765:8765" in laptop.split("docker run -d --name pepin-vslam")[1].split("\n")[0]
 
 
 def test_the_board_image_carries_no_lttng_tracer() -> None:

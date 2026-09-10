@@ -1,14 +1,14 @@
 {
   "configById": {
-    "3D!nav": {
+    "3D!room": {
       "cameraState": {
-        "perspective": false,
-        "distance": 14,
-        "phi": 0,
-        "thetaOffset": 0,
+        "perspective": true,
+        "distance": 9.0,
+        "phi": 55.0,
+        "thetaOffset": 45.0,
         "targetOffset": [
-          -3,
-          2,
+          0,
+          0,
           0
         ],
         "target": [
@@ -47,7 +47,7 @@
       },
       "topics": {
         "/map": {
-          "visible": true,
+          "visible": false,
           "colorMode": "custom",
           "minColor": "#ffffffff",
           "maxColor": "#000000ff",
@@ -60,23 +60,23 @@
           "alpha": 0.35
         },
         "/local_costmap/costmap": {
-          "visible": true,
+          "visible": false,
           "colorMode": "costmap",
           "alpha": 0.45
         },
         "/plan": {
-          "visible": true,
+          "visible": false,
           "lineWidth": 0.05,
           "color": "#00e676"
         },
         "/local_plan": {
-          "visible": true,
+          "visible": false,
           "lineWidth": 0.03,
           "color": "#ffea00"
         },
         "/scan": {
           "visible": true,
-          "pointSize": 4,
+          "pointSize": 3,
           "colorField": "intensity",
           "colorMode": "flat",
           "flatColor": "#ff9100"
@@ -97,12 +97,12 @@
           "color": "#2979ff"
         },
         "/amcl_path": {
-          "visible": true,
+          "visible": false,
           "lineWidth": 0.04,
           "color": "#ff1744"
         },
         "/goal_pose": {
-          "visible": true,
+          "visible": false,
           "type": "arrow",
           "color": "#00e5ff"
         },
@@ -117,7 +117,7 @@
         },
         "/rtabmap/cloud_map": {
           "visible": true,
-          "pointSize": 5,
+          "pointSize": 6,
           "colorMode": "rgb"
         }
       },
@@ -161,48 +161,6 @@
       ],
       "minLogLevel": 2,
       "nameFilter": {}
-    },
-    "Plot!fit": {
-      "paths": [
-        {
-          "value": "/localization_fit.data",
-          "enabled": true,
-          "timestampMethod": "receiveTime",
-          "label": "scan-to-map fit"
-        }
-      ],
-      "minYValue": 0,
-      "maxYValue": 1,
-      "showXAxisLabels": true,
-      "showYAxisLabels": true,
-      "showLegend": true,
-      "legendDisplay": "floating",
-      "isSynced": true,
-      "xAxisVal": "timestamp",
-      "followingViewWidth": 120
-    },
-    "RawMessages!bt": {
-      "topicPath": "/behavior_tree_log",
-      "diffEnabled": false,
-      "diffMethod": "custom",
-      "diffTopicPath": "",
-      "showFullMessageForDiff": false
-    },
-    "Tab!status": {
-      "activeTabIdx": 0,
-      "tabs": [
-        {
-          "title": "feedback",
-          "layout": "RawMessages!fb"
-        }
-      ]
-    },
-    "RawMessages!fb": {
-      "topicPath": "/navigate_to_pose/_action/feedback.feedback",
-      "diffEnabled": false,
-      "diffMethod": "custom",
-      "diffTopicPath": "",
-      "showFullMessageForDiff": false
     }
   },
   "globalVariables": {},
@@ -212,18 +170,8 @@
   },
   "layout": {
     "direction": "row",
-    "first": "3D!nav",
-    "second": {
-      "direction": "column",
-      "first": "RosOut!log",
-      "second": {
-        "direction": "column",
-        "first": "Plot!fit",
-        "second": "RawMessages!bt",
-        "splitPercentage": 45
-      },
-      "splitPercentage": 40
-    },
-    "splitPercentage": 66
+    "first": "3D!room",
+    "second": "RosOut!log",
+    "splitPercentage": 80
   }
 }

@@ -50,10 +50,10 @@ case "${1:-start}" in
     vslam)
         # Camera + lidar SLAM beside the navigation half (ros/pepin_bringup/launch/vslam.launch.py).
         stop_gently pepin-vslam
-        docker run -d --name pepin-vslam --network "$NET" --restart unless-stopped "${MOUNTS[@]}" \
+        docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped "${MOUNTS[@]}" \
             -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
             "$IMG" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" >/dev/null
-        echo "vslam up (RTAB-Map + camera stream): ros/laptop.sh logs vslam"; exit 0 ;;
+        echo "vslam up (RTAB-Map + camera + depth): Foxglove at ws://localhost:8765, ros/laptop.sh logs vslam"; exit 0 ;;
 esac
 # Which half the board expects: on side=all (ros/thin.sh vision) the board drives by itself and
 # this side starts only the bridge — RTAB-Map and the camera come with "ros/laptop.sh vslam".
