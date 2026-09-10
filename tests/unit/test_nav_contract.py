@@ -389,3 +389,67 @@ def test_the_recorder_is_its_own_node_on_the_board_side() -> None:
     server = (REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text()
     assert "RunRecorder(" not in server and "curl" not in server
     assert "RUN_COMMAND_TOPIC" in server and "RUN_STATUS_TOPIC" in server
+
+
+def test_the_camera_slam_lives_beside_the_tracker_never_over_it() -> None:
+    """RTAB-Map on the laptop publishes its own frame and no map -> odom: the board's tracker
+    keeps the reflexes' frame; the camera is nominal until calibrated and says so."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "vslam_launch", REPO / "ros/pepin_bringup/launch/vslam.launch.py"
+    )
+    src = (REPO / "ros/pepin_bringup/launch/vslam.launch.py").read_text()
+    assert '"publish_tf": False' in src and '"map_frame_id": "rtabmap"' in src
+    assert '"subscribe_scan": True' in src and '"Reg/Strategy": "1"' in src
+    assert "pepin_bringup.camera_stream" in src and spec is not None
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert "vslam.launch.py" in laptop and "config:/ws/config" in laptop
+
+
+def test_the_bridge_routes_only_what_the_split_needs_and_only_one_way() -> None:
+    """Routing every node's parameter services wedged the link; routing a topic both ways looped
+    it (a bridge finds its own writer and calls it a publisher). Each side's config lists its own
+    publishers and the other side's subscribers, generated from pepin.deployment."""
+    import json
+    import re
+
+    from pepin.deployment import bridge_allow, bridge_config
+
+    for side in ("board", "laptop"):
+        written = json.loads((REPO / f"ros/zenoh-bridge-{side}.json").read_text())
+        assert written == bridge_config(side), f"regenerate ros/zenoh-bridge-{side}.json"
+    board, laptop = bridge_allow("board"), bridge_allow("laptop")
+    pub_b, sub_l = re.compile(board["publishers"][0]), re.compile(laptop["subscribers"][0])
+    for name in (
+        "/scan",
+        "/tf",
+        "/tf_static",
+        "/map",
+        "/odometry/filtered",
+        "/tof/front",
+        "/tracker_pose",
+        "/dynamic_obstacles",
+        "/pepin/run_status",
+    ):
+        assert pub_b.search(name) and sub_l.search(name), name
+        assert not re.compile(laptop["publishers"][0]).search(name), f"{name} would loop"
+    for name in ("/plan", "/pepin/run", "/laptop/heartbeat", "/planner_selector", "/rtabmap/map"):
+        assert re.compile(laptop["publishers"][0]).search(name) and re.compile(
+            board["subscribers"][0]
+        ).search(name)
+        assert not pub_b.search(name), f"{name} would loop"
+    assert re.compile(board["action_servers"][0]).search("/navigate_to_pose")
+    assert re.compile(laptop["action_servers"][0]).search("/compute_path_to_pose")
+    assert re.compile(board["service_servers"][0]).search("/bt_navigator/change_state")
+    assert re.compile(laptop["service_servers"][0]).search(
+        "/global_costmap/clear_entirely_global_costmap"
+    )
+    for noise in ("/launch_ros_1/get_parameters", "/rosout", "/camera/image", "/ldlidar_node/scan"):
+        for block in (*board.values(), *laptop.values()):
+            assert not re.compile(block[0]).search(noise), noise
+    unit = (REPO / "board/pepin-bridge.service").read_text()
+    assert (
+        "zenoh-bridge-board.json" in unit
+        and "zenoh-bridge-laptop.json" in (REPO / "ros/laptop.sh").read_text()
+    )

@@ -127,3 +127,82 @@ def next_transition(states: dict[str, str]) -> tuple[str, int] | None:
             return node, TRANSITION_ACTIVATE
         return None
     return None
+
+
+# What crosses the bridge, by direction. Each bridge is allowed only the publishers that live on
+# its own side and the subscribers that live on the other: a bridge that may route a topic both
+# ways discovers its own writer as a local publisher and loops the topic back until nothing
+# crosses at all (scan and tf died the moment a second laptop launch subscribed, 2026-09-09).
+BOARD_PUBLISHES = (
+    "scan",
+    "tf",
+    "tf_static",
+    "map",
+    "odom",
+    "odometry/filtered",
+    "imu/data_raw",
+    "tof/front",
+    "tof/left",
+    "tof/right",
+    "tracker_pose",
+    "localization_fit",
+    "dynamic_obstacles",
+    "local_costmap/costmap",
+    "pepin/run_status",
+)
+LAPTOP_PUBLISHES = (
+    "plan",
+    "pepin/run",
+    HEARTBEAT_TOPIC,
+    "planner_selector",
+    "controller_selector",
+    "rtabmap/map",
+    "rtabmap/mapGraph",
+    "rtabmap/mapPath",
+    "rtabmap/info",
+)
+BOARD_SERVES = (
+    "relocalize",
+    "where_am_i",
+    *(f"{node}/{srv}" for node in BOARD_NAV_NODES for srv in ("get_state", "change_state")),
+)
+LAPTOP_SERVES = ("global_costmap/clear_entirely_global_costmap",)
+BOARD_ACTIONS = ("navigate_to_pose",)
+LAPTOP_ACTIONS = ("compute_path_to_pose",)
+
+
+_Names = tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]
+
+
+def _names_regex(names: tuple[str, ...]) -> str:
+    """One anchored regex over ROS names (with their leading slash) for the bridge's allow-list."""
+    return "^/(" + "|".join(sorted(names)) + ")$"
+
+
+def bridge_allow(side: str) -> dict[str, list[str]]:
+    """The bridge's ``allow`` block for ``side`` ("board" or "laptop"): its own publishers,
+    servers and action servers; the other side's as its subscribers and clients."""
+    board: _Names = (BOARD_PUBLISHES, BOARD_SERVES, BOARD_ACTIONS)
+    laptop: _Names = (LAPTOP_PUBLISHES, LAPTOP_SERVES, LAPTOP_ACTIONS)
+    if side == "board":
+        mine, theirs = board, laptop
+    elif side == "laptop":
+        mine, theirs = laptop, board
+    else:
+        raise ValueError(f"a bridge sits on the board or the laptop, not {side!r}")
+    return {
+        "publishers": [_names_regex(mine[0])],
+        "subscribers": [_names_regex(theirs[0])],
+        "service_servers": [_names_regex(mine[1])],
+        "service_clients": [_names_regex(theirs[1])],
+        "action_servers": [_names_regex(mine[2])],
+        "action_clients": [_names_regex(theirs[2])],
+    }
+
+
+def bridge_config(side: str) -> dict[str, object]:
+    """zenoh-bridge-ros2dds's configuration file for ``side`` (its own strict schema: nothing
+    but its keys). Written to ros/zenoh-bridge-<side>.json; a test keeps the files equal to this."""
+    return {
+        "plugins": {"ros2dds": {"allow": bridge_allow(side), "queries_timeout": {"default": 5.0}}}
+    }

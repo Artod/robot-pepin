@@ -15,11 +15,41 @@ NET=pepin-net
 # The map here chooses the places book, so it must be the board's map, not merely a valid one.
 MAP="${PEPIN_MAP:-$(ssh "root@$BOARD" "grep -oE 'PEPIN_MAP=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2 || true)}"
 [ -n "$MAP" ] || { echo "the board does not say which map it runs (ros/mode.sh nav MAP first)"; exit 1; }
+# The library is copied into the build context the same way sync.sh does for the board.
+mkdir -p "$HERE/pepin_src" && rsync -a --delete --exclude __pycache__ "$HERE/../src/pepin/" "$HERE/pepin_src/pepin/"
+# A bridge route created after the board's bridge started delivers nothing (zenoh-bridge-ros2dds
+# 1.5.1: /tf and /scan went silent the moment their laptop subscribers were re-announced), while
+# every route the bridge creates at its own start works. So whenever this side's subscribers
+# change, the board's bridge is restarted and comes back knowing all of them.
+settle_bridge() {
+    sleep 20  # let this side's nodes declare their subscriptions first
+    ssh "root@$BOARD" "systemctl restart pepin-bridge" 2>/dev/null
+    for _ in $(seq 1 30); do
+        curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' && return 0
+        sleep 3
+    done
+    echo "the board's bridge did not come back after its restart"
+}
+# The laptop image (ros/laptop-build.sh) carries RTAB-Map on top of the board's image.
+IMG=pepin-ros; docker image inspect pepin-laptop:latest >/dev/null 2>&1 && IMG=pepin-laptop
+MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/python3.12/site-packages/pepin_bringup:ro"
+        -v "$HERE/pepin_bringup/launch:/ws/install/pepin_bringup/share/pepin_bringup/launch:ro"
+        -v "$HERE/tools:/tools:ro" -v "$HERE/entrypoint.sh:/pepin_entrypoint.sh:ro"
+        -v "$HERE/pepin_src:/ws/pepin_src:ro" -v "$HERE/params:/params:ro" -v "$HERE/maps:/maps"
+        -v "$HERE/../config:/ws/config:ro")
 case "${1:-start}" in
     stop)
-        docker rm -f pepin-laptop pepin-zenoh >/dev/null 2>&1 || true; echo "laptop side stopped"; exit 0 ;;
+        docker rm -f pepin-laptop pepin-vslam pepin-zenoh >/dev/null 2>&1 || true; echo "laptop side stopped"; exit 0 ;;
     logs)
-        exec docker logs -f pepin-laptop ;;
+        exec docker logs -f "pepin-${2:-laptop}" ;;
+    vslam)
+        # Camera + lidar SLAM beside the navigation half (ros/pepin_bringup/launch/vslam.launch.py).
+        docker rm -f pepin-vslam >/dev/null 2>&1 || true
+        docker run -d --name pepin-vslam --network "$NET" "${MOUNTS[@]}" \
+            -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+            "$IMG" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" >/dev/null
+        settle_bridge
+        echo "vslam up (RTAB-Map + camera stream): ros/laptop.sh logs vslam"; exit 0 ;;
 esac
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 docker rm -f pepin-laptop pepin-zenoh >/dev/null 2>&1 || true
@@ -32,20 +62,12 @@ done
 curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' || { echo "the board's bridge does not answer on :8000 (ros/thin.sh on, then wait for it)"; exit 1; }
 # ROS_DISTRO matters: without it the bridge assumes Iron. Router mode on both sides, this one
 # connecting to the board's: the pairing measured to pass samples (peer mode here did not).
-docker run -d --name pepin-zenoh --network "$NET" -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.5.1 \
-    -e "tcp/$BOARD:7447" -d 7 --rest-http-port 8000 >/dev/null
-# The library is copied into the build context the same way sync.sh does for the board.
-mkdir -p "$HERE/pepin_src" && rsync -a --delete --exclude __pycache__ "$HERE/../src/pepin/" "$HERE/pepin_src/pepin/"
+docker run -d --name pepin-zenoh --network "$NET" -p 8001:8000 -v "$HERE/zenoh-bridge-laptop.json:/config.json:ro" \
+    -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.7.0 -c /config.json \
+    -e "tcp/$BOARD:7447" -d 7 --rest-http-port 8000 -w >/dev/null
 SITE=/ws/install/pepin_bringup/lib/python3.12/site-packages/pepin_bringup
-docker run -d --name pepin-laptop --network "$NET" \
-    -p 3337:3337 \
-    -v "$HERE/pepin_bringup/pepin_bringup:$SITE:ro" \
-    -v "$HERE/pepin_bringup/launch:/ws/install/pepin_bringup/share/pepin_bringup/launch:ro" \
-    -v "$HERE/tools:/tools:ro" \
-    -v "$HERE/entrypoint.sh:/pepin_entrypoint.sh:ro" \
-    -v "$HERE/pepin_src:/ws/pepin_src:ro" \
-    -v "$HERE/params:/params:ro" \
-    -v "$HERE/maps:/maps" \
+docker run -d --name pepin-laptop --network "$NET" -p 3337:3337 "${MOUNTS[@]}" \
     -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
-    pepin-ros ros2 launch pepin_bringup nav.launch.py side:=laptop "map:=$MAP" >/dev/null
+    "$IMG" ros2 launch pepin_bringup nav.launch.py side:=laptop "map:=$MAP" >/dev/null
+settle_bridge
 echo "laptop side up: planner + goal server (port 3337 here), bridged to $BOARD; ros/laptop.sh logs"
