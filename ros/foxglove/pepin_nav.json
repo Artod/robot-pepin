@@ -105,6 +105,15 @@
           "visible": true,
           "type": "arrow",
           "color": "#00e5ff"
+        },
+        "/rtabmap/map": {
+          "colorMode": "costmap",
+          "visible": true
+        },
+        "/rtabmap/mapPath": {
+          "visible": true,
+          "lineWidth": 0.05,
+          "color": "#ffd500"
         }
       },
       "layers": {

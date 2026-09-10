@@ -115,6 +115,18 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         actions.append(
             ExecuteProcess(cmd=["python3", "-m", "pepin_bringup.run_recorder"], output="screen")
         )
+    if runs_here(side, "relocalizer"):
+        # RTAB-Map (on the laptop, ros/pepin_bringup/launch/vslam.launch.py) builds its graph on the
+        # odometry frame and publishes its map in its own "rtabmap" frame, never map -> odom. This
+        # identity gives Foxglove a place to draw that map while it grows: over odom, beside ours.
+        actions.append(
+            Node(
+                package="tf2_ros",
+                executable="static_transform_publisher",
+                name="odom_to_rtabmap",
+                arguments=["--frame-id", "odom", "--child-frame-id", "rtabmap"],
+            )
+        )
     if runs_here(side, "goal_server"):
         # Waits for orders on a socket so a goal costs a socket write, not a client boot.
         # Its places book follows the map in use: /maps/flat3.yaml -> /maps/flat3.places.yaml.

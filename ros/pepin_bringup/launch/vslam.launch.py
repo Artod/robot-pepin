@@ -82,6 +82,8 @@ def generate_launch_description() -> LaunchDescription:
                         "topic_queue_size": 10,
                         "wait_for_transform": 0.5,
                         "odom_sensor_sync": False,
+                        # the grid is republished every second: the operator watches it grow
+                        "map_always_update": True,
                         **RTABMAP,
                     }
                 ],
