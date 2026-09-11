@@ -1,5 +1,6 @@
 """One tracker, any sources: the lidar path unchanged, a camera's fan alone, and both fused."""
 
+import json
 import math
 from itertools import pairwise
 
@@ -12,7 +13,8 @@ from pepin.dynamic import StaticMask, voting_mask
 from pepin.localization import Localizer, ScanObservation
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow, apply_motion, relative_motion
-from pepin.sources import CONTACT, DEPTH, LIDAR, SourceRegistry
+from pepin.sources import CONTACT, DEPTH, LIDAR, SourceFeed, SourceRegistry
+from pepin.timeline import OdomHistory, TimedScan
 
 WINDOW = SearchWindow(xy_m=0.09, xy_step_m=0.03, theta_deg=9.0, theta_step_deg=1.5)
 HALF_FAN_DEG = 40.0  # pepin.depth.SCAN_HALF_FOV: the camera's virtual scan
@@ -30,10 +32,10 @@ def fan(truth: Pose2D) -> np.ndarray:
     return points[np.abs(bearing) <= HALF_FAN_DEG]
 
 
-def drive() -> tuple[list[Pose2D], list[Pose2D]]:
+def drive(steps: int = 25) -> tuple[list[Pose2D], list[Pose2D]]:
     """A curved drive and the odometry that over-counts its turns by 15 %."""
     truth = [Pose2D(0.0, 0.0, 0.0)]
-    for i in range(1, 25):
+    for i in range(1, steps):
         truth.append(Pose2D(0.08 * i, 0.03 * i, 0.06 * i))
     odom = [truth[0]]
     for a, b in pairwise(truth):
@@ -201,3 +203,98 @@ def test_settings_name_the_sources_and_the_fusion_switch() -> None:
     assert "sources none" in loc.settings()
     with pytest.raises(ValueError):
         loc.sources.enable(["radar"])
+
+
+def timed(stamp: float, points: np.ndarray) -> TimedScan:
+    """A scan taken in one instant, as the node hands it to the feed."""
+    return TimedScan(stamp, points, np.full(len(points), stamp), np.full(len(points), 1.0), 0)
+
+
+def test_a_dead_lidar_hands_the_tracker_to_the_camera_and_a_returning_one_anchors_again() -> None:
+    """The node's trigger path built from the library's pieces: a SourceFeed over the odometry
+    history, every scan offered as it arrives, the anchor's release matched with the riders
+    carried to its moment. The lidar dies for 1.2 s of the drive: for the roster's half second
+    the feed still waits for it and the tracker holds, then the camera's fan (framed 40 ms
+    before each revolution would have ended, from where the cart was then) drives the updates
+    alone; when the lidar is back it anchors again and the fan rides along. The tracker never
+    leaves the room."""
+    truth, odom = drive(36)
+    feed = SourceFeed(SourceRegistry(enabled=[LIDAR, DEPTH]))
+    loc = tracker(sources=feed.registry)
+    history = OdomHistory()
+    anchors: list[str | None] = []
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        stamp = 0.1 * i
+        history.add(stamp, o)
+        if i:  # the frame 40 ms earlier, seen from the pose the cart had then
+            a, b = truth[i - 1], t
+            at_frame = Pose2D(
+                a.x + 0.6 * (b.x - a.x),
+                a.y + 0.6 * (b.y - a.y),
+                a.theta + 0.6 * (b.theta - a.theta),
+            )
+            feed.offer(DEPTH, timed(stamp - 0.04, fan(at_frame)))
+        if not 10 <= i < 22:
+            feed.offer(LIDAR, timed(stamp, whole(t)))
+        now = stamp + 0.02  # the node's clock at the arrival
+        taken = feed.take(history, now)
+        if taken is None:
+            anchors.append(None)
+            continue
+        anchor, scan = taken
+        scans = [
+            ScanObservation(anchor, scan.points, scan.stamp),
+            *feed.gather(anchor, scan.stamp, history),
+        ]
+        loc.update_from(history.at(scan.stamp) or o, scans)
+        anchors.append(loc.anchor)
+        metres, degrees = error(loc, t)
+        assert metres < 0.12 and degrees < 4.0, (
+            f"scan {i} ({anchor}): {metres * 100:.1f} cm, {degrees:.1f} deg"
+        )
+    assert anchors[:10] == [LIDAR] * 10
+    assert anchors[10:14] == [None] * 4, "the roster's half second: the feed waits for the lidar"
+    assert anchors[14:22] == [DEPTH] * 8, "then the camera drives"
+    assert anchors[22:] == [LIDAR] * 14, "the lidar is back and anchors again"
+    metres, degrees = error(loc, truth[-1])
+    assert metres < 0.05 and degrees < 2.0
+    stats, fed = loc.report(), feed.report()
+    assert stats.rejected == 0, "the carried frames agree with the revolution they ride with"
+    assert fed.gates[LIDAR].released == 24 and fed.gates[DEPTH].released == 8
+    assert fed.attached[DEPTH] == 24 - 1 and stats.fused + stats.bound == 23
+    assert stats.source_fit[DEPTH].n == 31 and stats.matched == 32
+
+
+def test_the_switch_goes_by_flag_name_and_the_sources_report_is_ready_for_the_wire() -> None:
+    loc = tracker(sources=SourceRegistry(enabled=[LIDAR, DEPTH]))
+    loc.switch("fusion", False)
+    loc.switch("sources", ("lidar",))
+    assert loc.fusion is False and loc.sources.enabled == (LIDAR,)
+    with pytest.raises(ValueError):
+        loc.switch("_window", 1)  # the tracker's own, not a switch
+    with pytest.raises(ValueError):
+        loc.switch("radar", 1)
+    loc.switch("sources", (LIDAR, DEPTH))
+    loc.switch("fusion", True)
+    truth = Pose2D(0.5, 0.0, 0.0)
+    loc.sources.observe(LIDAR, 1.0)
+    loc.sources.observe(DEPTH, 0.95)
+    loc.pose = Pose2D(truth.x + 0.06, truth.y, truth.theta)  # the belief 6 cm ahead of the truth
+    loc.update_from(
+        truth, [ScanObservation(LIDAR, whole(truth), 1.0), ScanObservation(DEPTH, fan(truth), 1.0)]
+    )
+    report = loc.sources_report(1.02)
+    assert report["anchor"] == LIDAR and report["fused"] == "lidar+depth"
+    assert report["rejected"] == [] and report["fit"] == round(loc.confidence, 3)
+    assert list(report["sources"]) == [LIDAR, DEPTH, CONTACT]
+    lidar = report["sources"][LIDAR]
+    assert lidar["health"].startswith("fresh") and 0.0 < lidar["fit"] <= 1.0
+    assert -8.5 < lidar["delta"][0] < -3.5, "the lidar proposes the 6 cm back, in centimetres"
+    assert len(lidar["sigma"]) == 3 and all(v > 0.0 for v in lidar["sigma"])
+    assert lidar["edge"] is False and report["sources"][DEPTH]["health"].startswith("fresh")
+    assert report["sources"][CONTACT] == {"health": "off"}
+    assert json.loads(json.dumps(report)) == report
+    loc.update_from(truth, [])  # nothing to match: the prediction stands, nothing measured
+    report = loc.sources_report(1.1)
+    assert report["anchor"] is None and report["fused"] is None
+    assert report["sources"][LIDAR] == {"health": "fresh 0.0 Hz"} and report["fit"] == 0.0

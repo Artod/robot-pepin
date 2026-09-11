@@ -18,6 +18,7 @@ import logging
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -33,7 +34,9 @@ from pepin.scanmatch import (
     apply_motion,
     relative_motion,
 )
-from pepin.sources import LIDAR, ScanSource, SourceRegistry
+from pepin.sources import LIDAR, ScanObservation, ScanSource, SourceRegistry
+
+__all__ = ["Localizer", "Running", "ScanObservation", "TrackStats", "pooled"]
 
 logger = logging.getLogger(__name__)
 
@@ -166,18 +169,6 @@ CARRY_MIN_GAIN = 0.08  # a carry moves the WHOLE scan onto the map: the field sc
 # them no better at the new pose; a review probe, 2026-09-11)
 
 
-@dataclass(frozen=True)
-class ScanObservation:
-    """One source's returns for one update: (N, 2) base-frame metres from ``source`` (a name
-    on the tracker's :class:`~pepin.sources.SourceRegistry`), the scan's stamp, and — for
-    tests — an explicit (N,) vote mask instead of the static map's."""
-
-    source: str
-    points: NDArray[np.float64]
-    stamp: float = 0.0
-    vote: NDArray[np.bool_] | None = None
-
-
 class Localizer:
     """Tracks the robot pose on a fixed occupancy grid from odometry and scans.
 
@@ -231,7 +222,13 @@ class Localizer:
         self.explained_vote = explained_vote
         self.sources = sources if sources is not None else SourceRegistry()
         self.fusion = fusion
-        self.measurements: list[PoseMeasurement] = []  # every source's word on the last update
+        # The last update, source by source: every source's word, the one they were fused into
+        # (the anchor's own when it stood alone or was a bound), who anchored, and the pose it
+        # all corrected from — what /localization/sources shows (``sources_report``).
+        self.measurements: list[PoseMeasurement] = []
+        self.fused: PoseMeasurement | None = None
+        self.anchor: str | None = None
+        self.prediction = initial
         # The carry thresholds are below the jump ones on purpose: the tracking window caps a
         # residual at its own size (9 cm on the board), so a 15 cm jump can never be seen at rest,
         # while two matches of a standing cart agreeing beyond 6 cm / 4 deg never happened on the
@@ -277,6 +274,52 @@ class Localizer:
         """The counters since the previous report, which are reset."""
         stats, self.stats = self.stats, TrackStats()
         return stats
+
+    def switch(self, name: str, value: Any) -> None:
+        """A live switch by its flag's name, between two updates: ``sources`` (the names of
+        the sensors that correct) goes to the roster, every other name is the attribute it
+        names (``rest_lock``, ``fusion``, ...); ``ValueError`` for a name that is neither."""
+        if name == "sources":
+            self.sources.enable(value)
+        elif hasattr(self, name) and not name.startswith("_"):
+            setattr(self, name, value)
+        else:
+            raise ValueError(f"{name}: not a switch of the tracker")
+
+    def sources_report(self, now: float) -> dict[str, Any]:
+        """Every source's word on the last update, ready for JSON: the anchor, the sources
+        fused, the ones a fusion rejected, and per source on the roster its health at ``now``
+        (``off`` when the flag has it off) with, when it measured, its fit, the correction it
+        proposed from the prediction (``delta``: cm, cm, deg), the roots of its covariance
+        diagonal (``sigma``: cm, cm, deg) and whether its match was a bound (``edge``)."""
+        fused = self.fused
+        report: dict[str, Any] = {
+            "anchor": self.anchor,
+            "fused": None if fused is None else fused.source,
+            "rejected": [] if fused is None else list(fused.rejected),
+            "fit": round(self.confidence, 3),
+            "sources": {},
+        }
+        by_name = {m.source: m for m in self.measurements}
+        for name in self.sources.names:
+            health = self.sources.health(name).text(now) if self.sources.is_enabled(name) else "off"
+            entry: dict[str, Any] = {"health": health}
+            measurement = by_name.get(name)
+            if measurement is not None:
+                p = self.prediction
+                sx, sy, st = measurement.sigmas
+                entry.update(
+                    fit=round(measurement.fit, 3),
+                    delta=[
+                        round((measurement.x - p.x) * 100.0, 2),
+                        round((measurement.y - p.y) * 100.0, 2),
+                        round(math.degrees(wrap_angle(measurement.yaw - p.theta)), 2),
+                    ],
+                    sigma=[round(sx * 100.0, 2), round(sy * 100.0, 2), round(math.degrees(st), 2)],
+                    edge=measurement.edge,
+                )
+            report["sources"][name] = entry
+        return report
 
     def _recovery_window(self) -> SearchWindow:
         """Recovery window sized to the uncertainty: grows with motion since the last good fit.
@@ -724,7 +767,7 @@ class Localizer:
             self._drift.y + abs(motion.y),
             self._drift.theta + abs(motion.theta),
         )
-        prediction = apply_motion(self.pose, motion)
+        prediction = self.prediction = apply_motion(self.pose, motion)
         stats = self.stats
         usable = [
             (observation, self.sources.source(observation.source))
@@ -739,6 +782,7 @@ class Localizer:
             self.weak_scans += 1
             stats.thin += 1
             self.measurements = []
+            self.fused = self.anchor = None
             return self.pose
         # The anchor: the widest fan on offer (the lidar when it is enabled and thick enough).
         # Its whole scan measures the confidence, the recovery searches with it, the carry and
@@ -759,6 +803,7 @@ class Localizer:
         # what makes the fused tracker provably no slower than the lidar alone on a bound.
         fused = fuse(self.measurements) if self.fusion and not anchored.edge else anchored
         assert fused is not None  # usable is not empty
+        self.fused, self.anchor = fused, anchor.source
         if len(self.measurements) > 1 and self.fusion:
             if anchored.edge:
                 stats.bound += 1
