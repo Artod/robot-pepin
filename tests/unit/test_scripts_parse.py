@@ -7,6 +7,7 @@ lerobot, which pulls torch; they are left out to keep the unit tier fast.
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -96,3 +97,77 @@ def test_go_sh_survives_a_camera_that_died_before_the_drive_ended(tmp_path) -> N
             ["bash", "-c", script, "_", str(d)], capture_output=True, text=True, timeout=20
         ).stdout.strip()
         assert out == expect, (name, out)
+
+
+def test_neck_sh_asks_the_base_server_and_prints_ticks_and_degrees() -> None:
+    """ros/neck.sh is the neck's hand: one JSON line to the base server's port, the answer in
+    ticks and degrees. A fake server stands in for the board here — the script must pick its
+    reply out of the state lines the real port also broadcasts, and fail on a refusal."""
+    import json
+    import os
+    import socket
+    import threading
+
+    assert subprocess.run(["bash", "-n", str(REPO / "ros/neck.sh")], timeout=20).returncode == 0
+    usage = (REPO / "ros/neck.sh").read_text()
+    for line in ("neck.sh read", "neck.sh home", "neck.sh goto PAN TILT", "neck.sh hold PAN TILT"):
+        assert line in usage
+    assert '"cmd": "neck_home"' in usage and '"cmd": "neck_goto"' in usage
+
+    def board(answers: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]], threading.Thread]:
+        """A one-client fake of the base server: collects what it is asked, then answers."""
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        asked: list[dict[str, Any]] = []
+
+        def run() -> None:
+            conn, _ = listener.accept()
+            with conn:
+                listener.close()
+                asked.append(json.loads(conn.recv(4096).split(b"\n")[0]))
+                conn.sendall(b'{"type":"state","x":0.0}\n')  # 20 Hz of noise around the answer
+                for answer in answers:
+                    conn.sendall((json.dumps(answer) + "\n").encode())
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        return listener.getsockname()[1], asked, thread
+
+    def run_script(port: int, *args: str) -> subprocess.CompletedProcess[str]:
+        env = os.environ | {"PEPIN_HOST": "127.0.0.1", "PEPIN_BASE_PORT": str(port)}
+        return subprocess.run(
+            ["bash", str(REPO / "ros/neck.sh"), *args],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+
+    port, asked, thread = board(
+        [{"type": "neck", "pan_ticks": 2021, "tilt_ticks": 2311, "age_s": 0.01}]
+    )
+    read = run_script(port, "read")
+    thread.join(timeout=5)
+    assert read.returncode == 0, read.stderr[-400:]
+    assert asked == [{"cmd": "neck"}]
+    assert "pan 2021 ticks (+0.0 deg left)" in read.stdout, read.stdout
+    assert "tilt 2311 ticks (+26.0 deg down)" in read.stdout, read.stdout
+
+    port, asked, thread = board(
+        [{"type": "neck_goto", "pan_ticks": 2100, "tilt_ticks": 2311, "reached": True, "ms": 840.0}]
+    )
+    moved = run_script(port, "goto", "2100", "2311")
+    thread.join(timeout=5)
+    assert moved.returncode == 0, moved.stderr[-400:]
+    assert asked == [{"cmd": "neck_goto", "pan_ticks": 2100, "tilt_ticks": 2311, "hold": False}]
+    assert "reached in 840 ms" in moved.stdout, moved.stdout
+
+    port, asked, thread = board(
+        [{"type": "neck_goto", "reached": False, "error": "neck target 4000 is outside its limits"}]
+    )
+    refused = run_script(port, "hold", "4000", "2311")
+    thread.join(timeout=5)
+    assert refused.returncode == 1, refused.stdout
+    assert asked[0]["hold"] is True
+    assert "outside its limits" in refused.stderr
