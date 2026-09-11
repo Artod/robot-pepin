@@ -24,6 +24,15 @@ MPS against 172 ms on the CPU inside the container, and the whole round trip fro
 pepin-vslam is 26.0 ms of which 6.1 ms is transport — so the hop costs a quarter of what the
 GPU saves. Send JPEG, not raw: q90 costs 1.1 ms to encode and saves 1.8 ms of wire, 37.7 KB
 through Docker's NAT instead of 675 KB.
+
+The node's side (not wired yet — pepin_bringup.depth_stream is being refactored elsewhere): a
+string parameter ``depth_backend`` in {remote, local, auto}, default from PEPIN_DEPTH_BACKEND
+and ``local`` without it, sets :attr:`Fallback.mode`; ``depth_url`` defaults to PEPIN_DEPTH_URL
+or :data:`DEFAULT_URL`. The node builds ``Fallback(RemoteDepth(url), MonoDepth(...))`` and calls
+it exactly where it calls ``self._net(rgb)`` today — same argument, same return — so only the
+construction changes. ``depth_backend`` is the first live parameter that is not a bool, so the
+node's set-parameters callback needs a branch for it; :attr:`Fallback.status` is the phrase for
+the report line.
 """
 
 from __future__ import annotations
