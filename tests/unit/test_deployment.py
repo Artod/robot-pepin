@@ -1,5 +1,8 @@
 """The split between the board and the laptop, and the link watch that makes it safe."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 from pepin.deployment import (
@@ -10,6 +13,8 @@ from pepin.deployment import (
     nav_nodes,
     runs_here,
 )
+
+REPO = Path(__file__).resolve().parents[2]
 
 
 def test_all_is_exactly_the_union_of_the_two_sides_with_nothing_shared() -> None:
@@ -174,7 +179,7 @@ def test_the_bridge_s_vision_mode_routes_the_board_s_plan_out_and_nothing_back_b
             assert not re.compile(side[kind][0]).search("/relocalize"), "nothing, not all"
     assert bridge_config("board", "vision")["plugins"]["ros2dds"]["allow"] == board  # type: ignore[index]
     assert bridge_allow("board") == bridge_allow("board", "split")
-    assert BRIDGE_MODES == ("split", "vision")
+    assert BRIDGE_MODES == ("split", "vision", "slam")
     assert bridge_config_name("board") == "zenoh-bridge-board.json"
     assert bridge_config_name("laptop", "vision") == "zenoh-bridge-laptop-vision.json"
     with pytest.raises(ValueError):
@@ -296,3 +301,79 @@ def test_the_necks_joint_states_reach_the_laptop_in_both_modes() -> None:
         assert re.compile(laptop["subscribers"][0]).search("/neck/state"), mode
         assert not re.compile(laptop["publishers"][0]).search("/neck/state"), mode
         assert re.compile(board["publishers"][0]).search("/tf"), mode
+
+
+def test_the_bridge_s_slam_mode_turns_the_map_around_and_keeps_tf_one_way() -> None:
+    """Online SLAM: the laptop's RTAB-Map is the only map, so /map crosses laptop -> board and
+    the board publishes none. /tf still crosses board -> laptop ONLY — a topic allowed as a
+    publisher on both sides loops — so the correction that would have ridden /tf crosses as a
+    message (/map_odom) and becomes map -> odom on the board (pepin_bringup.slam_frame). Nothing
+    the tracker used to publish crosses at all: in this mode there is no tracker."""
+    import re
+
+    from pepin.deployment import (
+        SLAM_BOARD_PUBLISHES,
+        SLAM_LAPTOP_PUBLISHES,
+        bridge_allow,
+        bridge_config,
+        bridge_config_name,
+    )
+
+    board, laptop = bridge_allow("board", "slam"), bridge_allow("laptop", "slam")
+    pub_b, sub_b = re.compile(board["publishers"][0]), re.compile(board["subscribers"][0])
+    pub_l, sub_l = re.compile(laptop["publishers"][0]), re.compile(laptop["subscribers"][0])
+    for name in ("/map", "/map_odom"):
+        assert pub_l.search(name) and sub_b.search(name), name
+        assert not pub_b.search(name), f"{name} would loop, and /map would be two maps"
+    for name in ("/tf", "/tf_static", "/scan", "/odom", "/odometry/filtered", "/imu/data_raw"):
+        assert pub_b.search(name) and sub_l.search(name), name
+        assert not pub_l.search(name), f"{name} would loop"
+    for gone in ("/tracker_pose", "/localization_fit"):
+        assert not pub_b.search(gone) and not pub_l.search(gone), gone
+    assert not set(SLAM_BOARD_PUBLISHES) & set(SLAM_LAPTOP_PUBLISHES)
+    # The board still drives: the plan and the costmaps come from it, as in vision mode.
+    for name in ("/plan", "/global_costmap/costmap", "/local_costmap/costmap", "/goal_pose"):
+        assert pub_b.search(name), name
+    for kind in ("service_servers", "service_clients", "action_servers", "action_clients"):
+        for side in (board, laptop):
+            assert side[kind] == ["^$"], kind  # topics only, as in vision mode
+    assert bridge_config_name("board", "slam") == "zenoh-bridge-board-slam.json"
+    assert bridge_config_name("laptop", "slam") == "zenoh-bridge-laptop-slam.json"
+    for side in ("board", "laptop"):
+        written = json.loads((REPO / f"ros/zenoh-bridge-{side}-slam.json").read_text())
+        assert written == bridge_config(side, "slam"), f"regenerate zenoh-bridge-{side}-slam.json"
+
+
+def test_exactly_one_side_publishes_the_map_in_every_mode() -> None:
+    """One map, one publisher of it, whichever mode the two halves are in: the board serves it
+    from a saved file in split and vision, the laptop builds it in SLAM. Two would mean the
+    costmap's static layer takes whichever message arrived last."""
+    import re
+
+    from pepin.deployment import BRIDGE_MODES, bridge_allow
+
+    for mode in BRIDGE_MODES:
+        sides = {
+            side
+            for side in ("board", "laptop")
+            if re.compile(bridge_allow(side, mode)["publishers"][0]).search("/map")
+        }
+        assert sides == ({"laptop"} if mode == "slam" else {"board"}), mode
+
+
+def test_the_board_serves_no_map_and_tracks_nothing_while_the_laptop_maps() -> None:
+    """runs_here is the whole split, and SLAM is a column of it: no map_server and no
+    relocalizer on the board (there is no map to serve or match against), and slam_frame in
+    their place — the one publisher of map -> odom in that mode, as the tracker is in the other."""
+    from pepin.deployment import runs_here
+
+    for node in ("map_server", "relocalizer"):
+        assert runs_here("board", node) and runs_here("all", node), node
+        assert not runs_here("board", node, slam=True), node
+        assert not runs_here("all", node, slam=True), node
+    assert runs_here("board", "slam_frame", slam=True) and runs_here("all", "slam_frame", slam=True)
+    assert not runs_here("board", "slam_frame"), "no correction to broadcast on a known map"
+    assert not runs_here("laptop", "slam_frame", slam=True), "the frame lives where the drive is"
+    # Everything else is untouched by the mode: the reflexes and the recorder stay put.
+    for node in ("controller_server", "bt_navigator", "run_recorder", "goal_server"):
+        assert runs_here("board", node, slam=True) == runs_here("board", node), node

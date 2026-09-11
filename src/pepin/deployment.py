@@ -58,10 +58,18 @@ def nav_nodes(side: str) -> tuple[str, ...]:
     raise ValueError(f"side must be one of {SIDES}, not {side!r}")
 
 
-def runs_here(side: str, node: str) -> bool:
-    """Whether a named piece runs on ``side``: Nav2 nodes, the map, the tracker, the goal server."""
+def runs_here(side: str, node: str, slam: bool = False) -> bool:
+    """Whether a named piece runs on ``side``: Nav2 nodes, the map, the tracker, the goal server.
+
+    ``slam`` is the online-SLAM mode, where the map does not exist before the drive: RTAB-Map on
+    the laptop builds it and owns the correction, so the board serves no saved map and runs no
+    scan-matching tracker, and one node of its own (``slam_frame``) puts that correction on the
+    board's ``map -> odom``. Exactly one owner of that edge in either mode.
+    """
     if node in MAP_NODES or node == "relocalizer":
-        return side in ("all", "board")
+        return side in ("all", "board") and not slam
+    if node == "slam_frame":
+        return side in ("all", "board") and slam
     if node == "goal_server":  # it carries the laptop's heartbeat too
         return side in ("all", "laptop")
     if node == "run_recorder":  # the tape is written where the sensors are
@@ -211,7 +219,14 @@ def _names_regex(names: tuple[str, ...]) -> str:
 # now comes FROM the board, and the laptop side publishes none of it (a topic allowed as a
 # publisher on both sides loops). No services or actions cross in vision mode: actions over the
 # bridge aborted the navigation container ("Failed to accept new goal", 2026-09-10 16:06).
-BRIDGE_MODES = ("split", "vision")
+# "slam" (ros/thin.sh slam) is vision mode with the map turned around: RTAB-Map on the laptop
+# IS the map, built while the cart drives, so the board serves no saved map and runs no tracker.
+# The grid crosses laptop -> board as /map (the global costmap's static layer reads it,
+# transient local) and the graph's correction as /rtabmap/mapGraph, which pepin_bringup.slam_frame
+# turns into map -> odom ON THE BOARD. /tf itself still crosses one way only (board -> laptop):
+# a topic allowed as a publisher on both sides loops until nothing crosses at all, so the
+# correction travels as a message and becomes a transform where the reflexes look it up.
+BRIDGE_MODES = ("split", "vision", "slam")
 VISION_BOARD_PUBLISHES = (
     *BOARD_PUBLISHES,
     "plan",
@@ -229,6 +244,25 @@ VISION_LAPTOP_PUBLISHES = (
     "depth_scan",
     "contact_scan",
 )
+# The board drives exactly as in vision mode, minus the three topics the saved map and its
+# tracker produced: /map is the laptop's now, and there is no /tracker_pose or /localization_fit
+# because nothing matches a scan against a map that does not exist yet.
+SLAM_BOARD_PUBLISHES = tuple(
+    name
+    for name in VISION_BOARD_PUBLISHES
+    if name not in ("map", "tracker_pose", "localization_fit")
+)
+# RTAB-Map's grid is remapped onto /map in this mode (there is no second map to fight), so
+# /rtabmap/map is not published at all; the graph and its correction still are.
+SLAM_LAPTOP_PUBLISHES = (
+    "map",
+    "map_odom",  # RTAB-Map's correction as a message; the board broadcasts it as map -> odom
+    "rtabmap/mapGraph",
+    "rtabmap/mapPath",
+    "rtabmap/info",
+    "depth_scan",
+    "contact_scan",
+)
 
 
 def bridge_allow(side: str, mode: str = "split") -> dict[str, list[str]]:
@@ -239,6 +273,8 @@ def bridge_allow(side: str, mode: str = "split") -> dict[str, list[str]]:
         laptop: _Names = (LAPTOP_PUBLISHES, LAPTOP_SERVES, LAPTOP_ACTIONS)
     elif mode == "vision":
         board, laptop = (VISION_BOARD_PUBLISHES, (), ()), (VISION_LAPTOP_PUBLISHES, (), ())
+    elif mode == "slam":
+        board, laptop = (SLAM_BOARD_PUBLISHES, (), ()), (SLAM_LAPTOP_PUBLISHES, (), ())
     else:
         raise ValueError(f"a bridge mode is one of {BRIDGE_MODES}, not {mode!r}")
     if side == "board":
@@ -271,10 +307,10 @@ def bridge_config(side: str, mode: str = "split") -> dict[str, object]:
 def bridge_config_name(side: str, mode: str = "split") -> str:
     """The file under ros/ that carries :func:`bridge_config` for ``side`` and ``mode``: the
     board's unit reads it as ``$PEPIN_BRIDGE_CONFIG`` (ros/thin.sh sets it with the mode),
-    ros/laptop.sh picks its own by the side the board reports."""
+    ros/laptop.sh picks its own by the side and the SLAM flag the board reports."""
     if mode not in BRIDGE_MODES:
         raise ValueError(f"a bridge mode is one of {BRIDGE_MODES}, not {mode!r}")
-    return f"zenoh-bridge-{side}.json" if mode == "split" else f"zenoh-bridge-{side}-vision.json"
+    return f"zenoh-bridge-{side}.json" if mode == "split" else f"zenoh-bridge-{side}-{mode}.json"
 
 
 def bridge_admin_for(side: str) -> str:
