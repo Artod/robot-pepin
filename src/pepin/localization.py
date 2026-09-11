@@ -1,21 +1,29 @@
-"""Localisation on a saved map: odometry predicts, the lidar corrects.
+"""Localisation on a saved map: odometry predicts, the sensors correct.
 
 The map is frozen, so every correction is absolute — errors do not compound
 the way they do while mapping. When a scan fits the map poorly (an open
 door, furniture that moved, a bad match) the odometry prediction is kept and
-the lidar is asked again on the next scan.
+the sensor is asked again on the next scan.
+
+Any scan-shaped evidence corrects: the lidar's revolution, the camera's virtual scan, the
+floor-contact scan (:mod:`pepin.sources`). Each enabled source is matched separately against
+the same map with the same machinery, each match carries a covariance read off its score
+surface, and the matches are fused by their information (:mod:`pepin.fusion`) before the pose
+is corrected — so lidar-only, camera-only and both go through one code path.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
 
 from pepin.dynamic import StaticMask, voting_mask
+from pepin.fusion import PoseMeasurement, covariance_from_score_surface, fuse
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import (
@@ -25,6 +33,7 @@ from pepin.scanmatch import (
     apply_motion,
     relative_motion,
 )
+from pepin.sources import LIDAR, ScanSource, SourceRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -124,10 +133,14 @@ class TrackStats:
     published_fit: Running = field(default_factory=Running)  # fit at the pose actually published
     step_xy_m: float = 0.0  # the largest position correction one match applied (map->odom's step)
     step_deg: float = 0.0  # the largest heading correction one match applied
+    source_fit: dict[str, Running] = field(default_factory=dict)  # fit per source, at its match
+    fused: int = 0  # updates whose correction was fused from more than one source
+    rejected: int = 0  # source measurements a fusion left out for disagreeing with the surest
 
     def summary(self) -> str:
-        """One log line, mean/min/max where a distribution matters."""
-        return (
+        """One log line, mean/min/max where a distribution matters; the per-source fits and
+        the fusion count only once a second source has spoken."""
+        line = (
             f"matched {self.matched} (thin {self.thin}), rest-locked {self.rest_locked} "
             f"(dt {self.rest_dt_s.text(digits=1)} s, gain {self.rest_gain.text()}), "
             f"carries {self.carries}, weak {self.weak}, lost {self.lost}, "
@@ -135,6 +148,12 @@ class TrackStats:
             f"fit {self.fit.text()} at the match / {self.published_fit.text()} published, "
             f"max step {self.step_xy_m * 100:.1f} cm / {self.step_deg:.2f} deg"
         )
+        if set(self.source_fit) - {LIDAR}:
+            per_source = ", ".join(
+                f"{name} {stat.text()} ({stat.n})" for name, stat in self.source_fit.items()
+            )
+            line += f"; sources {per_source}; fused {self.fused}, rejected {self.rejected}"
+        return line
 
 
 CARRY_MIN_GAIN = 0.08  # a carry moves the WHOLE scan onto the map: the field score at the matched
@@ -143,8 +162,20 @@ CARRY_MIN_GAIN = 0.08  # a carry moves the WHOLE scan onto the map: the field sc
 # them no better at the new pose; a review probe, 2026-09-11)
 
 
+@dataclass(frozen=True)
+class ScanObservation:
+    """One source's returns for one update: (N, 2) base-frame metres from ``source`` (a name
+    on the tracker's :class:`~pepin.sources.SourceRegistry`), the scan's stamp, and — for
+    tests — an explicit (N,) vote mask instead of the static map's."""
+
+    source: str
+    points: NDArray[np.float64]
+    stamp: float = 0.0
+    vote: NDArray[np.bool_] | None = None
+
+
 class Localizer:
-    """Tracks the robot pose on a fixed occupancy grid from odometry and lidar scans.
+    """Tracks the robot pose on a fixed occupancy grid from odometry and scans.
 
     Tracking takes the best match inside a small window around the odometry
     prediction unconditionally — exactly what kept the SLAM front end straight.
@@ -178,6 +209,8 @@ class Localizer:
         explained_vote: bool = True,  # returns the static map cannot explain do not score
         carry_m: float = 0.06,  # a rest residual past this, twice in a row, is a carry, not noise
         carry_deg: float = 4.0,
+        sources: SourceRegistry | None = None,  # which sensors correct; the lidar alone by default
+        fusion: bool = True,  # off: the widest enabled source corrects alone, the rest only report
     ) -> None:
         self._grid = grid
         # The tracker wants a continuous correction: quantised to the search step it corrects the
@@ -192,6 +225,9 @@ class Localizer:
         self.rest_gain = rest_gain
         self.rest_tau_s = rest_tau_s
         self.explained_vote = explained_vote
+        self.sources = sources if sources is not None else SourceRegistry()
+        self.fusion = fusion
+        self.measurements: list[PoseMeasurement] = []  # every source's word on the last update
         # The carry thresholds are below the jump ones on purpose: the tracking window caps a
         # residual at its own size (9 cm on the board), so a 15 cm jump can never be seen at rest,
         # while two matches of a standing cart agreeing beyond 6 cm / 4 deg never happened on the
@@ -228,7 +264,9 @@ class Localizer:
             f"rest_lock {'on' if self.rest_lock else 'off'}, "
             f"explained_vote {'on' if self.explained_vote else 'off'}, "
             f"rest_tau_s {self.rest_tau_s:.1f}, gain {self._correction_gain:.2f}, "
-            f"carry {self._carry_m * 100:.0f} cm / {self._carry_deg:.0f} deg"
+            f"carry {self._carry_m * 100:.0f} cm / {self._carry_deg:.0f} deg, "
+            f"sources {','.join(self.sources.enabled) or 'none'}, "
+            f"fusion {'on' if self.fusion else 'off'}"
         )
 
     def report(self) -> TrackStats:
@@ -434,17 +472,22 @@ class Localizer:
         self._last_odom = None  # the next update measures its step from the next reading
 
     def _voting(
-        self, points: NDArray[np.float64], vote: NDArray[np.bool_] | None
+        self, points: NDArray[np.float64], vote: NDArray[np.bool_] | None, min_points: int
     ) -> NDArray[np.float64]:
         """The returns the matcher is allowed to score: ``points[vote]``, or all of them.
 
-        A mask that would leave the match with fewer returns than a pose can be fixed from is
-        ignored — a thin scan is worse than a scan with some furniture in it.
+        A mask that would leave the match with fewer returns than a pose can be fixed from
+        (``min_points``) is ignored — a thin scan is worse than a scan with some furniture in it.
         """
         if vote is None:
             return points
         kept: NDArray[np.float64] = points[vote]
-        return kept if len(kept) >= self._min_points else points
+        return kept if len(kept) >= min_points else points
+
+    def _min_points_for(self, source: ScanSource) -> int:
+        """Fewer returns than this fix no pose: the constructor's floor for the lidar (the
+        callers that size it keep their word), the roster's for every other source."""
+        return self._min_points if source.name == LIDAR else source.min_points
 
     def predict(self, odom: Pose2D) -> Pose2D:
         """Advance the pose by odometry alone (between scans); the next scan corrects it."""
@@ -571,7 +614,68 @@ class Localizer:
         dt_s: float | None = None,
         mask: StaticMask | None = None,
     ) -> Pose2D:
-        """Advance by the odometry step since the last call, then correct with the scan.
+        """Advance by the odometry step since the last call, then correct with the lidar scan.
+
+        The single-lidar entry: ``points`` is the lidar's (N, 2) base-frame scan, and the call
+        is :meth:`update_from` with that one observation — every argument means what it means
+        there. ``vote``, an explicit (N,) mask over ``points``, replaces the static map's.
+        """
+        return self.update_from(
+            odom,
+            [ScanObservation(LIDAR, points, vote=vote)],
+            trust_odometry=trust_odometry,
+            at_rest=at_rest,
+            dt_s=dt_s,
+            mask=mask,
+        )
+
+    def _measure(
+        self,
+        observation: ScanObservation,
+        source: ScanSource,
+        prediction: Pose2D,
+        motion: Pose2D,
+        mask: StaticMask | None,
+    ) -> PoseMeasurement:
+        """One source's scan matched around the prediction: its pose, its fit on the whole scan
+        and the covariance read off the score surface, scaled by the source's trust."""
+        points, vote = observation.points, observation.vote
+        if vote is None and mask is not None and self.explained_vote:
+            vote = voting_mask(points, prediction, mask, min_points=source.vote_min_points)
+        voting = self._voting(points, vote, self._min_points_for(source))
+        if vote is not None:
+            self.stats.silenced_scans += 1
+            self.stats.silenced_points += len(points) - len(voting)
+        local, surface = self._matcher.match_around_surface(
+            prediction, voting, motion, self._window
+        )
+        fit = self._matcher.inlier_fraction(local.pose, points)
+        covariance = covariance_from_score_surface(surface, fit, trust=source.trust)
+        return PoseMeasurement(
+            local.pose.x,
+            local.pose.y,
+            local.pose.theta,
+            covariance,
+            observation.source,
+            observation.stamp,
+            fit,
+        )
+
+    def update_from(
+        self,
+        odom: Pose2D,
+        scans: Sequence[ScanObservation],
+        *,
+        trust_odometry: bool = True,
+        at_rest: bool = False,
+        dt_s: float | None = None,
+        mask: StaticMask | None = None,
+    ) -> Pose2D:
+        """Advance by the odometry step since the last call, then correct with whatever scans
+        arrived: each enabled source's scan is matched separately around the same prediction,
+        the matches are fused by their information (or, with ``fusion`` off, the widest
+        source's is taken alone) and the fused pose corrects the belief under the same rules
+        as ever — the rest lock, the carry, the driving gain, the lost recovery.
 
         ``trust_odometry=False`` discards the wheel step (slipping wheels): the pose is
         corrected from where it was, and the step is still consumed so it is never re-applied.
@@ -586,14 +690,16 @@ class Localizer:
         second and one matching ten times a second settle at rest at the same speed. ``None``
         (the default) keeps the old per-match ``rest_gain``; it changes nothing while moving.
 
-        ``mask`` is the static map's own explanation of the scan (``dynamic.StaticMask``): with
+        ``mask`` is the static map's own explanation of the scans (``dynamic.StaticMask``): with
         ``explained_vote`` on it is read at the pose this call predicts from, and only the
-        returns it explains score the match, which is how returns the map has no wall for (a
-        moved chair, a blanket) are kept from pulling the heading. ``vote``, an explicit (N,)
-        mask over ``points``, does the same from outside (tests). Confidence is always measured
-        on the WHOLE scan, so the fit this reports, the lost counter and the occlusion verdict
-        built on them mean exactly what they meant before; ``published_fit`` is the same measure
-        at the pose returned.
+        returns it explains score a match, which is how returns the map has no wall for (a
+        moved chair, a blanket) are kept from pulling the heading. Confidence is always measured
+        on the WHOLE scan of the anchor — the widest enabled source, the lidar when it is there
+        — at the fused pose, so the fit this reports, the lost counter and the occlusion
+        verdict built on them mean exactly what they meant before; ``published_fit`` is the
+        same measure at the pose returned. Scans from sources the flag has off, and scans
+        thinner than their source's floor, are ignored; with nothing left to match the
+        prediction stands (``thin``). Every source's measurement is kept in ``measurements``.
         """
         motion = (
             Pose2D()
@@ -608,20 +714,47 @@ class Localizer:
         )
         prediction = apply_motion(self.pose, motion)
         stats = self.stats
-        if len(points) < self._min_points:
+        usable = [
+            (observation, self.sources.source(observation.source))
+            for observation in scans
+            if self.sources.is_enabled(observation.source)
+            and len(observation.points)
+            >= self._min_points_for(self.sources.source(observation.source))
+        ]
+        if not usable:
             self.pose = prediction
             self.confidence = self.published_fit = 0.0
             self.weak_scans += 1
             stats.thin += 1
+            self.measurements = []
             return self.pose
-        if vote is None and mask is not None and self.explained_vote:
-            vote = voting_mask(points, prediction, mask)
-        voting = self._voting(points, vote)
-        if vote is not None:
-            stats.silenced_scans += 1
-            stats.silenced_points += len(points) - len(voting)
-        local = self._matcher.match_around(prediction, voting, motion, self._window)
-        pose, confidence = local.pose, self._matcher.inlier_fraction(local.pose, points)
+        # The anchor: the widest fan on offer (the lidar when it is enabled and thick enough).
+        # Its whole scan measures the confidence, the recovery searches with it, the carry and
+        # the published fit are judged on it — a +-40 degree fan alone cannot say "lost".
+        anchor, _ = max(usable, key=lambda pair: pair[1].fov_deg)
+        points = anchor.points
+        self.measurements = [
+            self._measure(observation, source, prediction, motion, mask)
+            for observation, source in usable
+        ]
+        for measurement in self.measurements:
+            stats.source_fit.setdefault(measurement.source, Running()).add(measurement.fit)
+        fused = (
+            fuse(self.measurements)
+            if self.fusion
+            else next(m for m in self.measurements if m.source == anchor.source)
+        )
+        assert fused is not None  # usable is not empty
+        if len(self.measurements) > 1 and self.fusion:
+            stats.fused += 1
+            stats.rejected += len(fused.rejected)
+        matched = fused.pose
+        pose = matched
+        confidence = (
+            fused.fit
+            if fused.source == anchor.source
+            else self._matcher.inlier_fraction(matched, points)
+        )
 
         was_lost = self.lost
         if was_lost:
@@ -666,7 +799,7 @@ class Localizer:
             self.weak_scans = 0
             self._drift = Pose2D()
         carry_gain = (
-            self._matcher.field_score(local.pose, points)
+            self._matcher.field_score(matched, points)
             - self._matcher.field_score(prediction, points)
             if at_rest and self.rest_lock
             else 0.0
