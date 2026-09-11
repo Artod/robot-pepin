@@ -124,6 +124,84 @@ servers; Nav2 (`nav.launch.py`) is started on demand inside it. Build or rebuild
    pose from Foxglove); then a goal.
 4. Memory: `free -m` on the board while navigating; the container must stay under ~700 MB.
 
+## Redundancy demo
+
+Both sensors see the room; either one alone is a mode the robot can be driven in, switched while
+it runs. `ros/sensor.sh` is one command per sensor, because a sensor has two ends and they must
+move together: what the tracker matches against the map (the relocalizer's `sources` flag) and
+what writes into the costmaps (`lidar_layer`, `camera_layer`, `contact_layer`, on the local
+**and** the global costmap). Half a switch — the layer off, the tracker still matching on it —
+is not a mode, it is a bug that looks like one.
+
+| mode | command | tracker sources | costmap layers |
+| --- | --- | --- | --- |
+| fused | `ros/sensor.sh lidar on` + `ros/sensor.sh camera on` | `lidar,depth,contact` | `lidar_layer`, `camera_layer`, `contact_layer` |
+| lidar only | `ros/sensor.sh camera off` | `lidar` | `lidar_layer` |
+| camera only | `ros/sensor.sh lidar off` (`--hard` to stop the driver) | `depth,contact` | `camera_layer`, `contact_layer` |
+
+The camera is one sensor read twice from the same frames: `depth_scan` is the band 8 cm-1.3 m
+above the floor (table tops, seats, a hand) and `contact_scan` is where the floor ends (chair
+feet, a plinth) — so `camera on` moves two sources and two layers at once.
+
+```bash
+ros/sensor.sh status            # what the tracker matches on, which layers are on, what each node last said
+ros/sensor.sh camera off        # lidar only
+ros/sensor.sh lidar off         # camera only: /scan still arrives, nothing reads it
+ros/sensor.sh lidar off --hard  # camera only, for real: the driver is deactivated and /scan stops
+ros/sensor.sh lidar on          # back, driver included
+```
+
+Every call is idempotent and prints only what it moved (`already so` when nothing differs). The
+soft `lidar off` is an ignored scan; `--hard` is the absence of one —
+`ros2 lifecycle set /ldlidar_node deactivate`, which sticks because the sensors lifecycle manager
+runs with `bond_timeout: 0.0` and does not resurrect it. Only `ros/sensor.sh lidar on` brings it
+back. `--hard` (and the reactivation) first reads `/navigate_to_pose/_action/status` and refuses
+while a goal is running, the check `ros/tools/turn_full.py` makes before it turns the cart; a
+status it cannot read refuses too. Nothing here restarts a container or writes a velocity.
+
+Expect it to be slow: a `ros2` CLI call is a Python node that must start and discover, about 10 s
+on the board under load. The script therefore reads one whole `ros2 param dump` per costmap
+rather than a `ros2 param get` per layer, writes only what differs, and takes freshness from the
+nodes' own report lines in `docker logs` instead of subscribing to anything.
+
+### What to watch
+
+Open `ros/foxglove/pepin_nav.json` in Foxglove Studio:
+
+- the 3D panel's `/scan` and `/depth_scan` beside `/local_costmap/costmap` and
+  `/global_costmap/costmap` — switching a layer changes the grid within a costmap cycle, and the
+  marks that remain tell you which sensor drew them;
+- the `scan-to-map fit` plot (`/localization_fit`, 0..1) — the tracker's own score of the scan it
+  matched. This is where camera-only localisation fails visibly;
+- the Log panel (filtered to `relocalizer`, `controller_server`, `planner_server`, ...).
+
+The report lines say the same in words, every 30 s, and `ros/sensor.sh status` prints all three:
+
+- `relocalizer` on the board: `tracker: ... flags: ... sources=lidar,depth,contact ...`
+- `depth_stream` in the laptop's SLAM container: `depth: 3.1 frames/s published ...`
+- `contact_scan` in the same container: `contact: 2.9 scans/s published ...`
+
+### What the numbers already say
+
+Camera-only localisation on the **lidar's** map does not work, and was measured before it was
+demonstrated (`scratch/camera_only_localization.py`, run 0171 replayed offline against
+`ros/maps/flat3_straight.yaml`):
+
+| tracker sources | error vs lidar-only (median / p90 / max) | verdict |
+| --- | --- | --- |
+| `depth` | 122 cm / 124 deg at the loss | loses the map after 0.5 s |
+| `contact` | 80 cm / 28 deg at the loss | loses the map after 12 s |
+| `depth,contact` | 29 / 52 / 90 cm | loses the map |
+| `lidar,depth,contact` | 0.7 / 1.6 / 5.7 cm, 0.21 / 0.56 / 1.9 deg | never lost |
+
+The camera's band is a different cross-section of the room than the lidar's plane 20 cm up:
+sofa cushions and table clutter fit "some wall" well (fit 0.90 at the wrong pose, 0.12 at the
+true one), and parked bumper-to-furniture the camera sees nothing of the floor below ~1.2 m.
+Camera-only localisation needs a camera-built map, not the lidar's slice. So the honest demo is:
+**the costmap half survives either sensor alone; the tracker half needs the lidar** — and fusing
+all three costs 0.7 cm of median agreement, which is free. `ros/sensor.sh lidar off` prints that
+warning itself when it takes the last lidar out of the tracker's sources.
+
 ## Frames and conventions
 
 `base_link` sits between the drive-wheel contact points (our robot frame): x forward, y left.
