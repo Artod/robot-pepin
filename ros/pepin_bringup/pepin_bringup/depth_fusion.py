@@ -75,6 +75,13 @@ STAGES = ("align", "integrate")
 FLAGS = FlagSet(
     Flag("enabled", True, description="frames are fused into the model; off, they are dropped"),
     Flag(
+        "fit_gate",
+        True,
+        description="frames are fused only while the tracker reports /localization_fit >= 0.50;"
+        " off, every frame is fused: SLAM mode, where RTAB-Map owns the pose and no tracker"
+        " speaks",
+    ),
+    Flag(
         "self_heal",
         True,
         description="a streak of frames refused at the alignment bound empties the model, so it"
@@ -218,7 +225,7 @@ class DepthFusion(Node):
         if msg.header.frame_id != self._poser.camera:
             self._tally.count("bad_frame")  # not the camera the poser places
             return
-        if self._fit < DRIVE_FIT:
+        if self._switches.on("fit_gate") and self._fit < DRIVE_FIT:
             self._tally.count("low_fit")
             return
         stamp = msg.header.stamp
