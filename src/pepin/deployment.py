@@ -164,6 +164,7 @@ BOARD_PUBLISHES = (
     "tof/right",
     "tracker_pose",
     "localization_fit",
+    "localization/sources",  # every scan source's word on each update, JSON (the tracker)
     "dynamic_obstacles",
     "local_costmap/costmap",
     "pepin/run_status",
