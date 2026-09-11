@@ -2,23 +2,34 @@
 
 Depth Anything V2 (metric, indoor, the small model) turns each camera frame into a depth image
 with the right shape and the wrong size — and the wrong size is not one number: the far end of
-a room comes out too far by more than the near end. The lidar fixes that (``pepin.depth``): the
-scan taken nearest the frame's exposure, carried to the frame's moment through the odometry and
-projected into the image through the two static mounts, names the true depth at the pixels it
-hits, spanning a metre to four, and those pixels fit an affine law in inverse depth
-(1 / z = a / D + b) pooled across minutes of frames and applied to the whole image. Nothing is
-published until that law exists: the raw network's depth is 1.5-2x too far and would put the
-costmap's obstacles where there are none, so frames are withheld until POOL_MIN_SAMPLES beam
-pairs are pooled — or until the law saved by the last run (``/maps/depth_law.json``, a day old
-at most) is loaded at start. Pixels on an object's edge are dropped, and the depth cut between
-8 cm and 1.3 m above the floor and folded onto the plane goes out as ``/depth_scan`` (a
-LaserScan in base_link) before the floor anchor touches anything: the board's local costmap
-marks and clears with it like with the lidar, so a table top stops the cart the way a wall
-does. The floor anchor (pixels within centimetres of the floor plane snap to it, the plane
-leaning with the accelerometer) is for the 3D model: the anchored depth goes out on
-``/camera/depth`` (32FC1 metres, the image's stamp and frame), where the fusion builds the model
-from it and the costmap reads obstacles the lidar's plane misses. Frames that arrive while the
-network is busy are dropped: the newest one wins. Every stage is timed and reported.
+a room comes out too far by more than the near end. The lidar fixes that: the scan taken
+nearest the frame's exposure, carried to the frame's moment through the odometry and projected
+into the image through the mounts, names the true depth at the pixels it hits, spanning a
+metre to four, and those pixels fit an affine law in inverse depth (1 / z = a / D + b) pooled
+across minutes of frames and applied to the whole image. That correction is a
+:class:`pepin.depth_pipeline.DepthPipeline` (:func:`pepin.depth_pipeline.standard_pipeline`):
+an ordered list of stages — the edge filter, the lidar anchor, the floor and wall anchors, the
+law, the wall correction, the floor anchor — each switched by the flag of its name, each
+counted and timed per frame, the node owning none of the arithmetic. Nothing is published
+until the law exists: the raw network's depth is 1.5-2x too far and would put the costmap's
+obstacles where there are none, so frames are withheld until POOL_MIN_SAMPLES beam pairs are
+pooled — or until the law saved by the last run (``/maps/depth_law.json``, a day old at most)
+is loaded at start. The depth as it stands before the floor anchor, cut between 8 cm and
+1.3 m above the floor and folded onto the plane, goes out as ``/depth_scan`` (a LaserScan in
+base_link): the board's local costmap marks and clears with it like with the lidar, so a
+table top stops the cart the way a wall does. The floor anchor (pixels within centimetres of
+the floor plane snap to it, the plane leaning with the accelerometer) is for the 3D model: the
+anchored depth goes out on ``/camera/depth`` (32FC1 metres, the image's stamp and frame),
+where the fusion builds the model from it and the costmap reads obstacles the lidar's plane
+misses. Frames that arrive while the network is busy are dropped: the newest one wins. Every
+stage is timed and reported.
+
+Where the camera sits is asked of TF at every frame's stamp (:class:`pepin.frame_pose.FramePoser`
+over the kit's :class:`TfHistory`): the neck moves, and ``base_link -> camera_link`` is published
+live from its encoders by the board's neck node; config/camera.json's mount is the fallback
+while TF has no such edge yet, and the report line counts the frames that used it. The same
+poser carries the scan to the frame's moment through the odometry. A pan of the head is counted
+too: the projections assume the camera looks along the cart's x.
 
 The network runs where ``depth_backend`` says: ``local`` is the CPU model in this container
 (0.2-0.3 s a frame), ``remote`` the same network on the laptop's GPU behind
@@ -30,13 +41,15 @@ A model that cannot be built (no cached weights and no hub, no memory) is not tr
 1, the launch respawns it, the respawn retries — and in ``auto`` the frame is lost until the
 service answers; the report line says which.
 
-The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): ``floor_anchor``,
-``edge_filter``, ``lidar_anchor``, ``depth_backend``; their state is printed in every report
-line.
+The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): one per stage of
+the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anchor``,
+``affine_law``, ``wall_correct``, ``floor_anchor`` — and ``depth_backend``; their state is
+printed in every report line.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -55,26 +68,20 @@ from pepin.camera import CameraConfig, intrinsics, mount_transform
 from pepin.depth import (
     POOL_MIN_SAMPLES,
     SCAN_WINDOW_S,
-    AffineScale,
+    UP_LEVEL,
     Array,
     CameraPose,
     Intrinsics,
     Tilt,
-    apply_affine,
-    beam_pairs,
-    carry,
     depth_to_scan,
-    drop_edges,
-    edge_mask,
-    floor_anchor,
-    floor_depth,
     load_law,
     nearest_stamp,
-    project,
+    optical_heading,
     save_law,
     scan_points,
     to_base,
 )
+from pepin.depth_pipeline import AffineLaw, FrameContext, standard_pipeline
 from pepin.depth_service import (
     DEFAULT_URL,
     MODES,
@@ -84,6 +91,7 @@ from pepin.depth_service import (
     RemoteDepth,
 )
 from pepin.flags import Flag, FlagSet
+from pepin.frame_pose import FramePoser
 from pepin.mounts import Mounts
 from pepin.tsdf import RigidPose
 from pepin_bringup.msgs import (
@@ -97,6 +105,7 @@ from pepin_bringup.node_kit import (
     Fatal,
     Switches,
     Tally,
+    TfHistory,
     TfLookup,
     Window,
     Worker,
@@ -107,19 +116,16 @@ CONFIG = "/ws/config/camera.json"
 LAW_FILE = "/maps/depth_law.json"  # ros/maps on the laptop, mounted at /maps by ros/laptop.sh
 DEFAULT_MODEL = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
 SCAN_RANGE_M = 6.0
-STAGES = ("network", "samples", "law", "edges", "floor", "scan", "publish")
-CARRY_WAIT_S = 0.2  # how long the carry waits for odometry to cover the scan-to-frame gap
+STAGES = ("network", "pose", "samples", "pipeline", "scan", "publish")
+CARRY_WAIT_S = 0.2  # how long TF is given to cover a frame's stamp (the carry, the camera pose)
+PAN_NOTICE_RAD = math.radians(1.0)  # a head turned more than this is projected as if it were not
+SCAN_BEFORE = "floor_anchor"  # the scan is built from the depth as it stands before this stage
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
-# other declaration, and printed in every report line.
+# other declaration, and printed in every report line. One bool per stage of the pipeline, in
+# its running order and under its name (standard_pipeline's names; the defaults are the chain
+# as measured on run 0171, scratch/pipeline_vs_truth.py: the lidar's affine law alone).
 FLAGS = FlagSet(
-    Flag(
-        "floor_anchor",
-        True,
-        description="pixels within centimetres of the floor plane snap to it in the published"
-        " image (the scan is built before it); the plane leans with the cart, from the IMU's up"
-        " vector",
-    ),
     Flag(
         "edge_filter",
         True,
@@ -133,6 +139,41 @@ FLAGS = FlagSet(
         " of a lidar that stops) — with no law yet nothing is published until it is back on",
     ),
     Flag(
+        "floor_pairs",
+        False,
+        description="the floor's pixels pair the network's depth with the plane's geometric depth,"
+        " a second hoop for the law that needs no lidar; off by default: measured, it pulls the"
+        " law off the lidar's row (1.4x too far there), where the costmap lives",
+    ),
+    Flag(
+        "wall_anchor",
+        False,
+        description="the lidar's returns extruded up the image while the network's depth stays"
+        " continuous pair the rows above the lidar's with the wall's depth, a third hoop; off by"
+        " default: measured, it puts the lidar's row 10 % too near while fixing the rows above",
+    ),
+    Flag(
+        "affine_law",
+        True,
+        description="the network's depth through 1 / z = a / D + b, fitted on the pooled pairs;"
+        " off, the raw network's depth goes out unwithheld (1.5-2x too far: an A/B measure of"
+        " the correction, never a way to drive)",
+    ),
+    Flag(
+        "wall_correct",
+        False,
+        description="after the law, the pixels the wall walk covered are set to the extruded"
+        " plane's depth outright; off by default (the same walk as wall_anchor, applied instead"
+        " of fitted)",
+    ),
+    Flag(
+        "floor_anchor",
+        True,
+        description="pixels within centimetres of the floor plane snap to it in the published"
+        " image (the scan is built before it); the plane leans with the cart, from the IMU's up"
+        " vector",
+    ),
+    Flag(
         "depth_backend",
         "local",
         choices=MODES,
@@ -142,6 +183,7 @@ FLAGS = FlagSet(
         " CPU model while it does not)",
     ),
 )
+FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
 
 
 class MonoDepth:
@@ -187,7 +229,7 @@ class DepthStream(Node):
         threads = int(self.declare_parameter("threads", 8).value)
         cfg = CameraConfig.load(config, board=board)
         x, y, z, _roll, pitch, _yaw = mount_transform(cfg)
-        self._camera = CameraPose(x, y, z, pitch)
+        self._camera_config = CameraPose(x, y, z, pitch)  # the fallback while TF has no edge
         self._hfov_deg = cfg.hfov_deg  # the nominal optics until a camera_info arrives
         self._intr: Intrinsics | None = None
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
@@ -203,22 +245,7 @@ class DepthStream(Node):
                 "depth_url", os.environ.get("PEPIN_DEPTH_URL", DEFAULT_URL)
             ).value
         )
-        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
-        self._imu_mount = self._imu_rotation(config.parent)
-        self._tilt: Tilt | None = None
-        self._floor: Array | None = None  # the expected floor depth image, for the current tilt
-        self._floor_up: Array | None = None
-        self._floor_intr: Intrinsics | None = None  # the optics it was computed for
-        self._tally = Tally(STAGES)
-        self.create_subscription(Imu, "/imu/data_raw", self._on_imu, qos_profile_sensor_data)
-        self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
-        self.create_subscription(Image, "/camera/image", self._on_image, newest)
-        self.create_subscription(LaserScan, "/scan", self._on_scan, reliable)
-        self._tf = TfLookup(self, on_failure=self._on_tf_failure)
-        self._lidar_mount: RigidPose | None = None
-        self._scans: deque[LaserScan] = deque()  # the last SCAN_WINDOW_S of scans, by stamp
-        self._scan_lock = threading.Lock()
-        self._law = AffineScale()
+        self._law = AffineLaw()
         self._last_verdict_wall = time.time()  # the law's age is the beams', not the node's
         saved = load_law(self._law_file, time.time())
         if saved is not None:
@@ -232,6 +259,22 @@ class DepthStream(Node):
                 f"no saved depth law at {self._law_file}: publishing waits for"
                 f" {POOL_MIN_SAMPLES} pooled beams"
             )
+        self._pipeline = standard_pipeline(self._law)
+        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
+        for name in self._pipeline.names:  # a launch override reaches the stage it names
+            self._pipeline.set(name, self._switches.on(name))
+        self._imu_mount = self._imu_rotation(config.parent)
+        self._tilt: Tilt | None = None
+        self._tally = Tally(STAGES)
+        self.create_subscription(Imu, "/imu/data_raw", self._on_imu, qos_profile_sensor_data)
+        self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
+        self.create_subscription(Image, "/camera/image", self._on_image, newest)
+        self.create_subscription(LaserScan, "/scan", self._on_scan, reliable)
+        self._tf = TfLookup(self, on_failure=self._on_tf_failure)
+        self._poser = FramePoser(TfHistory(self._tf, timeout_s=CARRY_WAIT_S))
+        self._lidar_mount: RigidPose | None = None
+        self._scans: deque[LaserScan] = deque()  # the last SCAN_WINDOW_S of scans, by stamp
+        self._scan_lock = threading.Lock()
         # The CPU model is built on its first frame (LazyDepth): in remote or auto mode with
         # the service answering it is never loaded, and the node is up in a second, not ten.
         self._local = LazyDepth(lambda: MonoDepth(model_name, threads))
@@ -245,7 +288,10 @@ class DepthStream(Node):
         self._fatal = Fatal(self)  # the worker's way out when no backend can answer
         self._worker = Worker(self._process, name="depth", on_error=self._on_work_error).start()
         self.create_timer(30.0, self._report)
-        self.get_logger().info("depth stream up: /camera/image -> /camera/depth, /depth_scan")
+        self.get_logger().info(
+            "depth stream up: /camera/image -> /camera/depth, /depth_scan; camera pose from TF"
+            f" (config/camera.json's pitch {math.degrees(pitch):.1f} deg while TF has no edge)"
+        )
 
     def close(self) -> None:
         """Stop the worker and the TF listener and wait for them: called before the node is
@@ -255,9 +301,12 @@ class DepthStream(Node):
         self._tf.close()
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
-        """A flag changed: ``depth_backend`` is the switch's mode, the rest are read in place."""
+        """A flag changed: ``depth_backend`` is the switch's mode, a stage's flag switches
+        that stage of the pipeline."""
         if name == "depth_backend":
             self._net.mode = str(new)
+        elif name in self._pipeline.switches:
+            self._pipeline.set(name, bool(new))
 
     def _on_work_error(self, text: str) -> None:
         self.get_logger().error(f"depth failed on a frame:\n{text}")
@@ -286,9 +335,11 @@ class DepthStream(Node):
 
     def _on_imu(self, msg: Imu) -> None:
         """The accelerometer says which way is up: a base_link reading (the C++ bridge's) as is,
-        any other frame through the mount in config/imu.json."""
-        if not self._switches.on("floor_anchor"):
-            return  # the up vector has no other reader; the switch back on picks the tilt up again
+        any other frame through the mount in config/imu.json. Read only while a floor stage
+        is on — the up vector has no other reader, and a stage switched back on picks the
+        tilt up afresh."""
+        if not any(self._switches.on(name) for name in FLOOR_STAGES):
+            return
         if self._tilt is None:
             if msg.header.frame_id == "base_link":
                 rotation = np.eye(3)  # the bridge rotated it already: see _imu_rotation
@@ -297,28 +348,16 @@ class DepthStream(Node):
             else:
                 # Without the mount the up vector would be the chip's own axes, and the floor
                 # would be anchored to a plane tilted by however the chip is glued on.
-                self._switches.set("floor_anchor", False)
+                for name in FLOOR_STAGES:
+                    if self._switches.on(name):
+                        self._switches.set(name, False)
                 self.get_logger().error(
-                    f"IMU readings in {msg.header.frame_id} and no mount: floor anchor off"
+                    f"IMU readings in {msg.header.frame_id} and no mount: the floor stages are off"
                 )
                 return
             self._tilt = Tilt(rotation)
         accel, _gyro = imu_arrays(msg)
         self._tilt.observe(accel, stamp_seconds(msg.header.stamp))
-
-    def _floor_expected(self, intr: Intrinsics) -> Array:
-        """The floor's depth image for the current lean, recomputed only when the lean moves."""
-        up = self._tilt.up if self._tilt is not None else np.array([0.0, 0.0, 1.0])
-        if (
-            self._floor is None
-            or self._floor_up is None
-            or self._floor_intr != intr  # a camera_info of another size: the cache is a wrong shape
-            or np.linalg.norm(up - self._floor_up) > 0.003
-        ):
-            self._floor = floor_depth(intr, self._camera, up)
-            self._floor_up = up.copy()
-            self._floor_intr = intr
-        return self._floor
 
     def _on_info(self, msg: CameraInfo) -> None:
         self._intr = Intrinsics.from_camera_info(msg.k, msg.width, msg.height)
@@ -342,8 +381,9 @@ class DepthStream(Node):
             self._tally.count("dropped")
 
     def _process(self, msg: Image) -> None:
-        """One frame through the network, the law, the edges, the scan, the floor and out —
-        or withheld before the scan when no law exists yet."""
+        """One frame through the network, then the pipeline — the anchors, the law, the edges,
+        the floor — the scan from the depth before the floor anchor, and out; or withheld by
+        a law that does not exist yet."""
         rgb = array_from_image(msg)
         if rgb is None or rgb.ndim != 3:
             self.get_logger().warning(
@@ -357,46 +397,40 @@ class DepthStream(Node):
             except DepthModelError as exc:
                 self._no_model(exc)
                 return
+        with tally.measure("pose"):  # includes the TF wait for the neck's edge
+            cam = self._camera_at(msg.header.stamp)
         with tally.measure("samples"):  # includes the TF wait for the carry
-            samples = self._lidar_samples(msg)
-        t_edges = time.perf_counter()
-        edge = edge_mask(depth)  # on the raw depth: relative, so the same after the law
-        t_edges = time.perf_counter() - t_edges
-        with tally.measure("law"):
-            pairs = beam_pairs(depth, samples, edge) if samples is not None else None
-            a_law, b_law = self._law.observe(pairs)
+            lidar = self._lidar_points(msg)
+        ctx = FrameContext(
+            self._intr_or_nominal(msg),
+            cam,
+            up=self._tilt.up if self._tilt is not None else UP_LEVEL,
+            lidar=lidar,
+            stamp=stamp_seconds(msg.header.stamp),
+        )
+        with tally.measure("pipeline"):
+            result = self._pipeline.run(depth, ctx)
         tally.count("processed")
-        if pairs is None:
-            tally.count("held")
-        else:
+        judged = result.verdict("lidar_anchor").pairs
+        if judged:
             tally.count("verdicts")
+            tally.count("samples", judged)
             self._last_verdict_wall = time.time()
-            tally.count("samples", int(pairs[0].size))
-        if not self._law.ready:
+        else:
+            tally.count("held")
+        if result.withheld:
             tally.count("withheld")
             self.get_logger().info(
-                f"no depth law yet ({self._law.pooled} of {POOL_MIN_SAMPLES} beams pooled):"
+                f"no depth law yet ({self._law.pooled} of {POOL_MIN_SAMPLES} pairs pooled):"
                 " nothing published",
                 throttle_duration_sec=10,
             )
             return
-        metric = apply_affine(depth, a_law, b_law)
-        t0 = time.perf_counter()
-        if self._switches.on("edge_filter"):
-            metric, dropped = drop_edges(metric, edge)
-            tally.count("edge_px", dropped)
-        tally.spent("edges", t_edges + time.perf_counter() - t0)
         with tally.measure("scan"):  # before the floor anchor: what stops the cart is measured
-            scan = self._as_scan(metric, msg)
-        with tally.measure("floor"):
-            if self._switches.on("floor_anchor") and self._intr is not None:
-                metric, anchored = floor_anchor(
-                    metric, self._floor_expected(self._intr), self._camera.z
-                )
-                tally.count("floor_px", anchored)
+            scan = self._as_scan(result.before(SCAN_BEFORE), msg, ctx)
         with tally.measure("publish"):
             self._pub.publish(
-                image_from_array(metric, "32FC1", msg.header.stamp, msg.header.frame_id)
+                image_from_array(result.depth, "32FC1", msg.header.stamp, msg.header.frame_id)
             )
             self._scan_pub.publish(scan)
         tally.count("frames")
@@ -418,10 +452,24 @@ class DepthStream(Node):
             throttle_duration_sec=30,
         )
 
-    def _as_scan(self, depth: Array, image: Image) -> LaserScan:
-        """The scaled depth folded onto the floor plane, in base_link, stamped like the image."""
+    def _camera_at(self, stamp: Any) -> CameraPose:
+        """Where the camera sat at ``stamp``: ``base_link <- camera_optical`` from TF (the
+        neck's live edge, or the static one), as the pipeline's pose; config/camera.json's
+        mount, counted, while TF has no such edge. A head turned past PAN_NOTICE_RAD is
+        counted too: the projections assume it looks along the cart's x."""
+        pose = self._poser.camera_in_base(stamp_seconds(stamp))
+        if pose is None:
+            self._tally.count("camera_from_config")
+            return self._camera_config
+        _pitch, pan = optical_heading(pose.rotation)
+        if abs(pan) > PAN_NOTICE_RAD:
+            self._tally.count("camera_panned")
+        return CameraPose.from_optical(pose.rotation, pose.translation)
+
+    def _as_scan(self, depth: Array, image: Image, ctx: FrameContext) -> LaserScan:
+        """The depth folded onto the floor plane, in base_link, stamped like the image."""
         angle_min, step, ranges = depth_to_scan(
-            depth, self._intr_or_nominal(image), self._camera, max_range=self._scan_max_range
+            depth, ctx.intr, ctx.cam, max_range=self._scan_max_range
         )
         return scan_from_ranges(
             ranges,
@@ -441,9 +489,12 @@ class DepthStream(Node):
         fx, fy, cx, cy = intrinsics(image.width, image.height, self._hfov_deg)
         return Intrinsics(fx, fy, cx, cy, image.width, image.height)
 
-    def _lidar_samples(self, image: Image) -> Array | None:
-        """The beams of the scan nearest the frame's exposure as pixels of this frame with their
-        true depth (column, row, metres): needs a scan within SCAN_MAX_AGE_S and both mounts."""
+    def _lidar_points(self, image: Image) -> Array | None:
+        """The scan nearest the frame's exposure as (n, 3) base_link points at the frame's
+        moment (the cart's own motion between the two stamps taken out through the odometry;
+        without it a 100 ms older scan is 2 degrees stale at 20 deg/s, and the points pass as
+        they are, counted): needs the camera's optics, a scan within SCAN_MAX_AGE_S and the
+        lidar's mount; ``None`` otherwise, or with the lidar anchor off."""
         intr = self._intr
         if intr is None or not self._switches.on("lidar_anchor"):
             return None
@@ -454,7 +505,8 @@ class DepthStream(Node):
         if i is None:
             return None
         scan = scans[i]
-        self._tally.sample("scan_age", abs(stamp_seconds(scan.header.stamp) - frame_t))
+        scan_t = stamp_seconds(scan.header.stamp)
+        self._tally.sample("scan_age", abs(scan_t - frame_t))
         mount = self._mount_of(scan.header.frame_id)
         if mount is None:
             return None
@@ -462,20 +514,11 @@ class DepthStream(Node):
             np.asarray(scan.ranges), scan.angle_min, scan.angle_increment, SCAN_RANGE_M
         )
         in_base = to_base(xy, mount.rotation, mount.translation)
-        carried = self._carried_to_frame(in_base, scan.header.stamp, image.header.stamp)
-        return project(carried, self._camera, intr)
-
-    def _carried_to_frame(self, points: Array, scan_stamp: Any, frame_stamp: Any) -> Array:
-        """The scan's points as base_link would see them at the frame's moment: the cart's own
-        motion between the two stamps, from odometry. Without it a 100 ms older scan is 2
-        degrees stale at 20 deg/s and the columns anchor to the wrong bearings."""
-        motion = self._tf.motion(
-            "base_link", scan_stamp, frame_stamp, "odom", timeout_s=CARRY_WAIT_S
-        )
-        if motion is None:
+        carried = self._poser.carry(in_base, scan_t, frame_t)
+        if carried is None:
             self._tally.count("uncarried")
-            return points
-        return carry(points, motion.rotation, motion.translation)
+            return in_base
+        return carried
 
     def _mount_of(self, frame: str) -> RigidPose | None:
         """base_link <- the laser's frame, looked up once and kept: where the beams start."""
@@ -494,7 +537,8 @@ class DepthStream(Node):
         return self._lidar_mount
 
     def _report(self) -> None:
-        """The window's numbers in one line, the law saved, the counters reset."""
+        """The window's numbers in one line — the pipeline's own words per stage, the backend,
+        the switches — the law saved, the counters and the stage totals reset."""
         w = self._tally.take()
         c = w.counts
         per_verdict = c["samples"] / max(c["verdicts"], 1)
@@ -504,15 +548,15 @@ class DepthStream(Node):
                 f" ({time.time() - self._last_verdict_wall:.0f} s old); is /scan alive?"
             )
         law = self._law
-        source = "" if law.fitted else " (from file)" if law.ready else " (none yet)"
         self.get_logger().info(
             f"depth: {w.rate('frames'):.1f} frames/s published ({c['processed']} through the"
-            f" net, {c['dropped']} dropped, {c['withheld']} withheld), law a {law.a:.2f}"
-            f" b {law.b:+.3f} on {law.pooled} beams{source} from {c['verdicts']} lidar verdicts"
-            f" ({per_verdict:.0f} samples each; held {c['held']} of {c['processed']} frames)"
-            f"{self._extras(w)}, backend {self._net.status}{self._model_note()},"
-            f" flags: {self._switches.state()}, ms median/max: {w.stages()}"
+            f" net, {c['dropped']} dropped, {c['withheld']} withheld); {self._pipeline.report()};"
+            f" {c['verdicts']} lidar verdicts ({per_verdict:.0f} pairs each; held {c['held']} of"
+            f" {c['processed']} frames){self._extras(w)}, backend {self._net.status}"
+            f"{self._model_note()}, flags: {self._switches.state()}, ms median/max:"
+            f" {w.stages()}"
         )
+        self._pipeline.reset_stats()
         if law.fitted:
             try:
                 save_law(self._law_file, law.a, law.b, law.pooled, self._last_verdict_wall)
@@ -533,24 +577,22 @@ class DepthStream(Node):
 
     def _extras(self, w: Window) -> str:
         """The parts of the report line a window may have nothing to say about: how old the
-        anchoring scans were, the scans no odometry could carry, the pixels each anchor
-        touched, and the last TF failure of each kind."""
+        anchoring scans were, the scans no odometry could carry, the frames whose camera pose
+        came from the config instead of TF, the frames with the head turned, the cart's lean,
+        and the last TF failure of each kind."""
         c, extra = w.counts, ""
         ages = w.samples.get("scan_age", [])
         if ages:
             extra += f", scan age median {float(np.median(ages)):.2f} s max {max(ages):.2f} s"
         if c["uncarried"]:
             extra += f", scans uncarried {c['uncarried']}"
-        if self._intr is not None and c["frames"]:
-            pixels = self._intr.width * self._intr.height * c["frames"]
-            if self._switches.on("floor_anchor"):
-                lean = self._tilt.roll_pitch_deg if self._tilt is not None else (0.0, 0.0)
-                extra += (
-                    f", floor {c['floor_px'] / pixels * 100:.0f}% of pixels"
-                    f" (lean roll {lean[0]:+.1f} pitch {lean[1]:+.1f} deg)"
-                )
-            if self._switches.on("edge_filter"):
-                extra += f", edges dropped {c['edge_px'] / pixels * 100:.0f}% of pixels"
+        if c["camera_from_config"]:
+            extra += f", camera pose from config {c['camera_from_config']} frames (no TF edge)"
+        if c["camera_panned"]:
+            extra += f", head panned {c['camera_panned']} frames (projected as if not)"
+        if self._tilt is not None and any(self._switches.on(name) for name in FLOOR_STAGES):
+            roll, pitch = self._tilt.roll_pitch_deg
+            extra += f", lean roll {roll:+.1f} pitch {pitch:+.1f} deg"
         if w.notes:
             extra += ", tf: " + "; ".join(
                 f"{kind} {c['tf_' + kind]}: {text}" for kind, text in w.notes.items()

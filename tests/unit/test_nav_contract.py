@@ -670,9 +670,11 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
     assert "Grid/MaxObstacleHeight" in params
     assert {"camera", "depth", "rtabmap", "frame", "foxglove"} <= _started_after_ghost_wait(vslam)
     node = sf.tree(f"{NODES}/depth_stream.py")
-    assert "/camera/depth" in sf.strings(node) and {"beam_pairs", "AffineScale"} <= sf.imported(
-        node
-    )
+    assert "/camera/depth" in sf.strings(node)
+    # The correction is the library's pipeline, run whole; the node owns no copy of a stage.
+    assert {"standard_pipeline", "AffineLaw", "FrameContext"} <= sf.imported(node)
+    assert "self._pipeline.run" in sf.calls(node) and "standard_pipeline" in sf.calls(node)
+    assert not {"beam_pairs", "apply_affine", "drop_edges", "floor_anchor"} & sf.imported(node)
     image = (REPO / "ros/Dockerfile.laptop").read_text()
     assert (
         "whl/cpu" in image and "HF_HUB_OFFLINE=1" in image and "ros-jazzy-foxglove-bridge" in image
@@ -1217,9 +1219,20 @@ def test_the_floor_anchors_the_depth_and_leans_with_the_imu() -> None:
     the accelerometer, and the IMU mount the laptop would apply is the one the board publishes
     (roll +90 deg: the chip's Y up)."""
     node = sf.tree(f"{NODES}/depth_stream.py")
-    assert load_table(REPO / NODES / "depth_stream.py")["floor_anchor"] is True, "default on"
+    flags = load_table(REPO / NODES / "depth_stream.py")
+    assert flags["floor_anchor"] is True, "default on"
     assert "/imu/data_raw" in sf.strings(node)
-    assert {"floor_anchor", "floor_depth"} <= sf.calls(node)
+    # The anchor is the pipeline's stage of that name, fed the IMU's up vector through the
+    # frame's context; the flags are one bool per stage, in the chain's order, and the chain's
+    # defaults are the measured ones (the lidar's affine law alone: scratch/pipeline_vs_truth).
+    from pepin.depth_pipeline import standard_pipeline
+
+    pipeline = standard_pipeline()
+    assert [f.name for f in flags][: len(pipeline.names)] == pipeline.names
+    assert {name: flags[name] for name in pipeline.names} == pipeline.switches
+    assert {"FrameContext", "Tilt"} <= sf.imported(node) and "self._tilt.up" in sf.unparsed(
+        node, ast.Attribute
+    )
     # The mount is not read here by hand: one loader for every sensor's place on the cart.
     assert "Mounts" in sf.imported(node) and "Mounts.load" in sf.calls(node)
     mount = json.loads((REPO / "config/imu.json").read_text())["mount"]
