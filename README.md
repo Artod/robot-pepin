@@ -389,6 +389,9 @@ uv run pytest && uv run mypy && uv run ruff check .
 # the robot
 ros/build.sh                            # sync ros/ + src/pepin to the board, build the image there
 ros/sync.sh                             # push code changes, restart the container (~20 s, no rebuild)
+ros/sync.sh --no-restart && ros/thin.sh kick relocalizer   # one node from the new sources (~10 s), the stack untouched
+ros/laptop.sh kick depth_fusion         # one laptop node from the mounted sources (~4 s), no container restart
+ros/laptop.sh vslam                     # camera SLAM on the laptop, the RTAB-Map database kept; --fresh starts an empty map
 ros/mode.sh nav /maps/<map>.yaml        # Nav2 + the tracker on a saved map
 ros/mode.sh sensors                     # lidar, base bridge, Foxglove — nothing that localises
 
@@ -449,7 +452,8 @@ nodes — the bridge keys routes by node name, and a killed node lingers for its
 a 1.5 GB board lived in a full zram swap and froze under load. The image rebuilds `tracetools`
 with its tracepoints excluded, and the stack now leaves 890 MB free.
 
-**Camera SLAM** (in progress): RTAB-Map runs on the laptop (`ros/laptop.sh vslam`) from the
+**Camera SLAM** (in progress): RTAB-Map runs on the laptop (`ros/laptop.sh vslam`; its database
+survives restarts, `--fresh` deletes it first) from the
 neck camera's MJPEG stream and the lidar scans over the bridge, registers with ICP on the scans
 and closes loops on what the camera sees, in its own `rtabmap` frame beside the tracker's map;
 its grid grows in Foxglove while the cart drives on the static map.
@@ -464,8 +468,9 @@ Anything V2, metric, on the laptop's CPU at three to four frames a second) turns
 a depth image, and the lidar sets its scale — the scan, carried to the frame's moment through
 the odometry (a 100 ms older scan is 2 degrees stale at 20 deg/s), projected into the image names the true
 depth at a hundred pixels a frame, and those pixels fit the network's error as an affine law in
-inverse depth (1/z = a/D + b), fitted on the beams of the last thirty frames together (one
-frame's beams span too little depth to tell a shift from a scale) and applied to the whole image — the
+inverse depth (1/z = a/D + b), fitted on the beams of the last few minutes of frames together (one
+frame's beams span too little depth to tell a shift from a scale, and a law that follows the view
+layers a wall) and applied to the whole image — the
 network sees the far end of a room too far by more than the near end, which one scale cannot say
 and a shift can: scaled at the beams' row alone, the wall a metre higher was off by half a metre
 (the network alone saw the

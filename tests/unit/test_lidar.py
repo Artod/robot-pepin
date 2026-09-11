@@ -6,7 +6,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pepin.lidar import FrameParser, LaserScan, LidarFrame, LidarMount, ScanAssembler
+from pepin.lidar import (
+    FRAME_HEADER,
+    FRAME_LEN,
+    FrameParser,
+    LaserScan,
+    LidarFrame,
+    LidarMount,
+    ScanAssembler,
+)
 
 SAMPLE = Path(__file__).resolve().parents[1] / "fixtures" / "ld19_sample.bin"
 
@@ -249,3 +257,20 @@ def test_the_lidar_mount_in_code_is_the_calibration_file_and_yields_the_launch_t
     x, y, z, roll, pitch, yaw = MOUNT.transform()
     assert (x, y, z) == (0.005, 0.0, 0.20) and pitch == 0.0
     assert roll == math.pi and yaw == pytest.approx(-1.5272, abs=1e-4)  # the launch's old defaults
+
+
+def test_a_flipped_byte_costs_exactly_one_frame_and_is_counted() -> None:
+    """One corrupt byte inside the second frame of the capture: that frame fails its CRC and is
+    dropped, the parser resynchronises on the next header, and every other frame parses
+    unchanged — a wire glitch costs one frame, never the stream."""
+    data = SAMPLE.read_bytes()
+    first = data.find(FRAME_HEADER)
+    second = first + FRAME_LEN
+    assert data[second : second + 2] == FRAME_HEADER  # the capture is contiguous frames
+    clean = FrameParser().feed(data)
+    damaged = bytearray(data)
+    damaged[second + 10] ^= 0xFF  # a distance byte of the second frame
+    parser = FrameParser()
+    frames = parser.feed(bytes(damaged))
+    assert parser.crc_failures == 1 and parser.frames == len(clean) - 1
+    assert frames == clean[:1] + clean[2:]

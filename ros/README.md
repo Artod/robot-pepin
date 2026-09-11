@@ -39,9 +39,14 @@ Foxglove Studio  <-- ws 8765 -->  docker: foxglove_bridge, ldlidar_node -> laser
 
 `ros/sync.sh` rsyncs `ros/` and `src/pepin` to the board and restarts the sensors container;
 `ros/nav.sh [MAP]` starts Nav2 inside it. The container mounts the code from the host (see
-`run.sh`), so Python nodes, launch files, params, maps and tools change in ~20 s. Only a
-Dockerfile change (apt packages, the C++ driver) needs `ros/build.sh`, which stops the container
-first and uses BuildKit's apt cache.
+`run.sh`), so Python nodes, launch files, params, maps and tools change in ~20 s. One node
+changes in seconds: `ros/sync.sh --no-restart && ros/thin.sh kick relocalizer` ends that process
+with SIGINT and the launch respawns it from the synced sources (`ros/laptop.sh kick depth_fusion`
+does the same in the laptop's containers; `ros/laptop.sh kick` and `ros/thin.sh kick` without a
+name list what each can reach). The laptop's SLAM container is its own: `ros/laptop.sh vslam`
+restarts it with the RTAB-Map database kept, `ros/laptop.sh vslam --fresh` deletes the database
+first and starts an empty map. Only a Dockerfile change (apt packages, the C++
+driver) needs `ros/build.sh`, which stops the container first and uses BuildKit's apt cache.
 
 ## Build and run (on the board)
 
@@ -71,9 +76,10 @@ servers; Nav2 (`nav.launch.py`) is started on demand inside it. Build or rebuild
 1. `robot.launch.py` alone: `/scan` at ~10 Hz (the hull box filter's output), `/odom` at 20 Hz, TF `odom -> base_link -> laser`.
    Push the cart forward by hand: `/odom` x grows. Turn it left: theta grows.
 2. Laser orientation: a wall in front of the cart must draw at +x in `base_link`. Our lidar
-   is mounted upside down and the LD19 counts angles clockwise; the static transform in the
-   launch file uses roll = pi and yaw = -87.5 degrees (from `config/lidar.json`). If the scan
-   comes out mirrored left/right, set `laser_roll:=0.0`.
+   is mounted upside down and the LD19 counts angles clockwise; the static transform (roll pi,
+   yaw -87.5 degrees) is read from `config/lidar.json` by the board's launch and by the
+   laptop's camera node alike — there is no launch argument for it. If the scan comes out
+   mirrored left/right, fix `roll_deg` in that file and `ros/sync.sh`.
 3. `nav.launch.py`: AMCL converges on the map after a few metres of teleop (or set the initial
    pose from Foxglove); then a goal.
 4. Memory: `free -m` on the board while navigating; the container must stay under ~700 MB.
