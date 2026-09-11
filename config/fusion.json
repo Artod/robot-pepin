@@ -1,0 +1,11 @@
+{
+  "origin_m": [-19.5, -5.5, -0.15],
+  "shape": [280, 250, 34],
+  "voxel_m": 0.05,
+  "truncation_m": 0.10,
+  "max_weight": 60.0,
+  "range_max_m": 4.0,
+  "weight_ref_m": 2.0,
+  "weight_cap": 4.0,
+  "notes": "The grid covers the served map (flat3_straight: 239x215 cells at 5 cm from -18.53, -4.38) with half a metre of margin and 1.7 m of height from 15 cm below the floor. A frame integrates voxels within range_max of the camera; an observation from weight_ref_m weighs 1, nearer ones up to weight_cap, farther ones less."
+}

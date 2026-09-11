@@ -9,6 +9,7 @@ recorder. The split is data, so a test can hold it and the launch file merely re
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 SIDES = ("all", "board", "laptop")
@@ -249,6 +250,7 @@ class BridgeIdentity:
 LAPTOP_SLAM_NODES = (
     "/camera_stream",
     "/depth_stream",
+    "/depth_fusion",
     "/rtabmap/rtabmap",
     "/rtabmap_frame",
     "/foxglove_bridge",
@@ -299,3 +301,9 @@ def lingering_nodes(admin_json: str, names: tuple[str, ...]) -> set[str]:
         _participant, _, node = tail.partition("/")
         seen.add(f"/{node}")
     return set(names) & seen
+
+
+def switch_updates(params: Iterable[tuple[str, object]], names: tuple[str, ...]) -> dict[str, bool]:
+    """The live switches a ``ros2 param set`` batch flips: ``{name: value}`` for the parameters
+    in ``names``, values read as booleans; the rest of the batch is ignored."""
+    return {name: bool(value) for name, value in params if name in names}

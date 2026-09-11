@@ -50,7 +50,6 @@ RTABMAP = {
     # borders (nominal optics, worst there) are not used
     "Grid/NoiseFilteringRadius": "0.10",
     "Grid/NoiseFilteringMinNeighbors": "5",
-    "Grid/DepthRoiRatios": "0.05 0.05 0.05 0.0",
     # graph: refine neighbour links with ICP, close loops with nearby nodes by space
     "RGBD/NeighborLinkRefining": "true",
     "RGBD/ProximityBySpace": "true",
@@ -124,6 +123,13 @@ def generate_launch_description() -> LaunchDescription:
         ],
         output="screen",
     )
+    # The same frames fused into one surface (pepin_bringup.depth_fusion): RTAB-Map keeps the
+    # graph, the closures and the place recognition; the voxels the operator looks at come from
+    # here, beside RTAB-Map's own cloud for comparison.
+    fusion = ExecuteProcess(
+        cmd=["python3", "-m", "pepin_bringup.depth_fusion"],
+        output="screen",
+    )
     rtabmap = Node(
         package="rtabmap_slam",
         executable="rtabmap",
@@ -180,7 +186,8 @@ def generate_launch_description() -> LaunchDescription:
             ghost_wait,
             RegisterEventHandler(
                 OnProcessExit(
-                    target_action=ghost_wait, on_exit=[camera, depth, rtabmap, frame, foxglove]
+                    target_action=ghost_wait,
+                    on_exit=[camera, depth, fusion, rtabmap, frame, foxglove],
                 )
             ),
         ]

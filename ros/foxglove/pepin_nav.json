@@ -116,7 +116,7 @@
           "color": "#ffd500"
         },
         "/rtabmap/cloud_map": {
-          "visible": true,
+          "visible": false,
           "pointSize": 5,
           "colorMode": "rgb"
         },
@@ -125,6 +125,11 @@
           "pointSize": 4,
           "colorMode": "flat",
           "flatColor": "#ff3b3b"
+        },
+        "/fusion/surface": {
+          "visible": true,
+          "pointSize": 5,
+          "colorMode": "rgb"
         }
       },
       "layers": {

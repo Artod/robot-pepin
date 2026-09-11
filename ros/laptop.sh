@@ -15,8 +15,9 @@ NET=pepin-net
 # The map here chooses the places book, so it must be the board's map, not merely a valid one.
 MAP="${PEPIN_MAP:-$(ssh "root@$BOARD" "grep -oE 'PEPIN_MAP=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2 || true)}"
 [ -n "$MAP" ] || { echo "the board does not say which map it runs (ros/mode.sh nav MAP first)"; exit 1; }
-# The library is copied into the build context the same way sync.sh does for the board.
-mkdir -p "$HERE/pepin_src" && rsync -a --delete --exclude __pycache__ "$HERE/../src/pepin/" "$HERE/pepin_src/pepin/"
+# The library is mounted live, like the ROS package: a copy went stale whenever a container was
+# restarted by the bridge watch rather than by this script (the depth node died on an import of a
+# function that existed in src/ but not in the copy, 2026-09-11).
 # The board's bridge is restarted once this side's bridge is up and BEFORE this side's containers
 # start: a subscription made against one bridge does not follow it through a restart (a costmap
 # kept a deaf transform listener for 139 s, run 0148), and a bridge restarted after the
@@ -39,7 +40,7 @@ IMG=pepin-ros; docker image inspect pepin-laptop:latest >/dev/null 2>&1 && IMG=p
 MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/python3.12/site-packages/pepin_bringup:ro"
         -v "$HERE/pepin_bringup/launch:/ws/install/pepin_bringup/share/pepin_bringup/launch:ro"
         -v "$HERE/tools:/tools:ro" -v "$HERE/entrypoint.sh:/pepin_entrypoint.sh:ro"
-        -v "$HERE/pepin_src:/ws/pepin_src:ro" -v "$HERE/params:/params:ro" -v "$HERE/maps:/maps"
+        -v "$HERE/../src/pepin:/ws/pepin_src/pepin:ro" -v "$HERE/params:/params:ro" -v "$HERE/maps:/maps"
         -v "$HERE/../config:/ws/config:ro")
 case "${1:-start}" in
     stop)
