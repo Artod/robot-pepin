@@ -25,6 +25,10 @@ The network runs where ``depth_backend`` says: ``local`` is the CPU model in thi
 :mod:`pepin.depth_service` (ros/depth_host.sh, 26 ms a round trip), ``auto`` the service while
 it answers and the CPU model while it does not (:class:`pepin.depth_service.Fallback`). The CPU
 model is built on its first frame, not at start: a node on the service never pays its gigabyte.
+A model that cannot be built (no cached weights and no hub, no memory) is not tried again: in
+``local`` mode the node leaves as it did when the model failed in the constructor — exit code
+1, the launch respawns it, the respawn retries — and in ``auto`` the frame is lost until the
+service answers; the report line says which.
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): ``floor_anchor``,
 ``edge_filter``, ``lidar_anchor``, ``depth_backend``; their state is printed in every report
@@ -36,6 +40,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+import traceback
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -70,7 +75,14 @@ from pepin.depth import (
     scan_points,
     to_base,
 )
-from pepin.depth_service import DEFAULT_URL, MODES, Fallback, LazyDepth, RemoteDepth
+from pepin.depth_service import (
+    DEFAULT_URL,
+    MODES,
+    DepthModelError,
+    Fallback,
+    LazyDepth,
+    RemoteDepth,
+)
 from pepin.flags import Flag, FlagSet
 from pepin.mounts import Mounts
 from pepin.tsdf import RigidPose
@@ -81,7 +93,15 @@ from pepin_bringup.msgs import (
     scan_from_ranges,
     stamp_seconds,
 )
-from pepin_bringup.node_kit import Switches, Tally, TfLookup, Window, Worker, spin_main
+from pepin_bringup.node_kit import (
+    Fatal,
+    Switches,
+    Tally,
+    TfLookup,
+    Window,
+    Worker,
+    spin_main,
+)
 
 CONFIG = "/ws/config/camera.json"
 LAW_FILE = "/maps/depth_law.json"  # ros/maps on the laptop, mounted at /maps by ros/laptop.sh
@@ -222,6 +242,7 @@ class DepthStream(Node):
             f"depth backend {self._net.status}: service at {depth_url}; the CPU model"
             f" ({model_name}, {threads} threads) loads on its first local frame"
         )
+        self._fatal = Fatal(self)  # the worker's way out when no backend can answer
         self._worker = Worker(self._process, name="depth", on_error=self._on_work_error).start()
         self.create_timer(30.0, self._report)
         self.get_logger().info("depth stream up: /camera/image -> /camera/depth, /depth_scan")
@@ -315,6 +336,8 @@ class DepthStream(Node):
                 self._scans.popleft()
 
     def _on_image(self, msg: Image) -> None:
+        if self._fatal.leaving:
+            return  # nothing can answer: no more frames on the way out
         if self._worker.offer(msg):
             self._tally.count("dropped")
 
@@ -329,7 +352,11 @@ class DepthStream(Node):
             return
         tally = self._tally
         with tally.measure("network"):
-            depth = self._net(rgb)
+            try:
+                depth = self._net(rgb)
+            except DepthModelError as exc:
+                self._no_model(exc)
+                return
         with tally.measure("samples"):  # includes the TF wait for the carry
             samples = self._lidar_samples(msg)
         t_edges = time.perf_counter()
@@ -373,6 +400,23 @@ class DepthStream(Node):
             )
             self._scan_pub.publish(scan)
         tally.count("frames")
+
+    def _no_model(self, exc: DepthModelError) -> None:
+        """The CPU model cannot be built (no cached weights and no hub, or no memory): the cause
+        with its traceback the first time, the remembered sentence after. In ``local`` mode it
+        is the only backend, so the node leaves as it did when the model was built in the
+        constructor — exit code 1, the launch respawns it, the respawn retries the load. In
+        ``auto`` the frame is lost, the service keeps being probed, the report line says why."""
+        self._tally.count("no_model")
+        detail = "".join(traceback.format_exception(exc)) if exc.__cause__ else f"{exc}"
+        if self._net.mode == "local":
+            self.get_logger().fatal(f"{detail}\nno other backend in local mode: leaving")
+            self._fatal.leave(f"depth_stream: {exc}; local mode has no other backend")
+            return
+        self.get_logger().error(
+            f"{detail}\nthe service is down too: frames are lost until it answers",
+            throttle_duration_sec=30,
+        )
 
     def _as_scan(self, depth: Array, image: Image) -> LaserScan:
         """The scaled depth folded onto the floor plane, in base_link, stamped like the image."""
@@ -466,8 +510,7 @@ class DepthStream(Node):
             f" net, {c['dropped']} dropped, {c['withheld']} withheld), law a {law.a:.2f}"
             f" b {law.b:+.3f} on {law.pooled} beams{source} from {c['verdicts']} lidar verdicts"
             f" ({per_verdict:.0f} samples each; held {c['held']} of {c['processed']} frames)"
-            f"{self._extras(w)}, backend {self._net.status}"
-            f"{'' if self._local.built else ' (CPU model not loaded)'},"
+            f"{self._extras(w)}, backend {self._net.status}{self._model_note()},"
             f" flags: {self._switches.state()}, ms median/max: {w.stages()}"
         )
         if law.fitted:
@@ -478,6 +521,15 @@ class DepthStream(Node):
                     f"cannot save the depth law to {self._law_file}: {exc}",
                     throttle_duration_sec=300,
                 )
+
+    def _model_note(self) -> str:
+        """The CPU model's state for the report line: nothing once it answers, ``not loaded``
+        while no frame has asked for it, and why it failed when one did."""
+        if self._local.built:
+            return ""
+        if self._local.failed:
+            return f" (CPU model failed: {self._local.failed})"
+        return " (CPU model not loaded)"
 
     def _extras(self, w: Window) -> str:
         """The parts of the report line a window may have nothing to say about: how old the

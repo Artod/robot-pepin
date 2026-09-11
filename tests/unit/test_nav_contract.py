@@ -973,6 +973,25 @@ def test_the_depth_network_runs_where_the_backend_flag_says_and_the_cpu_model_wa
     )
 
 
+def test_a_cpu_model_that_cannot_be_built_ends_the_node_in_local_mode() -> None:
+    """Built in the constructor, an uncached model with no hub ended the process visibly. Built
+    on its first frame it fails on the worker thread, where a raise is one logged frame among
+    the next: so the node catches pepin.depth_service.DepthModelError (LazyDepth remembers the
+    failure — no rebuild per frame) and in local mode leaves through the kit's Fatal, exit
+    code 1, the launch respawns it, no more frames offered on the way out; in auto mode the
+    frame is lost and the service keeps being probed."""
+    node = sf.tree(f"{NODES}/depth_stream.py")
+    assert {"DepthModelError", "Fatal"} <= sf.imported(node)
+    handled = {
+        sf.dotted(h.type)
+        for h in ast.walk(node)
+        if isinstance(h, ast.ExceptHandler) and h.type is not None
+    }
+    assert "DepthModelError" in handled, "a failed build is a typed condition, not a traceback"
+    assert len(sf.calls_to(node, "Fatal")) == 1 and sf.calls_to(node, "self._fatal.leave")
+    assert "self._fatal.leaving" in sf.unparsed(node, ast.Attribute), "no frames on the way out"
+
+
 def test_the_flags_script_reaches_a_node_where_it_runs_and_refuses_before_any_host() -> None:
     """ros/flags.sh runs the ros2 CLI inside the container a node lives in (the laptop's by
     docker exec, the board's over ssh), one parameter dump per node for a listing, and asks
