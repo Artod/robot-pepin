@@ -25,6 +25,15 @@ lean and reused for every frame. On our mount (1.23 m up, 26 degrees down, 78 de
 1280x720) the image's bottom row already looks 1.02 m ahead: nothing nearer than that is in
 the picture at all, which is exactly the range the lidar covers best. The two sensors are
 complements, not rivals.
+
+What this is worth, measured on a recorded drive against the lidar
+(``scratch/contact_vs_lidar.py``, run 0171, 22 open-floor frames, 2026-09-11): where the lidar
+returns at 1.50-1.75 m the contact scan's median difference is +1 cm (p90 28 cm) and 3 % of its
+marks are false; nearer than 1.25 m it reads 65 cm too far, because it cannot see under 1.02 m
+and reports the foot of whatever is behind; past 2 m every mark is false, because the network's
+floor drifts out of the band (the reason for CONTACT_MAX_RANGE). And the claim it exists for
+holds exactly: correcting the depth by the lidar's law — a factor of 2.2 — moved the contact
+ranges by 0.0 cm.
 """
 
 from __future__ import annotations
@@ -56,7 +65,12 @@ CONTACT_MIN_RUN = 8  # rows: a shorter floor run is noise, a shorter gap inside 
 CONTACT_BOTTOM_SLACK = 16  # rows the floor may start above the bottom (the border row is an edge)
 CONTACT_KTH = 2  # the k-th nearest contact of a bearing marks: a lone column never does
 CONTACT_SCALE_ROWS = 40  # bottom rows whose median depth / floor ratio is the frame's floor scale
-CONTACT_MAX_RANGE = 3.0  # metres: past this the floor's own depth noise is taller than a shoe
+CONTACT_MAX_RANGE = 2.0  # metres, measured (scratch/contact_vs_lidar.py, run 0171, 2026-09-11):
+# after the lidar's law the network's floor sits at 1.01 of the plane at 1.0-1.5 m, 0.96 at
+# 1.5-2.0, 0.89 at 2.0-2.5 and 0.80 at 2.5-3.0 — and 0.89 of the plane is 13 cm of height, the
+# width of the band itself. Past 2 m the floor leaves the band on its own and every column ends
+# in a contact that is not there: against the lidar, 3 % false marks below 1.75 m and 100 % above
+# 2.0 m. The cap is where the floor is still the floor, not where the optics run out
 SCALE_BOUNDS = (0.7, 1.4)  # a floor scale outside this is not a scale: the bottom is not floor
 N_BINS = round(2 * SCAN_HALF_FOV / SCAN_STEP) + 1  # the fan of pepin.depth.depth_to_scan
 
@@ -409,6 +423,7 @@ def contact_scan(
     *,
     noise: DepthNoise = DEPTH_NOISE,
     scale_rows: int = CONTACT_SCALE_ROWS,
+    scale_bounds: tuple[float, float] = SCALE_BOUNDS,
     min_run: int = CONTACT_MIN_RUN,
     bottom_slack: int = CONTACT_BOTTOM_SLACK,
     kth: int = CONTACT_KTH,
@@ -422,13 +437,14 @@ def contact_scan(
     that reached a verdict saw floor out to ``max_range``, NaN where none could say (no floor at
     the bottom, the floor ending in unknown depth, nothing at that bearing; an obstacle so close
     that its contact is below the picture reads NaN too, and the lidar owns that metre).
-    ``scale_rows`` is the frame's floor scale rows (0: off). Returns (angle_min,
-    angle_increment, ranges, verdict) — the first three ready for a LaserScan like
+    ``scale_rows`` is the frame's floor scale rows (0: off) and ``scale_bounds`` what it may
+    swallow — widened, the scan reads a depth image no law has corrected yet. Returns
+    (angle_min, angle_increment, ranges, verdict) — the first three ready for a LaserScan like
     :func:`pepin.depth.depth_to_scan`."""
     d = np.asarray(depth, dtype=float)
     with np.errstate(invalid="ignore"):
         beyond: Mask = ~(plane.range_m < max_range)
-    scale = floor_scale(d, plane.expected, scale_rows)
+    scale = floor_scale(d, plane.expected, scale_rows, scale_bounds)
     band = noise.height_band(plane.expected, plane.height)
     floor, _ = floor_mask(d, plane.expected, plane.height, band, scale)
     known: Mask = np.isfinite(d) & (d > NEAR_M)

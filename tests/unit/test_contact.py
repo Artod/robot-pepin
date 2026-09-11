@@ -172,14 +172,15 @@ def test_a_two_degree_lean_moves_every_ray_s_floor_point_by_the_geometry_s_amoun
 def test_a_lean_the_frame_s_floor_scale_cannot_absorb_is_a_phantom_obstacle() -> None:
     """An unmodelled lean lifts the far floor out of the band and the scan calls open floor an
     obstacle. The frame's own floor scale hides small leans — it is fitted on the bottom rows,
-    which rise with the lean — so 4 degrees still reads clear; at 7 degrees the far floor stands
-    20 cm over a 15 cm band and a phantom lands at two and a half metres. This is the failure
-    mode the costmap must be protected from until an open-floor drive has been measured."""
-    assert np.isinf(contact_scan(_scene(lean_deg=4.0), PLANE)[2][CENTRE])
-    phantom = contact_scan(_scene(lean_deg=7.0), PLANE)[2][CENTRE]
-    assert 1.8 < phantom < 2.9
-    told = FloorPlane.of(INTR, CAM, _nose_down(7.0))
-    assert np.isinf(contact_scan(_scene(lean_deg=7.0), told)[2][CENTRE])
+    which rise with the lean — so inside the scan's two metres a lean of 10 degrees still reads
+    clear. At 12 the floor stands 0.21 sin(12) m above the lifted plane by 1.7 m, 14 cm against
+    a 12 cm band, and a phantom lands there. This is the failure mode the costmap must be
+    protected from until an open-floor drive has been measured."""
+    assert np.isinf(contact_scan(_scene(lean_deg=10.0), PLANE)[2][CENTRE])
+    phantom = contact_scan(_scene(lean_deg=12.0), PLANE)[2][CENTRE]
+    assert 1.5 < phantom < 1.9
+    told = FloorPlane.of(INTR, CAM, _nose_down(12.0))
+    assert np.isinf(contact_scan(_scene(lean_deg=12.0), told)[2][CENTRE])
 
 
 def test_the_range_does_not_depend_on_the_network_s_scale() -> None:
@@ -215,7 +216,7 @@ def test_a_frame_that_cannot_say_says_nothing() -> None:
     blank = contact_scan(np.full((360, 640), np.nan), PLANE)
     assert np.isnan(blank[2]).all() and blank[3].blind == 640
     cut = _scene()
-    cut[:240] = np.nan  # the floor ends in unplaceable depth well inside the range
+    cut[:300] = np.nan  # the floor ends in unplaceable depth well inside the range
     unknown = contact_scan(cut, PLANE)
     assert unknown[3].unknown == 640 and np.isnan(unknown[2]).all()
     wall = contact_scan(np.full((360, 640), 0.35), PLANE)  # a body 35 cm from the lens
@@ -238,11 +239,11 @@ def test_the_bearing_grid_is_the_depth_scan_s_and_a_lone_column_marks_nothing() 
 
 
 def test_the_verdict_counts_the_columns_and_the_bearings_for_the_report_line() -> None:
-    verdict = contact_scan(_scene(box_x=2.0), PLANE)[3]
+    verdict = contact_scan(_scene(box_x=1.7), PLANE)[3]
     assert verdict.columns == 640
     assert verdict.contact + verdict.clear + verdict.near + verdict.blind + verdict.unknown == 640
     assert verdict.marked + verdict.cleared + verdict.unseen == N_BINS
     assert 0.9 < verdict.floor_fraction <= 1.0 and verdict.scale == pytest.approx(1.0)
-    assert verdict.median_range_m == pytest.approx(2.0, abs=0.05)
+    assert verdict.median_range_m == pytest.approx(1.7, abs=0.05)
     assert "contact (median" in str(verdict) and "unseen" in str(verdict)
     assert ColumnState.CONTACT > ColumnState.CLEAR  # the states rank by how much the column knows
