@@ -366,8 +366,11 @@ def test_new_objects_get_a_berth_in_both_costmaps() -> None:
     for costmap in ("local_costmap", "global_costmap"):
         params = _p(costmap)
         assert params["resolution"] == COSTMAP_CELL_M
-        layer = params["obstacle_layer"]
+        # The rings stay in the LIDAR's layer: marking only, they are cleared by the scan's own
+        # rays, which only happens while the two share one layer's grid.
+        layer = params["lidar_layer"]
         assert "dynamic" in layer["observation_sources"].split()
+        assert "scan" in layer["observation_sources"].split(), "nothing else would clear a ring"
         assert layer["dynamic"]["marking"] is True and layer["dynamic"]["clearing"] is False
 
 
@@ -700,7 +703,7 @@ def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph(
     from pepin.deployment import LAPTOP_PUBLISHES
 
     assert "depth_scan" in LAPTOP_PUBLISHES
-    layer = _p("local_costmap")["obstacle_layer"]
+    layer = _p("local_costmap")["camera_layer"]
     assert "depth_scan" in layer["observation_sources"].split()
     source = layer["depth_scan"]
     assert source["topic"] == "/depth_scan" and source["data_type"] == "LaserScan"
@@ -721,6 +724,94 @@ def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph(
     room = json.loads((REPO / "ros/foxglove/pepin_3d.json").read_text())["configById"]["3D!room"]
     assert room["topics"]["/depth_scan"]["visible"]
     assert room["topics"]["/local_costmap/costmap"]["visible"]
+
+
+SENSOR_LAYERS = ("lidar_layer", "camera_layer", "contact_layer")
+
+
+def test_one_layer_per_sensor_so_a_demo_can_switch_one_off_live() -> None:
+    """The three sensor layers stand in both costmaps in the order they write into the master
+    grid, each an ObstacleLayer with its own ``enabled``: that is the switch behind
+    ``ros2 param set /local_costmap/local_costmap camera_layer.enabled false``, a camera-only or
+    lidar-only drive without a restart (CLAUDE.md rule 19). One shared obstacle_layer could not
+    be switched per sensor, and its one grid let the lidar's rays clear the camera's marks."""
+    for costmap in ("local_costmap", "global_costmap"):
+        params = _p(costmap)
+        plugins = params["plugins"]
+        assert "obstacle_layer" not in plugins, f"{costmap}: the shared layer is split"
+        sensors = [name for name in plugins if name in SENSOR_LAYERS]
+        assert sensors == list(SENSOR_LAYERS), f"{costmap}: {plugins}"
+        tof = [name for name in plugins if name.startswith("tof_")]
+        assert plugins.index(sensors[-1]) < plugins.index(tof[0]), "sensors before the ToF"
+        assert plugins[-1] == "inflation_layer", "inflation is always last"
+        if "static_layer" in plugins:
+            assert plugins[0] == "static_layer"
+        for name in SENSOR_LAYERS:
+            layer = params[name]
+            assert layer["plugin"].endswith("ObstacleLayer"), name
+            assert isinstance(layer["enabled"], bool), f"{costmap}.{name} must be switchable"
+    topics = {
+        name: _p("local_costmap")[name][_p("local_costmap")[name]["observation_sources"].split()[0]]
+        for name in SENSOR_LAYERS
+    }
+    assert topics["lidar_layer"]["topic"] == "/scan"
+    assert topics["camera_layer"]["topic"] == "/depth_scan"
+    assert topics["contact_layer"]["topic"] == "/contact_scan"
+
+
+def test_a_dead_sensor_cannot_stall_a_costmap_that_the_others_still_feed() -> None:
+    """A source given an expected_update_rate declares its buffer stale when it goes quiet, the
+    layer stops being current and every goal dies with "Costmap timed out waiting for update"
+    (2026-09-07, the ToF's clock jump). With the sensors in separate layers that would be one
+    silent laptop stalling the board's controller, so every source is explicitly 0.0 and the
+    costmap keeps working with any subset of the sensors — down to none."""
+    for costmap in ("local_costmap", "global_costmap"):
+        params = _p(costmap)
+        for name in SENSOR_LAYERS:
+            layer = params[name]
+            sources = layer["observation_sources"].split()
+            assert sources, f"{costmap}.{name} has no source"
+            for source in sources:
+                assert layer[source]["expected_update_rate"] == 0.0, f"{costmap}.{name}.{source}"
+        for sensor in ("front", "left", "right"):
+            assert params[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
+
+
+def test_the_contact_scan_only_marks_and_stays_off_until_it_is_measured() -> None:
+    """Where the floor ends is a range the camera's own geometry measures (pepin.contact), and
+    the layer that reads it marks only: the scan never says the floor BEHIND a body is free, and
+    a column whose floor drifted out of the band ends on nothing — the false mark the 2 m cap
+    exists for. So no clearing, no inf (it would mark a lethal ring at range_max with clearing
+    off), the layer's range is the module's own cap, and the layer ships disabled in both
+    costmaps until a recorded drive says the marks are real (scratch/contact_validation.py)."""
+    from pepin.contact import CONTACT_MAX_RANGE
+
+    for costmap in ("local_costmap", "global_costmap"):
+        layer = _p(costmap)["contact_layer"]
+        assert layer["enabled"] is False, f"{costmap}: not validated on the robot yet"
+        assert layer["observation_sources"].split() == ["contact_scan"]
+        source = layer["contact_scan"]
+        assert source["topic"] == "/contact_scan" and source["data_type"] == "LaserScan"
+        assert source["sensor_frame"] == "base_link"
+        assert source["marking"] is True and source["clearing"] is False
+        assert source["inf_is_valid"] is False, "inf with clearing off would mark a ring at 2 m"
+        assert source["obstacle_max_range"] == CONTACT_MAX_RANGE
+    # The node's own cap is the same number, and its scan's range_max with it: a mark the layer
+    # would have to discard is a mark nobody sees.
+    node = sf.tree(f"{NODES}/contact_scan.py")
+    assert sf.dict_items(node)["max_range"] == {"CONTACT_MAX_RANGE"}
+    # The camera's two scans keep the rule that separates clearing from marking: depth_scan
+    # clears with inf, so the node's range_max must stay above the layer's obstacle range.
+    camera = _p("local_costmap")["camera_layer"]["depth_scan"]
+    declared = sf.calls_to(sf.tree(f"{NODES}/depth_stream.py"), "self.declare_parameter")
+    scan_max_range = next(
+        ast.literal_eval(call.args[1])
+        for call in declared
+        if ast.unparse(call.args[0]) == "'scan_max_range'"
+    )
+    assert camera["inf_is_valid"] is True and camera["obstacle_max_range"] < scan_max_range, (
+        "an inf ray clears to range_max: below that, every one of them marks instead"
+    )
 
 
 def test_the_floor_s_edge_is_a_node_of_the_kit_and_crosses_the_bridge() -> None:

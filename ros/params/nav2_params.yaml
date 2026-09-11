@@ -268,7 +268,7 @@ local_costmap:
       footprint_padding: 0.0
       resolution: 0.05
       footprint: "[[0.0625, 0.275], [0.0625, -0.275], [-0.30, -0.275], [-0.30, 0.275]]"
-      plugins: ["obstacle_layer", "tof_front_layer", "tof_left_layer", "tof_right_layer", "inflation_layer"]
+      plugins: ["lidar_layer", "camera_layer", "contact_layer", "tof_front_layer", "tof_left_layer", "tof_right_layer", "inflation_layer"]
       # The three VL53L1X at bumper height (tof_bridge -> sensor_msgs/Range): they see the rocking
       # chair's rails, a box on the floor, a carpet roll — everything under the lidar plane.
       # ONE LAYER PER SENSOR, on purpose: a single layer fed by all three shares one probability
@@ -339,23 +339,58 @@ local_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 5.0  # steep: cost falls off fast beyond the hull
         inflation_radius: 0.45  # the controller slows earlier near legs; only >= 253 is a wall
-      obstacle_layer:
+      # ONE LAYER PER SENSOR, like the three ToF below and for the same reason: separate layers
+      # cannot erase each other's evidence, and each is switched on its own while the robot runs
+      # (`ros2 param set /local_costmap//local_costmap camera_layer.enabled false`) — which is how a
+      # camera-only or lidar-only drive is demonstrated without restarting anything. `plugins`
+      # is the order they write into the master grid, and every layer here combines by maximum,
+      # so a mark is a mark whoever wrote it.
+      #
+      # What the split changes is the point of it: while scan, dynamic and depth_scan shared one
+      # grid, the LIDAR's rays cleared the CAMERA's marks — a beam passing 20 cm above the floor
+      # under a table erased the table top the camera had just seen. Now each sensor clears only
+      # what it can itself see. The price is the same coin's other side: a camera mark outlives a
+      # dead camera until the camera raytraces through it again.
+      #
+      # No sensor may stall the costmap by dying: expected_update_rate 0.0 on every source (a
+      # buffer given a rate calls itself stale, the layer stops being current and Nav2 answers
+      # every goal with "Costmap timed out waiting for update" — the ToF's lesson of 2026-09-07,
+      # the same one their no_readings_timeout: 0.0 carries), so this costmap keeps working with
+      # any subset of the sensors alive, down to none.
+      lidar_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
-        observation_sources: scan dynamic depth_scan
+        observation_sources: scan dynamic
         scan:
           topic: /scan
           max_obstacle_height: 2.0
           clearing: True
           marking: True
           data_type: "LaserScan"
+          expected_update_rate: 0.0
           raytrace_max_range: 2.5
           raytrace_min_range: 0.0
           obstacle_max_range: 2.0
           obstacle_min_range: 0.10
         # Lethal rings around whatever the static map does not explain (pepin.dynamic): the point
         # planners' berth around a person or a moved chair, since their inscribed band is 6 cm
-        # on this hull. Marking only: the lidar's own rays clear the cells when the object leaves.
+        # on this hull. Marking only: the lidar's own rays clear the cells when the object leaves
+        # — which is why this source stays in the LIDAR's layer and not in one of its own.
+        dynamic:
+          topic: /dynamic_obstacles
+          data_type: "PointCloud2"
+          sensor_frame: base_link
+          expected_update_rate: 0.0
+          marking: True
+          clearing: False
+          min_obstacle_height: -1.0
+          max_obstacle_height: 1.0
+          obstacle_max_range: 2.0  # no farther than the scan raytraces (2.5): a ring nobody can clear is a wall
+          obstacle_min_range: 0.0
+      camera_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: depth_scan
         depth_scan:
           # The camera's depth folded onto the plane (pepin_bringup.depth_stream on the laptop):
           # what stands 8 cm to 1.3 m above the floor — table tops, seats, a hand — marks and
@@ -367,6 +402,7 @@ local_costmap:
           observation_persistence: 1.0
           data_type: "LaserScan"
           sensor_frame: base_link
+          expected_update_rate: 0.0
           marking: True
           clearing: True
           raytrace_max_range: 3.0
@@ -375,15 +411,34 @@ local_costmap:
           # node's scan_max_range (3.0) must stay ABOVE obstacle_max_range or every inf ray marks
           # a lethal ring at range_max instead of clearing. NaN rays neither mark nor clear.
           inf_is_valid: True
-        dynamic:
-          topic: /dynamic_obstacles
-          data_type: "PointCloud2"
+      contact_layer:
+        # Where the floor ENDS, read off the same depth frames (pepin.contact, published by
+        # pepin_bringup.contact_scan): the feet of chairs, a low box, a plinth — what neither the
+        # lidar's plane 20 cm up nor depth_scan's 8 cm-1.3 m band can see. OFF until it is
+        # validated on the robot (scratch/contact_validation.py): an open-floor drive must mark
+        # nothing, and a taped box must be marked at the range the tape measure says.
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: False
+        observation_sources: contact_scan
+        contact_scan:
+          topic: /contact_scan
+          data_type: "LaserScan"
           sensor_frame: base_link
+          expected_update_rate: 0.0
           marking: True
+          # No clearing, and no ray of its own: this scan says where a body stands on the floor,
+          # never that the floor behind it is free — a column whose floor left the band ends on
+          # nothing, which is the false mark the 2 m cap exists for. So its marks live until the
+          # rolling window slides off them (local) or the costmap is cleared (global): one reason
+          # more for the layer to stay off until the numbers are in.
           clearing: False
-          min_obstacle_height: -1.0
-          max_obstacle_height: 1.0
-          obstacle_max_range: 2.0  # no farther than the scan raytraces (2.5): a ring nobody can clear is a wall
+          # inf means "floor seen clear out to the cap". Valid, it would become a point at
+          # range_max and, with clearing off, MARK a lethal ring at 2 m; dropped, it does what it
+          # should — nothing. NaN rays the projector drops in any case.
+          inf_is_valid: False
+          # 2.0 = pepin.contact.CONTACT_MAX_RANGE, the node's own cap and its scan's range_max:
+          # past it every mark measured false against the lidar (run 0171, 2026-09-11).
+          obstacle_max_range: 2.0
           obstacle_min_range: 0.0
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
@@ -427,8 +482,26 @@ global_costmap:
       track_unknown_space: false
       # The ToF are in here too, not just in the local costmap: a plan is what routes around an
       # obstacle, and a sensor whose returns never reach the planner can only ever stop the robot.
-      plugins: ["static_layer", "obstacle_layer", "tof_front_layer", "tof_left_layer", "tof_right_layer", "inflation_layer"]
-      obstacle_layer:
+      plugins: ["static_layer", "lidar_layer", "camera_layer", "contact_layer", "tof_front_layer", "tof_left_layer", "tof_right_layer", "inflation_layer"]
+      # ONE LAYER PER SENSOR, like the three ToF below and for the same reason: separate layers
+      # cannot erase each other's evidence, and each is switched on its own while the robot runs
+      # (`ros2 param set /global_costmap//global_costmap camera_layer.enabled false`) — which is how a
+      # camera-only or lidar-only drive is demonstrated without restarting anything. `plugins`
+      # is the order they write into the master grid, and every layer here combines by maximum,
+      # so a mark is a mark whoever wrote it.
+      #
+      # What the split changes is the point of it: while scan, dynamic and depth_scan shared one
+      # grid, the LIDAR's rays cleared the CAMERA's marks — a beam passing 20 cm above the floor
+      # under a table erased the table top the camera had just seen. Now each sensor clears only
+      # what it can itself see. The price is the same coin's other side: a camera mark outlives a
+      # dead camera until the camera raytraces through it again.
+      #
+      # No sensor may stall the costmap by dying: expected_update_rate 0.0 on every source (a
+      # buffer given a rate calls itself stale, the layer stops being current and Nav2 answers
+      # every goal with "Costmap timed out waiting for update" — the ToF's lesson of 2026-09-07,
+      # the same one their no_readings_timeout: 0.0 carries), so this costmap keeps working with
+      # any subset of the sensors alive, down to none.
+      lidar_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
         observation_sources: scan dynamic
@@ -438,22 +511,75 @@ global_costmap:
           clearing: True
           marking: True
           data_type: "LaserScan"
+          expected_update_rate: 0.0
           raytrace_max_range: 2.5
           raytrace_min_range: 0.0
           obstacle_max_range: 2.0
           obstacle_min_range: 0.10
         # Lethal rings around whatever the static map does not explain (pepin.dynamic): the point
         # planners' berth around a person or a moved chair, since their inscribed band is 6 cm
-        # on this hull. Marking only: the lidar's own rays clear the cells when the object leaves.
+        # on this hull. Marking only: the lidar's own rays clear the cells when the object leaves
+        # — which is why this source stays in the LIDAR's layer and not in one of its own.
         dynamic:
           topic: /dynamic_obstacles
           data_type: "PointCloud2"
           sensor_frame: base_link
+          expected_update_rate: 0.0
           marking: True
           clearing: False
           min_obstacle_height: -1.0
           max_obstacle_height: 1.0
           obstacle_max_range: 2.0  # no farther than the scan raytraces (2.5): a ring nobody can clear is a wall
+          obstacle_min_range: 0.0
+      camera_layer:
+        # The same depth scan the local costmap marks with, offered to the planner as well — and
+        # OFF until that is measured. The global costmap does not roll: a phantom from a depth
+        # frame the lidar never judged stays in the map until something raytraces through it or
+        # the costmap is cleared, whereas in the local costmap it slides out of a 3 m window. Turn
+        # it on for the camera-only demo (`ros2 param set /global_costmap/global_costmap
+        # camera_layer.enabled true`), and by default once a drive says the marks are real.
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: False
+        observation_sources: depth_scan
+        depth_scan:
+          topic: /depth_scan
+          observation_persistence: 1.0
+          data_type: "LaserScan"
+          sensor_frame: base_link
+          expected_update_rate: 0.0
+          marking: True
+          clearing: True
+          raytrace_max_range: 3.0
+          obstacle_max_range: 2.5
+          inf_is_valid: True
+      contact_layer:
+        # Where the floor ENDS, read off the same depth frames (pepin.contact, published by
+        # pepin_bringup.contact_scan): the feet of chairs, a low box, a plinth — what neither the
+        # lidar's plane 20 cm up nor depth_scan's 8 cm-1.3 m band can see. OFF until it is
+        # validated on the robot (scratch/contact_validation.py): an open-floor drive must mark
+        # nothing, and a taped box must be marked at the range the tape measure says.
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: False
+        observation_sources: contact_scan
+        contact_scan:
+          topic: /contact_scan
+          data_type: "LaserScan"
+          sensor_frame: base_link
+          expected_update_rate: 0.0
+          marking: True
+          # No clearing, and no ray of its own: this scan says where a body stands on the floor,
+          # never that the floor behind it is free — a column whose floor left the band ends on
+          # nothing, which is the false mark the 2 m cap exists for. So its marks live until the
+          # rolling window slides off them (local) or the costmap is cleared (global): one reason
+          # more for the layer to stay off until the numbers are in.
+          clearing: False
+          # inf means "floor seen clear out to the cap". Valid, it would become a point at
+          # range_max and, with clearing off, MARK a lethal ring at 2 m; dropped, it does what it
+          # should — nothing. NaN rays the projector drops in any case.
+          inf_is_valid: False
+          # 2.0 = pepin.contact.CONTACT_MAX_RANGE, the node's own cap and its scan's range_max:
+          # past it every mark measured false against the lidar (run 0171, 2026-09-11).
+          obstacle_max_range: 2.0
           obstacle_min_range: 0.0
       tof_front_layer:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
