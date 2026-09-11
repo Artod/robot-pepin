@@ -164,6 +164,7 @@ def test_the_operator_scripts_parse_and_keep_their_safety_lines() -> None:
         "feature.sh",
         "laptop.sh",
         "thin.sh",
+        "flags.sh",
     ):
         subprocess.run(["bash", "-n", str(REPO / "ros" / script)], check=True)
     stop = (REPO / "ros/stop.sh").read_text()
@@ -970,6 +971,40 @@ def test_the_depth_network_runs_where_the_backend_flag_says_and_the_cpu_model_wa
         'DEPTH_ENV=(-e PEPIN_DEPTH_BACKEND=auto -e "PEPIN_DEPTH_URL=http://host.docker.internal:'
         in laptop
     )
+
+
+def test_the_flags_script_reaches_a_node_where_it_runs_and_refuses_before_any_host() -> None:
+    """ros/flags.sh runs the ros2 CLI inside the container a node lives in (the laptop's by
+    docker exec, the board's over ssh), one parameter dump per node for a listing, and asks
+    the table first: a node without flags, a flag the node has not got, a value the flag
+    refuses — each ends here with the reason and exit 2, no host touched (like kick)."""
+    import os
+
+    src = (REPO / "ros/flags.sh").read_text()
+    assert '. "$HERE/lib.sh"' in src and "ros/tools/flags_doc.py" in src
+    assert "docker exec" in src and 'ssh "root@$BOARD"' in src and "/pepin_entrypoint.sh" in src
+    for verb in ("ros2 param dump", "ros2 param get", "ros2 param set"):
+        assert verb in src, verb
+    assert src.count("ssh ") == 1, "one path to the board: ros2_in"
+    env = {**os.environ, "PEPIN_HOST": "127.0.0.1"}
+    for args, reason in (
+        (["get", "no_such_node", "x"], "no node with a flags table"),
+        (["get", "depth_fusion", "gpu"], "no flag gpu"),
+        (["set", "depth_stream", "depth_backend", "gpu"], "'gpu' is not one of remote, local"),
+        (["set", "depth_fusion", "min_weight"], "usage"),
+        (["frob"], "usage"),
+    ):
+        refused = subprocess.run(
+            ["bash", str(REPO / "ros/flags.sh"), *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert refused.returncode == 2, (args, refused.stdout, refused.stderr)
+        assert reason in refused.stdout + refused.stderr, (args, refused.stdout, refused.stderr)
+    readme = (REPO / "ros/README.md").read_text()
+    assert "ros/flags.sh" in readme[readme.index("## Feature flags") :]
 
 
 def test_the_floor_anchors_the_depth_and_leans_with_the_imu() -> None:
