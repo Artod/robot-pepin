@@ -6,6 +6,7 @@ import threading
 import time
 from typing import Any
 
+import numpy as np
 import pytest
 import ros_stubs
 
@@ -16,6 +17,7 @@ from pepin_bringup.node_kit import (  # noqa: E402
     Fatal,
     Switches,
     Tally,
+    TfHistory,
     TfLookup,
     Worker,
     descriptor,
@@ -396,6 +398,45 @@ def test_a_lookup_answers_a_pose_or_none_with_the_failure_told() -> None:
     assert carried is not None and carried.translation.tolist() == [0.0, 0.0, 0.0]
     assert buffer.calls[-1][1].nanoseconds == 8_000_000_000 and buffer.calls[-1][4] == "odom"
     tf.close()  # no listener of its own: nothing to stop
+
+
+def test_tf_is_a_pose_history_the_frame_poser_can_read() -> None:
+    """pose_at(stamp, frame, fixed) is the lookup ``fixed <- frame`` at the stamp — seconds
+    turned into the message, the history's wait as the timeout — and None with the failure
+    told, so a FramePoser over it carries scans and places cameras out of TF."""
+    from pepin.frame_pose import FramePoser, PoseHistory
+
+    buffer = ros_stubs.Buffer()
+    buffer.transforms[("base_link", "camera_optical")] = ros_stubs.TransformStamped(
+        transform=ros_stubs.Transform(translation=ros_stubs.Vector3(x=0.1, y=0.0, z=1.2))
+    )
+    buffer.transforms[("odom", "base_link")] = ros_stubs.TransformStamped()
+    failures: list[tuple[str, str]] = []
+    history = TfHistory(
+        TfLookup(FakeNode(), buffer=buffer, on_failure=lambda k, t: failures.append((k, t))),
+        timeout_s=0.2,
+    )
+    as_history: PoseHistory = history  # the adapter satisfies the protocol
+    pose = as_history.pose_at(7.25, "camera_optical", "base_link")
+    assert pose is not None and pose.translation.tolist() == [0.1, 0.0, 1.2]
+    target, source, at, timeout = buffer.calls[-1]
+    assert (target, source, at.nanoseconds, timeout.nanoseconds) == (
+        "base_link",
+        "camera_optical",
+        7_250_000_000,
+        200_000_000,
+    )
+    poser = FramePoser(history)
+    on_cart = poser.camera_in_base(7.25)
+    assert on_cart is not None and on_cart.translation[2] == 1.2
+    carried = poser.carry(np.array([[2.0, 0.0, 0.2]]), 7.0, 7.25)
+    assert carried is not None and carried.tolist() == [[2.0, 0.0, 0.2]]  # the cart stood still
+    assert buffer.calls[-2][:2] == ("odom", "base_link") and buffer.calls[-1][:2] == (
+        "odom",
+        "base_link",
+    )
+    assert history.pose_at(7.25, "camera_optical", "map") is None  # no such edge
+    assert failures[-1][1].startswith("map<-camera_optical:")
 
 
 def test_the_listener_s_thread_is_stopped_and_joined_on_close() -> None:

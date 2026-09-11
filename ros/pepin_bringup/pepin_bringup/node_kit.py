@@ -5,12 +5,13 @@ drops the backlog (:class:`Worker`), counters and stage timings that a 30 s time
 one report line (:class:`Tally`), feature flags declared once in the module's ``FLAGS`` table
 (:mod:`pepin.flags`), flipped with ``ros2 param set`` and printed in that line
 (:class:`Switches`, CLAUDE.md rule 19), transforms looked up at a stamp with the
-failure told apart by kind (:class:`TfLookup`), and a ``main`` that leaves DDS properly on
-SIGINT (:func:`spin_main`). Each of these was copied between the depth node, the fusion node
-and the tracker with small differences — and one of the differences was a crash: a kicked
-depth node died with SIGABRT because its worker thread, a daemon, was inside the network when
-the interpreter shut down (see :func:`spin_main`). Nothing here knows what a node does; a node
-composes these and keeps its own logic.
+failure told apart by kind (:class:`TfLookup`, and as the pose history a
+:class:`pepin.frame_pose.FramePoser` reads, :class:`TfHistory`), and a ``main`` that leaves
+DDS properly on SIGINT (:func:`spin_main`). Each of these was copied between the depth node,
+the fusion node and the tracker with small differences — and one of the differences was a
+crash: a kicked depth node died with SIGABRT because its worker thread, a daemon, was inside
+the network when the interpreter shut down (see :func:`spin_main`). Nothing here knows what a
+node does; a node composes these and keeps its own logic.
 """
 
 from __future__ import annotations
@@ -42,12 +43,13 @@ from tf2_ros import Buffer, TransformListener
 from pepin.flags import Flag, FlagSet
 from pepin.telemetry import LatencySummary, LatencyTracker
 from pepin.tsdf import RigidPose
-from pepin_bringup.msgs import pose_from_transform, stamp_seconds
+from pepin_bringup.msgs import pose_from_transform, stamp_from_seconds, stamp_seconds
 
 __all__ = [
     "Fatal",
     "Switches",
     "Tally",
+    "TfHistory",
     "TfLookup",
     "Window",
     "Worker",
@@ -434,6 +436,22 @@ class TfLookup:
 
 def _time(stamp: Any) -> Any:
     return Time() if stamp is None else Time.from_msg(stamp)
+
+
+class TfHistory:
+    """TF as the :class:`pepin.frame_pose.PoseHistory` a :class:`pepin.frame_pose.FramePoser`
+    asks: ``pose_at(stamp, frame, fixed)`` is ``fixed <- frame`` at ``stamp`` seconds through
+    a :class:`TfLookup`, waiting up to ``timeout_s`` for the buffer to cover the moment (a
+    frame's stamp is newer than the last odometry or neck message by tens of milliseconds);
+    ``None`` when it cannot, the failure counted by the lookup's ``on_failure``."""
+
+    def __init__(self, lookup: TfLookup, timeout_s: float = 0.0) -> None:
+        self._lookup = lookup
+        self.timeout_s = timeout_s
+
+    def pose_at(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
+        """``fixed <- frame`` at ``stamp`` (seconds), or ``None`` when TF does not have it."""
+        return self._lookup.pose(fixed, frame, stamp_from_seconds(stamp), timeout_s=self.timeout_s)
 
 
 # ---- main ------------------------------------------------------------------------------------
