@@ -180,6 +180,7 @@ LAPTOP_PUBLISHES = (
     "rtabmap/mapPath",
     "rtabmap/info",
     "depth_scan",  # the camera's depth folded onto the plane, for the board's local costmap
+    "contact_scan",  # the same depth read at the floor: where bodies touch it (pepin.contact)
 )
 BOARD_SERVES = (
     "relocalize",
@@ -225,6 +226,7 @@ VISION_LAPTOP_PUBLISHES = (
     "rtabmap/mapPath",
     "rtabmap/info",
     "depth_scan",
+    "contact_scan",
 )
 
 
@@ -351,6 +353,7 @@ def routes_settled(count: int, expected: int | None, stable_s: float, settle_s: 
 LAPTOP_SLAM_NODES = (
     "/camera_stream",
     "/depth_stream",
+    "/contact_scan",
     "/depth_fusion",
     "/rtabmap/rtabmap",
     "/rtabmap_frame",

@@ -564,12 +564,13 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
     vslam = sf.tree(VSLAM_LAUNCH)
     assert ast.unparse(sf.keywords(_node_named(vslam, "rtabmap"))["namespace"]) == "'rtabmap'"
     assert _node_named(vslam, "foxglove_bridge") is not None
-    for module in ("camera_stream", "depth_stream", "goal_server"):
+    for module in ("camera_stream", "depth_stream", "contact_scan", "goal_server"):
         node = sf.tree(f"{NODES}/{module}.py")
         assert f"super().__init__('{module}')" in sf.unparsed(node, ast.Call), module
     assert laptop_launch_nodes("slam") == (
         "/camera_stream",
         "/depth_stream",
+        "/contact_scan",
         "/depth_fusion",
         "/rtabmap/rtabmap",
         "/rtabmap_frame",
@@ -636,6 +637,7 @@ def test_every_respawned_node_waits_for_its_own_ghost_first() -> None:
     for node in (
         "camera_stream",
         "depth_stream",
+        "contact_scan",
         "depth_fusion",
         "rtabmap_frame",
         "foxglove_bridge",
@@ -719,6 +721,43 @@ def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph(
     room = json.loads((REPO / "ros/foxglove/pepin_3d.json").read_text())["configById"]["3D!room"]
     assert room["topics"]["/depth_scan"]["visible"]
     assert room["topics"]["/local_costmap/costmap"]["visible"]
+
+
+def test_the_floor_s_edge_is_a_node_of_the_kit_and_crosses_the_bridge() -> None:
+    """The contact scan runs where the depth network runs — on the laptop, off /camera/depth —
+    and reaches the board's costmap the way /depth_scan does: through the bridge's allow-list,
+    one way, in both bridge modes. The node is the kit's: a newest-wins worker, live switches
+    printed in its report line, the floor's geometry rebuilt only when the lean or the optics
+    move, and a launch entry that respawns it behind a wait for its own ghost."""
+    from pepin.deployment import LAPTOP_PUBLISHES, VISION_LAPTOP_PUBLISHES, bridge_allow
+
+    node = sf.tree(f"{NODES}/contact_scan.py")
+    assert "super().__init__('contact_scan')" in sf.unparsed(node, ast.Call)
+    assert {"/contact_scan", "/camera/depth", "/camera/camera_info", "/imu/data_raw"} <= sf.strings(
+        node
+    )
+    assert {"FloorPlane", "contact_scan", "ContactVerdict", "Tilt"} <= sf.imported(node)
+    assert {"FloorPlane.of", "contact_scan", "scan_from_ranges"} <= sf.calls(node)
+    # the fan is /depth_scan's own, not one of its own invention
+    assert {"SCAN_HALF_FOV", "SCAN_STEP"} <= sf.names(node)
+    # the kit, not a copy of it: one worker thread, the tally's stages, the switches' state
+    assert {"Worker", "Switches", "Tally", "spin_main"} <= sf.imported(node)
+    assert "self._switches.state" in sf.calls(node) and "self._worker.stop" in sf.calls(node)
+    # the three live switches (CLAUDE.md rule 19), the feature's own name first
+    switches = sf.dict_items(node)
+    assert switches["contact_scan"] == {"True"} and switches["shadow"] == {"True"}
+    # the plane is a cache with two keys: the lean and the optics
+    assert "self._plane_up" in sf.unparsed(node, ast.Attribute)
+    assert "self._plane_intr != intr" in sf.unparsed(node, ast.Compare)
+    assert "contact_scan" in LAPTOP_PUBLISHES and "contact_scan" in VISION_LAPTOP_PUBLISHES
+    for mode in ("split", "vision"):
+        laptop, board = bridge_allow("laptop", mode), bridge_allow("board", mode)
+        assert re.compile(laptop["publishers"][0]).search("/contact_scan"), mode
+        assert re.compile(board["subscribers"][0]).search("/contact_scan"), mode
+        assert not re.compile(board["publishers"][0]).search("/contact_scan"), "it would loop"
+    vslam = sf.tree(VSLAM_LAUNCH)
+    assert "pepin_bringup.contact_scan" in sf.strings(vslam)
+    assert "contact" in _started_after_ghost_wait(vslam)
 
 
 def test_the_drive_ends_on_position_and_the_goal_server_turns_to_the_heading() -> None:
@@ -1161,6 +1200,7 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
     assert _respawning(vslam) == {
         "camera_stream",
         "depth_stream",
+        "contact_scan",
         "depth_fusion",
         "rtabmap_frame",
         "foxglove_bridge",
@@ -1214,7 +1254,13 @@ def test_the_laptop_image_provides_what_the_laptop_nodes_import() -> None:
         "rcl_interfaces", "tf2_msgs", "action_msgs", "builtin_interfaces", "visualization_msgs",
         "numpy", "yaml", "pepin", "pepin_bringup",
     }  # fmt: skip
-    for module in ("camera_stream", "depth_stream", "depth_fusion", "rtabmap_frame"):
+    for module in (
+        "camera_stream",
+        "depth_stream",
+        "contact_scan",
+        "depth_fusion",
+        "rtabmap_frame",
+    ):
         tree = ast.parse((REPO / "ros/pepin_bringup/pepin_bringup" / f"{module}.py").read_text())
         imported = set()
         for node in ast.walk(tree):

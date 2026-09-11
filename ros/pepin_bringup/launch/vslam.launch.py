@@ -9,6 +9,10 @@ by ICP on the scans. It publishes its own frame (``rtabmap``, tied to ``map`` by
 correction, see pepin_bringup.rtabmap_frame) and never ``map -> odom``, so the two
 localisations coexist; its occupancy grid is the map the tracker will be handed one day.
 
+The same depth frames are read a second time at floor height (pepin_bringup.contact_scan): the
+row where the floor ends in each column, lifted onto the floor plane, is ``/contact_scan`` — the
+ranges at which bodies touch the ground, which the lidar's plane 20 cm up cannot see.
+
 Arguments: ``board`` (the robot's address for the camera stream), ``database`` (RTAB-Map's
 database, kept across restarts — a bridge-watch restart must keep the map; a fresh one is the
 operator's call: ``ros/laptop.sh vslam --fresh`` deletes the file before the run), ``bridge_admin``
@@ -127,6 +131,16 @@ def generate_launch_description() -> LaunchDescription:
         prefix=_after_ghost("/depth_stream"),
         **RESPAWN,
     )
+    # The same depth read at the floor instead of above it (pepin_bringup.contact_scan): where
+    # the floor ENDS in each image column is where a body touches it — chair legs, a low box, a
+    # plinth — and that range is geometry, not the network's scale. It goes to the board as
+    # /contact_scan for the local costmap's contact_layer (off until validated on the robot).
+    contact = ExecuteProcess(
+        cmd=["python3", "-m", "pepin_bringup.contact_scan"],
+        output="screen",
+        prefix=_after_ghost("/contact_scan"),
+        **RESPAWN,
+    )
     # RTAB-Map's loop-closure correction as odom -> rtabmap (pepin_bringup.rtabmap_frame): the
     # voxels and the cart stay together after a closure.
     frame = ExecuteProcess(
@@ -230,7 +244,7 @@ def generate_launch_description() -> LaunchDescription:
             RegisterEventHandler(
                 OnProcessExit(
                     target_action=ghost_wait,
-                    on_exit=[camera, depth, fusion, rtabmap, frame, foxglove],
+                    on_exit=[camera, depth, contact, fusion, rtabmap, frame, foxglove],
                 )
             ),
         ]

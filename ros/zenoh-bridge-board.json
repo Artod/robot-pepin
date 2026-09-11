@@ -6,7 +6,7 @@
           "^/(dynamic_obstacles|imu/data_raw|local_costmap/costmap|localization_fit|map|neck/state|odom|odometry/filtered|pepin/run_status|scan|tf|tf_static|tof/front|tof/left|tof/right|tracker_pose)$"
         ],
         "subscribers": [
-          "^/(controller_selector|depth_scan|laptop/heartbeat|pepin/run|plan|planner_selector|rtabmap/info|rtabmap/map|rtabmap/mapGraph|rtabmap/mapPath)$"
+          "^/(contact_scan|controller_selector|depth_scan|laptop/heartbeat|pepin/run|plan|planner_selector|rtabmap/info|rtabmap/map|rtabmap/mapGraph|rtabmap/mapPath)$"
         ],
         "service_servers": [
           "^/(behavior_server/change_state|behavior_server/get_state|bt_navigator/change_state|bt_navigator/get_state|controller_server/change_state|controller_server/get_state|relocalize|velocity_smoother/change_state|velocity_smoother/get_state|where_am_i)$"
