@@ -15,6 +15,13 @@ two halves of the thin-client split — the board keeps the reflexes (controller
 map, tracker) and gets a link watch, the laptop takes the planner and the goal server. The split
 itself is data in ``pepin.deployment`` so a test can hold it; this file only reads it.
 Command chain: controller/behaviors -> cmd_vel_nav -> velocity_smoother -> /cmd_vel -> base_bridge.
+
+``slam:=true`` (ros/thin.sh slam) is the same stack on a map that does not exist yet: RTAB-Map on
+the laptop builds it while the cart drives and publishes it as ``/map``, which the global
+costmap's static layer reads (transient local, and every planner here allows unknown space), so
+this launch starts no map_server and no scan-matching tracker — pepin_bringup.slam_frame owns
+``map -> odom`` instead, from the correction the laptop sends it. One map, one owner of the
+frame, in either mode.
 """
 
 from launch import LaunchDescription
@@ -61,6 +68,10 @@ def _after_ghost(admin: str, *names: str) -> str:
 
 def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     side = LaunchConfiguration("side").perform(context)
+    # Online SLAM: the map is being built on the laptop while the cart drives, so nothing here
+    # serves a saved map and nothing here matches a scan against one. The global costmap's static
+    # layer takes /map over the bridge and pepin_bringup.slam_frame owns map -> odom instead.
+    slam = LaunchConfiguration("slam").perform(context).lower() == "true"
     admin = LaunchConfiguration("bridge_admin").perform(context) or bridge_admin_for(side)
     params = LaunchConfiguration("params_file")
     map_file = LaunchConfiguration("map")
@@ -107,7 +118,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         ),
     }
     nodes = [catalogue[name] for name in nav_nodes(side)]
-    if runs_here(side, "map_server"):
+    if runs_here(side, "map_server", slam):
         nodes.append(catalogue["map_server"])
         nodes.append(
             ComposableNode(
@@ -149,7 +160,20 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     )
     # The ROS nodes; the watches below are plain processes and start at once.
     actions: list = [container]  # type: ignore[type-arg]
-    if runs_here(side, "relocalizer"):
+    if runs_here(side, "slam_frame", slam):
+        # The laptop's RTAB-Map correction, broadcast here as map -> odom
+        # (pepin_bringup.slam_frame): /tf crosses the bridge board -> laptop only, so the
+        # correction arrives as a message on /map_odom and becomes a transform where Nav2 and
+        # the behaviours look it up. The tracker's seat while there is no map to track against.
+        actions.append(
+            ExecuteProcess(
+                cmd=["python3", "-m", "pepin_bringup.slam_frame"],
+                output="screen",
+                prefix=_after_ghost(admin, "/slam_frame"),
+                **RESPAWN,
+            )
+        )
+    if runs_here(side, "relocalizer", slam):
         # Kidnapped-robot recovery: the whole map is searched when the scan stops fitting.
         # Respawned, it re-seeds from /maps/last_pose.json (written every 2 s while the fit is
         # good): a kick at rest costs the seconds it takes to start, nothing else.
@@ -176,9 +200,14 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     if runs_here(side, "goal_server"):
         # Waits for orders on a socket so a goal costs a socket write, not a client boot.
         # Its places book follows the map in use: /maps/flat3.yaml -> /maps/flat3.places.yaml.
-        places = PythonExpression(
+        # A SLAM session gets a book of its own, empty until the drive marks something: the saved
+        # map's places are coordinates in a frame this new map does not share, and "go printer"
+        # would drive at a spot that means nothing here.
+        places: object = PythonExpression(
             ["'", LaunchConfiguration("map"), "'.rsplit('.', 1)[0] + '.places.yaml'"]
         )
+        if slam:
+            places = "/maps/slam.places.yaml"
         actions.append(
             Node(
                 package="pepin_bringup",
@@ -226,6 +255,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("map", default_value="/maps/20260903_182653_lap3_loop.yaml"),
             DeclareLaunchArgument("params_file", default_value="/params/nav2_params.yaml"),
             DeclareLaunchArgument("side", default_value="all", choices=list(SIDES)),
+            # Online SLAM (ros/thin.sh slam): no map_server, no tracker, /map from the laptop.
+            DeclareLaunchArgument("slam", default_value="false"),
             DeclareLaunchArgument("board", default_value="10.0.0.187"),
             DeclareLaunchArgument("bridge_admin", default_value=""),  # empty: by side
             OpaqueFunction(function=_describe),

@@ -3,8 +3,16 @@
 Two separate ``ros2 launch`` processes cost ~110 MB of Python each on a 1.5 GB
 board that also runs Nav2; this file includes robot.launch.py and, optionally,
 nav.launch.py so there is exactly one. Arguments are those of the two files
-(``map``, ``params_file``, ``laser_roll``, ``tof``, ...) plus ``nav`` and ``slam`` (both
-default false; mapping and AMCL never run together: two map->odom publishers).
+(``map``, ``params_file``, ``laser_roll``, ``tof``, ...) plus:
+
+- ``nav``: Nav2 on the saved ``map``.
+- ``slam``: online SLAM (ros/thin.sh slam). Nav2 too — the cart must navigate the map it is
+  building — but without map_server and without the tracker: the map arrives from the laptop's
+  RTAB-Map as ``/map`` and its correction as ``map -> odom``. It implies ``nav``, so the board
+  needs one switch, not two that can disagree.
+- ``slam_toolbox``: the old lidar-only mapper (ros/mode.sh slam_toolbox), which builds a map to
+  SAVE and cannot navigate on it. Never together with ``nav`` or ``slam``: two map -> odom
+  publishers, and the reason this argument is not called ``slam`` any more.
 """
 
 import os
@@ -14,7 +22,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -28,26 +36,41 @@ def generate_launch_description() -> LaunchDescription:
             "neck": LaunchConfiguration("neck"),
         }.items(),
     )
+    # SLAM mode navigates: one switch on the board, so PEPIN_NAV and PEPIN_SLAM can never
+    # disagree about whether the cart may drive the map it is building.
+    driving = PythonExpression(
+        [
+            "'",
+            LaunchConfiguration("nav"),
+            "' == 'true' or '",
+            LaunchConfiguration("slam"),
+            "' == 'true'",
+        ]
+    )
     nav = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(launch_dir, "nav.launch.py")),
-        condition=IfCondition(LaunchConfiguration("nav")),
-        launch_arguments={"side": LaunchConfiguration("side")}.items(),
+        condition=IfCondition(driving),
+        launch_arguments={
+            "side": LaunchConfiguration("side"),
+            "slam": LaunchConfiguration("slam"),
+        }.items(),
     )
-    slam = IncludeLaunchDescription(
+    slam_toolbox = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(launch_dir, "slam.launch.py")),
-        condition=IfCondition(LaunchConfiguration("slam")),
+        condition=IfCondition(LaunchConfiguration("slam_toolbox")),
     )
     return LaunchDescription(
         [
             DeclareLaunchArgument("nav", default_value="false"),
             DeclareLaunchArgument("side", default_value="all"),  # all | board | laptop
-            DeclareLaunchArgument("slam", default_value="false"),  # never together with nav
+            DeclareLaunchArgument("slam", default_value="false"),  # online SLAM: implies nav
+            DeclareLaunchArgument("slam_toolbox", default_value="false"),  # never with nav/slam
             DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
             DeclareLaunchArgument("imu", default_value="false"),
             DeclareLaunchArgument("tof", default_value="false"),
             DeclareLaunchArgument("neck", default_value="false"),
             robot,
             nav,
-            slam,
+            slam_toolbox,
         ]
     )
