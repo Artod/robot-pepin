@@ -233,6 +233,46 @@ def test_a_late_executor_matches_the_lidar_late_instead_of_calling_it_stale() ->
     assert not any("odometry ran late" in text for text in node.logger.texts("warning"))
 
 
+def test_a_fan_drives_without_a_first_search_and_the_watch_waits_for_a_full_turn() -> None:
+    """Camera-only (sources=depth): the fan's first release starts the tracker from its saved
+    pose with no whole-map search, every frame is matched, the fit is published on the fan,
+    the watch is off and the report line says so, /relocalize refuses. The lidar switched on
+    and heard from turns the watch on."""
+    with ros_stubs.parameters(sources="depth", min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
+    truth, odom = drive(8)
+    on_scan, on_depth = node.subs["/scan"][1], node.subs["/depth_scan"][1]
+    on_odom = node.subs["/odometry/filtered"][1]
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_depth(depth_msg(t, ts))
+        on_odom(odom_msg(o, ts))
+        assert node._tracker_initialised and not node._tracker_initialising
+    started = node.logger.texts("warning")[0]
+    assert "on the depth fan without a first search" in started
+    assert not any("first search proposes" in text for text in node.logger.texts("info"))
+    assert len(node.pubs["/tracker_pose"].sent) == 8, "the first frame too: no search to wait for"
+    node._check()
+    assert node._watch_on is False and len(node.pubs["localization_fit"].sent) == 1
+    node._report_tracking()
+    assert "watch off: no full-turn source, fit" in node.logger.texts("info")[-1]
+    res = node.services["relocalize"][1](None, ros_stubs.Trigger.Response())
+    assert not res.success and res.message.startswith("no full-turn scan to search with")
+    assert not node._searching
+    assert node.set_parameters([Parameter("sources", value="lidar,depth")])[0].successful
+    ts = 100.0 + 0.1 * len(truth)
+    node.clock.seconds = ts + 0.02
+    on_scan(lidar_msg(truth[-1], ts))
+    on_odom(odom_msg(odom[-1], ts))
+    node._check()
+    assert node._watch_on is True
+    node._report_tracking()
+    assert "watch fit" in node.logger.texts("info")[-1]
+
+
 def test_with_nothing_fresh_the_node_holds_and_says_so(node: Relocalizer) -> None:
     node.clock.seconds = 50.0
     node._report_tracking()

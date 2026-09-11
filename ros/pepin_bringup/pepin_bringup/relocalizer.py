@@ -19,7 +19,10 @@ Sources: the tracker matches whatever scan-shaped evidence the ``sources`` flag 
 drives every update while it is fresh and the camera's fans ride along, carried to its moment;
 when the lidar is stale or absent the fans drive the updates themselves, so a dead lidar hands
 the tracker to the camera without a restart. ``/localization/sources`` carries every source's
-word on each update as JSON for the operator.
+word on each update as JSON for the operator. The watch, the whole-map search and the first
+fix run on full revolutions only (:meth:`pepin.sources.SourceFeed.full_picture`): a fan sees a
+quarter of the room and two frames of the same view agree on the same look-alike, so while a
+fan drives the tracker follows it, the watch is off and ``/relocalize`` refuses.
 """
 
 from __future__ import annotations
@@ -62,6 +65,7 @@ from pepin.timeline import (
     MotionEdge,
     MotionFilter,
     OdomHistory,
+    TimedScan,
     deskew,
     standing_still,
     timed_scan_from_ros,
@@ -275,6 +279,9 @@ class Relocalizer(Node):
         self._laser_tf: tuple[float, float, float, bool] | None = None  # x, y, yaw, mirrored
         self._searching = False
         self.fit = float("nan")
+        # The watch judges full revolutions only; while a fan drives it is off and the report
+        # line says so (the fit is still measured and published, on the fan).
+        self._watch_on = True
         # Stage one: a wide window around the pose AMCL believes in (a push, a short carry); the
         # whole map only when that fails. On four A53 cores the whole-map lattice takes ~15 s,
         # the window about a second.
@@ -468,12 +475,23 @@ class Relocalizer(Node):
             return
         anchor, scan = taken
         if not self._tracker_initialised:
-            if not self._tracker_initialising and not self._searching:
-                self._tracker_initialising = True
-                threading.Thread(
-                    target=self._initialise_tracker, args=(scan.points,), daemon=True
-                ).start()
-            return
+            if self._registry.source(anchor).partial:
+                # A fan cannot find the cart (two frames of the same view agree on the same
+                # look-alike): no first search on it. The tracker follows the fan from its
+                # saved pose and the watch judges the pose once a full revolution drives.
+                self._tracker_initialised = True
+                self.get_logger().warning(
+                    f"tracker starts at ({loc.pose.x:+.2f}, {loc.pose.y:+.2f}, "
+                    f"{math.degrees(loc.pose.theta):+.0f} deg) on the {anchor} fan without a "
+                    "first search: a fan cannot find the cart"
+                )
+            else:
+                if not self._tracker_initialising and not self._searching:
+                    self._tracker_initialising = True
+                    threading.Thread(
+                        target=self._initialise_tracker, args=(scan.points,), daemon=True
+                    ).start()
+                return
         mono = time.monotonic()
         if self._pacer.skip(mono, self._searching):
             return
@@ -672,7 +690,8 @@ class Relocalizer(Node):
             f"tracker: {feed.summary()}, rested {self._rested}, {pacer.summary()}, deskew "
             f"failed {self._deskew_failed}; {loc.settings()}; {track.summary()}; "
             f"sources: {self._feed.status(self._now_s())}; "
-            f"watch fit {self.fit:.2f}, dynamic marks {self._dynamic_count}, "
+            f"watch {'fit' if self._watch_on else 'off: no full-turn source, fit'} "
+            f"{self.fit:.2f}, dynamic marks {self._dynamic_count}, "
             f"scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
             f"flags: {self._switches.state()}"
         )
@@ -752,8 +771,11 @@ class Relocalizer(Node):
 
     def _check(self) -> None:
         """Once a second: score the fit on the newest picture of the source that drives the
-        tracker; the watch decides whether to search the whole map."""
-        picture = self._feed.picture(self._now_s())
+        tracker; the watch decides whether to search the whole map — on a full revolution
+        only: while a fan drives, the fit is published and the watch is off."""
+        now = self._now_s()
+        full = self._feed.full_picture(now)
+        picture = full if full is not None else self._feed.picture(now)
         if self._matcher is None or picture is None:
             return
         pose = self._tracked_pose()
@@ -769,12 +791,17 @@ class Relocalizer(Node):
         # fit collapsed to 0.19-0.31 during every pivot while the tracker itself sat at 0.90-0.95
         # (run 0070, second by second), and a blind-drive rule built on the false number stopped
         # healthy drives mid-turn and moved the belief by 0.4 m to "recover" from nothing.
-        if self._localizer is not None and moving:
-            self.fit = float(self._localizer.confidence)
-        else:
-            self.fit = self._matcher.inlier_fraction(pose, picture.points)
+        self.fit = (
+            float(self._localizer.confidence)
+            if self._localizer is not None and moving
+            else self._matcher.inlier_fraction(pose, picture.points)
+        )
         self._fit_pub.publish(Float32(data=float(self._watch.reported_fit(self.fit))))
-        if self._searching or not self._tracker_initialised:
+        # A fan drives: its fit cannot say "lost" (LOST_FIT was tuned on full revolutions) and
+        # a search on it would re-seed the tracker on a look-alike the twin check cannot see:
+        # the watch is off, and the report line says so.
+        self._watch_on = full is not None
+        if self._searching or not self._tracker_initialised or not self._watch_on:
             return
         # The watch gets the tracker's OWN fit. reported_fit() is for the outside world: capped
         # at 0.35 while a candidate pends, and fed back here it kept a twin candidate alive at
@@ -797,7 +824,7 @@ class Relocalizer(Node):
                 self._searching = True
         if search:
             self.get_logger().warning(f"fit {self.fit:.2f}: searching the whole map")
-            threading.Thread(target=self._search_and_seed, daemon=True).start()
+            threading.Thread(target=self._search_and_seed, args=(picture,), daemon=True).start()
         elif occluded and self.fit < self._watch.lost_fit:
             self.get_logger().info(
                 f"fit {self.fit:.2f} but the scan is mostly things the map does not know: "
@@ -843,21 +870,22 @@ class Relocalizer(Node):
             return
         self._seed(pose, confidence)
 
-    def _search_and_seed(self) -> None:
+    def _search_and_seed(self, picture: TimedScan) -> None:
         """Worker thread: the search must not block the executor (scan and service callbacks)."""
         try:
-            self._relocalize()
+            self._relocalize(picture)
         finally:
             with self._episode:
                 self._searching = False
 
-    def _relocalize(self) -> str:
-        """One whole-map search on the newest scan; the watch decides what its answer is worth."""
+    def _relocalize(self, picture: TimedScan) -> str:
+        """One whole-map search on ``picture`` — the full revolution the caller decided on
+        (:meth:`~pepin.sources.SourceFeed.full_picture`; never a fan); the watch decides what
+        its answer is worth."""
         assert self._localizer is not None and self._matcher is not None
-        # The scan, its id and the map it was taken on, captured together at the start: a map
+        # The scan's id and the map it was taken on, captured together at the start: a map
         # swap during the seconds of a search must not stamp the old scan's fix as the new map's.
-        picture, map_id = self._feed.picture(self._now_s()), self._map_id
-        assert picture is not None
+        map_id = self._map_id
         points, scan = picture.points, picture.scan_id
         current = self._tracked_pose()
         current_fit = self._matcher.inlier_fraction(current, points) if current else 0.0
@@ -941,15 +969,22 @@ class Relocalizer(Node):
         /localization_fit within a few seconds. The search runs in the worker, never here: a
         loop on the executor thread froze the scan, so its "second opinion" was the first search
         replayed to the millimetre and every candidate was rubber-stamped (review, 2026-09-09)."""
-        if self._localizer is None or self._feed.picture(self._now_s()) is None:
-            res.success, res.message = False, "no map or no scan yet"
+        now = self._now_s()
+        picture = self._feed.full_picture(now)
+        if self._localizer is None or picture is None:
+            res.success = False
+            res.message = (
+                "no map or no scan yet"
+                if self._localizer is None or self._feed.picture(now) is None
+                else "no full-turn scan to search with: a fan cannot find the cart"
+            )
             return res
         with self._episode:
             if self._searching:
                 res.success, res.message = True, "a search is already running"
                 return res
             self._searching = True
-        threading.Thread(target=self._search_and_seed, daemon=True).start()
+        threading.Thread(target=self._search_and_seed, args=(picture,), daemon=True).start()
         res.success = True
         res.message = (
             "searching the whole map; a fix needs two searches that agree — watch /localization_fit"

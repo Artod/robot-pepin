@@ -1143,6 +1143,7 @@ def test_the_tracker_feeds_every_scan_source_through_one_path_and_reports_each()
         "self._feed.take",
         "self._feed.gather",
         "self._feed.picture",
+        "self._feed.full_picture",
         "self._feed.status",
         "loc.update_from",
         "loc.sources_report",
