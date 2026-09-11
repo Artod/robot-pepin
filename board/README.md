@@ -34,7 +34,7 @@ talk to the servo bus directly (`scripts/base_smoke.py`, `jog.py`,
 | `board/wifi-runtime-pm-on.conf` | `/etc/systemd/system/wifi-powersave-off.service.d/runtime-pm-on.conf` |
 | `src/pepin/` (the package, stdlib only on the board) | `/opt/pepin/pepin/` |
 | `config/base.json` | `/opt/pepin/config/base.json` |
-| `config/neck.json` | `/opt/pepin/config/neck.json` (the ids the `neck` command reads; absent, that command answers an error and the wheels do not care) |
+| `config/neck.json` | `/opt/pepin/config/neck.json` (the ids the `neck` command reads and the limits the move commands obey; absent, those commands answer an error and the wheels do not care) |
 
 Deploy the package and the configuration from the laptop:
 
@@ -43,6 +43,29 @@ rsync -a --delete --exclude '__pycache__' src/pepin/ root@pepin.local:/opt/pepin
 scp config/base.json config/neck.json root@pepin.local:/opt/pepin/config/
 ssh root@pepin.local 'systemctl restart pepin-base pepin-tof'
 ```
+
+## The neck on the base server's port (:3336)
+
+The two neck servos hang on the same bus as the wheels, so the base server is the only thing
+that may talk to them. Four JSON lines, from anywhere that can reach the port — `ros/neck.sh`
+is the shell around them:
+
+| Line | What happens |
+| --- | --- |
+| `{"cmd":"neck"}` | answers `{"type":"neck","pan_ticks":..,"tilt_ticks":..,"age_s":..,"read_ms":..}`: the encoders, cached, at most twenty bus reads a second however many clients ask |
+| `{"cmd":"neck_goto","pan_ticks":N,"tilt_ticks":N,"hold":false}` | moves the head there and answers `{"type":"neck_goto","pan_ticks":..,"tilt_ticks":..,"reached":bool,"ms":..,"hold":bool}` when it arrives or after 3 s. Either target may be `null` to leave that servo alone |
+| `{"cmd":"neck_home"}` | the same move to the reference pose of `config/neck.json` (`reference.pan_ticks` / `tilt_ticks`), the pose the camera mount was measured in |
+| `{"cmd":"ping"}` | the servo roster, ids 1–10 |
+
+What the move side refuses, rather than doing something smaller: a target outside the limits in
+`config/neck.json` (pan 257–3812, tilt 1814–3090 ticks — never clamped, a wrong number is a
+mistake); a move while the wheels turn (a write to a silent servo costs the wheel loop 0.4 s, and
+the deadman lives on that thread); a second move while one is under way; a servo that is not in
+position mode, which `scripts/jog.py wheel` writes into a servo's EEPROM and which would turn the
+head forever. The move itself runs one short bus transaction per 20 ms tick, so it never delays
+the wheels; the servos are released again when the head arrives, unless `"hold":true` asked them
+to keep the pose. Its answer is broadcast to every client of the port, not only to the one that
+asked — it is born when the head stops, and that may be seconds after the request.
 
 ## Setting up a fresh board
 
