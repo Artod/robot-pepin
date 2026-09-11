@@ -27,6 +27,22 @@ def test_script_answers_help(script: str) -> None:
     assert result.returncode == 0, result.stderr[-600:]
 
 
+def test_the_depth_host_launcher_parses_and_stays_off_by_default() -> None:
+    """ros/depth_host.sh runs the depth network on the laptop's GPU beside the containers;
+    ros/laptop.sh starts it only under PEPIN_DEPTH_HOST=1 and only then points the node at it,
+    so the default vslam start is exactly what it was (CPU in the container)."""
+    result = subprocess.run(
+        ["bash", "-n", str(REPO / "ros/depth_host.sh")], capture_output=True, text=True, timeout=20
+    )
+    assert result.returncode == 0, result.stderr
+    launcher = (REPO / "ros/depth_host.sh").read_text()
+    assert "pepin.depth_service" in launcher and "--group depth" in launcher
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert '"${PEPIN_DEPTH_HOST:-0}" = 1' in laptop
+    assert "PEPIN_DEPTH_BACKEND=auto" in laptop and "host.docker.internal" in laptop
+    assert laptop.count("depth_host.sh") >= 2  # started with vslam, stopped with stop
+
+
 def test_go_sh_survives_a_camera_that_died_before_the_drive_ended(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """go.sh once captured the camera itself and stopped ffmpeg by writing "q" into a fifo; when
     ffmpeg was already dead that write raised SIGPIPE in the shell's builtin printf and killed the

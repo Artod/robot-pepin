@@ -10,6 +10,8 @@
 #   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
 #                            neck on): the camera node here keeps its static edge off
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
+#   PEPIN_DEPTH_HOST=1 ros/laptop.sh vslam   the same with the depth network on the laptop's GPU
+#                            (ros/depth_host.sh, off by default) and the node told to use it
 # Only `start` talks to the board (its side and its map); stop, logs, vslam and kick never do.
 # Prerequisites: the image built here (ros/laptop-build.sh) and the board on side=board
 # (ros/thin.sh on). A Docker container on macOS lives behind the VM's NAT, so DDS discovery
@@ -71,6 +73,7 @@ MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/pyth
 case "${1:-start}" in
     stop)
         stop_gently pepin-laptop pepin-vslam; docker rm -f pepin-zenoh >/dev/null 2>&1 || true
+        if [ "${PEPIN_DEPTH_HOST:-0}" = 1 ]; then "$HERE/depth_host.sh" stop; fi
         echo "laptop side stopped"; exit 0 ;;
     logs)
         exec docker logs -f "pepin-${2:-laptop}" ;;
@@ -121,8 +124,17 @@ case "${1:-start}" in
         STATIC_CAMERA_TF=true
         case " ${*:2} " in *" --neck "*) STATIC_CAMERA_TF=false ;; esac
         stop_gently pepin-vslam
+        # The depth network on the laptop's GPU (ros/depth_host.sh): opt-in until measured. The
+        # node reads PEPIN_DEPTH_BACKEND (auto: the service, the CPU model when it does not
+        # answer) and PEPIN_DEPTH_URL (the host as the container sees it); without the flag
+        # neither is set and the node runs on the CPU as before.
+        DEPTH_ENV=()
+        if [ "${PEPIN_DEPTH_HOST:-0}" = 1 ]; then
+            "$HERE/depth_host.sh" start
+            DEPTH_ENV=(-e PEPIN_DEPTH_BACKEND=auto -e "PEPIN_DEPTH_URL=http://host.docker.internal:${PEPIN_DEPTH_PORT:-8790}")
+        fi
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
-            -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+            -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} \
             "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" >/dev/null
         echo "vslam up (RTAB-Map + camera + depth, static camera tf $STATIC_CAMERA_TF): Foxglove at ws://localhost:8765, ros/laptop.sh logs vslam"; exit 0 ;;
     start) ;;
