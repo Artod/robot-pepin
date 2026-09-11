@@ -12,15 +12,16 @@ the cart that saw it are drawn where RTAB-Map says they are, in one tree with th
 from __future__ import annotations
 
 import numpy as np
-import rclpy
-from geometry_msgs.msg import TransformStamped
 from rclpy.node import Node
 from rtabmap_msgs.msg import MapGraph
 from tf2_ros import TransformBroadcaster
 
-from pepin.depth import Array, invert, quaternion_from_matrix, rotation_matrix
+from pepin.tsdf import RigidPose
+from pepin_bringup.msgs import pose_from_transform, transform_from_pose
+from pepin_bringup.node_kit import spin_main
 
 RATE_HZ = 10.0
+FRAMES = ("map", "rtabmap")  # parent, child
 
 
 class RtabmapFrame(Node):
@@ -29,8 +30,7 @@ class RtabmapFrame(Node):
     def __init__(self) -> None:
         super().__init__("rtabmap_frame")
         self._tf = TransformBroadcaster(self)
-        self._rotation: Array = np.eye(3)
-        self._translation: Array = np.zeros(3)
+        self._pose = RigidPose(np.eye(3), np.zeros(3))
         self._graphs = 0
         self.create_subscription(MapGraph, "/rtabmap/mapGraph", self._on_graph, 5)
         self.create_timer(1.0 / RATE_HZ, self._broadcast)
@@ -39,38 +39,17 @@ class RtabmapFrame(Node):
         )
 
     def _on_graph(self, msg: MapGraph) -> None:
-        t, q = msg.map_to_odom.translation, msg.map_to_odom.rotation
-        self._rotation, self._translation = invert(
-            rotation_matrix(q.x, q.y, q.z, q.w), np.array([t.x, t.y, t.z])
-        )
+        """RTAB-Map's rtabmap -> map correction, kept the other way round: map -> rtabmap."""
+        self._pose = pose_from_transform(msg.map_to_odom).inverse()
         self._graphs += 1
 
     def _broadcast(self) -> None:
-        out = TransformStamped()
-        out.header.stamp = self.get_clock().now().to_msg()
-        out.header.frame_id, out.child_frame_id = "map", "rtabmap"
-        x, y, z = (float(v) for v in self._translation)
-        out.transform.translation.x, out.transform.translation.y, out.transform.translation.z = (
-            x,
-            y,
-            z,
-        )
-        qx, qy, qz, qw = quaternion_from_matrix(self._rotation)
-        out.transform.rotation.x, out.transform.rotation.y = qx, qy
-        out.transform.rotation.z, out.transform.rotation.w = qz, qw
-        self._tf.sendTransform(out)
+        stamp = self.get_clock().now().to_msg()
+        self._tf.sendTransform(transform_from_pose(*FRAMES, self._pose, stamp))
 
 
 def main() -> None:
-    rclpy.init()
-    node = RtabmapFrame()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.try_shutdown()
+    spin_main(RtabmapFrame)
 
 
 if __name__ == "__main__":
