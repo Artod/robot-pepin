@@ -8,9 +8,12 @@ from synthetic import raycast_room
 from test_localization import PILLAR, furnished_room_map
 
 from pepin.fusion import (
+    EDGE_INFLATION,
     FIT_FLOOR,
     PoseMeasurement,
+    at_edge,
     covariance_from_score_surface,
+    disagreement,
     fuse,
 )
 from pepin.odometry import Pose2D, wrap_angle
@@ -67,7 +70,7 @@ def test_nothing_fuses_to_none_and_one_measurement_is_itself() -> None:
 def test_two_isotropic_measurements_meet_at_their_information_weighted_mean() -> None:
     sharp = measurement(0.0, 0.0, 0.0, 0.01, 0.01, 0.01, "lidar")
     blunt = measurement(0.10, 0.10, 0.10, 0.03, 0.03, 0.03, "depth")
-    fused = fuse([sharp, blunt])
+    fused = fuse([sharp, blunt], gate=math.inf)  # ten centimetres apart: the gate would object
     assert fused is not None and fused.source == "lidar+depth"
     weight = (1 / 0.03**2) / (1 / 0.01**2 + 1 / 0.03**2)  # the blunt one's share: a tenth
     assert (fused.x, fused.y, fused.yaw) == pytest.approx((0.1 * weight,) * 3)
@@ -94,7 +97,47 @@ def test_a_ridge_along_a_wall_leaves_that_axis_to_the_other_source() -> None:
     assert fused.y == pytest.approx(0.01)  # two equally sure y answers meet half way
 
 
+def test_a_measurement_that_disagrees_beyond_the_gate_is_left_out_and_named() -> None:
+    """A camera scan of a table top the map has no wall for matches the map well half a metre
+    away; only its disagreement with the lidar gives it away. Fused with the gate off it would
+    drag the pose; with the gate it is a bystander, named in ``rejected``."""
+    lidar = measurement(0.0, 0.0, 0.0, 0.01, 0.01, 0.01, "lidar")
+    stray = measurement(0.50, 0.0, 0.0, 0.02, 0.02, 0.02, "depth")
+    assert disagreement(lidar, stray) == pytest.approx(0.5**2 / (0.01**2 + 0.02**2))
+    fused = fuse([lidar, stray])
+    assert fused is not None and fused.rejected == ("depth",) and fused.source == "lidar"
+    assert (fused.x, fused.y, fused.yaw) == (0.0, 0.0, 0.0)
+    fused = fuse([lidar, stray], gate=math.inf)
+    assert fused is not None and fused.rejected == () and fused.x > 0.05
+    agreeing = measurement(0.02, 0.0, 0.0, 0.02, 0.02, 0.02, "depth")
+    fused = fuse([lidar, agreeing])
+    assert fused is not None and fused.rejected == () and fused.source == "lidar+depth"
+
+
 # -- the covariance from a surface ------------------------------------------
+
+
+def test_a_match_on_the_windows_edge_is_a_bound_not_a_measurement() -> None:
+    """The best candidate on the lattice's border means the scan wanted to go farther than the
+    window allowed: the answer is the window's, and its covariance is widened accordingly."""
+    centred = surface_of(200.0, 200.0, 20.0)
+    assert not at_edge(centred)
+    n = round(WINDOW.xy_m / WINDOW.xy_step_m)
+    shifted = surface_of(200.0, 200.0, 20.0)
+    scores = shifted.scores.copy()
+    # move the peak to the last position (dx = dy = +0.09): the window's corner
+    scores[:, -1] = scores.max() + 1.0
+    edge = ScoreSurface(
+        scores, shifted.positions, shifted.headings, shifted.k, len(shifted.positions) - 1, 100, 1.0
+    )
+    assert at_edge(edge) and (2 * n + 1) ** 2 == len(shifted.positions)
+    tight = covariance_from_score_surface(centred, fit=1.0)
+    wide = covariance_from_score_surface(edge, fit=1.0)
+    assert wide[0, 0] > EDGE_INFLATION * tight[0, 0] / 4  # the corner's spread plus the inflation
+    turned = ScoreSurface(
+        shifted.scores, shifted.positions, shifted.headings, 0, shifted.i, 100, 1.0
+    )
+    assert at_edge(turned)
 
 
 def test_a_ridge_gives_an_anisotropic_covariance_and_a_peak_a_tight_one() -> None:

@@ -33,6 +33,14 @@ TEMPERATURE = 0.1
 PEAK_FLOOR = 0.2
 FIT_FLOOR = 0.1  # a fit below this inflates the covariance no further (a hundredfold)
 COV_RIDGE = 1e-12  # keeps a covariance invertible when a lattice step is zero
+# A match sitting on the window's edge is a bound, not a measurement: the best pose lay outside
+# what was searched. Its covariance is widened by this, so it can only ever be a faint vote.
+EDGE_INFLATION = 100.0
+# A measurement this far (Mahalanobis, squared, 3 degrees of freedom) from the surest one
+# does not describe the same pose: chi-square at 99 %. Left out of the fusion, named in
+# ``rejected``. A camera scan of a table top the lidar's map has no wall for matches the map
+# well somewhere within the window, and only its disagreement with the lidar gives it away.
+GATE = 11.34
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,7 @@ class PoseMeasurement:
     source: str
     stamp: float
     fit: float
+    rejected: tuple[str, ...] = ()  # sources a fusion left out for disagreeing (see ``fuse``)
 
     @property
     def pose(self) -> Pose2D:
@@ -73,23 +82,40 @@ class PoseMeasurement:
         )
 
 
-def fuse(measurements: Sequence[PoseMeasurement]) -> PoseMeasurement | None:
+def disagreement(a: PoseMeasurement, b: PoseMeasurement) -> float:
+    """The squared Mahalanobis distance between two measurements of the same pose, under the
+    sum of their covariances; the heading difference wrapped."""
+    d = np.array([b.x - a.x, b.y - a.y, wrap_angle(b.yaw - a.yaw)])
+    joint = a.covariance + b.covariance + COV_RIDGE * np.eye(3)
+    return float(d @ np.linalg.solve(joint, d))
+
+
+def fuse(measurements: Sequence[PoseMeasurement], gate: float = GATE) -> PoseMeasurement | None:
     """The information-weighted pose of several measurements: ``None`` for none, the one
     itself for one, and for more the information-filter update ``sum(L_i) mu = sum(L_i mu_i)``
-    with the headings taken relative to the surest source's, so nothing is averaged across
-    +-pi. The result's covariance is ``inv(sum(L_i))``, its fit the information-weighted mean
-    of the fits, its stamp the newest, its source the names joined with ``+``."""
+    with the headings taken relative to the surest source's (the most heading information),
+    so nothing is averaged across +-pi. A measurement whose :func:`disagreement` with the
+    surest one exceeds ``gate`` is left out and named in ``rejected`` (``gate`` ``inf`` fuses
+    all). The result's covariance is ``inv(sum(L_i))``, its fit the information-weighted mean
+    of the fits, its stamp the newest, its source the names fused joined with ``+``."""
     if not measurements:
         return None
     if len(measurements) == 1:
         return measurements[0]
     infos = [m.information for m in measurements]
-    reference = measurements[int(np.argmax([info[2, 2] for info in infos]))].yaw
+    surest = measurements[int(np.argmax([info[2, 2] for info in infos]))]
+    reference = surest.yaw
+    kept = [
+        (m, info)
+        for m, info in zip(measurements, infos, strict=True)
+        if m is surest or disagreement(surest, m) <= gate
+    ]
+    rejected = tuple(m.source for m in measurements if all(m is not k for k, _ in kept))
     total = np.zeros((3, 3))
     weighted = np.zeros(3)
     weight = 0.0
     fit = 0.0
-    for m, info in zip(measurements, infos, strict=True):
+    for m, info in kept:
         z = np.array([m.x, m.y, wrap_angle(m.yaw - reference)])
         total += info
         weighted += info @ z
@@ -103,9 +129,10 @@ def fuse(measurements: Sequence[PoseMeasurement]) -> PoseMeasurement | None:
         y=float(mean[1]),
         yaw=wrap_angle(reference + float(mean[2])),
         covariance=(covariance + covariance.T) / 2.0,
-        source="+".join(m.source for m in measurements),
-        stamp=max(m.stamp for m in measurements),
+        source="+".join(m.source for m, _ in kept),
+        stamp=max(m.stamp for m, _ in kept),
         fit=fit / weight if weight > 0.0 else 0.0,
+        rejected=rejected,
     )
 
 
@@ -145,4 +172,19 @@ def covariance_from_score_surface(surface: ScoreSurface, fit: float, trust: floa
     cov += np.diag([step_xy**2 / 12.0, step_xy**2 / 12.0, step_theta**2 / 12.0])
     cov /= max(fit, FIT_FLOOR) ** 2
     cov /= max(trust, 1e-6)
+    if at_edge(surface):
+        cov *= EDGE_INFLATION
     return cov
+
+
+def at_edge(surface: ScoreSurface) -> bool:
+    """True when the winner sits on the lattice's border in position or heading: the scan
+    wanted to go farther than the window let it, and the answer is the window, not the scan."""
+    headings, positions = len(surface.headings), len(surface.positions)
+    if headings > 1 and surface.k in (0, headings - 1):
+        return True
+    side = round(math.sqrt(positions))
+    if side * side != positions or side < 2:
+        return False
+    ix, iy = divmod(surface.i, side)
+    return ix in (0, side - 1) or iy in (0, side - 1)
