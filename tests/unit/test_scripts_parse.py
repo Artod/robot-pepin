@@ -389,6 +389,40 @@ def test_a_node_that_does_not_answer_is_reported_not_guessed(tmp_path) -> None: 
     assert not [c for c in sent if "param set" in c], sent
 
 
+def test_a_source_this_script_has_not_heard_of_survives_the_other_sensor_s_switch(  # type: ignore[no-untyped-def]
+    tmp_path,
+) -> None:
+    """The source list is read-modify-write, and the script's SOURCE_ORDER is only an order: a
+    name outside it (a source added to pepin.sources before this list hears of it) is carried
+    through, never quietly deleted by a switch of a different sensor."""
+    code, out, sent = _sensor(
+        tmp_path, "camera", "on", FAKE_SOURCES="lidar,sonar,depth", FAKE_LAYERS="false"
+    )
+    assert code == 0, out
+    assert "flags set relocalizer sources lidar,depth,contact,sonar" in sent, sent
+    assert "relocalizer sources lidar,depth,sonar -> lidar,depth,contact,sonar" in out
+    # and the same on the way out: switching the camera off keeps it too
+    _, out, sent = _sensor(
+        tmp_path, "camera", "off", FAKE_SOURCES="lidar,sonar,depth,contact", FAKE_LAYERS="true"
+    )
+    assert "flags set relocalizer sources lidar,sonar" in sent, sent
+
+
+def test_the_scripts_source_order_is_the_rosters_own() -> None:
+    """ros/sensor.sh cannot ask Python for pepin.sources' roster on every run (it is a shell
+    script that must also run against a bare checkout), so it carries the order as a literal.
+    This is the check that keeps the copy honest — the order it prints is the roster's."""
+    from pepin.sources import DEFAULT_SOURCES
+
+    line = next(
+        line
+        for line in (REPO / "ros/sensor.sh").read_text().splitlines()
+        if line.startswith("SOURCE_ORDER=")
+    )
+    order = line.split('"')[1].split()
+    assert order == [s.name for s in DEFAULT_SOURCES], "src/pepin/sources.py owns this order"
+
+
 def test_status_reads_every_end_of_the_switch(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """One picture, and the cheap half of it is free: the tracker's own sources come out of the
     report line it already prints every 30 s (pepin.flags renders `sources=...` into it), so

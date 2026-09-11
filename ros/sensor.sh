@@ -30,7 +30,9 @@ LIDAR_DRIVER=/ldlidar_node
 LOCAL_COSTMAP=/local_costmap/local_costmap
 GLOBAL_COSTMAP=/global_costmap/global_costmap
 COSTMAPS="$LOCAL_COSTMAP $GLOBAL_COSTMAP"
-SOURCE_ORDER="lidar depth contact"  # pepin.sources' own order, so two lists compare as text
+SOURCE_ORDER="lidar depth contact"  # pepin.sources' own order, so two lists compare as text.
+# Only an ORDER: a name outside it is carried through, never dropped (normalize_sources), and
+# tests/unit/test_scripts_parse.py fails when it drifts from src/pepin/sources.py.
 LAYER_ORDER="lidar_layer camera_layer contact_layer"
 NAV_ACTIONS="navigate_to_pose navigate_through_poses"
 REPORT_WINDOW_S=90  # the nodes report every 30 s: three windows, so one missed line is not a verdict
@@ -121,24 +123,31 @@ sensor_layers() {  # lidar|camera -> the costmap layers this sensor owns
     esac
 }
 
-normalize_sources() {  # CSV -> the same sources in SOURCE_ORDER, anything else dropped
-    local have=",$1," out="" item
+normalize_sources() {  # CSV -> the same sources, SOURCE_ORDER's first and in its order, then any
+    # name this script does not know, in the order it arrived. Nothing is ever dropped: the
+    # roster lives in src/pepin/sources.py, SOURCE_ORDER is only an order, and a source added
+    # there before this list hears of it must survive a switch of the other sensor untouched.
+    local csv="$1" seen="," out="" item
     for item in $SOURCE_ORDER; do
-        case "$have" in *",$item,"*) out="$out,$item" ;; esac
+        case ",$csv," in *",$item,"*) out="$out,$item"; seen="$seen$item," ;; esac
+    done
+    for item in ${csv//,/ }; do
+        case "$seen" in *",$item,"*) ;; *) out="$out,$item"; seen="$seen$item," ;; esac
     done
     echo "${out#,}"
 }
 
-sources_after() {  # CSV SENSOR on|off -> the tracker's source list once SENSOR is that way
-    local have=",$1," sensor="$2" state="$3" mine out="" item
+sources_after() {  # CSV SENSOR on|off -> the tracker's source list once SENSOR is that way: this
+    # sensor's own sources put in or taken out, every other name carried through as it was
+    local csv="$1" sensor="$2" state="$3" mine kept="" item
     mine=" $(sensor_sources "$sensor") "
-    for item in $SOURCE_ORDER; do
-        case "$mine" in
-            *" $item "*) if [ "$state" = on ]; then out="$out,$item"; fi ;;
-            *) case "$have" in *",$item,"*) out="$out,$item" ;; esac ;;
-        esac
+    for item in ${csv//,/ }; do
+        case "$mine" in *" $item "*) ;; *) kept="$kept,$item" ;; esac
     done
-    echo "${out#,}"
+    if [ "$state" = on ]; then
+        for item in $(sensor_sources "$sensor"); do kept="$kept,$item"; done
+    fi
+    normalize_sources "${kept#,}"
 }
 
 tracker_sources() {  # the tracker's sources flag as a comma list; exit 1 when it did not answer
