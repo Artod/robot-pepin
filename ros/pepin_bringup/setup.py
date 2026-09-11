@@ -28,6 +28,7 @@ setup(
             "relocalizer = pepin_bringup.relocalizer:main",
             "goal_server = pepin_bringup.goal_server:main",
             "run_recorder = pepin_bringup.run_recorder:main",
+            "slam_frame = pepin_bringup.slam_frame:main",
         ],
     },
 )
