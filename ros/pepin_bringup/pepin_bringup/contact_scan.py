@@ -28,9 +28,10 @@ difference is +1 cm and 3 % of the marks are false; below 1.25 m the picture's b
 looks 1.02 m ahead, so the scan reports the foot of whatever stands behind the near overhang and
 the lidar owns that metre.
 
-Switches, live (``ros2 param set /contact_scan <name> <value>``): ``contact_scan`` (publish or
-not), ``shadow`` (take the band's own width back off the range) and ``max_range``; their state and
-the last frame's :class:`pepin.contact.ContactVerdict` are printed in every report line.
+The flags (:data:`FLAGS`, all live, ``ros/flags.sh set contact_scan <name> <value>``):
+``contact_scan`` (publish or not), ``shadow`` (take the band's own width back off the range) and
+``max_range``; their state and the last frame's :class:`pepin.contact.ContactVerdict` are printed
+in every report line.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from pepin.contact import (
     contact_scan,
 )
 from pepin.depth import SCAN_HALF_FOV, SCAN_STEP, UP_LEVEL, Array, CameraPose, Intrinsics, Tilt
+from pepin.flags import Flag, FlagSet
 from pepin.mounts import Mounts
 from pepin_bringup.msgs import array_from_image, imu_arrays, scan_from_ranges, stamp_seconds
 from pepin_bringup.node_kit import Switches, Tally, Worker, spin_main
@@ -59,6 +61,35 @@ CONFIG = "/ws/config/camera.json"
 RANGE_MIN_M = 0.10  # the LaserScan's floor; the contact line itself never comes nearer than 1.0 m
 LEAN_EPSILON = 0.003  # how far the up vector may move before the floor's geometry is rebuilt
 STAGES = ("plane", "scan", "publish")
+RANGE_CEILING_M = 10.0  # the widest a drive may open max_range to while measuring a new cap
+
+# The node's flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
+# other declaration; their state is printed in every report line. Nothing is cached from them:
+# every frame reads them, so a change takes the next one.
+FLAGS = FlagSet(
+    Flag(
+        "contact_scan",
+        True,
+        description="the contact line is published; off, the node is a subscriber that costs"
+        " nothing — the costmap's own contact_layer.enabled is the other end of the same demo"
+        " switch, and either one alone takes the camera's floor line out",
+    ),
+    Flag(
+        "shadow",
+        True,
+        description="the last floor pixel on a face stands a band's width UP that face, so its"
+        " ray lands past the foot: on (measured), that width is taken back off the range"
+        " (pepin.contact.band_shadow); off is the raw boundary ray",
+    ),
+    Flag(
+        "max_range",
+        CONTACT_MAX_RANGE,
+        range=(RANGE_MIN_M, RANGE_CEILING_M),
+        description="metres past which a column is called clear instead of ended; the default"
+        " is where the floor is still the floor, not where the optics run out, and the"
+        " costmap's contact_layer.obstacle_max_range must match it",
+    ),
+)
 
 
 class ContactScan(Node):
@@ -70,21 +101,9 @@ class ContactScan(Node):
         cfg = CameraConfig.load(config)
         x, y, z, _roll, pitch, _yaw = mount_transform(cfg)
         self._camera = CameraPose(x, y, z, pitch)
-        # The three live switches (CLAUDE.md rule 19), declared last so the kit's callback sees no
-        # other declaration, and printed in every report line:
-        #   contact_scan  publish or not. Off, the node is a subscriber that costs nothing: the
-        #                 costmap's own `contact_layer.enabled` is the other end of the same
-        #                 demo switch, and either one alone takes the camera's floor line out.
-        #   shadow        the last floor pixel on a face stands a band's width UP that face, so
-        #                 its ray lands past the foot; on (measured), the width is taken back off
-        #                 (pepin.contact.band_shadow). Off is the raw boundary ray.
-        #   max_range     metres past which a column is called clear instead of ended. The
-        #                 default is where the floor is still the floor, not where the optics run
-        #                 out; the costmap's contact_layer.obstacle_max_range must match it.
-        self._switches = Switches(
-            self,
-            {"contact_scan": True, "shadow": True, "max_range": CONTACT_MAX_RANGE},
-        )
+        # Declared after every other parameter: rclpy runs the switches' callback on
+        # declarations too, and it refuses everything that is not a flag.
+        self._switches = Switches(self, FLAGS)
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         newest = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(LaserScan, "/contact_scan", reliable)
@@ -105,7 +124,7 @@ class ContactScan(Node):
             f"contact scan up: /camera/depth -> /contact_scan in base_link, camera at {z:.2f} m"
             f" and {np.degrees(pitch):.0f} deg down; the fan of /depth_scan,"
             f" {np.degrees(2 * SCAN_HALF_FOV):.0f} deg in steps of {np.degrees(SCAN_STEP):.1f}"
-            f" deg; switches: {self._switches.state()}"
+            f" deg; flags: {self._switches.state()}"
         )
 
     def close(self) -> None:
@@ -220,7 +239,7 @@ class ContactScan(Node):
 
     # ---- the report --------------------------------------------------------------------------
     def _report(self) -> None:
-        """The window's numbers, the last frame's verdict and the switches in one line."""
+        """The window's numbers, the last frame's verdict and the flags in one line."""
         w = self._tally.take()
         c = w.counts
         unseen = f"{c['no_intrinsics']} without optics, {c['bad_frame']} unreadable"
@@ -233,7 +252,7 @@ class ContactScan(Node):
             + f", {c['marked'] / max(c['frames'] * N_BINS, 1) * 100:.1f}% of the fan marked"
             + (f" (median contact {float(np.median(ranges)):.2f} m)" if ranges else "")
             + (f"; last frame: {verdict}" if verdict is not None else "; no frame yet")
-            + f"; switches: {self._switches.state()}; ms median/max: {w.stages()}"
+            + f"; flags: {self._switches.state()}; ms median/max: {w.stages()}"
         )
         if c["unleaned"]:
             self.get_logger().warning(

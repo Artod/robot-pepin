@@ -833,8 +833,7 @@ def test_the_contact_scan_only_marks_and_stays_off_until_it_is_measured() -> Non
         assert source["obstacle_max_range"] == CONTACT_MAX_RANGE
     # The node's own cap is the same number, and its scan's range_max with it: a mark the layer
     # would have to discard is a mark nobody sees.
-    node = sf.tree(f"{NODES}/contact_scan.py")
-    assert sf.dict_items(node)["max_range"] == {"CONTACT_MAX_RANGE"}
+    assert load_table(REPO / NODES / "contact_scan.py")["max_range"] == CONTACT_MAX_RANGE
     # The camera's two scans keep the rule that separates clearing from marking: depth_scan
     # clears with inf, so the node's range_max must stay above the layer's obstacle range.
     camera = _p("local_costmap")["camera_layer"]["depth_scan"]
@@ -869,9 +868,11 @@ def test_the_floor_s_edge_is_a_node_of_the_kit_and_crosses_the_bridge() -> None:
     # the kit, not a copy of it: one worker thread, the tally's stages, the switches' state
     assert {"Worker", "Switches", "Tally", "spin_main"} <= sf.imported(node)
     assert "self._switches.state" in sf.calls(node) and "self._worker.stop" in sf.calls(node)
-    # the three live switches (CLAUDE.md rule 19), the feature's own name first
-    switches = sf.dict_items(node)
-    assert switches["contact_scan"] == {"True"} and switches["shadow"] == {"True"}
+    # the three live flags (CLAUDE.md rule 19), the feature's own name first
+    flags = load_table(REPO / NODES / "contact_scan.py")
+    assert flags.names == ("contact_scan", "shadow", "max_range")
+    assert flags["contact_scan"] is True and flags["shadow"] is True
+    assert all(flag.live for flag in flags), "every one of them takes the next frame"
     # the plane is a cache with two keys: the lean and the optics
     assert "self._plane_up" in sf.unparsed(node, ast.Attribute)
     assert "self._plane_intr != intr" in sf.unparsed(node, ast.Compare)
