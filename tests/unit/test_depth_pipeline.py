@@ -214,32 +214,52 @@ def test_a_seeded_law_publishes_at_once_and_pairs_join_and_carry_their_lift() ->
 
 # ---- the floor as a second hoop ------------------------------------------------------------------
 def test_the_floor_alone_fits_the_law_with_no_lidar_and_a_box_stays_out() -> None:
-    """A floor with a box on it, seen through 1 / z = 1.3 / D + 0.03: the floor pairs' true
-    depths are the plane's, the box contributes none, and three frames in the law from the
-    floor alone is within a few percent of the truth — no lidar anywhere."""
-    law = AffineLaw()
-    geometry = FloorGeometry()
-    pipeline = DepthPipeline([EdgeFilter(), FloorPairs(law, geometry), law, FloorAnchor(geometry)])
+    """A floor with a box on it, seen through 1 / z = 1.3 / D + 0.03: three frames in the law
+    from the floor alone is within a few percent of the truth — no lidar anywhere. Every pair
+    is (network, plane) at one pixel of the stage's lattice; the box's lattice pixels are
+    candidates by every other test yet none reaches the pool, and against the same floor
+    without the box the pool loses exactly the box's footprint and gains nothing."""
     truth = _scene(None)
-    box = truth.copy()
-    box[220:300, 260:380] = truth[220:300, 260:380] * 0.6  # a box half a metre high
+    in_box = np.zeros(truth.shape, dtype=bool)
+    in_box[220:300, 260:380] = True
+    box = np.where(in_box, truth * 0.6, truth)  # a box half a metre high
     expected = floor_depth(INTR, CAM)
-    for k in range(3):
-        raw = _network(box, 1.3, 0.03, noise=0.02, seed=k)
-        result = pipeline.run(raw, _context(None))
-    assert not result.withheld and law.fitted
-    pool = result.frame.pool
-    assert pool is not None and pool.size > 500
-    rows = np.rint(INTR.cy - pool.lift * INTR.fy).astype(int)
-    assert not ((rows >= 220) & (rows < 300) & (pool.weight > 0)).any() or True  # rows only
-    assert law.a == pytest.approx(1.3, rel=0.05) and law.b == pytest.approx(0.03, abs=0.02)
+    stage = FloorPairs(AffineLaw())
+    s = stage.stride
+    pools: dict[bool, Pairs] = {}
+    raws: dict[bool, np.ndarray] = {}
+    for with_box, scene in ((False, truth), (True, box)):
+        law = AffineLaw()
+        geometry = FloorGeometry()
+        stage = FloorPairs(law, geometry)
+        pipeline = DepthPipeline([EdgeFilter(), stage, law, FloorAnchor(geometry)])
+        for k in range(3):
+            raw = _network(scene, 1.3, 0.03, noise=0.02, seed=k)
+            result = pipeline.run(raw, _context(None))
+        assert not result.withheld and law.fitted
+        assert law.a == pytest.approx(1.3, rel=0.05) and law.b == pytest.approx(0.03, abs=0.02)
+        assert result.frame.pool is not None and result.frame.pool.size > 500
+        pools[with_box], raws[with_box] = result.frame.pool, result.frame.raw
+    assert "stride 8" in pipeline.report() and s == 8
+    pool, raw = pools[True], raws[True]
     assert pool.weight[0] == 0.1
-    # every pair's truth is the plane's depth at a floor pixel: the box's pixels contribute none
-    floor_pixels = expected[~np.isnan(expected)]
-    assert np.isin(pool.z, floor_pixels).all()
-    inside_box = result.frame.raw[220:300:8, 260:380:8]
-    assert not np.isin(pool.d, inside_box).any()
-    assert "stride 8" in pipeline.report()
+    # every pair is the network's depth and the plane's depth at one and the same lattice pixel
+    lattice_raw, lattice_z = raw[::s, ::s].ravel(), expected[::s, ::s].ravel()
+    order = np.argsort(lattice_raw)
+    at = order[np.searchsorted(lattice_raw[order], pool.d)]
+    assert np.array_equal(lattice_raw[at], pool.d) and np.array_equal(lattice_z[at], pool.z)
+    # the box's lattice pixels are finite, off the plane's edges by nothing but the box, and out
+    sampled_box = raw[::s, ::s][in_box[::s, ::s]]
+    assert sampled_box.size == 150 and np.isfinite(sampled_box).all()
+    assert not np.isin(pool.d, sampled_box).any()
+    # the same noise on the plain floor: the box removes its own footprint's pairs, no other
+    plain, plain_raw = pools[False], raws[False]
+    footprint = plain_raw[::s, ::s][in_box[::s, ::s]]
+    footprint_pairs = footprint[np.isin(footprint, plain.d)]
+    assert footprint_pairs.size >= 0.9 * sampled_box.size  # the plain floor pairs there
+    assert np.isin(pool.d, plain.d).all()
+    gone = plain.d[~np.isin(plain.d, pool.d)]
+    assert np.array_equal(np.sort(gone), np.sort(footprint_pairs))
 
 
 def test_the_floor_pairs_judge_floor_with_the_law_once_it_exists() -> None:
