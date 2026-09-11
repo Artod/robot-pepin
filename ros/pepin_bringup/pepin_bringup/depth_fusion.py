@@ -3,17 +3,19 @@
 RTAB-Map assembles its cloud by concatenating one cloud per node, so two frames of one wall that
 disagree by a few centimetres are two walls. This node fuses the same frames (``/camera/depth``
 paired with its ``/camera/image`` by stamp — the depth carries the image's header — and placed
-by the tracker's pose from TF at that stamp) into ``pepin.tsdf``: one signed distance per voxel,
-updated by a distance-weighted average, so the wall is one surface, sharpened by near
-observations and never blurred back by far ones. Before a frame is fused, its points in the
-lidar's height band — exact by construction — are turned about the cart to fit the model, and
-the corrected heading places the frame (frame-to-model; the tracker's jitter at rest stays out
-of the model). A frame whose best turn is the search's edge is refused: the truth may lie
-beyond, and a turn to the bound would bake the remainder in. Frames are fused only while the
-tracker reports a fit the cart may drive on (``/localization_fit`` >= ``pepin.watch.DRIVE_FIT``):
-a lost tracker's pose would paint the room somewhere else. ``/fusion/surface`` (PointCloud2,
-map frame, colours from the camera, stamped with the last fused frame — the board's clock) is
-the zero-crossing of the field, published beside RTAB-Map's cloud.
+by the tracker's pose from TF at that stamp, through the :class:`pepin.frame_pose.FramePoser`
+the depth nodes share, over the kit's :class:`TfHistory`) into ``pepin.tsdf``: one signed
+distance per voxel, updated by a distance-weighted average, so the wall is one surface,
+sharpened by near observations and never blurred back by far ones. Before a frame is fused, its
+points in the lidar's height band — exact by construction — are turned about the cart to fit
+the model, and the corrected heading places the frame (frame-to-model; the tracker's jitter at
+rest stays out of the model). A frame whose best turn is the search's edge is refused: the
+truth may lie beyond, and a turn to the bound would bake the remainder in. Frames are fused only
+while the tracker reports a fit the cart may drive on (``/localization_fit`` >=
+``pepin.watch.DRIVE_FIT``): a lost tracker's pose would paint the room somewhere else.
+``/fusion/surface`` (PointCloud2, map frame, colours from the camera, stamped with the last
+fused frame — the board's clock) is the zero-crossing of the field, published beside RTAB-Map's
+cloud.
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
 ``align``, ``min_weight``, ``surface_hz``; their state is printed in every report line.
@@ -37,6 +39,7 @@ from std_srvs.srv import Trigger
 
 from pepin.depth import Intrinsics
 from pepin.flags import Flag, FlagSet
+from pepin.frame_pose import FramePoser
 from pepin.tsdf import (
     YAW_SEARCH,
     AlignReason,
@@ -47,8 +50,16 @@ from pepin.tsdf import (
     backproject,
 )
 from pepin.watch import DRIVE_FIT
-from pepin_bringup.msgs import array_from_image, cloud_from_points
-from pepin_bringup.node_kit import Switches, Tally, TfLookup, Window, Worker, spin_main
+from pepin_bringup.msgs import array_from_image, cloud_from_points, stamp_seconds
+from pepin_bringup.node_kit import (
+    Switches,
+    Tally,
+    TfHistory,
+    TfLookup,
+    Window,
+    Worker,
+    spin_main,
+)
 
 CONFIG = "/ws/config/fusion.json"
 TF_WAIT_S = 0.3
@@ -114,6 +125,7 @@ class DepthFusion(Node):
         self._sync = TimeSynchronizer([depth_sub, image_sub], PAIR_QUEUE)
         self._sync.registerCallback(self._on_pair)
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
+        self._poser = FramePoser(TfHistory(self._tf, timeout_s=TF_WAIT_S))
         self._intr: Intrinsics | None = None
         self._fit = 0.0  # no report yet reads as lost: every gate here compares with <
         self._lock = threading.Lock()  # the model and its last stamp, worker vs publisher
@@ -203,16 +215,16 @@ class DepthFusion(Node):
         if msg.encoding != "32FC1" or (msg.width, msg.height) != (intr.width, intr.height):
             self._tally.count("bad_frame")  # not the camera the intrinsics describe
             return
+        if msg.header.frame_id != self._poser.camera:
+            self._tally.count("bad_frame")  # not the camera the poser places
+            return
         if self._fit < DRIVE_FIT:
             self._tally.count("low_fit")
             return
         stamp = msg.header.stamp
-        camera = self._tf.pose("map", msg.header.frame_id, stamp, timeout_s=TF_WAIT_S)
-        base = (
-            self._tf.pose("map", "base_link", stamp, timeout_s=TF_WAIT_S)
-            if camera is not None
-            else None
-        )
+        at = stamp_seconds(stamp)
+        camera = self._poser.camera_in_map(at)
+        base = self._poser.base_in_map(at) if camera is not None else None
         if camera is None or base is None:
             return
         depth = array_from_image(msg)
