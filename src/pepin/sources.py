@@ -268,10 +268,14 @@ class SourceFeed:
 
     def take(self, history: OdomHistory, now: float) -> tuple[str, TimedScan] | None:
         """The anchor's waiting scan, with the anchor's name, once ``history`` covers it;
-        ``None`` while nothing is to be released (an expired scan is dropped and counted by
-        its gate). The other sources' scans keep waiting for :meth:`gather`."""
+        ``None`` while nothing is to be released. A scan that waited longer than the gate's
+        patience is dropped and counted as expired by its gate — with no anchor alive, at
+        every enabled gate, so a late odometry is still reported. The other sources' scans
+        keep waiting for :meth:`gather`."""
         anchor = self.anchor(now)
         if anchor is None:
+            for name in self.registry.enabled:
+                self._gates[name].expire(now)
             return None
         scan = self._gates[anchor].take(history, now)
         return None if scan is None else (anchor, scan)

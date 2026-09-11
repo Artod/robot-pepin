@@ -138,6 +138,9 @@ def test_nothing_fresh_holds_a_stale_rider_is_dropped_and_an_uncovered_one_waits
     feed.offer(DEPTH, scan(0.0))
     assert feed.anchor(5.0) is None and feed.picture(5.0) is not None, "the last picture heard"
     assert feed.status(5.0).startswith("holding map->odom: no fresh source; lidar absent")
+    feed.offer(LIDAR, scan(3.0))  # the odometry never reaches it (the history is empty here)
+    assert feed.take(OdomHistory(), 3.4) is None and feed.take(OdomHistory(), 3.6) is None
+    assert feed.report().gates[LIDAR].expired == 1, "a late odometry is reported anchor or not"
     feed.offer(DEPTH, scan(3.5))  # older than the camera's stale_after_s beside the anchor
     feed.offer(LIDAR, scan(5.0))
     assert feed.take(history, 5.02) is not None

@@ -238,10 +238,19 @@ class ScanGate:
             self.stats.released += 1
             self.stats.waited_s.append(max(0.0, now - scan.stamp))
             return scan
-        if now - scan.stamp > self._max_wait_s:
-            self._pending = None
-            self.stats.expired += 1
+        self.expire(now)
         return None
+
+    def expire(self, now: float) -> bool:
+        """Drop the waiting scan once it has waited longer than ``max_wait_s``, counted as
+        expired; True when it did. What :meth:`take` does with a scan it cannot release, for a
+        caller that is not releasing anything right now."""
+        scan = self._pending
+        if scan is None or now - scan.stamp <= self._max_wait_s:
+            return False
+        self._pending = None
+        self.stats.expired += 1
+        return True
 
     def drop(self) -> TimedScan | None:
         """Forget the waiting scan and return it: another source's update took it along, or it
