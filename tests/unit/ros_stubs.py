@@ -108,7 +108,39 @@ CameraInfo = _msg(
     r=lambda: [0.0] * 9,
     p=lambda: [0.0] * 12,
 )
+Twist = _msg("Twist", linear=Vector3, angular=Vector3)
+TwistWithCovariance = _msg("TwistWithCovariance", twist=Twist, covariance=lambda: [0.0] * 36)
+Odometry = _msg(
+    "Odometry",
+    header=Header,
+    child_frame_id="",
+    pose=PoseWithCovariance,
+    twist=TwistWithCovariance,
+)
+PoseStamped = _msg("PoseStamped", header=Header, pose=Pose)
+PoseArray = _msg("PoseArray", header=Header, poses=list)
+Path_ = _msg("Path", header=Header, poses=list)
+MapMetaData = _msg("MapMetaData", resolution=0.0, width=0, height=0, origin=Pose)
+OccupancyGrid = _msg("OccupancyGrid", header=Header, info=MapMetaData, data=list)
+Bool = _msg("Bool", data=False)
+Float32 = _msg("Float32", data=0.0)
+String = _msg("String", data="")
+TFMessage = _msg("TFMessage", transforms=list)
+GoalStatus = _msg("GoalStatus", status=0)
+for _name, _value in (("STATUS_ACCEPTED", 1), ("STATUS_EXECUTING", 2), ("STATUS_SUCCEEDED", 4)):
+    setattr(GoalStatus, _name, _value)
+GoalStatusArray = _msg("GoalStatusArray", status_list=list)
+ParticleCloud = _msg("ParticleCloud", header=Header, particles=list)
 SetParametersResult = _msg("SetParametersResult", successful=False, reason="")
+
+
+class Trigger:
+    """std_srvs/Trigger: the request has nothing, the response a flag and a message."""
+
+    Request = _msg("Trigger_Request")
+    Response = _msg("Trigger_Response", success=False, message="")
+
+
 IntegerRange = _msg("IntegerRange", from_value=0, to_value=0, step=0)
 FloatingPointRange = _msg("FloatingPointRange", from_value=0.0, to_value=0.0, step=0.0)
 ParameterDescriptor = _msg(
@@ -159,6 +191,9 @@ class RclpyTime:
     def to_msg(self) -> Any:
         return Time(sec=self.nanoseconds // 1_000_000_000, nanosec=self.nanoseconds % 1_000_000_000)
 
+    def __add__(self, other: Any) -> RclpyTime:
+        return RclpyTime(nanoseconds=self.nanoseconds + other.nanoseconds)
+
 
 class Duration:
     """rclpy.duration.Duration: seconds in, nanoseconds kept."""
@@ -180,6 +215,10 @@ class Buffer:
         if self.error is not None:
             raise self.error
         return self.transforms[(target, source)]
+
+    def set_transform_static(self, transform: Any, authority: str) -> None:
+        """A static transform kept by (parent, child), as a lookup of that pair finds it."""
+        self.transforms[(transform.header.frame_id, transform.child_frame_id)] = transform
 
     def lookup_transform_full(
         self,
@@ -231,6 +270,17 @@ class StaticTransformBroadcaster:
 
     def sendTransform(self, transforms: Any) -> None:  # noqa: N802 — tf2_ros' own name
         self.sent.extend(transforms if isinstance(transforms, list) else [transforms])
+
+
+class TransformBroadcaster(StaticTransformBroadcaster):
+    """tf2_ros': the dynamic one, kept the same way."""
+
+
+class DurabilityPolicy:
+    """rclpy.qos.DurabilityPolicy, the two the nodes here ask for."""
+
+    TRANSIENT_LOCAL = "transient_local"
+    VOLATILE = "volatile"
 
 
 class QoSProfile:
@@ -316,6 +366,7 @@ class Node:
         self.descriptors: dict[str, Any] = {}
         self.pubs: dict[str, Publisher] = {}
         self.subs: dict[str, tuple[Any, Any]] = {}  # topic -> (message type, callback)
+        self.services: dict[str, tuple[Any, Any]] = {}  # name -> (service type, callback)
         self.timers: list[tuple[float, Any]] = []
         self.parameter_callbacks: list[Any] = []
         self.clock = Clock()
@@ -345,6 +396,9 @@ class Node:
 
     def create_subscription(self, msg_type: Any, topic: str, callback: Any, qos: Any) -> None:
         self.subs[topic] = (msg_type, callback)
+
+    def create_service(self, srv_type: Any, name: str, callback: Any) -> None:
+        self.services[name] = (srv_type, callback)
 
     def create_timer(self, period_s: float, callback: Any) -> None:
         self.timers.append((period_s, callback))
@@ -403,6 +457,7 @@ def install() -> Any:
             "rclpy.qos",
             QoSProfile=QoSProfile,
             ReliabilityPolicy=ReliabilityPolicy,
+            DurabilityPolicy=DurabilityPolicy,
             qos_profile_sensor_data=QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT),
         ),
         "rclpy.duration": _module("rclpy.duration", Duration=Duration),
@@ -422,16 +477,38 @@ def install() -> Any:
         "builtin_interfaces": _module("builtin_interfaces"),
         "builtin_interfaces.msg": _module("builtin_interfaces.msg", Time=Time),
         "std_msgs": _module("std_msgs"),
-        "std_msgs.msg": _module("std_msgs.msg", Header=Header),
+        "std_msgs.msg": _module(
+            "std_msgs.msg", Header=Header, Bool=Bool, Float32=Float32, String=String
+        ),
         "geometry_msgs": _module("geometry_msgs"),
         "geometry_msgs.msg": _module(
             "geometry_msgs.msg",
             Transform=Transform,
             TransformStamped=TransformStamped,
             PoseWithCovarianceStamped=PoseWithCovarianceStamped,
+            PoseWithCovariance=PoseWithCovariance,
+            Pose=Pose,
+            PoseStamped=PoseStamped,
+            PoseArray=PoseArray,
+            Point=Point,
             Quaternion=Quaternion,
             Vector3=Vector3,
+            Twist=Twist,
         ),
+        "nav_msgs": _module("nav_msgs"),
+        "nav_msgs.msg": _module(
+            "nav_msgs.msg", OccupancyGrid=OccupancyGrid, Odometry=Odometry, Path=Path_
+        ),
+        "nav2_msgs": _module("nav2_msgs"),
+        "nav2_msgs.msg": _module("nav2_msgs.msg", ParticleCloud=ParticleCloud),
+        "action_msgs": _module("action_msgs"),
+        "action_msgs.msg": _module(
+            "action_msgs.msg", GoalStatus=GoalStatus, GoalStatusArray=GoalStatusArray
+        ),
+        "std_srvs": _module("std_srvs"),
+        "std_srvs.srv": _module("std_srvs.srv", Trigger=Trigger),
+        "tf2_msgs": _module("tf2_msgs"),
+        "tf2_msgs.msg": _module("tf2_msgs.msg", TFMessage=TFMessage),
         "sensor_msgs": _module("sensor_msgs"),
         "sensor_msgs.msg": _module(
             "sensor_msgs.msg",
@@ -447,6 +524,7 @@ def install() -> Any:
             Buffer=Buffer,
             TransformListener=TransformListener,
             StaticTransformBroadcaster=StaticTransformBroadcaster,
+            TransformBroadcaster=TransformBroadcaster,
         ),
     }
     sys.modules.update(modules)
