@@ -78,12 +78,13 @@ def test_every_node_has_the_private_members_it_uses() -> None:
 
 def test_the_tracker_pairs_every_scan_with_the_pose_of_its_own_moment() -> None:
     """The tracker never waits for a transform inside a callback and never falls back to the
-    newest pose: scans go through pepin.timeline's gate and are deskewed with its history. The
-    fallback cost 1-2 degrees of false correction per scan in every pivot (runs 0080-0083)."""
+    newest pose: scans go through pepin.sources' feed (a pepin.timeline gate per source) and
+    are deskewed with its history. The fallback cost 1-2 degrees of false correction per scan
+    in every pivot (runs 0080-0083)."""
     node = sf.tree("ros/pepin_bringup/pepin_bringup/relocalizer.py")
     waits = [c for c in ast.walk(node) if isinstance(c, ast.Call) and "timeout" in sf.keywords(c)]
     assert not waits, "a transform wait inside a callback: the old fallback path"
-    assert {"ScanGate", "deskew", "OdomHistory"} <= sf.calls(node)
+    assert {"SourceFeed", "deskew", "OdomHistory"} <= sf.calls(node)
     assert "/odometry/filtered" in sf.strings(node)
 
 

@@ -205,6 +205,12 @@ class FeedStats:
         """Scans handed to the matcher as the anchor, over every source."""
         return sum(g.released for g in self.gates.values())
 
+    @property
+    def expired(self) -> int:
+        """Scans dropped at their gate because the odometry never covered them, over every
+        source."""
+        return sum(g.expired for g in self.gates.values())
+
     def summary(self) -> str:
         """One log line: a single source's gate summary as it always read, or one clause per
         source with its rides and drops."""

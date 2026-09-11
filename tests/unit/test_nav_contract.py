@@ -465,12 +465,21 @@ def test_the_bridge_routes_only_what_the_split_needs_and_only_one_way() -> None:
         "/odometry/filtered",
         "/tof/front",
         "/tracker_pose",
+        "/localization/sources",
         "/dynamic_obstacles",
         "/pepin/run_status",
     ):
         assert pub_b.search(name) and sub_l.search(name), name
         assert not re.compile(laptop["publishers"][0]).search(name), f"{name} would loop"
-    for name in ("/plan", "/pepin/run", "/laptop/heartbeat", "/planner_selector", "/rtabmap/map"):
+    for name in (
+        "/plan",
+        "/pepin/run",
+        "/laptop/heartbeat",
+        "/planner_selector",
+        "/rtabmap/map",
+        "/depth_scan",
+        "/contact_scan",
+    ):
         assert re.compile(laptop["publishers"][0]).search(name) and re.compile(
             board["subscribers"][0]
         ).search(name)
@@ -1112,6 +1121,39 @@ def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_p
         for flag in flags:
             assert flag.description, f"{path.name}: {flag.name} needs a sentence"
     assert {"depth_stream", "depth_fusion", "relocalizer", "neck_state"} <= tables.keys()
+
+
+def test_the_tracker_feeds_every_scan_source_through_one_path_and_reports_each() -> None:
+    """The camera's fans reach the tracker beside the lidar — /depth_scan and /contact_scan,
+    LaserScans in base_link the bridge already carries to the board — through one path:
+    pepin.sources.SourceFeed releases the anchor's scan (the lidar while it is fresh, else the
+    camera: a dead lidar hands the tracker over without a restart), carries the others to its
+    moment, and Localizer.update_from matches them all around one prediction. The flags name
+    the sources and the fusion; every source's word goes out on /localization/sources and the
+    feed's status is in the report line."""
+    from pepin.deployment import LAPTOP_PUBLISHES
+
+    node = sf.tree(f"{NODES}/relocalizer.py")
+    assert {"/depth_scan", "/contact_scan", "/localization/sources"} <= sf.strings(node)
+    assert {"SourceFeed", "SourceRegistry", "ScanObservation"} <= sf.imported(node)
+    assert "ScanGate" not in sf.imported(node), "the feed is the gate: one trigger path"
+    calls = sf.calls(node)
+    assert {
+        "self._feed.offer",
+        "self._feed.take",
+        "self._feed.gather",
+        "self._feed.picture",
+        "self._feed.status",
+        "loc.update_from",
+        "loc.sources_report",
+        "self._localizer.switch",
+    } <= calls
+    assert "loc.update" not in calls and "self._gate.take" not in calls, "one path, not two"
+    assert len(sf.calls_to(node, "loc.update_from")) == 1
+    flags = load_table(REPO / NODES / "relocalizer.py")
+    assert flags["sources"] == ("lidar",) and flags["fusion"] is True
+    assert flags.flag("sources").choices == ("lidar", "depth", "contact")
+    assert {"depth_scan", "contact_scan"} <= set(LAPTOP_PUBLISHES)
 
 
 def test_the_depth_network_runs_where_the_backend_flag_says_and_the_cpu_model_waits() -> None:

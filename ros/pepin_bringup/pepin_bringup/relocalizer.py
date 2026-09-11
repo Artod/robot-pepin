@@ -12,6 +12,14 @@ reports pose and fit as text.
 
 Frames: the scan is transformed into ``base_link`` with the static laser
 transform looked up once; poses are in ``map``.
+
+Sources: the tracker matches whatever scan-shaped evidence the ``sources`` flag lets in —
+``/scan``, the camera's ``/depth_scan`` and ``/contact_scan`` (LaserScans already in
+``base_link``) — through one path (:class:`pepin.sources.SourceFeed`): the lidar's revolution
+drives every update while it is fresh and the camera's fans ride along, carried to its moment;
+when the lidar is stale or absent the fans drive the updates themselves, so a dead lidar hands
+the tracker to the camera without a restart. ``/localization/sources`` carries every source's
+word on each update as JSON for the operator.
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ import math
 import os
 import threading
 import time
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -47,12 +56,12 @@ from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
 from pepin.slip import SlipWatch
+from pepin.sources import CONTACT, DEPTH, LIDAR, ScanObservation, SourceFeed, SourceRegistry
 from pepin.timeline import (
     MatchPacer,
     MotionEdge,
     MotionFilter,
     OdomHistory,
-    ScanGate,
     deskew,
     standing_still,
     timed_scan_from_ros,
@@ -75,6 +84,10 @@ DUMP_DIR = (
 LAST_POSE_FILE = "/maps/last_pose.json"  # where the robot stood when the stack last ran
 LAST_POSE_MAX_AGE_S = 3600.0
 SLIP_SAID_AFTER = 3  # consecutive slipping scans before the log says it once
+# The camera's scans arrive in base_link already (pepin_bringup.depth_stream, contact_scan):
+# no mount to apply, unlike the lidar's, which is looked up from /tf_static.
+NO_MOUNT = (0.0, 0.0, 0.0, False)
+CAMERA_SCANS = ((DEPTH, "/depth_scan"), (CONTACT, "/contact_scan"))
 
 
 def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
@@ -85,10 +98,11 @@ def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
     return pose.x - (c * odom.x - s * odom.y), pose.y - (s * odom.x + c * odom.y), yaw
 
 
-# The tracker's flags: what applies without a restart (CLAUDE.md rule 19). Each is an attribute
-# of the Localizer (pepin.localization) and the flag callback writes it there; the next map's
-# tracker is built with the current values. Every other parameter is refused live (the answer
-# names it), because a "success" that changed nothing is a lie.
+# The tracker's flags: what applies without a restart (CLAUDE.md rule 19). Each is a switch of
+# the Localizer (pepin.localization: an attribute, or the roster's ``sources``) and the flag
+# callback writes it there (``Localizer.switch``); the next map's tracker is built with the
+# current values. Every other parameter is refused live (the answer names it), because a
+# "success" that changed nothing is a lie.
 FLAGS = FlagSet(
     Flag(
         "rest_lock",
@@ -113,6 +127,22 @@ FLAGS = FlagSet(
         0.05,
         range=(0.0, 1.0),
         description="the rest lock's share per match when no match cadence is known",
+    ),
+    Flag(
+        "sources",
+        (LIDAR,),
+        choices=(LIDAR, DEPTH, CONTACT),
+        description="the scan sources matched against the map: the lidar's revolution (/scan),"
+        " the camera's depth band (/depth_scan), the floor-contact line (/contact_scan); the"
+        " lidar drives the updates while it is fresh and the others ride along, a stale lidar"
+        " hands the updates to them. The fused modes are measured offline"
+        " (scratch/camera_only_localization.py) and turned on live",
+    ),
+    Flag(
+        "fusion",
+        True,
+        description="fuse every enabled source's match by its information; off: the widest"
+        " source corrects alone and the others only report",
     ),
 )
 
@@ -152,7 +182,8 @@ def grid_from_msg(msg: OccupancyGridMsg) -> OccupancyGrid:
 
 
 class Relocalizer(Node):
-    """Watches the scan-to-map fit at AMCL's pose and re-seeds AMCL from a whole-map search."""
+    """Tracks the pose on the map from every enabled scan source and owns map -> odom; watches
+    the fit and re-seeds itself (and AMCL) from a whole-map search when it stays poor."""
 
     def __init__(self) -> None:
         super().__init__("relocalizer")
@@ -212,7 +243,11 @@ class Relocalizer(Node):
         # sign of the turn, and the cart steered by the wobble (runs 0080-0083, 2026-09-09).
         self._odom_topic = str(self.declare_parameter("odom_topic", "/odometry/filtered").value)
         self._history = OdomHistory(horizon_s=5.0)
-        self._gate = ScanGate(max_wait_s=0.5)
+        # Every source's scans wait at the feed (a gate per source) and one of them drives the
+        # update: the lidar while it is fresh, else the camera. The roster is shared with the
+        # tracker, so the ``sources`` flag switches both at once.
+        self._registry = SourceRegistry()
+        self._feed = SourceFeed(self._registry, max_wait_s=0.5)
         self._motion = MotionFilter(min_m=0.005, min_deg=0.3, max_gap_s=1.0)
         self._rested = 0  # scans left unmatched because the cart stood still (per report)
         # What the map does not explain (a person, a moved chair) is published as lethal rings for
@@ -237,10 +272,6 @@ class Relocalizer(Node):
             _RosLogHandler(self)
         )  # localizer reasons in the ROS log
         self._localizer: Localizer | None = None
-        self._points: np.ndarray | None = None
-        self._ranges: np.ndarray | None = (
-            None  # raw beam ranges of the newest scan (NaN = no return)
-        )
         self._laser_tf: tuple[float, float, float, bool] | None = None  # x, y, yaw, mirrored
         self._searching = False
         self.fit = float("nan")
@@ -262,8 +293,18 @@ class Relocalizer(Node):
             self._on_scan,
             QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
         )
+        for name, topic in CAMERA_SCANS:
+            self.create_subscription(
+                LaserScan,
+                topic,
+                partial(self._on_camera_scan, name),
+                QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
+            )
         self.create_subscription(Odometry, self._odom_topic, self._on_odom, 20)
         self._fit_pub = self.create_publisher(Float32, "localization_fit", 5)
+        # Every source's word on each update, as JSON (Localizer.sources_report): the demo's
+        # view of the lidar and the camera agreeing, disagreeing, or one of them gone.
+        self._sources_pub = self.create_publisher(String, "/localization/sources", 5)
         # The fit at the pose actually published (the blend), beside the tracker's own fit at
         # the matched pose: the two part ways while a carry is being absorbed.
         self._published_fit_pub = self.create_publisher(Float32, "localization_fit_published", 5)
@@ -309,15 +350,21 @@ class Relocalizer(Node):
         # Declared after every other parameter: rclpy runs the switches' callback on
         # declarations too, and it refuses everything that is not a flag.
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
+        self._registry.enable(self._switches["sources"])
         self.get_logger().info("relocalizer up: watching the scan-to-map fit")
 
     # -- inputs -------------------------------------------------------------
 
+    def _now_s(self) -> float:
+        """The node's clock in seconds: the same clock the scans are stamped with."""
+        return float(self.get_clock().now().nanoseconds) * 1e-9
+
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
-        """A flag changed (``ros2 param set``): it is the Localizer's own attribute, written
-        through at once so the next scan is matched with it."""
+        """A flag changed (``ros2 param set``): it is the Localizer's own switch, written
+        through at once so the next scan is matched with it (``sources`` reaches the roster
+        the feed shares with it, so the anchor moves with the flag)."""
         if self._localizer is not None:
-            setattr(self._localizer, name, new)
+            self._localizer.switch(name, new)
 
     def _on_map(self, msg: OccupancyGridMsg) -> None:
         self._grid = grid_from_msg(msg)
@@ -332,6 +379,8 @@ class Relocalizer(Node):
         # 60 ms per scan on an A53 (the laptop default, 9x9x49x200, took 360 ms: 2 Hz).
         origin = msg.info.origin.position
         self._map_id = f"{msg.info.width}x{msg.info.height}@{origin.x:.2f},{origin.y:.2f}"
+        flags = self._switches.flags.as_dict()
+        self._registry.enable(flags.pop("sources"))  # the roster is the feed's and the tracker's
         self._localizer = Localizer(
             self._grid,
             self._last_known_pose(),  # a restart is not a trip back to the base
@@ -349,7 +398,8 @@ class Relocalizer(Node):
             lost_after=3,
             global_retry=False,
             interpolate=self._subcell_refine,
-            **self._switches.flags.as_dict(),
+            sources=self._registry,
+            **flags,
         )
         self.get_logger().info(f"map received: {msg.info.width}x{msg.info.height} cells")
         self._tracker_initialised = False  # a new map: find ourselves on it again
@@ -357,9 +407,19 @@ class Relocalizer(Node):
         self._last_match_stamp_s = None  # the next match is the first one on this map
 
     def _on_scan(self, msg: LaserScan) -> None:
+        """The lidar's revolution, moved into base_link by the mount looked up once."""
         if self._laser_tf is None and not self._lookup_laser(msg.header.frame_id):
             return
         assert self._laser_tf is not None
+        self._offer(LIDAR, msg, self._laser_tf)
+
+    def _on_camera_scan(self, name: str, msg: LaserScan) -> None:
+        """A camera fan (``/depth_scan``, ``/contact_scan``): a LaserScan in base_link already,
+        taken in one instant (its ``scan_time`` is zero: no beam to deskew)."""
+        self._offer(name, msg, NO_MOUNT)
+
+    def _offer(self, name: str, msg: LaserScan, mount: tuple[float, float, float, bool]) -> None:
+        """Any source's scan into the feed, and a try at matching whatever the feed releases."""
         self._scan_id += 1  # which scan a search was computed on: a second opinion needs a new one
         scan = timed_scan_from_ros(
             Time.from_msg(msg.header.stamp).nanoseconds * 1e-9,
@@ -368,12 +428,11 @@ class Relocalizer(Node):
             msg.angle_increment,
             msg.range_max,
             msg.scan_time,
-            self._laser_tf,
+            mount,
             self._scan_id,
         )
-        self._points, self._ranges = scan.points, scan.ranges  # the newest picture, as measured
+        self._feed.offer(name, scan)
         if self._track:
-            self._gate.offer(scan)
             self._track_pending()
 
     def _on_odom(self, msg: Odometry) -> None:
@@ -389,21 +448,25 @@ class Relocalizer(Node):
             self._track_pending()
 
     def _track_pending(self) -> None:
-        """Match the scan at the gate once the odometry history covers its whole revolution.
+        """Match the anchor's scan at the feed once the odometry history covers its whole
+        revolution, with the other sources' scans carried to its moment riding along.
 
-        Called on both inputs: a scan usually arrives before the odometry of its last beams and
-        is released by the odometry sample that completes it, 30-70 ms later. The scan is
-        deskewed with the history (every beam moved to where the robot was at the stamp) and the
-        pose the localizer predicts from is the interpolated pose at that same stamp, so the
+        Called on every input: a scan usually arrives before the odometry of its last beams and
+        is released by the odometry sample that completes it, 30-70 ms later. Which source's
+        scan is released is the feed's call (the lidar while it is fresh, else the camera; a
+        stale lidar's death is what moves the anchor, never a restart). The scan is deskewed
+        with the history (every beam moved to where the robot was at the stamp) and the pose
+        the localizer predicts from is the interpolated pose at that same stamp, so the
         residual the matcher reports is odometry error and nothing else.
         """
         loc = self._localizer
         if loc is None:
             return
-        now = self.get_clock().now().nanoseconds * 1e-9
-        scan = self._gate.take(self._history, now)
-        if scan is None:
+        now = self._now_s()
+        taken = self._feed.take(self._history, now)
+        if taken is None:
             return
+        anchor, scan = taken
         if not self._tracker_initialised:
             if not self._tracker_initialising and not self._searching:
                 self._tracker_initialising = True
@@ -447,10 +510,16 @@ class Relocalizer(Node):
         # What the sensors say, and nothing else: the wheels' and the gyro's word on rest, the
         # static map's mask. Whether either is used is the Localizer's switch (live).
         at_rest = standing_still(self._history, scan.stamp, self._odom_wz)
+        # The anchor's scan and every other enabled source's waiting scan, each moved into the
+        # base frame of the anchor's stamp through the odometry between the two (the feed).
+        scans = [
+            ScanObservation(anchor, points, scan.stamp),
+            *self._feed.gather(anchor, scan.stamp, self._history),
+        ]
         t0 = time.perf_counter()
-        pose = loc.update(
+        pose = loc.update_from(
             odom,
-            points,
+            scans,
             trust_odometry=not slip,
             at_rest=at_rest,
             dt_s=dt_s,
@@ -463,6 +532,7 @@ class Relocalizer(Node):
             pose, loc.confidence, Time(nanoseconds=int(scan.stamp * 1e9)).to_msg()
         )
         self._published_fit_pub.publish(Float32(data=float(loc.published_fit)))
+        self._sources_pub.publish(String(data=json.dumps(loc.sources_report(now))))
         self._publish_dynamic(points, pose, scan.stamp)  # the pose of this scan's own moment
 
     def _last_known_pose(self) -> Pose2D:
@@ -529,10 +599,10 @@ class Relocalizer(Node):
         finally:
             self._tracker_initialising = False
 
-    def _occluded(self, pose: Pose2D) -> bool:
+    def _occluded(self, points: Any, pose: Pose2D) -> bool:
         """A person beside the cart rather than a lost cart (:func:`pepin.dynamic.occluded`),
-        judged on the newest scan at ``pose``."""
-        return occluded(self._points, pose, self._static_mask, self._matcher, self._watch.lost_fit)
+        judged on the newest scan ``points`` at ``pose``."""
+        return occluded(points, pose, self._static_mask, self._matcher, self._watch.lost_fit)
 
     def _on_planner(self, msg: String) -> None:
         """The berth around new objects depends on who plans: a footprint planner brings the
@@ -590,23 +660,25 @@ class Relocalizer(Node):
         self._append_trail(msg)
 
     def _report_tracking(self) -> None:
-        """Every 30 s: where every released scan went, what the tracker did with the matched
-        ones (its switches, the rest lock's cadence and gain, carries, lost/weak, the fit at
-        the match and at the published pose, the largest map -> odom step), and the cost."""
+        """Every 30 s: where every released scan went (per source, with the rides), what the
+        tracker did with the matched ones (its switches, the rest lock's cadence and gain,
+        carries, lost/weak, the fit at the match and at the published pose, the largest
+        map -> odom step), who drives and every source's health, and the cost."""
         loc = self._localizer
         if loc is None:
             return
-        gate, pacer, track = self._gate.report(), self._pacer.report(), loc.report()
+        feed, pacer, track = self._feed.report(), self._pacer.report(), loc.report()
         self.get_logger().info(
-            f"tracker: {gate.summary()}, rested {self._rested}, {pacer.summary()}, deskew "
+            f"tracker: {feed.summary()}, rested {self._rested}, {pacer.summary()}, deskew "
             f"failed {self._deskew_failed}; {loc.settings()}; {track.summary()}; "
+            f"sources: {self._feed.status(self._now_s())}; "
             f"watch fit {self.fit:.2f}, dynamic marks {self._dynamic_count}, "
             f"scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
             f"flags: {self._switches.state()}"
         )
-        if gate.expired:
+        if feed.expired:
             self.get_logger().warning(
-                f"odometry ran late: {gate.expired} scans were never covered by {self._odom_topic} "
+                f"odometry ran late: {feed.expired} scans were never covered by {self._odom_topic} "
                 "and matched nothing"
             )
         self._rested = self._deskew_failed = self._dynamic_count = 0
@@ -679,8 +751,10 @@ class Relocalizer(Node):
     # -- the watch ------------------------------------------------------------
 
     def _check(self) -> None:
-        """Once a second: score the fit; the watch decides whether to search the whole map."""
-        if self._matcher is None or self._points is None:
+        """Once a second: score the fit on the newest picture of the source that drives the
+        tracker; the watch decides whether to search the whole map."""
+        picture = self._feed.picture(self._now_s())
+        if self._matcher is None or picture is None:
             return
         pose = self._tracked_pose()
         if pose is None:
@@ -698,14 +772,14 @@ class Relocalizer(Node):
         if self._localizer is not None and moving:
             self.fit = float(self._localizer.confidence)
         else:
-            self.fit = self._matcher.inlier_fraction(pose, self._points)
+            self.fit = self._matcher.inlier_fraction(pose, picture.points)
         self._fit_pub.publish(Float32(data=float(self._watch.reported_fit(self.fit))))
         if self._searching or not self._tracker_initialised:
             return
         # The watch gets the tracker's OWN fit. reported_fit() is for the outside world: capped
         # at 0.35 while a candidate pends, and fed back here it kept a twin candidate alive at
         # fit 0.76 and ran a whole-map search every second for half an hour (18:00 today).
-        occluded = self._occluded(pose)
+        occluded = self._occluded(picture.points, pose)
         # Under the episode lock, like every other _watch call and every claim of _searching:
         # the worker answers a search on its own thread and the two share this state.
         with self._episode:
@@ -782,8 +856,9 @@ class Relocalizer(Node):
         assert self._localizer is not None and self._matcher is not None
         # The scan, its id and the map it was taken on, captured together at the start: a map
         # swap during the seconds of a search must not stamp the old scan's fix as the new map's.
-        points, scan, map_id = self._points, self._scan_id, self._map_id
-        assert points is not None
+        picture, map_id = self._feed.picture(self._now_s()), self._map_id
+        assert picture is not None
+        points, scan = picture.points, picture.scan_id
         current = self._tracked_pose()
         current_fit = self._matcher.inlier_fraction(current, points) if current else 0.0
         started = time.monotonic()
@@ -866,7 +941,7 @@ class Relocalizer(Node):
         /localization_fit within a few seconds. The search runs in the worker, never here: a
         loop on the executor thread froze the scan, so its "second opinion" was the first search
         replayed to the millimetre and every candidate was rubber-stamped (review, 2026-09-09)."""
-        if self._localizer is None or self._points is None:
+        if self._localizer is None or self._feed.picture(self._now_s()) is None:
             res.success, res.message = False, "no map or no scan yet"
             return res
         with self._episode:
