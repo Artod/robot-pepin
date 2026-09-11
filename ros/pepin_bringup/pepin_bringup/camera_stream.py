@@ -8,7 +8,12 @@ captured the frame (ustreamer's X-Timestamp, the clock that stamps the lidar): a
 when the laptop decoded it was a few hundred milliseconds late, a picture placed ten degrees
 wrong while the cart turns.
 It also broadcasts the static ``base_link -> camera_link -> camera_optical`` transforms from
-the same file, so RTAB-Map knows where the pictures were taken from.
+the same file, so RTAB-Map knows where the pictures were taken from — the first of them only
+while ``static_camera_tf`` is true: with the board's neck node publishing base_link ->
+camera_link live from the servo encoders (pepin_bringup.neck_state, ros/feature.sh neck on)
+this side must not publish the same edge, and the launch passes the switch off
+(``ros/laptop.sh vslam --neck``). A static transform cannot be withdrawn once sent, so that
+switch is read at start, not live.
 """
 
 from __future__ import annotations
@@ -70,17 +75,26 @@ class CameraStream(Node):
                 " recognising places, not for measuring — calibrate with a checkerboard"
             )
         self._static = StaticTransformBroadcaster(self)
+        # base_link -> camera_link is static only while the neck stands still: when the board's
+        # neck node publishes it live (neck_state, flag neck_tf) this edge stays off here — two
+        # publishers of one edge fight, and a static one cannot be withdrawn, so it is a launch
+        # switch (vslam.launch.py static_camera_tf, ros/laptop.sh vslam --neck), not a live one.
+        self._static_camera = bool(self.declare_parameter("static_camera_tf", True).value)
         # The lidar's mount as well: the board publishes it too, but a static transform does not
         # replay to a late joiner over the bridge (RTAB-Map dropped every scan for an hour after a
         # board reboot, 2026-09-10) — both sides publish the same file's numbers.
         lx, ly, lz, lroll, lpitch, lyaw = LidarMount.from_json(LIDAR_CONFIG).transform()
-        self._static.sendTransform(
-            [
-                self._link_tf(),
-                self._optical_tf(),
-                self._tf("base_link", "laser", lx, ly, lz, lroll, lpitch, lyaw),
-            ]
-        )
+        transforms = [
+            self._optical_tf(),
+            self._tf("base_link", "laser", lx, ly, lz, lroll, lpitch, lyaw),
+        ]
+        if self._static_camera:
+            transforms.insert(0, self._link_tf())
+        else:
+            self.get_logger().info(
+                "base_link -> camera_link is the board's (neck_state): not broadcast from here"
+            )
+        self._static.sendTransform(transforms)
         self._frames = 0
         self._unstamped = 0  # frames the board sent without a capture time
         self.create_timer(30.0, self._report)
@@ -163,7 +177,10 @@ class CameraStream(Node):
         self._frames += 1
 
     def _report(self) -> None:
-        self.get_logger().info(f"camera: {self._frames / 30.0:.1f} frames/s")
+        static = "on" if self._static_camera else "off"
+        self.get_logger().info(
+            f"camera: {self._frames / 30.0:.1f} frames/s; static_camera_tf {static}"
+        )
         self._frames = 0
 
 

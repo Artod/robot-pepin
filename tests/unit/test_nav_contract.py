@@ -598,10 +598,11 @@ def test_every_respawned_node_waits_for_its_own_ghost_first() -> None:
     board's launch asks the bridge on its own host, and an unreachable admin is not waited for."""
     from pepin.deployment import nav_container_nodes
 
-    for name in ("nav.launch.py", "vslam.launch.py"):
+    for name in ("nav.launch.py", "vslam.launch.py", "robot.launch.py"):
         src = sf.tree(f"ros/pepin_bringup/launch/{name}")
         assert any(isinstance(n, ast.FunctionDef) and n.name == "_after_ghost" for n in src.body)
-        assert "pepin_bringup.ghost_wait" in sf.strings(src), name
+        # the laptop halves also wait for their whole set once; the board's launch only prefixes
+        assert any("pepin_bringup.ghost_wait" in s for s in sf.strings(src)), name
         for node, keywords in _launch_processes(name).items():
             if keywords.get("respawn") is True:
                 assert "_after_ghost(" in str(keywords.get("prefix")), (name, node)
@@ -637,6 +638,9 @@ def test_every_respawned_node_waits_for_its_own_ghost_first() -> None:
         "foxglove_bridge",
     ):
         assert f"_after_ghost('/{node}')" in sf.unparsed(vslam, ast.Call), node
+    robot = sf.tree(ROBOT_LAUNCH)
+    assert "_after_ghost('/neck_state')" in sf.unparsed(robot, ast.Call)
+    assert "bridge_admin_for('board')" in sf.unparsed(robot, ast.Call), "its own host's bridge"
     wait = sf.tree(f"{NODES}/ghost_wait.py")
     assert {"os.execvp(command[0], command)", "rest.index('--')"} <= sf.unparsed(wait, ast.Call)
     assert any("not waiting" in s for s in sf.strings(wait))
@@ -787,6 +791,83 @@ def test_both_publishers_of_base_link_to_laser_agree_and_the_driver_turns_ccw() 
     assert "qx" in entries["rotation.x"]  # the laser's transform takes the helper's answer
 
 
+def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() -> None:
+    """The camera rides a two-servo neck. The board's node (pepin_bringup.neck_state) asks the
+    base server for the encoders and publishes /neck/state and, behind its live ``neck_tf``,
+    base_link -> camera_link from them; the laptop's camera node must then stop broadcasting its
+    static copy of that edge — two publishers of one edge fight, and a static transform cannot
+    be withdrawn, so that one is a launch switch (``static_camera_tf``), read once at start.
+
+    One operator gesture per side, each carried by one launch argument: ``ros/feature.sh neck
+    on`` sets PEPIN_NECK, the unit passes ``neck:=`` down through bringup to robot.launch.py;
+    ``ros/laptop.sh vslam --neck`` passes ``static_camera_tf:=false`` into vslam.launch.py, which
+    hands it to the camera node alone. The board is never asked what it is doing: this launch
+    talks to no one, and a guess would be the two-publisher case.
+    """
+    node = sf.tree(f"{NODES}/neck_state.py")
+    declared = {
+        ast.unparse(c.args[0]): c.args[1] for c in sf.calls_to(node, "self.declare_parameter")
+    }
+    assert {"'host'", "'port'", "'poll_hz'", "'config'", "'neck_tf'"} <= declared.keys()
+    assert sf.assignments(node)["_NECK_REQUEST"] == 'b\'{"cmd":"neck"}\\n\''
+    assert {"parse_neck", "joint_angles", "camera_pose", "NeckConfig"} <= sf.imported(node)
+    assert "JsonLineLink" in sf.imported(node), "the reconnecting link, not a socket of its own"
+    assert "super().__init__('neck_state')" in sf.unparsed(node, ast.Call)
+    assert ast.unparse(declared["'poll_hz'"]) == "10.0"
+    # The switch defaults off while the model is unchecked against the hardware: the reference
+    # ticks unread (every pose is then the static mount) or the servo signs unverified.
+    from pepin.neck import NeckConfig
+
+    reference = NeckConfig.from_json(REPO / "config/neck.json").reference
+    if not (reference.known and reference.signs_verified):
+        assert ast.unparse(declared["'neck_tf'"]) == "False", "unverified: no transform by default"
+    camera = sf.tree(f"{NODES}/camera_stream.py")
+    switch = {ast.unparse(c.args[0]) for c in sf.calls_to(camera, "self.declare_parameter")}
+    assert "'static_camera_tf'" in switch
+    guarded = [
+        n
+        for n in ast.walk(camera)
+        if isinstance(n, ast.If)
+        and ast.unparse(n.test) == "self._static_camera"
+        and "_link_tf()" in ast.unparse(n.body)
+    ]
+    assert guarded, "base_link -> camera_link is broadcast only under the switch"
+    assert "_link_tf()" not in ast.unparse(guarded[0].orelse), "and not in the other branch"
+    kept = next(
+        ast.unparse(n)
+        for n in ast.walk(camera)
+        if isinstance(n, ast.List) and "_optical_tf()" in ast.unparse(n)
+    )
+    assert "'laser'" in kept and "_link_tf()" not in kept, "that edge alone goes, not the others"
+    vslam = sf.tree(VSLAM_LAUNCH)
+    assert "'static_camera_tf'" in {
+        ast.unparse(c.args[0]) for c in sf.calls_to(vslam, "DeclareLaunchArgument")
+    }
+    commands = [s for s in sf.unparsed(vslam, ast.List) if "'pepin_bringup." in s]
+    passes = [s for s in commands if "static_camera_tf:=" in s]
+    assert len(passes) == 1 and "pepin_bringup.camera_stream" in passes[0], "the camera node only"
+    robot = sf.tree(ROBOT_LAUNCH)
+    assert "pepin_bringup.neck_state" in sf.strings(robot)
+    neck_arg = next(
+        c for c in sf.calls_to(robot, "DeclareLaunchArgument") if ast.unparse(c.args[0]) == "'neck'"
+    )
+    assert ast.unparse(sf.keywords(neck_arg)["default_value"]) == "'false'"
+    bringup = sf.tree("ros/pepin_bringup/launch/bringup.launch.py")
+    assert bringup and "LaunchConfiguration('neck')" in sf.unparsed(bringup, ast.Call)
+    unit = (REPO / "board/pepin-ros.service").read_text()
+    assert "Environment=PEPIN_NECK=false" in unit and "neck:=${PEPIN_NECK}" in unit
+    feature = (REPO / "ros/feature.sh").read_text()
+    assert "neck) VAR=PEPIN_NECK ;;" in feature
+    assert "PEPIN_(CPP_BRIDGE|IMU|TOF|NECK|SIDE)" in (REPO / "ros/mode.sh").read_text()
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert 'case " ${*:2} " in *" --neck "*) STATIC_CAMERA_TF=false ;; esac' in laptop
+    assert any(
+        '"static_camera_tf:=$STATIC_CAMERA_TF"' in command
+        for command in sf.shell_commands(laptop)
+        if "docker run -d --name pepin-vslam" in command
+    )
+
+
 def test_the_frames_are_fused_into_one_surface_beside_rtabmap_s_cloud() -> None:
     """The SLAM launch runs the fusion node after the ghost wait; the node loads the grid from
     config/fusion.json and offers its switches as parameters; the 3D layout shows the fused
@@ -929,9 +1010,14 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         "foxglove_bridge",
     }
     assert _respawning(nav) == {"relocalizer", "run_recorder", "goal_server"}
+    # The board's sensor launch runs one of our processes too: the neck node (ros/feature.sh
+    # neck on). The drivers around it are ROS packages the container restarts with the launch.
+    robot = _launch_processes("robot.launch.py")
+    assert _respawning(robot) == {"neck_state"}
     for launch in (vslam, nav):
         for watch in ("ghost_wait", "bridge_watch"):
             assert "respawn" not in launch[watch], watch
+    for launch in (vslam, nav, robot):
         for name, keywords in launch.items():
             if keywords.get("respawn"):
                 assert 0.0 < float(str(keywords["respawn_delay"])) <= 5.0, name
@@ -1066,5 +1152,8 @@ def test_one_node_can_be_kicked_without_a_container_restart() -> None:
         assert all(name in refused.stdout for name, _ in rows), refused.stdout
         known[script] = {name for name, _ in rows}
     vslam, nav = _launch_processes("vslam.launch.py"), _launch_processes("nav.launch.py")
+    robot = _launch_processes("robot.launch.py")
     assert known["laptop.sh"] == (_respawning(vslam) - {"foxglove_bridge"}) | {"goal_server"}
-    assert known["thin.sh"] == _respawning(nav)
+    # Everything of ours the board respawns is kickable: the navigation half and the neck node
+    # of the sensor launch (a code change on the board is one kicked process, never a restart).
+    assert known["thin.sh"] == _respawning(nav) | _respawning(robot)

@@ -7,6 +7,8 @@
 #   ros/laptop.sh vslam      start (or restart) the camera SLAM container beside them; the
 #                            RTAB-Map database (ros/maps/rtabmap.db) is kept: the map survives
 #   ros/laptop.sh vslam --fresh   the same from an empty database (the old one is deleted first)
+#   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
+#                            neck on): the camera node here keeps its static edge off
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
 # Only `start` talks to the board (its side and its map); stop, logs, vslam and kick never do.
 # Prerequisites: the image built here (ros/laptop-build.sh) and the board on side=board
@@ -112,13 +114,19 @@ case "${1:-start}" in
             rm -f "$HERE"/maps/rtabmap.db "$HERE"/maps/rtabmap.db-*
             echo "vslam: ros/maps/rtabmap.db deleted; RTAB-Map starts an empty map"
         fi
+        # --neck anywhere after the subcommand: the board's neck node publishes base_link ->
+        # camera_link live (ros/feature.sh neck on), so the camera node's static edge goes off.
+        # Explicit on both sides on purpose: this subcommand never asks the board, and a wrong
+        # guess would be two publishers of one edge; the camera node's report warns of a mismatch.
+        STATIC_CAMERA_TF=true
+        case " ${*:2} " in *" --neck "*) STATIC_CAMERA_TF=false ;; esac
         stop_gently pepin-vslam
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
             -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
-            "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" >/dev/null
-        echo "vslam up (RTAB-Map + camera + depth): Foxglove at ws://localhost:8765, ros/laptop.sh logs vslam"; exit 0 ;;
+            "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" >/dev/null
+        echo "vslam up (RTAB-Map + camera + depth, static camera tf $STATIC_CAMERA_TF): Foxglove at ws://localhost:8765, ros/laptop.sh logs vslam"; exit 0 ;;
     start) ;;
-    *) echo "usage: ros/laptop.sh [start | stop | logs [vslam] | vslam [--fresh] | kick NODE]"; exit 2 ;;
+    *) echo "usage: ros/laptop.sh [start | stop | logs [vslam] | vslam [--fresh] [--neck] | kick NODE]"; exit 2 ;;
 esac
 # Which half the board expects: on side=all (ros/thin.sh vision) the board drives by itself and
 # this side starts only the bridge — RTAB-Map and the camera come with "ros/laptop.sh vslam".

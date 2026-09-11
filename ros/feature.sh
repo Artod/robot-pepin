@@ -3,12 +3,15 @@
 #   ros/feature.sh cpp on|off    the C++ base bridge instead of the Python one (~25 MB vs ~190 MB)
 #   ros/feature.sh imu on|off    read the MPU6050 and fuse it with the wheels (needs cpp on)
 #   ros/feature.sh tof on|off    the three ToF sensors into the local costmap (a Python bridge, ~150 MB)
+#   ros/feature.sh neck on|off   the neck's encoders as /neck/state and the live base_link -> camera_link
+#                                (a Python node, ~150 MB); the laptop's SLAM must then run with
+#                                `ros/laptop.sh vslam --neck`, or two nodes publish that one edge
 # Each change restarts the one launch process (about 60 s); the robot does not move.
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
-FEATURE="${1:?cpp | imu | tof}"; STATE="${2:?on | off}"
-case "$FEATURE" in cpp) VAR=PEPIN_CPP_BRIDGE ;; imu) VAR=PEPIN_IMU ;; tof) VAR=PEPIN_TOF ;; *) echo "unknown feature $FEATURE"; exit 2 ;; esac
+FEATURE="${1:?cpp | imu | tof | neck}"; STATE="${2:?on | off}"
+case "$FEATURE" in cpp) VAR=PEPIN_CPP_BRIDGE ;; imu) VAR=PEPIN_IMU ;; tof) VAR=PEPIN_TOF ;; neck) VAR=PEPIN_NECK ;; *) echo "unknown feature $FEATURE"; exit 2 ;; esac
 case "$STATE" in on) VAL=true ;; off) VAL=false ;; *) echo "on or off"; exit 2 ;; esac
 if [ "$FEATURE" = imu ] && [ "$VAL" = true ]; then
     ssh "root@$BOARD" "grep -q 'PEPIN_CPP_BRIDGE=true' /etc/default/pepin-ros" || { echo "imu needs the C++ bridge: ros/feature.sh cpp on first"; exit 1; }

@@ -288,3 +288,21 @@ def test_the_split_keeps_the_plan_on_the_laptop_and_vision_moves_it_to_the_board
         assert not publishes(side, "split", "/global_costmap/costmap")
     for name in ("/plan", "/global_costmap/costmap"):
         assert publishes("board", "vision", name) and not publishes("laptop", "vision", name)
+
+
+def test_the_necks_joint_states_reach_the_laptop_in_both_modes() -> None:
+    """The neck's servos are read on the board and the laptop's SLAM wants to know where the
+    camera looks, in either split: /neck/state crosses board -> laptop in both modes and is
+    never a laptop publisher (a topic allowed on both sides loops until nothing crosses). The
+    transform itself is not a topic of its own — it rides /tf, which already crosses."""
+    import re
+
+    from pepin.deployment import BOARD_PUBLISHES, LAPTOP_PUBLISHES, bridge_allow
+
+    assert "neck/state" in BOARD_PUBLISHES and "neck/state" not in LAPTOP_PUBLISHES
+    for mode in ("split", "vision"):
+        board, laptop = bridge_allow("board", mode), bridge_allow("laptop", mode)
+        assert re.compile(board["publishers"][0]).search("/neck/state"), mode
+        assert re.compile(laptop["subscribers"][0]).search("/neck/state"), mode
+        assert not re.compile(laptop["publishers"][0]).search("/neck/state"), mode
+        assert re.compile(board["publishers"][0]).search("/tf"), mode

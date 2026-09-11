@@ -12,7 +12,10 @@ localisations coexist; its occupancy grid is the map the tracker will be handed 
 Arguments: ``board`` (the robot's address for the camera stream), ``database`` (RTAB-Map's
 database, kept across restarts — a bridge-watch restart must keep the map; a fresh one is the
 operator's call: ``ros/laptop.sh vslam --fresh`` deletes the file before the run), ``bridge_admin``
-(the laptop bridge's REST admin, asked whether it still lists this launch's previous incarnation).
+(the laptop bridge's REST admin, asked whether it still lists this launch's previous incarnation),
+``static_camera_tf`` (default true: the camera node broadcasts base_link -> camera_link from
+config/camera.json; false when the board's neck node publishes that edge live — ros/feature.sh
+neck on, ``ros/laptop.sh vslam --neck`` — since two publishers of one edge fight).
 """
 
 from launch import LaunchDescription
@@ -151,6 +154,8 @@ def generate_launch_description() -> LaunchDescription:
             "--ros-args",
             "-p",
             ["board:=", board],
+            "-p",
+            ["static_camera_tf:=", LaunchConfiguration("static_camera_tf")],
         ],
         output="screen",
         prefix=_after_ghost("/camera_stream"),
@@ -213,6 +218,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("board", default_value="10.0.0.187"),
             DeclareLaunchArgument("database", default_value="/maps/rtabmap.db"),
             DeclareLaunchArgument("bridge_admin", default_value="http://pepin-zenoh:8000"),
+            DeclareLaunchArgument("static_camera_tf", default_value="true"),
             # A new board bridge means new subscriptions are needed: the watch exits, the launch
             # shuts down, the container's restart policy brings this half back.
             ExecuteProcess(

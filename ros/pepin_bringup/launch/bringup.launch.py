@@ -25,6 +25,7 @@ def generate_launch_description() -> LaunchDescription:
             "base_bridge_cpp": LaunchConfiguration("base_bridge_cpp"),
             "imu": LaunchConfiguration("imu"),
             "tof": LaunchConfiguration("tof"),
+            "neck": LaunchConfiguration("neck"),
         }.items(),
     )
     nav = IncludeLaunchDescription(
@@ -44,6 +45,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
             DeclareLaunchArgument("imu", default_value="false"),
             DeclareLaunchArgument("tof", default_value="false"),
+            DeclareLaunchArgument("neck", default_value="false"),
             robot,
             nav,
             slam,

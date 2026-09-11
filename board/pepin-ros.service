@@ -15,6 +15,9 @@ Environment=PEPIN_MAP=/maps/20260903_182653_lap3_loop.yaml
 Environment=PEPIN_CPP_BRIDGE=false
 Environment=PEPIN_IMU=false
 Environment=PEPIN_TOF=false
+# The neck's encoders and the live camera transform (ros/feature.sh neck on|off); the laptop's
+# SLAM must then start with ros/laptop.sh vslam --neck, or two nodes publish base_link -> camera_link.
+Environment=PEPIN_NECK=false
 # all: the whole stack here; board: the reflex half, with the planner and goal server on the laptop (ros/laptop.sh)
 Environment=PEPIN_SIDE=all
 # One container per boot; --rm so a stale one never blocks the name. The image is built by ros/build.sh.
@@ -26,7 +29,7 @@ ExecStartPre=-/bin/sh -c 'for i in $$(seq 1 90); do [ "$$(timedatectl show -p NT
 ExecStartPre=-/bin/sh -c 'mkdir -p /root/pepin-ros/logs && /usr/bin/docker logs pepin-ros > /root/pepin-ros/logs/$$(date +%%Y%%m%%d_%%H%%M%%S).log 2>&1'
 ExecStartPre=-/usr/bin/docker rm -f pepin-ros
 # run.sh mounts the code from /root/pepin-ros (see it): edits reach the robot via ros/sync.sh, no rebuild.
-ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} tof:=${PEPIN_TOF} side:=${PEPIN_SIDE}
+ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK} side:=${PEPIN_SIDE}
 # ros2 launch needs more than 5 s to bring a dozen nodes down on this board; a SIGKILL (137)
 # after the grace period is still a normal stop, not a failure.
 ExecStop=/usr/bin/docker stop -t 15 pepin-ros

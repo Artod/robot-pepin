@@ -168,6 +168,7 @@ BOARD_PUBLISHES = (
     "dynamic_obstacles",
     "local_costmap/costmap",
     "pepin/run_status",
+    "neck/state",  # the neck's joint angles (pepin_bringup.neck_state); its transform rides /tf
 )
 LAPTOP_PUBLISHES = (
     "plan",

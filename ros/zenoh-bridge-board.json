@@ -3,7 +3,7 @@
     "ros2dds": {
       "allow": {
         "publishers": [
-          "^/(dynamic_obstacles|imu/data_raw|local_costmap/costmap|localization_fit|map|odom|odometry/filtered|pepin/run_status|scan|tf|tf_static|tof/front|tof/left|tof/right|tracker_pose)$"
+          "^/(dynamic_obstacles|imu/data_raw|local_costmap/costmap|localization_fit|map|neck/state|odom|odometry/filtered|pepin/run_status|scan|tf|tf_static|tof/front|tof/left|tof/right|tracker_pose)$"
         ],
         "subscribers": [
           "^/(controller_selector|depth_scan|laptop/heartbeat|pepin/run|plan|planner_selector|rtabmap/info|rtabmap/map|rtabmap/mapGraph|rtabmap/mapPath)$"

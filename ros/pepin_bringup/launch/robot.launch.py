@@ -23,20 +23,36 @@ Arguments:
   once it has driven the cart.
 - ``imu`` (default false): read the MPU6050 on /dev/i2c-2 inside the C++ bridge and publish
   /imu/data_raw. Needs ``base_bridge_cpp:=true``; the Python bridge has no IMU.
+- ``neck`` (default false): the neck's encoders as /neck/state and, behind the node's live
+  ``neck_tf`` switch, base_link -> camera_link from them (pepin_bringup.neck_state, a Python
+  process, ~150 MB). The laptop's camera node must then keep its static edge off
+  (ros/laptop.sh vslam --neck); ros/feature.sh neck on|off flips this one.
 """
 
 import math
 
 from launch import Condition, LaunchContext, LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
-from pepin.deployment import BASE_MAX_ANGULAR_RAD_S, BASE_MAX_LINEAR_M_S
+from pepin.deployment import BASE_MAX_ANGULAR_RAD_S, BASE_MAX_LINEAR_M_S, bridge_admin_for
 from pepin.footprint import hull_box
 from pepin.mounts import Mounts
+
+# Our own Python nodes come back by themselves after this pause (a code change is one kicked
+# process: ros/thin.sh kick <node>), through a ghost wait of their own name first, as in
+# nav.launch.py: a crashed node's name outlives it in the bridge by the DDS lease.
+RESPAWN = {"respawn": True, "respawn_delay": 2.0}
+
+
+def _after_ghost(*names: str) -> str:
+    """A command prefix that waits until the bridge on this host lists none of ``names`` and
+    then becomes the command (pepin_bringup.ghost_wait; an unreachable admin is not waited for)."""
+    return f"python3 -m pepin_bringup.ghost_wait {bridge_admin_for('board')} {' '.join(names)} --"
+
 
 MOUNTS = Mounts.load()
 LASER = MOUNTS.lidar.transform()
@@ -250,6 +266,17 @@ def generate_launch_description() -> LaunchDescription:
         output="screen",
         condition=IfCondition(LaunchConfiguration("tof")),
     )
+    # The neck's encoders and the live camera transform (pepin_bringup.neck_state). As a module,
+    # like the recorder: the image's console scripts are generated at build time and the sources
+    # are mounted over them. Off by default until the switch-over is measured: the laptop's
+    # static edge must go off in the same breath (two publishers of one edge fight).
+    neck = ExecuteProcess(
+        cmd=["python3", "-m", "pepin_bringup.neck_state"],
+        output="screen",
+        prefix=_after_ghost("/neck_state"),
+        condition=IfCondition(LaunchConfiguration("neck")),
+        **RESPAWN,
+    )
     return LaunchDescription(
         [
             DeclareLaunchArgument("lidar_port", default_value="/dev/lidar"),
@@ -259,9 +286,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("tof", default_value="false"),
             DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
             DeclareLaunchArgument("imu", default_value="false"),
+            DeclareLaunchArgument("neck", default_value="false"),
             OpaqueFunction(function=sensors_container),
             base,
             ekf,
             tof,
+            neck,
         ]
     )
