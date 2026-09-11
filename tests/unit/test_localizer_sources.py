@@ -139,6 +139,44 @@ def test_fusion_off_takes_the_widest_source_alone_but_still_measures_the_rest() 
     assert off.report().fused == 1
 
 
+def test_the_anchors_bound_is_taken_alone_and_a_blind_fan_never_delays_a_carry() -> None:
+    """The cart stands 12 cm off in y, beyond the window, so the lidar's match sits on the
+    window's edge (a bound); the fan facing the far wall is blind along y, a plateau whose
+    winner is the tie-break toward the guess. Left to the fusion that plateau out-voted the
+    widened lidar and held the wrong pose for seconds under the rest lock (a review probe,
+    2026-09-11). Now the anchor's bound is taken alone and the plateau is a bound too: the
+    fused tracker carries when the lidar-only one does, and follows it within half a
+    centimetre, at rest and while driving."""
+    truth = Pose2D(0.5, 0.0, 0.0)  # the fan faces the far wall at x = 3: pins x, blind in y
+    lidar, camera = whole(truth), fan(truth)
+    for at_rest in (True, False):
+        alone = tracker()
+        both = tracker(sources=SourceRegistry(enabled=[LIDAR, DEPTH]))
+        alone.pose = both.pose = Pose2D(truth.x, truth.y + 0.12, truth.theta)
+        errors: list[tuple[float, float]] = []
+        for _ in range(8):
+            alone.update_from(truth, [ScanObservation(LIDAR, lidar)], at_rest=at_rest, dt_s=0.1)
+            both.update_from(
+                truth,
+                [ScanObservation(LIDAR, lidar), ScanObservation(DEPTH, camera)],
+                at_rest=at_rest,
+                dt_s=0.1,
+            )
+            errors.append((error(alone, truth)[0], error(both, truth)[0]))
+            if len(errors) == 1:  # the first match: on the edge, taken alone, the same floats
+                assert both.measurements[0].edge and "edge" in both.measurements[0].text()
+                assert (both.pose.x, both.pose.y) == (alone.pose.x, alone.pose.y)
+        for k, (a, b) in enumerate(errors):
+            assert b <= a + 0.005, (
+                f"at_rest={at_rest} update {k}: {b * 100:.1f} vs {a * 100:.1f} cm"
+            )
+        assert errors[0][0] > 0.07 and errors[-1][1] < 0.04
+        one, two = alone.report(), both.report()
+        assert two.carries == one.carries == (1 if at_rest else 0)
+        assert two.bound >= 1 and two.fused + two.bound == 8 and one.bound == 0
+        assert "anchor bound" in two.summary()
+
+
 def test_a_partial_fan_is_not_penalised_as_unexplained() -> None:
     """A fan explains the map as well as the revolution where it looks (the fit is a share of
     the returns, never of the field of view), and it may vote with its own floor: the lidar's

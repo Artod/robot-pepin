@@ -23,7 +23,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from pepin.dynamic import StaticMask, voting_mask
-from pepin.fusion import PoseMeasurement, covariance_from_score_surface, fuse
+from pepin.fusion import PoseMeasurement, at_edge, covariance_from_score_surface, fuse
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import (
@@ -136,6 +136,7 @@ class TrackStats:
     source_fit: dict[str, Running] = field(default_factory=dict)  # fit per source, at its match
     fused: int = 0  # updates whose correction was fused from more than one source
     rejected: int = 0  # source measurements a fusion left out for disagreeing with the surest
+    bound: int = 0  # updates the anchor's match sat on the window's edge and corrected alone
 
     def summary(self) -> str:
         """One log line, mean/min/max where a distribution matters; the per-source fits and
@@ -152,7 +153,10 @@ class TrackStats:
             per_source = ", ".join(
                 f"{name} {stat.text()} ({stat.n})" for name, stat in self.source_fit.items()
             )
-            line += f"; sources {per_source}; fused {self.fused}, rejected {self.rejected}"
+            line += (
+                f"; sources {per_source}; fused {self.fused}, rejected {self.rejected}, "
+                f"anchor bound {self.bound}"
+            )
         return line
 
 
@@ -637,8 +641,9 @@ class Localizer:
         motion: Pose2D,
         mask: StaticMask | None,
     ) -> PoseMeasurement:
-        """One source's scan matched around the prediction: its pose, its fit on the whole scan
-        and the covariance read off the score surface, scaled by the source's trust."""
+        """One source's scan matched around the prediction: its pose, its fit on the whole scan,
+        the covariance read off the score surface scaled by the source's trust, and whether
+        the match sat on the window's edge (``edge``: a bound, the truth lies beyond)."""
         points, vote = observation.points, observation.vote
         if vote is None and mask is not None and self.explained_vote:
             vote = voting_mask(points, prediction, mask, min_points=source.vote_min_points)
@@ -659,6 +664,7 @@ class Localizer:
             observation.source,
             observation.stamp,
             fit,
+            edge=at_edge(surface),
         )
 
     def update_from(
@@ -697,9 +703,15 @@ class Localizer:
         on the WHOLE scan of the anchor — the widest enabled source, the lidar when it is there
         — at the fused pose, so the fit this reports, the lost counter and the occlusion
         verdict built on them mean exactly what they meant before; ``published_fit`` is the
-        same measure at the pose returned. Scans from sources the flag has off, and scans
-        thinner than their source's floor, are ignored; with nothing left to match the
-        prediction stands (``thin``). Every source's measurement is kept in ``measurements``.
+        same measure at the pose returned. The anchor's bound is taken alone: when its match
+        sits on the window's edge the truth lies beyond what was searched, and a fan that sees
+        a quarter of the room has look-alikes inside the window where the revolution has none,
+        so it may not overrule that (``bound``); the next update searches from the new pose
+        and the fan has its say once the anchor is back inside — with the anchor bound, the
+        fused tracker steps exactly as the lidar-only one. Scans from sources the flag has
+        off, and scans thinner than their source's floor, are ignored; with nothing left to
+        match the prediction stands (``thin``). Every source's measurement is kept in
+        ``measurements``.
         """
         motion = (
             Pose2D()
@@ -739,15 +751,20 @@ class Localizer:
         ]
         for measurement in self.measurements:
             stats.source_fit.setdefault(measurement.source, Running()).add(measurement.fit)
-        fused = (
-            fuse(self.measurements)
-            if self.fusion
-            else next(m for m in self.measurements if m.source == anchor.source)
-        )
+        anchored = next(m for m in self.measurements if m.source == anchor.source)
+        # The anchor's bound is taken alone (see the docstring): a fan blind along a wall is a
+        # plateau whose winner is the guess, and un-widened it out-voted the edge-bound lidar
+        # and held a 12 cm slip for seconds under the rest lock (a review probe, 2026-09-11).
+        # The covariance now widens such a plateau too (fusion.bound_directions); this rule is
+        # what makes the fused tracker provably no slower than the lidar alone on a bound.
+        fused = fuse(self.measurements) if self.fusion and not anchored.edge else anchored
         assert fused is not None  # usable is not empty
         if len(self.measurements) > 1 and self.fusion:
-            stats.fused += 1
-            stats.rejected += len(fused.rejected)
+            if anchored.edge:
+                stats.bound += 1
+            else:
+                stats.fused += 1
+                stats.rejected += len(fused.rejected)
         matched = fused.pose
         pose = matched
         confidence = (
