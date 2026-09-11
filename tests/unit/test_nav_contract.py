@@ -834,17 +834,17 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     if not (reference.known and reference.signs_verified):
         assert neck_flags["neck_tf"] is False, "unverified: no transform by default"
     camera = sf.tree(f"{NODES}/camera_stream.py")
-    # The switch is one of the node's live parameters (node_kit.Switches, CLAUDE.md rule 19) and
-    # is printed in its report line — but a live change of this one is refused: the transform
-    # went out at start and a static transform cannot be withdrawn.
-    assert "static_camera_tf" in sf.dict_items(camera) and "Switches" in sf.imported(camera)
-    assert "self._switches.state" in sf.calls(camera)
-    refusal = next(
-        n
-        for n in ast.walk(camera)
-        if isinstance(n, ast.If) and ast.unparse(n.test) == "name == 'static_camera_tf'"
+    # The switch is one of the camera node's flags (node_kit.Switches over its FLAGS table,
+    # CLAUDE.md rule 19) and is printed in its report line — but it is declared not live: the
+    # transform went out at start, and a static transform cannot be withdrawn.
+    camera_flags = load_table(REPO / NODES / "camera_stream.py")
+    assert "static_camera_tf" in camera_flags and not camera_flags.flag("static_camera_tf").live
+    assert camera_flags["static_camera_tf"] is True, "this side owns the edge unless told not to"
+    assert "Switches" in sf.imported(camera)
+    report = sf.calls_to(camera, "self._switches.state")
+    assert report and all(ast.unparse(sf.keywords(c)["live_only"]) == "False" for c in report), (
+        "the report line carries the non-live flag too: it says which side owns the edge"
     )
-    assert any(isinstance(n, ast.Raise) for n in ast.walk(refusal)), "a live change is refused"
     guarded = [
         n
         for n in ast.walk(camera)

@@ -14,10 +14,10 @@ so RTAB-Map knows where the pictures were taken from — the camera's own edge o
 live from the servo encoders (pepin_bringup.neck_state, ros/feature.sh neck on) this side must
 not publish the same edge, and the launch passes the switch off (``ros/laptop.sh vslam --neck``).
 
-Switches, live (``ros2 param set /camera_stream <name> <value>``): ``scale`` (the published
-picture as a fraction of the camera's own, optics included); ``static_camera_tf`` is read at
-start and refused live — a static transform cannot be withdrawn once sent. Their state is
-printed in every report line.
+The flags (:data:`FLAGS`, ``ros/flags.sh set camera_stream <name> <value>``): ``scale``, live
+(the published picture as a fraction of the camera's own, optics included); ``static_camera_tf``,
+read at start and not live — a static transform cannot be withdrawn once sent, so the other
+value needs a restart. Both are printed in every report line.
 
 The frames are pulled by one thread (:meth:`CameraStream._pump`) which :meth:`CameraStream.close`
 stops and joins before the node is destroyed: a daemon thread left inside OpenCV's decoder when
@@ -46,6 +46,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from tf2_ros import StaticTransformBroadcaster
 
 from pepin.camera import CameraConfig, camera_info_arrays
+from pepin.flags import Flag, FlagSet
 from pepin.mjpeg import capture_time, parts
 from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
 from pepin_bringup.msgs import image_from_array, stamp_from_seconds, transform_from_mount
@@ -56,6 +57,30 @@ CONFIG = "/ws/config/camera.json"
 # the cost of stopping the node — close() shuts the socket down rather than waiting for it.
 STREAM_TIMEOUT_S = 5.0
 RETRY_S = 3.0  # between reconnections, waited on the stop event so a kick does not sit it out
+
+# The node's flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
+# other declaration; both are printed in every report line. The range's low end is inclusive
+# and a scale of zero is a picture of no pixels, so _on_switch refuses that one value.
+FLAGS = FlagSet(
+    Flag(
+        "scale",
+        0.5,
+        range=(0.0, 1.0),
+        description="the published picture as a fraction of the camera's own 1280x720, its"
+        " optics scaled with it: features for place recognition do not need 720p, and a"
+        " reliable 2.7 MB frame nine times a second is a cost with no return; a change takes"
+        " the next frame",
+    ),
+    Flag(
+        "static_camera_tf",
+        True,
+        live=False,
+        description="base_link -> camera_link is broadcast from here; it goes off (ros/laptop.sh"
+        " vslam --neck) when the board's neck node publishes that edge live from the servo"
+        " encoders (neck_state, flag neck_tf), because two publishers of one edge fight. Not"
+        " live: a static transform cannot be withdrawn once sent",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -76,20 +101,9 @@ class CameraStream(Node):
         board = str(self.declare_parameter("board", "127.0.0.1").value)
         config = Path(str(self.declare_parameter("config", CONFIG).value))
         self._cfg = CameraConfig.load(config, board=board)
-        # The two live switches (CLAUDE.md rule 19), declared last so the kit's callback sees no
-        # other declaration, and printed in every report line:
-        #   scale             the published picture as a fraction of the camera's own 1280x720.
-        #                     Features for place recognition do not need 720p, and a reliable
-        #                     2.7 MB frame nine times a second is a cost with no return; the
-        #                     optics scale with it, and a change takes the next frame.
-        #   static_camera_tf  base_link -> camera_link is broadcast from here. It goes off when
-        #                     the board's neck node publishes that edge live from the servo
-        #                     encoders (neck_state, flag neck_tf; ros/laptop.sh vslam --neck):
-        #                     two publishers of one edge fight. Read at start and refused live —
-        #                     a static transform cannot be withdrawn once sent.
-        self._switches = Switches(
-            self, {"scale": 0.5, "static_camera_tf": True}, on_change=self._on_switch
-        )
+        # Declared after every other parameter: rclpy runs the switches' callback on
+        # declarations too, and it refuses everything that is not a flag.
+        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._optics = self._optics_for(float(self._switches["scale"]))
         # Reliable, like RTAB-Map's subscribers: a best-effort image never matched them.
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
@@ -108,7 +122,9 @@ class CameraStream(Node):
         self._stream: Any | None = None  # the open response, so close() can break a blocked read
         self._thread = threading.Thread(target=self._pump, name="camera", daemon=True)
         self._thread.start()
-        self.get_logger().info(f"camera stream from {self._cfg.stream}")
+        self.get_logger().info(
+            f"camera stream from {self._cfg.stream}; flags: {self._switches.state(live_only=False)}"
+        )
 
     def close(self) -> None:
         """Stop the frame pump and wait for it, shutting the open stream's socket down so a read
@@ -199,18 +215,15 @@ class CameraStream(Node):
         info.k, info.d, info.r, info.p = camera_info_arrays(size[0], size[1], self._cfg.hfov_deg)
         return Optics(size, info)
 
-    def _on_switch(self, name: str, value: Any) -> None:
-        """A live parameter change: ``scale`` rebuilds the published size and its optics for the
-        next frame, ``static_camera_tf`` is refused (the transforms went out at start, and a
-        static one cannot be withdrawn)."""
-        if name == "static_camera_tf":
-            raise ValueError(
-                "static_camera_tf is read at start: a static transform cannot be withdrawn."
-                " Restart the node with the other value (ros/laptop.sh vslam --neck)"
-            )
-        if not 0.0 < float(value) <= 1.0:
-            raise ValueError(f"scale is a fraction of the camera's picture, not {value}")
-        self._optics = self._optics_for(float(value))
+    def _on_switch(self, name: str, _old: Any, new: Any) -> None:
+        """A flag changed: ``scale`` rebuilds the published size and its optics for the next
+        frame. ``static_camera_tf`` never reaches here — it is declared ``live=False`` and the
+        kit refuses the change with that reason, because the transforms went out at start and a
+        static one cannot be withdrawn."""
+        if name == "scale":
+            if float(new) <= 0.0:
+                raise ValueError("scale is a fraction of the camera's picture, not zero")
+            self._optics = self._optics_for(float(new))
 
     def _pump(self) -> None:
         """Read frames as they come; reconnect after a dropped stream (the board restarts too).
@@ -265,14 +278,15 @@ class CameraStream(Node):
 
     def _report(self) -> None:
         """Every 30 s: the period's frame rate, the frames the board sent without a capture time,
-        and the switches' state, in one line."""
+        and the flags' state, in one line. Every flag, not only the live ones: which side owns
+        base_link -> camera_link is the first thing one looks for in this log."""
         w = self._tally.take()
         unstamped = (
             f", {w.counts['unstamped']} without a capture time" if w.counts["unstamped"] else ""
         )
         self.get_logger().info(
             f"camera: {w.rate('frames'):.1f} frames/s{unstamped},"
-            f" switches: {self._switches.state()}"
+            f" flags: {self._switches.state(live_only=False)}"
         )
 
 

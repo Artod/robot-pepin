@@ -295,9 +295,11 @@ class Switches:
         """Whether switch ``name`` is on."""
         return self.flags.on(name)
 
-    def state(self) -> str:
-        """The live flags' values for the report line: ``floor_anchor=on depth_backend=auto``."""
-        return self.flags.state()
+    def state(self, live_only: bool = True) -> str:
+        """The live flags' values for the report line: ``floor_anchor=on depth_backend=auto``;
+        ``live_only=False`` adds the flags that are read at start, for a node whose report is
+        not readable without them (which side broadcasts a static transform, say)."""
+        return self.flags.state(live_only)
 
     def set(self, name: str, value: Any) -> Any:
         """Change ``name`` from inside the node (a switch it turns off itself, say): through the

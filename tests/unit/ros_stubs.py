@@ -135,7 +135,8 @@ class ParameterType:
 
 
 class Parameter:
-    """rclpy.parameter.Parameter: a name and a value (the type inferred, as rclpy does)."""
+    """rclpy.parameter.Parameter: a name and a value (the type inferred, as rclpy does) — what
+    a ``set`` carries and what :meth:`Node.declare_parameter` answers with."""
 
     def __init__(self, name: str, type_: Any = None, value: Any = None) -> None:
         self.name, self.type_, self.value = name, type_, value
@@ -305,13 +306,6 @@ def parameters(**values: Any) -> Iterator[None]:
             PARAMETERS.pop(name, None)
 
 
-class Parameter:
-    """What ``declare_parameter`` returns: the value the node reads back."""
-
-    def __init__(self, value: Any) -> None:
-        self.value = value
-
-
 class Node:
     """rclpy.node.Node as the nodes here use it: parameters over :data:`PARAMETERS`, publishers
     and subscriptions kept by topic, timers kept by period, one clock and one logger."""
@@ -319,6 +313,7 @@ class Node:
     def __init__(self, name: str) -> None:
         self.node_name = name
         self.declared: dict[str, Any] = {}
+        self.descriptors: dict[str, Any] = {}
         self.pubs: dict[str, Publisher] = {}
         self.subs: dict[str, tuple[Any, Any]] = {}  # topic -> (message type, callback)
         self.timers: list[tuple[float, Any]] = []
@@ -327,9 +322,14 @@ class Node:
         self.logger = Logger()
         self.destroyed = False
 
-    def declare_parameter(self, name: str, default: Any) -> Parameter:
+    def declare_parameter(self, name: str, default: Any, descriptor: Any = None) -> Parameter:
+        """Declare a parameter as rclpy does — the descriptor kept for a test to read — and
+        answer with the value the node reads back: the override of :func:`parameters`, or the
+        default."""
         self.declared[name] = default
-        return Parameter(PARAMETERS.get(name, default))
+        if descriptor is not None:
+            self.descriptors[name] = descriptor
+        return Parameter(name, value=PARAMETERS.get(name, default))
 
     def add_on_set_parameters_callback(self, callback: Any) -> None:
         self.parameter_callbacks.append(callback)

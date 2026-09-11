@@ -21,7 +21,7 @@ import ros_stubs
 RCLPY = ros_stubs.install()
 
 import cv2  # noqa: E402
-from pepin_bringup.camera_stream import CameraStream  # noqa: E402
+from pepin_bringup.camera_stream import FLAGS, CameraStream  # noqa: E402
 from pepin_bringup.msgs import stamp_seconds  # noqa: E402
 from pepin_bringup.node_kit import spin_main  # noqa: E402
 
@@ -251,14 +251,15 @@ def test_a_frame_the_board_did_not_stamp_takes_the_laptop_s_clock_and_is_counted
 
 def test_the_report_line_carries_the_rate_and_the_switches(build: Build) -> None:
     """The period's rate comes from the kit's Tally (the elapsed time, not a divisor of 30),
-    and both switches are printed with it (CLAUDE.md rule 19)."""
+    and both flags are printed with it — the live one and the one read at start (CLAUDE.md
+    rule 19)."""
     node, _ = build(multipart([(1.0, jpeg(320, 180)), (1.1, jpeg(320, 180))]))
     assert until(lambda: len(node.pubs["/camera/image"].sent) == 2)
     assert node.timers == [(30.0, node._report)]
     node._report()
     line = node.logger.texts("info")[-1]
     assert line.startswith("camera: ") and "frames/s" in line
-    assert "switches: scale 0.5, static_camera_tf on" in line
+    assert "flags: scale=0.5 static_camera_tf=on" in line
     node._report()
     assert "camera: 0.0 frames/s" in node.logger.texts("info")[-1], "the period was emptied"
 
@@ -278,12 +279,14 @@ def test_a_live_scale_rebuilds_the_optics_and_a_nonsense_one_is_refused(build: B
 
 
 def test_the_static_transform_switch_cannot_be_flipped_while_the_node_runs(build: Build) -> None:
-    """It went out at start and a static transform cannot be withdrawn: the live set is refused
-    with what to do instead, and the value stays."""
+    """It went out at start and a static transform cannot be withdrawn: the flag is declared
+    not live, so the set is refused with that reason and the value stays. The other value is
+    reached by a restart (``ros/laptop.sh vslam --neck``), which the flag's help says."""
     node, _ = build()
     refused = node.set_parameters([Param("static_camera_tf", False)])[0]
-    assert not refused.successful and "cannot be withdrawn" in refused.reason
+    assert not refused.successful and "not live, set at the next start" in refused.reason
     assert node._switches.on("static_camera_tf")
+    assert "cannot be withdrawn" in FLAGS.flag("static_camera_tf").help()
 
 
 # ---- the way out -----------------------------------------------------------------------------
