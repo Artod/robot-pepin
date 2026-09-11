@@ -817,6 +817,18 @@ class WallAnchor(AnchorStage):
         )
 
 
+class WallCorrection(WallAnchor):
+    """The wall anchor's correcting role as its own stage, after the law: the walked pixels
+    are set to the extruded plane's metric depth, which a law run afterwards would scale
+    again as if it were the network's (the pairs role stays before the law, where the raw
+    depth is)."""
+
+    name = "wall_correct"
+
+    def __init__(self, **settings: float | int | bool) -> None:
+        super().__init__(**{**settings, "pairs": False, "correct": True})  # type: ignore[arg-type]
+
+
 # ---- laws that read the elevation -------------------------------------------------------------
 class ElevationLaw(AffineLaw):
     """The affine law with a term in the ray's elevation, 1 / z = a / D + b + c * lift, for an
@@ -937,25 +949,28 @@ def standard_pipeline(
     *,
     floor_pairs: bool = False,
     wall_anchor: bool = False,
-    wall_pairs: bool = True,
     wall_correct: bool = False,
 ) -> DepthPipeline:
-    """The node's chain: edges -> lidar -> (floor pairs) -> (wall anchor) -> law -> floor
-    anchor, the two new anchors in the list and switched by the flags of the same name; the
-    wall anchor's two roles (``wall_pairs`` into the law's pool, ``wall_correct`` on the
-    pixels) are its own settings."""
+    """The node's chain: edges -> lidar -> (floor pairs) -> (wall pairs) -> law -> (wall
+    correction) -> floor anchor; the three new stages are in the list and switched by the
+    flags of the same name (``wall_anchor`` is the pairs role, ``wall_correct`` the pixels)."""
     the_law = law if law is not None else AffineLaw()
     geometry = FloorGeometry()
     stages: list[Stage] = [
         EdgeFilter(),
         LidarAnchor(),
         FloorPairs(the_law, geometry),
-        WallAnchor(pairs=wall_pairs, correct=wall_correct),
+        WallAnchor(),
         the_law,
+        WallCorrection(),
         FloorAnchor(geometry),
     ]
-    off = [n for n, on in (("floor_pairs", floor_pairs), ("wall_anchor", wall_anchor)) if not on]
-    return DepthPipeline(stages, off=off)
+    flags = (
+        ("floor_pairs", floor_pairs),
+        ("wall_anchor", wall_anchor),
+        ("wall_correct", wall_correct),
+    )
+    return DepthPipeline(stages, off=[name for name, on in flags if not on])
 
 
 __all__ = [
@@ -980,6 +995,7 @@ __all__ = [
     "StageStats",
     "Verdict",
     "WallAnchor",
+    "WallCorrection",
     "WallWalk",
     "lift_of",
     "standard_pipeline",

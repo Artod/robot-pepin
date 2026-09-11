@@ -116,9 +116,11 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
         "floor_pairs",
         "wall_anchor",
         "affine_law",
+        "wall_correct",
         "floor_anchor",
     ]
     assert not pipeline.on("floor_pairs") and not pipeline.on("wall_anchor")
+    assert not pipeline.on("wall_correct")
     withheld = 0
     for k, wall_x in enumerate((1.0, 1.5, 2.5, 3.5, 2.0)):
         raw = _network(_scene(wall_x), 1.3, 0.03, noise=0.03, seed=k)
@@ -163,6 +165,7 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
         "floor_pairs": False,
         "wall_anchor": False,
         "affine_law": True,
+        "wall_correct": False,
         "floor_anchor": True,
     }
     pipeline.set("floor_anchor", False)
@@ -177,7 +180,7 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
     result = pipeline.run(raw, _context(None))  # no lidar: no pairs, no law, withheld
     assert result.withheld and result.verdict("affine_law").withhold
     assert result.verdict("lidar_anchor").pairs == 0  # the run stopped at the law: no floor verdict
-    assert [v.stage for v in result.verdicts] == pipeline.names[:5]
+    assert [v.stage for v in result.verdicts] == pipeline.names[:5]  # stopped at the law
     with pytest.raises(KeyError):
         result.verdict("floor_anchor")
     stats = pipeline.stats
@@ -343,9 +346,15 @@ def test_the_walk_stops_where_a_table_top_recedes_and_can_correct_without_pairs(
     corrected, touched = quiet.correct(raw, frame)
     assert touched == walk.count and np.allclose(corrected[r, cols], front[r, cols])
     assert "correcting" in quiet.describe() and "pairs" not in quiet.describe()
-    pipeline = standard_pipeline(wall_anchor=True, wall_pairs=False, wall_correct=True)
+    law = AffineLaw()
+    law.seed(1.4, 0.0)
+    pipeline = standard_pipeline(law, wall_correct=True)
     result = pipeline.run(raw, _context(returns))
-    assert result.verdict("wall_anchor").pairs == 0 and result.verdict("wall_anchor").pixels > 0
+    assert not result.verdict("wall_anchor").on and result.verdict("wall_correct").pixels > 0
+    assert result.verdict("wall_correct").pairs == 0
+    # the correction lands after the law: the walked pixels are the plane's metric depth
+    assert np.allclose(result.depth[r, cols], front[r, cols])
+    assert np.allclose(result.after["affine_law"][r, cols], raw[r, cols] / 1.4)
 
 
 def test_the_wall_pairs_teach_the_affine_law_the_room_above_the_lidar_row() -> None:
