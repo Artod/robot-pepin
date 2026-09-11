@@ -7,44 +7,60 @@ optics of ``config/camera.json`` (nominal until calibrated), stamped with the mo
 captured the frame (ustreamer's X-Timestamp, the clock that stamps the lidar): a frame stamped
 when the laptop decoded it was a few hundred milliseconds late, a picture placed ten degrees
 wrong while the cart turns.
-It also broadcasts the static ``base_link -> camera_link -> camera_optical`` transforms from
-the same file, so RTAB-Map knows where the pictures were taken from — the first of them only
-while ``static_camera_tf`` is true: with the board's neck node publishing base_link ->
-camera_link live from the servo encoders (pepin_bringup.neck_state, ros/feature.sh neck on)
-this side must not publish the same edge, and the launch passes the switch off
-(``ros/laptop.sh vslam --neck``). A static transform cannot be withdrawn once sent, so that
-switch is read at start, not live.
+It also broadcasts the static ``base_link -> camera_link -> camera_optical`` and
+``base_link -> laser`` transforms from the mounts of ``config/`` (:class:`pepin.mounts.Mounts`),
+so RTAB-Map knows where the pictures were taken from — the camera's own edge only while
+``static_camera_tf`` is true: with the board's neck node publishing base_link -> camera_link
+live from the servo encoders (pepin_bringup.neck_state, ros/feature.sh neck on) this side must
+not publish the same edge, and the launch passes the switch off (``ros/laptop.sh vslam --neck``).
+
+Switches, live (``ros2 param set /camera_stream <name> <value>``): ``scale`` (the published
+picture as a fraction of the camera's own, optics included); ``static_camera_tf`` is read at
+start and refused live — a static transform cannot be withdrawn once sent. Their state is
+printed in every report line.
+
+The frames are pulled by one thread (:meth:`CameraStream._pump`) which :meth:`CameraStream.close`
+stops and joins before the node is destroyed: a daemon thread left inside OpenCV's decoder when
+the interpreter finalises is the depth node's SIGABRT (node_kit.spin_main).
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
-import time
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import cv2
+import numpy as np
 import rclpy
-from geometry_msgs.msg import TransformStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
 from tf2_ros import StaticTransformBroadcaster
 
-from pepin.camera import (
-    CameraConfig,
-    camera_info_arrays,
-    mount_transform,
-    optical_rotation,
-    quaternion_from_rpy,
-)
-from pepin.lidar import LidarMount
+from pepin.camera import CameraConfig, camera_info_arrays
 from pepin.mjpeg import capture_time, parts
+from pepin.mounts import LASER_FRAME, Mounts
+from pepin_bringup.msgs import image_from_array, stamp_from_seconds, transform_from_mount
+from pepin_bringup.node_kit import STOP_PATIENCE_S, Switches, Tally, spin_main
 
 CONFIG = "/ws/config/camera.json"
-LIDAR_CONFIG = "/ws/config/lidar.json"
+STREAM_TIMEOUT_S = 5.0  # the socket's: a stream that stops feeding raises instead of hanging
+RETRY_S = 3.0  # between reconnections, waited on the stop event so a kick does not sit it out
+
+
+@dataclass(frozen=True)
+class Optics:
+    """One scale's published picture: its size in pixels and the ``CameraInfo`` that describes
+    it. The two travel together so a live ``scale`` never gives a frame the other size's
+    optics — the pump reads the pair in one attribute read."""
+
+    size: tuple[int, int]
+    info: CameraInfo
 
 
 class CameraStream(Node):
@@ -55,91 +71,118 @@ class CameraStream(Node):
         board = str(self.declare_parameter("board", "127.0.0.1").value)
         config = Path(str(self.declare_parameter("config", CONFIG).value))
         self._cfg = CameraConfig.load(config, board=board)
-        # Half size by default: features for place recognition do not need 720p, and a reliable
-        # 2.7 MB frame nine times a second is a cost with no return. The optics scale with it.
-        self._scale = float(self.declare_parameter("scale", 0.5).value)
-        self._size = (round(self._cfg.width * self._scale), round(self._cfg.height * self._scale))
+        # The two live switches (CLAUDE.md rule 19), declared last so the kit's callback sees no
+        # other declaration, and printed in every report line:
+        #   scale             the published picture as a fraction of the camera's own 1280x720.
+        #                     Features for place recognition do not need 720p, and a reliable
+        #                     2.7 MB frame nine times a second is a cost with no return; the
+        #                     optics scale with it, and a change takes the next frame.
+        #   static_camera_tf  base_link -> camera_link is broadcast from here. It goes off when
+        #                     the board's neck node publishes that edge live from the servo
+        #                     encoders (neck_state, flag neck_tf; ros/laptop.sh vslam --neck):
+        #                     two publishers of one edge fight. Read at start and refused live —
+        #                     a static transform cannot be withdrawn once sent.
+        self._switches = Switches(
+            self, {"scale": 0.5, "static_camera_tf": True}, on_change=self._on_switch
+        )
+        self._optics = self._optics_for(float(self._switches["scale"]))
         # Reliable, like RTAB-Map's subscribers: a best-effort image never matched them.
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         self._image_pub = self.create_publisher(Image, "/camera/image", reliable)
         self._info_pub = self.create_publisher(CameraInfo, "/camera/camera_info", reliable)
-        self._info = CameraInfo()
-        self._info.header.frame_id = self._cfg.optical_frame
-        self._info.width, self._info.height = self._size
-        k, d, r, p = camera_info_arrays(self._size[0], self._size[1], self._cfg.hfov_deg)
-        self._info.distortion_model = "plumb_bob"
-        self._info.k, self._info.d, self._info.r, self._info.p = k, d, r, p
         if not self._cfg.calibrated:
             self.get_logger().warning(
                 f"camera optics are nominal ({self._cfg.hfov_deg:.0f} deg field of view): fine for"
                 " recognising places, not for measuring — calibrate with a checkerboard"
             )
         self._static = StaticTransformBroadcaster(self)
-        # base_link -> camera_link is static only while the neck stands still: when the board's
-        # neck node publishes it live (neck_state, flag neck_tf) this edge stays off here — two
-        # publishers of one edge fight, and a static one cannot be withdrawn, so it is a launch
-        # switch (vslam.launch.py static_camera_tf, ros/laptop.sh vslam --neck), not a live one.
-        self._static_camera = bool(self.declare_parameter("static_camera_tf", True).value)
-        # The lidar's mount as well: the board publishes it too, but a static transform does not
-        # replay to a late joiner over the bridge (RTAB-Map dropped every scan for an hour after a
-        # board reboot, 2026-09-10) — both sides publish the same file's numbers.
-        lx, ly, lz, lroll, lpitch, lyaw = LidarMount.from_json(LIDAR_CONFIG).transform()
+        self._static.sendTransform(self._static_transforms(Mounts.load(config.parent)))
+        self._tally = Tally()
+        self.create_timer(30.0, self._report)
+        self._stop = threading.Event()
+        self._stream: Any | None = None  # the open response, so close() can break a blocked read
+        self._thread = threading.Thread(target=self._pump, name="camera", daemon=True)
+        self._thread.start()
+        self.get_logger().info(f"camera stream from {self._cfg.stream}")
+
+    def close(self) -> None:
+        """Stop the frame pump and wait for it, closing the open stream so a read blocked on the
+        socket returns at once: called before the node is destroyed (node_kit.spin_main), so no
+        thread is left inside OpenCV's decoder or DDS when the interpreter finalises."""
+        self._stop.set()
+        stream = self._stream
+        if stream is not None:
+            with contextlib.suppress(Exception):  # already closed, or closing under the reader
+                stream.close()
+        self._thread.join(STOP_PATIENCE_S)
+        if self._thread.is_alive():
+            self.get_logger().warning(
+                f"the camera pump is still in the stream after {STOP_PATIENCE_S:.0f} s;"
+                " leaving anyway"
+            )
+
+    def _static_transforms(self, mounts: Mounts) -> list[Any]:
+        """The static edges this node broadcasts, from the mounts of ``config/``:
+        camera_link -> camera_optical and base_link -> laser always, base_link -> camera_link
+        only while ``static_camera_tf`` is on.
+
+        The laser goes out here as well as from the board because a static transform does not
+        replay to a late joiner over the bridge (RTAB-Map dropped every scan for an hour after a
+        board reboot, 2026-09-10): both sides publish the same file's numbers.
+        """
+        stamp = self.get_clock().now().to_msg()
+        camera = mounts.camera
         transforms = [
-            self._optical_tf(),
-            self._tf("base_link", "laser", lx, ly, lz, lroll, lpitch, lyaw),
+            transform_from_mount(camera.link_frame, camera.optical_frame, camera.optical, stamp),
+            transform_from_mount("base_link", LASER_FRAME, mounts.lidar, stamp),
         ]
-        if self._static_camera:
-            transforms.insert(0, self._link_tf())
+        if self._switches.on("static_camera_tf"):
+            transforms.insert(
+                0, transform_from_mount("base_link", camera.link_frame, camera.link, stamp)
+            )
         else:
             self.get_logger().info(
                 "base_link -> camera_link is the board's (neck_state): not broadcast from here"
             )
-        self._static.sendTransform(transforms)
-        self._frames = 0
-        self._unstamped = 0  # frames the board sent without a capture time
-        self.create_timer(30.0, self._report)
-        threading.Thread(target=self._pump, daemon=True).start()
-        self.get_logger().info(f"camera stream from {self._cfg.stream}")
+        return transforms
 
-    def _link_tf(self) -> TransformStamped:
-        x, y, z, roll, pitch, yaw = mount_transform(self._cfg)
-        return self._tf("base_link", self._cfg.link_frame, x, y, z, roll, pitch, yaw)
+    def _optics_for(self, scale: float) -> Optics:
+        """The published size for ``scale`` of the camera's own picture, and the ``CameraInfo``
+        that goes with it: the nominal pinhole of the configured field of view, scaled with the
+        image (half the pixels, half the focal length)."""
+        size = (round(self._cfg.width * scale), round(self._cfg.height * scale))
+        info = CameraInfo()
+        info.header.frame_id = self._cfg.optical_frame
+        info.width, info.height = size
+        info.distortion_model = "plumb_bob"
+        info.k, info.d, info.r, info.p = camera_info_arrays(size[0], size[1], self._cfg.hfov_deg)
+        return Optics(size, info)
 
-    def _optical_tf(self) -> TransformStamped:
-        roll, pitch, yaw = optical_rotation()
-        return self._tf(
-            self._cfg.link_frame, self._cfg.optical_frame, 0.0, 0.0, 0.0, roll, pitch, yaw
-        )
-
-    def _tf(
-        self,
-        parent: str,
-        child: str,
-        x: float,
-        y: float,
-        z: float,
-        roll: float,
-        pitch: float,
-        yaw: float,
-    ) -> TransformStamped:
-        t = TransformStamped()
-        t.header.stamp = self.get_clock().now().to_msg()
-        t.header.frame_id, t.child_frame_id = parent, child
-        t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = x, y, z
-        qx, qy, qz, qw = quaternion_from_rpy(roll, pitch, yaw)
-        t.transform.rotation.x, t.transform.rotation.y = qx, qy
-        t.transform.rotation.z, t.transform.rotation.w = qz, qw
-        return t
+    def _on_switch(self, name: str, value: Any) -> None:
+        """A live parameter change: ``scale`` rebuilds the published size and its optics for the
+        next frame, ``static_camera_tf`` is refused (the transforms went out at start, and a
+        static one cannot be withdrawn)."""
+        if name == "static_camera_tf":
+            raise ValueError(
+                "static_camera_tf is read at start: a static transform cannot be withdrawn."
+                " Restart the node with the other value (ros/laptop.sh vslam --neck)"
+            )
+        if not 0.0 < float(value) <= 1.0:
+            raise ValueError(f"scale is a fraction of the camera's picture, not {value}")
+        self._optics = self._optics_for(float(value))
 
     def _pump(self) -> None:
-        """Read frames as they come; reconnect after a dropped stream (the board restarts too)."""
-        import numpy as np
+        """Read frames as they come; reconnect after a dropped stream (the board restarts too).
 
-        while rclpy.ok():
+        Ends on :meth:`close`'s event — checked for every frame and every reconnection — or when
+        the context goes down; that is what lets the thread be joined instead of killed.
+        """
+        while not self._stop.is_set() and rclpy.ok():
             try:
-                with urllib.request.urlopen(self._cfg.stream, timeout=5.0) as stream:
+                with urllib.request.urlopen(self._cfg.stream, timeout=STREAM_TIMEOUT_S) as stream:
+                    self._stream = stream
                     for headers, body in parts(stream):
-                        if not rclpy.ok():
+                        if self._stop.is_set() or not rclpy.ok():
                             return
                         frame = cv2.imdecode(np.frombuffer(body, dtype=np.uint8), cv2.IMREAD_COLOR)
                         if frame is None:
@@ -147,57 +190,51 @@ class CameraStream(Node):
                         self._publish(frame, capture_time(headers))
                     self.get_logger().warning("camera stream ended; reconnecting")
             except Exception as error:
-                self.get_logger().warning(f"camera stream not reachable ({error}); retrying in 3 s")
-                time.sleep(3.0)
+                if self._stop.is_set():
+                    return  # the stream was closed under the reader: that is the way out
+                self.get_logger().warning(
+                    f"camera stream not reachable ({error}); retrying in {RETRY_S:.0f} s"
+                )
+                self._stop.wait(RETRY_S)
+            finally:
+                self._stream = None
 
-    def _publish(self, frame: object, taken_at: float | None) -> None:
-        import numpy as np
-
+    def _publish(self, frame: Any, taken_at: float | None) -> None:
+        """One decoded frame out as ``/camera/image`` with its ``/camera/camera_info``, scaled to
+        the current optics and stamped with the board's capture time (ustreamer's X-Timestamp)
+        or, when it sent none, with the laptop's clock."""
+        optics = self._optics
         array = np.asarray(frame)
-        if self._scale != 1.0:
-            array = cv2.resize(array, self._size, interpolation=cv2.INTER_AREA)
-        if taken_at is None:
-            self._unstamped += 1
+        if optics.size != (self._cfg.width, self._cfg.height):
+            array = cv2.resize(array, optics.size, interpolation=cv2.INTER_AREA)
         stamp = (
-            Time(nanoseconds=round(taken_at * 1e9)).to_msg()
-            if taken_at is not None
-            else self.get_clock().now().to_msg()
+            self.get_clock().now().to_msg() if taken_at is None else stamp_from_seconds(taken_at)
         )
-        msg = Image()
-        msg.header.stamp = stamp
-        msg.header.frame_id = self._cfg.optical_frame
-        msg.height, msg.width = int(array.shape[0]), int(array.shape[1])
-        msg.encoding = "bgr8"
-        msg.is_bigendian = 0
-        msg.step = msg.width * 3
-        msg.data = array.tobytes()
-        self._info.header.stamp = stamp
-        self._image_pub.publish(msg)
-        self._info_pub.publish(self._info)
-        self._frames += 1
+        optics.info.header.stamp = stamp
+        self._image_pub.publish(image_from_array(array, "bgr8", stamp, self._cfg.optical_frame))
+        self._info_pub.publish(optics.info)
+        self._tally.count("frames")
+        if taken_at is None:
+            self._tally.count("unstamped")
 
     def _report(self) -> None:
-        static = "on" if self._static_camera else "off"
-        self.get_logger().info(
-            f"camera: {self._frames / 30.0:.1f} frames/s; static_camera_tf {static}"
+        """Every 30 s: the period's frame rate, the frames the board sent without a capture time,
+        and the switches' state, in one line."""
+        w = self._tally.take()
+        unstamped = (
+            f", {w.counts['unstamped']} without a capture time" if w.counts["unstamped"] else ""
         )
-        self._frames = 0
+        self.get_logger().info(
+            f"camera: {w.rate('frames'):.1f} frames/s{unstamped},"
+            f" switches: {self._switches.state()}"
+        )
 
 
 def main() -> None:
     # ustreamer's frames carry APP segments OpenCV's MJPEG decoder cannot parse; ffmpeg reports
     # that on every frame at error level, which buries the launch's log. Fatal only.
     os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "8")
-    rclpy.init()
-    node = CameraStream()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    spin_main(CameraStream)
 
 
 if __name__ == "__main__":

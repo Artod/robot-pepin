@@ -743,8 +743,9 @@ def test_the_drive_ends_on_position_and_the_goal_server_turns_to_the_heading() -
 def test_the_lidar_mount_is_published_by_both_sides_from_one_file() -> None:
     """The board's launch reads base_link -> laser from config/lidar.json itself (no launch
     argument can override the calibration), the laptop's camera node publishes the same
-    transform from the same file, and ros/sync.sh puts config/ where the board's container
-    sees it (beside the library: /ws/pepin_src/config, pepin.deployment.config_file)."""
+    transform through the same reader (pepin.mounts.Mounts), and ros/sync.sh puts config/ where
+    the board's container sees it (beside the library: /ws/pepin_src/config,
+    pepin.deployment.config_file)."""
     robot = sf.tree(ROBOT_LAUNCH)
     assert sf.assignments(robot)["MOUNTS"] == "Mounts.load()"
     assert sf.assignments(robot)["LASER"] == "MOUNTS.lidar.transform()"
@@ -752,10 +753,11 @@ def test_the_lidar_mount_is_published_by_both_sides_from_one_file() -> None:
     assert not declared & {"'laser_roll'", "'laser_yaw'"} and "MOUNT" not in sf.imported(robot)
     assert "quaternion(laser_roll, laser_pitch, laser_yaw)" in sf.unparsed(robot, ast.Call)
     camera = sf.tree(f"{NODES}/camera_stream.py")
-    assert "self._tf('base_link', 'laser', lx, ly, lz, lroll, lpitch, lyaw)" in sf.unparsed(
+    assert "transform_from_mount('base_link', LASER_FRAME, mounts.lidar, stamp)" in sf.unparsed(
         camera, ast.Call
     )
-    assert "LidarMount.from_json" in sf.calls(camera)
+    assert "Mounts.load" in sf.calls(camera), "the same reader as the launch, not a second one"
+    assert {"Mounts", "LASER_FRAME"} <= sf.imported(camera)
     sync = (REPO / "ros/sync.sh").read_text()
     assert '"$HERE/../config/" "root@$BOARD:/root/pepin-ros/pepin_src/config/"' in sync
     assert "--exclude 'pepin_src'" in sync, "the ros/ rsync must not delete pepin_src/config"
@@ -827,23 +829,36 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     if not (reference.known and reference.signs_verified):
         assert neck_flags["neck_tf"] is False, "unverified: no transform by default"
     camera = sf.tree(f"{NODES}/camera_stream.py")
-    switch = {ast.unparse(c.args[0]) for c in sf.calls_to(camera, "self.declare_parameter")}
-    assert "'static_camera_tf'" in switch
+    # The switch is one of the node's live parameters (node_kit.Switches, CLAUDE.md rule 19) and
+    # is printed in its report line — but a live change of this one is refused: the transform
+    # went out at start and a static transform cannot be withdrawn.
+    assert "static_camera_tf" in sf.dict_items(camera) and "Switches" in sf.imported(camera)
+    assert "self._switches.state" in sf.calls(camera)
+    refusal = next(
+        n
+        for n in ast.walk(camera)
+        if isinstance(n, ast.If) and ast.unparse(n.test) == "name == 'static_camera_tf'"
+    )
+    assert any(isinstance(n, ast.Raise) for n in ast.walk(refusal)), "a live change is refused"
     guarded = [
         n
         for n in ast.walk(camera)
         if isinstance(n, ast.If)
-        and ast.unparse(n.test) == "self._static_camera"
-        and "_link_tf()" in ast.unparse(n.body)
+        and ast.unparse(n.test) == "self._switches.on('static_camera_tf')"
+        and "camera.link_frame, camera.link" in ast.unparse(n.body)
     ]
     assert guarded, "base_link -> camera_link is broadcast only under the switch"
-    assert "_link_tf()" not in ast.unparse(guarded[0].orelse), "and not in the other branch"
+    assert "camera.link_frame, camera.link" not in ast.unparse(guarded[0].orelse), (
+        "and not in the other branch"
+    )
     kept = next(
         ast.unparse(n)
         for n in ast.walk(camera)
-        if isinstance(n, ast.List) and "_optical_tf()" in ast.unparse(n)
+        if isinstance(n, ast.List) and "camera.optical, stamp" in ast.unparse(n)
     )
-    assert "'laser'" in kept and "_link_tf()" not in kept, "that edge alone goes, not the others"
+    assert "mounts.lidar" in kept and "camera.link, stamp" not in kept, (
+        "that edge alone goes, not the others"
+    )
     vslam = sf.tree(VSLAM_LAUNCH)
     assert "'static_camera_tf'" in {
         ast.unparse(c.args[0]) for c in sf.calls_to(vslam, "DeclareLaunchArgument")
