@@ -56,12 +56,19 @@ PAIR_QUEUE = 40  # depth arrives a fraction of a second after its image; pair by
 BAND_Z_M = (0.10, 0.35)  # around the lidar's plane (0.20 m): the frame's exact points
 BAND_STRIDE = 3
 BAND_MIN_POINTS = 50  # a frame with fewer points in the band is not worth a yaw search
+AT_BOUND_STREAK = 30  # ~3 s of frames refused at the search's bound: the model no longer fits
 STAGES = ("align", "integrate")
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration; their state is printed in every report line.
 FLAGS = FlagSet(
     Flag("enabled", True, description="frames are fused into the model; off, they are dropped"),
+    Flag(
+        "self_heal",
+        True,
+        description="a streak of frames refused at the alignment bound empties the model, so it"
+        " re-seeds from the next frame instead of staying frozen until a human resets it",
+    ),
     Flag(
         "align",
         True,
@@ -112,6 +119,7 @@ class DepthFusion(Node):
         self._lock = threading.Lock()  # the model and its last stamp, worker vs publisher
         self._model = Tsdf(self._spec)
         self._last_stamp: Any = None  # the last fused frame's header stamp, the board's clock
+        self._bound_streak = 0  # consecutive frames refused at the bound (self-healing)
         self._surface_points = 0
         self._worker = Worker(self._on_work, name="fusion", on_error=self._on_work_error).start()
         self._surface_timer = self.create_timer(
@@ -243,11 +251,33 @@ class DepthFusion(Node):
         with self._lock:
             verdict = align_yaw(self._model, band, pivot)
         if verdict.reason is AlignReason.ALIGNED:
+            self._bound_streak = 0
             self._tally.sample("yaw_deg", math.degrees(verdict.yaw))
             self._tally.sample("gain", verdict.gain)
             return camera.turned_about(pivot, verdict.yaw)
         self._refused(verdict.reason)
-        return None if verdict.reason is AlignReason.AT_BOUND else camera
+        if verdict.reason is not AlignReason.AT_BOUND:
+            self._bound_streak = 0
+            return camera
+        self._bound_streak += 1
+        if self._switches.on("self_heal") and self._bound_streak >= AT_BOUND_STREAK:
+            self._self_heal()
+            return camera  # the first frame of the new model goes in as given
+        return None
+
+    def _self_heal(self) -> None:
+        """Empty a model that no more frame fits: after ``AT_BOUND_STREAK`` refusals in a row the
+        room has moved on (a head that turned, a law that drifted) and the surface would stay
+        frozen forever; the next frame seeds a fresh model instead."""
+        with self._lock:
+            self._model = Tsdf(self._spec)
+            self._last_stamp = None
+        self._bound_streak = 0
+        self._tally.count("self_heals")
+        self.get_logger().warning(
+            f"{AT_BOUND_STREAK} frames in a row refused at the alignment bound: the model is"
+            " emptied and re-seeds from the next frame (flag self_heal)"
+        )
 
     def _refused(self, reason: AlignReason) -> None:
         self._tally.count("refused_" + reason.value)
@@ -274,6 +304,7 @@ class DepthFusion(Node):
         c = w.counts
         skipped = (
             f"low fit {c['low_fit']}, at bound {c['refused_at_bound']},"
+            f" self-heals {c['self_heals']},"
             f" no tf {c['no_tf']}, bad frame {c['bad_frame']}, no intrinsics {c['no_intrinsics']}"
         )
         tf_text = "; ".join(f"{k} {c['tf_' + k]}: {v}" for k, v in w.notes.items())
