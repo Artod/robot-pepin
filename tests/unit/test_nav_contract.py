@@ -796,9 +796,10 @@ def test_the_frames_are_fused_into_one_surface_beside_rtabmap_s_cloud() -> None:
     assert "fusion" in _started_after_ghost_wait(vslam)
     node = sf.tree(f"{NODES}/depth_fusion.py")
     assert sf.assignments(node)["CONFIG"] == "'/ws/config/fusion.json'"
-    declared = {ast.unparse(c.args[0]) for c in sf.calls_to(node, "self.declare_parameter")}
-    assert {"'enabled'", "'align'", "'min_weight'", "'surface_hz'"} <= declared
-    assert "self.add_on_set_parameters_callback" in sf.calls(node)
+    # The four are live switches of the kit (node_kit.Switches), so ros2 param set reaches
+    # them and their state is printed in the node's report line (CLAUDE.md rule 19).
+    assert {"enabled", "align", "min_weight", "surface_hz"} <= set(sf.dict_items(node))
+    assert "Switches" in sf.imported(node) and "self._switches.state" in sf.calls(node)
     assert {"/fusion/reset", "/fusion/surface"} <= sf.strings(node)
     for name in ("pepin_3d.json", "pepin_nav.json"):
         layout = json.loads((REPO / "ros/foxglove" / name).read_text())
