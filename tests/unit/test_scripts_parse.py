@@ -410,7 +410,9 @@ def test_a_node_that_does_not_answer_is_reported_not_guessed(tmp_path) -> None: 
     write, and writing it from an empty read would silently drop the other sensor."""
     code, out, sent = _sensor(tmp_path, "camera", "on", FAKE_SOURCES="none", FAKE_LAYERS="false")
     assert code == 1, out
-    assert "relocalizer did not answer" in out
+    assert "relocalizer did not answer about its sources" in out
+    # the same refusal covers a tracker that carries no `sources` flag at all, so it names both
+    assert "no sources flag in this build, or the node is down" in out
     assert not [c for c in sent if c.startswith("flags set")], sent
     assert [c for c in sent if "param set" in c], "the costmaps still take their half"
 

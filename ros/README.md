@@ -139,6 +139,12 @@ is not a mode, it is a bug that looks like one.
 | lidar only | `ros/sensor.sh camera off` | `lidar` | `lidar_layer` |
 | camera only | `ros/sensor.sh lidar off` (`--hard` to stop the driver) | `depth,contact` | `camera_layer`, `contact_layer` |
 
+The tracker column needs the relocalizer's `sources` flag, which arrives with the fusion wiring;
+the generated **Feature flags** table above is the authority on whether this build carries it
+(`ros/flags.sh list relocalizer` says the same about the running node). Until it does, every
+`ros/sensor.sh lidar|camera on|off` applies the costmap half, reports that the tracker's sources
+are unchanged and exits 1 — so the costmap column is what holds, and the modes are half modes.
+
 The camera is one sensor read twice from the same frames: `depth_scan` is the band 8 cm-1.3 m
 above the floor (table tops, seats, a hand) and `contact_scan` is where the floor ends (chair
 feet, a plinth) — so `camera on` moves two sources and two layers at once.
@@ -186,7 +192,9 @@ Open `ros/foxglove/pepin_nav.json` in Foxglove Studio:
 
 The report lines say the same in words, every 30 s, and `ros/sensor.sh status` prints all three:
 
-- `relocalizer` on the board: `tracker: ... flags: ... sources=lidar,depth,contact ...`
+- `relocalizer` on the board: `tracker: ... flags: rest_lock=on explained_vote=on ...`, with
+  `sources=lidar,depth,contact` among those flags once the tracker carries them (`ros/sensor.sh
+  status` prints the sources from this line, and says so plainly when the line has none)
 - `depth_stream` in the laptop's SLAM container: `depth: 3.1 frames/s published ...`
 - `contact_scan` in the same container: `contact: 2.9 scans/s published ...`
 

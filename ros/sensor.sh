@@ -2,7 +2,9 @@
 # One command per sensor, for the redundancy demo: the lidar and the camera go on and off while
 # the robot runs, in the two places that matter, together — what the tracker matches the map
 # against (the relocalizer's `sources` flag) and what writes into the costmaps (the per-sensor
-# layers of ros/params/nav2_params.yaml, on the local and the global costmap alike).
+# layers of ros/params/nav2_params.yaml, on the local and the global costmap alike). The tracker
+# half needs that flag to exist: it arrives with the fusion wiring, and against a relocalizer
+# that has none this script applies the costmap half, says so, and exits 1.
 #   ros/sensor.sh status            what the tracker matches on, which layers are on, what is fresh
 #   ros/sensor.sh lidar on|off      the lidar as a tracker source and as lidar_layer
 #   ros/sensor.sh lidar off --hard  ... and the driver deactivated: /scan stops, a real absence
@@ -207,7 +209,12 @@ refuse_if_navigating() {  # the lifecycle half never runs under a goal, nor unde
 apply_sources() {  # SENSOR on|off: the tracker's sources flag; prints what changed
     local sensor="$1" state="$2" have want
     have="$(tracker_sources)" || {
-        echo "  $TRACKER did not answer: its sources are unchanged"
+        # Two ways to get here and the operator must not have to guess which: the node is down,
+        # or this build's tracker has no sources flag at all (it arrives with the fusion wiring)
+        # and the tracker half of the switch does not exist yet. Either way the costmaps still
+        # take their half, and the exit status says the switch was not applied whole.
+        echo "  $TRACKER did not answer about its sources: they are unchanged"
+        echo "  (no sources flag in this build, or the node is down: ros/flags.sh list $TRACKER)"
         FAILED=1
         return 0
     }
