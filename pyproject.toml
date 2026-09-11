@@ -43,7 +43,10 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-markers = ["hardware: needs the live robot (run with --hardware)"]
+markers = [
+    "hardware: needs the live robot (run with --hardware)",
+    "slow: seconds, not milliseconds — simulated drives; not in the pre-commit hook (uv run pytest -m slow)",
+]
 
 [tool.mypy]
 python_version = "3.12"

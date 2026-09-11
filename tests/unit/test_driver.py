@@ -2,6 +2,7 @@
 
 import math
 
+import pytest
 from synthetic import raycast_room
 from test_localization import room_map
 
@@ -14,6 +15,9 @@ from pepin.places import Place
 from pepin.robot import Observation
 from pepin.scanmatch import apply_motion
 from pepin.tof import TofRanges
+
+# Whole simulated drives: seconds each, not milliseconds — run on demand, not in the hook.
+pytestmark = pytest.mark.slow
 
 
 class SimRobot:
