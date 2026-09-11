@@ -318,14 +318,30 @@ class SourceFeed:
 
     def picture(self, now: float) -> TimedScan | None:
         """The newest scan, as measured, of the source that drives the tracker at ``now`` —
-        what a watch judges the fit on and a whole-map search runs on — or, with nothing
-        driving, the newest scan heard from any enabled source (a standing cart's last picture
-        is still true); ``None`` before the first."""
+        what the published fit is measured on — or, with nothing driving, the newest scan
+        heard from any enabled source (a standing cart's last picture is still true);
+        ``None`` before the first."""
         anchor = self.anchor(now)
         if anchor is not None:
             return self._newest.get(anchor)
         heard = [self._newest[name] for name in self.registry.enabled if name in self._newest]
         return max(heard, key=lambda scan: scan.stamp, default=None)
+
+    def full_picture(self, now: float) -> TimedScan | None:
+        """The picture a watch may judge the fit on and a whole-map search may run on: the
+        driving source's newest scan when that source sees a full turn, or, with nothing
+        driving, the newest full turn heard from an enabled source; ``None`` while a fan
+        drives, or before the first full turn. A fan sees a quarter of the room: two frames of
+        the same view agree on the same look-alike, so a fan alone can neither say "lost" nor
+        find the cart (:attr:`ScanSource.partial`)."""
+        anchor = self.anchor(now)
+        names = (anchor,) if anchor is not None else self.registry.enabled
+        full = [
+            self._newest[name]
+            for name in names
+            if name in self._newest and not self.registry.source(name).partial
+        ]
+        return max(full, key=lambda scan: scan.stamp, default=None)
 
     def status(self, now: float) -> str:
         """One phrase for the report line: who drives — ``anchor lidar``; with nothing fresh

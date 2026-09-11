@@ -131,7 +131,7 @@ def test_nothing_fresh_holds_a_stale_rider_is_dropped_and_an_uncovered_one_waits
     feed = SourceFeed(SourceRegistry(enabled=[LIDAR, DEPTH]))
     history = driving(5.1)
     assert feed.anchor(0.0) is None and feed.take(history, 0.0) is None
-    assert feed.picture(0.0) is None
+    assert feed.picture(0.0) is None and feed.full_picture(0.0) is None
     assert feed.status(0.0) == (
         "holding map->odom: no fresh source; lidar absent, depth absent, contact off"
     )
@@ -140,6 +140,7 @@ def test_nothing_fresh_holds_a_stale_rider_is_dropped_and_an_uncovered_one_waits
     taken = feed.take(history, 5.0)
     assert taken is not None and taken[0] == DEPTH, "the odometry covers it: released, late"
     assert feed.anchor(5.0) is None and feed.picture(5.0) is not None, "the last picture heard"
+    assert feed.full_picture(5.0) is None, "a fan is no picture for a watch or a search"
     assert feed.status(5.0).startswith(
         "no fresh source, last release depth 4.5 s ago; lidar absent, depth stale 4.5 s"
     )
@@ -199,6 +200,8 @@ def test_a_revolution_delivered_late_is_matched_late_as_the_gate_alone_always_di
         assert feed.status(now).startswith("anchor lidar; lidar stale 0.6 s")
         taken, released = feed.take(history, now), gate.take(history, now)
         assert taken is not None and taken[1] is released, f"scan {k}: matched late, not dropped"
+    picture = feed.full_picture(3.5)
+    assert picture is not None and picture.scan_id == 19, "nothing fresh: the last revolution"
     assert feed.status(3.5).startswith("no fresh source, last release lidar 0.6 s ago; lidar stale")
     assert feed.report().summary() == gate.report().summary()
     late = scan(4.0, scan_id=99)
@@ -208,3 +211,29 @@ def test_a_revolution_delivered_late_is_matched_late_as_the_gate_alone_always_di
     feed_stats, gate_stats = feed.report(), gate.report()
     assert feed_stats.expired == gate_stats.expired == 1
     assert feed_stats.summary() == gate_stats.summary()
+
+
+def test_a_fan_is_no_picture_for_the_watch_or_a_search() -> None:
+    """While a fan drives, ``full_picture`` is None: a watch has nothing to judge and a
+    search nothing to run on. The lidar's revolution is the picture — driving, or, with
+    nothing fresh, the last one heard, a standing cart's picture being still true."""
+    feed = SourceFeed(SourceRegistry(enabled=[LIDAR, DEPTH]))
+    history = driving(3.0)
+    feed.offer(DEPTH, scan(1.0, scan_id=1))
+    assert feed.anchor(1.1) == DEPTH and feed.picture(1.1) is not None
+    assert feed.full_picture(1.1) is None
+    feed.offer(LIDAR, scan(1.2, scan_id=2))
+    full = feed.full_picture(1.3)
+    assert full is not None and full.scan_id == 2 and feed.picture(1.3) is full
+    assert feed.take(history, 1.3) is not None
+    feed.offer(DEPTH, scan(1.9, scan_id=3))
+    assert feed.anchor(2.0) == DEPTH and feed.take(history, 2.0) is not None
+    assert feed.full_picture(2.0) is None, "the camera drives: the watch has nothing to judge"
+    assert feed.anchor(3.5) is None, "nothing fresh, nothing waiting"
+    picture, full = feed.picture(3.5), feed.full_picture(3.5)
+    assert picture is not None and picture.scan_id == 3, "the newest heard, for the fit"
+    assert full is not None and full.scan_id == 2, "the last revolution, for the watch"
+    fans = SourceFeed(SourceRegistry(enabled=[DEPTH, CONTACT]))
+    fans.offer(DEPTH, scan(1.0))
+    fans.offer(CONTACT, scan(1.0))
+    assert fans.picture(1.1) is not None and fans.full_picture(1.1) is None
