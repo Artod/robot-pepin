@@ -7,7 +7,8 @@ from test_base import CFG, FakeBus
 
 from pepin.base import LEFT, RIGHT
 from pepin.base_link import decode_state
-from pepin.base_server import BaseServerCore
+from pepin.base_server import BaseServerCore, NeckMover, NeckReader
+from pepin.neck import NeckConfig
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -175,17 +176,34 @@ def test_malformed_client_lines_do_not_stop_the_wheel_loop() -> None:
 
 
 class NeckBus(PingableBus):
-    """FakeBus with neck servos on it: counts the reads, and can fall silent on the neck only."""
+    """FakeBus with neck servos on it: counts the reads, serves their operating mode, and can
+    fall silent on the neck only."""
 
     def __init__(self) -> None:
         super().__init__()
         self.positions.update({"neck": 2048, "head": 2360})
+        self.modes = {"neck": 0, "head": 0}  # 0: position mode, the only one a goal makes sense in
         self.neck_reads = 0
         self.neck_silent = False
+        self.torque_silent = False
+
+    def enable_torque(self, motors: list[str] | None = None) -> None:
+        self._answers_torque()
+        super().enable_torque(motors)
+
+    def disable_torque(self, motors: list[str] | None = None) -> None:
+        self._answers_torque()
+        super().disable_torque(motors)
+
+    def _answers_torque(self) -> None:
+        if self.torque_silent:
+            raise TimeoutError("no reply from ids [9] after 2 attempts")
 
     def sync_read(
         self, data_name: str, motors: list[str], *, normalize: bool = True
     ) -> dict[str, int]:
+        if data_name == "Operating_Mode":
+            return {m: self.modes[m] for m in motors}
         if "neck" in motors:
             self.neck_reads += 1
             if self.neck_silent:
@@ -194,8 +212,6 @@ class NeckBus(PingableBus):
 
 
 def make_neck_core() -> tuple[BaseServerCore, NeckBus]:
-    from pepin.base_server import NeckReader
-
     bus = NeckBus()
     core = BaseServerCore(
         bus,
@@ -321,3 +337,219 @@ def test_sigterm_sets_the_stop_event_so_the_wheels_are_released() -> None:
         assert stop.wait(2.0)
     finally:
         signal.signal(signal.SIGTERM, previous)
+
+
+# -- the neck's write side ---------------------------------------------------------------------
+
+NECK_CFG = NeckConfig.from_json(REPO / "config/neck.json")
+
+
+def make_move_core() -> tuple[BaseServerCore, NeckBus]:
+    """A core that can both read and move the neck, against the repo's real config/neck.json."""
+    bus = NeckBus()
+    reader = NeckReader(bus, ("neck", "head"), period_s=0.05, retry_s=5.0)
+    core = BaseServerCore(
+        bus,
+        CFG,
+        servo_names=[LEFT, RIGHT, "neck", "head"],
+        neck=reader,
+        mover=NeckMover(bus, reader, NECK_CFG),
+    )
+    core.tick(0.0)
+    return core, bus
+
+
+def goals(bus: NeckBus) -> dict[str, int]:
+    """Every Goal_Position written to the bus so far, by motor name."""
+    written: dict[str, int] = {}
+    for name, values in bus.writes:
+        if name == "Goal_Position":
+            written.update(values)
+    return written
+
+
+def test_a_move_writes_the_goal_then_answers_when_the_head_arrives() -> None:
+    """The command itself answers nothing: the reply is born when the head stops, and leaves
+    through take_replies (serve broadcasts it). Torque goes on before the goal and off after."""
+    core, bus = make_move_core()
+    assert (
+        core.command({"cmd": "neck_goto", "pan_ticks": 2021, "tilt_ticks": 2311}, now=1.0) is None
+    )
+    assert bus.torque == [("on", ["neck", "head"])]
+    assert goals(bus) == {"neck": 2021, "head": 2311}
+    assert ("Goal_Velocity", {"neck": 400}) in bus.writes, "a profile speed, not a wheel command"
+    core.tick(1.1)  # the servos are still on their way
+    assert core.take_replies() == []
+    bus.positions.update({"neck": 2021, "head": 2309})  # arrived, the tilt two ticks off
+    core.tick(1.2)
+    (reply,) = core.take_replies()
+    assert reply["type"] == "neck_goto" and reply["reached"] is True
+    assert (reply["pan_ticks"], reply["tilt_ticks"]) == (2021, 2309)
+    assert reply["ms"] == pytest.approx(200.0) and reply["hold"] is False
+    assert bus.torque[-1] == ("off", ["neck", "head"]), "the head is free to be pushed again"
+    assert core.take_replies() == []  # taken once
+
+
+def test_a_target_outside_the_configured_limits_is_refused_not_clamped() -> None:
+    core, bus = make_move_core()
+    reply = core.command({"cmd": "neck_goto", "pan_ticks": 4000}, now=1.0)
+    assert reply is not None and reply["reached"] is False
+    assert "257..3812" in reply["error"] and "4000" in reply["error"]
+    assert bus.torque == [] and goals(bus) == {}, "nothing was energised, nothing was written"
+    low = core.command({"cmd": "neck_goto", "tilt_ticks": 1000}, now=1.1)
+    assert low is not None and "1814..3090" in low["error"]
+    assert core.command({"cmd": "neck_goto"}, now=1.2) == {
+        "type": "neck_goto",
+        "reached": False,
+        "error": "neck_goto needs pan_ticks or tilt_ticks",
+    }
+
+
+def test_a_head_that_never_arrives_gives_up_and_is_released() -> None:
+    core, bus = make_move_core()
+    core.command({"cmd": "neck_goto", "pan_ticks": 2021}, now=1.0)
+    assert bus.torque == [("on", ["neck"])], "only the addressed servo is energised"
+    core.tick(2.0)
+    assert core.take_replies() == []
+    core.tick(4.1)  # 3 s after the start: the head never moved (a jammed or unpowered servo)
+    (reply,) = core.take_replies()
+    assert reply["reached"] is False and reply["pan_ticks"] == 2048
+    assert reply["ms"] == pytest.approx(3100.0)
+    assert bus.torque[-1] == ("off", ["neck"])
+
+
+def test_hold_leaves_the_servos_energised_until_the_server_lets_go() -> None:
+    core, bus = make_move_core()
+    core.command({"cmd": "neck_goto", "pan_ticks": 2048, "tilt_ticks": 2360, "hold": True}, now=1.0)
+    core.tick(1.1)  # already there: reached on the first step
+    (reply,) = core.take_replies()
+    assert reply["reached"] is True and reply["hold"] is True
+    assert bus.torque == [("on", ["neck", "head"])], "held: the torque stays on"
+    core.release()  # shutdown must not leave a head energised with nobody to release it
+    assert bus.torque[-1] == ("off", ["neck", "head"])
+
+
+def test_neck_home_goes_to_the_reference_ticks_of_the_config() -> None:
+    core, bus = make_move_core()
+    ref = NECK_CFG.reference
+    assert core.command({"cmd": "neck_home"}, now=1.0) is None
+    assert goals(bus) == {"neck": ref.pan_ticks, "head": ref.tilt_ticks}
+
+
+def test_home_without_reference_ticks_says_so_instead_of_moving() -> None:
+    """The reference is a hardware reading that may be missing (null in the file); nothing is
+    written then, because there is no pose to go to."""
+    from dataclasses import replace
+
+    bus = NeckBus()
+    reader = NeckReader(bus, ("neck", "head"))
+    unread = replace(NECK_CFG, reference=replace(NECK_CFG.reference, pan_ticks=None))
+    core = BaseServerCore(bus, CFG, neck=reader, mover=NeckMover(bus, reader, unread))
+    reply = core.command({"cmd": "neck_home"}, now=1.0)
+    assert reply is not None and "reference ticks are unread" in reply["error"]
+    assert goals(bus) == {} and bus.torque == []
+
+
+def test_a_servo_left_in_velocity_mode_is_never_given_a_goal() -> None:
+    """scripts/jog.py wheel writes velocity mode into a servo's EEPROM; in that mode the profile
+    speed is a command and the head would turn until something broke."""
+    core, bus = make_move_core()
+    bus.modes["head"] = 1
+    reply = core.command({"cmd": "neck_goto", "tilt_ticks": 2311}, now=1.0)
+    assert reply is not None and "position mode" in reply["error"] and "'head': 1" in reply["error"]
+    assert bus.torque == [] and goals(bus) == {}
+    assert core.command({"cmd": "neck_goto", "pan_ticks": 2021}, now=1.1) is None  # pan is fine
+
+
+def test_a_move_is_refused_while_the_wheels_turn_and_never_delays_the_deadman() -> None:
+    core, bus = make_move_core()
+    core.command({"cmd": "twist", "v": 0.1, "w": 0.0}, now=1.0)
+    refused = core.command({"cmd": "neck_goto", "pan_ticks": 2021}, now=1.05)
+    assert refused is not None and refused["error"] == "the wheels are moving"
+    core.command({"cmd": "stop"}, now=1.1)
+    assert core.command({"cmd": "neck_goto", "pan_ticks": 2021}, now=1.2) is None
+    assert core.command({"cmd": "neck_goto", "pan_ticks": 2100}, now=1.25) == {
+        "type": "neck_goto",
+        "reached": False,
+        "error": "a neck move is already under way",
+    }
+    core.command({"cmd": "twist", "v": 0.1, "w": 0.0}, now=1.3)  # driving, the head still moving
+    core.tick(1.35)
+    assert core.moving and not core.deadman
+    core.tick(1.95)  # 0.65 s without a command: the deadman fires on time, mid-move
+    assert core.deadman and not core.moving
+    assert bus.writes[-1] == ("Goal_Velocity", {LEFT: 0, RIGHT: 0})
+
+
+def test_a_move_command_without_a_neck_or_with_junk_in_it_answers_an_error() -> None:
+    core, _ = make_core()
+    reply = core.command({"cmd": "neck_goto", "pan_ticks": 2021}, now=1.0)
+    assert reply is not None and reply["error"] == "no neck configured on this base server"
+    assert core.command({"cmd": "neck_home"}, now=1.0) == reply
+    movable, _ = make_move_core()
+    junk = movable.command({"cmd": "neck_goto", "pan_ticks": "left a bit"}, now=1.0)
+    assert junk is not None and junk["error"].startswith("bad target:")
+
+
+def test_the_finished_move_reaches_the_client_that_asked_over_the_socket() -> None:
+    """End to end: the answer outlives the request, so serve broadcasts it as a line of its own."""
+    import json
+    import socket
+    import threading
+    import time
+
+    from pepin.base_server import DRIVING_COMMANDS, serve
+    from pepin.streams import JsonLinesServer
+
+    core, bus = make_move_core()
+    server = JsonLinesServer(0, driving_commands=DRIVING_COMMANDS).start()
+    stop = threading.Event()
+    worker = threading.Thread(target=serve, args=(core, server, 50.0, 20.0, stop), daemon=True)
+    worker.start()
+    try:
+        with socket.create_connection(("127.0.0.1", server.port), timeout=2.0) as raw:
+            raw.sendall(b'{"cmd": "neck_goto", "pan_ticks": 2021, "tilt_ticks": 2311}\n')
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and "neck" not in goals(bus):
+                time.sleep(0.01)
+            bus.positions.update({"neck": 2021, "head": 2311})
+            raw.settimeout(2.0)
+            buffer, answer = b"", None
+            while answer is None and time.monotonic() < deadline:
+                buffer += raw.recv(4096)
+                *lines, buffer = buffer.split(b"\n")
+                for line in lines:
+                    message = json.loads(line)
+                    if message.get("type") == "neck_goto":
+                        answer = message
+            assert answer is not None and answer["reached"] is True
+            assert (answer["pan_ticks"], answer["tilt_ticks"]) == (2021, 2311)
+    finally:
+        stop.set()
+        worker.join(timeout=2.0)
+
+
+def test_a_bus_that_will_not_take_the_write_refuses_the_move_and_stays_usable() -> None:
+    core, bus = make_move_core()
+    bus.torque_silent = True
+    reply = core.command({"cmd": "neck_goto", "pan_ticks": 2021}, now=1.0)
+    assert reply is not None and reply["error"].startswith("the bus refused the move:")
+    assert goals(bus) == {} and bus.torque == []
+    bus.torque_silent = False
+    assert core.command({"cmd": "neck_goto", "pan_ticks": 2021}, now=1.1) is None  # not stuck
+
+
+def test_a_servo_that_falls_silent_mid_move_is_answered_with_its_error() -> None:
+    """The encoders go quiet halfway: the move cannot be confirmed, so it is answered as not
+    reached with the bus error on it — and the torque-off that fails too is only logged."""
+    core, bus = make_move_core()
+    core.command({"cmd": "neck_goto", "pan_ticks": 2021}, now=1.0)
+    bus.neck_silent = True
+    bus.torque_silent = True
+    core.tick(1.1)
+    assert core.take_replies() == []
+    core.tick(4.2)
+    (reply,) = core.take_replies()
+    assert reply["reached"] is False and "no reply from ids" in reply["error"]
+    again = core.command({"cmd": "neck_goto", "pan_ticks": 2021}, now=4.3)
+    assert again is not None and "bus refused" in again["error"]  # the bus is still out
