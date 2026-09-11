@@ -15,6 +15,7 @@ from pepin.depth_service import (
     CONTENT_DEPTH,
     CONTENT_RGB,
     BadRequestError,
+    DepthModelError,
     DepthServer,
     DepthServiceError,
     Fallback,
@@ -292,3 +293,33 @@ def test_the_local_model_is_built_on_its_first_frame_and_once() -> None:
     assert not untouched.built
     remote.fail = True
     assert switch(frame)[0, 0] == 2.0 and untouched.built, "the first fallback builds it"
+
+
+def test_a_build_that_fails_is_remembered_and_the_service_still_gets_its_probes() -> None:
+    """An uncached model with no hub costs tens of seconds per attempt: the first failure is
+    kept (its cause attached once, for the log), every later frame raises it at once without
+    rebuilding, and in auto mode the remote is probed on schedule — the worker is never stuck
+    in a rebuild while the service is back."""
+    attempts = [0]
+
+    def build() -> FakeBackend:
+        attempts[0] += 1
+        raise OSError("no cached weights\n and no hub")
+
+    lazy = LazyDepth(build)
+    frame = _frame(4, 4)
+    with pytest.raises(DepthModelError, match="OSError: no cached weights and no hub") as first:
+        lazy(frame)
+    assert isinstance(first.value.__cause__, OSError)
+    with pytest.raises(DepthModelError) as again:
+        lazy(frame)
+    assert again.value.__cause__ is None and attempts[0] == 1, "no rebuild, no traceback twice"
+    assert not lazy.built and lazy.failed == "OSError: no cached weights and no hub"
+    now = [0.0]
+    remote = FakeBackend("remote", fail=True)
+    switch = Fallback(remote, lazy, mode="auto", failures=1, retry_s=30.0, clock=lambda: now[0])
+    with pytest.raises(DepthModelError):
+        switch(frame)  # the remote given up on, the model failed: the frame is lost
+    now[0] += 30.0
+    remote.fail = False
+    assert switch(frame)[0, 0] == 1.0 and attempts[0] == 1, "the probe found the service back"

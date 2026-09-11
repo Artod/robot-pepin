@@ -30,8 +30,11 @@ local, auto}, default from PEPIN_DEPTH_BACKEND and ``local`` without it, sets
 :attr:`Fallback.mode` live; ``depth_url`` defaults to PEPIN_DEPTH_URL or :data:`DEFAULT_URL`.
 The node builds ``Fallback(RemoteDepth(url), LazyDepth(lambda: MonoDepth(...)))`` and calls it
 where it called the model — same argument, same return; :class:`LazyDepth` builds the CPU model
-on its first frame, so a node on the service never loads it. :attr:`Fallback.status` is the
-phrase for the report line.
+on its first frame, so a node on the service never loads it. A build that fails is not tried
+again: every later frame raises :class:`DepthModelError` at once, which the node treats as
+fatal in ``local`` mode (the process ends, the launch respawns it — as loud as a model that
+failed in the constructor) and as a lost frame in ``auto`` (the service keeps being probed).
+:attr:`Fallback.status` is the phrase for the report line.
 """
 
 from __future__ import annotations
@@ -78,6 +81,11 @@ def model_id(name: str) -> str:
 
 class DepthServiceError(RuntimeError):
     """The service did not answer, or answered something that is not a depth image."""
+
+
+class DepthModelError(RuntimeError):
+    """The CPU model could not be built — no cached weights and no hub, or no memory — and
+    :class:`LazyDepth` will not try again: every later frame raises this at once."""
 
 
 class BadRequestError(ValueError):
@@ -468,11 +476,16 @@ class LazyDepth:
     """A :class:`DepthBackend` built on its first frame. The CPU model costs a gigabyte and
     seconds to load; behind :class:`Fallback` in remote or auto mode it is never asked while the
     service answers, and this is what keeps it from being paid for anyway. One build, under a
-    lock: two frames racing the first call get one model."""
+    lock: two frames racing the first call get one model. One attempt, too: a build that fails
+    (no cached weights and no hub, no memory) is remembered and every later frame raises
+    :class:`DepthModelError` at once — an uncached model re-entering the hub's timeouts on every
+    frame would keep the worker inside ``from_pretrained`` for tens of seconds at a time instead
+    of asking the service. What the failure means is the node's call; a restart is the retry."""
 
     def __init__(self, build: Callable[[], DepthBackend]) -> None:
         self._build = build
         self._backend: DepthBackend | None = None
+        self._error: str | None = None
         self._lock = threading.Lock()
 
     @property
@@ -480,17 +493,35 @@ class LazyDepth:
         """Whether the backend exists yet."""
         return self._backend is not None
 
+    @property
+    def failed(self) -> str | None:
+        """Why the build failed (``Type: message``, one line), or ``None`` while it has not."""
+        return self._error
+
     def __call__(self, rgb: Rgb) -> Array:
         backend = self._backend
         if backend is None:
             with self._lock:
                 backend = self._backend
                 if backend is None:
-                    t0 = time.perf_counter()
-                    log.info("building the local depth model")
-                    backend = self._backend = self._build()
-                    log.info("local depth model ready in %.1f s", time.perf_counter() - t0)
+                    backend = self._backend = self._build_once()
         return backend(rgb)
+
+    def _build_once(self) -> DepthBackend:
+        """The build, or the remembered failure raised again — with its cause only the first
+        time, so the traceback is logged once and not per frame."""
+        if self._error is not None:
+            raise DepthModelError(f"the CPU model failed to build: {self._error}")
+        t0 = time.perf_counter()
+        log.info("building the local depth model")
+        try:
+            backend = self._build()
+        except Exception as exc:
+            self._error = f"{type(exc).__name__}: {' '.join(str(exc).split())}"[:200]
+            log.error("the local depth model failed to build: %s", self._error)
+            raise DepthModelError(f"the CPU model failed to build: {self._error}") from exc
+        log.info("local depth model ready in %.1f s", time.perf_counter() - t0)
+        return backend
 
 
 MODES = ("remote", "local", "auto")
