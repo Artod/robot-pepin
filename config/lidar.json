@@ -14,5 +14,8 @@
       317,
       343
     ]
-  ]
+  ],
+  "z_m": 0.2,
+  "roll_deg": 180.0,
+  "note": "x_m/y_m/z_m and roll_deg/yaw_offset_deg are the base_link -> laser mount (the LD19 hangs upside down): published by the board's launch and by the laptop's camera node from this one file"
 }

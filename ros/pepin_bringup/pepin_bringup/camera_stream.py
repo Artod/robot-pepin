@@ -35,9 +35,11 @@ from pepin.camera import (
     optical_rotation,
     quaternion_from_rpy,
 )
+from pepin.lidar import LidarMount
 from pepin.mjpeg import capture_time, parts
 
 CONFIG = "/ws/config/camera.json"
+LIDAR_CONFIG = "/ws/config/lidar.json"
 
 
 class CameraStream(Node):
@@ -68,7 +70,17 @@ class CameraStream(Node):
                 " recognising places, not for measuring — calibrate with a checkerboard"
             )
         self._static = StaticTransformBroadcaster(self)
-        self._static.sendTransform([self._link_tf(), self._optical_tf()])
+        # The lidar's mount as well: the board publishes it too, but a static transform does not
+        # replay to a late joiner over the bridge (RTAB-Map dropped every scan for an hour after a
+        # board reboot, 2026-09-10) — both sides publish the same file's numbers.
+        lx, ly, lz, lroll, lpitch, lyaw = LidarMount.from_json(LIDAR_CONFIG).transform()
+        self._static.sendTransform(
+            [
+                self._link_tf(),
+                self._optical_tf(),
+                self._tf("base_link", "laser", lx, ly, lz, lroll, lpitch, lyaw),
+            ]
+        )
         self._frames = 0
         self._unstamped = 0  # frames the board sent without a capture time
         self.create_timer(30.0, self._report)

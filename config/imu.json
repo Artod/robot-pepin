@@ -1,0 +1,11 @@
+{
+  "mount": {
+    "x_m": 0.0,
+    "y_m": 0.0,
+    "z_m": 0.10,
+    "roll_deg": 90.0,
+    "pitch_deg": 0.0,
+    "yaw_deg": 0.0,
+    "note": "The GY-521 (MPU6050) sits with its Y axis up: gravity reads +9.8 on Y (2026-09-07), so a roll of +90 deg maps the chip's Y onto base_link's Z; its Y gyro is the yaw rate. The board publishes base_link -> imu_link from this; the laptop reads the accelerometer through the same rotation to know which way is up."
+  }
+}

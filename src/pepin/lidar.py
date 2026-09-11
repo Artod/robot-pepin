@@ -18,7 +18,7 @@ import struct
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Protocol
 
@@ -124,6 +124,20 @@ class LidarMount:
     min_range_m: float = 0.05
     max_range_m: float = 12.0
     masked_sectors_deg: tuple[tuple[float, float], ...] = ()
+    z_m: float = 0.0  # metres above the floor
+    roll_deg: float = 0.0  # 180: the sensor hangs upside down
+
+    def transform(self) -> tuple[float, float, float, float, float, float]:
+        """base_link -> laser as (x, y, z, roll, pitch, yaw) in metres and radians: the yaw is
+        the negative of the calibrated offset, the way the board's launch has always set it."""
+        return (
+            self.x_m,
+            self.y_m,
+            self.z_m,
+            math.radians(self.roll_deg),
+            0.0,
+            math.radians(-self.yaw_offset_deg),
+        )
 
     @classmethod
     def from_json(cls, path: str | Path) -> LidarMount:
@@ -131,7 +145,8 @@ class LidarMount:
         with open(path) as f:
             data = json.load(f)
         data["masked_sectors_deg"] = tuple(tuple(s) for s in data.get("masked_sectors_deg", ()))
-        return cls(**data)
+        known = {f.name for f in fields(cls)}  # a "note" in the file is for people, not here
+        return cls(**{k: v for k, v in data.items() if k in known})
 
     def is_masked(self, sensor_angle_deg: float) -> bool:
         """True inside a blocked sector (cart posts, the mast) — those returns are the
@@ -383,3 +398,18 @@ class LidarClient:
                     if self._scans.full():
                         self._scans.get_nowait()  # nobody is draining: keep the newest
                     self._scans.put(scan)
+
+
+# The mount as the board's launch needs it without the config directory mounted there; a test
+# keeps it equal to config/lidar.json, the calibration's home.
+MOUNT = LidarMount(
+    mirror=False,
+    yaw_offset_deg=87.5,
+    x_m=0.005,
+    y_m=0.0,
+    min_range_m=0.05,
+    max_range_m=12.0,
+    masked_sectors_deg=((192, 218), (317, 343)),
+    z_m=0.20,
+    roll_deg=180.0,
+)

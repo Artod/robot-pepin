@@ -34,8 +34,9 @@ from launch_ros.descriptions import ComposableNode
 
 from pepin.deployment import BASE_MAX_ANGULAR_RAD_S, BASE_MAX_LINEAR_M_S
 from pepin.footprint import hull_box
+from pepin.lidar import MOUNT
 
-LASER_X, LASER_Y, LASER_Z = 0.005, 0.0, 0.20
+LASER_X, LASER_Y, LASER_Z, LASER_ROLL, _LASER_PITCH, LASER_YAW = MOUNT.transform()
 # The MPU6050 sits flat on the chassis over base_link, Z up and its X arrow forward:
 # no rotation, only the height of the deck it is glued to.
 IMU_X, IMU_Y, IMU_Z = 0.0, 0.0, 0.10
@@ -250,8 +251,8 @@ def generate_launch_description() -> LaunchDescription:
     )
     return LaunchDescription(
         [
-            DeclareLaunchArgument("laser_roll", default_value="3.14159265"),
-            DeclareLaunchArgument("laser_yaw", default_value="-1.5272"),
+            DeclareLaunchArgument("laser_roll", default_value=str(LASER_ROLL)),
+            DeclareLaunchArgument("laser_yaw", default_value=str(LASER_YAW)),
             DeclareLaunchArgument("lidar_port", default_value="/dev/lidar"),
             DeclareLaunchArgument("lidar_debug", default_value="false"),
             DeclareLaunchArgument("foxglove", default_value="true"),

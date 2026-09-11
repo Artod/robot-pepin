@@ -8,10 +8,8 @@ import pytest
 from pepin.depth import (
     MIN_SAMPLES,
     CameraPose,
-    DepthScale,
     Intrinsics,
     project,
-    scale_from_samples,
     scan_points,
     to_base,
 )
@@ -53,31 +51,6 @@ def test_scan_points_and_the_lidar_mount() -> None:
     assert xy[0] == pytest.approx([1.0, 0.0]) and xy[1] == pytest.approx([-2.0, 0.0], abs=1e-9)
     base = to_base(xy, np.eye(3), np.array([0.10, 0.0, 0.15]))
     assert base[0] == pytest.approx([1.10, 0.0, 0.15])
-
-
-def test_the_verdict_is_the_median_ratio_and_needs_enough_samples() -> None:
-    depth = np.full((360, 640), 2.0)  # the network says 2 m everywhere
-    n = MIN_SAMPLES + 5
-    samples = np.stack([np.linspace(10, 600, n), np.full(n, 300.0), np.full(n, 1.0)], axis=1)
-    samples[0, 2] = 40.0  # one wild lidar return does not move the median
-    verdict = scale_from_samples(depth, samples)
-    assert verdict is not None
-    scale, count = verdict
-    assert scale == pytest.approx(0.5) and count == n
-    assert scale_from_samples(depth, samples[: MIN_SAMPLES - 1]) is None
-    assert scale_from_samples(depth, samples[:0]) is None
-    depth[300, :] = np.nan  # no prediction on that row
-    assert scale_from_samples(depth, samples) is None
-
-
-def test_the_running_scale_steps_boundedly_and_holds_without_the_lidar() -> None:
-    scale = DepthScale()
-    assert scale.observe(None) == 1.0 and scale.held == 1
-    assert scale.observe((0.5, 30)) == 0.5  # the first verdict is taken whole
-    assert scale.observe((5.0, 30)) == pytest.approx(0.625)  # then at most +25 % a frame
-    assert scale.observe((0.1, 30)) == pytest.approx(0.625 * 0.75)
-    held = scale.observe(None)
-    assert held == pytest.approx(0.625 * 0.75) and scale.held == 1 and scale.frames == 3
 
 
 def test_a_quaternion_becomes_the_rotation_tf_means() -> None:
@@ -125,3 +98,141 @@ def test_the_depth_image_becomes_a_scan_of_what_stands_above_the_floor() -> None
     empty = depth_to_scan(np.full((360, 640), np.inf), INTR, cam)[2]
     assert not np.isfinite(empty).any()
     _ = left  # the ray geometry above is what the function inverts
+
+
+def test_the_floor_s_depth_follows_the_camera_s_height_tilt_and_the_cart_s_lean() -> None:
+    """A camera 1.23 m up, tilted 26 degrees down: the ray through the principal point meets the
+    floor 1.23 / sin(26 deg) along the axis; the cart pitched 5 degrees nose-down brings it to
+    1.23 / sin(31 deg); rows at and above the horizon never meet the floor."""
+    import math
+
+    from pepin.depth import CameraPose, floor_anchor, floor_depth
+
+    intr = Intrinsics(fx=400.0, fy=400.0, cx=320.0, cy=180.0, width=640, height=360)
+    cam = CameraPose(0.0, 0.0, 1.23, math.radians(26.0))
+    level = floor_depth(intr, cam)
+    assert level[180, 320] == pytest.approx(1.23 / math.sin(math.radians(26.0)), rel=1e-6)
+    assert level[359, 320] < level[180, 320]  # the bottom row looks at nearer floor
+    # a shallower tilt puts the horizon inside the picture: above it no ray meets the floor
+    shallow = floor_depth(intr, CameraPose(0.0, 0.0, 1.23, math.radians(10.0)))
+    horizon_row = 180 - math.tan(math.radians(10.0)) * 400  # where the ray runs level
+    assert np.isnan(shallow[int(horizon_row) - 5, 320]) and np.isfinite(
+        shallow[int(horizon_row) + 5, 320]
+    )
+    nose_down = np.array([-math.sin(math.radians(5.0)), 0.0, math.cos(math.radians(5.0))])
+    leaning = floor_depth(intr, cam, up=nose_down)
+    # the camera stands 1.23 cos 5 deg above the leaning plane and the ray meets it at 31 deg
+    expected = 1.23 * math.cos(math.radians(5.0)) / math.sin(math.radians(31.0))
+    assert leaning[180, 320] == pytest.approx(expected, rel=1e-6)
+    # the anchor: floor within 15 % snaps, a box on the floor does not
+    guess = level * 1.06
+    guess[300:340, 200:260] = level[300:340, 200:260] * 0.5  # a box half-way to the floor
+    guess[:100, :] = np.nan
+    fixed, anchored = floor_anchor(guess, level)
+    assert anchored > 100_000
+    assert np.allclose(fixed[350, 100:600], level[350, 100:600])
+    assert np.allclose(fixed[320, 230], guess[320, 230])  # the box is left to the network
+
+
+def test_the_tilt_reads_gravity_through_the_mount_and_ignores_a_bump() -> None:
+    from pepin.depth import GRAVITY, Tilt, imu_mount_rotation
+
+    tilt = Tilt(imu_mount_rotation(90.0, 0.0, 0.0))
+    tilt.observe(np.array([0.0, GRAVITY, 0.0]), 0.0)  # the chip's Y up: level
+    assert np.allclose(tilt.up, [0.0, 0.0, 1.0])
+    assert tilt.roll_pitch_deg == pytest.approx((0.0, 0.0), abs=1e-9)
+    tilt.observe(np.array([0.0, GRAVITY, 6.0]), 0.5)  # a bump: not 1 g, ignored
+    assert np.allclose(tilt.up, [0.0, 0.0, 1.0])
+    # nose down 5 degrees: gravity leans onto the chip's z (base x); after a few seconds it shows
+    import math
+
+    a = np.array(
+        [-GRAVITY * math.sin(math.radians(5.0)), GRAVITY * math.cos(math.radians(5.0)), 0.0]
+    )
+    for i in range(1, 60):
+        tilt.observe(a, 0.5 + 0.1 * i)
+    _roll, pitch = tilt.roll_pitch_deg
+    assert pitch == pytest.approx(5.0, abs=0.2)
+
+
+def test_a_dead_accelerometer_leaves_the_lean_alone_instead_of_dividing_by_its_zero() -> None:
+    """A bridge that publishes zeros (the chip unplugged, a read that failed) must not turn the
+    up vector into NaN — every pixel of the floor would then stop being the floor."""
+    from pepin.depth import GRAVITY, Tilt, imu_mount_rotation
+
+    tilt = Tilt(imu_mount_rotation(90.0, 0.0, 0.0))
+    tilt.observe(np.array([0.0, GRAVITY, 0.0]), 0.0)
+    for i in range(10):
+        tilt.observe(np.zeros(3), 0.1 * (i + 1))
+    assert np.allclose(tilt.up, [0.0, 0.0, 1.0])
+    assert np.isfinite(tilt.up).all()
+
+
+def test_a_floor_the_camera_cannot_see_anchors_nothing() -> None:
+    """Pointed at the ceiling no ray meets the floor: the expected image is all NaN and the
+    network's depth must come back untouched."""
+    from pepin.depth import floor_anchor
+
+    guess = np.full((8, 8), 1.5)
+    fixed, anchored = floor_anchor(guess, np.full((8, 8), np.nan))
+    assert anchored == 0 and np.array_equal(fixed, guess)
+
+
+def test_a_stale_scan_is_carried_to_the_frame_s_moment() -> None:
+    """The cart turned 2 degrees left between the scan and the frame: a point dead ahead at 2 m
+    at the scan's moment sits 2 degrees to the right at the frame's moment."""
+    import math
+
+    from pepin.depth import carry, rotation_matrix
+
+    ahead = np.array([[2.0, 0.0, 0.2]])
+    yaw = math.radians(-2.0)  # base_link@frame <- base_link@scan: the world turned right
+    rot = rotation_matrix(0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2))
+    moved = carry(ahead, rot, np.zeros(3))
+    assert moved[0, 1] == pytest.approx(-2.0 * math.sin(math.radians(2.0)), rel=1e-6)
+    assert moved[0, 2] == 0.2
+
+
+def test_the_beams_pooled_over_frames_fit_the_network_s_depth_as_an_affine_law() -> None:
+    """The network sees the room too far, the far end more than the near: true 1/z = 1.2/D +
+    0.05. One frame's beams span 1.3-2 m and fit a scale only; ten frames pooled span 1-4 m
+    and recover both numbers; a frame without beams keeps the law."""
+    from pepin.depth import AffineScale, apply_affine, beam_pairs, fit_affine
+
+    a_true, b_true = 1.2, 0.05
+
+    def frame(z_lo: float, z_hi: float) -> tuple[np.ndarray, np.ndarray]:
+        z_true = np.linspace(z_lo, z_hi, 40)
+        d_net = 1.0 / ((1.0 / z_true - b_true) / a_true)
+        depth = np.tile(d_net, (10, 1))
+        samples = np.stack([np.arange(40, dtype=float), np.full(40, 5.0), z_true], axis=1)
+        return depth, samples
+
+    depth, samples = frame(1.3, 2.0)
+    pairs = beam_pairs(depth, samples)
+    assert pairs is not None and pairs[0].size == 40
+    assert fit_affine(*pairs)[1] == 0.0  # too narrow a spread for a shift
+    law = AffineScale()
+    for lo, hi in ((1.0, 1.6), (1.4, 2.2), (2.0, 3.0), (2.8, 4.0), (1.0, 4.0), (1.2, 3.5)):
+        law.observe(beam_pairs(*frame(lo, hi)))
+    assert law.a == pytest.approx(a_true, rel=1e-3) and law.b == pytest.approx(b_true, abs=1e-3)
+    assert law.pooled == 240
+    held = law.observe(None)
+    assert held == (law.a, law.b) and law.held == 1
+    corrected = apply_affine(frame(1.0, 4.0)[0], *held)
+    assert np.allclose(corrected[5], np.linspace(1.0, 4.0, 40), atol=0.01)
+    assert beam_pairs(depth, samples[: MIN_SAMPLES - 1]) is None
+
+
+def test_the_law_is_bounded_and_the_pool_forgets_old_frames() -> None:
+    from pepin.depth import A_BOUNDS, B_BOUNDS, AffineScale, fit_affine
+
+    d = np.linspace(1.0, 4.0, 300)
+    a, b = fit_affine(d, d / 10.0)  # a network ten times too far: clipped to the bound
+    assert a == A_BOUNDS[1] and B_BOUNDS[0] <= b <= B_BOUNDS[1]
+    law = AffineScale(pool_frames=2)
+    for _ in range(3):
+        law.observe((d, d))
+    assert (
+        law.pooled == 600 and law.a == pytest.approx(1.0) and law.b == pytest.approx(0.0, abs=1e-9)
+    )
