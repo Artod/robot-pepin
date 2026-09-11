@@ -361,12 +361,19 @@ local_costmap:
           # what stands 8 cm to 1.3 m above the floor — table tops, seats, a hand — marks and
           # clears like the lidar, three times a second, out to 3 m.
           topic: /depth_scan
+          # The last cloud is re-applied at every update until the next one arrives; a source that
+          # goes silent (a laptop stall, a container restart) would freeze a phantom in the map.
+          # One second of persistence lets it die without the layer going "not current".
+          observation_persistence: 1.0
           data_type: "LaserScan"
           sensor_frame: base_link
           marking: True
           clearing: True
           raytrace_max_range: 3.0
           obstacle_max_range: 2.5
+          # inf clears to the scan's range_max - 0.1 mm (Nav2 laserScanValidInfCallback): the depth
+          # node's scan_max_range (3.0) must stay ABOVE obstacle_max_range or every inf ray marks
+          # a lethal ring at range_max instead of clearing. NaN rays neither mark nor clear.
           inf_is_valid: True
         dynamic:
           topic: /dynamic_obstacles
