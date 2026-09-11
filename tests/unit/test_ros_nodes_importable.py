@@ -26,7 +26,10 @@ def test_the_tracker_node_keeps_its_decisions_out_of_itself() -> None:
     node = next(p for p in ROS_PYTHON if p.name == "relocalizer.py")
     tree = ast.parse(node.read_text())
     branches = sum(isinstance(n, (ast.If, ast.While)) for n in ast.walk(tree))
-    assert branches <= 45, f"{branches} branches in the node: extract the decision into src/pepin"
+    # A ratchet, like tests/coverage_floor.txt: it only ever goes down. The node sat at 45 of 45
+    # until occluded, SlipWatch and MotionEdge moved into src/pepin (39); 40 is one branch of
+    # room for a fix, and the next extraction lowers this line again.
+    assert branches <= 40, f"{branches} branches in the node: extract the decision into src/pepin"
     imports = {
         alias.name
         for n in ast.walk(tree)
