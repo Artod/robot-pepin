@@ -398,18 +398,3 @@ class LidarClient:
                     if self._scans.full():
                         self._scans.get_nowait()  # nobody is draining: keep the newest
                     self._scans.put(scan)
-
-
-# The mount as the board's launch needs it without the config directory mounted there; a test
-# keeps it equal to config/lidar.json, the calibration's home.
-MOUNT = LidarMount(
-    mirror=False,
-    yaw_offset_deg=87.5,
-    x_m=0.005,
-    y_m=0.0,
-    min_range_m=0.05,
-    max_range_m=12.0,
-    masked_sectors_deg=((192, 218), (317, 343)),
-    z_m=0.20,
-    roll_deg=180.0,
-)

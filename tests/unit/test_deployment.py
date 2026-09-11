@@ -205,11 +205,12 @@ def test_the_container_s_names_are_the_ones_its_respawn_must_see_gone() -> None:
 
 def test_the_mounts_are_read_from_config_wherever_the_library_runs(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """config/imu.json and config/lidar.json are found from a checkout, from a directory named
-    by PEPIN_CONFIG_DIR, and a missing file names every place looked instead of guessing."""
-    import math
+    by PEPIN_CONFIG_DIR, and a missing file names every place looked instead of guessing. What
+    the files then say is pepin.mounts' business (test_mounts.py); this is the search."""
     from pathlib import Path
 
-    from pepin.deployment import ImuMount, config_file
+    from pepin.deployment import config_file
+    from pepin.mounts import Mounts
 
     repo = Path(__file__).resolve().parents[2]
     monkeypatch.delenv("PEPIN_CONFIG_DIR", raising=False)
@@ -217,10 +218,7 @@ def test_the_mounts_are_read_from_config_wherever_the_library_runs(monkeypatch) 
     assert config_file("lidar.json") == repo / "config/lidar.json"
     with pytest.raises(FileNotFoundError, match=r"config/no_such\.json is in none of"):
         config_file("no_such.json")
-    mount = ImuMount.from_json(config_file("imu.json"))
-    x, y, z, roll, pitch, yaw = mount.transform()
-    assert (x, y, z) == (0.0, 0.0, 0.10) and (pitch, yaw) == (0.0, 0.0)
-    assert math.isclose(roll, math.pi / 2), "the chip's Y up: roll +90 deg"
+    assert Mounts.load() == Mounts.load(repo / "config"), "config_file finds the checkout's own"
     elsewhere = repo / "tests"
     monkeypatch.setenv("PEPIN_CONFIG_DIR", str(elsewhere))
     assert config_file("coverage_floor.txt") == elsewhere / "coverage_floor.txt"

@@ -739,9 +739,8 @@ def test_the_lidar_mount_is_published_by_both_sides_from_one_file() -> None:
     transform from the same file, and ros/sync.sh puts config/ where the board's container
     sees it (beside the library: /ws/pepin_src/config, pepin.deployment.config_file)."""
     robot = sf.tree(ROBOT_LAUNCH)
-    assert sf.assignments(robot)["LASER"] == (
-        "LidarMount.from_json(config_file('lidar.json')).transform()"
-    )
+    assert sf.assignments(robot)["MOUNTS"] == "Mounts.load()"
+    assert sf.assignments(robot)["LASER"] == "MOUNTS.lidar.transform()"
     declared = {ast.unparse(c.args[0]) for c in sf.calls_to(robot, "DeclareLaunchArgument")}
     assert not declared & {"'laser_roll'", "'laser_yaw'"} and "MOUNT" not in sf.imported(robot)
     assert "quaternion(laser_roll, laser_pitch, laser_yaw)" in sf.unparsed(robot, ast.Call)
@@ -767,7 +766,7 @@ def test_both_publishers_of_base_link_to_laser_agree_and_the_driver_turns_ccw() 
     from typing import cast
 
     from pepin.camera import quaternion_from_rpy
-    from pepin.lidar import MOUNT
+    from pepin.mounts import Mounts
 
     robot = sf.tree(ROBOT_LAUNCH)
     helper = next(
@@ -778,7 +777,7 @@ def test_both_publishers_of_base_link_to_laser_agree_and_the_driver_turns_ccw() 
     launch_quaternion = cast(
         Callable[[float, float, float], tuple[float, ...]], namespace["quaternion"]
     )
-    roll, pitch, yaw = MOUNT.transform()[3:]
+    roll, pitch, yaw = Mounts.load().lidar.transform()[3:]
     assert roll == math.pi and pitch == 0.0 and yaw != 0.0
     assert launch_quaternion(roll, pitch, yaw) == pytest.approx(
         quaternion_from_rpy(roll, pitch, yaw), abs=1e-9
@@ -814,17 +813,17 @@ def test_the_floor_anchors_the_depth_and_leans_with_the_imu() -> None:
     the accelerometer, and the IMU mount the laptop would apply is the one the board publishes
     (roll +90 deg: the chip's Y up)."""
     node = sf.tree(f"{NODES}/depth_stream.py")
-    declared = {ast.unparse(c) for c in sf.calls_to(node, "self.declare_parameter")}
-    assert "self.declare_parameter('floor_anchor', True)" in declared
+    assert sf.dict_items(node)["floor_anchor"] == {"True"}, "a live switch, default on"
     assert "/imu/data_raw" in sf.strings(node)
     assert {"floor_anchor", "floor_depth"} <= sf.calls(node)
-    assert sf.assignments(node)["IMU_CONFIG"] == "'/ws/config/imu.json'"
+    # The mount is not read here by hand: one loader for every sensor's place on the cart.
+    assert "Mounts" in sf.imported(node) and "Mounts.load" in sf.calls(node)
     mount = json.loads((REPO / "config/imu.json").read_text())["mount"]
     assert mount["roll_deg"] == 90.0 and mount["pitch_deg"] == 0.0 and mount["z_m"] == 0.10
     # The launch publishes that file, not a copy of its numbers: every rotation and
     # translation value of its static transforms is a name, never a literal.
     robot = sf.tree(ROBOT_LAUNCH)
-    assert sf.assignments(robot)["IMU"] == "ImuMount.from_json(config_file('imu.json')).transform()"
+    assert sf.assignments(robot)["IMU"] == "MOUNTS.imu.transform()"
     entries = sf.dict_items(robot)
     assert "ix" in entries["rotation.x"] and "imu_z" in entries["translation.z"]
     for key, values in entries.items():

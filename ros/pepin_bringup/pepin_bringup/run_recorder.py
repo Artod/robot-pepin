@@ -26,6 +26,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profi
 from sensor_msgs.msg import Imu, LaserScan, Range
 from std_msgs.msg import String
 
+from pepin.mounts import Mounts
 from pepin.recording import scan_record_from_ros
 from pepin.runlink import (
     IDLE,
@@ -36,9 +37,6 @@ from pepin.runlink import (
     parse_command,
 )
 from pepin.tape import RunTape, camera_clip_path, next_run_number
-
-MOUNT_YAW_RAD = math.radians(87.5)  # the head is turned; the mount is upside down (mirrored)
-MOUNT_X_M = 0.005
 
 
 def _yaw(orientation: object) -> float:
@@ -69,6 +67,12 @@ class RunRecorder:
         self._directory = directory
         self._tape = tape or RunTape()
         self.number = 0  # the run's number, said aloud instead of a timestamp
+        # The laser's place on the cart, from config/lidar.json: the replays turn the driver's
+        # own bearings into robot-frame ones with it (pepin.recording.scan_record_from_ros
+        # wants the offset the mount's yaw is the negative of).
+        lidar = Mounts.load().lidar
+        self._mount_yaw_rad = -math.radians(lidar.yaw_deg)
+        self._mount_x_m = lidar.x_m
         scan_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self._scan_qos = scan_qos
         # Always on: small messages, and they are what the prelude is made of.
@@ -166,8 +170,8 @@ class RunRecorder:
                 msg.range_min,
                 msg.range_max,
                 msg.scan_time,
-                mount_yaw_rad=MOUNT_YAW_RAD,
-                mount_x_m=MOUNT_X_M,
+                mount_yaw_rad=self._mount_yaw_rad,
+                mount_x_m=self._mount_x_m,
             )
         )
 

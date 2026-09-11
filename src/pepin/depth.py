@@ -346,13 +346,11 @@ class Tilt:
 
 def imu_mount_rotation(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Array:
     """The 3x3 rotation taking a vector from the IMU's axes to base_link, from the mount's
-    roll-pitch-yaw (the ROS convention, like the static transform the board publishes)."""
-    r, p, y = (math.radians(a) for a in (roll_deg, pitch_deg, yaw_deg))
-    rx = np.array([[1, 0, 0], [0, math.cos(r), -math.sin(r)], [0, math.sin(r), math.cos(r)]])
-    ry = np.array([[math.cos(p), 0, math.sin(p)], [0, 1, 0], [-math.sin(p), 0, math.cos(p)]])
-    rz = np.array([[math.cos(y), -math.sin(y), 0], [math.sin(y), math.cos(y), 0], [0, 0, 1]])
-    rot: Array = rz @ ry @ rx
-    return rot
+    roll-pitch-yaw in degrees (the ROS convention, like the static transform the board
+    publishes; :func:`pepin.mounts.rotation_from_rpy` is the one implementation)."""
+    from pepin.mounts import rotation_from_rpy
+
+    return rotation_from_rpy(*(math.radians(a) for a in (roll_deg, pitch_deg, yaw_deg)))
 
 
 # ---- flying pixels -------------------------------------------------------------------------

@@ -9,9 +9,8 @@ recorder. The split is data, so a test can hold it and the launch file merely re
 
 from __future__ import annotations
 
-import math
 from collections.abc import Iterable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from pathlib import Path
 
 SIDES = ("all", "board", "laptop")
@@ -47,41 +46,6 @@ def config_file(name: str) -> Path:
         if (home / name).is_file():
             return home / name
     raise FileNotFoundError(f"config/{name} is in none of {[str(h) for h in homes]}")
-
-
-@dataclass(frozen=True)
-class ImuMount:
-    """Where the IMU chip sits on the cart: base_link -> imu_link from config/imu.json's
-    ``mount`` (metres and degrees; the board's launch publishes it, the laptop's depth node
-    applies it to a reading that is not already in base_link)."""
-
-    x_m: float = 0.0
-    y_m: float = 0.0
-    z_m: float = 0.0
-    roll_deg: float = 0.0
-    pitch_deg: float = 0.0
-    yaw_deg: float = 0.0
-
-    @classmethod
-    def from_json(cls, path: str | Path) -> ImuMount:
-        """Load ``config/imu.json`` (its ``mount`` block; a ``note`` there is for people)."""
-        import json
-
-        with open(path) as f:
-            data = json.load(f)["mount"]
-        known = {f.name for f in fields(cls)}
-        return cls(**{k: float(v) for k, v in data.items() if k in known})
-
-    def transform(self) -> tuple[float, float, float, float, float, float]:
-        """base_link -> imu_link as (x, y, z, roll, pitch, yaw), metres and radians."""
-        return (
-            self.x_m,
-            self.y_m,
-            self.z_m,
-            math.radians(self.roll_deg),
-            math.radians(self.pitch_deg),
-            math.radians(self.yaw_deg),
-        )
 
 
 def nav_nodes(side: str) -> tuple[str, ...]:

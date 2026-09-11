@@ -298,9 +298,9 @@ def test_an_upside_down_laser_is_mirrored_before_the_yaw_is_applied() -> None:
     beam is the cart's -30, and the mount's yaw (-87.5 degrees) turns it after that: -117.5
     degrees in base_link. Yaw first, or no mirror, would put it at -57.5 — the wall on the
     wrong side of the cart."""
-    from pepin.lidar import MOUNT
+    from pepin.mounts import Mounts
 
-    x, y, _z, roll, _pitch, yaw = MOUNT.transform()
+    x, y, _z, roll, _pitch, yaw = Mounts.load().lidar.transform()
     assert roll == math.pi and math.degrees(yaw) == pytest.approx(-87.5)
     ranges = [float("nan"), 1.0]  # one beam, the driver's second bin: +30 degrees
 

@@ -244,17 +244,20 @@ def test_lidar_client_closed_while_connecting_hands_the_bridge_straight_back() -
     assert source.closed and source.reads == 0 and not client.connected
 
 
-def test_the_lidar_mount_in_code_is_the_calibration_file_and_yields_the_launch_transform() -> None:
-    """One mount: config/lidar.json is the calibration's home, pepin.lidar.MOUNT is its copy for
-    the board's launch (no config there), and both sides publish the same base_link -> laser."""
+def test_the_lidar_mount_is_the_calibration_file_and_yields_the_launch_transform() -> None:
+    """One mount: config/lidar.json is the calibration's home, read by everyone through
+    pepin.mounts (the code constant that used to shadow it is gone), and both sides publish
+    the same base_link -> laser."""
     import math
     from pathlib import Path
 
-    from pepin.lidar import MOUNT, LidarMount
+    from pepin.lidar import LidarMount
+    from pepin.mounts import Mounts
 
     repo = Path(__file__).resolve().parents[2]
-    assert LidarMount.from_json(repo / "config/lidar.json") == MOUNT
-    x, y, z, roll, pitch, yaw = MOUNT.transform()
+    sensor = LidarMount.from_json(repo / "config/lidar.json")
+    assert Mounts.load().lidar_sensor == sensor
+    x, y, z, roll, pitch, yaw = sensor.transform()
     assert (x, y, z) == (0.005, 0.0, 0.20) and pitch == 0.0
     assert roll == math.pi and yaw == pytest.approx(-1.5272, abs=1e-4)  # the launch's old defaults
 

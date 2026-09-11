@@ -8,10 +8,10 @@ to the wheels). Every extra ROS process costs ~140 MB on this 1.5 GB board, so
 composition is not a nicety here.
 
 The sensor mounts are not arguments: base_link -> laser comes from config/lidar.json (the LD19
-hangs upside down, roll pi, yaw -87.5 deg: the calibration's one home, read here through
-pepin.lidar.LidarMount) and base_link -> imu_link from config/imu.json (pepin.deployment
-.ImuMount), both found by pepin.deployment.config_file at launch time — on the board under
-/ws/pepin_src/config, which ros/sync.sh keeps beside the library.
+hangs upside down, roll pi, yaw -87.5 deg: the calibration's one home) and base_link -> imu_link
+from config/imu.json, both read through pepin.mounts.Mounts — the one loader every publisher of
+a sensor frame uses — and found by pepin.deployment.config_file at launch time: on the board
+under /ws/pepin_src/config, which ros/sync.sh keeps beside the library.
 
 Arguments:
 
@@ -34,19 +34,15 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
-from pepin.deployment import (
-    BASE_MAX_ANGULAR_RAD_S,
-    BASE_MAX_LINEAR_M_S,
-    ImuMount,
-    config_file,
-)
+from pepin.deployment import BASE_MAX_ANGULAR_RAD_S, BASE_MAX_LINEAR_M_S
 from pepin.footprint import hull_box
-from pepin.lidar import LidarMount
+from pepin.mounts import Mounts
 
-LASER = LidarMount.from_json(config_file("lidar.json")).transform()
+MOUNTS = Mounts.load()
+LASER = MOUNTS.lidar.transform()
 # The GY-521 sits with its Y axis up (gravity reads +9.8 on Y, 2026-09-07): roll +90 deg maps
 # the chip's Y onto base_link's Z, so its Y gyro is our yaw rate. The numbers live in the file.
-IMU = ImuMount.from_json(config_file("imu.json")).transform()
+IMU = MOUNTS.imu.transform()
 # The cart's own body, with 5 cm of margin: returns just outside the exact hull are its own
 # posts and cables, they travel with it, and the costmap turned them into a wall that made
 # every in-place turn "a collision ahead" (measured 2026-09-08: |y| 0.28-0.34 m in 41-71%

@@ -7,10 +7,10 @@ got no return; ROS wants metres and, by convention, ``+inf`` for "nothing
 within max_range"; a reading equal to max_range means "nothing seen", which is
 what Nav2's range layer clears the cone on.
 
-The mounts default to the numbers measured on the robot (config/tof.json,
-2026-09-04, +-1 cm) and are published once as static transforms from
-base_link, so a range in ``tof_left`` lands in the right place without anyone
-having to know where the shelf is.
+The mounts are read from config/tof.json through :class:`pepin.mounts.Mounts` (measured
+2026-09-04, +-1 cm; a parameter may still nudge one) and published once as static transforms
+from base_link, so a range in ``tof_left`` lands in the right place without anyone having to
+know where the shelf is.
 """
 
 from __future__ import annotations
@@ -21,17 +21,17 @@ import queue
 import time
 from typing import Any
 
-import rclpy
-from geometry_msgs.msg import TransformStamped
 from rclpy.duration import Duration
-from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Range
 from tf2_ros import StaticTransformBroadcaster
 
 from pepin.footprint import CONTACT_BAND_M
+from pepin.mounts import TOF_FRAME, Mount, Mounts
 from pepin.tof_horizon import RangeHold, trusted_max_range
 from pepin_bringup.link import JsonLineLink
+from pepin_bringup.msgs import transform_from_rpy
+from pepin_bringup.node_kit import spin_main
 from pepin_bringup.protocol import TOF_NAMES, parse_tof, parse_tof_status
 
 # VL53L1X: a ~27 deg cone, 4 cm dead zone, 1.3 m in short mode (the mode the board runs).
@@ -41,14 +41,6 @@ _FIELD_OF_VIEW_RAD = 0.47
 _MIN_RANGE_M = CONTACT_BAND_M
 _MAX_RANGE_M = 1.3
 _CROSSTALK_M = 0.12  # nearer than this is the sensor seeing its own surroundings
-
-# Mount defaults, from config/tof.json: (x_m, y_m, z_m, yaw_rad) in base_link — x forward,
-# y left, z up from the floor. All three look straight ahead, so every yaw is zero.
-_MOUNTS: dict[str, tuple[float, float, float, float]] = {
-    "front": (0.027, 0.0, 0.27, 0.0),
-    "left": (0.027, 0.148, 0.16, 0.0),
-    "right": (0.027, -0.155, 0.165, 0.0),
-}
 
 _DRAIN_HZ = 15.0  # readings come at ~15 Hz; a faster timer only burns the A53
 _SILENCE_WARN_S = 20.0  # a sensor with nothing valid for this long is reported, not trusted
@@ -85,7 +77,10 @@ class TofBridge(Node):
         # The mounts are resolved once, here, so the ceiling and the published frame agree: the
         # ceiling used to come from the hard-coded height while the frame came from the
         # parameter, and overriding one moved the other.
-        self._mounts = {name: self._resolve_mount(name) for name in TOF_NAMES}
+        measured = Mounts.load().tof
+        self._mounts = {
+            name: self._resolve_mount(name, measured.get(name, Mount())) for name in TOF_NAMES
+        }
         self._ceiling = {
             name: trusted_max_range(self._mounts[name][2], _FIELD_OF_VIEW_RAD, _MAX_RANGE_M)
             for name in TOF_NAMES
@@ -105,34 +100,30 @@ class TofBridge(Node):
         self._link.start()
         self.create_timer(1.0 / _DRAIN_HZ, self._publish_pending)
 
-    def shutdown(self) -> None:
+    def close(self) -> None:
         """Close the link, on the way out."""
         self._link.stop()
 
-    def _resolve_mount(self, name: str) -> tuple[float, float, float, float]:
-        """The mount of sensor ``name``: the measured default, overridable by parameter."""
-        x, y, z, yaw = _MOUNTS[name]
+    def _resolve_mount(self, name: str, measured: Mount) -> tuple[float, float, float, float]:
+        """The mount of sensor ``name`` as ``(x_m, y_m, z_m, yaw_rad)``: what config/tof.json
+        measured, each number overridable by a parameter (``left_z`` and the like)."""
         return (
-            float(self.declare_parameter(f"{name}_x", x).value),
-            float(self.declare_parameter(f"{name}_y", y).value),
-            float(self.declare_parameter(f"{name}_z", z).value),
-            float(self.declare_parameter(f"{name}_yaw", yaw).value),
+            float(self.declare_parameter(f"{name}_x", measured.x_m).value),
+            float(self.declare_parameter(f"{name}_y", measured.y_m).value),
+            float(self.declare_parameter(f"{name}_z", measured.z_m).value),
+            float(self.declare_parameter(f"{name}_yaw", math.radians(measured.yaw_deg)).value),
         )
 
-    def _mount_transform(self, name: str) -> TransformStamped:
+    def _mount_transform(self, name: str) -> Any:
         """Where sensor ``name`` sits on the robot, as a base_link -> tof_<name> transform."""
         x, y, z, yaw = self._mounts[name]
-
-        transform = TransformStamped()
-        transform.header.stamp = self.get_clock().now().to_msg()
-        transform.header.frame_id = self._base_frame
-        transform.child_frame_id = f"tof_{name}"
-        transform.transform.translation.x = x
-        transform.transform.translation.y = y
-        transform.transform.translation.z = z
-        transform.transform.rotation.z = math.sin(yaw / 2.0)
-        transform.transform.rotation.w = math.cos(yaw / 2.0)
-        return transform
+        return transform_from_rpy(
+            self._base_frame,
+            TOF_FRAME.format(name=name),
+            (x, y, z),
+            (0.0, 0.0, yaw),
+            self.get_clock().now().to_msg(),
+        )
 
     def _enqueue_ranges(self, message: dict[str, Any]) -> None:
         """Reader thread: hand one line of ranges to the ROS thread, dropping it if it is behind."""
@@ -182,7 +173,7 @@ class TofBridge(Node):
         # Stamped 60 ms ago: the reading is at least that old (tof server -> TCP -> here), and
         # a stamp behind the newest odom->base_link transform never makes the costmap wait.
         message.header.stamp = (self.get_clock().now() - Duration(seconds=0.06)).to_msg()
-        message.header.frame_id = f"tof_{name}"
+        message.header.frame_id = TOF_FRAME.format(name=name)
         message.radiation_type = Range.INFRARED
         message.field_of_view = _FIELD_OF_VIEW_RAD
         message.min_range = _MIN_RANGE_M
@@ -235,17 +226,7 @@ class TofBridge(Node):
 
 def main(args: list[str] | None = None) -> None:
     """Entry point: spin the bridge until it is interrupted."""
-    rclpy.init(args=args)
-    node = TofBridge()
-    try:
-        rclpy.spin(node)
-    except (KeyboardInterrupt, ExternalShutdownException):
-        pass  # Ctrl-C, or the SIGTERM of a docker stop
-    finally:
-        node.shutdown()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    spin_main(TofBridge, args)
 
 
 if __name__ == "__main__":
