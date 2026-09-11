@@ -41,7 +41,7 @@ CHANGED=0  # settings this run actually moved (each one is printed)
 FAILED=0   # something did not answer and was not applied: the exit status
 
 usage() {
-    echo "usage: ros/sensor.sh [status | lidar on|off [--hard] | camera on|off]"
+    echo "usage: ros/sensor.sh [status | lidar on|off | lidar off --hard | camera on|off]"
     exit 2
 }
 
@@ -242,13 +242,15 @@ apply_driver() {  # activate|deactivate WAS: the lidar driver's lifecycle, alrea
     CHANGED=$((CHANGED + 1))
 }
 
-driver_wanted() {  # SENSOR on|off HARD -> activate, deactivate or nothing for the lidar driver
+driver_wanted() {  # SENSOR on|off HARD -> activate, deactivate or nothing for the lidar driver.
+    # --hard is the deep half of an OFF and of nothing else: an `on` always ends with /scan
+    # running, whatever else is on the command line (switch() refuses that line anyway).
     local sensor="$1" state="$2" hard="$3"
     [ "$sensor" = lidar ] || return 0
-    if [ "$hard" = --hard ]; then
-        echo deactivate
-    elif [ "$state" = on ]; then
+    if [ "$state" = on ]; then
         echo activate  # a hard off is undone by the plain on: never leave /scan stopped by accident
+    elif [ "$hard" = --hard ]; then
+        echo deactivate
     fi
 }
 
@@ -257,7 +259,16 @@ switch() {  # SENSOR on|off [--hard]: the flag, the layers and, for the lidar, t
     [ "$state" = on ] || [ "$state" = off ] || usage
     case "$hard" in
         "") ;;
-        --hard) [ "$sensor" = lidar ] || { echo "--hard belongs to the lidar only"; exit 2; } ;;
+        --hard)
+            [ "$sensor" = lidar ] || { echo "--hard belongs to the lidar only"; exit 2; }
+            # "on --hard" reads as "on, and mean it"; it used to mean "on everywhere, then stop
+            # the driver" — the tracker and both costmaps told to use a lidar that no longer
+            # publishes. There is no deep half of an on, so the line is refused, not guessed.
+            [ "$state" = off ] || {
+                echo "--hard belongs to 'lidar off': it stops the driver, and 'lidar on' is what"
+                echo "starts it again"
+                exit 2
+            } ;;
         *) usage ;;
     esac
     echo "$sensor $state${hard:+ (hard)}:"

@@ -331,6 +331,24 @@ def test_lidar_off_leaves_the_driver_alone_and_hard_off_deactivates_it(tmp_path)
     assert "/ldlidar_node inactive -> active" in out
 
 
+def test_hard_is_refused_on_an_on_instead_of_stopping_the_driver_it_just_switched_on(  # type: ignore[no-untyped-def]
+    tmp_path,
+) -> None:
+    """`lidar on --hard` used to put the lidar back into the tracker's sources and into both
+    costmaps and then deactivate the driver: everything told to use a lidar that no longer
+    publishes. --hard is the deep half of an off; on an `on` the line is refused, and nothing
+    at all is applied."""
+    code, out, sent = _sensor(
+        tmp_path, "lidar", "on", "--hard", FAKE_SOURCES="depth,contact", FAKE_LAYERS="false"
+    )
+    assert code == 2, out
+    assert "--hard belongs to 'lidar off'" in out
+    assert sent == [], sent
+    # and the usage line no longer advertises the form it refuses
+    code, out, _ = _sensor(tmp_path, "lidar")
+    assert code == 2 and "lidar on|off | lidar off --hard" in out, out
+
+
 def test_the_lifecycle_half_is_refused_under_a_running_goal_and_under_a_blind_guard(  # type: ignore[no-untyped-def]
     tmp_path,
 ) -> None:
