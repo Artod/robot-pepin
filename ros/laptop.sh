@@ -4,9 +4,14 @@
 #   ros/laptop.sh            start (or restart) the bridge and the laptop-side Nav2 launch
 #   ros/laptop.sh stop       stop both
 #   ros/laptop.sh logs       follow the launch's output
-#   ros/laptop.sh vslam      start (or restart) the camera SLAM container beside them; the
-#                            RTAB-Map database (ros/maps/rtabmap.db) is kept: the map survives
-#   ros/laptop.sh vslam --fresh   the same from an empty database (the old one is deleted first)
+#   ros/laptop.sh vslam      start (or restart) the camera mapping container beside them, in the
+#                            mode `start` last read from the board (ros/.mode): beside the known
+#                            map the RTAB-Map database (ros/maps/rtabmap.db) is kept and the map
+#                            survives; in SLAM mode the session starts from an empty one
+#   ros/laptop.sh vslam --slam | --known-map   force the mode instead of taking the recorded one
+#   ros/laptop.sh vslam --camera-only   SLAM without the lidar: the grid is the camera's depth
+#   ros/laptop.sh vslam --resume  SLAM from the session's existing database instead of empty
+#   ros/laptop.sh vslam --fresh   delete this mode's database before the run
 #   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
 #                            neck on): the camera node here keeps its static edge off
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
@@ -59,7 +64,7 @@ kick_target() {  # node name -> "container|start-up line"
         depth_stream) echo "pepin-vslam|depth stream up" ;;
         contact_scan) echo "pepin-vslam|contact scan up" ;;
         depth_fusion) echo "pepin-vslam|fusion up: " ;;
-        rtabmap_frame) echo "pepin-vslam|map -> rtabmap follows" ;;
+        rtabmap_frame) echo "pepin-vslam|rtabmap frame up: " ;;
         goal_server) echo "pepin-laptop|goal server ready on port" ;;
         *) return 1 ;;
     esac
@@ -120,19 +125,39 @@ case "${1:-start}" in
         done
         echo "$NAME did not print '$LINE' within 120 s: ros/laptop.sh logs ${C#pepin-}"; exit 4 ;;
     vslam)
-        # Camera + lidar SLAM beside the navigation half (ros/pepin_bringup/launch/vslam.launch.py).
-        # The database is the map: it is kept across restarts (the launch never wipes it) and
-        # deleted only here, on request.
-        if [ "${2:-}" = --fresh ]; then
+        # Camera + lidar mapping beside the navigation half (ros/pepin_bringup/launch/vslam.launch.py),
+        # in one of two modes. Beside a KNOWN map the database is the map: it is kept across
+        # restarts (the launch never wipes it) and deleted only here, on request. In SLAM mode
+        # the map is what this session builds, in a database of its own, empty unless --resume.
+        #
+        # Which mode: the flags win, otherwise the one ros/laptop.sh start recorded when it last
+        # read the board (ros/.mode) — one source of truth, the board's own /etc/default/pepin-ros,
+        # read once on the only path that talks to it. This subcommand asks the board nothing.
+        MODE="$(cat "$HERE/.mode" 2>/dev/null || echo vision)"
+        if [ "$MODE" = slam ]; then SLAM=true; else SLAM=false; fi
+        CAMERA_ONLY=false; RESUME=false; FRESH=false
+        # --neck: the board's neck node publishes base_link -> camera_link live (ros/feature.sh
+        # neck on), so the camera node's static edge goes off. Explicit on purpose: a wrong guess
+        # would be two publishers of one edge; the camera node's report warns of a mismatch.
+        STATIC_CAMERA_TF=true
+        for arg in ${*:2}; do
+            case "$arg" in
+                --slam) SLAM=true ;;
+                --known-map) SLAM=false ;;
+                --camera-only) CAMERA_ONLY=true ;;
+                --resume) RESUME=true ;;
+                --fresh) FRESH=true ;;
+                --neck) STATIC_CAMERA_TF=false ;;
+                *) echo "usage: ros/laptop.sh vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck]"; exit 2 ;;
+            esac
+        done
+        if [ "$FRESH" = true ] && [ "$SLAM" = true ]; then
+            rm -f "$HERE"/maps/rtabmap_slam.db "$HERE"/maps/rtabmap_slam.db-*
+            echo "vslam: ros/maps/rtabmap_slam.db deleted (a SLAM session starts empty anyway)"
+        elif [ "$FRESH" = true ]; then
             rm -f "$HERE"/maps/rtabmap.db "$HERE"/maps/rtabmap.db-*
             echo "vslam: ros/maps/rtabmap.db deleted; RTAB-Map starts an empty map"
         fi
-        # --neck anywhere after the subcommand: the board's neck node publishes base_link ->
-        # camera_link live (ros/feature.sh neck on), so the camera node's static edge goes off.
-        # Explicit on both sides on purpose: this subcommand never asks the board, and a wrong
-        # guess would be two publishers of one edge; the camera node's report warns of a mismatch.
-        STATIC_CAMERA_TF=true
-        case " ${*:2} " in *" --neck "*) STATIC_CAMERA_TF=false ;; esac
         stop_gently pepin-vslam
         # The depth network on the laptop's GPU (ros/depth_host.sh): 20 ms a frame on Metal
         # against 170 ms on the CPU in the container (2026-09-11), so it is on wherever it can
@@ -149,10 +174,14 @@ case "${1:-start}" in
         fi
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
             -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} \
-            "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" >/dev/null
-        echo "vslam up (RTAB-Map + camera + depth, static camera tf $STATIC_CAMERA_TF): Foxglove at ws://localhost:8765, ros/laptop.sh logs vslam"; exit 0 ;;
+            "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
+            "slam:=$SLAM" "camera_only:=$CAMERA_ONLY" "resume:=$RESUME" >/dev/null
+        [ "$SLAM" = true ] \
+            && echo "vslam up in SLAM mode (camera_only $CAMERA_ONLY, resume $RESUME, static camera tf $STATIC_CAMERA_TF): the map grows on /map; board must be on ros/thin.sh slam. Foxglove ws://localhost:8765, save with ros/map.sh save NAME" \
+            || echo "vslam up beside the known map (static camera tf $STATIC_CAMERA_TF): Foxglove at ws://localhost:8765, ros/laptop.sh logs vslam"
+        exit 0 ;;
     start) ;;
-    *) echo "usage: ros/laptop.sh [start | stop | logs [vslam] | vslam [--fresh] [--neck] | kick NODE]"; exit 2 ;;
+    *) echo "usage: ros/laptop.sh [start | stop | logs [vslam] | vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck] | kick NODE]"; exit 2 ;;
 esac
 # Which half the board expects: on side=all (ros/thin.sh vision) the board drives by itself and
 # this side starts only the bridge — RTAB-Map and the camera come with "ros/laptop.sh vslam".
@@ -161,14 +190,25 @@ esac
 # No PEPIN_SIDE line in the board's file is side=all (ros/thin.sh vision and off delete it).
 SIDE="$(ssh "root@$BOARD" "grep -oE '^PEPIN_SIDE=.*' /etc/default/pepin-ros || echo PEPIN_SIDE=all" 2>/dev/null | cut -d= -f2 || true)"
 [ -n "$SIDE" ] || { echo "cannot read the board's side over ssh (root@$BOARD, /etc/default/pepin-ros): is it up?"; exit 1; }
+# ...and whether it is mapping from scratch: in SLAM mode the board serves no map, so /map and
+# the correction travel the other way and the bridge needs its own allow-list. No line at all is
+# false (ros/thin.sh on, vision and off delete it).
+SLAM_ON="$(ssh "root@$BOARD" "grep -oE '^PEPIN_SLAM=.*' /etc/default/pepin-ros || echo PEPIN_SLAM=false" 2>/dev/null | cut -d= -f2 || true)"
 if [ "$SIDE" = board ]; then
     # The map here chooses the places book, so it must be the board's map, not merely a valid one.
     MAP="${PEPIN_MAP:-$(ssh "root@$BOARD" "grep -oE '^PEPIN_MAP=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2 || true)}"
     [ -n "$MAP" ] || { echo "the board does not say which map it runs (ros/mode.sh nav MAP first)"; exit 1; }
     CONFIG=zenoh-bridge-laptop.json  # the split: this side publishes the plan and takes goals
+    MODE=split
+elif [ "$SLAM_ON" = true ]; then
+    CONFIG=zenoh-bridge-laptop-slam.json  # this side publishes the only map there is
+    MODE=slam
 else
     CONFIG=zenoh-bridge-laptop-vision.json  # the board publishes the plan too; this side maps only
+    MODE=vision
 fi
+# The mode the board is in, recorded for `ros/laptop.sh vslam`, which never asks the board itself.
+printf '%s\n' "$MODE" > "$HERE/.mode"
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 stop_gently pepin-laptop; docker rm -f pepin-zenoh >/dev/null 2>&1 || true
 # The board's bridge must be alive before this side connects: its REST admin answers when its
@@ -182,13 +222,13 @@ curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' || { echo
 # connecting to the board's: the pairing measured to pass samples (peer and client here did not).
 # The allow-lists (pepin.deployment.bridge_config) are one-way by side AND by mode: a topic
 # allowed as a publisher on both sides loops.
-echo "laptop bridge: restarting with $CONFIG (board on side=$SIDE)"
+echo "laptop bridge: restarting with $CONFIG (board on side=$SIDE, mode $MODE)"
 docker run -d --name pepin-zenoh --network "$NET" -p 8001:8000 -v "$HERE/$CONFIG:/config.json:ro" \
     -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.7.0 -c /config.json \
     -e "tcp/$BOARD:7447" -d 7 --rest-http-port 8000 >/dev/null
 settle_bridge  # BEFORE the containers: their subscriptions must be made against the bridge they will live with
 if [ "$SIDE" != board ]; then
-    echo "board on side=$SIDE: it drives by itself; bridge up for the laptop's SLAM (ros/laptop.sh vslam)"; exit 0
+    echo "board on side=$SIDE, mode $MODE: it drives by itself; bridge up for the laptop's mapping (ros/laptop.sh vslam)"; exit 0
 fi
 docker run -d --name pepin-laptop --network "$NET" -p 3337:3337 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
     -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \

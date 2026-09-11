@@ -29,6 +29,8 @@ ros/maps/*.data
 ros/maps/*_throttle*
 .coverage
 ros/maps/rtabmap*.db*
+# the board's mode, recorded by ros/laptop.sh start so ros/laptop.sh vslam need not ask
+ros/.mode
 ros/maps/last_pose.json
 
 # written by the depth node at run time (the persisted affine law)
