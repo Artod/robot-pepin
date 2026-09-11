@@ -108,6 +108,14 @@ def test_sync_write_packet_and_no_reply_expected(client) -> None:
     assert fake.sent[-1] == bytes.fromhex("ff ff fe 0a 83 2e 02 07 64 80 08 64 00 ed")
 
 
+def test_a_position_goal_is_two_plain_bytes_at_address_42(client) -> None:
+    """Goal_Position carries no sign bit, unlike the velocities around it: a neck goal of 2021
+    ticks must go out as e5 07, not as a sign-magnitude number."""
+    c, fake = client
+    c.sync_write("Goal_Position", {"left": 2021}, normalize=False)
+    assert fake.sent[-1] == bytes.fromhex("ff ff fe 07 83 2a 02 07 e5 07 58")
+
+
 def test_write_waits_for_the_status_reply(client) -> None:
     c, fake = client
     fake.rx = [status(7, b"")]

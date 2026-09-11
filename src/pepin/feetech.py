@@ -46,6 +46,8 @@ class Register:
 REGISTERS = {
     "Operating_Mode": Register(33, 1),
     "Torque_Enable": Register(40, 1),
+    # A position-mode goal, 0..4095 within one turn: no sign bit, unlike the velocities below.
+    "Goal_Position": Register(42, 2),
     "Goal_Velocity": Register(46, 2, sign_magnitude=True),
     "Present_Position": Register(56, 2, sign_magnitude=True),
     "Present_Velocity": Register(58, 2, sign_magnitude=True),
