@@ -1,17 +1,23 @@
-"""Just enough of ROS for ``pepin_bringup.node_kit`` and ``pepin_bringup.msgs`` to import here.
+"""Just enough of ROS for the ``pepin_bringup`` modules to import and run here.
 
 rclpy is not installed on the laptop, so the ROS package cannot be imported by the unit tests —
-except its two pure modules, whose ROS imports are message classes (fields with defaults) and a
+except its pure modules, whose ROS imports are message classes (fields with defaults) and a
 handful of rclpy names. :func:`install` puts fakes of exactly those into ``sys.modules`` (once,
 idempotent) and puts ``ros/pepin_bringup`` on the path, the way ``test_ros_bridge_protocol``
 reaches ``pepin_bringup.protocol``. The fakes hold the fields the real messages have and nothing
 else: a codec that wrote a field the message lacks would fail here as it would on the robot.
+
+Beside the messages there is enough of :class:`Node` — parameters with the overrides of
+:func:`parameters`, publishers that keep what they were handed, timers, a clock, a logger — for
+a whole node to be built in a test and driven through :func:`pepin_bringup.node_kit.spin_main`.
 """
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import types
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -90,6 +96,17 @@ Imu = _msg(
     orientation=Quaternion,
     angular_velocity=Vector3,
     linear_acceleration=Vector3,
+)
+CameraInfo = _msg(
+    "CameraInfo",
+    header=Header,
+    height=0,
+    width=0,
+    distortion_model="",
+    d=list,
+    k=lambda: [0.0] * 9,
+    r=lambda: [0.0] * 9,
+    p=lambda: [0.0] * 12,
 )
 SetParametersResult = _msg("SetParametersResult", successful=False, reason="")
 IntegerRange = _msg("IntegerRange", from_value=0, to_value=0, step=0)
@@ -204,6 +221,144 @@ class _Thread:
         self.joined = True
 
 
+class StaticTransformBroadcaster:
+    """tf2_ros': keeps every transform a node asked it to send, in order."""
+
+    def __init__(self, node: Any) -> None:
+        self.node = node
+        self.sent: list[Any] = []
+
+    def sendTransform(self, transforms: Any) -> None:  # noqa: N802 — tf2_ros' own name
+        self.sent.extend(transforms if isinstance(transforms, list) else [transforms])
+
+
+class QoSProfile:
+    """rclpy.qos.QoSProfile: what a publisher was created with, for a test to check."""
+
+    def __init__(self, *, depth: int = 10, reliability: Any = None, **rest: Any) -> None:
+        self.depth, self.reliability, self.rest = depth, reliability, rest
+
+
+class ReliabilityPolicy:
+    """rclpy.qos.ReliabilityPolicy, the two the nodes here ask for."""
+
+    RELIABLE = "reliable"
+    BEST_EFFORT = "best_effort"
+
+
+class Publisher:
+    """A publisher that publishes into a list: ``sent`` is what went out on the topic."""
+
+    def __init__(self, msg_type: Any, topic: str, qos: Any) -> None:
+        self.msg_type, self.topic, self.qos = msg_type, topic, qos
+        self.sent: list[Any] = []
+
+    def publish(self, msg: Any) -> None:
+        self.sent.append(msg)
+
+
+class Clock:
+    """rclpy's clock: ``now()`` is whatever ``seconds`` says, so a test owns the time."""
+
+    def __init__(self, seconds: float = 0.0) -> None:
+        self.seconds = seconds
+
+    def now(self) -> RclpyTime:
+        return RclpyTime(nanoseconds=round(self.seconds * 1e9))
+
+
+class Logger:
+    """rclpy's logger: every line, with its level, kept for the test to read."""
+
+    def __init__(self) -> None:
+        self.lines: list[tuple[str, str]] = []
+
+    def info(self, text: str, **rest: Any) -> None:
+        self.lines.append(("info", text))
+
+    def warning(self, text: str, **rest: Any) -> None:
+        self.lines.append(("warning", text))
+
+    def error(self, text: str, **rest: Any) -> None:
+        self.lines.append(("error", text))
+
+    def debug(self, text: str, **rest: Any) -> None:
+        self.lines.append(("debug", text))
+
+    def texts(self, level: str | None = None) -> list[str]:
+        """The lines said so far, of one level or of all of them."""
+        return [text for kind, text in self.lines if level is None or kind == level]
+
+
+PARAMETERS: dict[str, Any] = {}  # what declare_parameter answers instead of the node's default
+
+
+@contextlib.contextmanager
+def parameters(**values: Any) -> Iterator[None]:
+    """The parameter overrides a launch would pass on the command line, for the nodes built
+    inside the block (``with parameters(board='127.0.0.1'): node = CameraStream()``)."""
+    PARAMETERS.update(values)
+    try:
+        yield
+    finally:
+        for name in values:
+            PARAMETERS.pop(name, None)
+
+
+class Parameter:
+    """What ``declare_parameter`` returns: the value the node reads back."""
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+
+class Node:
+    """rclpy.node.Node as the nodes here use it: parameters over :data:`PARAMETERS`, publishers
+    and subscriptions kept by topic, timers kept by period, one clock and one logger."""
+
+    def __init__(self, name: str) -> None:
+        self.node_name = name
+        self.declared: dict[str, Any] = {}
+        self.pubs: dict[str, Publisher] = {}
+        self.subs: dict[str, tuple[Any, Any]] = {}  # topic -> (message type, callback)
+        self.timers: list[tuple[float, Any]] = []
+        self.parameter_callbacks: list[Any] = []
+        self.clock = Clock()
+        self.logger = Logger()
+        self.destroyed = False
+
+    def declare_parameter(self, name: str, default: Any) -> Parameter:
+        self.declared[name] = default
+        return Parameter(PARAMETERS.get(name, default))
+
+    def add_on_set_parameters_callback(self, callback: Any) -> None:
+        self.parameter_callbacks.append(callback)
+
+    def set_parameters(self, params: list[Any]) -> list[Any]:
+        """What ``ros2 param set`` does: every callback is asked, the first refusal is the
+        answer."""
+        return [callback(params) for callback in self.parameter_callbacks]
+
+    def create_publisher(self, msg_type: Any, topic: str, qos: Any) -> Publisher:
+        self.pubs[topic] = Publisher(msg_type, topic, qos)
+        return self.pubs[topic]
+
+    def create_subscription(self, msg_type: Any, topic: str, callback: Any, qos: Any) -> None:
+        self.subs[topic] = (msg_type, callback)
+
+    def create_timer(self, period_s: float, callback: Any) -> None:
+        self.timers.append((period_s, callback))
+
+    def get_clock(self) -> Clock:
+        return self.clock
+
+    def get_logger(self) -> Logger:
+        return self.logger
+
+    def destroy_node(self) -> None:
+        self.destroyed = True
+
+
 class Rclpy(types.ModuleType):
     """The ``rclpy`` module a test drives: ``spin`` runs whatever ``on_spin`` is set to."""
 
@@ -243,6 +398,13 @@ def install() -> Any:
     modules = {
         "rclpy": rclpy,
         "rclpy.time": _module("rclpy.time", Time=RclpyTime),
+        "rclpy.node": _module("rclpy.node", Node=Node),
+        "rclpy.qos": _module(
+            "rclpy.qos",
+            QoSProfile=QoSProfile,
+            ReliabilityPolicy=ReliabilityPolicy,
+            qos_profile_sensor_data=QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT),
+        ),
         "rclpy.duration": _module("rclpy.duration", Duration=Duration),
         "rclpy.executors": _module(
             "rclpy.executors", ExternalShutdownException=ExternalShutdownException
@@ -273,13 +435,19 @@ def install() -> Any:
         "sensor_msgs": _module("sensor_msgs"),
         "sensor_msgs.msg": _module(
             "sensor_msgs.msg",
+            CameraInfo=CameraInfo,
             Image=Image,
             LaserScan=LaserScan,
             PointCloud2=PointCloud2,
             PointField=PointField,
             Imu=Imu,
         ),
-        "tf2_ros": _module("tf2_ros", Buffer=Buffer, TransformListener=TransformListener),
+        "tf2_ros": _module(
+            "tf2_ros",
+            Buffer=Buffer,
+            TransformListener=TransformListener,
+            StaticTransformBroadcaster=StaticTransformBroadcaster,
+        ),
     }
     sys.modules.update(modules)
     package = str(REPO / "ros" / "pepin_bringup")
