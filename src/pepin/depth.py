@@ -72,6 +72,26 @@ class CameraPose:
     z: float
     pitch: float = 0.0
 
+    @classmethod
+    def from_optical(cls, rotation: Array, translation: Array) -> CameraPose:
+        """The pose from ``base_link <- camera_optical`` (the live TF edge when the neck
+        moves): the translation as is (the optical frame shares the link's origin) and the
+        pitch of the optical axis. A pan of the head is not carried — the projections here
+        assume the camera looks along base_link's x (:func:`optical_heading` says how far it
+        does not)."""
+        t = np.asarray(translation, dtype=float)
+        pitch, _pan = optical_heading(rotation)
+        return cls(float(t[0]), float(t[1]), float(t[2]), pitch)
+
+
+def optical_heading(rotation: Array) -> tuple[float, float]:
+    """Where a camera looks, from ``base_link <- camera_optical``'s rotation: the optical axis
+    (the frame's z) as a pitch (radians, positive down) and a pan (radians, positive left) in
+    base_link."""
+    forward = np.asarray(rotation, dtype=float)[:, 2]
+    pitch = math.atan2(-float(forward[2]), math.hypot(float(forward[0]), float(forward[1])))
+    return pitch, math.atan2(float(forward[1]), float(forward[0]))
+
 
 def scan_points(ranges: Array, angle_min: float, angle_increment: float, range_max: float) -> Array:
     """The valid beams of a scan as (n, 2) x-y points in the lidar's frame."""

@@ -351,6 +351,19 @@ class Result:
                 return v
         raise KeyError(name)
 
+    def before(self, name: str) -> Array:
+        """The depth as it stood when the stage called ``name`` began: the raw depth when no
+        stage ran before it, else the output of the last one that did (the node's scan is
+        built from the depth before the floor anchor, so what stops the cart is what was
+        measured). ``KeyError`` when the run never reached that stage."""
+        out = self.frame.raw
+        for v in self.verdicts:
+            if v.stage == name:
+                return out
+            if v.on:
+                out = self.after[v.stage]
+        raise KeyError(name)
+
 
 class DepthPipeline:
     """An ordered list of stages, each switchable by name (a node's flags), run on every

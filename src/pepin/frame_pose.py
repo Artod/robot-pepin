@@ -8,8 +8,10 @@ asks one :class:`PoseHistory` — TF in a node, a tape offline, a fake in a test
 the two questions the pipeline has: :meth:`FramePoser.carry` moves base_link points from the
 scan's moment to the frame's through the odometry frame (smooth, so a tracker correction
 between the two stamps does not tear the scan), and :meth:`FramePoser.camera_in_map` places the
-camera at the frame's stamp for the model. Stamps are seconds; poses are
-:class:`pepin.tsdf.RigidPose` (rotation and translation, ``fixed <- frame``).
+camera at the frame's stamp for the model — and a third, now that the neck moves:
+:meth:`FramePoser.camera_in_base` is where the camera sat on the cart at the frame's stamp,
+for the pipeline's projections. Stamps are seconds; poses are :class:`pepin.tsdf.RigidPose`
+(rotation and translation, ``fixed <- frame``).
 """
 
 from __future__ import annotations
@@ -63,6 +65,13 @@ class FramePoser:
         """``map <- camera_optical`` at ``stamp``: where the picture was taken from, for the
         model; ``None`` when the history cannot say."""
         return self._history.pose_at(stamp, self.camera, self.map_frame)
+
+    def camera_in_base(self, stamp: float) -> RigidPose | None:
+        """``base_link <- camera_optical`` at ``stamp``: where the camera sat on the cart when
+        the picture was taken — live once the neck's encoders publish the edge, so the depth
+        pipeline's camera pose is asked here and not read from a file; ``None`` when the
+        history has no such edge."""
+        return self._history.pose_at(stamp, self.camera, self.base)
 
     def motion(self, from_stamp: float, to_stamp: float) -> RigidPose | None:
         """How base_link moved between two stamps, seen through the odometry frame: the

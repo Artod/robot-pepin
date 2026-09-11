@@ -195,6 +195,30 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
     assert pipeline.stats["edge_filter"].frames == 0
 
 
+def test_the_depth_before_a_stage_is_the_last_output_before_it_or_the_raw() -> None:
+    """The node's scan is built from the depth as it stood before the floor anchor: the law's
+    output by default, the wall correction's when that is on, the raw depth when nothing
+    before the anchor ran; a stage the run never reached has no before."""
+    law = AffineLaw()
+    law.seed(1.4, 0.01)
+    raw = _network(_scene(2.0), 1.4, 0.01, noise=0.0, seed=0)
+    pipeline = standard_pipeline(law)
+    result = pipeline.run(raw, _context(_wall_returns(2.0)))
+    assert result.before("floor_anchor") is result.after["affine_law"]
+    assert result.before("edge_filter") is result.frame.raw
+    assert result.before("lidar_anchor") is result.after["edge_filter"]
+    corrected = standard_pipeline(law, wall_correct=True)
+    result = corrected.run(raw, _context(_wall_returns(2.0)))
+    assert result.before("floor_anchor") is result.after["wall_correct"]
+    bare = DepthPipeline([EdgeFilter(), FloorAnchor()], off=["edge_filter"])
+    result = bare.run(raw, _context(None))
+    assert result.before("floor_anchor") is result.frame.raw
+    stopped = standard_pipeline().run(raw, _context(None))  # withheld at the law
+    assert stopped.withheld
+    with pytest.raises(KeyError):
+        stopped.before("floor_anchor")
+
+
 def test_a_seeded_law_publishes_at_once_and_pairs_join_and_carry_their_lift() -> None:
     law = AffineLaw()
     law.seed(1.4, 0.01)

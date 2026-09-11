@@ -584,3 +584,24 @@ def test_a_law_file_that_is_not_a_law_is_refused(tmp_path: Path) -> None:
     ):
         path.write_text(text)
         assert load_law(path, now=0.0) is None, text
+
+
+def test_the_camera_pose_is_read_off_the_optical_edge_pitch_kept_pan_reported() -> None:
+    """base_link <- camera_optical as TF carries it (the neck's pitch and pan, then REP 103's
+    optical turn): the pose the pipeline wants has the translation as is and the pitch of the
+    optical axis; the pan is not carried, but optical_heading says how far the head is turned."""
+    from pepin.camera import OPTICAL_RPY
+    from pepin.depth import optical_heading
+    from pepin.mounts import rotation_from_rpy
+
+    optical = rotation_from_rpy(*OPTICAL_RPY)
+    straight = rotation_from_rpy(0.0, math.radians(31.5), 0.0) @ optical
+    cam = CameraPose.from_optical(straight, np.array([0.02, -0.01, 1.2]))
+    assert (cam.x, cam.y, cam.z) == (0.02, -0.01, 1.2)
+    assert cam.pitch == pytest.approx(math.radians(31.5))
+    assert optical_heading(straight) == pytest.approx((math.radians(31.5), 0.0))
+    panned = rotation_from_rpy(0.0, math.radians(31.5), math.radians(-20.0)) @ optical
+    assert CameraPose.from_optical(panned, np.zeros(3)).pitch == pytest.approx(math.radians(31.5))
+    assert optical_heading(panned) == pytest.approx((math.radians(31.5), math.radians(-20.0)))
+    # the optical axis of the level, unturned camera is base_link's x: no pitch, no pan
+    assert optical_heading(optical) == pytest.approx((0.0, 0.0))

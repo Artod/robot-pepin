@@ -76,6 +76,9 @@ def test_the_camera_and_the_cart_are_placed_in_the_map_at_the_stamp() -> None:
     assert on_map is not None
     assert on_map[0] == pytest.approx([4.0 + math.cos(1.2), 2.0 + math.sin(1.2), 0.0])
     assert poser.camera_in_map(-5.0) is None and poser.to_map(np.zeros((1, 3)), -5.0) is None
+    on_cart = FramePoser(FakeHistory()).camera_in_base(2.0)  # the fake's mount
+    assert on_cart is not None and on_cart.translation[2] == pytest.approx(1.23)
+    assert FramePoser(FakeHistory()).camera_in_base(-1.0) is None
 
 
 def test_the_frames_asked_for_are_the_poser_s_own_names() -> None:
@@ -83,6 +86,12 @@ def test_the_frames_asked_for_are_the_poser_s_own_names() -> None:
     poser = FramePoser(history, base="base", camera="cam", map_frame="world", odom_frame="odo")
     poser.camera_in_map(1.0)
     poser.carry(np.zeros((1, 3)), 0.0, 1.0)
-    assert history.asked == [(1.0, "cam", "world"), (0.0, "base", "odo"), (1.0, "base", "odo")]
+    poser.camera_in_base(2.0)
+    assert history.asked == [
+        (1.0, "cam", "world"),
+        (0.0, "base", "odo"),
+        (1.0, "base", "odo"),
+        (2.0, "cam", "base"),
+    ]
     fake: PoseHistory = history  # the fake satisfies the protocol
     assert fake.pose_at(0.0, "base", "odo") is not None
