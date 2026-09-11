@@ -34,12 +34,13 @@ talk to the servo bus directly (`scripts/base_smoke.py`, `jog.py`,
 | `board/wifi-runtime-pm-on.conf` | `/etc/systemd/system/wifi-powersave-off.service.d/runtime-pm-on.conf` |
 | `src/pepin/` (the package, stdlib only on the board) | `/opt/pepin/pepin/` |
 | `config/base.json` | `/opt/pepin/config/base.json` |
+| `config/neck.json` | `/opt/pepin/config/neck.json` (the ids the `neck` command reads; absent, that command answers an error and the wheels do not care) |
 
 Deploy the package and the configuration from the laptop:
 
 ```bash
 rsync -a --delete --exclude '__pycache__' src/pepin/ root@pepin.local:/opt/pepin/pepin/
-scp config/base.json root@pepin.local:/opt/pepin/config/base.json
+scp config/base.json config/neck.json root@pepin.local:/opt/pepin/config/
 ssh root@pepin.local 'systemctl restart pepin-base pepin-tof'
 ```
 

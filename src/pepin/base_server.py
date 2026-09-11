@@ -13,6 +13,12 @@ always be pushed by hand when idle. Nothing that talks to a laptop runs on
 the tick thread: each client has its own reader and writer threads, and a
 laptop that stops reading is dropped, not waited for.
 
+The neck's two servos share the bus. A ``neck`` request answers their
+encoders (:class:`NeckReader`): one extra bus round trip, cached so that a
+client polling at any rate costs at most twenty reads a second, and after a
+silent servo retried only at rest — a silent id costs 0.4 s of this thread,
+and the wheels come first. The neck is never commanded from here.
+
 Run on the board::
 
     python -m pepin.base_server --config /opt/pepin/config/base.json
@@ -36,11 +42,76 @@ from pepin.bus import MotorBus, verify_motors
 from pepin.feetech import FeetechTcpClient
 from pepin.geometry import BaseConfig
 from pepin.kinematics import STOP, Twist
+from pepin.neck import PAN, TILT, neck_servo_ids
 from pepin.odometry import DiffDriveOdometry
 from pepin.streams import JsonLinesServer
 from pepin.telemetry import LatencyTracker
 
 logger = logging.getLogger(__name__)
+
+# The commands that make a client a driver of the wheels; the wheels are released when the last
+# such client leaves, whoever else is still connected and merely asking (pepin.streams).
+DRIVING_COMMANDS = frozenset({"twist", "stop"})
+
+
+class NeckReader:
+    """The neck's encoders through the wheels' bus, cached: refreshed at most every ``period_s``,
+    and after a silent servo retried only at rest and after ``retry_s`` — a silent id costs
+    0.4 s of the tick thread, and the deadman lives there."""
+
+    def __init__(
+        self,
+        bus: MotorBus,
+        names: tuple[str, str] = (PAN, TILT),
+        *,
+        period_s: float = 0.05,
+        retry_s: float = 5.0,
+    ) -> None:
+        """``names`` are the (pan, tilt) motor names on ``bus``."""
+        self._bus = bus
+        self._names = names
+        self._period_s = period_s
+        self._retry_s = retry_s
+        self._ticks: tuple[int, int] | None = None
+        self._read_at: float | None = None
+        self._read_s = 0.0  # the last round trip, seconds
+        self._failed_at: float | None = None
+        self._error: str | None = None
+        self.latency = LatencyTracker("neck.read")
+
+    def read(self, now: float, *, at_rest: bool) -> dict[str, Any]:
+        """The ``neck`` reply at ``now``: fresh from the bus when the cache is older than the
+        period (a failed servo is retried only ``at_rest``), the cache otherwise."""
+        fresh = self._read_at is not None and now - self._read_at < self._period_s
+        failed_at = self._failed_at
+        held = failed_at is not None and (not at_rest or now - failed_at < self._retry_s)
+        if not fresh and not held:
+            self._refresh(now)
+        return self._reply(now)
+
+    def _refresh(self, now: float) -> None:
+        started = time.perf_counter()
+        try:
+            raw = self._bus.sync_read("Present_Position", list(self._names), normalize=False)
+        except (TimeoutError, OSError) as exc:
+            self._failed_at, self._error = now, str(exc)
+            logger.warning("neck encoders: %s", exc)
+            return
+        self._read_s = time.perf_counter() - started
+        self.latency.add(self._read_s)
+        self._ticks = (raw[self._names[0]], raw[self._names[1]])
+        self._read_at = now
+        self._failed_at, self._error = None, None
+
+    def _reply(self, now: float) -> dict[str, Any]:
+        reply: dict[str, Any] = {"type": "neck"}
+        if self._ticks is not None and self._read_at is not None:
+            reply["pan_ticks"], reply["tilt_ticks"] = self._ticks
+            reply["age_s"] = now - self._read_at
+            reply["read_ms"] = self._read_s * 1000.0
+        if self._error is not None:
+            reply["error"] = self._error
+        return reply
 
 
 class BaseServerCore:
@@ -55,8 +126,10 @@ class BaseServerCore:
         deadman_s: float = DEADMAN_S,
         disarm_after_s: float = 10.0,
         latency: LatencyTracker | None = None,
+        neck: NeckReader | None = None,
     ) -> None:
-        """``servo_names``: the roster :meth:`command` pings; ``latency`` feeds ``bus_p95_ms``."""
+        """``servo_names``: the roster :meth:`command` pings; ``latency`` feeds ``bus_p95_ms``;
+        ``neck`` answers the ``neck`` command (None: the command answers an error)."""
         self._bus = bus
         self._base = DiffDriveBase(bus, config)
         self._odom = DiffDriveOdometry(config.geometry)
@@ -64,6 +137,7 @@ class BaseServerCore:
         self._deadman_s = deadman_s
         self._disarm_after_s = disarm_after_s
         self._latency = latency
+        self._neck = neck
         self._watchdog = BusWatchdog()
         self.twist = STOP
         self.armed = False
@@ -80,7 +154,8 @@ class BaseServerCore:
         return self.twist.linear != 0.0 or self.twist.angular != 0.0
 
     def command(self, message: dict[str, Any], now: float) -> dict[str, Any] | None:
-        """Apply one client message; returns a reply for requests that have one (``ping``)."""
+        """Apply one client message; returns a reply for requests that have one (``ping``,
+        ``neck``)."""
         cmd = message.get("cmd")
         if cmd == "twist":
             self._last_command_at = now
@@ -104,6 +179,10 @@ class BaseServerCore:
                 return {"type": "pong", "busy": True}
             answers = {name: self._bus.ping(name) is not None for name in self._servo_names}
             return {"type": "pong", "servos": answers}
+        elif cmd == "neck":
+            if self._neck is None:
+                return {"type": "neck", "error": "no neck configured on this base server"}
+            return self._neck.read(now, at_rest=not self.moving)
         else:
             logger.warning("unknown command %r", message)
         return None
@@ -277,6 +356,11 @@ def main() -> None:
     parser.add_argument(
         "--servos", default="1-10", help="bus ids the ping command checks, e.g. 1-10"
     )
+    parser.add_argument(
+        "--neck-config",
+        default="/opt/pepin/config/neck.json",
+        help="the neck's servos (config/neck.json) the neck command reads; absent: an error reply",
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname).1s %(name)s: %(message)s"
@@ -284,6 +368,8 @@ def main() -> None:
 
     config = BaseConfig.from_json(args.config)
     motors = DiffDriveBase.motor_ids(config)
+    neck_ids = load_neck_ids(args.neck_config)
+    motors.update(neck_ids)  # ids 9 and 10 by their names, before the roster fills the rest
     first, last = (int(x) for x in args.servos.split("-"))
     for motor_id in range(first, last + 1):
         if motor_id not in motors.values():
@@ -293,9 +379,22 @@ def main() -> None:
     if bus is None:
         return  # stopped before the bus ever answered
     with bus:
-        core = BaseServerCore(bus, config, servo_names=list(motors), latency=bus.latency)
-        server = JsonLinesServer(args.port, on_last_client_left={"cmd": "release"}).start()
+        neck = NeckReader(bus, (PAN, TILT)) if neck_ids else None
+        core = BaseServerCore(bus, config, servo_names=list(motors), latency=bus.latency, neck=neck)
+        server = JsonLinesServer(
+            args.port, on_last_client_left={"cmd": "release"}, driving_commands=DRIVING_COMMANDS
+        ).start()
         serve(core, server, args.tick_hz, args.publish_hz, stop)
+
+
+def load_neck_ids(path: str) -> dict[str, int]:
+    """The neck's ``{name: id}`` from config/neck.json at ``path``, or ``{}`` (logged) when the
+    file is missing or malformed: the wheels do not depend on the neck."""
+    try:
+        return neck_servo_ids(path)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("no neck servos (%s): the neck command will answer an error", exc)
+        return {}
 
 
 if __name__ == "__main__":

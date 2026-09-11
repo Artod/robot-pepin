@@ -1,10 +1,15 @@
-"""The base server's core against a fake bus: arming, deadman, odometry, idle release."""
+"""The base server's core against a fake bus: arming, deadman, odometry, idle release, the neck."""
 
+from pathlib import Path
+
+import pytest
 from test_base import CFG, FakeBus
 
 from pepin.base import LEFT, RIGHT
 from pepin.base_link import decode_state
 from pepin.base_server import BaseServerCore
+
+REPO = Path(__file__).resolve().parents[2]
 
 
 class PingableBus(FakeBus):
@@ -167,6 +172,138 @@ def test_malformed_client_lines_do_not_stop_the_wheel_loop() -> None:
     stop.set()
     worker.join(timeout=2.0)
     assert not worker.is_alive()
+
+
+class NeckBus(PingableBus):
+    """FakeBus with neck servos on it: counts the reads, and can fall silent on the neck only."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.positions.update({"neck": 2048, "head": 2360})
+        self.neck_reads = 0
+        self.neck_silent = False
+
+    def sync_read(
+        self, data_name: str, motors: list[str], *, normalize: bool = True
+    ) -> dict[str, int]:
+        if "neck" in motors:
+            self.neck_reads += 1
+            if self.neck_silent:
+                raise TimeoutError("no reply from ids [9, 10] after 2 attempts")
+        return super().sync_read(data_name, motors, normalize=normalize)
+
+
+def make_neck_core() -> tuple[BaseServerCore, NeckBus]:
+    from pepin.base_server import NeckReader
+
+    bus = NeckBus()
+    core = BaseServerCore(
+        bus,
+        CFG,
+        servo_names=[LEFT, RIGHT, "neck", "head"],
+        neck=NeckReader(bus, ("neck", "head"), period_s=0.05, retry_s=5.0),
+    )
+    core.tick(0.0)
+    return core, bus
+
+
+def test_the_neck_command_answers_the_encoders_from_one_bus_read_per_period() -> None:
+    core, bus = make_neck_core()
+    first = core.command({"cmd": "neck"}, now=1.0)
+    assert first is not None and first["type"] == "neck"
+    assert (first["pan_ticks"], first["tilt_ticks"]) == (2048, 2360)
+    assert first["age_s"] == 0.0 and "error" not in first and bus.neck_reads == 1
+    bus.positions["head"] = 2400
+    cached = core.command({"cmd": "neck"}, now=1.02)  # inside the 50 ms period: no bus traffic
+    assert cached is not None and cached["tilt_ticks"] == 2360 and bus.neck_reads == 1
+    assert cached["age_s"] == pytest.approx(0.02)
+    fresh = core.command({"cmd": "neck"}, now=1.06)
+    assert fresh is not None and fresh["tilt_ticks"] == 2400 and bus.neck_reads == 2
+    assert "read_ms" in fresh
+    # the wheel path is untouched: no neck read happens on a tick
+    core.tick(1.1)
+    assert bus.neck_reads == 2
+
+
+def test_a_silent_neck_answers_an_error_and_is_retried_only_at_rest_after_a_pause() -> None:
+    core, bus = make_neck_core()
+    bus.neck_silent = True
+    reply = core.command({"cmd": "neck"}, now=1.0)
+    assert reply is not None and "error" in reply and "pan_ticks" not in reply
+    assert bus.neck_reads == 1
+    assert core.command({"cmd": "neck"}, now=2.0) == reply and bus.neck_reads == 1  # held
+    core.command({"cmd": "twist", "v": 0.1, "w": 0.0}, now=3.0)
+    core.command({"cmd": "neck"}, now=9.0)
+    assert bus.neck_reads == 1, "a silent servo is never retried while the wheels turn"
+    core.command({"cmd": "stop"}, now=9.5)
+    bus.neck_silent = False
+    healed = core.command({"cmd": "neck"}, now=9.6)
+    assert healed is not None and healed["pan_ticks"] == 2048 and bus.neck_reads == 2
+    assert "error" not in healed
+
+
+def test_stale_ticks_ride_along_with_the_error_of_a_servo_that_fell_silent() -> None:
+    core, bus = make_neck_core()
+    core.command({"cmd": "neck"}, now=1.0)
+    bus.neck_silent = True
+    reply = core.command({"cmd": "neck"}, now=2.0)
+    assert reply is not None and reply["pan_ticks"] == 2048 and reply["age_s"] == pytest.approx(1.0)
+    assert "error" in reply
+
+
+def test_without_a_neck_the_command_answers_an_error_not_a_crash() -> None:
+    core, _ = make_core()
+    reply = core.command({"cmd": "neck"}, now=1.0)
+    assert reply is not None and reply["type"] == "neck" and "error" in reply
+
+
+def test_the_neck_ids_come_from_the_file_and_a_missing_file_costs_only_the_neck(
+    tmp_path: Path,
+) -> None:
+    from pepin.base_server import load_neck_ids
+
+    assert load_neck_ids(str(REPO / "config/neck.json")) == {"neck": 9, "head": 10}
+    assert load_neck_ids(str(tmp_path / "absent.json")) == {}
+    broken = tmp_path / "neck.json"
+    broken.write_text('{"neck": {"id": "nine"}}')
+    assert load_neck_ids(str(broken)) == {}
+
+
+def test_a_neck_observer_leaving_does_not_release_the_wheels_but_the_driver_does() -> None:
+    """The neck node is a second client of the base server: its arrival and departure must be
+    invisible to the wheels, and the bridge's departure must still stop them at once."""
+    import socket
+    import threading
+    import time
+
+    from pepin.base_server import DRIVING_COMMANDS, serve
+    from pepin.streams import JsonLinesServer
+
+    core, _ = make_neck_core()
+    server = JsonLinesServer(
+        0, on_last_client_left={"cmd": "release"}, driving_commands=DRIVING_COMMANDS
+    ).start()
+    stop = threading.Event()
+    worker = threading.Thread(target=serve, args=(core, server, 50.0, 20.0, stop), daemon=True)
+    worker.start()
+    driver = socket.create_connection(("127.0.0.1", server.port), timeout=2.0)
+    observer = socket.create_connection(("127.0.0.1", server.port), timeout=2.0)
+    observer.sendall(b'{"cmd": "neck"}\n')
+    driver.sendall(b'{"cmd": "twist", "v": 0.1, "w": 0.0}\n')
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not core.moving:
+        time.sleep(0.01)
+    assert core.moving
+    observer.close()
+    time.sleep(0.2)
+    assert core.moving, "an observer leaving is not the driver leaving"
+    driver.close()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and core.moving:
+        time.sleep(0.01)
+    assert not core.moving, "the last driver left: the wheels are released"
+    stop.set()
+    worker.join(timeout=2.0)
 
 
 def test_sigterm_sets_the_stop_event_so_the_wheels_are_released() -> None:

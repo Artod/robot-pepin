@@ -108,6 +108,45 @@ def test_server_inbox_broadcast_and_farewell_over_localhost() -> None:
     server.close()
 
 
+def test_the_farewell_follows_the_last_driver_not_the_last_client() -> None:
+    """With driving commands named, a client that only asks is an observer: its leaving queues
+    no farewell, and its staying does not hide the driver's departure."""
+    import socket
+
+    from pepin.streams import JsonLinesServer
+
+    server = JsonLinesServer(
+        0, on_last_client_left={"cmd": "release"}, driving_commands=frozenset({"twist"})
+    ).start()
+    observer = socket.create_connection(("127.0.0.1", server.port), timeout=2.0)
+    driver = socket.create_connection(("127.0.0.1", server.port), timeout=2.0)
+    observer.sendall(b'{"cmd": "neck"}\n')
+    driver.sendall(b'{"cmd": "twist", "v": 0.1}\n')
+    deadline = time.monotonic() + 2.0
+    got: list = []
+    while time.monotonic() < deadline and len(got) < 2:
+        got += server.commands()
+        time.sleep(0.01)
+    assert {m["cmd"] for _, m in got} == {"neck", "twist"}
+    observer.close()
+    time.sleep(0.2)
+    assert server.commands() == [] and server.client_count == 1, "an observer left: nothing"
+    driver.close()
+    deadline = time.monotonic() + 2.0
+    farewell: list = []
+    while time.monotonic() < deadline and not farewell:
+        farewell = server.commands()
+        time.sleep(0.01)
+    assert farewell == [(None, {"cmd": "release"})], "the driver left: the farewell"
+    lone = socket.create_connection(("127.0.0.1", server.port), timeout=2.0)
+    lone.sendall(b'{"cmd": "neck"}\n')
+    time.sleep(0.1)
+    lone.close()
+    time.sleep(0.2)
+    assert all(m.get("cmd") != "release" for _, m in server.commands()), "never drove: no farewell"
+    server.close()
+
+
 def test_connections_reset_at_once_neither_kill_the_listener_nor_linger_as_clients() -> None:
     """A laptop that connects and dies immediately (wifi blip, a port scan) is forgotten cleanly."""
     import socket

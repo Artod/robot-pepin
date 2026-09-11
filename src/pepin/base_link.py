@@ -13,9 +13,17 @@ Wire format, one JSON object per line in both directions::
     laptop -> board  {"cmd": "twist", "v": <m/s>, "w": <rad/s>}   drive; re-arms the deadman
                      {"cmd": "stop"}                              stop now
                      {"cmd": "ping"}                              which servos answer on the bus
+                     {"cmd": "neck"}                              the neck's encoders (pan, tilt)
     board -> laptop  {"type": "state", ...}                       see :class:`BaseState`, ~20 Hz
                      {"type": "pong", "servos": {"left": true, "servo3": false, ...}}
                      {"type": "pong", "busy": true}                   moving: servos not pinged
+                     {"type": "neck", "pan_ticks": 2048, "tilt_ticks": 2360, "age_s": 0.01,
+                      "read_ms": 1.4}                             see :func:`pepin.neck.parse_neck`
+                     {"type": "neck", "error": "..."}             a silent servo (stale ticks, if
+                                                                  any, ride along)
+
+Only a client that has sent ``twist`` or ``stop`` counts as a driver: the wheels are released
+when the last driver leaves, whoever is still connected only asking (the neck node).
 """
 
 from __future__ import annotations

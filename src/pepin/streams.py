@@ -206,13 +206,18 @@ class ClientConn:
         inbox: queue.Queue[tuple[ClientConn | None, dict[str, Any]]],
         on_close: Callable[[ClientConn], None],
         outbox_size: int = 24,
+        driving_commands: frozenset[str] | None = None,
     ) -> None:
+        """``driving_commands``: the ``cmd`` values that make this client a driver (see
+        :class:`JsonLinesServer`); None makes every client a driver from the start."""
         self.conn = conn
         self.peer = peer
         self._inbox = inbox
         self._on_close = on_close
         self._outbox: queue.Queue[bytes] = queue.Queue(maxsize=outbox_size)
         self._lock = threading.Lock()
+        self._driving_commands = driving_commands
+        self.drives = driving_commands is None
         self.alive = True
 
     def start(self) -> ClientConn:
@@ -264,6 +269,8 @@ class ClientConn:
                         logger.warning("client %s sent an unreadable line; ignored", self.peer)
                         continue
                     if isinstance(message, dict):
+                        if not self.drives and message.get("cmd") in (self._driving_commands or ()):
+                            self.drives = True
                         self._inbox.put((self, message))
                     else:
                         logger.warning("client %s sent a non-object line; ignored", self.peer)
@@ -291,12 +298,27 @@ class JsonLinesServer:
     queues a message for every client, ``reply()`` for one. When the last
     client leaves, ``on_last_client_left`` is queued as a message the owner
     sees in ``commands()`` — on its own thread, like everything else.
+
+    With ``driving_commands`` given, only a client that has sent one of those
+    commands is a *driver*, and the farewell is queued when the last driver
+    leaves: an observer that only asks questions (the neck node polling the
+    encoders) must neither trigger the wheels' release by leaving nor, by
+    staying, hide the departure of the bridge that drives them.
     """
 
-    def __init__(self, port: int, *, on_last_client_left: dict[str, Any] | None = None) -> None:
-        """``port`` 0 picks a free one (tests); ``on_last_client_left`` is queued into the inbox."""
+    def __init__(
+        self,
+        port: int,
+        *,
+        on_last_client_left: dict[str, Any] | None = None,
+        driving_commands: frozenset[str] | None = None,
+    ) -> None:
+        """``port`` 0 picks a free one (tests); ``on_last_client_left`` is queued into the inbox
+        when the last driver leaves; ``driving_commands`` says what makes a client a driver
+        (None: every client is one from the moment it connects)."""
         self._requested_port = port
         self._farewell = on_last_client_left
+        self._driving_commands = driving_commands
         self._server: socket.socket | None = None
         self._clients: list[ClientConn] = []
         self._lock = threading.Lock()
@@ -358,9 +380,9 @@ class JsonLinesServer:
         with self._lock:
             if client in self._clients:
                 self._clients.remove(client)
-            alone = not self._clients
+            no_driver_left = not any(c.drives for c in self._clients)
         logger.info("client %s gone", client.peer)
-        if alone and self._farewell is not None:
+        if client.drives and no_driver_left and self._farewell is not None:
             self._inbox.put((None, dict(self._farewell)))
 
     def _accept_loop(self) -> None:
@@ -378,7 +400,9 @@ class JsonLinesServer:
                 time.sleep(0.05)
                 continue
             address = str(peer[0]) if peer else "?"  # reset-before-accept yields no address
-            client = ClientConn(conn, address, self._inbox, self._on_close)
+            client = ClientConn(
+                conn, address, self._inbox, self._on_close, driving_commands=self._driving_commands
+            )
             with self._lock:
                 self._clients.append(client)
             client.start()
