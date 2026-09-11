@@ -12,8 +12,8 @@
     "max": 3090
   },
   "reference": {
-    "pan_ticks": null,
-    "tilt_ticks": null,
+    "pan_ticks": 2021,
+    "tilt_ticks": 2311,
     "x_m": 0.0,
     "y_m": 0.0,
     "z_m": 1.23,
@@ -22,7 +22,7 @@
     "tilt_sign": 1,
     "signs_verified": false,
     "mount_measured": "2026-09-10",
-    "ticks_note": "x_m/y_m/z_m/pitch_deg are config/camera.json's mount, measured against the lidar on 2026-09-10 (scratch/depth_fit_models.py). pan_ticks and tilt_ticks are what the two encoders read AT THAT POSE and have never been read: while they are null the model ignores the encoders and answers the static mount for every reading (pepin.neck.joint_angles), so /neck/state and the neck_tf transform stand still while the head moves. To fill them, leave the head at rest, deploy the base server that answers the neck command (board/README.md) and ask it on its JSON-lines port: { printf '{\"cmd\":\"neck\"}\\n'; sleep 2; } | nc 10.0.0.187 3336 | grep -m1 '\"type\":\"neck\"' — the reply carries pan_ticks and tilt_ticks (the port also broadcasts state lines, hence the grep). scratch/neck_ticks_probe.py --host 10.0.0.187 --n 50 does the same 50 times and prints median/min/max and what the read costs the bus.",
+    "ticks_note": "x_m/y_m/z_m/pitch_deg are config/camera.json's mount, measured against the lidar on 2026-09-10 (scratch/depth_fit_models.py). pan_ticks and tilt_ticks are what the two encoders read at that pose: 2021 / 2311, read 2026-09-11 through the base server with the head untouched since the mount was measured (50 reads, min = max, scratch/neck_ticks_probe.py). Were they null, while they are null the model ignores the encoders and answers the static mount for every reading (pepin.neck.joint_angles), so /neck/state and the neck_tf transform stand still while the head moves. To fill them, leave the head at rest, deploy the base server that answers the neck command (board/README.md) and ask it on its JSON-lines port: { printf '{\"cmd\":\"neck\"}\\n'; sleep 2; } | nc 10.0.0.187 3336 | grep -m1 '\"type\":\"neck\"' — the reply carries pan_ticks and tilt_ticks (the port also broadcasts state lines, hence the grep). scratch/neck_ticks_probe.py --host 10.0.0.187 --n 50 does the same 50 times and prints median/min/max and what the read costs the bus.",
     "signs_note": "pan_sign and tilt_sign say which way an increasing tick count turns the camera and are UNVERIFIED: nobody has watched the picture while the neck moved, so keep neck_tf off (the node's default) until they are. The check, in daylight and after the reference ticks are filled in: ros/feature.sh neck on, watch ros2 topic echo /neck/state (or the node's report line), and move the head BY HAND — the base server torques the wheels only (pepin.base.DiffDriveBase.enable), so the neck servos are free to push. Tilting the head down, the picture tilting down with it, must make head_tilt GROW; if it shrinks, tilt_sign is -1. Panning the head to the robot's left (+y of base_link) must make neck_pan GROW; if it shrinks, pan_sign is -1. Then set signs_verified true. The powered version of the same check is scripts/jog.py neck --id 10 --delta 100, which needs the servo bus on the USB of the machine running it and pepin-base stopped on the board (board/README.md) — on the assembled robot the hand check is the cheap one.",
     "pivot_note": "the lever arms below are unmeasured and zero: the camera then turns about its own measured position, which is exact at the reference and off by the arms times the angle elsewhere. Measure with a ruler before the neck moves under SLAM: pan axis to tilt axis (forward, up, with the neck straight) and tilt axis to the lens (forward, up, in the head's own frame)."
   },
