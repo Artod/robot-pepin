@@ -40,15 +40,53 @@ class Param:
         self.name, self.value = name, value
 
 
+class FakeSocket:
+    """The socket under a response, with the one thing the node asks of it: a ``shutdown`` that
+    ends the recv the pump is blocked in."""
+
+    def __init__(self, released: threading.Event) -> None:
+        self._released = released
+        self.shut_down = False
+
+    def shutdown(self, how: int) -> None:
+        """End the blocked read with end-of-stream, the way a real SHUT_RDWR does."""
+        self.shut_down = True
+        self._released.set()
+
+
+class FakeRaw:
+    """urllib's SocketIO: where the socket hangs (``response.fp.raw._sock``)."""
+
+    def __init__(self, sock: FakeSocket | None) -> None:
+        self._sock = sock
+
+
+class FakeBuffer:
+    """The BufferedReader a response reads through (``response.fp``)."""
+
+    def __init__(self, raw: FakeRaw) -> None:
+        self.raw = raw
+
+
 class FakeStream:
     """ustreamer's response as a test writes it: the queued bytes, then a read that blocks the
-    way a live camera between frames does until the stream is closed under the reader."""
+    way a live camera between frames does.
 
-    def __init__(self, feed: bytes) -> None:
+    It blocks the way the real one does, which is the point of the fake: only a shutdown of the
+    socket (``fp.raw._sock``, where urllib keeps it) releases the reader — ``close()`` does not,
+    because a real ``HTTPResponse.close()`` takes the buffer lock the blocked reader holds and
+    waits out the socket's own timeout (scratch/camstream_close_unblocks_a_real_read.py). Left
+    alone, the read raises ``TimeoutError`` after ``timeout_s``, as the socket's timeout does.
+    """
+
+    def __init__(self, feed: bytes, timeout_s: float = 2.0, socket_under_it: bool = True) -> None:
         self.feed = feed
+        self.timeout_s = timeout_s
         self.reading = threading.Event()  # the pump is inside the blocking read
         self.released = threading.Event()
         self.closed = False
+        self.socket = FakeSocket(self.released) if socket_under_it else None
+        self.fp = FakeBuffer(FakeRaw(self.socket))
 
     def __enter__(self) -> FakeStream:
         return self
@@ -62,12 +100,12 @@ class FakeStream:
             chunk, self.feed = self.feed[:size], self.feed[size:]
             return chunk
         self.reading.set()
-        self.released.wait(2.0)
+        if not self.released.wait(self.timeout_s):
+            raise TimeoutError("timed out")  # what the socket raises when nothing comes
         return b""  # the stream ended
 
     def close(self) -> None:
         self.closed = True
-        self.released.set()
 
 
 def jpeg(width: int, height: int) -> bytes:
@@ -111,8 +149,10 @@ def build(monkeypatch: pytest.MonkeyPatch) -> Iterator[Build]:
     overrides; every node built is closed when the test ends."""
     made: list[CameraStream] = []
 
-    def make(feed: bytes = b"", **params: Any) -> tuple[CameraStream, FakeStream]:
-        stream = FakeStream(feed)
+    def make(
+        feed: bytes = b"", stream: FakeStream | None = None, **params: Any
+    ) -> tuple[CameraStream, FakeStream]:
+        stream = FakeStream(feed) if stream is None else stream
         monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=None: stream)
         with ros_stubs.parameters(config=CAMERA_JSON, **params):
             node = CameraStream()
@@ -247,15 +287,35 @@ def test_close_ends_the_pump_while_it_waits_to_reconnect(monkeypatch: pytest.Mon
 
 
 def test_close_stops_the_pump_from_inside_a_blocked_read(build: Build) -> None:
-    """The pump spends its life blocked on the socket between frames; close() closes the stream
-    under it, so the join takes milliseconds instead of the socket's five-second timeout."""
+    """The pump spends its life blocked on the socket between frames; close() shuts that socket
+    down under it, so the join takes milliseconds instead of the socket's five-second timeout.
+
+    The fake blocks the way the real response does — close() alone would not release it — so
+    this passes only while the node really does shut the socket down.
+    """
     node, stream = build(multipart([(1.0, jpeg(320, 180))]))
     assert stream.reading.wait(2.0), "the pump never reached the blocking read"
     started = time.monotonic()
     node.close()
-    assert not node._thread.is_alive() and stream.closed
+    assert not node._thread.is_alive()
+    assert stream.socket is not None and stream.socket.shut_down, "the socket was not shut down"
+    assert stream.closed, "and the response was closed by the pump's own with-block"
     assert time.monotonic() - started < 1.0
+    assert "camera stream ended" not in " ".join(node.logger.texts("warning")), (
+        "the stream we broke ourselves is not a dropped stream"
+    )
     assert node.logger.texts("warning")[-1:] != ["the camera pump is still in the stream"]
+
+
+def test_close_falls_back_to_closing_a_stream_with_no_socket_under_it(build: Build) -> None:
+    """Nothing to shut down (not a urllib response): close() is all there is, and the pump
+    still leaves — on the read's own timeout, which is what STREAM_TIMEOUT_S costs when the
+    shutdown is not available."""
+    blind = FakeStream(multipart([(1.0, jpeg(320, 180))]), timeout_s=0.3, socket_under_it=False)
+    node, stream = build(stream=blind)
+    assert stream.reading.wait(2.0), "the pump never reached the blocking read"
+    node.close()
+    assert stream.closed and not node._thread.is_alive()
 
 
 def test_the_pump_is_joined_before_the_node_is_destroyed_or_the_context_shut_down(

@@ -21,13 +21,16 @@ printed in every report line.
 
 The frames are pulled by one thread (:meth:`CameraStream._pump`) which :meth:`CameraStream.close`
 stops and joins before the node is destroyed: a daemon thread left inside OpenCV's decoder when
-the interpreter finalises is the depth node's SIGABRT (node_kit.spin_main).
+the interpreter finalises is the depth node's SIGABRT (node_kit.spin_main). That thread spends
+its life blocked in a socket read between frames, and what ends such a read is a shutdown of
+the socket under it, not a ``close()`` of the response (:meth:`CameraStream._break_stream`).
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+import socket
 import threading
 import urllib.request
 from dataclasses import dataclass
@@ -49,7 +52,9 @@ from pepin_bringup.msgs import image_from_array, stamp_from_seconds, transform_f
 from pepin_bringup.node_kit import STOP_PATIENCE_S, Switches, Tally, spin_main
 
 CONFIG = "/ws/config/camera.json"
-STREAM_TIMEOUT_S = 5.0  # the socket's: a stream that stops feeding raises instead of hanging
+# The socket's own timeout: a stream that stops feeding raises instead of hanging. It is not
+# the cost of stopping the node — close() shuts the socket down rather than waiting for it.
+STREAM_TIMEOUT_S = 5.0
 RETRY_S = 3.0  # between reconnections, waited on the stop event so a kick does not sit it out
 
 
@@ -106,19 +111,20 @@ class CameraStream(Node):
         self.get_logger().info(f"camera stream from {self._cfg.stream}")
 
     def close(self) -> None:
-        """Stop the frame pump and wait for it, closing the open stream so a read blocked on the
-        socket returns at once: called before the node is destroyed (node_kit.spin_main), so no
-        thread is left inside OpenCV's decoder or DDS when the interpreter finalises.
+        """Stop the frame pump and wait for it, shutting the open stream's socket down so a read
+        blocked between frames returns at once: called before the node is destroyed
+        (node_kit.spin_main), so no thread is left inside OpenCV's decoder or DDS when the
+        interpreter finalises.
 
-        The stream is closed twice when needed: the pump may have been opening a new one (a
-        reconnection) while the first close was reaching the old one, and then it would sit out
-        the socket's own timeout instead of leaving.
+        The stream is broken twice when needed: the pump may have been opening a new one (a
+        reconnection) while the first shutdown was reaching the old one, and then it would sit
+        out the socket's own timeout instead of leaving.
         """
         self._stop.set()
-        self._close_stream()
+        self._break_stream()
         self._thread.join(0.5)
         if self._thread.is_alive():
-            self._close_stream()
+            self._break_stream()
             self._thread.join(STOP_PATIENCE_S)
         if self._thread.is_alive():
             self.get_logger().warning(
@@ -126,13 +132,30 @@ class CameraStream(Node):
                 " leaving anyway"
             )
 
-    def _close_stream(self) -> None:
-        """Close the response the pump is reading, if it has one: that is what ends a read
-        blocked between frames."""
+    def _break_stream(self) -> None:
+        """End the read the pump is blocked in, if it has a stream open: shut the socket under
+        the response down, which makes that read return end-of-stream at once.
+
+        Not ``close()``: an ``HTTPResponse`` closes through the ``BufferedReader`` whose lock
+        the blocked reader holds, so the call waits out the socket's own timeout on the
+        caller's thread and the read still ends on the timeout, not on the close (measured, 5 s
+        of the container's ``docker stop -t 15`` budget:
+        scratch/camstream_close_unblocks_a_real_read.py, 2026-09-11). ``shutdown`` returns in
+        microseconds and the read comes back immediately
+        (scratch/camstream_shutdown_interrupts_a_blocked_read.py). The response itself is closed
+        by the pump's own ``with`` block on its way out; ``close()`` here is only the fallback
+        for a stream object with no socket under it.
+        """
         stream = self._stream
-        if stream is not None:
-            with contextlib.suppress(Exception):  # already closed, or closing under the reader
+        if stream is None:
+            return
+        raw = getattr(getattr(stream, "fp", None), "raw", None)
+        sock = getattr(raw, "_sock", None)
+        with contextlib.suppress(Exception):  # already shut down, or gone under the reader
+            if sock is None:
                 stream.close()
+            else:
+                sock.shutdown(socket.SHUT_RDWR)
 
     def _static_transforms(self, mounts: Mounts) -> list[Any]:
         """The static edges this node broadcasts, from the mounts of ``config/``:
@@ -187,8 +210,9 @@ class CameraStream(Node):
     def _pump(self) -> None:
         """Read frames as they come; reconnect after a dropped stream (the board restarts too).
 
-        Ends on :meth:`close`'s event — checked for every frame and every reconnection — or when
-        the context goes down; that is what lets the thread be joined instead of killed.
+        Ends on :meth:`close`'s event — checked for every frame and every reconnection, and the
+        blocked read between frames is ended by :meth:`_break_stream` — or when the context goes
+        down; that is what lets the thread be joined instead of killed.
         """
         while not self._stop.is_set() and rclpy.ok():
             try:
@@ -203,6 +227,8 @@ class CameraStream(Node):
                         if frame is None:
                             continue
                         self._publish(frame, capture_time(headers))
+                    if self._stop.is_set():
+                        return  # the socket was shut down under the reader: that is the way out
                     self.get_logger().warning("camera stream ended; reconnecting")
             except Exception as error:
                 if self._stop.is_set():
