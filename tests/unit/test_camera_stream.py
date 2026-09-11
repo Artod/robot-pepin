@@ -154,7 +154,7 @@ def build(monkeypatch: pytest.MonkeyPatch) -> Iterator[Build]:
     ) -> tuple[CameraStream, FakeStream]:
         stream = FakeStream(feed) if stream is None else stream
         monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=None: stream)
-        with ros_stubs.parameters(config=CAMERA_JSON, **params):
+        with ros_stubs.parameters(**{"config": CAMERA_JSON, **params}):
             node = CameraStream()
         made.append(node)
         return node, stream
@@ -171,9 +171,10 @@ def edges(node: CameraStream) -> list[tuple[str, str]]:
 
 # ---- the static transforms -------------------------------------------------------------------
 def test_the_node_broadcasts_the_camera_s_two_edges_and_the_laser_s(build: Build) -> None:
-    """Three edges go out at start, from config/camera.json and config/lidar.json through one
-    reader (pepin.mounts.Mounts) — the laser as well, because a static transform does not replay
-    to a late joiner over the bridge."""
+    """Three edges go out at start, from config/camera.json and config/lidar.json through
+    pepin.mounts — the laser as well, because a static transform does not replay to a late
+    joiner over the bridge. The laser's numbers are checked against the whole-config reader
+    (Mounts.load, what the board's launch calls): the narrow readers are the same parser."""
     node, _ = build()
     assert edges(node) == [
         ("base_link", "camera_link"),
@@ -193,6 +194,26 @@ def test_the_camera_link_edge_is_left_to_the_board_when_the_switch_is_off(build:
     node, _ = build(static_camera_tf=False)
     assert edges(node) == [("camera_link", "camera_optical"), ("base_link", "laser")]
     assert any("neck_state" in line for line in node.logger.texts("info"))
+
+
+def test_the_node_reads_only_the_two_files_whose_frames_it_publishes(
+    build: Build, tmp_path: Path
+) -> None:
+    """camera.json and lidar.json, nothing else: with imu.json missing and tof.json corrupted
+    the camera node still starts and broadcasts its three edges.
+
+    The whole-directory reader (pepin.mounts.Mounts.load) parses all four files, and a node
+    that died on a sensor it never publishes would crash-loop under the launch's RESPAWN.
+    """
+    for name in ("camera.json", "lidar.json"):
+        (tmp_path / name).write_text((CONFIG_DIR / name).read_text())
+    (tmp_path / "tof.json").write_text("{ this is not json")  # and no imu.json at all
+    node, _ = build(config=str(tmp_path / "camera.json"))
+    assert edges(node) == [
+        ("base_link", "camera_link"),
+        ("camera_link", "camera_optical"),
+        ("base_link", "laser"),
+    ]
 
 
 # ---- the frames ------------------------------------------------------------------------------

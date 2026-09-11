@@ -743,8 +743,8 @@ def test_the_drive_ends_on_position_and_the_goal_server_turns_to_the_heading() -
 def test_the_lidar_mount_is_published_by_both_sides_from_one_file() -> None:
     """The board's launch reads base_link -> laser from config/lidar.json itself (no launch
     argument can override the calibration), the laptop's camera node publishes the same
-    transform through the same reader (pepin.mounts.Mounts), and ros/sync.sh puts config/ where
-    the board's container sees it (beside the library: /ws/pepin_src/config,
+    transform through the same module's reader (pepin.mounts), and ros/sync.sh puts config/
+    where the board's container sees it (beside the library: /ws/pepin_src/config,
     pepin.deployment.config_file)."""
     robot = sf.tree(ROBOT_LAUNCH)
     assert sf.assignments(robot)["MOUNTS"] == "Mounts.load()"
@@ -753,11 +753,16 @@ def test_the_lidar_mount_is_published_by_both_sides_from_one_file() -> None:
     assert not declared & {"'laser_roll'", "'laser_yaw'"} and "MOUNT" not in sf.imported(robot)
     assert "quaternion(laser_roll, laser_pitch, laser_yaw)" in sf.unparsed(robot, ast.Call)
     camera = sf.tree(f"{NODES}/camera_stream.py")
-    assert "transform_from_mount('base_link', LASER_FRAME, mounts.lidar, stamp)" in sf.unparsed(
-        camera, ast.Call
+    assert (
+        "transform_from_mount('base_link', LASER_FRAME, load_lidar_mount(config_dir), stamp)"
+        in sf.unparsed(camera, ast.Call)
     )
-    assert "Mounts.load" in sf.calls(camera), "the same reader as the launch, not a second one"
-    assert {"Mounts", "LASER_FRAME"} <= sf.imported(camera)
+    # The same parser as the launch (pepin.mounts), but only the files whose frames this node
+    # publishes: Mounts.load also reads imu.json and tof.json, and a missing or broken file of
+    # a sensor the camera never publishes would crash-loop it under the launch's RESPAWN.
+    assert {"load_lidar_mount", "load_camera_mounts"} <= sf.calls(camera)
+    assert "Mounts.load" not in sf.calls(camera), "not the whole config directory"
+    assert {"load_lidar_mount", "LASER_FRAME"} <= sf.imported(camera)
     sync = (REPO / "ros/sync.sh").read_text()
     assert '"$HERE/../config/" "root@$BOARD:/root/pepin-ros/pepin_src/config/"' in sync
     assert "--exclude 'pepin_src'" in sync, "the ros/ rsync must not delete pepin_src/config"
@@ -856,7 +861,7 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
         for n in ast.walk(camera)
         if isinstance(n, ast.List) and "camera.optical, stamp" in ast.unparse(n)
     )
-    assert "mounts.lidar" in kept and "camera.link, stamp" not in kept, (
+    assert "LASER_FRAME" in kept and "camera.link, stamp" not in kept, (
         "that edge alone goes, not the others"
     )
     vslam = sf.tree(VSLAM_LAUNCH)

@@ -47,7 +47,7 @@ from tf2_ros import StaticTransformBroadcaster
 
 from pepin.camera import CameraConfig, camera_info_arrays
 from pepin.mjpeg import capture_time, parts
-from pepin.mounts import LASER_FRAME, Mounts
+from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
 from pepin_bringup.msgs import image_from_array, stamp_from_seconds, transform_from_mount
 from pepin_bringup.node_kit import STOP_PATIENCE_S, Switches, Tally, spin_main
 
@@ -101,7 +101,7 @@ class CameraStream(Node):
                 " recognising places, not for measuring — calibrate with a checkerboard"
             )
         self._static = StaticTransformBroadcaster(self)
-        self._static.sendTransform(self._static_transforms(Mounts.load(config.parent)))
+        self._static.sendTransform(self._static_transforms(config.parent))
         self._tally = Tally()
         self.create_timer(30.0, self._report)
         self._stop = threading.Event()
@@ -157,20 +157,25 @@ class CameraStream(Node):
             else:
                 sock.shutdown(socket.SHUT_RDWR)
 
-    def _static_transforms(self, mounts: Mounts) -> list[Any]:
-        """The static edges this node broadcasts, from the mounts of ``config/``:
+    def _static_transforms(self, config_dir: Path) -> list[Any]:
+        """The static edges this node broadcasts, read from the files of ``config_dir``:
         camera_link -> camera_optical and base_link -> laser always, base_link -> camera_link
         only while ``static_camera_tf`` is on.
+
+        Two files, camera.json and lidar.json, through the readers the board's launch uses
+        (:mod:`pepin.mounts`) — not the whole-directory :meth:`pepin.mounts.Mounts.load`, which
+        also parses imu.json and tof.json: a sensor this node never publishes would then take
+        the camera down at start, and under the launch's RESPAWN that is a crash loop.
 
         The laser goes out here as well as from the board because a static transform does not
         replay to a late joiner over the bridge (RTAB-Map dropped every scan for an hour after a
         board reboot, 2026-09-10): both sides publish the same file's numbers.
         """
         stamp = self.get_clock().now().to_msg()
-        camera = mounts.camera
+        camera = load_camera_mounts(config_dir)
         transforms = [
             transform_from_mount(camera.link_frame, camera.optical_frame, camera.optical, stamp),
-            transform_from_mount("base_link", LASER_FRAME, mounts.lidar, stamp),
+            transform_from_mount("base_link", LASER_FRAME, load_lidar_mount(config_dir), stamp),
         ]
         if self._switches.on("static_camera_tf"):
             transforms.insert(
