@@ -7,6 +7,7 @@
 #   ros/go.sh where | places | cancel
 #   ros/go.sh planner navfn|lattice|theta|smac|hybrid   swap the planner (and its controller)
 #   ros/go.sh trip                      printer, then home — the round trip, one command
+#   ros/go.sh round [NAME]              one full turn in place, judged by the gyro, recorded
 # Ctrl-C closes the connection and cancels the goal.
 # A drive brings its own tape home: the board's jsonl (scans, odometry, tracked pose), the
 # container log, and the head camera — any goal may turn out to be the clip worth posting.
@@ -20,7 +21,9 @@ BOARD="${PEPIN_HOST:-10.0.0.187}"
 PORT=3337
 case "${1:-}" in
     trip) "$0" printer && "$0" home; exit $? ;;
-    "") echo "usage: ros/go.sh printer | home | X Y [YAW] | mark NAME | where | places | cancel | planner navfn|lattice|theta|smac|hybrid | trip"; exit 2 ;;
+    round)  # a full turn in place (ros/tools/turn_full.py on the board), recorded as NAME
+        ssh -o ConnectTimeout=10 "root@$BOARD" 'docker exec -i pepin-ros /pepin_entrypoint.sh python3 - "'"${2:-round}"'"' < "$(cd "$(dirname "$0")" && pwd)/tools/turn_full.py"; exit $? ;;
+    "") echo "usage: ros/go.sh printer | home | X Y [YAW] | mark NAME | where | places | cancel | planner navfn|lattice|theta|smac|hybrid | trip | round"; exit 2 ;;
     mark)   REQUEST="{\"cmd\":\"mark\",\"name\":\"${2:?a name}\"}" ;;
     where)  REQUEST='{"cmd":"where"}' ;;
     places) REQUEST='{"cmd":"places"}' ;;
