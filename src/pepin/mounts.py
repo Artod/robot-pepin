@@ -10,7 +10,10 @@ degrees), and :class:`Mounts` reads all of them from the config directory: ``lid
 sensor's other fields — masks, ranges, mirror — stay on :class:`pepin.lidar.LidarMount`),
 ``imu``, ``camera`` (its link and its optical frame), ``tof`` by sensor name. Whatever publishes
 a static transform or projects a beam reads it here, so both sides of the bridge publish one
-laser and the depth's projection agrees with it.
+laser and the depth's projection agrees with it. A node that needs one sensor takes that
+sensor's reader (:func:`load_lidar_mount`, :func:`load_camera_mounts`) rather than
+:meth:`Mounts.load`: the same parser, but a broken file of a sensor it never publishes does
+not take it down at start.
 """
 
 from __future__ import annotations
@@ -138,6 +141,38 @@ class CameraMounts:
         return cls(link, OPTICAL_MOUNT, cfg.link_frame, cfg.optical_frame)
 
 
+def config_path(config_dir: str | Path | None, name: str) -> Path:
+    """One config file: inside ``config_dir`` when a directory is given, else wherever
+    :func:`pepin.deployment.config_file` finds it (a checkout, the board's synced copy, the
+    laptop containers' /ws/config)."""
+    return Path(config_dir) / name if config_dir is not None else config_file(name)
+
+
+def load_lidar(config_dir: str | Path | None = None) -> LidarMount:
+    """The lidar as ``config/lidar.json`` writes it — its place on the cart plus its masks,
+    ranges and mirror — from that file alone."""
+    return LidarMount.from_json(config_path(config_dir, "lidar.json"))
+
+
+def load_lidar_mount(config_dir: str | Path | None = None) -> Mount:
+    """The laser's ``base_link -> laser`` placement from ``config/lidar.json`` alone: the
+    numbers (and the sign of the yaw) the board's launch publishes.
+
+    One sensor's file, not the whole directory: a node that publishes only the laser must not
+    die at start because another sensor's file is missing or broken (:meth:`Mounts.load` reads
+    all four)."""
+    return lidar_mount(load_lidar(config_dir))
+
+
+def load_camera_mounts(
+    config_dir: str | Path | None = None, camera: str = "overview"
+) -> CameraMounts:
+    """The camera's two static frames (``base_link -> camera_link -> camera_optical``) from
+    ``config/camera.json`` alone — again one sensor's file, see :func:`load_lidar_mount`."""
+    data = json.loads(config_path(config_dir, "camera.json").read_text())
+    return CameraMounts.from_config(CameraConfig.from_json(data[camera]))
+
+
 @dataclass(frozen=True)
 class Mounts:
     """Every sensor's mount, from the config directory (:meth:`load`)."""
@@ -152,17 +187,18 @@ class Mounts:
     def load(cls, config_dir: str | Path | None = None, camera: str = "overview") -> Mounts:
         """Read lidar.json, imu.json, camera.json and tof.json from ``config_dir``, or from
         wherever :func:`pepin.deployment.config_file` finds them (a checkout, the board's
-        synced copy, the laptop containers' /ws/config) when no directory is given."""
+        synced copy, the laptop containers' /ws/config) when no directory is given.
 
-        def path(name: str) -> Path:
-            return Path(config_dir) / name if config_dir is not None else config_file(name)
+        All four files, so a caller that needs one sensor takes the narrow reader beside this
+        one (:func:`load_lidar_mount`, :func:`load_camera_mounts`) instead of dying on a file
+        it has no use for."""
 
         def read(name: str) -> Any:
-            return json.loads(path(name).read_text())
+            return json.loads(config_path(config_dir, name).read_text())
 
-        sensor = LidarMount.from_json(path("lidar.json"))
+        sensor = load_lidar(config_dir)
         imu = Mount.from_json(read("imu.json")["mount"])
-        cam = CameraMounts.from_config(CameraConfig.from_json(read("camera.json")[camera]))
+        cam = load_camera_mounts(config_dir, camera)
         tof = {
             name: Mount.from_json(entry["mount"])
             for name, entry in read("tof.json")["sensors"].items()
