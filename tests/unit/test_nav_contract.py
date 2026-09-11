@@ -3,6 +3,7 @@
 Each assertion is a lesson paid for on the robot: the value it pins was the cause of a failed run.
 """
 
+import json
 import re
 import subprocess
 import xml.etree.ElementTree as ET
@@ -495,6 +496,7 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
     assert laptop_launch_nodes("slam") == (
         "/camera_stream",
         "/depth_stream",
+        "/depth_fusion",
         "/rtabmap/rtabmap",
         "/rtabmap_frame",
         "/foxglove_bridge",
@@ -521,7 +523,7 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
     for name in ("camera", "depth", "rtabmap", "frame", "foxglove"):
         assert name in gated.split("on_exit=")[1], name
     node = (REPO / "ros/pepin_bringup/pepin_bringup/depth_stream.py").read_text()
-    assert '"/camera/depth"' in node and "scale_from_samples" in node and "DepthScale" in node
+    assert '"/camera/depth"' in node and "beam_pairs" in node and "AffineScale" in node
     image = (REPO / "ros/Dockerfile.laptop").read_text()
     assert (
         "whl/cpu" in image and "HF_HUB_OFFLINE=1" in image and "ros-jazzy-foxglove-bridge" in image
@@ -536,7 +538,8 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
     # the 3D view: the cloud, the path, the scan and the robot; no grid lies over the voxels
     room = json.loads((REPO / "ros/foxglove/pepin_3d.json").read_text())["configById"]["3D!room"]
     shown = {t for t, c in room["topics"].items() if c.get("visible")}
-    assert "/rtabmap/cloud_map" in shown and "/rtabmap/mapPath" in shown and "/scan" in shown
+    assert "/fusion/surface" in shown  # the fused surface is what the operator sees
+    assert "/rtabmap/cloud_map" in room["topics"]  # RTAB-Map's cloud stays a click away
     # the two floor grids that fought each other stay out; the local costmap is asked for
     assert not shown & {"/map", "/rtabmap/map", "/global_costmap/costmap"}
     laptop = (REPO / "ros/laptop.sh").read_text()
@@ -588,6 +591,64 @@ def test_the_drive_ends_on_position_and_the_goal_server_turns_to_the_heading() -
     server = (REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text()
     assert 'ActionClient(self, Spin, "spin")' in server and "_pivot_to(yaw_deg" in server
     assert "PIVOT_TOLERANCE_DEG = 11.5" in server  # the general checker's 0.20 rad
+
+
+def test_the_lidar_mount_is_published_by_both_sides_from_one_file() -> None:
+    """The board's launch takes base_link -> laser from pepin.lidar.MOUNT (pinned to
+    config/lidar.json), and the laptop's camera node publishes the same transform itself."""
+    robot = (REPO / "ros/pepin_bringup/launch/robot.launch.py").read_text()
+    assert "MOUNT.transform()" in robot and "0.20" not in robot.split("MOUNT.transform()")[0][-200:]
+    assert 'default_value="3.14159265"' not in robot and 'default_value="-1.5272"' not in robot
+    camera = (REPO / "ros/pepin_bringup/pepin_bringup/camera_stream.py").read_text()
+    assert 'self._tf("base_link", "laser"' in camera and "LidarMount.from_json" in camera
+
+
+def test_the_frames_are_fused_into_one_surface_beside_rtabmap_s_cloud() -> None:
+    """The SLAM launch runs the fusion node after the ghost wait; the node loads the grid from
+    config/fusion.json and offers its switches as parameters; the 3D layout shows the fused
+    surface and hides RTAB-Map's concatenated cloud by default (both stay available)."""
+    vslam = (REPO / "ros/pepin_bringup/launch/vslam.launch.py").read_text()
+    assert "pepin_bringup.depth_fusion" in vslam and "fusion, rtabmap" in vslam
+    node = (REPO / "ros/pepin_bringup/pepin_bringup/depth_fusion.py").read_text()
+    assert 'CONFIG = "/ws/config/fusion.json"' in node
+    for switch in ('"enabled"', '"align"', '"min_weight"', '"smooth_map_odom"'):
+        assert f"declare_parameter({switch}" in node, switch
+    assert "add_on_set_parameters_callback" in node and '"/fusion/reset"' in node
+    assert '"/fusion/surface"' in node
+    for name in ("pepin_3d.json", "pepin_nav.json"):
+        layout = json.loads((REPO / "ros/foxglove" / name).read_text())
+        panel = next(v for k, v in layout["configById"].items() if k.startswith("3D"))
+        assert panel["topics"]["/fusion/surface"]["visible"] is True
+        assert panel["topics"]["/fusion/surface"]["colorMode"] == "rgb"
+        assert panel["topics"]["/rtabmap/cloud_map"]["visible"] is False
+
+
+def test_the_floor_anchors_the_depth_and_leans_with_the_imu() -> None:
+    """The depth node snaps floor pixels to the floor plane (switchable), the plane leans with
+    the accelerometer, and the IMU mount the laptop would apply is the one the board publishes
+    (roll +90 deg: the chip's Y up)."""
+    import math
+
+    node = (REPO / "ros/pepin_bringup/pepin_bringup/depth_stream.py").read_text()
+    assert 'declare_parameter("floor_anchor", True)' in node
+    assert '"/imu/data_raw"' in node and "floor_anchor(" in node and "floor_depth(" in node
+    assert 'IMU_CONFIG = "/ws/config/imu.json"' in node
+    mount = json.loads((REPO / "config/imu.json").read_text())["mount"]
+    launch = (REPO / "ros/pepin_bringup/launch/robot.launch.py").read_text()
+    half = math.sin(math.radians(mount["roll_deg"]) / 2.0)
+    assert f'"rotation.x": {half:.7f}' in launch and mount["pitch_deg"] == 0.0
+    assert (
+        '"translation.z": IMU_Z' in launch
+        and f"IMU_X, IMU_Y, IMU_Z = 0.0, 0.0, {mount['z_m']:.2f}" in launch
+    )
+
+
+def test_the_laptop_mounts_the_library_live_not_a_copy() -> None:
+    """A copy of src/pepin went stale whenever the bridge watch restarted a container: the
+    laptop containers mount the library itself, like the ROS package."""
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert '"$HERE/../src/pepin:/ws/pepin_src/pepin:ro"' in laptop
+    assert "rsync" not in laptop
 
 
 def test_the_board_image_carries_no_lttng_tracer() -> None:

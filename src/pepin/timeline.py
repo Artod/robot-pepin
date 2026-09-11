@@ -39,6 +39,7 @@ __all__ = [
     "TimedScan",
     "beam_times",
     "deskew",
+    "standing_still",
 ]
 
 
@@ -276,6 +277,38 @@ class MotionFilter:
     def reset(self) -> None:
         """Forget the last match (a new map, a re-seed): the next scan is due."""
         self._last = None
+
+
+REST_WINDOW_S = 0.6  # how far back "the cart has not moved" is asked about
+REST_MOVE_M = 0.01  # travel allowed over that window and still called rest
+REST_TURN_DEG = 0.6  # turn allowed over that window and still called rest
+REST_YAW_RATE_DEG_S = 1.5  # the gyro must be this quiet too; a slow pivot is 20-35 deg/s
+
+
+def standing_still(
+    history: OdomHistory,
+    t: float,
+    yaw_rate: float,
+    window_s: float = REST_WINDOW_S,
+    max_move_m: float = REST_MOVE_M,
+    max_turn_deg: float = REST_TURN_DEG,
+    max_yaw_rate_deg_s: float = REST_YAW_RATE_DEG_S,
+) -> bool:
+    """True when the cart has not moved for ``window_s`` before ``t`` and the gyro is quiet.
+
+    Two independent witnesses on purpose: the wheels (through the fused odometry in ``history``)
+    and ``yaw_rate`` in rad/s, which comes from the gyro and answers before the wheels have turned
+    a countable tick. Unknown history — the window reaches before the oldest sample — reads as
+    "moving", so the answer is only ever used to hold a pose that is known to be at rest.
+    """
+    if abs(math.degrees(yaw_rate)) > max_yaw_rate_deg_s:
+        return False
+    now, before = history.at(t), history.at(t - window_s)
+    if now is None or before is None:
+        return False
+    moved = math.hypot(now.x - before.x, now.y - before.y)
+    turned = abs(wrap_angle(now.theta - before.theta))
+    return moved <= max_move_m and turned <= math.radians(max_turn_deg)
 
 
 def timed_scan_from_ros(

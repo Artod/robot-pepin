@@ -127,6 +127,37 @@ def dynamic_marks(
     return rings(dedupe(news), berth.ring_m)
 
 
+VOTE_MIN_SHARE = 0.5  # below this the pose, not the room, is what the scan disagrees with
+VOTE_MIN_POINTS = 60  # too few explained returns fix no pose; let the whole scan speak
+
+
+def voting_mask(
+    points_base: NDArray[np.float64],
+    pose: Pose2D,
+    mask: StaticMask,
+    min_share: float = VOTE_MIN_SHARE,
+    min_points: int = VOTE_MIN_POINTS,
+) -> NDArray[np.bool_] | None:
+    """Which returns may vote in the scan match at ``pose``: the ones the static map explains.
+
+    A blanket over a chair, a bag on the floor, a person: returns the map has no wall for pull the
+    correlative score toward whatever cell happens to lie under them, and the heading follows the
+    furniture instead of the walls. Silencing them costs nothing — they carry no information about
+    a pose measured against a static map.
+
+    Returns ``None`` (everything votes, the behaviour without this filter) when the mask would be
+    self-confirming: fewer than ``min_share`` of the scan explained, or fewer than ``min_points``
+    left. Then it is the pose that is wrong, and the returns it does not explain are exactly the
+    evidence that can fix it.
+    """
+    if len(points_base) == 0:
+        return None
+    explained = mask.explains(to_map(points_base, pose))
+    if explained.mean() < min_share or int(explained.sum()) < min_points:
+        return None
+    return explained
+
+
 NEAR_OCCLUSION_M = 1.5  # a person beside the cart is within this; the walls are beyond
 
 

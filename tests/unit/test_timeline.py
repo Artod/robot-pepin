@@ -17,6 +17,7 @@ from pepin.timeline import (
     TimedScan,
     beam_times,
     deskew,
+    standing_still,
     timed_scan_from_ros,
 )
 
@@ -202,6 +203,34 @@ def test_the_matcher_rests_while_the_cart_stands_and_wakes_on_any_step() -> None
     assert f.due(Pose2D(0.006, 0.0, math.radians(0.5)), 1.45)  # a second passed
     f.reset()
     assert f.due(Pose2D(0.006, 0.0, math.radians(0.5)), 1.46)
+
+
+# -- rest ---------------------------------------------------------------------
+
+
+def _resting_history(jitter_deg: float = 0.1) -> OdomHistory:
+    """A second of a standing cart: the filter's own noise, nothing else."""
+    return history_of(
+        [(0.1 * i, 0.0005 * (i % 2), 0.0, math.radians(jitter_deg) * (i % 2)) for i in range(21)]
+    )
+
+
+def test_a_standing_cart_is_recognised_by_the_wheels_and_the_gyro_together() -> None:
+    assert standing_still(_resting_history(), 2.0, yaw_rate=0.0)
+    assert not standing_still(_resting_history(), 2.0, yaw_rate=math.radians(20.0)), (
+        "the gyro alone must be able to say the cart turns"
+    )
+
+
+def test_a_turning_cart_is_never_called_at_rest() -> None:
+    turning = history_of([(0.1 * i, 0.0, 0.0, math.radians(3.0 * i)) for i in range(21)])
+    assert not standing_still(turning, 2.0, yaw_rate=math.radians(30.0))
+    # Even with a gyro that says nothing (a dead sensor), the wheels refuse it.
+    assert not standing_still(turning, 2.0, yaw_rate=0.0)
+
+
+def test_rest_is_unknown_before_the_history_reaches_back_far_enough() -> None:
+    assert not standing_still(history_of([(0.0, 0.0, 0.0, 0.0)]), 0.0, yaw_rate=0.0)
 
 
 # -- the real beam order ------------------------------------------------------

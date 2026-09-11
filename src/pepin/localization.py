@@ -100,15 +100,22 @@ class Localizer:
         correction_gain: float = 1.0,  # share of each match's residual applied (see ``_blend``)
         jump_m: float = 0.15,  # a residual past this is not noise: taken whole
         jump_deg: float = 6.0,
+        interpolate: bool = True,  # answer between the candidates, not only on them
+        rest_lock: bool = True,  # hold the pose while the cart stands still (see ``update``)
+        rest_gain: float = 0.05,  # share per match when the caller times nothing (see ``_blend``)
+        rest_tau_s: float = 6.0,  # time constant of the rest lock when the caller passes ``dt_s``
     ) -> None:
         self._grid = grid
         # The tracker wants a continuous correction: quantised to the search step it corrects the
         # heading in 1.5 degree jumps and the robot weaves. A pose graph selects, and does not.
-        self._matcher = CorrelativeMatcher(grid, max_points=max_points, interpolate=True)
+        self._matcher = CorrelativeMatcher(grid, max_points=max_points, interpolate=interpolate)
         self._global_retry = global_retry
         self._correction_gain = correction_gain
         self._jump_m = jump_m
         self._jump_deg = jump_deg
+        self._rest_lock = rest_lock
+        self._rest_gain = rest_gain
+        self._rest_tau_s = max(rest_tau_s, 1e-3)  # a zero constant would be a division by nothing
         self._coarse_matcher: CorrelativeMatcher | None = None
         self._coarse_version = -1
         self._window = window or SearchWindow()
@@ -326,6 +333,19 @@ class Localizer:
         self._drift = Pose2D()
         self._last_odom = None  # the next update measures its step from the next reading
 
+    def _voting(
+        self, points: NDArray[np.float64], vote: NDArray[np.bool_] | None
+    ) -> NDArray[np.float64]:
+        """The returns the matcher is allowed to score: ``points[vote]``, or all of them.
+
+        A mask that would leave the match with fewer returns than a pose can be fixed from is
+        ignored — a thin scan is worse than a scan with some furniture in it.
+        """
+        if vote is None:
+            return points
+        kept: NDArray[np.float64] = points[vote]
+        return kept if len(kept) >= self._min_points else points
+
     def predict(self, odom: Pose2D) -> Pose2D:
         """Advance the pose by odometry alone (between scans); the next scan corrects it."""
         motion = Pose2D() if self._last_odom is None else relative_motion(self._last_odom, odom)
@@ -338,7 +358,13 @@ class Localizer:
         self.pose = apply_motion(self.pose, motion)
         return self.pose
 
-    def _blend(self, prediction: Pose2D, matched: Pose2D) -> Pose2D:
+    def _blend(
+        self,
+        prediction: Pose2D,
+        matched: Pose2D,
+        at_rest: bool = False,
+        dt_s: float | None = None,
+    ) -> Pose2D:
         """Move from the prediction toward the match by ``correction_gain`` of the way.
 
         One match is a noisy measurement (about 1 degree and 1 cm of noise with 120 beams on a
@@ -348,11 +374,40 @@ class Localizer:
         scan converges in a few tenths of a second and filters the noise. Only the residual is
         damped — the motion itself is already in the prediction, so nothing lags behind the robot.
         A residual too large to be noise (a push, a carry, a re-seed) is taken whole.
+
+        ``at_rest`` swaps that gain for a slow average: a standing cart has no odometry error to
+        correct, so every scan's residual there is match noise, and taking half of each one is
+        what moves the published heading inside a several-degree band while nothing moves.
+        The average is in SECONDS, not in matches: ``dt_s`` (the time since the previous match)
+        gives ``gain = 1 - exp(-dt_s / rest_tau_s)``, so the same residual dies with the same
+        three-second time constant whether the caller matches at 10 Hz (an offline replay) or
+        about once a second (the node, which rests between matches — ``timeline.MotionFilter``).
+        A fixed per-match gain cannot: 0.05 per match is 2 s at 10 Hz and 20 s at 1 Hz, and at
+        20 s a 6 cm nudge inside the jump window outlives a parking manoeuvre. ``dt_s=None``
+        keeps the old per-match ``rest_gain`` for callers that time nothing.
+
+        The jump rule is deliberately NOT an escape hatch from the rest lock: at rest the wheels
+        and the gyro have both said for half a second that nothing turned, so a residual of six
+        degrees is a bad match, not a rotation. A tracker that is *lost* is another matter — it
+        drops the lock and takes what the recovery search found, at whatever gain it would use
+        while driving.
+
+        Note what the caller gets back: ``confidence`` is measured at the MATCHED pose, not at
+        the blended pose returned here, so at a low gain the reported fit belongs to a pose the
+        robot never published (deliberate: the fit must answer "does the scan fit the map here",
+        not "how far has the average crawled").
         """
         dx, dy = matched.x - prediction.x, matched.y - prediction.y
         dtheta = wrap_angle(matched.theta - prediction.theta)
         jump = math.hypot(dx, dy) > self._jump_m or abs(dtheta) > math.radians(self._jump_deg)
-        gain = 1.0 if jump else self._correction_gain
+        if at_rest and self._rest_lock and not self.lost:
+            gain = (
+                self._rest_gain
+                if dt_s is None
+                else 1.0 - math.exp(-max(dt_s, 0.0) / self._rest_tau_s)
+            )
+        else:
+            gain = 1.0 if jump else self._correction_gain
         return Pose2D(
             prediction.x + gain * dx,
             prediction.y + gain * dy,
@@ -360,12 +415,32 @@ class Localizer:
         )
 
     def update(
-        self, odom: Pose2D, points: NDArray[np.float64], trust_odometry: bool = True
+        self,
+        odom: Pose2D,
+        points: NDArray[np.float64],
+        trust_odometry: bool = True,
+        at_rest: bool = False,
+        vote: NDArray[np.bool_] | None = None,
+        dt_s: float | None = None,
     ) -> Pose2D:
         """Advance by the odometry step since the last call, then correct with the scan.
 
         ``trust_odometry=False`` discards the wheel step (slipping wheels): the pose is
         corrected from where it was, and the step is still consumed so it is never re-applied.
+
+        ``at_rest`` says the cart is standing (wheels and gyro agree): the residual is then
+        averaged in slowly instead of being taken every scan — see :meth:`_blend`.
+
+        ``dt_s`` is the time since the PREVIOUS call, in seconds; it makes that average a time
+        constant (``rest_tau_s``) instead of a per-match share, so a caller matching once a
+        second and one matching ten times a second settle at rest at the same speed. ``None``
+        (the default) keeps the old per-match ``rest_gain``; it changes nothing while moving.
+
+        ``vote`` is an optional (N,) mask over ``points``: only the returns it selects are scored
+        by the matcher, which is how returns the static map cannot explain (a moved chair, a
+        blanket) are kept from pulling the heading. Confidence is always measured on the WHOLE
+        scan, so the fit this reports, the lost counter and the occlusion verdict built on them
+        mean exactly what they meant before.
         """
         motion = (
             Pose2D()
@@ -384,10 +459,13 @@ class Localizer:
             self.confidence = 0.0
             self.weak_scans += 1
             return self.pose
-        local = self._matcher.match_around(prediction, points, motion, self._window)
+        voting = self._voting(points, vote)
+        local = self._matcher.match_around(prediction, voting, motion, self._window)
         pose, confidence = local.pose, self._matcher.inlier_fraction(local.pose, points)
 
         if self.lost:
+            # The whole scan, never the mask: a mask is read at a pose, and a lost tracker's pose
+            # is the thing in doubt. Silencing what it cannot explain would silence the evidence.
             coarse = self._matcher.match(prediction, points, self._recovery_window())
             far = self._matcher.match(coarse.pose, points, self._window)
             far_confidence = self._matcher.inlier_fraction(far.pose, points)
@@ -415,7 +493,7 @@ class Localizer:
                     )  # fmt: skip
                     pose, confidence = anywhere.pose, anywhere_confidence
 
-        self.pose = self._blend(prediction, pose)
+        self.pose = self._blend(prediction, pose, at_rest=at_rest, dt_s=dt_s)
         self.confidence = confidence
         if confidence < self._lost_below:
             self.weak_scans += 1

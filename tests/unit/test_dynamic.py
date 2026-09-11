@@ -124,3 +124,39 @@ def test_the_berth_is_the_toes_for_a_footprint_planner_and_the_hull_for_a_point_
         b = berth_for(point)
         assert b.ring_m == point_planner_ring_m() and b.near_m == near_exclusion_m(b.ring_m)
     assert hybrid.near_m < berth_for("GridBased").near_m  # a person at 0.7 m is seen by Hybrid
+
+
+# -- who may vote in the scan match -------------------------------------------
+
+
+def wall_scan(n: int = 200) -> np.ndarray:
+    """``n`` returns spread along the mapped wall at x = 3.0, seen from the origin."""
+    ys = np.linspace(0.2, 3.8, n)
+    return np.column_stack((np.full(n, 3.02), ys))
+
+
+def test_the_returns_the_map_explains_are_the_ones_that_vote() -> None:
+    from pepin.dynamic import voting_mask
+
+    mask = StaticMask(room())
+    points = wall_scan()
+    points[:20] = [1.5, 2.0]  # a blanket in the middle of the room: the map has no wall there
+    vote = voting_mask(points, Pose2D(), mask)
+    assert vote is not None
+    assert not vote[:20].any() and vote[20:].all()
+
+
+def test_a_scan_the_map_barely_explains_lets_everything_vote() -> None:
+    """A pose far off puts the whole scan on open floor; a mask built there would silence
+    exactly the returns that could fix it."""
+    from pepin.dynamic import voting_mask
+
+    assert voting_mask(wall_scan(), Pose2D(-1.5, 0.0, 0.0), StaticMask(room())) is None
+
+
+def test_too_few_explained_returns_let_everything_vote() -> None:
+    from pepin.dynamic import VOTE_MIN_POINTS, voting_mask
+
+    mask = StaticMask(room())
+    assert voting_mask(wall_scan(VOTE_MIN_POINTS - 1), Pose2D(), mask) is None
+    assert voting_mask(wall_scan(VOTE_MIN_POINTS), Pose2D(), mask) is not None

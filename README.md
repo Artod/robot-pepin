@@ -461,8 +461,14 @@ things a 2D lidar cannot. It recognises places: a bag of ORB words names the nod
 like, ICP on the two scans gives the transform, and the graph closes the loop (nine closures on
 one printer-home-printer round trip). And it measures height: a monocular depth network (Depth
 Anything V2, metric, on the laptop's CPU at three to four frames a second) turns each frame into
-a depth image, and the lidar sets its scale — the scan projected into the image names the true
-depth at a hundred pixels a frame, the median ratio scales the frame (the network alone saw the
+a depth image, and the lidar sets its scale — the scan, carried to the frame's moment through
+the odometry (a 100 ms older scan is 2 degrees stale at 20 deg/s), projected into the image names the true
+depth at a hundred pixels a frame, and those pixels fit the network's error as an affine law in
+inverse depth (1/z = a/D + b), fitted on the beams of the last thirty frames together (one
+frame's beams span too little depth to tell a shift from a scale) and applied to the whole image — the
+network sees the far end of a room too far by more than the near end, which one scale cannot say
+and a shift can: scaled at the beams' row alone, the wall a metre higher was off by half a metre
+(the network alone saw the
 room 1.5-2x too far). The camera's tilt and field of view are measured against the lidar, not
 read off a datasheet: the tilt (26 degrees) and the field of view (78 degrees, the datasheet's 70
 placed the image's edges 4 degrees wrong) at which the lidar's beams land on the surfaces the
@@ -479,9 +485,28 @@ onto the plane, goes to the board as a laser scan (`/depth_scan`, ±40 degrees, 
 second, a few kilobytes) and is the local costmap's third observation source, marking and
 clearing like the lidar. A table top stops the cart the way a wall does.
 
-**Next**: the depth scan into the global costmap as well (a planner that routes through a table
-it never saw), localisation by picture at start-up and in the tracker's symmetric corners, and
-places named from what the camera sees.
+**One surface, not a pile of clouds**: RTAB-Map assembles its map by concatenating one cloud per
+node, so two frames of a wall that disagree by a few centimetres are two walls. The frames are
+therefore also fused on the laptop into a truncated signed distance field (`pepin.tsdf`, plain
+numpy: 5 cm voxels over the served map, a frame in 30 ms): each voxel keeps one distance to the
+nearest surface and a weight, an observation moves it by a weighted average, and near
+observations weigh more than far ones ((2 m / d)², capped), so the model sharpens when the cart
+comes close and does not blur back when it leaves. Before a frame is fused, its points in the
+lidar's height band — exact by construction — are turned about the cart by the yaw that seats
+them best on the model (frame-to-model, ±4 degrees, sub-degree), so the tracker's heading jitter
+at rest never reaches the model. (A slowed copy of the tracker's map-to-odom correction can
+place the frames instead — it keeps a turn in place clean, but lags after a drive across the
+room and lands the drive's frames rotated against the lidar, so it is off by default.) Pixels on an object's edge — where the network blurs the object
+into what stands behind it and the pixel lands in mid-air — are dropped before anything else
+sees them. The floor is a second anchor: pixels whose depth agrees with the
+floor plane (the camera's height and tilt, the cart's lean from the accelerometer) snap to it.
+`/fusion/surface` is the field's zero-crossing, read between voxels; it sits in the 3D layout
+beside RTAB-Map's cloud, and every piece is a live switch (`ros2 param set /depth_fusion align
+false`, `/depth_stream floor_anchor false`) so each can be judged alone.
+
+**Next**: the tracker's heading refined below its 5 cm cells and held at rest, the depth scan
+into the global costmap as well, localisation by picture at start-up and in the tracker's
+symmetric corners, and places named from what the camera sees.
 
 ## Credits
 

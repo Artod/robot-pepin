@@ -127,3 +127,14 @@ def test_a_launch_waits_until_the_bridge_has_forgotten_its_ghost() -> None:
     assert "/goal_server" in laptop_launch_nodes("nav")
     with pytest.raises(ValueError):
         laptop_launch_nodes("board")
+
+
+def test_a_parameter_batch_flips_only_the_known_live_switches() -> None:
+    from pepin.deployment import switch_updates
+
+    batch = [("rest_lock", False), ("threads", 8), ("explained_vote", 1), ("subcell_refine", False)]
+    assert switch_updates(batch, ("rest_lock", "explained_vote")) == {
+        "rest_lock": False,
+        "explained_vote": True,
+    }
+    assert switch_updates([], ("rest_lock",)) == {}
