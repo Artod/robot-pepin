@@ -95,6 +95,37 @@ class MatchResult:
         return self.score > self.guess_score
 
 
+@dataclass(frozen=True)
+class ScoreSurface:
+    """The lattice a match was decided on, kept so a covariance can be read off it.
+
+    ``scores`` is (T, P) over headings x positions, ``positions`` the (P, 2) world metres and
+    ``headings`` the (T,) radians of the candidates; ``k``, ``i`` index the winner. ``n_points``
+    beams were scored and ``top`` is the field's peak value, so ``scores / (n_points * top)``
+    is a per-beam score in units of "on the wall" that no map's log-odds scale enters.
+    """
+
+    scores: NDArray[np.float64]
+    positions: NDArray[np.float64]
+    headings: NDArray[np.float64]
+    k: int
+    i: int
+    n_points: int
+    top: float
+
+    @property
+    def xy_step_m(self) -> float:
+        """The lattice's position step (0 for a single-candidate lattice)."""
+        if len(self.positions) < 2:
+            return 0.0
+        return float(abs(self.positions[1, 1] - self.positions[0, 1]))  # dx outer, dy inner
+
+    @property
+    def theta_step(self) -> float:
+        """The lattice's heading step in radians (0 for a single heading)."""
+        return float(self.headings[1] - self.headings[0]) if len(self.headings) > 1 else 0.0
+
+
 class CorrelativeMatcher:
     """Finds the pose in a window around the guess that best explains a scan.
 
@@ -120,6 +151,7 @@ class CorrelativeMatcher:
         self._interpolate = interpolate
         self._field: NDArray[np.float64] | None = None
         self._field_version = -1
+        self._top = 0.0  # the field's peak value, cached with it
 
     def invalidate(self) -> None:
         """Force a rebuild of the score field; only needed after editing ``log_odds`` by hand.
@@ -152,7 +184,13 @@ class CorrelativeMatcher:
             ):
                 spread = np.maximum(spread, w * np.roll(np.roll(occupied, dr, axis=0), dc, axis=1))
             self._field = spread + np.minimum(lo, 0.0)
+            self._top = float(np.maximum(self._field, 0.0).max())
         return self._field
+
+    def field_top(self) -> float:
+        """The field's peak value: what a beam scores dead on a wall (0 on an empty map)."""
+        self._score_field()
+        return self._top
 
     def _subsample(self, points: NDArray[np.float64]) -> NDArray[np.float64]:
         """Every k-th beam, down to at most ``max_points``: the score surface barely
@@ -201,11 +239,17 @@ class CorrelativeMatcher:
         turn-in-place) widens the window with coarser steps first, and the
         fine pass around that winner brings back the base resolution.
         """
+        return self.match_around_surface(guess, points, motion, window)[0]
+
+    def match_around_surface(
+        self, guess: Pose2D, points: NDArray[np.float64], motion: Pose2D, window: SearchWindow
+    ) -> tuple[MatchResult, ScoreSurface]:
+        """:meth:`match_around`, plus the lattice of the fine pass the answer was read from."""
         wide = window.widened_for(motion)
         if wide == window:
-            return self.match(guess, points, window)
+            return self.match_surface(guess, points, window)
         coarse = self.match(guess, points, wide)
-        return self.match(coarse.pose, points, window)
+        return self.match_surface(coarse.pose, points, window)
 
     def inlier_fraction(
         self,
@@ -235,7 +279,7 @@ class CorrelativeMatcher:
         fraction, which counts a point one cell off a wall the same as one on it."""
         if len(points) == 0:
             return 0.0
-        top = float(np.maximum(self._score_field(), 0.0).max())
+        top = self.field_top()
         if top <= 0.0:
             return 0.0
         return float(np.maximum(self._values_at(pose, points), 0.0).mean() / top)
@@ -276,10 +320,22 @@ class CorrelativeMatcher:
         ``points`` are the scan's robot-frame (P, 2) meters. Every candidate is
         scored exhaustively; near-equal scores break toward ``guess``.
         """
+        return self.match_surface(guess, points, window)[0]
+
+    def match_surface(
+        self, guess: Pose2D, points: NDArray[np.float64], window: SearchWindow | None = None
+    ) -> tuple[MatchResult, ScoreSurface]:
+        """:meth:`match`, plus the whole lattice it chose from (:class:`ScoreSurface`): the
+        winner's neighbourhood says how sharply the scan pins the pose in each direction."""
         window = window or self._window
         pts = self._subsample(points)
-        pose, score = self._peak(*self._lattice(guess, pts, window))
-        return MatchResult(pose=pose, score=score, guess_score=self.score(guess, pts))
+        scores, positions, headings = self._lattice(guess, pts, window)
+        field, k, i = self._winner(scores)
+        pose = self._refined(field, positions, headings, k, i)
+        result = MatchResult(
+            pose=pose, score=float(field[k, i]), guess_score=self.score(guess, pts)
+        )
+        return result, ScoreSurface(scores, positions, headings, k, i, len(pts), self.field_top())
 
     def match_top(
         self,
