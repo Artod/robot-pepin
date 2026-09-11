@@ -100,9 +100,12 @@ def carry(points: Array, rotation: Array, translation: Array) -> Array:
     return moved
 
 
-def project(points_base: Array, cam: CameraPose, intr: Intrinsics) -> Array:
-    """Pixels the base_link points land on: (m, 3) rows of column, row and depth along the
-    optical axis, only for points inside the image and in front of the camera."""
+def project_all(
+    points_base: Array, cam: CameraPose, intr: Intrinsics
+) -> tuple[Array, Array, Array]:
+    """Every base_link point as (column, row, depth along the optical axis), whether or not it
+    lands inside the image or in front of the camera (a point behind the lens has a negative
+    depth and a meaningless pixel): for a caller that must keep the points' order."""
     p = np.asarray(points_base, dtype=float) - np.array([cam.x, cam.y, cam.z])
     c, s = math.cos(cam.pitch), math.sin(cam.pitch)
     # camera_link axes: forward, left, up; the pitch turns forward towards the floor
@@ -112,7 +115,21 @@ def project(points_base: Array, cam: CameraPose, intr: Intrinsics) -> Array:
     with np.errstate(divide="ignore", invalid="ignore"):
         u = intr.fx * (-left / forward) + intr.cx
         v = intr.fy * (-up / forward) + intr.cy
-    keep = (forward > NEAR_M) & (u >= 0) & (u < intr.width) & (v >= 0) & (v < intr.height)
+    return u, v, forward
+
+
+def in_image(u: Array, v: Array, forward: Array, intr: Intrinsics) -> Mask:
+    """Which projected points are scene points of the picture: in front of the lens (deeper
+    than NEAR_M) and inside the image."""
+    keep: Mask = (forward > NEAR_M) & (u >= 0) & (u < intr.width) & (v >= 0) & (v < intr.height)
+    return keep
+
+
+def project(points_base: Array, cam: CameraPose, intr: Intrinsics) -> Array:
+    """Pixels the base_link points land on: (m, 3) rows of column, row and depth along the
+    optical axis, only for points inside the image and in front of the camera."""
+    u, v, forward = project_all(points_base, cam, intr)
+    keep = in_image(u, v, forward, intr)
     return np.stack([u[keep], v[keep], forward[keep]], axis=1)
 
 
@@ -397,13 +414,11 @@ B_BOUNDS = (-0.2, 0.2)  # 1/m: a shift beyond this is a broken fit, not a lens
 LAW_MAX_AGE_S = 24 * 3600.0  # a saved law older than this is another day's room and lighting
 
 
-def beam_pairs(
+def beam_hits(
     depth: Array, samples: Array, edge: Mask | None = None
-) -> tuple[Array, Array] | None:
-    """The (network depth, true depth) pairs at the pixels the beams hit, or ``None`` under
-    MIN_SAMPLES usable pixels. Pixels flagged in ``edge`` (:func:`edge_mask` of the same image)
-    are left out: a beam landing on a blurred edge pairs the lidar's depth with a number between
-    two surfaces, and such pairs bend the fit."""
+) -> npt.NDArray[np.intp] | None:
+    """Which beams (rows of ``samples``: column, row, true depth) judge the depth image: those
+    landing on a finite scene pixel off any edge, or ``None`` under MIN_SAMPLES of them."""
     if samples.shape[0] == 0:
         return None
     cols = samples[:, 0].astype(int)
@@ -414,39 +429,75 @@ def beam_pairs(
         ok &= ~edge[rows, cols]
     if int(ok.sum()) < MIN_SAMPLES:
         return None
-    return predicted[ok], samples[ok, 2]
+    return np.flatnonzero(ok)
 
 
-def _fit_noisy_on_exact(x: Array, y: Array) -> tuple[float, float]:
+def beam_pairs(
+    depth: Array, samples: Array, edge: Mask | None = None
+) -> tuple[Array, Array] | None:
+    """The (network depth, true depth) pairs at the pixels the beams hit, or ``None`` under
+    MIN_SAMPLES usable pixels. Pixels flagged in ``edge`` (:func:`edge_mask` of the same image)
+    are left out: a beam landing on a blurred edge pairs the lidar's depth with a number between
+    two surfaces, and such pairs bend the fit."""
+    hits = beam_hits(depth, samples, edge)
+    if hits is None:
+        return None
+    cols = samples[hits, 0].astype(int)
+    rows = samples[hits, 1].astype(int)
+    return np.asarray(depth, dtype=float)[rows, cols], samples[hits, 2]
+
+
+def weighted_median(values: Array, weight: Array | None) -> float:
+    """The median of ``values``, each counting ``weight`` times (the plain median when
+    ``weight`` is ``None``): the value at which half the total weight lies below — the mean of
+    the two values on either side when the half falls exactly between them, so equal weights
+    give ``np.median`` to the bit."""
+    if weight is None:
+        return float(np.median(values))
+    order = np.argsort(values, kind="stable")
+    sorted_values = values[order]
+    cumulative = np.cumsum(weight[order])
+    half = 0.5 * cumulative[-1]
+    i = min(int(np.searchsorted(cumulative, half)), values.size - 1)
+    if cumulative[i] == half and i + 1 < values.size:
+        return float((sorted_values[i] + sorted_values[i + 1]) / 2.0)
+    return float(sorted_values[i])
+
+
+def _fit_noisy_on_exact(x: Array, y: Array, weight: Array | None = None) -> tuple[float, float]:
     """(alpha, beta) of x = alpha * y + beta by least squares, the worst quarter of the residuals
     dropped once and the fit repeated. ``x`` is the noisy variable (the network's 1 / D),
-    ``y`` the exact one (the lidar's 1 / z)."""
-    alpha, beta = np.polyfit(y, x, 1)
+    ``y`` the exact one (the lidar's 1 / z). ``weight`` counts each pair that many times in
+    the squares (a per-pair share, not a per-pair sigma); the residual cut is per pair."""
+    w = None if weight is None else np.sqrt(weight)
+    alpha, beta = np.polyfit(y, x, 1, w=w)
     res = np.abs(x - (alpha * y + beta))
     keep = res <= np.percentile(res, 75)
     if int(keep.sum()) >= 3:
-        alpha, beta = np.polyfit(y[keep], x[keep], 1)
+        alpha, beta = np.polyfit(y[keep], x[keep], 1, w=None if w is None else w[keep])
     return float(alpha), float(beta)
 
 
-def _bounded(a: float, b: float, x: Array, y: Array) -> tuple[float, float]:
+def _bounded(
+    a: float, b: float, x: Array, y: Array, weight: Array | None = None
+) -> tuple[float, float]:
     """(a, b) of y = a x + b inside A_BOUNDS and B_BOUNDS. When a bound binds, the other
     parameter is refitted with the bound fixed (the median residual): clipping both independently
     turned a degenerate (0.27, 0.43) into a (0.3, 0.2) that fits nothing."""
     a_lo, a_hi = A_BOUNDS
     b_lo, b_hi = B_BOUNDS
     if not (math.isfinite(a) and math.isfinite(b)):
-        return float(np.clip(np.median(y / x), a_lo, a_hi)), 0.0  # no slope at all: a scale
+        return float(np.clip(weighted_median(y / x, weight), a_lo, a_hi)), 0.0  # a scale only
     if a < a_lo or a > a_hi:
         a = a_lo if a < a_lo else a_hi
-        b = float(np.clip(np.median(y - a * x), b_lo, b_hi))
+        b = float(np.clip(weighted_median(y - a * x, weight), b_lo, b_hi))
     elif b < b_lo or b > b_hi:
         b = b_lo if b < b_lo else b_hi
-        a = float(np.clip(np.median((y - b) / x), a_lo, a_hi))
+        a = float(np.clip(weighted_median((y - b) / x, weight), a_lo, a_hi))
     return a, b
 
 
-def fit_affine(d: Array, z: Array) -> tuple[float, float]:
+def fit_affine(d: Array, z: Array, weight: Array | None = None) -> tuple[float, float]:
     """The law 1 / z = a / D + b over (network, lidar) pairs, bounded to what a lens and a
     network can plausibly do.
 
@@ -457,15 +508,17 @@ def fit_affine(d: Array, z: Array) -> tuple[float, float]:
     intercept (regression dilution) — the mechanism behind the a 0.27, b 0.43 that squeezed the
     room into two metres. A shift is fitted only when the pool spans MIN_DEPTH_SPREAD between
     its 5th and 95th depth percentiles and holds POOL_MIN_SAMPLES pairs (one reflection at 6 m
-    must not enable it on a 1.3-2 m pool); otherwise the scale alone, the median ratio."""
+    must not enable it on a 1.3-2 m pool); otherwise the scale alone, the median ratio.
+    ``weight`` (one per pair, ``None`` for equal) is each pair's share in the squares and the
+    medians; the spread and count gates count pairs, not weight."""
     x, y = 1.0 / d, 1.0 / z
     lo, hi = np.percentile(z, (5, 95))
     if float(hi / lo) < MIN_DEPTH_SPREAD or d.size < POOL_MIN_SAMPLES:
-        return float(np.clip(np.median(y / x), *A_BOUNDS)), 0.0
-    alpha, beta = _fit_noisy_on_exact(x, y)
+        return float(np.clip(weighted_median(y / x, weight), *A_BOUNDS)), 0.0
+    alpha, beta = _fit_noisy_on_exact(x, y, weight)
     with np.errstate(divide="ignore", invalid="ignore"):
         a, b = float(np.divide(1.0, alpha)), float(np.divide(-beta, alpha))
-    return _bounded(a, b, x, y)
+    return _bounded(a, b, x, y, weight)
 
 
 class AffineScale:
