@@ -30,3 +30,6 @@ ros/maps/*_throttle*
 .coverage
 ros/maps/rtabmap*.db*
 ros/maps/last_pose.json
+
+# written by the depth node at run time (the persisted affine law)
+ros/maps/depth_law.json
