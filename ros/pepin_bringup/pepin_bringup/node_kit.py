@@ -45,6 +45,7 @@ from pepin.tsdf import RigidPose
 from pepin_bringup.msgs import pose_from_transform, stamp_seconds
 
 __all__ = [
+    "Fatal",
     "Switches",
     "Tally",
     "TfLookup",
@@ -434,19 +435,48 @@ def _time(stamp: Any) -> Any:
 
 
 # ---- main ------------------------------------------------------------------------------------
+class Fatal:
+    """The node's way out when a worker thread finds it cannot go on (its only backend cannot
+    be built, say): the thread leaves the reason here and a timer on the spin thread raises it
+    out of ``rclpy.spin`` as ``SystemExit`` — so :func:`spin_main` still joins the workers and
+    disposes the participant, and the process exits with code 1 and the reason on stderr, as
+    loud as a node that failed in its constructor (the launch respawns it; the respawn is the
+    retry). Nothing in rclpy ends a spin from another thread with an exit code: ``shutdown()``
+    is the normal end, code 0, "finished cleanly" in the launch's log."""
+
+    def __init__(self, node: Any, period_s: float = 1.0) -> None:
+        self._reason: str | None = None
+        node.create_timer(period_s, self._raise)
+
+    @property
+    def leaving(self) -> bool:
+        """Whether a reason was left: the node ends within a period."""
+        return self._reason is not None
+
+    def leave(self, reason: str) -> None:
+        """Leave the reason (the first one stands); the node ends within a period."""
+        if self._reason is None:
+            self._reason = reason
+
+    def _raise(self) -> None:
+        if self._reason is not None:
+            raise SystemExit(self._reason)
+
+
 def spin_main(factory: Callable[[], Any], args: list[str] | None = None) -> None:
     """A node's ``main``: init, build the node, spin, and leave cleanly on SIGINT — the signal
     the launch sends at shutdown and ``ros/laptop.sh kick`` sends by hand.
 
     rclpy's handler shuts the context down and the spin ends with ``KeyboardInterrupt`` or
-    ``ExternalShutdownException`` (whichever lands first); both are the normal end. Then, in
-    this order: the node's ``close()`` if it has one (its worker threads and TF listener are
-    stopped and JOINED), ``destroy_node`` (the DDS participant is disposed, so the bridge
-    forgets the name at once and the respawn meets no ghost), and the context's shutdown. The
-    join is the fix for the depth node's SIGABRT: a daemon thread still inside the network's
-    C++ when the interpreter finalised was ended with ``pthread_exit``, which unwinds through
-    ``noexcept`` frames into ``std::terminate`` ("terminate called without an active exception",
-    CPython 3.12, gh-87135). A joined thread has no frames to unwind.
+    ``ExternalShutdownException`` (whichever lands first); both are the normal end. The loud
+    end is a :class:`Fatal`: ``SystemExit`` with the reason, exit code 1, through the same
+    order. Then, in this order: the node's ``close()`` if it has one (its worker threads and
+    TF listener are stopped and JOINED), ``destroy_node`` (the DDS participant is disposed, so
+    the bridge forgets the name at once and the respawn meets no ghost), and the context's
+    shutdown. The join is the fix for the depth node's SIGABRT: a daemon thread still inside
+    the network's C++ when the interpreter finalised was ended with ``pthread_exit``, which
+    unwinds through ``noexcept`` frames into ``std::terminate`` ("terminate called without an
+    active exception", CPython 3.12, gh-87135). A joined thread has no frames to unwind.
     """
     rclpy.init(args=args)
     node: Any = None

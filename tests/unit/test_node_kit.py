@@ -13,6 +13,7 @@ RCLPY = ros_stubs.install()
 
 from pepin_bringup import node_kit  # noqa: E402
 from pepin_bringup.node_kit import (  # noqa: E402
+    Fatal,
     Switches,
     Tally,
     TfLookup,
@@ -35,6 +36,7 @@ class FakeNode:
         self.set_calls: list[list[tuple[str, Any]]] = []
         self.callback: Any = None
         self.lines: list[str] = []
+        self.timers: list[tuple[float, Any]] = []
         self.destroyed = False
         self.closed = False
 
@@ -51,6 +53,10 @@ class FakeNode:
         """rclpy's: each parameter through the set callback, its result back."""
         self.set_calls.append([(p.name, p.value) for p in params])
         return [self.callback(params)]
+
+    def create_timer(self, period_s: float, callback: Any) -> Any:
+        self.timers.append((period_s, callback))
+        return callback
 
     def get_logger(self) -> Any:
         node = self
@@ -469,6 +475,47 @@ def test_the_worker_is_joined_before_the_node_is_destroyed_or_the_context_shut_d
     order.append("shutdown" if RCLPY.log[-1] == "try_shutdown" else "no shutdown")
     assert order == ["worker out", "destroy", "shutdown"]
     assert not nodes[0].worker.alive, "a daemon thread left running is the abort"
+
+
+def test_a_worker_thread_ends_the_node_through_fatal_with_an_exit_code_in_order() -> None:
+    """A thread cannot raise into rclpy.spin, and shutdown() from it is the normal end (code 0,
+    "finished cleanly" in the launch's log): the reason is left in Fatal and its timer raises
+    SystemExit on the spin thread, so the process exits 1 with the reason — after close and
+    destroy, before the context's shutdown — as loud as a constructor that failed."""
+    RCLPY.log.clear()
+
+    class Leaving(FakeNode):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fatal = Fatal(self, period_s=0.5)
+
+    nodes: list[Leaving] = []
+
+    def factory() -> Leaving:
+        nodes.append(Leaving())
+        return nodes[-1]
+
+    def end_spin() -> None:
+        node = nodes[0]
+        (period, tick) = node.timers[0]
+        assert period == 0.5 and not node.fatal.leaving
+        tick()  # nothing left yet: the spin goes on
+        worker = threading.Thread(target=node.fatal.leave, args=("no model",))
+        worker.start()
+        worker.join(1.0)
+        node.fatal.leave("a later reason")  # the first stands
+        assert node.fatal.leaving
+        tick()
+
+    RCLPY.on_spin = end_spin
+    try:
+        with pytest.raises(SystemExit, match="no model") as left:
+            spin_main(factory)
+    finally:
+        RCLPY.on_spin = None
+    assert left.value.code == "no model", "the reason on stderr, exit code 1"
+    assert RCLPY.log == ["init", "spin", "try_shutdown"]
+    assert nodes[0].closed and nodes[0].destroyed
 
 
 def test_a_node_that_fails_to_build_still_shuts_the_context_down() -> None:
