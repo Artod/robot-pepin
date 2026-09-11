@@ -36,8 +36,9 @@ SOURCE_ORDER="lidar depth contact"  # pepin.sources' own order, so two lists com
 LAYER_ORDER="lidar_layer camera_layer contact_layer"
 NAV_ACTIONS="navigate_to_pose navigate_through_poses"
 REPORT_WINDOW_S=90  # the nodes report every 30 s: three windows, so one missed line is not a verdict
-GOAL_PATIENCE_S=12  # a latched status reaches a fresh subscriber once it has discovered the
-                    # publisher, and discovery alone is ~7 s on the board
+GUARD_TIMEOUT_S=30  # the navigation guard's whole rclpy pass (ros/tools/nav_goal_running.py):
+                    # python and rclpy start, the node discovers, and it spins its own window —
+                    # about 13 s on the board, and this cap is what a hung DDS runs into
 
 CHANGED=0  # settings this run actually moved (each one is printed)
 FAILED=0   # something did not answer and was not applied: the exit status
@@ -165,34 +166,39 @@ driver_state() {  # the lidar driver's lifecycle state as one word; "?" when it 
     echo "${state:-?}"
 }
 
-goal_running() {  # ACTION -> yes, no, or ? (the query itself failed), from the latched status
-    local action="$1" reply rc
-    reply="$(on_board timeout "$GOAL_PATIENCE_S" ros2 topic echo --once \
-        --qos-durability transient_local --qos-reliability reliable \
-        "/$action/_action/status" 2>/dev/null)" && rc=0 || rc=$?
-    case "$rc" in
-        124) echo no; return 0 ;;  # nobody published a status within the patience
-        0) ;;
-        *) echo "?"; return 0 ;;
-    esac
-    case "$reply" in
-        *"status: 1"* | *"status: 2"*) echo yes ;;  # ACCEPTED or EXECUTING
-        *) echo no ;;
-    esac
+nav_goals() {  # ACTION=yes|no|? for every navigation action, in one rclpy pass on the board.
+    # The tool is piped in from the laptop's copy, so this guard needs no deploy and works on a
+    # board whose /tools are older than this script. Empty when the pass did not run at all.
+    local remote="docker exec -i pepin-ros /pepin_entrypoint.sh"  # -i: the tool arrives on stdin
+    ssh "root@$BOARD" "$remote timeout $GUARD_TIMEOUT_S python3 - $NAV_ACTIONS" \
+        < "$HERE/tools/nav_goal_running.py" 2>/dev/null || true
+}
+
+goal_running() {  # LINE ACTION -> yes, no, or ? (the pass could not tell, or never answered)
+    local word
+    for word in $1; do
+        case "$word" in
+            "$2=yes") echo yes; return 0 ;;
+            "$2=no") echo no; return 0 ;;
+            "$2="*) echo "?"; return 0 ;;  # the pass's own "?": it could not see
+        esac
+    done
+    echo "?"  # the line carries no word for this action: the pass did not run
 }
 
 refuse_if_navigating() {  # the lifecycle half never runs under a goal, nor under a blind guard
-    local action verdict
+    local action verdict line
     echo "  checking that no navigation goal is running"
-    echo "  (up to $((GOAL_PATIENCE_S * 2)) s: a ros2 CLI node costs seconds to start on the board)"
+    echo "  (up to $GUARD_TIMEOUT_S s: an rclpy pass that must start and discover on the board)"
+    line="$(nav_goals)"
     for action in $NAV_ACTIONS; do
-        verdict="$(goal_running "$action")"
+        verdict="$(goal_running "$line" "$action")"
         case "$verdict" in
             no) ;;
             yes) echo "  refused: a navigation goal is running ($action); ros/go.sh cancel first"
                  exit 1 ;;
-            *) echo "  refused: /$action/_action/status did not answer, so the guard cannot see"
-               echo "  whether the robot is driving; ros/watch.sh, or leave --hard off"
+            *) echo "  refused: the guard could not read /$action/_action/status, so it cannot"
+               echo "  see whether the robot is driving; ros/watch.sh, or leave --hard off"
                exit 1 ;;
         esac
     done

@@ -194,7 +194,9 @@ answer() {  # the canned reply of the board or the laptop, by what was asked of 
             [ "${FAKE_DRIVER:-active}" = none ] && return 1
             printf '%s [3]\n' \
                 "$(cat "$FAKE_DRIVER_STATE" 2>/dev/null || printf '%s' "${FAKE_DRIVER:-active}")" ;;
-        *_action/status*) printf '%s\n' "${FAKE_GOAL:-}"; [ -n "${FAKE_GOAL:-}" ] || return 124 ;;
+        *python3*)  # the navigation guard's rclpy pass (ros/tools/nav_goal_running.py)
+            printf '%s\n' "${FAKE_GOALS-navigate_to_pose=no navigate_through_poses=no}"
+            [ -n "${FAKE_GOALS-x}" ] || return 124 ;;
         *"param dump"*)
             [ "${FAKE_LAYERS:-false}" = none ] && return 1
             printf '%s\n' "${1##* }:" "  ros__parameters:"
@@ -226,6 +228,12 @@ def _sensor(tmp_path, *args, **env):  # type: ignore[no-untyped-def]
         (here / name).write_text(text)
         (here / name).chmod(0o755)
     (here / "sensor.sh").write_text((REPO / "ros/sensor.sh").read_text())
+    # The navigation guard pipes this file into the board's python, so it must be where the
+    # script looks for it — the real one, unfaked: what answers is the fake ssh.
+    (here / "tools").mkdir(exist_ok=True)
+    (here / "tools/nav_goal_running.py").write_text(
+        (REPO / "ros/tools/nav_goal_running.py").read_text()
+    )
     log = tmp_path / "log"
     log.write_text("")
     run = subprocess.run(
@@ -352,12 +360,13 @@ def test_hard_is_refused_on_an_on_instead_of_stopping_the_driver_it_just_switche
 def test_the_lifecycle_half_is_refused_under_a_running_goal_and_under_a_blind_guard(  # type: ignore[no-untyped-def]
     tmp_path,
 ) -> None:
-    """An absent /scan under a moving robot is an experiment nobody chose, so --hard reads the
-    navigation action's latched status first (ros/tools/turn_full.py's check) and refuses before
-    anything at all is applied — a half-applied switch is worse than a refusal. A status the
-    guard could not read refuses too: a guard that cannot see does not wave through."""
+    """An absent /scan under a moving robot is an experiment nobody chose, so --hard asks the
+    navigation actions first (ros/tools/nav_goal_running.py) and refuses before anything at all
+    is applied — a half-applied switch is worse than a refusal. An answer the guard could not
+    get refuses too: a guard that cannot see does not wave through."""
+    goal = "navigate_to_pose=yes navigate_through_poses=no"
     code, out, sent = _sensor(
-        tmp_path, "lidar", "off", "--hard", FAKE_GOAL="  status: 2", FAKE_LAYERS="true"
+        tmp_path, "lidar", "off", "--hard", FAKE_GOALS=goal, FAKE_LAYERS="true"
     )
     assert code == 1
     assert "refused: a navigation goal is running (navigate_to_pose" in out
@@ -367,12 +376,33 @@ def test_the_lifecycle_half_is_refused_under_a_running_goal_and_under_a_blind_gu
     assert code == 1 and "did not answer a lifecycle get" in out
     assert not [c for c in sent if "param set" in c], sent
 
-    # A finished goal (status 4) is not a running one.
-    code, out, sent = _sensor(
-        tmp_path, "lidar", "off", "--hard", FAKE_GOAL="  status: 4", FAKE_LAYERS="true"
-    )
+    # A pass that answered "no" for both actions is the only way through.
+    code, out, sent = _sensor(tmp_path, "lidar", "off", "--hard", FAKE_LAYERS="true")
     assert code == 0, out
     assert f"{BOARD} ros2 lifecycle set /ldlidar_node deactivate" in sent
+
+
+def test_a_guard_that_could_not_see_refuses_instead_of_reading_it_as_no_goal(  # type: ignore[no-untyped-def]
+    tmp_path,
+) -> None:
+    """The guard used to run `ros2 topic echo --once` under a 12 s `timeout` and read the 124 as
+    "nobody published a status, so no goal is running" — but a loaded board (the only state in
+    which a goal IS running) is exactly what makes that query time out: one successful echo
+    measured 8.1 s on an idle board. Both shapes of "I could not tell" now refuse: the pass's
+    own `?`, and a pass that printed nothing at all."""
+    for goals in ("navigate_to_pose=? navigate_through_poses=no", "", "bogus output"):
+        code, out, sent = _sensor(
+            tmp_path, "lidar", "off", "--hard", FAKE_GOALS=goals, FAKE_LAYERS="true"
+        )
+        assert code == 1, (goals, out)
+        assert "the guard could not read /navigate_to_pose/_action/status" in out, goals
+        assert not [c for c in sent if "param set" in c or "lifecycle set" in c], (goals, sent)
+    # the pass is one rclpy node piped in from the laptop, not a ros2 CLI call per action
+    _, _, sent = _sensor(tmp_path, "lidar", "off", "--hard", FAKE_LAYERS="true")
+    assert not [c for c in sent if "topic echo" in c], sent
+    piped = [c for c in sent if "python3 -" in c]
+    assert len(piped) == 1 and "navigate_to_pose navigate_through_poses" in piped[0], sent
+    assert "docker exec -i pepin-ros" in piped[0], piped
 
 
 def test_a_node_that_does_not_answer_is_reported_not_guessed(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -406,6 +436,33 @@ def test_a_source_this_script_has_not_heard_of_survives_the_other_sensor_s_switc
         tmp_path, "camera", "off", FAKE_SOURCES="lidar,sonar,depth,contact", FAKE_LAYERS="true"
     )
     assert "flags set relocalizer sources lidar,sonar" in sent, sent
+
+
+def test_the_navigation_guard_separates_no_goal_from_could_not_see() -> None:
+    """ros/tools/nav_goal_running.py exists for one distinction a `timeout` cannot make: an
+    action server that has simply never had a goal (nothing latched to receive) looks exactly
+    like a query too slow to discover anything. The subscription's own match, and the graph,
+    are what tell them apart — and every case it cannot settle answers `?`, which the caller
+    refuses on."""
+    import importlib.util
+
+    path = REPO / "ros/tools/nav_goal_running.py"
+    spec = importlib.util.spec_from_file_location("nav_goal_running", path)
+    assert spec is not None and spec.loader is not None
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)  # imports no rclpy: that lives inside main()
+    grace, blind = tool.MATCH_GRACE_S, tool.GRAPH_GRACE_S
+
+    # a status arrived and carries a running goal / carries none
+    assert tool.verdict(True, True, 0.1, 0.1) == "yes"
+    assert tool.verdict(False, True, 0.1, 0.1) == "no"
+    # the server is up and stayed silent: nothing is latched, so no goal has run since it started
+    assert tool.verdict(False, False, grace, 0.0) == "no"
+    assert tool.verdict(False, False, grace - 0.5, 0.0) == "?", "still in flight is not an answer"
+    # no publisher at all: only a graph this node has really seen makes that an answer
+    assert tool.verdict(False, False, None, blind) == "no"
+    assert tool.verdict(False, False, None, blind - 0.5) == "?"
+    assert tool.verdict(False, False, None, 0.0) == "?", "a blind pass never says no"
 
 
 def test_the_scripts_source_order_is_the_rosters_own() -> None:

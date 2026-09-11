@@ -155,9 +155,18 @@ Every call is idempotent and prints only what it moved (`already so` when nothin
 soft `lidar off` is an ignored scan; `--hard` is the absence of one —
 `ros2 lifecycle set /ldlidar_node deactivate`, which sticks because the sensors lifecycle manager
 runs with `bond_timeout: 0.0` and does not resurrect it. Only `ros/sensor.sh lidar on` brings it
-back. `--hard` (and the reactivation) first reads `/navigate_to_pose/_action/status` and refuses
-while a goal is running, the check `ros/tools/turn_full.py` makes before it turns the cart; a
-status it cannot read refuses too. Nothing here restarts a container or writes a velocity.
+back. `--hard` (and the reactivation) first asks `ros/tools/nav_goal_running.py` — one rclpy pass
+over `/navigate_to_pose/_action/status` and `/navigate_through_poses/_action/status`, piped into
+the board's python so nothing has to be deployed — and refuses while a goal is running, the check
+`ros/tools/turn_full.py` makes before it turns the cart. An answer it could not get refuses too,
+and that is why the check is a node rather than a `ros2 topic echo --once` under a `timeout`: an
+action server that has had no goal since it started has nothing latched to hand over, so the echo
+hangs exactly as it hangs when the CLI is too slow to discover anything, and both come back as
+exit 124. Measured on the board on 2026-09-11 with Nav2 up and no goal yet sent: the status
+publishers are matched 0.26 s into the pass and not one message ever arrives. A subscription can
+tell "the server is up and silent" from "this pass saw nothing at all"; a `timeout` cannot, and
+the loaded board that makes the query slow is the one state in which a goal really is running.
+The whole pass costs ~7.6 s. Nothing here restarts a container or writes a velocity.
 
 Expect it to be slow: a `ros2` CLI call is a Python node that must start and discover, about 10 s
 on the board under load. The script therefore reads one whole `ros2 param dump` per costmap
