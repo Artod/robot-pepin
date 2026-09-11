@@ -49,6 +49,20 @@ def _started_after_ghost_wait(launch: ast.Module) -> set[str]:
     return {ast.unparse(started)}
 
 
+def _rtabmap(table: str) -> dict[str, object]:
+    """One of vslam.launch.py's RTAB-Map tables (``RTABMAP``, ``KNOWN_MAP``, ``SLAM``,
+    ``SLAM_LIDAR``, ``SLAM_CAMERA_ONLY``) as a dict. The modes overlay the common table, so a
+    contract names the one it means instead of the union of every dict literal in the file."""
+    return dict(ast.literal_eval(sf.assignments(sf.tree(VSLAM_LAUNCH))[table]))
+
+
+def _case_blocks(script: str) -> dict[str, str]:
+    """A shell script's top-level ``case`` branches by label: ``on)`` up to the next label."""
+    labels = list(re.finditer(r"^    (\w+|\*)\)", script, re.M))
+    ends = [m.start() for m in labels[1:]] + [len(script)]
+    return {m.group(1): script[m.end() : end] for m, end in zip(labels, ends, strict=True)}
+
+
 def _p(node: str) -> dict:  # type: ignore[type-arg]
     block = PARAMS[node]
     if (
@@ -161,6 +175,7 @@ def test_the_operator_scripts_parse_and_keep_their_safety_lines() -> None:
         "tour.sh",
         "lib.sh",
         "mode.sh",
+        "map.sh",
         "feature.sh",
         "laptop.sh",
         "thin.sh",
@@ -433,17 +448,19 @@ def test_the_camera_slam_lives_beside_the_tracker_never_over_it() -> None:
     keeps the reflexes' frame; the camera is nominal until calibrated and says so."""
     vslam = sf.tree(VSLAM_LAUNCH)
     params = sf.dict_items(vslam)
-    assert params["publish_tf"] == {"False"} and params["map_frame_id"] == {"'rtabmap'"}
+    assert params["publish_tf"] == {"False"}, "neither mode lets RTAB-Map into a tf tree"
+    assert _rtabmap("KNOWN_MAP")["map_frame_id"] == "rtabmap"
     rtabmap = sf.keywords(_node_named(vslam, "rtabmap"))
     assert ast.unparse(rtabmap["namespace"]) == "'rtabmap'", (
         "its relative 'map' output must not land on /map"
     )
-    assert params["subscribe_scan"] == {"True"} and params["Reg/Strategy"] == {"'1'"}
+    assert _rtabmap("KNOWN_MAP")["subscribe_scan"] is True
+    assert _rtabmap("RTABMAP")["Reg/Strategy"] == "1"
     assert "pepin_bringup.camera_stream" in sf.strings(vslam)
     laptop = (REPO / "ros/laptop.sh").read_text()
     assert "vslam.launch.py" in laptop and "config:/ws/config" in laptop
     # a mono camera cannot seed a loop-closure transform: ICP from identity does
-    assert params["RGBD/LoopClosureIdentityGuess"] == {"'true'"}
+    assert _rtabmap("RTABMAP")["RGBD/LoopClosureIdentityGuess"] == "true"
 
 
 def test_the_bridge_routes_only_what_the_split_needs_and_only_one_way() -> None:
@@ -675,8 +692,9 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
     assert "pepin_bringup.depth_stream" in sf.strings(vslam)
     assert params["subscribe_depth"] == {"True"}
     assert "('depth/image', '/camera/depth')" in sf.unparsed(vslam, ast.Tuple)
-    assert params["Grid/Sensor"] == {"'2'"} and params["Grid/3D"] == {"'true'"}
-    assert "Grid/MaxObstacleHeight" in params
+    known = _rtabmap("KNOWN_MAP")
+    assert known["Grid/Sensor"] == "2" and known["Grid/3D"] == "true"  # 0.22's Grid/FromDepth
+    assert "Grid/MaxObstacleHeight" in _rtabmap("RTABMAP")
     assert {"camera", "depth", "rtabmap", "frame", "foxglove"} <= _started_after_ghost_wait(vslam)
     node = sf.tree(f"{NODES}/depth_stream.py")
     assert "/camera/depth" in sf.strings(node)
@@ -731,8 +749,8 @@ def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph(
     frame = sf.tree(f"{NODES}/rtabmap_frame.py")
     assert "/rtabmap/mapGraph" in sf.strings(frame)
     assert "('map', 'rtabmap')" in sf.unparsed(frame, ast.Tuple)
-    # RTAB-Map's odometry is the tracker's pose
-    assert sf.dict_items(vslam)["odom_frame_id"] == {"'map'"}
+    # RTAB-Map's odometry is the tracker's pose on a known map
+    assert _rtabmap("KNOWN_MAP")["odom_frame_id"] == "map"
     room = json.loads((REPO / "ros/foxglove/pepin_3d.json").read_text())["configById"]["3D!room"]
     assert room["topics"]["/depth_scan"]["visible"]
     assert room["topics"]["/local_costmap/costmap"]["visible"]
@@ -1060,9 +1078,12 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     assert "Environment=PEPIN_NECK=false" in unit and "neck:=${PEPIN_NECK}" in unit
     feature = (REPO / "ros/feature.sh").read_text()
     assert "neck) VAR=PEPIN_NECK ;;" in feature
-    assert "PEPIN_(CPP_BRIDGE|IMU|TOF|NECK|SIDE)" in (REPO / "ros/mode.sh").read_text()
+    assert (
+        "PEPIN_(CPP_BRIDGE|IMU|TOF|NECK|SIDE|BRIDGE|BRIDGE_CONFIG)"
+        in (REPO / "ros/mode.sh").read_text()
+    ), "a mode change must not wipe the bridge the board was told to run"
     laptop = (REPO / "ros/laptop.sh").read_text()
-    assert 'case " ${*:2} " in *" --neck "*) STATIC_CAMERA_TF=false ;; esac' in laptop
+    assert "--neck) STATIC_CAMERA_TF=false ;;" in laptop, "a flag anywhere after the subcommand"
     assert any(
         '"static_camera_tf:=$STATIC_CAMERA_TF"' in command
         for command in sf.shell_commands(laptop)
@@ -1376,7 +1397,7 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         assert not any("arguments" in sf.keywords(c) for c in sf.calls_to(vslam_launch, callee))
     laptop = (REPO / "ros/laptop.sh").read_text()
     fresh = laptop[laptop.index("    vslam)") : laptop.index("    start)")]
-    assert '[ "${2:-}" = --fresh ]' in fresh and 'rm -f "$HERE"/maps/rtabmap.db' in fresh
+    assert "--fresh) FRESH=true ;;" in fresh and 'rm -f "$HERE"/maps/rtabmap.db' in fresh
     assert fresh.index("rm -f") < fresh.index("docker run")
     vslam = _launch_processes("vslam.launch.py")
     nav = _launch_processes("nav.launch.py")
@@ -1388,7 +1409,7 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         "rtabmap_frame",
         "foxglove_bridge",
     }
-    assert _respawning(nav) == {"relocalizer", "run_recorder", "goal_server"}
+    assert _respawning(nav) == {"relocalizer", "run_recorder", "goal_server", "slam_frame"}
     # The board's sensor launch runs one of our processes too: the neck node (ros/feature.sh
     # neck on). The drivers around it are ROS packages the container restarts with the launch.
     robot = _launch_processes("robot.launch.py")
@@ -1542,3 +1563,121 @@ def test_one_node_can_be_kicked_without_a_container_restart() -> None:
     # Everything of ours the board respawns is kickable: the navigation half and the neck node
     # of the sensor launch (a code change on the board is one kicked process, never a restart).
     assert known["thin.sh"] == _respawning(nav) | _respawning(robot)
+
+
+def test_online_slam_has_one_map_and_one_owner_of_map_to_odom() -> None:
+    """The robot is put somewhere unknown and builds ONE map while it drives. RTAB-Map on the
+    laptop is that map: the EKF's odometry under it, its grid remapped onto /map (transient
+    local, which the board's static layer reads), a database of its own that starts empty. Its
+    correction is map -> odom — but /tf crosses the bridge board -> laptop only, so it travels
+    as a message (/map_odom) and becomes a transform on the BOARD, where the reflexes look it
+    up: rtabmap_frame publishes no transform at all in this mode and slam_frame is the single
+    publisher of that edge, exactly as the tracker is on a known map."""
+    vslam = sf.tree(VSLAM_LAUNCH)
+    slam, lidar, camera_only = (
+        _rtabmap("SLAM"),
+        _rtabmap("SLAM_LIDAR"),
+        _rtabmap("SLAM_CAMERA_ONLY"),
+    )
+    assert slam["odom_frame_id"] == "odom" and slam["map_frame_id"] == "map"
+    assert sf.dict_items(vslam)["publish_tf"] == {"False"}, "in neither mode, in either tree"
+    assert "('map', '/map')" in sf.unparsed(vslam, ast.Tuple), "the grid IS the map here"
+    under_slam = [
+        ast.unparse(n)
+        for n in ast.walk(vslam)
+        if isinstance(n, ast.If) and ast.unparse(n.test) == "slam"
+    ]
+    assert any("remappings.append(('map', '/map'))" in b for b in under_slam), "only in this mode"
+    # An empty database every session, and never the known map's file.
+    assert sf.dict_items(vslam)["delete_db_on_start"] == {"slam and (not resume)"}
+    names = sf.assignments(vslam)
+    assert names["SLAM_DATABASE"] != names["KNOWN_MAP_DATABASE"]
+    # With the lidar the 2D grid is the SCAN's (Grid/Sensor 0): the camera's metric scale is
+    # scene-dependent and a map the cart plans on may not be built out of it. Without the lidar
+    # it is the depth's, ray-traced so the floor becomes free space, and capped where the
+    # network's scale stops being a measurement.
+    assert lidar["subscribe_scan"] is True and lidar["Grid/Sensor"] == "0"
+    assert lidar["RGBD/NeighborLinkRefining"] == "true", "the scan refines the wheels' link"
+    assert camera_only["subscribe_scan"] is False and camera_only["Grid/Sensor"] == "1"
+    assert camera_only["Grid/RayTracing"] == "true", "or free space stays unknown"
+    assert float(str(camera_only["Grid/RangeMax"])) <= 3.5
+    assert camera_only["RGBD/NeighborLinkRefining"] == "false"
+    for table in (lidar, camera_only):
+        assert table["Grid/3D"] == "false", "Nav2's static layer reads a 2D grid"
+    common = _rtabmap("RTABMAP")
+    assert {"Grid/MaxGroundHeight", "Grid/MaxObstacleHeight", "Grid/NormalsSegmentation"} <= set(
+        common
+    )
+    assert common["RGBD/OptimizeFromGraphEnd"] == "false", "the jump belongs in map -> odom"
+    # The correction: a message out of the laptop, a transform on the board, one publisher each.
+    frame = sf.tree(f"{NODES}/rtabmap_frame.py")
+    flags = load_table(REPO / NODES / "rtabmap_frame.py")
+    assert "slam" in flags and not flags.flag("slam").live and flags["slam"] is False
+    assert "/map_odom" in sf.strings(frame) and "('map', 'odom')" in sf.unparsed(frame, ast.Tuple)
+    board_frame = sf.tree(f"{NODES}/slam_frame.py")
+    assert "super().__init__('slam_frame')" in sf.unparsed(board_frame, ast.Call)
+    assert sf.assignments(board_frame)["FRAMES"] == "('map', 'odom')"
+    assert sf.assignments(board_frame)["CORRECTION_TOPIC"] == "'/map_odom'"
+    assert "TransformBroadcaster" in sf.imported(board_frame)
+    assert "MapGraph" not in sf.imported(board_frame), "the board's image carries no rtabmap_msgs"
+    # The board: no map server, no tracker, slam_frame instead, and Nav2 all the same.
+    nav = sf.tree(NAV_LAUNCH)
+    calls = sf.unparsed(nav, ast.Call)
+    for node in ("map_server", "relocalizer"):
+        assert f"runs_here(side, '{node}', slam)" in calls, node
+    assert "runs_here(side, 'slam_frame', slam)" in calls
+    assert "pepin_bringup.slam_frame" in sf.strings(nav)
+    assert "_after_ghost(admin, '/slam_frame')" in calls
+    # A new map does not inherit the saved map's marks: they are coordinates in another frame.
+    assert "/maps/slam.places.yaml" in sf.strings(nav)
+    # The grid the board plans on: the static layer takes it over the bridge, latched, and every
+    # planner may route through what nobody has looked at yet — a map that is still growing.
+    assert _p("global_costmap")["static_layer"]["map_subscribe_transient_local"] is True
+    planners = _p("planner_server")
+    for name in planners["planner_plugins"]:
+        assert planners[name]["allow_unknown"] is True, name
+
+
+def test_one_gesture_per_side_puts_the_stack_into_slam_and_one_saves_the_map() -> None:
+    """The board is flipped by ros/thin.sh slam — the bridge's slam allow-list and PEPIN_SLAM in
+    the same breath, because a board still serving its own /map while the laptop publishes one
+    is two maps — and every other mode of that script leaves SLAM behind it. The laptop learns
+    the mode once, on the only path that talks to the board, and records it (ros/.mode) for the
+    subcommand that never does. ros/map.sh save freezes the grid into the pair map_server reads."""
+    thin = _case_blocks((REPO / "ros/thin.sh").read_text())
+    assert "PEPIN_BRIDGE_CONFIG=zenoh-bridge-board-slam.json" in thin["slam"]
+    assert "PEPIN_SLAM=true" in thin["slam"] and "PEPIN_NAV=true" in thin["slam"], "SLAM drives"
+    for other in ("on", "vision", "off"):
+        assert "/^PEPIN_SLAM=/d" in thin[other], f"{other} must leave SLAM mode"
+        assert "board-slam" not in thin[other], other
+    unit = (REPO / "board/pepin-ros.service").read_text()
+    assert "Environment=PEPIN_SLAM_TOOLBOX=false" in unit
+    assert "slam:=${PEPIN_SLAM} slam_toolbox:=${PEPIN_SLAM_TOOLBOX}" in unit
+    bringup = sf.tree("ros/pepin_bringup/launch/bringup.launch.py")
+    args = {ast.unparse(c.args[0]) for c in sf.calls_to(bringup, "DeclareLaunchArgument")}
+    assert {"'slam'", "'slam_toolbox'", "'nav'"} <= args
+    # SLAM implies nav: one switch on the board, so the two can never disagree about driving.
+    driving = next(c for c in sf.calls_to(bringup, "PythonExpression"))
+    assert "' == 'true' or '" in ast.unparse(driving)
+    includes = sf.dict_items(bringup)
+    assert "LaunchConfiguration('slam')" in includes["slam"]
+    # The bridge unit waits for the stack's last node, which is slam_frame when there is no tracker.
+    bridge = (REPO / "board/pepin-bridge.service").read_text()
+    assert 'pgrep -f "pepin_bringup.(relocalizer|slam_frame)"' in bridge
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert "CONFIG=zenoh-bridge-laptop-slam.json" in laptop
+    assert 'SLAM_ON="$(ssh' in laptop and 'printf \'%s\\n\' "$MODE" > "$HERE/.mode"' in laptop
+    assert 'MODE="$(cat "$HERE/.mode"' in laptop, "the vslam subcommand reads it, never the board"
+    assert "ros/.mode" in (REPO / ".gitignore").read_text().splitlines()
+    vslam_run = next(
+        c for c in sf.shell_commands(laptop) if "docker run -d --name pepin-vslam" in c
+    )
+    for passed in ('"slam:=$SLAM"', '"camera_only:=$CAMERA_ONLY"', '"resume:=$RESUME"'):
+        assert passed in vslam_run, passed
+    save = (REPO / "ros/map.sh").read_text()
+    assert "map_saver_cli" in save and "-t /map" in save and "pepin-vslam" in save
+    assert "save_map_timeout" in save
+    layout = json.loads((REPO / "ros/foxglove/pepin_slam.json").read_text())
+    room = layout["configById"]["3D!slam"]
+    assert room["topics"]["/map"]["visible"] and room["topics"]["/fusion/surface"]["visible"]
+    assert "/rtabmap/mapPath" in room["topics"]

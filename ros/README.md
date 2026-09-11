@@ -45,8 +45,82 @@ with SIGINT and the launch respawns it from the synced sources (`ros/laptop.sh k
 does the same in the laptop's containers; `ros/laptop.sh kick` and `ros/thin.sh kick` without a
 name list what each can reach). The laptop's SLAM container is its own: `ros/laptop.sh vslam`
 restarts it with the RTAB-Map database kept, `ros/laptop.sh vslam --fresh` deletes the database
-first and starts an empty map. Only a Dockerfile change (apt packages, the C++
+first and starts an empty map (in SLAM mode the session starts empty anyway: see below). Only a Dockerfile change (apt packages, the C++
 driver) needs `ros/build.sh`, which stops the container first and uses BuildKit's apt cache.
+
+## Online SLAM
+
+The robot is put somewhere it has never been, builds **one** map while it drives, and navigates
+in it. RTAB-Map on the laptop is that map: the camera names the places (appearance-based loop
+closure), the lidar gives the geometry, and both go into one graph and one occupancy grid — there
+is no second map anywhere. The board keeps the reflexes and the wheels; it serves no saved map and
+runs no scan-matching tracker, because there is nothing yet to match against.
+
+Who owns what:
+
+| | known map (`ros/thin.sh vision`) | online SLAM (`ros/thin.sh slam`) |
+| --- | --- | --- |
+| `/map` | the board's `map_server`, from a file | the laptop's RTAB-Map, growing |
+| `map -> odom` | the board's `relocalizer` | the board's `slam_frame`, from the laptop |
+| RTAB-Map's odometry | the tracker's pose (`map`) | the EKF's `odom` |
+| RTAB-Map's map frame | `rtabmap`, beside the real one | `map` — it *is* the real one |
+| its database | kept (`ros/maps/rtabmap.db`) | empty each session (`rtabmap_slam.db`) |
+
+`/tf` crosses the bridge board → laptop only (a topic allowed as a publisher on both sides loops
+until nothing crosses at all), so the correction RTAB-Map computes travels the other way as a
+message on `/map_odom` and becomes a transform on the board, where Nav2 and the behaviours look it
+up. One publisher of that edge, in either mode.
+
+### A session
+
+```bash
+ros/sync.sh                      # the board gets the new launch, the bridge config and slam_frame
+ros/thin.sh slam                 # board: bridge on with the slam allow-list, Nav2 on, no map server
+ros/laptop.sh                    # laptop bridge; reads the board's mode and records it (ros/.mode)
+ros/laptop.sh vslam              # RTAB-Map as the SLAM (the recorded mode); --slam forces it
+ros/teleop.sh                    # or drive by goal, below — the map grows as the cart moves
+ros/map.sh save flat3_slam       # freeze the grid into ros/maps/flat3_slam.{yaml,pgm}
+```
+
+Goals work with no places book: `ros/go.sh -1.0 0.3 90` drives to map coordinates, and a click in
+Foxglove (Publish → `/goal_pose`, frame `map`) does the same. The saved map's places are not
+offered — they are coordinates in a frame this new map does not share — and the session's own book
+(`/maps/slam.places.yaml` on the board) stays empty: `ros/go.sh mark` and `ros/go.sh where` read
+the pose from the tracker's `/where_am_i`, and in SLAM mode there is no tracker, so both answer
+without one. Mark places after the map is saved and the board is back on it.
+
+Watch the map grow with the `ros/foxglove/pepin_slam.json` layout at `ws://localhost:8765`: `/map` under the fused surface, the graph's path, the head camera.
+
+To go back to driving a saved map: `ros/thin.sh vision` (which leaves SLAM mode), then
+`ros/mode.sh nav /maps/flat3_slam.yaml`.
+
+### Camera only
+
+`ros/laptop.sh vslam --camera-only` does not subscribe to the lidar at all: the grid is built from
+the camera's depth (`Grid/Sensor 1`), ray-traced so the floor it flew over becomes free space, and
+capped at 3 m — past that this network's metric scale stops being a measurement. It is the honest
+test of "the camera as the primary sense"; with the lidar present the 2D grid is the **scan's**
+(`Grid/Sensor 0`), because the depth's scale is scene-dependent (0.94 to 1.98 across one
+afternoon) and a map the cart plans on may not be built out of that.
+
+Other flags: `--resume` continues the session's database instead of starting empty, `--fresh`
+deletes it first, `--known-map` forces the old mode regardless of what the board is doing.
+
+### Not yet verified on the robot
+
+- RTAB-Map's own `map -> odom` quality against the wheels-plus-gyro EKF: on a known map its
+  "odometry" was the tracker's centimetre-accurate pose, and the graph rejected closures as
+  inconsistent when it was fed raw odometry (2026-09-10). Whether ICP on the scans plus
+  `RGBD/NeighborLinkRefining` absorbs that drift is the first thing to look at.
+- Nav2 on a growing map: the global costmap's static layer resizes with every new `/map`, and the
+  local costmap works in the `map` frame, which jumps at a loop closure. `track_unknown_space:
+  false` means unmapped ground is planned through as free floor — which is what exploration needs
+  and what a wrong correction would exploit.
+- The correction's path (laptop `mapGraph` → `/map_odom` → the board's `slam_frame`) adds a
+  wireless hop before the transform moves; the transform itself is re-stamped at 10 Hz on the
+  board, so only the *value* is late, never the lookup.
+- `Grid/RangeMax 8.0` for the lidar grid and the camera-only ground/obstacle heights are
+  first guesses from the known-map profile, not measurements.
 
 ## Feature flags
 
@@ -87,6 +161,7 @@ generated by `ros/tools/flags_doc.py` (a unit test keeps it current).
 | `relocalizer` | `rest_gain` | number 0..1 | 0.05 | yes | the rest lock's share per match when no match cadence is known |
 | `relocalizer` | `sources` | list of: lidar, depth, contact | lidar | yes | the scan sources matched against the map: the lidar's revolution (/scan), the camera's depth band (/depth_scan), the floor-contact line (/contact_scan); the lidar drives the updates while it is fresh and the others ride along, a stale lidar hands the updates to them. The fused modes are measured offline (scratch/camera_only_localization.py) and turned on live |
 | `relocalizer` | `fusion` | bool | on | yes | fuse every enabled source's match by its information; off: the widest source corrects alone and the others only report |
+| `rtabmap_frame` | `slam` | bool | off | at start | RTAB-Map is the map (online SLAM): its correction is map -> odom and goes to the board as a message on /map_odom, where pepin_bringup.slam_frame broadcasts it; off, the board's tracker owns map -> odom and this node broadcasts map -> rtabmap here. Not live: the two modes are two different edges, and a transform once sent stands |
 
 ## Build and run (on the board)
 

@@ -1,0 +1,216 @@
+{
+  "configById": {
+    "3D!slam": {
+      "cameraState": {
+        "perspective": true,
+        "distance": 12.0,
+        "phi": 55.0,
+        "thetaOffset": 45.0,
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followTf": "base_link",
+      "followMode": "follow-position",
+      "scene": {
+        "enableStats": false,
+        "backgroundColor": "#1b1b1b"
+      },
+      "transforms": {
+        "frame:map": {
+          "visible": true
+        },
+        "frame:odom": {
+          "visible": true
+        },
+        "frame:base_link": {
+          "visible": true
+        },
+        "frame:camera_link": {
+          "visible": false
+        },
+        "frame:laser": {
+          "visible": false
+        }
+      },
+      "topics": {
+        "/map": {
+          "visible": true,
+          "colorMode": "custom",
+          "minColor": "#ffffffff",
+          "maxColor": "#000000ff",
+          "unknownColor": "#80808060",
+          "frameLocked": false
+        },
+        "/rtabmap/mapPath": {
+          "visible": true,
+          "lineWidth": 0.05,
+          "color": "#ffd500"
+        },
+        "/rtabmap/cloud_map": {
+          "visible": false,
+          "pointSize": 6,
+          "colorMode": "rgb"
+        },
+        "/fusion/surface": {
+          "visible": true,
+          "pointSize": 5,
+          "colorMode": "rgb"
+        },
+        "/scan": {
+          "visible": true,
+          "pointSize": 3,
+          "colorField": "intensity",
+          "colorMode": "flat",
+          "flatColor": "#ff9100"
+        },
+        "/depth_scan": {
+          "visible": false,
+          "pointSize": 4,
+          "colorMode": "flat",
+          "flatColor": "#ff3b3b"
+        },
+        "/contact_scan": {
+          "visible": false,
+          "pointSize": 4,
+          "colorMode": "flat",
+          "flatColor": "#b388ff"
+        },
+        "/local_costmap/costmap": {
+          "visible": true,
+          "colorMode": "costmap",
+          "alpha": 0.35
+        },
+        "/global_costmap/costmap": {
+          "visible": false,
+          "colorMode": "costmap",
+          "alpha": 0.35
+        },
+        "/local_costmap/published_footprint": {
+          "visible": true,
+          "lineWidth": 0.03,
+          "color": "#2979ff"
+        },
+        "/plan": {
+          "visible": true,
+          "lineWidth": 0.05,
+          "color": "#00e676"
+        },
+        "/local_plan": {
+          "visible": false,
+          "lineWidth": 0.03,
+          "color": "#ffea00"
+        },
+        "/goal_pose": {
+          "visible": true,
+          "type": "arrow",
+          "color": "#00e5ff"
+        }
+      },
+      "layers": {
+        "grid": {
+          "visible": true,
+          "frameId": "map",
+          "layerId": "foxglove.Grid",
+          "size": 20,
+          "divisions": 20,
+          "lineWidth": 1,
+          "color": "#404040",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "order": 1
+        }
+      },
+      "publish": {
+        "type": "pose",
+        "poseTopic": "/goal_pose",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose"
+      }
+    },
+    "Image!head": {
+      "cameraState": {
+        "distance": 20,
+        "perspective": false,
+        "phi": 60,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 45,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "imageMode": {
+        "imageTopic": "/camera/image"
+      },
+      "transforms": {},
+      "topics": {}
+    },
+    "RosOut!log": {
+      "searchTerms": [
+        "rtabmap",
+        "rtabmap_frame",
+        "slam_frame",
+        "planner_server",
+        "controller_server",
+        "bt_navigator"
+      ],
+      "minLogLevel": 2,
+      "nameFilter": {}
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "direction": "row",
+    "first": "3D!slam",
+    "second": {
+      "direction": "column",
+      "first": "Image!head",
+      "second": "RosOut!log",
+      "splitPercentage": 55
+    },
+    "splitPercentage": 70
+  }
+}
