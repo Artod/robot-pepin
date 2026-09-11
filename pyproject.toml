@@ -21,6 +21,11 @@ dev = [
 macos = [
     "rumps>=0.4.0",
 ]
+# The depth network on the laptop's GPU (pepin.depth_service, ros/depth_host.sh): torch comes
+# with the base install (lerobot), transformers only here — the unit tier never imports it.
+depth = [
+    "transformers>=4.50",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -80,3 +85,10 @@ disallow_subclassing_any = false
 disallow_any_generics = false
 disallow_untyped_calls = false
 disallow_untyped_defs = false
+
+# transformers is the optional `depth` group: with it installed its untyped from_pretrained
+# needs a `type: ignore[no-untyped-call]`, without it the import is Any and the same comment
+# reads as unused. The module is checked as strictly as the rest; only that warning is off.
+[[tool.mypy.overrides]]
+module = "pepin.depth_service"
+warn_unused_ignores = false
