@@ -43,7 +43,13 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, Imu, LaserScan
 
 from pepin.camera import CameraConfig, mount_transform
-from pepin.contact import CONTACT_MAX_RANGE, ContactVerdict, FloorPlane, contact_scan
+from pepin.contact import (
+    CONTACT_MAX_RANGE,
+    N_BINS,
+    ContactVerdict,
+    FloorPlane,
+    contact_scan,
+)
 from pepin.depth import SCAN_HALF_FOV, SCAN_STEP, UP_LEVEL, Array, CameraPose, Intrinsics, Tilt
 from pepin.mounts import Mounts
 from pepin_bringup.msgs import array_from_image, imu_arrays, scan_from_ranges, stamp_seconds
@@ -209,7 +215,6 @@ class ContactScan(Node):
         self._verdict = verdict  # one frozen dataclass, swapped for the report timer to read
         self._tally.count("frames")
         self._tally.count("marked", verdict.marked)
-        self._tally.count("cleared", verdict.cleared)
         if verdict.contact:
             self._tally.sample("range", verdict.median_range_m)
 
@@ -225,11 +230,8 @@ class ContactScan(Node):
             f"contact: {w.rate('frames'):.1f} scans/s published of {c['depth_in']} depth frames"
             f" ({c['dropped']} dropped, {c['off']} switched off, {unseen}),"
             f" {c['planes']} floor rebuilds"
-            + (
-                f", median contact {float(np.median(ranges)):.2f} m over the window"
-                if ranges
-                else ""
-            )
+            + f", {c['marked'] / max(c['frames'] * N_BINS, 1) * 100:.1f}% of the fan marked"
+            + (f" (median contact {float(np.median(ranges)):.2f} m)" if ranges else "")
             + (f"; last frame: {verdict}" if verdict is not None else "; no frame yet")
             + f"; switches: {self._switches.state()}; ms median/max: {w.stages()}"
         )
