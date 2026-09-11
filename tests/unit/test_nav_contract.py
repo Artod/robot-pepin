@@ -697,9 +697,10 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
 
 
 def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph() -> None:
-    """The depth folded onto the plane goes to the board as /depth_scan and marks the local
-    costmap; the camera stamps frames with the board's capture time; map -> rtabmap comes
-    from RTAB-Map's own correction on the laptop, not from a fixed identity on the board."""
+    """The depth folded onto the plane goes to the board as /depth_scan and is wired into the
+    local costmap's camera layer (which ships off, see the test below); the camera stamps frames
+    with the board's capture time; map -> rtabmap comes from RTAB-Map's own correction on the
+    laptop, not from a fixed identity on the board."""
     from pepin.deployment import LAPTOP_PUBLISHES
 
     assert "depth_scan" in LAPTOP_PUBLISHES
@@ -775,6 +776,21 @@ def test_a_dead_sensor_cannot_stall_a_costmap_that_the_others_still_feed() -> No
                 assert layer[source]["expected_update_rate"] == 0.0, f"{costmap}.{name}.{source}"
         for sensor in ("front", "left", "right"):
             assert params[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
+
+
+def test_only_the_measured_layer_is_on_by_default() -> None:
+    """The split gives the camera a grid of its own that the lidar can no longer scrub, and that
+    is a behaviour nobody has driven: the only measurement of /depth_scan (run 0171, p50 41
+    lethal cells vs 40 in 0160) was taken with it inside the lidar's layer, being scrubbed, and
+    the scan is not yet cleared of false marks (2026-09-11). So both camera layers ship off, as
+    the contact layers do, and what is enabled is the lidar — what run 0171 actually measured.
+    Each flips live (``camera_layer.enabled true``), and the default follows the numbers."""
+    for costmap in ("local_costmap", "global_costmap"):
+        params = _p(costmap)
+        assert params["lidar_layer"]["enabled"] is True
+        assert params["camera_layer"]["enabled"] is False, f"{costmap}: the split is unmeasured"
+        for sensor in ("front", "left", "right"):
+            assert params[f"tof_{sensor}_layer"]["enabled"] is True
 
 
 def test_a_layer_that_never_clears_forgets_a_source_that_died() -> None:

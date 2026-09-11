@@ -341,7 +341,7 @@ local_costmap:
         inflation_radius: 0.45  # the controller slows earlier near legs; only >= 253 is a wall
       # ONE LAYER PER SENSOR, like the three ToF below and for the same reason: separate layers
       # cannot erase each other's evidence, and each is switched on its own while the robot runs
-      # (`ros2 param set /local_costmap//local_costmap camera_layer.enabled false`) — which is how a
+      # (`ros2 param set /local_costmap/local_costmap camera_layer.enabled true`) — which is how a
       # camera-only or lidar-only drive is demonstrated without restarting anything. `plugins`
       # is the order they write into the master grid, and every layer here combines by maximum,
       # so a mark is a mark whoever wrote it.
@@ -350,7 +350,10 @@ local_costmap:
       # grid, the LIDAR's rays cleared the CAMERA's marks — a beam passing 20 cm above the floor
       # under a table erased the table top the camera had just seen. Now each sensor clears only
       # what it can itself see. The price is the same coin's other side: a camera mark outlives a
-      # dead camera until the camera raytraces through it again.
+      # dead camera until the camera raytraces through it again — which is why the camera and the
+      # contact layers both ship enabled: False here, and the lidar, the one layer whose marks a
+      # measured drive stands behind, is what is on by default. Turning one on is the demo AND
+      # the measurement; the default follows the numbers.
       #
       # No sensor may stall the costmap by dying: expected_update_rate 0.0 on every source (a
       # buffer given a rate calls itself stale, the layer stops being current and Nav2 answers
@@ -388,8 +391,19 @@ local_costmap:
           obstacle_max_range: 2.0  # no farther than the scan raytraces (2.5): a ring nobody can clear is a wall
           obstacle_min_range: 0.0
       camera_layer:
+        # The camera's depth in a grid the lidar cannot reach — and OFF by default, because that
+        # is a change nobody has measured yet. Until now this source sat inside the shared
+        # obstacle layer where the lidar's rays scrubbed it, and that is the only arrangement
+        # ever driven: run 0171 measured it changing nothing (lethal cells p50 41 vs 40 against
+        # run 0160). Alone in its own layer it clears only inside its own ±40 deg fan, so a mark
+        # the cart turns or reverses away from stands until the tree's ClearEntireCostmap 5 s
+        # later, where a lidar sweep used to erase it in 0.1 s — and the scan is not validated
+        # against false marks (2026-09-11: an open-floor recording must mark nothing first, the
+        # same drive the contact layer waits for). So the split ships as a rename of what was
+        # measured: `ros2 param set /local_costmap/local_costmap camera_layer.enabled true` is
+        # the camera-only drive and the measurement, and True becomes the default when it says so.
         plugin: "nav2_costmap_2d::ObstacleLayer"
-        enabled: True
+        enabled: False
         observation_sources: depth_scan
         depth_scan:
           # The camera's depth folded onto the plane (pepin_bringup.depth_stream on the laptop):
@@ -493,7 +507,7 @@ global_costmap:
       plugins: ["static_layer", "lidar_layer", "camera_layer", "contact_layer", "tof_front_layer", "tof_left_layer", "tof_right_layer", "inflation_layer"]
       # ONE LAYER PER SENSOR, like the three ToF below and for the same reason: separate layers
       # cannot erase each other's evidence, and each is switched on its own while the robot runs
-      # (`ros2 param set /global_costmap//global_costmap camera_layer.enabled false`) — which is how a
+      # (`ros2 param set /global_costmap/global_costmap camera_layer.enabled true`) — which is how a
       # camera-only or lidar-only drive is demonstrated without restarting anything. `plugins`
       # is the order they write into the master grid, and every layer here combines by maximum,
       # so a mark is a mark whoever wrote it.
@@ -502,7 +516,10 @@ global_costmap:
       # grid, the LIDAR's rays cleared the CAMERA's marks — a beam passing 20 cm above the floor
       # under a table erased the table top the camera had just seen. Now each sensor clears only
       # what it can itself see. The price is the same coin's other side: a camera mark outlives a
-      # dead camera until the camera raytraces through it again.
+      # dead camera until the camera raytraces through it again — which is why the camera and the
+      # contact layers both ship enabled: False here, and the lidar, the one layer whose marks a
+      # measured drive stands behind, is what is on by default. Turning one on is the demo AND
+      # the measurement; the default follows the numbers.
       #
       # No sensor may stall the costmap by dying: expected_update_rate 0.0 on every source (a
       # buffer given a rate calls itself stale, the layer stops being current and Nav2 answers

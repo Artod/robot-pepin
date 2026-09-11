@@ -487,8 +487,11 @@ reach it over the bridge, so the cloud never crosses the WiFi.
 
 **The depth drives too**: the same depth, cut between 8 cm and 1.3 m above the floor and folded
 onto the plane, goes to the board as a laser scan (`/depth_scan`, ±40 degrees, three times a
-second, a few kilobytes) and is the local costmap's third observation source, marking and
-clearing like the lidar. A table top stops the cart the way a wall does.
+second, a few kilobytes) and feeds a costmap layer of its own, marking and clearing like the
+lidar: a table top stops the cart the way a wall does. One layer per sensor, so the lidar's rays
+can no longer erase what only the camera saw — and because nothing else can erase it either, the
+camera layer is switched off until a drive measures the difference (`ros2 param set
+/local_costmap/local_costmap camera_layer.enabled true`, live, no restart).
 
 **One surface, not a pile of clouds**: RTAB-Map assembles its map by concatenating one cloud per
 node, so two frames of a wall that disagree by a few centimetres are two walls. The frames are
