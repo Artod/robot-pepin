@@ -17,6 +17,8 @@ import pytest
 import source_facts as sf
 import yaml
 
+from pepin.flags import load_table
+
 REPO = Path(__file__).resolve().parents[2]
 PARAMS = yaml.safe_load((REPO / "ros/params/nav2_params.yaml").read_text())
 ROBOT_LAUNCH = "ros/pepin_bringup/launch/robot.launch.py"
@@ -808,7 +810,9 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     declared = {
         ast.unparse(c.args[0]): c.args[1] for c in sf.calls_to(node, "self.declare_parameter")
     }
-    assert {"'host'", "'port'", "'poll_hz'", "'config'", "'neck_tf'"} <= declared.keys()
+    assert {"'host'", "'port'", "'poll_hz'", "'config'"} <= declared.keys()
+    neck_flags = load_table(REPO / NODES / "neck_state.py")
+    assert "neck_tf" in neck_flags and neck_flags.flag("neck_tf").live
     assert sf.assignments(node)["_NECK_REQUEST"] == 'b\'{"cmd":"neck"}\\n\''
     assert {"parse_neck", "joint_angles", "camera_pose", "NeckConfig"} <= sf.imported(node)
     assert "JsonLineLink" in sf.imported(node), "the reconnecting link, not a socket of its own"
@@ -820,7 +824,7 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
 
     reference = NeckConfig.from_json(REPO / "config/neck.json").reference
     if not (reference.known and reference.signs_verified):
-        assert ast.unparse(declared["'neck_tf'"]) == "False", "unverified: no transform by default"
+        assert neck_flags["neck_tf"] is False, "unverified: no transform by default"
     camera = sf.tree(f"{NODES}/camera_stream.py")
     switch = {ast.unparse(c.args[0]) for c in sf.calls_to(camera, "self.declare_parameter")}
     assert "'static_camera_tf'" in switch
@@ -877,9 +881,11 @@ def test_the_frames_are_fused_into_one_surface_beside_rtabmap_s_cloud() -> None:
     assert "fusion" in _started_after_ghost_wait(vslam)
     node = sf.tree(f"{NODES}/depth_fusion.py")
     assert sf.assignments(node)["CONFIG"] == "'/ws/config/fusion.json'"
-    # The four are live switches of the kit (node_kit.Switches), so ros2 param set reaches
-    # them and their state is printed in the node's report line (CLAUDE.md rule 19).
-    assert {"enabled", "align", "min_weight", "surface_hz"} <= set(sf.dict_items(node))
+    # The four are flags of the node's table (node_kit.Switches over pepin.flags), so ros2
+    # param set reaches them and their state is printed in the report line (CLAUDE.md rule 19).
+    fusion_flags = load_table(REPO / NODES / "depth_fusion.py")
+    assert {"enabled", "align", "min_weight", "surface_hz"} <= set(fusion_flags.names)
+    assert fusion_flags.flag("surface_hz").range is not None, "a rate is bounded"
     assert "Switches" in sf.imported(node) and "self._switches.state" in sf.calls(node)
     assert {"/fusion/reset", "/fusion/surface"} <= sf.strings(node)
     for name in ("pepin_3d.json", "pepin_nav.json"):
@@ -890,12 +896,41 @@ def test_the_frames_are_fused_into_one_surface_beside_rtabmap_s_cloud() -> None:
         assert panel["topics"]["/rtabmap/cloud_map"]["visible"] is False
 
 
+def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_prints() -> None:
+    """CLAUDE.md rule 19, in one place per node: a node that has live switches builds them from
+    its module-level FLAGS table (pepin.flags), which loads without the node (the README and
+    ros/flags.sh read it there), prints their state in its report line, and declares no live
+    parameter by hand — a switch outside the table is invisible to the tools."""
+    from pepin.flags import FlagSet
+
+    tables = {}
+    for path in sorted((REPO / NODES).glob("*.py")):
+        node = sf.tree(f"{NODES}/{path.name}")
+        if "Switches" not in sf.imported(node):
+            assert "add_on_set_parameters_callback" not in sf.calls(node), path.name
+            continue
+        flags = load_table(path)
+        assert isinstance(flags, FlagSet) and len(flags), path.name
+        tables[path.stem] = flags
+        assert "self._switches.state" in sf.calls(node), f"{path.name}: the report line"
+        switches = sf.calls_to(node, "Switches")
+        assert len(switches) == 1 and ast.unparse(switches[0].args[1]) == "FLAGS", path.name
+        assert "self.add_on_set_parameters_callback" not in sf.calls(node), path.name
+        declared = {
+            ast.literal_eval(c.args[0]) for c in sf.calls_to(node, "self.declare_parameter")
+        }
+        assert not declared & set(flags.names), f"{path.name}: a flag declared twice"
+        for flag in flags:
+            assert flag.description, f"{path.name}: {flag.name} needs a sentence"
+    assert {"depth_stream", "depth_fusion", "relocalizer", "neck_state"} <= tables.keys()
+
+
 def test_the_floor_anchors_the_depth_and_leans_with_the_imu() -> None:
     """The depth node snaps floor pixels to the floor plane (switchable), the plane leans with
     the accelerometer, and the IMU mount the laptop would apply is the one the board publishes
     (roll +90 deg: the chip's Y up)."""
     node = sf.tree(f"{NODES}/depth_stream.py")
-    assert sf.dict_items(node)["floor_anchor"] == {"True"}, "a live switch, default on"
+    assert load_table(REPO / NODES / "depth_stream.py")["floor_anchor"] is True, "default on"
     assert "/imu/data_raw" in sf.strings(node)
     assert {"floor_anchor", "floor_depth"} <= sf.calls(node)
     # The mount is not read here by hand: one loader for every sensor's place on the cart.

@@ -12,14 +12,14 @@ read, this node only asks). The geometry is pepin.neck on config/neck.json: at t
 ticks the transform equals the static one, so flipping the switch moves nothing.
 
 Parameters: ``host``/``port`` (the base server, 127.0.0.1:3336), ``poll_hz`` (10), ``config``
-(config/neck.json beside the library, pepin.deployment.config_file), ``neck_tf`` (live, default
-**off**: the joint states only).
+(config/neck.json beside the library, pepin.deployment.config_file); the flag ``neck_tf``
+(:data:`FLAGS`, live, default **off**: the joint states only).
 
 ``neck_tf`` defaults off because the model is not yet checked against the hardware: the
 reference ticks in config/neck.json are unread (the transform is then the static mount at any
 head pose) and the two servo signs are UNVERIFIED, so a moving head could be reported turning
 the wrong way. Read the ticks, watch the picture while the head moves (config/neck.json says
-exactly how), then ``ros2 param set /neck_state neck_tf true`` — and the laptop's camera node
+exactly how), then ``ros/flags.sh set neck_state neck_tf true`` — and the laptop's camera node
 must be started with ``ros/laptop.sh vslam --neck`` in the same breath, or two nodes publish
 base_link -> camera_link.
 """
@@ -30,7 +30,6 @@ from typing import Any
 
 import rclpy
 from geometry_msgs.msg import TransformStamped
-from rcl_interfaces.msg import SetParametersResult
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -38,14 +37,28 @@ from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster
 
 from pepin.camera import quaternion_from_rpy
-from pepin.deployment import config_file, switch_updates
+from pepin.deployment import config_file
+from pepin.flags import Flag, FlagSet
 from pepin.neck import JOINT_NAMES, NeckConfig, camera_pose, joint_angles, parse_neck
 from pepin_bringup.link import JsonLineLink
+from pepin_bringup.node_kit import Switches
 
 _NECK_REQUEST = b'{"cmd":"neck"}\n'
 _REPORT_S = 30.0
 _STALE_S = 1.0  # a cached reading older than this (the servo fell silent) is not a pose
-SWITCHES = ("neck_tf",)
+
+# The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
+# other declaration; their state is printed in every report line. neck_tf defaults off while
+# the model is unchecked against the hardware (see the module docstring).
+FLAGS = FlagSet(
+    Flag(
+        "neck_tf",
+        False,
+        description="base_link -> camera_link is published live from the neck's encoders; the"
+        " laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes"
+        " publish that edge",
+    ),
+)
 
 
 class NeckState(Node):
@@ -57,7 +70,7 @@ class NeckState(Node):
         port = int(self.declare_parameter("port", 3336).value)
         self._poll_hz = float(self.declare_parameter("poll_hz", 10.0).value)
         config = str(self.declare_parameter("config", str(config_file("neck.json"))).value)
-        self._neck_tf = bool(self.declare_parameter("neck_tf", False).value)
+        self._switches = Switches(self, FLAGS)
         self._cfg = NeckConfig.from_json(config)
         self._joints_pub = self.create_publisher(JointState, "neck/state", 10)
         self._tf = TransformBroadcaster(self)
@@ -69,13 +82,12 @@ class NeckState(Node):
         self._link.start()
         self.create_timer(1.0 / self._poll_hz, self._poll)
         self.create_timer(_REPORT_S, self._report)
-        self.add_on_set_parameters_callback(self._on_parameters)
         ref = self._cfg.reference
         self.get_logger().info(
             f"neck state up: base server {host}:{port} at {self._poll_hz:.0f} Hz, reference pan"
             f" {ref.pan_ticks} tilt {ref.tilt_ticks} ticks -> pitch {ref.pitch_deg:.0f} deg at"
             f" {ref.z_m:.2f} m, signs {'verified' if ref.signs_verified else 'UNVERIFIED'};"
-            f" neck_tf {'on' if self._neck_tf else 'off'}"
+            f" flags: {self._switches.state()}"
         )
         if not ref.known:
             self.get_logger().warning(
@@ -123,7 +135,7 @@ class NeckState(Node):
         joints.name = list(JOINT_NAMES)
         joints.position = [angles.pan_rad, angles.pitch_rad]
         self._joints_pub.publish(joints)
-        if not self._neck_tf:
+        if not self._switches.on("neck_tf"):
             return
         x, y, z, roll, pitch, yaw = camera_pose(self._cfg, angles)
         t = TransformStamped()
@@ -134,14 +146,6 @@ class NeckState(Node):
         t.transform.rotation.x, t.transform.rotation.y = qx, qy
         t.transform.rotation.z, t.transform.rotation.w = qz, qw
         self._tf.sendTransform(t)
-
-    def _on_parameters(self, params: list[Any]) -> SetParametersResult:
-        """The live switches: ``ros2 param set /neck_state neck_tf false`` stops the transform."""
-        for name, value in switch_updates(((p.name, p.value) for p in params), SWITCHES).items():
-            if name == "neck_tf":
-                self._neck_tf = value
-            self.get_logger().info(f"{name} {'on' if value else 'off'}")
-        return SetParametersResult(successful=True)
 
     def _report(self) -> None:
         """One line per half minute: what was asked and answered, where the neck is, the cost."""
@@ -158,7 +162,7 @@ class NeckState(Node):
         self.get_logger().info(
             f"neck: polls {c['polls']}, replies {c['replies']}, errors {c['errors']}, stale"
             f" {c['stale']}, out of limits {c['out_of_limits']}; {where}; read {self._read_ms:.1f}"
-            f" ms; neck_tf {'on' if self._neck_tf else 'off'}, poll {self._poll_hz:.0f} Hz"
+            f" ms; flags: {self._switches.state()}, poll {self._poll_hz:.0f} Hz"
             f"{model}{error}"
         )
         for key in c:

@@ -92,6 +92,36 @@ Imu = _msg(
     linear_acceleration=Vector3,
 )
 SetParametersResult = _msg("SetParametersResult", successful=False, reason="")
+IntegerRange = _msg("IntegerRange", from_value=0, to_value=0, step=0)
+FloatingPointRange = _msg("FloatingPointRange", from_value=0.0, to_value=0.0, step=0.0)
+ParameterDescriptor = _msg(
+    "ParameterDescriptor",
+    name="",
+    type=0,
+    description="",
+    additional_constraints="",
+    read_only=False,
+    dynamic_typing=False,
+    floating_point_range=list,
+    integer_range=list,
+)
+
+
+class ParameterType:
+    """rcl_interfaces' constants: the wire types a descriptor names."""
+
+    PARAMETER_NOT_SET = 0
+    PARAMETER_BOOL = 1
+    PARAMETER_INTEGER = 2
+    PARAMETER_DOUBLE = 3
+    PARAMETER_STRING = 4
+
+
+class Parameter:
+    """rclpy.parameter.Parameter: a name and a value (the type inferred, as rclpy does)."""
+
+    def __init__(self, name: str, type_: Any = None, value: Any = None) -> None:
+        self.name, self.type_, self.value = name, type_, value
 
 
 class ExternalShutdownException(Exception):  # noqa: N818 — rclpy's own name
@@ -217,9 +247,15 @@ def install() -> Any:
         "rclpy.executors": _module(
             "rclpy.executors", ExternalShutdownException=ExternalShutdownException
         ),
+        "rclpy.parameter": _module("rclpy.parameter", Parameter=Parameter),
         "rcl_interfaces": _module("rcl_interfaces"),
         "rcl_interfaces.msg": _module(
-            "rcl_interfaces.msg", SetParametersResult=SetParametersResult
+            "rcl_interfaces.msg",
+            SetParametersResult=SetParametersResult,
+            ParameterDescriptor=ParameterDescriptor,
+            ParameterType=ParameterType,
+            IntegerRange=IntegerRange,
+            FloatingPointRange=FloatingPointRange,
         ),
         "builtin_interfaces": _module("builtin_interfaces"),
         "builtin_interfaces.msg": _module("builtin_interfaces.msg", Time=Time),

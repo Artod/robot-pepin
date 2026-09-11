@@ -41,6 +41,7 @@ from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformBroadcaster
 
 from pepin.dynamic import StaticMask, berth_for, dynamic_marks, occluded
+from pepin.flags import Flag, FlagSet
 from pepin.localization import Localizer
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D, wrap_angle
@@ -84,16 +85,36 @@ def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
     return pose.x - (c * odom.x - s * odom.y), pose.y - (s * odom.x + c * odom.y), yaw
 
 
-# The tracker's parameters that apply without a restart, with the default each is declared
-# from (its type is the default's); they are attributes of the Localizer and the switch
-# callback writes them there. Every other parameter is refused live (the answer names it),
-# because a "success" that changed nothing is a lie.
-LIVE_PARAMS: dict[str, Any] = {
-    "rest_lock": True,
-    "explained_vote": True,
-    "rest_tau_s": 6.0,
-    "rest_gain": 0.05,
-}
+# The tracker's flags: what applies without a restart (CLAUDE.md rule 19). Each is an attribute
+# of the Localizer (pepin.localization) and the flag callback writes it there; the next map's
+# tracker is built with the current values. Every other parameter is refused live (the answer
+# names it), because a "success" that changed nothing is a lie.
+FLAGS = FlagSet(
+    Flag(
+        "rest_lock",
+        True,
+        description="hold the pose while the cart stands still (wheels and gyro agree): a"
+        " match's residual is blended in with a time constant instead of taken whole",
+    ),
+    Flag(
+        "explained_vote",
+        True,
+        description="returns the static map cannot explain (a person, a moved chair) do not"
+        " score the match",
+    ),
+    Flag(
+        "rest_tau_s",
+        6.0,
+        range=(0.1, 60.0),
+        description="the rest lock's time constant: seconds for a residual to die at rest",
+    ),
+    Flag(
+        "rest_gain",
+        0.05,
+        range=(0.0, 1.0),
+        description="the rest lock's share per match when no match cadence is known",
+    ),
+)
 
 
 class _RosLogHandler(logging.Handler):
@@ -286,17 +307,17 @@ class Relocalizer(Node):
         )
         self.create_timer(self._check_period_s, self._check)
         # Declared after every other parameter: rclpy runs the switches' callback on
-        # declarations too, and it refuses everything that is not live.
-        self._switches = Switches(self, LIVE_PARAMS, on_change=self._on_switch)
+        # declarations too, and it refuses everything that is not a flag.
+        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self.get_logger().info("relocalizer up: watching the scan-to-map fit")
 
     # -- inputs -------------------------------------------------------------
 
-    def _on_switch(self, name: str, value: Any) -> None:
-        """A live parameter changed (``ros2 param set``): it is the Localizer's own attribute,
-        written through at once so the next scan is matched with it."""
+    def _on_switch(self, name: str, _old: Any, new: Any) -> None:
+        """A flag changed (``ros2 param set``): it is the Localizer's own attribute, written
+        through at once so the next scan is matched with it."""
         if self._localizer is not None:
-            setattr(self._localizer, name, value)
+            setattr(self._localizer, name, new)
 
     def _on_map(self, msg: OccupancyGridMsg) -> None:
         self._grid = grid_from_msg(msg)
@@ -328,7 +349,7 @@ class Relocalizer(Node):
             lost_after=3,
             global_retry=False,
             interpolate=self._subcell_refine,
-            **self._switches.values(),
+            **self._switches.flags.as_dict(),
         )
         self.get_logger().info(f"map received: {msg.info.width}x{msg.info.height} cells")
         self._tracker_initialised = False  # a new map: find ourselves on it again
@@ -581,7 +602,7 @@ class Relocalizer(Node):
             f"failed {self._deskew_failed}; {loc.settings()}; {track.summary()}; "
             f"watch fit {self.fit:.2f}, dynamic marks {self._dynamic_count}, "
             f"scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
-            f"switches: {self._switches.state()}"
+            f"flags: {self._switches.state()}"
         )
         if gate.expired:
             self.get_logger().warning(

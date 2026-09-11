@@ -12,7 +12,17 @@ import ros_stubs
 RCLPY = ros_stubs.install()
 
 from pepin_bringup import node_kit  # noqa: E402
-from pepin_bringup.node_kit import Switches, Tally, TfLookup, Worker, spin_main  # noqa: E402
+from pepin_bringup.node_kit import (  # noqa: E402
+    Switches,
+    Tally,
+    TfLookup,
+    Worker,
+    descriptor,
+    spin_main,
+)
+from ros_stubs import ParameterType  # noqa: E402
+
+from pepin.flags import Flag, FlagSet  # noqa: E402
 
 
 class FakeNode:
@@ -21,18 +31,26 @@ class FakeNode:
     def __init__(self, overrides: dict[str, Any] | None = None) -> None:
         self.overrides = overrides or {}
         self.declared: dict[str, Any] = {}
+        self.descriptors: dict[str, Any] = {}
+        self.set_calls: list[list[tuple[str, Any]]] = []
         self.callback: Any = None
         self.lines: list[str] = []
         self.destroyed = False
         self.closed = False
 
-    def declare_parameter(self, name: str, default: Any) -> Any:
+    def declare_parameter(self, name: str, default: Any, descriptor: Any = None) -> Any:
         """rclpy's: the default is what the node declares, the override is what it reads back."""
         self.declared[name] = default
+        self.descriptors[name] = descriptor
         return type("Param", (), {"value": self.overrides.get(name, default)})()
 
     def add_on_set_parameters_callback(self, callback: Any) -> None:
         self.callback = callback
+
+    def set_parameters(self, params: list[Any]) -> list[Any]:
+        """rclpy's: each parameter through the set callback, its result back."""
+        self.set_calls.append([(p.name, p.value) for p in params])
+        return [self.callback(params)]
 
     def get_logger(self) -> Any:
         node = self
@@ -185,45 +203,137 @@ def test_counts_from_two_threads_are_not_lost() -> None:
 
 
 # ---- Switches ------------------------------------------------------------------------------
-def test_switches_are_declared_from_their_defaults_and_read_back_typed() -> None:
-    node = FakeNode(overrides={"edge_filter": False, "min_weight": 3})
-    switches = Switches(node, {"floor_anchor": True, "edge_filter": True, "min_weight": 2.0})
-    assert node.declared == {"floor_anchor": True, "edge_filter": True, "min_weight": 2.0}
+FLAGS = FlagSet(
+    Flag("floor_anchor", True, description="floor pixels snap to the plane"),
+    Flag("edge_filter", True),
+    Flag("min_weight", 2.0, range=(0.0, 100.0), description="observations a voxel needs"),
+    Flag("threads", 8, range=(1, 32)),
+    Flag("backend", "local", choices=("remote", "local", "auto"), env="PEPIN_BACKEND"),
+    Flag("sources", ("lidar",), choices=("lidar", "depth")),
+    Flag("model", "small", choices=("small", "base"), live=False),
+)
+
+
+def test_flags_are_declared_with_descriptors_and_read_back_from_overrides_and_the_env() -> None:
+    node = FakeNode(overrides={"edge_filter": False, "min_weight": 3.0, "sources": "depth,lidar"})
+    switches = Switches(node, FLAGS, environ={"PEPIN_BACKEND": "auto"})
+    assert node.declared == {
+        "floor_anchor": True,
+        "edge_filter": True,
+        "min_weight": 2.0,
+        "threads": 8,
+        "backend": "auto",  # the environment's word is the declared default
+        "sources": "lidar",  # a list travels as one string
+        "model": "small",
+    }
+    d = node.descriptors
+    assert d["floor_anchor"].type == ParameterType.PARAMETER_BOOL
+    assert d["floor_anchor"].description == "floor pixels snap to the plane"
+    assert d["min_weight"].type == ParameterType.PARAMETER_DOUBLE
+    assert d["min_weight"].description == "observations a voxel needs (0..100)"
+    assert [(r.from_value, r.to_value) for r in d["min_weight"].floating_point_range] == [
+        (0.0, 100.0)
+    ]
+    assert d["threads"].type == ParameterType.PARAMETER_INTEGER
+    assert [(r.from_value, r.to_value, r.step) for r in d["threads"].integer_range] == [(1, 32, 0)]
+    assert d["threads"].floating_point_range == [] and d["floor_anchor"].integer_range == []
+    assert d["backend"].type == ParameterType.PARAMETER_STRING
+    assert d["backend"].description == (
+        "(one of: remote, local, auto) (PEPIN_BACKEND overrides the default at start)"
+    )
+    assert d["sources"].description == "(any of: lidar, depth, comma-separated)"
+    assert d["model"].description == "(one of: small, base) (not live: set at the next start)"
     assert switches.on("floor_anchor") and not switches.on("edge_filter")
-    assert switches["min_weight"] == 3.0 and isinstance(switches["min_weight"], float)
-    assert switches.values() == {"floor_anchor": True, "edge_filter": False, "min_weight": 3.0}
-    assert switches.state() == "floor_anchor on, edge_filter off, min_weight 3.0"
+    assert switches["min_weight"] == 3.0 and switches["sources"] == ("depth", "lidar")
+    assert switches["backend"] == "auto"
+    assert switches.state() == (
+        "floor_anchor=on edge_filter=off min_weight=3.0 threads=8 backend=auto sources=depth,lidar"
+    )
+    assert FLAGS["edge_filter"] is True and FLAGS["backend"] == "local", "the table is copied"
     assert node.callback is not None, "ros2 param set reaches the switches"
+    assert Switches(FakeNode(), FLAGS)["backend"] == "local", "os.environ without the variable"
 
 
-def test_a_set_flips_the_switch_and_is_logged_and_an_unknown_name_is_refused() -> None:
+def test_a_bad_launch_override_or_environment_stops_the_node_with_the_reason() -> None:
+    with pytest.raises(ValueError, match="backend: 'gpu' is not one of remote, local, auto"):
+        Switches(FakeNode(overrides={"backend": "gpu"}), FLAGS)
+    with pytest.raises(ValueError, match="PEPIN_BACKEND: backend: 'gpu' is not one of"):
+        Switches(FakeNode(), FLAGS, environ={"PEPIN_BACKEND": "gpu"})
+
+
+def test_a_set_flips_the_flag_and_is_logged_and_what_is_not_a_live_flag_is_refused() -> None:
     node = FakeNode()
-    switches = Switches(node, {"floor_anchor": True, "min_weight": 2.0})
-    result = node.callback([Param("floor_anchor", False), Param("min_weight", 4)])
-    assert result.successful and switches.state() == "floor_anchor off, min_weight 4.0"
-    assert node.lines == ["floor_anchor off", "min_weight = 4.0"]
-    refused = node.callback([Param("threads", 4), Param("floor_anchor", True)])
-    assert not refused.successful and refused.reason == "threads: not live, set at the next start"
+    switches = Switches(node, FLAGS)
+    result = node.callback([Param("floor_anchor", False), Param("min_weight", 4.0)])
+    assert result.successful and switches.state().startswith("floor_anchor=off edge_filter=on")
+    assert switches["min_weight"] == 4.0
+    assert node.lines == ["floor_anchor=off", "min_weight=4.0"]
+    refused = node.callback([Param("use_sim_time", True), Param("floor_anchor", True)])
+    assert not refused.successful and refused.reason == (
+        "use_sim_time: not a flag of this node; the flags are floor_anchor, edge_filter,"
+        " min_weight, threads, backend, sources, model"
+    )
     assert not switches.on("floor_anchor"), "a refused batch changes nothing"
+    stale = node.callback([Param("model", "base")])
+    assert not stale.successful and stale.reason == "model: not live, set at the next start"
+    assert switches["model"] == "small"
+    wrong = node.callback([Param("backend", "gpu")])
+    assert (
+        not wrong.successful and wrong.reason == "backend: 'gpu' is not one of remote, local, auto"
+    )
+    out = node.callback([Param("min_weight", 500.0)])
+    assert not out.successful and out.reason == "min_weight: 500.0 is outside 0..100"
+    assert node.callback([Param("sources", "depth,lidar")]).successful
+    assert switches["sources"] == ("depth", "lidar") and node.lines[-1] == "sources=depth,lidar"
 
 
-def test_on_change_sees_every_change_and_can_refuse_one() -> None:
+def test_on_change_sees_old_and_new_and_can_refuse_and_a_refused_batch_is_undone() -> None:
     node = FakeNode()
-    seen: list[tuple[str, Any]] = []
+    seen: list[tuple[str, Any, Any]] = []
 
-    def on_change(name: str, value: Any) -> None:
-        seen.append((name, value))
-        if name == "surface_hz" and value <= 0:
-            raise ValueError("surface_hz must be positive")
+    def on_change(name: str, old: Any, new: Any) -> None:
+        seen.append((name, old, new))
+        if name == "min_weight" and new > 50:
+            raise ValueError("a voxel never gets that many looks")
 
-    switches = Switches(node, {"enabled": True, "surface_hz": 1.0}, on_change=on_change)
-    assert node.callback([Param("surface_hz", 2.0)]).successful
-    refused = node.callback([Param("surface_hz", 0.0)])
-    assert not refused.successful and refused.reason == "surface_hz must be positive"
-    assert switches["surface_hz"] == 2.0, "the old value stays after a refusal"
-    switches.set("enabled", False)  # the node flips one itself
-    assert seen == [("surface_hz", 2.0), ("surface_hz", 0.0), ("enabled", False)]
-    assert node.lines[-1] == "enabled off"
+    switches = Switches(node, FLAGS, on_change=on_change)
+    assert node.callback([Param("min_weight", 5.0)]).successful
+    refused = node.callback([Param("edge_filter", False), Param("min_weight", 60.0)])
+    assert not refused.successful and refused.reason == "a voxel never gets that many looks"
+    assert switches["min_weight"] == 5.0, "the old value stays after a refusal"
+    assert switches.on("edge_filter"), "and the earlier flag of the batch is put back"
+    assert seen == [
+        ("min_weight", 2.0, 5.0),
+        ("edge_filter", True, False),
+        ("min_weight", 5.0, 60.0),
+        ("edge_filter", False, True),  # the undo goes through on_change too
+    ]
+
+
+def test_the_node_s_own_set_goes_through_the_parameter_server() -> None:
+    """A switch the node turns off itself (the depth node's floor anchor without an IMU mount)
+    must read the same from ``ros2 param get``: the change is sent to the node's parameters,
+    whose callback is this very object."""
+    node = FakeNode()
+    switches = Switches(node, FLAGS)
+    assert switches.set("floor_anchor", "off") is True
+    assert node.set_calls == [[("floor_anchor", False)]]
+    assert not switches.on("floor_anchor") and node.lines[-1] == "floor_anchor=off"
+    assert switches.set("sources", ("depth",)) == ("lidar",)
+    assert node.set_calls[-1] == [("sources", "depth")], "on the wire, a list is one string"
+    with pytest.raises(ValueError, match=r"threads: 0 is outside 1\.\.32"):
+        switches.set("threads", 0)
+    assert switches["threads"] == 8
+    with pytest.raises(ValueError, match="model: not live"):
+        switches.set("model", "base")
+
+
+def test_a_descriptor_carries_the_flag_s_wire_type_and_range() -> None:
+    d = descriptor(Flag("gain", 0.5))
+    assert d.name == "gain" and d.type == ParameterType.PARAMETER_DOUBLE
+    assert d.description == "" and d.floating_point_range == [] and d.integer_range == []
+    d = descriptor(Flag("n", 3, range=(0, 9), description="count"))
+    assert d.description == "count (0..9)" and d.integer_range[0].to_value == 9
 
 
 # ---- TfLookup ------------------------------------------------------------------------------

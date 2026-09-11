@@ -15,10 +15,9 @@ a lost tracker's pose would paint the room somewhere else. ``/fusion/surface`` (
 map frame, colours from the camera, stamped with the last fused frame — the board's clock) is
 the zero-crossing of the field, published beside RTAB-Map's cloud.
 
-Switches, live (``ros2 param set /depth_fusion <name> <value>``): ``enabled`` (fuse or not),
-``align`` (frame-to-model on/off), ``min_weight`` (how many observations a voxel needs before
-it is shown), ``surface_hz``; their state is printed in every report line. ``/fusion/reset``
-(std_srvs/Trigger) empties the model, the pairing queues and the tallies.
+The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
+``align``, ``min_weight``, ``surface_hz``; their state is printed in every report line.
+``/fusion/reset`` (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
 """
 
 from __future__ import annotations
@@ -37,6 +36,7 @@ from std_msgs.msg import Float32
 from std_srvs.srv import Trigger
 
 from pepin.depth import Intrinsics
+from pepin.flags import Flag, FlagSet
 from pepin.tsdf import (
     YAW_SEARCH,
     AlignReason,
@@ -58,6 +58,32 @@ BAND_STRIDE = 3
 BAND_MIN_POINTS = 50  # a frame with fewer points in the band is not worth a yaw search
 STAGES = ("align", "integrate")
 
+# The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
+# other declaration; their state is printed in every report line.
+FLAGS = FlagSet(
+    Flag("enabled", True, description="frames are fused into the model; off, they are dropped"),
+    Flag(
+        "align",
+        True,
+        description="frame-to-model: a frame's lidar-height band is turned about the cart to"
+        " fit the model before it is fused, and a frame whose best turn is the search's bound"
+        " is refused",
+    ),
+    Flag(
+        "min_weight",
+        2.0,
+        range=(0.0, 100.0),
+        description="observations a voxel needs before it is shown in /fusion/surface",
+    ),
+    Flag(
+        "surface_hz",
+        1.0,
+        range=(0.1, 10.0),
+        description="how often /fusion/surface is published (the crossing search costs a"
+        " fraction of a second)",
+    ),
+)
+
 
 class DepthFusion(Node):
     """Fuses depth frames into the TSDF and publishes its surface."""
@@ -66,13 +92,7 @@ class DepthFusion(Node):
         super().__init__("depth_fusion")
         config = Path(str(self.declare_parameter("config", CONFIG).value))
         self._spec = GridSpec.load(config)
-        # The live switches (CLAUDE.md rule 19), declared last so the kit's callback sees no
-        # other declaration; their state is printed in every report line.
-        self._switches = Switches(
-            self,
-            {"enabled": True, "align": True, "min_weight": 2.0, "surface_hz": 1.0},
-            on_change=self._on_switch,
-        )
+        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._tally = Tally(STAGES)
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(PointCloud2, "/fusion/surface", reliable)
@@ -116,12 +136,12 @@ class DepthFusion(Node):
         return 1.0 / max(surface_hz, 0.1)
 
     # ---- switches ------------------------------------------------------------------------
-    def _on_switch(self, name: str, value: Any) -> None:
-        """A switch changed: only ``surface_hz`` has anything to do beyond being read."""
+    def _on_switch(self, name: str, _old: Any, new: Any) -> None:
+        """A flag changed: only ``surface_hz`` has anything to do beyond being read."""
         if name != "surface_hz":
             return
         try:
-            self._surface_timer.timer_period_ns = int(self._period(float(value)) * 1e9)
+            self._surface_timer.timer_period_ns = int(self._period(float(new)) * 1e9)
         except (AttributeError, TypeError) as exc:  # an rclpy without a live period
             raise ValueError(f"surface_hz cannot change live: {exc}") from exc
 
@@ -264,7 +284,7 @@ class DepthFusion(Node):
             f" align {w.ms_per('align', 'frames'):.0f} ms, {self._turns(w)};"
             f" refused: {self._refusals(w) or 'none'}; skipped: {skipped};"
             f" no image {c['no_image']}; surface {self._surface_points} points;"
-            f" switches: {self._switches.state()}" + (f"; tf: {tf_text}" if tf_text else "")
+            f" flags: {self._switches.state()}" + (f"; tf: {tf_text}" if tf_text else "")
         )
 
     @staticmethod

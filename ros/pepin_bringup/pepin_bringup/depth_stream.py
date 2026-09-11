@@ -20,7 +20,7 @@ leaning with the accelerometer) is for the 3D model: the anchored depth goes out
 from it and the costmap reads obstacles the lidar's plane misses. Frames that arrive while the
 network is busy are dropped: the newest one wins. Every stage is timed and reported.
 
-Switches, live (``ros2 param set /depth_stream <name> <value>``): ``floor_anchor``,
+The flags (:data:`FLAGS`, ``ros2 param set /depth_stream <flag> <value>``): ``floor_anchor``,
 ``edge_filter``, ``lidar_anchor``; their state is printed in every report line.
 """
 
@@ -63,6 +63,7 @@ from pepin.depth import (
     scan_points,
     to_base,
 )
+from pepin.flags import Flag, FlagSet
 from pepin.mounts import Mounts
 from pepin.tsdf import RigidPose
 from pepin_bringup.msgs import (
@@ -80,6 +81,30 @@ DEFAULT_MODEL = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
 SCAN_RANGE_M = 6.0
 STAGES = ("network", "samples", "law", "edges", "floor", "scan", "publish")
 CARRY_WAIT_S = 0.2  # how long the carry waits for odometry to cover the scan-to-frame gap
+
+# The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
+# other declaration, and printed in every report line.
+FLAGS = FlagSet(
+    Flag(
+        "floor_anchor",
+        True,
+        description="pixels within centimetres of the floor plane snap to it in the published"
+        " image (the scan is built before it); the plane leans with the cart, from the IMU's up"
+        " vector",
+    ),
+    Flag(
+        "edge_filter",
+        True,
+        description="flying pixels at object edges are dropped from the published depth and the"
+        " scan; the law's beam pairs skip them regardless",
+    ),
+    Flag(
+        "lidar_anchor",
+        True,
+        description="the lidar fits the depth's law; off, the last law is held (the failure mode"
+        " of a lidar that stops) — with no law yet nothing is published until it is back on",
+    ),
+)
 
 
 class MonoDepth:
@@ -134,21 +159,7 @@ class DepthStream(Node):
         self._scan_pub = self.create_publisher(LaserScan, "/depth_scan", reliable)
         self._scan_max_range = float(self.declare_parameter("scan_max_range", 3.0).value)
         self._law_file = Path(str(self.declare_parameter("law_file", LAW_FILE).value))
-        # The three live switches (CLAUDE.md rule 19), declared last so the kit's callback sees
-        # no other declaration, and printed in every report line:
-        #   floor_anchor  pixels within centimetres of the floor plane snap to it in the
-        #                 published image (the scan is built before it); the plane leans with
-        #                 the cart (pepin.depth.floor_depth and the IMU's up vector).
-        #   edge_filter   flying pixels at object edges are dropped from the published depth and
-        #                 the scan (pepin.depth.edge_mask); the law's beam pairs skip them
-        #                 regardless, the mask being computed for them anyway.
-        #   lidar_anchor  the lidar fits the depth's law; off, the last law is held — the failure
-        #                 mode of a lidar that stops, and a measure of what the lidar buys the
-        #                 depth. With no law yet (nothing pooled, nothing saved) nothing is
-        #                 published until it is switched back on.
-        self._switches = Switches(
-            self, {"floor_anchor": True, "edge_filter": True, "lidar_anchor": True}
-        )
+        self._switches = Switches(self, FLAGS)
         self._imu_mount = self._imu_rotation(config.parent)
         self._tilt: Tilt | None = None
         self._floor: Array | None = None  # the expected floor depth image, for the current tilt
@@ -418,7 +429,7 @@ class DepthStream(Node):
             f" net, {c['dropped']} dropped, {c['withheld']} withheld), law a {law.a:.2f}"
             f" b {law.b:+.3f} on {law.pooled} beams{source} from {c['verdicts']} lidar verdicts"
             f" ({per_verdict:.0f} samples each; held {c['held']} of {c['processed']} frames)"
-            f"{self._extras(w)}, switches: {self._switches.state()},"
+            f"{self._extras(w)}, flags: {self._switches.state()},"
             f" ms median/max: {w.stages()}"
         )
         if law.fitted:

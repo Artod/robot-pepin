@@ -249,28 +249,18 @@ def test_a_launch_waits_until_the_bridge_has_forgotten_its_ghost() -> None:
         laptop_launch_nodes("board")
 
 
-def test_a_parameter_batch_flips_only_the_known_live_switches() -> None:
-    from pepin.deployment import switch_updates
+def test_a_node_s_flags_are_reached_where_its_process_lives() -> None:
+    """ros/flags.sh execs into the container a node runs in: the laptop's SLAM container for
+    the camera nodes, its navigation container for the planner and the goal server, the board's
+    for the tracker, the sensors and anything it does not know."""
+    from pepin.deployment import node_host
 
-    batch = [("rest_lock", False), ("threads", 8), ("explained_vote", 1), ("subcell_refine", False)]
-    assert switch_updates(batch, ("rest_lock", "explained_vote")) == {
-        "rest_lock": False,
-        "explained_vote": True,
-    }
-    assert switch_updates([], ("rest_lock",)) == {}
-
-
-def test_a_string_switch_value_reads_as_python_truth_not_as_its_spelling() -> None:
-    """The switches are declared as bools, so rclpy refuses a string before the callback sees
-    it; should one ever get through, bool() is what applies: "" is off, any other text is on
-    — "off" included."""
-    from pepin.deployment import switch_updates
-
-    batch = [("rest_lock", ""), ("explained_vote", "off")]
-    assert switch_updates(batch, ("rest_lock", "explained_vote")) == {
-        "rest_lock": False,
-        "explained_vote": True,
-    }
+    assert node_host("depth_stream") == ("laptop", "pepin-vslam")
+    assert node_host("/depth_fusion") == ("laptop", "pepin-vslam")
+    assert node_host("goal_server") == ("laptop", "pepin-laptop")
+    assert node_host("planner_server") == ("laptop", "pepin-laptop")
+    assert node_host("relocalizer") == ("board", "pepin-ros")
+    assert node_host("neck_state") == ("board", "pepin-ros")
 
 
 def test_the_split_keeps_the_plan_on_the_laptop_and_vision_moves_it_to_the_board() -> None:

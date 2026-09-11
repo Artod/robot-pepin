@@ -9,7 +9,6 @@ recorder. The split is data, so a test can hold it and the launch file merely re
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -417,7 +416,14 @@ def lingering_nodes(admin_json: str, names: tuple[str, ...]) -> set[str]:
     return set(names) & seen
 
 
-def switch_updates(params: Iterable[tuple[str, object]], names: tuple[str, ...]) -> dict[str, bool]:
-    """The live switches a ``ros2 param set`` batch flips: ``{name: value}`` for the parameters
-    in ``names``, values read as booleans; the rest of the batch is ignored."""
-    return {name: bool(value) for name, value in params if name in names}
+def node_host(node: str) -> tuple[str, str]:
+    """Where a node's process lives in the split stack, as ``(side, container)``: the laptop's
+    SLAM container for the camera nodes, its navigation container for the planner and the goal
+    server, the board's ``pepin-ros`` for everything else (the sensors, the tracker, the
+    reflexes) — what ros/flags.sh execs into to reach the node's parameters."""
+    name = f"/{node.lstrip('/')}"
+    if name in laptop_launch_nodes("slam"):
+        return "laptop", "pepin-vslam"
+    if name in laptop_launch_nodes("nav"):
+        return "laptop", "pepin-laptop"
+    return "board", "pepin-ros"

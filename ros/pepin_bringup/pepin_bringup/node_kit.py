@@ -2,8 +2,9 @@
 
 A node on this robot is a subscription or two, a thread that works on the newest message and
 drops the backlog (:class:`Worker`), counters and stage timings that a 30 s timer turns into
-one report line (:class:`Tally`), live switches flipped with ``ros2 param set`` and printed in
-that line (:class:`Switches`, CLAUDE.md rule 19), transforms looked up at a stamp with the
+one report line (:class:`Tally`), feature flags declared once in the module's ``FLAGS`` table
+(:mod:`pepin.flags`), flipped with ``ros2 param set`` and printed in that line
+(:class:`Switches`, CLAUDE.md rule 19), transforms looked up at a stamp with the
 failure told apart by kind (:class:`TfLookup`), and a ``main`` that leaves DDS properly on
 SIGINT (:func:`spin_main`). Each of these was copied between the depth node, the fusion node
 and the tracker with small differences — and one of the differences was a crash: a kicked
@@ -14,6 +15,7 @@ composes these and keeps its own logic.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import traceback
@@ -24,12 +26,20 @@ from dataclasses import dataclass
 from typing import Any
 
 import rclpy
-from rcl_interfaces.msg import SetParametersResult
+from rcl_interfaces.msg import (
+    FloatingPointRange,
+    IntegerRange,
+    ParameterDescriptor,
+    ParameterType,
+    SetParametersResult,
+)
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
+from rclpy.parameter import Parameter
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 
+from pepin.flags import Flag, FlagSet
 from pepin.telemetry import LatencySummary, LatencyTracker
 from pepin.tsdf import RigidPose
 from pepin_bringup.msgs import pose_from_transform, stamp_seconds
@@ -40,6 +50,7 @@ __all__ = [
     "TfLookup",
     "Window",
     "Worker",
+    "descriptor",
     "spin_main",
     "stamp_seconds",
     "tf_failure_kind",
@@ -219,76 +230,118 @@ class Tally:
 
 
 # ---- live switches ---------------------------------------------------------------------------
+_WIRE_TYPES = {
+    "bool": ParameterType.PARAMETER_BOOL,
+    "integer": ParameterType.PARAMETER_INTEGER,
+    "double": ParameterType.PARAMETER_DOUBLE,
+    "string": ParameterType.PARAMETER_STRING,
+}
+
+
+def descriptor(flag: Flag) -> ParameterDescriptor:
+    """The parameter descriptor of ``flag``: its wire type, its help (the description with the
+    choices, the range, the overriding variable, whether it is live) and, for a number with a
+    range, the integer or floating-point range ``ros2 param describe`` prints and rclpy checks."""
+    d = ParameterDescriptor(
+        name=flag.name, type=_WIRE_TYPES[flag.wire_type], description=flag.help()
+    )
+    if flag.kind == "number" and flag.range is not None:
+        lo, hi = flag.range
+        if flag.integer:
+            d.integer_range = [IntegerRange(from_value=int(lo), to_value=int(hi), step=0)]
+        else:
+            d.floating_point_range = [
+                FloatingPointRange(from_value=float(lo), to_value=float(hi), step=0.0)
+            ]
+    return d
+
+
 class Switches:
-    """A node's live parameters: declared from ``defaults`` (each typed by its default, a bool
-    is a switch), changed with ``ros2 param set`` while the node runs, and printed in its report
-    line by :meth:`state` — how a feature ships with the old behaviour reachable (CLAUDE.md rule
-    19). Any other parameter named in a ``set`` is refused with the reason: rclpy runs this
-    callback on declarations too, so create the switches after the node's last
-    ``declare_parameter``. ``on_change(name, value)`` is told of every change and may raise
-    ``ValueError`` to refuse it (the old value stays)."""
+    """A node's feature flags as its live ROS parameters: the table (:class:`pepin.flags.FlagSet`,
+    the module's ``FLAGS``) declared with descriptors — type, help, the range of a number — read
+    back through a launch override or the flag's ``env`` variable, changed with ``ros2 param
+    set`` (ros/flags.sh) while the node runs and printed in its report line by :meth:`state`
+    (CLAUDE.md rule 19). A set is refused with the reason when the name is not in the table
+    (rclpy runs this callback on declarations too: create the switches after the node's last
+    ``declare_parameter``), when the flag is not live, when the value is not one of the flag's,
+    or when ``on_change(name, old, new)`` raises ``ValueError``; a refused batch leaves every
+    flag as it was. The table is copied: the module's ``FLAGS`` keeps its defaults."""
 
     def __init__(
         self,
         node: Any,
-        defaults: Mapping[str, Any],
+        flags: FlagSet,
         *,
-        on_change: Callable[[str, Any], None] | None = None,
+        on_change: Callable[[str, Any, Any], None] | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
+        self._node = node
         self._log = node.get_logger()
         self._on_change = on_change
-        self._kinds: dict[str, Callable[[Any], Any]] = {
-            name: type(value) for name, value in defaults.items()
-        }
-        self._values: dict[str, Any] = {
-            name: self._kinds[name](node.declare_parameter(name, value).value)
-            for name, value in defaults.items()
-        }
+        self.flags = FlagSet(*flags)
+        defaults = self.flags.defaults(os.environ if environ is None else environ)
+        for flag in self.flags:
+            declared = node.declare_parameter(
+                flag.name, flag.wire(defaults[flag.name]), descriptor(flag)
+            ).value
+            self.flags.set(flag.name, declared)  # a launch override, checked like any change
         node.add_on_set_parameters_callback(self._on_set)
 
     def __getitem__(self, name: str) -> Any:
-        return self._values[name]
+        return self.flags[name]
 
     def on(self, name: str) -> bool:
         """Whether switch ``name`` is on."""
-        return bool(self._values[name])
-
-    def values(self) -> dict[str, Any]:
-        """Every parameter's current value by name."""
-        return dict(self._values)
-
-    def set(self, name: str, value: Any) -> None:
-        """Change ``name`` from inside the node (a switch it turns off itself, say), logged
-        like a change from outside; ``ValueError`` from ``on_change`` leaves the old value."""
-        new = self._kinds[name](value)
-        old, self._values[name] = self._values[name], new
-        if self._on_change is not None:
-            try:
-                self._on_change(name, new)
-            except ValueError:
-                self._values[name] = old
-                raise
-        self._log.info(
-            f"{name} {'on' if new else 'off'}" if isinstance(new, bool) else f"{name} = {new}"
-        )
+        return self.flags.on(name)
 
     def state(self) -> str:
-        """Every parameter's value in one compact string: ``floor_anchor on, min_weight 2.0``."""
-        return ", ".join(
-            f"{name} {'on' if value else 'off'}" if isinstance(value, bool) else f"{name} {value}"
-            for name, value in self._values.items()
-        )
+        """The live flags' values for the report line: ``floor_anchor=on depth_backend=auto``."""
+        return self.flags.state()
+
+    def set(self, name: str, value: Any) -> Any:
+        """Change ``name`` from inside the node (a switch it turns off itself, say): through the
+        parameter server, so ``ros2 param get`` agrees and the change is logged like one from
+        outside; returns the old value, ``ValueError`` with the reason changes nothing."""
+        flag = self.flags.flag(name)
+        old = self.flags[name]
+        result = self._node.set_parameters([Parameter(name, value=flag.wire(flag.parse(value)))])[0]
+        if not result.successful:
+            raise ValueError(result.reason)
+        return old
+
+    def _apply(self, name: str, value: Any) -> Any:
+        """One change into the table and to ``on_change``; the old value back on a refusal."""
+        old = self.flags.set(name, value)
+        new = self.flags[name]
+        if self._on_change is not None:
+            try:
+                self._on_change(name, old, new)
+            except ValueError:
+                self.flags.set(name, old)
+                raise
+        self._log.info(f"{name}={self.flags.flag(name).render(new)}")
+        return old
 
     def _on_set(self, params: list[Any]) -> SetParametersResult:
-        stale = [p.name for p in params if p.name not in self._values]
+        unknown = [p.name for p in params if p.name not in self.flags]
+        if unknown:
+            return SetParametersResult(
+                successful=False,
+                reason=f"{', '.join(unknown)}: not a flag of this node; the flags are"
+                f" {', '.join(self.flags.names)}",
+            )
+        stale = [p.name for p in params if not self.flags.flag(p.name).live]
         if stale:
             return SetParametersResult(
                 successful=False, reason=f"{', '.join(stale)}: not live, set at the next start"
             )
+        applied: list[tuple[str, Any]] = []
         for p in params:
             try:
-                self.set(p.name, p.value)
+                applied.append((p.name, self._apply(p.name, p.value)))
             except ValueError as exc:
+                for name, old in reversed(applied):  # the batch is one change or none
+                    self._apply(name, old)
                 return SetParametersResult(successful=False, reason=str(exc))
         return SetParametersResult(successful=True)
 
