@@ -925,6 +925,53 @@ def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_p
     assert {"depth_stream", "depth_fusion", "relocalizer", "neck_state"} <= tables.keys()
 
 
+def test_the_depth_network_runs_where_the_backend_flag_says_and_the_cpu_model_waits() -> None:
+    """The depth node calls one backend where it called the model (``self._net(rgb)``); that
+    backend is the switch between the laptop's GPU service and the CPU model in the container
+    (pepin.depth_service.Fallback), picked live by the ``depth_backend`` flag whose default
+    comes from PEPIN_DEPTH_BACKEND, and the CPU model is built on its first local frame, never
+    at start. laptop.sh sets the flag and the service's address only when it starts the
+    service; without them the node is on the CPU as before."""
+    node = sf.tree(f"{NODES}/depth_stream.py")
+    assert {"Fallback", "RemoteDepth", "LazyDepth"} <= sf.imported(node)
+    assert "self._net(rgb)" in sf.unparsed(node, ast.Call), "the call site did not move"
+    switch = sf.calls_to(node, "Fallback")
+    assert len(switch) == 1 and sf.dotted(switch[0].args[0]) == "RemoteDepth()"
+    assert ast.unparse(sf.keywords(switch[0])["mode"]) == "self._switches['depth_backend']"
+    models = sf.calls_to(node, "MonoDepth")
+    lambdas = [n for n in ast.walk(node) if isinstance(n, ast.Lambda)]
+    assert models and all(any(m in ast.walk(lam) for lam in lambdas) for m in models), (
+        "the CPU model is built inside LazyDepth's lambda, not at start"
+    )
+    assert "self._net.mode" in {
+        ast.unparse(t) for n in ast.walk(node) if isinstance(n, ast.Assign) for t in n.targets
+    }
+    flags = load_table(REPO / NODES / "depth_stream.py")
+    backend = flags.flag("depth_backend")
+    assert backend.kind == "choice" and set(backend.choices) == {"remote", "local", "auto"}
+    assert backend.default == "local" and backend.env == "PEPIN_DEPTH_BACKEND" and backend.live
+    assert "self._net.status" in {
+        ast.unparse(n) for n in ast.walk(node) if isinstance(n, ast.Attribute)
+    }, "the switch's status is in the report line"
+    url = next(
+        c
+        for c in sf.calls_to(node, "self.declare_parameter")
+        if ast.unparse(c.args[0]) == "'depth_url'"
+    )
+    assert "PEPIN_DEPTH_URL" in ast.unparse(url.args[1]) and "DEFAULT_URL" in ast.unparse(
+        url.args[1]
+    )
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    vslam_run = next(
+        c for c in sf.shell_commands(laptop) if "docker run -d --name pepin-vslam" in c
+    )
+    assert '${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"}' in vslam_run
+    assert (
+        'DEPTH_ENV=(-e PEPIN_DEPTH_BACKEND=auto -e "PEPIN_DEPTH_URL=http://host.docker.internal:'
+        in laptop
+    )
+
+
 def test_the_floor_anchors_the_depth_and_leans_with_the_imu() -> None:
     """The depth node snaps floor pixels to the floor plane (switchable), the plane leans with
     the accelerometer, and the IMU mount the laptop would apply is the one the board publishes

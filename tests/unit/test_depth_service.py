@@ -18,6 +18,7 @@ from pepin.depth_service import (
     DepthServer,
     DepthServiceError,
     Fallback,
+    LazyDepth,
     RemoteDepth,
     decode_frame,
     encode_frame,
@@ -264,3 +265,30 @@ def test_a_single_hiccup_does_not_switch_the_backend() -> None:
     remote.fail = False
     assert switch(frame)[0, 0] == 1.0 and switch.on_remote
     assert switch.local_frames == 1 and switch.remote_frames == 1
+
+
+def test_the_local_model_is_built_on_its_first_frame_and_once() -> None:
+    """The CPU model costs a gigabyte and seconds: the node hands the switch a LazyDepth, which
+    builds it on the first frame that actually goes local — never while the service answers."""
+    built: list[FakeBackend] = []
+
+    def build() -> FakeBackend:
+        built.append(FakeBackend("local"))
+        return built[-1]
+
+    lazy = LazyDepth(build)
+    assert not lazy.built and built == []
+    frame = _frame(4, 4)
+    assert lazy(frame)[0, 0] == 2.0 and lazy.built
+    lazy(frame)
+    assert len(built) == 1 and built[0].calls == 2
+    remote = FakeBackend("remote")
+    untouched = LazyDepth(build)
+    switch = Fallback(remote, untouched, mode="auto", clock=lambda: 0.0)
+    for _ in range(5):
+        assert switch(frame)[0, 0] == 1.0
+    assert not untouched.built and len(built) == 1, "the service answered: no model loaded"
+    Fallback(remote, untouched, mode="remote")(frame)
+    assert not untouched.built
+    remote.fail = True
+    assert switch(frame)[0, 0] == 2.0 and untouched.built, "the first fallback builds it"

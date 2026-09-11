@@ -10,9 +10,11 @@
 #   ros/depth_host.sh bench [N]       time N frames (default 30) through the network here and, when
 #                                     the service is up, through it (JPEG and raw); the frames come
 #                                     from scratch/_depth_bench/cam when that directory exists
-# Off by default: ros/laptop.sh vslam starts it only with PEPIN_DEPTH_HOST=1, and then tells the
-# node to use it. The weights come from the Hugging Face cache (~/.cache/huggingface/hub, the same
-# files the laptop image carries); a model already cached is loaded offline, a new one is fetched.
+# ros/laptop.sh vslam starts it wherever torch's Metal backend is available (PEPIN_DEPTH_HOST=0
+# keeps the network on the CPU in the container, =1 insists) and tells the node to use it; the
+# node's depth_backend flag switches live (ros/flags.sh). The weights come from the Hugging Face
+# cache (~/.cache/huggingface/hub, the same files the laptop image carries); a model already
+# cached is loaded offline, a new one is fetched.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"

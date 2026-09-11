@@ -10,8 +10,10 @@
 #   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
 #                            neck on): the camera node here keeps its static edge off
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
-#   PEPIN_DEPTH_HOST=1 ros/laptop.sh vslam   the same with the depth network on the laptop's GPU
-#                            (ros/depth_host.sh, off by default) and the node told to use it
+#   ros/laptop.sh vslam      also starts the depth network on the laptop's GPU (ros/depth_host.sh)
+#                            and tells the node to use it, when torch's Metal backend is there;
+#                            PEPIN_DEPTH_HOST=0 keeps the network on the CPU in the container,
+#                            PEPIN_DEPTH_HOST=1 insists on the service (it falls back to the CPU)
 # Only `start` talks to the board (its side and its map); stop, logs, vslam and kick never do.
 # Prerequisites: the image built here (ros/laptop-build.sh) and the board on side=board
 # (ros/thin.sh on). A Docker container on macOS lives behind the VM's NAT, so DDS discovery
@@ -62,6 +64,13 @@ kick_target() {  # node name -> "container|start-up line"
     esac
 }
 now_ms() { perl -MTime::HiRes=time -e 'printf "%.0f", time*1000'; }
+# Whether the depth network runs on this laptop's GPU (ros/depth_host.sh) beside the container:
+# PEPIN_DEPTH_HOST=1 or 0 decides outright; otherwise torch's Metal backend is asked (~2 s: the
+# import), the same question the service itself answers before it falls back to the CPU.
+depth_host_wanted() {
+    case "${PEPIN_DEPTH_HOST:-}" in 1) return 0 ;; 0) return 1 ;; esac
+    (cd "$HERE/.." && uv run --group depth python -c 'import torch; print(torch.backends.mps.is_available())' 2>/dev/null) | grep -qx True
+}
 # How many participants the bridge admin at $1 lists under node name $2 (its keys read
 # @/<zid>/ros2/node/<participant>/<name>): 1 is the live node alone, 2 is the node beside its ghost.
 bridge_count() { curl -s -m 3 "$1/@/local/ros2/node/**" | grep -o "/ros2/node/[^/\"]*/$2\"" | wc -l | tr -d ' '; }
@@ -73,7 +82,7 @@ MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/pyth
 case "${1:-start}" in
     stop)
         stop_gently pepin-laptop pepin-vslam; docker rm -f pepin-zenoh >/dev/null 2>&1 || true
-        if [ "${PEPIN_DEPTH_HOST:-0}" = 1 ]; then "$HERE/depth_host.sh" stop; fi
+        [ "${PEPIN_DEPTH_HOST:-}" = 0 ] || "$HERE/depth_host.sh" stop
         echo "laptop side stopped"; exit 0 ;;
     logs)
         exec docker logs -f "pepin-${2:-laptop}" ;;
@@ -124,14 +133,18 @@ case "${1:-start}" in
         STATIC_CAMERA_TF=true
         case " ${*:2} " in *" --neck "*) STATIC_CAMERA_TF=false ;; esac
         stop_gently pepin-vslam
-        # The depth network on the laptop's GPU (ros/depth_host.sh): opt-in until measured. The
-        # node reads PEPIN_DEPTH_BACKEND (auto: the service, the CPU model when it does not
-        # answer) and PEPIN_DEPTH_URL (the host as the container sees it); without the flag
-        # neither is set and the node runs on the CPU as before.
+        # The depth network on the laptop's GPU (ros/depth_host.sh): 20 ms a frame on Metal
+        # against 170 ms on the CPU in the container (2026-09-11), so it is on wherever it can
+        # run (depth_host_wanted). The node reads PEPIN_DEPTH_BACKEND (auto: the service, the
+        # CPU model while it does not answer; its depth_backend flag switches live) and
+        # PEPIN_DEPTH_URL (the host as the container sees it); without them the node runs on
+        # the CPU as before.
         DEPTH_ENV=()
-        if [ "${PEPIN_DEPTH_HOST:-0}" = 1 ]; then
+        if depth_host_wanted; then
             "$HERE/depth_host.sh" start
             DEPTH_ENV=(-e PEPIN_DEPTH_BACKEND=auto -e "PEPIN_DEPTH_URL=http://host.docker.internal:${PEPIN_DEPTH_PORT:-8790}")
+        else
+            echo "depth network on the CPU in the container (PEPIN_DEPTH_HOST=1 for the GPU service)"
         fi
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
             -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} \

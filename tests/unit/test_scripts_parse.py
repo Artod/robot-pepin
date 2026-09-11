@@ -27,10 +27,13 @@ def test_script_answers_help(script: str) -> None:
     assert result.returncode == 0, result.stderr[-600:]
 
 
-def test_the_depth_host_launcher_parses_and_stays_off_by_default() -> None:
+def test_the_depth_host_launcher_parses_and_is_on_wherever_the_gpu_is() -> None:
     """ros/depth_host.sh runs the depth network on the laptop's GPU beside the containers;
-    ros/laptop.sh starts it only under PEPIN_DEPTH_HOST=1 and only then points the node at it,
-    so the default vslam start is exactly what it was (CPU in the container)."""
+    ros/laptop.sh vslam starts it and points the node at it when torch's Metal backend answers
+    True — PEPIN_DEPTH_HOST=0 keeps the CPU model in the container, =1 insists without asking.
+    The decision is one shell function, run here with a fake ``uv`` in torch's place."""
+    import re
+
     result = subprocess.run(
         ["bash", "-n", str(REPO / "ros/depth_host.sh")], capture_output=True, text=True, timeout=20
     )
@@ -38,9 +41,28 @@ def test_the_depth_host_launcher_parses_and_stays_off_by_default() -> None:
     launcher = (REPO / "ros/depth_host.sh").read_text()
     assert "pepin.depth_service" in launcher and "--group depth" in launcher
     laptop = (REPO / "ros/laptop.sh").read_text()
-    assert '"${PEPIN_DEPTH_HOST:-0}" = 1' in laptop
+    assert "if depth_host_wanted; then" in laptop
     assert "PEPIN_DEPTH_BACKEND=auto" in laptop and "host.docker.internal" in laptop
     assert laptop.count("depth_host.sh") >= 2  # started with vslam, stopped with stop
+    function = re.search(r"^depth_host_wanted\(\) \{.*?^\}", laptop, re.M | re.S)
+    assert function is not None
+    assert "torch.backends.mps.is_available()" in function.group(0)
+
+    def wanted(env: dict[str, str], torch_says: str) -> bool:
+        script = (
+            f'HERE="{REPO}/ros"; uv() {{ [ -n "{torch_says}" ] && echo "{torch_says}"; }}; '
+            f"{function.group(0)}; depth_host_wanted && echo yes || echo no"
+        )
+        out = subprocess.run(
+            ["bash", "-c", script], env=env, capture_output=True, text=True, timeout=20
+        )
+        assert out.returncode == 0, out.stderr
+        return out.stdout.strip() == "yes"
+
+    base = {"PATH": "/usr/bin:/bin"}
+    assert wanted(base, "True") and not wanted(base, "False") and not wanted(base, "")
+    assert not wanted({**base, "PEPIN_DEPTH_HOST": "0"}, "True"), "0 keeps the CPU"
+    assert wanted({**base, "PEPIN_DEPTH_HOST": "1"}, ""), "1 insists, even without torch"
 
 
 def test_go_sh_survives_a_camera_that_died_before_the_drive_ended(tmp_path) -> None:  # type: ignore[no-untyped-def]

@@ -20,8 +20,15 @@ leaning with the accelerometer) is for the 3D model: the anchored depth goes out
 from it and the costmap reads obstacles the lidar's plane misses. Frames that arrive while the
 network is busy are dropped: the newest one wins. Every stage is timed and reported.
 
-The flags (:data:`FLAGS`, ``ros2 param set /depth_stream <flag> <value>``): ``floor_anchor``,
-``edge_filter``, ``lidar_anchor``; their state is printed in every report line.
+The network runs where ``depth_backend`` says: ``local`` is the CPU model in this container
+(0.2-0.3 s a frame), ``remote`` the same network on the laptop's GPU behind
+:mod:`pepin.depth_service` (ros/depth_host.sh, 26 ms a round trip), ``auto`` the service while
+it answers and the CPU model while it does not (:class:`pepin.depth_service.Fallback`). The CPU
+model is built on its first frame, not at start: a node on the service never pays its gigabyte.
+
+The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): ``floor_anchor``,
+``edge_filter``, ``lidar_anchor``, ``depth_backend``; their state is printed in every report
+line.
 """
 
 from __future__ import annotations
@@ -63,6 +70,7 @@ from pepin.depth import (
     scan_points,
     to_base,
 )
+from pepin.depth_service import DEFAULT_URL, MODES, Fallback, LazyDepth, RemoteDepth
 from pepin.flags import Flag, FlagSet
 from pepin.mounts import Mounts
 from pepin.tsdf import RigidPose
@@ -103,6 +111,15 @@ FLAGS = FlagSet(
         True,
         description="the lidar fits the depth's law; off, the last law is held (the failure mode"
         " of a lidar that stops) — with no law yet nothing is published until it is back on",
+    ),
+    Flag(
+        "depth_backend",
+        "local",
+        choices=MODES,
+        env="PEPIN_DEPTH_BACKEND",
+        description="where the network runs: local (the CPU model in this container), remote"
+        " (the laptop's GPU service, ros/depth_host.sh), auto (the service while it answers, the"
+        " CPU model while it does not)",
     ),
 )
 
@@ -159,7 +176,14 @@ class DepthStream(Node):
         self._scan_pub = self.create_publisher(LaserScan, "/depth_scan", reliable)
         self._scan_max_range = float(self.declare_parameter("scan_max_range", 3.0).value)
         self._law_file = Path(str(self.declare_parameter("law_file", LAW_FILE).value))
-        self._switches = Switches(self, FLAGS)
+        # The depth service as this container sees it (host.docker.internal is the laptop);
+        # read at start: the client reconnects by itself, the address does not move.
+        depth_url = str(
+            self.declare_parameter(
+                "depth_url", os.environ.get("PEPIN_DEPTH_URL", DEFAULT_URL)
+            ).value
+        )
+        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._imu_mount = self._imu_rotation(config.parent)
         self._tilt: Tilt | None = None
         self._floor: Array | None = None  # the expected floor depth image, for the current tilt
@@ -188,8 +212,16 @@ class DepthStream(Node):
                 f"no saved depth law at {self._law_file}: publishing waits for"
                 f" {POOL_MIN_SAMPLES} pooled beams"
             )
-        self.get_logger().info(f"loading {model_name} on CPU")
-        self._net = MonoDepth(model_name, threads)
+        # The CPU model is built on its first frame (LazyDepth): in remote or auto mode with
+        # the service answering it is never loaded, and the node is up in a second, not ten.
+        self._local = LazyDepth(lambda: MonoDepth(model_name, threads))
+        self._net = Fallback(
+            RemoteDepth(depth_url), self._local, mode=self._switches["depth_backend"]
+        )
+        self.get_logger().info(
+            f"depth backend {self._net.status}: service at {depth_url}; the CPU model"
+            f" ({model_name}, {threads} threads) loads on its first local frame"
+        )
         self._worker = Worker(self._process, name="depth", on_error=self._on_work_error).start()
         self.create_timer(30.0, self._report)
         self.get_logger().info("depth stream up: /camera/image -> /camera/depth, /depth_scan")
@@ -200,6 +232,11 @@ class DepthStream(Node):
         if not self._worker.stop():
             self.get_logger().warning("the depth worker did not finish its frame; leaving anyway")
         self._tf.close()
+
+    def _on_switch(self, name: str, _old: Any, new: Any) -> None:
+        """A flag changed: ``depth_backend`` is the switch's mode, the rest are read in place."""
+        if name == "depth_backend":
+            self._net.mode = str(new)
 
     def _on_work_error(self, text: str) -> None:
         self.get_logger().error(f"depth failed on a frame:\n{text}")
@@ -429,8 +466,9 @@ class DepthStream(Node):
             f" net, {c['dropped']} dropped, {c['withheld']} withheld), law a {law.a:.2f}"
             f" b {law.b:+.3f} on {law.pooled} beams{source} from {c['verdicts']} lidar verdicts"
             f" ({per_verdict:.0f} samples each; held {c['held']} of {c['processed']} frames)"
-            f"{self._extras(w)}, flags: {self._switches.state()},"
-            f" ms median/max: {w.stages()}"
+            f"{self._extras(w)}, backend {self._net.status}"
+            f"{'' if self._local.built else ' (CPU model not loaded)'},"
+            f" flags: {self._switches.state()}, ms median/max: {w.stages()}"
         )
         if law.fitted:
             try:

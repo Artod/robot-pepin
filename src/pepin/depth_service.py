@@ -25,14 +25,13 @@ pepin-vslam is 26.0 ms of which 6.1 ms is transport — so the hop costs a quart
 GPU saves. Send JPEG, not raw: q90 costs 1.1 ms to encode and saves 1.8 ms of wire, 37.7 KB
 through Docker's NAT instead of 675 KB.
 
-The node's side (not wired yet — pepin_bringup.depth_stream is being refactored elsewhere): a
-string parameter ``depth_backend`` in {remote, local, auto}, default from PEPIN_DEPTH_BACKEND
-and ``local`` without it, sets :attr:`Fallback.mode`; ``depth_url`` defaults to PEPIN_DEPTH_URL
-or :data:`DEFAULT_URL`. The node builds ``Fallback(RemoteDepth(url), MonoDepth(...))`` and calls
-it exactly where it calls ``self._net(rgb)`` today — same argument, same return — so only the
-construction changes. ``depth_backend`` is the first live parameter that is not a bool, so the
-node's set-parameters callback needs a branch for it; :attr:`Fallback.status` is the phrase for
-the report line.
+The node's side (pepin_bringup.depth_stream): the choice flag ``depth_backend`` in {remote,
+local, auto}, default from PEPIN_DEPTH_BACKEND and ``local`` without it, sets
+:attr:`Fallback.mode` live; ``depth_url`` defaults to PEPIN_DEPTH_URL or :data:`DEFAULT_URL`.
+The node builds ``Fallback(RemoteDepth(url), LazyDepth(lambda: MonoDepth(...)))`` and calls it
+where it called the model — same argument, same return; :class:`LazyDepth` builds the CPU model
+on its first frame, so a node on the service never loads it. :attr:`Fallback.status` is the
+phrase for the report line.
 """
 
 from __future__ import annotations
@@ -463,6 +462,35 @@ class RemoteDepth:
             conn.close()
         result: dict[str, Any] = json.loads(data)
         return result
+
+
+class LazyDepth:
+    """A :class:`DepthBackend` built on its first frame. The CPU model costs a gigabyte and
+    seconds to load; behind :class:`Fallback` in remote or auto mode it is never asked while the
+    service answers, and this is what keeps it from being paid for anyway. One build, under a
+    lock: two frames racing the first call get one model."""
+
+    def __init__(self, build: Callable[[], DepthBackend]) -> None:
+        self._build = build
+        self._backend: DepthBackend | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def built(self) -> bool:
+        """Whether the backend exists yet."""
+        return self._backend is not None
+
+    def __call__(self, rgb: Rgb) -> Array:
+        backend = self._backend
+        if backend is None:
+            with self._lock:
+                backend = self._backend
+                if backend is None:
+                    t0 = time.perf_counter()
+                    log.info("building the local depth model")
+                    backend = self._backend = self._build()
+                    log.info("local depth model ready in %.1f s", time.perf_counter() - t0)
+        return backend(rgb)
 
 
 MODES = ("remote", "local", "auto")
