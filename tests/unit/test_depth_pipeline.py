@@ -308,6 +308,46 @@ def test_the_wall_anchor_extrudes_the_lidar_row_up_a_wall_and_stops_at_a_chair_s
     assert anchor.walk(Frame(raw, _context(lonely))) is None
 
 
+def test_the_walk_stops_where_a_table_top_recedes_and_can_correct_without_pairs() -> None:
+    """A table 1.5 m ahead: its front is vertical from the floor to 0.7 m, its top runs back
+    to 2.5 m, and the network's depth is continuous across the edge (the front's depth grows
+    into the top's without a step). The walk climbs the front and stops within the slope
+    window of the top's start; the wall behind is walked to the picture's top. With ``pairs``
+    off the anchor still corrects the walked pixels and contributes nothing."""
+    fwd, _left, up = _rays()
+    wall = _scene(2.0, floor=False)
+    front = 1.5 / fwd
+    z_front = CAM.z + front * up  # the height each ray meets the front's plane at
+    on_front = z_front < 0.7
+    # the top: the horizontal plane at 0.7 m, from the front's edge back to the wall
+    with np.errstate(divide="ignore"):
+        top = np.where(up < 0, (0.7 - CAM.z) / up, np.inf)
+    on_top = ~on_front & (top < wall) & (top >= front)
+    truth = np.where(on_front, front, np.where(on_top, top, wall))
+    raw = 1.4 * truth
+    returns = _wall_returns(1.5)  # the lidar meets the front at 0.2 m across the view
+    anchor = WallAnchor(row_stride=1)
+    walk = anchor.walk(Frame(raw, _context(returns)))
+    assert walk is not None
+    r, k = np.nonzero(walk.walked)
+    cols = walk.cols[k]
+    edge_row = np.array([np.flatnonzero(on_front[:, c]).min() for c in cols])
+    # the walk reaches the top's edge and passes it by no more than the slope window (the
+    # window straddling the edge averages the top's climb with the front's); never the wall
+    overshoot = edge_row - r  # rows above the top's edge (negative: still on the front)
+    assert 0 <= overshoot.max() <= anchor.slope_window
+    assert on_front[r, cols].mean() > 0.9 and not (truth[r, cols] >= wall[r, cols]).any()
+    quiet = WallAnchor(pairs=False, correct=True)
+    frame = Frame(raw, _context(returns))
+    assert quiet.pairs(frame) is None
+    corrected, touched = quiet.correct(raw, frame)
+    assert touched == walk.count and np.allclose(corrected[r, cols], front[r, cols])
+    assert "correcting" in quiet.describe() and "pairs" not in quiet.describe()
+    pipeline = standard_pipeline(wall_anchor=True, wall_pairs=False, wall_correct=True)
+    result = pipeline.run(raw, _context(returns))
+    assert result.verdict("wall_anchor").pairs == 0 and result.verdict("wall_anchor").pixels > 0
+
+
 def test_the_wall_pairs_teach_the_affine_law_the_room_above_the_lidar_row() -> None:
     """A network right at the lidar's row and 20 % too far above it (an error the beams cannot
     see): with the wall pairs in the pool the elevation law finds the term, the row law's

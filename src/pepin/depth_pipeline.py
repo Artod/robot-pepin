@@ -19,6 +19,16 @@ columns while the network's depth stays continuous (a wall goes on, a chair back
 top), a third hoop above the lidar's row. Two more laws let the data say whether the error above
 the lidar's row depends on the elevation: :class:`ElevationLaw` adds a term in the ray's lift,
 :class:`RowLaw` fits a law per band of rows.
+
+Measured on run 0171 (29 frames against the run's lidar cloud and its COLMAP reference,
+scratch/pipeline_vs_truth.py, 2026-09-11), which set the defaults of :func:`standard_pipeline`:
+the network's error is not one law — 1.1x too far on the floor, 1.6x at the lidar's row, 2.0x
+from 0.3 m up — so every hoop but the lidar's pulls the law off the row the costmap lives on.
+Floor pairs alone put the lidar's row 2.0x too far (a camera without lidar sees walls where the
+raw network does); wall pairs at 0.2 of a beam put it 10 % too near while fixing the 0.5-0.8 m
+slice (0.86 -> 1.00 of the truth); the elevation term is real (c +0.1) but linear in lift is the
+wrong shape (the error steps within 60 rows of the lidar's row and is flat above), and the row
+law overfits. The lidar-only affine law stays the default; the new anchors ship switched off.
 """
 
 from __future__ import annotations
@@ -68,6 +78,8 @@ WALL_ROW_STRIDE = 4  # rows between two wall pairs of one column
 WALL_PAIR_WEIGHT = 0.2
 WALL_MAX_HEIGHT = 2.0  # metres above the floor a wall point may stand: higher is a ceiling
 WALL_NEIGHBOUR_GAP = 0.30  # metres between a return and its scan neighbours for a wall direction
+WALL_SLOPE_TOL = 0.004  # per row: how much faster than the plane the network's depth may climb
+WALL_SLOPE_WINDOW = 6  # rows either side over which that climb is measured (the noise averaged)
 MIN_LIFT_SPREAD = 0.15  # the pool's elevation span (5th-95th of lift) before an elevation term
 ROW_BANDS = 6  # bands of elevation of the row law
 
@@ -670,9 +682,13 @@ class WallAnchor(AnchorStage):
     local direction of the surface they lie on; the vertical plane through that line is the
     wall, and for the rows above the return in its column — as long as the network's depth
     stays continuous from row to row (a step over ``rel_step`` of itself is another object:
-    a chair back ends at its top, a wall goes on) — the pixel's ray meets that plane at a
-    depth the geometry knows. Those (network, wall) pairs are a third hoop above the lidar's
-    row; with ``correct`` the walked pixels are set to the wall's depth outright."""
+    a chair back ends at its top, a wall goes on) and climbs the column no faster than the
+    plane's own depth does (a table top or a seat is continuous with its front but recedes
+    a percent a row where a vertical surface moves a tenth of that: the log-depth slopes over
+    ``slope_window`` rows may differ by ``slope_tol`` a row) — the pixel's ray meets that
+    plane at a depth the geometry knows. With ``pairs`` those (network, wall) pairs are a
+    third hoop above the lidar's row; with ``correct`` the walked pixels are set to the
+    wall's depth outright."""
 
     name = "wall_anchor"
 
@@ -684,6 +700,9 @@ class WallAnchor(AnchorStage):
         weight: float = WALL_PAIR_WEIGHT,
         max_height: float = WALL_MAX_HEIGHT,
         neighbour_gap: float = WALL_NEIGHBOUR_GAP,
+        slope_tol: float = WALL_SLOPE_TOL,
+        slope_window: int = WALL_SLOPE_WINDOW,
+        pairs: bool = True,
         correct: bool = False,
     ) -> None:
         self.rel_step = rel_step
@@ -691,6 +710,9 @@ class WallAnchor(AnchorStage):
         self.weight = weight
         self.max_height = max_height
         self.neighbour_gap = neighbour_gap
+        self.slope_tol = slope_tol
+        self.slope_window = slope_window
+        self.contribute = pairs
         self.correct_pixels = correct
 
     def walk(self, frame: Frame) -> WallWalk | None:
@@ -739,6 +761,14 @@ class WallAnchor(AnchorStage):
             step = np.abs(raw[:-1] - raw[1:]) / raw[1:]
         bad = ~np.isfinite(raw) | ~np.isfinite(t) | (t <= NEAR_M) | (z_up > self.max_height)
         bad[:-1] |= ~np.isfinite(step) | (step > self.rel_step)
+        w = self.slope_window
+        if w > 0 and h > 2 * w:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ln_d, ln_t = np.log(raw), np.log(t)
+                climb_d = (ln_d[: -2 * w] - ln_d[2 * w :]) / (2 * w)  # up the column, per row
+                climb_t = (ln_t[: -2 * w] - ln_t[2 * w :]) / (2 * w)
+                apart = np.abs(climb_d - climb_t)
+            bad[w:-w] |= ~np.isfinite(apart) | (apart > self.slope_tol)
         # rows above the return with no bad row between: the count of bad rows at or above a
         # row, less the count at or above the return, must be zero
         above = np.vstack([np.cumsum(bad[::-1], axis=0)[::-1], np.zeros((1, bad.shape[1]))])
@@ -749,7 +779,9 @@ class WallAnchor(AnchorStage):
 
     def pairs(self, frame: Frame) -> Pairs | None:
         """(network, wall) pairs every ``row_stride`` rows of the walk, or ``None`` under
-        MIN_SAMPLES."""
+        MIN_SAMPLES or with ``pairs`` off."""
+        if not self.contribute:
+            return None
         walk = self.walk(frame)
         if walk is None:
             return None
@@ -776,9 +808,12 @@ class WallAnchor(AnchorStage):
         return out, int(r.size)
 
     def describe(self) -> str:
+        roles = ("pairs " if self.contribute else "") + (
+            "correcting" if self.correct_pixels else ""
+        )
         return (
-            f"step {self.rel_step:.0%}, weight {self.weight:g}"
-            f"{', correcting' if self.correct_pixels else ''}"
+            f"step {self.rel_step:.0%}, slope {self.slope_tol:.1%}/row, weight {self.weight:g},"
+            f" {roles.strip() or 'idle'}"
         )
 
 
@@ -786,9 +821,10 @@ class WallAnchor(AnchorStage):
 class ElevationLaw(AffineLaw):
     """The affine law with a term in the ray's elevation, 1 / z = a / D + b + c * lift, for an
     error that grows up the picture. Fitted the way the affine law is (the noisy 1 / D
-    regressed on the exact 1 / z and lift, then inverted); ``c`` stays 0 until the pool spans
-    elevations (MIN_LIFT_SPREAD between its 5th and 95th lift percentiles) and depths, and the
-    fit falls back to the affine law when its (a, b) leave the bounds."""
+    regressed on the exact 1 / z and lift, then inverted). Each term has its own gate: ``c``
+    needs the pool to span elevations (MIN_LIFT_SPREAD between its 5th and 95th lift
+    percentiles), ``b`` needs it to span depths (MIN_DEPTH_SPREAD, as the affine law) and is
+    0 otherwise; the fit falls back to the affine law when its (a, b) leave the bounds."""
 
     name = "elevation_law"
 
@@ -805,17 +841,20 @@ class ElevationLaw(AffineLaw):
             return
         lo, hi = np.percentile(pool.lift, (5, 95))
         z_lo, z_hi = np.percentile(pool.z, (5, 95))
-        if hi - lo < MIN_LIFT_SPREAD or z_hi / z_lo < MIN_DEPTH_SPREAD:
+        if hi - lo < MIN_LIFT_SPREAD:
             return
+        with_shift = z_hi / z_lo >= MIN_DEPTH_SPREAD
         x, y = 1.0 / pool.d, 1.0 / pool.z
         w = np.sqrt(pool.weight)
-        design = np.stack([y, pool.lift, np.ones_like(y)], axis=1) * w[:, None]
+        columns = [y, pool.lift] + ([np.ones_like(y)] if with_shift else [])
+        design = np.stack(columns, axis=1) * w[:, None]
         coef, *_ = np.linalg.lstsq(design, x * w, rcond=None)
-        res = np.abs(x - (coef[0] * y + coef[1] * pool.lift + coef[2]))
+        res = np.abs(x - (coef[0] * y + coef[1] * pool.lift + (coef[2] if with_shift else 0.0)))
         keep = res <= np.percentile(res, 75)
         if int(keep.sum()) >= 4:
             coef, *_ = np.linalg.lstsq(design[keep], (x * w)[keep], rcond=None)
-        alpha, gamma, beta = (float(k) for k in coef)
+        alpha, gamma = float(coef[0]), float(coef[1])
+        beta = float(coef[2]) if with_shift else 0.0
         if alpha == 0.0:
             return
         a, b, c = 1.0 / alpha, -beta / alpha, -gamma / alpha
@@ -898,17 +937,20 @@ def standard_pipeline(
     *,
     floor_pairs: bool = False,
     wall_anchor: bool = False,
+    wall_pairs: bool = True,
     wall_correct: bool = False,
 ) -> DepthPipeline:
     """The node's chain: edges -> lidar -> (floor pairs) -> (wall anchor) -> law -> floor
-    anchor, the two new anchors in the list and switched by the flags of the same name."""
+    anchor, the two new anchors in the list and switched by the flags of the same name; the
+    wall anchor's two roles (``wall_pairs`` into the law's pool, ``wall_correct`` on the
+    pixels) are its own settings."""
     the_law = law if law is not None else AffineLaw()
     geometry = FloorGeometry()
     stages: list[Stage] = [
         EdgeFilter(),
         LidarAnchor(),
         FloorPairs(the_law, geometry),
-        WallAnchor(correct=wall_correct),
+        WallAnchor(pairs=wall_pairs, correct=wall_correct),
         the_law,
         FloorAnchor(geometry),
     ]
