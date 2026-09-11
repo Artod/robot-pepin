@@ -51,3 +51,28 @@ def slipping(
         min_turn_deg
     )
     return claimed and not changed
+
+
+class SlipWatch:
+    """Slip scan by scan, for a tracker: the wheels' step since the previous scan against
+    whether the picture changed (:func:`scan_changed`, :func:`slipping`). ``streak`` counts
+    the consecutive slipping scans, so a caller can say it once when the third one lands."""
+
+    def __init__(self) -> None:
+        self._last_ranges: NDArray[np.float64] | None = None
+        self._last_odom: Pose2D | None = None
+        self.streak = 0
+
+    def observe(self, ranges: NDArray[np.float64], odom: Pose2D) -> bool:
+        """True when the wheels claim a step since the previous scan and the ranges (equal
+        binning) show the same picture. The first scan is never slip: nothing to compare."""
+        from pepin.scanmatch import relative_motion
+
+        changed = True
+        if self._last_ranges is not None:
+            changed, _ = scan_changed(self._last_ranges, ranges)
+        step = Pose2D() if self._last_odom is None else relative_motion(self._last_odom, odom)
+        slip = slipping(step, changed)
+        self._last_ranges, self._last_odom = ranges, odom
+        self.streak = self.streak + 1 if slip else 0
+        return slip

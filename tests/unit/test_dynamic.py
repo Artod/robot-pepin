@@ -189,3 +189,55 @@ def test_exactly_half_explained_votes_and_one_under_half_does_not() -> None:
     assert VOTE_MIN_SHARE == 0.5 and vote is not None and int(vote.sum()) == 100
     assert voting_mask(np.vstack([wall_scan(99), blanket]), Pose2D(), mask) is None
     assert voting_mask(np.zeros((0, 2)), Pose2D(), mask) is None
+
+
+class _Judge:
+    """A matcher that always scores the same: what ``occluded`` asks of the real one."""
+
+    def __init__(self, fit: float) -> None:
+        self.fit = fit
+        self.judged = 0  # how many points it was handed the last time
+
+    def inlier_fraction(self, pose: Pose2D, points: np.ndarray) -> float:
+        self.judged = len(points)
+        return self.fit
+
+
+def _crowded_scan() -> np.ndarray:
+    """25 returns on a person half a metre ahead and 25 on the wall 2.5 m ahead, base frame."""
+    person = np.column_stack([np.full(25, 0.5), np.linspace(-0.1, 0.1, 25)])
+    wall = np.column_stack([np.full(25, 2.5), np.linspace(-0.5, 0.5, 25)])
+    return np.vstack([person, wall])
+
+
+def test_a_person_beside_the_cart_is_occlusion_while_the_walls_beyond_still_fit() -> None:
+    """The tracker's own question, extracted: the near scan is mostly news, the far scan still
+    lies on the map at this pose — a person, not a lost cart."""
+    from pepin.dynamic import occluded
+
+    pose = Pose2D(0.5, 2.0, 0.0)  # the wall at x = 3.0 is 2.5 m ahead
+    points, mask, judge = _crowded_scan(), StaticMask(room()), _Judge(0.8)
+    assert occluded(points, pose, mask, judge, lost_fit=0.35)
+    assert judge.judged == 25, "only the far returns judge the pose"
+
+
+def test_a_wrong_pose_is_lost_not_occluded_and_a_thin_scan_says_nothing() -> None:
+    """The far test is what tells a person from a twin: a pose the walls refuse is not
+    occluded. Before the map, the matcher or twenty returns, the answer is False."""
+    from pepin.dynamic import occluded
+
+    pose, points, mask = Pose2D(0.5, 2.0, 0.0), _crowded_scan(), StaticMask(room())
+    assert not occluded(points, pose, mask, _Judge(0.1), lost_fit=0.35), "the walls refuse it"
+    assert not occluded(points[:10], pose, mask, _Judge(0.8), lost_fit=0.35), "too few returns"
+    assert not occluded(None, pose, mask, _Judge(0.8), lost_fit=0.35)
+    assert not occluded(points, pose, None, _Judge(0.8), lost_fit=0.35), "no map yet"
+    assert not occluded(points, pose, mask, None, lost_fit=0.35), "no matcher yet"
+
+
+def test_a_scan_the_map_explains_from_end_to_end_is_not_occluded() -> None:
+    """Nothing new near the cart: the near share is nothing and the question does not arise."""
+    from pepin.dynamic import occluded
+
+    pose, mask = Pose2D(0.5, 2.0, 0.0), StaticMask(room())
+    on_wall = np.column_stack([np.full(50, 2.5), np.linspace(-0.5, 0.5, 50)])
+    assert not occluded(on_wall, pose, mask, _Judge(0.9), lost_fit=0.35)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -228,3 +229,36 @@ def berth_for(planner_id: str, hull: Footprint = HULL) -> Berth:
         else point_planner_ring_m(hull)
     )
     return Berth(ring, near_exclusion_m(ring, hull))
+
+
+OCCLUDED_SHARE = 0.25  # a quarter of the near scan on things the map does not know
+MIN_JUDGEABLE_POINTS = 20  # fewer returns than this say nothing about occlusion or fit
+
+
+class FitJudge(Protocol):
+    """Scores how well a scan lies on the map at a pose — what
+    :class:`pepin.scanmatch.CorrelativeMatcher` does, as little of it as :func:`occluded` needs."""
+
+    def inlier_fraction(self, pose: Pose2D, points: NDArray[np.float64]) -> float:
+        """The share of ``points`` (base frame, at ``pose``) that land on mapped obstacles."""
+        ...
+
+
+def occluded(
+    points: NDArray[np.float64] | None,
+    pose: Pose2D,
+    mask: StaticMask | None,
+    judge: FitJudge | None,
+    lost_fit: float,
+) -> bool:
+    """A person beside the cart, not a lost cart: the NEAR scan is mostly things the map does
+    not know (:func:`occlusion_split`) while the walls beyond still fit ``pose`` at least as
+    well as ``lost_fit``. A wrong pose fails the far test and is not occluded (the first version
+    judged the whole scan and hid a twin behind "occluded"). False before the map, the matcher
+    or a scan of :data:`MIN_JUDGEABLE_POINTS` returns exists."""
+    if mask is None or judge is None or points is None or len(points) < MIN_JUDGEABLE_POINTS:
+        return False
+    near_share, far = occlusion_split(points, mask.explains(to_map(points, pose)))
+    if near_share <= OCCLUDED_SHARE or far.sum() < MIN_JUDGEABLE_POINTS:
+        return False
+    return judge.inlier_fraction(pose, points[far]) >= lost_fit

@@ -25,32 +25,30 @@ import time
 from typing import Any
 
 import numpy as np
-import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
-from geometry_msgs.msg import PoseArray, PoseStamped, PoseWithCovarianceStamped, TransformStamped
+from geometry_msgs.msg import PoseArray, PoseStamped, PoseWithCovarianceStamped
 from nav2_msgs.msg import ParticleCloud
 from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from nav_msgs.msg import Odometry, Path
-from rcl_interfaces.msg import SetParametersResult
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan, PointCloud2
-from sensor_msgs_py import point_cloud2
-from std_msgs.msg import Bool, Float32, Header, String
+from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformBroadcaster
 
-from pepin.dynamic import StaticMask, berth_for, dynamic_marks, occlusion_split, to_map
+from pepin.dynamic import StaticMask, berth_for, dynamic_marks, occluded
 from pepin.localization import Localizer
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D, wrap_angle
-from pepin.scanmatch import CorrelativeMatcher, SearchWindow, relative_motion
-from pepin.slip import scan_changed, slipping
+from pepin.scanmatch import CorrelativeMatcher, SearchWindow
+from pepin.slip import SlipWatch
 from pepin.timeline import (
     MatchPacer,
+    MotionEdge,
     MotionFilter,
     OdomHistory,
     ScanGate,
@@ -59,6 +57,15 @@ from pepin.timeline import (
     timed_scan_from_ros,
 )
 from pepin.watch import DRIVE_FIT, LOST_FIT, LostWatch, Verdict
+from pepin_bringup.msgs import (
+    cloud_from_points,
+    planar_mount,
+    pose_with_covariance,
+    stamp_from_seconds,
+    transform_from_rpy,
+    yaw_of,
+)
+from pepin_bringup.node_kit import Switches, TfLookup, spin_main
 
 OCCUPIED_LOG_ODDS, FREE_LOG_ODDS = 4.0, -4.0
 DUMP_DIR = (
@@ -66,10 +73,7 @@ DUMP_DIR = (
 )
 LAST_POSE_FILE = "/maps/last_pose.json"  # where the robot stood when the stack last ran
 LAST_POSE_MAX_AGE_S = 3600.0
-
-
-OCCLUDED_SHARE = 0.25  # a quarter of the scan on things the map does not know
-MIN_JUDGEABLE_POINTS = 20  # fewer returns than this say nothing about occlusion or fit
+SLIP_SAID_AFTER = 3  # consecutive slipping scans before the log says it once
 
 
 def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
@@ -80,14 +84,15 @@ def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
     return pose.x - (c * odom.x - s * odom.y), pose.y - (s * odom.x + c * odom.y), yaw
 
 
-# The tracker's parameters that apply without a restart, with the type each is read as; they
-# are attributes of the Localizer and the callback writes them there. Every other parameter is
-# refused live (the answer names it), because a "success" that changed nothing is a lie.
+# The tracker's parameters that apply without a restart, with the default each is declared
+# from (its type is the default's); they are attributes of the Localizer and the switch
+# callback writes them there. Every other parameter is refused live (the answer names it),
+# because a "success" that changed nothing is a lie.
 LIVE_PARAMS: dict[str, Any] = {
-    "rest_lock": bool,
-    "explained_vote": bool,
-    "rest_tau_s": float,
-    "rest_gain": float,
+    "rest_lock": True,
+    "explained_vote": True,
+    "rest_tau_s": 6.0,
+    "rest_gain": 0.05,
 }
 
 
@@ -104,11 +109,6 @@ class _RosLogHandler(logging.Handler):
             self._node.get_logger().warning(text)
         else:
             self._node.get_logger().info(text)
-
-
-def yaw_of(q: Any) -> float:
-    """Yaw of a geometry_msgs quaternion (planar robot)."""
-    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
 
 def grid_from_msg(msg: OccupancyGridMsg) -> OccupancyGrid:
@@ -161,18 +161,10 @@ class Relocalizer(Node):
         # The rest lock averages in seconds, not in matches: a standing cart is matched about
         # once a second (MotionFilter below), a replay feeds every scan, and both must settle
         # at the same speed. rest_gain is only the fallback for a caller that times nothing.
-        # These four apply live (ros2 param set /relocalizer rest_lock false): a demo compares
+        # LIVE_PARAMS apply live (ros2 param set /relocalizer rest_lock false): a demo compares
         # them without a stack restart; subcell_refine is the matcher's construction and takes
-        # effect at the next start. _live holds their current values for the next map's tracker.
-        self._live: dict[str, Any] = {
-            name: kind(self.declare_parameter(name, default).value)
-            for name, kind, default in (
-                ("rest_lock", bool, True),
-                ("explained_vote", bool, True),
-                ("rest_tau_s", float, 6.0),
-                ("rest_gain", float, 0.05),
-            )
-        }
+        # effect at the next start. The switches are built at the end of this method, after the
+        # last declare_parameter, and hold the values the next map's tracker is built with.
         self._odom_wz = 0.0  # newest fused yaw rate (gyro-driven): the second witness of rest
         # map -> odom is published 20 times a second, dated 0.1 s ahead (AMCL's habit, shorter):
         # a consumer asking for "now" always finds a transform and never extrapolates.
@@ -187,11 +179,7 @@ class Relocalizer(Node):
         self._last_match_stamp_s: float | None = None  # scan stamp of the previous match: dt_s
         self._last_scan_age_s = 0.0
         self._last_map_odom = (0.0, 0.0, 0.0)  # the belief until the first fix: the base
-        self._last_ranges: np.ndarray | None = (
-            None  # the previous scan's ranges, for slip detection
-        )
-        self._track_odom: Pose2D | None = None  # odom pose at the previous tracked scan
-        self._slip_streak = 0
+        self._slip = SlipWatch()  # wheels claiming a step the picture does not show
         self._map_id = ""
         self._pending_seed: tuple[str, Pose2D, float] | None = None
         self._scan_id = 0
@@ -220,7 +208,7 @@ class Relocalizer(Node):
         )
         self._deskew_failed = 0  # scans matched raw because the history had a hole (per report)
 
-        self._last_odom: Pose2D | None = None  # odom->base_link at the previous check
+        self._motion_edge = MotionEdge()  # odom->base_link moved since the previous check
         self._navigating = False  # a NavigateToPose goal is executing
         self._grid: OccupancyGrid | None = None
         self._matcher: CorrelativeMatcher | None = None
@@ -285,7 +273,7 @@ class Relocalizer(Node):
         # Static transforms only (the laser mount). /tf itself is not read here: this node owns
         # map -> odom and keeps odom -> base_link in its own history, and 40 tf messages a second
         # deserialised in Python cost a quarter of an A53 core for nothing.
-        self._tf = Buffer()
+        self._tf = TfLookup(self, buffer=Buffer())  # no listener: /tf_static is read below
         self.create_subscription(
             TFMessage,
             "/tf_static",
@@ -297,28 +285,18 @@ class Relocalizer(Node):
             ),
         )
         self.create_timer(self._check_period_s, self._check)
-        # Registered after the last declare_parameter: rclpy runs this callback on declarations
-        # too, and it refuses everything that is not live.
-        self.add_on_set_parameters_callback(self._on_switch)
+        # Declared after every other parameter: rclpy runs the switches' callback on
+        # declarations too, and it refuses everything that is not live.
+        self._switches = Switches(self, LIVE_PARAMS, on_change=self._on_switch)
         self.get_logger().info("relocalizer up: watching the scan-to-map fit")
 
     # -- inputs -------------------------------------------------------------
 
-    def _on_switch(self, params: list[Any]) -> SetParametersResult:
-        """``ros2 param set``: the tracker's live parameters (LIVE_PARAMS) are written to the
-        Localizer at once; a batch naming any other parameter is refused with the reason."""
-        stale = [p.name for p in params if p.name not in LIVE_PARAMS]
-        if stale:
-            return SetParametersResult(
-                successful=False, reason=f"{', '.join(stale)}: not live, set at the next start"
-            )
-        for p in params:
-            value = LIVE_PARAMS[p.name](p.value)
-            self._live[p.name] = value
-            if self._localizer is not None:
-                setattr(self._localizer, p.name, value)
-            self.get_logger().info(f"{p.name} = {value}")
-        return SetParametersResult(successful=True)
+    def _on_switch(self, name: str, value: Any) -> None:
+        """A live parameter changed (``ros2 param set``): it is the Localizer's own attribute,
+        written through at once so the next scan is matched with it."""
+        if self._localizer is not None:
+            setattr(self._localizer, name, value)
 
     def _on_map(self, msg: OccupancyGridMsg) -> None:
         self._grid = grid_from_msg(msg)
@@ -350,7 +328,7 @@ class Relocalizer(Node):
             lost_after=3,
             global_retry=False,
             interpolate=self._subcell_refine,
-            **self._live,
+            **self._switches.values(),
         )
         self.get_logger().info(f"map received: {msg.info.width}x{msg.info.height} cells")
         self._tracker_initialised = False  # a new map: find ourselves on it again
@@ -439,14 +417,8 @@ class Relocalizer(Node):
         # Slip: the wheels claim a step but the scan is the same picture as a tenth of a second ago.
         # Then the wheel step is a lie; the pose is corrected from where it was, and Nav2's progress
         # checker (map frame) sees the truth: no progress -> a recovery instead of a 60 s wheelspin.
-        changed = True
-        if self._last_ranges is not None:
-            changed, _ = scan_changed(self._last_ranges, scan.ranges)
-        step = Pose2D() if self._track_odom is None else relative_motion(self._track_odom, odom)
-        slip = slipping(step, changed)
-        self._last_ranges, self._track_odom = scan.ranges, odom
-        self._slip_streak = self._slip_streak + 1 if slip else 0
-        if self._slip_streak == 3:
+        slip = self._slip.observe(scan.ranges, odom)
+        if self._slip.streak == SLIP_SAID_AFTER:
             self.get_logger().warning(
                 "wheels turning, world standing still: slip, wheel step ignored"
             )
@@ -537,22 +509,9 @@ class Relocalizer(Node):
             self._tracker_initialising = False
 
     def _occluded(self, pose: Pose2D) -> bool:
-        """A person beside the cart: the NEAR scan is mostly things the map does not know while
-        the walls beyond still fit the pose. A wrong pose fails the far test and is not occluded
-        (the first version judged the whole scan and hid a twin behind "occluded", 18:07)."""
-        points, matcher = self._points, self._matcher
-        if (
-            self._static_mask is None
-            or matcher is None
-            or points is None
-            or len(points) < MIN_JUDGEABLE_POINTS
-        ):
-            return False
-        world = to_map(points, pose)
-        near_share, far = occlusion_split(points, self._static_mask.explains(world))
-        if near_share <= OCCLUDED_SHARE or far.sum() < MIN_JUDGEABLE_POINTS:
-            return False
-        return matcher.inlier_fraction(pose, points[far]) >= self._watch.lost_fit
+        """A person beside the cart rather than a lost cart (:func:`pepin.dynamic.occluded`),
+        judged on the newest scan at ``pose``."""
+        return occluded(self._points, pose, self._static_mask, self._matcher, self._watch.lost_fit)
 
     def _on_planner(self, msg: String) -> None:
         """The berth around new objects depends on who plans: a footprint planner brings the
@@ -574,11 +533,8 @@ class Relocalizer(Node):
             return
         marks = dynamic_marks(points, pose, self._static_mask, self._berth)
         self._dynamic_count += len(marks)
-        header = Header()
-        header.stamp = Time(nanoseconds=int(stamp_s * 1e9)).to_msg()
-        header.frame_id = "map"
-        xyz = [(float(x), float(y), 0.0) for x, y in marks]
-        self._dynamic_pub.publish(point_cloud2.create_cloud_xyz32(header, xyz))
+        xyz = np.column_stack([marks, np.zeros(len(marks))])  # the marks lie on the floor
+        self._dynamic_pub.publish(cloud_from_points(xyz, None, stamp_from_seconds(stamp_s), "map"))
 
     def _send_map_odom(self) -> None:
         """Broadcast the current map -> odom, 20 times a second and after every match, dated
@@ -593,31 +549,22 @@ class Relocalizer(Node):
         behind a stale future-dated one.
         """
         x, y, yaw = self._last_map_odom
-        msg = TransformStamped()
         future = self.get_clock().now() + Duration(seconds=self._tf_future_s)
-        msg.header.stamp = future.to_msg()
-        msg.header.frame_id = "map"
-        msg.child_frame_id = "odom"
-        msg.transform.translation.x = x
-        msg.transform.translation.y = y
-        msg.transform.rotation.z = math.sin(yaw / 2.0)
-        msg.transform.rotation.w = math.cos(yaw / 2.0)
-        self._tf_pub.sendTransform(msg)
+        self._tf_pub.sendTransform(
+            transform_from_rpy("map", "odom", (x, y, 0.0), (0.0, 0.0, yaw), future.to_msg())
+        )
 
     def _publish_tracker_pose(self, pose: Pose2D, confidence: float, stamp: Any) -> None:
         """The tracked pose for the operator's view and the trail; sigma grows as the fit drops."""
-        msg = PoseWithCovarianceStamped()
-        msg.header.stamp = stamp
-        msg.header.frame_id = "map"
-        msg.pose.pose.position.x = pose.x
-        msg.pose.pose.position.y = pose.y
-        msg.pose.pose.orientation.z = math.sin(pose.theta / 2.0)
-        msg.pose.pose.orientation.w = math.cos(pose.theta / 2.0)
-        sigma = 0.05 + 0.3 * (1.0 - confidence)
-        cov = [0.0] * 36
-        cov[0] = cov[7] = sigma**2
-        cov[35] = (math.radians(3.0) + math.radians(20.0) * (1.0 - confidence)) ** 2
-        msg.pose.covariance = cov
+        msg = pose_with_covariance(
+            pose.x,
+            pose.y,
+            pose.theta,
+            0.05 + 0.3 * (1.0 - confidence),
+            math.radians(3.0) + math.radians(20.0) * (1.0 - confidence),
+            stamp,
+            "map",
+        )
         self._tracker_pub.publish(msg)
         self._append_trail(msg)
 
@@ -633,7 +580,8 @@ class Relocalizer(Node):
             f"tracker: {gate.summary()}, rested {self._rested}, {pacer.summary()}, deskew "
             f"failed {self._deskew_failed}; {loc.settings()}; {track.summary()}; "
             f"watch fit {self.fit:.2f}, dynamic marks {self._dynamic_count}, "
-            f"scan age at match {self._last_scan_age_s * 1000:.0f} ms"
+            f"scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
+            f"switches: {self._switches.state()}"
         )
         if gate.expired:
             self.get_logger().warning(
@@ -644,16 +592,12 @@ class Relocalizer(Node):
 
     def _lookup_laser(self, frame: str) -> bool:
         """The static base_link <- laser transform, as x, y, yaw and whether roll is pi."""
-        try:
-            t = self._tf.lookup_transform("base_link", frame, rclpy.time.Time())
-        except Exception:  # not yet available: try on the next scan
+        t = self._tf.transform("base_link", frame)
+        if t is None:  # not yet available: try on the next scan
             return False
-        q = t.transform.rotation
-        roll = math.atan2(2 * (q.w * q.x + q.y * q.z), 1 - 2 * (q.x * q.x + q.y * q.y))
-        mirrored = abs(abs(roll) - math.pi) < 0.2
-        self._laser_tf = (t.transform.translation.x, t.transform.translation.y, yaw_of(q), mirrored)
+        x, _y, yaw, mirrored = self._laser_tf = planar_mount(t)
         self.get_logger().info(
-            f"laser mount: x {self._laser_tf[0]:.3f} yaw {math.degrees(self._laser_tf[2]):.1f} deg"
+            f"laser mount: x {x:.3f} yaw {math.degrees(yaw):.1f} deg"
             f"{' upside down' if mirrored else ''}"
         )
         self.create_subscription(
@@ -693,21 +637,12 @@ class Relocalizer(Node):
 
     def _moving(self) -> bool:
         """Did base_link move in the odom frame since the previous check (1 cm or 1 degree)?"""
-        now = self._history.newest
-        if now is None:
-            return False
-        before, self._last_odom = self._last_odom, now
-        if before is None:
-            return False
-        turned = abs(
-            math.atan2(math.sin(now.theta - before.theta), math.cos(now.theta - before.theta))
-        )
-        return math.hypot(now.x - before.x, now.y - before.y) > 0.01 or turned > math.radians(1.0)
+        return self._motion_edge.moved(self._history.newest)
 
     def _on_tf_static(self, msg: TFMessage) -> None:
         """The static frames (latched): the laser mount is read from them once."""
         for transform in msg.transforms:
-            self._tf.set_transform_static(transform, "static")
+            self._tf.buffer.set_transform_static(transform, "static")
 
     def _tracked_pose(self) -> Pose2D | None:
         """map -> base_link now: this node's map -> odom over the newest odometry pose."""
@@ -891,18 +826,17 @@ class Relocalizer(Node):
         self._motion.reset()
         with self._episode:  # the worker may be inside _watch.answer() right now
             self._watch.seeded(time.monotonic())
-        msg = PoseWithCovarianceStamped()
-        msg.header.frame_id = "map"
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.pose.pose.position.x = pose.x
-        msg.pose.pose.position.y = pose.y
-        msg.pose.pose.orientation.z = math.sin(pose.theta / 2.0)
-        msg.pose.pose.orientation.w = math.cos(pose.theta / 2.0)
-        cov = [0.0] * 36
-        cov[0] = cov[7] = 0.05**2
-        cov[35] = math.radians(5.0) ** 2
-        msg.pose.covariance = cov
-        self._pose_pub.publish(msg)
+        self._pose_pub.publish(
+            pose_with_covariance(
+                pose.x,
+                pose.y,
+                pose.theta,
+                0.05,
+                math.radians(5.0),
+                self.get_clock().now().to_msg(),
+                "map",
+            )
+        )
 
     # -- services ---------------------------------------------------------
 
@@ -943,16 +877,7 @@ class Relocalizer(Node):
 
 def main(args: list[str] | None = None) -> None:
     """Entry point."""
-    rclpy.init(args=args)
-    node = Relocalizer()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    spin_main(Relocalizer, args)
 
 
 if __name__ == "__main__":

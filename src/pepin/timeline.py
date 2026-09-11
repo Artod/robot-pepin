@@ -281,6 +281,32 @@ class MotionFilter:
         self._last = None
 
 
+class MotionEdge:
+    """Did the cart move between two looks at the odometry?
+
+    An edge detector, not a speedometer: each call compares the pose it is given with the one
+    of the previous call and keeps it. Calling it twice in the same tick compares a reading
+    with itself and answers "standing still" — which once killed the tracker's "never re-seed
+    a moving robot" gate (2026-09-09), so the caller samples it exactly once per tick.
+    """
+
+    def __init__(self, min_m: float = 0.01, min_deg: float = 1.0) -> None:
+        self._min_m = min_m
+        self._min_rad = math.radians(min_deg)
+        self._last: Pose2D | None = None
+
+    def moved(self, now: Pose2D | None) -> bool:
+        """True when ``now`` is more than ``min_m`` or ``min_deg`` from the previous call's
+        pose. False without odometry, and false on the first call: there is nothing to compare."""
+        if now is None:
+            return False
+        before, self._last = self._last, now
+        if before is None:
+            return False
+        turned = abs(wrap_angle(now.theta - before.theta)) > self._min_rad
+        return math.hypot(now.x - before.x, now.y - before.y) > self._min_m or turned
+
+
 @dataclass
 class PacerStats:
     """What the pacer did since the last report: matches timed, scans skipped and why."""

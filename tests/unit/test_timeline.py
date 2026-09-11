@@ -12,6 +12,7 @@ from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
 from pepin.timeline import (
     MatchPacer,
+    MotionEdge,
     MotionFilter,
     OdomHistory,
     ScanGate,
@@ -204,6 +205,20 @@ def test_the_matcher_rests_while_the_cart_stands_and_wakes_on_any_step() -> None
     assert f.due(Pose2D(0.006, 0.0, math.radians(0.5)), 1.45)  # a second passed
     f.reset()
     assert f.due(Pose2D(0.006, 0.0, math.radians(0.5)), 1.46)
+
+
+def test_the_motion_edge_compares_with_the_previous_look_and_never_with_itself() -> None:
+    """The tracker's "is the cart moving" gate: the first look and a look with no odometry are
+    "standing still", a step or a degree since the previous look is motion, and asking twice in
+    a row about the same pose says still — which is why the tracker samples it exactly once."""
+    edge = MotionEdge()
+    assert not edge.moved(None) and not edge.moved(Pose2D(1.0, 1.0, 0.0)), "nothing to compare"
+    assert not edge.moved(Pose2D(1.005, 1.0, 0.0)), "5 mm is not a step"
+    assert edge.moved(Pose2D(1.05, 1.0, 0.0))
+    assert not edge.moved(Pose2D(1.05, 1.0, 0.0)), "the same reading twice: standing still"
+    assert edge.moved(Pose2D(1.05, 1.0, math.radians(2.0)))
+    assert not edge.moved(Pose2D(1.05, 1.0, math.radians(2.5)))  # half a degree
+    assert MotionEdge(min_m=0.5).moved(None) is False
 
 
 # -- the pacer ----------------------------------------------------------------
