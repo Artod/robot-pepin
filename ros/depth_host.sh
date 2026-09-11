@@ -24,13 +24,16 @@ HUB="${HF_HOME:-$HOME/.cache/huggingface}/hub"
 
 health() { curl -s -m 3 "$URL/health"; }
 running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
-summary() {  # the /health JSON as one line
+# The /health JSON as one line. %-formatting, not f-strings: the script is single-quoted for the
+# shell, so the quotes an f-string needs around its dict keys cannot be escaped inside it.
+summary() {
     python3 -c '
 import json, sys
 h = json.load(sys.stdin)
-ms = " ".join(f"{k} {v[\"median\"]:.0f}/{v[\"p95\"]:.0f}" for k, v in h["ms"].items())
-print(f"{h[\"model\"].rsplit(\"/\", 1)[-1]} on {h[\"device\"]}: {h[\"requests\"]} frames served,"
-      f" {h[\"errors\"]} refused, up {h[\"uptime_s\"]:.0f} s, ms median/p95: {ms}")'
+ms = " ".join("%s %.0f/%.0f" % (k, v["median"], v["p95"]) for k, v in h["ms"].items())
+print("%s on %s: %d frames served, %d refused, up %.0f s, ms median/p95: %s"
+      % (h["model"].rsplit("/", 1)[-1], h["device"], h["requests"], h["errors"],
+         h["uptime_s"], ms))'
 }
 cached() {  # is MODEL ($1) in the hub cache? (short names map to the metric-indoor ids)
     case "$1" in
@@ -65,7 +68,7 @@ case "${1:-status}" in
         nohup uv run --group depth python -m pepin.depth_service --model "$MODEL" --port "$PORT" \
             --log-dir "$LOGDIR" >"$LOGDIR/depth_host.out" 2>&1 &
         echo $! > "$PIDFILE"
-        for _ in $(seq 1 180); do  # Small loads in ~10 s, Large in ~30 s, a download longer
+        for _ in $(seq 1 180); do  # Small loads in 2 s from cache, Large in 3 s, a download longer
             if health >/dev/null 2>&1; then
                 echo "depth host up on $URL: $(health | summary)"
                 exit 0

@@ -18,8 +18,12 @@ so often — a live parameter picks remote, local or auto.
 
 HTTP/1.1 with keep-alive was chosen over a socket protocol because both ends are the standard
 library, one TCP connection is reused for every frame, ``curl --data-binary @frame.jpg`` debugs
-it, and the framing overhead is nothing against the payload (0.3-2 MB); what the transport
-actually costs on this laptop is measured by scratch/depth_backend_bench.py.
+it, and the framing overhead is nothing against the payload. Measured (2026-09-11,
+scratch/depth_backend_bench.py, 640x360 frames, M5 Pro): the Small model answers in 20.6 ms on
+MPS against 172 ms on the CPU inside the container, and the whole round trip from inside
+pepin-vslam is 26.0 ms of which 6.1 ms is transport — so the hop costs a quarter of what the
+GPU saves. Send JPEG, not raw: q90 costs 1.1 ms to encode and saves 1.8 ms of wire, 37.7 KB
+through Docker's NAT instead of 675 KB.
 """
 
 from __future__ import annotations
@@ -156,7 +160,8 @@ def unpack_depth(headers: Mapping[str, str], body: bytes) -> Depth:
 def resize_depth(depth: Depth, size: tuple[int, int]) -> Depth:
     """A depth image at another (height, width), bilinear with half-pixel centres — what
     torch's ``interpolate(mode="bilinear", align_corners=False)`` computes, so a native-size
-    answer resized here matches the server's (scratch/depth_backend_bench.py compares them)."""
+    answer resized here matches the server's (2e-06 m worst pixel over 30 frames,
+    scratch/depth_backend_bench.py)."""
     if tuple(depth.shape) == tuple(size):
         return depth
     import cv2
