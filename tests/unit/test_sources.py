@@ -13,7 +13,7 @@ from pepin.sources import (
     SourceHealth,
     SourceRegistry,
 )
-from pepin.timeline import OdomHistory, TimedScan
+from pepin.timeline import OdomHistory, ScanGate, TimedScan
 
 
 def test_the_lidar_alone_is_on_by_default_and_the_flag_picks_the_rest() -> None:
@@ -135,12 +135,20 @@ def test_nothing_fresh_holds_a_stale_rider_is_dropped_and_an_uncovered_one_waits
     assert feed.status(0.0) == (
         "holding map->odom: no fresh source; lidar absent, depth absent, contact off"
     )
-    feed.offer(DEPTH, scan(0.0))
+    feed.offer(DEPTH, scan(0.5))
+    assert feed.anchor(5.0) == DEPTH, "nothing fresh but a frame waiting: its gate decides"
+    taken = feed.take(history, 5.0)
+    assert taken is not None and taken[0] == DEPTH, "the odometry covers it: released, late"
     assert feed.anchor(5.0) is None and feed.picture(5.0) is not None, "the last picture heard"
-    assert feed.status(5.0).startswith("holding map->odom: no fresh source; lidar absent")
+    assert feed.status(5.0).startswith(
+        "no fresh source, last release depth 4.5 s ago; lidar absent, depth stale 4.5 s"
+    )
     feed.offer(LIDAR, scan(3.0))  # the odometry never reaches it (the history is empty here)
+    assert feed.anchor(3.6) == LIDAR, "called stale at 0.6 s, but its revolution waits"
     assert feed.take(OdomHistory(), 3.4) is None and feed.take(OdomHistory(), 3.6) is None
-    assert feed.report().gates[LIDAR].expired == 1, "a late odometry is reported anchor or not"
+    stats = feed.report()
+    assert stats.gates[LIDAR].expired == 1, "uncovered past the patience: the odometry ran late"
+    assert stats.gates[DEPTH].released == 1 and stats.expired == 1
     feed.offer(DEPTH, scan(3.5))  # older than the camera's stale_after_s beside the anchor
     feed.offer(LIDAR, scan(5.0))
     assert feed.take(history, 5.02) is not None
@@ -167,5 +175,36 @@ def test_the_sources_flag_moves_the_anchor_without_a_restart() -> None:
     feed.registry.enable([DEPTH, CONTACT])
     feed.offer(CONTACT, scan(1.01))
     assert feed.anchor(1.02) == DEPTH, "two fans alike: the roster's first while it is fresh"
+    assert feed.anchor(2.005) == DEPTH, "a moment too old, but its frame still waits at the gate"
+    assert feed.take(OdomHistory(), 2.005) is None, "uncovered past the patience: expired"
     assert feed.anchor(2.005) == CONTACT, "the depth fan a moment too old: the other one"
     assert feed.picture(2.005) is not None and feed.picture(2.005).stamp == 1.01
+
+
+def test_a_revolution_delivered_late_is_matched_late_as_the_gate_alone_always_did() -> None:
+    """The executor lag of 2026-09-06 (a scan half a second old by the time its callback
+    ran): at take-time the lidar is called stale, but the odometry covers its revolution, and
+    coverage — never freshness — decides a release. With the lidar alone the feed is the bare
+    gate: the same offers and takes through both give the same scans and the same counters,
+    and ``expired`` still means one thing, an uncovered scan past the patience."""
+    history = driving(4.0)
+    feed, gate = SourceFeed(SourceRegistry()), ScanGate(max_wait_s=0.5)
+    for k in range(20):
+        stamp = 1.0 + 0.1 * k
+        revolution = scan(stamp, scan_id=k)
+        feed.offer(LIDAR, revolution)
+        gate.offer(revolution)
+        now = stamp + 0.6  # the callback runs 0.6 s after the stamp
+        assert feed.anchor(now) == LIDAR
+        assert feed.status(now).startswith("anchor lidar; lidar stale 0.6 s")
+        taken, released = feed.take(history, now), gate.take(history, now)
+        assert taken is not None and taken[1] is released, f"scan {k}: matched late, not dropped"
+    assert feed.status(3.5).startswith("no fresh source, last release lidar 0.6 s ago; lidar stale")
+    assert feed.report().summary() == gate.report().summary()
+    late = scan(4.0, scan_id=99)
+    feed.offer(LIDAR, late)
+    gate.offer(late)
+    assert feed.take(OdomHistory(), 4.6) is None and gate.take(OdomHistory(), 4.6) is None
+    feed_stats, gate_stats = feed.report(), gate.report()
+    assert feed_stats.expired == gate_stats.expired == 1
+    assert feed_stats.summary() == gate_stats.summary()

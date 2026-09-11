@@ -202,6 +202,37 @@ def test_a_dead_lidar_hands_the_node_to_the_camera_and_back_on_its_own_trigger(
     assert "flags: rest_lock=on" in line and "sources=lidar,depth fusion=on" in line
 
 
+def test_a_late_executor_matches_the_lidar_late_instead_of_calling_it_stale() -> None:
+    """The regime of 2026-09-06 (every scan half a second old by the time its callback ran),
+    with the default flags: the node is the old gate. Every revolution the odometry covers is
+    matched, 600 ms late, none expires, no "odometry ran late", and the status names the
+    lidar as the anchor while its health reads stale."""
+    with ros_stubs.parameters(min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
+    truth, odom = drive(12)
+    loc = node._localizer
+    assert loc is not None
+    on_scan, on_odom = node.subs["/scan"][1], node.subs["/odometry/filtered"][1]
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.6  # the callbacks run 0.6 s after the stamp
+        on_odom(odom_msg(o, ts))  # the odometry queue drained before the scan's turn
+        on_scan(lidar_msg(t, ts))
+        if i == 0:
+            assert until(lambda: node._tracker_initialised)
+    assert len(node.pubs["/tracker_pose"].sent) == 11, "every revolution after the first"
+    metres, degrees = error(loc, truth[-1])
+    assert metres < 0.05 and degrees < 2.0
+    node._report_tracking()
+    line = node.logger.texts("info")[-1]
+    assert "released 12, replaced 0, expired 0" in line and "scan age at match 600 ms" in line
+    assert "sources: no fresh source, last release lidar 0.6 s ago; lidar stale 0.6 s" in line
+    assert "watch fit" in line
+    assert not any("odometry ran late" in text for text in node.logger.texts("warning"))
+
+
 def test_with_nothing_fresh_the_node_holds_and_says_so(node: Relocalizer) -> None:
     node.clock.seconds = 50.0
     node._report_tracking()

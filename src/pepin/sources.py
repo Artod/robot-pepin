@@ -228,20 +228,24 @@ class SourceFeed:
     the tracker's next update.
 
     One path for lidar-only, camera-only and fused: the anchor (:meth:`anchor`) is the widest
-    enabled source while it is fresh — the lidar — and when the registry says it is stale or
-    absent, the fresh enabled source heard from last, so a dead lidar hands the tracker to the
-    camera without a restart and a returning lidar takes it back. :meth:`take` releases the
-    anchor's scan once the history covers its revolution (:class:`~pepin.timeline.ScanGate`);
-    :meth:`gather` then carries the other sources' waiting scans to that moment through the
-    odometry — the recipe of scratch/camera_only_localization.py — so every source is matched
-    around one prediction. With no enabled source fresh there is nothing to release and the
-    tracker holds; :meth:`status` says so.
+    enabled source — the lidar — while its scan waits at the gate or it is fresh, and when the
+    registry says it is stale with nothing waiting, the fresh enabled source heard from last,
+    so a dead lidar hands the tracker to the camera without a restart and a returning lidar
+    takes it back. :meth:`take` releases the anchor's scan once the history covers its
+    revolution (:class:`~pepin.timeline.ScanGate`): coverage decides a release, never
+    freshness, so a revolution the executor delivers late is matched late — as the gate alone
+    always did — instead of being thrown away while the lidar is called stale. :meth:`gather`
+    then carries the other sources' waiting scans to that moment through the odometry — the
+    recipe of scratch/camera_only_localization.py — so every source is matched around one
+    prediction. With no enabled source fresh and nothing waiting there is nothing to release
+    and the tracker holds; :meth:`status` says so.
     """
 
     def __init__(self, registry: SourceRegistry | None = None, max_wait_s: float = 0.5) -> None:
         self.registry = registry if registry is not None else SourceRegistry()
         self._gates = {name: ScanGate(max_wait_s) for name in self.registry.names}
         self._newest: dict[str, TimedScan] = {}
+        self._last_release: tuple[str, float] | None = None  # who drove last, and when
         self.stats = FeedStats()
 
     def offer(self, name: str, scan: TimedScan) -> None:
@@ -253,32 +257,39 @@ class SourceFeed:
 
     def anchor(self, now: float) -> str | None:
         """The source whose scans drive the updates at ``now``: the widest enabled fan while
-        it is fresh, else the fresh enabled source heard from last; ``None`` when no enabled
-        source is fresh."""
-        alive = self.registry.alive(now)
-        if not alive:
-            return None
-        widest = max(
+        a scan of its waits at the gate or it is fresh (its gate decides the release, by
+        coverage); when it is stale with nothing waiting, the fresh enabled source heard from
+        last; with nothing fresh, the enabled source that still has a scan waiting, widest
+        first; ``None`` when nothing is enabled or nothing waits."""
+        by_width = sorted(
             (self.registry.source(name) for name in self.registry.enabled),
-            key=lambda source: source.fov_deg,
+            key=lambda source: -source.fov_deg,  # stable: the roster's order breaks a tie
         )
-        if widest in alive:
+        if not by_width:
+            return None
+        widest = by_width[0]
+        alive = self.registry.alive(now)
+        if widest in alive or self._gates[widest.name].pending is not None:
             return widest.name
-        return min(alive, key=lambda source: self.registry.health(source.name).age_s(now)).name
+        if alive:
+            return min(alive, key=lambda s: self.registry.health(s.name).age_s(now)).name
+        waiting = [s.name for s in by_width if self._gates[s.name].pending is not None]
+        return waiting[0] if waiting else None
 
     def take(self, history: OdomHistory, now: float) -> tuple[str, TimedScan] | None:
-        """The anchor's waiting scan, with the anchor's name, once ``history`` covers it;
-        ``None`` while nothing is to be released. A scan that waited longer than the gate's
-        patience is dropped and counted as expired by its gate — with no anchor alive, at
-        every enabled gate, so a late odometry is still reported. The other sources' scans
-        keep waiting for :meth:`gather`."""
+        """The anchor's waiting scan, with the anchor's name, once ``history`` covers it —
+        however old it is by then — else ``None``. A scan the history has not covered within
+        the gate's patience is dropped and counted as expired by its gate: the odometry ran
+        late, which is the only thing ``expired`` ever means. The other sources' scans keep
+        waiting for :meth:`gather`."""
         anchor = self.anchor(now)
         if anchor is None:
-            for name in self.registry.enabled:
-                self._gates[name].expire(now)
             return None
         scan = self._gates[anchor].take(history, now)
-        return None if scan is None else (anchor, scan)
+        if scan is None:
+            return None
+        self._last_release = (anchor, scan.stamp)
+        return anchor, scan
 
     def gather(self, anchor: str, stamp: float, history: OdomHistory) -> list[ScanObservation]:
         """The other enabled sources' waiting scans as observations at the anchor's ``stamp``:
@@ -308,7 +319,7 @@ class SourceFeed:
     def picture(self, now: float) -> TimedScan | None:
         """The newest scan, as measured, of the source that drives the tracker at ``now`` —
         what a watch judges the fit on and a whole-map search runs on — or, with nothing
-        fresh, the newest scan heard from any enabled source (a standing cart's last picture
+        driving, the newest scan heard from any enabled source (a standing cart's last picture
         is still true); ``None`` before the first."""
         anchor = self.anchor(now)
         if anchor is not None:
@@ -317,10 +328,18 @@ class SourceFeed:
         return max(heard, key=lambda scan: scan.stamp, default=None)
 
     def status(self, now: float) -> str:
-        """One phrase for the report line: who drives (``anchor lidar``, or ``holding
-        map->odom: no fresh source``) and every source's health."""
+        """One phrase for the report line: who drives — ``anchor lidar``; with nothing fresh
+        and nothing waiting, ``no fresh source, last release lidar 0.6 s ago`` (a late
+        executor's lidar is matched late, not held), or ``holding map->odom: no fresh
+        source`` before the first release — and every source's health."""
         anchor = self.anchor(now)
-        who = "holding map->odom: no fresh source" if anchor is None else f"anchor {anchor}"
+        if anchor is not None:
+            who = f"anchor {anchor}"
+        elif self._last_release is None:
+            who = "holding map->odom: no fresh source"
+        else:
+            name, stamp = self._last_release
+            who = f"no fresh source, last release {name} {now - stamp:.1f} s ago"
         return f"{who}; {self.registry.report(now)}"
 
     def report(self) -> FeedStats:
