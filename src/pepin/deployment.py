@@ -244,14 +244,13 @@ VISION_LAPTOP_PUBLISHES = (
     "depth_scan",
     "contact_scan",
 )
-# The board drives exactly as in vision mode, minus the three topics the saved map and its
-# tracker produced: /map is the laptop's now, and there is no /tracker_pose or /localization_fit
-# because nothing matches a scan against a map that does not exist yet.
-SLAM_BOARD_PUBLISHES = tuple(
-    name
-    for name in VISION_BOARD_PUBLISHES
-    if name not in ("map", "tracker_pose", "localization_fit")
-)
+# The saved map's own topics, the ones SLAM mode has no publisher for: /map is the laptop's here,
+# and the rest are the tracker's, which does not run because nothing matches a scan against a map
+# that does not exist yet. Named, not spelled out below, so a topic added to the vision list
+# reaches SLAM mode by itself unless it is one of these.
+_NOT_IN_SLAM = ("map", "tracker_pose", "localization_fit", "localization/sources")
+# The board drives exactly as in vision mode, minus those.
+SLAM_BOARD_PUBLISHES = tuple(n for n in VISION_BOARD_PUBLISHES if n not in _NOT_IN_SLAM)
 # RTAB-Map's grid is remapped onto /map in this mode (there is no second map to fight), so
 # /rtabmap/map is not published at all; the graph and its correction still are.
 SLAM_LAPTOP_PUBLISHES = (

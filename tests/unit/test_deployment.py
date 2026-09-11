@@ -328,7 +328,7 @@ def test_the_bridge_s_slam_mode_turns_the_map_around_and_keeps_tf_one_way() -> N
     for name in ("/tf", "/tf_static", "/scan", "/odom", "/odometry/filtered", "/imu/data_raw"):
         assert pub_b.search(name) and sub_l.search(name), name
         assert not pub_l.search(name), f"{name} would loop"
-    for gone in ("/tracker_pose", "/localization_fit"):
+    for gone in ("/tracker_pose", "/localization_fit", "/localization/sources"):
         assert not pub_b.search(gone) and not pub_l.search(gone), gone
     assert not set(SLAM_BOARD_PUBLISHES) & set(SLAM_LAPTOP_PUBLISHES)
     # The board still drives: the plan and the costmaps come from it, as in vision mode.
