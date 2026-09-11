@@ -11,6 +11,7 @@ from pepin.mapping import grid_from_pgm
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
 from pepin.timeline import (
+    MatchPacer,
     MotionFilter,
     OdomHistory,
     ScanGate,
@@ -205,6 +206,30 @@ def test_the_matcher_rests_while_the_cart_stands_and_wakes_on_any_step() -> None
     assert f.due(Pose2D(0.006, 0.0, math.radians(0.5)), 1.46)
 
 
+# -- the pacer ----------------------------------------------------------------
+
+
+def test_the_pacer_skips_a_burst_a_long_match_and_a_search_and_counts_each() -> None:
+    """Every released scan the pacer turns away is counted by its reason, so the gate's
+    released minus rested minus skipped is exactly what the tracker matched."""
+    p = MatchPacer(min_gap_s=0.05, long_match_s=0.12)
+    assert not p.skip(1.0, searching=False)
+    p.matched(1.0, took_s=0.03)
+    assert p.skip(1.02, searching=False), "20 ms after a match: the same picture again"
+    assert not p.skip(1.06, searching=False)
+    p.matched(1.06, took_s=0.2)  # a long match: the board gets 0.2 s back
+    assert p.skip(1.2, searching=False)
+    assert p.skip(1.3, searching=True)
+    assert not p.skip(1.3, searching=False)
+    stats = p.report()
+    assert (stats.matched, stats.skipped_gap, stats.skipped_busy, stats.skipped_searching) == (
+        2, 1, 1, 1,
+    )  # fmt: skip
+    assert stats.skipped == 3 and stats.worst_s == 0.2 and stats.took_s == pytest.approx(0.23)
+    assert "skipped 3 (gap 1, busy 1, searching 1)" in stats.summary()
+    assert p.report().matched == 0 and "-" in p.report().summary()
+
+
 # -- rest ---------------------------------------------------------------------
 
 
@@ -263,3 +288,28 @@ def test_the_newest_beam_is_at_index_zero_on_real_pivots(flat) -> None:  # type:
             best = matcher.match(guess, fixed, window).pose
             sink.append(matcher.inlier_fraction(best, fixed))
     assert np.mean(forward) > np.mean(backward) + 0.03, (forward, backward)
+
+
+# -- the laser's mount ---------------------------------------------------------
+
+
+def test_an_upside_down_laser_is_mirrored_before_the_yaw_is_applied() -> None:
+    """The LD19 hangs upside down (roll pi in config/lidar.json), so the driver's +30 degree
+    beam is the cart's -30, and the mount's yaw (-87.5 degrees) turns it after that: -117.5
+    degrees in base_link. Yaw first, or no mirror, would put it at -57.5 — the wall on the
+    wrong side of the cart."""
+    from pepin.lidar import MOUNT
+
+    x, y, _z, roll, _pitch, yaw = MOUNT.transform()
+    assert roll == math.pi and math.degrees(yaw) == pytest.approx(-87.5)
+    ranges = [float("nan"), 1.0]  # one beam, the driver's second bin: +30 degrees
+
+    def bearing(mirrored: bool) -> float:
+        scan = timed_scan_from_ros(
+            0.0, ranges, 0.0, math.radians(30.0), 12.0, 0.1, (x, y, yaw, mirrored), 1
+        )
+        px, py = scan.points[0] - (x, y)
+        return math.degrees(math.atan2(py, px))
+
+    assert bearing(mirrored=True) == pytest.approx(-117.5)
+    assert bearing(mirrored=False) == pytest.approx(-57.5)

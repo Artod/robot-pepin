@@ -201,3 +201,57 @@ def test_adopting_a_pose_clears_what_the_old_belief_implied() -> None:
     loc.adopt(Pose2D(1.0, 2.0, 0.5), 0.8)
     assert loc.pose == Pose2D(1.0, 2.0, 0.5) and loc.confidence == 0.8
     assert not loc.lost and loc._recovery_window().xy_m == loc._recovery.xy_m
+
+
+def test_a_stamp_that_does_not_advance_holds_the_pose_and_no_stamp_uses_the_per_match_law() -> None:
+    """At rest the lock's gain is a time constant: a scan of the same moment as the previous
+    one (dt 0) moves the pose by nothing at all, a match two seconds later takes
+    1 - exp(-2 / 6) of the residual, and a caller that times nothing (dt None) gets the
+    per-match rest_gain, whatever it was given before."""
+    loc = Localizer(room_map(), Pose2D(), rest_tau_s=6.0, rest_gain=0.05)
+    loc.update(Pose2D(), raycast_room(Pose2D()))
+    nudged = raycast_room(Pose2D(0.03, 0.0, 0.0))  # the scan says 3 cm ahead; the wheels, nothing
+    before = loc.pose
+    held = loc.update(Pose2D(), nudged, at_rest=True, dt_s=0.0)
+    assert (held.x, held.y, held.theta) == pytest.approx((before.x, before.y, before.theta))
+    same_moment = loc.report()
+    assert same_moment.rest_locked == 1 and same_moment.rest_gain.hi == 0.0
+    loc.update(Pose2D(), nudged, at_rest=True, dt_s=2.0)
+    timed = loc.report()
+    assert timed.rest_gain.hi == pytest.approx(1.0 - math.exp(-2.0 / 6.0))
+    assert timed.rest_dt_s.hi == 2.0
+    loc.update(Pose2D(), nudged, at_rest=True, dt_s=None)
+    untimed = loc.report()
+    assert untimed.rest_gain.hi == pytest.approx(0.05) and untimed.rest_dt_s.n == 0
+    assert loc.pose.x > before.x  # the two timed matches did move it toward the scan
+
+
+def test_two_agreeing_rest_residuals_beyond_the_carry_thresholds_are_taken_whole() -> None:
+    """A standing cart lifted 10 cm: the first rest match beyond carry_m is blended like noise
+    and remembered as a hint; the next one agreeing with it, the whole scan fitting the map
+    better there (carry_gain past CARRY_MIN_GAIN), is a carry, taken whole. A residual inside
+    the thresholds is never a carry however often it repeats; two beyond them that disagree (a
+    wandering match) are not one; and an agreeing pair that gains the map nothing (a person
+    by the lidar, a chair pushed against the cart) is not one either."""
+    from pepin.localization import CARRY_MIN_GAIN
+
+    grid = room_map()
+    loc = Localizer(grid, Pose2D(), carry_m=0.06, carry_deg=4.0, rest_tau_s=6.0)
+    here, lifted = Pose2D(), Pose2D(0.10, 0.0, 0.0)
+    first, gain = loc._blend(here, lifted, at_rest=True, dt_s=1.0, carry_gain=0.2)
+    assert gain == pytest.approx(1.0 - math.exp(-1.0 / 6.0)) and first.x < 0.02
+    again = Pose2D(0.11, 0.01, 0.0)
+    carried, gain = loc._blend(here, again, at_rest=True, dt_s=1.0, carry_gain=0.2)
+    assert gain == 1.0 and (carried.x, carried.y) == pytest.approx((0.11, 0.01))
+    assert loc.stats.carries == 1
+    loc = Localizer(grid, Pose2D(), carry_m=0.06, carry_deg=4.0)
+    for _ in range(3):
+        _, gain = loc._blend(here, Pose2D(0.03, 0.0, 0.0), at_rest=True, dt_s=1.0, carry_gain=0.2)
+        assert gain < 1.0
+    loc._blend(here, lifted, at_rest=True, dt_s=1.0, carry_gain=0.2)
+    _, gain = loc._blend(here, Pose2D(-0.10, 0.0, 0.0), at_rest=True, dt_s=1.0, carry_gain=0.2)
+    assert gain < 1.0 and loc.stats.carries == 0
+    loc = Localizer(grid, Pose2D(), carry_m=0.06, carry_deg=4.0)
+    loc._blend(here, lifted, at_rest=True, dt_s=1.0, carry_gain=CARRY_MIN_GAIN / 2)
+    _, gain = loc._blend(here, again, at_rest=True, dt_s=1.0, carry_gain=CARRY_MIN_GAIN / 2)
+    assert gain < 1.0 and loc.stats.carries == 0, "agreeing twice is not enough: the map must fit"

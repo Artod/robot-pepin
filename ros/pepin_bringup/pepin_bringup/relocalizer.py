@@ -43,14 +43,14 @@ from std_srvs.srv import Trigger
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformBroadcaster
 
-from pepin.deployment import switch_updates
-from pepin.dynamic import StaticMask, berth_for, dynamic_marks, occlusion_split, to_map, voting_mask
+from pepin.dynamic import StaticMask, berth_for, dynamic_marks, occlusion_split, to_map
 from pepin.localization import Localizer
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D, wrap_angle
-from pepin.scanmatch import CorrelativeMatcher, SearchWindow, apply_motion, relative_motion
+from pepin.scanmatch import CorrelativeMatcher, SearchWindow, relative_motion
 from pepin.slip import scan_changed, slipping
 from pepin.timeline import (
+    MatchPacer,
     MotionFilter,
     OdomHistory,
     ScanGate,
@@ -80,7 +80,15 @@ def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
     return pose.x - (c * odom.x - s * odom.y), pose.y - (s * odom.x + c * odom.y), yaw
 
 
-LIVE_SWITCHES = ("rest_lock", "explained_vote")  # applied without a restart
+# The tracker's parameters that apply without a restart, with the type each is read as; they
+# are attributes of the Localizer and the callback writes them there. Every other parameter is
+# refused live (the answer names it), because a "success" that changed nothing is a lie.
+LIVE_PARAMS: dict[str, Any] = {
+    "rest_lock": bool,
+    "explained_vote": bool,
+    "rest_tau_s": float,
+    "rest_gain": float,
+}
 
 
 class _RosLogHandler(logging.Handler):
@@ -150,29 +158,34 @@ class Relocalizer(Node):
         #   rest_lock       a standing cart averages the match in slowly instead of re-deciding
         #   explained_vote  returns the static map cannot explain do not score the match
         self._subcell_refine = bool(self.declare_parameter("subcell_refine", True).value)
-        self._rest_lock = bool(self.declare_parameter("rest_lock", True).value)
-        self._rest_gain = float(self.declare_parameter("rest_gain", 0.05).value)
         # The rest lock averages in seconds, not in matches: a standing cart is matched about
         # once a second (MotionFilter below), a replay feeds every scan, and both must settle
         # at the same speed. rest_gain is only the fallback for a caller that times nothing.
-        self._rest_tau_s = float(self.declare_parameter("rest_tau_s", 6.0).value)
-        self._explained_vote = bool(self.declare_parameter("explained_vote", True).value)
-        # rest_lock and explained_vote apply live (ros2 param set /relocalizer rest_lock false):
-        # a demo compares them without a stack restart; subcell_refine is the matcher's
-        # construction and takes effect at the next start.
-        self.add_on_set_parameters_callback(self._on_switch)
+        # These four apply live (ros2 param set /relocalizer rest_lock false): a demo compares
+        # them without a stack restart; subcell_refine is the matcher's construction and takes
+        # effect at the next start. _live holds their current values for the next map's tracker.
+        self._live: dict[str, Any] = {
+            name: kind(self.declare_parameter(name, default).value)
+            for name, kind, default in (
+                ("rest_lock", bool, True),
+                ("explained_vote", bool, True),
+                ("rest_tau_s", float, 6.0),
+                ("rest_gain", float, 0.05),
+            )
+        }
         self._odom_wz = 0.0  # newest fused yaw rate (gyro-driven): the second witness of rest
-        self._rest_locked = 0  # scans matched under the rest lock (per report)
-        self._silenced = [0, 0]  # scans with a vote mask, returns silenced by it (per report)
-        self._tf_future_s = float(self.declare_parameter("tf_future_s", 0.5).value)
+        # map -> odom is published 20 times a second, dated 0.1 s ahead (AMCL's habit, shorter):
+        # a consumer asking for "now" always finds a transform and never extrapolates.
+        self._tf_future_s = float(self.declare_parameter("tf_future_s", 0.1).value)
         self._tracker_initialised = False
         self._tracker_initialising = False
-        self._track_busy_until = 0.0
-        self._min_match_gap_s = float(self.declare_parameter("min_match_gap_s", 0.15).value)
-        self._last_match_at = 0.0
+        # 0.05 s: the lidar turns at 10 Hz, and a gap of 0.15 s used to skip every other scan;
+        # the pacer's busy rule (skip as long as a slow match took) is what protects the board.
+        self._pacer = MatchPacer(
+            min_gap_s=float(self.declare_parameter("min_match_gap_s", 0.05).value)
+        )
         self._last_match_stamp_s: float | None = None  # scan stamp of the previous match: dt_s
         self._last_scan_age_s = 0.0
-        self._track_stats = [0, 0.0, 0.0]  # scans, total match seconds, worst match seconds
         self._last_map_odom = (0.0, 0.0, 0.0)  # the belief until the first fix: the base
         self._last_ranges: np.ndarray | None = (
             None  # the previous scan's ranges, for slip detection
@@ -242,6 +255,9 @@ class Relocalizer(Node):
         )
         self.create_subscription(Odometry, self._odom_topic, self._on_odom, 20)
         self._fit_pub = self.create_publisher(Float32, "localization_fit", 5)
+        # The fit at the pose actually published (the blend), beside the tracker's own fit at
+        # the matched pose: the two part ways while a carry is being absorbed.
+        self._published_fit_pub = self.create_publisher(Float32, "localization_fit_published", 5)
         self._pose_pub = self.create_publisher(PoseWithCovarianceStamped, "/initialpose", 5)
         self._tf_pub = TransformBroadcaster(self)
         self._tracker_pub = self.create_publisher(PoseWithCovarianceStamped, "/tracker_pose", 5)
@@ -249,6 +265,7 @@ class Relocalizer(Node):
         self.create_timer(30.0, self._report_tracking)
         self.create_timer(2.0, self._remember_pose)
         self.create_timer(0.2, self._apply_pending_seed)  # the worker's fix, applied here
+        self.create_timer(0.05, self._send_map_odom)  # the frame stays alive, scans or not
         self.create_subscription(
             String, "/pepin/note", lambda m: self.get_logger().info(f"note: {m.data}"), 5
         )
@@ -280,16 +297,27 @@ class Relocalizer(Node):
             ),
         )
         self.create_timer(self._check_period_s, self._check)
+        # Registered after the last declare_parameter: rclpy runs this callback on declarations
+        # too, and it refuses everything that is not live.
+        self.add_on_set_parameters_callback(self._on_switch)
         self.get_logger().info("relocalizer up: watching the scan-to-map fit")
 
     # -- inputs -------------------------------------------------------------
 
     def _on_switch(self, params: list[Any]) -> SetParametersResult:
-        """The tracker's live switches (rest_lock, explained_vote) via ``ros2 param set``."""
-        flips = switch_updates(((p.name, p.value) for p in params), LIVE_SWITCHES)
-        for name, value in flips.items():
-            setattr(self, f"_{name}", value)
-            self.get_logger().info(f"{name} {'on' if value else 'off'}")
+        """``ros2 param set``: the tracker's live parameters (LIVE_PARAMS) are written to the
+        Localizer at once; a batch naming any other parameter is refused with the reason."""
+        stale = [p.name for p in params if p.name not in LIVE_PARAMS]
+        if stale:
+            return SetParametersResult(
+                successful=False, reason=f"{', '.join(stale)}: not live, set at the next start"
+            )
+        for p in params:
+            value = LIVE_PARAMS[p.name](p.value)
+            self._live[p.name] = value
+            if self._localizer is not None:
+                setattr(self._localizer, p.name, value)
+            self.get_logger().info(f"{p.name} = {value}")
         return SetParametersResult(successful=True)
 
     def _on_map(self, msg: OccupancyGridMsg) -> None:
@@ -322,9 +350,7 @@ class Relocalizer(Node):
             lost_after=3,
             global_retry=False,
             interpolate=self._subcell_refine,
-            rest_lock=self._rest_lock,
-            rest_gain=self._rest_gain,
-            rest_tau_s=self._rest_tau_s,
+            **self._live,
         )
         self.get_logger().info(f"map received: {msg.info.width}x{msg.info.height} cells")
         self._tracker_initialised = False  # a new map: find ourselves on it again
@@ -360,7 +386,6 @@ class Relocalizer(Node):
         # The gyro's word on whether the cart turns, taken from the filter that already fuses it:
         # subscribing to /imu/data_raw here would cost a slice of a core for a number we have.
         self._odom_wz = float(msg.twist.twist.angular.z)
-        self._send_map_odom()  # the frame stays alive at the odometry's rate, scans or not
         if self._track:
             self._track_pending()
 
@@ -388,20 +413,15 @@ class Relocalizer(Node):
                 ).start()
             return
         mono = time.monotonic()
-        if (
-            self._searching
-            or mono < self._track_busy_until
-            or mono - self._last_match_at < self._min_match_gap_s
-        ):
+        if self._pacer.skip(mono, self._searching):
             return
         odom = self._history.at(scan.stamp)
         if odom is None:  # cannot happen past the gate; a guard, not a fallback
             return
-        self._publish_dynamic(scan.points, loc.pose, scan.stamp)
         if not self._motion.due(odom, scan.stamp):
-            self._rested += 1  # standing still: the last match still holds
+            self._rested += 1  # standing still: the last match still holds, and so does the pose
+            self._publish_dynamic(scan.points, loc.pose, scan.stamp)
             return
-        self._last_match_at = mono
         # Seconds of robot time since the previous match, from the scan stamps (never the wall
         # clock): the rest lock's gain is a time constant, and this cadence is what it needs.
         previous_stamp = self._last_match_stamp_s
@@ -431,40 +451,26 @@ class Relocalizer(Node):
                 "wheels turning, world standing still: slip, wheel step ignored"
             )
         self._slip_pub.publish(Bool(data=slip))
-        at_rest = self._rest_lock and standing_still(self._history, scan.stamp, self._odom_wz)
-        self._rest_locked += int(at_rest)
-        # The pose the localizer is about to predict from: what the static mask is read at.
-        prediction = apply_motion(loc.pose, Pose2D() if slip else step)
-        vote = self._vote_mask(points, prediction)
+        # What the sensors say, and nothing else: the wheels' and the gyro's word on rest, the
+        # static map's mask. Whether either is used is the Localizer's switch (live).
+        at_rest = standing_still(self._history, scan.stamp, self._odom_wz)
         t0 = time.perf_counter()
         pose = loc.update(
-            odom, points, trust_odometry=not slip, at_rest=at_rest, vote=vote, dt_s=dt_s
+            odom,
+            points,
+            trust_odometry=not slip,
+            at_rest=at_rest,
+            dt_s=dt_s,
+            mask=self._static_mask,
         )
-        took = time.perf_counter() - t0
-        stats = self._track_stats
-        stats[0], stats[1], stats[2] = stats[0] + 1, stats[1] + took, max(stats[2], took)
-        if took > 0.12:
-            self._track_busy_until = mono + took  # skip about as long as we just spent
+        self._pacer.matched(mono, time.perf_counter() - t0)
         self._last_map_odom = map_to_odom(pose, odom)
         self._send_map_odom()
         self._publish_tracker_pose(
             pose, loc.confidence, Time(nanoseconds=int(scan.stamp * 1e9)).to_msg()
         )
-
-    def _vote_mask(self, points: Any, prediction: Pose2D) -> Any:
-        """Which returns of this scan may score the match, or ``None`` when all of them may.
-
-        The static map's own explanation of the scan at the pose the odometry predicts. Only the
-        matcher's score is affected: the fit, the lost counter and the occlusion verdict are still
-        measured on the whole scan, so :class:`pepin.watch.LostWatch` sees exactly what it saw.
-        """
-        if not self._explained_vote or self._static_mask is None:
-            return None
-        mask = voting_mask(points, prediction, self._static_mask)
-        if mask is not None:
-            self._silenced[0] += 1
-            self._silenced[1] += int((~mask).sum())
-        return mask
+        self._published_fit_pub.publish(Float32(data=float(loc.published_fit)))
+        self._publish_dynamic(points, pose, scan.stamp)  # the pose of this scan's own moment
 
     def _last_known_pose(self) -> Pose2D:
         """The pose saved by the previous run if it is recent and was good, else the map origin."""
@@ -575,11 +581,19 @@ class Relocalizer(Node):
         self._dynamic_pub.publish(point_cloud2.create_cloud_xyz32(header, xyz))
 
     def _send_map_odom(self) -> None:
-        """Broadcast the current map -> odom, dated a little into the future like AMCL does."""
+        """Broadcast the current map -> odom, 20 times a second and after every match, dated
+        ``tf_future_s`` (0.1 s) ahead like AMCL does.
+
+        The contract for every consumer: compose the LATEST map -> odom with odom -> base_link
+        at your own stamp. map -> odom is a slowly moving correction, not a trajectory — its
+        stamp says "valid from here", never "measured here" — while odom -> base_link carries
+        the motion and is exact at its stamp. A consumer that asks tf2 for map -> base_link at a
+        stamp gets exactly that composition; the short future date keeps "now" inside the
+        buffer so nobody extrapolates, and keeps a fresh correction from waiting half a second
+        behind a stale future-dated one.
+        """
         x, y, yaw = self._last_map_odom
         msg = TransformStamped()
-        # Dated from the clock, not the scan: the transform is valid now and for the next half
-        # second, so a controller asking for "now" between two scans is never left extrapolating.
         future = self.get_clock().now() + Duration(seconds=self._tf_future_s)
         msg.header.stamp = future.to_msg()
         msg.header.frame_id = "map"
@@ -608,21 +622,17 @@ class Relocalizer(Node):
         self._append_trail(msg)
 
     def _report_tracking(self) -> None:
-        """Every 30 s: how many scans were matched and how long a match takes on this board."""
-        n, total, worst = self._track_stats
-        gate = self._gate.report()
-        matched = (
-            f"matched {n}, {total / n * 1000:.0f} ms mean, {worst * 1000:.0f} ms worst"
-            if n
-            else "matched 0"
-        )
-        scans, silenced = self._silenced
+        """Every 30 s: where every released scan went, what the tracker did with the matched
+        ones (its switches, the rest lock's cadence and gain, carries, lost/weak, the fit at
+        the match and at the published pose, the largest map -> odom step), and the cost."""
+        loc = self._localizer
+        if loc is None:
+            return
+        gate, pacer, track = self._gate.report(), self._pacer.report(), loc.report()
         self.get_logger().info(
-            f"tracker: {gate.summary()}, rested {self._rested}, deskew failed "
-            f"{self._deskew_failed}; {matched}, fit {self.fit:.2f}, "
-            f"dynamic marks {self._dynamic_count}, "
-            f"rest-locked {self._rest_locked}, "
-            f"unexplained returns silenced {silenced} over {scans} scans, "
+            f"tracker: {gate.summary()}, rested {self._rested}, {pacer.summary()}, deskew "
+            f"failed {self._deskew_failed}; {loc.settings()}; {track.summary()}; "
+            f"watch fit {self.fit:.2f}, dynamic marks {self._dynamic_count}, "
             f"scan age at match {self._last_scan_age_s * 1000:.0f} ms"
         )
         if gate.expired:
@@ -630,9 +640,7 @@ class Relocalizer(Node):
                 f"odometry ran late: {gate.expired} scans were never covered by {self._odom_topic} "
                 "and matched nothing"
             )
-        self._track_stats = [0, 0.0, 0.0]
-        self._rested = self._deskew_failed = self._dynamic_count = self._rest_locked = 0
-        self._silenced = [0, 0]
+        self._rested = self._deskew_failed = self._dynamic_count = 0
 
     def _lookup_laser(self, frame: str) -> bool:
         """The static base_link <- laser transform, as x, y, yaw and whether roll is pi."""
@@ -816,7 +824,9 @@ class Relocalizer(Node):
     def _relocalize(self) -> str:
         """One whole-map search on the newest scan; the watch decides what its answer is worth."""
         assert self._localizer is not None and self._matcher is not None
-        points, scan = self._points, self._scan_id
+        # The scan, its id and the map it was taken on, captured together at the start: a map
+        # swap during the seconds of a search must not stamp the old scan's fix as the new map's.
+        points, scan, map_id = self._points, self._scan_id, self._map_id
         assert points is not None
         current = self._tracked_pose()
         current_fit = self._matcher.inlier_fraction(current, points) if current else 0.0
@@ -837,7 +847,7 @@ class Relocalizer(Node):
         with self._episode:
             verdict = self._watch.answer(answer, confidence, current_fit, scan, time.monotonic())
             if verdict.verdict is Verdict.APPLY and verdict.pose is not None:
-                self._pending_seed = (self._map_id, verdict.pose, verdict.confidence)
+                self._pending_seed = (map_id, verdict.pose, verdict.confidence)
         where = (
             "nothing"
             if answer is None
@@ -870,6 +880,15 @@ class Relocalizer(Node):
         if self._localizer is not None:
             self._localizer.adopt(pose, confidence)
         self.fit = confidence
+        # map->odom follows the seed NOW: the next matched scan may be a second away at rest, and
+        # for that second /localization_fit would say "found" while the transform still placed the
+        # cart where it stood before a carry (a review probe, 2026-09-11).
+        newest = self._history.newest
+        self._last_map_odom = (
+            map_to_odom(pose, newest) if newest is not None else self._last_map_odom
+        )
+        self._send_map_odom()
+        self._motion.reset()
         with self._episode:  # the worker may be inside _watch.answer() right now
             self._watch.seeded(time.monotonic())
         msg = PoseWithCovarianceStamped()

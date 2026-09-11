@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
 
+from pepin.dynamic import StaticMask, voting_mask
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import (
@@ -72,6 +74,75 @@ def pooled(grid: OccupancyGrid, factor: int) -> OccupancyGrid:
     return coarse
 
 
+@dataclass
+class Running:
+    """Count, mean and extremes of a stream of numbers, for one report line."""
+
+    n: int = 0
+    total: float = 0.0
+    lo: float = math.inf
+    hi: float = -math.inf
+
+    def add(self, value: float) -> None:
+        """Count ``value`` in."""
+        self.n += 1
+        self.total += value
+        self.lo, self.hi = min(self.lo, value), max(self.hi, value)
+
+    @property
+    def mean(self) -> float:
+        """The mean so far (NaN when nothing was counted)."""
+        return self.total / self.n if self.n else float("nan")
+
+    def text(self, scale: float = 1.0, digits: int = 2) -> str:
+        """``mean/min/max`` scaled, or ``-`` when empty."""
+        if not self.n:
+            return "-"
+        mean, lo, hi = (v * scale for v in (self.mean, self.lo, self.hi))
+        return f"{mean:.{digits}f}/{lo:.{digits}f}/{hi:.{digits}f}"
+
+
+@dataclass
+class TrackStats:
+    """What the tracker did since the last report: every match counted by what happened to it.
+
+    ``released - rested - skipped`` at the node must equal ``matched + thin`` here, so a scan that
+    went nowhere shows up as a hole in this arithmetic instead of vanishing.
+    """
+
+    matched: int = 0  # scans matched (whatever the gain)
+    thin: int = 0  # scans with too few returns to match: odometry only
+    rest_locked: int = 0  # matches blended under the rest lock
+    carries: int = 0  # rest matches taken whole: two in a row agreed on a new pose (a carry)
+    weak: int = 0  # matches whose fit was below lost_below
+    lost: int = 0  # matches made while lost (the recovery search ran)
+    silenced_scans: int = 0  # matches with a vote mask in force
+    silenced_points: int = 0  # returns the mask kept out of the score, in total
+    rest_dt_s: Running = field(default_factory=Running)  # seconds between rest matches
+    rest_gain: Running = field(default_factory=Running)  # the gain the lock used per match
+    fit: Running = field(default_factory=Running)  # confidence at the matched pose
+    published_fit: Running = field(default_factory=Running)  # fit at the pose actually published
+    step_xy_m: float = 0.0  # the largest position correction one match applied (map->odom's step)
+    step_deg: float = 0.0  # the largest heading correction one match applied
+
+    def summary(self) -> str:
+        """One log line, mean/min/max where a distribution matters."""
+        return (
+            f"matched {self.matched} (thin {self.thin}), rest-locked {self.rest_locked} "
+            f"(dt {self.rest_dt_s.text(digits=1)} s, gain {self.rest_gain.text()}), "
+            f"carries {self.carries}, weak {self.weak}, lost {self.lost}, "
+            f"silenced {self.silenced_points} returns over {self.silenced_scans} scans, "
+            f"fit {self.fit.text()} at the match / {self.published_fit.text()} published, "
+            f"max step {self.step_xy_m * 100:.1f} cm / {self.step_deg:.2f} deg"
+        )
+
+
+CARRY_MIN_GAIN = 0.08  # a carry moves the WHOLE scan onto the map: the field score at the matched
+# pose beats the held pose by this much (real carries on the tapes: >= +0.115; a person standing by
+# the lidar or a chair pushed against the cart: <= +0.043 — they agree twice too, but the map fits
+# them no better at the new pose; a review probe, 2026-09-11)
+
+
 class Localizer:
     """Tracks the robot pose on a fixed occupancy grid from odometry and lidar scans.
 
@@ -104,6 +175,9 @@ class Localizer:
         rest_lock: bool = True,  # hold the pose while the cart stands still (see ``update``)
         rest_gain: float = 0.05,  # share per match when the caller times nothing (see ``_blend``)
         rest_tau_s: float = 6.0,  # time constant of the rest lock when the caller passes ``dt_s``
+        explained_vote: bool = True,  # returns the static map cannot explain do not score
+        carry_m: float = 0.06,  # a rest residual past this, twice in a row, is a carry, not noise
+        carry_deg: float = 4.0,
     ) -> None:
         self._grid = grid
         # The tracker wants a continuous correction: quantised to the search step it corrects the
@@ -113,9 +187,20 @@ class Localizer:
         self._correction_gain = correction_gain
         self._jump_m = jump_m
         self._jump_deg = jump_deg
-        self._rest_lock = rest_lock
-        self._rest_gain = rest_gain
-        self._rest_tau_s = max(rest_tau_s, 1e-3)  # a zero constant would be a division by nothing
+        # The live switches: the node's parameter callback writes them between two scans.
+        self.rest_lock = rest_lock
+        self.rest_gain = rest_gain
+        self.rest_tau_s = rest_tau_s
+        self.explained_vote = explained_vote
+        # The carry thresholds are below the jump ones on purpose: the tracking window caps a
+        # residual at its own size (9 cm on the board), so a 15 cm jump can never be seen at rest,
+        # while two matches of a standing cart agreeing beyond 6 cm / 4 deg never happened on the
+        # rest-locked tapes (0182, 0183, 0193: p99 of the rest residual 5 cm / 2.8 deg).
+        self._carry_m = carry_m
+        self._carry_deg = carry_deg
+        self._rest_hint: Pose2D | None = None  # a rest match beyond the carry thresholds, once
+        self.stats = TrackStats()
+        self.published_fit = 0.0  # inlier fraction at the pose ``update`` returned
         self._coarse_matcher: CorrelativeMatcher | None = None
         self._coarse_version = -1
         self._window = window or SearchWindow()
@@ -136,6 +221,20 @@ class Localizer:
     def lost(self) -> bool:
         """True once several scans in a row fit poorly: the wide recovery search is active."""
         return self.weak_scans >= self._lost_after
+
+    def settings(self) -> str:
+        """The live switches and constants as one phrase, for the report line."""
+        return (
+            f"rest_lock {'on' if self.rest_lock else 'off'}, "
+            f"explained_vote {'on' if self.explained_vote else 'off'}, "
+            f"rest_tau_s {self.rest_tau_s:.1f}, gain {self._correction_gain:.2f}, "
+            f"carry {self._carry_m * 100:.0f} cm / {self._carry_deg:.0f} deg"
+        )
+
+    def report(self) -> TrackStats:
+        """The counters since the previous report, which are reset."""
+        stats, self.stats = self.stats, TrackStats()
+        return stats
 
     def _recovery_window(self) -> SearchWindow:
         """Recovery window sized to the uncertainty: grows with motion since the last good fit.
@@ -328,9 +427,10 @@ class Localizer:
         re-seed that left the drift behind kept searching as if the robot were still lost.
         """
         self.pose = pose
-        self.confidence = confidence
+        self.confidence = self.published_fit = confidence
         self.weak_scans = 0
         self._drift = Pose2D()
+        self._rest_hint = None
         self._last_odom = None  # the next update measures its step from the next reading
 
     def _voting(
@@ -358,14 +458,47 @@ class Localizer:
         self.pose = apply_motion(self.pose, motion)
         return self.pose
 
+    def _within(self, a: Pose2D, b: Pose2D, xy_m: float, deg: float) -> bool:
+        """True when the two poses differ by at most ``xy_m`` in position and ``deg`` in heading."""
+        return math.hypot(a.x - b.x, a.y - b.y) <= xy_m and abs(
+            wrap_angle(a.theta - b.theta)
+        ) <= math.radians(deg)
+
+    def _carried(self, matched: Pose2D, prediction: Pose2D, gain: float) -> bool:
+        """Was the standing cart carried? Two rest matches in a row agreeing on a pose beyond
+        ``carry_m`` / ``carry_deg`` from the held one, AND the whole scan fitting the map better
+        at that pose by CARRY_MIN_GAIN, say yes. A single one is match noise and only becomes the
+        hint the next match is held against; an intruder — a person by the lidar, a chair pushed
+        against the cart — agrees with itself twice but gains the map nothing at the new pose."""
+        hint = self._rest_hint
+        agrees = hint is not None and self._within(
+            matched, hint, self._carry_m / 2, self._carry_deg / 2
+        )
+        beyond = not self._within(matched, prediction, self._carry_m, self._carry_deg)
+        self._rest_hint = matched if beyond and not agrees else None
+        return agrees and gain >= CARRY_MIN_GAIN
+
+    def _rest_gain_for(self, dt_s: float | None) -> float:
+        """The lock's share of a residual: per second when timed, per match when not; never
+        above the driving gain, so one match after a long silence cannot be taken whole."""
+        gain = (
+            self.rest_gain
+            if dt_s is None
+            else 1.0 - math.exp(-max(dt_s, 0.0) / max(self.rest_tau_s, 1e-3))
+        )
+        return min(gain, self._correction_gain)
+
     def _blend(
         self,
         prediction: Pose2D,
         matched: Pose2D,
         at_rest: bool = False,
         dt_s: float | None = None,
-    ) -> Pose2D:
-        """Move from the prediction toward the match by ``correction_gain`` of the way.
+        lost: bool = False,
+        carry_gain: float = 0.0,
+    ) -> tuple[Pose2D, float]:
+        """Move from the prediction toward the match by ``correction_gain`` of the way; returns
+        the pose and the gain used.
 
         One match is a noisy measurement (about 1 degree and 1 cm of noise with 120 beams on a
         5 cm map), and the pose it corrects is published as a transform the controller steers by:
@@ -380,39 +513,53 @@ class Localizer:
         what moves the published heading inside a several-degree band while nothing moves.
         The average is in SECONDS, not in matches: ``dt_s`` (the time since the previous match)
         gives ``gain = 1 - exp(-dt_s / rest_tau_s)``, so the same residual dies with the same
-        three-second time constant whether the caller matches at 10 Hz (an offline replay) or
-        about once a second (the node, which rests between matches — ``timeline.MotionFilter``).
-        A fixed per-match gain cannot: 0.05 per match is 2 s at 10 Hz and 20 s at 1 Hz, and at
-        20 s a 6 cm nudge inside the jump window outlives a parking manoeuvre. ``dt_s=None``
-        keeps the old per-match ``rest_gain`` for callers that time nothing.
+        time constant (``rest_tau_s``, 6 s by default) whether the caller matches at 10 Hz (an
+        offline replay) or about once a second (the node, which rests between matches —
+        ``timeline.MotionFilter``). A fixed per-match gain cannot: 0.05 per match is 2 s at
+        10 Hz and 20 s at 1 Hz, and at 20 s a 6 cm nudge inside the jump window outlives a
+        parking manoeuvre. ``dt_s=None`` keeps the old per-match ``rest_gain`` for callers that
+        time nothing. Either way the gain is capped at ``correction_gain``: after a long gap
+        (a whole-map search, an expired scan) the first match back is one noisy match, not the
+        truth, and ``1 - exp(-15 / 6)`` would have taken it nine tenths whole.
 
         The jump rule is deliberately NOT an escape hatch from the rest lock: at rest the wheels
         and the gyro have both said for half a second that nothing turned, so a residual of six
-        degrees is a bad match, not a rotation. A tracker that is *lost* is another matter — it
-        drops the lock and takes what the recovery search found, at whatever gain it would use
-        while driving.
+        degrees is a bad match, not a rotation. A carry is: the cart lifted straight, or skidded
+        sideways, ticks no wheel and turns no gyro, and the lock would absorb the new pose with
+        its time constant while the stop reflex ran on the old one. So a residual beyond the
+        carry thresholds that the NEXT rest match agrees with is taken whole (``_carried``); a
+        single one is blended like any rest match. A tracker that is ``lost`` drops the lock and
+        takes what the recovery search found, at whatever gain it would use while driving.
 
         Note what the caller gets back: ``confidence`` is measured at the MATCHED pose, not at
-        the blended pose returned here, so at a low gain the reported fit belongs to a pose the
-        robot never published (deliberate: the fit must answer "does the scan fit the map here",
-        not "how far has the average crawled").
+        the blended pose returned here (deliberate: the fit must answer "does the scan fit the
+        map here", not "how far has the average crawled"); ``published_fit`` is the same measure
+        at the blended pose, so the two diverging is what a carry looks like in the report.
         """
         dx, dy = matched.x - prediction.x, matched.y - prediction.y
         dtheta = wrap_angle(matched.theta - prediction.theta)
         jump = math.hypot(dx, dy) > self._jump_m or abs(dtheta) > math.radians(self._jump_deg)
-        if at_rest and self._rest_lock and not self.lost:
-            gain = (
-                self._rest_gain
-                if dt_s is None
-                else 1.0 - math.exp(-max(dt_s, 0.0) / self._rest_tau_s)
-            )
+        stats = self.stats
+        if at_rest and self.rest_lock and not lost:
+            if self._carried(matched, prediction, carry_gain):
+                gain = 1.0
+                stats.carries += 1
+            else:
+                gain = self._rest_gain_for(dt_s)
+                stats.rest_locked += 1
+                stats.rest_gain.add(gain)
+                if dt_s is not None:
+                    stats.rest_dt_s.add(dt_s)
         else:
+            self._rest_hint = None  # the wheels explain the next residual; a carry needs rest
             gain = 1.0 if jump else self._correction_gain
+        stats.step_xy_m = max(stats.step_xy_m, gain * math.hypot(dx, dy))
+        stats.step_deg = max(stats.step_deg, gain * abs(math.degrees(dtheta)))
         return Pose2D(
             prediction.x + gain * dx,
             prediction.y + gain * dy,
             wrap_angle(prediction.theta + gain * dtheta),
-        )
+        ), gain
 
     def update(
         self,
@@ -422,25 +569,31 @@ class Localizer:
         at_rest: bool = False,
         vote: NDArray[np.bool_] | None = None,
         dt_s: float | None = None,
+        mask: StaticMask | None = None,
     ) -> Pose2D:
         """Advance by the odometry step since the last call, then correct with the scan.
 
         ``trust_odometry=False`` discards the wheel step (slipping wheels): the pose is
         corrected from where it was, and the step is still consumed so it is never re-applied.
 
-        ``at_rest`` says the cart is standing (wheels and gyro agree): the residual is then
-        averaged in slowly instead of being taken every scan — see :meth:`_blend`.
+        ``at_rest`` says the cart is standing (wheels and gyro agree): with ``rest_lock`` on
+        the residual is then averaged in slowly instead of being taken every scan — see
+        :meth:`_blend`. The caller passes what the sensors say and nothing else; the switch is
+        this object's.
 
         ``dt_s`` is the time since the PREVIOUS call, in seconds; it makes that average a time
         constant (``rest_tau_s``) instead of a per-match share, so a caller matching once a
         second and one matching ten times a second settle at rest at the same speed. ``None``
         (the default) keeps the old per-match ``rest_gain``; it changes nothing while moving.
 
-        ``vote`` is an optional (N,) mask over ``points``: only the returns it selects are scored
-        by the matcher, which is how returns the static map cannot explain (a moved chair, a
-        blanket) are kept from pulling the heading. Confidence is always measured on the WHOLE
-        scan, so the fit this reports, the lost counter and the occlusion verdict built on them
-        mean exactly what they meant before.
+        ``mask`` is the static map's own explanation of the scan (``dynamic.StaticMask``): with
+        ``explained_vote`` on it is read at the pose this call predicts from, and only the
+        returns it explains score the match, which is how returns the map has no wall for (a
+        moved chair, a blanket) are kept from pulling the heading. ``vote``, an explicit (N,)
+        mask over ``points``, does the same from outside (tests). Confidence is always measured
+        on the WHOLE scan, so the fit this reports, the lost counter and the occlusion verdict
+        built on them mean exactly what they meant before; ``published_fit`` is the same measure
+        at the pose returned.
         """
         motion = (
             Pose2D()
@@ -454,16 +607,25 @@ class Localizer:
             self._drift.theta + abs(motion.theta),
         )
         prediction = apply_motion(self.pose, motion)
+        stats = self.stats
         if len(points) < self._min_points:
             self.pose = prediction
-            self.confidence = 0.0
+            self.confidence = self.published_fit = 0.0
             self.weak_scans += 1
+            stats.thin += 1
             return self.pose
+        if vote is None and mask is not None and self.explained_vote:
+            vote = voting_mask(points, prediction, mask)
         voting = self._voting(points, vote)
+        if vote is not None:
+            stats.silenced_scans += 1
+            stats.silenced_points += len(points) - len(voting)
         local = self._matcher.match_around(prediction, voting, motion, self._window)
         pose, confidence = local.pose, self._matcher.inlier_fraction(local.pose, points)
 
-        if self.lost:
+        was_lost = self.lost
+        if was_lost:
+            stats.lost += 1
             # The whole scan, never the mask: a mask is read at a pose, and a lost tracker's pose
             # is the thing in doubt. Silencing what it cannot explain would silence the evidence.
             coarse = self._matcher.match(prediction, points, self._recovery_window())
@@ -493,11 +655,34 @@ class Localizer:
                     )  # fmt: skip
                     pose, confidence = anywhere.pose, anywhere_confidence
 
-        self.pose = self._blend(prediction, pose, at_rest=at_rest, dt_s=dt_s)
+        # The counter first, the blend after: the scan that makes the tracker lost must not be
+        # averaged in under the rest lock, and the scan that finds it again (the fit is back,
+        # the counter clears) must still be taken at the driving gain, not crawled into.
         self.confidence = confidence
         if confidence < self._lost_below:
             self.weak_scans += 1
+            stats.weak += 1
         else:
             self.weak_scans = 0
             self._drift = Pose2D()
+        carry_gain = (
+            self._matcher.field_score(local.pose, points)
+            - self._matcher.field_score(prediction, points)
+            if at_rest and self.rest_lock
+            else 0.0
+        )
+        self.pose, gain = self._blend(
+            prediction,
+            pose,
+            at_rest=at_rest,
+            dt_s=dt_s,
+            lost=was_lost or self.lost,
+            carry_gain=carry_gain,
+        )
+        self.published_fit = (
+            confidence if gain >= 1.0 else self._matcher.inlier_fraction(self.pose, points)
+        )
+        stats.matched += 1
+        stats.fit.add(confidence)
+        stats.published_fit.add(self.published_fit)
         return self.pose

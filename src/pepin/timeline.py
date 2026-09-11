@@ -33,8 +33,10 @@ from numpy.typing import NDArray
 from pepin.odometry import Pose2D, wrap_angle
 
 __all__ = [
+    "MatchPacer",
     "MotionFilter",
     "OdomHistory",
+    "PacerStats",
     "ScanGate",
     "TimedScan",
     "beam_times",
@@ -277,6 +279,79 @@ class MotionFilter:
     def reset(self) -> None:
         """Forget the last match (a new map, a re-seed): the next scan is due."""
         self._last = None
+
+
+@dataclass
+class PacerStats:
+    """What the pacer did since the last report: matches timed, scans skipped and why."""
+
+    matched: int = 0
+    took_s: float = 0.0  # seconds spent matching, in total
+    worst_s: float = 0.0  # the longest single match
+    skipped_gap: int = 0  # released too soon after the previous match
+    skipped_busy: int = 0  # the previous match ran long; the board got that time back
+    skipped_searching: int = 0  # a whole-map search runs in the worker
+
+    @property
+    def skipped(self) -> int:
+        """Scans released by the gate and matched by nobody, for any reason."""
+        return self.skipped_gap + self.skipped_busy + self.skipped_searching
+
+    def summary(self) -> str:
+        """One log line: the match cost and the skips by reason."""
+        cost = (
+            f"{self.took_s / self.matched * 1000:.0f} ms mean, {self.worst_s * 1000:.0f} ms worst"
+            if self.matched
+            else "-"
+        )
+        return (
+            f"matched {self.matched} ({cost}), skipped {self.skipped} (gap {self.skipped_gap}, "
+            f"busy {self.skipped_busy}, searching {self.skipped_searching})"
+        )
+
+
+class MatchPacer:
+    """Spares the board: says whether a released scan may be matched right now, and counts the
+    ones that may not, so the gate's ``released`` is accounted for scan by scan.
+
+    A scan is skipped while a whole-map search runs in the worker, for about as long as the
+    previous match took when it ran past ``long_match_s`` (the executor gets that time back for
+    the odometry and the controller), and within ``min_gap_s`` of the previous match (two
+    scans in one burst say nothing new).
+    """
+
+    def __init__(self, min_gap_s: float = 0.05, long_match_s: float = 0.12) -> None:
+        self._min_gap_s = min_gap_s
+        self._long_match_s = long_match_s
+        self._last_match_at = -math.inf
+        self._busy_until = -math.inf
+        self.stats = PacerStats()
+
+    def skip(self, now: float, searching: bool) -> bool:
+        """True when this scan is not to be matched at ``now`` (monotonic seconds); counted."""
+        if searching:
+            self.stats.skipped_searching += 1
+        elif now < self._busy_until:
+            self.stats.skipped_busy += 1
+        elif now - self._last_match_at < self._min_gap_s:
+            self.stats.skipped_gap += 1
+        else:
+            return False
+        return True
+
+    def matched(self, now: float, took_s: float) -> None:
+        """A match started at ``now`` and took ``took_s``; a long one buys the board a pause."""
+        self._last_match_at = now
+        if took_s > self._long_match_s:
+            self._busy_until = now + took_s
+        self.stats.matched += 1
+        self.stats.took_s += took_s
+        self.stats.worst_s = max(self.stats.worst_s, took_s)
+
+    def report(self) -> PacerStats:
+        """The counters since the previous report, which are reset."""
+        stats, self.stats = self.stats, PacerStats()
+        return stats
 
 
 REST_WINDOW_S = 0.6  # how far back "the cart has not moved" is asked about

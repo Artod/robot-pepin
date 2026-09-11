@@ -160,3 +160,32 @@ def test_too_few_explained_returns_let_everything_vote() -> None:
     mask = StaticMask(room())
     assert voting_mask(wall_scan(VOTE_MIN_POINTS - 1), Pose2D(), mask) is None
     assert voting_mask(wall_scan(VOTE_MIN_POINTS), Pose2D(), mask) is not None
+
+
+def test_a_wrong_pose_rings_only_the_nearest_news() -> None:
+    """120 returns the map has no wall for, 12 cm apart: a person is a handful, this is a pose
+    that is wrong. The MAX_NEWS_POINTS nearest to the wheels are ringed — what is close is what
+    the wheels meet — and the far ones are not."""
+    from pepin.dynamic import MAX_NEWS_POINTS
+
+    mask = StaticMask(room())
+    pose = Pose2D(0.2, 2.0, 0.0)
+    xs, ys = np.meshgrid(np.linspace(1.0, 2.4, 12), np.linspace(-0.6, 0.6, 10))
+    points = np.column_stack((xs.ravel(), ys.ravel()))
+    ranges = np.sort(np.hypot(points[:, 0], points[:, 1]))
+    assert len(points) == 120 > MAX_NEWS_POINTS and ranges[0] >= NEAR_M
+    marks = dynamic_marks(points, pose, mask, POINT)
+    assert len(marks) == MAX_NEWS_POINTS * PER_CENTRE
+    centres = marks[:MAX_NEWS_POINTS] - (pose.x, pose.y)  # rings() lists the centres first
+    assert np.hypot(centres[:, 0], centres[:, 1]).max() <= ranges[MAX_NEWS_POINTS - 1] + 1e-9
+
+
+def test_exactly_half_explained_votes_and_one_under_half_does_not() -> None:
+    from pepin.dynamic import VOTE_MIN_SHARE, voting_mask
+
+    mask = StaticMask(room())
+    blanket = np.tile([[1.5, 2.0]], (100, 1))  # a hundred returns the map has no wall for
+    vote = voting_mask(np.vstack([wall_scan(100), blanket]), Pose2D(), mask)
+    assert VOTE_MIN_SHARE == 0.5 and vote is not None and int(vote.sum()) == 100
+    assert voting_mask(np.vstack([wall_scan(99), blanket]), Pose2D(), mask) is None
+    assert voting_mask(np.zeros((0, 2)), Pose2D(), mask) is None
