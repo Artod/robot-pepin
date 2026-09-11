@@ -226,6 +226,26 @@ def test_the_static_transform_switch_cannot_be_flipped_while_the_node_runs(build
 
 
 # ---- the way out -----------------------------------------------------------------------------
+def test_close_ends_the_pump_while_it_waits_to_reconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A board that is not there: the pump waits between attempts on the stop event, not on
+    sleep, so a kick does not have to sit out the three seconds."""
+    attempted = threading.Event()
+
+    def refuse(url: str, timeout: float | None = None) -> Any:
+        attempted.set()
+        raise ConnectionRefusedError("no board there")
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    with ros_stubs.parameters(config=CAMERA_JSON):
+        node = CameraStream()
+    assert attempted.wait(2.0), "the pump never tried to open the stream"
+    started = time.monotonic()
+    node.close()
+    assert not node._thread.is_alive()
+    assert time.monotonic() - started < 1.0, "it sat out the retry wait"
+    assert any("not reachable" in line for line in node.logger.texts("warning"))
+
+
 def test_close_stops_the_pump_from_inside_a_blocked_read(build: Build) -> None:
     """The pump spends its life blocked on the socket between frames; close() closes the stream
     under it, so the join takes milliseconds instead of the socket's five-second timeout."""

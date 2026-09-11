@@ -108,18 +108,31 @@ class CameraStream(Node):
     def close(self) -> None:
         """Stop the frame pump and wait for it, closing the open stream so a read blocked on the
         socket returns at once: called before the node is destroyed (node_kit.spin_main), so no
-        thread is left inside OpenCV's decoder or DDS when the interpreter finalises."""
+        thread is left inside OpenCV's decoder or DDS when the interpreter finalises.
+
+        The stream is closed twice when needed: the pump may have been opening a new one (a
+        reconnection) while the first close was reaching the old one, and then it would sit out
+        the socket's own timeout instead of leaving.
+        """
         self._stop.set()
-        stream = self._stream
-        if stream is not None:
-            with contextlib.suppress(Exception):  # already closed, or closing under the reader
-                stream.close()
-        self._thread.join(STOP_PATIENCE_S)
+        self._close_stream()
+        self._thread.join(0.5)
+        if self._thread.is_alive():
+            self._close_stream()
+            self._thread.join(STOP_PATIENCE_S)
         if self._thread.is_alive():
             self.get_logger().warning(
                 f"the camera pump is still in the stream after {STOP_PATIENCE_S:.0f} s;"
                 " leaving anyway"
             )
+
+    def _close_stream(self) -> None:
+        """Close the response the pump is reading, if it has one: that is what ends a read
+        blocked between frames."""
+        stream = self._stream
+        if stream is not None:
+            with contextlib.suppress(Exception):  # already closed, or closing under the reader
+                stream.close()
 
     def _static_transforms(self, mounts: Mounts) -> list[Any]:
         """The static edges this node broadcasts, from the mounts of ``config/``:
@@ -181,6 +194,8 @@ class CameraStream(Node):
             try:
                 with urllib.request.urlopen(self._cfg.stream, timeout=STREAM_TIMEOUT_S) as stream:
                     self._stream = stream
+                    if self._stop.is_set():  # close() ran while this one was still opening
+                        return
                     for headers, body in parts(stream):
                         if self._stop.is_set() or not rclpy.ok():
                             return
