@@ -1,8 +1,19 @@
-"""The source roster: the ``sources`` flag, and who is alive."""
+"""The source roster: the ``sources`` flag, who is alive, and whose scan drives the update."""
 
+import numpy as np
 import pytest
 
-from pepin.sources import CONTACT, DEPTH, LIDAR, ScanSource, SourceHealth, SourceRegistry
+from pepin.odometry import Pose2D
+from pepin.sources import (
+    CONTACT,
+    DEPTH,
+    LIDAR,
+    ScanSource,
+    SourceFeed,
+    SourceHealth,
+    SourceRegistry,
+)
+from pepin.timeline import OdomHistory, TimedScan
 
 
 def test_the_lidar_alone_is_on_by_default_and_the_flag_picks_the_rest() -> None:
@@ -49,3 +60,109 @@ def test_a_custom_roster_keeps_its_own_order_and_floors() -> None:
     registry = SourceRegistry([sonar], enabled=["sonar"])
     assert registry.enabled == ("sonar",) and registry.source("sonar").min_points == 4
     assert registry.health("sonar").verdict(0.0) == "absent"
+
+
+# ---- the feed: whose scan drives the update, and the riders carried to its moment ------------
+def scan(stamp: float, points: list[list[float]] | None = None, scan_id: int = 0) -> TimedScan:
+    """A scan taken in one instant at ``stamp`` (a camera frame, or a lidar turn standing)."""
+    pts = np.array([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]] if points is None else points)
+    return TimedScan(stamp, pts, np.full(len(pts), stamp), np.full(len(pts), 1.0), scan_id)
+
+
+def driving(until_s: float, speed_m_s: float = 0.5) -> OdomHistory:
+    """Odometry of a cart driving straight ahead at ``speed_m_s``, sampled at 20 Hz."""
+    history = OdomHistory()
+    for k in range(int(until_s * 20) + 1):
+        history.add(0.05 * k, Pose2D(speed_m_s * 0.05 * k, 0.0, 0.0))
+    return history
+
+
+def test_the_lidar_anchors_while_fresh_and_a_rider_is_carried_to_its_moment() -> None:
+    """The camera's frame 50 ms before the lidar's revolution saw the wall 1 m ahead; the cart
+    drove 2.5 cm on since, so at the lidar's moment that wall is 97.5 cm ahead: the rider's
+    returns are moved by the odometry between the two stamps, and each frame rides once."""
+    feed = SourceFeed(SourceRegistry(enabled=[LIDAR, DEPTH]))
+    history = driving(2.0)
+    feed.offer(DEPTH, scan(0.95, [[1.0, 0.0], [1.0, 0.5]]))
+    feed.offer(LIDAR, scan(1.0, scan_id=7))
+    assert feed.anchor(1.02) == LIDAR
+    taken = feed.take(history, 1.02)
+    assert taken is not None and taken[0] == LIDAR and taken[1].scan_id == 7
+    assert feed.take(history, 1.02) is None, "released once"
+    riders = feed.gather(LIDAR, 1.0, history)
+    assert [r.source for r in riders] == [DEPTH] and riders[0].stamp == 1.0
+    np.testing.assert_allclose(riders[0].points, [[0.975, 0.0], [0.975, 0.5]], atol=1e-9)
+    assert feed.gather(LIDAR, 1.0, history) == [], "a frame rides once"
+    stats = feed.report()
+    assert stats.gates[LIDAR].released == 1 and stats.attached[DEPTH] == 1 and stats.released == 1
+    assert (
+        stats.summary().startswith("lidar: scans 1, released 1") and "attached 1" in stats.summary()
+    )
+    alone = SourceFeed(SourceRegistry())
+    alone.offer(LIDAR, scan(1.0))
+    assert alone.report().summary().startswith("scans 1, released 0"), "one source: as ever"
+
+
+def test_a_dead_lidar_hands_the_updates_to_the_camera_and_takes_them_back() -> None:
+    feed = SourceFeed(SourceRegistry(enabled=[LIDAR, DEPTH]))
+    history = driving(4.0)
+    for k in range(11):  # the lidar at 10 Hz until t = 1.0, then silence
+        feed.offer(LIDAR, scan(0.1 * k))
+    feed.offer(DEPTH, scan(1.05))
+    assert feed.take(history, 1.07) is not None and feed.anchor(1.3) == LIDAR
+    assert feed.take(history, 1.3) is None, "the lidar is still fresh: the frame waits for it"
+    feed.offer(DEPTH, scan(1.4))
+    assert feed.anchor(1.6) == DEPTH, "0.5 s without a revolution: the camera drives"
+    taken = feed.take(history, 1.6)
+    assert taken is not None and taken[0] == DEPTH and taken[1].stamp == 1.4
+    assert feed.gather(DEPTH, 1.4, history) == []
+    assert feed.picture(1.6) is not None and feed.picture(1.6).stamp == 1.4
+    assert feed.status(1.6).startswith("anchor depth; lidar stale 0.6 s, depth fresh")
+    feed.offer(DEPTH, scan(1.95))
+    feed.offer(LIDAR, scan(2.0))  # the lidar is back
+    assert feed.anchor(2.02) == LIDAR and feed.picture(2.02).stamp == 2.0
+    taken = feed.take(history, 2.02)
+    assert taken is not None and taken[0] == LIDAR
+    assert [r.source for r in feed.gather(LIDAR, 2.0, history)] == [DEPTH], "and the frame rides"
+    assert feed.status(2.02).startswith("anchor lidar; lidar fresh")
+
+
+def test_nothing_fresh_holds_a_stale_rider_is_dropped_and_an_uncovered_one_waits() -> None:
+    feed = SourceFeed(SourceRegistry(enabled=[LIDAR, DEPTH]))
+    history = driving(5.1)
+    assert feed.anchor(0.0) is None and feed.take(history, 0.0) is None
+    assert feed.picture(0.0) is None
+    assert feed.status(0.0) == (
+        "holding map->odom: no fresh source; lidar absent, depth absent, contact off"
+    )
+    feed.offer(DEPTH, scan(0.0))
+    assert feed.anchor(5.0) is None and feed.picture(5.0) is not None, "the last picture heard"
+    assert feed.status(5.0).startswith("holding map->odom: no fresh source; lidar absent")
+    feed.offer(DEPTH, scan(3.5))  # older than the camera's stale_after_s beside the anchor
+    feed.offer(LIDAR, scan(5.0))
+    assert feed.take(history, 5.02) is not None
+    assert feed.gather(LIDAR, 5.0, history) == [] and feed.report().dropped[DEPTH] == 1
+    feed.offer(DEPTH, scan(5.2))  # newer than the odometry: not carried yet, not dropped
+    feed.offer(LIDAR, scan(5.1))
+    assert feed.take(history, 5.12) is not None and feed.gather(LIDAR, 5.1, history) == []
+    history.add(5.3, Pose2D(2.65, 0.0, 0.0))
+    feed.offer(LIDAR, scan(5.2))
+    assert feed.take(history, 5.22) is not None
+    assert [r.source for r in feed.gather(LIDAR, 5.2, history)] == [DEPTH]
+    feed.offer(CONTACT, scan(5.2))  # the flag has it off: heard, never anchored, never a rider
+    assert feed.anchor(5.22) == LIDAR and feed.gather(LIDAR, 5.2, history) == []
+    assert "contact off" in feed.status(5.22)
+
+
+def test_the_sources_flag_moves_the_anchor_without_a_restart() -> None:
+    feed = SourceFeed(SourceRegistry(enabled=[DEPTH]))
+    feed.offer(LIDAR, scan(1.0))
+    feed.offer(DEPTH, scan(1.0))
+    assert feed.anchor(1.02) == DEPTH, "the lidar arrives but the flag has it off"
+    feed.registry.enable([LIDAR, DEPTH])
+    assert feed.anchor(1.02) == LIDAR
+    feed.registry.enable([DEPTH, CONTACT])
+    feed.offer(CONTACT, scan(1.01))
+    assert feed.anchor(1.02) == DEPTH, "two fans alike: the roster's first while it is fresh"
+    assert feed.anchor(2.005) == CONTACT, "the depth fan a moment too old: the other one"
+    assert feed.picture(2.005) is not None and feed.picture(2.005).stamp == 1.01

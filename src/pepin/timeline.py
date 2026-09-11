@@ -243,6 +243,13 @@ class ScanGate:
             self.stats.expired += 1
         return None
 
+    def drop(self) -> TimedScan | None:
+        """Forget the waiting scan and return it: another source's update took it along, or it
+        aged out beside the anchor (:class:`pepin.sources.SourceFeed`). Not a release and not an
+        expiry: the counters are the caller's."""
+        scan, self._pending = self._pending, None
+        return scan
+
     def report(self) -> GateStats:
         """The counters since the previous report, which are reset."""
         stats, self.stats = self.stats, GateStats()
