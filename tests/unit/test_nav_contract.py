@@ -777,6 +777,25 @@ def test_a_dead_sensor_cannot_stall_a_costmap_that_the_others_still_feed() -> No
             assert params[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
 
 
+def test_a_layer_that_never_clears_forgets_a_source_that_died() -> None:
+    """The other half of expected_update_rate 0.0: a buffer keeps exactly one cloud without
+    observation_persistence and re-applies it at every update forever, so a silent source freezes
+    a phantom (2026-09-11, verified against Nav2 1.3.12's obstacle_layer.cpp). A layer whose
+    sources all mark and never clear cannot erase that phantom by any means — ClearEntireCostmap
+    empties the grid for one cycle and the frozen cloud marks it again — so every source in such
+    a layer must forget. A layer that does clear (the lidar's, the camera's) scrubs its own."""
+    for costmap in ("local_costmap", "global_costmap"):
+        params = _p(costmap)
+        for name in SENSOR_LAYERS:
+            layer = params[name]
+            sources = layer["observation_sources"].split()
+            if any(layer[source].get("clearing") for source in sources):
+                continue
+            for source in sources:
+                persistence = layer[source].get("observation_persistence", 0.0)
+                assert persistence > 0.0, f"{costmap}.{name}.{source} would freeze forever"
+
+
 def test_the_contact_scan_only_marks_and_stays_off_until_it_is_measured() -> None:
     """Where the floor ends is a range the camera's own geometry measures (pepin.contact), and
     the layer that reads it marks only: the scan never says the floor BEHIND a body is free, and

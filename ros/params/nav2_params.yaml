@@ -422,15 +422,23 @@ local_costmap:
         observation_sources: contact_scan
         contact_scan:
           topic: /contact_scan
+          # A buffer without persistence keeps exactly ONE cloud and re-applies it at every
+          # update, forever: a source that goes silent (a laptop stall, a container restart)
+          # freezes a phantom here that nothing can erase — this layer owns no clearing ray, and
+          # even ClearEntireCostmap only empties the grid for one cycle before the frozen cloud
+          # marks it again. One second of persistence lets it die (depth_scan's rule above).
+          observation_persistence: 1.0
           data_type: "LaserScan"
           sensor_frame: base_link
           expected_update_rate: 0.0
           marking: True
           # No clearing, and no ray of its own: this scan says where a body stands on the floor,
           # never that the floor behind it is free — a column whose floor left the band ends on
-          # nothing, which is the false mark the 2 m cap exists for. So its marks live until the
-          # rolling window slides off them (local) or the costmap is cleared (global): one reason
-          # more for the layer to stay off until the numbers are in.
+          # nothing, which is the false mark the 2 m cap exists for. So nothing here erases a
+          # mark: it lives until the rolling window slides off it (local) or the costmap is
+          # cleared (global) — and a clear only holds because of the persistence above, which
+          # empties the buffer a second after the node stops. One reason more for the layer to
+          # stay off until the numbers are in.
           clearing: False
           # inf means "floor seen clear out to the cap". Valid, it would become a point at
           # range_max and, with clearing off, MARK a lethal ring at 2 m; dropped, it does what it
@@ -563,15 +571,23 @@ global_costmap:
         observation_sources: contact_scan
         contact_scan:
           topic: /contact_scan
+          # A buffer without persistence keeps exactly ONE cloud and re-applies it at every
+          # update, forever: a source that goes silent (a laptop stall, a container restart)
+          # freezes a phantom here that nothing can erase — this layer owns no clearing ray, and
+          # even ClearEntireCostmap only empties the grid for one cycle before the frozen cloud
+          # marks it again. One second of persistence lets it die (depth_scan's rule above).
+          observation_persistence: 1.0
           data_type: "LaserScan"
           sensor_frame: base_link
           expected_update_rate: 0.0
           marking: True
           # No clearing, and no ray of its own: this scan says where a body stands on the floor,
           # never that the floor behind it is free — a column whose floor left the band ends on
-          # nothing, which is the false mark the 2 m cap exists for. So its marks live until the
-          # rolling window slides off them (local) or the costmap is cleared (global): one reason
-          # more for the layer to stay off until the numbers are in.
+          # nothing, which is the false mark the 2 m cap exists for. So nothing here erases a
+          # mark: it lives until the rolling window slides off it (local) or the costmap is
+          # cleared (global) — and a clear only holds because of the persistence above, which
+          # empties the buffer a second after the node stops. One reason more for the layer to
+          # stay off until the numbers are in.
           clearing: False
           # inf means "floor seen clear out to the cap". Valid, it would become a point at
           # range_max and, with clearing off, MARK a lethal ring at 2 m; dropped, it does what it
