@@ -9,8 +9,10 @@ recorder. The split is data, so a test can hold it and the launch file merely re
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
+from pathlib import Path
 
 SIDES = ("all", "board", "laptop")
 
@@ -28,6 +30,58 @@ HEARTBEAT_HZ = 2.0
 # the bridge would have cut anything faster — one cap, the base's, passed to it at launch.
 BASE_MAX_LINEAR_M_S = 0.30
 BASE_MAX_ANGULAR_RAD_S = 1.0
+
+
+def config_file(name: str) -> Path:
+    """The path of ``config/<name>`` wherever this library runs: ``$PEPIN_CONFIG_DIR`` when
+    set; else the ``config`` directory beside the ``pepin`` package (the board's container:
+    /ws/pepin_src/config, put there by ros/sync.sh — the container mounts no /ws/config); else
+    the one beside the source tree (a checkout: src/pepin/../../config; the laptop's containers:
+    /ws/config). Raises ``FileNotFoundError`` naming every place looked, never a guess."""
+    import os
+
+    package = Path(__file__).resolve().parent
+    homes = [Path(os.environ["PEPIN_CONFIG_DIR"])] if os.environ.get("PEPIN_CONFIG_DIR") else []
+    homes += [package.parent / "config", package.parents[1] / "config"]
+    for home in homes:
+        if (home / name).is_file():
+            return home / name
+    raise FileNotFoundError(f"config/{name} is in none of {[str(h) for h in homes]}")
+
+
+@dataclass(frozen=True)
+class ImuMount:
+    """Where the IMU chip sits on the cart: base_link -> imu_link from config/imu.json's
+    ``mount`` (metres and degrees; the board's launch publishes it, the laptop's depth node
+    applies it to a reading that is not already in base_link)."""
+
+    x_m: float = 0.0
+    y_m: float = 0.0
+    z_m: float = 0.0
+    roll_deg: float = 0.0
+    pitch_deg: float = 0.0
+    yaw_deg: float = 0.0
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> ImuMount:
+        """Load ``config/imu.json`` (its ``mount`` block; a ``note`` there is for people)."""
+        import json
+
+        with open(path) as f:
+            data = json.load(f)["mount"]
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: float(v) for k, v in data.items() if k in known})
+
+    def transform(self) -> tuple[float, float, float, float, float, float]:
+        """base_link -> imu_link as (x, y, z, roll, pitch, yaw), metres and radians."""
+        return (
+            self.x_m,
+            self.y_m,
+            self.z_m,
+            math.radians(self.roll_deg),
+            math.radians(self.pitch_deg),
+            math.radians(self.yaw_deg),
+        )
 
 
 def nav_nodes(side: str) -> tuple[str, ...]:
@@ -179,15 +233,47 @@ _Names = tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]
 
 
 def _names_regex(names: tuple[str, ...]) -> str:
-    """One anchored regex over ROS names (with their leading slash) for the bridge's allow-list."""
-    return "^/(" + "|".join(sorted(names)) + ")$"
+    """One anchored regex over ROS names (with their leading slash) for the bridge's allow-list.
+    No names at all is a regex no name matches: an empty list could read as "everything"."""
+    return "^/(" + "|".join(sorted(names)) + ")$" if names else "^$"
 
 
-def bridge_allow(side: str) -> dict[str, list[str]]:
-    """The bridge's ``allow`` block for ``side`` ("board" or "laptop"): its own publishers,
-    servers and action servers; the other side's as its subscribers and clients."""
-    board: _Names = (BOARD_PUBLISHES, BOARD_SERVES, BOARD_ACTIONS)
-    laptop: _Names = (LAPTOP_PUBLISHES, LAPTOP_SERVES, LAPTOP_ACTIONS)
+# The bridge's two modes. "split" (ros/thin.sh on): the board keeps the reflexes, the laptop
+# plans and takes goals. "vision" (ros/thin.sh vision): every drive stays on the board and the
+# bridge carries topics only — RTAB-Map and the camera on the laptop, the operator's Foxglove
+# there too — so what the laptop half would publish in the split (the plan, the global costmap)
+# now comes FROM the board, and the laptop side publishes none of it (a topic allowed as a
+# publisher on both sides loops). No services or actions cross in vision mode: actions over the
+# bridge aborted the navigation container ("Failed to accept new goal", 2026-09-10 16:06).
+BRIDGE_MODES = ("split", "vision")
+VISION_BOARD_PUBLISHES = (
+    *BOARD_PUBLISHES,
+    "plan",
+    "local_plan",
+    "global_costmap/costmap",
+    "local_costmap/published_footprint",
+    "goal_pose",
+    "amcl_path",
+)
+VISION_LAPTOP_PUBLISHES = (
+    "rtabmap/map",
+    "rtabmap/mapGraph",
+    "rtabmap/mapPath",
+    "rtabmap/info",
+    "depth_scan",
+)
+
+
+def bridge_allow(side: str, mode: str = "split") -> dict[str, list[str]]:
+    """The bridge's ``allow`` block for ``side`` ("board" or "laptop") in ``mode``: its own
+    publishers, servers and action servers; the other side's as its subscribers and clients."""
+    if mode == "split":
+        board: _Names = (BOARD_PUBLISHES, BOARD_SERVES, BOARD_ACTIONS)
+        laptop: _Names = (LAPTOP_PUBLISHES, LAPTOP_SERVES, LAPTOP_ACTIONS)
+    elif mode == "vision":
+        board, laptop = (VISION_BOARD_PUBLISHES, (), ()), (VISION_LAPTOP_PUBLISHES, (), ())
+    else:
+        raise ValueError(f"a bridge mode is one of {BRIDGE_MODES}, not {mode!r}")
     if side == "board":
         mine, theirs = board, laptop
     elif side == "laptop":
@@ -204,12 +290,31 @@ def bridge_allow(side: str) -> dict[str, list[str]]:
     }
 
 
-def bridge_config(side: str) -> dict[str, object]:
-    """zenoh-bridge-ros2dds's configuration file for ``side`` (its own strict schema: nothing
-    but its keys). Written to ros/zenoh-bridge-<side>.json; a test keeps the files equal to this."""
+def bridge_config(side: str, mode: str = "split") -> dict[str, object]:
+    """zenoh-bridge-ros2dds's configuration file for ``side`` in ``mode`` (its own strict
+    schema: nothing but its keys). Written to ros/<bridge_config_name(side, mode)>; a test
+    keeps the files equal to this."""
     return {
-        "plugins": {"ros2dds": {"allow": bridge_allow(side), "queries_timeout": {"default": 5.0}}}
+        "plugins": {
+            "ros2dds": {"allow": bridge_allow(side, mode), "queries_timeout": {"default": 5.0}}
+        }
     }
+
+
+def bridge_config_name(side: str, mode: str = "split") -> str:
+    """The file under ros/ that carries :func:`bridge_config` for ``side`` and ``mode``: the
+    board's unit reads it as ``$PEPIN_BRIDGE_CONFIG`` (ros/thin.sh sets it with the mode),
+    ros/laptop.sh picks its own by the side the board reports."""
+    if mode not in BRIDGE_MODES:
+        raise ValueError(f"a bridge mode is one of {BRIDGE_MODES}, not {mode!r}")
+    return f"zenoh-bridge-{side}.json" if mode == "split" else f"zenoh-bridge-{side}-vision.json"
+
+
+def bridge_admin_for(side: str) -> str:
+    """The REST admin of the bridge a launch on ``side`` shares a host with: the laptop's
+    bridge container on the Docker network, or the board's on the host network (the board's
+    container runs with ``--network host``)."""
+    return "http://pepin-zenoh:8000" if side == "laptop" else "http://127.0.0.1:8000"
 
 
 def bridge_zid(admin_json: str) -> str | None:
@@ -231,18 +336,50 @@ def bridge_zid(admin_json: str) -> str | None:
 
 
 class BridgeIdentity:
-    """Remembers which bridge the laptop last talked to; says when it is a different one."""
+    """Remembers which bridge the laptop last talked to; says when this half must restart.
 
-    def __init__(self) -> None:
+    Three verdicts, each once: a different id than the last seen (the board's bridge was
+    restarted); no answer for ``silence_s`` after contact (a wedged bridge stays "Up" and
+    answers nothing, 2026-09-09 — the half restarts so it comes back against whatever the
+    unit's liveness check brings up); and the first id seen by a watch that started with no
+    bridge to talk to (its nodes subscribed against nothing: a bridge restarted AFTER the
+    containers breaks exactly those subscriptions, run 0148). A brief silence is not a change.
+    """
+
+    def __init__(self, silence_s: float = 60.0) -> None:
+        self._silence_s = silence_s
         self._zid: str | None = None
+        self._last_answer: float | None = None
+        self._started_blind = False
+        self._polls = 0
 
-    def observe(self, zid: str | None) -> bool:
-        """True once: the first id seen after another one — the board's bridge was restarted.
-        An unreachable bridge (``None``) is not a change; the same id again is not either."""
+    def observe(self, zid: str | None, now: float = 0.0) -> bool:
+        """One poll of the admin (``zid`` or ``None`` when it did not answer) at ``now``
+        seconds: True when this half should restart."""
+        self._polls += 1
         if zid is None:
-            return False
+            if self._polls == 1:
+                self._started_blind = True
+            if self._last_answer is None or now - self._last_answer < self._silence_s:
+                return False
+            self._last_answer = None  # once per silence: the next answer is a first contact
+            return True
         first, self._zid = self._zid, zid
-        return first is not None and first != zid
+        heard_before = self._last_answer is not None
+        self._last_answer = now
+        if first is None:
+            blind, self._started_blind = self._started_blind, False
+            return blind and not heard_before
+        return first != zid
+
+
+def routes_settled(count: int, expected: int | None, stable_s: float, settle_s: float) -> bool:
+    """Whether a new bridge has finished declaring its routes: the count has not moved for
+    ``settle_s`` seconds and is at least half of ``expected`` — the previous bridge's count at
+    first contact, the only measure of "all" there is (a fixed 20 made vision mode, which
+    routes fewer topics, wait out the whole patience). Unknown ``expected``: any route at all."""
+    floor = 1 if expected is None else max(1, expected // 2)
+    return stable_s >= settle_s and count >= floor
 
 
 # Fully qualified names of the ROS nodes the laptop's SLAM launch creates
@@ -257,22 +394,34 @@ LAPTOP_SLAM_NODES = (
 )
 
 
+def nav_container_nodes(side: str) -> tuple[str, ...]:
+    """Fully qualified names of the ROS nodes the Nav2 container on ``side`` creates: the
+    container itself, its lifecycle nodes, the costmap each planner/controller creates inside,
+    the map server with its manager where the map lives, and the navigation manager. What a
+    respawn of the container must see gone from the bridge first (2026-09-11 03:07: respawned
+    within its predecessor's lease, the board's bridge dropped /map and /navigate_to_pose)."""
+    names = [f"/nav2_container_{side}" if side != "all" else "/nav2_container"]
+    names += [f"/{node}" for node in nav_nodes(side)]
+    if "controller_server" in nav_nodes(side):
+        names.append("/local_costmap/local_costmap")
+    if "planner_server" in nav_nodes(side):
+        names.append("/global_costmap/global_costmap")
+    if runs_here(side, "map_server"):
+        names += ["/map_server", "/lifecycle_manager_localization"]
+    names.append(f"/lifecycle_manager_navigation_{side}")
+    return tuple(names)
+
+
 def laptop_launch_nodes(launch: str) -> tuple[str, ...]:
     """Fully qualified names of the ROS nodes the laptop's ``launch`` ("nav" or "slam") creates.
 
-    The navigation half is the planner side's lifecycle nodes in their own container, its
-    manager, the global costmap the planner creates, and the goal server.
+    The navigation half is the planner side's container (:func:`nav_container_nodes`) and the
+    goal server.
     """
     if launch == "slam":
         return LAPTOP_SLAM_NODES
     if launch == "nav":
-        return (
-            *(f"/{node}" for node in LAPTOP_NAV_NODES),
-            "/global_costmap/global_costmap",
-            "/lifecycle_manager_navigation_laptop",
-            "/nav2_container_laptop",
-            "/goal_server",
-        )
+        return (*nav_container_nodes("laptop"), "/goal_server")
     raise ValueError(f"launch must be 'nav' or 'slam', not {launch!r}")
 
 

@@ -1,0 +1,29 @@
+{
+  "plugins": {
+    "ros2dds": {
+      "allow": {
+        "publishers": [
+          "^/(amcl_path|dynamic_obstacles|global_costmap/costmap|goal_pose|imu/data_raw|local_costmap/costmap|local_costmap/published_footprint|local_plan|localization_fit|map|odom|odometry/filtered|pepin/run_status|plan|scan|tf|tf_static|tof/front|tof/left|tof/right|tracker_pose)$"
+        ],
+        "subscribers": [
+          "^/(depth_scan|rtabmap/info|rtabmap/map|rtabmap/mapGraph|rtabmap/mapPath)$"
+        ],
+        "service_servers": [
+          "^$"
+        ],
+        "service_clients": [
+          "^$"
+        ],
+        "action_servers": [
+          "^$"
+        ],
+        "action_clients": [
+          "^$"
+        ]
+      },
+      "queries_timeout": {
+        "default": 5.0
+      }
+    }
+  }
+}

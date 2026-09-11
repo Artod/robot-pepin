@@ -7,12 +7,14 @@ bridge. A separate Python process runs ``base_bridge`` (odometry, TF, /cmd_vel
 to the wheels). Every extra ROS process costs ~140 MB on this 1.5 GB board, so
 composition is not a nicety here.
 
+The sensor mounts are not arguments: base_link -> laser comes from config/lidar.json (the LD19
+hangs upside down, roll pi, yaw -87.5 deg: the calibration's one home, read here through
+pepin.lidar.LidarMount) and base_link -> imu_link from config/imu.json (pepin.deployment
+.ImuMount), both found by pepin.deployment.config_file at launch time — on the board under
+/ws/pepin_src/config, which ros/sync.sh keeps beside the library.
+
 Arguments:
 
-- ``laser_roll`` (default pi): the LD19 hangs upside down; the driver emits a
-  standard counter-clockwise scan for an upright sensor, so a roll of pi mirrors
-  it back. If a wall in front of the cart draws mirrored left/right, pass 0.0.
-- ``laser_yaw`` (default -1.5272 rad = -87.5 deg, from config/lidar.json).
 - ``lidar_port`` (default /dev/lidar), ``lidar_debug`` (default false),
 - ``foxglove`` (default true) and ``foxglove_port`` (default 8765),
 - ``tof`` (default false): the ToF bridge, once Nav2 has a layer that reads it.
@@ -32,14 +34,19 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
-from pepin.deployment import BASE_MAX_ANGULAR_RAD_S, BASE_MAX_LINEAR_M_S
+from pepin.deployment import (
+    BASE_MAX_ANGULAR_RAD_S,
+    BASE_MAX_LINEAR_M_S,
+    ImuMount,
+    config_file,
+)
 from pepin.footprint import hull_box
-from pepin.lidar import MOUNT
+from pepin.lidar import LidarMount
 
-LASER_X, LASER_Y, LASER_Z, LASER_ROLL, _LASER_PITCH, LASER_YAW = MOUNT.transform()
-# The MPU6050 sits flat on the chassis over base_link, Z up and its X arrow forward:
-# no rotation, only the height of the deck it is glued to.
-IMU_X, IMU_Y, IMU_Z = 0.0, 0.0, 0.10
+LASER = LidarMount.from_json(config_file("lidar.json")).transform()
+# The GY-521 sits with its Y axis up (gravity reads +9.8 on Y, 2026-09-07): roll +90 deg maps
+# the chip's Y onto base_link's Z, so its Y gyro is our yaw rate. The numbers live in the file.
+IMU = ImuMount.from_json(config_file("imu.json")).transform()
 # The cart's own body, with 5 cm of margin: returns just outside the exact hull are its own
 # posts and cables, they travel with it, and the costmap turned them into a wall that made
 # every in-place turn "a collision ahead" (measured 2026-09-08: |y| 0.28-0.34 m in 41-71%
@@ -65,10 +72,11 @@ def quaternion(roll: float, pitch: float, yaw: float) -> tuple[float, float, flo
 
 
 def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
-    """Build the container once the launch arguments have values (the quaternion needs numbers)."""
-    roll = float(LaunchConfiguration("laser_roll").perform(context))
-    yaw = float(LaunchConfiguration("laser_yaw").perform(context))
-    qx, qy, qz, qw = quaternion(roll, 0.0, yaw)
+    """Build the container once the launch arguments have values."""
+    laser_x, laser_y, laser_z, laser_roll, laser_pitch, laser_yaw = LASER
+    qx, qy, qz, qw = quaternion(laser_roll, laser_pitch, laser_yaw)
+    imu_x, imu_y, imu_z, imu_roll, imu_pitch, imu_yaw = IMU
+    ix, iy, iz, iw = quaternion(imu_roll, imu_pitch, imu_yaw)
     debug = LaunchConfiguration("lidar_debug").perform(context).lower() == "true"
     port = int(LaunchConfiguration("foxglove_port").perform(context))
     components = [
@@ -124,9 +132,9 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 {
                     "frame_id": "base_link",
                     "child_frame_id": "laser",
-                    "translation.x": LASER_X,
-                    "translation.y": LASER_Y,
-                    "translation.z": LASER_Z,
+                    "translation.x": laser_x,
+                    "translation.y": laser_y,
+                    "translation.z": laser_z,
                     "rotation.x": qx,
                     "rotation.y": qy,
                     "rotation.z": qz,
@@ -151,16 +159,13 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
                     {
                         "frame_id": "base_link",
                         "child_frame_id": "imu_link",
-                        "translation.x": IMU_X,
-                        "translation.y": IMU_Y,
-                        "translation.z": IMU_Z,
-                        # The GY-521 sits with its Y axis up (gravity reads +9.8 on Y,
-                        # 2026-09-07): roll +90 deg maps the chip's Y onto base_link's Z,
-                        # so its Y gyro is our yaw rate.
-                        "rotation.x": 0.7071068,
-                        "rotation.y": 0.0,
-                        "rotation.z": 0.0,
-                        "rotation.w": 0.7071068,
+                        "translation.x": imu_x,
+                        "translation.y": imu_y,
+                        "translation.z": imu_z,
+                        "rotation.x": ix,  # config/imu.json: roll +90 deg, the chip's Y up
+                        "rotation.y": iy,
+                        "rotation.z": iz,
+                        "rotation.w": iw,
                     }
                 ],
             )
@@ -251,8 +256,6 @@ def generate_launch_description() -> LaunchDescription:
     )
     return LaunchDescription(
         [
-            DeclareLaunchArgument("laser_roll", default_value=str(LASER_ROLL)),
-            DeclareLaunchArgument("laser_yaw", default_value=str(LASER_YAW)),
             DeclareLaunchArgument("lidar_port", default_value="/dev/lidar"),
             DeclareLaunchArgument("lidar_debug", default_value="false"),
             DeclareLaunchArgument("foxglove", default_value="true"),

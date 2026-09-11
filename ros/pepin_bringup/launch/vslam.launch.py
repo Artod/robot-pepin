@@ -10,8 +10,9 @@ correction, see pepin_bringup.rtabmap_frame) and never ``map -> odom``, so the t
 localisations coexist; its occupancy grid is the map the tracker will be handed one day.
 
 Arguments: ``board`` (the robot's address for the camera stream), ``database`` (RTAB-Map's
-database; deleted on start while the map is being learnt from scratch), ``bridge_admin`` (the
-laptop bridge's REST admin, asked whether it still lists this launch's previous incarnation).
+database, kept across restarts — a bridge-watch restart must keep the map; a fresh one is the
+operator's call: ``ros/laptop.sh vslam --fresh`` deletes the file before the run), ``bridge_admin``
+(the laptop bridge's REST admin, asked whether it still lists this launch's previous incarnation).
 """
 
 from launch import LaunchDescription
@@ -70,6 +71,30 @@ RTABMAP = {
 }
 
 
+# A node that exits comes back by itself after this pause, so a code change costs one kicked
+# process (ros/laptop.sh kick <module>: SIGINT, the signal the launch itself sends at shutdown)
+# instead of a container restart. A kicked node leaves DDS properly (its main destroys the node
+# and the context, the participant is disposed, the bridge forgets the name at once) and the
+# pause starts at its exit, so the successor never overlaps a ghost. A CRASHED node does (nothing
+# disposed, the name outlives it by the DDS lease, the bridge drops its routes when the ghost
+# expires), so every respawned command starts through a ghost wait of its own name
+# (``_after_ghost``). A container is stopped with SIGINT (ros/laptop.sh, --stop-signal) so the
+# launch shuts its nodes down properly; the ghost wait at the top covers what still lingers.
+# The watches below are not respawned: their exit IS the signal (bridge_watch -> shutdown,
+# ghost_wait -> start the nodes).
+RESPAWN = {"respawn": True, "respawn_delay": 2.0}
+
+
+def _after_ghost(*names: str) -> list:  # type: ignore[type-arg]
+    """A command prefix that waits until the laptop's bridge lists none of ``names`` and then
+    becomes the command (pepin_bringup.ghost_wait; an unreachable admin is not waited for)."""
+    return [
+        "python3 -m pepin_bringup.ghost_wait ",
+        LaunchConfiguration("bridge_admin"),
+        f" {' '.join(names)} --",
+    ]
+
+
 def generate_launch_description() -> LaunchDescription:
     board = LaunchConfiguration("board")
     database = LaunchConfiguration("database")
@@ -96,12 +121,16 @@ def generate_launch_description() -> LaunchDescription:
             ["board:=", board],
         ],
         output="screen",
+        prefix=_after_ghost("/depth_stream"),
+        **RESPAWN,
     )
     # RTAB-Map's loop-closure correction as odom -> rtabmap (pepin_bringup.rtabmap_frame): the
     # voxels and the cart stay together after a closure.
     frame = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.rtabmap_frame"],
         output="screen",
+        prefix=_after_ghost("/rtabmap_frame"),
+        **RESPAWN,
     )
     # The operator's Foxglove connects here for the 3D view: the cloud stays on the laptop and
     # the board's topics arrive over the bridge, so nothing crosses the WiFi twice.
@@ -111,6 +140,8 @@ def generate_launch_description() -> LaunchDescription:
         name="foxglove_bridge",
         output="screen",
         parameters=[{"port": 8765, "address": "0.0.0.0", "send_buffer_limit": 100_000_000}],
+        prefix=_after_ghost("/foxglove_bridge"),
+        **RESPAWN,
     )
     camera = ExecuteProcess(
         cmd=[
@@ -122,6 +153,8 @@ def generate_launch_description() -> LaunchDescription:
             ["board:=", board],
         ],
         output="screen",
+        prefix=_after_ghost("/camera_stream"),
+        **RESPAWN,
     )
     # The same frames fused into one surface (pepin_bringup.depth_fusion): RTAB-Map keeps the
     # graph, the closures and the place recognition; the voxels the operator looks at come from
@@ -129,6 +162,8 @@ def generate_launch_description() -> LaunchDescription:
     fusion = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.depth_fusion"],
         output="screen",
+        prefix=_after_ghost("/depth_fusion"),
+        **RESPAWN,
     )
     rtabmap = Node(
         package="rtabmap_slam",
@@ -139,7 +174,9 @@ def generate_launch_description() -> LaunchDescription:
         # global costmap a second, growing map (2026-09-10 01:00).
         namespace="rtabmap",
         output="screen",
-        arguments=["-d"],  # start from an empty database while the map is being learnt
+        # No "-d": the database is the map, and the bridge watch restarts this container
+        # whenever the board's bridge is new — a launch that wiped it lost the map on every
+        # such restart. An empty start is explicit: ros/laptop.sh vslam --fresh.
         parameters=[
             {
                 "frame_id": "base_link",

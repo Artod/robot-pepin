@@ -4,6 +4,8 @@
 #     git config core.hooksPath .githooks
 set -e
 cd "$(git rev-parse --show-toplevel)"
+echo "pre-commit: shell syntax (ros/*.sh, board/*.sh)"
+for script in ros/*.sh board/*.sh; do bash -n "$script"; done
 echo "pre-commit: ruff"
 uv run ruff check . --quiet
 uv run ruff format --check . --quiet

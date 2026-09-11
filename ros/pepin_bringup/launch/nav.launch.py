@@ -7,8 +7,9 @@ composes map_server, AMCL, planner, controller, behaviors, bt_navigator and the
 velocity smoother into one container at a lower CPU priority than the sensor
 nodes (see robot.launch.py), so a busy planner never starves the lidar.
 
-Arguments: ``map`` (default the flat's lap3 map), ``params_file``, ``bridge_admin`` (the laptop
-bridge's REST admin, for the laptop half's ghost wait) and ``side``:
+Arguments: ``map`` (default the flat's lap3 map), ``params_file``, ``bridge_admin`` (the REST
+admin of the bridge on this host, for the ghost waits; empty = by side, see
+pepin.deployment.bridge_admin_for) and ``side``:
 ``all`` (default) is the whole stack on one machine, as before; ``board`` and ``laptop`` are the
 two halves of the thin-client split — the board keeps the reflexes (controller, behaviours, tree,
 map, tracker) and gets a link watch, the laptop takes the planner and the goal server. The split
@@ -30,11 +31,37 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
-from pepin.deployment import SIDES, autostart_for, laptop_launch_nodes, nav_nodes, runs_here
+from pepin.deployment import (
+    SIDES,
+    autostart_for,
+    bridge_admin_for,
+    laptop_launch_nodes,
+    nav_container_nodes,
+    nav_nodes,
+    runs_here,
+)
+
+# Our own nodes come back by themselves after this pause: a code change costs one kicked process
+# (ros/thin.sh kick <node> on the board, ros/laptop.sh kick <node> here; SIGINT, what the launch
+# sends at shutdown) instead of a stack restart with the bridge and the laptop containers behind
+# it. A kicked node leaves DDS properly and the pause starts at its exit, so its successor never
+# meets its ghost in the bridge; a CRASHED node does (nothing disposed, the name outlives it by
+# the DDS lease, the bridge drops its routes when the ghost expires — the Nav2 container at
+# 2026-09-11 03:07), so every respawned command starts through a ghost wait of its own names
+# (``_after_ghost``). The watches are not respawned: their exit is the signal (bridge_watch ->
+# shutdown, ghost_wait -> start the nodes, link_watch cancels and keeps running).
+RESPAWN = {"respawn": True, "respawn_delay": 2.0}
+
+
+def _after_ghost(admin: str, *names: str) -> str:
+    """A command prefix that waits until the bridge at ``admin`` lists none of ``names`` and
+    then becomes the command (pepin_bringup.ghost_wait; an unreachable admin is not waited for)."""
+    return f"python3 -m pepin_bringup.ghost_wait {admin} {' '.join(names)} --"
 
 
 def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     side = LaunchConfiguration("side").perform(context)
+    admin = LaunchConfiguration("bridge_admin").perform(context) or bridge_admin_for(side)
     params = LaunchConfiguration("params_file")
     map_file = LaunchConfiguration("map")
     to_smoother = [("cmd_vel", "cmd_vel_nav")]
@@ -106,7 +133,9 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         package="rclcpp_components",
         executable="component_container_isolated",
         output="screen",
-        prefix="nice -n 5",  # planning yields to the sensor nodes (nice -10) under load
+        # Planning yields to the sensor nodes (nice -10) under load; the ghost wait keeps the
+        # niceness through its exec.
+        prefix=f"nice -n 5 {_after_ghost(admin, *nav_container_nodes(side))}",
         # A crash of one Nav2 node takes the whole container with it (SIGABRT at a goal,
         # 2026-09-10 16:06: the board drove nothing until a stack restart). Respawned, the
         # container is back in seconds and the laptop's bring-up activates its nodes again.
@@ -122,12 +151,27 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     actions: list = [container]  # type: ignore[type-arg]
     if runs_here(side, "relocalizer"):
         # Kidnapped-robot recovery: the whole map is searched when the scan stops fitting.
-        actions.append(Node(package="pepin_bringup", executable="relocalizer", output="screen"))
+        # Respawned, it re-seeds from /maps/last_pose.json (written every 2 s while the fit is
+        # good): a kick at rest costs the seconds it takes to start, nothing else.
+        actions.append(
+            Node(
+                package="pepin_bringup",
+                executable="relocalizer",
+                output="screen",
+                prefix=_after_ghost(admin, "/relocalizer"),
+                **RESPAWN,
+            )
+        )
     if runs_here(side, "run_recorder"):
         # As a module, like link_watch: the image's console scripts are generated at build time
         # and the sources are mounted over them, so a new executable would need a rebuild.
         actions.append(
-            ExecuteProcess(cmd=["python3", "-m", "pepin_bringup.run_recorder"], output="screen")
+            ExecuteProcess(
+                cmd=["python3", "-m", "pepin_bringup.run_recorder"],
+                output="screen",
+                prefix=_after_ghost(admin, "/run_recorder"),
+                **RESPAWN,
+            )
         )
     if runs_here(side, "goal_server"):
         # Waits for orders on a socket so a goal costs a socket write, not a client boot.
@@ -141,6 +185,8 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 executable="goal_server",
                 output="screen",
                 parameters=[{"places": places, "side": side}],
+                prefix=_after_ghost(admin, "/goal_server"),
+                **RESPAWN,
             )
         )
     if side == "laptop":
@@ -148,13 +194,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         # previous incarnation of this launch (pepin_bringup.ghost_wait), or their routes die
         # with the ghost ten seconds after they were made (2026-09-10, RTAB-Map without /scan).
         ghost_wait = ExecuteProcess(
-            cmd=[
-                "python3",
-                "-m",
-                "pepin_bringup.ghost_wait",
-                LaunchConfiguration("bridge_admin"),
-                *laptop_launch_nodes("nav"),
-            ],
+            cmd=["python3", "-m", "pepin_bringup.ghost_wait", admin, *laptop_launch_nodes("nav")],
             output="screen",
         )
         actions = [
@@ -187,7 +227,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("params_file", default_value="/params/nav2_params.yaml"),
             DeclareLaunchArgument("side", default_value="all", choices=list(SIDES)),
             DeclareLaunchArgument("board", default_value="10.0.0.187"),
-            DeclareLaunchArgument("bridge_admin", default_value="http://pepin-zenoh:8000"),
+            DeclareLaunchArgument("bridge_admin", default_value=""),  # empty: by side
             OpaqueFunction(function=_describe),
         ]
     )

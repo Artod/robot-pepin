@@ -97,12 +97,134 @@ def test_the_laptop_notices_a_new_board_bridge() -> None:
     assert (
         bridge_zid("") is None and bridge_zid("[]") is None and bridge_zid('[{"key":"x"}]') is None
     )
-    seen = BridgeIdentity()
-    assert not seen.observe(None)  # unreachable: not a change
-    assert not seen.observe("a")  # the first bridge seen
-    assert not seen.observe("a") and not seen.observe(None)
-    assert seen.observe("b")  # a new bridge: restart
-    assert not seen.observe("b")
+    seen = BridgeIdentity(silence_s=60.0)
+    assert not seen.observe("a", now=0.0)  # the first bridge seen
+    assert not seen.observe("a", now=5.0) and not seen.observe(None, now=10.0)  # a hiccup
+    assert seen.observe("b", now=15.0)  # a new bridge: restart
+    assert not seen.observe("b", now=20.0)
+
+
+def test_a_silent_bridge_restarts_the_half_once_and_a_blind_start_restarts_on_first_contact() -> (
+    None
+):
+    """A wedged bridge stays "Up" and answers nothing: after a minute of silence the half
+    restarts. A watch that never had a bridge to talk to restarts its half when one appears —
+    its nodes subscribed against nothing, and a bridge that comes AFTER the containers breaks
+    exactly those subscriptions (run 0148). A watch that heard the bridge first does not."""
+    from pepin.deployment import BridgeIdentity
+
+    seen = BridgeIdentity(silence_s=60.0)
+    assert not seen.observe("a", now=0.0)
+    assert not seen.observe(None, now=30.0) and not seen.observe(None, now=59.0)
+    assert seen.observe(None, now=61.0), "a minute of silence: restart"
+    assert not seen.observe(None, now=120.0), "once per silence"
+    blind = BridgeIdentity(silence_s=60.0)
+    assert not blind.observe(None, now=0.0) and not blind.observe(None, now=5.0)
+    assert not blind.observe(None, now=30.0), "no contact yet, and no silence to time"
+    assert blind.observe("a", now=35.0), "the first bridge for a half that started without one"
+    assert not blind.observe("a", now=40.0)
+    heard = BridgeIdentity(silence_s=60.0)
+    assert not heard.observe("a", now=0.0) and not heard.observe("a", now=5.0)
+
+
+def test_the_routes_settle_against_the_bridge_s_own_count_not_a_fixed_number() -> None:
+    """Vision mode routes fewer topics than the fixed 20 and waited the whole patience: the
+    threshold is half of what the previous bridge had at first contact."""
+    from pepin.deployment import routes_settled
+
+    assert routes_settled(count=12, expected=24, stable_s=15.0, settle_s=15.0)
+    assert not routes_settled(count=11, expected=24, stable_s=15.0, settle_s=15.0)
+    assert not routes_settled(count=30, expected=24, stable_s=14.9, settle_s=15.0), "still moving"
+    assert routes_settled(count=1, expected=None, stable_s=15.0, settle_s=15.0), "no reference"
+    assert not routes_settled(count=0, expected=None, stable_s=15.0, settle_s=15.0)
+    assert not routes_settled(count=0, expected=1, stable_s=15.0, settle_s=15.0)
+
+
+def test_the_bridge_s_vision_mode_routes_the_board_s_plan_out_and_nothing_back_but_the_map() -> (
+    None
+):
+    """With the whole drive on the board, the plan and the costmaps the laptop half would have
+    published come from the board; the laptop publishes only its map and depth, so nothing is a
+    publisher on both sides (a loop); no service or action crosses (they aborted the container)."""
+    import re
+
+    from pepin.deployment import (
+        BRIDGE_MODES,
+        VISION_BOARD_PUBLISHES,
+        VISION_LAPTOP_PUBLISHES,
+        bridge_admin_for,
+        bridge_allow,
+        bridge_config,
+        bridge_config_name,
+    )
+
+    board, laptop = bridge_allow("board", "vision"), bridge_allow("laptop", "vision")
+    pub_b, sub_l = re.compile(board["publishers"][0]), re.compile(laptop["subscribers"][0])
+    pub_l, sub_b = re.compile(laptop["publishers"][0]), re.compile(board["subscribers"][0])
+    for name in ("/plan", "/global_costmap/costmap", "/local_plan", "/goal_pose", "/scan", "/tf"):
+        assert pub_b.search(name) and sub_l.search(name), name
+        assert not pub_l.search(name), f"{name} would loop"
+    for name in ("/rtabmap/map", "/depth_scan"):
+        assert pub_l.search(name) and sub_b.search(name), name
+        assert not pub_b.search(name), f"{name} would loop"
+    assert not set(VISION_BOARD_PUBLISHES) & set(VISION_LAPTOP_PUBLISHES)
+    for kind in ("service_servers", "service_clients", "action_servers", "action_clients"):
+        for side in (board, laptop):
+            assert not re.compile(side[kind][0]).search("/navigate_to_pose"), kind
+            assert not re.compile(side[kind][0]).search("/relocalize"), "nothing, not all"
+    assert bridge_config("board", "vision")["plugins"]["ros2dds"]["allow"] == board  # type: ignore[index]
+    assert bridge_allow("board") == bridge_allow("board", "split")
+    assert BRIDGE_MODES == ("split", "vision")
+    assert bridge_config_name("board") == "zenoh-bridge-board.json"
+    assert bridge_config_name("laptop", "vision") == "zenoh-bridge-laptop-vision.json"
+    with pytest.raises(ValueError):
+        bridge_allow("board", "cloud")
+    with pytest.raises(ValueError):
+        bridge_config_name("board", "cloud")
+    assert bridge_admin_for("laptop") == "http://pepin-zenoh:8000"
+    assert bridge_admin_for("board") == bridge_admin_for("all") == "http://127.0.0.1:8000"
+
+
+def test_the_container_s_names_are_the_ones_its_respawn_must_see_gone() -> None:
+    from pepin.deployment import laptop_launch_nodes, nav_container_nodes
+
+    board = nav_container_nodes("board")
+    assert board[0] == "/nav2_container_board" and "/bt_navigator" in board
+    assert "/local_costmap/local_costmap" in board and "/global_costmap/global_costmap" not in board
+    assert "/map_server" in board and "/lifecycle_manager_navigation_board" in board
+    laptop = nav_container_nodes("laptop")
+    assert "/planner_server" in laptop and "/global_costmap/global_costmap" in laptop
+    assert "/map_server" not in laptop and "/controller_server" not in laptop
+    assert set(laptop_launch_nodes("nav")) == set(laptop) | {"/goal_server"}
+    whole = nav_container_nodes("all")
+    assert whole[0] == "/nav2_container" and set(board[1:]) | set(laptop[1:]) <= set(whole) | {
+        "/lifecycle_manager_navigation_board",
+        "/lifecycle_manager_navigation_laptop",
+    }
+
+
+def test_the_mounts_are_read_from_config_wherever_the_library_runs(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """config/imu.json and config/lidar.json are found from a checkout, from a directory named
+    by PEPIN_CONFIG_DIR, and a missing file names every place looked instead of guessing."""
+    import math
+    from pathlib import Path
+
+    from pepin.deployment import ImuMount, config_file
+
+    repo = Path(__file__).resolve().parents[2]
+    monkeypatch.delenv("PEPIN_CONFIG_DIR", raising=False)
+    assert config_file("imu.json") == repo / "config/imu.json"
+    assert config_file("lidar.json") == repo / "config/lidar.json"
+    with pytest.raises(FileNotFoundError, match=r"config/no_such\.json is in none of"):
+        config_file("no_such.json")
+    mount = ImuMount.from_json(config_file("imu.json"))
+    x, y, z, roll, pitch, yaw = mount.transform()
+    assert (x, y, z) == (0.0, 0.0, 0.10) and (pitch, yaw) == (0.0, 0.0)
+    assert math.isclose(roll, math.pi / 2), "the chip's Y up: roll +90 deg"
+    elsewhere = repo / "tests"
+    monkeypatch.setenv("PEPIN_CONFIG_DIR", str(elsewhere))
+    assert config_file("coverage_floor.txt") == elsewhere / "coverage_floor.txt"
+    assert config_file("imu.json") == repo / "config/imu.json", "the override is searched first"
 
 
 def test_a_launch_waits_until_the_bridge_has_forgotten_its_ghost() -> None:
@@ -138,3 +260,33 @@ def test_a_parameter_batch_flips_only_the_known_live_switches() -> None:
         "explained_vote": True,
     }
     assert switch_updates([], ("rest_lock",)) == {}
+
+
+def test_a_string_switch_value_reads_as_python_truth_not_as_its_spelling() -> None:
+    """The switches are declared as bools, so rclpy refuses a string before the callback sees
+    it; should one ever get through, bool() is what applies: "" is off, any other text is on
+    — "off" included."""
+    from pepin.deployment import switch_updates
+
+    batch = [("rest_lock", ""), ("explained_vote", "off")]
+    assert switch_updates(batch, ("rest_lock", "explained_vote")) == {
+        "rest_lock": False,
+        "explained_vote": True,
+    }
+
+
+def test_the_split_keeps_the_plan_on_the_laptop_and_vision_moves_it_to_the_board() -> None:
+    """In the split the laptop plans, so /plan crosses from it and the global costmap crosses
+    from nobody; in vision mode the board plans and both cross from it alone."""
+    import re
+
+    from pepin.deployment import bridge_allow
+
+    def publishes(side: str, mode: str, name: str) -> bool:
+        return re.compile(bridge_allow(side, mode)["publishers"][0]).search(name) is not None
+
+    assert publishes("laptop", "split", "/plan") and not publishes("board", "split", "/plan")
+    for side in ("board", "laptop"):
+        assert not publishes(side, "split", "/global_costmap/costmap")
+    for name in ("/plan", "/global_costmap/costmap"):
+        assert publishes("board", "vision", name) and not publishes("laptop", "vision", name)
