@@ -123,7 +123,7 @@ def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     code, out, err = _main(["where", "nope"], capsys)
     assert code == 2 and out == "" and err.startswith("nope: no node with a flags table")
     code, out, _ = _main(["flag", "neck_state", "neck_tf"], capsys)
-    assert code == 0 and out.startswith("neck_state/neck_tf: bool, default off\n")
+    assert code == 0 and out.startswith("neck_state/neck_tf: bool, default on\n")
     code, _, err = _main(["flag", "neck_state", "gpu"], capsys)
     assert code == 2 and err.startswith("neck_state: no flag gpu; the flags are neck_tf")
     assert _main(["value", "depth_fusion", "min_weight", "3"], capsys)[1] == "3.0\n"

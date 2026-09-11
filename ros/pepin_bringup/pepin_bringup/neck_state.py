@@ -13,15 +13,15 @@ ticks the transform equals the static one, so flipping the switch moves nothing.
 
 Parameters: ``host``/``port`` (the base server, 127.0.0.1:3336), ``poll_hz`` (10), ``config``
 (config/neck.json beside the library, pepin.deployment.config_file); the flag ``neck_tf``
-(:data:`FLAGS`, live, default **off**: the joint states only).
+(:data:`FLAGS`, live, default **on** since 2026-09-11).
 
-``neck_tf`` defaults off because the model is not yet checked against the hardware: the
-reference ticks in config/neck.json are unread (the transform is then the static mount at any
-head pose) and the two servo signs are UNVERIFIED, so a moving head could be reported turning
-the wrong way. Read the ticks, watch the picture while the head moves (config/neck.json says
-exactly how), then ``ros/flags.sh set neck_state neck_tf true`` — and the laptop's camera node
-must be started with ``ros/laptop.sh vslam --neck`` in the same breath, or two nodes publish
-base_link -> camera_link.
+``neck_tf`` defaults on because the model is checked against the hardware: the reference ticks
+in config/neck.json were read at the measured mount pose and both servo signs were verified by
+moving the head by hand while watching /neck/state (config/neck.json says how, and how to redo
+it after the neck is re-assembled). With the reference null again the transform is the static
+mount at any head pose. The laptop's camera node must run with ``ros/laptop.sh vslam --neck``
+whenever this is on, or two nodes publish base_link -> camera_link; ``ros/flags.sh set
+neck_state neck_tf false`` hands the edge back to the laptop's static one.
 """
 
 from __future__ import annotations
@@ -48,12 +48,12 @@ _REPORT_S = 30.0
 _STALE_S = 1.0  # a cached reading older than this (the servo fell silent) is not a pose
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
-# other declaration; their state is printed in every report line. neck_tf defaults off while
-# the model is unchecked against the hardware (see the module docstring).
+# other declaration; their state is printed in every report line. neck_tf defaults on since the
+# model was checked against the hardware (see the module docstring).
 FLAGS = FlagSet(
     Flag(
         "neck_tf",
-        False,
+        True,
         description="base_link -> camera_link is published live from the neck's encoders; the"
         " laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes"
         " publish that edge",
