@@ -33,9 +33,22 @@ TEMPERATURE = 0.1
 PEAK_FLOOR = 0.2
 FIT_FLOOR = 0.1  # a fit below this inflates the covariance no further (a hundredfold)
 COV_RIDGE = 1e-12  # keeps a covariance invertible when a lattice step is zero
-# A match sitting on the window's edge is a bound, not a measurement: the best pose lay outside
-# what was searched. Its covariance is widened by this, so it can only ever be a faint vote.
-EDGE_INFLATION = 100.0
+# A match the window bounded is a bound, not a measurement, and is widened by this so it can
+# only ever be a faint vote. The window bounds a match two ways: the winner sits on the
+# lattice's edge (the best pose lay outside what was searched, :func:`at_edge`), or the
+# likelihood is flat along some direction (:func:`bound_directions`) — there the winner is the
+# lattice's own tie-break toward the guess and the spread about it is the window's, so an
+# un-widened plateau would vote for the prediction as if it had measured it (a review probe,
+# 2026-09-11: a fan blind along a wall out-voted the lidar's edge-bound match by 113 to 80 in
+# information and held a 12 cm slip for seconds). On a fan that sees one wall the plateau is
+# the direction along the wall; on a scan that fits nothing, every direction.
+BOUND_INFLATION = 100.0
+# A direction is a plateau when the likelihood's spread along it is at least this share of a
+# flat surface's (the lattice's uniform second moment about the winner). A likelihood that
+# falls to 1/e only at the window's edge — a drop of one temperature across the half-width —
+# reads 0.70 on the node's 7 position samples, 0.73 on its 13 heading samples and 0.75 in the
+# limit; anything flatter is the window's answer, not the scan's.
+PLATEAU_RATIO = 0.7
 # A measurement this far (Mahalanobis, squared, 3 degrees of freedom) from the surest one
 # does not describe the same pose: chi-square at 99 %. Left out of the fusion, named in
 # ``rejected``. A camera scan of a table top the lidar's map has no wall for matches the map
@@ -56,6 +69,7 @@ class PoseMeasurement:
     stamp: float
     fit: float
     rejected: tuple[str, ...] = ()  # sources a fusion left out for disagreeing (see ``fuse``)
+    edge: bool = False  # the match sat on the window's edge: a bound, the truth lies beyond
 
     @property
     def pose(self) -> Pose2D:
@@ -79,6 +93,7 @@ class PoseMeasurement:
         return (
             f"{self.source} ({self.x:+.2f}, {self.y:+.2f}, {math.degrees(self.yaw):+.1f} deg) "
             f"+- {sx * 100:.1f}/{sy * 100:.1f} cm, {math.degrees(st):.1f} deg, fit {self.fit:.2f}"
+            + (", edge" if self.edge else "")
         )
 
 
@@ -146,11 +161,34 @@ def covariance_from_score_surface(surface: ScoreSurface, fit: float, trust: floa
     their mean: the winner is the pose reported, and on a plateau the truth is anywhere on it),
     plus a lattice step's quantisation (``step^2 / 12``) per axis. A scan that fits equally
     well anywhere along a wall keeps its weight along it and loses it across, which is the
-    anisotropy a fusion needs; a scan that fits nowhere has a flat surface and a wide covariance
-    in every direction, bounded by the window — the window is the prior. The whole matrix is
-    divided by ``max(fit, FIT_FLOOR)^2`` — a poor fit is a wide answer — and by ``trust``, the
-    source's own weight (a camera's depth is not a lidar's range).
+    anisotropy a fusion needs. But a direction the likelihood never falls along inside the
+    window was not measured at all: the window bounded it, and the winner there is the
+    lattice's tie-break toward the guess. Such directions (:func:`bound_directions`), like a
+    winner on the window's edge (:func:`at_edge`), are widened by ``BOUND_INFLATION`` — a
+    scan that fits nowhere, flat everywhere, carries no vote. The whole matrix is divided by
+    ``max(fit, FIT_FLOOR)^2`` — a poor fit is a wide answer — and by ``trust``, the source's
+    own weight (a camera's depth is not a lidar's range).
     """
+    weights, dxy, dtheta = _likelihood(surface)
+    cov = _spread(weights, dxy, dtheta)
+    flat = _bound_directions(cov, dxy, dtheta)
+    step_xy, step_theta = surface.xy_step_m, surface.theta_step
+    cov += np.diag([step_xy**2 / 12.0, step_xy**2 / 12.0, step_theta**2 / 12.0])
+    cov /= max(fit, FIT_FLOOR) ** 2
+    cov /= max(trust, 1e-6)
+    if at_edge(surface):
+        return cov * BOUND_INFLATION
+    for v in flat:
+        # A congruence: the variance along ``v`` grows BOUND_INFLATION-fold, its covariance
+        # with the other directions by the root of that, and the matrix stays positive definite.
+        widen = np.eye(3) + (math.sqrt(BOUND_INFLATION) - 1.0) * np.outer(v, v)
+        cov = widen @ cov @ widen
+    return cov
+
+
+def _likelihood(surface: ScoreSurface) -> tuple[Matrix, Matrix, NDArray[np.float64]]:
+    """Every candidate's likelihood weight (T, P) relative to the winner, with the position
+    offsets (P, 2) and the wrapped heading offsets (T,) about it."""
     denominator = max(surface.n_points, 1) * (surface.top if surface.top > 0.0 else 1.0)
     per_beam = surface.scores / denominator
     best = per_beam[surface.k, surface.i]
@@ -160,6 +198,11 @@ def covariance_from_score_surface(surface: ScoreSurface, fit: float, trust: floa
         np.sin(surface.headings - surface.headings[surface.k]),
         np.cos(surface.headings - surface.headings[surface.k]),
     )
+    return weights, dxy, dtheta
+
+
+def _spread(weights: Matrix, dxy: Matrix, dtheta: NDArray[np.float64]) -> Matrix:
+    """The weighted second moment (3x3 over x, y, yaw) of the candidates about the winner."""
     total = float(weights.sum())
     w_xy = weights.sum(axis=0)  # (P,)
     w_theta = weights.sum(axis=1)  # (T,)
@@ -168,13 +211,33 @@ def covariance_from_score_surface(surface: ScoreSurface, fit: float, trust: floa
     cov[:2, :2] = np.einsum("p,pi,pj->ij", w_xy, dxy, dxy) / total
     cov[2, 2] = float((w_theta * dtheta * dtheta).sum() / total)
     cov[2, :2] = cov[:2, 2] = np.einsum("kp,k,pj->j", weights, dtheta, dxy) / total
-    step_xy, step_theta = surface.xy_step_m, surface.theta_step
-    cov += np.diag([step_xy**2 / 12.0, step_xy**2 / 12.0, step_theta**2 / 12.0])
-    cov /= max(fit, FIT_FLOOR) ** 2
-    cov /= max(trust, 1e-6)
-    if at_edge(surface):
-        cov *= EDGE_INFLATION
     return cov
+
+
+def _bound_directions(
+    spread: Matrix, dxy: Matrix, dtheta: NDArray[np.float64]
+) -> list[NDArray[np.float64]]:
+    """:func:`bound_directions` from the spread and the offsets already in hand."""
+    flat: list[NDArray[np.float64]] = []
+    if len(dxy) > 1:
+        uniform = dxy.T @ dxy / len(dxy)  # a flat surface's second moment about the winner
+        values, vectors = np.linalg.eigh(spread[:2, :2])
+        for value, v in zip(values, vectors.T, strict=True):
+            if value >= PLATEAU_RATIO * float(v @ uniform @ v):
+                flat.append(np.array([v[0], v[1], 0.0]))
+    if len(dtheta) > 1 and spread[2, 2] >= PLATEAU_RATIO * float((dtheta * dtheta).mean()):
+        flat.append(np.array([0.0, 0.0, 1.0]))
+    return flat
+
+
+def bound_directions(surface: ScoreSurface) -> list[NDArray[np.float64]]:
+    """Unit directions in (x, y, yaw) the scan does not resolve inside the window: along each
+    the likelihood's spread is at least ``PLATEAU_RATIO`` of a flat surface's, so the window
+    bounded the answer and the winner is the tie-break toward the guess. The heading is judged
+    on its own; the position along the eigen-directions of its spread, so a wall at any angle
+    to the map's axes is found along itself. Empty for a single-candidate lattice."""
+    weights, dxy, dtheta = _likelihood(surface)
+    return _bound_directions(_spread(weights, dxy, dtheta), dxy, dtheta)
 
 
 def at_edge(surface: ScoreSurface) -> bool:

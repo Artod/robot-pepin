@@ -8,10 +8,11 @@ from synthetic import raycast_room
 from test_localization import PILLAR, furnished_room_map
 
 from pepin.fusion import (
-    EDGE_INFLATION,
+    BOUND_INFLATION,
     FIT_FLOOR,
     PoseMeasurement,
     at_edge,
+    bound_directions,
     covariance_from_score_surface,
     disagreement,
     fuse,
@@ -133,7 +134,7 @@ def test_a_match_on_the_windows_edge_is_a_bound_not_a_measurement() -> None:
     assert at_edge(edge) and (2 * n + 1) ** 2 == len(shifted.positions)
     tight = covariance_from_score_surface(centred, fit=1.0)
     wide = covariance_from_score_surface(edge, fit=1.0)
-    assert wide[0, 0] > EDGE_INFLATION * tight[0, 0] / 4  # the corner's spread plus the inflation
+    assert wide[0, 0] > BOUND_INFLATION * tight[0, 0] / 4  # the corner's spread plus the inflation
     turned = ScoreSurface(
         shifted.scores, shifted.positions, shifted.headings, 0, shifted.i, 100, 1.0
     )
@@ -141,21 +142,70 @@ def test_a_match_on_the_windows_edge_is_a_bound_not_a_measurement() -> None:
 
 
 def test_a_ridge_gives_an_anisotropic_covariance_and_a_peak_a_tight_one() -> None:
+    """Along the ridge the scan resolved nothing inside the window: that axis is a bound,
+    the window's spread widened like an edge; across it the answer is as sharp as a peak's."""
     ridge = covariance_from_score_surface(surface_of(200.0, 0.0, 20.0), fit=1.0)
     sx, sy, _ = np.sqrt(np.diag(ridge))
     assert sy > 3 * sx, f"along the ridge {sy * 100:.1f} cm vs across {sx * 100:.1f} cm"
     plateau = math.sqrt(np.mean(np.arange(-3, 4) ** 2) * 0.03**2 + 0.03**2 / 12)  # the window
-    assert sy == pytest.approx(plateau, rel=0.05)
+    assert sy == pytest.approx(plateau * math.sqrt(BOUND_INFLATION), rel=0.05)
     peak = covariance_from_score_surface(surface_of(200.0, 200.0, 20.0), fit=1.0)
     px, py, _ = np.sqrt(np.diag(peak))
     assert px == pytest.approx(sx) and py == pytest.approx(sx)
     assert abs(ridge[0, 1]) < 1e-9  # axis-aligned ridge: no correlation
+    (along,) = bound_directions(surface_of(200.0, 0.0, 20.0))
+    assert np.allclose(np.abs(along), [0.0, 1.0, 0.0])
+    assert bound_directions(surface_of(200.0, 200.0, 20.0)) == []
 
 
 def test_a_flat_surface_is_a_wide_answer_in_every_direction() -> None:
+    """A scan that fits nothing: flat everywhere, a bound in every direction, no vote."""
     flat = covariance_from_score_surface(surface_of(0.0, 0.0, 0.0), fit=1.0)
     sx, sy, st = np.sqrt(np.diag(flat))
-    assert sx == pytest.approx(sy) and sx > 0.05 and st > math.radians(4.0)
+    assert sx == pytest.approx(sy) and sx > 0.5 and st > math.radians(40.0)
+    assert len(bound_directions(surface_of(0.0, 0.0, 0.0))) == 3
+
+
+def diagonal_ridge(across_sharp: float) -> ScoreSurface:
+    """A peak flat along the map's (1, 1) diagonal — a wall at 45 degrees to the axes — whose
+    score falls by ``across_sharp`` per metre squared across it."""
+    n = round(WINDOW.xy_m / WINDOW.xy_step_m)
+    offsets = np.arange(-n, n + 1) * WINDOW.xy_step_m
+    m = round(WINDOW.theta_deg / WINDOW.theta_step_deg)
+    headings = np.radians(np.arange(-m, m + 1) * WINDOW.theta_step_deg)
+    scores = np.empty((len(headings), len(offsets) ** 2))
+    for k, th in enumerate(headings):
+        p = 0
+        for dx in offsets:
+            for dy in offsets:
+                scores[k, p] = 1.0 - across_sharp * ((dx - dy) / math.sqrt(2.0)) ** 2 - 20.0 * th**2
+                p += 1
+    return lattice(scores)
+
+
+def test_a_plateau_is_a_bound_the_tie_break_toward_the_guess_measures_nothing() -> None:
+    """A wall at any angle: the direction along it is found by the spread's own eigenvectors,
+    widened like an edge, while across it the answer stays sharp. The threshold is the
+    temperature: a likelihood that falls to 1/e only at the window's edge is a plateau, one
+    that falls twice as fast is resolved. The heading is judged the same way."""
+    (along,) = bound_directions(diagonal_ridge(200.0))
+    assert np.allclose(np.abs(along), [1.0, 1.0, 0.0] / np.sqrt(2.0))
+    cov = covariance_from_score_surface(diagonal_ridge(200.0), fit=1.0)
+    u, v = np.array([1.0, 1.0, 0.0]) / math.sqrt(2.0), np.array([1.0, -1.0, 0.0]) / math.sqrt(2.0)
+    assert u @ cov @ u > BOUND_INFLATION / 2 * (v @ cov @ v)
+    assert np.all(np.linalg.eigvalsh(cov) > 0.0)  # widened by congruence: still a covariance
+    # 1 - 12.35 * 0.09^2 = 0.9: the score drops by one temperature (a tenth) at the edge
+    assert len(bound_directions(surface_of(200.0, 12.0, 20.0))) == 1  # flatter: a plateau
+    assert bound_directions(surface_of(200.0, 30.0, 20.0)) == []  # steeper: resolved
+    (turn,) = bound_directions(surface_of(200.0, 200.0, 0.0))
+    assert np.allclose(turn, [0.0, 0.0, 1.0])
+    st = covariance_from_score_surface(surface_of(200.0, 200.0, 0.0), fit=1.0)[2, 2]
+    assert (
+        st
+        > BOUND_INFLATION
+        / 2
+        * covariance_from_score_surface(surface_of(200.0, 200.0, 20.0), fit=1.0)[2, 2]
+    )
 
 
 def test_a_poor_fit_and_a_low_trust_inflate_the_covariance() -> None:
