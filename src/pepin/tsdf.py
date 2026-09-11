@@ -12,7 +12,9 @@ crosses zero, read out at sub-voxel positions between neighbouring voxels.
 Frame-to-model: before a frame is integrated, its points in the lidar's height band — exact by
 construction, the lidar's own beams set them (``pepin.depth``) — are turned about the cart by a
 few candidate yaws and scored against the model; the best turn corrects the pose the frame is
-integrated with. The tracker's heading jitter at rest thus never reaches the model.
+integrated with. The tracker's heading jitter at rest thus never reaches the model. The frame
+is placed by TF at its own stamp, nothing else: a smoothed copy of the tracker's correction was
+tried and lagged behind a drive across the room (2026-09-11).
 """
 
 from __future__ import annotations
@@ -20,7 +22,9 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -29,6 +33,8 @@ from pepin.depth import NEAR_M, Intrinsics
 
 Array = npt.NDArray[np.float64]
 Float32 = npt.NDArray[np.float32]
+Floats = npt.NDArray[np.floating[Any]]
+Uint8 = npt.NDArray[np.uint8]
 
 
 @dataclass(frozen=True)
@@ -60,9 +66,9 @@ class GridSpec:
             weight_cap=float(data["weight_cap"]),
         )
 
-    def observation_weight(self, depth: Array) -> Array:
+    def observation_weight(self, depth: Floats) -> Floats:
         """How much a measurement at ``depth`` metres counts: (ref / d)^2, capped."""
-        w: Array = np.minimum(self.weight_cap, (self.weight_ref_m / np.maximum(depth, 1e-3)) ** 2)
+        w: Floats = np.minimum(self.weight_cap, (self.weight_ref_m / np.maximum(depth, 1e-3)) ** 2)
         return w
 
 
@@ -74,6 +80,7 @@ class RigidPose:
     translation: Array
 
     def inverse(self) -> RigidPose:
+        """The same transform the other way (frame <- map)."""
         r = self.rotation.T
         return RigidPose(r, -(r @ self.translation))
 
@@ -87,12 +94,15 @@ class RigidPose:
         return RigidPose(rz @ self.rotation, t)
 
 
-def backproject(depth: Array, intr: Intrinsics, stride: int = 1) -> Array:
+def backproject(
+    depth: Array, intr: Intrinsics, stride: int = 1, range_max: float = math.inf
+) -> Array:
     """The depth image as (n, 3) points in the optical frame (x right, y down, z forward),
-    every ``stride``-th pixel, only finite depths beyond the lens."""
+    every ``stride``-th pixel, only finite depths beyond the lens and within ``range_max``
+    (the model integrates nothing farther, so farther points can never be on known ground)."""
     d = np.asarray(depth, dtype=float)[::stride, ::stride]
     rows, cols = np.mgrid[0 : depth.shape[0] : stride, 0 : depth.shape[1] : stride]
-    ok = np.isfinite(d) & (d > NEAR_M)
+    ok = np.isfinite(d) & (d > NEAR_M) & (d <= range_max)
     z = d[ok]
     x = (cols[ok] - intr.cx) / intr.fx * z
     y = (rows[ok] - intr.cy) / intr.fy * z
@@ -108,34 +118,56 @@ class Tsdf:
         nx, ny, nz = spec.shape
         self.sdf: Float32 = np.ones((nx, ny, nz), dtype=np.float32)  # in truncation units
         self.weight: Float32 = np.zeros((nx, ny, nz), dtype=np.float32)
-        self.rgb: Float32 = np.zeros((nx, ny, nz, 3), dtype=np.float32)
+        self.rgb: Uint8 = np.zeros((nx, ny, nz, 3), dtype=np.uint8)
+        # colour has its own weight: a voxel seen as free space for a while and then as a wall
+        # would otherwise start its colour from black
+        self.colour_weight: Float32 = np.zeros((nx, ny, nz), dtype=np.float32)
 
     def snapshot(self) -> Tsdf:
-        """A copy of the model's arrays: read the surface from it while the original keeps
-        integrating."""
+        """A copy of what ``surface`` reads (field, weight, colour): read the surface from it
+        while the original keeps integrating."""
         twin = Tsdf.__new__(Tsdf)
         twin.spec = self.spec
         twin.sdf, twin.weight, twin.rgb = self.sdf.copy(), self.weight.copy(), self.rgb.copy()
         return twin
 
     # ---- geometry helpers ----------------------------------------------------------------
-    def _index_box(self, centre: Array, radius: float) -> tuple[slice, slice, slice] | None:
-        """Voxel index ranges within ``radius`` metres of ``centre``, clipped to the grid."""
+    def _index_box(self, lo_m: Array, hi_m: Array) -> tuple[slice, slice, slice] | None:
+        """Voxel index ranges of the box ``lo_m``..``hi_m`` (map metres), clipped to the grid;
+        ``None`` when the box misses the grid."""
         s = self.spec
-        lo = np.floor((centre - radius - np.array(s.origin)) / s.voxel_m).astype(int)
-        hi = np.ceil((centre + radius - np.array(s.origin)) / s.voxel_m).astype(int) + 1
+        origin = np.array(s.origin)
+        lo = np.floor((lo_m - origin) / s.voxel_m).astype(int) - 1
+        hi = np.ceil((hi_m - origin) / s.voxel_m).astype(int) + 1
         lo = np.maximum(lo, 0)
         hi = np.minimum(hi, np.array(s.shape))
         if np.any(hi <= lo):
             return None
         return slice(lo[0], hi[0]), slice(lo[1], hi[1]), slice(lo[2], hi[2])
 
-    def _centres(self, box: tuple[slice, slice, slice]) -> Array:
+    def _frustum_box(self, intr: Intrinsics, pose: RigidPose) -> tuple[slice, slice, slice] | None:
+        """The voxels a frame can touch: the bounding box of the camera and its four corner
+        rays at ``range_max`` plus the truncation (a surface at the range limit is felt that
+        far behind it), so a frame integrates its own view, not a 8 m cube around it."""
+        s = self.spec
+        far = s.range_max_m + s.truncation_m
+        us, vs = (-0.5, intr.width - 0.5), (-0.5, intr.height - 0.5)  # the pixels' outer edges
+        corners = np.array(
+            [
+                [(u - intr.cx) / intr.fx * far, (v - intr.cy) / intr.fy * far, far]
+                for u in us
+                for v in vs
+            ]
+        )
+        pts = np.vstack([pose.translation, corners @ pose.rotation.T + pose.translation])
+        return self._index_box(pts.min(axis=0), pts.max(axis=0))
+
+    def _centres(self, box: tuple[slice, slice, slice]) -> Float32:
         s = self.spec
         ix, iy, iz = np.mgrid[box[0], box[1], box[2]]
-        centres: Array = (
-            np.stack([ix, iy, iz], axis=-1).reshape(-1, 3) + 0.5
-        ) * s.voxel_m + np.array(s.origin)
+        centres: Float32 = (
+            (np.stack([ix, iy, iz], axis=-1).reshape(-1, 3) + 0.5) * s.voxel_m + np.array(s.origin)
+        ).astype(np.float32)
         return centres
 
     def voxel_of(self, points_map: Array) -> tuple[Array, Array]:
@@ -148,31 +180,36 @@ class Tsdf:
     # ---- integration ---------------------------------------------------------------------
     def integrate(
         self,
-        depth: Array,
-        rgb: npt.NDArray[np.uint8] | None,
+        depth: Array | Float32,
+        rgb: Uint8 | None,
         intr: Intrinsics,
         pose: RigidPose,
     ) -> int:
         """Fuse one depth frame (metres, optical frame) taken from ``pose`` (map <- optical);
-        returns how many voxels were updated."""
+        returns how many voxels were updated. Colour goes only into voxels within the
+        truncation of the surface, never into the free space a ray crosses on its way."""
         s = self.spec
-        box = self._index_box(pose.translation, s.range_max_m)
+        box = self._frustum_box(intr, pose)
         if box is None:
             return 0
         centres = self._centres(box)
         inv = pose.inverse()
-        cam = centres @ inv.rotation.T + inv.translation  # voxel centres in the optical frame
+        # voxel centres in the optical frame, float32 throughout: a centimetre is 1e-2 of a
+        # metre, far above float32's 1e-7, and the frame is millions of voxels
+        cam = centres @ inv.rotation.T.astype(np.float32) + inv.translation.astype(np.float32)
         z = cam[:, 2]
         front = z > NEAR_M
         with np.errstate(divide="ignore", invalid="ignore"):
             u = np.where(front, intr.fx * cam[:, 0] / z + intr.cx, -1.0)
             v = np.where(front, intr.fy * cam[:, 1] / z + intr.cy, -1.0)
-        ui, vi = np.floor(u).astype(int), np.floor(v).astype(int)
+        # pixel i's ray passes through coordinate i (``backproject``): the nearest pixel, not the
+        # one to the left, or every voxel reads the depth half a pixel aside
+        ui, vi = np.rint(u).astype(int), np.rint(v).astype(int)
         seen = front & (ui >= 0) & (ui < intr.width) & (vi >= 0) & (vi < intr.height)
         if not np.any(seen):
             return 0
-        d = np.full(centres.shape[0], np.nan)
-        d[seen] = np.asarray(depth, dtype=float)[vi[seen], ui[seen]]
+        d = np.full(centres.shape[0], np.nan, dtype=np.float32)
+        d[seen] = np.asarray(depth, dtype=np.float32)[vi[seen], ui[seen]]
         measured = np.isfinite(d) & (d > NEAR_M) & (d <= s.range_max_m)
         sdf = d - z  # positive: the voxel is between the camera and the surface
         touch = measured & (sdf > -s.truncation_m)
@@ -187,21 +224,37 @@ class Tsdf:
         w_old = self.weight[ix, iy, iz]
         w_new = w_old + w_obs
         self.sdf[ix, iy, iz] = (self.sdf[ix, iy, iz] * w_old + t * w_obs) / w_new
-        if rgb is not None:
-            colour = np.asarray(rgb)[vi[touch], ui[touch]].astype(np.float32)
-            self.rgb[ix, iy, iz] = (
-                self.rgb[ix, iy, iz] * w_old[:, None] + colour * w_obs[:, None]
-            ) / w_new[:, None]
         self.weight[ix, iy, iz] = np.minimum(s.max_weight, w_new)
+        if rgb is not None:
+            near = t < 1.0  # within the truncation: the surface itself, not the ray's free run
+            if np.any(near):
+                self._blend_colour(
+                    (ix[near], iy[near], iz[near]),
+                    np.asarray(rgb)[vi[touch][near], ui[touch][near]],
+                    w_obs[near],
+                )
         return int(flat.size)
 
+    def _blend_colour(self, at: tuple[Array, Array, Array], colour: Uint8, w_obs: Float32) -> None:
+        """The colour of the voxels ``at`` moved toward ``colour`` by the same weighted average
+        as the field, on the colour's own weight; blended in float, stored as bytes."""
+        cw_old = self.colour_weight[at]
+        cw_new = cw_old + w_obs
+        old = self.rgb[at].astype(np.float32)
+        mixed = (old * cw_old[:, None] + colour.astype(np.float32) * w_obs[:, None]) / cw_new[
+            :, None
+        ]
+        self.rgb[at] = np.clip(np.rint(mixed), 0, 255).astype(np.uint8)
+        self.colour_weight[at] = np.minimum(self.spec.max_weight, cw_new)
+
     # ---- readout -------------------------------------------------------------------------
-    def surface(self, min_weight: float = 2.0) -> tuple[Array, npt.NDArray[np.uint8]]:
+    def surface(self, min_weight: float = 2.0) -> tuple[Array, Uint8]:
         """Points where the field crosses zero between two weighted neighbours, interpolated
-        to the crossing along each axis: the model's surface as (n, 3) map points and colours."""
+        to the crossing along each axis: the model's surface as (n, 3) map points and colours
+        (each point's colour from the neighbour nearer the surface, the smaller |sdf|)."""
         s = self.spec
         pts: list[Array] = []
-        cols: list[Float32] = []
+        cols: list[Uint8] = []
         known = self.weight >= min_weight
         for axis in range(3):
             a = [slice(None)] * 3
@@ -213,15 +266,19 @@ class Tsdf:
             cross = ka & kb & (np.sign(sa) != np.sign(sb)) & (sa != 0)
             if not np.any(cross):
                 continue
-            idx = np.argwhere(cross).astype(float)
-            frac = sa[cross] / (sa[cross] - sb[cross])
+            ia = np.argwhere(cross)
+            va, vb = sa[cross], sb[cross]
+            frac = va / (va - vb)
+            idx = ia.astype(float)
             idx[:, axis] += frac
             pts.append((idx + 0.5) * s.voxel_m + np.array(s.origin))
-            ia = np.argwhere(cross)
-            cols.append(self.rgb[ia[:, 0], ia[:, 1], ia[:, 2]])
+            ib = ia.copy()
+            ib[:, axis] += 1
+            nearer = np.where((np.abs(vb) < np.abs(va))[:, None], ib, ia)
+            cols.append(self.rgb[nearer[:, 0], nearer[:, 1], nearer[:, 2]])
         if not pts:
             return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.uint8)
-        return np.concatenate(pts), np.clip(np.concatenate(cols), 0, 255).astype(np.uint8)
+        return np.concatenate(pts), np.concatenate(cols)
 
     def fit_per_point(
         self, points_map: Array, min_weight: float = 2.0
@@ -262,13 +319,21 @@ class Tsdf:
         known[inside] = on_ground
         return fit, known
 
-    def score(self, points_map: Array, min_weight: float = 2.0) -> tuple[float, int]:
+    def score(
+        self, points_map: Array, min_weight: float = 2.0, weights: Array | None = None
+    ) -> tuple[float, int]:
         """The mean of ``fit_per_point`` over ALL the points (unknown ones count zero, so a
-        turn that carries points out of the model loses) and how many were on known ground."""
+        turn that carries points out of the model loses), each point counting ``weights``
+        (equal by default), and how many were on known ground."""
         fit, known = self.fit_per_point(points_map, min_weight)
         if fit.size == 0:
             return 0.0, 0
-        return float(fit.mean()), int(known.sum())
+        if weights is None:
+            return float(fit.mean()), int(known.sum())
+        total = float(np.sum(weights))
+        if total <= 0.0:
+            return 0.0, int(known.sum())
+        return float(np.dot(fit, weights) / total), int(known.sum())
 
 
 YAW_SEARCH = tuple(math.radians(d) for d in np.arange(-4.0, 4.01, 0.5))
@@ -276,82 +341,76 @@ ALIGN_MIN_POINTS = 200  # fewer band points on known voxels: the model has nothi
 ALIGN_MIN_GAIN = 0.02  # the best turn must beat "no turn" by this much of the score
 
 
+class AlignReason(StrEnum):
+    """Why ``align_yaw`` answered what it did. Only ALIGNED carries a turn to apply; AT_BOUND
+    is the one answer a frame must not be integrated on."""
+
+    ALIGNED = "aligned"  # a turn inside the search beat no turn: apply it
+    FITS = "fits"  # no turn beats none by the minimum gain: the frame sits on the model
+    UNJUDGED = "unjudged"  # too few band points on known ground: the model cannot judge
+    AT_BOUND = "at_bound"  # the best turn is the search's edge: the truth may lie beyond
+
+
+@dataclass(frozen=True)
+class Alignment:
+    """The verdict of ``align_yaw``: the turn (radians, 0 unless ALIGNED or AT_BOUND), its
+    score gain over no turn, how many band points the model knew at no turn, and the reason."""
+
+    yaw: float
+    gain: float
+    judged: int
+    reason: AlignReason
+
+    @property
+    def aligned(self) -> bool:
+        return self.reason is AlignReason.ALIGNED
+
+
 def align_yaw(
     model: Tsdf,
     band_map: Array,
     pivot_xy: tuple[float, float],
     candidates: tuple[float, ...] = YAW_SEARCH,
-) -> tuple[float, float, int] | None:
-    """The turn about ``pivot_xy`` that seats the frame's band points best on the model:
-    (yaw, score gain over no turn, points on known ground at no turn), parabola-refined
-    between the best three candidates. Every candidate is scored over the whole band, a point
-    off known ground counting zero, so a turn cannot win by dropping points. ``None`` when the
-    model knows too few of the points, when no turn beats none, or when the best candidate is
-    the last one tried (the true turn may lie beyond the search, and a turn to the bound would
-    bake the remainder into the model)."""
+) -> Alignment:
+    """The turn about ``pivot_xy`` that seats the frame's band points best on the model,
+    parabola-refined between the best three candidates (``candidates`` must include no turn).
+
+    Every candidate is scored over the whole band, a point off known ground counting zero, so a
+    turn cannot win by dropping points. Each point counts by its lever arm |p - pivot|: a turn
+    of one degree moves a point 4 m out by 7 cm and one 0.5 m out by 9 mm, so the far wall
+    carries the information about the turn and a sofa beside the cart, which only slides along
+    itself, must not dilute it. The score's peak is a kink (a sum of |sdf| tents), so the
+    parabola's vertex under-reaches it by up to a tenth of a degree — half a centimetre at 3 m.
+    """
+    zero = min(range(len(candidates)), key=lambda i: abs(candidates[i]))
+    if abs(candidates[zero]) > 1e-12:
+        raise ValueError("the yaw candidates must include no turn")
     pivot = np.array([pivot_xy[0], pivot_xy[1], 0.0])
     rel = band_map - pivot
+    lever = np.hypot(rel[:, 0], rel[:, 1])  # unchanged by any turn about the pivot
     scores = []
     judged_at_zero = 0
-    for yaw in candidates:
+    for i, yaw in enumerate(candidates):
         c, s = math.cos(yaw), math.sin(yaw)
         turned = np.stack(
             [c * rel[:, 0] - s * rel[:, 1], s * rel[:, 0] + c * rel[:, 1], rel[:, 2]], axis=1
         )
-        score, n = model.score(turned + pivot)
+        score, n = model.score(turned + pivot, weights=lever)
         scores.append(score)
-        if yaw == 0.0:
+        if i == zero:
             judged_at_zero = n
     if judged_at_zero < ALIGN_MIN_POINTS:
-        return None
+        return Alignment(0.0, 0.0, judged_at_zero, AlignReason.UNJUDGED)
     best = int(np.argmax(scores))
-    zero = candidates.index(0.0) if 0.0 in candidates else best
-    gain = scores[best] - scores[zero]
+    gain = float(scores[best] - scores[zero])
     if gain < ALIGN_MIN_GAIN:
-        return None
+        return Alignment(0.0, gain, judged_at_zero, AlignReason.FITS)
     if best == 0 or best == len(candidates) - 1:
-        return None
+        return Alignment(float(candidates[best]), gain, judged_at_zero, AlignReason.AT_BOUND)
     yaw = candidates[best]
     y0, y1, y2 = scores[best - 1], scores[best], scores[best + 1]
     denom = y0 - 2.0 * y1 + y2
-    if denom < 0.0:  # the vertex of the parabola through the three best
+    if denom < 0.0:  # the vertex of the parabola through the three best: toward the higher side
         step = candidates[best + 1] - candidates[best]
         yaw += 0.5 * (y0 - y2) / denom * step
-    return float(yaw), float(gain), judged_at_zero
-
-
-SLOW_TAU_S = 10.0  # the tracker's map->odom swings +-1.5 deg while the cart turns; frames placed
-# by the smoothed correction keep the gyro's consistency between them (2026-09-11)
-
-
-class SlowCorrection:
-    """The tracker's map->odom correction low-passed: x, y and yaw follow it with a time
-    constant, the first value taken whole. Frames placed by this correction composed with the
-    odometry (gyro-smooth) stay consistent with each other while the tracker's per-match
-    corrections jitter; the frame-to-model alignment absorbs what remains."""
-
-    def __init__(self, tau_s: float = SLOW_TAU_S) -> None:
-        self._tau = tau_s
-        self._pose: RigidPose | None = None
-        self._t: float | None = None
-
-    def observe(self, correction: RigidPose, t: float) -> RigidPose:
-        """Feed the tracker's map<-odom at time ``t`` (s); returns the smoothed one."""
-        if self._pose is None or self._t is None:
-            self._pose, self._t = correction, t
-            return correction
-        k = 1.0 - math.exp(-max(t - self._t, 0.0) / self._tau)
-        old_yaw = math.atan2(self._pose.rotation[1, 0], self._pose.rotation[0, 0])
-        new_yaw = math.atan2(correction.rotation[1, 0], correction.rotation[0, 0])
-        d_yaw = (new_yaw - old_yaw + math.pi) % (2.0 * math.pi) - math.pi
-        yaw = old_yaw + k * d_yaw
-        c, s = math.cos(yaw), math.sin(yaw)
-        rotation = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
-        translation = self._pose.translation + k * (correction.translation - self._pose.translation)
-        self._pose, self._t = RigidPose(rotation, translation), t
-        return self._pose
-
-    @staticmethod
-    def compose(a: RigidPose, b: RigidPose) -> RigidPose:
-        """a then b: (map<-odom) composed with (odom<-camera) gives map<-camera."""
-        return RigidPose(a.rotation @ b.rotation, a.rotation @ b.translation + a.translation)
+    return Alignment(float(yaw), gain, judged_at_zero, AlignReason.ALIGNED)
