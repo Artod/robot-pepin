@@ -403,6 +403,37 @@ def test_a_binding_bound_refits_the_other_parameter_instead_of_clipping_both() -
     assert np.median(refit) < np.median(clipped) and refit[150] < 1e-9
 
 
+def test_a_scale_of_three_and_a_half_is_fitted_and_not_clipped() -> None:
+    """The bound must not be where the data lives. At the lidar mount a tape measured on
+    2026-09-12 the pool asks for a scale of 2-3 and the joint fit overshoots that, which the old
+    ceiling of 3.0 turned into a flat a 3.00 / b -0.200 for every room. A network 3.5x too far
+    is now fitted exactly, with nothing on a bound and nothing to report."""
+    from pepin.depth import A_BOUNDS, at_bound, fit_affine
+
+    z = np.linspace(1.0, 5.0, 400)
+    d = 3.5 * z  # one scale, no shift: the law is a = 3.5, b = 0
+    a, b = fit_affine(d, z)
+    assert a == pytest.approx(3.5, rel=1e-6) and b == pytest.approx(0.0, abs=1e-9)
+    assert a < A_BOUNDS[1], "the honest ask must sit inside the bound, not on it"
+    assert at_bound(a, b) == ""
+
+
+def test_a_clipped_law_says_so_in_the_report_line() -> None:
+    """A law on a bound is a ceiling, not a fit: the node's line must name which parameter hit
+    it instead of printing a round number that reads as measured."""
+    from pepin.depth import A_BOUNDS, B_BOUNDS, at_bound
+    from pepin.depth_pipeline import AffineLaw
+
+    assert at_bound(A_BOUNDS[1], 0.0) == "a"
+    assert at_bound(1.0, B_BOUNDS[0]) == "b"
+    assert at_bound(A_BOUNDS[0], B_BOUNDS[1]) == "a+b"
+    law = AffineLaw()
+    law.seed(A_BOUNDS[1], B_BOUNDS[0])
+    assert "[a+b AT BOUND]" in law.describe()
+    law.seed(2.0, 0.0)
+    assert "AT BOUND" not in law.describe()
+
+
 def test_the_law_is_bounded_and_the_pool_forgets_old_frames() -> None:
     from pepin.depth import A_BOUNDS, B_BOUNDS, AffineScale, fit_affine
 

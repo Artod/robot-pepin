@@ -430,9 +430,34 @@ MIN_DEPTH_SPREAD = 2.5  # the pooled depths' 95th / 5th percentile must reach th
 POOL_FRAMES = 600  # frames whose beams are pooled for the fit: minutes of views, so the law is
 # the map's, not the view's — a 30-frame pool slid with the heading and layered a far wall
 POOL_MIN_SAMPLES = 200  # pairs before a shift is fitted, and before any depth is published
-A_BOUNDS = (0.3, 3.0)  # 1 / scale: the network is never off by more than this
+A_BOUNDS = (0.3, 5.0)  # 1 / scale: the network is never off by more than this. The old 3.0 was
+# not a physical limit, it was a ceiling the data hit: with the lidar's beams placed at the
+# measured mount the pool asks a ~= 2-3 and the joint fit overshoots it, so the fit saturated at
+# 3.00 with b pinned at -0.200 and stopped being a fit at all (scratch/lidar_height_check.py,
+# 2026-09-12). The rulers that never hear of the lidar — the wall planes and the floor plane —
+# read the network 2.0-2.3x too far, so 5.0 is better than twice the largest honest ask and still
+# refuses a pool that has gone degenerate. A law that lands on a bound says so in the report line
+# (:func:`at_bound`); it is a symptom to read, not a number to trust. Measured on run 0171
+# (scratch/lidar_height_fix_report.py): a is fitted at 2.80 instead of pinned at 3.00, and the
+# fused band's distance to the lidar reads 5.2 cm against the clipped law's 3.8 — the clipped law
+# was the closer of the two by luck, not by fit, and b still lands on B_BOUNDS at -0.200, which is
+# the next bound to question and was left alone here.
 B_BOUNDS = (-0.2, 0.2)  # 1/m: a shift beyond this is a broken fit, not a lens
 LAW_MAX_AGE_S = 24 * 3600.0  # a saved law older than this is another day's room and lighting
+
+
+def at_bound(a: float, b: float) -> str:
+    """Which of the law's parameters sits on its bound — ``"a"``, ``"b"``, ``"a+b"`` or ``""``.
+
+    A clipped law is not a fit: the pool asked for more than a lens and a network are allowed to
+    be off by, and the report line must say so rather than print a round 3.00 that reads as
+    measured. Empty when the law is inside both bounds."""
+    names = []
+    if a <= A_BOUNDS[0] or a >= A_BOUNDS[1]:
+        names.append("a")
+    if b <= B_BOUNDS[0] or b >= B_BOUNDS[1]:
+        names.append("b")
+    return "+".join(names)
 
 
 def beam_hits(

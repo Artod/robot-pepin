@@ -60,6 +60,7 @@ from pepin.depth import (
     Intrinsics,
     Mask,
     apply_affine,
+    at_bound,
     beam_hits,
     drop_edges,
     edge_mask,
@@ -560,8 +561,13 @@ class AffineLaw(LawStage):
         return apply_affine(depth, self.a, self.b)
 
     def describe(self) -> str:
+        """The law for the report line: its two numbers, the pairs behind them, where they came
+        from, and — when a parameter sits on its bound — that the pool asked for more than the
+        bounds allow, so the number is a ceiling and not a fit."""
         source = "" if self.fitted else " (seed)" if self._seeded else " (none yet)"
-        return f"a {self.a:.2f} b {self.b:+.3f} on {self.pooled} pairs{source}"
+        clipped = at_bound(self.a, self.b)
+        edge = f" [{clipped} AT BOUND]" if clipped else ""
+        return f"a {self.a:.2f} b {self.b:+.3f} on {self.pooled} pairs{source}{edge}"
 
 
 class FloorGeometry:
