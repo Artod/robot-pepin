@@ -43,8 +43,9 @@ service answers; the report line says which.
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): one per stage of
 the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anchor``,
-``affine_law``, ``wall_correct``, ``floor_anchor`` — and ``depth_backend``; their state is
-printed in every report line.
+``affine_law``, ``wall_correct``, ``floor_anchor`` — plus ``depth_backend`` and
+``scale_ceiling``, the largest 1 / scale the law may be fitted to; their state is printed in
+every report line.
 """
 
 from __future__ import annotations
@@ -67,6 +68,7 @@ from sensor_msgs.msg import CameraInfo, Image, Imu, LaserScan
 from pepin.camera import CameraConfig, intrinsics, mount_transform
 from pepin.depth import (
     POOL_MIN_SAMPLES,
+    SCALE_CEILING,
     SCAN_WINDOW_S,
     UP_LEVEL,
     Array,
@@ -79,6 +81,7 @@ from pepin.depth import (
     optical_heading,
     save_law,
     scan_points,
+    set_scale_ceiling,
     to_base,
 )
 from pepin.depth_pipeline import AffineLaw, FrameContext, standard_pipeline
@@ -182,6 +185,15 @@ FLAGS = FlagSet(
         " (the laptop's GPU service, ros/depth_host.sh), auto (the service while it answers, the"
         " CPU model while it does not)",
     ),
+    Flag(
+        "scale_ceiling",
+        SCALE_CEILING,
+        range=(0.5, 20.0),
+        description="the largest 1 / scale the law may be fitted to (pepin.depth.A_BOUNDS'"
+        " upper half): raising it from the 3.0 the fit used to saturate at is what stopped the"
+        " law from being a clipped constant once the lidar's plane was measured. Set it back to"
+        " 3.0 to compare the two laws in the field; a law that lands on a bound prints AT BOUND",
+    ),
 )
 FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
 
@@ -263,6 +275,7 @@ class DepthStream(Node):
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         for name in self._pipeline.names:  # a launch override reaches the stage it names
             self._pipeline.set(name, self._switches.on(name))
+        set_scale_ceiling(float(self._switches["scale_ceiling"]))  # and the law's bound
         self._imu_mount = self._imu_rotation(config.parent)
         self._tilt: Tilt | None = None
         self._tally = Tally(STAGES)
@@ -301,10 +314,12 @@ class DepthStream(Node):
         self._tf.close()
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
-        """A flag changed: ``depth_backend`` is the switch's mode, a stage's flag switches
-        that stage of the pipeline."""
+        """A flag changed: ``depth_backend`` is the switch's mode, ``scale_ceiling`` the law's
+        upper bound, a stage's flag switches that stage of the pipeline."""
         if name == "depth_backend":
             self._net.mode = str(new)
+        elif name == "scale_ceiling":
+            set_scale_ceiling(float(new))  # the next fit is bounded by it; the law in hand is not
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
 

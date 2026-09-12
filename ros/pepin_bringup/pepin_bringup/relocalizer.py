@@ -52,7 +52,7 @@ from std_srvs.srv import Trigger
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformBroadcaster
 
-from pepin.dynamic import StaticMask, berth_for, dynamic_marks, occluded
+from pepin.dynamic import StaticMask, berth_for, dynamic_marks, occluded, toe_reach_m
 from pepin.flags import Flag, FlagSet
 from pepin.localization import Localizer
 from pepin.mapping import GridSpec, OccupancyGrid
@@ -148,7 +148,25 @@ FLAGS = FlagSet(
         description="fuse every enabled source's match by its information; off: the widest"
         " source corrects alone and the others only report",
     ),
+    Flag(
+        "toe_reach",
+        toe_reach_m(),
+        range=(0.0, 0.60),
+        description="how far past the leg the lidar sees a standing person's toe reaches,"
+        " metres: the term the dynamic rings are sized on (pepin.dynamic.berth_for). The"
+        " default is computed from the lidar's mount (config/lidar.json); set it to compare"
+        " berths in the field without a restart",
+    ),
+    Flag(
+        "near_rings",
+        True,
+        description="a return is ringed as soon as it clears the cart's own outline, and only"
+        " the marks that would land on that outline are dropped; off, nothing within the ring"
+        " plus the outline is ringed at all — the older rule, whose blind disc grows with the"
+        " ring (a 7 cm wider ring stops ringing a person at 0.90 m)",
+    ),
 )
+BERTH_FLAGS = ("toe_reach", "near_rings")  # the flags that resize the berth, not the tracker
 
 
 class _RosLogHandler(logging.Handler):
@@ -259,7 +277,8 @@ class Relocalizer(Node):
         self._static_mask: StaticMask | None = None
         self._dynamic_pub = self.create_publisher(PointCloud2, "/dynamic_obstacles", 5)
         self._dynamic_count = 0  # marks published since the last report
-        self._berth = berth_for("GridBased")  # until the goal server says who plans
+        self._planner_id = "GridBased"  # until the goal server says who plans
+        self._berth = berth_for(self._planner_id)  # resized once the switches exist
         self.create_subscription(
             String,
             "planner_selector",
@@ -358,6 +377,7 @@ class Relocalizer(Node):
         # declarations too, and it refuses everything that is not a flag.
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._registry.enable(self._switches["sources"])
+        self._resize_berth()
         self.get_logger().info("relocalizer up: watching the scan-to-map fit")
 
     # -- inputs -------------------------------------------------------------
@@ -367,11 +387,28 @@ class Relocalizer(Node):
         return float(self.get_clock().now().nanoseconds) * 1e-9
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
-        """A flag changed (``ros2 param set``): it is the Localizer's own switch, written
-        through at once so the next scan is matched with it (``sources`` reaches the roster
-        the feed shares with it, so the anchor moves with the flag)."""
+        """A flag changed (``ros2 param set``): a berth flag resizes the rings around new
+        objects at once, every other one is the Localizer's own switch, written through so the
+        next scan is matched with it (``sources`` reaches the roster the feed shares with it,
+        so the anchor moves with the flag)."""
+        if name in BERTH_FLAGS:
+            self._resize_berth()  # the switches already hold the new value
+            return
         if self._localizer is not None:
             self._localizer.switch(name, new)
+
+    def _resize_berth(self) -> None:
+        """Rebuild the berth around new objects from the planner in charge and the berth flags,
+        and log the two distances it comes down to."""
+        self._berth = berth_for(
+            self._planner_id,
+            reach_m=float(self._switches["toe_reach"]),
+            near_rings=bool(self._switches["near_rings"]),
+        )
+        self.get_logger().info(
+            f"planner {self._planner_id}: dynamic rings {self._berth.ring_m:.2f} m, none within"
+            f" {self._berth.near_m:.2f} m, marks trimmed within {self._berth.trim_m:.2f} m"
+        )
 
     def _on_map(self, msg: OccupancyGridMsg) -> None:
         self._grid = grid_from_msg(msg)
@@ -388,6 +425,8 @@ class Relocalizer(Node):
         self._map_id = f"{msg.info.width}x{msg.info.height}@{origin.x:.2f},{origin.y:.2f}"
         flags = self._switches.flags.as_dict()
         self._registry.enable(flags.pop("sources"))  # the roster is the feed's and the tracker's
+        for name in BERTH_FLAGS:  # the rings around new objects, not switches of the tracker
+            flags.pop(name)
         self._localizer = Localizer(
             self._grid,
             self._last_known_pose(),  # a restart is not a trip back to the base
@@ -625,11 +664,8 @@ class Relocalizer(Node):
     def _on_planner(self, msg: String) -> None:
         """The berth around new objects depends on who plans: a footprint planner brings the
         hull itself, a point planner needs it in the ring (pepin.dynamic.berth_for)."""
-        self._berth = berth_for(msg.data)
-        self.get_logger().info(
-            f"planner {msg.data}: dynamic rings {self._berth.ring_m:.2f} m, "
-            f"none within {self._berth.near_m:.2f} m"
-        )
+        self._planner_id = msg.data
+        self._resize_berth()
 
     def _publish_dynamic(self, points: Any, pose: Pose2D, stamp_s: float) -> None:
         """Lethal rings around the returns the map does not explain, in the map frame.
@@ -691,7 +727,9 @@ class Relocalizer(Node):
             f"failed {self._deskew_failed}; {loc.settings()}; {track.summary()}; "
             f"sources: {self._feed.status(self._now_s())}; "
             f"watch {'fit' if self._watch_on else 'off: no full-turn source, fit'} "
-            f"{self.fit:.2f}, dynamic marks {self._dynamic_count}, "
+            f"{self.fit:.2f}, dynamic marks {self._dynamic_count} "
+            f"(rings {self._berth.ring_m:.2f} m from {self._berth.near_m:.2f} m out, trimmed "
+            f"within {self._berth.trim_m:.2f} m), "
             f"scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
             f"flags: {self._switches.state()}"
         )
