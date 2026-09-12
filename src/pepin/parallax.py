@@ -33,6 +33,18 @@ parallax either whatever the baseline; and the odometry's own error is the floor
 depth here, so a 2 cm baseline error on a 15 cm baseline is 13 % on every depth it yields.
 The module is pure numpy and OpenCV: no ROS, no pipeline, and cv2 is imported inside
 :func:`match` so a test that never tracks never pays for it.
+
+Measured on runs 0171 and 0165 against the lidar's own ranges
+(scratch/parallax_vs_lidar.py / .txt, 2026-09-12): 3-5 ms a frame at 640x360, 30-190 pairs on a
+frame where the cart really stepped, spread over the whole picture (41-56 % in the bottom third,
+10-23 % in the top, against the lidar's single row). The depth itself is as good as the step,
+and on those two runs the cart crawls: at a 0.5 s gap the median perpendicular baseline is
+2.9 cm, only 8 of 29 frame pairs carry 5 cm of odometry, and what survives the gates is 10-35 %
+too far with a +-25 % band — the same band the odometry's own step has against the tracker's
+(0.79-1.26 on 0171, 0.56-1.24 on 0165), which multiplies every parallax depth one for one. The
+weights already know this: a 3 cm baseline weighs 0.02 of a lidar beam, a 15 cm one 0.4. Two
+things not measured there would move it: a calibrated focal length (the depth is proportional
+to fx and the optics are still the nominal 78 degree guess) and a run at driving speed.
 """
 
 from __future__ import annotations
@@ -69,7 +81,17 @@ DISPARITY_SIGMA_PX = 0.5  # what the flow knows a corner's place to
 LIDAR_SIGMA_INV = 0.005  # 1/m: a lidar beam's inverse-depth noise (2 cm at 2 m), the weight's 1
 MAX_WEIGHT = 1.0  # no parallax pair outweighs a lidar beam
 
-REASONS = ("still", "rotation-only", "flow", "epipolar", "behind", "parallax", "epipole", "reproj")
+REASONS = (
+    "still",
+    "rotation-only",
+    "flow",
+    "outside",
+    "epipolar",
+    "behind",
+    "parallax",
+    "epipole",
+    "reproj",
+)
 
 
 @dataclass(frozen=True)
@@ -350,7 +372,8 @@ def parallax_truth(
 
     The gates, in the order a point meets them: the motion itself (nothing under
     ``min_baseline_m`` of travel can triangulate — ``still`` when the camera did not turn
-    either, ``rotation-only`` when it only turned); the flow's forward-backward check; the
+    either, ``rotation-only`` when it only turned); the flow's forward-backward check; landing
+    inside the second image at all (the flow follows a corner off the edge); the
     epipolar distance to the known motion (``max_sampson_px``); a depth in front of both
     lenses; enough parallax for the depth to mean something (``min_parallax_ratio`` of the
     depth, and ``epipole_min_deg`` away from the direction of travel); and the triangulated
@@ -365,8 +388,14 @@ def parallax_truth(
     rejected["flow"] = found - tracked
     if tracked == 0:
         return ParallaxTruth.nothing("flow", rejected=rejected)
-    keep = sampson(pts_a, pts_b, intr, motion) <= max_sampson_px
-    rejected["epipolar"] = int((~keep).sum())
+    # The flow happily follows a corner off the edge of B; a kept point's rounded pixel is a
+    # pixel of the image, so a caller may index the depth with it without checking again.
+    column = np.rint(np.asarray(pts_b, dtype=float)[:, 0])
+    row = np.rint(np.asarray(pts_b, dtype=float)[:, 1])
+    keep = (column >= 0) & (column < intr.width) & (row >= 0) & (row < intr.height)
+    rejected["outside"] = int((~keep).sum())
+    keep &= sampson(pts_a, pts_b, intr, motion) <= max_sampson_px
+    rejected["epipolar"] = int((~keep).sum()) - rejected["outside"]
     z, sigma, residual, baseline = _triangulate_full(pts_a, pts_b, intr, motion)
     behind = keep & ~np.isfinite(z)
     rejected["behind"] = int(behind.sum())

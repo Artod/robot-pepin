@@ -169,8 +169,10 @@ FLAGS = FlagSet(
         " the odometry's transform between the two stamps (pepin.parallax), pair the network's"
         " depth with a depth in metres measured by the cart's own movement — a hoop that needs"
         " no lidar and no assumed plane and that lands at every elevation the picture has; off"
-        " by default until it is measured on the robot, and it yields nothing while the cart"
-        " stands still or turns on the spot",
+        " by default: measured offline on runs 0171 and 0165 it costs 3-5 ms and gives 30-190"
+        " pairs where the cart really stepped, but at those runs' 2-3 cm baselines the depth is"
+        " 10-35 % too far with the odometry's own +-25 % band, and it yields nothing at all"
+        " while the cart stands still or turns on the spot",
     ),
     Flag(
         "affine_law",

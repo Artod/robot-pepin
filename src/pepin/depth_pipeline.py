@@ -957,7 +957,12 @@ class ParallaxAnchor(AnchorStage):
     cart stands still, or turns on the spot, yields nothing at all and says which. Each pair
     carries its own weight: the ratio of its inverse-depth variance to a lidar beam's, capped
     at 1, so a short baseline or a badly tracked corner counts for little without being
-    thrown away."""
+    thrown away.
+
+    Measured offline on runs 0171 and 0165 (scratch/parallax_vs_lidar.py, 2026-09-12): 3-5 ms a
+    frame, 30-190 pairs where the cart really stepped, 10-35 % too far with a +-25 % band at the
+    2-3 cm baselines those slow runs give — the odometry's own band over such a step. It ships
+    switched off until it is seen at driving speed with calibrated optics."""
 
     name = "parallax_anchor"
 
