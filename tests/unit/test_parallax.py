@@ -25,13 +25,14 @@ from pepin.tsdf import RigidPose
 INTR = Intrinsics(fx=400.0, fy=400.0, cx=320.0, cy=180.0, width=640, height=360)
 BANDS = ((0, 120, 4.0), (120, 240, 2.0), (240, 360, 4.0 / 3.0))  # rows and the plane's depth
 SIDESTEP_M = 0.10  # the camera's own displacement: 10, 20 and 30 px of disparity on the bands
+MARGIN = 128  # spare columns either side of the rendered view, so a band may shift into them
 
 
 def texture(seed: int = 7) -> np.ndarray:
     """A rough indoor-like image: white noise blurred by a box filter, so corners are sharp but
     not single pixels (a single-pixel corner tracks to the wrong place at sub-pixel accuracy)."""
     rng = np.random.default_rng(seed)
-    fine = rng.integers(0, 255, size=(INTR.height, INTR.width + 64), dtype=np.int64)
+    fine = rng.integers(0, 255, size=(INTR.height, INTR.width + 2 * MARGIN), dtype=np.int64)
     k = 3
     blurred = fine.astype(float)
     for axis in (0, 1):
@@ -45,11 +46,11 @@ def rendered_pair(sidestep_m: float = SIDESTEP_M) -> tuple[np.ndarray, np.ndarra
     to its right between them: each band of rows shifts by exactly ``fx * sidestep / z``
     pixels, which the bands are chosen to make whole. Returns (view A, view B, the motion)."""
     wide = texture()
-    a = np.ascontiguousarray(wide[:, 32:-32])
+    a = np.ascontiguousarray(wide[:, MARGIN:-MARGIN])
     b = np.empty_like(a)
     for top, bottom, z in BANDS:
         shift = round(INTR.fx * sidestep_m / z)
-        b[top:bottom] = wide[top:bottom, 32 + shift : 32 + shift + INTR.width]
+        b[top:bottom] = wide[top:bottom, MARGIN + shift : MARGIN + shift + INTR.width]
     return a, b, Motion(np.eye(3), np.array([-sidestep_m, 0.0, 0.0]))
 
 
@@ -278,3 +279,20 @@ def test_a_colour_frame_becomes_the_grey_the_tracker_reads() -> None:
     assert grey.shape == (4, 5) and grey.dtype == np.uint8
     assert int(grey[0, 0]) == round(0.587 * 200)
     assert to_gray(grey) is not None and to_gray(grey).shape == (4, 5)
+
+
+def test_every_kept_point_s_rounded_pixel_indexes_the_second_image() -> None:
+    """The flow follows a corner past the border of B and rounding can push a point at 639.6
+    to column 640; neither may reach the pool, because an anchor indexes the depth image with a
+    kept point's rounded pixel (13 such points on run 0171, scratch/parallax_vs_lidar.py)."""
+    depth = np.full((INTR.height, INTR.width), 3.0)
+    for sidestep in (SIDESTEP_M, -0.25):  # corners leaving on the left, then on the right
+        a, b, motion = rendered_pair(sidestep)
+        truth = parallax_truth(a, b, INTR, motion)
+        assert truth.kept > 50
+        column = np.rint(truth.points[:, 0]).astype(int)
+        row = np.rint(truth.points[:, 1]).astype(int)
+        assert column.min() >= 0 and column.max() < INTR.width
+        assert row.min() >= 0 and row.max() < INTR.height
+        assert depth[row, column].shape == truth.z.shape
+        assert truth.rejected["outside"] >= 0
