@@ -186,6 +186,25 @@ def test_coverage_counts_cells_tilt_and_closeness_and_names_what_is_missing() ->
     assert good.tilted >= TILTED_VIEWS and good.close >= CLOSE_VIEWS and good.good()
 
 
+def test_the_run_s_own_view_count_is_the_bar_not_the_module_s_default() -> None:
+    """``--views 18`` must lower the bar it is judged against, or a short run collects what it
+    was asked for and is then refused for not having collected enough (found end to end,
+    scratch/calib_runner_end_to_end.py)."""
+    views = [
+        View(np.zeros((1, 1, 2), np.float32), (r, c), 0.2, 0.4)
+        for r in range(GRID)
+        for c in range(GRID)
+        for _ in range(CELL_VIEWS)
+    ]
+    assert len(views) == 18
+    assert Coverage.of(views, target=18).good()
+    short = Coverage.of(views, target=40)
+    assert not short.good() and "18/40" in short.hint() and "18/40" in short.report()
+    collector = Collector(BOARD, SIZE, target=18)
+    collector.views.extend(views)
+    assert collector.done() and collector.coverage.target == 18
+
+
 def test_a_tilted_board_reads_as_tilted_and_a_square_one_does_not() -> None:
     flat = project(np.array([0.0, 0.0, 0.0]), pose_for(640, 360, 0.6, 0.0, 0.0))
     tilted = project(np.array([0.0, 0.6, 0.0]), pose_for(640, 360, 0.6, 0.6, 0.0))

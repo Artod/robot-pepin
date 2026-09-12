@@ -170,10 +170,12 @@ class Coverage:
     tilted: int = 0
     close: int = 0
     total: int = 0
+    target: int = TARGET_VIEWS  # how many views this run asked for (ros/calibrate.sh --views)
 
     @classmethod
-    def of(cls, views: Sequence[View]) -> Coverage:
-        """The coverage of a list of accepted views."""
+    def of(cls, views: Sequence[View], target: int = TARGET_VIEWS) -> Coverage:
+        """The coverage of a list of accepted views, against a run that asked for ``target`` of
+        them."""
         cells: dict[tuple[int, int], int] = {}
         for view in views:
             cells[view.cell] = cells.get(view.cell, 0) + 1
@@ -182,6 +184,7 @@ class Coverage:
             tilted=sum(1 for v in views if v.tilt >= TILT_MIN),
             close=sum(1 for v in views if v.area >= CLOSE_AREA),
             total=len(views),
+            target=target,
         )
 
     def missing_cells(self) -> list[tuple[int, int]]:
@@ -203,16 +206,16 @@ class Coverage:
             return True
         if view.area >= CLOSE_AREA and self.close < CLOSE_VIEWS:
             return True
-        return self.total < TARGET_VIEWS
+        return self.total < self.target
 
     def good(self) -> bool:
         """Whether the set covers enough to be worth solving: every cell filled, enough tilted
-        and close views, and the view count reached."""
+        and close views, and the run's own view count reached."""
         return (
             not self.missing_cells()
             and self.tilted >= TILTED_VIEWS
             and self.close >= CLOSE_VIEWS
-            and self.total >= TARGET_VIEWS
+            and self.total >= self.target
         )
 
     def hint(self) -> str:
@@ -226,8 +229,8 @@ class Coverage:
             return f"tilt the board (turn a corner towards the lens): {self.tilted}/{TILTED_VIEWS}"
         if self.close < CLOSE_VIEWS:
             return f"bring the board closer, filling the frame: {self.close}/{CLOSE_VIEWS}"
-        if self.total < TARGET_VIEWS:
-            return f"keep moving it around: {self.total}/{TARGET_VIEWS} views"
+        if self.total < self.target:
+            return f"keep moving it around: {self.total}/{self.target} views"
         return "covered — finishing"
 
     def report(self) -> str:
@@ -239,7 +242,7 @@ class Coverage:
             lines.append(f"  {counts}")
         lines.append(
             f"  tilted {self.tilted}/{TILTED_VIEWS}   close {self.close}/{CLOSE_VIEWS}"
-            f"   views {self.total}/{TARGET_VIEWS}"
+            f"   views {self.total}/{self.target}"
         )
         if not self.good():
             lines.append(f"  next: {self.hint()}")
@@ -276,13 +279,13 @@ class Collector:
 
     @property
     def coverage(self) -> Coverage:
-        """The coverage of what has been kept so far."""
-        return Coverage.of(self.views)
+        """The coverage of what has been kept so far, against this run's target."""
+        return Coverage.of(self.views, self.target)
 
     def done(self) -> bool:
-        """Whether enough well-spread views are in hand: the target count reached and the
-        coverage's quotas met."""
-        return len(self.views) >= self.target and self.coverage.good()
+        """Whether enough well-spread views are in hand: every one of the coverage's quotas met,
+        the target count among them."""
+        return self.coverage.good()
 
     def offer(self, corners: Corners | None, now: float) -> Verdict:
         """One frame's corners at time ``now`` (seconds, monotonic). Answers what happened and
