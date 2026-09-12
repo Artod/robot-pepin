@@ -2,6 +2,7 @@
 itself to fit the model before it is let in."""
 
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -393,3 +394,21 @@ def test_the_frustum_box_is_the_view_out_to_range_max_and_nothing_when_the_view_
     away = _optical_pose(-2.0, 0.0, math.pi)  # outside the grid, looking away from it
     assert model._frustum_box(INTR, away) is None
     assert model.integrate(_render_wall(away, -4.0), None, INTR, away) == 0
+
+
+def test_the_band_s_half_width_is_a_config_value_with_a_fallback(tmp_path: Path) -> None:
+    """The layer a frame is seated on is data, not a constant compiled into the fusion node
+    (CLAUDE.md rule 19): ``band_half_z_m`` in config/fusion.json is where it starts, and the
+    node makes it a live flag from there. An unreadable or silent file falls back, never
+    raises — the node would otherwise not come up at all."""
+    from pepin.deployment import config_file
+    from pepin.tsdf import BAND_HALF_Z_M, band_half_z_m
+
+    assert band_half_z_m() == band_half_z_m(config_file("fusion.json")) == 0.125
+    named = tmp_path / "named.json"
+    named.write_text('{"band_half_z_m": 0.2}')
+    assert band_half_z_m(named) == 0.2
+    silent = tmp_path / "silent.json"
+    silent.write_text("{}")
+    assert band_half_z_m(silent) == BAND_HALF_Z_M
+    assert band_half_z_m(tmp_path / "missing.json") == BAND_HALF_Z_M

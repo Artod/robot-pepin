@@ -72,6 +72,33 @@ class GridSpec:
         return w
 
 
+BAND_HALF_Z_M = 0.125  # the fallback when config/fusion.json is unreadable or silent
+
+
+def band_half_z_m(path: str | Path | None = None) -> float:
+    """Half the height band around the lidar's plane whose points are exact by construction,
+    metres, from ``band_half_z_m`` in ``config/fusion.json``.
+
+    The band is the layer a frame may be turned by: the depth image is anchored on the beams,
+    so only their own height is trustworthy enough to seat a frame on the model. The plane
+    itself is never written here — it is the lidar's mount, and the node reads it from the
+    published ``base_link -> laser`` edge. :data:`BAND_HALF_Z_M` when the file is missing or
+    does not name it (the value the band has always had, 0.10-0.35 around an assumed 0.20 m).
+    """
+    if path is None:
+        from pepin.deployment import config_file
+
+        try:
+            path = config_file("fusion.json")
+        except FileNotFoundError:
+            return BAND_HALF_Z_M
+    try:
+        with open(path) as f:
+            return float(json.load(f)["band_half_z_m"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return BAND_HALF_Z_M
+
+
 @dataclass(frozen=True)
 class RigidPose:
     """A frame's placement in the map: 3x3 rotation and translation (map <- frame)."""
