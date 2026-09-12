@@ -1069,10 +1069,13 @@ class RayLaw(AffineLaw):
         return self._live_gain
 
     def saved_state(self) -> dict[str, Any] | None:
-        """The angular law as plain JSON values for :func:`pepin.depth.save_law`, or ``None``
-        while there is none or it is still the seed the last run left (a seed is never written
-        back as a fresh measurement: its age would never expire)."""
-        return self.gain.state() if self.gain is not None and self._live_gain else None
+        """The angular law that stands as plain JSON values for :func:`pepin.depth.save_law`,
+        ``None`` while there is none. A seed the live pool has not replaced is written back
+        rather than dropped: the file holds one record for both laws, so anything left out of a
+        save is erased, and this law belongs to the camera and the network, not to the room the
+        last window happened to show (:mod:`pepin.elevation`) — the whole file is only ever
+        written while the affine law rests on live pairs."""
+        return self.gain.state() if self.gain is not None else None
 
     @property
     def clipped(self) -> bool:
@@ -1125,10 +1128,12 @@ class RayLaw(AffineLaw):
         return out, Verdict(self.name, True, pairs=n, pixels=int(out.size), note=self.describe())
 
     def describe(self) -> str:
-        """The affine law's words, then the angular law's (or why there is none)."""
+        """The affine law's words, then the angular law's — marked ``(seed)`` while it is the
+        one the last run saved — or why there is none."""
         if self.gain is None:
             return super().describe() + "; affine fallback"
-        return super().describe() + "; " + self.gain.describe()
+        source = "" if self._live_gain else " (seed)"
+        return super().describe() + "; " + self.gain.describe() + source
 
 
 # ---- the chain ----------------------------------------------------------------------------------

@@ -515,6 +515,11 @@ def test_both_laws_go_through_the_file_from_one_run_to_the_next(
     assert second._ray.ray_ready and not second._ray.ray_fitted, "restored, not refitted"
     assert second._ray.gain is not None and second._ray.gain.state() == saved["ray"]
     assert "ray law ray deg" in second.logger.texts("info")[0]
+    for k, wall_x in enumerate(WALLS[:3]):  # frames whose angles carry no angular law of their own
+        frame(second, _net, CONFIG_CAM, wall_x, k)
+    assert not second._ray.ray_fitted and "(seed)" in second._pipeline.report()
+    second._report()
+    assert json.loads(path.read_text())["ray"] == saved["ray"], "the seed is kept, not erased"
 
 
 def test_a_law_file_without_a_ray_record_leaves_the_affine_law_alone(build: Build) -> None:
@@ -525,4 +530,4 @@ def test_a_law_file_without_a_ray_record_leaves_the_affine_law_alone(build: Buil
     assert node._ray.gain is None and node._ray.saved_state() is None
     frame(node, net, CONFIG_CAM, 2.0, 0)
     node._report()
-    assert "ray" not in json.loads(node._law_file.read_text()), "a seed is not a measurement"
+    assert "ray" not in json.loads(node._law_file.read_text()), "nothing is invented"

@@ -406,15 +406,18 @@ def test_a_saved_gain_that_places_nothing_is_refused_like_a_saved_affine_law() -
     assert RayGain.restore({**bound, "clipped": True}) is not None
 
 
-def test_the_stage_saves_only_the_gain_it_fitted_itself() -> None:
-    """What goes into the law file is a measurement, never the seed the last run left: a
-    seeded stage offers nothing until its own pool carries a law."""
+def test_the_stage_says_whether_the_gain_it_offers_is_its_own() -> None:
+    """A seeded stage says ``(seed)`` in the report line until its own pool carries a law, and
+    hands the seed back to the law file meanwhile: the file holds one record for both laws, so
+    what is left out of a save is erased."""
     pool = _pairs()
     elevation, _azimuth = ray_angles(pool.lift, pool.left)
     gain = fit_ray(pool.d, pool.z, elevation, pool.weight)
     assert gain is not None
     law = RayLaw()
     law.seed_gain(gain)
-    assert law.ray_ready and not law.ray_fitted and law.saved_state() is None
+    assert law.ray_ready and not law.ray_fitted and law.saved_state() == gain.state()
+    assert law.describe().endswith("(seed)")
     law.fit(pool)
     assert law.ray_fitted and law.saved_state() == law.gain.state()
+    assert not law.describe().endswith("(seed)")
