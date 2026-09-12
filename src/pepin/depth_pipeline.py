@@ -1029,7 +1029,12 @@ class RayLaw(AffineLaw):
     same pixels come from the ray's law. Off it also falls back, without a word, whenever
     :func:`pepin.elevation.fit_ray` returns nothing — too few pairs, too narrow a cone, a slope
     that turns non-positive — and the frame is withheld only where the affine law would withhold
-    it (no law at all)."""
+    it (no law at all).
+
+    Cost: the stage refits on every frame as the affine law does, and the angular fit is the
+    wider design — 8.5 ms a frame (10.5 max) against the affine law's 2.9 on a 47 000-pair pool
+    of run 0171's frames, measured on the Mac. The stage is off by default; a pool that large
+    only exists with the wall anchor on."""
 
     name = "ray_law"
 
