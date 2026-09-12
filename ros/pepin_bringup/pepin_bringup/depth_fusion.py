@@ -18,7 +18,8 @@ fused frame — the board's clock) is the zero-crossing of the field, published 
 cloud.
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
-``align``, ``min_weight``, ``surface_hz``; their state is printed in every report line.
+``align``, ``min_weight``, ``surface_hz``, ``band_half_z``; their state is printed in every
+report line, beside the band itself and the source of the plane it is centred on.
 ``/fusion/reset`` (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
 """
 
@@ -39,8 +40,8 @@ from std_srvs.srv import Trigger
 
 from pepin.depth import Intrinsics
 from pepin.flags import Flag, FlagSet
-from pepin.frame_pose import FramePoser
-from pepin.mounts import load_lidar_mount
+from pepin.frame_pose import BASE_FRAME, FramePoser
+from pepin.mounts import LASER_FRAME, load_lidar_mount
 from pepin.tsdf import (
     YAW_SEARCH,
     AlignReason,
@@ -49,6 +50,7 @@ from pepin.tsdf import (
     Tsdf,
     align_yaw,
     backproject,
+    band_half_z_m,
 )
 from pepin.watch import DRIVE_FIT
 from pepin_bringup.msgs import array_from_image, cloud_from_points, stamp_seconds
@@ -64,11 +66,8 @@ from pepin_bringup.node_kit import (
 
 CONFIG = "/ws/config/fusion.json"
 TF_WAIT_S = 0.3
+BAND_TF_WAIT_S = 5.0  # the static base_link -> laser edge at start: the board publishes it once
 PAIR_QUEUE = 40  # depth arrives a fraction of a second after its image; pair by exact stamp
-BAND_HALF_Z_M = 0.125  # half the band around the lidar's plane: the frame's exact points.
-# The plane itself is never typed here — it is config/lidar.json's mount, read at start
-# (:func:`band_z_m`), so a re-measured lidar moves the band with it. The half-width is the
-# one the band has always had (it was 0.10-0.35 around an assumed 0.20 m).
 BAND_STRIDE = 3
 BAND_MIN_POINTS = 50  # a frame with fewer points in the band is not worth a yaw search
 AT_BOUND_STREAK = 30  # ~3 s of frames refused at the search's bound: the model no longer fits
@@ -111,16 +110,27 @@ FLAGS = FlagSet(
         description="how often /fusion/surface is published (the crossing search costs a"
         " fraction of a second)",
     ),
+    Flag(
+        "band_half_z",
+        band_half_z_m(),
+        range=(0.02, 0.50),
+        description="half the height band around the lidar's plane a frame is seated on,"
+        " metres (config/fusion.json's band_half_z_m is the default); the band's centre is the"
+        " plane the published base_link -> laser edge names, and both are printed in the"
+        " report line",
+    ),
 )
 
 
-def band_z_m(half_m: float = BAND_HALF_Z_M) -> tuple[float, float]:
-    """The height band whose points are exact by construction, metres above the floor: the
-    lidar's own plane (config/lidar.json, :func:`pepin.mounts.load_lidar_mount`) plus and minus
-    ``half_m``. The depth image is anchored on the beams, so this is the layer a frame may be
-    turned by; it moves with the mount and is never a second copy of its height."""
-    z = load_lidar_mount().z_m
-    return (z - half_m, z + half_m)
+def band_z_m(plane_z_m: float, half_m: float) -> tuple[float, float]:
+    """The height band whose points are exact by construction, metres above the floor:
+    ``plane_z_m`` (the lidar's own plane) plus and minus ``half_m``.
+
+    The depth image is anchored on the beams, so this is the layer a frame may be turned by. It
+    holds only while the band's centre is the plane the beams actually come from, which is why
+    the caller reads that plane from TF (:meth:`DepthFusion._plane_z_m`) rather than from the
+    config this process happens to have."""
+    return (plane_z_m - half_m, plane_z_m + half_m)
 
 
 class DepthFusion(Node):
@@ -130,7 +140,15 @@ class DepthFusion(Node):
         super().__init__("depth_fusion")
         config = Path(str(self.declare_parameter("config", CONFIG).value))
         self._spec = GridSpec.load(config)
-        self._band_z_m = band_z_m()
+        # The band's centre is the lidar's plane, and the only copy of it both sides of the
+        # bridge agree on is the published base_link -> laser edge: this process reads
+        # config/lidar.json from the laptop's checkout while the beams are published from the
+        # board's own synced copy, and between a mount change and ros/sync.sh the two differ by
+        # the whole change. TF is asked at start (and again while it has not answered); the
+        # mount here is only the fallback, and the report line says which one the band sits on.
+        self._plane_z_m = load_lidar_mount().z_m
+        self._plane_source = "config"
+        self._band_z_m = band_z_m(self._plane_z_m, band_half_z_m())
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._tally = Tally(STAGES)
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
@@ -147,6 +165,7 @@ class DepthFusion(Node):
         self._sync.registerCallback(self._on_pair)
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
         self._poser = FramePoser(TfHistory(self._tf, timeout_s=TF_WAIT_S))
+        self._read_plane(BAND_TF_WAIT_S)
         self._intr: Intrinsics | None = None
         self._fit = 0.0  # no report yet reads as lost: every gate here compares with <
         self._lock = threading.Lock()  # the model and its last stamp, worker vs publisher
@@ -162,7 +181,7 @@ class DepthFusion(Node):
         nx, ny, nz = self._spec.shape
         self.get_logger().info(
             f"fusion up: {nx}x{ny}x{nz} voxels of {self._spec.voxel_m * 100:.0f} cm from"
-            f" {self._spec.origin}; {self._switches.state()}; fused while"
+            f" {self._spec.origin}; {self._switches.state()}; {self._band_text()}; fused while"
             f" /localization_fit >= {DRIVE_FIT:.2f}"
         )
 
@@ -176,9 +195,49 @@ class DepthFusion(Node):
     def _period(surface_hz: float) -> float:
         return 1.0 / max(surface_hz, 0.1)
 
+    # ---- the lidar's plane ---------------------------------------------------------------
+    def _read_plane(self, wait_s: float) -> bool:
+        """Take the band's centre from the published ``base_link -> laser`` edge, the height the
+        beams the band is anchored on actually come from; ``True`` when TF answered.
+
+        A failure leaves the fallback in place (config/lidar.json as this process reads it) and
+        is said out loud: the two can disagree by a whole mount change until ros/sync.sh has
+        run, and a band centred on the wrong plane holds no exact points at all.
+        """
+        if self._plane_source == "tf":
+            return True
+        edge = self._tf.transform(BASE_FRAME, LASER_FRAME, timeout_s=wait_s)
+        if edge is None:
+            self.get_logger().warning(
+                f"no {BASE_FRAME} -> {LASER_FRAME} yet: the band sits on config/lidar.json's"
+                f" {self._plane_z_m:.3f} m, which is this side's copy of the mount"
+            )
+            self._set_band()
+            return False
+        self._plane_z_m = float(edge.transform.translation.z)
+        self._plane_source = "tf"
+        self._set_band()
+        return True
+
+    def _set_band(self) -> None:
+        """Rebuild the height band from the current plane and the ``band_half_z`` flag."""
+        self._band_z_m = band_z_m(self._plane_z_m, float(self._switches["band_half_z"]))
+
+    def _band_text(self) -> str:
+        """The band for a report line: its two heights, its centre and where that centre came
+        from — ``band 0.26-0.51 m (plane 0.383 m from tf)``."""
+        return (
+            f"band {self._band_z_m[0]:.2f}-{self._band_z_m[1]:.2f} m"
+            f" (plane {self._plane_z_m:.3f} m from {self._plane_source})"
+        )
+
     # ---- switches ------------------------------------------------------------------------
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
-        """A flag changed: only ``surface_hz`` has anything to do beyond being read."""
+        """A flag changed: ``band_half_z`` rebuilds the height band, ``surface_hz`` retimes the
+        publisher; every other flag is only read."""
+        if name == "band_half_z":
+            self._set_band()
+            return
         if name != "surface_hz":
             return
         try:
@@ -334,6 +393,7 @@ class DepthFusion(Node):
         )
 
     def _report(self) -> None:
+        self._read_plane(0.0)  # a board that came up after this node still moves the band
         w = self._tally.take()
         c = w.counts
         skipped = (
@@ -349,7 +409,7 @@ class DepthFusion(Node):
             f" align {w.ms_per('align', 'frames'):.0f} ms, {self._turns(w)};"
             f" refused: {self._refusals(w) or 'none'}; skipped: {skipped};"
             f" no image {c['no_image']}; surface {self._surface_points} points;"
-            f" band {self._band_z_m[0]:.2f}-{self._band_z_m[1]:.2f} m;"
+            f" {self._band_text()};"
             f" flags: {self._switches.state()}" + (f"; tf: {tf_text}" if tf_text else "")
         )
 
