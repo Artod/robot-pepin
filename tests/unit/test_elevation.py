@@ -345,3 +345,62 @@ def test_the_stage_withholds_only_while_no_law_of_any_kind_exists() -> None:
     assert not result.withheld
     law = pipeline.stage("ray_law")
     assert isinstance(law, RayLaw) and law.ray_ready and isinstance(law, AffineLaw)
+
+
+# ---- the guards read the whole cone, not the axis ---------------------------------------------
+def _cone(az_gain: float, n: int = 4000) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """A pool of rays over a whole 70 deg cone, the network's inverse-depth slope rising with
+    the elevation and by ``az_gain`` per normalised radian of azimuth: (network depth, true
+    depth, elevation, azimuth)."""
+    rng = np.random.default_rng(0)
+    elevation = rng.uniform(-0.35, 0.30, n)
+    azimuth = rng.uniform(-0.60, 0.60, n)
+    z = rng.uniform(0.8, 4.0, n)
+    alpha = 1.0 + 0.3 * elevation / RAY_SCALE + az_gain * azimuth / RAY_SCALE
+    return z / alpha, z, elevation, azimuth
+
+
+def test_an_azimuth_that_turns_the_slope_over_at_one_edge_is_refused() -> None:
+    """The azimuth polynomial carries no constant term, so on the optical axis — where the
+    guards used to be read — it is identically zero. A pool steep enough in azimuth for the
+    fitted slope to go negative at one edge of the lens came back as a law with clipped false
+    while every ray on that side silently took the A_BOUNDS ceiling; the guards now cross both
+    spans and refuse it."""
+    d, z, elevation, azimuth = _cone(1.2)
+    assert fit_ray(d, z, elevation, azimuth=azimuth, azimuth_degree=1) is None
+    on_axis = fit_ray(d, z, elevation, azimuth=azimuth, azimuth_degree=0)
+    assert on_axis is not None, "without the azimuth term the same pool still carries a law"
+
+
+def test_the_azimuth_is_held_at_its_own_span_s_edge_like_the_elevation() -> None:
+    """A gentle azimuth dependence fits, and outside the azimuth the pool reached the gain
+    stops moving: a polynomial free to extrapolate would run away past the lens' edge."""
+    d, z, elevation, azimuth = _cone(0.2)
+    gain = fit_ray(d, z, elevation, azimuth=azimuth, azimuth_degree=1)
+    assert gain is not None and gain.azimuth.size == 1 and not gain.clipped
+    assert math.degrees(gain.az_hi) == pytest.approx(33.0, abs=2.0)
+    assert gain.az_lo == pytest.approx(-gain.az_hi, abs=0.02)
+    grid = np.linspace(gain.lo, gain.hi, 9)
+    edge = gain.slope(grid, np.full_like(grid, gain.az_hi))
+    assert np.allclose(gain.slope(grid, np.full_like(grid, gain.az_hi + 0.5)), edge)
+    assert f"az {math.degrees(gain.az_lo):+.0f}" in gain.describe()
+    wide = np.linspace(-1.0, 1.0, 33)
+    assert bool(np.all(gain.slope(grid[:, None], wide[None, :]) > 0.0))
+
+
+def test_a_saved_gain_that_places_nothing_is_refused_like_a_saved_affine_law() -> None:
+    """A record is judged on restore the way the fit judged it: a slope that turns
+    non-positive anywhere on its own cone (every ray there would take the A_BOUNDS ceiling), an
+    azimuth polynomial with no span of its own, and a record whose ``clipped`` denies a bound it
+    meets are all refused, and the affine law stands instead."""
+    d, z, elevation, azimuth = _cone(0.2)
+    gain = fit_ray(d, z, elevation, azimuth=azimuth, azimuth_degree=1)
+    assert gain is not None
+    good = gain.state()
+    assert RayGain.restore(good) is not None
+    assert RayGain.restore({**good, "alpha": [-1.0, 0.0, 0.0]}) is None
+    assert RayGain.restore({**good, "az_lo": 0.0, "az_hi": 0.0}) is None
+    assert RayGain.restore({**good, "azimuth": [-5.0]}) is None  # positive on the axis alone
+    bound = {**good, "alpha": [0.4, 0.0, 0.0]}  # positive, but a of 2.5-5.9: past A_BOUNDS
+    assert RayGain.restore(bound) is None, "clipped false denies a bound it meets"
+    assert RayGain.restore({**bound, "clipped": True}) is not None

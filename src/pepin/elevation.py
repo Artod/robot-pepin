@@ -28,11 +28,15 @@ overfits where a band holds one wall).
 Two guards make it safe on a robot. The pool sees only the angles its anchors reach — the
 lidar's beams on run 0171 span -24 to +18 degrees of elevation, the near returns low and the
 far ones by the horizon — so outside the fitted span the gain is **held at the span's edge**,
-never extrapolated by a polynomial that is free to run away above the picture; and every
-angle's (a, b) is clipped into the affine law's own bounds (:data:`pepin.depth.A_BOUNDS`,
-:data:`pepin.depth.B_BOUNDS`), the fit reporting whether that clip binds anywhere inside the
-span (:attr:`RayGain.clipped`) so a report line can say the law is at its bound. A fit that
-does not clear its gates is no fit at all (``None``), and the caller keeps the affine law.
+in elevation and in azimuth alike, never extrapolated by a polynomial that is free to run away
+above or beside the picture; and every angle's (a, b) is clipped into the affine law's own
+bounds (:data:`pepin.depth.A_BOUNDS`, :data:`pepin.depth.B_BOUNDS`), the fit reporting whether
+that clip binds anywhere inside the span (:attr:`RayGain.clipped`) so a report line can say the
+law is at its bound. Both guards are judged over the whole fitted cone, elevations crossed with
+azimuths (:func:`_slope_over`): at azimuth 0 alone the azimuth polynomial, which carries no
+constant term, reads identically zero and a whole side of the image could turn non-positive
+unseen. A fit that does not clear its gates is no fit at all (``None``), and the caller keeps
+the affine law.
 """
 
 from __future__ import annotations
@@ -82,7 +86,8 @@ class RayGain:
     normalised elevation, ``azimuth`` ascending from the first power of the normalised azimuth
     (empty when none was fitted), the shift ``beta``, the elevation span it was fitted over
     (radians, outside which the gain is held at its edge), whether a bound binds inside that
-    span and how many pairs it rests on."""
+    span, how many pairs it rests on and the azimuth span, held at its edge the same way (both
+    zero when no azimuth term was fitted)."""
 
     alpha: Array
     beta: float
@@ -91,6 +96,8 @@ class RayGain:
     clipped: bool
     pairs: int
     azimuth: Array
+    az_lo: float = 0.0
+    az_hi: float = 0.0
 
     @property
     def degree(self) -> int:
@@ -98,12 +105,12 @@ class RayGain:
         return int(self.alpha.size) - 1
 
     def slope(self, elevation: Array, azimuth: Array | None = None) -> Array:
-        """``alpha`` at these ray angles (radians), the elevation held at the fitted span's
-        edge outside it: the factor the exact inverse depth enters the network's with."""
+        """``alpha`` at these ray angles (radians), each angle held at the fitted span's edge
+        outside it: the factor the exact inverse depth enters the network's with."""
         u = np.clip(np.asarray(elevation, dtype=float), self.lo, self.hi) / RAY_SCALE
         out: Array = np.asarray(np.polyval(self.alpha[::-1], u), dtype=float)
         if self.azimuth.size and azimuth is not None:
-            v = np.asarray(azimuth, dtype=float) / RAY_SCALE
+            v = np.clip(np.asarray(azimuth, dtype=float), self.az_lo, self.az_hi) / RAY_SCALE
             out = out + np.asarray(np.polyval(np.append(self.azimuth[::-1], 0.0), v), dtype=float)
         return out
 
@@ -134,13 +141,19 @@ class RayGain:
 
     def describe(self) -> str:
         """The gain in a few words: its degree, its ``a`` at the bottom, middle and top of the
-        fitted span, that span in degrees, and whether a bound binds inside it."""
+        fitted span, that span in degrees (with the azimuth's beside it when one was fitted),
+        and whether a bound binds inside it."""
         lo, hi = math.degrees(self.lo), math.degrees(self.hi)
         mid = 0.5 * (lo + hi)
         scales = " ".join(f"{self.scale_at(e):.2f}@{e:+.0f}" for e in (lo, mid, hi))
+        az = (
+            f" az {math.degrees(self.az_lo):+.0f}..{math.degrees(self.az_hi):+.0f} deg"
+            if self.azimuth.size
+            else ""
+        )
         return (
             f"ray deg {self.degree}{'+az' if self.azimuth.size else ''} a {scales}"
-            f" b {-self.beta * self.scale_at(mid):+.3f} span {lo:+.0f}..{hi:+.0f} deg"
+            f" b {-self.beta * self.scale_at(mid):+.3f} span {lo:+.0f}..{hi:+.0f} deg{az}"
             f" on {self.pairs} pairs{' CLIPPED' if self.clipped else ''}"
         )
 
@@ -154,13 +167,19 @@ class RayGain:
             "clipped": bool(self.clipped),
             "pairs": int(self.pairs),
             "azimuth": [float(c) for c in self.azimuth],
+            "az_lo": float(self.az_lo),
+            "az_hi": float(self.az_hi),
         }
 
     @classmethod
     def restore(cls, state: Any) -> RayGain | None:
         """The gain a :meth:`state` was written from, or ``None`` when the record is missing,
-        malformed, empty or rests on fewer than POOL_MIN_SAMPLES pairs (a saved law is trusted
-        no further than a live one)."""
+        malformed, empty, rests on fewer than POOL_MIN_SAMPLES pairs, or is not a law
+        :func:`fit_ray` could have returned — a saved law is judged exactly as a live one, so a
+        record whose slope turns non-positive somewhere inside its own span (every ray there
+        would silently take the A_BOUNDS ceiling) or whose ``clipped`` flag denies a bound it
+        does meet is refused, as :func:`pepin.depth.load_law` refuses an affine law outside its
+        bounds."""
         try:
             alpha = np.asarray([float(c) for c in state["alpha"]], dtype=float)
             azimuth = np.asarray([float(c) for c in state.get("azimuth", ())], dtype=float)
@@ -172,6 +191,8 @@ class RayGain:
                 bool(state.get("clipped", False)),
                 int(state["pairs"]),
                 azimuth,
+                float(state.get("az_lo", 0.0)),
+                float(state.get("az_hi", 0.0)),
             )
         except (TypeError, ValueError, KeyError, IndexError):
             return None
@@ -179,6 +200,14 @@ class RayGain:
         if alpha.size == 0 or not finite or not math.isfinite(gain.beta):
             return None
         if gain.hi <= gain.lo or gain.pairs < POOL_MIN_SAMPLES:
+            return None
+        if not math.isfinite(gain.az_lo) or not math.isfinite(gain.az_hi):
+            return None
+        if azimuth.size and gain.az_hi <= gain.az_lo:
+            return None  # an azimuth polynomial with no span of its own is held at zero
+        if not bool(np.all(_slope_over(gain) > 0.0)):
+            return None
+        if _outside(gain) and not gain.clipped:
             return None
         return gain
 
@@ -236,11 +265,23 @@ def _design(y: Array, u: Array, v: Array | None, deg: int, az_deg: int, shift: b
     return np.stack(columns, axis=1)
 
 
-def _outside(gain: RayGain, azimuth: bool) -> bool:
+def _slope_over(gain: RayGain) -> Array:
+    """The gain's slope over every ray angle it was fitted on: RAY_GRID elevations across its
+    elevation span, crossed with RAY_GRID azimuths across its azimuth span when an azimuth term
+    was fitted. Judging the guards at azimuth 0 alone would read the azimuth polynomial where
+    it is identically zero (it carries no constant term), and a whole side of the image could
+    turn non-positive unseen."""
+    eps: Array = np.linspace(gain.lo, gain.hi, RAY_GRID, dtype=float)
+    if not gain.azimuth.size:
+        return gain.slope(eps)
+    az: Array = np.linspace(gain.az_lo, gain.az_hi, RAY_GRID, dtype=float)
+    return gain.slope(eps[:, None], az[None, :])
+
+
+def _outside(gain: RayGain) -> bool:
     """Whether the law this gain amounts to leaves A_BOUNDS or B_BOUNDS anywhere inside its
-    own span (a non-positive slope counts as outside: that law places nothing)."""
-    grid: Array = np.linspace(gain.lo, gain.hi, RAY_GRID, dtype=float)
-    slope = gain.slope(grid, np.zeros_like(grid) if azimuth else None)
+    own span of ray angles (a non-positive slope counts as outside: that law places nothing)."""
+    slope = _slope_over(gain)
     if not bool(np.all(slope > 0.0)):
         return True
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -280,7 +321,8 @@ def fit_ray(
     ``None`` comes back under POOL_MIN_SAMPLES pairs, on a pool too narrow in angle for even a
     straight line (:func:`usable_degree`), on one whose angle is the depth in disguise
     (:func:`separable` over RAY_MAX_CONFOUND — the lidar's beams alone always are), or on a fit
-    whose slope is not positive across its own span. The caller then keeps its affine law."""
+    whose slope is not positive anywhere across its own cone — both spans, elevation crossed
+    with azimuth. The caller then keeps its affine law."""
     d = np.asarray(d, dtype=float)
     z = np.asarray(z, dtype=float)
     eps = np.asarray(elevation, dtype=float)
@@ -298,11 +340,15 @@ def fit_ray(
         return None
     v = None
     az_deg = 0
+    az_lo = az_hi = 0.0
     if azimuth is not None and azimuth_degree > 0:
-        v = np.asarray(azimuth, dtype=float) / RAY_SCALE
+        az = np.asarray(azimuth, dtype=float)
+        az_span = np.percentile(az, (2, 98))
+        az_lo, az_hi = float(az_span[0]), float(az_span[1])
+        v = np.clip(az, az_lo, az_hi) / RAY_SCALE
         az_deg = azimuth_degree
-        if separable(v, y) > RAY_MAX_CONFOUND:
-            v, az_deg = None, 0
+        if az_hi <= az_lo or separable(v, y) > RAY_MAX_CONFOUND:
+            v, az_deg, az_lo, az_hi = None, 0, 0.0, 0.0
     z_span = np.percentile(z, (5, 95))
     with_shift = bool(z_span[1] / z_span[0] >= MIN_DEPTH_SPREAD)
     gain: RayGain | None = None
@@ -312,13 +358,19 @@ def fit_ray(
             return None
         beta = float(coef[-1]) if shift else 0.0
         candidate = RayGain(
-            coef[: deg + 1], beta, lo, hi, False, int(d.size), coef[deg + 1 : deg + 1 + az_deg]
+            coef[: deg + 1],
+            beta,
+            lo,
+            hi,
+            False,
+            int(d.size),
+            coef[deg + 1 : deg + 1 + az_deg],
+            az_lo,
+            az_hi,
         )
         gain = candidate
-        if not _outside(candidate, az_deg > 0):
+        if not _outside(candidate):
             return candidate
-    if gain is None or _outside(gain, az_deg > 0):
-        grid: Array = np.linspace(lo, hi, RAY_GRID, dtype=float)
-        if gain is None or not bool(np.all(gain.slope(grid) > 0.0)):
-            return None  # a law that places nothing is no law
-    return RayGain(gain.alpha, gain.beta, lo, hi, True, int(d.size), gain.azimuth)
+    if gain is None or not bool(np.all(_slope_over(gain) > 0.0)):
+        return None  # a law that places nothing is no law
+    return RayGain(gain.alpha, gain.beta, lo, hi, True, int(d.size), gain.azimuth, az_lo, az_hi)
