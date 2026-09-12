@@ -47,9 +47,9 @@ service answers; the report line says which.
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): one per stage of
 the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anchor``,
-``affine_law``, ``ray_law``, ``wall_correct``, ``floor_anchor`` — plus ``depth_backend`` and
-``scale_ceiling``, the largest 1 / scale the law may be fitted to; their state is printed in
-every report line.
+``parallax_anchor``, ``affine_law``, ``ray_law``, ``wall_correct``, ``floor_anchor`` — plus
+``depth_backend`` and ``scale_ceiling``, the largest 1 / scale the law may be fitted to; their
+state is printed in every report line.
 """
 
 from __future__ import annotations
@@ -102,6 +102,7 @@ from pepin.elevation import RayGain
 from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import FramePoser
 from pepin.mounts import Mounts
+from pepin.parallax import to_gray
 from pepin.tsdf import RigidPose
 from pepin_bringup.msgs import (
     array_from_image,
@@ -160,6 +161,16 @@ FLAGS = FlagSet(
         description="the lidar's returns extruded up the image while the network's depth stays"
         " continuous pair the rows above the lidar's with the wall's depth, a third hoop; off by"
         " default: measured, it puts the lidar's row 10 % too near while fixing the rows above",
+    ),
+    Flag(
+        "parallax_anchor",
+        False,
+        description="the corners this frame shares with the previous one, triangulated against"
+        " the odometry's transform between the two stamps (pepin.parallax), pair the network's"
+        " depth with a depth in metres measured by the cart's own movement — a hoop that needs"
+        " no lidar and no assumed plane and that lands at every elevation the picture has; off"
+        " by default until it is measured on the robot, and it yields nothing while the cart"
+        " stands still or turns on the spot",
     ),
     Flag(
         "affine_law",
@@ -450,12 +461,17 @@ class DepthStream(Node):
             cam = self._camera_at(msg.header.stamp)
         with tally.measure("samples"):  # includes the TF wait for the carry
             lidar = self._lidar_points(msg)
+        # The parallax anchor is the one stage that reads the picture itself; the grey copy is
+        # made only while it is on, and the poser it triangulates against is the same TF the
+        # carry uses.
         ctx = FrameContext(
             self._intr_or_nominal(msg),
             cam,
             up=self._tilt.up if self._tilt is not None else UP_LEVEL,
             lidar=lidar,
             stamp=stamp_seconds(msg.header.stamp),
+            gray=to_gray(rgb) if self._pipeline.on("parallax_anchor") else None,
+            motion=self._poser,
         )
         with tally.measure("pipeline"):
             result = self._pipeline.run(depth, ctx)
