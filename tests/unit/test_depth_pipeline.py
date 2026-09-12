@@ -123,6 +123,7 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
         "floor_pairs",
         "wall_anchor",
         "affine_law",
+        "ray_law",
         "wall_correct",
         "floor_anchor",
     ]
@@ -172,6 +173,7 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
         "floor_pairs": False,
         "wall_anchor": False,
         "affine_law": True,
+        "ray_law": False,
         "wall_correct": False,
         "floor_anchor": True,
     }

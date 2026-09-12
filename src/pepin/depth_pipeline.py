@@ -71,6 +71,7 @@ from pepin.depth import (
     project,
     project_all,
 )
+from pepin.elevation import RAY_AZIMUTH_DEGREE, RAY_DEGREE, RayGain, fit_ray, ray_angles
 
 LEAN_STEP = 0.003  # the floor's expected depth is recomputed when the up vector moves this much
 FLOOR_PAIR_STRIDE = 8  # every 8th row and column of the floor: 3600 candidates of a 640x360 frame
@@ -90,24 +91,38 @@ ROW_BANDS = 6  # bands of elevation of the row law
 class Pairs:
     """What an anchor knows about some pixels: the network's depth ``d`` there, the true depth
     ``z`` (metres along the optical axis), each pair's ``weight`` in a fit (a lidar beam is 1),
-    and the ray's ``lift`` — its elevation above the optical axis per unit depth,
-    ``-(row - cy) / fy`` — which the elevation-aware laws read."""
+    and where the ray points — its ``lift``, the elevation above the optical axis per unit
+    depth, ``-(row - cy) / fy``, and its ``left``, the same for the azimuth,
+    ``-(column - cx) / fx`` (zero where an anchor does not say). The angle-aware laws read
+    those two: the tangents of the ray's angles off the optical axis, the camera's own
+    parameter, which no tilt of the neck moves."""
 
     d: Array
     z: Array
     weight: Array
     lift: Array
+    left: Array
 
     @classmethod
-    def of(cls, d: Array, z: Array, lift: Array, weight: float | Array = 1.0) -> Pairs:
-        """Pairs from arrays, ``weight`` one number for all or one per pair."""
+    def of(
+        cls,
+        d: Array,
+        z: Array,
+        lift: Array,
+        weight: float | Array = 1.0,
+        left: Array | None = None,
+    ) -> Pairs:
+        """Pairs from arrays, ``weight`` one number for all or one per pair, ``left`` zero
+        (the optical axis' own column) when the anchor does not know the azimuth."""
         dd = np.asarray(d, dtype=float)
         w = (
             np.full(dd.shape, float(weight))
             if np.ndim(weight) == 0
             else np.asarray(weight, dtype=float)
         )
-        return cls(dd, np.asarray(z, dtype=float), w, np.asarray(lift, dtype=float))
+        lifted = np.asarray(lift, dtype=float)
+        sideways = np.zeros_like(dd) if left is None else np.asarray(left, dtype=float)
+        return cls(dd, np.asarray(z, dtype=float), w, lifted, sideways)
 
     @property
     def size(self) -> int:
@@ -124,12 +139,19 @@ class Pairs:
             np.concatenate([p.z for p in parts]),
             np.concatenate([p.weight for p in parts]),
             np.concatenate([p.lift for p in parts]),
+            np.concatenate([p.left for p in parts]),
         )
 
 
 def lift_of(rows: npt.ArrayLike, intr: Intrinsics) -> Array:
     """The elevation of the ray through ``rows`` above the optical axis, per unit depth."""
     out: Array = -(np.asarray(rows, dtype=float) - intr.cy) / intr.fy
+    return out
+
+
+def left_of(columns: npt.ArrayLike, intr: Intrinsics) -> Array:
+    """The azimuth of the ray through ``columns`` left of the optical axis, per unit depth."""
+    out: Array = -(np.asarray(columns, dtype=float) - intr.cx) / intr.fx
     return out
 
 
@@ -490,8 +512,13 @@ class LidarAnchor(AnchorStage):
             return None
         cols = beams[hits, 0].astype(int)
         rows = beams[hits, 1].astype(int)
+        intr = frame.ctx.intr
         return Pairs.of(
-            frame.raw[rows, cols], beams[hits, 2], lift_of(rows, frame.ctx.intr), self.weight
+            frame.raw[rows, cols],
+            beams[hits, 2],
+            lift_of(rows, intr),
+            self.weight,
+            left_of(cols, intr),
         )
 
     def describe(self) -> str:
@@ -654,6 +681,7 @@ class FloorPairs(AnchorStage):
         metric = self.law.apply(raw, ctx)[::s, ::s] if self.law.ready else None
         expected, raw, edge = expected[::s, ::s], raw[::s, ::s], frame.edge[::s, ::s]
         rows = np.arange(0, frame.raw.shape[0], s)[:, None] * np.ones_like(raw, dtype=int)
+        cols = np.arange(0, frame.raw.shape[1], s)[None, :] * np.ones_like(raw, dtype=int)
         ok = np.isfinite(expected) & np.isfinite(raw) & (raw > NEAR_M) & ~edge
         if int(ok.sum()) < MIN_SAMPLES:
             return None
@@ -673,7 +701,13 @@ class FloorPairs(AnchorStage):
             floor = ok & np.isfinite(height) & (np.abs(height) < band)
         if int(floor.sum()) < MIN_SAMPLES:
             return None
-        return Pairs.of(raw[floor], expected[floor], lift_of(rows[floor], ctx.intr), self.weight)
+        return Pairs.of(
+            raw[floor],
+            expected[floor],
+            lift_of(rows[floor], ctx.intr),
+            self.weight,
+            left_of(cols[floor], ctx.intr),
+        )
 
     def describe(self) -> str:
         return f"stride {self.stride}, weight {self.weight:g}"
@@ -810,8 +844,13 @@ class WallAnchor(AnchorStage):
         r, k = np.nonzero(strided)
         if r.size < MIN_SAMPLES:
             return None
+        intr = frame.ctx.intr
         return Pairs.of(
-            frame.raw[r, walk.cols[k]], walk.depth[r, k], lift_of(r, frame.ctx.intr), self.weight
+            frame.raw[r, walk.cols[k]],
+            walk.depth[r, k],
+            lift_of(r, intr),
+            self.weight,
+            left_of(walk.cols[k], intr),
         )
 
     def correct(self, depth: Array, frame: Frame) -> tuple[Array, int]:
@@ -963,17 +1002,121 @@ class RowLaw(AffineLaw):
         return f"{self.pooled} pairs, bands a/b {bands}"
 
 
+# ---- the law of the ray -----------------------------------------------------------------------
+class RayLaw(AffineLaw):
+    """The affine law with its scale a smooth function of the ray's angle off the optical axis
+    (:mod:`pepin.elevation`): ``1 / z = a(eps, az) / D + b(eps, az)``, fitted on the same pool,
+    with the plain affine law as its fallback whenever the angular fit does not stand.
+
+    The error this corrects belongs to the camera and the network, not to the room: it is
+    parameterised by the ray's own elevation (and azimuth) in radians, so the neck may tilt and
+    pan without moving the law — the head's pose enters where it always did, through TF into
+    :class:`FrameContext`'s :class:`pepin.depth.CameraPose`, which decides which world point a
+    ray meets, not how far the network thinks it is. As a stage the law reads the frame's raw
+    depth and keeps the holes of the depth handed to it, so it can stand either as the chain's
+    only law or behind the affine law as the flag ``ray_law`` switching between the two live
+    (rule 19): with the flag off, the affine law's image goes on unchanged; with it on, the
+    same pixels come from the ray's law. Off it also falls back, without a word, whenever
+    :func:`pepin.elevation.fit_ray` returns nothing — too few pairs, too narrow a cone, a slope
+    that turns non-positive — and the frame is withheld only where the affine law would withhold
+    it (no law at all)."""
+
+    name = "ray_law"
+
+    def __init__(
+        self,
+        pool_frames: int = POOL_FRAMES,
+        *,
+        degree: int = RAY_DEGREE,
+        azimuth_degree: int = RAY_AZIMUTH_DEGREE,
+    ) -> None:
+        super().__init__(pool_frames)
+        self.degree = degree
+        self.azimuth_degree = azimuth_degree
+        self.gain: RayGain | None = None
+        self._seeded_gain: RayGain | None = None
+
+    def seed_gain(self, gain: RayGain) -> None:
+        """Start from a saved gain (the map's), applied until the live pool can fit its own."""
+        self._seeded_gain = gain
+        self.gain = gain
+
+    @property
+    def ray_ready(self) -> bool:
+        """Whether an angular law exists; false means this stage is the affine law."""
+        return self.gain is not None
+
+    @property
+    def clipped(self) -> bool:
+        """Whether the angular law meets a bound inside its own span (a law at its limit)."""
+        return self.gain is not None and self.gain.clipped
+
+    def fit(self, pairs: Pairs | None) -> None:
+        """The affine fit, then the angular one on the whole pool; a pool that cannot carry an
+        angular law leaves the seeded gain, or none, and the affine law stands."""
+        super().fit(pairs)
+        pool = self.pool
+        if pool is None or not self.fitted:
+            return
+        elevation, azimuth = ray_angles(pool.lift, pool.left)
+        gain = fit_ray(
+            pool.d,
+            pool.z,
+            elevation,
+            pool.weight,
+            azimuth=azimuth,
+            degree=self.degree,
+            azimuth_degree=self.azimuth_degree,
+        )
+        if gain is not None:
+            self.gain = gain
+        elif self._seeded_gain is None:
+            self.gain = None
+
+    def apply(self, depth: Array, ctx: FrameContext) -> Array:
+        """The depth through the angular law — one (a, b) per pixel, from that pixel's ray —
+        or through the plain affine law while no angular law stands."""
+        d = np.asarray(depth, dtype=float)
+        if self.gain is None:
+            return apply_affine(d, self.a, self.b)
+        rows = np.arange(d.shape[0])[:, None]
+        columns = np.arange(d.shape[1])[None, :]
+        elevation, azimuth = ray_angles(lift_of(rows, ctx.intr), left_of(columns, ctx.intr))
+        return self.gain.apply(d, elevation, azimuth)
+
+    def run(self, depth: Array, frame: Frame) -> tuple[Array, Verdict]:
+        """Fit on the pool and correct the frame's raw depth, keeping the holes of the depth
+        handed in (the edge filter's, and the affine law's where it ran before this stage);
+        the frame is withheld only while no law of any kind exists."""
+        pool = frame.pool
+        self.fit(pool)
+        n = 0 if pool is None else pool.size
+        if not self.ready:
+            return depth, Verdict(self.name, True, pairs=n, note="no law yet", withhold=True)
+        out = np.where(np.isfinite(depth), self.apply(frame.raw, frame.ctx), np.nan)
+        return out, Verdict(self.name, True, pairs=n, pixels=int(out.size), note=self.describe())
+
+    def describe(self) -> str:
+        """The affine law's words, then the angular law's (or why there is none)."""
+        if self.gain is None:
+            return super().describe() + "; affine fallback"
+        return super().describe() + "; " + self.gain.describe()
+
+
 # ---- the chain ----------------------------------------------------------------------------------
 def standard_pipeline(
     law: LawStage | None = None,
     *,
     floor_pairs: bool = False,
     wall_anchor: bool = False,
+    ray_law: bool = False,
     wall_correct: bool = False,
 ) -> DepthPipeline:
-    """The node's chain: edges -> lidar -> (floor pairs) -> (wall pairs) -> law -> (wall
-    correction) -> floor anchor; the three new stages are in the list and switched by the
-    flags of the same name (``wall_anchor`` is the pairs role, ``wall_correct`` the pixels)."""
+    """The node's chain: edges -> lidar -> (floor pairs) -> (wall pairs) -> law -> (ray law) ->
+    (wall correction) -> floor anchor; the four new stages are in the list and switched by the
+    flags of the same name (``wall_anchor`` is the pairs role, ``wall_correct`` the pixels).
+    The ray law sits behind the affine one and corrects the same raw depth by the ray's angle
+    instead: on, its image replaces the affine law's; off, the affine law's stands."""
     the_law = law if law is not None else AffineLaw()
     geometry = FloorGeometry()
     stages: list[Stage] = [
@@ -982,12 +1125,14 @@ def standard_pipeline(
         FloorPairs(the_law, geometry),
         WallAnchor(),
         the_law,
+        RayLaw(),
         WallCorrection(),
         FloorAnchor(geometry),
     ]
     flags = (
         ("floor_pairs", floor_pairs),
         ("wall_anchor", wall_anchor),
+        ("ray_law", ray_law),
         ("wall_correct", wall_correct),
     )
     return DepthPipeline(stages, off=[name for name, on in flags if not on])
@@ -1009,6 +1154,7 @@ __all__ = [
     "LawStage",
     "LidarAnchor",
     "Pairs",
+    "RayLaw",
     "Result",
     "RowLaw",
     "Stage",
@@ -1017,6 +1163,7 @@ __all__ = [
     "WallAnchor",
     "WallCorrection",
     "WallWalk",
+    "left_of",
     "lift_of",
     "standard_pipeline",
 ]
