@@ -1690,3 +1690,38 @@ def test_one_gesture_per_side_puts_the_stack_into_slam_and_one_saves_the_map() -
     room = layout["configById"]["3D!slam"]
     assert room["topics"]["/map"]["visible"] and room["topics"]["/fusion/surface"]["visible"]
     assert "/rtabmap/mapPath" in room["topics"]
+
+
+def test_the_camera_s_optics_have_exactly_one_reader() -> None:
+    """A stack that measures with a guessed field of view looks exactly like one measuring with
+    a calibration, so there is one function that decides — pepin.camera.optics — and no node
+    builds a pinhole from hfov_deg for itself. Held on the syntax trees: a node that goes back
+    to reading cfg.hfov_deg would be a second place to remember when a calibration is written.
+    """
+    nodes = sorted((REPO / "ros/pepin_bringup/pepin_bringup").glob("*.py"))
+    readers = []
+    for path in nodes:
+        module = sf.tree(str(path.relative_to(REPO)))
+        called = sf.calls(module)
+        if "optics" in called:
+            readers.append(path.stem)
+        assert "intrinsics" not in called, f"{path.stem}: build the optics through pepin.camera"
+        assert "camera_info_arrays" not in called, f"{path.stem}: optics().camera_info_arrays()"
+    assert readers == ["camera_stream", "depth_stream"], readers
+    # The one reader answers both provenances and says which in words, for the report lines.
+    camera = sf.tree("src/pepin/camera.py")
+    assert "Optics" in sf.names(camera) and "Calibration" in sf.names(camera)
+    assert "write_calibration" in {f.name for f in camera.body if isinstance(f, ast.FunctionDef)}
+
+
+def test_the_calibration_tool_is_reachable_as_one_command() -> None:
+    """ros/calibrate.sh is the whole procedure — print the board, collect, fit, write — so no
+    step lives only in someone's memory (the brief for this camera: one command)."""
+    script = (REPO / "ros/calibrate.sh").read_text()
+    assert "scripts/calibrate_camera.py" in script and "--host" in script
+    runner = sf.tree("scripts/calibrate_camera.py")
+    called = sf.calls(runner)
+    assert {"calibrate", "find_corners", "board_pdf", "write_calibration"} <= called
+    flags = {ast.unparse(c.args[0]) for c in sf.calls_to(runner, "parser.add_argument")}
+    assert {"'--board'", "'--square'", "'--no-window'", "'--print'", "'--images'"} <= flags
+    assert "## Camera calibration" in (REPO / "ros/README.md").read_text()

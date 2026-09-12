@@ -16,6 +16,7 @@ import math
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -434,3 +435,42 @@ def test_the_imu_leans_the_floor_only_while_a_floor_stage_is_on(build: Build) ->
     assert not alien._switches.on("floor_anchor") and not alien._switches.on("floor_pairs")
     assert not alien._pipeline.on("floor_anchor") and not alien._pipeline.on("floor_pairs")
     assert "the floor stages are off" in alien.logger.texts("error")[-1]
+
+
+def test_the_fallback_optics_are_the_calibration_when_the_config_carries_one(
+    build: Build, tmp_path: Path
+) -> None:
+    """Before any camera_info arrives the node projects with config/camera.json's own optics.
+    Those must be the checkerboard's when there is one, scaled to the frame, and the nominal
+    pinhole of the field of view when there is not — one reader for both (pepin.camera.optics),
+    so a calibration written by ros/calibrate.sh needs no second edit here."""
+    node, _net = build()
+    node._intr = None
+    frame = SimpleNamespace(width=WIDTH, height=HEIGHT)
+    nominal = node._intr_or_nominal(frame)  # type: ignore[arg-type]
+    assert nominal == INTR, "the config is uncalibrated today: the nominal pinhole"
+
+    data = json.loads(Path(CAMERA_JSON).read_text())
+    data["overview"]["calibrated"] = True
+    data["overview"]["intrinsics"] = {
+        "width": 1280,
+        "height": 720,
+        "fx": 900.0,
+        "fy": 896.0,
+        "cx": 646.0,
+        "cy": 354.0,
+        "dist": [-0.31, 0.1, 0.0005, -0.0004, 0.0],
+        "model": "plumb_bob",
+        "rms": 0.28,
+        "views": 26,
+        "board": "9x6 inner corners, 24.0 mm squares",
+        "date": "2026-09-12",
+    }
+    calibrated = tmp_path / "camera.json"
+    calibrated.write_text(json.dumps(data))
+    node._camera_cfg = CameraConfig.load(calibrated)
+    measured = node._intr_or_nominal(frame)  # type: ignore[arg-type]
+    assert (measured.fx, measured.fy) == (450.0, 448.0)  # scaled to the published 640x360
+    assert (measured.cx, measured.cy) == (323.0, 177.0)
+    assert (measured.width, measured.height) == (WIDTH, HEIGHT)
+    assert measured != nominal

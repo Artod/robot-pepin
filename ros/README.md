@@ -34,6 +34,7 @@ Foxglove Studio  <-- ws 8765 -->  docker: foxglove_bridge, ldlidar_node -> laser
 | `ros/params/` | Nav2 parameters for this cart (footprint, speeds, rates for a weak CPU) |
 | `ros/maps/` | Converted maps (`<name>.pgm` + `<name>.yaml`) |
 | `ros/tools/npz_to_map.py` | Our occupancy grid -> map_server format |
+| `ros/calibrate.sh` | Checkerboard calibration of the neck camera, print to config (see below) |
 
 ## Iterate without rebuilding
 
@@ -93,6 +94,65 @@ Watch the map grow with the `ros/foxglove/pepin_slam.json` layout at `ws://local
 
 To go back to driving a saved map: `ros/thin.sh vision` (which leaves SLAM mode), then
 `ros/mode.sh nav /maps/flat3_slam.yaml`.
+
+## Camera calibration
+
+The neck camera's optics were a guess: one field-of-view number (78 deg, fitted against the lidar
+on 2026-09-10) standing in for four — `fx`, `fy`, `cx`, `cy` — and a lens that bends straight
+lines and was not modelled at all. A checkerboard measures all of it in one sitting.
+
+```bash
+ros/calibrate.sh --print      # data/checkerboard.pdf: print at 100 %, not "fit to page"
+ros/calibrate.sh              # a window, ~25 views, then the fit is written to config/camera.json
+ros/calibrate.sh --no-window  # the same over ssh: a text coverage report instead of the window
+```
+
+**Print the board.** `--print` writes an A4 (or `--page letter`) sheet of 10x7 squares — 9x6
+*inner corners*, which is what the calibration counts — with its square size printed on it. Print
+at 100 %; then **measure one square with a ruler** and, if it is not 24.0 mm, pass what it really
+is: `ros/calibrate.sh --square 0.0235`. That square is the only length in the whole procedure, and
+every metre the camera later reports is wrong by however wrong it is. Tape the sheet to something
+rigid — a book, a clipboard. A bent board fits a bent lens.
+
+**Run it.** No keys to press: hold the board where the line at the top says, keep it still, and
+the shot is taken on its own countdown (a bar fills; a green border means it was kept). The grid
+drawn over the picture is the coverage — each third of the frame wants two views, because the
+distortion at a corner of the image is only ever seen by a board that was at that corner. It also
+wants six views turned at an angle (about 30 deg or more: fronto-parallel views alone let the
+focal length and the distance trade against each other) and three close enough to fill the frame.
+It stops by itself at ~25 well-spread views; `q` stops it early.
+
+**What the numbers mean.**
+
+| Number | What it is | What is good |
+| --- | --- | --- |
+| `fx`, `fy` | focal length in pixels, at 1280x720 | within a few per cent of each other |
+| `cx`, `cy` | where the optical axis crosses the sensor | near 640, 360 — tens of pixels off is normal, hundreds is a bad fit |
+| `dist` | plumb_bob: `k1 k2 p1 p2 k3` | `k1` around -0.3 for a wide webcam; the tangential `p1 p2` near zero |
+| `rms` | mean reprojection error over every corner of every view | **under 0.5 px, or nothing is written** |
+| worst view | the view the fit explains worst | one blurred view carries the whole RMS — shoot that place again |
+| `hfov_deg` | derived from `fx`, for people to read | replaces the old nominal number in the config |
+
+A poor run refuses to write and says why: too few views, a frame the board never covered, or an
+RMS over the bound. Accepted frames are kept under `data/camera_calib/<timestamp>/`, so a run can
+be re-fitted without the camera: `ros/calibrate.sh --images data/camera_calib/20260912-181500`.
+
+**After it is written.** `config/camera.json` gets an `intrinsics` block beside `calibrated: true`
+and a refreshed `hfov_deg`. Everything that needs the camera's optics reads one function,
+`pepin.camera.optics` — `camera_stream` publishes the measured `K` and `D` on
+`/camera/camera_info` (scaled to whatever `scale` publishes), and `depth_stream` uses the same
+numbers as its fallback until a `camera_info` arrives. Restart the node to pick them up
+(`ros/laptop.sh kick camera_stream`); its report line then says `optics: calibrated 2026-09-12 on
+9x6 ..., rms 0.31 px, 70.6 deg wide` instead of `optics: nominal 78 deg field of view
+(uncalibrated)`. The `undistort` flag publishes a rectified picture (`ros/flags.sh set
+camera_stream undistort true`); it is off until the straightened picture has been measured against
+the raw one on the robot. A calibration that turns out bad is switched off with one boolean —
+`calibrated: false` — and the block stays in the file as history.
+
+**When to redo it.** After anything that changes the optics or the sensor's relation to them: a
+different lens or camera, a knocked or re-seated lens barrel, a re-mounted head that required
+touching the camera body, a change of capture resolution. Re-seating the *neck* changes the mount,
+not the intrinsics — that is `config/camera.json`'s `mount` block and a different measurement.
 
 ### Camera only
 
