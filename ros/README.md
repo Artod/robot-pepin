@@ -131,14 +131,16 @@ It stops by itself at ~25 well-spread views; `q` stops it early.
 | `dist` | plumb_bob: `k1 k2 p1 p2 k3` | `k1` around -0.3 for a wide webcam; the tangential `p1 p2` near zero |
 | `rms` | mean reprojection error over every corner of every view | **under 0.5 px, or nothing is written** |
 | worst view | the view the fit explains worst | one blurred view carries the whole RMS — shoot that place again |
-| `hfov_deg` | derived from `fx`, for people to read | replaces the old nominal number in the config |
+| `hfov_deg` | derived from `fx`, for people to read | inside the block; the config's own `hfov_deg` stays the nominal number |
 
 A poor run refuses to write and says why: too few views, a frame the board never covered, or an
 RMS over the bound. Accepted frames are kept under `data/camera_calib/<timestamp>/`, so a run can
 be re-fitted without the camera: `ros/calibrate.sh --images data/camera_calib/20260912-181500`.
 
-**After it is written.** `config/camera.json` gets an `intrinsics` block beside `calibrated: true`
-and a refreshed `hfov_deg`. Everything that needs the camera's optics reads one function,
+**After it is written.** `config/camera.json` gets an `intrinsics` block beside `calibrated: true`.
+The config's own `hfov_deg` is left alone — it is the nominal field of view the stack falls back
+to, and the measured one lives inside the block. Everything that needs the camera's optics reads
+one function,
 `pepin.camera.optics` — `camera_stream` publishes the measured `K` and `D` on
 `/camera/camera_info` (scaled to whatever `scale` publishes), and `depth_stream` uses the same
 numbers as its fallback until a `camera_info` arrives. Restart the node to pick them up

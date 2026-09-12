@@ -319,15 +319,17 @@ def test_the_detector_says_nothing_when_there_is_no_board() -> None:
 # ---- the config round trip -------------------------------------------------------------------
 def test_a_calibration_survives_the_config_and_comes_back_as_the_optics(tmp_path: Path) -> None:
     """Write the fit into a copy of config/camera.json and read it back through the one reader:
-    calibrated is on, the intrinsics are the fit's, and hfov_deg has been re-derived from fx."""
-    config = tmp_path / "camera.json"
-    config.write_text((REPO / "config/camera.json").read_text())
+    calibrated is on, the intrinsics are the fit's, and the block carries the field of view the
+    measured fx implies."""
+    config = Path(camera_config(tmp_path))
+    nominal_hfov = CameraConfig.load(config).hfov_deg
     fit = calibrate(synthetic_views(), BOARD, SIZE)
     write_calibration(config, fit.calibration)
     data = json.loads(config.read_text())["overview"]
     assert data["calibrated"] is True
     assert data["mount"]["z_m"] == 1.23  # every other key of the file survives the write
-    assert data["hfov_deg"] == pytest.approx(fit.calibration.hfov_deg(), abs=0.01)
+    assert data["hfov_deg"] == nominal_hfov, "the nominal field of view is not rewritten"
+    assert data["intrinsics"]["hfov_deg"] == pytest.approx(fit.calibration.hfov_deg(), abs=0.01)
     back = Calibration.from_json(data["intrinsics"])
     assert back.fx == pytest.approx(fit.calibration.fx, abs=0.001)
     assert back.dist == pytest.approx(fit.calibration.dist, abs=1e-6)
@@ -375,14 +377,27 @@ def test_an_intrinsics_block_left_in_the_file_but_switched_off_is_not_used(
 ) -> None:
     """``calibrated: false`` beside a full intrinsics block is history, not optics: the reader
     answers the nominal pinhole, so a bad calibration is turned off by one boolean."""
-    config = tmp_path / "camera.json"
-    data = json.loads((REPO / "config/camera.json").read_text())
-    data["overview"]["intrinsics"] = Calibration(
+    block = Calibration(
         900.0, 900.0, 640.0, 360.0, 1280, 720, (0.0,) * 5, 0.3, "2026-09-12", str(BOARD)
     ).to_json()
-    config.write_text(json.dumps(data))
-    cfg = CameraConfig.load(config)
+    cfg = CameraConfig.load(camera_config(tmp_path, block, calibrated=False))
     assert cfg.calibration is None and not optics(cfg, 1280, 720).calibrated
+
+
+def test_switching_a_written_calibration_off_gives_the_nominal_optics_back(
+    tmp_path: Path,
+) -> None:
+    """The boolean is a two-way switch: after a real write, `calibrated: false` answers exactly
+    the pinhole the camera had before the checkerboard — the nominal field of view survives the
+    write, so turning a bad calibration off is not a different camera again."""
+    config = Path(camera_config(tmp_path))
+    before = optics(CameraConfig.load(config), 640, 360)
+    write_calibration(config, calibrate(synthetic_views(), BOARD, SIZE).calibration)
+    data = json.loads(config.read_text())
+    data["overview"]["calibrated"] = False
+    config.write_text(json.dumps(data))
+    after = optics(CameraConfig.load(config), 640, 360)
+    assert after == before and not after.calibrated
 
 
 # ---- rectification and the printable board ----------------------------------------------------

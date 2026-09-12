@@ -261,9 +261,13 @@ def main() -> None:
         return
     write_calibration(args.config, fit.calibration, args.camera)
     logger.info(
-        "wrote %s: calibrated true, hfov_deg %.2f (derived from fx)",
+        "wrote %s: calibrated true, intrinsics at %dx%d, %.2f deg wide (from fx); hfov_deg stays"
+        " the nominal %.1f, so calibrated: false puts the old optics back",
         args.config,
+        fit.calibration.width,
+        fit.calibration.height,
         fit.calibration.hfov_deg(),
+        cfg.hfov_deg,
     )
     logger.info("restart the camera node to publish it: ros/laptop.sh kick camera_stream")
 

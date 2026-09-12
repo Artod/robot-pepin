@@ -70,10 +70,13 @@ class Calibration:
         )
 
     def to_json(self) -> dict[str, Any]:
-        """The block as ``config/camera.json`` carries it, in reading order."""
+        """The block as ``config/camera.json`` carries it, in reading order. ``hfov_deg`` here is
+        derived from ``fx`` and is for people to read: the block's own field of view, kept apart
+        from the camera's nominal one outside it."""
         return {
             "width": self.width,
             "height": self.height,
+            "hfov_deg": round(self.hfov_deg(), 2),
             "fx": round(self.fx, 3),
             "fy": round(self.fy, 3),
             "cx": round(self.cx, 3),
@@ -260,9 +263,14 @@ def optics(cfg: CameraConfig, width: int, height: int) -> Optics:
 
 
 def write_calibration(path: str | Path, result: Calibration, camera: str = "overview") -> None:
-    """Put ``result`` into ``config/camera.json`` as ``<camera>.intrinsics``, flip
-    ``calibrated`` to true and refresh the derived ``hfov_deg`` from ``fx``; every other key of
-    the file — the mount, the frames, the notes — is left exactly as it was.
+    """Put ``result`` into ``config/camera.json`` as ``<camera>.intrinsics`` and flip
+    ``calibrated`` to true; every other key of the file — ``hfov_deg``, the mount, the frames,
+    the notes — is left exactly as it was.
+
+    ``hfov_deg`` outside the block stays the nominal field of view on purpose: it is what
+    :func:`optics` answers while ``calibrated`` is false, so that boolean is a two-way switch
+    and turning a bad calibration off restores the optics of before it. The field of view the
+    measured ``fx`` implies is written inside the block (:meth:`Calibration.to_json`).
 
     The file is rewritten through a temporary file next to it, so an interrupted write never
     leaves the stack with half a camera.
@@ -270,7 +278,6 @@ def write_calibration(path: str | Path, result: Calibration, camera: str = "over
     file = Path(path)
     data = json.loads(file.read_text())
     block = data[camera]
-    block["hfov_deg"] = round(result.hfov_deg(), 2)
     block["calibrated"] = True
     block["intrinsics"] = result.to_json()
     tmp = file.with_suffix(file.suffix + ".tmp")
