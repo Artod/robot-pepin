@@ -26,6 +26,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -650,12 +651,52 @@ def apply_affine(depth: Array, a: float, b: float) -> Array:
     return out
 
 
-def save_law(path: Path, a: float, b: float, pooled: int, now: float) -> None:
+LAW_VERSION = 2  # 1: the affine law alone; 2: the same file with the ray law's record beside it
+
+
+def save_law(
+    path: Path,
+    a: float,
+    b: float,
+    pooled: int,
+    now: float,
+    ray: dict[str, Any] | None = None,
+) -> None:
     """Write the law next to the maps, atomically (a temp file, then ``os.replace``): a restart
-    begins from it instead of the raw network's depth. ``now`` is the wall clock in seconds."""
+    begins from it instead of the raw network's depth. ``now`` is the wall clock in seconds.
+    ``ray`` is the angle-dependent law's record beside the affine one
+    (:meth:`pepin.elevation.RayGain.state`), in the same file under its own key so one law is
+    never read with another's map: a reader of version 1 sees the affine law it expects and
+    ignores the rest."""
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"a": a, "b": b, "pooled": pooled, "saved_at": now}))
+    record: dict[str, Any] = {
+        "version": LAW_VERSION,
+        "a": a,
+        "b": b,
+        "pooled": pooled,
+        "saved_at": now,
+    }
+    if ray is not None:
+        record["ray"] = ray
+    tmp.write_text(json.dumps(record))
     os.replace(tmp, path)
+
+
+def load_ray(path: Path, now: float, max_age_s: float = LAW_MAX_AGE_S) -> Any | None:
+    """The saved ray law's record (the dict :meth:`pepin.elevation.RayGain.state` wrote) when
+    the file is there, holds one, and is no older than ``max_age_s``; ``None`` otherwise — an
+    older file, or one written before the ray law existed, simply has none. The record is not
+    judged here: :meth:`pepin.elevation.RayGain.restore` does that, so this module keeps no
+    knowledge of the angular law's shape."""
+    try:
+        data = json.loads(path.read_text())
+        saved_at = float(data["saved_at"])
+        ray = data.get("ray")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if ray is None or now - saved_at > max_age_s:
+        return None
+    return ray
 
 
 def load_law(
