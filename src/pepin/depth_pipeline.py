@@ -48,7 +48,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import pairwise
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -1050,16 +1050,29 @@ class RayLaw(AffineLaw):
         self.azimuth_degree = azimuth_degree
         self.gain: RayGain | None = None
         self._seeded_gain: RayGain | None = None
+        self._live_gain = False
 
     def seed_gain(self, gain: RayGain) -> None:
         """Start from a saved gain (the map's), applied until the live pool can fit its own."""
         self._seeded_gain = gain
         self.gain = gain
+        self._live_gain = False
 
     @property
     def ray_ready(self) -> bool:
         """Whether an angular law exists; false means this stage is the affine law."""
         return self.gain is not None
+
+    @property
+    def ray_fitted(self) -> bool:
+        """Whether the angular law rests on the live pool rather than on a seed."""
+        return self._live_gain
+
+    def saved_state(self) -> dict[str, Any] | None:
+        """The angular law as plain JSON values for :func:`pepin.depth.save_law`, or ``None``
+        while there is none or it is still the seed the last run left (a seed is never written
+        back as a fresh measurement: its age would never expire)."""
+        return self.gain.state() if self.gain is not None and self._live_gain else None
 
     @property
     def clipped(self) -> bool:
@@ -1084,9 +1097,9 @@ class RayLaw(AffineLaw):
             azimuth_degree=self.azimuth_degree,
         )
         if gain is not None:
-            self.gain = gain
+            self.gain, self._live_gain = gain, True
         elif self._seeded_gain is None:
-            self.gain = None
+            self.gain, self._live_gain = None, False
 
     def apply(self, depth: Array, ctx: FrameContext) -> Array:
         """The depth through the angular law — one (a, b) per pixel, from that pixel's ray —
@@ -1122,6 +1135,7 @@ class RayLaw(AffineLaw):
 def standard_pipeline(
     law: LawStage | None = None,
     *,
+    ray: RayLaw | None = None,
     floor_pairs: bool = False,
     wall_anchor: bool = False,
     ray_law: bool = False,
@@ -1131,8 +1145,13 @@ def standard_pipeline(
     (wall correction) -> floor anchor; the four new stages are in the list and switched by the
     flags of the same name (``wall_anchor`` is the pairs role, ``wall_correct`` the pixels).
     The ray law sits behind the affine one and corrects the same raw depth by the ray's angle
-    instead: on, its image replaces the affine law's; off, the affine law's stands."""
+    instead: on, its image replaces the affine law's; off, the affine law's stands.
+
+    Both laws may be handed in so the caller keeps them: each pools and fits on its own, so a
+    saved law must be seeded into **both** (:meth:`AffineLaw.seed`), or the ray law withholds
+    every frame of the warm-up while the affine law publishes from the seed."""
     the_law = law if law is not None else AffineLaw()
+    the_ray = ray if ray is not None else RayLaw()
     geometry = FloorGeometry()
     stages: list[Stage] = [
         EdgeFilter(),
@@ -1140,7 +1159,7 @@ def standard_pipeline(
         FloorPairs(the_law, geometry),
         WallAnchor(),
         the_law,
-        RayLaw(),
+        the_ray,
         WallCorrection(),
         FloorAnchor(geometry),
     ]
