@@ -308,7 +308,7 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     assert "backend fake (CPU model not loaded)" in line
     assert (
         "flags: edge_filter=on lidar_anchor=on floor_pairs=off wall_anchor=off affine_law=on"
-        " wall_correct=off floor_anchor=on depth_backend=local" in line
+        " ray_law=off wall_correct=off floor_anchor=on depth_backend=local" in line
     )
     assert "ms median/max: network" in line and "pipeline" in line
     saved = json.loads(node._law_file.read_text())

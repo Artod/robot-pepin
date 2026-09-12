@@ -43,7 +43,7 @@ service answers; the report line says which.
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): one per stage of
 the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anchor``,
-``affine_law``, ``wall_correct``, ``floor_anchor`` — plus ``depth_backend`` and
+``affine_law``, ``ray_law``, ``wall_correct``, ``floor_anchor`` — plus ``depth_backend`` and
 ``scale_ceiling``, the largest 1 / scale the law may be fitted to; their state is printed in
 every report line.
 """
@@ -161,6 +161,15 @@ FLAGS = FlagSet(
         description="the network's depth through 1 / z = a / D + b, fitted on the pooled pairs;"
         " off, the raw network's depth goes out unwithheld (1.5-2x too far: an A/B measure of"
         " the correction, never a way to drive)",
+    ),
+    Flag(
+        "ray_law",
+        False,
+        description="the law's scale follows the ray's angle off the optical axis, a / D + b"
+        " fitted per elevation (pepin.elevation) instead of one pair of numbers for the whole"
+        " picture; off, the affine law's image stands. A property of the camera and the network,"
+        " so the neck may tilt without refitting; off by default until it is measured on the"
+        " robot, and it falls back to the affine law wherever the pool cannot carry it",
     ),
     Flag(
         "wall_correct",
