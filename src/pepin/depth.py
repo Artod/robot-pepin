@@ -430,20 +430,39 @@ MIN_DEPTH_SPREAD = 2.5  # the pooled depths' 95th / 5th percentile must reach th
 POOL_FRAMES = 600  # frames whose beams are pooled for the fit: minutes of views, so the law is
 # the map's, not the view's — a 30-frame pool slid with the heading and layered a far wall
 POOL_MIN_SAMPLES = 200  # pairs before a shift is fitted, and before any depth is published
-A_BOUNDS = (0.3, 5.0)  # 1 / scale: the network is never off by more than this. The old 3.0 was
-# not a physical limit, it was a ceiling the data hit: with the lidar's beams placed at the
-# measured mount the pool asks a ~= 2-3 and the joint fit overshoots it, so the fit saturated at
-# 3.00 with b pinned at -0.200 and stopped being a fit at all (scratch/lidar_height_check.py,
-# 2026-09-12). The rulers that never hear of the lidar — the wall planes and the floor plane —
-# read the network 2.0-2.3x too far, so 5.0 is better than twice the largest honest ask and still
-# refuses a pool that has gone degenerate. A law that lands on a bound says so in the report line
-# (:func:`at_bound`); it is a symptom to read, not a number to trust. Measured on run 0171
-# (scratch/lidar_height_fix_report.py): a is fitted at 2.80 instead of pinned at 3.00, and the
-# fused band's distance to the lidar reads 5.2 cm against the clipped law's 3.8 — the clipped law
-# was the closer of the two by luck, not by fit, and b still lands on B_BOUNDS at -0.200, which is
-# the next bound to question and was left alone here.
+SCALE_FLOOR = 0.3  # 1 / scale: the network is never nearer than this factor
+SCALE_CEILING = 5.0  # 1 / scale: nor farther. The old 3.0 was not a physical limit, it was a
+# ceiling the data hit: with the lidar's beams placed at the measured mount the pool asks
+# a ~= 2-3 and the joint fit overshoots it, so the fit saturated at 3.00 with b pinned at -0.200
+# and stopped being a fit at all (scratch/lidar_height_check.py, 2026-09-12). The rulers that
+# never hear of the lidar — the wall planes and the floor plane — read the network 2.0-2.3x too
+# far, so 5.0 is better than twice the largest honest ask and still refuses a pool that has gone
+# degenerate. A law that lands on a bound says so in the report line (:func:`at_bound`); it is a
+# symptom to read, not a number to trust. Measured on run 0171 (scratch/lidar_height_fix_report.py):
+# a is fitted at 2.80 instead of pinned at 3.00, and the fused band's distance to the lidar reads
+# 5.2 cm against the clipped law's 3.8 — the clipped law was the closer of the two by luck, not by
+# fit, and b still lands on B_BOUNDS at -0.200, which is the next bound to question and was left
+# alone here. The 3.00 is one `ros2 param set depth_stream scale_ceiling 3.0` away
+# (:func:`set_scale_ceiling`), so the field can settle the two A/B without a rebuild.
+A_BOUNDS = (SCALE_FLOOR, SCALE_CEILING)  # the live pair; read it through :func:`a_bounds`
 B_BOUNDS = (-0.2, 0.2)  # 1/m: a shift beyond this is a broken fit, not a lens
 LAW_MAX_AGE_S = 24 * 3600.0  # a saved law older than this is another day's room and lighting
+
+
+def a_bounds() -> tuple[float, float]:
+    """What 1 / scale is allowed to be right now: :data:`A_BOUNDS` as
+    :func:`set_scale_ceiling` last left it. Every site that bounds or judges a law reads it
+    here, so one switch moves all of them at once."""
+    return A_BOUNDS
+
+
+def set_scale_ceiling(ceiling: float) -> None:
+    """Move the upper bound on 1 / scale for this process (the ``scale_ceiling`` switch of the
+    depth node); ``ValueError`` for a ceiling at or under the floor changes nothing."""
+    global A_BOUNDS
+    if not math.isfinite(ceiling) or ceiling <= A_BOUNDS[0]:
+        raise ValueError(f"scale_ceiling {ceiling} is not above the floor {A_BOUNDS[0]}")
+    A_BOUNDS = (A_BOUNDS[0], float(ceiling))
 
 
 def at_bound(a: float, b: float) -> str:
@@ -452,8 +471,9 @@ def at_bound(a: float, b: float) -> str:
     A clipped law is not a fit: the pool asked for more than a lens and a network are allowed to
     be off by, and the report line must say so rather than print a round 3.00 that reads as
     measured. Empty when the law is inside both bounds."""
+    a_lo, a_hi = a_bounds()
     names = []
-    if a <= A_BOUNDS[0] or a >= A_BOUNDS[1]:
+    if a <= a_lo or a >= a_hi:
         names.append("a")
     if b <= B_BOUNDS[0] or b >= B_BOUNDS[1]:
         names.append("b")
@@ -530,7 +550,7 @@ def _bounded(
     """(a, b) of y = a x + b inside A_BOUNDS and B_BOUNDS. When a bound binds, the other
     parameter is refitted with the bound fixed (the median residual): clipping both independently
     turned a degenerate (0.27, 0.43) into a (0.3, 0.2) that fits nothing."""
-    a_lo, a_hi = A_BOUNDS
+    a_lo, a_hi = a_bounds()
     b_lo, b_hi = B_BOUNDS
     if not (math.isfinite(a) and math.isfinite(b)):
         return float(np.clip(weighted_median(y / x, weight), a_lo, a_hi)), 0.0  # a scale only
@@ -560,7 +580,7 @@ def fit_affine(d: Array, z: Array, weight: Array | None = None) -> tuple[float, 
     x, y = 1.0 / d, 1.0 / z
     lo, hi = np.percentile(z, (5, 95))
     if float(hi / lo) < MIN_DEPTH_SPREAD or d.size < POOL_MIN_SAMPLES:
-        return float(np.clip(weighted_median(y / x, weight), *A_BOUNDS)), 0.0
+        return float(np.clip(weighted_median(y / x, weight), *a_bounds())), 0.0
     alpha, beta = _fit_noisy_on_exact(x, y, weight)
     with np.errstate(divide="ignore", invalid="ignore"):
         a, b = float(np.divide(1.0, alpha)), float(np.divide(-beta, alpha))
@@ -649,7 +669,8 @@ def load_law(
         pooled, saved_at = int(data["pooled"]), float(data["saved_at"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    plausible = A_BOUNDS[0] <= a <= A_BOUNDS[1] and B_BOUNDS[0] <= b <= B_BOUNDS[1]
+    a_lo, a_hi = a_bounds()
+    plausible = a_lo <= a <= a_hi and B_BOUNDS[0] <= b <= B_BOUNDS[1]
     if not plausible or pooled < POOL_MIN_SAMPLES or now - saved_at > max_age_s:
         return None
     return a, b, pooled

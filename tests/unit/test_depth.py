@@ -418,6 +418,31 @@ def test_a_scale_of_three_and_a_half_is_fitted_and_not_clipped() -> None:
     assert at_bound(a, b) == ""
 
 
+def test_the_scale_ceiling_is_a_switch_and_the_old_one_is_one_set_away() -> None:
+    """CLAUDE.md rule 19: the ceiling that was raised from 3.0 to 5.0 is the depth node's
+    ``scale_ceiling`` flag, so the field can put the old law back without a rebuild. Every site
+    that bounds or judges a law reads the live pair, the pipeline's included."""
+    from pepin.depth import SCALE_CEILING, a_bounds, at_bound, fit_affine, set_scale_ceiling
+    from pepin.depth_pipeline import a_bounds as pipeline_bounds
+
+    z = np.linspace(1.0, 5.0, 400)
+    d = 3.5 * z
+    try:
+        set_scale_ceiling(3.0)
+        assert a_bounds() == (0.3, 3.0)
+        a, b = fit_affine(d, z)
+        assert a == 3.0 and at_bound(a, b) == "a", "the old ceiling clips the same pool"
+        with pytest.raises(ValueError, match="not above the floor"):
+            set_scale_ceiling(0.2)
+        assert a_bounds() == (0.3, 3.0), "a refused ceiling changes nothing"
+        # The pipeline's plausibility gate must read the live pair, never an import-time copy.
+        assert pipeline_bounds() == (0.3, 3.0)
+    finally:
+        set_scale_ceiling(SCALE_CEILING)
+    assert a_bounds() == (0.3, SCALE_CEILING)
+    assert at_bound(*fit_affine(d, z)) == ""
+
+
 def test_a_clipped_law_says_so_in_the_report_line() -> None:
     """A law on a bound is a ceiling, not a fit: the node's line must name which parameter hit
     it instead of printing a round number that reads as measured."""

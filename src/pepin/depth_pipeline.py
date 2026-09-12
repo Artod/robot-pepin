@@ -45,7 +45,6 @@ import numpy.typing as npt
 
 from pepin.contact import DEPTH_NOISE, DepthNoise
 from pepin.depth import (
-    A_BOUNDS,
     B_BOUNDS,
     EDGE_REL_STEP,
     FLOOR_HEIGHT_TOLERANCE,
@@ -59,6 +58,7 @@ from pepin.depth import (
     CameraPose,
     Intrinsics,
     Mask,
+    a_bounds,
     apply_affine,
     at_bound,
     beam_hits,
@@ -889,7 +889,8 @@ class ElevationLaw(AffineLaw):
         if alpha == 0.0:
             return
         a, b, c = 1.0 / alpha, -beta / alpha, -gamma / alpha
-        if A_BOUNDS[0] <= a <= A_BOUNDS[1] and B_BOUNDS[0] <= b <= B_BOUNDS[1]:
+        a_lo, a_hi = a_bounds()
+        if a_lo <= a <= a_hi and B_BOUNDS[0] <= b <= B_BOUNDS[1]:
             self.a, self.b, self.c = a, b, c
 
     def apply(self, depth: Array, ctx: FrameContext) -> Array:
