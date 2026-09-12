@@ -255,10 +255,12 @@ in charge: 0.32 m under a footprint planner, which is a toe's 0.27 m of reach pa
 lidar sees plus a hand's width, and 0.48 m under a point planner, which is that reach plus the
 21 cm of half-width its 6 cm disc leaves out. The reach is computed from the mount, not typed:
 the beam crosses a standing person on the upper shin, a relaxed shin leans back off vertical,
-and the shoe still reaches 0.21 m past the ankle. Nothing nearer than the ring plus the hull's own
-circumscribed radius is ringed at all — a ring drawn across the cart's outline would refuse its
-every command (run 0087) — and mapped furniture is never ringed, so the cart still parks against
-it.
+and the shoe still reaches 0.21 m past the ankle. A mark that would land on the cart's own
+outline is dropped — a lethal cell there refuses its every command (run 0087) — and a return
+inside that outline is not ringed at all; the blind disc is the cart's size and stays there
+however wide the ring grows, because an exclusion that grew with the ring would have stopped
+ringing a person at 0.90 m the day the reach went up by 7 cm. Mapped furniture is never ringed,
+so the cart still parks against it.
 
 ## Planning and control
 

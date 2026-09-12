@@ -372,12 +372,21 @@ def test_new_objects_get_a_berth_in_both_costmaps() -> None:
     planner's ring makes up the width its 6 cm band lacks plus the toes, a footprint planner's
     only the toes; nothing is ringed so close that a ring could touch the cart's own outline.
     Both costmaps mark the rings and never raytrace-clear through them."""
-    from pepin.dynamic import COSTMAP_CELL_M, berth_for, near_exclusion_m, point_planner_ring_m
+    from pepin.dynamic import (
+        COSTMAP_CELL_M,
+        berth_for,
+        hull_clearance_m,
+        near_exclusion_m,
+        point_planner_ring_m,
+    )
     from pepin.footprint import HULL
 
     point = berth_for("GridBased")
     assert point.ring_m == point_planner_ring_m(HULL) >= HULL.half_width_m - HULL.inscribed_radius_m
-    assert point.near_m == near_exclusion_m(point.ring_m, HULL)
+    # A mark on the cart's outline is what run 0087 refused to drive away from, so that is what
+    # is dropped; the blind disc no longer grows with the ring (the old rule: near_rings off).
+    assert point.trim_m == point.near_m == hull_clearance_m(HULL)
+    assert berth_for("GridBased", near_rings=False).near_m == near_exclusion_m(point.ring_m, HULL)
     for costmap in ("local_costmap", "global_costmap"):
         params = _p(costmap)
         assert params["resolution"] == COSTMAP_CELL_M

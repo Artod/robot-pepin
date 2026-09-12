@@ -9,9 +9,13 @@ that the static map does not explain (a person, a moved chair, a bag) are marked
 costmaps as lethal rings of :attr:`Berth.ring_m` radius, a berth the point planners cannot enter.
 Mapped furniture keeps its 6 cm and the cart still parks against it.
 
-Points within :attr:`Berth.near_m` of the robot get no ring: whatever stands beside a parked cart is
-handled by the contact band and the controller's own footprint check, and a ring landing on the
-cart's outline would refuse its departure (run 0087).
+A mark within :attr:`Berth.trim_m` of ``base_link`` is dropped: that is the cart's own outline,
+and a lethal cell on it refuses its departure (run 0087). Whatever stands that close is handled
+by the contact band and the controller's own footprint check anyway. :attr:`Berth.near_m` — the
+range inside which a return is not ringed at all — is the outline too, so the blind disc stays
+the cart's size whatever the ring grows to; the older rule that made it the ring plus the
+outline is still reachable (``berth_for(..., near_rings=False)``, the tracker's ``near_rings``
+flag).
 """
 
 from __future__ import annotations
@@ -114,19 +118,25 @@ def dynamic_marks(
     points_base: NDArray[np.float64], pose: Pose2D, mask: StaticMask, berth: Berth
 ) -> NDArray[np.float64]:
     """The lethal marks a scan adds to the costmaps: rings of ``berth.ring_m`` around every
-    return the map does not explain, farther than ``berth.near_m`` from the robot. (M, 2) in the
-    map frame; empty when the scan agrees with the map."""
+    return the map does not explain, farther than ``berth.near_m`` from the robot, with every
+    mark nearer than ``berth.trim_m`` dropped so no ring lands on the cart's own outline.
+    (M, 2) in the map frame; empty when the scan agrees with the map."""
     if len(points_base) == 0:
         return np.zeros((0, 2), dtype=np.float64)
     ranges = np.hypot(points_base[:, 0], points_base[:, 1])
     far = ranges >= berth.near_m
-    world = to_map(points_base[far], pose)
-    unexplained = ~mask.explains(world)
-    news = world[unexplained]
+    kept = points_base[far]
+    unexplained = ~mask.explains(to_map(kept, pose))
+    news = kept[unexplained]
     if len(news) > MAX_NEWS_POINTS:  # the nearest first: what is close is what the wheels meet
         nearest = np.argsort(ranges[far][unexplained])[:MAX_NEWS_POINTS]
         news = news[nearest]
-    return rings(dedupe(news), berth.ring_m)
+    # The ring is built in the base frame so the trim can measure each mark from the cart
+    # itself; the marks go to the map frame whole, as one transform.
+    marks = rings(dedupe(news), berth.ring_m)
+    if berth.trim_m > 0.0 and len(marks):
+        marks = marks[np.hypot(marks[:, 0], marks[:, 1]) >= berth.trim_m]
+    return to_map(marks, pose)
 
 
 VOTE_MIN_SHARE = 0.5  # below this the pose, not the room, is what the scan disagrees with
@@ -220,12 +230,16 @@ class Berth:
     """How new objects are marked for the planner in charge.
 
     ``ring_m`` is the lethal ring drawn around every unexplained return; ``near_m`` the distance
-    inside which nothing is ringed (a ring there would land on the cart's own outline and refuse
-    its every command — run 0087).
+    inside which a return is not ringed at all; ``trim_m`` the distance inside which a single
+    mark is dropped, whatever it belongs to — a mark there lands on the cart's own outline and
+    refuses its every command (run 0087). The failure was a *mark* on the outline, so the trim
+    is what answers it and ``near_m`` need not grow with the ring
+    (:func:`hull_clearance_m`, :func:`near_exclusion_m`, :func:`berth_for`).
     """
 
     ring_m: float
     near_m: float
+    trim_m: float = 0.0
 
 
 def point_planner_ring_m(hull: Footprint = HULL, reach_m: float | None = None) -> float:
@@ -248,22 +262,47 @@ def footprint_planner_ring_m(reach_m: float | None = None, hand_m: float = HAND_
     return (toe_reach_m() if reach_m is None else reach_m) + hand_m
 
 
+def hull_clearance_m(hull: Footprint = HULL, cell_m: float = COSTMAP_CELL_M) -> float:
+    """Closer than this to ``base_link`` no mark may be drawn: the hull's circumscribed radius
+    plus one cell, the circle the cart occupies whatever way it is turned."""
+    return hull.circumscribed_radius_m + cell_m
+
+
 def near_exclusion_m(
     ring_m: float, hull: Footprint = HULL, cell_m: float = COSTMAP_CELL_M
 ) -> float:
-    """Closer than this no ring is drawn: the ring plus the hull's circumscribed radius plus one
-    cell, so a ring can never touch the cart's own outline."""
-    return ring_m + hull.circumscribed_radius_m + cell_m
+    """Closer than this no ring is drawn at all: the ring plus the hull's circumscribed radius
+    plus one cell, so no point of a ring can touch the cart's own outline.
+
+    This is the ``near_rings=False`` berth, kept reachable (CLAUDE.md rule 19). It pays for the
+    guarantee with a blind disc that grows with the ring: raise the reach by 7 cm and a person
+    standing 0.90 m ahead stops being ringed, which is the case the ring exists for. The
+    ``near_rings=True`` berth trims the offending marks instead (:func:`hull_clearance_m`).
+    """
+    return ring_m + hull_clearance_m(hull, cell_m)
 
 
-def berth_for(planner_id: str, hull: Footprint = HULL) -> Berth:
-    """The berth for the Nav2 planner plugin in charge (``planner_selector``)."""
+def berth_for(
+    planner_id: str,
+    hull: Footprint = HULL,
+    reach_m: float | None = None,
+    near_rings: bool = True,
+) -> Berth:
+    """The berth for the Nav2 planner plugin in charge (``planner_selector``).
+
+    ``reach_m`` overrides the toe reach the mount implies (:func:`toe_reach_m`), the live knob
+    over the ring's size. With ``near_rings`` on, a return is ringed as soon as it clears the
+    cart's own outline and only the marks that would land on that outline are dropped; off, the
+    old rule applies and nothing within the ring plus the outline is ringed at all.
+    """
     ring = (
-        footprint_planner_ring_m()
+        footprint_planner_ring_m(reach_m)
         if planner_id in FOOTPRINT_PLANNERS
-        else point_planner_ring_m(hull)
+        else point_planner_ring_m(hull, reach_m)
     )
-    return Berth(ring, near_exclusion_m(ring, hull))
+    clearance = hull_clearance_m(hull)
+    near = clearance if near_rings else near_exclusion_m(ring, hull)
+    return Berth(ring, near, clearance)
 
 
 OCCLUDED_SHARE = 0.25  # a quarter of the near scan on things the map does not know

@@ -67,7 +67,29 @@ def test_what_stands_beside_a_parked_cart_gets_no_ring() -> None:
     beside = np.array([[0.30, 0.30]])  # 42 cm away: the contact band and the footprint handle it
     assert len(dynamic_marks(beside, pose, mask, POINT)) == 0
     farther = np.array([[NEAR_M + 0.05, 0.0]])
-    assert len(dynamic_marks(farther, pose, mask, POINT)) == PER_CENTRE
+    marks = dynamic_marks(farther, pose, mask, POINT)
+    # The ring is drawn; the arc of it that would land on the cart's own outline is dropped, and
+    # nothing else is. A whole return is never thrown away for the sake of one bad mark.
+    assert 0 < len(marks) < PER_CENTRE
+    from_cart = np.hypot(marks[:, 0] - pose.x, marks[:, 1] - pose.y)
+    assert from_cart.min() >= POINT.trim_m - 1e-9
+
+
+def test_a_wider_ring_does_not_blind_the_band_it_widened() -> None:
+    """The failure the near exclusion used to cause: it was the ring plus the cart's outline, so
+    every centimetre added to the ring took a centimetre of berth away from the returns just
+    outside it. A person 0.90 m ahead was ringed with the old 0.41 m ring and would have stopped
+    being ringed at all by the 0.48 m one — in exactly the case the ring exists for."""
+    from pepin.dynamic import berth_for, near_exclusion_m
+
+    mask = StaticMask(room())
+    pose = Pose2D(0.5, 2.0, 0.0)
+    person = np.array([[0.90, 0.0]])
+    assert near_exclusion_m(POINT.ring_m) > 0.90, "the case this test is about"
+    assert len(dynamic_marks(person, pose, mask, POINT)) > 0
+    old = berth_for("GridBased", near_rings=False)  # the old rule, still one flag away
+    assert old.near_m == near_exclusion_m(old.ring_m)
+    assert len(dynamic_marks(person, pose, mask, old)) == 0
 
 
 def test_a_ring_leaves_no_gap_a_point_planner_could_walk_through() -> None:
@@ -108,6 +130,7 @@ def test_the_berth_is_the_toes_for_a_footprint_planner_and_the_hull_for_a_point_
         HAND_M,
         berth_for,
         footprint_planner_ring_m,
+        hull_clearance_m,
         near_exclusion_m,
         point_planner_ring_m,
         toe_reach_m,
@@ -123,14 +146,23 @@ def test_the_berth_is_the_toes_for_a_footprint_planner_and_the_hull_for_a_point_
     assert toe_reach_m(0.20) == 0.24 and toe_reach_m(0.0) == 0.21
     assert point_planner_ring_m() == HULL.half_width_m - HULL.inscribed_radius_m + reach
     assert footprint_planner_ring_m() == reach + HAND_M
-    assert near_exclusion_m(0.25) == 0.25 + HULL.circumscribed_radius_m + COSTMAP_CELL_M
+    assert hull_clearance_m() == HULL.circumscribed_radius_m + COSTMAP_CELL_M
+    assert near_exclusion_m(0.25) == 0.25 + hull_clearance_m()
     hybrid = berth_for("Hybrid")
     assert hybrid.ring_m == footprint_planner_ring_m() == 0.32
     assert berth_for("Lattice") == hybrid
     for point in ("GridBased", "Smac2D", "ThetaStar", ""):
         b = berth_for(point)
-        assert b.ring_m == point_planner_ring_m() and b.near_m == near_exclusion_m(b.ring_m)
-    assert hybrid.near_m < berth_for("GridBased").near_m  # a person at 0.7 m is seen by Hybrid
+        assert b.ring_m == point_planner_ring_m()
+        # The blind disc is the cart's own outline and nothing more, whatever the ring grows to;
+        # the old rule that added the ring to it is one flag away.
+        assert b.near_m == b.trim_m == hull_clearance_m()
+        assert berth_for(point, near_rings=False).near_m == near_exclusion_m(b.ring_m)
+    assert hybrid.near_m == berth_for("GridBased").near_m == hull_clearance_m()
+    # The reach is the live knob over the ring (the tracker's toe_reach flag), and only over it.
+    wider = berth_for("GridBased", reach_m=reach + 0.10)
+    assert abs(wider.ring_m - (berth_for("GridBased").ring_m + 0.10)) < 1e-9
+    assert wider.near_m == hull_clearance_m()
 
 
 # -- who may vote in the scan match -------------------------------------------
