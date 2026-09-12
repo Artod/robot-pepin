@@ -65,7 +65,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, Imu, LaserScan
 
-from pepin.camera import CameraConfig, intrinsics, mount_transform
+from pepin.camera import CameraConfig, mount_transform, optics
 from pepin.depth import (
     POOL_MIN_SAMPLES,
     SCALE_CEILING,
@@ -242,7 +242,7 @@ class DepthStream(Node):
         cfg = CameraConfig.load(config, board=board)
         x, y, z, _roll, pitch, _yaw = mount_transform(cfg)
         self._camera_config = CameraPose(x, y, z, pitch)  # the fallback while TF has no edge
-        self._hfov_deg = cfg.hfov_deg  # the nominal optics until a camera_info arrives
+        self._camera_cfg = cfg  # config/camera.json's own optics until a camera_info arrives
         self._intr: Intrinsics | None = None
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         newest = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
@@ -497,12 +497,19 @@ class DepthStream(Node):
         )
 
     def _intr_or_nominal(self, image: Image) -> Intrinsics:
-        """The camera_info's optics, or the nominal pinhole of config/camera.json's field of
-        view until one arrives."""
+        """The camera_info's optics, or config/camera.json's own until one arrives — the
+        checkerboard's calibration scaled to this frame's size when the file carries one, the
+        nominal pinhole of the configured field of view when it does not.
+
+        One reader for both (:func:`pepin.camera.optics`), so a calibration reaches the depth's
+        fallback the moment ros/calibrate.sh writes it, with no second place to remember. The
+        distortion is dropped here on purpose: these projections are a pinhole, and the
+        rectified picture camera_stream can publish is the place that answers for the lens.
+        """
         if self._intr is not None:
             return self._intr
-        fx, fy, cx, cy = intrinsics(image.width, image.height, self._hfov_deg)
-        return Intrinsics(fx, fy, cx, cy, image.width, image.height)
+        lens = optics(self._camera_cfg, image.width, image.height)
+        return Intrinsics(lens.fx, lens.fy, lens.cx, lens.cy, lens.width, lens.height)
 
     def _lidar_points(self, image: Image) -> Array | None:
         """The scan nearest the frame's exposure as (n, 3) base_link points at the frame's

@@ -7,6 +7,7 @@ out, which is the point: the pump must be joined before the node is destroyed.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import urllib.request
@@ -236,6 +237,95 @@ def test_a_frame_goes_out_at_the_scale_with_the_board_s_capture_time(build: Buil
     assert (info.k[2], info.k[5]) == (320.0, 180.0), "the optics scale with the picture"
 
 
+# ---- the optics ------------------------------------------------------------------------------
+CALIBRATION = {
+    "width": 1280,
+    "height": 720,
+    "fx": 900.0,
+    "fy": 896.0,
+    "cx": 646.0,
+    "cy": 354.0,
+    "dist": [-0.31, 0.1, 0.0005, -0.0004, 0.0],
+    "model": "plumb_bob",
+    "rms": 0.28,
+    "views": 26,
+    "board": "9x6 inner corners, 24.0 mm squares",
+    "date": "2026-09-12",
+}
+
+
+def calibrated_config(tmp_path: Path, calibrated: bool = True) -> str:
+    """A copy of config/camera.json carrying a checkerboard calibration (and lidar.json beside
+    it, which the node reads for the laser's static edge)."""
+    data = json.loads((CONFIG_DIR / "camera.json").read_text())
+    data["overview"]["calibrated"] = calibrated
+    data["overview"]["intrinsics"] = CALIBRATION
+    data["overview"]["hfov_deg"] = 70.6
+    (tmp_path / "camera.json").write_text(json.dumps(data))
+    (tmp_path / "lidar.json").write_text((CONFIG_DIR / "lidar.json").read_text())
+    return str(tmp_path / "camera.json")
+
+
+def test_a_calibrated_camera_publishes_the_measured_k_and_d_scaled_to_the_picture(
+    build: Build, tmp_path: Path
+) -> None:
+    """With an intrinsics block in the config the CameraInfo is the checkerboard's, scaled to
+    the published 640x360 (half the focal length, half the principal point) and carrying the
+    lens's distortion; the start-up warning about guessed optics is gone and the report line
+    says the numbers were measured."""
+    node, _ = build(multipart([(1.0, jpeg(1280, 720))]), config=calibrated_config(tmp_path))
+    assert until(lambda: node.pubs["/camera/camera_info"].sent)
+    info = node.pubs["/camera/camera_info"].sent[0]
+    assert (info.k[0], info.k[4]) == (450.0, 448.0)
+    assert (info.k[2], info.k[5]) == (323.0, 177.0)
+    assert info.d == pytest.approx(CALIBRATION["dist"])  # normalised: unchanged by the scale
+    assert info.p[0] == info.k[0] and info.p[2] == info.k[2]
+    assert not any("nominal" in line for line in node.logger.texts("warning"))
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "calibrated 2026-09-12" in line and "rms 0.28 px" in line and "9x6" in line
+
+
+def test_the_undistort_flag_rectifies_the_picture_and_says_so_in_the_info(
+    build: Build, tmp_path: Path
+) -> None:
+    """Flag on: the frame goes out through the remap tables and its CameraInfo carries the
+    straightened image's own K with no distortion left — there is none in the picture any more.
+    The flag is live, so the next frame is rectified without a restart."""
+    node, stream = build(config=calibrated_config(tmp_path))
+    assert node._published.maps is None and node._published.info.d[0] != 0.0
+    assert node.set_parameters([Param("undistort", True)])[0].successful
+    published = node._published
+    assert published.maps is not None and published.size == (640, 360)
+    assert published.info.d == [0.0, 0.0, 0.0, 0.0, 0.0]
+    assert published.info.k[0] != 450.0, "the rectified picture has its own focal length"
+    assert "rectified" in published.optics.source
+    node._publish(np.zeros((720, 1280, 3), dtype=np.uint8), 2.0)
+    image = node.pubs["/camera/image"].sent[-1]
+    assert (image.width, image.height) == (640, 360)
+    assert stream is not None
+
+
+def test_undistorting_an_uncalibrated_camera_is_refused_with_the_reason(build: Build) -> None:
+    """There is nothing to undo without a calibration, and a flag that silently did nothing
+    would read as a measurement that had been made."""
+    node, _ = build()
+    refused = node.set_parameters([Param("undistort", True)])[0]
+    assert not refused.successful and "ros/calibrate.sh" in refused.reason
+    assert not node._switches.on("undistort") and node._published.maps is None
+
+
+def test_an_intrinsics_block_with_calibrated_false_is_not_published(
+    build: Build, tmp_path: Path
+) -> None:
+    """One boolean turns a bad calibration off: the block stays in the file as history and the
+    node goes back to the nominal pinhole, warning that it did."""
+    node, _ = build(config=calibrated_config(tmp_path, calibrated=False))
+    node._report()
+    assert "uncalibrated" in node.logger.texts("info")[-1]
+    assert any("nominal" in line for line in node.logger.texts("warning"))
+
+
 def test_a_frame_the_board_did_not_stamp_takes_the_laptop_s_clock_and_is_counted(
     build: Build,
 ) -> None:
@@ -249,17 +339,18 @@ def test_a_frame_the_board_did_not_stamp_takes_the_laptop_s_clock_and_is_counted
     assert "1 without a capture time" in node.logger.texts("info")[-1]
 
 
-def test_the_report_line_carries_the_rate_and_the_switches(build: Build) -> None:
-    """The period's rate comes from the kit's Tally (the elapsed time, not a divisor of 30),
-    and both flags are printed with it — the live one and the one read at start (CLAUDE.md
-    rule 19)."""
+def test_the_report_line_carries_the_rate_the_optics_and_the_switches(build: Build) -> None:
+    """The period's rate comes from the kit's Tally (the elapsed time, not a divisor of 30), the
+    optics say in words whether they were measured or guessed, and every flag is printed with
+    them — the live ones and the one read at start (CLAUDE.md rule 19)."""
     node, _ = build(multipart([(1.0, jpeg(320, 180)), (1.1, jpeg(320, 180))]))
     assert until(lambda: len(node.pubs["/camera/image"].sent) == 2)
     assert node.timers == [(30.0, node._report)]
     node._report()
     line = node.logger.texts("info")[-1]
     assert line.startswith("camera: ") and "frames/s" in line
-    assert "flags: scale=0.5 static_camera_tf=on" in line
+    assert "optics: nominal 78 deg field of view (uncalibrated)" in line
+    assert "flags: scale=0.5 undistort=off static_camera_tf=on" in line
     node._report()
     assert "camera: 0.0 frames/s" in node.logger.texts("info")[-1], "the period was emptied"
 
@@ -269,13 +360,13 @@ def test_a_live_scale_rebuilds_the_optics_and_a_nonsense_one_is_refused(build: B
     """``ros2 param set /camera_stream scale 0.25`` takes the next frame down to a quarter,
     optics included; a scale outside (0, 1] is refused with its reason and nothing changes."""
     node, _ = build()
-    assert node._optics.size == (640, 360)
+    assert node._published.size == (640, 360)
     assert node.set_parameters([Param("scale", 0.25)])[0].successful
-    assert node._optics.size == (320, 180) and node._optics.info.width == 320
-    assert (node._optics.info.k[2], node._optics.info.k[5]) == (160.0, 90.0)
+    assert node._published.size == (320, 180) and node._published.info.width == 320
+    assert (node._published.info.k[2], node._published.info.k[5]) == (160.0, 90.0)
     refused = node.set_parameters([Param("scale", 0.0)])[0]
     assert not refused.successful and "fraction" in refused.reason
-    assert node._optics.size == (320, 180) and node._switches["scale"] == 0.25
+    assert node._published.size == (320, 180) and node._switches["scale"] == 0.25
 
 
 def test_the_static_transform_switch_cannot_be_flipped_while_the_node_runs(build: Build) -> None:

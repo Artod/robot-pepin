@@ -3,10 +3,12 @@
 ustreamer on the board serves the AC310 as an MJPEG stream; nothing on the board decodes it (the
 board has no core to spare and no use for pixels). This node runs on the laptop, pulls the
 stream with OpenCV, and publishes ``/camera/image`` (bgr8) and ``/camera/camera_info`` with the
-optics of ``config/camera.json`` (nominal until calibrated), stamped with the moment the board
-captured the frame (ustreamer's X-Timestamp, the clock that stamps the lidar): a frame stamped
-when the laptop decoded it was a few hundred milliseconds late, a picture placed ten degrees
-wrong while the cart turns.
+optics of ``config/camera.json`` — the checkerboard's measured K and distortion once
+``ros/calibrate.sh`` has written them (``calibrated: true``), the nominal pinhole of the
+configured field of view until then, one reader deciding (:func:`pepin.camera.optics`) and the
+report line saying which — stamped with the moment the board captured the frame (ustreamer's
+X-Timestamp, the clock that stamps the lidar): a frame stamped when the laptop decoded it was a
+few hundred milliseconds late, a picture placed ten degrees wrong while the cart turns.
 It also broadcasts the static ``base_link -> camera_link -> camera_optical`` and
 ``base_link -> laser`` transforms from the mounts of ``config/`` (:class:`pepin.mounts.Mounts`),
 so RTAB-Map knows where the pictures were taken from — the camera's own edge only while
@@ -15,9 +17,11 @@ live from the servo encoders (pepin_bringup.neck_state, ros/feature.sh neck on) 
 not publish the same edge, and the launch passes the switch off (``ros/laptop.sh vslam --neck``).
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set camera_stream <name> <value>``): ``scale``, live
-(the published picture as a fraction of the camera's own, optics included); ``static_camera_tf``,
-read at start and not live — a static transform cannot be withdrawn once sent, so the other
-value needs a restart. Both are printed in every report line.
+(the published picture as a fraction of the camera's own, optics included); ``undistort``, live
+(the picture is straightened by the calibration before it goes out, and its CameraInfo then
+carries no distortion); ``static_camera_tf``, read at start and not live — a static transform
+cannot be withdrawn once sent, so the other value needs a restart. All three are printed in
+every report line.
 
 The frames are pulled by one thread (:meth:`CameraStream._pump`) which :meth:`CameraStream.close`
 stops and joins before the node is destroyed: a daemon thread left inside OpenCV's decoder when
@@ -45,7 +49,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
 from tf2_ros import StaticTransformBroadcaster
 
-from pepin.camera import CameraConfig, camera_info_arrays
+from pepin.calibration import undistort_optics
+from pepin.camera import CameraConfig, Optics, optics
 from pepin.flags import Flag, FlagSet
 from pepin.mjpeg import capture_time, parts
 from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
@@ -72,6 +77,15 @@ FLAGS = FlagSet(
         " the next frame",
     ),
     Flag(
+        "undistort",
+        False,
+        description="the published picture is rectified with the checkerboard calibration"
+        " (config/camera.json's intrinsics) and its camera_info then says no distortion; off by"
+        " default until the straightened picture has been measured against the raw one, and a"
+        " no-op while the camera is uncalibrated, since there is nothing to undo. Rectifying"
+        " crops to the largest all-valid rectangle, so the field of view narrows a little",
+    ),
+    Flag(
         "static_camera_tf",
         True,
         live=False,
@@ -84,13 +98,16 @@ FLAGS = FlagSet(
 
 
 @dataclass(frozen=True)
-class Optics:
-    """One scale's published picture: its size in pixels and the ``CameraInfo`` that describes
-    it. The two travel together so a live ``scale`` never gives a frame the other size's
-    optics — the pump reads the pair in one attribute read."""
+class Published:
+    """One scale's published picture: its size in pixels, the ``CameraInfo`` that describes it,
+    the optics those came from, and the remap tables when the picture is being rectified. They
+    travel together so a live ``scale`` or ``undistort`` never gives a frame the other
+    setting's optics — the pump reads the whole thing in one attribute read."""
 
     size: tuple[int, int]
     info: CameraInfo
+    optics: Optics
+    maps: tuple[Any, Any] | None = None  # cv2.remap's x and y tables, only while rectifying
 
 
 class CameraStream(Node):
@@ -104,7 +121,9 @@ class CameraStream(Node):
         # Declared after every other parameter: rclpy runs the switches' callback on
         # declarations too, and it refuses everything that is not a flag.
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
-        self._optics = self._optics_for(float(self._switches["scale"]))
+        self._published = self._published_for(
+            float(self._switches["scale"]), self._switches.on("undistort")
+        )
         # Reliable, like RTAB-Map's subscribers: a best-effort image never matched them.
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         self._image_pub = self.create_publisher(Image, "/camera/image", reliable)
@@ -113,6 +132,7 @@ class CameraStream(Node):
             self.get_logger().warning(
                 f"camera optics are nominal ({self._cfg.hfov_deg:.0f} deg field of view): fine for"
                 " recognising places, not for measuring — calibrate with a checkerboard"
+                " (ros/calibrate.sh)"
             )
         self._static = StaticTransformBroadcaster(self)
         self._static.sendTransform(self._static_transforms(config.parent))
@@ -123,7 +143,8 @@ class CameraStream(Node):
         self._thread = threading.Thread(target=self._pump, name="camera", daemon=True)
         self._thread.start()
         self.get_logger().info(
-            f"camera stream from {self._cfg.stream}; flags: {self._switches.state(live_only=False)}"
+            f"camera stream from {self._cfg.stream}; optics: {self._published.optics.source};"
+            f" flags: {self._switches.state(live_only=False)}"
         )
 
     def close(self) -> None:
@@ -203,27 +224,55 @@ class CameraStream(Node):
             )
         return transforms
 
-    def _optics_for(self, scale: float) -> Optics:
-        """The published size for ``scale`` of the camera's own picture, and the ``CameraInfo``
-        that goes with it: the nominal pinhole of the configured field of view, scaled with the
-        image (half the pixels, half the focal length)."""
+    def _published_for(self, scale: float, undistort: bool) -> Published:
+        """The published size for ``scale`` of the camera's own picture, the ``CameraInfo`` that
+        goes with it, and — while ``undistort`` is on and there is a calibration to undo — the
+        remap tables that straighten the frame.
+
+        The optics come from :func:`pepin.camera.optics`: the checkerboard's K and distortion
+        scaled to the published size when config/camera.json carries a calibration, the nominal
+        pinhole of the configured field of view otherwise. Rectified, the CameraInfo carries the
+        straightened image's own K and no distortion, because the picture no longer has any.
+        """
         size = (round(self._cfg.width * scale), round(self._cfg.height * scale))
+        lens = optics(self._cfg, size[0], size[1])
         info = CameraInfo()
         info.header.frame_id = self._cfg.optical_frame
         info.width, info.height = size
         info.distortion_model = "plumb_bob"
-        info.k, info.d, info.r, info.p = camera_info_arrays(size[0], size[1], self._cfg.hfov_deg)
-        return Optics(size, info)
+        maps: tuple[Any, Any] | None = None
+        if undistort and self._cfg.calibration is not None:
+            k, d, new_k = undistort_optics(self._cfg.calibration, size[0], size[1])
+            maps = cv2.initUndistortRectifyMap(k, d, None, new_k, size, cv2.CV_16SC2)
+            lens = Optics(
+                float(new_k[0, 0]),
+                float(new_k[1, 1]),
+                float(new_k[0, 2]),
+                float(new_k[1, 2]),
+                size[0],
+                size[1],
+                (),
+                True,
+                f"{lens.source}, rectified to {new_k[0, 0]:.0f} px focal",
+            )
+        info.k, info.d, info.r, info.p = lens.camera_info_arrays()
+        return Published(size, info, lens, maps)
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
-        """A flag changed: ``scale`` rebuilds the published size and its optics for the next
-        frame. ``static_camera_tf`` never reaches here — it is declared ``live=False`` and the
-        kit refuses the change with that reason, because the transforms went out at start and a
-        static one cannot be withdrawn."""
+        """A flag changed: ``scale`` and ``undistort`` rebuild the published size, its optics and
+        the remap tables for the next frame. ``static_camera_tf`` never reaches here — it is
+        declared ``live=False`` and the kit refuses the change with that reason, because the
+        transforms went out at start and a static one cannot be withdrawn."""
         if name == "scale":
             if float(new) <= 0.0:
                 raise ValueError("scale is a fraction of the camera's picture, not zero")
-            self._optics = self._optics_for(float(new))
+            self._published = self._published_for(float(new), self._switches.on("undistort"))
+        elif name == "undistort":
+            if bool(new) and self._cfg.calibration is None:
+                raise ValueError(
+                    "there is no calibration to undistort with: run ros/calibrate.sh first"
+                )
+            self._published = self._published_for(float(self._switches["scale"]), bool(new))
 
     def _pump(self) -> None:
         """Read frames as they come; reconnect after a dropped stream (the board restarts too).
@@ -260,32 +309,41 @@ class CameraStream(Node):
 
     def _publish(self, frame: Any, taken_at: float | None) -> None:
         """One decoded frame out as ``/camera/image`` with its ``/camera/camera_info``, scaled to
-        the current optics and stamped with the board's capture time (ustreamer's X-Timestamp)
-        or, when it sent none, with the laptop's clock."""
-        optics = self._optics
+        the current optics, straightened when ``undistort`` is on, and stamped with the board's
+        capture time (ustreamer's X-Timestamp) or, when it sent none, with the laptop's clock."""
+        published = self._published
         array = np.asarray(frame)
-        if optics.size != (self._cfg.width, self._cfg.height):
-            array = cv2.resize(array, optics.size, interpolation=cv2.INTER_AREA)
+        if published.size != (self._cfg.width, self._cfg.height):
+            array = cv2.resize(array, published.size, interpolation=cv2.INTER_AREA)
+        if published.maps is not None:
+            array = cv2.remap(array, published.maps[0], published.maps[1], cv2.INTER_LINEAR)
+            self._tally.count("rectified")
         stamp = (
             self.get_clock().now().to_msg() if taken_at is None else stamp_from_seconds(taken_at)
         )
-        optics.info.header.stamp = stamp
+        published.info.header.stamp = stamp
         self._image_pub.publish(image_from_array(array, "bgr8", stamp, self._cfg.optical_frame))
-        self._info_pub.publish(optics.info)
+        self._info_pub.publish(published.info)
         self._tally.count("frames")
         if taken_at is None:
             self._tally.count("unstamped")
 
     def _report(self) -> None:
         """Every 30 s: the period's frame rate, the frames the board sent without a capture time,
-        and the flags' state, in one line. Every flag, not only the live ones: which side owns
-        base_link -> camera_link is the first thing one looks for in this log."""
+        where the published optics came from, and the flags' state, in one line.
+
+        Every flag, not only the live ones: which side owns base_link -> camera_link is the
+        first thing one looks for in this log. And the optics in words, because a stack quietly
+        measuring with a guessed field of view looks exactly like one measuring with a
+        calibration (:attr:`pepin.camera.Optics.source`).
+        """
         w = self._tally.take()
         unstamped = (
             f", {w.counts['unstamped']} without a capture time" if w.counts["unstamped"] else ""
         )
         self.get_logger().info(
             f"camera: {w.rate('frames'):.1f} frames/s{unstamped},"
+            f" optics: {self._published.optics.source},"
             f" flags: {self._switches.state(live_only=False)}"
         )
 
