@@ -258,7 +258,9 @@ def test_the_lidar_mount_is_the_calibration_file_and_yields_the_launch_transform
     sensor = LidarMount.from_json(repo / "config/lidar.json")
     assert Mounts.load().lidar_sensor == sensor
     x, y, z, roll, pitch, yaw = sensor.transform()
-    assert (x, y, z) == (0.005, 0.0, 0.20) and pitch == 0.0
+    # The height is never pinned here: config/lidar.json is its one home (a tape measured it
+    # on 2026-09-12) and a second copy in a test is exactly the shadow this test is about.
+    assert (x, y) == (0.005, 0.0) and z == sensor.z_m > 0.0 and pitch == 0.0
     assert roll == math.pi and yaw == pytest.approx(-1.5272, abs=1e-4)  # the launch's old defaults
 
 

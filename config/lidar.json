@@ -15,7 +15,7 @@
       343
     ]
   ],
-  "z_m": 0.2,
+  "z_m": 0.383,
   "roll_deg": 180.0,
-  "note": "x_m/y_m/z_m and roll_deg/yaw_offset_deg are the base_link -> laser mount (the LD19 hangs upside down): published by the board's launch and by the laptop's camera node from this one file"
+  "note": "x_m/y_m/z_m and roll_deg/yaw_offset_deg are the base_link -> laser mount (the LD19 hangs upside down): published by the board's launch and by the laptop's camera node from this one file. z_m 0.383 m was measured with a tape on 2026-09-12, floor to the middle of the sensor's window; the 0.20 m that stood here before it was never measured. The pictures agree: at 0.383 the beams and the vertical walls read the same depth-network scale (3 % apart, 18 % at 0.20) and the fused band's median distance to the lidar goes 12.9 -> 3.8 cm (scratch/lidar_height_check.py, scratch/lidar_height_fix_report.py). Nothing else may repeat this number: every threshold that depends on the lidar's plane reads the mount (pepin.mounts.load_lidar_mount)."
 }

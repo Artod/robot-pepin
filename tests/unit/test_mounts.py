@@ -49,7 +49,7 @@ def test_the_files_load_and_each_sensor_is_where_the_stack_has_always_put_it() -
     mounts = Mounts.load(CONFIG)
     assert mounts == Mounts.load()  # config_file resolves the same checkout
     x, y, z, roll, pitch, yaw = mounts.lidar.transform()
-    assert (x, y, z) == (0.005, 0.0, 0.20) and pitch == 0.0
+    assert (x, y) == (0.005, 0.0) and z == mounts.lidar_sensor.z_m > 0.0 and pitch == 0.0
     assert roll == math.pi and yaw == pytest.approx(-1.5272, abs=1e-4)  # the launch's old defaults
     assert mounts.lidar_sensor == LidarMount.from_json(CONFIG / "lidar.json")
     assert mounts.lidar_sensor.masked_sectors_deg == ((192, 218), (317, 343))
