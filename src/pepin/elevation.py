@@ -60,6 +60,8 @@ MIN_RAY_SPAN = 0.15  # rad (8.6 deg) of elevation a pool must span before any an
 # fitted; each further degree needs another MIN_RAY_SPAN and its own bin of pairs
 RAY_BIN_MIN = MIN_SAMPLES  # pairs each bin of the span must hold for the degree it carries
 RAY_GRID = 65  # angles across the fitted span the bounds are checked on
+RAY_MAX_CONFOUND = 0.90  # |correlation| between the ray's angle and the inverse depth over the
+# pool past which the two cannot be told apart: the lidar's own beams read 1.00, wall pairs 0.37
 RESIDUAL_KEEP = 75  # percentile of the residuals kept for the second pass, as fit_affine
 
 
@@ -211,6 +213,46 @@ def _solve(design: Array, target: Array, weight: Array) -> Array:
     return out
 
 
+def separable(u: Array, y: Array) -> float:
+    """How much of the ray's angle is the depth in disguise: |correlation| between the
+    normalised angle and the exact inverse depth over the pool. The lidar's beams alone read
+    1.000 — a plane of returns at one height puts a beam's elevation on a curve of its range
+    (run 0171, scratch/ray_identifiability_probe.py) — so an angular term fitted on them is the
+    affine law written twice and would blame the angle for what the depth does. The wall
+    anchor's pairs, many elevations at one depth, read 0.37."""
+    if u.size < 2 or float(np.std(u)) == 0.0 or float(np.std(y)) == 0.0:
+        return 1.0
+    return float(abs(np.corrcoef(u, y)[0, 1]))
+
+
+def _design(y: Array, u: Array, v: Array | None, deg: int, az_deg: int, shift: bool) -> Array:
+    """The regression's columns: the inverse depth times each power of the angles, and the
+    constant the shift needs."""
+    columns = [y * u**k for k in range(deg + 1)]
+    if v is not None:
+        columns += [y * v**j for j in range(1, az_deg + 1)]
+    if shift:
+        columns.append(np.ones_like(y))
+    return np.stack(columns, axis=1)
+
+
+def _outside(gain: RayGain, azimuth: bool) -> bool:
+    """Whether the law this gain amounts to leaves A_BOUNDS or B_BOUNDS anywhere inside its
+    own span (a non-positive slope counts as outside: that law places nothing)."""
+    grid: Array = np.linspace(gain.lo, gain.hi, RAY_GRID, dtype=float)
+    slope = gain.slope(grid, np.zeros_like(grid) if azimuth else None)
+    if not bool(np.all(slope > 0.0)):
+        return True
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scale, shift = 1.0 / slope, -gain.beta / slope
+    return bool(
+        np.any(scale < A_BOUNDS[0])
+        or np.any(scale > A_BOUNDS[1])
+        or np.any(shift < B_BOUNDS[0])
+        or np.any(shift > B_BOUNDS[1])
+    )
+
+
 def fit_ray(
     d: Array,
     z: Array,
@@ -230,10 +272,15 @@ def fit_ray(
     ``1 / D = alpha(ray) * (1 / z) + beta`` — the noisy variable on the left, as
     :func:`pepin.depth.fit_affine` — with ``alpha`` a polynomial in the normalised elevation
     (and azimuth) and one shift ``beta``, fitted only when the pool spans MIN_DEPTH_SPREAD in
-    depth, exactly as the affine law's shift is. ``None`` comes back under POOL_MIN_SAMPLES
-    pairs, on a pool too narrow in angle for even a straight line (:func:`usable_degree`), or
-    on a fit whose slope is not positive across its own span; the caller then keeps its affine
-    law."""
+    depth, exactly as the affine law's shift is. When the law that comes out leaves A_BOUNDS or
+    B_BOUNDS anywhere inside its own span, the shift is dropped and the angular scale refitted
+    alone (:func:`pepin.depth._bounded`'s rule: a bound that binds means the other parameter is
+    the free one) — a pure per-ray scale is what the rest of the room can be trusted with.
+
+    ``None`` comes back under POOL_MIN_SAMPLES pairs, on a pool too narrow in angle for even a
+    straight line (:func:`usable_degree`), on one whose angle is the depth in disguise
+    (:func:`separable` over RAY_MAX_CONFOUND — the lidar's beams alone always are), or on a fit
+    whose slope is not positive across its own span. The caller then keeps its affine law."""
     d = np.asarray(d, dtype=float)
     z = np.asarray(z, dtype=float)
     eps = np.asarray(elevation, dtype=float)
@@ -247,45 +294,31 @@ def fit_ray(
         return None
     x, y = 1.0 / d, 1.0 / z
     u = np.clip(eps, lo, hi) / RAY_SCALE
-    columns = [y * u**k for k in range(deg + 1)]
+    if separable(u, y) > RAY_MAX_CONFOUND:
+        return None
+    v = None
     az_deg = 0
     if azimuth is not None and azimuth_degree > 0:
         v = np.asarray(azimuth, dtype=float) / RAY_SCALE
         az_deg = azimuth_degree
-        columns += [y * v**j for j in range(1, az_deg + 1)]
-    z_lo, z_hi = np.percentile(z, (5, 95))
-    with_shift = bool(z_hi / z_lo >= MIN_DEPTH_SPREAD)
-    if with_shift:
-        columns.append(np.ones_like(y))
-    coef = _solve(np.stack(columns, axis=1), x, w)
-    alpha = coef[: deg + 1]
-    az_coef = coef[deg + 1 : deg + 1 + az_deg]
-    beta = float(coef[-1]) if with_shift else 0.0
-    if not (np.isfinite(coef).all() and math.isfinite(beta)):
-        return None
-    gain = RayGain(alpha, beta, lo, hi, False, int(d.size), az_coef)
-    grid: Array = np.linspace(lo, hi, RAY_GRID, dtype=float)
-    slope = gain.slope(grid, np.zeros_like(grid) if az_deg else None)
-    if not bool(np.all(slope > 0.0)):
-        return None
-    with np.errstate(divide="ignore", invalid="ignore"):
-        scale, shift = 1.0 / slope, -beta / slope
-    clipped = bool(
-        np.any(scale < A_BOUNDS[0])
-        or np.any(scale > A_BOUNDS[1])
-        or np.any(shift < B_BOUNDS[0])
-        or np.any(shift > B_BOUNDS[1])
-    )
-    return RayGain(alpha, beta, lo, hi, clipped, int(d.size), az_coef)
-
-
-__all__ = [
-    "MIN_RAY_SPAN",
-    "RAY_AZIMUTH_DEGREE",
-    "RAY_DEGREE",
-    "RAY_SCALE",
-    "RayGain",
-    "fit_ray",
-    "ray_angles",
-    "usable_degree",
-]
+        if separable(v, y) > RAY_MAX_CONFOUND:
+            v, az_deg = None, 0
+    z_span = np.percentile(z, (5, 95))
+    with_shift = bool(z_span[1] / z_span[0] >= MIN_DEPTH_SPREAD)
+    gain: RayGain | None = None
+    for shift in (with_shift, False) if with_shift else (False,):
+        coef = _solve(_design(y, u, v, deg, az_deg, shift), x, w)
+        if not np.isfinite(coef).all():
+            return None
+        beta = float(coef[-1]) if shift else 0.0
+        candidate = RayGain(
+            coef[: deg + 1], beta, lo, hi, False, int(d.size), coef[deg + 1 : deg + 1 + az_deg]
+        )
+        gain = candidate
+        if not _outside(candidate, az_deg > 0):
+            return candidate
+    if gain is None or _outside(gain, az_deg > 0):
+        grid: Array = np.linspace(lo, hi, RAY_GRID, dtype=float)
+        if gain is None or not bool(np.all(gain.slope(grid) > 0.0)):
+            return None  # a law that places nothing is no law
+    return RayGain(gain.alpha, gain.beta, lo, hi, True, int(d.size), gain.azimuth)

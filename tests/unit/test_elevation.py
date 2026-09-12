@@ -33,7 +33,15 @@ from pepin.depth_pipeline import (
     lift_of,
     standard_pipeline,
 )
-from pepin.elevation import MIN_RAY_SPAN, RayGain, fit_ray, ray_angles, usable_degree
+from pepin.elevation import (
+    MIN_RAY_SPAN,
+    RAY_SCALE,
+    RayGain,
+    fit_ray,
+    ray_angles,
+    separable,
+    usable_degree,
+)
 
 INTR = Intrinsics(fx=395.0, fy=395.0, cx=320.0, cy=180.0, width=640, height=360)
 CAM = CameraPose(0.0, 0.0, 1.23, math.radians(26.0))
@@ -206,6 +214,32 @@ def test_a_pool_of_one_elevation_carries_no_angular_law_and_the_affine_law_stand
     assert "affine fallback" in law.describe()
 
 
+def test_a_pool_whose_angle_is_the_depth_in_disguise_fits_no_ray_law() -> None:
+    """The lidar's returns lie in one plane, so a beam's elevation in the picture is a curve of
+    its range: such a pool reads 1.00 separable and fits no angular law at all, because any
+    shape it found would be the affine law written twice. The wall anchor's pairs — many
+    elevations at one depth — break that and the law stands."""
+    raw, ctx = _frames()
+    beams = ctx.beams
+    assert beams is not None
+    hits = np.arange(beams.shape[0])
+    rows = beams[hits, 1].astype(int)
+    lift = lift_of(rows, INTR)
+    elevation, _azimuth = ray_angles(lift)
+    y = 1.0 / beams[hits, 2]
+    assert separable(elevation / RAY_SCALE, y) > 0.99
+    pipeline = standard_pipeline(ray_law=True)  # the lidar alone
+    for _ in range(3):
+        pipeline.run(raw, ctx)
+    law = pipeline.stage("ray_law")
+    assert isinstance(law, RayLaw) and law.fitted and not law.ray_ready
+    walled = standard_pipeline(ray_law=True, wall_anchor=True)
+    for _ in range(3):
+        walled.run(raw, ctx)
+    with_walls = walled.stage("ray_law")
+    assert isinstance(with_walls, RayLaw) and with_walls.ray_ready
+
+
 def test_a_law_at_its_bound_says_so_and_is_clipped_there() -> None:
     """A network four times too far at the top of the cone asks for a scale past A_BOUNDS: the
     fit stands, the verdict says CLIPPED, and no pixel is corrected past the bound."""
@@ -272,9 +306,9 @@ def test_the_stage_is_off_by_default_and_leaves_the_affine_image_untouched() -> 
     """The chain carries the ray law switched off: the published image is the affine law's, bit
     for bit, and the flag is what turns it into the ray law's without a restart."""
     raw, ctx = _frames()
-    plain = standard_pipeline()
-    assert plain.switches["ray_law"] is False
-    switched = standard_pipeline(ray_law=True)
+    plain = standard_pipeline(wall_anchor=True)
+    assert standard_pipeline().switches["ray_law"] is False
+    switched = standard_pipeline(ray_law=True, wall_anchor=True)
     switched.set("ray_law", False)
     for _ in range(3):
         first = plain.run(raw, ctx)
@@ -290,7 +324,7 @@ def test_the_stage_keeps_the_holes_of_the_image_it_is_handed() -> None:
     """The ray law corrects the frame's raw depth but publishes nothing the stages before it
     dropped: the edge filter's pixels stay NaN."""
     raw, ctx = _frames()
-    pipeline = standard_pipeline(ray_law=True)
+    pipeline = standard_pipeline(ray_law=True, wall_anchor=True)
     for _ in range(3):
         result = pipeline.run(raw, ctx)
     affine = result.after["affine_law"]
@@ -303,7 +337,7 @@ def test_the_stage_withholds_only_while_no_law_of_any_kind_exists() -> None:
     """With nothing pooled the ray law withholds the frame like the affine law does; once the
     affine law stands it never withholds again, angular fit or not."""
     raw, ctx = _frames()
-    pipeline = standard_pipeline(ray_law=True)
+    pipeline = standard_pipeline(ray_law=True, wall_anchor=True)
     blind = FrameContext(INTR, CAM, stamp=1.0)
     assert pipeline.run(raw, blind).withheld
     for _ in range(3):

@@ -167,9 +167,12 @@ FLAGS = FlagSet(
         False,
         description="the law's scale follows the ray's angle off the optical axis, a / D + b"
         " fitted per elevation (pepin.elevation) instead of one pair of numbers for the whole"
-        " picture; off, the affine law's image stands. A property of the camera and the network,"
-        " so the neck may tilt without refitting; off by default until it is measured on the"
-        " robot, and it falls back to the affine law wherever the pool cannot carry it",
+        " picture; off, the affine law's image stands. Needs wall_anchor on as well: the lidar's"
+        " own beams put a return's elevation on a curve of its range, so on them alone the"
+        " angular fit is refused and this stage is the affine law. A property of the camera and"
+        " the network, so the neck may tilt without refitting; off by default until it is"
+        " measured on the robot (scratch/ray_law_eval.txt: held out, it tightens the beams'"
+        " scatter on three drive halves of four and moves the median 5-10 % near)",
     ),
     Flag(
         "wall_correct",

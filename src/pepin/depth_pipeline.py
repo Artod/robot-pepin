@@ -29,6 +29,16 @@ raw network does); wall pairs at 0.2 of a beam put it 10 % too near while fixing
 slice (0.86 -> 1.00 of the truth); the elevation term is real (c +0.1) but linear in lift is the
 wrong shape (the error steps within 60 rows of the lidar's row and is flat above), and the row
 law overfits. The lidar-only affine law stays the default; the new anchors ship switched off.
+
+:class:`RayLaw` (:mod:`pepin.elevation`) is the third such law and the one parameterised the
+way the error is: by the ray's angle off the optical axis, so the neck may tilt without
+refitting. Measured held out on the same 29 frames (scratch/ray_law_eval.txt, 2026-09-12) it
+tightens the scatter of the beams' residual on three drive halves of four (q3 0.46 -> 0.13 on
+the widest) and moves the median 5-10 % near, and its scale reproduces between two tapes of the
+same room at the bottom and the middle of the frame (12 % and 8 % apart) but not at the top
+(30 %). It ships switched off, and on the lidar's beams alone it is refused outright: a
+return's elevation is a curve of its range, so there the angle and the depth are one regressor
+(:func:`pepin.elevation.separable`) and the affine law stands instead.
 """
 
 from __future__ import annotations
