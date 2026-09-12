@@ -149,7 +149,17 @@ numbers as its fallback until a `camera_info` arrives. Restart the node to pick 
 (uncalibrated)`. The `undistort` flag publishes a rectified picture (`ros/flags.sh set
 camera_stream undistort true`); it is off until the straightened picture has been measured against
 the raw one on the robot. A calibration that turns out bad is switched off with one boolean —
-`calibrated: false` — and the block stays in the file as history.
+`calibrated: false` — and the block stays in the file as history, the nominal 78 deg pinhole
+coming back untouched.
+
+**Re-fit the tilt afterwards.** `mount.pitch_deg` (26 deg) was not measured on its own: it came
+out of the same lidar fit as the 78 deg field of view, and in that fit the two traded against
+each other (78/26 with a 1.2 % residual, the nominal 70/28 with 3.0 %). Pinning `fx` with a
+checkerboard therefore leaves the tilt fitted against a focal length that is no longer in use —
+the run says so when it writes. Re-fit `mount.pitch_deg` with the measured `fx` held fixed
+(`scratch/depth_fit_models.py`) before trusting what `depth_stream` projects; `camera_stream`
+broadcasts the same number as the static `base_link -> camera_link` edge, so it moves the whole
+camera in TF too.
 
 **When to redo it.** After anything that changes the optics or the sensor's relation to them: a
 different lens or camera, a knocked or re-seated lens barrel, a re-mounted head that required

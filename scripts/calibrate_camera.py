@@ -269,6 +269,14 @@ def main() -> None:
         fit.calibration.hfov_deg(),
         cfg.hfov_deg,
     )
+    logger.warning(
+        "the mount's pitch (%.1f deg) was fitted together with the nominal %.1f deg field of"
+        " view against the lidar, and the two traded against each other: with fx now measured,"
+        " re-fit mount.pitch_deg with it pinned (scratch/depth_fit_models.py) before trusting"
+        " what depth_stream projects",
+        cfg.pitch_deg,
+        cfg.hfov_deg,
+    )
     logger.info("restart the camera node to publish it: ros/laptop.sh kick camera_stream")
 
 

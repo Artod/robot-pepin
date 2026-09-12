@@ -10,7 +10,7 @@
       "y_m": 0.0,
       "z_m": 1.23,
       "pitch_deg": 26.0,
-      "note": "tilt and field of view measured together 2026-09-10 by scratch/depth_fit_models.py: the lidar's beams projected into the depth image agree best at 78 deg / 26 deg (residual 1.2 %, 3.0 % at the nominal 70 deg / 28 deg). STALE: those beams were projected at the lidar mount config/lidar.json carried that day, which a tape measure corrected on 2026-09-12; the same self-calibration redone at the measured mount votes for a different camera (76 deg / 35 deg, and 78/26 scores worse than it did), so this fit must be redone live on the robot before either number is trusted. A checkerboard calibration settles the field of view for good."
+      "note": "tilt and field of view measured together 2026-09-10 by scratch/depth_fit_models.py: the lidar's beams projected into the depth image agree best at 78 deg / 26 deg (residual 1.2 %, 3.0 % at the nominal 70 deg / 28 deg). STALE twice over: those beams were projected at the lidar mount config/lidar.json carried that day, which a tape measure corrected on 2026-09-12 (the same self-calibration redone at the measured mount votes for a different camera, 76 deg / 35 deg, and 78/26 scores worse than it did); and the tilt and the field of view traded against each other in that fit, so a checkerboard that pins the focal length settles the field of view for good and leaves this tilt to be re-fitted live on the robot with the new fx held fixed."
     },
     "frames": {
       "link": "camera_link",

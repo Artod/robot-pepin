@@ -1724,4 +1724,9 @@ def test_the_calibration_tool_is_reachable_as_one_command() -> None:
     assert {"calibrate", "find_corners", "board_pdf", "write_calibration"} <= called
     flags = {ast.unparse(c.args[0]) for c in sf.calls_to(runner, "parser.add_argument")}
     assert {"'--board'", "'--square'", "'--no-window'", "'--print'", "'--images'"} <= flags
-    assert "## Camera calibration" in (REPO / "ros/README.md").read_text()
+    # the mount's tilt was fitted together with the field of view the checkerboard replaces, so
+    # the run that writes the intrinsics must say the tilt is now stale — in the log and in the
+    # README, the two places someone calibrating ever looks.
+    assert any("pitch" in text and "depth_fit_models" in text for text in sf.strings(runner))
+    readme = (REPO / "ros/README.md").read_text()
+    assert "## Camera calibration" in readme and "mount.pitch_deg" in readme
