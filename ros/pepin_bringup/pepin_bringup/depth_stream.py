@@ -14,9 +14,13 @@ counted and timed per frame, the node owning none of the arithmetic. Nothing is 
 until the law exists: the raw network's depth is 1.5-2x too far and would put the costmap's
 obstacles where there are none, so frames are withheld until POOL_MIN_SAMPLES beam pairs are
 pooled — or until the law saved by the last run (``/maps/depth_law.json``, a day old at most)
-is loaded at start. The depth as it stands before the floor anchor, cut between 8 cm and
-1.3 m above the floor and folded onto the plane, goes out as ``/depth_scan`` (a LaserScan in
-base_link): the board's local costmap marks and clears with it like with the lidar, so a
+is loaded at start. That file carries both laws: the affine numbers, seeded into every law of
+the chain so none of them withholds while another publishes, and the ray law's own record
+beside them, written whenever that stage has fitted one on the live pool and restored only
+when it still stands on its own terms. The depth as it stands before the floor anchor, cut
+between 8 cm and 1.3 m above the floor and folded onto the plane, goes out as ``/depth_scan``
+(a LaserScan in base_link): the board's local costmap marks and clears with it like with the
+lidar, so a
 table top stops the cart the way a wall does. The floor anchor (pixels within centimetres of
 the floor plane snap to it, the plane leaning with the accelerometer) is for the 3D model: the
 anchored depth goes out on ``/camera/depth`` (32FC1 metres, the image's stamp and frame),
@@ -77,6 +81,7 @@ from pepin.depth import (
     Tilt,
     depth_to_scan,
     load_law,
+    load_ray,
     nearest_stamp,
     optical_heading,
     save_law,
@@ -84,7 +89,7 @@ from pepin.depth import (
     set_scale_ceiling,
     to_base,
 )
-from pepin.depth_pipeline import AffineLaw, FrameContext, standard_pipeline
+from pepin.depth_pipeline import AffineLaw, FrameContext, RayLaw, standard_pipeline
 from pepin.depth_service import (
     DEFAULT_URL,
     MODES,
@@ -93,6 +98,7 @@ from pepin.depth_service import (
     LazyDepth,
     RemoteDepth,
 )
+from pepin.elevation import RayGain
 from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import FramePoser
 from pepin.mounts import Mounts
@@ -270,20 +276,10 @@ class DepthStream(Node):
             ).value
         )
         self._law = AffineLaw()
+        self._ray = RayLaw()
         self._last_verdict_wall = time.time()  # the law's age is the beams', not the node's
-        saved = load_law(self._law_file, time.time())
-        if saved is not None:
-            self._law.seed(saved[0], saved[1])
-            self.get_logger().info(
-                f"depth law from {self._law_file}: a {saved[0]:.2f} b {saved[1]:+.3f}"
-                f" on {saved[2]} beams; publishing at once"
-            )
-        else:
-            self.get_logger().info(
-                f"no saved depth law at {self._law_file}: publishing waits for"
-                f" {POOL_MIN_SAMPLES} pooled beams"
-            )
-        self._pipeline = standard_pipeline(self._law)
+        self._seed_laws(time.time())
+        self._pipeline = standard_pipeline(self._law, ray=self._ray)
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         for name in self._pipeline.names:  # a launch override reaches the stage it names
             self._pipeline.set(name, self._switches.on(name))
@@ -324,6 +320,32 @@ class DepthStream(Node):
         if not self._worker.stop():
             self.get_logger().warning("the depth worker did not finish its frame; leaving anyway")
         self._tf.close()
+
+    def _seed_laws(self, now: float) -> None:
+        """Hand both laws what the last run saved in the law file, and say so in the log: the
+        affine numbers to the affine law *and* to the ray law (each pools and fits on its own,
+        so a ray law left unseeded would withhold every frame of the warm-up while the affine
+        law publishes), and the angular gain to the ray law when the file holds one that still
+        stands (:meth:`pepin.elevation.RayGain.restore` judges it). Without a file nothing is
+        published until POOL_MIN_SAMPLES beam pairs are pooled."""
+        saved = load_law(self._law_file, now)
+        if saved is None:
+            self.get_logger().info(
+                f"no saved depth law at {self._law_file}: publishing waits for"
+                f" {POOL_MIN_SAMPLES} pooled beams"
+            )
+            return
+        self._law.seed(saved[0], saved[1])
+        self._ray.seed(saved[0], saved[1])
+        record = load_ray(self._law_file, now)
+        gain = RayGain.restore(record) if record is not None else None
+        if gain is not None:
+            self._ray.seed_gain(gain)
+        ray_note = f"; ray law {gain.describe()}" if gain is not None else "; no ray law saved"
+        self.get_logger().info(
+            f"depth law from {self._law_file}: a {saved[0]:.2f} b {saved[1]:+.3f}"
+            f" on {saved[2]} beams; publishing at once{ray_note}"
+        )
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
         """A flag changed: ``depth_backend`` is the switch's mode, ``scale_ceiling`` the law's
@@ -593,7 +615,14 @@ class DepthStream(Node):
         self._pipeline.reset_stats()
         if law.fitted:
             try:
-                save_law(self._law_file, law.a, law.b, law.pooled, self._last_verdict_wall)
+                save_law(
+                    self._law_file,
+                    law.a,
+                    law.b,
+                    law.pooled,
+                    self._last_verdict_wall,
+                    ray=self._ray.saved_state(),
+                )
             except OSError as exc:
                 self.get_logger().warning(
                     f"cannot save the depth law to {self._law_file}: {exc}",

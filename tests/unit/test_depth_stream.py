@@ -211,7 +211,8 @@ Build = Callable[..., tuple[DepthStream, FakeNet]]
 def build(tmp_path: Path) -> Iterator[Build]:
     """A depth node over the stubs: the config's camera, a scripted network, the lidar's mount
     and a still odometry in TF, the camera's optical edge when asked for, a saved law when
-    given; every node built is closed when the test ends.
+    given (in its own file unless ``law_file`` names one two nodes are to share); every node
+    built is closed when the test ends.
 
     Its config is a copy of config/camera.json with the optics pinned to the nominal pinhole —
     the INTR this file's synthetic room is built with — so the day the robot's camera is
@@ -225,9 +226,10 @@ def build(tmp_path: Path) -> Iterator[Build]:
         camera_edge: Any = None,
         odom: bool = True,
         law: tuple[float, float] | None = None,
+        law_file: Path | None = None,
         **params: Any,
     ) -> tuple[DepthStream, FakeNet]:
-        law_file = tmp_path / f"depth_law_{len(made)}.json"
+        law_file = law_file or tmp_path / f"depth_law_{len(made)}.json"
         if law is not None:
             save_law(law_file, law[0], law[1], 500, time.time())
         with ros_stubs.parameters(config=nominal, law_file=str(law_file), **params):
@@ -468,3 +470,59 @@ def test_the_fallback_optics_are_the_calibration_when_the_config_carries_one(
     assert (measured.cx, measured.cy) == (323.0, 177.0)
     assert (measured.width, measured.height) == (WIDTH, HEIGHT)
     assert measured != nominal
+
+
+# ---- the law file: both laws ------------------------------------------------------------------
+PITCHES = (10.0, 26.0, 42.0)  # the head at three tilts: the same wall at three elevations, so
+# the ray's angle and the depth are no longer one regressor (pepin.elevation.separable 0.26)
+
+
+def _tilted_run(node: DepthStream, net: FakeNet) -> None:
+    """Twelve frames of the walls with the head tilting between PITCHES: a pool whose angles
+    an angular law can be told from (one pitch reads separable 1.00 and fits none)."""
+    for k, wall_x in enumerate(WALLS * 2):
+        pitch = PITCHES[k % len(PITCHES)]
+        node._tf.buffer.transforms[("base_link", "camera_optical")] = _optical_edge(pitch)
+        frame(node, net, CameraPose(0.05, 0.0, 1.2, math.radians(pitch)), wall_x, k)
+
+
+def test_a_seeded_law_publishes_at_once_with_the_ray_law_on(build: Build) -> None:
+    """The saved law seeds every law of the chain, not only the affine one: with ``ray_law``
+    on, the first frame goes out. The ray law pools and fits on its own, so left unseeded it
+    withheld the whole warm-up while the start line said "publishing at once"."""
+    node, net = build(law=LAW, ray_law=True, wall_anchor=True)
+    assert "publishing at once" in node.logger.texts("info")[0]
+    assert node._ray.ready and not node._ray.ray_ready, "the affine seed, no angular law yet"
+    frame(node, net, CONFIG_CAM, 2.0, 0)
+    depths, scans = published(node)
+    assert len(depths) == 1 and len(scans) == 1, "the seeded chain withholds nothing"
+    assert node._pipeline.stats["ray_law"].frames == 1
+
+
+def test_both_laws_go_through_the_file_from_one_run_to_the_next(
+    build: Build, tmp_path: Path
+) -> None:
+    """A run that fits an angular law writes it beside the affine one, and the next start
+    restores it and applies it before any live pool."""
+    path = tmp_path / "shared_law.json"
+    first, net = build(law_file=path, ray_law=True, wall_anchor=True)
+    _tilted_run(first, net)
+    assert first._ray.ray_fitted and first._ray.gain is not None
+    first._report()
+    saved = json.loads(path.read_text())
+    assert saved["version"] == 2 and saved["ray"] == first._ray.gain.state()
+    second, _net = build(law_file=path, ray_law=True, wall_anchor=True)
+    assert second._ray.ray_ready and not second._ray.ray_fitted, "restored, not refitted"
+    assert second._ray.gain is not None and second._ray.gain.state() == saved["ray"]
+    assert "ray law ray deg" in second.logger.texts("info")[0]
+
+
+def test_a_law_file_without_a_ray_record_leaves_the_affine_law_alone(build: Build) -> None:
+    """The common case — a file written by a run with the stage off, or by an older build:
+    the affine law is seeded, the ray law waits for its own pool, and nothing is invented."""
+    node, net = build(law=LAW, ray_law=True, wall_anchor=True)
+    assert "no ray law saved" in node.logger.texts("info")[0]
+    assert node._ray.gain is None and node._ray.saved_state() is None
+    frame(node, net, CONFIG_CAM, 2.0, 0)
+    node._report()
+    assert "ray" not in json.loads(node._law_file.read_text()), "a seed is not a measurement"
