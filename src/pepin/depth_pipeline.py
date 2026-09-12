@@ -16,9 +16,12 @@ Two new anchors stand beside the lidar: :class:`FloorPairs` — the floor's pixe
 network's depth with the plane's geometric depth, a second hoop the law can be fitted through
 with no lidar at all — and :class:`WallAnchor` — the lidar's returns extruded up the image
 columns while the network's depth stays continuous (a wall goes on, a chair back ends at its
-top), a third hoop above the lidar's row. Two more laws let the data say whether the error above
-the lidar's row depends on the elevation: :class:`ElevationLaw` adds a term in the ray's lift,
-:class:`RowLaw` fits a law per band of rows.
+top), a third hoop above the lidar's row; and :class:`ParallaxAnchor` — the corners this frame
+shares with the previous one, triangulated against the odometry's transform between the two
+stamps (:mod:`pepin.parallax`), a fourth hoop that needs no second sensor and no assumed plane
+and that measures at every elevation the picture has. Two more laws let the data say whether the
+error above the lidar's row depends on the elevation: :class:`ElevationLaw` adds a term in the
+ray's lift, :class:`RowLaw` fits a law per band of rows.
 
 Measured on run 0171 (29 frames against the run's lidar cloud and its COLMAP reference,
 scratch/pipeline_vs_truth.py, 2026-09-11), which set the defaults of :func:`standard_pipeline`:
@@ -94,6 +97,9 @@ WALL_SLOPE_TOL = 0.004  # per row: how much faster than the plane the network's 
 WALL_SLOPE_WINDOW = 6  # rows either side over which that climb is measured (the noise averaged)
 MIN_LIFT_SPREAD = 0.15  # the pool's elevation span (5th-95th of lift) before an elevation term
 ROW_BANDS = 6  # bands of elevation of the row law
+PARALLAX_MIN_GAP_S = 0.08  # a partner frame nearer in time than this has no baseline to speak of
+PARALLAX_MAX_GAP_S = 0.60  # farther back than this the view has changed more than the flow follows
+PARALLAX_WEIGHT = 1.0  # the share of a parallax pair's own inverse-depth precision that counts
 
 
 # ---- what flows through the pipeline ----------------------------------------------------------
@@ -165,17 +171,45 @@ def left_of(columns: npt.ArrayLike, intr: Intrinsics) -> Array:
     return out
 
 
+class Rigid(Protocol):
+    """A rigid transform: a 3x3 rotation and a translation (:class:`pepin.tsdf.RigidPose`)."""
+
+    @property
+    def rotation(self) -> Array:
+        """The 3x3 rotation."""
+        ...
+
+    @property
+    def translation(self) -> Array:
+        """The translation."""
+        ...
+
+
+class MotionSource(Protocol):
+    """Who can say how the cart moved between two moments —
+    :meth:`pepin.frame_pose.FramePoser.motion` in a node, a tape offline, a fake in a test."""
+
+    def motion(self, from_stamp: float, to_stamp: float) -> Rigid | None:
+        """base_link at ``from_stamp`` into base_link at ``to_stamp``, or ``None`` when the
+        odometry does not cover both moments."""
+        ...
+
+
 @dataclass(frozen=True, eq=False)
 class FrameContext:
     """What a frame brings besides the network's depth: the optics, the camera's place on the
     cart, which way is up (base_link), the lidar's returns as base_link points carried to the
-    frame's moment (``None`` without a scan) and the frame's stamp in seconds."""
+    frame's moment (``None`` without a scan), the frame's stamp in seconds — and, for the
+    anchors that read the picture rather than a sensor, the frame's grey image and the source
+    of the cart's motion between stamps (both ``None`` unless a node supplies them)."""
 
     intr: Intrinsics
     cam: CameraPose
     up: Array = field(default_factory=lambda: UP_LEVEL.copy())
     lidar: Array | None = None
     stamp: float = 0.0
+    gray: npt.NDArray[np.uint8] | None = None
+    motion: MotionSource | None = None
 
     @cached_property
     def beams(self) -> Array | None:
@@ -897,6 +931,121 @@ class WallCorrection(WallAnchor):
         super().__init__(**{**settings, "pairs": False, "correct": True})  # type: ignore[arg-type]
 
 
+# ---- motion as a hoop, with no lidar at all ---------------------------------------------------
+@dataclass(frozen=True, eq=False)
+class PreviousFrame:
+    """The frame the parallax anchor kept: its grey image, its stamp and where the camera sat
+    on the cart when it was taken (the neck may have moved since)."""
+
+    gray: npt.NDArray[np.uint8]
+    stamp: float
+    cam: CameraPose
+
+
+class ParallaxAnchor(AnchorStage):
+    """The cart's own motion as a source of truth: a corner seen in this frame and in the
+    previous one, with the odometry's transform between the two stamps, is two rays with a
+    known baseline, and where they meet is a depth in metres (:mod:`pepin.parallax`). No lidar
+    is involved and no floor plane is assumed — this is the hoop a camera keeps when every
+    other sensor is off, and the only one that measures at every elevation the picture has, so
+    it is the pool a law over the ray's angle can be fitted on.
+
+    The anchor keeps the previous frame inside (grey image, stamp, camera pose) and asks
+    :class:`FrameContext`'s motion source for the transform between the two stamps. A pair of
+    frames closer together than ``min_gap_s`` has no baseline worth triangulating and one
+    farther apart than ``max_gap_s`` has changed more than the flow follows; a frame while the
+    cart stands still, or turns on the spot, yields nothing at all and says which. Each pair
+    carries its own weight: the ratio of its inverse-depth variance to a lidar beam's, capped
+    at 1, so a short baseline or a badly tracked corner counts for little without being
+    thrown away."""
+
+    name = "parallax_anchor"
+
+    def __init__(
+        self,
+        *,
+        weight: float = PARALLAX_WEIGHT,
+        min_gap_s: float = PARALLAX_MIN_GAP_S,
+        max_gap_s: float = PARALLAX_MAX_GAP_S,
+    ) -> None:
+        self.weight = weight
+        self.min_gap_s = min_gap_s
+        self.max_gap_s = max_gap_s
+        self.frames = 0  # pairs of frames that reached the triangulation
+        self.contributed = 0  # of those, the ones that gave at least one pair
+        self.rejected: dict[str, int] = {}
+        self._prev: PreviousFrame | None = None
+        self._baseline: list[float] = []
+        self._sigma: list[float] = []
+
+    def _count(self, reason: str, n: int = 1) -> None:
+        """Tally one cause of a lost pair or a lost frame, for the report line."""
+        if n:
+            self.rejected[reason] = self.rejected.get(reason, 0) + n
+
+    def pairs(self, frame: Frame) -> Pairs | None:
+        """(network, triangulated) pairs at the corners this frame shares with the previous
+        one, or ``None`` when there is no usable motion between the two."""
+        from pepin.parallax import camera_motion, parallax_truth
+
+        ctx = frame.ctx
+        gray = ctx.gray
+        if gray is None:
+            self._count("no image")
+            return None
+        previous, self._prev = self._prev, PreviousFrame(gray, ctx.stamp, ctx.cam)
+        if previous is None:
+            return None
+        gap = ctx.stamp - previous.stamp
+        if not self.min_gap_s <= gap <= self.max_gap_s:
+            self._count("gap")
+            return None
+        moved = None if ctx.motion is None else ctx.motion.motion(previous.stamp, ctx.stamp)
+        if moved is None:
+            self._count("no odometry")
+            return None
+        motion = camera_motion(moved.rotation, moved.translation, previous.cam, ctx.cam)
+        truth = parallax_truth(previous.gray, gray, ctx.intr, motion)
+        self.frames += 1
+        for reason, n in truth.rejected.items():
+            self._count(reason, n)
+        if truth.kept == 0:
+            self._count(truth.verdict or "none")
+            return None
+        cols = np.rint(truth.points[:, 0]).astype(int)
+        rows = np.rint(truth.points[:, 1]).astype(int)
+        d = frame.raw[rows, cols]
+        ok = np.isfinite(d) & (d > NEAR_M) & ~frame.edge[rows, cols]
+        self._count("edge", int((~ok).sum()))
+        if not bool(ok.any()):
+            return None
+        self.contributed += 1
+        self._baseline.append(float(np.median(truth.baseline[ok])))
+        self._sigma.append(float(np.median(truth.sigma[ok])))
+        del self._baseline[:-POOL_FRAMES], self._sigma[:-POOL_FRAMES]
+        return Pairs.of(
+            d[ok],
+            truth.z[ok],
+            lift_of(rows[ok], ctx.intr),
+            self.weight * truth.weight[ok],
+            left_of(cols[ok], ctx.intr),
+        )
+
+    def describe(self) -> str:
+        """The verdict for the report line: the frames that triangulated, the median baseline
+        and sigma of the pairs they gave, and what was thrown away and why."""
+        if not self._baseline:
+            dropped = ", ".join(f"{k} {v}" for k, v in self.rejected.items())
+            return f"weight {self.weight:g}, no pairs yet" + (f" ({dropped})" if dropped else "")
+        dropped = ", ".join(f"{k} {v}" for k, v in self.rejected.items())
+        return (
+            f"weight {self.weight:g}, {self.contributed}/{self.frames} frames,"
+            f" baseline {np.median(self._baseline) * 100:.1f} cm,"
+            f" sigma {np.median(self._sigma) * 100:.1f} cm"
+            + (f", rejected: {dropped}" if dropped else "")
+        )
+
+
 # ---- laws that read the elevation -------------------------------------------------------------
 class ElevationLaw(AffineLaw):
     """The affine law with a term in the ray's elevation, 1 / z = a / D + b + c * lift, for an
@@ -1143,14 +1292,15 @@ def standard_pipeline(
     ray: RayLaw | None = None,
     floor_pairs: bool = False,
     wall_anchor: bool = False,
+    parallax_anchor: bool = False,
     ray_law: bool = False,
     wall_correct: bool = False,
 ) -> DepthPipeline:
-    """The node's chain: edges -> lidar -> (floor pairs) -> (wall pairs) -> law -> (ray law) ->
-    (wall correction) -> floor anchor; the four new stages are in the list and switched by the
-    flags of the same name (``wall_anchor`` is the pairs role, ``wall_correct`` the pixels).
-    The ray law sits behind the affine one and corrects the same raw depth by the ray's angle
-    instead: on, its image replaces the affine law's; off, the affine law's stands.
+    """The node's chain: edges -> lidar -> (floor pairs) -> (wall pairs) -> (parallax) -> law
+    -> (ray law) -> (wall correction) -> floor anchor; the five new stages are in the list and
+    switched by the flags of the same name (``wall_anchor`` is the pairs role, ``wall_correct``
+    the pixels). The ray law sits behind the affine one and corrects the same raw depth by the
+    ray's angle instead: on, its image replaces the affine law's; off, the affine law's stands.
 
     Both laws may be handed in so the caller keeps them: each pools and fits on its own, so a
     saved law must be seeded into **both** (:meth:`AffineLaw.seed`), or the ray law withholds
@@ -1163,6 +1313,7 @@ def standard_pipeline(
         LidarAnchor(),
         FloorPairs(the_law, geometry),
         WallAnchor(),
+        ParallaxAnchor(),
         the_law,
         the_ray,
         WallCorrection(),
@@ -1171,6 +1322,7 @@ def standard_pipeline(
     flags = (
         ("floor_pairs", floor_pairs),
         ("wall_anchor", wall_anchor),
+        ("parallax_anchor", parallax_anchor),
         ("ray_law", ray_law),
         ("wall_correct", wall_correct),
     )
@@ -1192,9 +1344,13 @@ __all__ = [
     "Law",
     "LawStage",
     "LidarAnchor",
+    "MotionSource",
     "Pairs",
+    "ParallaxAnchor",
+    "PreviousFrame",
     "RayLaw",
     "Result",
+    "Rigid",
     "RowLaw",
     "Stage",
     "StageStats",

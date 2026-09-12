@@ -122,6 +122,7 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
         "lidar_anchor",
         "floor_pairs",
         "wall_anchor",
+        "parallax_anchor",
         "affine_law",
         "ray_law",
         "wall_correct",
@@ -172,6 +173,7 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
         "lidar_anchor": True,
         "floor_pairs": False,
         "wall_anchor": False,
+        "parallax_anchor": False,
         "affine_law": True,
         "ray_law": False,
         "wall_correct": False,
@@ -189,7 +191,7 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
     result = pipeline.run(raw, _context(None))  # no lidar: no pairs, no law, withheld
     assert result.withheld and result.verdict("affine_law").withhold
     assert result.verdict("lidar_anchor").pairs == 0  # the run stopped at the law: no floor verdict
-    assert [v.stage for v in result.verdicts] == pipeline.names[:5]  # stopped at the law
+    assert [v.stage for v in result.verdicts] == pipeline.names[:6]  # stopped at the law
     with pytest.raises(KeyError):
         result.verdict("floor_anchor")
     stats = pipeline.stats
