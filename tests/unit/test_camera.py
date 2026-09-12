@@ -19,12 +19,17 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 def test_the_config_loads_and_names_the_board() -> None:
+    """The committed config's shape, not its state: this is the one test that reads the real
+    file, and a checkerboard run (ros/calibrate.sh) must not break it — it adds an intrinsics
+    block and flips calibrated, and rewrites nothing asserted here."""
     cfg = CameraConfig.load(REPO / "config/camera.json", board="10.0.0.187")
     assert cfg.stream == "http://10.0.0.187:8080/stream"
     assert (cfg.width, cfg.height) == (1280, 720)
     # tilt and field of view measured against the lidar on 2026-09-10 (scratch/depth_fit_models.py)
-    assert cfg.z_m == 1.23 and cfg.x_m == 0.0 and cfg.pitch_deg == 26.0 and cfg.hfov_deg == 78.0
-    assert not cfg.calibrated  # nominal optics until a checkerboard says otherwise
+    assert cfg.z_m == 1.23 and cfg.x_m == 0.0 and cfg.pitch_deg == 26.0
+    assert cfg.hfov_deg == 78.0  # the nominal pinhole, kept whatever a calibration measures
+    # calibrated and the block go together: on means there are numbers, off means the fallback
+    assert cfg.calibrated == (cfg.calibration is not None)
 
 
 def test_a_nominal_pinhole_puts_the_field_of_view_across_the_image() -> None:

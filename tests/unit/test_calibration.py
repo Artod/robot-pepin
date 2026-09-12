@@ -22,6 +22,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+from camera_configs import camera_config
 
 from pepin.calibration import (
     CELL_VIEWS,
@@ -338,7 +339,9 @@ def test_a_calibration_survives_the_config_and_comes_back_as_the_optics(tmp_path
     assert "calibrated" in at_full.source and "rms" in at_full.source
 
 
-def test_the_optics_scale_to_the_published_size_and_fall_back_to_the_nominal() -> None:
+def test_the_optics_scale_to_the_published_size_and_fall_back_to_the_nominal(
+    tmp_path: Path,
+) -> None:
     """Half the pixels, half the focal length and half the principal point; the distortion
     coefficients act on normalised coordinates and do not move. With no calibration in the file
     the same function answers the nominal pinhole and says so."""
@@ -358,7 +361,7 @@ def test_the_optics_scale_to_the_published_size_and_fall_back_to_the_nominal() -
     half = calibration.scaled(640, 360)
     assert (half.fx, half.cy) == (450.0, 178.0) and half.dist == calibration.dist
     assert half.hfov_deg() == pytest.approx(calibration.hfov_deg(), abs=1e-9)
-    cfg = CameraConfig.load(REPO / "config/camera.json")
+    cfg = CameraConfig.load(camera_config(tmp_path))
     nominal = optics(cfg, 640, 360)
     assert not nominal.calibrated and nominal.dist == ()
     assert nominal.hfov_deg == pytest.approx(cfg.hfov_deg, abs=1e-9)

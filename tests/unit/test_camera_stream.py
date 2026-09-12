@@ -7,7 +7,6 @@ out, which is the point: the pump must be joined before the node is destroyed.
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 import urllib.request
@@ -22,6 +21,7 @@ import ros_stubs
 RCLPY = ros_stubs.install()
 
 import cv2  # noqa: E402
+from camera_configs import CALIBRATION, camera_config  # noqa: E402
 from pepin_bringup.camera_stream import FLAGS, CameraStream  # noqa: E402
 from pepin_bringup.msgs import stamp_seconds  # noqa: E402
 from pepin_bringup.node_kit import spin_main  # noqa: E402
@@ -145,17 +145,25 @@ Build = Callable[..., tuple[CameraStream, FakeStream]]
 
 
 @pytest.fixture
-def build(monkeypatch: pytest.MonkeyPatch) -> Iterator[Build]:
+def build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Build]:
     """Build a camera node whose stream is the given bytes and whose parameters are the given
-    overrides; every node built is closed when the test ends."""
+    overrides; every node built is closed when the test ends.
+
+    Its config is a copy of config/camera.json with the optics pinned to the nominal pinhole, so
+    what these tests see does not change the day the robot's camera is calibrated; a test that
+    wants measured optics passes ``config=calibrated_config(tmp_path)``.
+    """
     made: list[CameraStream] = []
+    nominal = tmp_path / "nominal"
+    nominal.mkdir()
+    default_config = camera_config(nominal)
 
     def make(
         feed: bytes = b"", stream: FakeStream | None = None, **params: Any
     ) -> tuple[CameraStream, FakeStream]:
         stream = FakeStream(feed) if stream is None else stream
         monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=None: stream)
-        with ros_stubs.parameters(**{"config": CAMERA_JSON, **params}):
+        with ros_stubs.parameters(**{"config": default_config, **params}):
             node = CameraStream()
         made.append(node)
         return node, stream
@@ -238,32 +246,10 @@ def test_a_frame_goes_out_at_the_scale_with_the_board_s_capture_time(build: Buil
 
 
 # ---- the optics ------------------------------------------------------------------------------
-CALIBRATION = {
-    "width": 1280,
-    "height": 720,
-    "fx": 900.0,
-    "fy": 896.0,
-    "cx": 646.0,
-    "cy": 354.0,
-    "dist": [-0.31, 0.1, 0.0005, -0.0004, 0.0],
-    "model": "plumb_bob",
-    "rms": 0.28,
-    "views": 26,
-    "board": "9x6 inner corners, 24.0 mm squares",
-    "date": "2026-09-12",
-}
-
-
 def calibrated_config(tmp_path: Path, calibrated: bool = True) -> str:
     """A copy of config/camera.json carrying a checkerboard calibration (and lidar.json beside
     it, which the node reads for the laser's static edge)."""
-    data = json.loads((CONFIG_DIR / "camera.json").read_text())
-    data["overview"]["calibrated"] = calibrated
-    data["overview"]["intrinsics"] = CALIBRATION
-    data["overview"]["hfov_deg"] = 70.6
-    (tmp_path / "camera.json").write_text(json.dumps(data))
-    (tmp_path / "lidar.json").write_text((CONFIG_DIR / "lidar.json").read_text())
-    return str(tmp_path / "camera.json")
+    return camera_config(tmp_path, CALIBRATION, calibrated=calibrated)
 
 
 def test_a_calibrated_camera_publishes_the_measured_k_and_d_scaled_to_the_picture(

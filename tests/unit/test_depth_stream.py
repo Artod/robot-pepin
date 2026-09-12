@@ -25,6 +25,7 @@ import ros_stubs
 
 RCLPY = ros_stubs.install()
 
+from camera_configs import CALIBRATION, camera_config  # noqa: E402
 from pepin_bringup.depth_stream import FLAGS, SCAN_RANGE_M, DepthStream  # noqa: E402
 from pepin_bringup.msgs import image_from_array, pose_from_transform, scan_from_ranges  # noqa: E402
 
@@ -58,6 +59,9 @@ from pepin.tsdf import RigidPose  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 CAMERA_JSON = str(REPO / "config" / "camera.json")
 WIDTH, HEIGHT = 640, 360  # what camera_stream publishes at scale 0.5
+# The mount and the nominal field of view: the two numbers a calibration never rewrites (it
+# writes an intrinsics block beside them). The nodes under test are given a config of their own,
+# with the optics pinned to this nominal pinhole — see the build fixture.
 CONFIG = CameraConfig.load(CAMERA_JSON)
 K, _D, _R, _P = camera_info_arrays(WIDTH, HEIGHT, CONFIG.hfov_deg)
 INTR = Intrinsics.from_camera_info(K, WIDTH, HEIGHT)
@@ -207,8 +211,15 @@ Build = Callable[..., tuple[DepthStream, FakeNet]]
 def build(tmp_path: Path) -> Iterator[Build]:
     """A depth node over the stubs: the config's camera, a scripted network, the lidar's mount
     and a still odometry in TF, the camera's optical edge when asked for, a saved law when
-    given; every node built is closed when the test ends."""
+    given; every node built is closed when the test ends.
+
+    Its config is a copy of config/camera.json with the optics pinned to the nominal pinhole —
+    the INTR this file's synthetic room is built with — so the day the robot's camera is
+    calibrated does not move the reference."""
     made: list[DepthStream] = []
+    nominal_dir = tmp_path / "nominal"
+    nominal_dir.mkdir()
+    nominal = camera_config(nominal_dir)
 
     def make(
         camera_edge: Any = None,
@@ -219,7 +230,7 @@ def build(tmp_path: Path) -> Iterator[Build]:
         law_file = tmp_path / f"depth_law_{len(made)}.json"
         if law is not None:
             save_law(law_file, law[0], law[1], 500, time.time())
-        with ros_stubs.parameters(config=CAMERA_JSON, law_file=str(law_file), **params):
+        with ros_stubs.parameters(config=nominal, law_file=str(law_file), **params):
             node = DepthStream()
         made.append(node)
         net = FakeNet()
@@ -440,35 +451,18 @@ def test_the_imu_leans_the_floor_only_while_a_floor_stage_is_on(build: Build) ->
 def test_the_fallback_optics_are_the_calibration_when_the_config_carries_one(
     build: Build, tmp_path: Path
 ) -> None:
-    """Before any camera_info arrives the node projects with config/camera.json's own optics.
+    """Before any camera_info arrives the node projects with the camera config's own optics.
     Those must be the checkerboard's when there is one, scaled to the frame, and the nominal
     pinhole of the field of view when there is not — one reader for both (pepin.camera.optics),
-    so a calibration written by ros/calibrate.sh needs no second edit here."""
+    so a calibration written by ros/calibrate.sh needs no second edit here. Both configs are
+    built here: neither provenance is read off the committed file."""
     node, _net = build()
     node._intr = None
     frame = SimpleNamespace(width=WIDTH, height=HEIGHT)
     nominal = node._intr_or_nominal(frame)  # type: ignore[arg-type]
-    assert nominal == INTR, "the config is uncalibrated today: the nominal pinhole"
+    assert nominal == INTR, "no intrinsics block in the config: the nominal pinhole"
 
-    data = json.loads(Path(CAMERA_JSON).read_text())
-    data["overview"]["calibrated"] = True
-    data["overview"]["intrinsics"] = {
-        "width": 1280,
-        "height": 720,
-        "fx": 900.0,
-        "fy": 896.0,
-        "cx": 646.0,
-        "cy": 354.0,
-        "dist": [-0.31, 0.1, 0.0005, -0.0004, 0.0],
-        "model": "plumb_bob",
-        "rms": 0.28,
-        "views": 26,
-        "board": "9x6 inner corners, 24.0 mm squares",
-        "date": "2026-09-12",
-    }
-    calibrated = tmp_path / "camera.json"
-    calibrated.write_text(json.dumps(data))
-    node._camera_cfg = CameraConfig.load(calibrated)
+    node._camera_cfg = CameraConfig.load(camera_config(tmp_path, CALIBRATION))
     measured = node._intr_or_nominal(frame)  # type: ignore[arg-type]
     assert (measured.fx, measured.fy) == (450.0, 448.0)  # scaled to the published 640x360
     assert (measured.cx, measured.cy) == (323.0, 177.0)
