@@ -51,7 +51,7 @@ from pepin.depth import (  # noqa: E402
     scan_points,
     to_base,
 )
-from pepin.mounts import rotation_from_rpy  # noqa: E402
+from pepin.mounts import load_lidar_mount, rotation_from_rpy  # noqa: E402
 from pepin.tsdf import RigidPose  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
@@ -61,7 +61,10 @@ CONFIG = CameraConfig.load(CAMERA_JSON)
 K, _D, _R, _P = camera_info_arrays(WIDTH, HEIGHT, CONFIG.hfov_deg)
 INTR = Intrinsics.from_camera_info(K, WIDTH, HEIGHT)
 CONFIG_CAM = CameraPose(*mount_transform(CONFIG)[:3], mount_transform(CONFIG)[4])
-LIDAR_MOUNT = RigidPose(np.eye(3), np.array([0.0, 0.0, 0.2]))
+# The mount is config/lidar.json's, not a number retyped here: the beams these fakes place
+# must sit where the node projects them from.
+LIDAR_Z_M = load_lidar_mount().z_m
+LIDAR_MOUNT = RigidPose(np.eye(3), np.array([0.0, 0.0, LIDAR_Z_M]))
 SCAN_MAX_RANGE = 3.0  # the node's default
 WALLS = (1.0, 1.5, 2.5, 3.5, 2.0, 3.0)  # views enough for POOL_MIN_SAMPLES pairs and a spread
 LAW = (1.3, 0.03)  # the network's own error: 1 / z = a / D + b
@@ -221,7 +224,7 @@ def build(tmp_path: Path) -> Iterator[Build]:
         net = FakeNet()
         node._net = net  # type: ignore[assignment]
         edges = node._tf.buffer.transforms
-        edges[("base_link", "laser")] = _transform((0.0, 0.0, 0.2), np.eye(3))
+        edges[("base_link", "laser")] = _transform((0.0, 0.0, LIDAR_Z_M), np.eye(3))
         if odom:
             edges[("odom", "base_link")] = ros_stubs.TransformStamped()
         if camera_edge is not None:

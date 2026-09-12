@@ -202,7 +202,10 @@ live while teleoperating.
 
 ## Perception and costmaps
 
-**LD19 lidar**, 10 Hz, 455 beams, mounted upside down at 0.20 m with a yaw of −87.5°. The driver
+**LD19 lidar**, 10 Hz, 455 beams, mounted upside down at the height `config/lidar.json` carries
+(0.383 m, floor to the middle of the window, tape-measured 2026-09-12) with a yaw of −87.5°. That
+file is the only place the height is written: every band and berth derived from it reads the
+mount. The driver
 emits a counter-clockwise scan for an upright sensor, so the static transform carries a roll of
 π to mirror it back. A box filter removes the cart's own hull plus the contact band — those
 returns are its posts and cables, they travel with it, and the costmap used to turn them into a
@@ -248,9 +251,11 @@ the pose and the map, so it is what spots new objects: on every matched scan, re
 mapped obstacle accounts for — a person, a moved chair, a bag on the floor — go out on
 `/dynamic_obstacles` as lethal rings, a second observation source in both costmaps. Marking only;
 the lidar's own rays clear those cells when the object leaves. The ring is sized for the planner
-in charge: 0.25 m under a footprint planner, which is a toe's 0.20 m of reach past the shin the
-lidar sees plus a hand's width, and 0.41 m under a point planner, which is that reach plus the
-21 cm of half-width its 6 cm disc leaves out. Nothing nearer than the ring plus the hull's own
+in charge: 0.32 m under a footprint planner, which is a toe's 0.27 m of reach past the leg the
+lidar sees plus a hand's width, and 0.48 m under a point planner, which is that reach plus the
+21 cm of half-width its 6 cm disc leaves out. The reach is computed from the mount, not typed:
+the beam crosses a standing person on the upper shin, a relaxed shin leans back off vertical,
+and the shoe still reaches 0.21 m past the ankle. Nothing nearer than the ring plus the hull's own
 circumscribed radius is ringed at all — a ring drawn across the cart's outline would refuse its
 every command (run 0087) — and mapped furniture is never ringed, so the cart still parks against
 it.
@@ -348,7 +353,7 @@ a good drive credited to the wrong planner is worse than no measurement.
   0.505 m track, 4096 ticks/rev, one serial bus
 - **Orange Pi Zero 3** (Armbian, Debian trixie): 4× Cortex-A53 at 1.4 GHz, 1.5 GB RAM — the whole
   autonomy runs here
-- **LDRobot LD19** 360° lidar under the mid shelf, upside down at 0.20 m
+- **LDRobot LD19** 360° lidar under the mid shelf, upside down at 0.383 m (tape, 2026-09-12)
 - **3× VL53L1X** time-of-flight sensors: front at 0.27 m, left and right at ~0.16 m, all level
   and facing forward
 - **MPU6050** IMU on I²C, bolted flat over `base_link`; only its yaw rate is used

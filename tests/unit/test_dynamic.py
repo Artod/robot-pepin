@@ -72,7 +72,7 @@ def test_what_stands_beside_a_parked_cart_gets_no_ring() -> None:
 
 def test_a_ring_leaves_no_gap_a_point_planner_could_walk_through() -> None:
     """A point planner is stopped by lethal cells, never by the gaps between them: twelve marks
-    on a 0.41 m ring stand 0.22 m apart and the plan goes straight between two of them."""
+    on a half-metre ring stand 0.26 m apart and the plan goes straight between two of them."""
     ring = rings(np.zeros((1, 2)), RING_M)[1:]
     step = np.hypot(*(ring - np.roll(ring, 1, axis=0)).T)
     assert step.max() <= COSTMAP_CELL_M + 1e-9
@@ -106,19 +106,26 @@ def test_the_berth_is_the_toes_for_a_footprint_planner_and_the_hull_for_a_point_
     from pepin.dynamic import (
         COSTMAP_CELL_M,
         HAND_M,
-        TOE_REACH_M,
         berth_for,
         footprint_planner_ring_m,
         near_exclusion_m,
         point_planner_ring_m,
+        toe_reach_m,
     )
     from pepin.footprint import HULL
+    from pepin.mounts import load_lidar_mount
 
-    assert point_planner_ring_m() == HULL.half_width_m - HULL.inscribed_radius_m + TOE_REACH_M
-    assert footprint_planner_ring_m() == TOE_REACH_M + HAND_M
+    # The reach is computed from the mount, never a second copy of it. The numbers below are
+    # its consequences at the mount config/lidar.json carries today; re-measure the lidar and
+    # this test fails on purpose, because the berth a person gets must be looked at again.
+    reach = toe_reach_m()
+    assert reach == toe_reach_m(load_lidar_mount().z_m) == 0.27
+    assert toe_reach_m(0.20) == 0.24 and toe_reach_m(0.0) == 0.21
+    assert point_planner_ring_m() == HULL.half_width_m - HULL.inscribed_radius_m + reach
+    assert footprint_planner_ring_m() == reach + HAND_M
     assert near_exclusion_m(0.25) == 0.25 + HULL.circumscribed_radius_m + COSTMAP_CELL_M
     hybrid = berth_for("Hybrid")
-    assert hybrid.ring_m == footprint_planner_ring_m() == 0.25
+    assert hybrid.ring_m == footprint_planner_ring_m() == 0.32
     assert berth_for("Lattice") == hybrid
     for point in ("GridBased", "Smac2D", "ThetaStar", ""):
         b = berth_for(point)

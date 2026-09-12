@@ -40,6 +40,7 @@ from std_srvs.srv import Trigger
 from pepin.depth import Intrinsics
 from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import FramePoser
+from pepin.mounts import load_lidar_mount
 from pepin.tsdf import (
     YAW_SEARCH,
     AlignReason,
@@ -64,7 +65,10 @@ from pepin_bringup.node_kit import (
 CONFIG = "/ws/config/fusion.json"
 TF_WAIT_S = 0.3
 PAIR_QUEUE = 40  # depth arrives a fraction of a second after its image; pair by exact stamp
-BAND_Z_M = (0.10, 0.35)  # around the lidar's plane (0.20 m): the frame's exact points
+BAND_HALF_Z_M = 0.125  # half the band around the lidar's plane: the frame's exact points.
+# The plane itself is never typed here — it is config/lidar.json's mount, read at start
+# (:func:`band_z_m`), so a re-measured lidar moves the band with it. The half-width is the
+# one the band has always had (it was 0.10-0.35 around an assumed 0.20 m).
 BAND_STRIDE = 3
 BAND_MIN_POINTS = 50  # a frame with fewer points in the band is not worth a yaw search
 AT_BOUND_STREAK = 30  # ~3 s of frames refused at the search's bound: the model no longer fits
@@ -110,6 +114,15 @@ FLAGS = FlagSet(
 )
 
 
+def band_z_m(half_m: float = BAND_HALF_Z_M) -> tuple[float, float]:
+    """The height band whose points are exact by construction, metres above the floor: the
+    lidar's own plane (config/lidar.json, :func:`pepin.mounts.load_lidar_mount`) plus and minus
+    ``half_m``. The depth image is anchored on the beams, so this is the layer a frame may be
+    turned by; it moves with the mount and is never a second copy of its height."""
+    z = load_lidar_mount().z_m
+    return (z - half_m, z + half_m)
+
+
 class DepthFusion(Node):
     """Fuses depth frames into the TSDF and publishes its surface."""
 
@@ -117,6 +130,7 @@ class DepthFusion(Node):
         super().__init__("depth_fusion")
         config = Path(str(self.declare_parameter("config", CONFIG).value))
         self._spec = GridSpec.load(config)
+        self._band_z_m = band_z_m()
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._tally = Tally(STAGES)
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
@@ -262,7 +276,8 @@ class DepthFusion(Node):
         fits; ``None`` when the best turn is the search's bound (the frame must not go in)."""
         points = backproject(depth, intr, stride=BAND_STRIDE, range_max=self._spec.range_max_m)
         in_map = points @ camera.rotation.T + camera.translation
-        band = in_map[(in_map[:, 2] >= BAND_Z_M[0]) & (in_map[:, 2] <= BAND_Z_M[1])]
+        lo, hi = self._band_z_m
+        band = in_map[(in_map[:, 2] >= lo) & (in_map[:, 2] <= hi)]
         if band.shape[0] < BAND_MIN_POINTS:
             self._refused(AlignReason.UNJUDGED)
             return camera
@@ -334,6 +349,7 @@ class DepthFusion(Node):
             f" align {w.ms_per('align', 'frames'):.0f} ms, {self._turns(w)};"
             f" refused: {self._refusals(w) or 'none'}; skipped: {skipped};"
             f" no image {c['no_image']}; surface {self._surface_points} points;"
+            f" band {self._band_z_m[0]:.2f}-{self._band_z_m[1]:.2f} m;"
             f" flags: {self._switches.state()}" + (f"; tf: {tf_text}" if tf_text else "")
         )
 

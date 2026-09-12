@@ -1,9 +1,10 @@
 """The camera as a lidar at floor height: the contact line, lifted onto the floor plane.
 
 The monocular depth network gives the scene's shape with an uncertain size; the lidar gives
-exact ranges, but only in its own plane 20 cm above the floor (``config/lidar.json``). What
-both miss is where things *touch the floor*: a chair's legs under its seat, a box lower than
-the lidar's plane, the plinth of a sofa set back from its front. In the image that place is a
+exact ranges, but only in its own plane, a third of a metre up (``config/lidar.json``'s mount,
+the one place that number lives). What both miss is where things *touch the floor*: a chair's
+legs under its seat, a box lower than the lidar's plane, the plinth of a sofa set back from its
+front. In the image that place is a
 line. Going up any column from the bottom, the pixels are floor — their depth grows row by row
 exactly as the floor plane's would (:func:`pepin.depth.floor_depth`) — until something standing
 on the floor takes over and the depth stops growing. The row where the floor ends is the

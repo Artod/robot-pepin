@@ -75,10 +75,17 @@ def _network(z: np.ndarray, a: float, b: float, noise: float, seed: int) -> np.n
     return d * (1.0 + noise * rng.standard_normal(z.shape))
 
 
+# This file builds its own little room; SCENE_LIDAR_Z is where that room's lidar hangs, not
+# the cart's mount (config/lidar.json, measured 2026-09-12). The stages under test read the
+# beams they are handed and never the mount, so the scene is free to put them anywhere.
+SCENE_LIDAR_Z = 0.2
+
+
 def _wall_returns(wall_x: float, n: int = 80) -> np.ndarray:
-    """The lidar's returns on a wall ``wall_x`` ahead, in scan order, at the lidar's height."""
+    """The lidar's returns on a wall ``wall_x`` ahead, in scan order, at the scene's lidar
+    height."""
     y = np.linspace(-1.2, 1.2, n)
-    return np.stack([np.full(n, wall_x), y, np.full(n, 0.2)], axis=1)
+    return np.stack([np.full(n, wall_x), y, np.full(n, SCENE_LIDAR_Z)], axis=1)
 
 
 def _context(lidar: np.ndarray | None) -> FrameContext:
@@ -319,9 +326,10 @@ def test_the_wall_anchor_extrudes_the_lidar_row_up_a_wall_and_stops_at_a_chair_s
     raw = 1.5 * chair
     returns = _wall_returns(2.0)
     u = project(returns, CAM, INTR)[:, 0]
-    hits_chair = (u >= 280) & (u < 360)  # the lidar at 0.2 m meets the chair there, not the wall
+    hits_chair = (u >= 280) & (u < 360)  # the scene's beam meets the chair there, not the wall
     c, s = math.cos(CAM.pitch), math.sin(CAM.pitch)
-    same_column = (c * 1.2 + s * (CAM.z - 0.2)) / (c * 2.0 + s * (CAM.z - 0.2))
+    lift = CAM.z - SCENE_LIDAR_Z
+    same_column = (c * 1.2 + s * lift) / (c * 2.0 + s * lift)
     returns[hits_chair, 0] = 1.2
     returns[hits_chair, 1] *= same_column
     assert np.allclose(project(returns, CAM, INTR)[:, 0], u)
@@ -351,7 +359,8 @@ def test_the_wall_anchor_extrudes_the_lidar_row_up_a_wall_and_stops_at_a_chair_s
     assert WallAnchor().correct(raw, frame) == (raw, 0)
     assert "correcting" in WallAnchor(correct=True).describe()
     assert anchor.pairs(Frame(raw, _context(None))) is None
-    lonely = np.array([[2.0, 0.0, 0.2], [2.0, 0.9, 0.2], [2.0, -0.9, 0.2]])  # no neighbours
+    z = SCENE_LIDAR_Z
+    lonely = np.array([[2.0, 0.0, z], [2.0, 0.9, z], [2.0, -0.9, z]])  # no neighbours
     assert anchor.walk(Frame(raw, _context(lonely))) is None
 
 
@@ -372,7 +381,7 @@ def test_the_walk_stops_where_a_table_top_recedes_and_can_correct_without_pairs(
     on_top = ~on_front & (top < wall) & (top >= front)
     truth = np.where(on_front, front, np.where(on_top, top, wall))
     raw = 1.4 * truth
-    returns = _wall_returns(1.5)  # the lidar meets the front at 0.2 m across the view
+    returns = _wall_returns(1.5)  # the scene's beam meets the front across the whole view
     anchor = WallAnchor(row_stride=1)
     walk = anchor.walk(Frame(raw, _context(returns)))
     assert walk is not None

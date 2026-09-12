@@ -347,8 +347,9 @@ local_costmap:
       # so a mark is a mark whoever wrote it.
       #
       # What the split changes is the point of it: while scan, dynamic and depth_scan shared one
-      # grid, the LIDAR's rays cleared the CAMERA's marks — a beam passing 20 cm above the floor
-      # under a table erased the table top the camera had just seen. Now each sensor clears only
+      # grid, the LIDAR's rays cleared the CAMERA's marks — a beam passing through the lidar's
+      # own plane (config/lidar.json's mount) under a table erased the table top the camera had
+      # just seen. Now each sensor clears only
       # what it can itself see. The price is the same coin's other side: a camera mark outlives a
       # dead camera until the camera raytraces through it again — which is why the camera and the
       # contact layers both ship enabled: False here, and the lidar, the one layer whose marks a
@@ -428,7 +429,7 @@ local_costmap:
       contact_layer:
         # Where the floor ENDS, read off the same depth frames (pepin.contact, published by
         # pepin_bringup.contact_scan): the feet of chairs, a low box, a plinth — what neither the
-        # lidar's plane 20 cm up nor depth_scan's 8 cm-1.3 m band can see. OFF until it is
+        # lidar's own plane (config/lidar.json's mount) nor depth_scan's 8 cm-1.3 m band sees. OFF until it is
         # validated on the robot (scratch/contact_validation.py): an open-floor drive must mark
         # nothing, and a taped box must be marked at the range the tape measure says.
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -513,8 +514,9 @@ global_costmap:
       # so a mark is a mark whoever wrote it.
       #
       # What the split changes is the point of it: while scan, dynamic and depth_scan shared one
-      # grid, the LIDAR's rays cleared the CAMERA's marks — a beam passing 20 cm above the floor
-      # under a table erased the table top the camera had just seen. Now each sensor clears only
+      # grid, the LIDAR's rays cleared the CAMERA's marks — a beam passing through the lidar's
+      # own plane (config/lidar.json's mount) under a table erased the table top the camera had
+      # just seen. Now each sensor clears only
       # what it can itself see. The price is the same coin's other side: a camera mark outlives a
       # dead camera until the camera raytraces through it again — which is why the camera and the
       # contact layers both ship enabled: False here, and the lidar, the one layer whose marks a
@@ -580,7 +582,7 @@ global_costmap:
       contact_layer:
         # Where the floor ENDS, read off the same depth frames (pepin.contact, published by
         # pepin_bringup.contact_scan): the feet of chairs, a low box, a plinth — what neither the
-        # lidar's plane 20 cm up nor depth_scan's 8 cm-1.3 m band can see. OFF until it is
+        # lidar's own plane (config/lidar.json's mount) nor depth_scan's 8 cm-1.3 m band sees. OFF until it is
         # validated on the robot (scratch/contact_validation.py): an open-floor drive must mark
         # nothing, and a taped box must be marked at the range the tape measure says.
         plugin: "nav2_costmap_2d::ObstacleLayer"

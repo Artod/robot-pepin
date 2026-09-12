@@ -287,7 +287,7 @@ demonstrated (`scratch/camera_only_localization.py`, run 0171 replayed offline a
 | `depth,contact` | 29 / 52 / 90 cm | loses the map |
 | `lidar,depth,contact` | 0.7 / 1.6 / 5.7 cm, 0.21 / 0.56 / 1.9 deg | never lost |
 
-The camera's band is a different cross-section of the room than the lidar's plane 20 cm up:
+The camera's band is a different cross-section of the room than the lidar's own plane:
 sofa cushions and table clutter fit "some wall" well (fit 0.90 at the wrong pose, 0.12 at the
 true one), and parked bumper-to-furniture the camera sees nothing of the floor below ~1.2 m.
 Camera-only localisation needs a camera-built map, not the lidar's slice. So the honest demo is:

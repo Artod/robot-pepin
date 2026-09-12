@@ -12,7 +12,7 @@ ros_stubs.install()
 
 from pepin_bringup import msgs  # noqa: E402
 
-from pepin.mounts import Mount  # noqa: E402
+from pepin.mounts import Mount, load_lidar_mount  # noqa: E402
 from pepin.tsdf import RigidPose  # noqa: E402
 
 
@@ -44,11 +44,16 @@ def test_a_quaternion_s_angles_come_back_out() -> None:
 
 def test_the_laser_mount_reads_as_planar_and_upside_down() -> None:
     """The LD19 hangs (roll pi): the planar stack gets (x, y, yaw, mirrored) from the static
-    transform, the way the tracker has read it since it stopped hard-coding the mount."""
-    laser = Mount(x_m=0.005, z_m=0.2, roll_deg=180.0, yaw_deg=-87.5)
+    transform, the way the tracker has read it since it stopped hard-coding the mount.
+
+    The mount is the real one, read from config/lidar.json — a height retyped in a test is the
+    same shadow that let 0.20 m stand unmeasured until 2026-09-12."""
+    laser = load_lidar_mount()
+    assert laser.roll_deg == 180.0 and laser.z_m > 0.0
     t = msgs.transform_from_mount("base_link", "laser", laser, ros_stubs.Time())
     x, y, yaw, mirrored = msgs.planar_mount(t)
-    assert (x, y) == (0.005, 0.0) and math.degrees(yaw) == pytest.approx(-87.5) and mirrored
+    assert (x, y) == (laser.x_m, laser.y_m) and mirrored
+    assert math.degrees(yaw) == pytest.approx(laser.yaw_deg)
     level = msgs.transform_from_mount("base_link", "laser", Mount(yaw_deg=10.0), None)
     assert msgs.planar_mount(level)[3] is False
 

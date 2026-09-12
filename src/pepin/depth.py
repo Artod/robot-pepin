@@ -3,7 +3,8 @@
 A monocular depth network gives the shape of the scene but not its size, and the size it gets
 wrong is not one number: on our lens Depth Anything V2 (metric, indoor) put a coffee table one
 metre away at 2.1 m and the far wall further out still. The lidar knows distances exactly, but
-only in its own plane, 20 cm above the floor (``config/lidar.json``). Projected into the image,
+only in its own plane, whose height above the floor is ``config/lidar.json``'s mount and nothing
+else (:func:`pepin.mounts.load_lidar_mount`). Projected into the image,
 the scan's beams name the true depth at a few hundred pixels; those (network, true) pairs,
 pooled over minutes of frames so they span the room's depths, fit an affine law in inverse
 depth, 1 / z = a / D + b — what a relative-depth network is built to be right up to — and the
@@ -214,7 +215,7 @@ def nearest_stamp(
 SCAN_MIN_Z_M = 0.15  # the scan marks from this height: the network's floor is ~5 % noisy in
 # depth, and a relative depth error e is a height error of 1.23 m * e along every ray, so an 8 cm
 # floor margin sat a 6.5 % depth error away from marking the open floor as a wall (a review probe,
-# 2026-09-11); 15 cm is a 12 % margin, the lidar's own plane is at 20 cm, tops and seats stay in
+# 2026-09-11); 15 cm is a 12 % margin, well under the lidar's own plane, tops and seats stay in
 SCAN_HALF_FOV = math.radians(40.0)  # the tilted camera's bearings reach a little past its lens
 SCAN_STEP = math.radians(0.5)
 SCAN_KTH = 3  # the k-th nearest point of a bearing: a flying pixel at an edge does not mark

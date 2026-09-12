@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import cache
 from typing import Protocol
 
 import numpy as np
@@ -90,7 +91,7 @@ def ring_points(radius_m: float, cell_m: float = COSTMAP_CELL_M) -> int:
     """How many marks close a ring of ``radius_m``: no two of them more than ``cell_m`` apart.
 
     A point planner is stopped by lethal cells, not by the gaps between them: twelve marks on a
-    0.41 m ring stand 0.22 m apart, four costmap cells of clear floor the plan walks straight
+    half-metre ring stand 0.26 m apart, five costmap cells of clear floor the plan walks straight
     through, which is the opposite of a berth.
     """
     return max(RING_MIN_POINTS, math.ceil(2.0 * math.pi * radius_m / cell_m))
@@ -180,7 +181,36 @@ def occlusion_split(
     return share, far
 
 
-TOE_REACH_M = 0.20  # a foot reaches this far past the shin the lidar sees at 0.20 m
+SHOE_AHEAD_OF_ANKLE_M = 0.21  # a 28 cm shoe with the ankle 7 cm back from the heel
+ANKLE_HEIGHT_M = 0.07  # where the leg's pivot sits above the floor
+SHIN_LEAN_DEG = 10.0  # how far back a relaxed standing shin may lean off vertical
+
+
+@cache
+def toe_reach_m(lidar_z_m: float | None = None) -> float:
+    """How far a standing person's toe reaches past the point the lidar's beam meets on the leg,
+    metres, rounded up to the centimetre.
+
+    The lidar sees one horizontal slice of a person: whatever the beam lands on, the shoe sticks
+    out further and a wheel takes it (2026-09-09). The flat 0.20 m that stood here was the shoe
+    alone, written while the mount was assumed to be at ankle height. The tape measure of
+    2026-09-12 put the plane most of the way up the shin instead, and a shin leaning back off
+    vertical carries the beam's contact point *behind* the ankle, so the toe reaches further
+    past it: the shoe ahead of the ankle plus ``(z - ankle) * tan(lean)``, rounded up to the
+    centimetre. The height itself is never typed here — it is ``config/lidar.json`` through
+    :func:`pepin.mounts.load_lidar_mount`, read once (``lidar_z_m`` overrides it, for tests and
+    for asking what another mount would cost); a re-measured lidar takes a restart, like every
+    other mount on the cart.
+    """
+    if lidar_z_m is None:
+        from pepin.mounts import load_lidar_mount
+
+        lidar_z_m = load_lidar_mount().z_m
+    above_ankle = max(lidar_z_m - ANKLE_HEIGHT_M, 0.0)
+    reach = SHOE_AHEAD_OF_ANKLE_M + above_ankle * math.tan(math.radians(SHIN_LEAN_DEG))
+    return math.ceil(reach * 100.0) / 100.0
+
+
 HAND_M = 0.05  # the margin a planner that knows the hull passes a person with
 FOOTPRINT_PLANNERS = ("Hybrid", "Lattice")  # Nav2 plugin ids that check the polygon
 
@@ -198,19 +228,24 @@ class Berth:
     near_m: float
 
 
-def point_planner_ring_m(hull: Footprint = HULL, toe_reach_m: float = TOE_REACH_M) -> float:
+def point_planner_ring_m(hull: Footprint = HULL, reach_m: float | None = None) -> float:
     """The ring a point planner needs so a wheel clears a person's toes.
 
     NavFn, Smac 2D and Theta* keep their path the hull's inscribed radius from a lethal cell and
     no farther; the wheel line is the half-width out from the path. The ring makes up the
-    difference and adds the toes the lidar cannot see: 0.275 - 0.0625 + 0.20 on this cart.
+    difference and adds the toes the lidar cannot see (:func:`toe_reach_m`): on this cart
+    0.275 - 0.0625 + the reach.
     """
-    return hull.half_width_m - hull.inscribed_radius_m + toe_reach_m
+    return (
+        hull.half_width_m
+        - hull.inscribed_radius_m
+        + (toe_reach_m() if reach_m is None else reach_m)
+    )
 
 
-def footprint_planner_ring_m(toe_reach_m: float = TOE_REACH_M, hand_m: float = HAND_M) -> float:
+def footprint_planner_ring_m(reach_m: float | None = None, hand_m: float = HAND_M) -> float:
     """The ring for a planner that checks the polygon itself: the toes and a hand's width."""
-    return toe_reach_m + hand_m
+    return (toe_reach_m() if reach_m is None else reach_m) + hand_m
 
 
 def near_exclusion_m(
