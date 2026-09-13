@@ -1,0 +1,7 @@
+[Unit]
+Description=Pepin: reap stray ros2 CLI tools every minute
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+[Install]
+WantedBy=timers.target

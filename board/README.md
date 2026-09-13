@@ -95,3 +95,7 @@ Notes that cost an evening each:
   reason the wheel loop lives on the board.
 
 Check from the laptop: `uv run python scripts/health_check.py --quick`.
+
+## Stray ros2 CLI tools
+
+`board/reap_ros2_cli.sh` (systemd timer `pepin-reap.timer`, every minute) kills `ros2 topic|param|run|node|service|...` processes older than 90 s inside `pepin-ros` — a `timeout` around a CLI probe ends the tool but not always its DDS shutdown, and a dozen leftovers took the board to load 12 (2026-09-13). Nodes are never touched. Install: copy `board/pepin-reap.{service,timer}` to `/etc/systemd/system/`, the script to `/root/pepin-ros/board/`, `systemctl enable --now pepin-reap.timer`. Operator rule: probe the board with `timeout -s KILL` and one tool at a time.
