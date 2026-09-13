@@ -68,6 +68,14 @@ def at(x: float, y: float, yaw_deg: float, age_s: float) -> Any:
     )
 
 
+def standing_at(node: Any, transform: Any) -> None:
+    """Put map -> base_link into the node's own TF buffer. The first lookup is what starts the
+    listener (the node never subscribes to /tf until something asks for a pose), so one ask
+    comes first — exactly as on the robot."""
+    node._tf_pose()
+    node._tf.buffer.transforms[("map", "base_link")] = transform
+
+
 def tracker_says(node: Any, fit: float) -> None:
     """A stack whose tracker is up: its service answers and its fit is on the wire."""
     where = node.service_clients["where_am_i"]
@@ -84,7 +92,7 @@ def test_without_a_tracker_a_fresh_transform_is_the_pose_and_the_goal_goes(tmp_p
     pose is map -> base_link and the goal is judged by how fresh that edge is. The first live
     session's goals were all refused here with "the tracker is not up" (2026-09-13 14:05)."""
     node = server(tmp_path)
-    node._tf.buffer.transforms[("map", "base_link")] = at(1.25, -0.5, 90.0, age_s=0.1)
+    standing_at(node, at(1.25, -0.5, 90.0, age_s=0.1))
     pose = node._pose_now()
     assert (round(pose["x"], 3), round(pose["y"], 3)) == (1.25, -0.5)
     assert abs(pose["yaw_deg"] - 90.0) < 1e-6
@@ -124,11 +132,11 @@ def test_a_transform_that_stopped_coming_is_as_good_as_none(tmp_path) -> None:  
     means a publisher has stopped. The refusal carries the age, because "stale" and "missing"
     are two different things to go and look at."""
     node = server(tmp_path)
-    node._tf.buffer.transforms[("map", "base_link")] = at(0.0, 0.0, 0.0, age_s=4.2)
+    standing_at(node, at(0.0, 0.0, 0.0, age_s=4.2))
     ready = node._ready()
     assert not ready.ready and not ready.search
     assert "map -> base_link is 4.2 s old" in ready.reason
-    node._tf.buffer.transforms[("map", "base_link")] = at(0.0, 0.0, 0.0, age_s=TF_FRESH_S - 0.01)
+    standing_at(node, at(0.0, 0.0, 0.0, age_s=TF_FRESH_S - 0.01))
     assert node._ready().ready
 
 
@@ -136,7 +144,7 @@ def test_where_a_tracker_speaks_nothing_changes(tmp_path) -> None:  # type: igno
     """The known-map stack is untouched: the tracker's own pose is the answer, its fit decides,
     and a weak fit still buys the whole-map search instead of driving on a fresh transform."""
     node = server(tmp_path)
-    node._tf.buffer.transforms[("map", "base_link")] = at(9.9, 9.9, 0.0, age_s=0.05)
+    standing_at(node, at(9.9, 9.9, 0.0, age_s=0.05))
     tracker_says(node, 0.71)
     pose = node._pose_now()
     assert (pose["x"], pose["fit"]) == (-1.4, 0.71), "the tracker's, not the transform's"
@@ -153,7 +161,7 @@ def test_the_flag_off_is_the_old_node_that_only_ever_asked_the_tracker(tmp_path)
     never comes."""
     assert FLAGS.flag("tf_pose").default is True and FLAGS.flag("tf_pose").live
     node = server(tmp_path)
-    node._tf.buffer.transforms[("map", "base_link")] = at(1.0, 1.0, 0.0, age_s=0.05)
+    standing_at(node, at(1.0, 1.0, 0.0, age_s=0.05))
     node._switches.set("tf_pose", False)
     assert node._pose_now() == {}
     old = node._ready()
@@ -165,13 +173,13 @@ def test_a_place_marked_without_a_tracker_carries_no_fit(tmp_path) -> None:  # t
     """The session's own book fills in SLAM mode too. A mark is refused on the same evidence a
     goal is, and it writes no fit at all rather than a 0.00 that would read as "marked lost"."""
     node = server(tmp_path)
-    node._tf.buffer.transforms[("map", "base_link")] = at(2.0, -1.0, -45.0, age_s=0.2)
+    standing_at(node, at(2.0, -1.0, -45.0, age_s=0.2))
     answer = node.mark("charger")
     assert answer["event"] == "marked"
     book = json.loads((tmp_path / "places.yaml").read_text())
     assert book["charger"] == {"x": 2.0, "y": -1.0, "yaw_deg": -45.0}
 
-    node._tf.buffer.transforms[("map", "base_link")] = at(2.0, -1.0, -45.0, age_s=9.0)
+    standing_at(node, at(2.0, -1.0, -45.0, age_s=9.0))
     stale = node.mark("printer")
     assert stale["event"] == "error" and "9.0 s old" in stale["detail"]
     assert "printer" not in json.loads((tmp_path / "places.yaml").read_text())

@@ -80,6 +80,7 @@ BRINGUP_ROUND_S = 10.0  # a lifecycle query or transition that has not answered 
 MAP_FRAME = "map"
 BASE_FRAME = "base_link"
 TF_WAIT_S = 0.3  # how long a pose lookup waits for the edge: the drive thread asks, not a callback
+TF_FIRST_WAIT_S = 2.0  # ...and the first one waits for the listener's buffer to fill at all
 TRACKER_WAIT_S = 1.0  # the one probe for "is there a tracker at all" — its relocalise service
 
 # The live flags (CLAUDE.md rule 19); their state is printed in the node's start line.
@@ -129,8 +130,9 @@ class GoalServer(Node):
         self._fit_heard = False  # a tracker has spoken here at least once
         self.create_subscription(Float32, "localization_fit", self._on_fit, 10)
         # The pose's other source: map -> base_link, which the tracker owns on a saved map and
-        # pepin_bringup.slam_frame owns in SLAM mode. Read only when no tracker answers.
-        self._tf = TfLookup(self)
+        # pepin_bringup.slam_frame owns in SLAM mode. Read only when no tracker answers, and the
+        # listener behind it is not started until then (_tf_pose).
+        self._tf: TfLookup | None = None
         self._gate = GoalGate()
         # Latched: the behaviour tree reads its selector once, whenever it next ticks.
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -414,7 +416,13 @@ class GoalServer(Node):
     def _tf_pose(self) -> dict[str, float]:
         """The cart's pose from ``map -> base_link`` alone, with the age of that edge in seconds
         (``age_s``): what SLAM mode has instead of a tracker. Empty when nobody publishes it."""
-        transform = self._tf.transform(MAP_FRAME, BASE_FRAME, timeout_s=TF_WAIT_S)
+        wait = TF_WAIT_S
+        if self._tf is None:
+            # Started on the first ask and never before: a TF listener is a subscription to /tf,
+            # sixty messages a second on the board, and where the tracker answers nothing here
+            # ever reads it. Its buffer starts empty, so this one lookup waits longer.
+            self._tf, wait = TfLookup(self), TF_FIRST_WAIT_S
+        transform = self._tf.transform(MAP_FRAME, BASE_FRAME, timeout_s=wait)
         if transform is None:
             return {}
         now = self.get_clock().now().nanoseconds * 1e-9
