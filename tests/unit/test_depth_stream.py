@@ -450,7 +450,7 @@ def test_the_imu_leans_the_floor_only_while_something_asks_for_the_lean(build: B
     node.subs["/imu/data_raw"][1](reading)
     assert node._lean.estimator is not None and node._lean.up == pytest.approx([0.0, 0.0, 1.0])
     assert "lean +0.0/+0.0 deg" in node._lean.report()
-    off, _ = build(floor_anchor=False)
+    off, _ = build(floor_anchor=False, imu_lean=False)
     off.subs["/imu/data_raw"][1](reading)
     assert off._lean.estimator is None and "lean none" in off._lean.report()
     alien, _ = build(floor_pairs=True)

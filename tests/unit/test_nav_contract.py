@@ -927,7 +927,7 @@ def test_the_floor_s_edge_is_a_node_of_the_kit_and_crosses_the_bridge() -> None:
     # the live flags (CLAUDE.md rule 19), the feature's own name first
     flags = load_table(REPO / NODES / "contact_scan.py")
     assert flags.names == ("contact_scan", "shadow", "imu_lean", "max_range")
-    assert flags["imu_lean"] is False, "off until the lean is measured on the robot"
+    assert flags["imu_lean"] is True, "on since the gyro's sign was verified by hand (2026-09-13)"
     assert flags["contact_scan"] is True and flags["shadow"] is True
     assert all(flag.live for flag in flags), "every one of them takes the next frame"
     # the plane is a cache with two keys: the lean and the optics
@@ -1209,7 +1209,7 @@ def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
     for name in ("depth_fusion", "depth_stream", "contact_scan"):
         node = sf.tree(f"{NODES}/{name}.py")
         flags = load_table(REPO / NODES / f"{name}.py")
-        assert flags["imu_lean"] is False, f"{name}: off until measured on the robot"
+        assert flags["imu_lean"] is True, f"{name}: on since the gyro's sign was verified by hand"
         assert "LeanFeed" in sf.imported(node), name
         assert "/imu/data_raw" not in sf.strings(node), f"{name}: the kit owns the subscription"
         assert "self._lean.report" in sf.calls(node), f"{name}: the lean in the report line"

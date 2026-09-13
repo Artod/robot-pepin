@@ -150,21 +150,17 @@ FLAGS = FlagSet(
     ),
     Flag(
         "imu_lean",
-        False,
+        True,
         description="the cart's lean (pepin.lean, from /imu/data_raw) is followed with the gyro"
         " as well as the accelerometer, and a frame is placed with the lean at its stamp composed"
         " on base_link before the planar odometry instead of as if the cart stood level; the"
         " lidar's scan follows the same switch — its beams are walked as the 3D rays the leaning"
         " body sends them along, and lean_gate_deg drops the scans taken too far from level",
-        why="until the gyro's roll and pitch signs are checked by tipping the cart by hand. What"
-        " a lean costs is measured on the beams themselves: while the body is tipped their world"
-        " height moves a median 8.9 cm, p95 25.3 cm, max 55.7 cm over 8209 returns, 653 beams"
-        " dive into the floor, and integrating them level writes 54 false walls (worst 0.79 m)"
-        " where walking them as 3D rays writes 19 (scratch/lidar_lean_effect.txt). What is not"
-        " measured is the correction's sign: only the yaw axis was ever checked against a 90"
-        " degree turn on the robot, and of 93 tapes with IMU records none carry the"
-        " accelerometer, so every lean proof so far is a synthetic bump replayed over real"
-        " geometry",
+        why="on: the gyro's sign was verified by hand on 2026-09-13 (the cart tipped nose-down"
+        " read pitch +10.5 deg, left-side-down read roll -9.4 deg, the fast path following at"
+        " once with quality 0.9 while held; scratch/lean_tip_test.txt), and the gyro's zero"
+        " offset is learned. Off, the floor anchor keeps the accelerometer-only lean, which by"
+        " design ignores any tip shorter than 10 s",
         on_when="after a hand tip through a known angle shows the reported lean following it the"
         " right way and returning to zero",
         off_when="wherever the lean in the report line disagrees with the cart's visible"

@@ -100,16 +100,16 @@ FLAGS = FlagSet(
     ),
     Flag(
         "imu_lean",
-        False,
+        True,
         description="the floor plane leans with the gyro as well as the accelerometer"
         " (pepin.lean: the lean of a wheel climbing a threshold is followed within a sample"
         " instead of being gated away as a push); off, the accelerometer alone, as it always has"
         " been",
-        why="until the gyro's roll and pitch signs are checked by tipping the cart by hand. The"
-        " sensitivity is measured as geometry: 2 degrees of nose-down moves the principal ray's"
-        " floor point from 2.52 m to 2.35 m — 17 cm, 7 % of the range — which is exactly what a"
-        " wheel on a threshold does. The correction's sign, though, has never been verified on"
-        " the robot (only the yaw axis was), so the gyro stays out",
+        why="on: the gyro's sign was verified by hand on 2026-09-13 (the cart tipped nose-down"
+        " read pitch +10.5 deg, left-side-down read roll -9.4 deg, the fast path following at"
+        " once with quality 0.9 while held; scratch/lean_tip_test.txt), and the gyro's zero"
+        " offset is learned. Off, the floor anchor keeps the accelerometer-only lean, which by"
+        " design ignores any tip shorter than 10 s",
         on_when="after a hand tip through a known angle shows the reported lean following it the"
         " right way; the gain is the threshold case, where a real lean is followed within a"
         " sample",

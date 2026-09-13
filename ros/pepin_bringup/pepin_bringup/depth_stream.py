@@ -331,22 +331,16 @@ FLAGS = FlagSet(
     ),
     Flag(
         "imu_lean",
-        False,
+        True,
         description="the cart's lean (pepin.lean, from /imu/data_raw) is followed with the gyro as"
         " well as the accelerometer and carried into the scan's carry and the camera's place in"
         " the map; off, the floor plane leans with the accelerometer alone, as it always has, and"
         " nothing else is leaned",
-        why="until the gyro's roll and pitch signs are checked by tipping the cart by hand. What"
-        " is worth is measured — 5 degrees of lean walks a 3 m ray 26 cm off the plane — and so is"
-        " the chip at rest (30 s level: accel mean (-0.051, -0.067, +9.945) m/s2 = roll -0.39 deg,"
-        " pitch +0.29 deg; gyro bias (-0.001, -0.028, +0.074) deg/s at 0.03-0.05 deg/s of noise,"
-        " config/imu.json's level block). What is not measured is the correction's sign: only the"
-        " yaw axis was checked against a 90 degree turn on the robot, roll and pitch come from a"
-        " mount mapping nobody has turned through a known angle, and a level floor hides a swap or"
-        " a flip. The recordings cannot settle it either — of 93 tapes with IMU records none carry"
-        " the accelerometer (scratch/lean_effect.py), so every lean proof so far is a synthetic"
-        " bump replayed over real geometry. With the flag off the report line still prints the"
-        " accelerometer-only lean, which is the A/B",
+        why="on: the gyro's sign was verified by hand on 2026-09-13 (the cart tipped nose-down"
+        " read pitch +10.5 deg, left-side-down read roll -9.4 deg, the fast path following at"
+        " once with quality 0.9 while held; scratch/lean_tip_test.txt), and the gyro's zero"
+        " offset is learned. Off, the floor anchor keeps the accelerometer-only lean, which by"
+        " design ignores any tip shorter than 10 s",
         on_when="after a hand tip through a known angle shows the reported lean following it the"
         " right way and returning to zero",
         off_when="the moment the lean in the report line disagrees with the cart's visible"
