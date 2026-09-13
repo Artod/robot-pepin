@@ -28,6 +28,7 @@ from ros_stubs import (  # noqa: E402
     LaserScan,
     Odometry,
     Parameter,
+    PoseWithCovarianceStamped,
     String,
     TransformStamped,
 )
@@ -503,3 +504,81 @@ def test_the_map_that_does_not_fit_reaches_the_operator(node: Relocalizer) -> No
         "reseeds": 0,
         "accept": True,
     }
+
+
+# -- the pace of a cart that stands still -------------------------------------
+
+
+def seed_msg(pose: Pose2D) -> Any:
+    """A pose on /initialpose: Foxglove's "set pose", and this node's own announcement."""
+    msg = PoseWithCovarianceStamped()
+    msg.pose.pose.position.x, msg.pose.pose.position.y = pose.x, pose.y
+    msg.pose.pose.orientation.z = math.sin(pose.theta / 2.0)
+    msg.pose.pose.orientation.w = math.cos(pose.theta / 2.0)
+    return msg
+
+
+def echo_initialpose(node: Relocalizer, rounds: int = 20) -> int:
+    """Hand every /initialpose message the node published back to its own subscription — ROS 2
+    delivers a publication to the publishing node's own subscriptions — until nothing new goes
+    out; returns the rounds that took (``rounds`` means it never stopped)."""
+    if "/initialpose" not in node.pubs or "/initialpose" not in node.subs:
+        return 0
+    pub, on_seed = node.pubs["/initialpose"], node.subs["/initialpose"][1]
+    for turn in range(rounds):
+        pending, pub.sent = pub.sent, []
+        if not pending:
+            return turn
+        for msg in pending:
+            on_seed(msg)
+    return rounds
+
+
+def stand(node: Relocalizer, t0: float, seconds: float) -> int:
+    """A cart that does not move, ten revolutions a second for ``seconds``, every /initialpose
+    the node publishes handed straight back to it; returns the scans that were matched."""
+    poses, still = node.pubs["/tracker_pose"], Pose2D()
+    before = len(poses.sent)
+    for i in range(round(seconds * 10)):
+        ts = t0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        node.subs["/scan"][1](lidar_msg(still, ts))
+        node.subs["/odometry/filtered"][1](odom_msg(still, ts))
+        echo_initialpose(node)
+        assert until(lambda: node._tracker_initialised)
+    return len(poses.sent) - before
+
+
+def test_a_standing_cart_is_matched_about_once_a_second_even_after_a_seed() -> None:
+    """The regression of 2026-09-13 18:35: a standing cart was matched four to five times a
+    second (``rested 0, matched 115`` against the morning's ``rested 266, matched 30``), at 90 %
+    of an A53 core, with the published fit down from 0.77 to 0.51.
+
+    ``rested`` counts the scans ``timeline.MotionFilter`` refuses — nothing moved and the last
+    match is younger than a second — and every seed resets that filter, because a re-seed means
+    the cart is somewhere else now. The node publishes its every seed on /initialpose so AMCL
+    follows it AND listens there for the operator's, and a publication reaches the publishing
+    node's own subscriptions: one seed by hand became a seed at the executor's speed. The board
+    log said "seeded by the operator" 4882 times in four minutes.
+
+    So: a still cart is matched about once a second, before a seed and after one, with whatever
+    the node puts on /initialpose handed straight back to it.
+    """
+    with ros_stubs.parameters(min_match_gap_s=0.0):  # the pacer spaces on the wall clock
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
+    assert stand(node, 100.0, 4.0) <= 5, "one match a second, plus the first"
+    assert node._rested >= 30, "every other scan rested: the last match still holds"
+
+    node.clock.seconds = 104.0
+    seeded = Pose2D(0.03, -0.02, math.radians(1.0))  # the operator, a few cm off the truth
+    node.subs["/initialpose"][1](seed_msg(seeded))
+    loc = node._localizer
+    assert loc is not None
+    assert math.hypot(loc.pose.x - seeded.x, loc.pose.y - seeded.y) < 1e-6, "adopted as the truth"
+    assert echo_initialpose(node) <= 1, "the node answered its own seed, and kept answering"
+
+    node._rested = 0
+    assert stand(node, 104.1, 4.0) <= 6, "the seed is taken once, not once per scan"
+    assert node._rested >= 30
