@@ -13,10 +13,10 @@ import numpy as np
 import pytest
 
 from pepin.depth import (
-    A_BOUNDS,
     POOL_MIN_SAMPLES,
     CameraPose,
     Intrinsics,
+    a_bounds,
     apply_affine,
     fit_affine,
     load_law,
@@ -241,17 +241,21 @@ def test_a_pool_whose_angle_is_the_depth_in_disguise_fits_no_ray_law() -> None:
 
 
 def test_a_law_at_its_bound_says_so_and_is_clipped_there() -> None:
-    """A network four times too far at the top of the cone asks for a scale past A_BOUNDS: the
-    fit stands, the verdict says CLIPPED, and no pixel is corrected past the bound."""
+    """A network whose error grows steeply up the cone asks for a scale past the live ceiling
+    (5.75 against 5.0, scratch/ray_law_clip_steepness.py): the fit stands, the verdict says
+    CLIPPED, and no pixel is corrected past the bound. The bounds are read through
+    :func:`pepin.depth.a_bounds`, not copied, so the ``scale_ceiling`` switch moves this test
+    with the code."""
+    lo, hi = a_bounds()
     pool = _pairs()
     elevation, _azimuth = ray_angles(pool.lift)
-    steep = pool.d * (1.0 + 1.6 * (elevation - elevation.min()))
+    steep = pool.d * (1.0 + 2.8 * (elevation - elevation.min()))
     gain = fit_ray(steep, pool.z, elevation, pool.weight)
     assert gain is not None and gain.clipped
     assert "CLIPPED" in gain.describe()
     grid = np.linspace(gain.lo, gain.hi, 17, dtype=float)
     a, _b = gain.law(grid)
-    assert float(a.max()) <= A_BOUNDS[1] + 1e-12 and float(a.min()) >= A_BOUNDS[0] - 1e-12
+    assert float(a.max()) <= hi + 1e-12 and float(a.min()) >= lo - 1e-12
 
 
 def test_the_gain_is_held_at_the_span_s_edge_above_what_the_pool_saw() -> None:
@@ -364,7 +368,7 @@ def test_an_azimuth_that_turns_the_slope_over_at_one_edge_is_refused() -> None:
     """The azimuth polynomial carries no constant term, so on the optical axis — where the
     guards used to be read — it is identically zero. A pool steep enough in azimuth for the
     fitted slope to go negative at one edge of the lens came back as a law with clipped false
-    while every ray on that side silently took the A_BOUNDS ceiling; the guards now cross both
+    while every ray on that side silently took the scale ceiling; the guards now cross both
     spans and refuse it."""
     d, z, elevation, azimuth = _cone(1.2)
     assert fit_ray(d, z, elevation, azimuth=azimuth, azimuth_degree=1) is None
@@ -390,7 +394,7 @@ def test_the_azimuth_is_held_at_its_own_span_s_edge_like_the_elevation() -> None
 
 def test_a_saved_gain_that_places_nothing_is_refused_like_a_saved_affine_law() -> None:
     """A record is judged on restore the way the fit judged it: a slope that turns
-    non-positive anywhere on its own cone (every ray there would take the A_BOUNDS ceiling), an
+    non-positive anywhere on its own cone (every ray there would take the scale ceiling), an
     azimuth polynomial with no span of its own, and a record whose ``clipped`` denies a bound it
     meets are all refused, and the affine law stands instead."""
     d, z, elevation, azimuth = _cone(0.2)
@@ -401,7 +405,7 @@ def test_a_saved_gain_that_places_nothing_is_refused_like_a_saved_affine_law() -
     assert RayGain.restore({**good, "alpha": [-1.0, 0.0, 0.0]}) is None
     assert RayGain.restore({**good, "az_lo": 0.0, "az_hi": 0.0}) is None
     assert RayGain.restore({**good, "azimuth": [-5.0]}) is None  # positive on the axis alone
-    bound = {**good, "alpha": [0.4, 0.0, 0.0]}  # positive, but a of 2.5-5.9: past A_BOUNDS
+    bound = {**good, "alpha": [0.4, 0.0, 0.0]}  # positive, but a of 2.5-5.9: past the ceiling
     assert RayGain.restore(bound) is None, "clipped false denies a bound it meets"
     assert RayGain.restore({**bound, "clipped": True}) is not None
 

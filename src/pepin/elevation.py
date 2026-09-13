@@ -30,7 +30,8 @@ lidar's beams on run 0171 span -24 to +18 degrees of elevation, the near returns
 far ones by the horizon — so outside the fitted span the gain is **held at the span's edge**,
 in elevation and in azimuth alike, never extrapolated by a polynomial that is free to run away
 above or beside the picture; and every angle's (a, b) is clipped into the affine law's own
-bounds (:data:`pepin.depth.A_BOUNDS`, :data:`pepin.depth.B_BOUNDS`), the fit reporting whether
+bounds (:func:`pepin.depth.a_bounds`, :data:`pepin.depth.B_BOUNDS`, read live so the
+``scale_ceiling`` switch moves this law's ceiling too), the fit reporting whether
 that clip binds anywhere inside the span (:attr:`RayGain.clipped`) so a report line can say the
 law is at its bound. Both guards are judged over the whole fitted cone, elevations crossed with
 azimuths (:func:`_slope_over`): at azimuth 0 alone the azimuth polynomial, which carries no
@@ -48,12 +49,12 @@ from typing import Any
 import numpy as np
 
 from pepin.depth import (
-    A_BOUNDS,
     B_BOUNDS,
     MIN_DEPTH_SPREAD,
     MIN_SAMPLES,
     POOL_MIN_SAMPLES,
     Array,
+    a_bounds,
 )
 
 RAY_SCALE = 0.5  # rad: the angle the polynomial's variable counts in (u = eps / RAY_SCALE), so
@@ -119,7 +120,8 @@ class RayGain:
         ``1 / z = a / D + b``, each inside the affine law's own bounds."""
         with np.errstate(divide="ignore", invalid="ignore"):
             alpha = self.slope(elevation, azimuth)
-            a = np.clip(np.where(alpha > 0.0, 1.0 / alpha, A_BOUNDS[1]), *A_BOUNDS)
+            bounds = a_bounds()
+            a = np.clip(np.where(alpha > 0.0, 1.0 / alpha, bounds[1]), *bounds)
             b = np.clip(np.where(alpha > 0.0, -self.beta / alpha, 0.0), *B_BOUNDS)
         return a, b
 
@@ -177,7 +179,7 @@ class RayGain:
         malformed, empty, rests on fewer than POOL_MIN_SAMPLES pairs, or is not a law
         :func:`fit_ray` could have returned — a saved law is judged exactly as a live one, so a
         record whose slope turns non-positive somewhere inside its own span (every ray there
-        would silently take the A_BOUNDS ceiling) or whose ``clipped`` flag denies a bound it
+        would silently take the scale ceiling) or whose ``clipped`` flag denies a bound it
         does meet is refused, as :func:`pepin.depth.load_law` refuses an affine law outside its
         bounds."""
         try:
@@ -279,16 +281,18 @@ def _slope_over(gain: RayGain) -> Array:
 
 
 def _outside(gain: RayGain) -> bool:
-    """Whether the law this gain amounts to leaves A_BOUNDS or B_BOUNDS anywhere inside its
-    own span of ray angles (a non-positive slope counts as outside: that law places nothing)."""
+    """Whether the law this gain amounts to leaves the live scale bounds or B_BOUNDS anywhere
+    inside its own span of ray angles (a non-positive slope counts as outside: that law places
+    nothing)."""
     slope = _slope_over(gain)
     if not bool(np.all(slope > 0.0)):
         return True
     with np.errstate(divide="ignore", invalid="ignore"):
         scale, shift = 1.0 / slope, -gain.beta / slope
+    lo, hi = a_bounds()
     return bool(
-        np.any(scale < A_BOUNDS[0])
-        or np.any(scale > A_BOUNDS[1])
+        np.any(scale < lo)
+        or np.any(scale > hi)
         or np.any(shift < B_BOUNDS[0])
         or np.any(shift > B_BOUNDS[1])
     )
@@ -313,9 +317,9 @@ def fit_ray(
     ``1 / D = alpha(ray) * (1 / z) + beta`` — the noisy variable on the left, as
     :func:`pepin.depth.fit_affine` — with ``alpha`` a polynomial in the normalised elevation
     (and azimuth) and one shift ``beta``, fitted only when the pool spans MIN_DEPTH_SPREAD in
-    depth, exactly as the affine law's shift is. When the law that comes out leaves A_BOUNDS or
-    B_BOUNDS anywhere inside its own span, the shift is dropped and the angular scale refitted
-    alone (:func:`pepin.depth._bounded`'s rule: a bound that binds means the other parameter is
+    depth, exactly as the affine law's shift is. When the law that comes out leaves the scale
+    bounds or B_BOUNDS anywhere inside its own span, the shift is dropped and the angular scale
+    refitted alone (:func:`pepin.depth._bounded`'s rule: a bound that binds means the other is
     the free one) — a pure per-ray scale is what the rest of the room can be trusted with.
 
     ``None`` comes back under POOL_MIN_SAMPLES pairs, on a pool too narrow in angle for even a
