@@ -33,6 +33,7 @@ def furnished_room_map() -> OccupancyGrid:
     return grid
 
 
+@pytest.mark.slow
 def test_tracks_the_truth_while_odometry_over_counts_turns() -> None:
     truth = [Pose2D(0.0, 0.0, 0.0)]
     for i in range(1, 25):
@@ -173,6 +174,7 @@ def test_the_matcher_follows_a_map_that_keeps_growing() -> None:
     assert matcher.inlier_fraction(pose, with_wall) > before + 0.2
 
 
+@pytest.mark.slow
 def test_a_robot_pushed_by_hand_while_lost_relocalises_from_the_whole_map() -> None:
     """Odometry saw nothing; the local recovery window cannot reach; the global search can."""
 

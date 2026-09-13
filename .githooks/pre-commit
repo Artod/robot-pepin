@@ -1,7 +1,7 @@
-#!/bin/sh
-# Pre-commit gate: style, types, and fast unit tests. Hardware tests are
-# excluded on purpose — they need the robot. Enable once per clone with:
-#     git config core.hooksPath .githooks
+#!/bin/bash
+# Fast gate on every commit: shell syntax, ruff, mypy (its cache keeps it to seconds), the
+# millisecond tests. Simulated drives, loop closures and socket tests are marked `slow` and run
+# in .githooks/pre-push (with the coverage floor) and on demand: uv run pytest -m slow.
 set -e
 cd "$(git rev-parse --show-toplevel)"
 echo "pre-commit: shell syntax (ros/*.sh, board/*.sh)"
@@ -11,8 +11,5 @@ uv run ruff check . --quiet
 uv run ruff format --check . --quiet
 echo "pre-commit: mypy"
 uv run mypy --no-error-summary
-echo "pre-commit: unit tests + coverage floor ($(cat tests/coverage_floor.txt)%)"
-# The floor only ever goes up: raise tests/coverage_floor.txt when coverage rises, never lower it.
-# Fast tests only: the slow simulated drives (-m slow) run on demand, not on every commit.
-uv run pytest tests/unit -q --no-header -p no:cacheprovider -m "not slow" \
-    --cov=src/pepin --cov-report=term:skip-covered --cov-fail-under="$(cat tests/coverage_floor.txt)"
+echo "pre-commit: fast unit tests"
+uv run pytest tests/unit -q --no-header -p no:cacheprovider -m "not slow"

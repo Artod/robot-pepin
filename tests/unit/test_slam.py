@@ -44,6 +44,7 @@ def test_keyframes_follow_motion_and_skip_standing_still() -> None:
     assert len(slam.graph.edges) == 1
 
 
+@pytest.mark.slow
 def test_loop_closure_detected_and_end_pose_corrected() -> None:
     poses = square()
     slam = GraphSlam(SPEC, loop=LoopClosureConfig(min_index_gap=16, min_path_m=3.0))
@@ -65,6 +66,7 @@ def test_loop_closure_detected_and_end_pose_corrected() -> None:
     assert abs(end.theta - truth.theta) < math.radians(1.5)
 
 
+@pytest.mark.slow
 def test_no_closure_against_recent_keyframes() -> None:
     slam = GraphSlam(SPEC, loop=LoopClosureConfig(min_index_gap=100))
     drive(slam, square())
@@ -81,6 +83,7 @@ def test_no_closure_without_enough_path_between_the_keyframes() -> None:
     assert not slam.closures and len(slam.keyframes) == 20
 
 
+@pytest.mark.slow
 def test_inconsistent_closure_is_rolled_back() -> None:
     slam = GraphSlam(SPEC, loop=LoopClosureConfig(min_index_gap=100))
     drive(slam, square())

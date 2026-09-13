@@ -3,6 +3,7 @@
 import math
 
 import numpy as np
+import pytest
 from synthetic import raycast_room
 from test_localization import room_map
 
@@ -55,6 +56,7 @@ def simulate(
     return pose, closest, False
 
 
+@pytest.mark.slow
 def test_drives_straight_to_the_goal_in_an_empty_room() -> None:
     start, goal = Pose2D(-2.0, 0.0, 0.0), (2.0, 0.0)
     nav = Navigator(room_map(), start, goal, NavigatorConfig(controller=FAST))
@@ -64,6 +66,7 @@ def test_drives_straight_to_the_goal_in_an_empty_room() -> None:
     assert math.hypot(pose.x - goal[0], pose.y - goal[1]) < 0.15
 
 
+@pytest.mark.slow
 def test_routes_around_a_person_the_map_does_not_know() -> None:
     start, goal = Pose2D(-2.0, 0.0, 0.0), (2.0, 0.0)
     nav = Navigator(room_map(), start, goal, NavigatorConfig(controller=FAST))
@@ -212,6 +215,7 @@ def test_arrival_is_sticky_across_a_pause() -> None:
     assert later.done and later.twist == STOP and later.target is None
 
 
+@pytest.mark.slow
 def test_a_person_stepping_in_close_ahead_is_passed_not_pushed() -> None:
     """The person appears 0.9 m ahead; the cart backs off, turns and passes (it used to jam)."""
     start, goal = Pose2D(-2.0, 0.0, 0.0), (2.0, 0.0)
