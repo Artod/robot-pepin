@@ -20,6 +20,10 @@ turns them into one number every consumer asks for:
 * :class:`LeanHistory` — the last seconds of leans, readable at any moment in between, so a
   consumer asks for the lean at its frame's exposure and not for the lean now.
 * :class:`LeanSource` — the port a :class:`pepin.frame_pose.FramePoser` takes a lean through.
+* :class:`LeanGate` — how far the body may be from level before a measurement is thrown away
+  instead of corrected, and the counters of what it did, for a node's report line.
+* :func:`scan_height_shift` — how far a lidar's returns move in height when the body leans: the
+  physical size of the problem, in metres, per beam.
 
 Angles are radians, positive roll is right side down and positive pitch is nose down — the ROS
 convention, the same signs ``pepin.mounts.rotation_from_rpy`` composes.
@@ -48,6 +52,7 @@ QUALITY_TAU_S = 1.0  # how fast the share of accepted samples forgets (the readi
 HISTORY_S = 5.0  # how far back a consumer may ask for a lean
 HISTORY_MAX = 2000  # and how many samples that may ever cost (50 Hz * 5 s = 250)
 HISTORY_SLACK_S = 0.1  # a stamp this far past the newest sample reads as the newest lean
+SCAN_LEAN_GATE_DEG = 3.0  # a scan taken past this lean is another slice of the room, not the map's
 
 
 def _rotation_xy(roll: float, pitch: float) -> Array:
@@ -364,6 +369,53 @@ class LeanEstimator:
         return self.history.at(stamp)
 
 
+@dataclass
+class LeanGate:
+    """How far the body may be from level before a measurement is refused.
+
+    Some measurements can be corrected for the lean and some cannot. A lidar revolution taken
+    while the cart is tipped is a real slice of the room — just not the slice the map wants: at
+    5 degrees the beam is 44 cm off the sensor's plane at 5 m, so the wall it usually sweeps is
+    replaced by a tabletop, the air under a seat, or nothing at all. Below the gate the leaned
+    ray is written where it really goes; above it there is nothing worth writing, and the whole
+    scan is dropped. ``gate_deg`` is live — the owning node's flag writes it — and
+    :attr:`admitted` / :attr:`refused` count what happened, for that node's report line.
+    """
+
+    gate_deg: float = SCAN_LEAN_GATE_DEG
+    admitted: int = 0
+    refused: int = 0
+
+    def admits(self, lean: Lean | None) -> bool:
+        """Whether a measurement taken at ``lean`` may be used: ``True`` when the body is within
+        the gate, or when ``lean`` is ``None`` (nothing is known about that moment, so there is
+        no correction to gate and no reason to throw the measurement away); ``False`` when the
+        body is tipped further. Counts both ways."""
+        if lean is not None and lean.size_deg > self.gate_deg:
+            self.refused += 1
+            return False
+        self.admitted += 1
+        return True
+
+
+def scan_height_shift(ranges: Array, bearings: Array, lean: Lean) -> Array:
+    """How far each return's height in the world moves because the body leans: metres per
+    return, positive up, ``NaN`` where there was no return.
+
+    A beam of length ``r`` at robot-frame bearing ``b`` leaves the sensor in its own plane; tip
+    the body and the far end of that beam rises or falls by ``r`` times the vertical part of
+    the turned ray — ``r sin(lean)`` for a beam straight ahead under a pure pitch, 44 cm at 5 m
+    under 5 degrees. This is the whole physical case for placing a scan by the body's real
+    pose: the range itself changes by 1/cos, four parts in a thousand, and nobody would care.
+    The mount's own rise (centimetres, the same for every beam) is not in this number.
+    """
+    r = np.asarray(ranges, dtype=float)
+    b = np.asarray(bearings, dtype=float)
+    m = lean.rotation()
+    shift: Array = r * (m[2, 0] * np.cos(b) + m[2, 1] * np.sin(b))
+    return shift
+
+
 def imu_mount_rotation(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Array:
     """The 3x3 rotation taking a vector from the IMU's axes to base_link, from the mount's
     roll-pitch-yaw in degrees (the ROS convention, like the static transform the board
@@ -382,9 +434,12 @@ __all__ = [
     "LEAN_NORM_TOLERANCE",
     "LEAN_TAU_S",
     "LEVEL",
+    "SCAN_LEAN_GATE_DEG",
     "Lean",
     "LeanEstimator",
+    "LeanGate",
     "LeanHistory",
     "LeanSource",
     "imu_mount_rotation",
+    "scan_height_shift",
 ]
