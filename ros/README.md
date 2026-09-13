@@ -49,6 +49,73 @@ restarts it with the RTAB-Map database kept, `ros/laptop.sh vslam --fresh` delet
 first and starts an empty map (in SLAM mode the session starts empty anyway: see below). Only a Dockerfile change (apt packages, the C++
 driver) needs `ros/build.sh`, which stops the container first and uses BuildKit's apt cache.
 
+## The zenoh bridge
+
+The board and the laptop are two ROS graphs joined by `zenoh-bridge-ros2dds` 1.7.0, a router on
+each side over one TCP link (board `-l tcp/0.0.0.0:7447`, laptop `-e tcp/<board>:7447`). Each
+bridge gets a one-way allow-list generated from `pepin.deployment.bridge_config(side, mode)` into
+`ros/zenoh-bridge-<side>[-<mode>].json`, and a test keeps the files equal to the generator: a
+topic allowed as a publisher on BOTH sides loops until nothing crosses.
+
+**The admin space is network-wide.** Either bridge answers `@/*/ros2/route/**`,
+`@/*/ros2/dds/**`, `@/*/ros2/node/**` and `@/*/ros2/config` for BOTH bridges — the two replies
+were byte-for-byte the same size on 2026-09-13 — with the owner in the key (`@/<zid>/...`). So a
+`topic/sub/depth_scan` on the laptop's admin is the BOARD's route seen from here, not a second
+crossing, and `@/*/ros2/dds/**` is `ros2 topic info -v` for both machines from one curl. Read it
+all in one command with `scratch/bridge_flow.py`.
+
+**DDS does not cross the WiFi.** Measured 2026-09-13: the board's bridge saw 11 DDS participants,
+the laptop's 10, and the two sets did not intersect. The laptop's containers are on a docker
+bridge network inside Docker Desktop's VM and their RTPS discovery never reaches the LAN; the
+board's (`--network host`) never reaches the Mac. Every crossing is the bridge's. `-d 7` and
+`ros_localhost_only: false` are therefore left as they are; the hardening for the day a ROS node
+runs natively on the Mac, or a second robot joins domain 7, is `ROS_AUTOMATIC_DISCOVERY_RANGE=
+LOCALHOST` in the board's two containers (both are `--network host`, so they still see each
+other) — not enabled, because nothing has ever been measured crossing.
+
+**A route's QoS is a race, and the race is the recurring failure.** A route is keyed by topic
+name alone and is created by whichever declaration arrives first — a local ROS endpoint, or the
+far bridge's announcement of its own. Its DDS endpoint takes that declaration's QoS, and
+`routes_mgr` never revises it when the other side shows up (1.7.0 `route_publisher.rs`: "those
+are either the QoS announced by a remote bridge on a Reader discovery, either the QoS adapted
+from a local discovered Writer"). Two sides that disagree therefore get an endpoint that matches
+one of them and starves the other, which is what "the route exists on both admins, the publisher
+is there, nothing arrives" has meant every time. It is not rare: in the bring-up of 2026-09-13
+22:43 the laptop bridge created 47 routes and 24 of them came from the far bridge's
+announcement, including every route re-created after the board's bridge restarted while the
+laptop's nodes stayed up (`scratch/bridge_state_184752_laptop_bridge.log`).
+
+So: **a bridged topic carries the same reliability and depth on both sides**, and the pairs that
+must agree live in `pepin.deployment.BRIDGED_QOS`, which `node_kit.bridged_qos_profile` hands to
+every subscription that reads one. The first entry is `/imu/data_raw`: the board's C++ bridge
+writes it RELIABLE, KEEP_LAST 10, the three laptop nodes read it through `node_kit.LeanFeed`, and
+while they asked for the sensor-data default (BEST_EFFORT, 5) the laptop saw 10-11 Hz of the
+board's 48 whenever the announcement won the race. The DDS legs are inside one host — the
+wireless hop is zenoh's, not DDS's — so RELIABLE there costs a memcpy, not a retransmission.
+
+**The watch verifies flow, not route counts** (`pepin_bringup.bridge_watch`, flags `flow_watch`,
+`flow_silence_s`, `bridge_restart`). It subscribes to every topic both bridges agree should
+arrive on this side — the far side has a publisher with a real node behind it, some node here is
+waiting — counts the messages, and prints one line a minute with the rate of each. It never
+subscribes to a topic nobody here reads: that subscription would create the route, pin its QoS
+to the watch's own, and pay for a topic to cross that nobody wants. When a topic that should
+flow carries nothing for `flow_silence_s`, the repair ladder is:
+
+1. **Restart the laptop's bridge container alone** (`POST /containers/pepin-zenoh/restart` on the
+   mounted docker socket). Every route is re-created; `pepin-vslam` keeps running, so the fusion
+   model and RTAB-Map's database survive. There is nothing gentler: the REST admin is read-only
+   (`permissions { read: true, write: false }`), so 1.7.0 has no config reload and no way to drop
+   one route.
+2. **Restart this half** — the old action, kept: the watch exits with code 3, the launch shuts
+   down, the container's restart policy brings it back with fresh subscriptions. This is also
+   what still happens when the board's bridge changes its zenoh id, and when the docker socket is
+   not mounted.
+
+Deploying a change to the bridge: `ros/sync.sh`, then `ros/thin.sh on|vision|slam` (the board's
+bridge unit restarts with its config), then `ros/laptop.sh start` — in that order, because
+`laptop.sh` waits for the board's bridge to answer and settles it before the laptop's containers
+start their subscriptions.
+
 ## Online SLAM
 
 The robot is put somewhere it has never been, builds **one** map while it drives, and navigates
@@ -414,6 +481,9 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 
 | node | flag | kind | default | live | description |
 | --- | --- | --- | --- | --- | --- |
+| `bridge_watch` | `flow_watch` | bool | on | yes | count the messages of every topic that should arrive on this side and repair a topic that carries nothing; off, this watch sees only the board bridge's identity and its route count, as before |
+| `bridge_watch` | `flow_silence_s` | number 5..300 | 20.0 | yes | seconds a topic both bridges say should flow may carry nothing before it counts as a dead route |
+| `bridge_watch` | `bridge_restart` | bool | on | yes | repair a dead route by restarting the laptop's bridge container alone (Docker Engine API over /var/run/docker.sock); off, the repair is the old one — this whole half restarts, which throws away the fusion model and RTAB-Map's working set |
 | `camera_stream` | `scale` | number 0..1 | 0.5 | yes | the published picture as a fraction of the camera's own 1280x720, its optics scaled with it; a change takes the next frame |
 | `camera_stream` | `undistort` | bool | off | yes | the published picture is rectified with the checkerboard calibration (config/camera.json's intrinsics) and its camera_info then says no distortion; a no-op while the camera is uncalibrated, since there is nothing to undo. Rectifying crops to the largest all-valid rectangle, so the field of view narrows |
 | `camera_stream` | `static_camera_tf` | bool | on | at start | base_link -> camera_link is broadcast from here; it goes off (ros/laptop.sh vslam --neck) when the board's neck node publishes that edge live from the servo encoders (neck_state, flag neck_tf), because two publishers of one edge fight |
@@ -480,6 +550,24 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `rtabmap_frame` | `slam` | bool | off | at start | RTAB-Map is the map (online SLAM): its correction is map -> odom and goes to the board as a message on /map_odom, where pepin_bringup.slam_frame broadcasts it; off, the board's tracker owns map -> odom and this node broadcasts map -> rtabmap here |
 
 ### The flags one by one
+
+#### `bridge_watch`
+
+- **`flow_watch`** — bool, default on
+  - *What:* count the messages of every topic that should arrive on this side and repair a topic that carries nothing; off, this watch sees only the board bridge's identity and its route count, as before
+  - *Default:* on — a route count cannot see the failure that cost two evenings: /depth_scan (2026-09-12) and /imu/data_raw (2026-09-13) each had a route on both admins and a live publisher on the far side, and carried zero messages until a bridge was restarted by hand. The mechanism is read off the bridge's own source and its admin (pepin.deployment.BRIDGED_QOS): a route's DDS QoS is whatever the declaration that created it carried, and it is never revised. The subscriptions this flag adds are free — every one of them is on a topic some other node here already receives
+  - *On when:* always on a split or vision stack: it is the only thing that can tell a dead route from a quiet one
+  - *Off when:* while bisecting the bridge by hand, so the watch takes no action of its own
+- **`flow_silence_s`** — number 5..300, default 20.0
+  - *What:* seconds a topic both bridges say should flow may carry nothing before it counts as a dead route (5..300)
+  - *Default:* 20.0 — the topics watched here are the periodic ones — /scan at 10 Hz, /tf at 40, /imu at 48, /localization/sources at 1 — so twenty seconds is twenty missed messages of the slowest of them and four polls of this watch, while still shorter than a goal. A topic published on a change only (/pepin/run_status) is never starved: nothing publishes it between changes, and the watch only counts what both bridges call live. default by design, unmeasured
+  - *On when:* shorten it when a dead route must be caught inside a drive
+  - *Off when:* lengthen it on a congested link, where a ten-second stall is the wireless hop and not the bridge
+- **`bridge_restart`** — bool, default on
+  - *What:* repair a dead route by restarting the laptop's bridge container alone (Docker Engine API over /var/run/docker.sock); off, the repair is the old one — this whole half restarts, which throws away the fusion model and RTAB-Map's working set
+  - *Default:* on — the bridge offers nothing gentler: its REST admin is read-only in 1.7.0 (the running config prints permissions { read: true, write: false }), so there is no reload and no way to drop a single route. Restarting the container re-creates every route in a few seconds and leaves pepin-vslam alive. It falls back by itself when the docker socket is not mounted, and escalates to the whole half when the silence returns after a restart. default by design, unmeasured
+  - *On when:* always: it is strictly less destructive than the fallback
+  - *Off when:* when the laptop's bridge must not be touched — bisecting it by hand, or running without the docker socket mounted
 
 #### `camera_stream`
 
