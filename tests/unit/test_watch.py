@@ -7,8 +7,11 @@ from pepin.watch import (
     DRIVE_FIT,
     LOST_FIT,
     PROVISIONAL_FIT_CAP,
+    TF_FRESH_S,
     BlindDriveWatch,
+    GoalGate,
     LostWatch,
+    Readiness,
     Verdict,
 )
 
@@ -203,3 +206,37 @@ def test_an_occluded_scan_is_not_lost() -> None:
     # the same three low checks unoccluded do ask for a search
     hits = [w.observe(0.30, moving=False, navigating=False, now=20.0 + t) for t in range(3)]
     assert hits == [False, False, True]
+
+
+def test_a_goal_starts_on_the_tracker_s_fit_where_a_tracker_speaks() -> None:
+    """The known-map stack is unchanged by the gate: at or above the drive rung the goal goes,
+    under it the goal buys one whole-map search first (the node's own _find_myself)."""
+    gate = GoalGate()
+    assert gate.verdict(DRIVE_FIT, None) == Readiness(True, tracker=True)
+    lost = gate.verdict(0.31, None)
+    assert (lost.ready, lost.tracker, lost.search) == (False, True, True)
+    assert "fit 0.31 under 0.50" in lost.reason
+
+
+def test_without_a_tracker_a_fresh_transform_is_what_lets_a_goal_start() -> None:
+    """Online SLAM has no tracker and therefore no fit: nobody publishes /localization_fit, and
+    the gate that waited for one refused every goal on 2026-09-13. The evidence there is the
+    pose's own edge — map -> base_link, re-broadcast at 10 Hz from RTAB-Map's correction."""
+    gate = GoalGate()
+    assert gate.verdict(None, 0.08) == Readiness(True, tracker=False)
+    assert gate.verdict(None, TF_FRESH_S) == Readiness(True, tracker=False), "the bound is allowed"
+    stale = gate.verdict(None, 4.2)
+    assert (stale.ready, stale.tracker, stale.search) == (False, False, False)
+    assert "map -> base_link is 4.2 s old" in stale.reason and "fresher than 1.0 s" in stale.reason
+    missing = gate.verdict(None, None)
+    assert not missing.ready and not missing.search
+    assert "nothing publishes map -> base_link" in missing.reason, "which of the two it was"
+
+
+def test_the_gate_never_searches_where_there_is_nothing_to_search_with() -> None:
+    """A whole-map search is the tracker's own service: asking for one without a tracker is how
+    a goal ended as "the tracker is not up". No fit, no search — the refusal is final until the
+    transform comes back."""
+    gate = GoalGate()
+    assert not any(gate.verdict(None, age).search for age in (None, 0.0, 0.5, 10.0))
+    assert all(gate.verdict(fit, None).tracker for fit in (0.0, 0.49, 0.5, 0.9))

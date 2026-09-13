@@ -3,6 +3,10 @@
 The decision is pure: a fit, whether the robot is moving, whether a goal is running, and the
 clock. Keeping it out of the ROS node is what makes it testable — the node only supplies the
 readings and acts on the answer.
+
+:class:`GoalGate` is the same question one step earlier — may a drive START — and it is the one
+rule that also has to answer where no tracker exists at all (online SLAM): there the evidence is
+the age of ``map -> base_link``, not a fit.
 """
 
 from __future__ import annotations
@@ -27,6 +31,12 @@ ADMIT_MARGIN = 0.10  # ...and it must beat what the tracker already has by this 
 AGREE_M = 0.5  # two fixes this close...
 AGREE_DEG = 30.0  # ...and this aligned are the same place
 CONFIRM_TRIES = 4  # fresh searches allowed to agree before the fix is given up as a twin
+
+# How old the map -> base_link edge may be and still be a pose to start a drive on, where no
+# tracker publishes a fit. The edge is re-broadcast at 10 Hz (pepin_bringup.slam_frame) over
+# odometry published at 50 Hz, so a whole second without one is ten missed broadcasts: the
+# correction or the odometry has stopped, not jittered. Nav2's own transform tolerance is 0.3 s.
+TF_FRESH_S = 1.0
 
 
 class Verdict(StrEnum):
@@ -202,6 +212,66 @@ class LostWatch:
         return math.hypot(a.x - b.x, a.y - b.y) <= AGREE_M and abs(
             wrap_angle(a.theta - b.theta)
         ) <= math.radians(AGREE_DEG)
+
+
+@dataclass(frozen=True)
+class Readiness:
+    """Whether a goal may start now, whether a tracker is there at all, and why not when it may
+    not — the phrase the operator reads on a refusal."""
+
+    ready: bool
+    tracker: bool  # a tracker publishes a fit here: what arms the blind-drive watch
+    search: bool = False  # the tracker is up but lost: one whole-map search is owed first
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class GoalGate:
+    """May the cart be sent to a goal: on the tracker's fit where a tracker runs, on the age of
+    ``map -> base_link`` where none does.
+
+    Two stacks, one question. On a saved map the scan-matching tracker publishes
+    ``/localization_fit`` and a drive starts from ``drive_fit`` — under it the goal buys one
+    whole-map search first. In online SLAM there is no tracker at all: RTAB-Map owns the pose on
+    the laptop and the board only re-broadcasts its correction, so nobody ever publishes a fit
+    and the gate that waited for one refused every goal ("the tracker is not up", 2026-09-13
+    14:05). The evidence SLAM mode does have is the transform itself: a goal is accepted while
+    ``map -> base_link`` is younger than ``fresh_s``, and refused otherwise with which of the two
+    it was — missing, or stale and how stale. There is nothing to search with here, so a refusal
+    is final until the frames come back.
+    """
+
+    drive_fit: float = DRIVE_FIT
+    fresh_s: float = TF_FRESH_S
+
+    def verdict(self, fit: float | None, tf_age_s: float | None) -> Readiness:
+        """One goal's answer. ``fit`` is the tracker's, or ``None`` where no tracker speaks;
+        ``tf_age_s`` is how many seconds ago ``map -> base_link`` was stamped (``None``: nothing
+        publishes it). Returns the :class:`Readiness` the caller acts on."""
+        if fit is not None:
+            if fit >= self.drive_fit:
+                return Readiness(True, tracker=True)
+            return Readiness(
+                False,
+                tracker=True,
+                search=True,
+                reason=f"fit {fit:.2f} under {self.drive_fit:.2f}: stand still or relocalize",
+            )
+        if tf_age_s is None:
+            return Readiness(
+                False,
+                tracker=False,
+                reason="no tracker, and nothing publishes map -> base_link: the SLAM half of the"
+                " stack is not up",
+            )
+        if tf_age_s > self.fresh_s:
+            return Readiness(
+                False,
+                tracker=False,
+                reason=f"no tracker, and map -> base_link is {tf_age_s:.1f} s old: a drive needs"
+                f" it fresher than {self.fresh_s:.1f} s",
+            )
+        return Readiness(True, tracker=False)
 
 
 @dataclass
