@@ -409,6 +409,7 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `global_watch` | `global_watch` | bool | on | yes | run the whole-map search once every watch_period_s and publish what it finds on /localization/candidate; off, this node is a subscriber that costs nothing and the board is back to searching for itself only once it is already lost |
 | `global_watch` | `watch_period_s` | number 0.2..60 | 1.0 | yes | seconds between searches |
 | `global_watch` | `watch_max_scan_age_s` | number 0.1..3600 | 1.0 | yes | how long a revolution may sit in hand and still be searched, counted from when it ARRIVED here |
+| `goal_server` | `tf_pose` | bool | on | yes | where no tracker answers, the cart's pose is read from TF (map -> base_link) and a goal is judged by how fresh that edge is; off, only the tracker is ever asked |
 | `neck_state` | `neck_tf` | bool | on | yes | base_link -> camera_link is published live from the neck's encoders; the laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes publish that edge |
 | `relocalizer` | `rest_lock` | bool | on | yes | hold the pose while the cart stands still (wheels quiet 0.6 s and the gyro under 1.5 deg/s): a match's residual is blended in with a time constant instead of taken whole |
 | `relocalizer` | `explained_vote` | bool | on | yes | returns the static map cannot explain (a person, a moved chair) do not score the match |
@@ -640,6 +641,14 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* 1.0 — default by design, unmeasured as a number; the rule behind it is measured. /scan arrives at 9.8-10.8 Hz, so a healthy revolution is about 0.1 s old and one second is ten missed ones. The age is taken on this machine's monotonic clock and never from the stamp, because the board's clock runs 2.3-2.8 s ahead of the Mac's: a stamp-based age would either never fire or switch the watch off for good
   - *On when:* raise it when the bridge is slow but honest and candidates are being dropped as stale
   - *Off when:* a huge value is the old behaviour, which searched whatever was held — including a frozen scan, publishing the same answer again as if it were news
+
+#### `goal_server`
+
+- **`tf_pose`** — bool, default on
+  - *What:* where no tracker answers, the cart's pose is read from TF (map -> base_link) and a goal is judged by how fresh that edge is; off, only the tracker is ever asked
+  - *Default:* on — off, this node refused every goal of the first online-SLAM session — 'the tracker is not up' (2026-09-13 14:05), the goals driven by publishing /goal_pose by hand, which is Nav2 without a run, a tape or a verdict. In SLAM mode there IS no tracker: RTAB-Map owns the pose and pepin_bringup.slam_frame re-broadcasts its correction as map -> odom at 10 Hz, so 1.0 s without a transform is ten missed broadcasts, not jitter. The known-map modes are untouched: there the tracker answers first and its fit decides, exactly as before
+  - *On when:* on in online SLAM, and anywhere else the pose is owned by something that publishes map -> base_link instead of a fit
+  - *Off when:* to have a stack without a tracker refuse goals outright again — the old behaviour, and the honest one where a fit is the only evidence trusted
 
 #### `neck_state`
 

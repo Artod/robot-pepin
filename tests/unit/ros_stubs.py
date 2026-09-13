@@ -10,6 +10,9 @@ else: a codec that wrote a field the message lacks would fail here as it would o
 Beside the messages there is enough of :class:`Node` — parameters with the overrides of
 :func:`parameters`, publishers that keep what they were handed, timers, a clock, a logger — for
 a whole node to be built in a test and driven through :func:`pepin_bringup.node_kit.spin_main`.
+Service clients (:class:`Client`) and action clients (:class:`ActionClient`) are faked too, and
+both start with nobody on the other end: a test says a service is ready, which is how the
+absence of the tracker in SLAM mode is written down.
 """
 
 from __future__ import annotations
@@ -139,6 +142,37 @@ class Trigger:
 
     Request = _msg("Trigger_Request")
     Response = _msg("Trigger_Response", success=False, message="")
+
+
+DurationMsg = _msg("Duration", sec=0, nanosec=0)
+Transition = _msg("Transition", id=0)
+State = _msg("State", id=0, label="")
+
+
+class ChangeState:
+    """lifecycle_msgs/ChangeState: the transition to send, and whether it was taken."""
+
+    Request = _msg("ChangeState_Request", transition=Transition)
+    Response = _msg("ChangeState_Response", success=False)
+
+
+class GetState:
+    """lifecycle_msgs/GetState: the state a managed node is in."""
+
+    Request = _msg("GetState_Request")
+    Response = _msg("GetState_Response", current_state=State)
+
+
+class NavigateToPose:
+    """nav2_msgs/NavigateToPose: the drive's goal — where to go, in the map frame."""
+
+    Goal = _msg("NavigateToPose_Goal", pose=PoseStamped)
+
+
+class Spin:
+    """nav2_msgs/Spin: the turn in place and how long it may take."""
+
+    Goal = _msg("Spin_Goal", target_yaw=0.0, time_allowance=DurationMsg)
 
 
 IntegerRange = _msg("IntegerRange", from_value=0, to_value=0, step=0)
@@ -308,6 +342,63 @@ class Publisher:
         self.sent.append(msg)
 
 
+class Future:
+    """rclpy's future, already finished: a callback fires the moment it is registered, which is
+    what :meth:`GoalServer._wait` waits for."""
+
+    def __init__(self, result: Any = None) -> None:
+        self._result = result
+
+    def add_done_callback(self, callback: Any) -> None:
+        callback(self)
+
+    def done(self) -> bool:
+        return True
+
+    def result(self) -> Any:
+        return self._result
+
+
+class Client:
+    """A service client: ``ready`` says whether the service exists at all (an absent tracker is
+    a client that never becomes ready), ``response`` is what a call answers with, and every
+    request is kept in ``calls``."""
+
+    def __init__(self, srv_type: Any, name: str) -> None:
+        self.srv_type, self.name = srv_type, name
+        self.ready = False
+        self.response: Any = None
+        self.calls: list[Any] = []
+
+    def wait_for_service(self, timeout_sec: float = 0.0) -> bool:
+        return self.ready
+
+    def service_is_ready(self) -> bool:
+        return self.ready
+
+    def call_async(self, request: Any) -> Future:
+        self.calls.append(request)
+        return Future(self.response)
+
+
+class ActionClient:
+    """rclpy.action's client as the nodes here use it: whether a server answers, and the goals
+    it was sent (``handle`` is what ``send_goal_async`` hands back)."""
+
+    def __init__(self, node: Any, action_type: Any, name: str) -> None:
+        self.node, self.action_type, self.name = node, action_type, name
+        self.server = False
+        self.handle: Any = None
+        self.goals: list[Any] = []
+
+    def wait_for_server(self, timeout_sec: float = 0.0) -> bool:
+        return self.server
+
+    def send_goal_async(self, goal: Any, feedback_callback: Any = None) -> Future:
+        self.goals.append(goal)
+        return Future(self.handle)
+
+
 class Clock:
     """rclpy's clock: ``now()`` is whatever ``seconds`` says, so a test owns the time."""
 
@@ -367,6 +458,7 @@ class Node:
         self.pubs: dict[str, Publisher] = {}
         self.subs: dict[str, tuple[Any, Any]] = {}  # topic -> (message type, callback)
         self.services: dict[str, tuple[Any, Any]] = {}  # name -> (service type, callback)
+        self.service_clients: dict[str, Client] = {}  # name -> the client this node created
         self.timers: list[tuple[float, Any]] = []
         self.parameter_callbacks: list[Any] = []
         self.clock = Clock()
@@ -399,6 +491,11 @@ class Node:
 
     def create_service(self, srv_type: Any, name: str, callback: Any) -> None:
         self.services[name] = (srv_type, callback)
+
+    def create_client(self, srv_type: Any, name: str) -> Client:
+        """A client of someone else's service; not ready until a test says the service is there."""
+        self.service_clients[name] = Client(srv_type, name)
+        return self.service_clients[name]
 
     def create_timer(self, period_s: float, callback: Any) -> None:
         self.timers.append((period_s, callback))
@@ -465,6 +562,7 @@ def install() -> Any:
             "rclpy.executors", ExternalShutdownException=ExternalShutdownException
         ),
         "rclpy.parameter": _module("rclpy.parameter", Parameter=Parameter),
+        "rclpy.action": _module("rclpy.action", ActionClient=ActionClient),
         "rcl_interfaces": _module("rcl_interfaces"),
         "rcl_interfaces.msg": _module(
             "rcl_interfaces.msg",
@@ -475,7 +573,13 @@ def install() -> Any:
             FloatingPointRange=FloatingPointRange,
         ),
         "builtin_interfaces": _module("builtin_interfaces"),
-        "builtin_interfaces.msg": _module("builtin_interfaces.msg", Time=Time),
+        "builtin_interfaces.msg": _module(
+            "builtin_interfaces.msg", Time=Time, Duration=DurationMsg
+        ),
+        "lifecycle_msgs": _module("lifecycle_msgs"),
+        "lifecycle_msgs.srv": _module(
+            "lifecycle_msgs.srv", ChangeState=ChangeState, GetState=GetState
+        ),
         "std_msgs": _module("std_msgs"),
         "std_msgs.msg": _module(
             "std_msgs.msg", Header=Header, Bool=Bool, Float32=Float32, String=String
@@ -501,6 +605,7 @@ def install() -> Any:
         ),
         "nav2_msgs": _module("nav2_msgs"),
         "nav2_msgs.msg": _module("nav2_msgs.msg", ParticleCloud=ParticleCloud),
+        "nav2_msgs.action": _module("nav2_msgs.action", NavigateToPose=NavigateToPose, Spin=Spin),
         "action_msgs": _module("action_msgs"),
         "action_msgs.msg": _module(
             "action_msgs.msg", GoalStatus=GoalStatus, GoalStatusArray=GoalStatusArray

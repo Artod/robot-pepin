@@ -438,6 +438,28 @@ def test_the_board_half_does_not_autostart_and_the_laptop_knows_its_side() -> No
     assert "next_transition" in sf.calls(server) and "ChangeState" in sf.imported(server)
 
 
+def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publishes() -> None:
+    """In SLAM mode nothing publishes /localization_fit, and the goal server used to refuse
+    every goal with "the tracker is not up" (2026-09-13 14:05). The rule lives in
+    pepin.watch.GoalGate, the node only supplies the two readings — the tracker's fit, or the
+    age of map -> base_link — and the blind-drive watch, which reads a fit, is armed only where
+    a tracker publishes one."""
+    server = sf.tree(f"{NODES}/goal_server.py")
+    assert {"GoalGate", "Readiness", "TF_FRESH_S"} <= sf.imported(server), "the rule is pepin's"
+    assert "TfLookup" in sf.imported(server) and "self._tf.transform" in sf.calls(server)
+    assert sf.assignments(server)["MAP_FRAME"] == "'map'"
+    assert sf.assignments(server)["BASE_FRAME"] == "'base_link'"
+    assert "self._gate.verdict" in sf.calls(server)
+    armed = [
+        s for s in sf.unparsed(server, ast.IfExp) if s.startswith("BlindDriveWatch() if ready")
+    ]
+    assert armed and armed[0].endswith("else None"), "no fit to watch without a tracker"
+    # The fallback is a flag, so the old behaviour is one `ros/flags.sh set` away (rule 19).
+    flags = load_table(REPO / NODES / "goal_server.py")
+    assert flags.names == ("tf_pose",) and flags.flag("tf_pose").live
+    assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"
+
+
 def test_the_recorder_is_its_own_node_on_the_board_side() -> None:
     """The split's first tapes were written on the laptop and had no scans: the recorder lives
     where the sensors are, and the goal server only sends it a command."""
