@@ -132,92 +132,190 @@ FLAGS = FlagSet(
     Flag(
         "rest_lock",
         True,
-        description="hold the pose while the cart stands still (wheels and gyro agree): a"
-        " match's residual is blended in with a time constant instead of taken whole",
+        description="hold the pose while the cart stands still (wheels quiet 0.6 s and the gyro"
+        " under 1.5 deg/s): a match's residual is blended in with a time constant instead of"
+        " taken whole",
+        why="the best-measured switch in the tracker. On tape 0182 (6 s at rest, a full turn, 8 s"
+        " at rest) the published pose's rest band goes from 8.34 deg with the lattice alone to"
+        " 0.51 deg with the rest lock, and on the robot it reads 0.42 deg at sd 0.13; while"
+        " driving (tape 0170) it took p90 |yaw rate - gyro| from 7.74 to 4.86 deg/s and the"
+        " correction's sd from 0.45 to 0.29 deg. It costs +0.04-0.08 ms a scan. Flipped live in"
+        " the demo: 9 deg to 0.3",
+        on_when="always: a still cart whose pose wanders is the first thing a watcher sees",
+        off_when="to show what the raw match does (the demo's A/B), or where the cart is carried"
+        " by hand and the wheels have no say in whether it stands still",
     ),
     Flag(
         "explained_vote",
         True,
-        description="returns the static map cannot explain (a person, a moved chair) do not"
-        " score the match",
+        description="returns the static map cannot explain (a person, a moved chair) do not score"
+        " the match",
+        why="alone it took the rest band from 10.5 deg to 2.38, and with the rest lock and the"
+        " sub-cell refinement to 0.51 (tape 0173). The mask is dropped when fewer than half the"
+        " returns are explained or fewer than 60 come back, because a vote taken only on what"
+        " already fits is mildly self-confirming",
+        on_when="in a room with people and furniture that moves — the room this robot lives in",
+        off_when="in an empty room where every return should count, or to measure what a crowd"
+        " costs the match",
     ),
     Flag(
         "rest_tau_s",
         6.0,
-        range=(0.1, 60.0),
         description="the rest lock's time constant: seconds for a residual to die at rest",
+        why="6 s against the 3 s first tried: at the node's roughly 1 Hz rest cadence 3 s let"
+        " 2.5x more match noise through, and 6 s halves that while still converging a nudge in"
+        " seconds — the rest band reads 0.37 deg at 6 s",
+        on_when="lengthen it for a cart that stands for minutes and must not drift at all",
+        off_when="shorten it when a nudged cart has to take its new pose quickly — a demo where"
+        " the cart is pushed by hand",
+        range=(0.1, 60.0),
     ),
     Flag(
         "rest_gain",
         0.05,
-        range=(0.0, 1.0),
         description="the rest lock's share per match when no match cadence is known",
+        why="default by design, unmeasured on its own: 0.05 against the driving gain of 0.5 was a"
+        " guess, kept after the robot run because the rest bands it is inside of (0.42-0.51 deg)"
+        " came out right. It has never been swept",
+        on_when="raise it towards the driving gain when the rest lock is too slow to accept a"
+        " real correction",
+        off_when="0 lets no match move the pose while the cart stands: a hard hold, and a way to"
+        " see how far the odometry alone wanders",
+        range=(0.0, 1.0),
     ),
     Flag(
         "sources",
         (LIDAR,),
-        choices=(LIDAR, DEPTH, CONTACT),
         description="the scan sources matched against the map: the lidar's revolution (/scan),"
         " the camera's depth band (/depth_scan), the floor-contact line (/contact_scan); the"
         " lidar drives the updates while it is fresh and the others ride along, a stale lidar"
-        " hands the updates to them. The fused modes are measured offline"
-        " (scratch/camera_only_localization.py) and turned on live",
+        " hands the updates to them",
+        why="the lidar alone, because the camera cannot carry the map by itself: replayed on run"
+        " 0171 against flat3 the depth band alone loses the map in 0.5 s (122 cm, 124 deg) and"
+        " the contact line alone in 12 s (80 cm, 28 deg) — the camera's 0.15-1.3 m band is a"
+        " different cross-section of the room than the lidar's 0.2 m map, so a look-alike place"
+        " scores fit 0.90 at its own match and 0.12 at the truth. Fused with the lidar and gated"
+        " on disagreement, all three together stay within 0.7/1.6/5.7 cm and 0.21/0.56/1.9 deg of"
+        " lidar-only and never lose the map (scratch/camera_only_localization.py)",
+        on_when="add depth and contact where the lidar is blocked or blind — parked bumper to"
+        " furniture, or a lidar that stopped: the fused modes are measured and gated, so they"
+        " cost the pose nothing",
+        off_when="drop a source the moment /localization/sources shows it disagreeing with the"
+        " others; the lidar alone is the safe state",
+        choices=(LIDAR, DEPTH, CONTACT),
     ),
     Flag(
         "fusion",
         True,
-        description="fuse every enabled source's match by its information; off: the widest"
-        " source corrects alone and the others only report",
+        description="fuse every enabled source's match by its information; off: the widest source"
+        " corrects alone and the others only report",
+        why="with all three sources the fused pose stays within 0.7-5.7 cm of lidar-only and"
+        " never loses the map. One defect was found and fixed on the way: an edge-bound lidar"
+        " used to be out-voted by a blind fan's plateau, so the anchor's bound is now taken alone"
+        " — a 12 cm slip at rest is carried by the second match instead of held for 2.5 s, and"
+        " recovery while driving is 3.2 cm against lidar-only's 2.9",
+        on_when="whenever more than one source is enabled",
+        off_when="to see which source is actually moving the pose: off, the others still report",
     ),
     Flag(
         "toe_reach",
         toe_reach_m(),
-        range=(0.0, 0.60),
-        description="how far past the leg the lidar sees a standing person's toe reaches,"
-        " metres: the term the dynamic rings are sized on (pepin.dynamic.berth_for). The"
-        " default is computed from the lidar's mount (config/lidar.json); set it to compare"
-        " berths in the field without a restart",
+        description="how far past the leg the lidar sees a standing person's toe reaches, metres:"
+        " the term the dynamic rings are sized on (pepin.dynamic.berth_for). The default is"
+        " computed from the lidar's mount (config/lidar.json)",
+        why="one measured number and three assumed ones: the mount is 0.383 m by tape, and the"
+        " reach is 0.21 + (z - 0.07) tan 10 deg — a 28 cm shoe whose ankle sits 7 cm back, a shin"
+        " leaning 10 degrees — typed anthropometry that has never been measured against a person"
+        " in front of this cart. It matters in metres: a point planner's ring is 0.41 m at the"
+        " 0.20 that stood here before and 0.48 m at this 0.27. The flag exists because the cart"
+        " once ran over feet",
+        on_when="raise it for boots, or for a cart that must give more room: every dynamic ring"
+        " widens by the same amount",
+        off_when="lower it to compare berths in the field without a restart; 0 rings only what"
+        " the beams themselves see",
+        range=(0.0, 0.6),
     ),
     Flag(
         "near_rings",
         True,
-        description="a return is ringed as soon as it clears the cart's own outline, and only"
-        " the marks that would land on that outline are dropped; off, nothing within the ring"
-        " plus the outline is ringed at all — the older rule, whose blind disc grows with the"
-        " ring (a 7 cm wider ring stops ringing a person at 0.90 m)",
+        description="a return is ringed as soon as it clears the cart's own outline, and only the"
+        " marks that would land on that outline are dropped; off, nothing within the ring plus"
+        " the outline is ringed at all — the older rule, whose blind disc grows with the ring",
+        why="exact geometry, no field A/B of the two rules. The old rule blanks a disc of ring +"
+        " 0.457 m (the cart's circumscribed radius plus one costmap cell), so at the ring today's"
+        " reach asks for, 0.48 m, a person standing 0.90 m ahead would not be ringed at all — the"
+        " very case the ring exists for. The new rule trims only the marks that land on the"
+        " cart's own outline, which is what the run-0087 failure actually was: a mark on itself"
+        " that refuses its every command",
+        on_when="wherever a person may come within a metre of the cart — the close approach this"
+        " robot is built for",
+        off_when="to reproduce the older rule side by side; remember its blind disc grows with"
+        " the ring (7 cm of extra ring stopped a person at 0.90 m from being ringed at all)",
     ),
     Flag(
         "accept_candidates",
         True,
-        description="re-seed from the laptop watchdog's whole-map candidates"
-        f" ({CANDIDATE_TOPIC}, pepin.watchdog): a place that disagrees with the tracked pose"
-        " candidate_streak times in a row, about the same place each time, is adopted through"
-        " the path the board's own search uses. Off: the candidates are still judged, counted"
-        " and reported, and only the board's own slow whole-map search can bring the cart back",
+        description=f"re-seed from the laptop watchdog's whole-map candidates ({CANDIDATE_TOPIC},"
+        " pepin.watchdog): a place that disagrees with the tracked pose candidate_streak times in"
+        " a row, about the same place each time, is adopted through the path the board's own"
+        " search uses",
+        why="measured on the kidnap tape (run 0171: the odometry jumps 1 m and 40 deg while the"
+        " scans do not) this is the difference between coming back in 2.9 s over 28 scans and"
+        " never coming back — the tracker's own window still had 0.69 m of error after 39 s, and"
+        " the board's own searches found the truth four times (fits 0.76/0.72/0.79/0.75 against"
+        " the tracker's 0.50-0.60) and died unconfirmed each time, because at a metre off this"
+        " flat still fits 0.53, just under the 0.55 that declares the cart lost. Over the"
+        " undisturbed tape it re-seeded 0 times, and against another flat's map 9 of 12"
+        " candidates were called unknown_map",
+        on_when="whenever the laptop's watchdog runs and the map is the right one",
+        off_when="where a teleport is more dangerous than being lost — under a live goal, or in a"
+        " room the map does not cover: off, the candidates are still judged, counted and reported",
     ),
     Flag(
         "candidate_streak",
         CANDIDATE_STREAK,
-        range=(1, 10),
         description="how many candidates in a row must disagree with the tracker and agree with"
         " each other before one of them re-seeds it: the price of a teleport, in seconds",
+        why="deliberate conservatism above a measurement that was neutral: on the kidnap tape a"
+        " streak of 1 recovered in 0.8 s (8 scans) and this streak of 3 in 2.9 s (28 scans), and"
+        " both re-seeded 0 times over the undisturbed tape, where the pose never left the"
+        " reference by more than 0.000 m. Nothing measured prefers 3; the argument is that a"
+        " look-alike keeps looking alike, so one agreement is not proof",
+        on_when="raise it in a room of look-alike corners, where a wrong teleport costs more than"
+        " three seconds of being lost",
+        off_when="1 is the fastest recovery measured (0.8 s) and on that tape just as safe — the"
+        " value to try when a demo has to show the cart coming back",
+        range=(1, 10),
     ),
     Flag(
         "carry_candidates",
         True,
-        description="a candidate's pose is moved from the moment of its own scan to now over"
-        " the odometry between the two before it is judged and fused (pepin.watchdog.carried),"
-        " and one the odometry history no longer covers is dropped. Off: the pose the laptop"
-        " measured a search and a wireless hop ago is judged and installed as the pose now,"
-        " which on a driving cart is centimetres backwards along the drive every time",
+        description="a candidate's pose is moved from the moment of its own scan to now over the"
+        " odometry between the two stamps (pepin.watchdog.carried) before it is judged and fused,"
+        " and one the odometry history no longer covers is dropped",
+        why="by argument from a measured latency, not by a measured gain: a whole-map search"
+        " takes 0.12-0.25 s plus a wireless hop, so at 0.8 m/s an uncarried pose is installed"
+        " about 20 cm backwards along the drive every time — a bias, not noise. On the kidnap"
+        " tape the carry changes nothing measurable (2.9 s, 28 scans, 0 false re-seeds either"
+        " way), because that cart was barely moving when it was lost",
+        on_when="whenever the cart may re-seed while driving",
+        off_when="only to reproduce the old behaviour, where the pose the laptop measured a"
+        " search and a hop ago is installed as the pose now",
     ),
     Flag(
         "distinct_scans",
         True,
-        description="a streak is counted in scans, not in messages: a candidate whose scan id"
-        " is already in the run is a second opinion that heard the first one's scan, counted as"
-        " replay and not lengthening the streak. Off is the old behaviour, where a frozen /scan"
-        " on the laptop could re-seed the tracker on one scan's answer repeated",
+        description="a streak is counted in scans, not in messages: a candidate whose scan id is"
+        " already in the run is a second opinion that heard the first one's scan, counted as"
+        " replay and not lengthening the streak",
+        why="the failure it answers is real: a frozen /scan on the laptop published the same"
+        " search answer once a second and the board counted three of them as three seconds of"
+        " evidence — the same replay that fooled the board's own two-search rule on 2026-09-09."
+        " On the kidnap tape it costs nothing (2.9 s, 28 scans unchanged). A sender that names no"
+        " scan says id 0, and a repeated 0 reads as replay too",
+        on_when="wherever the candidates cross a bridge that can freeze — which is this robot's",
+        off_when="only to reproduce the old counting, where one scan's answer repeated could"
+        " re-seed the tracker",
     ),
 )
 BERTH_FLAGS = ("toe_reach", "near_rings")  # the flags that resize the berth, not the tracker

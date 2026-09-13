@@ -82,26 +82,49 @@ FLAGS = FlagSet(
     Flag(
         "global_watch",
         True,
-        description="run the whole-map search once every watch_period_s and publish what it"
-        f" finds on {CANDIDATE_TOPIC}; off, this node is a subscriber that costs nothing and the"
-        " board is back to searching for itself only once it is already lost. Off in SLAM mode:"
-        " the map is RTAB-Map's there and it is still being built",
+        description="run the whole-map search once every watch_period_s and publish what it finds"
+        f" on {CANDIDATE_TOPIC}; off, this node is a subscriber that costs nothing and the board"
+        " is back to searching for itself only once it is already lost",
+        why="measured on the kidnap tape (run 0171, where the odometry jumps 1 m and 40 deg while"
+        " the scans do not): the tracker's own window never recovered — 0.69 m of error still"
+        " there after 39 s — and the board's own slow search found the truth four times (fits"
+        " 0.76/0.72/0.79/0.75 against the tracker's 0.50-0.60) and died unconfirmed every time,"
+        " because at a metre off this flat still fits 0.53, just under the 0.55 that declares the"
+        " cart lost. This search costs 125 ms median (p90 165, max 258) against the board's 3700"
+        " ms, and with the shipped streak of 3 it brought the cart back in 2.9 s with 0 false"
+        " re-seeds over the undisturbed tape",
+        on_when="whenever the map is a known one and the laptop is up",
+        off_when="in SLAM mode: the map is RTAB-Map's there and still being built, so a whole-map"
+        " search searches a map that changes under it",
     ),
     Flag(
         "watch_period_s",
         1.0,
+        description="seconds between searches",
+        why="it follows from the measured cost and the streak: one search is 125 ms median, 165"
+        " ms p90, 258 ms max of one core on this machine, so 1 Hz is 12-26 % of a core, and one"
+        " candidate a second is what makes the shipped streak of 3 cost 2.9 s of recovery",
+        on_when="shorten it when recovery must be faster than three seconds and the laptop has"
+        " the core to spare",
+        off_when="lengthen it on a busy laptop, or on a map large enough that a search costs more"
+        " than the measured 0.26 s",
         range=(0.2, 60.0),
-        description="seconds between searches; one search costs 0.1-0.3 s of one core on this"
-        " machine, and a candidate is worth the most while the tracker is still healthy",
     ),
     Flag(
         "watch_max_scan_age_s",
         1.0,
-        range=(0.1, 3600.0),
         description="how long a revolution may sit in hand and still be searched, counted from"
-        " when it ARRIVED here: a bridge that stops delivering leaves the newest scan frozen,"
-        " and searching it again would publish the same answer as if it were news. A huge value"
-        " is the old behaviour, which searched whatever was held",
+        " when it ARRIVED here",
+        why="default by design, unmeasured as a number; the rule behind it is measured. /scan"
+        " arrives at 9.8-10.8 Hz, so a healthy revolution is about 0.1 s old and one second is"
+        " ten missed ones. The age is taken on this machine's monotonic clock and never from the"
+        " stamp, because the board's clock runs 2.3-2.8 s ahead of the Mac's: a stamp-based age"
+        " would either never fire or switch the watch off for good",
+        on_when="raise it when the bridge is slow but honest and candidates are being dropped as"
+        " stale",
+        off_when="a huge value is the old behaviour, which searched whatever was held — including"
+        " a frozen scan, publishing the same answer again as if it were news",
+        range=(0.1, 3600.0),
     ),
 )
 
