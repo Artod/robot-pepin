@@ -6,8 +6,9 @@ scans against a frozen picture (``flat3.pgm`` through map_server) while the TSDF
 This module makes the volume the map itself:
 
 * the lidar writes its own layer into it — every beam carves free space along its run and marks
-  a surface at its return, at the height of the lidar's plane and nowhere else (the plane plus
-  or minus one voxel), on its own weight channel;
+  a surface at its return, at the height the ray itself is at (the beam plus or minus one
+  voxel: the level sweep of a level body, and the climbing ray of a body leaning over a
+  slipper, which at 5 degrees is 44 cm off the plane at 5 m), on its own weight channel;
 * the camera keeps writing its band through :class:`pepin.tsdf.Tsdf`, and inside the lidar's
   layer it is not allowed to overwrite what the lidar has spoken for: the network's depth is
   scale-uncertain, the lidar's returns are metric truth, and one bad law would otherwise push a
@@ -281,42 +282,42 @@ class WorldMap:
         mount: PlanarMount | None = None,
         stamp: float | None = None,
     ) -> int:
-        """Write one lidar revolution into the volume at the sensor's own plane; returns how
+        """Write one lidar revolution into the volume along the beams' own rays; returns how
         many voxels were touched.
 
         ``angles`` are robot-frame bearings (radians, CCW from forward — what ``pepin.lidar``
         and the run tape carry) and ``ranges`` the metres along them, NaN where there was no
-        return. A beam carves free space along its whole run and marks a surface at its end; a
-        beam whose range is beyond the mount's reach carves free space out to that reach and
-        marks nothing, because the reach is how far this sensor may be believed. A beam with no
-        return at all (NaN) writes nothing, unless ``LidarLaw.no_return_free`` is on — then it
-        too carves to the reach and marks nothing, which is how an open door stays open.
-        Everything is written into the layer at the sensor's plane and one voxel either side, on
-        the lidar's weight channel, and one scan speaks at most once about a voxel however many
-        of its beams cross it.
+        return. ``pose_base_in_map`` is the body's whole rigid pose, lean and all: the beams
+        leave the mount on the leaning cart and climb or dive with it, so their samples land in
+        the voxels the ray really passes through rather than in the rows of a level plane. On a
+        body tipped 5 degrees a return at 5 m is 44 cm off that plane — a tabletop, or the air
+        under a seat, written as a wall in the one layer the cart drives by.
+
+        A beam carves free space along its whole run and marks a surface at its end; a beam
+        whose range is beyond the mount's reach carves free space out to that reach and marks
+        nothing, because the reach is how far this sensor may be believed; a beam that leaves
+        the volume's height is carved as far as it stays inside. A beam with no return at all
+        (NaN) writes nothing, unless ``LidarLaw.no_return_free`` is on — then it too carves to
+        the reach and marks nothing, which is how an open door stays open. Every sample is
+        written on the lidar's weight channel, at its own height and one voxel either side, and
+        one scan speaks at most once about a voxel however many of its beams cross it.
         """
         mount = mount if mount is not None else self.mount
-        rows = self._layer_rows(pose_base_in_map, mount)
-        if rows is None:
-            return 0
+        if self._layer_rows(pose_base_in_map, mount) is None:
+            return 0  # the cart's own plane is not in this volume
         cells = self._beam_cells(angles, ranges, pose_base_in_map, mount)
         if cells is None:
             return 0
-        flat, w_obs, t_obs = cells
-        _nx, ny, _nz = self.spec.shape
-        ix, iy = np.divmod(flat, ny)
-        touched = 0
-        for iz in range(*rows):
-            at = (ix, iy, np.full(ix.shape, iz))
-            w_old = self.volume.weight[at]
-            w_new = w_old + w_obs
-            self.volume.sdf[at] = (self.volume.sdf[at] * w_old + t_obs * w_obs) / w_new
-            # the lidar's own cap, below the volume's: a cell it owns stays movable
-            self.volume.weight[at] = np.minimum(self.law.max_weight, w_new)
-            self.lidar_weight[at] = np.minimum(self.law.max_weight, self.lidar_weight[at] + w_obs)
-            touched += int(ix.size)
+        at, w_obs, t_obs = cells
+        w_old = self.volume.weight[at]
+        w_new = w_old + w_obs
+        self.volume.sdf[at] = (self.volume.sdf[at] * w_old + t_obs * w_obs) / w_new
+        # the lidar's own cap, below the volume's: a cell it owns stays movable
+        self.volume.weight[at] = np.minimum(self.law.max_weight, w_new)
+        self.lidar_weight[at] = np.minimum(self.law.max_weight, self.lidar_weight[at] + w_obs)
+        self._widen_rows(at[2])
         self._note(stamp, LIDAR, pose_base_in_map)
-        return touched
+        return int(at[0].size)
 
     def integrate_depth(
         self,
@@ -354,8 +355,13 @@ class WorldMap:
         )
 
     def _layer_rows(self, pose: RigidPose, mount: PlanarMount) -> tuple[int, int] | None:
-        """The z voxel rows of the sensor's layer at ``pose``, remembered as the lidar's own;
-        ``None`` when the plane misses the volume."""
+        """The z voxel rows of the sensor's layer at ``pose`` as a level body would sweep it,
+        remembered as the lidar's own; ``None`` when that plane misses the volume.
+
+        This is the plane the layer is *read out* at (:meth:`lidar_slice`, ``/map``), which must
+        not wobble with the body — a leaning cart still drives on the same floor. Where the
+        beams of a leaning body actually wrote is :meth:`_widen_rows`' business.
+        """
         plane = float(pose.translation[2]) + mount.z_m
         origin_z, voxel, nz = self.spec.origin[2], self.spec.voxel_m, self.spec.shape[2]
         lo = math.floor((plane - self.law.layer_half_m - origin_z) / voxel)
@@ -364,16 +370,27 @@ class WorldMap:
         if hi <= lo:
             return None
         self.lidar_plane_m = plane
+        self._widen_rows(np.array([lo, hi - 1]))
+        return lo, hi
+
+    def _widen_rows(self, iz: Ints | Array) -> None:
+        """Remember that the lidar has written in these z rows: the band the camera's fusion
+        hands back to it (:meth:`integrate_depth`). A leaning beam writes above and below the
+        plane, so the band grows with what the rays touched; inside it the protection is still
+        per cell (``lidar_weight > 0``), so a wider band protects nothing the lidar never
+        wrote."""
+        if iz.size == 0:
+            return
+        lo, hi = int(iz.min()), int(iz.max()) + 1
         self._rows = (
             (lo, hi) if self._rows is None else (min(self._rows[0], lo), max(self._rows[1], hi))
         )
-        return lo, hi
 
     def _beam_cells(
         self, angles: Array, ranges: Array, pose: RigidPose, mount: PlanarMount
-    ) -> tuple[Ints, Array, Array] | None:
-        """The scan as (flat x-y cell index, weight, signed distance in truncation units), one
-        entry per cell the scan touches; ``None`` when no beam reaches the volume.
+    ) -> tuple[tuple[Ints, Ints, Ints], Array, Array] | None:
+        """The scan as (voxel index triple, weight, signed distance in truncation units), one
+        entry per voxel the scan touches; ``None`` when no beam reaches the volume.
 
         The beam is sampled on a ladder of rungs, plus one sample AT the return itself. That
         last one is what puts the wall in the map: the rungs land where the ladder's spacing
@@ -385,7 +402,9 @@ class WorldMap:
 
         A sample's weight slides from the free weight far along the beam to the hit weight at
         the return: the samples near the surface are the ones carrying its position, and the
-        return's own sample carries the full hit weight at distance zero.
+        return's own sample carries the full hit weight at distance zero. Each sample is spread
+        over the layer's half-thickness about its own height, so a climbing ray keeps the
+        thickness a level sweep always had.
         """
         s = self.spec
         r = np.asarray(ranges, dtype=float)
@@ -399,10 +418,6 @@ class WorldMap:
         seen = r[valid]
         hit = np.isfinite(seen) & (seen <= mount.max_range_m)
         reach = np.where(hit, seen, mount.max_range_m)
-        yaw = math.atan2(float(pose.rotation[1, 0]), float(pose.rotation[0, 0]))
-        bearing = a[valid] + yaw
-        ox = float(pose.translation[0]) + math.cos(yaw) * mount.x_m - math.sin(yaw) * mount.y_m
-        oy = float(pose.translation[1]) + math.sin(yaw) * mount.x_m + math.cos(yaw) * mount.y_m
         step = s.voxel_m * self.law.step_voxels
         limit = reach + np.where(hit, s.truncation_m, 0.0)
         ladder = np.arange(1, math.ceil(float(limit.max()) / step) + 1) * step
@@ -414,29 +429,71 @@ class WorldMap:
         # the return itself, sampled exactly where it came back: distance zero, full hit weight
         along = np.concatenate([along, reach[hit]])
         beam = np.concatenate([beam, np.flatnonzero(hit)])
-        x = ox + np.cos(bearing[beam]) * along
-        y = oy + np.sin(bearing[beam]) * along
+        x, y, z = self._sample_points(a[valid][beam], along, pose, mount)
         # a beam that ran out of reach carries no surface: its whole run is free space, and a
         # distance that shrinks toward its end would otherwise read as a wall at the reach
         t = np.where(hit[beam], np.minimum(1.0, (reach[beam] - along) / s.truncation_m), 1.0)
         w = self.law.free_weight + (self.law.hit_weight - self.law.free_weight) * (
             1.0 - np.minimum(1.0, np.abs(t))
         )
-        nx, ny, _nz = s.shape
+        nx, ny, nz = s.shape
         ix = np.floor((x - s.origin[0]) / s.voxel_m).astype(int)
         iy = np.floor((y - s.origin[1]) / s.voxel_m).astype(int)
-        on = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+        half = self.law.layer_half_m
+        lo = np.clip(np.floor((z - half - s.origin[2]) / s.voxel_m).astype(int), 0, nz)
+        hi = np.clip(np.floor((z + half - s.origin[2]) / s.voxel_m).astype(int) + 1, 0, nz)
+        on = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny) & (hi > lo)
         if not np.any(on):
             return None
-        flat = ix[on] * ny + iy[on]
-        w, t = w[on], t[on]
-        sum_w = np.bincount(flat, weights=w, minlength=nx * ny)
-        sum_wt = np.bincount(flat, weights=w * t, minlength=nx * ny)
-        cells: Ints = np.flatnonzero(sum_w > 0.0)
-        t_obs = sum_wt[cells] / sum_w[cells]
+        ix, iy, lo, hi, w, t = ix[on], iy[on], lo[on], hi[on], w[on], t[on]
+        rows = hi - lo  # how many voxels of the layer this sample is spread over
+        sample = np.repeat(np.arange(rows.size), rows)
+        iz = lo[sample] + (np.arange(int(rows.sum())) - np.repeat(np.cumsum(rows) - rows, rows))
+        flat = (ix[sample] * ny + iy[sample]) * nz + iz
+        cell, of_cell = np.unique(flat, return_inverse=True)
+        sum_w = np.bincount(of_cell, weights=w[sample], minlength=cell.size)
+        sum_wt = np.bincount(of_cell, weights=(w * t)[sample], minlength=cell.size)
+        spoke = sum_w > 0.0
+        cell, sum_w, sum_wt = cell[spoke], sum_w[spoke], sum_wt[spoke]
+        t_obs = sum_wt / sum_w
         # one scan is one observation of a voxel, however many beams crossed it
-        w_obs = np.minimum(sum_w[cells], self.law.hit_weight)
-        return cells, w_obs, t_obs
+        w_obs = np.minimum(sum_w, self.law.hit_weight)
+        column, iz = np.divmod(cell, nz)
+        ix, iy = np.divmod(column, ny)
+        return (ix, iy, iz), w_obs, t_obs
+
+    def _sample_points(
+        self, bearings: Array, along: Array, pose: RigidPose, mount: PlanarMount
+    ) -> tuple[Array, Array, Array]:
+        """Where the samples of the beams sit in the map: one (x, y, z) per (sensor-frame
+        bearing, metres along the beam) pair.
+
+        A body standing level sweeps its sensor's plane, and that is the arithmetic this has
+        always been — kept exactly, so nothing but the lean itself can move a level run's map.
+        A leaning body turns the whole ray through the pose's own rotation: the mount rides up
+        or down with the body and every beam leaves it along ``R @ (cos b, sin b, 0)``, which
+        is the ray whose height grows as ``r sin(lean)``.
+        """
+        m = np.asarray(pose.rotation, dtype=float)
+        if bool(m[2, 0] == 0.0 and m[2, 1] == 0.0 and m[2, 2] == 1.0):
+            yaw = math.atan2(float(m[1, 0]), float(m[0, 0]))
+            ox = float(pose.translation[0]) + math.cos(yaw) * mount.x_m - math.sin(yaw) * mount.y_m
+            oy = float(pose.translation[1]) + math.sin(yaw) * mount.x_m + math.cos(yaw) * mount.y_m
+            heading = bearings + yaw
+            return (
+                ox + np.cos(heading) * along,
+                oy + np.sin(heading) * along,
+                np.full(along.shape, float(pose.translation[2]) + mount.z_m),
+            )
+        origin = np.asarray(pose.translation, dtype=float) + m @ np.array(
+            [mount.x_m, mount.y_m, mount.z_m], dtype=float
+        )
+        cos_b, sin_b = np.cos(bearings), np.sin(bearings)
+        return (
+            origin[0] + (m[0, 0] * cos_b + m[0, 1] * sin_b) * along,
+            origin[1] + (m[1, 0] * cos_b + m[1, 1] * sin_b) * along,
+            origin[2] + (m[2, 0] * cos_b + m[2, 1] * sin_b) * along,
+        )
 
     # ---- readout -------------------------------------------------------------------------
     def slice(self, z_lo: float, z_hi: float, law: SliceLaw | None = None) -> OccupancySlice:

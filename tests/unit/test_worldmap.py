@@ -8,13 +8,16 @@ stack reads it as (a ROS message, the tracker's log-odds grid, a map_server pair
 
 from __future__ import annotations
 
+import hashlib
 import math
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from pepin.depth import Intrinsics
+from pepin.lean import Lean
 from pepin.mapping import grid_from_pgm
 from pepin.tsdf import GridSpec, RigidPose
 from pepin.worldmap import (
@@ -184,6 +187,175 @@ def test_the_layer_is_at_the_lidars_plane_and_one_voxel_thick() -> None:
     assert lo <= PLANE_M <= hi
     assert hi - lo <= 3 * world.spec.voxel_m, "the plane plus or minus one voxel, no more"
     assert world.slice(1.0, 1.2).counts()["known"] == 0, "the lidar wrote nothing above itself"
+
+
+# ---- the body's lean -------------------------------------------------------------------------
+TABLE_Z_M = 0.7  # the tabletop the sensor's plane never sees while the cart stands level
+TABLE_X_M = (2.0, 4.0)  # how far it reaches in front of the cart
+TABLE_HALF_Y_M = 0.5
+WALL_X_M = 5.0  # the wall behind it
+TIP_DEG = 6.0
+# The three channels after LEVEL_POSES scanned the box eight times, as the implementation that
+# wrote flat planes left them (scratch/lidar_level_is_bit_identical.py runs the two
+# implementations side by side out of git: 0 voxels differ). A level run's map is this, to the
+# bit, for ever — the digest only ever moves when the level arithmetic itself does, and then
+# that probe says so. It moved once, at ce22d98, where the return started being sampled where
+# it came back instead of only on the ray's ladder.
+LEVEL_DIGEST = "7e40351d9305a2820aebba7604fe95429e175c005bf38666fe30b974ead5cbe0"
+LEVEL_POSES = ((0.0, 0.0, 0.0), (0.5, -0.3, 0.7), (-0.8, 0.9, -2.1), (0.2, 0.2, math.pi))
+
+
+def tipped(pitch_deg: float, x: float = 0.0, y: float = 0.0, yaw: float = 0.0) -> RigidPose:
+    """The cart at (x, y, yaw) with its nose down by ``pitch_deg`` (negative: nose up), the lean
+    composed onto the planar pose exactly as :class:`pepin.frame_pose.FramePoser` composes it."""
+    planar = at(x, y, yaw)
+    lean = Lean(0.0, math.radians(pitch_deg), 0.0)
+    return RigidPose(planar.rotation @ lean.rotation(), planar.translation)
+
+
+def tilt_spec() -> GridSpec:
+    """A grid reaching 7 m ahead: the wall of the tipping room is at 5 m, out of the box's."""
+    return GridSpec(origin=(-1.0, -3.0, -0.15), shape=(160, 120, 34), camera_band_m=(0.15, 1.30))
+
+
+def fan_scan(
+    pose: RigidPose, sensor: PlanarMount, beams: int = 121, half_fov_deg: float = 30.0
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """What a lidar on ``pose`` really measures in a room with a tabletop at 0.7 m (2 to 4 m
+    ahead, half a metre either side) and a wall at 5 m behind it: bearings, ranges, and the
+    true (n, 3) map points the returns came from.
+
+    The beams are cast as the 3D rays they are, so a level body's fan stays at the sensor's
+    plane and sees only the wall, while a tipped body's fan climbs into the tabletop.
+    """
+    b = np.radians(np.linspace(-half_fov_deg, half_fov_deg, beams))
+    m = np.asarray(pose.rotation, dtype=float)
+    origin = np.asarray(pose.translation, dtype=float) + m @ np.array(
+        [sensor.x_m, sensor.y_m, sensor.z_m]
+    )
+    d = m @ np.stack([np.cos(b), np.sin(b), np.zeros_like(b)])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        to_wall = np.where(d[0] > 0.0, (WALL_X_M - origin[0]) / d[0], np.inf)
+        to_table = (TABLE_Z_M - origin[2]) / d[2]
+    hit = origin[:, None] + d * to_table
+    on_table = (
+        (to_table > 0.0)
+        & (TABLE_X_M[0] <= hit[0])
+        & (hit[0] <= TABLE_X_M[1])
+        & (np.abs(hit[1]) <= TABLE_HALF_Y_M)
+    )
+    ranges = np.minimum(to_wall, np.where(on_table, to_table, np.inf))
+    return b, ranges, (origin[:, None] + d * ranges).T
+
+
+def surface_at(world: WorldMap, point: np.ndarray) -> bool:
+    """Whether the lidar marked a surface within one voxel of a map point in the volume."""
+    s = world.spec
+    at_ = [int((float(point[i]) - s.origin[i]) / s.voxel_m) for i in range(3)]
+    box = tuple(slice(max(i - 1, 0), i + 2) for i in at_)
+    near = np.abs(world.volume.sdf[box]) <= 0.5 * s.voxel_m / s.truncation_m + 1e-5
+    return bool((near & (world.lidar_weight[box] > 0.0)).any())
+
+
+def channels(world: WorldMap) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The three channels a scan writes, for comparing two maps element for element."""
+    return world.volume.sdf, world.volume.weight, world.lidar_weight
+
+
+def scanned_box(pose_of: Callable[[float, float, float], RigidPose]) -> WorldMap:
+    """The box scanned eight times from LEVEL_POSES, each pose built by ``pose_of``."""
+    world = WorldMap(spec(), mount())
+    for i in range(8):
+        x, y, yaw = LEVEL_POSES[i % len(LEVEL_POSES)]
+        angles, ranges = box_scan(x, y)
+        world.integrate_scan(angles, ranges, pose_of(x, y, yaw), stamp=100.0 + i)
+    return world
+
+
+def test_a_level_body_writes_the_voxels_it_has_always_written() -> None:
+    """CLAUDE.md rule 19's old behaviour, to the bit. A pure-yaw pose is what the planar EKF
+    gives and what ``imu_lean`` off leaves, and the map it writes must be the map that was
+    written before the beams became rays — not "within a voxel": a night's map has to be
+    comparable with last night's, and a difference nobody can name is a bug nobody can find."""
+    digest = hashlib.sha256()
+    for channel in channels(scanned_box(at)):
+        digest.update(np.ascontiguousarray(channel).tobytes())
+    assert digest.hexdigest() == LEVEL_DIGEST
+
+
+def test_a_lean_of_zero_is_the_level_map_bit_for_bit() -> None:
+    """And the switch's on state with nothing to correct is the same map again: a Lean of zero
+    composed onto a planar pose leaves a pure yaw, which is the plane the beams always swept."""
+    for level, leaned in zip(
+        channels(scanned_box(at)),
+        channels(scanned_box(lambda x, y, yaw: tipped(0.0, x, y, yaw))),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(level, leaned)
+
+
+def test_a_tipped_body_writes_its_beams_where_they_really_went() -> None:
+    """A rear wheel climbs a threshold, the nose lifts 6 degrees for a second, and the whole fan
+    climbs with it — by tan(6 deg), 10.5 cm per metre out, whatever the bearing. At 3 m that is
+    the underside of a tabletop. Placed level, those returns are a wall 3 m ahead in the one
+    layer the cart drives by, where the room is open floor; placed along the rays they really
+    are, they are a tabletop at its own height and the plane says nothing at all."""
+    pose = tipped(-TIP_DEG)
+    angles, ranges, points = fan_scan(pose, mount())
+    leaning, level = WorldMap(tilt_spec(), mount()), WorldMap(tilt_spec(), mount())
+    for i in range(8):
+        leaning.integrate_scan(angles, ranges, pose, stamp=100.0 + i)
+        level.integrate_scan(angles, ranges, at(), stamp=100.0 + i)
+    ahead = points[points.shape[0] // 2]
+    assert abs(ahead[2] - TABLE_Z_M) < 1e-9, "the beam straight ahead ends on the tabletop"
+    assert 2.9 < float(ranges[ranges.size // 2]) < 3.2, "3 m out, where the tabletop starts"
+    assert surface_at(leaning, ahead), "the tabletop is written at the height it was seen at"
+    on_table = np.abs(points[:, 2] - TABLE_Z_M) < 1e-9
+    assert on_table.sum() >= 15, "a score of beams climb into the tabletop"
+    assert all(surface_at(leaning, p) for p in points), "every return, at its own height"
+    # the wall behind it: the beams that pass beside the tabletop still reach it, and it is
+    # still a wall — at the height 6 degrees of nose put the beam, 45 cm above the plane
+    wall = points[~on_table][-1]
+    assert wall[0] == pytest.approx(WALL_X_M, abs=1e-9) and wall[2] > PLANE_M + 0.4
+    assert surface_at(leaning, wall)
+    # and what the level assumption makes of the same returns: a wall across the open floor
+    flat = np.array([float(ranges[ranges.size // 2]), 0.0, PLANE_M])
+    assert surface_at(level, flat), "placed level, the tabletop is a false wall 3 m ahead"
+    assert not surface_at(leaning, flat), "placed along the ray, that floor stays open"
+    assert not surface_at(leaning, np.array([WALL_X_M, 0.0, PLANE_M])), "nor is the wall there"
+
+
+def test_the_layer_grows_to_the_rows_the_leaning_beams_wrote() -> None:
+    """The band the camera's fusion hands back to the lidar follows the rays: a climbing beam
+    writes above the plane, and the protection inside the band is still per cell, so the camera
+    keeps every voxel the lidar never spoke for."""
+    pose = tipped(-TIP_DEG)
+    angles, ranges, points = fan_scan(pose, mount())
+    world = WorldMap(tilt_spec(), mount())
+    world.integrate_scan(angles, ranges, pose, stamp=100.0)
+    written = np.flatnonzero(world.lidar_weight.any(axis=(0, 1)))
+    top = world.spec.origin[2] + (written[-1] + 1) * world.spec.voxel_m
+    assert top >= points[:, 2].max(), "the band reaches the highest beam"
+    assert world.lidar_weight[:, :, written[0] : written[-1] + 1].min() == 0.0, "not a full band"
+
+
+def test_a_beam_that_climbs_out_of_the_volume_is_carved_as_far_as_it_reaches() -> None:
+    """A steep tip aims the fan over the volume's ceiling: what is inside is still carved, and
+    the part above it is simply not written — no wrapping, no clipping to the top row."""
+    world = WorldMap(tilt_spec(), mount())
+    pose = tipped(-30.0)
+    angles = np.array([0.0])
+    ranges = np.array([6.0])  # 3 m up at its end, over the 1.55 m ceiling
+    assert world.integrate_scan(angles, ranges, pose, stamp=100.0) > 0
+    s = world.spec
+    tilt = math.radians(30.0)
+    ox, oz = -math.sin(tilt) * PLANE_M, math.cos(tilt) * PLANE_M  # the mount, tipped with it
+    ceiling = s.origin[2] + s.shape[2] * s.voxel_m
+    leaves_at = ox + math.cos(tilt) * (ceiling - oz) / math.sin(tilt)
+    columns = np.flatnonzero(world.lidar_weight.any(axis=(1, 2)))
+    far = s.origin[0] + (columns[-1] + 1) * s.voxel_m
+    assert far == pytest.approx(leaves_at, abs=0.15), "carved to where the ray leaves the ceiling"
+    assert far < ox + math.cos(tilt) * 3.0, "far short of the beam's own end at 6 m"
 
 
 def test_a_wall_that_moved_away_is_cleared_by_the_beams_that_cross_it() -> None:
