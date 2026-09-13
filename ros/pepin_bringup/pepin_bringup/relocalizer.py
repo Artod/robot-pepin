@@ -23,6 +23,14 @@ word on each update as JSON for the operator. The watch, the whole-map search an
 fix run on full revolutions only (:meth:`pepin.sources.SourceFeed.full_picture`): a fan sees a
 quarter of the room and two frames of the same view agree on the same look-alike, so while a
 fan drives the tracker follows it, the watch is off and ``/relocalize`` refuses.
+
+The watchdog: the same whole-map search runs CONTINUOUSLY on the laptop, which does it in a
+tenth of a second instead of seconds (:mod:`pepin_bringup.global_watch`), and its answers arrive
+here on ``/localization/candidate``. :class:`pepin.watchdog.CandidateGate` judges each one
+against this tracker's own pose and fit; a streak of candidates that disagree with the tracker
+and agree with each other re-seeds it through the pending seed — the very path this node's own
+search uses, with the ``accept_candidates`` flag as the switch. Nothing here depends on the
+laptop: with no candidate arriving, the board's own slow search is the fallback it always was.
 """
 
 from __future__ import annotations
@@ -54,8 +62,10 @@ from tf2_ros import Buffer, TransformBroadcaster
 
 from pepin.dynamic import StaticMask, berth_for, dynamic_marks, occluded, toe_reach_m
 from pepin.flags import Flag, FlagSet
+from pepin.fusion import sigma_from_fit
+from pepin.localization import SWITCHES as TRACKER_SWITCHES
 from pepin.localization import Localizer
-from pepin.mapping import GridSpec, OccupancyGrid
+from pepin.mapping import OccupancyGrid
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
 from pepin.slip import SlipWatch
@@ -71,8 +81,11 @@ from pepin.timeline import (
     timed_scan_from_ros,
 )
 from pepin.watch import DRIVE_FIT, LOST_FIT, LostWatch, Verdict
+from pepin.watchdog import CANDIDATE_STREAK, CandidateGate, GlobalCandidate
 from pepin_bringup.msgs import (
     cloud_from_points,
+    grid_from_msg,
+    map_id,
     planar_mount,
     pose_with_covariance,
     stamp_from_seconds,
@@ -81,7 +94,6 @@ from pepin_bringup.msgs import (
 )
 from pepin_bringup.node_kit import Switches, TfLookup, spin_main
 
-OCCUPIED_LOG_ODDS, FREE_LOG_ODDS = 4.0, -4.0
 DUMP_DIR = (
     "/maps/rec"  # every failed whole-map search leaves its scan here, for the offline autopsy
 )
@@ -92,6 +104,11 @@ SLIP_SAID_AFTER = 3  # consecutive slipping scans before the log says it once
 # no mount to apply, unlike the lidar's, which is looked up from /tf_static.
 NO_MOUNT = (0.0, 0.0, 0.0, False)
 CAMERA_SCANS = ((DEPTH, "/depth_scan"), (CONTACT, "/contact_scan"))
+# The laptop's whole-map watchdog (pepin_bringup.global_watch) publishes a candidate here about
+# once a second, as one self-contained JSON message (pepin.watchdog.GlobalCandidate): the board
+# never has to join two topics to judge one answer, and a message that does not parse is counted,
+# not obeyed. The board's own slow search is untouched: it is the fallback when none arrives.
+CANDIDATE_TOPIC = "/localization/candidate"
 
 
 def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
@@ -165,6 +182,22 @@ FLAGS = FlagSet(
         " plus the outline is ringed at all — the older rule, whose blind disc grows with the"
         " ring (a 7 cm wider ring stops ringing a person at 0.90 m)",
     ),
+    Flag(
+        "accept_candidates",
+        True,
+        description="re-seed from the laptop watchdog's whole-map candidates"
+        f" ({CANDIDATE_TOPIC}, pepin.watchdog): a place that disagrees with the tracked pose"
+        " candidate_streak times in a row, about the same place each time, is adopted through"
+        " the path the board's own search uses. Off: the candidates are still judged, counted"
+        " and reported, and only the board's own slow whole-map search can bring the cart back",
+    ),
+    Flag(
+        "candidate_streak",
+        CANDIDATE_STREAK,
+        range=(1, 10),
+        description="how many candidates in a row must disagree with the tracker and agree with"
+        " each other before one of them re-seeds it: the price of a teleport, in seconds",
+    ),
 )
 BERTH_FLAGS = ("toe_reach", "near_rings")  # the flags that resize the berth, not the tracker
 
@@ -182,25 +215,6 @@ class _RosLogHandler(logging.Handler):
             self._node.get_logger().warning(text)
         else:
             self._node.get_logger().info(text)
-
-
-def grid_from_msg(msg: OccupancyGridMsg) -> OccupancyGrid:
-    """A nav_msgs map as our log-odds grid (occupied +4, free -4, unknown 0)."""
-    info = msg.info
-    spec = GridSpec(
-        info.resolution,
-        info.origin.position.x,
-        info.origin.position.y,
-        info.width * info.resolution,
-        info.height * info.resolution,
-    )
-    grid = OccupancyGrid(spec)
-    data = np.array(msg.data, dtype=np.int16).reshape(info.height, info.width)
-    grid.log_odds[:] = np.where(
-        data >= 65, OCCUPIED_LOG_ODDS, np.where((data >= 0) & (data <= 35), FREE_LOG_ODDS, 0.0)
-    )
-    grid.version += 1
-    return grid
 
 
 class Relocalizer(Node):
@@ -298,6 +312,10 @@ class Relocalizer(Node):
         self._laser_tf: tuple[float, float, float, bool] | None = None  # x, y, yaw, mirrored
         self._searching = False
         self.fit = float("nan")
+        # The laptop's watchdog: its candidates are judged against this tracker's own pose and
+        # fit, and a streak of disagreements about one place re-seeds through _pending_seed —
+        # the very path the board's own search uses. All the judging is in pepin.watchdog.
+        self._candidates = CandidateGate()
         # The watch judges full revolutions only; while a fan drives it is off and the report
         # line says so (the fit is still measured and published, on the fan).
         self._watch_on = True
@@ -327,6 +345,14 @@ class Relocalizer(Node):
                 QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
             )
         self.create_subscription(Odometry, self._odom_topic, self._on_odom, 20)
+        # Depth 1: a candidate is a snapshot of a moment, and the newest one is the only one
+        # worth judging; a backlog of them would re-seed from a scan seconds old.
+        self.create_subscription(
+            String,
+            CANDIDATE_TOPIC,
+            self._on_candidate,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
+        )
         self._fit_pub = self.create_publisher(Float32, "localization_fit", 5)
         # Every source's word on each update, as JSON (Localizer.sources_report): the demo's
         # view of the lidar and the camera agreeing, disagreeing, or one of them gone.
@@ -378,6 +404,8 @@ class Relocalizer(Node):
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._registry.enable(self._switches["sources"])
         self._resize_berth()
+        for name in self._candidates.switches:  # a launch override reaches the gate too
+            self._candidates.switch(name, self._switches[name])
         self.get_logger().info("relocalizer up: watching the scan-to-map fit")
 
     # -- inputs -------------------------------------------------------------
@@ -388,14 +416,17 @@ class Relocalizer(Node):
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
         """A flag changed (``ros2 param set``): a berth flag resizes the rings around new
-        objects at once, every other one is the Localizer's own switch, written through so the
-        next scan is matched with it (``sources`` reaches the roster the feed shares with it,
-        so the anchor moves with the flag)."""
+        objects at once; every other one is written through to whichever object owns it — the
+        Localizer (``sources`` reaches the roster the feed shares with it, so the anchor moves
+        with the flag) or the candidate gate — so the next scan, and the next candidate, are
+        handled with it. Each object names its own flags (``switches``), so a set of one
+        object's flag is never refused by the other."""
         if name in BERTH_FLAGS:
             self._resize_berth()  # the switches already hold the new value
             return
-        if self._localizer is not None:
-            self._localizer.switch(name, new)
+        for target in (self._localizer, self._candidates):
+            if target is not None and name in target.switches:
+                target.switch(name, new)
 
     def _resize_berth(self) -> None:
         """Rebuild the berth around new objects from the planner in charge and the berth flags,
@@ -415,15 +446,17 @@ class Relocalizer(Node):
         with self._episode:  # a candidate found on the old map is evidence about nothing here
             self._watch = LostWatch(**self._watch_args)  # type: ignore[arg-type]
             self._pending_seed = None
+            self._candidates.forget()
         self._matcher = CorrelativeMatcher(self._grid)
         self._static_mask = StaticMask(self._grid)
         # lost_after huge: update() must never run a whole-map search in the executor thread on
         # this board (10-20 s); the 1 Hz watcher below does that in a worker and re-seeds.
         # Tracking window sized for this board: 7x7 positions x 13 headings x 120 beams is about
         # 60 ms per scan on an A53 (the laptop default, 9x9x49x200, took 360 ms: 2 Hz).
-        origin = msg.info.origin.position
-        self._map_id = f"{msg.info.width}x{msg.info.height}@{origin.x:.2f},{origin.y:.2f}"
-        flags = self._switches.flags.as_dict()
+        self._map_id = map_id(msg)
+        # The tracker's own flags only: the gate's (accept_candidates, candidate_streak) are
+        # this node's, not a Localizer's, and each object names what it owns.
+        flags = {n: v for n, v in self._switches.flags.as_dict().items() if n in TRACKER_SWITCHES}
         self._registry.enable(flags.pop("sources"))  # the roster is the feed's and the tracker's
         for name in BERTH_FLAGS:  # the rings around new objects, not switches of the tracker
             flags.pop(name)
@@ -492,6 +525,32 @@ class Relocalizer(Node):
         self._odom_wz = float(msg.twist.twist.angular.z)
         if self._track:
             self._track_pending()
+
+    def _on_candidate(self, msg: String) -> None:
+        """The laptop watchdog's whole-map candidate (one JSON message, pepin.watchdog): judged
+        by the gate against this tracker's own pose and fit, on this tracker's own map.
+
+        A streak of disagreements about one place becomes a pending seed, which the 0.2 s timer
+        applies through :meth:`_seed` — the same door the board's own search uses, so a
+        candidate can do nothing a search could not. No re-seed while a goal runs: a teleport
+        mid-drive is worse than a poor fit, and the drive's own watches stop it soon enough.
+        Nothing is decided here; the verdicts reach the operator in the report line and in the
+        ``candidates`` block of /localization/sources.
+        """
+        try:
+            candidate = GlobalCandidate.from_json(msg.data)
+        except (KeyError, TypeError, ValueError) as exc:
+            self._candidates.malformed(str(exc))
+            return
+        answer = self._candidates.observe(
+            candidate,
+            self._tracked_pose(),
+            self.fit,
+            map_id=self._map_id,
+            allow=not self._navigating,
+        )
+        with self._episode:  # the search worker writes _pending_seed from its own thread
+            self._pending_seed = answer.pending(self._map_id) or self._pending_seed
 
     def _track_pending(self) -> None:
         """Match the anchor's scan at the feed once the odometry history covers its whole
@@ -589,7 +648,9 @@ class Relocalizer(Node):
             pose, loc.confidence, Time(nanoseconds=int(scan.stamp * 1e9)).to_msg()
         )
         self._published_fit_pub.publish(Float32(data=float(loc.published_fit)))
-        self._sources_pub.publish(String(data=json.dumps(loc.sources_report(now))))
+        report = loc.sources_report(now)
+        report["candidates"] = self._candidates.status()  # the laptop's word, beside the scans'
+        self._sources_pub.publish(String(data=json.dumps(report)))
         self._publish_dynamic(points, pose, scan.stamp)  # the pose of this scan's own moment
 
     def _last_known_pose(self) -> Pose2D:
@@ -700,16 +761,11 @@ class Relocalizer(Node):
         )
 
     def _publish_tracker_pose(self, pose: Pose2D, confidence: float, stamp: Any) -> None:
-        """The tracked pose for the operator's view and the trail; sigma grows as the fit drops."""
-        msg = pose_with_covariance(
-            pose.x,
-            pose.y,
-            pose.theta,
-            0.05 + 0.3 * (1.0 - confidence),
-            math.radians(3.0) + math.radians(20.0) * (1.0 - confidence),
-            stamp,
-            "map",
-        )
+        """The tracked pose for the operator's view and the trail; sigma grows as the fit drops
+        (:func:`pepin.fusion.sigma_from_fit` — the same numbers a fusion weighs this pose by,
+        so what the operator sees and what the watchdog's candidate is weighed against agree)."""
+        sigma_xy, sigma_yaw = sigma_from_fit(confidence)
+        msg = pose_with_covariance(pose.x, pose.y, pose.theta, sigma_xy, sigma_yaw, stamp, "map")
         self._tracker_pub.publish(msg)
         self._append_trail(msg)
 
@@ -717,7 +773,8 @@ class Relocalizer(Node):
         """Every 30 s: where every released scan went (per source, with the rides), what the
         tracker did with the matched ones (its switches, the rest lock's cadence and gain,
         carries, lost/weak, the fit at the match and at the published pose, the largest
-        map -> odom step), who drives and every source's health, and the cost."""
+        map -> odom step), who drives and every source's health, what the laptop's watchdog
+        proposed and what came of it, and the cost."""
         loc = self._localizer
         if loc is None:
             return
@@ -731,6 +788,7 @@ class Relocalizer(Node):
             f"(rings {self._berth.ring_m:.2f} m from {self._berth.near_m:.2f} m out, trimmed "
             f"within {self._berth.trim_m:.2f} m), "
             f"scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
+            f"{self._candidates.report()}; "
             f"flags: {self._switches.state()}"
         )
         if feed.expired:

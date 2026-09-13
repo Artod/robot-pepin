@@ -54,6 +54,16 @@ PLATEAU_RATIO = 0.7
 # ``rejected``. A camera scan of a table top the lidar's map has no wall for matches the map
 # well somewhere within the window, and only its disagreement with the lidar gives it away.
 GATE = 11.34
+# A pose with no score surface behind it — the tracker's own belief, an operator's word — is
+# still a measurement, and :func:`from_fit` gives it the only spread it has: its fit. A pose that
+# fits the map perfectly is worth SIGMA_XY_M / SIGMA_YAW_DEG, one that fits nothing those plus
+# the LOST pair. The numbers are the ones the tracker has always published its pose with
+# (pepin_bringup.relocalizer's covariance on /tracker_pose), moved here so the tracker's word and
+# a scan's match are weighed on one scale.
+SIGMA_XY_M = 0.05
+SIGMA_XY_LOST_M = 0.30
+SIGMA_YAW_DEG = 3.0
+SIGMA_YAW_LOST_DEG = 20.0
 
 
 @dataclass(frozen=True)
@@ -148,6 +158,33 @@ def fuse(measurements: Sequence[PoseMeasurement], gate: float = GATE) -> PoseMea
         stamp=max(m.stamp for m, _ in kept),
         fit=fit / weight if weight > 0.0 else 0.0,
         rejected=rejected,
+    )
+
+
+def sigma_from_fit(fit: float) -> tuple[float, float]:
+    """How sure a pose known only by its fit is: ``(position metres, heading radians)``, from
+    :data:`SIGMA_XY_M` / :data:`SIGMA_YAW_DEG` at a perfect fit to those plus the LOST pair at
+    a fit of zero. Linear on purpose: it is a report of confidence, not a measurement."""
+    lost = 1.0 - min(max(fit, 0.0), 1.0)
+    return (
+        SIGMA_XY_M + SIGMA_XY_LOST_M * lost,
+        math.radians(SIGMA_YAW_DEG + SIGMA_YAW_LOST_DEG * lost),
+    )
+
+
+def from_fit(pose: Pose2D, fit: float, source: str, stamp: float = 0.0) -> PoseMeasurement:
+    """A pose that has no score surface behind it as a measurement any fusion can take: the
+    pose itself, an isotropic position sigma and a heading sigma from :func:`sigma_from_fit`.
+    What the tracker's own belief is worth beside a fresh match of a scan."""
+    sigma_xy, sigma_yaw = sigma_from_fit(fit)
+    return PoseMeasurement(
+        pose.x,
+        pose.y,
+        pose.theta,
+        np.diag([sigma_xy**2, sigma_xy**2, sigma_yaw**2]),
+        source,
+        stamp,
+        fit,
     )
 
 

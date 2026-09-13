@@ -30,6 +30,13 @@ from pepin.timeline import GateStats, OdomHistory, ScanGate, TimedScan
 LIDAR = "lidar"
 DEPTH = "depth"
 CONTACT = "contact"
+# Two POSE sources, not scan sources: the tracker's own belief and the laptop's whole-map
+# watchdog (:mod:`pepin.watchdog`), which answers with a place on the map instead of a scan.
+# Neither is ever on the roster — no gate, no health, never an anchor, never matched — they
+# only name a measurement in a fusion and in the ``/localization/sources`` report, so a reader
+# of that JSON can tell whose word moved the pose.
+TRACKER = "tracker"
+WATCHDOG = "watchdog"
 RATE_TAU_S = 2.0  # the rate's time constant: a few seconds of intervals, not the whole run
 
 

@@ -24,7 +24,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from pepin.dynamic import StaticMask, voting_mask
-from pepin.fusion import PoseMeasurement, at_edge, covariance_from_score_surface, fuse
+from pepin.fusion import (
+    PoseMeasurement,
+    at_edge,
+    covariance_from_score_surface,
+    from_fit,
+    fuse,
+)
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import (
@@ -34,9 +40,14 @@ from pepin.scanmatch import (
     apply_motion,
     relative_motion,
 )
-from pepin.sources import LIDAR, ScanObservation, ScanSource, SourceRegistry
+from pepin.sources import LIDAR, TRACKER, ScanObservation, ScanSource, SourceRegistry
 
 __all__ = ["Localizer", "Running", "ScanObservation", "TrackStats", "pooled"]
+
+# The flags a node may route into :meth:`Localizer.switch` — every live switch this tracker
+# owns, by the name its Flag carries. A node with flags of its own (the candidate gate's, say)
+# asks this tuple first, so a set of a flag that is not the tracker's is never refused by it.
+SWITCHES = ("sources", "rest_lock", "explained_vote", "rest_tau_s", "rest_gain", "fusion")
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +286,11 @@ class Localizer:
         stats, self.stats = self.stats, TrackStats()
         return stats
 
+    @property
+    def switches(self) -> tuple[str, ...]:
+        """The flag names :meth:`switch` takes (:data:`SWITCHES`): what a node may route here."""
+        return SWITCHES
+
     def switch(self, name: str, value: Any) -> None:
         """A live switch by its flag's name, between two updates: ``sources`` (the names of
         the sensors that correct) goes to the roster, every other name is the attribute it
@@ -395,44 +411,7 @@ class Localizer:
         is refused with confidence 0: "tell me where I am" beats driving off
         from the wrong twin.
         """
-        spec = self._grid.spec
-        centre = Pose2D(spec.x_min_m + spec.width_m / 2, spec.y_min_m + spec.height_m / 2, 0.0)
-        thinned = points[:: max(1, len(points) // thin_to)]
-        whole_map = SearchWindow(
-            xy_m=max(spec.width_m, spec.height_m) / 2,
-            xy_step_m=spec.resolution_m * GLOBAL_POOL_FACTOR,
-            theta_deg=180.0,
-            theta_step_deg=theta_step_deg,
-        )
-        # Exhaustive over the whole grid at every heading (FFT correlation on the fine grid);
-        # the pooled lattice it replaces once ranked the truth 5th and missed it on real maps.
-        peaks = self._matcher.match_everywhere(
-            points,
-            theta_step_deg=GLOBAL_FFT_THETA_STEP_DEG,
-            top_k=GLOBAL_PEAKS,
-            pool=GLOBAL_FFT_POOL,
-        )
-        if not peaks:
-            peaks = self._coarse().match_top(centre, thinned, GLOBAL_PEAKS, whole_map)
-        # Ranked by the field score (how exactly the scan sits on the walls): the inlier
-        # fraction saturates one cell off a wall and let a look-alike 5 m away tie with the
-        # truth at the cluttered base (0.56 vs 0.58) where the field score said 1.69 vs 2.16.
-        refined = sorted(
-            (self.refine(peak.pose, points) for peak in peaks),
-            key=lambda r: -self._rank(r[0].pose, points),
-        )
-        distinct: list[tuple[MatchResult, float]] = []  # several peaks refine into one basin
-        for candidate in refined:
-            if not any(
-                math.hypot(
-                    candidate[0].pose.x - kept[0].pose.x, candidate[0].pose.y - kept[0].pose.y
-                )
-                < 0.3
-                and abs(wrap_angle(candidate[0].pose.theta - kept[0].pose.theta))
-                < math.radians(15.0)
-                for kept in distinct
-            ):
-                distinct.append(candidate)
+        distinct = self.global_candidates(points, theta_step_deg, thin_to)
         best, best_confidence = distinct[0]
         second, second_confidence = distinct[1] if len(distinct) > 1 else distinct[0]
         apart = math.hypot(best.pose.x - second.pose.x, best.pose.y - second.pose.y) > 0.5 or abs(
@@ -479,6 +458,95 @@ class Localizer:
             best.pose, best_confidence, denied_best, second.pose, second_confidence, denied,
         )  # fmt: skip
         return best, best_confidence
+
+    def global_candidates(
+        self,
+        points: NDArray[np.float64],
+        theta_step_deg: float = GLOBAL_THETA_STEP_DEG,
+        thin_to: int = 120,
+    ) -> list[tuple[MatchResult, float]]:
+        """Every distinct place on the whole map this scan could have been taken from, best
+        first, each with its inlier fraction: the ranking half of :meth:`global_search` without
+        the twin verdict.
+
+        The exhaustive FFT pass over the grid proposes ``GLOBAL_PEAKS`` peaks, each is refined
+        on the fine grid, they are ranked by :meth:`_rank` (how exactly the scan sits on the
+        walls, minus a mild charge for points the map puts on open floor) and peaks that refined
+        into one basin are merged. The list is what says whether the map answers with ONE place
+        or with several alike (:func:`pepin.watchdog.ambiguity`); :meth:`global_search` reads
+        the first two of it.
+        """
+        spec = self._grid.spec
+        centre = Pose2D(spec.x_min_m + spec.width_m / 2, spec.y_min_m + spec.height_m / 2, 0.0)
+        thinned = points[:: max(1, len(points) // thin_to)]
+        whole_map = SearchWindow(
+            xy_m=max(spec.width_m, spec.height_m) / 2,
+            xy_step_m=spec.resolution_m * GLOBAL_POOL_FACTOR,
+            theta_deg=180.0,
+            theta_step_deg=theta_step_deg,
+        )
+        # Exhaustive over the whole grid at every heading (FFT correlation on the fine grid);
+        # the pooled lattice it replaces once ranked the truth 5th and missed it on real maps.
+        peaks = self._matcher.match_everywhere(
+            points,
+            theta_step_deg=GLOBAL_FFT_THETA_STEP_DEG,
+            top_k=GLOBAL_PEAKS,
+            pool=GLOBAL_FFT_POOL,
+        )
+        if not peaks:
+            peaks = self._coarse().match_top(centre, thinned, GLOBAL_PEAKS, whole_map)
+        # Ranked by the field score (how exactly the scan sits on the walls): the inlier
+        # fraction saturates one cell off a wall and let a look-alike 5 m away tie with the
+        # truth at the cluttered base (0.56 vs 0.58) where the field score said 1.69 vs 2.16.
+        refined = sorted(
+            (self.refine(peak.pose, points) for peak in peaks),
+            key=lambda r: -self._rank(r[0].pose, points),
+        )
+        distinct: list[tuple[MatchResult, float]] = []  # several peaks refine into one basin
+        for candidate in refined:
+            if not any(
+                math.hypot(
+                    candidate[0].pose.x - kept[0].pose.x, candidate[0].pose.y - kept[0].pose.y
+                )
+                < 0.3
+                and abs(wrap_angle(candidate[0].pose.theta - kept[0].pose.theta))
+                < math.radians(15.0)
+                for kept in distinct
+            ):
+                distinct.append(candidate)
+        return distinct
+
+    def measure(
+        self, pose: Pose2D, points: NDArray[np.float64], source: str, stamp: float = 0.0
+    ) -> PoseMeasurement:
+        """One place on the map as a measurement: ``pose`` sharpened in the tracking window
+        against this scan, the inlier fraction of the whole scan there as its fit, and the
+        covariance read off the score surface it was chosen on (:func:`covariance_from_score
+        _surface`) — how far the pose may move before the scan stops fitting, per direction.
+
+        The same machinery :meth:`_measure` uses for a tracking update, without the odometry's
+        motion and without the static map's vote: for a pose that came from somewhere else — a
+        whole-map search, the laptop's watchdog — so it can be weighed against the tracker's own
+        belief by information instead of by a rule of thumb.
+        """
+        local, surface = self._matcher.match_surface(pose, points, self._window)
+        fit = self._matcher.inlier_fraction(local.pose, points)
+        return PoseMeasurement(
+            local.pose.x,
+            local.pose.y,
+            local.pose.theta,
+            covariance_from_score_surface(surface, fit),
+            source,
+            stamp,
+            fit,
+            edge=at_edge(surface),
+        )
+
+    def belief(self, stamp: float = 0.0) -> PoseMeasurement:
+        """What this tracker currently believes, as a measurement: its pose, its confidence as
+        the fit, and the isotropic covariance that confidence buys (:func:`pepin.fusion.from_fit`).
+        The tracker's own word on one scale with everybody else's."""
+        return from_fit(self.pose, self.confidence, TRACKER, stamp)
 
     def refine(self, pose: Pose2D, points: NDArray[np.float64]) -> tuple[MatchResult, float]:
         """A coarse candidate sharpened with a medium and then the tracking window."""

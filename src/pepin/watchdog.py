@@ -1,0 +1,361 @@
+"""A second opinion on where the cart is, computed where there is a CPU to compute it.
+
+The tracker on the board localises in a window around the odometry's prediction (+-9 cm,
++-9 degrees, about 50 ms a scan) and, when the fit stays low for several scans, falls back to an
+exhaustive whole-map search: FFT correlation over every shift at 40 headings, seconds on a
+Cortex-A53. So the board can only ask "where am I, really?" after it has already admitted it is
+lost, and then it pays for the question with seconds of a core it also drives with.
+
+The laptop runs the same search in a tenth of a second. This module is the pure half of running
+it there CONTINUOUSLY, as a watchdog: once a second the laptop searches the whole map on the
+newest scan and publishes what it found — a place, a covariance read off the correlation peak,
+the fit at that place and how ambiguous the map's answer was
+(:class:`GlobalCandidate`). :func:`judge` says what one such candidate is worth beside the pose
+the tracker holds:
+
+* ``agree`` — the same place: the tracker is right, nothing to do (this is the normal verdict,
+  once a second, forever, and its count is how one knows the watchdog is alive).
+* ``disagree`` — a different place, explaining the scan clearly better, and the map answers with
+  one place only. Three of those in a row that also agree WITH EACH OTHER re-seed the tracker
+  through the path its own search uses (:class:`CandidateGate`).
+* ``unknown_map`` — the best place on the map fits nothing, or the map answers with two places
+  alike. Then the scan is not a scan of this map: another room, another flat, a map from before
+  the furniture moved. Counted and said out loud; no automatic mode switch — that is the
+  owner's decision, and a robot that changes maps on its own is worse than a lost one.
+* ``nothing`` — a different place that does NOT explain the scan better. The candidate claims
+  nothing, so neither does this module.
+
+The board's own slow search stays exactly as it was: the fallback for when no candidate arrives
+(the laptop is off, the link is down, the watch is switched off).
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any, ClassVar
+
+import numpy as np
+from numpy.typing import NDArray
+
+from pepin.fusion import Matrix, PoseMeasurement, from_fit, fuse
+from pepin.odometry import Pose2D, wrap_angle
+from pepin.sources import TRACKER, WATCHDOG
+from pepin.watch import ADMIT_FIT, ADMIT_MARGIN, AGREE_DEG, AGREE_M
+
+__all__ = [
+    "CandidateGate",
+    "CandidateVerdict",
+    "GateAnswer",
+    "GlobalCandidate",
+    "ambiguity",
+    "judge",
+    "same_place",
+]
+
+# A candidate this close to the tracked pose and this well aligned with it says the same place.
+# The tracker's window walks a residual in at 9 cm a scan, so half a metre is something it
+# corrects by itself within a second of driving — there is nothing here to re-seed. The same
+# pair the board's own two-search rule calls agreement (pepin.watch.AGREE_M / AGREE_DEG), so
+# "the two searches agree" and "the candidate agrees with the tracker" mean one thing.
+SAME_PLACE_M = AGREE_M
+SAME_PLACE_DEG = AGREE_DEG
+# How much better than the tracker's own fit a candidate must explain the scan before its
+# disagreement is evidence of anything. The margin a whole-map answer must beat the tracker by
+# on the board (pepin.watch.ADMIT_MARGIN): a candidate is never cheaper evidence than a search.
+BEAT_MARGIN = ADMIT_MARGIN
+# Below this fit the best place on the whole map explains nothing: not "the cart is elsewhere"
+# but "this is not a scan of this map". The board's floor for admitting a search's answer at
+# all (pepin.watch.ADMIT_FIT); this flat's true pose scores 0.5-0.65 on its own maps.
+UNKNOWN_MAP_FIT = ADMIT_FIT
+# The second-best place's fit over the best's, counting only places that are a DIFFERENT place
+# (farther apart than the pair below). Above this the map answers "here — or just as well
+# there": a symmetric room, a corridor, a map the scan does not belong to. Such a candidate is
+# never acted on. 0.90 is the margin within which the whole-map search itself calls two places
+# twins (pepin.localization.TWIN_MARGIN, 1 - 0.10), on the fit instead of the field score.
+AMBIGUITY_MAX = 0.90
+AMBIGUITY_APART_M = 0.5
+AMBIGUITY_APART_DEG = 30.0
+# Candidates that disagree with the tracker AND with each other, in a row, before the tracker is
+# re-seeded. One search a second on a standing cart is one second of evidence per candidate; a
+# look-alike keeps looking alike, so the streak is not proof — it is the price of a teleport,
+# and it is what keeps a single unlucky search (a person filling half the fan, a door that
+# opened) from moving a healthy tracker.
+CANDIDATE_STREAK = 3
+# ...and unknown_map verdicts in a row before the tracker says the map does not fit. The same
+# length for the same reason: one is a blocked lidar, three is a different room.
+UNKNOWN_STREAK = 3
+
+
+class CandidateVerdict(StrEnum):
+    """What one whole-map candidate is worth beside the pose the tracker holds."""
+
+    AGREE = "agree"  # the same place: the tracker is right
+    DISAGREE = "disagree"  # another place, clearly better, and the map is sure of it
+    UNKNOWN_MAP = "unknown_map"  # nothing on this map fits, or two places fit alike
+    NOTHING = "nothing"  # another place, but no better than what the tracker already has
+
+
+def same_place(a: Pose2D, b: Pose2D) -> bool:
+    """Whether two poses are the same place, to :data:`SAME_PLACE_M` and
+    :data:`SAME_PLACE_DEG`."""
+    return math.hypot(a.x - b.x, a.y - b.y) <= SAME_PLACE_M and abs(
+        wrap_angle(a.theta - b.theta)
+    ) <= math.radians(SAME_PLACE_DEG)
+
+
+def ambiguity(places: Sequence[tuple[Pose2D, float]]) -> float:
+    """How alike the map's runner-up explains the scan: the best fit among places that are a
+    different place from the first one, over the first one's fit.
+
+    ``places`` is the whole-map search's answer, best first, as
+    (pose, fit) — :meth:`pepin.localization.Localizer.global_candidates`. 0.0 when the map holds
+    one place that fits this scan and nothing else (the happy case); 1.0 when the best place
+    fits nothing at all, because then every rival is its equal.
+    """
+    if not places:
+        return 1.0
+    best_pose, best_fit = places[0]
+    if best_fit <= 0.0:
+        return 1.0
+    rivals = [
+        fit
+        for pose, fit in places[1:]
+        if math.hypot(pose.x - best_pose.x, pose.y - best_pose.y) > AMBIGUITY_APART_M
+        or abs(wrap_angle(pose.theta - best_pose.theta)) > math.radians(AMBIGUITY_APART_DEG)
+    ]
+    return max(rivals, default=0.0) / best_fit
+
+
+@dataclass(frozen=True)
+class GlobalCandidate:
+    """One whole-map search's answer, ready to travel: where the cart is (map frame), how sure
+    that is per direction (a 3x3 covariance over x, y, yaw read off the correlation peak's own
+    shape), the fit at the peak, how ambiguous the map's answer was (:func:`ambiguity`), the
+    stamp of the scan it was computed on and the map it was computed against."""
+
+    x: float
+    y: float
+    yaw: float
+    covariance: Matrix
+    score: float  # the inlier fraction at the peak: how well the scan fits the map there
+    ambiguity: float
+    stamp: float
+    map_id: str
+
+    @property
+    def pose(self) -> Pose2D:
+        """The place the search found."""
+        return Pose2D(self.x, self.y, self.yaw)
+
+    def measurement(self) -> PoseMeasurement:
+        """This candidate as a measurement for :func:`pepin.fusion.fuse`: the same shape any
+        scan source's match has, named :data:`pepin.sources.WATCHDOG`."""
+        return PoseMeasurement(
+            self.x, self.y, self.yaw, self.covariance, WATCHDOG, self.stamp, self.score
+        )
+
+    def to_json(self, **extra: Any) -> str:
+        """The candidate as one JSON message — everything a tracker needs to judge it, so a
+        reader never has to join two topics. ``extra`` adds the sender's own notes (the verdict
+        it reached, what the search cost) for the operator; a reader ignores what it does not
+        know."""
+        return json.dumps(
+            {
+                "x": round(self.x, 4),
+                "y": round(self.y, 4),
+                "yaw": round(self.yaw, 5),
+                "covariance": [[round(float(v), 8) for v in row] for row in self.covariance],
+                "score": round(self.score, 4),
+                "ambiguity": round(self.ambiguity, 4),
+                "stamp": self.stamp,
+                "map": self.map_id,
+                **extra,
+            }
+        )
+
+    @classmethod
+    def from_json(cls, text: str) -> GlobalCandidate:
+        """A candidate back from :meth:`to_json`; ``ValueError``, ``KeyError`` or ``TypeError``
+        for anything else, which is what a subscriber counts as a malformed message."""
+        raw = json.loads(text)
+        covariance: NDArray[np.float64] = np.asarray(raw["covariance"], dtype=float)
+        if covariance.shape != (3, 3):
+            raise ValueError(f"a candidate's covariance is 3x3, not {covariance.shape}")
+        return cls(
+            x=float(raw["x"]),
+            y=float(raw["y"]),
+            yaw=float(raw["yaw"]),
+            covariance=covariance,
+            score=float(raw["score"]),
+            ambiguity=float(raw["ambiguity"]),
+            stamp=float(raw["stamp"]),
+            map_id=str(raw["map"]),
+        )
+
+    def text(self) -> str:
+        """``(x, y, yaw deg) fit 0.63, ambiguity 0.21`` for a report line."""
+        return (
+            f"({self.x:+.2f}, {self.y:+.2f}, {math.degrees(self.yaw):+.0f} deg) "
+            f"fit {self.score:.2f}, ambiguity {self.ambiguity:.2f}"
+        )
+
+
+def judge(candidate: GlobalCandidate, current_pose: Pose2D, current_fit: float) -> CandidateVerdict:
+    """What ``candidate`` is worth beside the pose the tracker holds and the fit it holds it at.
+
+    In order, because the order is the argument:
+
+    1. The map's own answer first. A best place below :data:`UNKNOWN_MAP_FIT`, or a runner-up
+       explaining the scan within :data:`AMBIGUITY_MAX` of it from somewhere else, means the
+       search could not say where the cart is — ``unknown_map``. Judging such an answer against
+       the tracker would be reading tea leaves.
+    2. Then the cheap case: within :data:`SAME_PLACE_M` / :data:`SAME_PLACE_DEG` of the tracked
+       pose the candidate confirms it — ``agree``.
+    3. Elsewhere, it must also explain the scan better than the tracker's own fit by
+       :data:`BEAT_MARGIN` to be ``disagree``; otherwise it is a worse explanation of the same
+       scan from farther away, and claims ``nothing``.
+    """
+    if candidate.score < UNKNOWN_MAP_FIT or candidate.ambiguity > AMBIGUITY_MAX:
+        return CandidateVerdict.UNKNOWN_MAP
+    if same_place(candidate.pose, current_pose):
+        return CandidateVerdict.AGREE
+    if candidate.score >= current_fit + BEAT_MARGIN:
+        return CandidateVerdict.DISAGREE
+    return CandidateVerdict.NOTHING
+
+
+@dataclass(frozen=True)
+class GateAnswer:
+    """What the tracker does with one candidate: the verdict, and — only when a streak closed —
+    the pose to re-seed from, as the measurement it was fused into."""
+
+    verdict: CandidateVerdict
+    seed: PoseMeasurement | None = None
+
+    def pending(self, map_id: str) -> tuple[str, Pose2D, float] | None:
+        """The re-seed as the tracker node's pending-seed triple (map, pose, fit), or ``None``
+        when this candidate changes nothing."""
+        return None if self.seed is None else (map_id, self.seed.pose, self.seed.fit)
+
+
+@dataclass
+class CandidateGate:
+    """The tracker's side of the watchdog: judges every candidate that arrives, counts the
+    verdicts, and says once — after :attr:`candidate_streak` disagreements about ONE place — to
+    re-seed from it.
+
+    Pure: the node hands it the candidate, the pose it holds, the fit it holds it at and whether
+    a re-seed is allowed at all; it answers, and a report line reads its counters. The re-seed
+    pose is not the candidate itself but the two fused by their information
+    (:func:`pepin.fusion.fuse`, no gate — the disagreement is the point): a candidate sure to a
+    centimetre against a tracker lost at fit 0.2 carries the fusion by two hundred to one and
+    the seed IS the candidate, while a candidate the window bounded (a covariance widened a
+    hundredfold) barely moves a healthy tracker. One rule instead of two.
+    """
+
+    accept_candidates: bool = True  # off: candidates are judged and counted, never acted on
+    candidate_streak: int = CANDIDATE_STREAK
+    unknown_streak: int = UNKNOWN_STREAK
+    map_fits: bool = True  # False once unknown_streak candidates in a row said it does not
+    last: CandidateVerdict | None = None  # the newest verdict, for the status
+    _run: list[GlobalCandidate] = field(default_factory=list, init=False)  # the disagreeing ones
+    _unknown_run: int = field(default=0, init=False)
+    _counts: dict[str, int] = field(default_factory=dict, init=False)
+    _reseeds: int = field(default=0, init=False)
+    _malformed: int = field(default=0, init=False)
+    _reason: str = field(default="", init=False)  # the last malformed message's complaint
+
+    switches: ClassVar[tuple[str, ...]] = ("accept_candidates", "candidate_streak")
+
+    def switch(self, name: str, value: Any) -> None:
+        """A live flag by its name (:attr:`switches`); ``ValueError`` for any other name."""
+        if name not in self.switches:
+            raise ValueError(f"{name}: not a switch of the candidate gate")
+        setattr(self, name, int(value) if name == "candidate_streak" else bool(value))
+
+    def malformed(self, reason: str) -> None:
+        """A message that was not a candidate arrived; counted, with the complaint kept."""
+        self._malformed += 1
+        self._reason = reason
+
+    def observe(
+        self,
+        candidate: GlobalCandidate,
+        current_pose: Pose2D | None,
+        current_fit: float,
+        map_id: str,
+        allow: bool = True,
+    ) -> GateAnswer:
+        """One candidate against the tracker's ``current_pose`` (``None`` before the first fix)
+        and ``current_fit``, on the map ``map_id``.
+
+        A candidate computed on another map is evidence about nothing here and breaks every
+        streak (the laptop may be a map behind after a swap). ``allow`` is the node's word on
+        whether a re-seed is possible at all right now — a goal is running, say; the candidate
+        is still judged and counted, so the report tells the truth either way.
+        """
+        if candidate.map_id != map_id:
+            self._count("elsewhere")
+            self.forget()
+            return GateAnswer(CandidateVerdict.NOTHING)
+        if current_pose is None:
+            self._count("no_pose")
+            return GateAnswer(CandidateVerdict.NOTHING)
+        verdict = judge(candidate, current_pose, current_fit)
+        self._count(str(verdict))
+        self.last = verdict
+        if verdict is CandidateVerdict.UNKNOWN_MAP:
+            self._run = []
+            self._unknown_run += 1
+            self.map_fits = self.map_fits and self._unknown_run < self.unknown_streak
+            return GateAnswer(verdict)
+        self._unknown_run = 0
+        if verdict is not CandidateVerdict.DISAGREE:
+            self.forget()  # a candidate that confirms, or claims nothing, ends any run
+            return GateAnswer(verdict)
+        if self._run and not same_place(self._run[-1].pose, candidate.pose):
+            self._run = []  # disagreeing about a DIFFERENT place each time proves nothing
+        self._run.append(candidate)
+        if len(self._run) < self.candidate_streak or not (self.accept_candidates and allow):
+            return GateAnswer(verdict)
+        self._run = []
+        self._reseeds += 1
+        held = from_fit(current_pose, current_fit, TRACKER, candidate.stamp)
+        seed = fuse([held, candidate.measurement()], gate=math.inf)
+        return GateAnswer(verdict, seed)
+
+    def status(self) -> dict[str, Any]:
+        """The gate as the operator sees it on ``/localization/sources``: the newest verdict,
+        whether the map still fits, how many candidates each verdict has taken since the node
+        started and how many re-seeds came of them."""
+        return {
+            "verdict": None if self.last is None else str(self.last),
+            "map_fits": self.map_fits,
+            "reseeds": self._reseeds,
+            "accept": self.accept_candidates,
+        }
+
+    def report(self) -> str:
+        """One phrase for the tracker's report line; the counters are reset, the latched
+        ``map does not fit`` is not (only a candidate that agrees clears it)."""
+        counts, reseeds, malformed = self._counts, self._reseeds, self._malformed
+        seen = sum(counts.values())
+        body = ", ".join(f"{name} {n}" for name, n in sorted(counts.items())) or "none"
+        self._counts, self._reseeds, self._malformed = {}, 0, 0
+        return (
+            f"candidates {seen} ({body}), re-seeds {reseeds}, "
+            f"malformed {malformed}{f' ({self._reason})' if self._reason else ''}"
+            + ("" if self.map_fits else "; THE MAP DOES NOT FIT what the lidar sees")
+        )
+
+    def _count(self, name: str) -> None:
+        self._counts[name] = self._counts.get(name, 0) + 1
+
+    def forget(self) -> None:
+        """Every streak ends and the map is given the benefit of the doubt again: what a
+        candidate that confirms the tracker does, and what a new map means for the ones held."""
+        self._run, self._unknown_run, self.map_fits = [], 0, True

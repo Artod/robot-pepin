@@ -1220,7 +1220,7 @@ def test_the_tracker_feeds_every_scan_source_through_one_path_and_reports_each()
         "self._feed.status",
         "loc.update_from",
         "loc.sources_report",
-        "self._localizer.switch",
+        "target.switch",  # every flag is written to whichever object names it (``switches``)
     } <= calls
     assert "loc.update" not in calls and "self._gate.take" not in calls, "one path, not two"
     assert len(sf.calls_to(node, "loc.update_from")) == 1

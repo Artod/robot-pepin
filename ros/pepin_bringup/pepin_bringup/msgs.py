@@ -23,6 +23,7 @@ from std_msgs.msg import Header
 
 from pepin.camera import quaternion_from_rpy
 from pepin.depth import decode_rgb, quaternion_from_matrix, rotation_matrix
+from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.mounts import Mount
 from pepin.tsdf import RigidPose
 from pepin.worldmap import OccupancyGridFields
@@ -157,6 +158,40 @@ def pose_with_covariance(
     cov[35] = sigma_yaw_rad**2
     msg.pose.covariance = cov
     return msg
+
+
+# ---- maps ------------------------------------------------------------------------------------
+# A nav_msgs occupancy grid in our log-odds: map_server's trinary is 100 occupied, 0 free, -1
+# unknown, and unknown must stay at zero — a matcher scores unknown space silently, and calling
+# it free moved every fit by 0.3 (scratch/whole_map_search_offline.py, 2026-09-06).
+OCCUPIED_LOG_ODDS, FREE_LOG_ODDS = 4.0, -4.0
+
+
+def grid_from_msg(msg: Any) -> OccupancyGrid:
+    """A ``nav_msgs/OccupancyGrid`` as our log-odds grid (occupied +4, free -4, unknown 0)."""
+    info = msg.info
+    spec = GridSpec(
+        info.resolution,
+        info.origin.position.x,
+        info.origin.position.y,
+        info.width * info.resolution,
+        info.height * info.resolution,
+    )
+    grid = OccupancyGrid(spec)
+    data = np.array(msg.data, dtype=np.int16).reshape(info.height, info.width)
+    grid.log_odds[:] = np.where(
+        data >= 65, OCCUPIED_LOG_ODDS, np.where((data >= 0) & (data <= 35), FREE_LOG_ODDS, 0.0)
+    )
+    grid.version += 1
+    return grid
+
+
+def map_id(msg: Any) -> str:
+    """A map's identity as every node here spells it: ``239x215@-18.53,-4.38``, its size in
+    cells and its origin. Two nodes on two machines must agree letter for letter — a candidate
+    computed on another map is evidence about nothing — so the spelling lives here, once."""
+    origin = msg.info.origin.position
+    return f"{msg.info.width}x{msg.info.height}@{origin.x:.2f},{origin.y:.2f}"
 
 
 # ---- images --------------------------------------------------------------------------------
