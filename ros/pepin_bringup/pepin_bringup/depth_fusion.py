@@ -253,7 +253,15 @@ class DepthFusion(Node):
         # The scan has its own worker: integrating a revolution takes milliseconds, but it waits
         # for the lock a camera frame holds, and the executor thread must not wait with it.
         self._scans = Worker(self._on_scan_work, name="scan", on_error=self._on_work_error).start()
-        self.create_subscription(LaserScan, SCAN_TOPIC, self._on_scan, QoSProfile(depth=2))
+        # Reliable, like every other subscriber of this topic (the tracker, the depth stream):
+        # the board publishes it reliably and a best-effort reader of a reliable writer over
+        # the bridge gets nothing at all.
+        self.create_subscription(
+            LaserScan,
+            SCAN_TOPIC,
+            self._on_scan,
+            QoSProfile(depth=2, reliability=ReliabilityPolicy.RELIABLE),
+        )
         self._laser: tuple[PlanarMount, float, bool] | None = None  # mount, yaw, upside down
         self._map_pub: Any = None  # made on the first publish: only where this side owns /map
         self._clock = SnapshotClock(float(self._switches["snapshot_s"]))
@@ -279,16 +287,23 @@ class DepthFusion(Node):
         between a known room and an unknown one is only what is already in the cells."""
         if self._switches.on("resume_volume") and self._world_path.exists():
             try:
-                self._world = WorldMap.load(self._world_path, self._mount)
+                resumed = WorldMap.load(self._world_path, self._mount)
             except (ValueError, OSError) as exc:
                 self.get_logger().warning(f"{self._world_path}: not resumed ({exc})")
             else:
-                stats = self._world.maturity()
-                self.get_logger().info(
-                    f"resumed {self._world_path}: {stats['voxels']:.0f} voxels,"
-                    f" {stats['frames']:.0f} frames, stamp {self._world.stamp:.0f}"
-                )
-                return
+                if resumed.spec != self._spec:  # the config is the truth, not the old file
+                    self.get_logger().warning(
+                        f"{self._world_path}: saved on another grid ({resumed.spec.shape} from"
+                        f" {resumed.spec.origin}); starting empty on the config's"
+                    )
+                else:
+                    self._world = resumed
+                    stats = resumed.maturity()
+                    self.get_logger().info(
+                        f"resumed {self._world_path}: {stats['voxels']:.0f} voxels,"
+                        f" {stats['frames']:.0f} frames, stamp {resumed.stamp:.0f}"
+                    )
+                    return
         if self._seed_map:
             from pepin.mapping import grid_from_pgm
 
@@ -450,7 +465,9 @@ class DepthFusion(Node):
         return True
 
     def _snapshot(self) -> None:
-        """Write the volume to ``world_path`` — the warm cache a next run resumes from."""
+        """Write the volume to ``world_path`` — the warm cache a next run resumes from. The
+        lock is held for the write (half a second for a grid of noise, less for a real one), so
+        a snapshot costs the camera a frame or two once every ``snapshot_s``."""
         try:
             with self._lock:
                 self._world.save(self._world_path)
@@ -605,7 +622,6 @@ class DepthFusion(Node):
             )
         )
         self._tally.count("maps")
-        self._map_counts = view.counts()
 
     def _report(self) -> None:
         self._read_plane(0.0)  # a board that came up after this node still moves the band
