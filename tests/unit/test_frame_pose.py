@@ -10,6 +10,7 @@ import pytest
 
 from pepin.depth import rotation_matrix
 from pepin.frame_pose import FramePoser, PoseHistory
+from pepin.lean import Lean
 from pepin.tsdf import RigidPose
 
 
@@ -95,3 +96,96 @@ def test_the_frames_asked_for_are_the_poser_s_own_names() -> None:
     ]
     fake: PoseHistory = history  # the fake satisfies the protocol
     assert fake.pose_at(0.0, "base", "odo") is not None
+
+
+class FakeLean:
+    """A fixed lean at every stamp, and a count of who asked."""
+
+    def __init__(self, roll_deg: float = 0.0, pitch_deg: float = 0.0) -> None:
+        self.lean = Lean(math.radians(roll_deg), math.radians(pitch_deg), 0.0, 1.0)
+        self.asked: list[float] = []
+
+    def lean_at(self, stamp: float) -> Lean | None:
+        self.asked.append(stamp)
+        return Lean(self.lean.roll, self.lean.pitch, stamp, self.lean.quality)
+
+
+class LevelHistory:
+    """The cart at the map's origin, facing along x, its camera on the same spot: whatever the
+    poser answers is the lean and nothing else."""
+
+    def pose_at(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
+        return RigidPose(np.eye(3), np.zeros(3))
+
+
+def test_a_five_degree_pitch_moves_a_point_three_metres_out_by_the_geometric_amount() -> None:
+    """The whole reason the lean exists: nose down by 5 degrees, a wall 3 m ahead drops
+    3 sin 5 = 26 cm and comes 3 (1 - cos 5) = 1.1 cm nearer. The poser puts the lean under the
+    planar pose, so the point lands where it really is."""
+    lean = FakeLean(pitch_deg=5.0)
+    poser = FramePoser(LevelHistory(), lean=lean, apply_lean=True)
+    placed = poser.to_map(np.array([[3.0, 0.0, 0.0]]), 1.0)
+    assert placed is not None
+    assert placed[0, 2] == pytest.approx(-3.0 * math.sin(math.radians(5.0)))
+    assert placed[0, 0] == pytest.approx(3.0 * math.cos(math.radians(5.0)))
+    assert float(np.linalg.norm(placed[0] - np.array([3.0, 0.0, 0.0]))) == pytest.approx(
+        2 * 3.0 * math.sin(math.radians(2.5)), abs=1e-9
+    )
+    # the camera hangs off base_link, so it swings with the body and its rotation carries the lean
+    camera = poser.camera_in_map(1.0)
+    assert camera is not None and camera.rotation == pytest.approx(lean.lean.rotation())
+    assert lean.asked  # the lean was asked for at the frame's stamp, not read as "now"
+
+
+def test_the_switch_off_is_the_pose_the_poser_has_always_answered() -> None:
+    """``apply_lean`` off, or a source with nothing to say about that moment, and every answer
+    is bit for bit the single lookup of before — no multiplication by a rotation of one."""
+    history, lean = FakeHistory(), FakeLean(roll_deg=3.0, pitch_deg=-4.0)
+    plain = FramePoser(FakeHistory())
+    off = FramePoser(history, lean=lean, apply_lean=False)
+    for stamp in (0.5, 2.0):
+        for name in ("base_in_map", "camera_in_map"):
+            want, got = getattr(plain, name)(stamp), getattr(off, name)(stamp)
+            assert want is not None and got is not None
+            assert np.array_equal(want.rotation, got.rotation)
+            assert np.array_equal(want.translation, got.translation)
+    assert not lean.asked  # switched off, the source is not even consulted
+    assert history.asked == [(0.5, "base_link", "map"), (0.5, "camera_optical", "map")] * 1 + [
+        (2.0, "base_link", "map"),
+        (2.0, "camera_optical", "map"),
+    ]
+    carried = FramePoser(FakeHistory()).carry(np.array([[2.0, 0.0, 0.2]]), 0.0, 1.0)
+    same = off.carry(np.array([[2.0, 0.0, 0.2]]), 0.0, 1.0)
+    assert carried is not None and same is not None and np.array_equal(carried, same)
+
+
+def test_a_lean_that_changes_between_two_stamps_rides_along_with_the_carry() -> None:
+    """A scan taken while the cart was level, carried into a frame taken 5 degrees nose down:
+    the point must come out 5 degrees higher in the frame's own axes, because the body under it
+    tipped. Two leans, one on each side of the motion."""
+
+    class Changing:
+        def lean_at(self, stamp: float) -> Lean | None:
+            return Lean(0.0, math.radians(5.0) if stamp > 0.5 else 0.0, stamp, 1.0)
+
+    poser = FramePoser(LevelHistory(), lean=Changing(), apply_lean=True)
+    moved = poser.carry(np.array([[3.0, 0.0, 0.0]]), 0.0, 1.0)
+    assert moved is not None
+    assert moved[0, 2] == pytest.approx(3.0 * math.sin(math.radians(5.0)))
+    assert poser.motion(0.0, 1.0) is not None
+
+
+def test_a_source_with_nothing_to_say_about_the_moment_leaves_the_pose_alone() -> None:
+    """The IMU has no reading covering that stamp (the node just started, a gap in the stream):
+    the poser answers the planar pose rather than nothing at all."""
+
+    class Silent:
+        def lean_at(self, stamp: float) -> Lean | None:
+            return None
+
+    poser = FramePoser(FakeHistory(), lean=Silent(), apply_lean=True)
+    plain = FramePoser(FakeHistory())
+    got, want = poser.camera_in_map(2.0), plain.camera_in_map(2.0)
+    assert got is not None and want is not None
+    assert np.array_equal(got.rotation, want.rotation)
+    assert poser.lean_at(2.0) is None

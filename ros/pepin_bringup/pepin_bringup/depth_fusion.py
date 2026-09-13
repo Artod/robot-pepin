@@ -88,6 +88,7 @@ from pepin_bringup.msgs import (
     stamp_seconds,
 )
 from pepin_bringup.node_kit import (
+    LeanFeed,
     Switches,
     Tally,
     TfHistory,
@@ -119,6 +120,13 @@ FLAGS = FlagSet(
         description="frames are fused only while the tracker reports /localization_fit >= 0.50;"
         " off, every frame is fused: SLAM mode, where RTAB-Map owns the pose and no tracker"
         " speaks",
+    ),
+    Flag(
+        "imu_lean",
+        False,
+        description="a frame is placed with the cart's lean at its stamp (pepin.lean, from"
+        " /imu/data_raw) composed on base_link before the planar odometry, instead of as if the"
+        " cart stood level; off, the lean is estimated and reported but not applied",
     ),
     Flag(
         "self_heal",
@@ -267,7 +275,12 @@ class DepthFusion(Node):
         self._sync = TimeSynchronizer([depth_sub, image_sub], PAIR_QUEUE)
         self._sync.registerCallback(self._on_pair)
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
-        self._poser = FramePoser(TfHistory(self._tf, timeout_s=TF_WAIT_S))
+        self._lean = LeanFeed(self, config.parent, on_unmounted=self._on_unmounted)
+        self._poser = FramePoser(
+            TfHistory(self._tf, timeout_s=TF_WAIT_S),
+            lean=self._lean,
+            apply_lean=self._switches.on("imu_lean"),
+        )
         self._read_plane(BAND_TF_WAIT_S)
         self._intr: Intrinsics | None = None
         self._fit = 0.0  # no report yet reads as lost: every gate here compares with <
@@ -400,8 +413,12 @@ class DepthFusion(Node):
 
     # ---- switches ------------------------------------------------------------------------
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
-        """A flag changed: ``band_half_z`` rebuilds the height band, the two rates retime their
-        timer, ``snapshot_s`` its clock, and the rest are only read where they are used."""
+        """A flag changed: ``imu_lean`` is the poser's switch, ``band_half_z`` rebuilds the
+        height band, the two rates retime their timer, ``snapshot_s`` its clock, and the rest
+        are only read where they are used."""
+        if name == "imu_lean":
+            self._poser.apply_lean = bool(new)
+            return
         if name == "band_half_z":
             self._set_band()
             return
@@ -419,6 +436,15 @@ class DepthFusion(Node):
 
     def _on_work_error(self, text: str) -> None:
         self.get_logger().error(f"fusion failed on a frame:\n{text}")
+
+    def _on_unmounted(self, frame_id: str) -> None:
+        """IMU readings the node cannot turn into base_link: the lean stays unknown and every
+        frame is placed level, whatever ``imu_lean`` says."""
+        self._tally.count("unleaned")
+        self.get_logger().error(
+            f"IMU readings in {frame_id} and no mount: frames are placed as if the cart were level",
+            throttle_duration_sec=60,
+        )
 
     def _on_tf_failure(self, kind: str, text: str) -> None:
         self._tally.count("no_tf")
@@ -672,7 +698,7 @@ class DepthFusion(Node):
         c = w.counts
         skipped = (
             f"low fit {c['low_fit']}, at bound {c['refused_at_bound']},"
-            f" self-heals {c['self_heals']},"
+            f" self-heals {c['self_heals']}, unleaned {c['unleaned']},"
             f" no tf {c['no_tf']}, bad frame {c['bad_frame']}, no intrinsics {c['no_intrinsics']}"
         )
         tf_text = "; ".join(f"{k} {c['tf_' + k]}: {v}" for k, v in w.notes.items())
@@ -683,7 +709,7 @@ class DepthFusion(Node):
             f" align {w.ms_per('align', 'frames'):.0f} ms, {self._turns(w)};"
             f" refused: {self._refusals(w) or 'none'}; skipped: {skipped};"
             f" no image {c['no_image']}; surface {self._surface_points} points;"
-            f" {self._band_text()}; {self._world_line(w)};"
+            f" {self._band_text()}; {self._world_line(w)}; {self._lean.report()};"
             f" flags: {self._switches.state()}" + (f"; tf: {tf_text}" if tf_text else "")
         )
 

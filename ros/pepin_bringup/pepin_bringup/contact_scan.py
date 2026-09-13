@@ -29,7 +29,8 @@ looks 1.02 m ahead, so the scan reports the foot of whatever stands behind the n
 the lidar owns that metre.
 
 The flags (:data:`FLAGS`, all live, ``ros/flags.sh set contact_scan <name> <value>``):
-``contact_scan`` (publish or not), ``shadow`` (take the band's own width back off the range) and
+``contact_scan`` (publish or not), ``shadow`` (take the band's own width back off the range),
+``imu_lean`` (the floor plane follows the gyro too, not the accelerometer alone) and
 ``max_range``; their state and the last frame's :class:`pepin.contact.ContactVerdict` are printed
 in every report line.
 """
@@ -40,8 +41,8 @@ from pathlib import Path
 
 import numpy as np
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
-from sensor_msgs.msg import CameraInfo, Image, Imu, LaserScan
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import CameraInfo, Image, LaserScan
 
 from pepin.camera import CameraConfig, mount_transform
 from pepin.contact import (
@@ -51,11 +52,10 @@ from pepin.contact import (
     FloorPlane,
     contact_scan,
 )
-from pepin.depth import SCAN_HALF_FOV, SCAN_STEP, UP_LEVEL, Array, CameraPose, Intrinsics, Tilt
+from pepin.depth import SCAN_HALF_FOV, SCAN_STEP, Array, CameraPose, Intrinsics
 from pepin.flags import Flag, FlagSet
-from pepin.mounts import Mounts
-from pepin_bringup.msgs import array_from_image, imu_arrays, scan_from_ranges, stamp_seconds
-from pepin_bringup.node_kit import Switches, Tally, Worker, spin_main
+from pepin_bringup.msgs import array_from_image, scan_from_ranges
+from pepin_bringup.node_kit import LeanFeed, Switches, Tally, Worker, spin_main
 
 CONFIG = "/ws/config/camera.json"
 RANGE_MIN_M = 0.10  # the LaserScan's floor; the contact line itself never comes nearer than 1.0 m
@@ -82,6 +82,14 @@ FLAGS = FlagSet(
         " (pepin.contact.band_shadow); off is the raw boundary ray",
     ),
     Flag(
+        "imu_lean",
+        False,
+        description="the floor plane leans with the gyro as well as the accelerometer"
+        " (pepin.lean: the lean of a wheel climbing a threshold is followed within a sample"
+        " instead of being gated away as a push); off, the accelerometer alone, as it always"
+        " has been",
+    ),
+    Flag(
         "max_range",
         CONTACT_MAX_RANGE,
         range=(RANGE_MIN_M, RANGE_CEILING_M),
@@ -103,19 +111,22 @@ class ContactScan(Node):
         self._camera = CameraPose(x, y, z, pitch)
         # Declared after every other parameter: rclpy runs the switches' callback on
         # declarations too, and it refuses everything that is not a flag.
-        self._switches = Switches(self, FLAGS)
+        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         newest = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(LaserScan, "/contact_scan", reliable)
         self._tally = Tally(STAGES)
         self._intr: Intrinsics | None = None
-        self._imu_mount = self._imu_rotation(config.parent)
-        self._tilt: Tilt | None = None
+        self._lean = LeanFeed(
+            self,
+            config.parent,
+            use_gyro=self._switches.on("imu_lean"),
+            on_unmounted=self._no_imu_mount,
+        )
         self._plane: FloorPlane | None = None
         self._plane_up: Array | None = None  # the lean it was built for
         self._plane_intr: Intrinsics | None = None  # and the optics
         self._verdict: ContactVerdict | None = None  # the last frame's, for the report line
-        self.create_subscription(Imu, "/imu/data_raw", self._on_imu, qos_profile_sensor_data)
         self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
         self.create_subscription(Image, "/camera/depth", self._on_depth, newest)
         self._worker = Worker(self._process, name="contact", on_error=self._on_work_error).start()
@@ -136,39 +147,19 @@ class ContactScan(Node):
         self.get_logger().error(f"the contact scan failed on a frame:\n{text}")
 
     # ---- inputs ------------------------------------------------------------------------------
-    def _imu_rotation(self, config_dir: Path) -> Array | None:
-        """The rotation from the chip's axes into base_link (``config/imu.json`` through
-        :class:`pepin.mounts.Mounts`), read once; ``None`` (with one error) when the files are
-        missing or broken. A reading already published in base_link — the C++ bridge's, which has
-        applied this very rotation — must not be turned a second time."""
-        try:
-            rotation: Array = Mounts.load(config_dir).imu.rotation()
-        except (OSError, KeyError, ValueError, TypeError) as exc:
-            self.get_logger().error(
-                f"no IMU mount in {config_dir} ({exc}): a reading outside base_link cannot"
-                " lean the floor, and the contact line will be read off a level plane"
-            )
-            return None
-        return rotation
+    def _on_switch(self, name: str, _old: object, new: object) -> None:
+        """A flag changed: ``imu_lean`` is the estimator's switch, the rest are only read."""
+        if name == "imu_lean":
+            self._lean.use_gyro = bool(new)
 
-    def _on_imu(self, msg: Imu) -> None:
-        """The accelerometer says which way is up: a base_link reading (the C++ bridge's) as is,
-        any other frame through the mount in config/imu.json."""
-        if self._tilt is None:
-            if msg.header.frame_id == "base_link":
-                rotation = np.eye(3)  # the bridge rotated it already: see _imu_rotation
-            elif self._imu_mount is not None:
-                rotation = self._imu_mount
-            else:
-                self._tally.count("unleaned")
-                self.get_logger().error(
-                    f"IMU readings in {msg.header.frame_id} and no mount: the floor stays level",
-                    throttle_duration_sec=60,
-                )
-                return
-            self._tilt = Tilt(rotation)
-        accel, _gyro = imu_arrays(msg)
-        self._tilt.observe(accel, stamp_seconds(msg.header.stamp))
+    def _no_imu_mount(self, frame_id: str) -> None:
+        """IMU readings outside base_link with no mount to turn them: the floor stays level and
+        a leaning cart reads its contacts long, which the report line says once a window."""
+        self._tally.count("unleaned")
+        self.get_logger().error(
+            f"IMU readings in {frame_id} and no mount: the floor stays level",
+            throttle_duration_sec=60,
+        )
 
     def _on_info(self, msg: CameraInfo) -> None:
         self._intr = Intrinsics.from_camera_info(msg.k, msg.width, msg.height)
@@ -182,7 +173,7 @@ class ContactScan(Node):
     def _floor_plane(self, intr: Intrinsics) -> FloorPlane:
         """The floor's geometry for the current lean and optics, rebuilt only when one of them
         moves: per pixel where its ray lands on the plane, how far that is and in which bearing."""
-        up = self._tilt.up if self._tilt is not None else UP_LEVEL
+        up = self._lean.up
         if (
             self._plane is None
             or self._plane_up is None
@@ -252,7 +243,8 @@ class ContactScan(Node):
             + f", {c['marked'] / max(c['frames'] * N_BINS, 1) * 100:.1f}% of the fan marked"
             + (f" (median contact {float(np.median(ranges)):.2f} m)" if ranges else "")
             + (f"; last frame: {verdict}" if verdict is not None else "; no frame yet")
-            + f"; flags: {self._switches.state()}; ms median/max: {w.stages()}"
+            + f"; {self._lean.report()}; flags: {self._switches.state()};"
+            + f" ms median/max: {w.stages()}"
         )
         if c["unleaned"]:
             self.get_logger().warning(

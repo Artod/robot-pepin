@@ -27,7 +27,12 @@ RCLPY = ros_stubs.install()
 
 from camera_configs import CALIBRATION, camera_config  # noqa: E402
 from pepin_bringup.depth_stream import FLAGS, SCAN_RANGE_M, DepthStream  # noqa: E402
-from pepin_bringup.msgs import image_from_array, pose_from_transform, scan_from_ranges  # noqa: E402
+from pepin_bringup.msgs import (  # noqa: E402
+    image_from_array,
+    pose_from_transform,
+    scan_from_ranges,
+    stamp_seconds,
+)
 
 from pepin.camera import (  # noqa: E402
     OPTICAL_RPY,
@@ -433,24 +438,26 @@ def test_a_scan_the_odometry_cannot_carry_passes_as_it_is_and_is_counted(build: 
     assert counts["uncarried"] == 1 and counts["frames"] == 1 and counts["verdicts"] == 1
 
 
-def test_the_imu_leans_the_floor_only_while_a_floor_stage_is_on(build: Build) -> None:
-    """A base_link reading seeds the tilt as is; with both floor stages off it is not read;
-    a reading in another frame with no mount switches the floor stages off."""
+def test_the_imu_leans_the_floor_only_while_something_asks_for_the_lean(build: Build) -> None:
+    """A base_link reading seeds the lean as is; with both floor stages off and imu_lean off it
+    is not read at all; a reading in another frame with no mount switches the floor stages
+    off."""
     node, _net = build()
     reading = ros_stubs.Imu(
         header=ros_stubs.Header(stamp=_stamp(0), frame_id="base_link"),
         linear_acceleration=ros_stubs.Vector3(x=0.0, y=0.0, z=9.81),
     )
     node.subs["/imu/data_raw"][1](reading)
-    assert node._tilt is not None and node._tilt.up == pytest.approx([0.0, 0.0, 1.0])
+    assert node._lean.estimator is not None and node._lean.up == pytest.approx([0.0, 0.0, 1.0])
+    assert "lean +0.0/+0.0 deg" in node._lean.report()
     off, _ = build(floor_anchor=False)
     off.subs["/imu/data_raw"][1](reading)
-    assert off._tilt is None
+    assert off._lean.estimator is None and "lean none" in off._lean.report()
     alien, _ = build(floor_pairs=True)
-    alien._imu_mount = None
+    alien._lean._mount = None
     reading.header.frame_id = "imu"
     alien.subs["/imu/data_raw"][1](reading)
-    assert alien._tilt is None
+    assert alien._lean.estimator is None
     assert not alien._switches.on("floor_anchor") and not alien._switches.on("floor_pairs")
     assert not alien._pipeline.on("floor_anchor") and not alien._pipeline.on("floor_pairs")
     assert "the floor stages are off" in alien.logger.texts("error")[-1]
@@ -537,3 +544,25 @@ def test_a_law_file_without_a_ray_record_leaves_the_affine_law_alone(build: Buil
     frame(node, net, CONFIG_CAM, 2.0, 0)
     node._report()
     assert "ray" not in json.loads(node._law_file.read_text()), "nothing is invented"
+
+
+def test_the_imu_lean_flag_places_the_frame_and_carries_the_scan_with_the_body(
+    build: Build,
+) -> None:
+    """With every floor stage off, imu_lean alone is enough to read the IMU, and it is the
+    poser that the reading reaches: the flag turns the lean on for the frame\'s pose and turns
+    the gyro on inside the estimator; off again, both go back."""
+    node, _net = build(floor_anchor=False, imu_lean=True)
+    assert node._poser.apply_lean and node._lean.use_gyro
+    node.subs["/imu/data_raw"][1](
+        ros_stubs.Imu(
+            header=ros_stubs.Header(stamp=_stamp(0), frame_id="base_link"),
+            linear_acceleration=ros_stubs.Vector3(x=0.0, y=0.0, z=9.81),
+        )
+    )
+    assert node._lean.estimator is not None  # read with no floor stage on at all
+    at = stamp_seconds(_stamp(0))
+    assert node._poser.lean_at(at) is not None
+    node._switches.set("imu_lean", False)
+    assert not node._poser.apply_lean and not node._lean.use_gyro
+    assert node._poser.lean_at(at) is None

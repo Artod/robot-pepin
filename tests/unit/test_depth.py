@@ -1,5 +1,6 @@
 """The lidar sets the law of the camera's depth: projection, the pairs, the pooled fit, the
-scan the costmap reads, the floor anchor and the tilt behind it, the saved law."""
+scan the costmap reads, the floor anchor (the lean behind it is tests/unit/test_lean.py), the
+saved law."""
 
 import math
 from pathlib import Path
@@ -175,83 +176,6 @@ def test_the_floor_anchor_is_a_height_test_so_a_shoe_stays_a_shoe() -> None:
     assert np.allclose(fixed[320, 230], guess[320, 230])  # the box is left to the network
     assert np.allclose(fixed[120, 430], guess[120, 430])  # so is the shoe
     assert level[120, 430] > 3.0  # and the shoe is far: 5 cm at 3 m is 1.6 % of depth
-
-
-def _chip_reading(pitch_deg: float) -> np.ndarray:
-    """The MPU6050's accelerometer (Y up, roll +90 mount) when the cart is nose down by
-    ``pitch_deg``: gravity leans onto the chip's z (base x)."""
-    from pepin.depth import GRAVITY
-
-    p = math.radians(pitch_deg)
-    return np.array([-GRAVITY * math.sin(p), GRAVITY * math.cos(p), 0.0])
-
-
-def test_the_tilt_reads_gravity_through_the_mount_and_ignores_a_bump_and_a_push() -> None:
-    """Level at the first sample; a bump (not 1 g) is ignored; a push (the cart accelerating
-    leans the apparent gravity 3 degrees at the same 1 g) is ignored for as long as any push
-    lasts; the same lean outlasting the time constant is a slope and the up vector follows."""
-    from pepin.depth import GRAVITY, TILT_TAU_S, Tilt, imu_mount_rotation
-
-    tilt = Tilt(imu_mount_rotation(90.0, 0.0, 0.0))
-    tilt.observe(np.array([0.0, GRAVITY, 0.0]), 0.0)  # the chip's Y up: level
-    assert np.allclose(tilt.up, [0.0, 0.0, 1.0])
-    assert tilt.roll_pitch_deg == pytest.approx((0.0, 0.0), abs=1e-9)
-    tilt.observe(np.array([0.0, GRAVITY, 6.0]), 0.5)  # a bump: not 1 g, ignored
-    assert np.allclose(tilt.up, [0.0, 0.0, 1.0])
-    t = 0.5
-    while t < 3.0:  # a push: 3 degrees for 2.5 s
-        t += 0.1
-        tilt.observe(_chip_reading(3.0), t)
-    assert tilt.roll_pitch_deg[1] == pytest.approx(0.0, abs=1e-9)
-    while t < 3.0 + TILT_TAU_S + 0.5:  # the lean persists past the time constant: a slope
-        t += 0.1
-        tilt.observe(_chip_reading(3.0), t)
-    assert tilt.roll_pitch_deg[1] == pytest.approx(3.0, abs=1e-6)
-
-
-def test_a_small_lean_is_followed_slowly_and_a_nan_sample_is_ignored() -> None:
-    """Half a degree is inside the gate and is low-passed with the 10 s time constant: after
-    30 s the filter has come 95 % of the way. A NaN reading passes no gate and leaves the up
-    vector finite and unchanged."""
-    from pepin.depth import GRAVITY, TILT_TAU_S, Tilt, imu_mount_rotation
-
-    tilt = Tilt(imu_mount_rotation(90.0, 0.0, 0.0))
-    tilt.observe(np.array([0.0, GRAVITY, 0.0]), 0.0)
-    for i in range(1, 301):
-        tilt.observe(_chip_reading(0.5), 0.1 * i)
-    assert tilt.roll_pitch_deg[1] == pytest.approx(
-        0.5 * (1 - math.exp(-30.0 / TILT_TAU_S)), abs=0.01
-    )
-    before = tilt.up.copy()
-    tilt.observe(np.array([np.nan, GRAVITY, 0.0]), 31.0)
-    assert np.array_equal(tilt.up, before) and np.isfinite(tilt.up).all()
-
-
-def test_a_dead_accelerometer_leaves_the_lean_alone_instead_of_dividing_by_its_zero() -> None:
-    """A bridge that publishes zeros (the chip unplugged, a read that failed) must not turn the
-    up vector into NaN — every pixel of the floor would then stop being the floor."""
-    from pepin.depth import GRAVITY, Tilt, imu_mount_rotation
-
-    tilt = Tilt(imu_mount_rotation(90.0, 0.0, 0.0))
-    tilt.observe(np.array([0.0, GRAVITY, 0.0]), 0.0)
-    for i in range(10):
-        tilt.observe(np.zeros(3), 0.1 * (i + 1))
-    assert np.allclose(tilt.up, [0.0, 0.0, 1.0])
-    assert np.isfinite(tilt.up).all()
-
-
-def test_the_imu_mount_of_the_config_is_the_rotation_the_cpp_bridge_applies() -> None:
-    """config/imu.json says roll +90 deg; base_bridge.cpp's to_base_axes for a Y-up chip maps
-    base (x, y, z) <- chip (x, -z, y). The two must agree, or a reading published in base_link
-    would be rotated twice."""
-    import json
-
-    from pepin.depth import imu_mount_rotation
-
-    mount = json.loads((Path(__file__).parents[2] / "config/imu.json").read_text())["mount"]
-    rot = imu_mount_rotation(mount["roll_deg"], mount["pitch_deg"], mount["yaw_deg"])
-    chip = np.array([1.0, 2.0, 3.0])
-    assert rot @ chip == pytest.approx([1.0, -3.0, 2.0])
 
 
 def test_a_floor_the_camera_cannot_see_anchors_nothing() -> None:
@@ -508,21 +432,6 @@ def test_the_law_is_saved_atomically_and_loaded_only_while_fresh_and_plausible(
     assert load_law(path, now=1000.0) is None  # outside the bounds
     path.write_text("{not json")
     assert load_law(path, now=1000.0) is None
-
-
-def test_a_sideways_imu_mount_reads_as_a_roll_of_ninety_degrees_and_no_floor() -> None:
-    """The chip's Y up through an identity mount (as if config/imu.json said the chip were
-    not turned): the up vector lands on base_link's y, a 90 degree roll, and a floor
-    perpendicular to that passes through the wheels edge-on — no ray meets it, every pixel's
-    floor depth is NaN. The mount's roll +90 is what turns this into a level floor."""
-    from pepin.depth import GRAVITY, Tilt, floor_depth
-
-    tilt = Tilt(np.eye(3))
-    tilt.observe(np.array([0.0, GRAVITY, 0.0]), 0.0)
-    assert tilt.up == pytest.approx([0.0, 1.0, 0.0])
-    assert tilt.roll_pitch_deg == pytest.approx((90.0, 0.0))
-    cam = CameraPose(0.0, 0.0, 1.23, math.radians(26.0))
-    assert np.isnan(floor_depth(INTR, cam, up=tilt.up)).all()
 
 
 def test_the_edge_mask_of_a_five_by_five_is_the_spike_its_cross_and_the_border() -> None:

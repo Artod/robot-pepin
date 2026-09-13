@@ -914,19 +914,20 @@ def test_the_floor_s_edge_is_a_node_of_the_kit_and_crosses_the_bridge() -> None:
 
     node = sf.tree(f"{NODES}/contact_scan.py")
     assert "super().__init__('contact_scan')" in sf.unparsed(node, ast.Call)
-    assert {"/contact_scan", "/camera/depth", "/camera/camera_info", "/imu/data_raw"} <= sf.strings(
-        node
-    )
-    assert {"FloorPlane", "contact_scan", "ContactVerdict", "Tilt"} <= sf.imported(node)
+    assert {"/contact_scan", "/camera/depth", "/camera/camera_info"} <= sf.strings(node)
+    # the IMU is not subscribed here by hand: one owner of the lean for every node (LeanFeed)
+    assert "/imu/data_raw" in sf.strings(sf.tree(f"{NODES}/node_kit.py"))
+    assert {"FloorPlane", "contact_scan", "ContactVerdict", "LeanFeed"} <= sf.imported(node)
     assert {"FloorPlane.of", "contact_scan", "scan_from_ranges"} <= sf.calls(node)
     # the fan is /depth_scan's own, not one of its own invention
     assert {"SCAN_HALF_FOV", "SCAN_STEP"} <= sf.names(node)
     # the kit, not a copy of it: one worker thread, the tally's stages, the switches' state
     assert {"Worker", "Switches", "Tally", "spin_main"} <= sf.imported(node)
     assert "self._switches.state" in sf.calls(node) and "self._worker.stop" in sf.calls(node)
-    # the three live flags (CLAUDE.md rule 19), the feature's own name first
+    # the live flags (CLAUDE.md rule 19), the feature's own name first
     flags = load_table(REPO / NODES / "contact_scan.py")
-    assert flags.names == ("contact_scan", "shadow", "max_range")
+    assert flags.names == ("contact_scan", "shadow", "imu_lean", "max_range")
+    assert flags["imu_lean"] is False, "off until the lean is measured on the robot"
     assert flags["contact_scan"] is True and flags["shadow"] is True
     assert all(flag.live for flag in flags), "every one of them takes the next frame"
     # the plane is a cache with two keys: the lean and the optics
@@ -1349,12 +1350,14 @@ def test_the_flags_script_reaches_a_node_where_it_runs_and_refuses_before_any_ho
 
 def test_the_floor_anchors_the_depth_and_leans_with_the_imu() -> None:
     """The depth node snaps floor pixels to the floor plane (switchable), the plane leans with
-    the accelerometer, and the IMU mount the laptop would apply is the one the board publishes
+    the cart, and the IMU mount the laptop would apply is the one the board publishes
     (roll +90 deg: the chip's Y up)."""
     node = sf.tree(f"{NODES}/depth_stream.py")
     flags = load_table(REPO / NODES / "depth_stream.py")
     assert flags["floor_anchor"] is True, "default on"
-    assert "/imu/data_raw" in sf.strings(node)
+    kit = sf.tree(f"{NODES}/node_kit.py")
+    assert "/imu/data_raw" in sf.strings(kit), "the lean's one subscription lives in the kit"
+    assert {"LeanEstimator", "Mounts"} <= sf.imported(kit)
     # The anchor is the pipeline's stage of that name, fed the IMU's up vector through the
     # frame's context; the flags are one bool per stage, in the chain's order, and the chain's
     # defaults are the measured ones (the lidar's affine law alone: scratch/pipeline_vs_truth).
@@ -1363,11 +1366,12 @@ def test_the_floor_anchors_the_depth_and_leans_with_the_imu() -> None:
     pipeline = standard_pipeline()
     assert [f.name for f in flags][: len(pipeline.names)] == pipeline.names
     assert {name: flags[name] for name in pipeline.names} == pipeline.switches
-    assert {"FrameContext", "Tilt"} <= sf.imported(node) and "self._tilt.up" in sf.unparsed(
+    assert {"FrameContext", "LeanFeed"} <= sf.imported(node) and "self._lean.up" in sf.unparsed(
         node, ast.Attribute
     )
-    # The mount is not read here by hand: one loader for every sensor's place on the cart.
-    assert "Mounts" in sf.imported(node) and "Mounts.load" in sf.calls(node)
+    # The mount is not read here by hand: one loader for every sensor's place on the cart,
+    # and the kit's LeanFeed is the only caller of it for the IMU.
+    assert "Mounts.load" in sf.calls(kit)
     mount = json.loads((REPO / "config/imu.json").read_text())["mount"]
     assert mount["roll_deg"] == 90.0 and mount["pitch_deg"] == 0.0 and mount["z_m"] == 0.10
     # The launch publishes that file, not a copy of its numbers: every rotation and

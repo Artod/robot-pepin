@@ -45,10 +45,16 @@ A model that cannot be built (no cached weights and no hub, no memory) is not tr
 1, the launch respawns it, the respawn retries — and in ``auto`` the frame is lost until the
 service answers; the report line says which.
 
+How far the cart leans is one estimator's (``pepin.lean`` through the kit's ``LeanFeed``, off
+``/imu/data_raw``): the floor plane's up vector, and — with ``imu_lean`` on — the lean the poser
+composes into the scan's carry and the camera's place, so a body tipped over a slipper does not
+place its frame as if it stood level.
+
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): one per stage of
 the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anchor``,
 ``parallax_anchor``, ``affine_law``, ``ray_law``, ``wall_correct``, ``floor_anchor`` — plus
-``depth_backend`` and ``scale_ceiling``, the largest 1 / scale the law may be fitted to; their
+``depth_backend``, ``scale_ceiling``, the largest 1 / scale the law may be fitted to, and
+``imu_lean``; their
 state is printed in every report line.
 """
 
@@ -66,19 +72,17 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
-from sensor_msgs.msg import CameraInfo, Image, Imu, LaserScan
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import CameraInfo, Image, LaserScan
 
 from pepin.camera import CameraConfig, mount_transform, optics
 from pepin.depth import (
     POOL_MIN_SAMPLES,
     SCALE_CEILING,
     SCAN_WINDOW_S,
-    UP_LEVEL,
     Array,
     CameraPose,
     Intrinsics,
-    Tilt,
     depth_to_scan,
     load_law,
     load_ray,
@@ -101,18 +105,17 @@ from pepin.depth_service import (
 from pepin.elevation import RayGain
 from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import FramePoser
-from pepin.mounts import Mounts
 from pepin.parallax import to_gray
 from pepin.tsdf import RigidPose
 from pepin_bringup.msgs import (
     array_from_image,
     image_from_array,
-    imu_arrays,
     scan_from_ranges,
     stamp_seconds,
 )
 from pepin_bringup.node_kit import (
     Fatal,
+    LeanFeed,
     Switches,
     Tally,
     TfHistory,
@@ -227,6 +230,14 @@ FLAGS = FlagSet(
         " law from being a clipped constant once the lidar's plane was measured. Set it back to"
         " 3.0 to compare the two laws in the field; a law that lands on a bound prints AT BOUND",
     ),
+    Flag(
+        "imu_lean",
+        False,
+        description="the cart's lean (pepin.lean, from /imu/data_raw) is followed with the gyro"
+        " as well as the accelerometer and carried into the scan's carry and the camera's place"
+        " in the map; off, the floor plane leans with the accelerometer alone, as it always has,"
+        " and nothing else is leaned",
+    ),
 )
 FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
 
@@ -299,15 +310,23 @@ class DepthStream(Node):
         for name in self._pipeline.names:  # a launch override reaches the stage it names
             self._pipeline.set(name, self._switches.on(name))
         set_scale_ceiling(float(self._switches["scale_ceiling"]))  # and the law's bound
-        self._imu_mount = self._imu_rotation(config.parent)
-        self._tilt: Tilt | None = None
         self._tally = Tally(STAGES)
-        self.create_subscription(Imu, "/imu/data_raw", self._on_imu, qos_profile_sensor_data)
+        self._lean = LeanFeed(
+            self,
+            config.parent,
+            use_gyro=self._switches.on("imu_lean"),
+            on_unmounted=self._no_imu_mount,
+            enabled=self._leans_anything,
+        )
         self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
         self.create_subscription(Image, "/camera/image", self._on_image, newest)
         self.create_subscription(LaserScan, "/scan", self._on_scan, reliable)
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
-        self._poser = FramePoser(TfHistory(self._tf, timeout_s=CARRY_WAIT_S))
+        self._poser = FramePoser(
+            TfHistory(self._tf, timeout_s=CARRY_WAIT_S),
+            lean=self._lean,
+            apply_lean=self._switches.on("imu_lean"),
+        )
         self._lidar_mount: RigidPose | None = None
         self._scans: deque[LaserScan] = deque()  # the last SCAN_WINDOW_S of scans, by stamp
         self._scan_lock = threading.Lock()
@@ -364,11 +383,15 @@ class DepthStream(Node):
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
         """A flag changed: ``depth_backend`` is the switch's mode, ``scale_ceiling`` the law's
-        upper bound, a stage's flag switches that stage of the pipeline."""
+        upper bound, ``imu_lean`` the poser's and the estimator's, a stage's flag switches that
+        stage of the pipeline."""
         if name == "depth_backend":
             self._net.mode = str(new)
         elif name == "scale_ceiling":
             set_scale_ceiling(float(new))  # the next fit is bounded by it; the law in hand is not
+        elif name == "imu_lean":
+            self._poser.apply_lean = bool(new)
+            self._lean.use_gyro = bool(new)
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
 
@@ -379,49 +402,26 @@ class DepthStream(Node):
         self._tally.count("tf_" + kind)
         self._tally.note(kind, text)
 
-    def _imu_rotation(self, config_dir: Path) -> Array | None:
-        """The rotation from the chip's axes into base_link (``config/imu.json`` through
-        :class:`pepin.mounts.Mounts`), read once; ``None`` (with one error) when the files are
-        missing or broken. It is only needed for a reading published in a frame other than
-        base_link: the C++ bridge (base_bridge.cpp, ``to_base_axes`` with ``imu_up_axis`` "y",
-        ``imu_frame`` "base_link") already turns the accelerometer into base_link — the same
-        rotation as this file's roll +90 deg — so for its readings the mount must not be applied
-        a second time."""
-        try:
-            rotation: Array = Mounts.load(config_dir).imu.rotation()
-        except (OSError, KeyError, ValueError, TypeError) as exc:
-            self.get_logger().error(
-                f"no IMU mount in {config_dir} ({exc}): a reading outside base_link"
-                " cannot lean the floor"
-            )
-            return None
-        return rotation
+    def _leans_anything(self) -> bool:
+        """Whether anything in this node wants the lean this second: a floor stage (the plane
+        the anchors snap to) or ``imu_lean`` (the poser). Nothing does — the readings are not
+        even decoded, and a stage switched back on picks the lean up afresh."""
+        return self._switches.on("imu_lean") or any(
+            self._switches.on(name) for name in FLOOR_STAGES
+        )
 
-    def _on_imu(self, msg: Imu) -> None:
-        """The accelerometer says which way is up: a base_link reading (the C++ bridge's) as is,
-        any other frame through the mount in config/imu.json. Read only while a floor stage
-        is on — the up vector has no other reader, and a stage switched back on picks the
-        tilt up afresh."""
-        if not any(self._switches.on(name) for name in FLOOR_STAGES):
-            return
-        if self._tilt is None:
-            if msg.header.frame_id == "base_link":
-                rotation = np.eye(3)  # the bridge rotated it already: see _imu_rotation
-            elif self._imu_mount is not None:
-                rotation = self._imu_mount
-            else:
-                # Without the mount the up vector would be the chip's own axes, and the floor
-                # would be anchored to a plane tilted by however the chip is glued on.
-                for name in FLOOR_STAGES:
-                    if self._switches.on(name):
-                        self._switches.set(name, False)
-                self.get_logger().error(
-                    f"IMU readings in {msg.header.frame_id} and no mount: the floor stages are off"
-                )
-                return
-            self._tilt = Tilt(rotation)
-        accel, _gyro = imu_arrays(msg)
-        self._tilt.observe(accel, stamp_seconds(msg.header.stamp))
+    def _no_imu_mount(self, frame_id: str) -> None:
+        """IMU readings outside base_link with no mount to turn them: the up vector would be
+        the chip's own axes and the floor would be anchored to a plane tilted by however the
+        chip is glued on, so the floor stages go off and the poser leans nothing."""
+        for name in FLOOR_STAGES:
+            if self._switches.on(name):
+                self._switches.set(name, False)
+        if self._switches.on("imu_lean"):
+            self._switches.set("imu_lean", False)
+        self.get_logger().error(
+            f"IMU readings in {frame_id} and no mount: the floor stages are off"
+        )
 
     def _on_info(self, msg: CameraInfo) -> None:
         self._intr = Intrinsics.from_camera_info(msg.k, msg.width, msg.height)
@@ -471,7 +471,7 @@ class DepthStream(Node):
         ctx = FrameContext(
             self._intr_or_nominal(msg),
             cam,
-            up=self._tilt.up if self._tilt is not None else UP_LEVEL,
+            up=self._lean.up,
             lidar=lidar,
             stamp=stamp_seconds(msg.header.stamp),
             gray=to_gray(rgb) if self._pipeline.on("parallax_anchor") else None,
@@ -676,9 +676,7 @@ class DepthStream(Node):
             extra += f", camera pose from config {c['camera_from_config']} frames (no TF edge)"
         if c["camera_panned"]:
             extra += f", head panned {c['camera_panned']} frames (projected as if not)"
-        if self._tilt is not None and any(self._switches.on(name) for name in FLOOR_STAGES):
-            roll, pitch = self._tilt.roll_pitch_deg
-            extra += f", lean roll {roll:+.1f} pitch {pitch:+.1f} deg"
+        extra += f", {self._lean.report()}"
         if w.notes:
             extra += ", tf: " + "; ".join(
                 f"{kind} {c['tf_' + kind]}: {text}" for kind, text in w.notes.items()

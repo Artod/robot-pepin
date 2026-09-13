@@ -24,8 +24,10 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import rclpy
 from rcl_interfaces.msg import (
     FloatingPointRange,
@@ -37,16 +39,29 @@ from rcl_interfaces.msg import (
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.parameter import Parameter
+from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
+from sensor_msgs.msg import Imu
 from tf2_ros import Buffer, TransformListener
 
+from pepin.depth import UP_LEVEL, Array
 from pepin.flags import Flag, FlagSet
+from pepin.lean import Lean, LeanEstimator
+from pepin.mounts import Mounts
 from pepin.telemetry import LatencySummary, LatencyTracker
 from pepin.tsdf import RigidPose
-from pepin_bringup.msgs import pose_from_transform, stamp_from_seconds, stamp_seconds
+from pepin_bringup.msgs import (
+    imu_arrays,
+    pose_from_transform,
+    stamp_from_seconds,
+    stamp_seconds,
+)
+
+BASE_FRAME = "base_link"  # the frame the C++ bridge publishes its IMU readings in
 
 __all__ = [
     "Fatal",
+    "LeanFeed",
     "Switches",
     "Tally",
     "TfHistory",
@@ -452,6 +467,107 @@ class TfHistory:
     def pose_at(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
         """``fixed <- frame`` at ``stamp`` (seconds), or ``None`` when TF does not have it."""
         return self._lookup.pose(fixed, frame, stamp_from_seconds(stamp), timeout_s=self.timeout_s)
+
+
+class LeanFeed:
+    """``/imu/data_raw`` as the cart's lean: one subscription feeding one
+    :class:`pepin.lean.LeanEstimator`, and that estimator as the
+    :class:`pepin.lean.LeanSource` a :class:`pepin.frame_pose.FramePoser` or a floor plane
+    takes from — so a node has one owner of "how far the body leans" instead of a copy.
+
+    The mount rule, which each of the depth nodes used to carry its own copy of: a reading
+    already published in ``base_link`` (the C++ bridge's — ``base_bridge.cpp`` turns every
+    sample into the robot's axes before publishing) is taken as it is, a reading in any other
+    frame goes through ``config/imu.json`` (:class:`pepin.mounts.Mounts`), and a reading in
+    another frame with no mount is refused: ``on_unmounted(frame_id)`` is called once per
+    reading so the node can say what it does about it (turn a stage off, count it, log it).
+    The estimator appears on the first usable reading, not before.
+    """
+
+    def __init__(
+        self,
+        node: Any,
+        config_dir: Path,
+        *,
+        topic: str = "/imu/data_raw",
+        use_gyro: bool = True,
+        on_unmounted: Callable[[str], None] | None = None,
+        enabled: Callable[[], bool] | None = None,
+    ) -> None:
+        self._log = node.get_logger()
+        self._mount = self._rotation(config_dir)
+        self._on_unmounted = on_unmounted
+        self._enabled = enabled
+        self._use_gyro = use_gyro
+        self.estimator: LeanEstimator | None = None
+        node.create_subscription(Imu, topic, self._on_imu, qos_profile_sensor_data)
+
+    @property
+    def use_gyro(self) -> bool:
+        """Whether the gyro carries the fast part of the lean (off: the accelerometer alone,
+        the filter the floor anchor has always run)."""
+        return self._use_gyro
+
+    @use_gyro.setter
+    def use_gyro(self, value: bool) -> None:
+        self._use_gyro = bool(value)
+        if self.estimator is not None:
+            self.estimator.use_gyro = self._use_gyro
+
+    @property
+    def up(self) -> Array:
+        """Which way is up in base_link, level while no reading has been believed yet."""
+        return UP_LEVEL if self.estimator is None else self.estimator.up
+
+    def lean_at(self, stamp: float) -> Lean | None:
+        """:class:`pepin.lean.LeanSource`: the lean at ``stamp``, or ``None`` when the IMU
+        says nothing about that moment (no reading yet, or a stamp outside the history)."""
+        return None if self.estimator is None else self.estimator.lean_at(stamp)
+
+    def report(self) -> str:
+        """The lean for a report line: ``lean 0.3/-1.8 deg q0.94`` (roll/pitch, quality), or
+        ``lean none`` while no reading has been believed."""
+        if self.estimator is None:
+            return "lean none"
+        roll, pitch = self.estimator.roll_pitch_deg
+        # + 0.0 so a level cart reads +0.0 and never the -0.0 that atan2 answers for it
+        return f"lean {roll + 0.0:+.1f}/{pitch + 0.0:+.1f} deg q{self.estimator.quality:.2f}"
+
+    def _rotation(self, config_dir: Path) -> Array | None:
+        """The rotation from the chip's axes into base_link, read once; ``None`` (with one
+        error) when the files are missing or broken."""
+        try:
+            rotation: Array = Mounts.load(config_dir).imu.rotation()
+        except (OSError, KeyError, ValueError, TypeError) as exc:
+            self._log.error(
+                f"no IMU mount in {config_dir} ({exc}): a reading outside base_link cannot"
+                " say how the cart leans"
+            )
+            return None
+        return rotation
+
+    def _on_imu(self, msg: Any) -> None:
+        """One reading into the estimator, through the mount when it is not in base_link."""
+        if self._enabled is not None and not self._enabled():
+            return
+        if self.estimator is None:
+            rotation = self._start_rotation(msg.header.frame_id)
+            if rotation is None:
+                return
+            self.estimator = LeanEstimator(rotation, use_gyro=self._use_gyro)
+        accel, gyro = imu_arrays(msg)
+        self.estimator.observe(accel, stamp_seconds(msg.header.stamp), gyro)
+
+    def _start_rotation(self, frame_id: str) -> Array | None:
+        """Which rotation this publisher's readings need, or ``None`` when they cannot be used
+        (the node is told once per reading, so it can react as it likes)."""
+        if frame_id == BASE_FRAME:
+            return np.eye(3)  # the bridge rotated it already: a second turn would tilt the floor
+        if self._mount is not None:
+            return self._mount
+        if self._on_unmounted is not None:
+            self._on_unmounted(frame_id)
+        return None
 
 
 # ---- main ------------------------------------------------------------------------------------

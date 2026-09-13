@@ -11,8 +11,9 @@ depth, 1 / z = a / D + b — what a relative-depth network is built to be right 
 law corrects the whole image (:class:`AffineScale`, :func:`fit_affine`, :func:`apply_affine`).
 Two more corrections act where they measure: pixels on an object's edge carry a depth blurred
 between the object and what is behind it and are dropped (:func:`edge_mask`); pixels within a
-few centimetres of the floor plane snap to it, the plane leaning with the accelerometer
-(:func:`floor_depth`, :func:`floor_anchor`, :class:`Tilt`). The result is a depth image the
+few centimetres of the floor plane snap to it, the plane leaning with the cart
+(:func:`floor_depth`, :func:`floor_anchor`; how far it leans is ``pepin.lean``'s, the one
+estimator every consumer of the IMU takes from). The result is a depth image the
 fusion turns into a 3D model and — folded onto the plane by :func:`depth_to_scan` — a scan the
 costmap marks and clears with, so a table top stops the cart the way a wall does. The law is
 saved next to the maps (:func:`save_law`) so a restart begins from it, not from the raw network.
@@ -273,9 +274,6 @@ def depth_to_scan(
 # ---- the floor as a second anchor -------------------------------------------------------------
 FLOOR_HEIGHT_TOLERANCE = 0.04  # metres above or below the floor plane a pixel may sit and be floor
 UP_LEVEL: Array = np.array([0.0, 0.0, 1.0])
-GRAVITY = 9.81
-TILT_TAU_S = 10.0  # the accelerometer's up vector, low-passed: a push or a bump is not a slope
-TILT_GATE_DEG = 1.0  # a sample leaning more than this from the running up is a push, not gravity
 
 
 def floor_depth(intr: Intrinsics, cam: CameraPose, up: Array = UP_LEVEL) -> Array:
@@ -322,74 +320,6 @@ def floor_anchor(
     out = d.copy()
     out[is_floor] = expected[is_floor]
     return out, int(is_floor.sum())
-
-
-class Tilt:
-    """Which way is up, from the accelerometer: the IMU's reading turned into base_link through
-    its mount and low-passed. At rest the chip reads +g along up; while the cart accelerates the
-    reading leans, so three gates stand before the filter: a non-finite sample is ignored, a
-    norm away from 1 g (a bump, braking) is ignored, and a sample leaning more than
-    TILT_GATE_DEG from the running up is a push (0.3 m/s^2 leans the apparent gravity 1.8 deg,
-    which the norm cannot see) — unless the lean outlasts the time constant, which no push does:
-    then the cart stands on a slope and the up vector is re-seeded from the sample."""
-
-    def __init__(self, imu_to_base: Array, tau_s: float = TILT_TAU_S) -> None:
-        self._rotation = np.asarray(imu_to_base, dtype=float)
-        self._tau = tau_s
-        self._up: Array = UP_LEVEL.copy()
-        self._seeded = False
-        self._last_t: float | None = None
-        self._leaning_since: float | None = None
-
-    def observe(self, accel_imu: Array, t: float) -> None:
-        """Feed one accelerometer reading (m/s^2, the IMU's own axes) at time ``t`` (s)."""
-        a = self._rotation @ np.asarray(accel_imu, dtype=float)
-        if not bool(np.all(np.isfinite(a))):
-            return  # a NaN would pass the norm gate and poison the up vector for good
-        norm = float(np.linalg.norm(a))
-        if abs(norm - GRAVITY) > 1.0:  # braking, a bump: not gravity alone
-            self._last_t = t
-            return
-        fresh = a / norm
-        if not self._seeded:
-            self._up, self._seeded, self._last_t = fresh, True, t
-            return
-        lean = math.degrees(math.acos(float(np.clip(np.dot(fresh, self._up), -1.0, 1.0))))
-        if lean > TILT_GATE_DEG:
-            if self._leaning_since is None:
-                self._leaning_since = t
-            elif t - self._leaning_since > self._tau:
-                self._up, self._leaning_since = fresh, None  # a lean that lasts is the floor
-            self._last_t = t
-            return
-        self._leaning_since = None
-        k = 1.0 - math.exp(
-            -max(t - (self._last_t if self._last_t is not None else t), 0.0) / self._tau
-        )
-        blended = (1.0 - k) * self._up + k * fresh
-        self._up = blended / np.linalg.norm(blended)
-        self._last_t = t
-
-    @property
-    def up(self) -> Array:
-        """The unit vector pointing up, in base_link."""
-        return self._up
-
-    @property
-    def roll_pitch_deg(self) -> tuple[float, float]:
-        """The cart's roll and pitch in degrees (positive: right side down, nose down)."""
-        ux, uy, uz = self._up
-        # nose down: the world's up leans towards the tail (-x) in the body's axes
-        return math.degrees(math.atan2(uy, uz)), math.degrees(math.atan2(-ux, uz))
-
-
-def imu_mount_rotation(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Array:
-    """The 3x3 rotation taking a vector from the IMU's axes to base_link, from the mount's
-    roll-pitch-yaw in degrees (the ROS convention, like the static transform the board
-    publishes; :func:`pepin.mounts.rotation_from_rpy` is the one implementation)."""
-    from pepin.mounts import rotation_from_rpy
-
-    return rotation_from_rpy(*(math.radians(a) for a in (roll_deg, pitch_deg, yaw_deg)))
 
 
 # ---- flying pixels -------------------------------------------------------------------------
