@@ -1202,6 +1202,10 @@ def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
         assert re.compile(allowed).search("/imu/data_raw"), mode
     kit = sf.tree(f"{NODES}/node_kit.py")
     assert "/imu/data_raw" in sf.strings(kit) and "LeanEstimator" in sf.imported(kit)
+    # and it starts from what the level floor measured, not from a zero it learns again per run
+    assert "LevelPose" in sf.imported(kit), "the kit reads config/imu.json's level block"
+    level = json.loads((REPO / "config/imu.json").read_text())["level"]
+    assert len(level["gyro_bias_deg_s"]) == 3 and "note" in level
     for name in ("depth_fusion", "depth_stream", "contact_scan"):
         node = sf.tree(f"{NODES}/{name}.py")
         flags = load_table(REPO / NODES / f"{name}.py")

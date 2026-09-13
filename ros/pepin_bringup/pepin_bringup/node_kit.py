@@ -46,7 +46,7 @@ from tf2_ros import Buffer, TransformListener
 
 from pepin.depth import UP_LEVEL, Array
 from pepin.flags import Flag, FlagSet
-from pepin.lean import Lean, LeanEstimator
+from pepin.lean import Lean, LeanEstimator, LevelPose
 from pepin.mounts import Mounts
 from pepin.telemetry import LatencySummary, LatencyTracker
 from pepin.tsdf import RigidPose
@@ -481,7 +481,10 @@ class LeanFeed:
     frame goes through ``config/imu.json`` (:class:`pepin.mounts.Mounts`), and a reading in
     another frame with no mount is refused: ``on_unmounted(frame_id)`` is called once per
     reading so the node can say what it does about it (turn a stage off, count it, log it).
-    The estimator appears on the first usable reading, not before.
+    The estimator appears on the first usable reading, not before, and starts from
+    config/imu.json's measured ``level`` block: the chip's own residual roll and pitch on a
+    level floor are subtracted from every lean, and the gyro's offset measured there is the
+    bias the filter begins with instead of zero.
     """
 
     def __init__(
@@ -496,6 +499,7 @@ class LeanFeed:
     ) -> None:
         self._log = node.get_logger()
         self._mount = self._rotation(config_dir)
+        self._level = self._level_pose(config_dir)
         self._on_unmounted = on_unmounted
         self._enabled = enabled
         self._use_gyro = use_gyro
@@ -538,6 +542,20 @@ class LeanFeed:
             f" bias {self.estimator.gyro_bias_deg_s:.2f} deg/s"
         )
 
+    def _level_pose(self, config_dir: Path) -> LevelPose | None:
+        """config/imu.json's measured level pose, read once: the chip's residual tilt and the
+        gyro's zero offset the estimator starts from. ``None`` (with one warning) when the file
+        carries no such block or a broken one — then nothing is subtracted, as before it was
+        measured."""
+        try:
+            return LevelPose.from_config(config_dir / "imu.json")
+        except (OSError, KeyError, ValueError, TypeError) as exc:
+            self._log.warning(
+                f"no level pose in {config_dir}/imu.json ({exc}): the chip's own tilt and the"
+                " gyro's offset at rest are not subtracted"
+            )
+            return None
+
     def _rotation(self, config_dir: Path) -> Array | None:
         """The rotation from the chip's axes into base_link, read once; ``None`` (with one
         error) when the files are missing or broken."""
@@ -559,7 +577,7 @@ class LeanFeed:
             rotation = self._start_rotation(msg.header.frame_id)
             if rotation is None:
                 return
-            self.estimator = LeanEstimator(rotation, use_gyro=self._use_gyro)
+            self.estimator = LeanEstimator(rotation, use_gyro=self._use_gyro, level=self._level)
         accel, gyro = imu_arrays(msg)
         self.estimator.observe(accel, stamp_seconds(msg.header.stamp), gyro)
 

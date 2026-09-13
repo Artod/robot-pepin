@@ -35,11 +35,13 @@ convention, the same signs ``pepin.mounts.rotation_from_rpy`` composes.
 
 from __future__ import annotations
 
+import json
 import math
 import threading
 from bisect import bisect_left
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -245,13 +247,21 @@ class LeanEstimator:
         *,
         use_gyro: bool = True,
         history: LeanHistory | None = None,
+        level: LevelPose | None = None,
     ) -> None:
         self._rotation = np.asarray(imu_to_base, dtype=float)
         self._tau = tau_s
         self.use_gyro = use_gyro
         self.history = LeanHistory() if history is None else history
         self._up: Array = UP_LEVEL.copy()
-        self._bias: Array = np.zeros(3)  # the gyro's zero offset, rad/s in base_link
+        # The measured level pose, or nothing to subtract: the chip's own residual tilt as the
+        # rotation that takes its reading back onto base_link's z, and the gyro's offset there
+        # as the bias the integral term starts from instead of zero (it would otherwise spend a
+        # minute of driving learning a number that was measured at rest).
+        self._zero: Array | None = None if level is None else _rotation_xy(level.roll, level.pitch)
+        self._bias: Array = (  # the gyro's zero offset, rad/s in base_link
+            np.zeros(3) if level is None else np.asarray(level.gyro_bias, dtype=float).copy()
+        )
         self._seeded = False
         self._last_t: float | None = None
         self._leaning_since: float | None = None
@@ -344,8 +354,16 @@ class LeanEstimator:
 
     @property
     def up(self) -> Array:
-        """The unit vector pointing up, in base_link."""
-        return self._up
+        """The unit vector pointing up, in base_link, with the measured level pose taken off."""
+        return self._levelled()
+
+    def _levelled(self) -> Array:
+        """The filter's up vector with the chip's own residual tilt subtracted: on a level floor
+        a still cart reads base_link's z. Without a measured level pose it is the raw vector."""
+        if self._zero is None:
+            return self._up
+        out: Array = self._zero @ self._up
+        return out
 
     @property
     def quality(self) -> float:
@@ -372,7 +390,7 @@ class LeanEstimator:
 
     def lean_now(self, stamp: float) -> Lean:
         """The lean the filter holds this instant, stamped ``stamp``."""
-        return Lean.from_up(self._up, stamp, self._quality)
+        return Lean.from_up(self._levelled(), stamp, self._quality)
 
     def lean_at(self, stamp: float) -> Lean | None:
         """:class:`LeanSource`: the lean at ``stamp`` from the history of accepted samples."""
@@ -426,6 +444,36 @@ def scan_height_shift(ranges: Array, bearings: Array, lean: Lean) -> Array:
     return shift
 
 
+@dataclass(frozen=True)
+class LevelPose:
+    """What the IMU says while the cart stands still on a floor that is level: the residual
+    roll and pitch of the chip on its bracket (radians) and the gyro's zero offset there
+    (rad/s, base_link axes). Both are subtracted, so a still cart on a level floor reports no
+    lean and no drift."""
+
+    roll: float
+    pitch: float
+    gyro_bias: Array
+
+    @classmethod
+    def from_config(cls, path: str | Path) -> LevelPose | None:
+        """config/imu.json's ``level`` block as a :class:`LevelPose`, or ``None`` when the file
+        carries none (nothing is subtracted, which is what every run did before it was
+        measured). Raises ``ValueError`` for a block that is there but malformed."""
+        data = json.loads(Path(path).read_text())
+        block = data.get("level")
+        if block is None:
+            return None
+        bias = [float(v) for v in block.get("gyro_bias_deg_s", (0.0, 0.0, 0.0))]
+        if len(bias) != 3:
+            raise ValueError(f"{path}: level.gyro_bias_deg_s needs three axes, got {len(bias)}")
+        return cls(
+            math.radians(float(block["roll_deg"])),
+            math.radians(float(block["pitch_deg"])),
+            np.radians(np.asarray(bias, dtype=float)),
+        )
+
+
 def imu_mount_rotation(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Array:
     """The 3x3 rotation taking a vector from the IMU's axes to base_link, from the mount's
     roll-pitch-yaw in degrees (the ROS convention, like the static transform the board
@@ -451,6 +499,7 @@ __all__ = [
     "LeanGate",
     "LeanHistory",
     "LeanSource",
+    "LevelPose",
     "imu_mount_rotation",
     "scan_height_shift",
 ]

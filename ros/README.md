@@ -558,4 +558,10 @@ the flag is on or off, so it can be watched before it is believed. The `q` in th
 share of the lean gravity itself voted for, and it is also a gate: below `lean_min_quality` the
 lean is treated as unknown and the measurement is placed level, because a gyro whose zero has
 drifted reports a tip nobody made (0.2 deg/s of bias reads as 3 degrees on a level floor) and it
-arrives with a quality near zero, while a real tip over a threshold keeps `q` at 1.00.
+arrives with a quality near zero, while a real tip over a threshold keeps `q` at 1.00. Both the
+zero of the roll and pitch and the gyro's starting bias come from `config/imu.json`'s `level`
+block — what the chip read over 30 s at rest on a floor that is level (2026-09-12): -0.39 deg of
+roll, +0.29 of pitch and [-0.001, -0.028, +0.074] deg/s of rate. They are subtracted, so a still
+cart on level ground reports no lean and the filter does not spend the first minute of every run
+learning an offset that was measured once. Without the block nothing is subtracted, which is what
+every run before it did.

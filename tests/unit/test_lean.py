@@ -19,6 +19,7 @@ from pepin.lean import (
     LeanEstimator,
     LeanGate,
     LeanHistory,
+    LevelPose,
     imu_mount_rotation,
     scan_height_shift,
 )
@@ -348,3 +349,63 @@ def test_the_gate_drops_the_scans_taken_too_far_from_level_and_counts_them() -> 
     gate.gate_deg = 10.0  # live: the node's flag writes it
     assert gate.admits(Lean(0.0, math.radians(4.0), 0.0))
     assert (gate.admitted, gate.refused) == (3, 2)
+
+
+# ---- the measured level pose (config/imu.json's level block) ---------------------------------
+REPO = Path(__file__).resolve().parents[2]
+
+
+def test_the_measured_level_pose_is_read_from_the_config_and_subtracted() -> None:
+    """config/imu.json carries what the chip reads on a floor that is level: its own residual
+    roll and pitch, and the gyro's offset there. The estimator starts from both — the tilt comes
+    off every reported lean, and the offset is the bias the filter begins with instead of a zero
+    it would have to learn again on every run."""
+    level = LevelPose.from_config(REPO / "config/imu.json")
+    assert level is not None
+    assert (math.degrees(level.roll), math.degrees(level.pitch)) == pytest.approx(
+        (-0.39, 0.29), abs=1e-9
+    )
+    assert np.degrees(level.gyro_bias) == pytest.approx([-0.001, -0.028, 0.074], abs=1e-9)
+
+    # the cart standing on that same level floor: the chip reads its own residual tilt
+    tilted = LeanEstimator(MOUNT, level=level)
+    tilted.observe(_chip_reading(math.degrees(level.pitch), math.degrees(level.roll)), 0.0)
+    assert tilted.roll_pitch_deg == pytest.approx((0.0, 0.0), abs=1e-9), "level reads level"
+    assert tilted.up == pytest.approx([0.0, 0.0, 1.0], abs=1e-9)
+    assert tilted.gyro_bias == pytest.approx(level.gyro_bias, abs=1e-12)
+
+    # and the same readings with nothing measured: the chip's own tilt is reported as the cart's
+    bare = LeanEstimator(MOUNT)
+    bare.observe(_chip_reading(math.degrees(level.pitch), math.degrees(level.roll)), 0.0)
+    assert bare.roll_pitch_deg == pytest.approx((-0.39, 0.29), abs=1e-9)
+    assert bare.gyro_bias == pytest.approx([0.0, 0.0, 0.0])
+
+
+def test_a_real_lean_is_still_the_lean_with_a_level_pose_subtracted() -> None:
+    """Subtracting the mount's residual does not blunt a real tip: a cart nose-down 5 degrees
+    reads 5 degrees less the 0.29 the chip carries on level ground."""
+    level = LevelPose.from_config(REPO / "config/imu.json")
+    assert level is not None
+    estimator = LeanEstimator(MOUNT, level=level)
+    estimator.observe(_chip_reading(5.0), 0.0)
+    roll, pitch = estimator.roll_pitch_deg
+    assert pitch == pytest.approx(5.0 - 0.29, abs=0.01)
+    assert roll == pytest.approx(0.39, abs=0.01)
+
+
+def test_a_config_without_a_level_block_subtracts_nothing_and_a_broken_one_says_so(
+    tmp_path: Path,
+) -> None:
+    """Every run before the floor was measured had no such block: then nothing is subtracted.
+    A block that is there but not three axes is an error, not a silent half-correction."""
+    import json
+
+    plain = tmp_path / "imu.json"
+    plain.write_text(json.dumps({"mount": {"roll_deg": 90.0}}))
+    assert LevelPose.from_config(plain) is None
+    broken = tmp_path / "broken.json"
+    broken.write_text(
+        json.dumps({"level": {"roll_deg": 0.0, "pitch_deg": 0.0, "gyro_bias_deg_s": [0.0, 0.0]}})
+    )
+    with pytest.raises(ValueError):
+        LevelPose.from_config(broken)
