@@ -22,12 +22,12 @@ as its static layer, and its correction becomes the board's ``map -> odom`` (rta
 ``slam`` switch sends it as a message, pepin_bringup.slam_frame broadcasts it there). The
 database starts empty every session unless ``resume:=true``, and it is a file of its own: a SLAM
 session must never wipe the known map's graph. Two of the fusion's switches are this mode's to
-set, not the operator's: ``fit_gate`` comes up OFF (no tracker runs here, so ``/localization_fit``
-never comes and the gate would fuse nothing at all) and ``map_source`` comes up already saying
-where ``/map`` will come from. Both stay live — this is the default a session starts from, not a
-lock. With ``camera_only:=true`` the lidar is not
-subscribed at all and the grid comes from the camera's depth — the honest test of "the camera as
-the primary sense", and the one case where the map is only as true as the network's scale.
+set, not the operator's: ``fit_gate`` comes up OFF (no tracker runs here, so
+``/localization_fit`` never comes and the gate would fuse nothing at all) and ``map_source``
+comes up already saying where ``/map`` will come from. Both stay live — this is the default a
+session starts from, not a lock. With ``camera_only:=true`` the lidar is not subscribed at all
+and the grid comes from the camera's depth — the honest test of "the camera as the primary
+sense", and the one case where the map is only as true as the network's scale.
 
 Arguments: ``board`` (the robot's address for the camera stream), ``slam``, ``camera_only``,
 ``resume``, ``database`` (empty: chosen by the mode), ``bridge_admin`` (the laptop bridge's REST
