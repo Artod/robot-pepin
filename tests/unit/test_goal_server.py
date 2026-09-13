@@ -18,10 +18,10 @@ import ros_stubs
 
 ros_stubs.install()
 
-from pepin_bringup.goal_server import FLAGS, GoalServer  # noqa: E402
+from pepin_bringup.goal_server import CORRECTION_TOPIC, FLAGS, GoalServer  # noqa: E402
 from ros_stubs import Float32, Header, Quaternion, TransformStamped, Vector3  # noqa: E402
 
-from pepin.watch import TF_FRESH_S  # noqa: E402
+from pepin.watch import CORRECTION_FRESH_S, TF_FRESH_S  # noqa: E402
 
 NOW = 1000.0  # the node's clock, in seconds; a transform's age is NOW minus its stamp
 
@@ -76,6 +76,59 @@ def standing_at(node: Any, transform: Any) -> None:
     node._tf.buffer.transforms[("map", "base_link")] = transform
 
 
+def correction_landed(node: Any, age_s: float = 0.0) -> None:
+    """The SLAM correction arrived ``age_s`` seconds ago: the pulse of the half of the stack
+    that owns the pose in SLAM mode (rtabmap_frame publishes it at 10 Hz, graph or no graph)."""
+    node.clock.seconds = NOW - age_s
+    node.subs[CORRECTION_TOPIC][1](TransformStamped())
+    node.clock.seconds = NOW
+
+
+class Pending:
+    """Nav2's result future as the drive loop reads it: not done for ``ticks`` turns of the
+    loop, then done. A callback fires at once, so the thread's own wait never hangs a test;
+    ``on_tick`` runs at the top of every turn — where a test makes the world change mid-drive."""
+
+    def __init__(self, ticks: int, on_tick: Any = None) -> None:
+        self.ticks = ticks
+        self._on_tick = on_tick
+
+    def done(self) -> bool:
+        self.ticks -= 1
+        if self._on_tick is not None:
+            self._on_tick()
+        return self.ticks < 0
+
+    def add_done_callback(self, callback: Any) -> None:
+        callback(self)
+
+    def result(self) -> Any:
+        return None
+
+
+class Handle:
+    """Nav2's goal handle: accepted, its result pending, and it counts its cancellations."""
+
+    def __init__(self, ticks: int, on_tick: Any = None) -> None:
+        self.accepted = True
+        self.cancelled = 0
+        self._result = Pending(ticks, on_tick)
+
+    def get_result_async(self) -> Pending:
+        return self._result
+
+    def cancel_goal_async(self) -> None:
+        self.cancelled += 1
+
+
+def nav2_answers(node: Any, ticks: int, on_tick: Any = None) -> Handle:
+    """A Nav2 that accepts the goal and keeps driving for ``ticks`` turns of the drive loop."""
+    node._client.server = True
+    node._client.handle = Handle(ticks, on_tick)
+    handle: Handle = node._client.handle
+    return handle
+
+
 def tracker_says(node: Any, fit: float) -> None:
     """A stack whose tracker is up: its service answers and its fit is on the wire."""
     where = node.service_clients["where_am_i"]
@@ -93,6 +146,7 @@ def test_without_a_tracker_a_fresh_transform_is_the_pose_and_the_goal_goes(tmp_p
     session's goals were all refused here with "the tracker is not up" (2026-09-13 14:05)."""
     node = server(tmp_path)
     standing_at(node, at(1.25, -0.5, 90.0, age_s=0.1))
+    correction_landed(node)
     pose = node._pose_now()
     assert (round(pose["x"], 3), round(pose["y"], 3)) == (1.25, -0.5)
     assert abs(pose["yaw_deg"] - 90.0) < 1e-6
@@ -132,6 +186,7 @@ def test_a_transform_that_stopped_coming_is_as_good_as_none(tmp_path) -> None:  
     means a publisher has stopped. The refusal carries the age, because "stale" and "missing"
     are two different things to go and look at."""
     node = server(tmp_path)
+    correction_landed(node)
     standing_at(node, at(0.0, 0.0, 0.0, age_s=4.2))
     ready = node._ready()
     assert not ready.ready and not ready.search
@@ -174,6 +229,7 @@ def test_a_place_marked_without_a_tracker_carries_no_fit(tmp_path) -> None:  # t
     goal is, and it writes no fit at all rather than a 0.00 that would read as "marked lost"."""
     node = server(tmp_path)
     standing_at(node, at(2.0, -1.0, -45.0, age_s=0.2))
+    correction_landed(node)
     answer = node.mark("charger")
     assert answer["event"] == "marked"
     book = json.loads((tmp_path / "places.yaml").read_text())
@@ -183,3 +239,83 @@ def test_a_place_marked_without_a_tracker_carries_no_fit(tmp_path) -> None:  # t
     stale = node.mark("printer")
     assert stale["event"] == "error" and "9.0 s old" in stale["detail"]
     assert "printer" not in json.loads((tmp_path / "places.yaml").read_text())
+
+
+def test_a_goal_is_refused_when_the_correction_stopped_though_the_edge_is_fresh(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The hole the transform cannot see. slam_frame re-broadcasts the LAST correction at 10 Hz
+    with a fresh stamp, so with the laptop gone map -> base_link is still 0.1 s old: the gate
+    passed, Nav2's costmaps (0.3 s tolerance on that same edge) never timed out, and the cart
+    would have driven a map that stopped growing. The correction's own age is the evidence."""
+    node = server(tmp_path)
+    standing_at(node, at(1.0, 0.5, 0.0, age_s=0.1))
+    correction_landed(node, age_s=9.0)
+    refused = node._ready()
+    assert not refused.ready and not refused.search and not refused.tracker
+    assert "the SLAM correction stopped 9.0 s ago" in refused.reason
+
+    wire = Wire()
+    node._handle({"cmd": "go", "x": 1.0, "y": 0.3}, wire)
+    (event,) = wire.events()
+    assert event["event"] == "error" and "SLAM correction stopped" in event["detail"]
+    assert not node._client.goals, "nothing was sent to Nav2"
+
+    correction_landed(node, age_s=CORRECTION_FRESH_S)
+    assert node._ready().ready, "the bound is allowed; a WiFi hiccup is not a dead laptop"
+
+
+def test_a_goal_before_the_slam_half_is_up_is_refused_by_name(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Nothing has ever arrived on /map_odom: the edge is identity, which is the honest map at
+    the start of a session and tells the operator nothing. The refusal names what is missing."""
+    node = server(tmp_path)
+    standing_at(node, at(0.0, 0.0, 0.0, age_s=0.05))
+    never = node._ready()
+    assert not never.ready and "no SLAM correction has ever arrived" in never.reason
+
+
+def test_the_correction_watch_off_is_the_transform_alone(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """CLAUDE.md rule 19: the old behaviour stays one flag away. Off, a goal rests on the age of
+    map -> base_link, the way the first SLAM session drove."""
+    assert FLAGS.flag("correction_watch").default is True
+    assert FLAGS.flag("correction_watch").live
+    node = server(tmp_path)
+    standing_at(node, at(1.0, 0.5, 0.0, age_s=0.1))
+    correction_landed(node, age_s=9.0)
+    assert not node._ready().ready
+    node._switches.set("correction_watch", False)
+    assert node._ready().ready
+    assert "correction_watch=off" in node._switches.state()
+
+
+def test_a_drive_is_cut_when_the_correction_dies_under_it(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The SLAM analogue of the blind-drive watch. Nav2 is no backstop here — it reads the same
+    re-broadcast edge and would keep following the plan by dead reckoning — so the drive stops
+    the moment the pulse of the half that owns the pose stops, with no search to fall back on."""
+    node = server(tmp_path)
+    standing_at(node, at(0.0, 0.0, 0.0, age_s=0.1))
+    correction_landed(node)
+    # The laptop goes away with the goal already running: the gate saw a live pulse, and the
+    # clock moves nine seconds past the last correction on the drive loop's first turn.
+    handle = nav2_answers(node, ticks=20, on_tick=lambda: setattr(node.clock, "seconds", NOW + 9.0))
+    wire = Wire()
+    node._go({"cmd": "go", "x": 1.0, "y": 0.0}, wire, record=tmp_path / "run.jsonl")
+
+    events = {event["event"]: event for event in wire.events()}
+    assert events["accepted"]["pose"] == "tf"
+    assert events["lost"]["correction_s"] == 9.0, "and it says how long the silence was"
+    assert "the SLAM correction stopped" in events["done"]["detail"]
+    assert handle.cancelled == 1, "the goal was cancelled, not left to finish"
+    assert not node._driving
+
+
+def test_a_live_correction_lets_the_drive_run(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The other half of the same rule: while the pulse keeps arriving nothing interferes."""
+    node = server(tmp_path)
+    standing_at(node, at(0.0, 0.0, 0.0, age_s=0.1))
+    correction_landed(node)
+    handle = nav2_answers(node, ticks=2)
+    wire = Wire()
+    node._go({"cmd": "go", "x": 1.0, "y": 0.0}, wire, record=tmp_path / "run.jsonl")
+
+    events = {event["event"]: event for event in wire.events()}
+    assert "lost" not in events and handle.cancelled == 0
+    assert "detail" not in events["done"]

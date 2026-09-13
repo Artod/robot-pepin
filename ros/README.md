@@ -100,6 +100,19 @@ evidence, writing no `fit` at all rather than a `0.00`. The saved map's places a
 they are coordinates in a frame this new map does not share. The old behaviour — only ever ask
 the tracker — is `ros/flags.sh set goal_server tf_pose false`.
 
+**A fresh edge is no evidence that the laptop is still there.** `slam_frame` re-broadcasts the
+LAST correction at 10 Hz with a fresh stamp, so with the laptop shut down `map -> base_link` is
+still 0.1 s old: the gate would pass, and Nav2 — whose costmaps read that same edge against a
+0.3 s tolerance — would not abort either, so the cart would follow its plan by dead reckoning
+across a map that stopped growing. The goal server therefore also listens to the correction
+itself (`/map_odom`, published at 10 Hz whether or not the graph moved): a goal is **refused**
+when it has been silent for 2 seconds or has never arrived, and a running drive is **cancelled**
+when it falls silent under it — this mode's answer to the blind-drive watch, which has no fit to
+read here. `ros/go.sh where` prints `correction_s`, the age of the last one, wherever one has
+ever landed; the board logs the silence when it starts (`nothing on /map_odom for ... s`) and
+keeps broadcasting the edge all the same, because Nav2 there must not lose its global frame to a
+wireless hiccup. Off: `ros/flags.sh set goal_server correction_watch false`.
+
 Two things this mode needs that are **not** the operator's to remember:
 
 - **The camera's costmap layers stay off for driving.** They marked within 2 cm of the hull and
@@ -222,7 +235,8 @@ deletes it first, `--known-map` forces the old mode regardless of what the board
   and what a wrong correction would exploit.
 - The correction's path (laptop `mapGraph` → `/map_odom` → the board's `slam_frame`) adds a
   wireless hop before the transform moves; the transform itself is re-stamped at 10 Hz on the
-  board, so only the *value* is late, never the lookup.
+  board, so only the *value* is late, never the lookup — which is why the freshness of the
+  lookup says nothing about the laptop, and the goal server watches the message instead.
 - `Grid/RangeMax 8.0` for the lidar grid and the camera-only ground/obstacle heights are
   first guesses from the known-map profile, not measurements.
 
@@ -430,6 +444,7 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `global_watch` | `watch_period_s` | number 0.2..60 | 1.0 | yes | seconds between searches |
 | `global_watch` | `watch_max_scan_age_s` | number 0.1..3600 | 1.0 | yes | how long a revolution may sit in hand and still be searched, counted from when it ARRIVED here |
 | `goal_server` | `tf_pose` | bool | on | yes | where no tracker answers, the cart's pose is read from TF (map -> base_link) and a goal is judged by how fresh that edge is; off, only the tracker is ever asked |
+| `goal_server` | `correction_watch` | bool | on | yes | where no tracker answers, the SLAM correction (/map_odom) must be arriving for a goal to start, and a drive is cut when it stops; off, the age of map -> base_link is the only evidence read |
 | `neck_state` | `neck_tf` | bool | on | yes | base_link -> camera_link is published live from the neck's encoders; the laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes publish that edge |
 | `relocalizer` | `rest_lock` | bool | on | yes | hold the pose while the cart stands still (wheels quiet 0.6 s and the gyro under 1.5 deg/s): a match's residual is blended in with a time constant instead of taken whole |
 | `relocalizer` | `explained_vote` | bool | on | yes | returns the static map cannot explain (a person, a moved chair) do not score the match |
@@ -669,6 +684,11 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* on — off, this node refused every goal of the first online-SLAM session — 'the tracker is not up' (2026-09-13 14:05), the goals driven by publishing /goal_pose by hand, which is Nav2 without a run, a tape or a verdict. In SLAM mode there IS no tracker: RTAB-Map owns the pose and pepin_bringup.slam_frame re-broadcasts its correction as map -> odom at 10 Hz, so 1.0 s without a transform is ten missed broadcasts, not jitter. The known-map modes are untouched: there the tracker answers first and its fit decides, exactly as before
   - *On when:* on in online SLAM, and anywhere else the pose is owned by something that publishes map -> base_link instead of a fit
   - *Off when:* to have a stack without a tracker refuse goals outright again — the old behaviour, and the honest one where a fit is the only evidence trusted
+- **`correction_watch`** — bool, default on
+  - *What:* where no tracker answers, the SLAM correction (/map_odom) must be arriving for a goal to start, and a drive is cut when it stops; off, the age of map -> base_link is the only evidence read
+  - *Default:* on — map -> base_link is no evidence that the SLAM half is alive: slam_frame re-broadcasts the LAST correction at 10 Hz with a fresh stamp, so with the laptop shut down the edge is still 0.1 s old, the gate passes, and Nav2 — whose costmaps read that same edge against a 0.3 s tolerance — does not abort either. The cart would drive a map that stopped growing, on dead reckoning, with nothing to notice. The correction is a 10 Hz pulse whatever the graph does (pepin_bringup.rtabmap_frame publishes between optimisations too), so 2.0 s of silence is twenty missed messages over the bridge, not a hiccup
+  - *On when:* in online SLAM, where the pose is owned by a machine on the other side of the bridge
+  - *Off when:* when this node cannot hear /map_odom in a stack that is otherwise healthy — 'ros/go.sh where' prints 'correction_s' where one has ever landed, and prints none at all in that case; the drive then rests on the transform alone, as it did before
 
 #### `neck_state`
 

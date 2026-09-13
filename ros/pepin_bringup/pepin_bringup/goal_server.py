@@ -22,6 +22,14 @@ slam_frame only broadcasts its correction — so this node reads ``map -> base_l
 instead and judges the goal by how fresh that edge is (:class:`pepin.watch.GoalGate`). The
 ``tf_pose`` flag is that fallback: off, the node is the old one, which asked the tracker and
 refused every goal in SLAM mode with "the tracker is not up" (2026-09-13 14:05).
+
+WHAT SAYS THE SLAM HALF IS STILL THERE. Not that transform: slam_frame re-broadcasts the LAST
+correction at 10 Hz with a fresh stamp, so ``map -> base_link`` stays milliseconds old with the
+laptop shut down — the gate would pass and Nav2, whose costmaps read the same fresh edge, would
+never time out either. The correction itself is the pulse (``/map_odom``, published between
+graphs too), so this node listens to it, refuses a goal when it has stopped and cuts a running
+drive when it stops mid-way: the SLAM analogue of the blind-drive watch, under the
+``correction_watch`` flag.
 """
 
 from __future__ import annotations
@@ -37,7 +45,7 @@ from typing import Any
 
 import rclpy
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from lifecycle_msgs.srv import ChangeState, GetState
 from nav2_msgs.action import NavigateToPose, Spin
 from rclpy.action import ActionClient
@@ -62,7 +70,15 @@ from pepin.runlink import (
     start_command,
     stop_command,
 )
-from pepin.watch import DRIVE_FIT, TF_FRESH_S, BlindDriveWatch, GoalGate, Readiness
+from pepin.watch import (
+    CORRECTION_FRESH_S,
+    DRIVE_FIT,
+    TF_FRESH_S,
+    BlindDriveWatch,
+    Correction,
+    GoalGate,
+    Readiness,
+)
 from pepin_bringup.msgs import stamp_seconds, yaw_of
 from pepin_bringup.node_kit import Switches, TfLookup
 
@@ -79,6 +95,7 @@ BRINGUP_ROUND_S = 10.0  # a lifecycle query or transition that has not answered 
 
 MAP_FRAME = "map"
 BASE_FRAME = "base_link"
+CORRECTION_TOPIC = "/map_odom"  # the SLAM half's pulse; the board's slam_frame reads it too
 TF_WAIT_S = 0.3  # how long a pose lookup waits for the edge: the drive thread asks, not a callback
 TF_FIRST_WAIT_S = 2.0  # ...and the first one waits for the listener's buffer to fill at all
 TRACKER_WAIT_S = 1.0  # the one probe for "is there a tracker at all" — its relocalise service
@@ -102,6 +119,26 @@ FLAGS = FlagSet(
         " publishes map -> base_link instead of a fit",
         off_when="to have a stack without a tracker refuse goals outright again — the old"
         " behaviour, and the honest one where a fit is the only evidence trusted",
+    ),
+    Flag(
+        "correction_watch",
+        True,
+        description="where no tracker answers, the SLAM correction (/map_odom) must be arriving"
+        " for a goal to start, and a drive is cut when it stops; off, the age of map ->"
+        " base_link is the only evidence read",
+        why="map -> base_link is no evidence that the SLAM half is alive: slam_frame"
+        " re-broadcasts the LAST correction at 10 Hz with a fresh stamp, so with the laptop shut"
+        " down the edge is still 0.1 s old, the gate passes, and Nav2 — whose costmaps read that"
+        " same edge against a 0.3 s tolerance — does not abort either. The cart would drive a"
+        " map that stopped growing, on dead reckoning, with nothing to notice. The correction is"
+        " a 10 Hz pulse whatever the graph does (pepin_bringup.rtabmap_frame publishes between"
+        f" optimisations too), so {CORRECTION_FRESH_S:.1f} s of silence is twenty missed messages"
+        " over the bridge, not a hiccup",
+        on_when="in online SLAM, where the pose is owned by a machine on the other side of the"
+        " bridge",
+        off_when="when this node cannot hear /map_odom in a stack that is otherwise healthy —"
+        " 'ros/go.sh where' prints 'correction_s' where one has ever landed, and prints none at"
+        " all in that case; the drive then rests on the transform alone, as it did before",
     ),
 )
 
@@ -133,6 +170,13 @@ class GoalServer(Node):
         # pepin_bringup.slam_frame owns in SLAM mode. Read only when no tracker answers, and the
         # listener behind it is not started until then (_tf_pose).
         self._tf: TfLookup | None = None
+        # The SLAM half's pulse. RTAB-Map's correction is published at 10 Hz whether or not the
+        # graph moved, so its ARRIVAL is what says the machine that owns the pose is still there;
+        # the transform composed from it says nothing, because slam_frame re-broadcasts the last
+        # one for ever (pepin.watch.Correction). Only the arrival time is kept: the correction
+        # itself belongs to slam_frame, which is the one publisher of the edge.
+        self._correction_at: float | None = None
+        self.create_subscription(TransformStamped, CORRECTION_TOPIC, self._on_correction, 5)
         self._gate = GoalGate()
         # Latched: the behaviour tree reads its selector once, whenever it next ticks.
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -259,6 +303,21 @@ class GoalServer(Node):
         self.fit = float(msg.data)
         self._fit_heard = True
 
+    def _on_correction(self, _msg: TransformStamped) -> None:
+        """The SLAM correction landed here; only when it did is kept."""
+        self._correction_at = self._clock_s()
+
+    def _clock_s(self) -> float:
+        """The node's clock in seconds."""
+        return float(self.get_clock().now().nanoseconds) * 1e-9
+
+    def _correction(self) -> Correction:
+        """How long ago the SLAM correction last landed here (inside: ``None`` when none ever
+        has) — the evidence a goal without a tracker is judged on beside the transform."""
+        if self._correction_at is None:
+            return Correction(None)
+        return Correction(max(0.0, self._clock_s() - self._correction_at))
+
     @staticmethod
     def _wait(future: Any, timeout: float) -> Any:
         """Wait for a future from a session thread; the node's own spin drives it to completion.
@@ -357,6 +416,9 @@ class GoalServer(Node):
             # Which of the two spoke, said outright: a fit of 0.00 beside a pose read from TF
             # is not a lost robot, it is a stack with no tracker in it.
             source = "tracker" if "fit" in pose else "tf" if pose else "none"
+            # ...and how long ago the SLAM correction last landed, where one ever has: the one
+            # reading that tells a live SLAM half from a dead one before a goal is sent.
+            correction = self._correction().age_s
             self._send(
                 connection,
                 {
@@ -364,6 +426,7 @@ class GoalServer(Node):
                     "fit": self.fit,
                     "planner": self.planner,
                     "pose": source,
+                    **({} if correction is None else {"correction_s": round(correction, 2)}),
                     **pose,
                 },
             )
@@ -440,9 +503,11 @@ class GoalServer(Node):
 
     def _ready(self) -> Readiness:
         """May a goal start now (:class:`pepin.watch.GoalGate`): the tracker's fit where a
-        tracker runs, the age of map -> base_link where none does."""
+        tracker runs; where none does, the age of map -> base_link AND the age of the SLAM
+        correction, which is the only one of the two a dead laptop stops."""
         if self._switches.on("tf_pose") and not self._tracker_here():
-            return self._gate.verdict(None, self._tf_pose().get("age_s"))
+            watched = self._correction() if self._switches.on("correction_watch") else None
+            return self._gate.verdict(None, self._tf_pose().get("age_s"), watched)
         return self._gate.verdict(self.fit, None)
 
     def mark(self, name: str) -> dict[str, Any]:
@@ -571,11 +636,15 @@ class GoalServer(Node):
             result_future = handle.get_result_async()
             last = 0.0
             # The blind-drive watch reads the tracker's fit: where no tracker publishes one it is
-            # not armed at all (it would read the standing 0.0 as lost four seconds in). What
-            # stops a SLAM drive that loses its pose is Nav2 itself — the controller cannot look
-            # base_link up in map and aborts the goal.
+            # not armed at all (it would read the standing 0.0 as lost four seconds in).
             blind = BlindDriveWatch() if ready.tracker else None
+            # Its SLAM analogue. Nav2 is NOT the backstop here: slam_frame keeps broadcasting
+            # map -> odom from the last correction, so the costmaps keep a fresh map ->
+            # base_link and nothing times out — the cart would follow its plan by dead reckoning
+            # across a map that stopped growing. The correction's arrival is what stops it.
+            pulse = not ready.tracker and self._switches.on("correction_watch")
             stopped_lost = False
+            cut = ""
             while rclpy.ok() and not result_future.done():
                 time.sleep(0.05)  # the node's own spin serves the action; this thread only reports
                 now = time.monotonic()
@@ -587,6 +656,21 @@ class GoalServer(Node):
                     self.get_logger().warning(
                         f"lost mid-drive (fit {self.fit:.2f}): stopping to relocalise"
                     )
+                    handle.cancel_goal_async()
+                    break
+                if pulse and (correction := self._correction()).stale(
+                    self._gate.correction_fresh_s
+                ):
+                    cut = correction.phrase()  # no tracker, nothing to search with: stop, period
+                    self._send(
+                        connection,
+                        {
+                            "event": "lost",
+                            "correction_s": correction.age_s,
+                            "t": round(now - started, 1),
+                        },
+                    )
+                    self.get_logger().warning(f"{cut}: stopping the drive, the map is not growing")
                     handle.cancel_goal_async()
                     break
                 if feedback and now - last > 1.0:
@@ -608,9 +692,11 @@ class GoalServer(Node):
                     )
                     self._go(request, connection, resume=False)
                 return
+            if cut:  # let the cancel land before the tape is closed
+                self._wait(result_future, 10.0)
             outcome = result_future.result()
             status = getattr(outcome, "status", 0) if outcome else 0
-            if status == 4:  # position met: now the heading, on the tape still
+            if status == 4 and not cut:  # position met: now the heading, on the tape still
                 self._pivot_to(yaw_deg, connection)
             self.stop_recording()  # closed before the answer: the caller fetches it on reading
             self._send(
@@ -623,6 +709,7 @@ class GoalServer(Node):
                     "seconds": round(time.monotonic() - started, 1),
                     "arrival": self._pose_now(),
                     "recording": None if record is None else str(record),
+                    **({"detail": cut} if cut else {}),
                 },
             )
         finally:  # a refused goal or a broken connection must not leave a recorder running

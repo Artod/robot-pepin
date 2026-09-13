@@ -456,8 +456,31 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
     assert armed and armed[0].endswith("else None"), "no fit to watch without a tracker"
     # The fallback is a flag, so the old behaviour is one `ros/flags.sh set` away (rule 19).
     flags = load_table(REPO / NODES / "goal_server.py")
-    assert flags.names == ("tf_pose",) and flags.flag("tf_pose").live
+    assert flags.names == ("tf_pose", "correction_watch")
+    assert all(flags.flag(name).live for name in flags.names)
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"
+
+
+def test_the_slam_drive_is_judged_on_the_correction_and_not_on_the_edge_it_feeds() -> None:
+    """A fresh map -> base_link proves nothing about the laptop: pepin_bringup.slam_frame
+    re-broadcasts the LAST correction at 10 Hz with a fresh stamp, so the edge stays
+    milliseconds old with the laptop shut down — the gate passed and Nav2, whose costmaps read
+    that same edge against a 0.3 s tolerance, never aborted either. So the goal server listens
+    to the correction itself, on the topic the board's frame node reads, and cuts the drive when
+    the pulse stops: the SLAM analogue of the blind-drive watch, which has no fit to read."""
+    server = sf.tree(f"{NODES}/goal_server.py")
+    assert sf.assignments(server)["CORRECTION_TOPIC"] == "'/map_odom'"
+    assert "self.create_subscription" in sf.calls(server)
+    assert "Correction" in sf.imported(server), "the rule is pepin.watch's, not the node's"
+    assert "self._correction" in sf.calls(server)
+    cut = [s for s in sf.unparsed(server, ast.Call) if ".stale(" in s]
+    assert cut, "the drive loop asks the same question the gate does"
+    assert "handle.cancel_goal_async" in sf.calls(server)
+    # The board's own node never stops broadcasting for a silence: Nav2 there would lose its
+    # global frame to a WiFi hiccup. It says so in the log, and the decision lives in the gate.
+    frame = sf.tree(f"{NODES}/slam_frame.py")
+    assert "self._report_silence" in sf.calls(frame)
+    assert "self._tf.sendTransform" in sf.calls(frame)
 
 
 def test_the_recorder_is_its_own_node_on_the_board_side() -> None:
