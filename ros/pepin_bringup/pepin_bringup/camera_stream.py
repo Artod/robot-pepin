@@ -70,29 +70,50 @@ FLAGS = FlagSet(
     Flag(
         "scale",
         0.5,
+        description="the published picture as a fraction of the camera's own 1280x720, its optics"
+        " scaled with it; a change takes the next frame",
+        why="default by design, unmeasured: the half size was chosen when the stream was made"
+        " reliable for RTAB-Map (2026-09-09) and has never been compared with the full one — no"
+        " feature count, no loop closure, no bandwidth measured either way. What is measured is"
+        " the rate: 8.9 fps over the bridge then, 11-11.5 fps in the report lines since. A"
+        " full-size bgr8 frame is 2.7 MB of arithmetic (1280 x 720 x 3), and 640x360 is what the"
+        " depth network resizes to anyway",
+        on_when="raise it towards 1.0 when place recognition or a calibration needs the detail"
+        " and the bridge has the bandwidth to carry it",
+        off_when="lower it when the bridge is the bottleneck: the optics are scaled with the"
+        " picture, so nothing downstream has to be told",
         range=(0.0, 1.0),
-        description="the published picture as a fraction of the camera's own 1280x720, its"
-        " optics scaled with it: features for place recognition do not need 720p, and a"
-        " reliable 2.7 MB frame nine times a second is a cost with no return; a change takes"
-        " the next frame",
     ),
     Flag(
         "undistort",
         False,
         description="the published picture is rectified with the checkerboard calibration"
-        " (config/camera.json's intrinsics) and its camera_info then says no distortion; off by"
-        " default until the straightened picture has been measured against the raw one, and a"
-        " no-op while the camera is uncalibrated, since there is nothing to undo. Rectifying"
-        " crops to the largest all-valid rectangle, so the field of view narrows a little",
+        " (config/camera.json's intrinsics) and its camera_info then says no distortion; a no-op"
+        " while the camera is uncalibrated, since there is nothing to undo. Rectifying crops to"
+        " the largest all-valid rectangle, so the field of view narrows",
+        why="default by design, unmeasured: the camera is calibrated (45 views, rms 0.230 px, fx"
+        " 724.1, fy 726.8, cx 652.0, cy 374.0, k1 -0.150, k2 -0.129, k3 +0.092, HFOV 82.9 deg,"
+        " 2026-09-13), but the straightened picture has never been compared with the raw one on"
+        " the robot, and nobody has measured what the crop costs in field of view",
+        on_when="when a consumer needs straight lines — a checkerboard, a marker, a recogniser"
+        " that assumes a pinhole",
+        off_when="wherever a consumer was measured in the raw picture's optics (the depth"
+        " pipeline's law was fitted there), and wherever the field of view matters more than"
+        " straight lines",
     ),
     Flag(
         "static_camera_tf",
         True,
-        live=False,
         description="base_link -> camera_link is broadcast from here; it goes off (ros/laptop.sh"
         " vslam --neck) when the board's neck node publishes that edge live from the servo"
-        " encoders (neck_state, flag neck_tf), because two publishers of one edge fight. Not"
-        " live: a static transform cannot be withdrawn once sent",
+        " encoders (neck_state, flag neck_tf), because two publishers of one edge fight",
+        why="default by design, unmeasured: an ownership rule rather than a tuning — one edge,"
+        " one publisher. Not live because a static transform cannot be withdrawn once it is sent,"
+        " so the choice is made at start",
+        on_when="when the neck does not publish the edge: a fixed head, or the neck node down",
+        off_when="whenever neck_state runs with neck_tf on — at start, since this one cannot be"
+        " taken back",
+        live=False,
     ),
 )
 

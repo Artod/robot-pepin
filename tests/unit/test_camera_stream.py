@@ -363,7 +363,9 @@ def test_the_static_transform_switch_cannot_be_flipped_while_the_node_runs(build
     refused = node.set_parameters([Param("static_camera_tf", False)])[0]
     assert not refused.successful and "not live, set at the next start" in refused.reason
     assert node._switches.on("static_camera_tf")
-    assert "cannot be withdrawn" in FLAGS.flag("static_camera_tf").help()
+    entry = FLAGS.flag("static_camera_tf")
+    assert "set at the next start" in entry.help()
+    assert "cannot be withdrawn" in entry.paragraph(), "the reason lives in the why now"
 
 
 # ---- the way out -----------------------------------------------------------------------------

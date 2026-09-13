@@ -73,29 +73,67 @@ FLAGS = FlagSet(
         description="the contact line is published; off, the node is a subscriber that costs"
         " nothing — the costmap's own contact_layer.enabled is the other end of the same demo"
         " switch, and either one alone takes the camera's floor line out",
+        why="default by design, unmeasured as a switch: it is one end of a pair, so the line can"
+        " be taken out of the map in one command from either side. The line's own accuracy is"
+        " measured (see max_range), but the validation drive that was asked for — an open floor"
+        " showing about 0 % marks and a taped box at 1.2, 1.6 and 2.0 m landing within 10 cm —"
+        " has not been run",
+        on_when="wherever the camera's floor line should be seen: the redundancy demo, or a low"
+        " obstacle the lidar's plane looks over",
+        off_when="to take the line out in one command, and on a run where this node's cost must"
+        " be zero",
     ),
     Flag(
         "shadow",
         True,
         description="the last floor pixel on a face stands a band's width UP that face, so its"
-        " ray lands past the foot: on (measured), that width is taken back off the range"
+        " ray lands past the foot: on, that width is taken back off the range"
         " (pepin.contact.band_shadow); off is the raw boundary ray",
+        why="the uncorrected ray reports an obstacle about 10 % of its range too far — at 1.5 m"
+        " the band is 0.120 m tall and the raw ray lands at 1.66 m, 16 cm of phantom clearance,"
+        " in the direction a costmap pays for. That 10 % is geometry on this mount, not a field"
+        " A/B: no run compares the line against the lidar with the correction off",
+        on_when="wherever the line feeds a costmap: an obstacle reported too far is the failure a"
+        " bumper pays for",
+        off_when="to see the raw boundary ray, or on a mount whose band is thin enough that the"
+        " correction is inside the noise",
     ),
     Flag(
         "imu_lean",
         False,
         description="the floor plane leans with the gyro as well as the accelerometer"
         " (pepin.lean: the lean of a wheel climbing a threshold is followed within a sample"
-        " instead of being gated away as a push); off, the accelerometer alone, as it always"
-        " has been",
+        " instead of being gated away as a push); off, the accelerometer alone, as it always has"
+        " been",
+        why="until the gyro's roll and pitch signs are checked by tipping the cart by hand. The"
+        " sensitivity is measured as geometry: 2 degrees of nose-down moves the principal ray's"
+        " floor point from 2.52 m to 2.35 m — 17 cm, 7 % of the range — which is exactly what a"
+        " wheel on a threshold does. The correction's sign, though, has never been verified on"
+        " the robot (only the yaw axis was), so the gyro stays out",
+        on_when="after a hand tip through a known angle shows the reported lean following it the"
+        " right way; the gain is the threshold case, where a real lean is followed within a"
+        " sample",
+        off_when="wherever the reported lean disagrees with the cart's visible attitude",
     ),
     Flag(
         "max_range",
         CONTACT_MAX_RANGE,
+        description="metres past which a column is called clear instead of ended; the costmap's"
+        " contact_layer.obstacle_max_range must match it",
+        why="where the floor stops being the floor, not where the optics run out: on 22"
+        " open-floor frames of run 0171 the network's floor sits at 1.01 of the geometric plane"
+        " at 1.0-1.5 m, 0.96 at 1.5-2.0, 0.89 at 2.0-2.5 and 0.80 at 2.5-3.0 — and 0.89 of the"
+        " plane is 13 cm of height, the width of the band itself, so past 2 m the floor leaves"
+        " the band on its own and the column ends on nothing. The marks agree: 3 % false below"
+        " 1.75 m, 44 % beyond it, and without the cap every mark past 2 m is false"
+        " (scratch/contact_vs_lidar.py). Measured 2026-09-11 on the old geometry (lidar 0.20 m,"
+        " camera 1.23 m at 26 deg, hfov 78), all three since corrected — the cap has not been"
+        " re-measured",
+        on_when="raise it only after the floor ratio is re-measured on the corrected geometry,"
+        " and raise the costmap's obstacle_max_range with it",
+        off_when="lower it where the floor is patterned, wet or dark, which shortens the range"
+        " the network's floor stays flat over",
         range=(RANGE_MIN_M, RANGE_CEILING_M),
-        description="metres past which a column is called clear instead of ended; the default"
-        " is where the floor is still the floor, not where the optics run out, and the"
-        " costmap's contact_layer.obstacle_max_range must match it",
     ),
 )
 

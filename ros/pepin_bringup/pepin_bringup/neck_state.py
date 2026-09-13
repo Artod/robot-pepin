@@ -57,6 +57,18 @@ FLAGS = FlagSet(
         description="base_link -> camera_link is published live from the neck's encoders; the"
         " laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes"
         " publish that edge",
+        why="the encoders are honest and their signs are checked by hand: the tilt reads 26 ->"
+        " 103 degrees as the head goes down and the pan 0 -> -124 degrees to the left"
+        " (config/neck.json's tilt_sign +1, pan_sign -1), 50 reads of a still head gave the same"
+        " ticks every time, a read costs 9.7 ms, and the tick scale solved from the level frames"
+        " is 1.067 true degrees per commanded degree, so 360/4096 stands"
+        " (scratch/neck_tilt_scale.txt). At the reference pose the live transform equals the"
+        " static one, so turning it on moves nothing until the head does",
+        on_when="whenever the head moves at all: with it off a turned head is a camera the map"
+        " places where it is not",
+        off_when="when the laptop broadcasts the static edge instead (camera_stream's"
+        " static_camera_tf), or when the neck bus is suspect and a frozen edge is better than a"
+        " wrong one",
     ),
 )
 

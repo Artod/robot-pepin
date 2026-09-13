@@ -41,13 +41,21 @@ FLAGS = FlagSet(
     Flag(
         "slam",
         False,
+        description="RTAB-Map is the map (online SLAM): its correction is map -> odom and goes to"
+        " the board as a message on /map_odom, where pepin_bringup.slam_frame broadcasts it; off,"
+        " the board's tracker owns map -> odom and this node broadcasts map -> rtabmap here",
+        why="default by design, unmeasured: this says which edge is published — a mode, not a"
+        " tunable — and the two modes are two different graphs of frames, which is also why it is"
+        " not live. What the mode is worth was measured in the first session: from an empty"
+        " database a room came up as a 341x341 map over 21 and then 55 graph nodes, a 1 m goal"
+        " with a 90 degree turn landed within 2.8 cm and home within 6.6 cm after about 4 m of"
+        " driving, one loop-closure hypothesis was rejected by the scan check (5 % against the 10"
+        " % it needs) and none was accepted",
+        on_when="in an unknown room, launched as one mode end to end (ros/thin.sh slam on the"
+        " board, ros/laptop.sh vslam --slam): set at start, never mid-run",
+        off_when="in every known-map mode, where the board's tracker owns map -> odom: the two"
+        " publishers must never both run",
         live=False,
-        description=(
-            "RTAB-Map is the map (online SLAM): its correction is map -> odom and goes to the "
-            "board as a message on /map_odom, where pepin_bringup.slam_frame broadcasts it; off, "
-            "the board's tracker owns map -> odom and this node broadcasts map -> rtabmap here. "
-            "Not live: the two modes are two different edges, and a transform once sent stands"
-        ),
     ),
 )
 
