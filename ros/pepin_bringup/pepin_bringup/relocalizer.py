@@ -27,10 +27,11 @@ fan drives the tracker follows it, the watch is off and ``/relocalize`` refuses.
 The watchdog: the same whole-map search runs CONTINUOUSLY on the laptop, which does it in a
 tenth of a second instead of seconds (:mod:`pepin_bringup.global_watch`), and its answers arrive
 here on ``/localization/candidate``. :class:`pepin.watchdog.CandidateGate` judges each one
-against this tracker's own pose and fit; a streak of candidates that disagree with the tracker
-and agree with each other re-seeds it through the pending seed — the very path this node's own
-search uses, with the ``accept_candidates`` flag as the switch. Nothing here depends on the
-laptop: with no candidate arriving, the board's own slow search is the fallback it always was.
+against this tracker's own pose and fit; a streak of candidates from different scans that
+disagree with the tracker and agree with each other re-seeds it through the pending seed — the
+very path this node's own search uses, with the ``accept_candidates`` flag as the switch.
+Nothing here depends on the laptop: with no candidate arriving, the board's own slow search is
+the fallback it always was.
 """
 
 from __future__ import annotations
@@ -197,6 +198,14 @@ FLAGS = FlagSet(
         range=(1, 10),
         description="how many candidates in a row must disagree with the tracker and agree with"
         " each other before one of them re-seeds it: the price of a teleport, in seconds",
+    ),
+    Flag(
+        "distinct_scans",
+        True,
+        description="a streak is counted in scans, not in messages: a candidate whose scan id"
+        " is already in the run is a second opinion that heard the first one's scan, counted as"
+        " replay and not lengthening the streak. Off is the old behaviour, where a frozen /scan"
+        " on the laptop could re-seed the tracker on one scan's answer repeated",
     ),
 )
 BERTH_FLAGS = ("toe_reach", "near_rings")  # the flags that resize the berth, not the tracker

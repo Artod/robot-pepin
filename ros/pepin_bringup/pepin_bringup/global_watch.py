@@ -22,6 +22,12 @@ map to search — RTAB-Map builds the map while the cart drives, and a search ag
 is still growing would be a search against the answer — so the launch starts this node with the
 flag off.
 
+One search, one revolution: a revolution already in hand is never searched twice. A message
+repeating the stamp in hand is dropped, a revolution nobody has replaced within
+``watch_max_scan_age_s`` stops being searched at all, and the id of the revolution travels with
+the candidate — so a frozen ``/scan`` here cannot become three pieces of evidence over there
+(:class:`pepin.watchdog.CandidateGate`, ``distinct_scans``).
+
 The scan is NOT deskewed here (no odometry history on this side) and it is matched raw: the
 exhaustive pass runs on a 0.1 m grid at 9 degree headings, where a revolution's smear is under
 one cell, and the board re-measures every candidate in its own tracking window before adopting
@@ -88,6 +94,15 @@ FLAGS = FlagSet(
         description="seconds between searches; one search costs 0.1-0.3 s of one core on this"
         " machine, and a candidate is worth the most while the tracker is still healthy",
     ),
+    Flag(
+        "watch_max_scan_age_s",
+        1.0,
+        range=(0.1, 3600.0),
+        description="how long a revolution may sit in hand and still be searched, counted from"
+        " when it ARRIVED here: a bridge that stops delivering leaves the newest scan frozen,"
+        " and searching it again would publish the same answer as if it were news. A huge value"
+        " is the old behaviour, which searched whatever was held",
+    ),
 )
 
 
@@ -103,6 +118,7 @@ class GlobalWatch(Node):
         self._map_id = ""
         self._laser: tuple[float, float, float, bool] | None = None  # x, y, yaw, mirrored
         self._scan: TimedScan | None = None  # the newest revolution, in base_link
+        self._scan_at = 0.0  # monotonic, when that revolution arrived here
         self._pose: Pose2D | None = None  # what the board's tracker believes
         self._fit = 0.0  # ...and how well its scan fits the map there
         self._last_search = 0.0  # monotonic, of the last search STARTED
@@ -167,13 +183,24 @@ class GlobalWatch(Node):
         )
 
     def _on_scan(self, msg: LaserScan) -> None:
-        """The board's lidar revolution, moved into base_link by the mount read once."""
+        """The board's lidar revolution, moved into base_link by the mount read once.
+
+        A message whose stamp is not newer than the one in hand is the same revolution over
+        again (the bridge redelivering, a publisher looping) and is dropped: the id below is
+        then the identity of the REVOLUTION, which is what the board's gate counts a streak in,
+        and not a count of messages.
+        """
         if self._laser is None and not self._lookup_laser(msg.header.frame_id):
             return
         assert self._laser is not None
+        stamp = Time.from_msg(msg.header.stamp).nanoseconds * 1e-9
+        if self._scan is not None and stamp <= self._scan.stamp:
+            self._tally.count("repeat")
+            return
         self._scan_id += 1
+        self._scan_at = time.monotonic()
         self._scan = timed_scan_from_ros(
-            Time.from_msg(msg.header.stamp).nanoseconds * 1e-9,
+            stamp,
             msg.ranges,
             msg.angle_min,
             msg.angle_increment,
@@ -210,7 +237,15 @@ class GlobalWatch(Node):
     # ---- the watch -------------------------------------------------------------------------
     def _tick(self) -> None:
         """Every :data:`TICK_S`: offer the newest revolution to the search thread, if the period
-        has passed, the watch is on, a map is there and the scan is thick enough to search on."""
+        has passed, the watch is on, a map is there, the revolution is fresh and thick enough.
+
+        Fresh is counted on THIS machine's monotonic clock, from the moment the revolution
+        arrived — never as the node's clock minus the scan's stamp. The stamp is the board's
+        and the board's clock runs 2.3-2.8 s ahead of this Mac's (journal, 2026-09-09): that
+        subtraction is a lie whose sign depends on which host drifted, and it would either
+        never fire or switch the watch off for good. Arrival is local, and a frozen ``/scan``
+        is exactly what it measures.
+        """
         now = time.monotonic()
         scan = self._scan
         if not self._switches.on("global_watch"):
@@ -220,6 +255,9 @@ class GlobalWatch(Node):
             return
         if self._localizer is None or scan is None:
             self._tally.count("nothing_to_search")
+            return
+        if now - self._scan_at > float(self._switches["watch_max_scan_age_s"]):
+            self._tally.count("stale")  # nothing new has arrived: the same answer is not news
             return
         if len(scan.points) < MIN_POINTS:
             self._tally.count("thin")
@@ -259,6 +297,7 @@ class GlobalWatch(Node):
             ),
             stamp=scan.stamp,
             map_id=map_id_now,
+            scan_id=scan.scan_id,  # the board counts a streak in scans, not in messages
         )
         pose = self._pose
         verdict = CandidateVerdict.NOTHING if pose is None else judge(candidate, pose, self._fit)
@@ -293,8 +332,9 @@ class GlobalWatch(Node):
             f"global watch: {c['published']} candidates from {c['scans']} scans"
             f" ({verdicts}); last {last}; tracker fit {self._fit:.2f};"
             f" skipped: off {c['off']}, no map or scan {c['nothing_to_search']},"
-            f" thin {c['thin']}, still searching {c['busy']}, found nothing {c['found_nothing']},"
-            f" failed {c['failed']}; ms median/max: {w.stages()};"
+            f" nothing new {c['stale']}, thin {c['thin']}, still searching {c['busy']},"
+            f" found nothing {c['found_nothing']}, failed {c['failed']};"
+            f" revolutions heard twice {c['repeat']}; ms median/max: {w.stages()};"
             f" flags: {self._switches.state()}"
         )
         if c["failed"]:

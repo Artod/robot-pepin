@@ -9,6 +9,7 @@ scan, with no robot.
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import time
@@ -288,10 +289,18 @@ CARRIED_TO = Pose2D(1.2, -0.8, math.radians(60.0))  # where the whole-map search
 SURE = np.diag([0.02**2, 0.02**2, math.radians(1.0) ** 2]).tolist()
 
 
+_SCANS = itertools.count(1)  # a candidate a second, each off its own revolution
+
+
 def candidate_msg(
-    node: Relocalizer, pose: Pose2D, score: float = 0.70, stamp: float = 100.0
+    node: Relocalizer,
+    pose: Pose2D,
+    score: float = 0.70,
+    stamp: float = 100.0,
+    scan: int | None = None,
 ) -> Any:
-    """What pepin_bringup.global_watch publishes: one JSON message on /localization/candidate."""
+    """What pepin_bringup.global_watch publishes: one JSON message on /localization/candidate,
+    off a fresh revolution unless ``scan`` names one."""
     return String(
         data=json.dumps(
             {
@@ -302,6 +311,7 @@ def candidate_msg(
                 "score": score,
                 "ambiguity": 0.2,
                 "stamp": stamp,
+                "scan": next(_SCANS) if scan is None else scan,
                 "map": node._map_id,
                 "verdict": "disagree",
                 "search_ms": 140.0,
@@ -336,6 +346,19 @@ def test_three_candidates_that_disagree_re_seed_the_tracker(node: Relocalizer) -
     line = node.logger.texts("info")[-1]
     assert "candidates 3 (disagree 3), re-seeds 1" in line
     assert "accept_candidates=on candidate_streak=3" in line
+
+
+def test_one_frozen_scan_cannot_re_seed_the_tracker(node: Relocalizer) -> None:
+    """The laptop's /scan stops moving (the bridge wedges) and the same revolution is searched
+    again and again: the answers carry one scan id, and one scan is one opinion."""
+    standing(node)
+    on_candidate = node.subs["/localization/candidate"][1]
+    for _ in range(6):
+        on_candidate(candidate_msg(node, CARRIED_TO, stamp=100.0, scan=77))
+    assert node._pending_seed is None
+    node._report_tracking()
+    line = node.logger.texts("info")[-1]
+    assert "replay 5" in line and "re-seeds 0" in line and "distinct_scans=on" in line
 
 
 def test_a_candidate_that_agrees_changes_nothing(node: Relocalizer) -> None:

@@ -16,8 +16,8 @@ the tracker holds:
 * ``agree`` — the same place: the tracker is right, nothing to do (this is the normal verdict,
   once a second, forever, and its count is how one knows the watchdog is alive).
 * ``disagree`` — a different place, explaining the scan clearly better, and the map answers with
-  one place only. Three of those in a row that also agree WITH EACH OTHER re-seed the tracker
-  through the path its own search uses (:class:`CandidateGate`).
+  one place only. Three of those in a row, each from a DIFFERENT scan and all agreeing WITH EACH
+  OTHER, re-seed the tracker through the path its own search uses (:class:`CandidateGate`).
 * ``unknown_map`` — the best place on the map fits nothing, or the map answers with two places
   alike. Then the scan is not a scan of this map: another room, another flat, a map from before
   the furniture moved. Counted and said out loud; no automatic mode switch — that is the
@@ -80,8 +80,9 @@ UNKNOWN_MAP_FIT = ADMIT_FIT
 AMBIGUITY_MAX = 0.90
 AMBIGUITY_APART_M = 0.5
 AMBIGUITY_APART_DEG = 30.0
-# Candidates that disagree with the tracker AND with each other, in a row, before the tracker is
-# re-seeded. One search a second on a standing cart is one second of evidence per candidate; a
+# Candidates from DIFFERENT scans that disagree with the tracker and agree with each other, in a
+# row, before the tracker is re-seeded. One search a second on a standing cart is one second of
+# evidence per candidate — one scan's answer repeated is not two of them (``distinct_scans``); a
 # look-alike keeps looking alike, so the streak is not proof — it is the price of a teleport,
 # and it is what keeps a single unlucky search (a person filling half the fan, a door that
 # opened) from moving a healthy tracker.
@@ -140,7 +141,13 @@ class GlobalCandidate:
     """One whole-map search's answer, ready to travel: where the cart is (map frame), how sure
     that is per direction (a 3x3 covariance over x, y, yaw read off the correlation peak's own
     shape), the fit at the peak, how ambiguous the map's answer was (:func:`ambiguity`), the
-    stamp of the scan it was computed on and the map it was computed against."""
+    stamp and identity of the scan it was computed on and the map it was computed against.
+
+    ``scan_id`` identifies the REVOLUTION, not the message: two candidates carrying one scan id
+    are one search's answer said twice, and a streak built of them is one scan's evidence
+    repeated (:meth:`CandidateGate.observe`). 0 means the sender did not say, and is read as
+    "not a new scan" — the conservative half of the same rule.
+    """
 
     x: float
     y: float
@@ -150,6 +157,7 @@ class GlobalCandidate:
     ambiguity: float
     stamp: float
     map_id: str
+    scan_id: int = 0
 
     @property
     def pose(self) -> Pose2D:
@@ -177,6 +185,7 @@ class GlobalCandidate:
                 "score": round(self.score, 4),
                 "ambiguity": round(self.ambiguity, 4),
                 "stamp": self.stamp,
+                "scan": self.scan_id,
                 "map": self.map_id,
                 **extra,
             }
@@ -199,6 +208,10 @@ class GlobalCandidate:
             ambiguity=float(raw["ambiguity"]),
             stamp=float(raw["stamp"]),
             map_id=str(raw["map"]),
+            # A sender that does not name its scan says 0, and every such candidate then looks
+            # like a replay of the previous one: a version skew loses the re-seeds and says so
+            # in the report line, instead of building a streak out of one scan.
+            scan_id=int(raw.get("scan", 0)),
         )
 
     def text(self) -> str:
@@ -270,6 +283,7 @@ class CandidateGate:
 
     accept_candidates: bool = True  # off: candidates are judged and counted, never acted on
     candidate_streak: int = CANDIDATE_STREAK
+    distinct_scans: bool = True  # off: a streak may be built out of one scan's answer repeated
     unknown_streak: int = UNKNOWN_STREAK
     map_fits: bool = True  # False once unknown_streak candidates in a row said it does not
     last: CandidateVerdict | None = None  # the newest verdict, for the status
@@ -280,7 +294,11 @@ class CandidateGate:
     _malformed: int = field(default=0, init=False)
     _reason: str = field(default="", init=False)  # the last malformed message's complaint
 
-    switches: ClassVar[tuple[str, ...]] = ("accept_candidates", "candidate_streak")
+    switches: ClassVar[tuple[str, ...]] = (
+        "accept_candidates",
+        "candidate_streak",
+        "distinct_scans",
+    )
 
     def switch(self, name: str, value: Any) -> None:
         """A live flag by its name (:attr:`switches`); ``ValueError`` for any other name."""
@@ -308,6 +326,13 @@ class CandidateGate:
         streak (the laptop may be a map behind after a swap). ``allow`` is the node's word on
         whether a re-seed is possible at all right now — a goal is running, say; the candidate
         is still judged and counted, so the report tells the truth either way.
+
+        A streak is three SCANS, not three messages: a candidate carrying a scan id already in
+        the run is the same second opinion said twice (a frozen ``/scan`` on the laptop, a
+        message delivered twice) and is counted as ``replay`` without lengthening the run — the
+        rule :meth:`pepin.watch.LostWatch.answer` has for the board's own two searches, after a
+        frozen scan rubber-stamped every candidate there on 2026-09-09. ``distinct_scans`` off
+        is the old behaviour.
         """
         if candidate.map_id != map_id:
             self._count("elsewhere")
@@ -332,6 +357,9 @@ class CandidateGate:
             return GateAnswer(verdict)
         if self._run and not same_place(self._run[-1].pose, candidate.pose):
             self._run = []  # disagreeing about a DIFFERENT place each time proves nothing
+        if self.distinct_scans and any(held.scan_id == candidate.scan_id for held in self._run):
+            self._count("replay")  # one scan's answer heard twice: no second opinion in it
+            return GateAnswer(verdict)
         self._run.append(candidate)
         if len(self._run) < self.candidate_streak or not (self.accept_candidates and allow):
             return GateAnswer(verdict)

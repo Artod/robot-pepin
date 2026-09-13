@@ -145,6 +145,48 @@ def test_the_verdict_travels_with_the_candidate() -> None:
         lost.close()
 
 
+def test_one_revolution_is_one_candidate_however_often_it_arrives() -> None:
+    """A message repeating the stamp in hand is the same revolution over again (a bridge
+    redelivering): it is counted and dropped, so the id that travels with a candidate is the
+    identity of a REVOLUTION — which is what the board counts a streak in."""
+    node = watch()
+    try:
+        held = node._scan
+        node.subs["/scan"][1](scan_msg(TRUTH))  # the same revolution, a second time
+        assert node._scan is held
+        node._tick()
+        assert until(lambda: node.pubs["/localization/candidate"].sent)
+        assert published(node).scan_id == 1
+        node.subs["/scan"][1](scan_msg(TRUTH, t=100.1))
+        node._last_search = 0.0
+        node._tick()
+        assert until(lambda: len(node.pubs["/localization/candidate"].sent) == 2)
+        assert published(node).scan_id == 2
+        node._report()
+        assert "revolutions heard twice 1" in node.logger.texts("info")[-1]
+    finally:
+        node.close()
+
+
+def test_a_revolution_nobody_replaces_stops_being_searched() -> None:
+    """The bridge wedges and /scan freezes: searching the same revolution again would publish
+    the same answer once a second as if it were news, and three of those on the board used to
+    look like three seconds of evidence. Freshness is counted from when the scan ARRIVED here —
+    never the node's clock minus its stamp, which is the board's and runs seconds ahead."""
+    node = watch()
+    try:
+        node._scan_at -= 2.0  # nothing has arrived for two seconds
+        node._tick()
+        assert not node.pubs["/localization/candidate"].sent
+        node._report()
+        assert "nothing new 1" in node.logger.texts("info")[-1]
+        node.subs["/scan"][1](scan_msg(TRUTH, t=101.0))
+        node._tick()
+        assert until(lambda: node.pubs["/localization/candidate"].sent)
+    finally:
+        node.close()
+
+
 def test_the_flag_makes_the_node_a_subscriber_that_costs_nothing() -> None:
     """Off — as the launch starts it in SLAM mode — nothing is searched and nothing published;
     on again, live, and the next tick searches."""

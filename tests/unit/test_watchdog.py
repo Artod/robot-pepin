@@ -7,6 +7,8 @@ no map: :func:`pepin.watchdog.judge` and :class:`pepin.watchdog.CandidateGate` a
 
 from __future__ import annotations
 
+import itertools
+import json
 import math
 
 import numpy as np
@@ -30,13 +32,20 @@ MAP = "239x215@-18.53,-4.38"
 HERE = Pose2D(-9.5, 2.4, math.radians(50.0))
 ELSEWHERE = Pose2D(-13.5, 2.0, math.radians(-135.0))  # the corner four metres away
 SURE = np.diag([0.02**2, 0.02**2, math.radians(1.0) ** 2])  # a peak as sharp as a real one
+_SCANS = itertools.count(1)  # every candidate comes off its own revolution, as on the wire
 
 
 def candidate(
-    pose: Pose2D = HERE, score: float = 0.65, ambiguity: float = 0.2, stamp: float = 100.0
+    pose: Pose2D = HERE,
+    score: float = 0.65,
+    ambiguity: float = 0.2,
+    stamp: float = 100.0,
+    scan: int | None = None,
 ) -> GlobalCandidate:
-    """A candidate at ``pose``, as sure as a good peak on this flat's map."""
-    return GlobalCandidate(pose.x, pose.y, pose.theta, SURE, score, ambiguity, stamp, MAP)
+    """A candidate at ``pose``, as sure as a good peak on this flat's map; off a fresh
+    revolution unless ``scan`` names one (what a frozen /scan on the laptop would send)."""
+    scan_id = next(_SCANS) if scan is None else scan
+    return GlobalCandidate(pose.x, pose.y, pose.theta, SURE, score, ambiguity, stamp, MAP, scan_id)
 
 
 # ---- one candidate ----------------------------------------------------------------------
@@ -147,6 +156,28 @@ def test_candidates_that_disagree_about_different_places_never_re_seed() -> None
         assert answer.seed is None, x
 
 
+def test_one_scan_s_answer_heard_three_times_is_still_one_piece_of_evidence() -> None:
+    """The defect this rule exists for: a frozen /scan on the laptop searched again and again
+    publishes the same answer, and a streak counted in messages would be one scan rubber-stamped
+    — what a frozen scan did to the board's own two-search rule on 2026-09-09."""
+    gate = CandidateGate()
+    for _ in range(5):
+        assert gate.observe(candidate(ELSEWHERE, scan=77), HERE, 0.20, MAP).seed is None
+    line = gate.report()
+    assert "disagree 5" in line and "replay 4" in line and "re-seeds 0" in line
+    assert gate.observe(candidate(ELSEWHERE), HERE, 0.20, MAP).seed is None, "a second scan"
+    assert gate.observe(candidate(ELSEWHERE), HERE, 0.20, MAP).seed is not None, "a third one"
+
+
+def test_the_distinct_scans_switch_brings_the_old_behaviour_back() -> None:
+    """Off, a streak is three messages again: the switch a regression is turned off with."""
+    gate = CandidateGate()
+    gate.switch("distinct_scans", False)
+    for _ in range(2):
+        assert gate.observe(candidate(ELSEWHERE, scan=77), HERE, 0.20, MAP).seed is None
+    assert gate.observe(candidate(ELSEWHERE, scan=77), HERE, 0.20, MAP).seed is not None
+
+
 def test_one_agreement_ends_a_streak() -> None:
     gate = CandidateGate()
     gate.observe(candidate(ELSEWHERE), HERE, 0.20, MAP)
@@ -221,11 +252,25 @@ def test_a_candidate_survives_the_trip_as_json() -> None:
     sent = candidate(ELSEWHERE)
     back = GlobalCandidate.from_json(sent.to_json(verdict="disagree", search_ms=142.0))
     assert back.map_id == MAP and back.stamp == sent.stamp
+    assert back.scan_id == sent.scan_id, "which revolution answered travels with the answer"
     assert math.hypot(back.x - sent.x, back.y - sent.y) < 1e-4
     assert abs(back.yaw - sent.yaw) < 1e-4
     assert back.score == sent.score and back.ambiguity == sent.ambiguity
     assert np.allclose(back.covariance, sent.covariance)
     assert back.measurement().source == WATCHDOG
+
+
+def test_a_sender_that_does_not_name_its_scan_never_builds_a_streak() -> None:
+    """A publisher from before this field says nothing, which reads as 0 — and 0 repeated is a
+    replay, so a version skew loses the re-seeds and says so, instead of inventing evidence."""
+    sent = candidate(ELSEWHERE)
+    without = {k: v for k, v in json.loads(sent.to_json()).items() if k != "scan"}
+    old = GlobalCandidate.from_json(json.dumps(without))
+    assert old.scan_id == 0
+    gate = CandidateGate()
+    for _ in range(4):
+        assert gate.observe(old, HERE, 0.20, MAP).seed is None
+    assert "replay 3" in gate.report()
 
 
 def test_a_message_that_is_not_a_candidate_is_refused_not_obeyed() -> None:
