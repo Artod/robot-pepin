@@ -1,9 +1,9 @@
-"""The laptop's watchdog node: a map, a scan, and a candidate on the wire once a second.
+"""The laptop's localizer: a candidate on the wire once a second, and the camera's own poses.
 
 rclpy is faked (``ros_stubs``), the map and the scans are the furnished room of
 test_localization, so the node is built and driven here exactly as on the laptop — the whole
-search included, which is what makes this the one test that says what a candidate really
-carries.
+search included, which is what makes this the one test that says what a candidate and a
+measurement really carry.
 """
 
 from __future__ import annotations
@@ -17,7 +17,11 @@ import ros_stubs
 
 RCLPY = ros_stubs.install()
 
-from pepin_bringup.global_watch import FLAGS, GlobalWatch  # noqa: E402
+from pepin_bringup.laptop_localizer import (  # noqa: E402
+    CAMERA_MAP_TOPIC,
+    FLAGS,
+    LaptopLocalizer,
+)
 from ros_stubs import (  # noqa: E402
     Float32,
     Header,
@@ -28,9 +32,11 @@ from ros_stubs import (  # noqa: E402
 from ros_stubs import PoseWithCovarianceStamped as PoseMsg  # noqa: E402
 from synthetic import raycast_room  # noqa: E402
 from test_localization import PILLAR, furnished_room_map, room_map  # noqa: E402
-from test_relocalizer_node import map_msg, stamp  # noqa: E402
+from test_relocalizer_node import depth_msg, map_msg, odom_msg, stamp  # noqa: E402
 
+from pepin.measurements import RemoteMeasurement  # noqa: E402
 from pepin.odometry import Pose2D  # noqa: E402
+from pepin.sources import CONTACT, DEPTH  # noqa: E402
 from pepin.watchdog import CandidateVerdict, GlobalCandidate  # noqa: E402
 
 # The fixture room is a 6 x 4 m rectangle with one small box in a corner, so it is very nearly
@@ -55,9 +61,10 @@ def scan_msg(truth: Pose2D, t: float = 100.0) -> Any:
     )
 
 
-def pose_msg(pose: Pose2D) -> Any:
-    """What the board's tracker believes, as /tracker_pose carries it."""
-    msg = PoseMsg()
+def pose_msg(pose: Pose2D, t: float = 100.0) -> Any:
+    """What the board's tracker believes, as /tracker_pose carries it: the pose and the moment
+    it speaks for (the stamp of the scan it was matched on)."""
+    msg = PoseMsg(header=Header(stamp=stamp(t), frame_id="map"))
     msg.pose.pose.position.x, msg.pose.pose.position.y = pose.x, pose.y
     msg.pose.pose.orientation.z = math.sin(pose.theta / 2.0)
     msg.pose.pose.orientation.w = math.cos(pose.theta / 2.0)
@@ -76,11 +83,11 @@ def until(predicate: Callable[[], Any], timeout_s: float = 20.0) -> bool:
 
 def watch(
     believes: Pose2D | None = None, fit: float = 0.9, grid: Any = None, **flags: Any
-) -> GlobalWatch:
+) -> LaptopLocalizer:
     """A node with the room as its map, the laser at the base's origin, one revolution taken
     from :data:`TRUTH` waiting, and — when given — what the board's tracker believes."""
     with ros_stubs.parameters(**flags):
-        node = GlobalWatch()
+        node = LaptopLocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     node.subs["/map"][1](map_msg(furnished_room_map() if grid is None else grid))
     node.subs["/scan"][1](scan_msg(TRUTH))
@@ -90,7 +97,21 @@ def watch(
     return node
 
 
-def published(node: GlobalWatch) -> GlobalCandidate:
+def standing(node: LaptopLocalizer, believes: Pose2D = TRUTH, t: float = 100.0) -> None:
+    """The board's word at ``t``: one belief and the odometry around it, the cart standing
+    still, so a camera scan of that moment has a pose to be matched around."""
+    node.subs["/tracker_pose"][1](pose_msg(believes, t))
+    node.subs["/localization_fit"][1](Float32(data=0.9))
+    for k in range(16):  # a second and a half of trail: a carry never runs off its end here
+        node.subs["/odometry/filtered"][1](odom_msg(Pose2D(), t - 0.5 + 0.1 * k))
+
+
+def measured(node: LaptopLocalizer) -> RemoteMeasurement:
+    """The newest measurement, parsed back the way the board's tracker parses it."""
+    return RemoteMeasurement.from_json(node.pubs["/localization/measurement"].sent[-1].data)
+
+
+def published(node: LaptopLocalizer) -> GlobalCandidate:
     """The newest candidate, parsed back the way the board's tracker parses it."""
     return GlobalCandidate.from_json(node.pubs["/localization/candidate"].sent[-1].data)
 
@@ -208,7 +229,7 @@ def test_nothing_is_searched_without_a_map_or_a_scan() -> None:
     """The node waits: no map yet, a scan too thin to say anything, and the period between two
     searches are all counted and none of them is an error."""
     with ros_stubs.parameters(watch_period_s=0.2):
-        node = GlobalWatch()
+        node = LaptopLocalizer()
     try:
         node._tick()  # no map, no scan
         node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
@@ -241,5 +262,134 @@ def test_a_map_that_answers_with_two_places_alike_says_so() -> None:
         assert f'"verdict": "{CandidateVerdict.UNKNOWN_MAP}"' in (
             node.pubs["/localization/candidate"].sent[-1].data
         )
+    finally:
+        node.close()
+
+
+# ---- the camera's own poses -----------------------------------------------------------------
+def test_a_camera_scan_around_the_board_s_belief_becomes_a_measurement() -> None:
+    """The day's verdict in one test: the camera's fan is matched HERE, in a small window around
+    the pose the board believes in at that fan's own stamp, and what crosses the link is the
+    place it measured — with the covariance the score surface gave it, the source's name, the
+    scan's stamp and the map id the board holds."""
+    node = watch()
+    try:
+        standing(node)
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
+        answer = measured(node)
+        assert answer.source == DEPTH and abs(answer.stamp - 100.1) < 1e-6
+        assert answer.map_id == node._map_id, "the board's map, not the grid we matched against"
+        assert math.hypot(answer.x - TRUTH.x, answer.y - TRUTH.y) < 0.1
+        assert abs(answer.yaw - TRUTH.theta) < math.radians(5.0)
+        assert answer.fit > 0.4 and answer.covariance.shape == (3, 3)
+        sx, sy, syaw = answer.measurement().sigmas
+        assert 0.0 < sx < 1.0 and 0.0 < sy < 1.0 and 0.0 < syaw < math.radians(45.0)
+        sent = node.pubs["/localization/measurement"].sent[-1].data
+        assert '"matched_on": "/map"' in sent and '"belief_age_ms": 100.0' in sent
+        node._report()
+        line = node.logger.texts("info")[-1]
+        assert "measurements: depth 1 at fit" in line and "against /map" in line
+        assert "camera_sources=depth,contact camera_match_hz=5.0" in line
+    finally:
+        node.close()
+
+
+def test_each_source_is_matched_at_its_own_rate_and_the_rest_are_paced() -> None:
+    """5 Hz per source, counted on the SCANS' stamps so a replay paces as the robot does: a
+    second fan 50 ms after the first is not matched, one 200 ms after it is, and the contact
+    line's rate is its own."""
+    node = watch()
+    try:
+        standing(node)
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.0))
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.05))
+        node.subs["/contact_scan"][1](depth_msg(TRUTH, 100.05))
+        assert len(node.pubs["/localization/measurement"].sent) == 2, "depth paced, contact not"
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.25))
+        assert len(node.pubs["/localization/measurement"].sent) == 3
+        assert {
+            m.source
+            for m in map(
+                RemoteMeasurement.from_json,
+                [msg.data for msg in node.pubs["/localization/measurement"].sent],
+            )
+        } == {DEPTH, CONTACT}
+        node._report()
+        assert "paced 1" in node.logger.texts("info")[-1]
+    finally:
+        node.close()
+
+
+def test_without_a_belief_to_start_from_nothing_is_measured() -> None:
+    """A match is a refinement of the board's own pose: with no pose heard, or one old enough to
+    mean the board or the bridge is gone, there is nothing to refine and the scan is counted,
+    not guessed at. The same for a scan the odometry trail does not reach."""
+    node = watch()
+    try:
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.0))
+        assert not node.pubs["/localization/measurement"].sent
+        standing(node, t=100.0)
+        node.subs["/odometry/filtered"][1](odom_msg(Pose2D(), 103.0))
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 103.0))  # the belief is 3 s old
+        assert not node.pubs["/localization/measurement"].sent
+        node._report()
+        line = node.logger.texts("info")[-1]
+        assert "no belief 1" in line and "stale belief 1" in line
+    finally:
+        node.close()
+
+
+def test_the_camera_matches_the_volume_s_own_band_when_the_fusion_publishes_it() -> None:
+    """The lidar's plane and the camera's band are two cross-sections of one room, and a scan
+    must be matched against its own: once pepin_bringup.depth_fusion publishes /map_camera, that
+    is the grid the camera's scans are refined on — and the measurement still carries /map's id,
+    because that is the map the board holds."""
+    node = watch()
+    try:
+        standing(node)
+        node.subs[CAMERA_MAP_TOPIC][1](map_msg(furnished_room_map()))
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
+        assert node._camera_map == CAMERA_MAP_TOPIC
+        assert measured(node).map_id == node._map_id
+        assert '"matched_on": "/map_camera"' in (
+            node.pubs["/localization/measurement"].sent[-1].data
+        )
+        node._report()
+        assert "against /map_camera" in node.logger.texts("info")[-1]
+    finally:
+        node.close()
+
+
+def test_the_flag_takes_the_camera_out_of_the_pose_without_touching_anything_else() -> None:
+    """camera_sources empty: the scans still arrive (the costmap's copy of them is another
+    matter entirely), nothing is matched, nothing crosses, and the board is on the lidar alone.
+    Live, and a source at a time."""
+    node = watch(camera_sources="")
+    try:
+        standing(node)
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
+        node.subs["/contact_scan"][1](depth_msg(TRUTH, 100.1))
+        assert not node.pubs["/localization/measurement"].sent
+        node._report()
+        assert "source off 2" in node.logger.texts("info")[-1]
+        assert node.set_parameters([Parameter("camera_sources", value="contact")])[0].successful
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.3))
+        node.subs["/contact_scan"][1](depth_msg(TRUTH, 100.3))
+        assert [measured(node).source] == [CONTACT]
+    finally:
+        node.close()
+
+
+def test_a_match_that_explains_nothing_is_not_sent() -> None:
+    """A fan of somewhere else, matched in a hand's width around where the board thinks the cart
+    is, fits nothing: the pose it lands on is the window's tie-break rather than a measurement,
+    so it is counted as a low fit and the board never hears it."""
+    node = watch()
+    try:
+        standing(node)
+        node.subs["/depth_scan"][1](depth_msg(ELSEWHERE, 100.1))
+        assert not node.pubs["/localization/measurement"].sent
+        node._report()
+        assert "low fit 1" in node.logger.texts("info")[-1]
     finally:
         node.close()

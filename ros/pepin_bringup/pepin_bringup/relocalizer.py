@@ -14,16 +14,21 @@ service on demand, and ``/where_am_i`` reports pose and fit as text.
 Frames: the scan is transformed into ``base_link`` with the static laser
 transform looked up once; poses are in ``map``.
 
-Sources: the tracker matches whatever scan-shaped evidence the ``sources`` flag lets in —
-``/scan``, the camera's ``/depth_scan`` and ``/contact_scan`` (LaserScans already in
-``base_link``) — through one path (:class:`pepin.sources.SourceFeed`): the lidar's revolution
-drives every update while it is fresh and the camera's fans ride along, carried to its moment;
-when the lidar is stale or absent the fans drive the updates themselves, so a dead lidar hands
-the tracker to the camera without a restart. ``/localization/sources`` carries every source's
-word on each update as JSON for the operator. The watch, the whole-map search and the first
-fix run on full revolutions only (:meth:`pepin.sources.SourceFeed.full_picture`): a fan sees a
-quarter of the room and two frames of the same view agree on the same look-alike, so while a
-fan drives the tracker follows it, the watch is off and ``/relocalize`` refuses.
+Sources: the lidar's revolution is matched here, on the board, through the one trigger path
+(:class:`pepin.sources.SourceFeed`) — the scan waits at its gate until the odometry covers its
+whole revolution and then drives an update. The camera is a source too, but its scans are
+matched on the laptop that produces them (:mod:`pepin_bringup.laptop_localizer`) and only the
+POSE they measured arrives here, on ``/localization/measurement``: this node carries each
+measurement to the moment of its next update over the same odometry history a riding scan would
+have been carried along, and the tracker fuses it by information beside the lidar's own match
+(:mod:`pepin.measurements`). Matching those scans HERE is what the day of 2026-09-13 measured
+and refused: three matches a revolution, 147 ms instead of 45, every second revolution dropped
+(4.7 Hz) and the live pose 50 cm p90 off the lidar's truth. With the lidar stale or absent the
+measurements drive the updates by themselves, so a dead lidar still hands the tracker to the
+camera without a restart; with the link down there are simply no measurements and the tracker
+is the lidar-only one it always was. ``/localization/sources`` carries every source's word on
+each update as JSON for the operator. The watch, the whole-map search and the first fix run on
+full revolutions only (:meth:`pepin.sources.SourceFeed.full_picture`).
 
 The watchdog: the same whole-map search runs CONTINUOUSLY on the laptop, which does it in a
 tenth of a second instead of seconds (:mod:`pepin_bringup.global_watch`), and its answers arrive
@@ -46,7 +51,6 @@ import math
 import os
 import threading
 import time
-from functools import partial
 from typing import Any
 
 import numpy as np
@@ -71,17 +75,22 @@ from pepin.fusion import sigma_from_fit
 from pepin.localization import SWITCHES as TRACKER_SWITCHES
 from pepin.localization import Localizer
 from pepin.mapping import OccupancyGrid
+from pepin.measurements import (
+    MEASUREMENT_MAX_AGE_S,
+    MeasurementGate,
+    RemoteMeasurement,
+)
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
 from pepin.slip import SlipWatch
-from pepin.sources import CONTACT, DEPTH, LIDAR, ScanObservation, SourceFeed, SourceRegistry
+from pepin.sources import CAMERA, CONTACT, DEPTH, LIDAR, ScanObservation, SourceFeed, SourceRegistry
 from pepin.timeline import (
     MatchPacer,
     MotionEdge,
     MotionFilter,
     OdomHistory,
     TimedScan,
-    deskew,
+    deskewed,
     standing_still,
     timed_scan_from_ros,
 )
@@ -105,15 +114,16 @@ DUMP_DIR = (
 LAST_POSE_FILE = "/maps/last_pose.json"  # where the robot stood when the stack last ran
 LAST_POSE_MAX_AGE_S = 3600.0
 SLIP_SAID_AFTER = 3  # consecutive slipping scans before the log says it once
-# The camera's scans arrive in base_link already (pepin_bringup.depth_stream, contact_scan):
-# no mount to apply, unlike the lidar's, which is looked up from /tf_static.
-NO_MOUNT = (0.0, 0.0, 0.0, False)
-CAMERA_SCANS = ((DEPTH, "/depth_scan"), (CONTACT, "/contact_scan"))
-# The laptop's whole-map watchdog (pepin_bringup.global_watch) publishes a candidate here about
-# once a second, as one self-contained JSON message (pepin.watchdog.GlobalCandidate): the board
+# The laptop's whole-map watchdog (pepin_bringup.laptop_localizer) publishes a candidate here
+# about once a second, as one self-contained JSON message (pepin.watchdog.GlobalCandidate): the
+# board
 # never has to join two topics to judge one answer, and a message that does not parse is counted,
 # not obeyed. The board's own slow search is untouched: it is the fallback when none arrives.
 CANDIDATE_TOPIC = "/localization/candidate"
+# ...and on this one, several times a second, the pose it measured out of a camera scan
+# (pepin.measurements.RemoteMeasurement): the same shape of message, judged the same way — a
+# map id that is not ours is refused, a message that does not parse is counted, not obeyed.
+MEASUREMENT_TOPIC = "/localization/measurement"
 
 
 def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
@@ -187,29 +197,54 @@ FLAGS = FlagSet(
     Flag(
         "sources",
         (LIDAR,),
-        description="the scan sources matched against the map: the lidar's revolution (/scan),"
-        " the camera's depth band (/depth_scan), the floor-contact line (/contact_scan); the"
-        " lidar drives the updates while it is fresh and the others ride along, a stale lidar"
-        " hands the updates to them",
+        description="what corrects the pose: the lidar's revolution (/scan), matched here; the"
+        " camera (`camera`), whose scans the laptop matches and whose ANSWER arrives on"
+        " /localization/measurement; the camera's raw scans (`depth`, `contact`) matched here,"
+        " which is the old behaviour and costs this board three matches a revolution. The lidar"
+        " drives the updates while it is fresh and the rest ride along, carried to its moment; a"
+        " stale lidar hands the updates to them",
         why="the lidar alone, because the camera cannot carry the map by itself: replayed on run"
         " 0171 against flat3 the depth band alone loses the map in 0.5 s (122 cm, 124 deg) and"
         " the contact line alone in 12 s (80 cm, 28 deg) — the camera's 0.15-1.3 m band is a"
         " different cross-section of the room than the lidar's 0.2 m map, so a look-alike place"
         " scores fit 0.90 at its own match and 0.12 at the truth. Fused with the lidar and gated"
         " on disagreement, all three together stay within 0.7/1.6/5.7 cm and 0.21/0.56/1.9 deg of"
-        " lidar-only and never lose the map (scratch/camera_only_localization.py)",
-        on_when="add depth and contact where the lidar is blocked or blind — parked bumper to"
-        " furniture, or a lidar that stopped: the fused modes are measured and gated, so they"
-        " cost the pose nothing",
+        " lidar-only and never lose the map (scratch/camera_only_localization.py). `camera` is"
+        " that same fusion with the matching moved to the laptop: on this board the raw scans"
+        " took the tracker to 147 ms and 4.7 Hz and the live pose 50 cm p90 off the lidar's truth"
+        " (scratch/drive_bisect.py, runs 0238-0241), while a measurement costs a matrix inverse",
+        on_when="add `camera` where the lidar is blocked or blind — parked bumper to furniture,"
+        " or a lidar that stopped: the fusion is measured and gated, and the board pays nothing"
+        " for it",
         off_when="drop a source the moment /localization/sources shows it disagreeing with the"
-        " others; the lidar alone is the safe state",
-        choices=(LIDAR, DEPTH, CONTACT),
+        " others; the lidar alone is the safe state. `depth`/`contact` are the old on-board"
+        " matching, for an A/B on a board with CPU to spare — never for a drive",
+        choices=(LIDAR, DEPTH, CONTACT, CAMERA),
+    ),
+    Flag(
+        "measurement_max_age_s",
+        MEASUREMENT_MAX_AGE_S,
+        description="how old a pose measurement from the laptop may be, in seconds, at the"
+        " moment of the update that would take it: past this it is dropped instead of carried",
+        why="the number the day of 2026-09-13 asked for: the camera's word pulled the live pose"
+        " 50 cm p90 off the truth while the board matched at 4.7 Hz with 147 ms per scan, and"
+        " every one of those measurements was fused as if it spoke for the moment it was used"
+        " at. On the new path a measurement is 0.1-0.3 s old when an update takes it (a camera"
+        " frame at 5 Hz plus the link), so half a second is the slack around that, not a"
+        " threshold anybody has hit; the failure it is against — a bridge that stalls and"
+        " delivers a burst — is seconds",
+        on_when="raise it only to see what a stale measurement does; the carry over odometry is"
+        " honest for as long as the odometry is",
+        off_when="lower it towards the measurement's own age (0.3 s) where the cart drives fast"
+        " and a carry over a tenth of a second is already a decimetre",
+        range=(0.05, 5.0),
     ),
     Flag(
         "fusion",
         True,
-        description="fuse every enabled source's match by its information; off: the widest source"
-        " corrects alone and the others only report",
+        description="fuse every enabled source's word by its information — a match made here, a"
+        " measurement made on the laptop; off: the widest source corrects alone and the others"
+        " only report",
         why="with all three sources the fused pose stays within 0.7-5.7 cm of lidar-only and"
         " never loses the map. One defect was found and fixed on the way: an edge-bound lidar"
         " used to be out-voted by a blind fan's plateau, so the anchor's bound is now taken alone"
@@ -404,6 +439,10 @@ class Relocalizer(Node):
         # tracker, so the ``sources`` flag switches both at once.
         self._registry = SourceRegistry()
         self._feed = SourceFeed(self._registry, max_wait_s=0.5)
+        # The camera's word, measured on the laptop: the newest per source waits here until an
+        # update takes it, carried to that update's moment over the same history a riding scan
+        # would have been carried along (pepin.measurements).
+        self._measurements = MeasurementGate(self._registry)
         self._motion = MotionFilter(min_m=0.005, min_deg=0.3, max_gap_s=1.0)
         self._rested = 0  # scans left unmatched because the cart stood still (per report)
         # What the map does not explain (a person, a moved chair) is published as lethal rings for
@@ -457,13 +496,6 @@ class Relocalizer(Node):
             self._on_scan,
             QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
         )
-        for name, topic in CAMERA_SCANS:
-            self.create_subscription(
-                LaserScan,
-                topic,
-                partial(self._on_camera_scan, name),
-                QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
-            )
         self.create_subscription(Odometry, self._odom_topic, self._on_odom, 20)
         # Depth 1: a candidate is a snapshot of a moment, and the newest one is the only one
         # worth judging; a backlog of them would re-seed from a scan seconds old.
@@ -472,6 +504,16 @@ class Relocalizer(Node):
             CANDIDATE_TOPIC,
             self._on_candidate,
             QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
+        )
+        # Depth 5, not 1: unlike a candidate — a snapshot of now, where only the newest is worth
+        # judging — every measurement carries the stamp it was measured at and is carried to the
+        # update that takes it, so a short queue is a few tenths of a second of the camera's
+        # history rather than a backlog of stale opinions.
+        self.create_subscription(
+            String,
+            MEASUREMENT_TOPIC,
+            self._on_measurement,
+            QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE),
         )
         self._fit_pub = self.create_publisher(Float32, "localization_fit", 5)
         # Every source's word on each update, as JSON (Localizer.sources_report): the demo's
@@ -531,8 +573,9 @@ class Relocalizer(Node):
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._registry.enable(self._switches["sources"])
         self._resize_berth()
-        for name in self._candidates.switches:  # a launch override reaches the gate too
-            self._candidates.switch(name, self._switches[name])
+        for gate in (self._candidates, self._measurements):  # a launch override reaches them too
+            for name in gate.switches:
+                gate.switch(name, self._switches[name])
         self.get_logger().info("relocalizer up: watching the scan-to-map fit")
 
     # -- inputs -------------------------------------------------------------
@@ -551,7 +594,7 @@ class Relocalizer(Node):
         if name in BERTH_FLAGS:
             self._resize_berth()  # the switches already hold the new value
             return
-        for target in (self._localizer, self._candidates):
+        for target in (self._localizer, self._candidates, self._measurements):
             if target is not None and name in target.switches:
                 target.switch(name, new)
 
@@ -574,6 +617,7 @@ class Relocalizer(Node):
             self._watch = LostWatch(**self._watch_args)  # type: ignore[arg-type]
             self._pending_seed = None
             self._candidates.forget()
+            self._measurements.forget()  # nor is a pose measured against the old one
         self._matcher = CorrelativeMatcher(self._grid)
         self._static_mask = StaticMask(self._grid)
         # lost_after huge: update() must never run a whole-map search in the executor thread on
@@ -618,11 +662,6 @@ class Relocalizer(Node):
         assert self._laser_tf is not None
         self._offer(LIDAR, msg, self._laser_tf)
 
-    def _on_camera_scan(self, name: str, msg: LaserScan) -> None:
-        """A camera fan (``/depth_scan``, ``/contact_scan``): a LaserScan in base_link already,
-        taken in one instant (its ``scan_time`` is zero: no beam to deskew)."""
-        self._offer(name, msg, NO_MOUNT)
-
     def _offer(self, name: str, msg: LaserScan, mount: tuple[float, float, float, bool]) -> None:
         """Any source's scan into the feed, and a try at matching whatever the feed releases."""
         self._scan_id += 1  # which scan a search was computed on: a second opinion needs a new one
@@ -637,8 +676,7 @@ class Relocalizer(Node):
             self._scan_id,
         )
         self._feed.offer(name, scan)
-        if self._track:
-            self._track_pending()
+        self._track_pending()
 
     def _on_odom(self, msg: Odometry) -> None:
         """Every fused odometry sample feeds the history; a scan waiting for it gets matched."""
@@ -649,8 +687,7 @@ class Relocalizer(Node):
         # The gyro's word on whether the cart turns, taken from the filter that already fuses it:
         # subscribing to /imu/data_raw here would cost a slice of a core for a number we have.
         self._odom_wz = float(msg.twist.twist.angular.z)
-        if self._track:
-            self._track_pending()
+        self._track_pending()
 
     def _on_candidate(self, msg: String) -> None:
         """The laptop watchdog's whole-map candidate (one JSON message, pepin.watchdog): carried
@@ -680,9 +717,87 @@ class Relocalizer(Node):
         with self._episode:  # the search worker writes _pending_seed from its own thread
             self._pending_seed = answer.pending(self._map_id) or self._pending_seed
 
+    def _on_measurement(self, msg: String) -> None:
+        """The laptop's pose measurement off a camera scan (one JSON message,
+        pepin.measurements): it waits at the gate for the next update, which carries it from the
+        moment of its own scan to that update's moment and fuses it.
+
+        Nothing is decided here — a measurement on another map is refused by the gate, a message
+        that does not parse is counted — and the try at an update is the same one every input
+        makes: with the lidar alive the measurement rides its next revolution, and with the lidar
+        stale or gone it drives an update of its own (:meth:`_track_on_measurements`).
+        """
+        try:
+            remote = RemoteMeasurement.from_json(msg.data)
+        except (KeyError, TypeError, ValueError) as exc:
+            self._measurements.malformed(str(exc))
+            return
+        self._measurements.offer(remote, self._map_id)
+        self._track_pending()
+
+    def _track_on_measurements(self, now: float) -> None:
+        """An update driven by the camera's measurements alone, at the stamp of the newest one.
+
+        This is what a dead lidar leaves: no scan waits at the feed and nothing is fresh, so the
+        feed has no anchor and the only word about where the cart is comes over the link. What
+        may drive such an update, and when, is the gate's decision
+        (:meth:`pepin.measurements.MeasurementGate.drive`); here it is carried out. The rest
+        filter that spares the matcher while the cart stands does not apply — there is nothing
+        to match, the match was made on the laptop — and the rest LOCK still does its work
+        inside the tracker. The tracker takes its first fix this way too, from its saved pose,
+        with no whole-map search: a fan cannot find the cart, and a pose measured off one cannot
+        either.
+        """
+        loc = self._localizer
+        plan = self._measurements.drive(self._feed.anchor(now), self._history)
+        if loc is None or plan is None:
+            return
+        if not self._tracker_initialised:
+            self._tracker_initialised = True
+            self.get_logger().warning(
+                f"tracker starts at ({loc.pose.x:+.2f}, {loc.pose.y:+.2f}, "
+                f"{math.degrees(loc.pose.theta):+.0f} deg) on the camera's measurements without "
+                "a first search: a fan cannot find the cart"
+            )
+        previous_stamp = self._last_match_stamp_s
+        self._last_match_stamp_s = plan.stamp
+        dt_s = (
+            plan.stamp - previous_stamp
+            if previous_stamp is not None and plan.stamp > previous_stamp
+            else None
+        )
+        self._last_scan_age_s = now - plan.stamp
+        pose = loc.update_from(
+            plan.odom,
+            [],
+            measurements=[plan.measurement],
+            at_rest=standing_still(self._history, plan.stamp, self._odom_wz),
+            dt_s=dt_s,
+        )
+        self._publish_update(loc, pose, plan.odom, plan.stamp, now)
+
+    def _publish_update(
+        self, loc: Localizer, pose: Pose2D, odom: Pose2D, stamp: float, now: float
+    ) -> None:
+        """What every update publishes, however it was driven: map -> odom from the pose at this
+        stamp, the tracked pose with the covariance its fit buys, the fit at the pose actually
+        published, and every source's word as JSON — the scans', the watchdog's and the
+        camera's."""
+        self._last_map_odom = map_to_odom(pose, odom)
+        self._send_map_odom()
+        self._publish_tracker_pose(
+            pose, loc.confidence, Time(nanoseconds=int(stamp * 1e9)).to_msg()
+        )
+        self._published_fit_pub.publish(Float32(data=float(loc.published_fit)))
+        report = loc.sources_report(now)
+        report["candidates"] = self._candidates.status()  # the laptop's word, beside the scans'
+        report["measurements"] = self._measurements.status()
+        self._sources_pub.publish(String(data=json.dumps(report)))
+
     def _track_pending(self) -> None:
         """Match the anchor's scan at the feed once the odometry history covers its whole
-        revolution, with the other sources' scans carried to its moment riding along.
+        revolution, with the other sources' scans — and the camera's measurements from the
+        laptop — carried to its moment riding along.
 
         Called on every input: a scan usually arrives before the odometry of its last beams and
         is released by the odometry sample that completes it, 30-70 ms later. Which source's
@@ -693,11 +808,12 @@ class Relocalizer(Node):
         residual the matcher reports is odometry error and nothing else.
         """
         loc = self._localizer
-        if loc is None:
+        if loc is None or not self._track:  # ``track`` false: AMCL owns the pose, we only watch
             return
         now = self._now_s()
         taken = self._feed.take(self._history, now)
         if taken is None:
+            self._track_on_measurements(now)  # a dead lidar: the camera's word drives instead
             return
         anchor, scan = taken
         if not self._tracker_initialised:
@@ -738,10 +854,8 @@ class Relocalizer(Node):
             else None
         )
         self._last_scan_age_s = now - scan.stamp
-        points = deskew(scan.points, scan.times, self._history, scan.stamp)
-        if points is None:
-            self._deskew_failed += 1
-            points = scan.points
+        points, whole = deskewed(scan, self._history)
+        self._deskew_failed += not whole
         # Slip: the wheels claim a step but the scan is the same picture as a tenth of a second ago.
         # Then the wheel step is a lie; the pose is corrected from where it was, and Nav2's progress
         # checker (map frame) sees the truth: no progress -> a recovery instead of a 60 s wheelspin.
@@ -764,21 +878,14 @@ class Relocalizer(Node):
         pose = loc.update_from(
             odom,
             scans,
+            measurements=self._measurements.take(scan.stamp, self._history),
             trust_odometry=not slip,
             at_rest=at_rest,
             dt_s=dt_s,
             mask=self._static_mask,
         )
         self._pacer.matched(mono, time.perf_counter() - t0)
-        self._last_map_odom = map_to_odom(pose, odom)
-        self._send_map_odom()
-        self._publish_tracker_pose(
-            pose, loc.confidence, Time(nanoseconds=int(scan.stamp * 1e9)).to_msg()
-        )
-        self._published_fit_pub.publish(Float32(data=float(loc.published_fit)))
-        report = loc.sources_report(now)
-        report["candidates"] = self._candidates.status()  # the laptop's word, beside the scans'
-        self._sources_pub.publish(String(data=json.dumps(report)))
+        self._publish_update(loc, pose, odom, scan.stamp, now)
         self._publish_dynamic(points, pose, scan.stamp)  # the pose of this scan's own moment
 
     def _last_known_pose(self) -> Pose2D:
@@ -916,7 +1023,7 @@ class Relocalizer(Node):
             f"(rings {self._berth.ring_m:.2f} m from {self._berth.near_m:.2f} m out, trimmed "
             f"within {self._berth.trim_m:.2f} m), "
             f"scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
-            f"{self._candidates.report()}; "
+            f"{self._candidates.report()}; {self._measurements.report()}; "
             f"flags: {self._switches.state()}"
         )
         if feed.expired:
@@ -996,14 +1103,20 @@ class Relocalizer(Node):
     def _check(self) -> None:
         """Once a second: score the fit on the newest picture of the source that drives the
         tracker; the watch decides whether to search the whole map — on a full revolution
-        only: while a fan drives, the fit is published and the watch is off."""
+        only: while anything narrower drives, the fit is published and the watch is off.
+
+        With no scan of our own at all — the camera's measurements driving the tracker — there
+        is nothing here to score, and the fit published is the one the laptop measured and the
+        tracker kept. It is the honest number: the goal server and the watchdog both read this
+        topic, and a tracker running on the camera alone must still be able to say how well it
+        sits on the map.
+        """
         now = self._now_s()
         full = self._feed.full_picture(now)
         picture = full if full is not None else self._feed.picture(now)
-        if self._matcher is None or picture is None:
-            return
+        loc = self._localizer
         pose = self._tracked_pose()
-        if pose is None:
+        if self._matcher is None or loc is None or pose is None:
             return
         # Sampled exactly once: _moving() is an edge detector on odometry, and a second call in
         # the same tick compared a reading with itself and told the watch the robot stood still
@@ -1016,21 +1129,21 @@ class Relocalizer(Node):
         # (run 0070, second by second), and a blind-drive rule built on the false number stopped
         # healthy drives mid-turn and moved the belief by 0.4 m to "recover" from nothing.
         self.fit = (
-            float(self._localizer.confidence)
-            if self._localizer is not None and moving
+            float(loc.confidence)
+            if moving or picture is None
             else self._matcher.inlier_fraction(pose, picture.points)
         )
         self._fit_pub.publish(Float32(data=float(self._watch.reported_fit(self.fit))))
-        # A fan drives: its fit cannot say "lost" (LOST_FIT was tuned on full revolutions) and
-        # a search on it would re-seed the tracker on a look-alike the twin check cannot see:
-        # the watch is off, and the report line says so.
+        # A fan drives, or nothing here does: such a fit cannot say "lost" (LOST_FIT was tuned on
+        # full revolutions) and a search on it would re-seed the tracker on a look-alike the twin
+        # check cannot see — the watch is off, and the report line says so.
         self._watch_on = full is not None
-        if self._searching or not self._tracker_initialised or not self._watch_on:
+        if full is None or self._searching or not self._tracker_initialised:
             return
         # The watch gets the tracker's OWN fit. reported_fit() is for the outside world: capped
         # at 0.35 while a candidate pends, and fed back here it kept a twin candidate alive at
         # fit 0.76 and ran a whole-map search every second for half an hour (18:00 today).
-        occluded = self._occluded(picture.points, pose)
+        occluded = self._occluded(full.points, pose)
         # Under the episode lock, like every other _watch call and every claim of _searching:
         # the worker answers a search on its own thread and the two share this state.
         with self._episode:
@@ -1048,7 +1161,7 @@ class Relocalizer(Node):
                 self._searching = True
         if search:
             self.get_logger().warning(f"fit {self.fit:.2f}: searching the whole map")
-            threading.Thread(target=self._search_and_seed, args=(picture,), daemon=True).start()
+            threading.Thread(target=self._search_and_seed, args=(full,), daemon=True).start()
         elif occluded and self.fit < self._watch.lost_fit:
             self.get_logger().info(
                 f"fit {self.fit:.2f} but the scan is mostly things the map does not know: "

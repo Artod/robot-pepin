@@ -440,18 +440,24 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `depth_stream` | `scale_ceiling` | number 0.5..20 | 5.0 | yes | the largest 1 / scale the law may be fitted to (the upper half of pepin.depth.A_BOUNDS); a law that lands on a bound prints AT BOUND |
 | `depth_stream` | `imu_lean` | bool | on | yes | the cart's lean (pepin.lean, from /imu/data_raw) is followed with the gyro as well as the accelerometer and carried into the scan's carry and the camera's place in the map; off, the floor plane leans with the accelerometer alone, as it always has, and nothing else is leaned |
 | `depth_stream` | `lean_min_quality` | number 0..1 | 0.5 | yes | how much of the lean gravity must have voted for (pepin.lean's quality, printed beside the lean in this line) before a frame is placed by it: below it the lean is treated as unknown and the frame is placed level |
-| `global_watch` | `global_watch` | bool | on | yes | run the whole-map search once every watch_period_s and publish what it finds on /localization/candidate; off, this node is a subscriber that costs nothing and the board is back to searching for itself only once it is already lost |
-| `global_watch` | `watch_period_s` | number 0.2..60 | 1.0 | yes | seconds between searches |
-| `global_watch` | `watch_max_scan_age_s` | number 0.1..3600 | 1.0 | yes | how long a revolution may sit in hand and still be searched, counted from when it ARRIVED here |
 | `goal_server` | `tf_pose` | bool | on | yes | where no tracker answers, the cart's pose is read from TF (map -> base_link) and a goal is judged by how fresh that edge is; off, only the tracker is ever asked |
 | `goal_server` | `correction_watch` | bool | on | yes | where no tracker answers, the SLAM correction (/map_odom) must be arriving for a goal to start, and a drive is cut when it stops; off, the age of map -> base_link is the only evidence read |
+| `laptop_localizer` | `global_watch` | bool | on | yes | run the whole-map search once every watch_period_s and publish what it finds on /localization/candidate; off, this half of the node is a subscriber that costs nothing and the board is back to searching for itself only once it is already lost |
+| `laptop_localizer` | `watch_period_s` | number 0.2..60 | 1.0 | yes | seconds between searches |
+| `laptop_localizer` | `watch_max_scan_age_s` | number 0.1..3600 | 1.0 | yes | how long a revolution may sit in hand and still be searched, counted from when it ARRIVED here |
+| `laptop_localizer` | `camera_sources` | list of: depth, contact | depth,contact | yes | which camera scans are matched here and sent to the board as pose measurements on /localization/measurement: the depth band, the floor-contact line; empty, nothing is matched and the board tracks on the lidar alone |
+| `laptop_localizer` | `camera_match_hz` | number 0.2..30 | 5.0 | yes | how often each camera source is matched and a measurement published |
+| `laptop_localizer` | `camera_window_m` | number 0.01..1 | 0.09 | yes | half-width of the window a camera scan is matched in, metres, around the board's belief carried to that scan's moment |
+| `laptop_localizer` | `camera_window_deg` | number 0.5..90 | 9.0 | yes | half-width of the same window in heading, degrees |
+| `laptop_localizer` | `camera_min_fit` | number 0..1 | 0.25 | yes | a camera match whose fit is below this is not sent: it is counted as low fit and the board never hears about it |
 | `neck_state` | `neck_tf` | bool | on | yes | base_link -> camera_link is published live from the neck's encoders; the laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes publish that edge |
 | `relocalizer` | `rest_lock` | bool | on | yes | hold the pose while the cart stands still (wheels quiet 0.6 s and the gyro under 1.5 deg/s): a match's residual is blended in with a time constant instead of taken whole |
 | `relocalizer` | `explained_vote` | bool | on | yes | returns the static map cannot explain (a person, a moved chair) do not score the match |
 | `relocalizer` | `rest_tau_s` | number 0.1..60 | 6.0 | yes | the rest lock's time constant: seconds for a residual to die at rest |
 | `relocalizer` | `rest_gain` | number 0..1 | 0.05 | yes | the rest lock's share per match when no match cadence is known |
-| `relocalizer` | `sources` | list of: lidar, depth, contact | lidar | yes | the scan sources matched against the map: the lidar's revolution (/scan), the camera's depth band (/depth_scan), the floor-contact line (/contact_scan); the lidar drives the updates while it is fresh and the others ride along, a stale lidar hands the updates to them |
-| `relocalizer` | `fusion` | bool | on | yes | fuse every enabled source's match by its information; off: the widest source corrects alone and the others only report |
+| `relocalizer` | `sources` | list of: lidar, depth, contact, camera | lidar | yes | what corrects the pose: the lidar's revolution (/scan), matched here; the camera (`camera`), whose scans the laptop matches and whose ANSWER arrives on /localization/measurement; the camera's raw scans (`depth`, `contact`) matched here, which is the old behaviour and costs this board three matches a revolution. The lidar drives the updates while it is fresh and the rest ride along, carried to its moment; a stale lidar hands the updates to them |
+| `relocalizer` | `measurement_max_age_s` | number 0.05..5 | 0.5 | yes | how old a pose measurement from the laptop may be, in seconds, at the moment of the update that would take it: past this it is dropped instead of carried |
+| `relocalizer` | `fusion` | bool | on | yes | fuse every enabled source's word by its information — a match made here, a measurement made on the laptop; off: the widest source corrects alone and the others only report |
 | `relocalizer` | `toe_reach` | number 0..0.6 | 0.27 | yes | how far past the leg the lidar sees a standing person's toe reaches, metres: the term the dynamic rings are sized on (pepin.dynamic.berth_for). The default is computed from the lidar's mount (config/lidar.json) |
 | `relocalizer` | `near_rings` | bool | on | yes | a return is ringed as soon as it clears the cart's own outline, and only the marks that would land on that outline are dropped; off, nothing within the ring plus the outline is ringed at all — the older rule, whose blind disc grows with the ring |
 | `relocalizer` | `accept_candidates` | bool | on | yes | re-seed from the laptop watchdog's whole-map candidates (/localization/candidate, pepin.watchdog): a place that disagrees with the tracked pose candidate_streak times in a row, about the same place each time, is adopted through the path the board's own search uses |
@@ -659,10 +665,10 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *On when:* raise it towards 1.0 on a robot that only ever leans when something real pushes it
   - *Off when:* 0 believes every lean, as before the floor existed: an A/B of the gyro's own drift
 
-#### `global_watch`
+#### `laptop_localizer`
 
 - **`global_watch`** — bool, default on
-  - *What:* run the whole-map search once every watch_period_s and publish what it finds on /localization/candidate; off, this node is a subscriber that costs nothing and the board is back to searching for itself only once it is already lost
+  - *What:* run the whole-map search once every watch_period_s and publish what it finds on /localization/candidate; off, this half of the node is a subscriber that costs nothing and the board is back to searching for itself only once it is already lost
   - *Default:* on — measured on the kidnap tape (run 0171, where the odometry jumps 1 m and 40 deg while the scans do not): the tracker's own window never recovered — 0.69 m of error still there after 39 s — and the board's own slow search found the truth four times (fits 0.76/0.72/0.79/0.75 against the tracker's 0.50-0.60) and died unconfirmed every time, because at a metre off this flat still fits 0.53, just under the 0.55 that declares the cart lost. This search costs 125 ms median (p90 165, max 258) against the board's 3700 ms, and with the shipped streak of 3 it brought the cart back in 2.9 s with 0 false re-seeds over the undisturbed tape
   - *On when:* whenever the map is a known one and the laptop is up
   - *Off when:* in SLAM mode: the map is RTAB-Map's there and still being built, so a whole-map search searches a map that changes under it
@@ -676,6 +682,31 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* 1.0 — default by design, unmeasured as a number; the rule behind it is measured. /scan arrives at 9.8-10.8 Hz, so a healthy revolution is about 0.1 s old and one second is ten missed ones. The age is taken on this machine's monotonic clock and never from the stamp, because the board's clock runs 2.3-2.8 s ahead of the Mac's: a stamp-based age would either never fire or switch the watch off for good
   - *On when:* raise it when the bridge is slow but honest and candidates are being dropped as stale
   - *Off when:* a huge value is the old behaviour, which searched whatever was held — including a frozen scan, publishing the same answer again as if it were news
+- **`camera_sources`** — list of: depth, contact, default depth,contact
+  - *What:* which camera scans are matched here and sent to the board as pose measurements on /localization/measurement: the depth band, the floor-contact line; empty, nothing is matched and the board tracks on the lidar alone (any of: depth, contact, comma-separated)
+  - *Default:* depth,contact — both, because fused they are what stays within 0.7/1.6/5.7 cm of lidar-only over run 0171 while neither carries the map alone (the depth band alone loses it in 0.5 s, the contact line in 12 s: scratch/camera_only_localization.py). Matching them HERE is the day's verdict: on the board the same pair cost 147 ms a scan, 4.7 Hz and 50 cm p90 of live error (scratch/drive_bisect.py, runs 0238-0241), and on this machine a match is a few milliseconds of a core that has nothing else to do
+  - *On when:* whenever the camera is meant to help the pose — parked bumper to furniture, a blocked or dead lidar
+  - *Off when:* empty is the switch that takes the camera out of the tracker's pose without touching the costmap layers, and the state to leave it in while the camera's own numbers are in doubt
+- **`camera_match_hz`** — number 0.2..30, default 5.0
+  - *What:* how often each camera source is matched and a measurement published (0.2..30)
+  - *Default:* 5.0 — the cadence the offline replay fused at and the cadence the camera delivers: the depth pipeline runs at 9-11 fps and the contact scan beside it, and the replay that cost 0.7 cm fused every frame. 5 Hz per source is half of what arrives — two matches a frame period, a few ms each here — and it is what the board's own update rate can absorb without a measurement ever waiting longer than its carry is honest
+  - *On when:* raise it towards the camera's own rate when the pose must follow the camera closely and this machine is idle
+  - *Off when:* lower it on a busy laptop: the board fuses whatever arrives, and a measurement that comes at 2 Hz is still carried honestly to the update that takes it
+- **`camera_window_m`** — number 0.01..1, default 0.09
+  - *What:* half-width of the window a camera scan is matched in, metres, around the board's belief carried to that scan's moment (0.01..1)
+  - *Default:* 0.09 — the tracker's own window (the board's 0.09 m), which is what the offline replay matched the camera scans in for its 0.7 cm: the camera REFINES a pose that the lidar and the odometry already hold to centimetres, it does not search for one. Wider is not better here — a +-40 degree fan has look-alikes a hand's width away that a full revolution does not
+  - *On when:* widen it where the board's belief is poor and the camera is expected to pull it back — a long blind stretch, a lidar that has been off
+  - *Off when:* narrow it to make a camera match cheaper and safer still; below the odometry's own error over a fifth of a second it stops being able to correct anything
+- **`camera_window_deg`** — number 0.5..90, default 9.0
+  - *What:* half-width of the same window in heading, degrees (0.5..90)
+  - *Default:* 9.0 — the tracker's own 9 degrees, the replay's settings: a fan's heading is the one thing it measures well, and the belief it starts from is never more than a degree or two out while the lidar is alive
+  - *On when:* widen it after a stretch on odometry alone, where the heading is what drifts
+  - *Off when:* narrow it where the cart turns little and every degree of search is cost
+- **`camera_min_fit`** — number 0..1, default 0.25
+  - *What:* a camera match whose fit is below this is not sent: it is counted as low fit and the board never hears about it (0..1)
+  - *Default:* 0.25 — 0.25 is the fit at which the tracker itself calls a scan weak (pepin.localization's lost_below): below it the scan explains nothing and its pose is the window's tie-break, not a measurement. It refuses only that much — the camera's fans sit at 0.5-0.6 against the lidar's map on run 0171, and the worst live camera-only fits of 2026-09-13 were 0.35-0.46. The covariance already widens a poor match a hundredfold at the bound; this floor is for what is not a match at all
+  - *On when:* raise it to send only matches the map really explains — a room the camera sees badly, a map that has moved on
+  - *Off when:* lower it to let the board's own disagreement gate do all the judging, which is what it is there for
 
 #### `goal_server`
 
@@ -720,13 +751,18 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* 0.05 — default by design, unmeasured on its own: 0.05 against the driving gain of 0.5 was a guess, kept after the robot run because the rest bands it is inside of (0.42-0.51 deg) came out right. It has never been swept
   - *On when:* raise it towards the driving gain when the rest lock is too slow to accept a real correction
   - *Off when:* 0 lets no match move the pose while the cart stands: a hard hold, and a way to see how far the odometry alone wanders
-- **`sources`** — list of: lidar, depth, contact, default lidar
-  - *What:* the scan sources matched against the map: the lidar's revolution (/scan), the camera's depth band (/depth_scan), the floor-contact line (/contact_scan); the lidar drives the updates while it is fresh and the others ride along, a stale lidar hands the updates to them (any of: lidar, depth, contact, comma-separated)
-  - *Default:* lidar — the lidar alone, because the camera cannot carry the map by itself: replayed on run 0171 against flat3 the depth band alone loses the map in 0.5 s (122 cm, 124 deg) and the contact line alone in 12 s (80 cm, 28 deg) — the camera's 0.15-1.3 m band is a different cross-section of the room than the lidar's 0.2 m map, so a look-alike place scores fit 0.90 at its own match and 0.12 at the truth. Fused with the lidar and gated on disagreement, all three together stay within 0.7/1.6/5.7 cm and 0.21/0.56/1.9 deg of lidar-only and never lose the map (scratch/camera_only_localization.py)
-  - *On when:* add depth and contact where the lidar is blocked or blind — parked bumper to furniture, or a lidar that stopped: the fused modes are measured and gated, so they cost the pose nothing
-  - *Off when:* drop a source the moment /localization/sources shows it disagreeing with the others; the lidar alone is the safe state
+- **`sources`** — list of: lidar, depth, contact, camera, default lidar
+  - *What:* what corrects the pose: the lidar's revolution (/scan), matched here; the camera (`camera`), whose scans the laptop matches and whose ANSWER arrives on /localization/measurement; the camera's raw scans (`depth`, `contact`) matched here, which is the old behaviour and costs this board three matches a revolution. The lidar drives the updates while it is fresh and the rest ride along, carried to its moment; a stale lidar hands the updates to them (any of: lidar, depth, contact, camera, comma-separated)
+  - *Default:* lidar — the lidar alone, because the camera cannot carry the map by itself: replayed on run 0171 against flat3 the depth band alone loses the map in 0.5 s (122 cm, 124 deg) and the contact line alone in 12 s (80 cm, 28 deg) — the camera's 0.15-1.3 m band is a different cross-section of the room than the lidar's 0.2 m map, so a look-alike place scores fit 0.90 at its own match and 0.12 at the truth. Fused with the lidar and gated on disagreement, all three together stay within 0.7/1.6/5.7 cm and 0.21/0.56/1.9 deg of lidar-only and never lose the map (scratch/camera_only_localization.py). `camera` is that same fusion with the matching moved to the laptop: on this board the raw scans took the tracker to 147 ms and 4.7 Hz and the live pose 50 cm p90 off the lidar's truth (scratch/drive_bisect.py, runs 0238-0241), while a measurement costs a matrix inverse
+  - *On when:* add `camera` where the lidar is blocked or blind — parked bumper to furniture, or a lidar that stopped: the fusion is measured and gated, and the board pays nothing for it
+  - *Off when:* drop a source the moment /localization/sources shows it disagreeing with the others; the lidar alone is the safe state. `depth`/`contact` are the old on-board matching, for an A/B on a board with CPU to spare — never for a drive
+- **`measurement_max_age_s`** — number 0.05..5, default 0.5
+  - *What:* how old a pose measurement from the laptop may be, in seconds, at the moment of the update that would take it: past this it is dropped instead of carried (0.05..5)
+  - *Default:* 0.5 — the number the day of 2026-09-13 asked for: the camera's word pulled the live pose 50 cm p90 off the truth while the board matched at 4.7 Hz with 147 ms per scan, and every one of those measurements was fused as if it spoke for the moment it was used at. On the new path a measurement is 0.1-0.3 s old when an update takes it (a camera frame at 5 Hz plus the link), so half a second is the slack around that, not a threshold anybody has hit; the failure it is against — a bridge that stalls and delivers a burst — is seconds
+  - *On when:* raise it only to see what a stale measurement does; the carry over odometry is honest for as long as the odometry is
+  - *Off when:* lower it towards the measurement's own age (0.3 s) where the cart drives fast and a carry over a tenth of a second is already a decimetre
 - **`fusion`** — bool, default on
-  - *What:* fuse every enabled source's match by its information; off: the widest source corrects alone and the others only report
+  - *What:* fuse every enabled source's word by its information — a match made here, a measurement made on the laptop; off: the widest source corrects alone and the others only report
   - *Default:* on — with all three sources the fused pose stays within 0.7-5.7 cm of lidar-only and never loses the map. One defect was found and fixed on the way: an edge-bound lidar used to be out-voted by a blind fan's plateau, so the anchor's bound is now taken alone — a 12 cm slip at rest is carried by the second match instead of held for 2.5 s, and recovery while driving is 3.2 cm against lidar-only's 2.9
   - *On when:* whenever more than one source is enabled
   - *Off when:* to see which source is actually moving the pose: off, the others still report

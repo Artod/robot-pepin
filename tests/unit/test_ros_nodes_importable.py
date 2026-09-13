@@ -27,9 +27,10 @@ def test_the_tracker_node_keeps_its_decisions_out_of_itself() -> None:
     tree = ast.parse(node.read_text())
     branches = sum(isinstance(n, (ast.If, ast.While)) for n in ast.walk(tree))
     # A ratchet, like tests/coverage_floor.txt: it only ever goes down. The node sat at 45 of 45
-    # until occluded, SlipWatch and MotionEdge moved into src/pepin (39); 40 is one branch of
-    # room for a fix, and the next extraction lowers this line again.
-    assert branches <= 40, f"{branches} branches in the node: extract the decision into src/pepin"
+    # until occluded, SlipWatch and MotionEdge moved into src/pepin (39), and the camera's
+    # measurements arrived with the decisions that carry them already in pepin.measurements
+    # (the gate's own drive()) and the deskew fallback in pepin.timeline (38).
+    assert branches <= 38, f"{branches} branches in the node: extract the decision into src/pepin"
     imports = {
         alias.name
         for n in ast.walk(tree)
@@ -80,11 +81,12 @@ def test_the_tracker_pairs_every_scan_with_the_pose_of_its_own_moment() -> None:
     """The tracker never waits for a transform inside a callback and never falls back to the
     newest pose: scans go through pepin.sources' feed (a pepin.timeline gate per source) and
     are deskewed with its history. The fallback cost 1-2 degrees of false correction per scan
-    in every pivot (runs 0080-0083)."""
+    in every pivot (runs 0080-0083). The camera's measurements are placed in time by the same
+    history, through the gate that carries them (pepin.measurements)."""
     node = sf.tree("ros/pepin_bringup/pepin_bringup/relocalizer.py")
     waits = [c for c in ast.walk(node) if isinstance(c, ast.Call) and "timeout" in sf.keywords(c)]
     assert not waits, "a transform wait inside a callback: the old fallback path"
-    assert {"SourceFeed", "deskew", "OdomHistory"} <= sf.calls(node)
+    assert {"SourceFeed", "deskewed", "OdomHistory", "MeasurementGate"} <= sf.calls(node)
     assert "/odometry/filtered" in sf.strings(node)
 
 

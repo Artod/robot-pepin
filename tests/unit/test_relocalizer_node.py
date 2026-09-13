@@ -1,6 +1,7 @@
-"""The tracker node under the ROS stubs: three scan topics into one feed, the lidar's death
-handing the updates to the camera on the node's own trigger path and a returning lidar
-taking them back, the flags that pick the sources, and every source's word on the wire.
+"""The tracker node under the ROS stubs: the lidar's revolution into the feed, the camera's
+poses arriving already matched from the laptop, the lidar's death handing the updates to those
+measurements and a returning lidar taking them back, the flags that pick the sources, and every
+source's word on the wire.
 
 rclpy is faked (``ros_stubs``); the map, the scans and the odometry are the furnished room's
 of test_localization, so the node is built and driven here exactly as on the board, scan by
@@ -39,8 +40,8 @@ from test_localization import PILLAR, furnished_room_map  # noqa: E402
 from test_localizer_sources import drive, error  # noqa: E402
 
 from pepin.odometry import Pose2D  # noqa: E402
-from pepin.scanmatch import apply_motion  # noqa: E402
-from pepin.sources import CONTACT, DEPTH, LIDAR  # noqa: E402
+from pepin.scanmatch import apply_motion, relative_motion  # noqa: E402
+from pepin.sources import CAMERA, DEPTH, LIDAR  # noqa: E402
 
 BEAMS = 180
 FAN = [*range(160, 180), *range(0, 21)]  # the raycast's beams within +-40 degrees, in order
@@ -116,22 +117,61 @@ def between(a: Pose2D, b: Pose2D, share: float) -> Pose2D:
 
 @pytest.fixture
 def node() -> Relocalizer:
-    """A tracker with the camera's fan enabled beside the lidar, the laser mounted at the
-    base's origin, the furnished room as its map."""
+    """A tracker with the camera enabled beside the lidar — as measurements from the laptop, the
+    only way the camera reaches this node — the laser mounted at the base's origin, the
+    furnished room as its map."""
     # No match gap: the pacer spaces matches on the wall clock, and a test feeds a second of
     # scans in milliseconds.
-    with ros_stubs.parameters(sources="lidar,depth", min_match_gap_s=0.0):
+    with ros_stubs.parameters(sources="lidar,camera", min_match_gap_s=0.0):
         node = Relocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     node.subs["/map"][1](map_msg())
     return node
 
 
-def test_the_node_subscribes_every_source_and_the_flags_pick_them(node: Relocalizer) -> None:
-    assert {"/scan", "/depth_scan", "/contact_scan", "/odometry/filtered", "/map"} <= set(node.subs)
+SURE_CAMERA = np.diag([0.05**2, 0.05**2, math.radians(2.0) ** 2]).tolist()
+
+
+def measurement_msg(
+    node: Relocalizer,
+    pose: Pose2D,
+    t: float,
+    source: str = DEPTH,
+    fit: float = 0.6,
+    map_id: str | None = None,
+) -> Any:
+    """What pepin_bringup.laptop_localizer publishes: one JSON message on
+    /localization/measurement, a pose the laptop matched out of a camera scan taken at ``t``."""
+    return String(
+        data=json.dumps(
+            {
+                "x": pose.x,
+                "y": pose.y,
+                "yaw": pose.theta,
+                "covariance": SURE_CAMERA,
+                "source": source,
+                "stamp": t,
+                "fit": fit,
+                "edge": False,
+                "map": node._map_id if map_id is None else map_id,
+                "belief_age_ms": 40.0,
+                "matched_on": "/map",
+            }
+        )
+    )
+
+
+def test_the_node_takes_the_camera_as_a_measurement_and_never_as_a_scan(
+    node: Relocalizer,
+) -> None:
+    """The day's architecture, as the node's own wiring: the lidar's scan and the laptop's
+    measurements come in, the camera's raw scans do not — matching them here cost this board
+    147 ms a revolution and 4.7 Hz (scratch/drive_bisect.py, run 0238)."""
+    assert {"/scan", "/odometry/filtered", "/map", "/localization/measurement"} <= set(node.subs)
+    assert "/depth_scan" not in node.subs and "/contact_scan" not in node.subs
     assert "/localization/sources" in node.pubs and "/tracker_pose" in node.pubs
     assert FLAGS["sources"] == (LIDAR,), "the module's default: the lidar alone"
-    assert node._registry.enabled == (LIDAR, DEPTH), "the launch override reached the roster"
+    assert node._registry.enabled == (LIDAR, CAMERA), "the launch override reached the roster"
     assert node._localizer is not None and node._localizer.sources is node._registry
     assert node.set_parameters([Parameter("sources", value="lidar")])[0].successful
     assert node._registry.enabled == (LIDAR,) and node._localizer.sources.enabled == (LIDAR,)
@@ -139,32 +179,33 @@ def test_the_node_subscribes_every_source_and_the_flags_pick_them(node: Relocali
     assert not refused.successful and "sonar" in refused.reason
     assert node.set_parameters([Parameter("fusion", value=False)])[0].successful
     assert node._localizer.fusion is False
-    assert node.set_parameters([Parameter("sources", value="depth,contact")])[0].successful
-    assert node._registry.enabled == (DEPTH, CONTACT)
-    assert "sources=depth,contact fusion=off" in node._switches.state()
+    assert node.set_parameters([Parameter("sources", value="camera")])[0].successful
+    assert node._registry.enabled == (CAMERA,)
+    assert "sources=camera measurement_max_age_s=0.5 fusion=off" in node._switches.state()
 
 
-def test_a_dead_lidar_hands_the_node_to_the_camera_and_back_on_its_own_trigger(
+def test_a_dead_lidar_hands_the_node_to_the_camera_s_measurements_and_back(
     node: Relocalizer,
 ) -> None:
     """The drive of test_localizer_sources through the node's callbacks: the lidar's revolution
-    on /scan, the camera's fan on /depth_scan 40 ms before it, the odometry that covers them.
-    The lidar goes silent for 1.2 s in the middle: the feed waits the roster's half second,
-    then the fan drives the updates and map -> odom keeps moving; when the lidar is back it
-    anchors again. Every update's word goes out on /localization/sources."""
+    on /scan, the camera's pose — matched on the laptop out of a frame taken 40 ms earlier — on
+    /localization/measurement, the odometry that covers both. The lidar goes silent for 1.2 s in
+    the middle: the feed waits the roster's half second, then the measurements drive the updates
+    by themselves and map -> odom keeps moving; when the lidar is back it anchors again and they
+    ride along. Every update's word goes out on /localization/sources."""
     truth, odom = drive(36)
     loc = node._localizer
     assert loc is not None
     sources_pub, pose_pub = node.pubs["/localization/sources"], node.pubs["/tracker_pose"]
-    on_scan, on_depth = node.subs["/scan"][1], node.subs["/depth_scan"][1]
+    on_scan, on_measure = node.subs["/scan"][1], node.subs["/localization/measurement"][1]
     on_odom = node.subs["/odometry/filtered"][1]
-    anchors: list[str | None] = []
+    drivers: list[str | None] = []
     map_odom_at: dict[int, tuple[float, float, float]] = {}
     for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
         ts = 100.0 + 0.1 * i
         node.clock.seconds = ts + 0.02  # the node's clock at the arrival
         if i:
-            on_depth(depth_msg(between(truth[i - 1], t, 0.6), ts - 0.04))
+            on_measure(measurement_msg(node, between(truth[i - 1], t, 0.6), ts - 0.04))
         if not 10 <= i < 22:
             on_scan(lidar_msg(t, ts))
         published = len(sources_pub.sent)
@@ -172,38 +213,112 @@ def test_a_dead_lidar_hands_the_node_to_the_camera_and_back_on_its_own_trigger(
         if i == 0:  # the first release starts the whole-map search that seeds the watch
             assert until(lambda: node._tracker_initialised)
             assert not sources_pub.sent, "the first scan went to the search, not the tracker"
-            anchors.append(None)
+            drivers.append(None)
             continue
         if len(sources_pub.sent) == published:
-            anchors.append(None)
+            drivers.append(None)
             continue
         report = json.loads(sources_pub.sent[-1].data)
-        anchors.append(report["anchor"])
+        drivers.append(report["fused"])
         map_odom_at[i] = node._last_map_odom
         metres, degrees = error(loc, t)
         assert metres < 0.12 and degrees < 4.0, f"scan {i}: {metres * 100:.1f} cm, {degrees:.1f}"
-    assert anchors[:2] == [None, LIDAR] and anchors[2:10] == [LIDAR] * 8
-    assert anchors[10:14] == [None] * 4, "the roster's half second: the feed waits for the lidar"
-    assert anchors[14:22] == [DEPTH] * 8, "then the camera drives"
-    assert anchors[22:] == [LIDAR] * 14, "the lidar is back and anchors again"
+    assert (
+        drivers[1].startswith(LIDAR)
+        and all(  # type: ignore[union-attr]
+            d is not None and d.startswith(LIDAR) for d in drivers[2:10]
+        )
+    )
+    assert drivers[10:14] == [None] * 4, "the roster's half second: the feed waits for the lidar"
+    assert drivers[14:22] == [CAMERA] * 8, "then the camera's measurements drive alone"
+    assert all(d == f"{LIDAR}+{CAMERA}" for d in drivers[22:]), "the lidar anchors again"
     assert map_odom_at[21] != map_odom_at[9], "map -> odom moved on the camera's word"
     metres, degrees = error(loc, truth[-1])
     assert metres < 0.05 and degrees < 2.0
     assert len(pose_pub.sent) == len(sources_pub.sent) == 35 - 4
-    camera = json.loads(sources_pub.sent[13].data)  # the first update the camera drove
-    assert camera["anchor"] == DEPTH and camera["fused"] == DEPTH and camera["rejected"] == []
+    camera = json.loads(sources_pub.sent[9].data)  # the first update the camera drove
+    assert camera["anchor"] is None and camera["fused"] == CAMERA and camera["rejected"] == []
     assert camera["sources"][LIDAR]["health"].startswith("stale")
-    assert camera["sources"][DEPTH]["health"].startswith("fresh")
-    assert {"fit", "delta", "sigma", "edge"} <= set(camera["sources"][DEPTH])
-    assert "fit" not in camera["sources"][LIDAR] and camera["sources"][CONTACT] == {"health": "off"}
+    assert camera["sources"][CAMERA]["health"].startswith("fresh")
+    assert {"fit", "delta", "sigma", "edge"} <= set(camera["sources"][CAMERA])
+    assert "fit" not in camera["sources"][LIDAR] and camera["sources"][DEPTH] == {"health": "off"}
+    assert camera["measurements"]["used"] == [DEPTH]
+    assert camera["measurements"]["age_ms"] == 0.0, "it drove its own update"
     fused = json.loads(sources_pub.sent[-1].data)
-    assert fused["anchor"] == LIDAR and fused["fused"] == "lidar+depth"
+    assert fused["anchor"] == LIDAR and fused["fused"] == f"{LIDAR}+{CAMERA}"
+    assert fused["measurements"]["age_ms"] > 0.0, "carried from its own scan to the revolution's"
     node._report_tracking()
     line = node.logger.texts("info")[-1]
-    assert "sources: anchor lidar; lidar fresh" in line and "depth fresh" in line
-    assert "lidar: scans" in line and "attached" in line
-    assert "sources lidar,depth, fusion on" in line, "the tracker's settings"
-    assert "flags: rest_lock=on" in line and "sources=lidar,depth fusion=on" in line
+    assert "sources: anchor lidar; lidar fresh" in line and "camera fresh" in line
+    assert "tracker: scans 24, released 24" in line, "one gate again: the lidar's"
+    assert "sources lidar,camera, fusion on" in line, "the tracker's settings"
+    assert f"measurements 35 (received 35, replaced 4, taken 31), per source: {DEPTH} 31" in line
+    # the four replaced are the ones offered while the feed still waited for the lidar:
+    # each was overtaken by a newer one before any update could take it
+    assert "flags: rest_lock=on" in line and "sources=lidar,camera" in line
+    assert "measurement_max_age_s=0.5 fusion=on" in line
+
+
+def test_a_measurement_is_carried_from_its_own_scan_to_the_update_that_takes_it(
+    node: Relocalizer,
+) -> None:
+    """A pose measured on the laptop speaks for the moment of the camera frame it was measured
+    on, and the update that fuses it happens later: it is moved over the odometry between the
+    two before it is weighed, exactly as a riding scan would have been. Uncarried, it would pull
+    the pose back along the drive by whatever the cart covered in the meantime."""
+    truth, odom = drive(4)
+    on_scan, on_measure = node.subs["/scan"][1], node.subs["/localization/measurement"][1]
+    on_odom = node.subs["/odometry/filtered"][1]
+    for i, (o, t) in enumerate(zip(odom[:3], truth[:3], strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_scan(lidar_msg(t, ts))
+        on_odom(odom_msg(o, ts))
+        if i == 0:
+            assert until(lambda: node._tracker_initialised)
+    loc = node._localizer
+    assert loc is not None
+    step = Pose2D(0.20, 0.0, 0.0)  # what the wheels say happened between the two moments
+    on_measure(measurement_msg(node, truth[2], 100.2))
+    node.clock.seconds = 100.32
+    on_scan(lidar_msg(truth[3], 100.3))
+    on_odom(odom_msg(apply_motion(odom[2], step), 100.3))
+    camera = next(m for m in loc.measurements if m.source == CAMERA)
+    carried = apply_motion(truth[2], step)
+    assert math.hypot(camera.x - carried.x, camera.y - carried.y) < 0.01
+    assert math.hypot(camera.x - truth[2].x, camera.y - truth[2].y) > 0.15, "not the raw pose"
+    assert relative_motion(odom[2], apply_motion(odom[2], step)).x > 0.19, "the trail it rode"
+
+
+def test_a_measurement_older_than_the_gate_or_from_another_map_is_refused(
+    node: Relocalizer,
+) -> None:
+    """The failure of 2026-09-13 in one rule: a camera pose whose moment the update can no
+    longer honestly carry it from is dropped, not fused. So is one measured against another map,
+    and a message that is not a measurement at all is counted and never obeyed."""
+    truth, odom = drive(4)
+    on_scan, on_measure = node.subs["/scan"][1], node.subs["/localization/measurement"][1]
+    on_odom = node.subs["/odometry/filtered"][1]
+    for i, (o, t) in enumerate(zip(odom[:3], truth[:3], strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_scan(lidar_msg(t, ts))
+        on_odom(odom_msg(o, ts))
+        if i == 0:
+            assert until(lambda: node._tracker_initialised)
+    loc = node._localizer
+    assert loc is not None
+    on_measure(measurement_msg(node, truth[2], 99.5))  # measured 0.8 s before this update
+    on_measure(measurement_msg(node, truth[2], 100.25, map_id="1x1@0.00,0.00"))
+    on_measure(String(data="not json at all"))
+    node.clock.seconds = 100.32
+    on_scan(lidar_msg(truth[3], 100.3))
+    on_odom(odom_msg(odom[3], 100.3))
+    assert [m.source for m in loc.measurements] == [LIDAR], "the lidar corrected alone"
+    node._report_tracking()
+    line = node.logger.texts("info")[-1]
+    assert "stale 1" in line and "elsewhere 1" in line and "malformed 1" in line
+    assert "measurement_max_age_s=0.5" in line
 
 
 def test_a_late_executor_matches_the_lidar_late_instead_of_calling_it_stale() -> None:
@@ -237,36 +352,41 @@ def test_a_late_executor_matches_the_lidar_late_instead_of_calling_it_stale() ->
     assert not any("odometry ran late" in text for text in node.logger.texts("warning"))
 
 
-def test_a_fan_drives_without_a_first_search_and_the_watch_waits_for_a_full_turn() -> None:
-    """Camera-only (sources=depth): the fan's first release starts the tracker from its saved
-    pose with no whole-map search, every frame is matched, the fit is published on the fan,
-    the watch is off and the report line says so, /relocalize refuses. The lidar switched on
-    and heard from turns the watch on."""
-    with ros_stubs.parameters(sources="depth", min_match_gap_s=0.0):
+def test_the_camera_alone_drives_without_a_first_search_and_the_watch_waits_for_a_turn() -> None:
+    """Camera-only (sources=camera): the first measurement starts the tracker from its saved
+    pose with no whole-map search — a pose measured off a +-40 degree fan cannot find the cart
+    any more than the fan itself could — every measurement drives an update, the fit is the one
+    the laptop measured, the watch is off and the report line says so, /relocalize refuses. The
+    lidar switched on and heard from turns the watch on."""
+    with ros_stubs.parameters(sources="camera", min_match_gap_s=0.0):
         node = Relocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     node.subs["/map"][1](map_msg())
     truth, odom = drive(8)
-    on_scan, on_depth = node.subs["/scan"][1], node.subs["/depth_scan"][1]
+    on_scan, on_measure = node.subs["/scan"][1], node.subs["/localization/measurement"][1]
     on_odom = node.subs["/odometry/filtered"][1]
     for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
         ts = 100.0 + 0.1 * i
         node.clock.seconds = ts + 0.02
-        on_depth(depth_msg(t, ts))
         on_odom(odom_msg(o, ts))
+        on_measure(measurement_msg(node, t, ts))
         assert node._tracker_initialised and not node._tracker_initialising
     started = node.logger.texts("warning")[0]
-    assert "on the depth fan without a first search" in started
+    assert "on the camera's measurements without a first search" in started
     assert not any("first search proposes" in text for text in node.logger.texts("info"))
-    assert len(node.pubs["/tracker_pose"].sent) == 8, "the first frame too: no search to wait for"
+    loc = node._localizer
+    assert loc is not None
+    metres, degrees = error(loc, truth[-1])
+    assert metres < 0.05 and degrees < 2.0, "the camera's word alone carried the pose"
+    assert len(node.pubs["/tracker_pose"].sent) == 8, "one update per measurement"
     node._check()
     assert node._watch_on is False and len(node.pubs["localization_fit"].sent) == 1
     node._report_tracking()
     assert "watch off: no full-turn source, fit" in node.logger.texts("info")[-1]
     res = node.services["relocalize"][1](None, ros_stubs.Trigger.Response())
-    assert not res.success and res.message.startswith("no full-turn scan to search with")
+    assert not res.success and res.message.startswith("no map or no scan yet")
     assert not node._searching
-    assert node.set_parameters([Parameter("sources", value="lidar,depth")])[0].successful
+    assert node.set_parameters([Parameter("sources", value="lidar,camera")])[0].successful
     ts = 100.0 + 0.1 * len(truth)
     node.clock.seconds = ts + 0.02
     on_scan(lidar_msg(truth[-1], ts))
@@ -281,7 +401,8 @@ def test_with_nothing_fresh_the_node_holds_and_says_so(node: Relocalizer) -> Non
     node.clock.seconds = 50.0
     node._report_tracking()
     line = node.logger.texts("info")[-1]
-    assert "sources: holding map->odom: no fresh source; lidar absent, depth absent" in line
+    assert "sources: holding map->odom: no fresh source; lidar absent, depth off" in line
+    assert "contact off, camera absent" in line
     res = node.services["relocalize"][1](None, ros_stubs.Trigger.Response())
     assert not res.success and res.message == "no map or no scan yet"
 

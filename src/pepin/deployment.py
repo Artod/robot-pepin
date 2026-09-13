@@ -243,10 +243,15 @@ VISION_LAPTOP_PUBLISHES = (
     "rtabmap/info",
     "depth_scan",
     "contact_scan",
-    # The laptop's whole-map watchdog (pepin_bringup.global_watch) proposing a place to the
+    # The laptop's whole-map watchdog (pepin_bringup.laptop_localizer) proposing a place to the
     # board's tracker, once a second, as JSON. Vision mode only: this is where the laptop sees
     # the board's /scan and /map, and in SLAM mode there is no saved map to search.
     "localization/candidate",
+    # ...and the camera's poses, measured on the laptop out of /depth_scan and /contact_scan and
+    # fused by the board's tracker (pepin.measurements). The scans themselves still cross for the
+    # costmap; what used to cross for the POSE was the matching, and that cost the board 147 ms a
+    # scan and 50 cm p90 of live error (scratch/drive_bisect.py, run 0238).
+    "localization/measurement",
 )
 # The saved map's own topics, the ones SLAM mode has no publisher for: /map is the laptop's here,
 # and the rest are the tracker's, which does not run because nothing matches a scan against a map
@@ -259,6 +264,7 @@ SLAM_BOARD_PUBLISHES = tuple(n for n in VISION_BOARD_PUBLISHES if n not in _NOT_
 # /rtabmap/map is not published at all; the graph and its correction still are.
 SLAM_LAPTOP_PUBLISHES = (
     "map",
+    "localization/measurement",  # the camera's poses; harmless where no tracker listens
     "map_odom",  # RTAB-Map's correction as a message; the board broadcasts it as map -> odom
     "rtabmap/mapGraph",
     "rtabmap/mapPath",
@@ -411,7 +417,7 @@ LAPTOP_SLAM_NODES = (
     "/depth_stream",
     "/contact_scan",
     "/depth_fusion",
-    "/global_watch",
+    "/laptop_localizer",
     "/rtabmap/rtabmap",
     "/rtabmap_frame",
     "/foxglove_bridge",

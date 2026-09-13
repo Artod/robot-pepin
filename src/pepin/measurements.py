@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import numpy as np
@@ -32,10 +32,15 @@ from numpy.typing import NDArray
 from pepin.fusion import Matrix, PoseMeasurement, carried, fuse
 from pepin.odometry import Pose2D
 from pepin.scanmatch import relative_motion
-from pepin.sources import CAMERA
+from pepin.sources import CAMERA, SourceRegistry
 from pepin.timeline import OdomTrail
 
-__all__ = ["MEASUREMENT_MAX_AGE_S", "MeasurementGate", "RemoteMeasurement"]
+__all__ = [
+    "MEASUREMENT_MAX_AGE_S",
+    "MeasurementGate",
+    "MeasurementUpdate",
+    "RemoteMeasurement",
+]
 
 # How old a measurement may be, in seconds, when the update it rides on happens: past this the
 # carry is no longer honest and the measurement is dropped. 0.5 s is the roster's own patience
@@ -146,7 +151,17 @@ class RemoteMeasurement:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
+class MeasurementUpdate:
+    """An update the remote measurements drive by themselves — what a dead lidar leaves: the
+    moment it happens at (the newest measurement's own stamp, so nothing has to be carried
+    forward), the odometry pose there, and the camera's word fused into one measurement."""
+
+    stamp: float
+    odom: Pose2D
+    measurement: PoseMeasurement
+
+
 class MeasurementGate:
     """The receiving side: the newest measurement per source waits here until an update takes
     it, carried to that update's moment over the receiver's own odometry.
@@ -160,19 +175,32 @@ class MeasurementGate:
     :data:`pepin.sources.CAMERA`, so the tracker sees one word from the camera and its
     ``sources`` flag has one name to switch.
 
+    ``sources`` is the tracker's roster: the gate asks it whether the camera is switched on at
+    all (nothing is taken while it is off) and tells it every measurement's stamp, so the
+    camera's health reads in the report line exactly as a scan source's does. Without one the
+    gate is always on, which is what an offline replay wants.
+
     Pure: the node offers messages and takes measurements; a report line reads the counters.
     """
 
-    measurement_max_age_s: float = MEASUREMENT_MAX_AGE_S
-    name: str = CAMERA  # what the fused measurement is called on the tracker's roster
-    _pending: dict[str, RemoteMeasurement] = field(default_factory=dict, init=False)
-    _counts: dict[str, int] = field(default_factory=dict, init=False)
-    _taken: dict[str, int] = field(default_factory=dict, init=False)
-    _malformed: int = field(default=0, init=False)
-    _reason: str = field(default="", init=False)  # the last malformed message's complaint
-    _last: RemoteMeasurement | None = field(default=None, init=False)
-    _age_s: float = field(default=0.0, init=False)  # the newest taken measurement's age
-    _rejected: tuple[str, ...] = field(default=(), init=False)  # sources the last fusion dropped
+    def __init__(
+        self,
+        sources: SourceRegistry | None = None,
+        measurement_max_age_s: float = MEASUREMENT_MAX_AGE_S,
+        name: str = CAMERA,
+    ) -> None:
+        self.sources = sources
+        self.measurement_max_age_s = measurement_max_age_s
+        self.name = name  # what the fused measurement is called on the tracker's roster
+        self._pending: dict[str, RemoteMeasurement] = {}
+        self._counts: dict[str, int] = {}
+        self._taken: dict[str, int] = {}
+        self._malformed = 0
+        self._reason = ""  # the last malformed message's complaint
+        self._last: RemoteMeasurement | None = None
+        self._age_s = 0.0  # the newest taken measurement's age
+        self._rejected: tuple[str, ...] = ()  # sources the last fusion dropped
+        self._used: tuple[str, ...] = ()  # ...and the ones it was made of
 
     switches: ClassVar[tuple[str, ...]] = ("measurement_max_age_s",)
 
@@ -200,6 +228,8 @@ class MeasurementGate:
         self._pending[remote.source] = remote
         self._last = remote
         self._count("received")
+        if self.sources is not None:
+            self.sources.observe(self.name, remote.stamp)  # the camera's health, as a scan's
         return True
 
     @property
@@ -212,9 +242,13 @@ class MeasurementGate:
         alone happens at — or ``None`` when nothing waits."""
         return max((m.stamp for m in self._pending.values()), default=None)
 
-    def take(self, stamp: float, odometry: OdomTrail) -> PoseMeasurement | None:
-        """Every waiting measurement carried to ``stamp`` and fused into one, or ``None`` when
-        none survives.
+    def enabled(self) -> bool:
+        """Whether the tracker's roster has this source switched on (always, without one)."""
+        return self.sources is None or self.sources.is_enabled(self.name)
+
+    def take(self, stamp: float, odometry: OdomTrail) -> list[PoseMeasurement]:
+        """Every waiting measurement carried to ``stamp`` and fused into one, as a list of one —
+        or an empty list when the source is switched off or nothing survives the carry.
 
         Each is moved from the moment of its own scan to ``stamp`` over the odometry between
         the two (:func:`pepin.fusion.carried`) and then consumed, whatever became of it: one
@@ -226,6 +260,8 @@ class MeasurementGate:
         it was made of is in this gate's own report.
         """
         taken: list[PoseMeasurement] = []
+        if not self.enabled():
+            return []
         at_stamp = odometry.at(stamp)
         for source, remote in list(self._pending.items()):
             del self._pending[source]
@@ -241,34 +277,54 @@ class MeasurementGate:
             self._taken[source] = self._taken.get(source, 0) + 1
             self._count("taken")
             taken.append(carried(remote.measurement(), relative_motion(at_scan, at_stamp), stamp))
+        self._used = tuple(m.source for m in taken)
         fused = fuse(taken)
         if fused is None:
-            return None
+            return []
         self._rejected = fused.rejected
         if fused.rejected:
             self._count("disagreed")
-        return PoseMeasurement(
-            fused.x,
-            fused.y,
-            fused.yaw,
-            fused.covariance,
-            self.name,
-            stamp,
-            fused.fit,
-            rejected=fused.rejected,
-            edge=all(m.edge for m in taken),
-        )
+        return [
+            PoseMeasurement(
+                fused.x,
+                fused.y,
+                fused.yaw,
+                fused.covariance,
+                self.name,
+                stamp,
+                fused.fit,
+                rejected=fused.rejected,
+                edge=all(m.edge for m in taken),
+            )
+        ]
+
+    def drive(self, anchor: str | None, odometry: OdomTrail) -> MeasurementUpdate | None:
+        """The update the camera's measurements drive by themselves, or ``None``.
+
+        What a dead lidar leaves: no scan waits at the feed and none is fresh, so the feed has
+        no ``anchor`` and the only word about where the cart is came over the link. The update
+        happens at the newest measurement's own stamp — nothing to carry forward, and the
+        odometry there is the pose it is predicted from. ``None`` while a scan source is driving
+        (the measurement rides ITS next update instead), while the source is switched off,
+        with nothing waiting, or when the odometry trail does not reach that moment.
+        """
+        stamp = None if anchor is not None or not self.enabled() else self.pending_stamp()
+        odom = None if stamp is None else odometry.at(stamp)
+        if stamp is None or odom is None:
+            return None
+        taken = self.take(stamp, odometry)
+        return MeasurementUpdate(stamp, odom, taken[0]) if taken else None
 
     def forget(self) -> None:
         """Drop everything waiting: what a new map means for measurements made on the old one."""
         self._pending.clear()
 
     def status(self) -> dict[str, Any]:
-        """The gate as the operator sees it on ``/localization/sources``: which sources have
-        been taken, which the last fusion rejected, how old the newest one was when it was
-        taken, and the age the gate refuses past."""
+        """The gate as the operator sees it on ``/localization/sources``: which sources the last
+        update's camera word was made of, which of them the fusion rejected for disagreeing, how
+        old the newest one was when it was taken, and the age the gate refuses past."""
         return {
-            "taken": dict(sorted(self._taken.items())),
+            "used": list(self._used),
             "rejected": list(self._rejected),
             "age_ms": round(self._age_s * 1e3, 1),
             "max_age_s": self.measurement_max_age_s,

@@ -672,7 +672,7 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
         "/depth_stream",
         "/contact_scan",
         "/depth_fusion",
-        "/global_watch",
+        "/laptop_localizer",
         "/rtabmap/rtabmap",
         "/rtabmap_frame",
         "/foxglove_bridge",
@@ -1375,19 +1375,25 @@ def test_every_flag_says_why_its_default_is_what_it_is_and_when_to_move_it() -> 
     )
 
 
-def test_the_tracker_feeds_every_scan_source_through_one_path_and_reports_each() -> None:
-    """The camera's fans reach the tracker beside the lidar — /depth_scan and /contact_scan,
-    LaserScans in base_link the bridge already carries to the board — through one path:
-    pepin.sources.SourceFeed releases the anchor's scan (the lidar while it is fresh, else the
-    camera: a dead lidar hands the tracker over without a restart), carries the others to its
-    moment, and Localizer.update_from matches them all around one prediction. The flags name
-    the sources and the fusion; every source's word goes out on /localization/sources and the
-    feed's status is in the report line."""
-    from pepin.deployment import LAPTOP_PUBLISHES
+def test_the_tracker_matches_the_lidar_here_and_takes_the_camera_as_a_measurement() -> None:
+    """The architecture of 2026-09-13, held as a contract. The lidar's revolutions reach the
+    tracker through one path (pepin.sources.SourceFeed: the anchor's scan released once the
+    odometry covers it, the others carried to its moment, Localizer.update_from matching them
+    all around one prediction). The camera's scans do NOT: they are matched on the laptop that
+    produces them and arrive here as pose measurements (pepin.measurements), carried to the
+    update that takes them by the same history and fused by information — because matching them
+    on this board took the tracker to 147 ms a revolution, 4.7 Hz and 50 cm p90 of live error
+    (scratch/drive_bisect.py, runs 0238-0241). The flags name the sources and the fusion; every
+    source's word goes out on /localization/sources and the feed's status is in the report
+    line."""
+    from pepin.deployment import LAPTOP_PUBLISHES, VISION_LAPTOP_PUBLISHES
 
     node = sf.tree(f"{NODES}/relocalizer.py")
-    assert {"/depth_scan", "/contact_scan", "/localization/sources"} <= sf.strings(node)
+    assert {"/localization/measurement", "/localization/sources"} <= sf.strings(node)
+    assert "/depth_scan" not in sf.strings(node), "the camera's scans are not matched here"
+    assert "/contact_scan" not in sf.strings(node)
     assert {"SourceFeed", "SourceRegistry", "ScanObservation"} <= sf.imported(node)
+    assert {"MeasurementGate", "RemoteMeasurement"} <= sf.imported(node)
     assert "ScanGate" not in sf.imported(node), "the feed is the gate: one trigger path"
     calls = sf.calls(node)
     assert {
@@ -1397,16 +1403,44 @@ def test_the_tracker_feeds_every_scan_source_through_one_path_and_reports_each()
         "self._feed.picture",
         "self._feed.full_picture",
         "self._feed.status",
+        "self._measurements.offer",
+        "self._measurements.take",
+        "self._measurements.drive",  # the camera drives an update when no scan does
         "loc.update_from",
         "loc.sources_report",
         "target.switch",  # every flag is written to whichever object names it (``switches``)
     } <= calls
     assert "loc.update" not in calls and "self._gate.take" not in calls, "one path, not two"
-    assert len(sf.calls_to(node, "loc.update_from")) == 1
+    assert len(sf.calls_to(node, "loc.update_from")) == 2, "the scan's update and the camera's"
     flags = load_table(REPO / NODES / "relocalizer.py")
     assert flags["sources"] == ("lidar",) and flags["fusion"] is True
-    assert flags.flag("sources").choices == ("lidar", "depth", "contact")
+    assert flags.flag("sources").choices == ("lidar", "depth", "contact", "camera")
+    assert flags["measurement_max_age_s"] == 0.5
+    # The camera's scans still cross for the costmap; the pose it measures crosses beside them.
     assert {"depth_scan", "contact_scan"} <= set(LAPTOP_PUBLISHES)
+    assert "localization/measurement" in VISION_LAPTOP_PUBLISHES
+
+
+def test_the_laptop_localizer_matches_the_camera_where_the_camera_is() -> None:
+    """The other half of the same rule, on the laptop: /depth_scan and /contact_scan are
+    subscribed LOCALLY (they are published on this machine — no bridge hop), matched in a small
+    window around the board's belief carried to the scan's stamp, and published as one JSON
+    measurement. The band the volume cuts for the camera (/map_camera) is what they are matched
+    against when the fusion publishes one."""
+    node = sf.tree(f"{NODES}/laptop_localizer.py")
+    assert "super().__init__('laptop_localizer')" in sf.unparsed(node, ast.Call)
+    assert {"/depth_scan", "/contact_scan", "/map_camera", "/localization/measurement"} <= (
+        sf.strings(node)
+    )
+    assert {"RemoteMeasurement", "Localizer", "OdomHistory"} <= sf.imported(node)
+    calls = sf.calls(node)
+    assert {"localizer.measure", "RemoteMeasurement.of", "remote.to_json"} <= calls
+    assert {"apply_motion", "relative_motion"} <= calls, "the belief is carried to the scan"
+    flags = load_table(REPO / NODES / "laptop_localizer.py")
+    assert flags["camera_sources"] == ("depth", "contact")
+    assert flags["camera_match_hz"] == 5.0 and flags["camera_min_fit"] == 0.25
+    assert flags["camera_window_m"] == 0.09 and flags["camera_window_deg"] == 9.0
+    assert flags["global_watch"] is True, "the watchdog half is untouched"
 
 
 def test_the_depth_network_runs_where_the_backend_flag_says_and_the_cpu_model_waits() -> None:
@@ -1653,7 +1687,7 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         "depth_stream",
         "contact_scan",
         "depth_fusion",
-        "global_watch",
+        "laptop_localizer",
         "rtabmap_frame",
         "foxglove_bridge",
     }

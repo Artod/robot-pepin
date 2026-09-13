@@ -42,6 +42,7 @@ __all__ = [
     "TimedScan",
     "beam_times",
     "deskew",
+    "deskewed",
     "standing_still",
 ]
 
@@ -194,6 +195,19 @@ class TimedScan:
     def first_t(self) -> float:
         """Time of the oldest beam (the stamp itself when the scan is empty)."""
         return float(self.times.min()) if len(self.times) else self.stamp
+
+
+def deskewed(scan: TimedScan, history: OdomHistory) -> tuple[NDArray[np.float64], bool]:
+    """A scan's returns placed at their own moments (:func:`deskew`), and whether that worked.
+
+    ``(points, True)`` with every beam moved into the base frame of the scan's stamp; ``(the
+    scan as measured, False)`` when the odometry history has a hole over the revolution and
+    nothing can be placed. Matching the raw revolution is the right fallback — it is what the
+    tracker did before deskewing existed — but it is a degraded match, so the caller counts
+    the Falses and says how many there were.
+    """
+    moved = deskew(scan.points, scan.times, history, scan.stamp)
+    return (scan.points, False) if moved is None else (moved, True)
 
 
 @dataclass
