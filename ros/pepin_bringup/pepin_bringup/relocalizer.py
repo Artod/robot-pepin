@@ -476,11 +476,10 @@ class Relocalizer(Node):
         # 60 ms per scan on an A53 (the laptop default, 9x9x49x200, took 360 ms: 2 Hz).
         self._map_id = map_id(msg)
         # The tracker's own flags only: the gate's (accept_candidates, candidate_streak) are
-        # this node's, not a Localizer's, and each object names what it owns.
+        # this node's and the berth's (BERTH_FLAGS) size the rings around new objects, so
+        # neither belongs to a Localizer — each object names what it owns.
         flags = {n: v for n, v in self._switches.flags.as_dict().items() if n in TRACKER_SWITCHES}
         self._registry.enable(flags.pop("sources"))  # the roster is the feed's and the tracker's
-        for name in BERTH_FLAGS:  # the rings around new objects, not switches of the tracker
-            flags.pop(name)
         self._localizer = Localizer(
             self._grid,
             self._last_known_pose(),  # a restart is not a trip back to the base

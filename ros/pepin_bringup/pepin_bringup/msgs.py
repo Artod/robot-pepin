@@ -17,7 +17,7 @@ import numpy as np
 import numpy.typing as npt
 from builtin_interfaces.msg import Time as TimeMsg
 from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from sensor_msgs.msg import Image, LaserScan, PointCloud2, PointField
 from std_msgs.msg import Header
 
@@ -264,7 +264,7 @@ def occupancy_grid(fields: OccupancyGridFields, stamp: Any, frame_id: str) -> An
     """A grid of 0 free / 100 occupied / -1 unknown as a ``nav_msgs/OccupancyGrid``: the cells
     row-major from the origin corner, which is where the map's own (0, 0) cell sits. What
     :meth:`pepin.worldmap.WorldMap.to_occupancy_grid_message_fields` hands over, packed."""
-    msg = OccupancyGrid()
+    msg = OccupancyGridMsg()
     msg.header = header(stamp, frame_id)
     msg.info.resolution = float(fields.resolution)
     msg.info.width, msg.info.height = int(fields.width), int(fields.height)
