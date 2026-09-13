@@ -144,9 +144,11 @@ FLAGS = FlagSet(
         " centimetre tracker pose. The 0.50 itself is the drive rung of the tracker's own ladder"
         " (pepin.watch: blind 0.30, drive 0.50, lost 0.55), inherited, not swept for fusion",
         on_when="in the known-map modes (split, vision), where the board's tracker publishes the"
-        " fit: it keeps a frame taken while the pose was wrong out of the model",
+        " fit: it keeps a frame taken while the pose was wrong out of the model. The launch"
+        " brings it up on there and off in SLAM mode; this is how to put it back on by hand",
         off_when="in SLAM mode, where RTAB-Map owns the pose and no tracker speaks — with the"
-        " gate on nothing is ever fused there",
+        " gate on nothing is ever fused there. vslam.launch.py passes fit_gate:=false in that"
+        " mode, so nobody has to remember it at the start of a session",
     ),
     Flag(
         "imu_lean",

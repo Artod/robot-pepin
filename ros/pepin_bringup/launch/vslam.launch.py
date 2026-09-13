@@ -21,7 +21,11 @@ EKF's wheels-plus-gyro odometry over the bridge (``odom_frame_id: odom``) and it
 as its static layer, and its correction becomes the board's ``map -> odom`` (rtabmap_frame's
 ``slam`` switch sends it as a message, pepin_bringup.slam_frame broadcasts it there). The
 database starts empty every session unless ``resume:=true``, and it is a file of its own: a SLAM
-session must never wipe the known map's graph. With ``camera_only:=true`` the lidar is not
+session must never wipe the known map's graph. Two of the fusion's switches are this mode's to
+set, not the operator's: ``fit_gate`` comes up OFF (no tracker runs here, so ``/localization_fit``
+never comes and the gate would fuse nothing at all) and ``map_source`` comes up already saying
+where ``/map`` will come from. Both stay live — this is the default a session starts from, not a
+lock. With ``camera_only:=true`` the lidar is not
 subscribed at all and the grid comes from the camera's depth — the honest test of "the camera as
 the primary sense", and the one case where the map is only as true as the network's scale.
 
@@ -46,7 +50,7 @@ from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from pepin.deployment import laptop_launch_nodes
+from pepin.deployment import laptop_launch_nodes, map_owner
 
 # What RTAB-Map is told in both modes: how a transform between two nodes is found, how the graph
 # is built and closed, and what a place looks like. Only the frames and the grid depend on the
@@ -191,6 +195,10 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     camera_only = _flag(context, "camera_only")
     resume = _flag(context, "resume")
     world_map = _flag(context, "world_map")
+    mode = "slam" if slam else "vision"
+    # Whether the fused volume may be /map at all: the mode's owner (pepin.deployment) and the
+    # launch's own world_map, the two halves the node checks before it publishes anything.
+    volume_owns_map = world_map and map_owner(mode) == "laptop"
     database = LaunchConfiguration("database").perform(context) or (
         SLAM_DATABASE if slam else KNOWN_MAP_DATABASE
     )
@@ -306,11 +314,20 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             "pepin_bringup.depth_fusion",
             "--ros-args",
             "-p",
-            f"mode:={'slam' if slam else 'vision'}",
+            f"mode:={mode}",
             "-p",
             f"world_map:={'true' if world_map else 'false'}",
+            # The flag comes up already saying where /map will come from, computed from the same
+            # table the node checks (pepin.deployment.map_owner): volume only where this side
+            # owns /map AND the launch kept RTAB-Map's grid off it. The operator had to set this
+            # live in the first world-map session; a launch argument is not a thing to remember.
             "-p",
-            f"map_source:={'volume' if world_map else 'file'}",
+            f"map_source:={'volume' if volume_owns_map else 'file'}",
+            # No tracker runs in SLAM mode, so /localization_fit never comes and a gate waiting
+            # for it fused 0 frames of the first session (2026-09-13 14:05). It stays live: the
+            # operator can put it back on with ros/flags.sh set depth_fusion fit_gate true.
+            "-p",
+            f"fit_gate:={'false' if slam else 'true'}",
         ],
         output="screen",
         prefix=_after_ghost("/depth_fusion"),
@@ -364,8 +381,10 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     )
     scan = "camera only (no /scan)" if camera_only else "lidar + camera"
     start = "resumed" if resume else "empty"
+    grid = "the fused volume" if volume_owns_map else "RTAB-Map's grid"
     report = (
-        f"vslam up: online SLAM, {scan}, {start} database {database}, grid -> /map;"
+        f"vslam up: online SLAM, {scan}, {start} database {database}, /map from {grid};"
+        " the fusion's fit_gate is off (no tracker publishes a fit here) and"
         " the global watch is off (the map is being built)"
         if slam
         else f"vslam up: beside the known map, lidar + camera, database {database};"

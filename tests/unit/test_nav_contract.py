@@ -1207,6 +1207,32 @@ def test_the_volume_is_the_map_and_only_one_side_publishes_it() -> None:
     )
 
 
+def test_the_slam_mode_s_two_fusion_switches_come_from_the_launch_not_the_operator() -> None:
+    """Both were set by hand in the first world-map SLAM session (2026-09-13 14:05): the volume
+    fused 0 frames until fit_gate came off (no tracker runs in SLAM, so /localization_fit never
+    arrives), and map_source had to be moved to volume for /map. The launch knows the mode, so
+    the launch is where both are decided — and both stay live flags, so a session can still
+    compare A against B without a restart."""
+    vslam = sf.tree(VSLAM_LAUNCH)
+    passed = sf.unparsed(vslam, ast.JoinedStr)
+    assert "f\"fit_gate:={('false' if slam else 'true')}\"" in passed
+    assert "f\"map_source:={('volume' if volume_owns_map else 'file')}\"" in passed
+    # ...and "may the volume be /map" is the same two-part answer the node checks, not a guess.
+    assert "map_owner" in sf.imported(vslam), "the mode's owner is deployment's table"
+    assert "volume_owns_map = world_map and map_owner(mode) == 'laptop'" in sf.unparsed(
+        vslam, ast.Assign
+    )
+    fusion = load_table(REPO / NODES / "depth_fusion.py")
+    assert fusion.flag("fit_gate").live and fusion.flag("fit_gate").default is True, (
+        "the launch overrides a default for one mode; it does not change what the flag ships as"
+    )
+    node = sf.tree(f"{NODES}/depth_fusion.py")
+    assert "self._switches.on" in sf.calls(node), "the node reads the flag, not the mode"
+    assert "the fusion's fit_gate is off" in " ".join(sf.strings(vslam)), (
+        "and the launch says so in its own report line"
+    )
+
+
 def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
     """One estimator (pepin.lean through the kit's LeanFeed, off /imu/data_raw — which crosses
     the bridge in both modes, so a laptop node reads it directly and no /lean topic is needed),
