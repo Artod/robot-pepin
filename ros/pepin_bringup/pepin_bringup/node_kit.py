@@ -39,11 +39,12 @@ from rcl_interfaces.msg import (
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.parameter import Parameter
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import Imu
 from tf2_ros import Buffer, TransformListener
 
+from pepin.deployment import bridged_qos
 from pepin.depth import UP_LEVEL, Array
 from pepin.flags import Flag, FlagSet
 from pepin.lean import Lean, LeanEstimator, LevelPose
@@ -469,6 +470,31 @@ class TfHistory:
         return self._lookup.pose(fixed, frame, stamp_from_seconds(stamp), timeout_s=self.timeout_s)
 
 
+def bridged_qos_profile(topic: str) -> Any:
+    """The QoS every endpoint of ``topic`` must use when the topic crosses the bridge
+    (:data:`pepin.deployment.BRIDGED_QOS`), or the sensor-data default where there is no rule.
+
+    Not a matter of taste: the bridge fixes a route's DDS QoS at the moment the route is created
+    — from the local endpoint it discovered, or from the far bridge's announcement, whichever
+    came first — and never revises it. Two sides that disagree therefore get a route whose QoS
+    is decided by a race, and the loser is starved: the board writes /imu/data_raw RELIABLE ten
+    deep at 48 Hz, these nodes read it, and while they asked for best effort five deep the
+    laptop saw 10-11 Hz (2026-09-13, scratch/bridge_state_182255_dds_table.txt).
+    """
+    pinned = bridged_qos(topic)
+    if pinned is None:
+        return qos_profile_sensor_data
+    reliability, depth = pinned
+    return QoSProfile(
+        depth=depth,
+        reliability=(
+            ReliabilityPolicy.RELIABLE
+            if reliability == "reliable"
+            else ReliabilityPolicy.BEST_EFFORT
+        ),
+    )
+
+
 class LeanFeed:
     """``/imu/data_raw`` as the cart's lean: one subscription feeding one
     :class:`pepin.lean.LeanEstimator`, and that estimator as the
@@ -504,7 +530,7 @@ class LeanFeed:
         self._enabled = enabled
         self._use_gyro = use_gyro
         self.estimator: LeanEstimator | None = None
-        node.create_subscription(Imu, topic, self._on_imu, qos_profile_sensor_data)
+        node.create_subscription(Imu, topic, self._on_imu, bridged_qos_profile(topic))
 
     @property
     def use_gyro(self) -> bool:
