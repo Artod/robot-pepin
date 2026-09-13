@@ -9,8 +9,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import pepin.lean
 from pepin.lean import (
     GRAVITY,
+    LEAN_BIAS_MAX_DEG_S,
     LEAN_TAU_S,
     Lean,
     LeanEstimator,
@@ -179,6 +181,46 @@ def test_a_sideways_imu_mount_reads_as_a_roll_of_ninety_degrees_and_no_floor() -
     intr = Intrinsics(fx=457.0, fy=457.0, cx=320.0, cy=180.0, width=640, height=360)
     cam = CameraPose(0.0, 0.0, 1.23, math.radians(26.0))
     assert np.isnan(floor_depth(intr, cam, up=estimator.up)).all()
+
+
+def test_a_gyro_that_reads_a_rate_while_the_cart_is_still_is_learned_and_not_leaned() -> None:
+    """The chip's zero offset: the bridge averages it once at boot, the rest of the run is
+    thermal drift. Integrated bare it is a permanent false lean of bias x tau — 0.2 deg/s reads
+    as 2 degrees of slope on a level floor, with the accelerometer still voting for it (quality
+    1.00: nothing in the report line to warn about it). The filter learns the offset instead:
+    after a minute of level floor the cart reads level, the learned bias is the chip's own, and
+    switching the gyro off does not move the lean (rule 19: the old behaviour is right there)."""
+    estimator = LeanEstimator(MOUNT)
+    drift = _chip_rates(0.0, 0.2)
+    t = 0.0
+    while t < 60.0:
+        estimator.observe(_chip_reading(0.0), t, drift)
+        t += 0.02
+    assert estimator.roll_pitch_deg == pytest.approx((0.0, 0.0), abs=0.1)
+    assert estimator.quality == pytest.approx(1.0, abs=1e-6)  # the gates never fired
+    assert estimator.gyro_bias_deg_s == pytest.approx(0.2, abs=0.02)
+    with_gyro = estimator.roll_pitch_deg
+    estimator.use_gyro = False
+    assert estimator.roll_pitch_deg == pytest.approx(with_gyro, abs=1e-12)
+
+
+def test_a_push_teaches_the_bias_nothing_and_the_learned_bias_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bias is learned only from samples that passed the gates, so the 3 degrees a push
+    leans the apparent gravity by never become a rate the cart is turning at; and however loud
+    the disagreement, the estimate stops at LEAN_BIAS_MAX_DEG_S — a wrong mount or a dead axis
+    cannot wind it up without end (the gain is turned up here so one sample reaches the stop)."""
+    estimator = LeanEstimator(MOUNT)
+    t = _level(estimator, 0.0)
+    pushed = _chip_reading(3.0)  # outside the 1 deg gate: a push, not a slope
+    for _ in range(100):  # two seconds of it, shorter than the time constant
+        estimator.observe(pushed, t, _chip_rates(0.0, 0.0))
+        t += 0.02
+    assert estimator.gyro_bias_deg_s == pytest.approx(0.0, abs=1e-9)
+    monkeypatch.setattr(pepin.lean, "LEAN_BIAS_GAIN", 1e6)
+    estimator.observe(_chip_reading(0.5), t, _chip_rates(0.0, 0.0))  # inside the gate: believed
+    assert estimator.gyro_bias_deg_s == pytest.approx(LEAN_BIAS_MAX_DEG_S, rel=1e-9)
 
 
 def test_the_yaw_rate_of_a_pivot_does_not_move_the_up_vector() -> None:

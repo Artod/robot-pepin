@@ -525,13 +525,18 @@ class LeanFeed:
         return None if self.estimator is None else self.estimator.lean_at(stamp)
 
     def report(self) -> str:
-        """The lean for a report line: ``lean 0.3/-1.8 deg q0.94`` (roll/pitch, quality), or
-        ``lean none`` while no reading has been believed."""
+        """The lean for a report line: ``lean +0.3/-1.8 deg q0.94 bias 0.05 deg/s`` (roll and
+        pitch, how much of them gravity voted for, and the zero offset learned for the gyro —
+        the chip's drift, which is what a lean nobody can see would be made of), or ``lean
+        none`` while no reading has been believed."""
         if self.estimator is None:
             return "lean none"
         roll, pitch = self.estimator.roll_pitch_deg
         # + 0.0 so a level cart reads +0.0 and never the -0.0 that atan2 answers for it
-        return f"lean {roll + 0.0:+.1f}/{pitch + 0.0:+.1f} deg q{self.estimator.quality:.2f}"
+        return (
+            f"lean {roll + 0.0:+.1f}/{pitch + 0.0:+.1f} deg q{self.estimator.quality:.2f}"
+            f" bias {self.estimator.gyro_bias_deg_s:.2f} deg/s"
+        )
 
     def _rotation(self, config_dir: Path) -> Array | None:
         """The rotation from the chip's axes into base_link, read once; ``None`` (with one

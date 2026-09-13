@@ -10,10 +10,11 @@ The accelerometer and the gyro are free information that nobody was using for th
 turns them into one number every consumer asks for:
 
 * :class:`LeanEstimator` — gravity's direction from the accelerometer for the slow truth, the
-  gyro's rates for the fast part (a complementary filter), with the gates the floor anchor has
-  always had: a non-finite sample, a reading away from 1 g (braking, a bump) and a lean beyond
-  the dead band (a push leans the apparent gravity without leaning the cart) never reach the
-  filter, and a lean outlasting the time constant is a floor, not a push.
+  gyro's rates for the fast part and the gyro's own zero offset learned from what gravity keeps
+  disagreeing with (a complementary filter with its integral term), with the gates the floor
+  anchor has always had: a non-finite sample, a reading away from 1 g (braking, a bump) and a
+  lean beyond the dead band (a push leans the apparent gravity without leaning the cart) never
+  reach the filter, and a lean outlasting the time constant is a floor, not a push.
 * :class:`Lean` — one reading: roll and pitch about base_link's own x and y, its stamp and how
   much of it is measured rather than integrated.
 * :class:`LeanHistory` — the last seconds of leans, readable at any moment in between, so a
@@ -41,6 +42,8 @@ GRAVITY = 9.81
 LEAN_TAU_S = 10.0  # the accelerometer's up vector, low-passed: a push or a bump is not a slope
 LEAN_GATE_DEG = 1.0  # a sample leaning more than this from the running up is a push, not gravity
 LEAN_NORM_TOLERANCE = 1.0  # m/s^2 away from gravity: the reading is not gravity alone
+LEAN_BIAS_GAIN = 0.1  # 1/s^2: how fast a disagreement gravity keeps voting for becomes a bias
+LEAN_BIAS_MAX_DEG_S = 5.0  # and the largest zero offset the filter will ever blame the gyro for
 QUALITY_TAU_S = 1.0  # how fast the share of accepted samples forgets (the reading's quality)
 HISTORY_S = 5.0  # how far back a consumer may ask for a lean
 HISTORY_MAX = 2000  # and how many samples that may ever cost (50 Hz * 5 s = 250)
@@ -208,6 +211,14 @@ class LeanEstimator:
     sample while the accelerometer is still being disbelieved. ``use_gyro=False`` leaves exactly
     the accelerometer-only filter the floor anchor has always run.
 
+    A gyro that reads a rate while the body is still would otherwise turn into a permanent false
+    lean of ``bias * tau`` (0.05 deg/s reads as half a degree of slope that nothing can see:
+    the accelerometer still votes, so the quality stays at 1.00), and the bridge averages the
+    chip's offset once at boot and never again, so the rest of the run is thermal drift. So the
+    disagreement gravity keeps voting for is integrated into :attr:`gyro_bias` and taken off
+    every rate before it is integrated — the standard integral half of a complementary filter.
+    It is learned only from samples that passed the gates, so a push teaches it nothing.
+
     Every accepted sample is appended to :attr:`history`, so a consumer can ask for the lean at
     its frame's stamp (:meth:`lean_at`) instead of the lean now.
     """
@@ -225,6 +236,7 @@ class LeanEstimator:
         self.use_gyro = use_gyro
         self.history = LeanHistory() if history is None else history
         self._up: Array = UP_LEVEL.copy()
+        self._bias: Array = np.zeros(3)  # the gyro's zero offset, rad/s in base_link
         self._seeded = False
         self._last_t: float | None = None
         self._leaning_since: float | None = None
@@ -234,14 +246,14 @@ class LeanEstimator:
         """Feed one IMU sample (m/s^2 and rad/s, the IMU's own axes) at time ``t`` (seconds).
 
         The gyro turns the up vector first (nothing gates it: a rate is a rate), then the
-        accelerometer pulls it back towards gravity through the gates.
+        accelerometer pulls it back towards gravity through the gates — and what it has to keep
+        pulling back becomes the gyro's learned zero offset.
         """
         a = self._rotation @ np.asarray(accel_imu, dtype=float)
         if not bool(np.all(np.isfinite(a))):
             return  # a NaN would pass the norm gate and poison the up vector for good
         dt = 0.0 if self._last_t is None else max(t - self._last_t, 0.0)
-        if self.use_gyro and gyro_imu is not None and self._seeded:
-            self._turn(gyro_imu, dt)
+        integrated = self._turn(gyro_imu, dt)
         norm = float(np.linalg.norm(a))
         if abs(norm - GRAVITY) > LEAN_NORM_TOLERANCE:  # braking, a bump: not gravity alone
             self._decay(dt)
@@ -264,6 +276,7 @@ class LeanEstimator:
             self._record(t)
             return
         self._leaning_since = None
+        self._learn_bias(fresh, dt, integrated)
         k = 1.0 - math.exp(-dt / self._tau)
         blended = (1.0 - k) * self._up + k * fresh
         self._up = blended / np.linalg.norm(blended)
@@ -271,19 +284,38 @@ class LeanEstimator:
         self._last_t = t
         self._record(t)
 
-    def _turn(self, gyro_imu: Array, dt: float) -> None:
+    def _turn(self, gyro_imu: Array | None, dt: float) -> bool:
         """Turn the up vector by the body's own rotation over ``dt``: a world-fixed vector's
-        body coordinates change by ``-omega x up``. The yaw rate — the big one in a pivot —
-        drops out of the cross product while the cart is near level, which is the point."""
-        if dt <= 0.0:
-            return
-        w = self._rotation @ np.asarray(gyro_imu, dtype=float)
+        body coordinates change by ``-omega x up``, less the zero offset learned for the gyro.
+        The yaw rate — the big one in a pivot — drops out of the cross product while the cart is
+        near level, which is the point. Returns whether a rate was integrated: False with no
+        gyro sample, before the first accelerometer sample, with the switch off or on a
+        non-finite reading — and only an integrated rate is something to blame a bias on."""
+        if gyro_imu is None or dt <= 0.0 or not self.use_gyro or not self._seeded:
+            return False
+        w = self._rotation @ np.asarray(gyro_imu, dtype=float) - self._bias
         if not bool(np.all(np.isfinite(w))):
-            return
+            return False
         turned: Array = self._up - np.cross(w, self._up) * dt
         norm = float(np.linalg.norm(turned))
         if norm > 1e-9:
             self._up = turned / norm
+        return True
+
+    def _learn_bias(self, fresh: Array, dt: float, integrated: bool) -> None:
+        """Blame the gyro for the part of the disagreement with gravity that never goes away.
+
+        ``fresh x up`` is (for small angles) the turn that would put the estimate back on
+        gravity, in base_link and in radians; integrating it at ``LEAN_BIAS_GAIN`` is the
+        integral term of the complementary filter, and the pull-back towards ``fresh`` is
+        already its proportional one. The estimate is clamped to ``LEAN_BIAS_MAX_DEG_S`` so
+        nothing — a chip on its side, a mount that is wrong — can wind it up without end.
+        """
+        if dt <= 0.0 or not integrated:
+            return
+        limit = math.radians(LEAN_BIAS_MAX_DEG_S)
+        learned = self._bias - LEAN_BIAS_GAIN * np.cross(fresh, self._up) * dt
+        self._bias = np.clip(learned, -limit, limit)
 
     def _decay(self, dt: float) -> None:
         """A sample gravity did not vote for: the reading is that much less measured."""
@@ -304,6 +336,18 @@ class LeanEstimator:
     def quality(self) -> float:
         """How much of the current lean gravity itself voted for, 0 to 1."""
         return self._quality
+
+    @property
+    def gyro_bias(self) -> Array:
+        """The zero offset learned for the gyro (rad/s, base_link axes): what is taken off
+        every rate before it is integrated."""
+        return self._bias
+
+    @property
+    def gyro_bias_deg_s(self) -> float:
+        """How far the gyro reads from zero while the body is still, in degrees per second —
+        the chip's drift, for a report line."""
+        return math.degrees(float(np.linalg.norm(self._bias)))
 
     @property
     def roll_pitch_deg(self) -> tuple[float, float]:
@@ -332,6 +376,8 @@ def imu_mount_rotation(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Arr
 __all__ = [
     "GRAVITY",
     "HISTORY_SLACK_S",
+    "LEAN_BIAS_GAIN",
+    "LEAN_BIAS_MAX_DEG_S",
     "LEAN_GATE_DEG",
     "LEAN_NORM_TOLERANCE",
     "LEAN_TAU_S",
