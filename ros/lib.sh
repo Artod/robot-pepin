@@ -30,16 +30,17 @@ pepin_render() {  # "[proc] [LEVEL] [epoch] [node]: text" -> "HH:MM:SS LEVEL nod
     '
 }
 watch_start() {
-    # The viewer runs in a process group of its own (job control on for the fork): the stop
-    # then reaches every member — the ssh streaming the log included — with one signal. Killing
-    # the subshell alone, or pkill by command line, left the ssh alive; it held the caller's
-    # stdout open, and a script whose goto output was piped never returned (2026-09-13: the
-    # cart stood at the printer for nine minutes while goto.sh waited on its own viewer).
-    set -m
-    ( ssh "root@$BOARD" "docker logs -f --since 3s pepin-ros 2>&1" \
-        | grep --line-buffered -E "$PEPIN_WATCH_KEEP" | grep --line-buffered -vE "$PEPIN_WATCH_DROP" | pepin_render ) 2>/dev/null &
+    # The viewer runs in a process group of its own, so the stop reaches every member — the
+    # ssh streaming the log included — with one signal. Killing the subshell alone, or pkill
+    # by command line, left the ssh alive; it held the caller's stdout open, and a script whose
+    # goto output was piped never returned (2026-09-13: the cart stood at the printer for nine
+    # minutes while goto.sh waited on its own viewer). python's setpgrp, not bash's `set -m`:
+    # job control needs a terminal, and a script run with its stdin on /dev/null got no group.
+    export -f pepin_render
+    python3 -c 'import os, sys; os.setpgrp(); os.execvp(sys.argv[1], sys.argv[1:])' bash -c \
+        'ssh "root@$0" "docker logs -f --since 3s pepin-ros 2>&1" | grep --line-buffered -E "$1" | grep --line-buffered -vE "$2" | pepin_render' \
+        "$BOARD" "$PEPIN_WATCH_KEEP" "$PEPIN_WATCH_DROP" 2>/dev/null &
     PEPIN_WATCH_PID=$!
-    set +m
     disown "$PEPIN_WATCH_PID" 2>/dev/null || true
 }
 watch_stop() {  # never blocks: a stuck viewer must not delay the stop that follows it
