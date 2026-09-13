@@ -1935,3 +1935,23 @@ def test_no_node_shadows_an_rclpy_node_attribute() -> None:
         if re.search(rf"self\.{name}\s*=", p.read_text())
     ]
     assert offenders == [], offenders
+
+
+def test_no_node_publishes_on_a_topic_it_listens_to() -> None:
+    """A node that publishes on a topic it subscribes to receives its own messages back (ROS 2
+    delivers local publications too). The relocalizer told AMCL its seed on /initialpose and,
+    once it listened there for the operator, fed itself: every seed came back as a new seed,
+    20 times a second, map -> odom flipping 16 cm (2026-09-13). Literal topic names only;
+    a topic named through a constant is not seen here."""
+    import re
+    from pathlib import Path
+
+    nodes = Path(__file__).resolve().parents[2] / "ros" / "pepin_bringup" / "pepin_bringup"
+    literal = r'\(\s*[^,()]+,\s*"([^"]+)"'
+    offenders = []
+    for p in sorted(nodes.glob("*.py")):
+        source = p.read_text()
+        published = set(re.findall(r"create_publisher" + literal, source))
+        listened = set(re.findall(r"create_subscription" + literal, source))
+        offenders += [f"{p.name}: {topic}" for topic in sorted(published & listened)]
+    assert not offenders, f"a node would hear itself on: {offenders}"

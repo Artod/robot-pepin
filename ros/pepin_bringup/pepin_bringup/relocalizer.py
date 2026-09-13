@@ -5,10 +5,11 @@ cart across the room, push it, lift it onto the carpet, and it keeps believing
 the old pose. This node closes that gap with the correlative whole-map search
 from :mod:`pepin.localization` (a fraction of a second on the pooled grid, with
 the twin check). Every second it scores how well the current scan lies on the
-map at AMCL's pose; when the fit stays poor it searches the whole map and, if a
-clearly better pose exists, re-seeds AMCL through ``/initialpose``. The same
-search answers the ``/relocalize`` service on demand, and ``/where_am_i``
-reports pose and fit as text.
+map at the tracked pose; when the fit stays poor it searches the whole map and,
+if a clearly better pose exists, re-seeds the tracker. The operator seeds it the
+same way by publishing on ``/initialpose`` (Foxglove's pose estimate); the node
+never publishes there itself. The same search answers the ``/relocalize``
+service on demand, and ``/where_am_i`` reports pose and fit as text.
 
 Frames: the scan is transformed into ``base_link`` with the static laser
 transform looked up once; poses are in ``map``.
@@ -479,7 +480,6 @@ class Relocalizer(Node):
         # The fit at the pose actually published (the blend), beside the tracker's own fit at
         # the matched pose: the two part ways while a carry is being absorbed.
         self._published_fit_pub = self.create_publisher(Float32, "localization_fit_published", 5)
-        self._pose_pub = self.create_publisher(PoseWithCovarianceStamped, "/initialpose", 5)
         # The operator's own word (Foxglove's "set pose", ros/goto.sh seed): the map has twins —
         # 2026-09-13 the whole-map search seeded the cart 6 m from its base at fit 0.77 and the
         # watchdog's true candidate (0.72 vs 0.69) could not beat it by the margin — and nothing
@@ -1169,7 +1169,14 @@ class Relocalizer(Node):
         self._seed(pose, 1.0)
 
     def _seed(self, pose: Pose2D, confidence: float) -> None:
-        """Adopt ``pose`` with the confidence it was measured at; AMCL is told via /initialpose."""
+        """Adopt ``pose`` with the confidence it was measured at: the localizer, the fit, map ->
+        odom and the watch follow at once.
+
+        Nothing goes back out on /initialpose. This node listens there for the operator, and
+        the old "tell AMCL" publication fed the node its own seed: every adoption came back as
+        an operator seed, 20 times a second, and two hand seeds alternated for an hour with
+        map -> odom flipping 16 cm at 38 Hz and the rest lock reset on every turn (2026-09-13).
+        """
         if self._localizer is not None:
             self._localizer.adopt(pose, confidence)
         self.fit = confidence
@@ -1184,17 +1191,6 @@ class Relocalizer(Node):
         self._motion.reset()
         with self._episode:  # the worker may be inside _watch.answer() right now
             self._watch.seeded(time.monotonic())
-        self._pose_pub.publish(
-            pose_with_covariance(
-                pose.x,
-                pose.y,
-                pose.theta,
-                0.05,
-                math.radians(5.0),
-                self.get_clock().now().to_msg(),
-                "map",
-            )
-        )
 
     # -- services ---------------------------------------------------------
 

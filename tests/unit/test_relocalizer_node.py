@@ -327,10 +327,32 @@ def standing(node: Relocalizer) -> None:
     node.subs["/odometry/filtered"][1](odom_msg(Pose2D(), 100.0))
 
 
+def test_an_operator_seed_is_adopted_once_and_never_echoed(node: Relocalizer) -> None:
+    """A pose published on /initialpose (Foxglove's pose estimate) is adopted at once, and it
+    stays one seed: the node has no publisher on that topic, so its adoption cannot come back
+    to it as a new operator seed (the 20 Hz loop of 2026-09-13)."""
+    from pepin_bringup.msgs import pose_with_covariance
+
+    standing(node)
+    loc = node._localizer
+    assert loc is not None
+    node.subs["/initialpose"][1](
+        pose_with_covariance(
+            CARRIED_TO.x, CARRIED_TO.y, CARRIED_TO.theta, 0.05, math.radians(5.0), TimeMsg(), "map"
+        )
+    )
+    assert math.hypot(loc.pose.x - CARRIED_TO.x, loc.pose.y - CARRIED_TO.y) < 0.01
+    assert node.fit == 1.0, "the operator's word is taken at full confidence"
+    assert "/initialpose" not in node.pubs
+    assert node.logger.texts("info")[-1].startswith(
+        "seeded by the operator at (1.20, -0.80, 60 deg)"
+    )
+
+
 def test_three_candidates_that_disagree_re_seed_the_tracker(node: Relocalizer) -> None:
     """The kidnap the board cannot see: the tracker holds the old pose, the laptop's search
     says another place three times in a row, and the tracker adopts it through the very door
-    its own search uses — /initialpose goes out, map -> odom follows at once."""
+    its own search uses — map -> odom follows at once, and nothing goes out on /initialpose."""
     standing(node)
     on_candidate = node.subs["/localization/candidate"][1]
     loc = node._localizer
@@ -342,7 +364,10 @@ def test_three_candidates_that_disagree_re_seed_the_tracker(node: Relocalizer) -
     assert node._pending_seed is not None
     node._apply_pending_seed()
     assert math.hypot(loc.pose.x - CARRIED_TO.x, loc.pose.y - CARRIED_TO.y) < 0.1
-    assert node.pubs["/initialpose"].sent, "AMCL is told, as after the board's own search"
+    assert "/initialpose" not in node.pubs, (
+        "the node listens on /initialpose: a publication there came back as an operator seed,"
+        " 20 times a second (2026-09-13)"
+    )
     node._report_tracking()
     line = node.logger.texts("info")[-1]
     assert "candidates 3 (disagree 3), re-seeds 1" in line
