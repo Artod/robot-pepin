@@ -124,9 +124,10 @@ FLAGS = FlagSet(
     Flag(
         "imu_lean",
         False,
-        description="a frame is placed with the cart's lean at its stamp (pepin.lean, from"
-        " /imu/data_raw) composed on base_link before the planar odometry, instead of as if the"
-        " cart stood level; off, the lean is estimated and reported but not applied",
+        description="the cart's lean (pepin.lean, from /imu/data_raw) is followed with the gyro"
+        " as well as the accelerometer, and a frame is placed with the lean at its stamp composed"
+        " on base_link before the planar odometry instead of as if the cart stood level; off, the"
+        " accelerometer alone, estimated and reported but not applied",
     ),
     Flag(
         "self_heal",
@@ -275,7 +276,12 @@ class DepthFusion(Node):
         self._sync = TimeSynchronizer([depth_sub, image_sub], PAIR_QUEUE)
         self._sync.registerCallback(self._on_pair)
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
-        self._lean = LeanFeed(self, config.parent, on_unmounted=self._on_unmounted)
+        self._lean = LeanFeed(
+            self,
+            config.parent,
+            use_gyro=self._switches.on("imu_lean"),
+            on_unmounted=self._on_unmounted,
+        )
         self._poser = FramePoser(
             TfHistory(self._tf, timeout_s=TF_WAIT_S),
             lean=self._lean,
@@ -413,11 +419,13 @@ class DepthFusion(Node):
 
     # ---- switches ------------------------------------------------------------------------
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
-        """A flag changed: ``imu_lean`` is the poser's switch, ``band_half_z`` rebuilds the
-        height band, the two rates retime their timer, ``snapshot_s`` its clock, and the rest
-        are only read where they are used."""
+        """A flag changed: ``imu_lean`` is the estimator's switch and the poser's — one name,
+        one meaning, in every node that has it — ``band_half_z`` rebuilds the height band, the
+        two rates retime their timer, ``snapshot_s`` its clock, and the rest are only read
+        where they are used."""
         if name == "imu_lean":
             self._poser.apply_lean = bool(new)
+            self._lean.use_gyro = bool(new)
             return
         if name == "band_half_z":
             self._set_band()

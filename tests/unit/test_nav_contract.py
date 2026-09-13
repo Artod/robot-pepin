@@ -1188,9 +1188,11 @@ def test_the_volume_is_the_map_and_only_one_side_publishes_it() -> None:
 def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
     """One estimator (pepin.lean through the kit's LeanFeed, off /imu/data_raw — which crosses
     the bridge in both modes, so a laptop node reads it directly and no /lean topic is needed),
-    one flag name in every node that uses it, off until it is measured on the robot, and the
-    lean in each of their report lines. The tracker is deliberately not among them: it runs on
-    the board and already refuses an IMU subscription for a number the EKF gives it."""
+    one flag name and one meaning in every node that uses it — imu_lean switches the estimator
+    in all three and the poser in the two that place a frame — off until it is measured on the
+    robot, and the lean in each of their report lines. The tracker is deliberately not among
+    them: it runs on the board and already refuses an IMU subscription for a number the EKF
+    gives it."""
     from pepin.deployment import BOARD_PUBLISHES, bridge_allow
 
     assert "imu/data_raw" in BOARD_PUBLISHES
@@ -1206,6 +1208,15 @@ def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
         assert "LeanFeed" in sf.imported(node), name
         assert "/imu/data_raw" not in sf.strings(node), f"{name}: the kit owns the subscription"
         assert "self._lean.report" in sf.calls(node), f"{name}: the lean in the report line"
+        # and the flag switches the estimator itself in every one of them, or two report lines
+        # would print two different leans of the same body with every flag in the same state
+        feed = sf.calls_to(node, "LeanFeed")
+        assert len(feed) == 1, f"{name}: one lean feed"
+        gyro = sf.keywords(feed[0]).get("use_gyro")
+        assert gyro is not None and ast.unparse(gyro) == "self._switches.on('imu_lean')", name
+        assert "self._lean.use_gyro" in sf.unparsed(node, ast.Attribute), (
+            f"{name}: imu_lean is the estimator's switch live, not only at start-up"
+        )
     # the poser is where the lean meets the pose, and only the two nodes that place a frame
     for name in ("depth_fusion", "depth_stream"):
         node = sf.tree(f"{NODES}/{name}.py")
