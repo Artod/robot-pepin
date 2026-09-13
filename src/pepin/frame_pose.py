@@ -20,7 +20,8 @@ stays planar), so a body leaning over a slipper or a threshold is placed as if i
 switch :attr:`FramePoser.apply_lean` on, and every pose it answers carries the lean at that
 stamp composed on the body's side of the planar pose (``map <- base_link_planar`` then roll and
 pitch about base_link's own x and y); switched off, every answer is the single TF lookup it has
-always been.
+always been. A lean gravity did not vote for — :attr:`FramePoser.min_lean_quality`, a drifting
+gyro's own signature — is not a lean but an unknown, and is placed level like any other.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from typing import Protocol
 import numpy as np
 
 from pepin.depth import Array, carry
-from pepin.lean import Lean, LeanSource
+from pepin.lean import LEAN_QUALITY_FLOOR, Lean, LeanSource
 from pepin.tsdf import RigidPose
 
 BASE_FRAME = "base_link"
@@ -62,6 +63,7 @@ class FramePoser:
         odom_frame: str = ODOM_FRAME,
         lean: LeanSource | None = None,
         apply_lean: bool = False,
+        min_lean_quality: float = LEAN_QUALITY_FLOOR,
     ) -> None:
         self._history = history
         self.base = base
@@ -70,14 +72,28 @@ class FramePoser:
         self.odom_frame = odom_frame
         self.lean = lean
         self.apply_lean = apply_lean  # live: the owning node's imu_lean flag writes it
+        # live: the owning node's lean_min_quality flag writes it
+        self.min_lean_quality = min_lean_quality
 
     def lean_at(self, stamp: float) -> Lean | None:
         """The lean this poser would apply at ``stamp``, or ``None`` when it applies none (no
-        source, the switch off, or nothing known about that moment) — also what a report line
-        prints to show what the switch is doing."""
+        source, the switch off, nothing known about that moment, or a lean gravity did not vote
+        for) — also what a report line prints to show what the switch is doing.
+
+        The quality floor is the difference between a body that leans and a gyro that drifts.
+        Both arrive here as a lean of a few degrees; only the second one comes with a quality
+        near zero, because the accelerometer has been refusing to agree with it for seconds
+        (0.2 deg/s of bias reports 3 degrees of tip on a level floor). Below the floor the lean
+        is unknown rather than wrong: the measurement is placed level, exactly as it is when the
+        IMU says nothing at all, and the scan gate (:class:`pepin.lean.LeanGate`) admits it
+        instead of throwing away a revolution because of a number nobody measured.
+        """
         if not self.apply_lean or self.lean is None:
             return None
-        return self.lean.lean_at(stamp)
+        lean = self.lean.lean_at(stamp)
+        if lean is None or lean.quality < self.min_lean_quality:
+            return None
+        return lean
 
     def base_in_map(self, stamp: float) -> RigidPose | None:
         """``map <- base_link`` at ``stamp``: where the cart stood, and — with ``apply_lean``

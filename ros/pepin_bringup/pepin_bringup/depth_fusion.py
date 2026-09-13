@@ -23,7 +23,9 @@ the lidar's own weight channel, which the camera's scale-uncertain depth may not
 the layer at the lidar's plane reads out as an occupancy grid. The rays follow the body: with
 ``imu_lean`` on the scan is placed by the leaning pose, so a beam that climbs 44 cm over 5 m
 while the cart tips writes a tabletop where it hit one instead of a wall at the plane, and a
-revolution taken past ``lean_gate_deg`` is dropped rather than believed.
+revolution taken past ``lean_gate_deg`` is dropped rather than believed. A lean gravity did
+not vote for (``lean_min_quality``: a drifting gyro's own signature) is no lean at all, and the
+measurement is placed level instead of by a number nobody measured.
 
 With ``map_source=volume`` that grid goes out as ``/map`` at ``map_hz`` (transient local), so
 the tracker and Nav2 localise and plan on the volume instead of on a frozen file, and a "known
@@ -36,11 +38,11 @@ is set afterwards. The volume is snapshotted to ``world_path`` every ``snapshot_
 shutdown.
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
-``fit_gate``, ``imu_lean``, ``lean_gate_deg``, ``self_heal``, ``align``, ``min_weight``,
-``map_min_weight``, ``surface_hz``, ``band_half_z``, ``lidar_layer``, ``no_return_free``,
-``map_source``, ``map_hz``, ``snapshot_s``, ``resume_volume``; their state is printed in every
-report line, beside the band itself and the source of the plane it is centred on.
-``/fusion/reset``
+``fit_gate``, ``imu_lean``, ``lean_gate_deg``, ``lean_min_quality``, ``self_heal``, ``align``,
+``min_weight``, ``map_min_weight``, ``surface_hz``, ``band_half_z``, ``lidar_layer``,
+``no_return_free``, ``map_source``, ``map_hz``, ``snapshot_s``, ``resume_volume``; their state
+is printed in every report line, beside the band itself and the source of the plane it is
+centred on. ``/fusion/reset``
 (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
 """
 
@@ -65,7 +67,7 @@ from pepin.deployment import map_owner
 from pepin.depth import Intrinsics
 from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import BASE_FRAME, FramePoser
-from pepin.lean import SCAN_LEAN_GATE_DEG, LeanGate
+from pepin.lean import LEAN_QUALITY_FLOOR, SCAN_LEAN_GATE_DEG, LeanGate
 from pepin.mounts import LASER_FRAME, load_lidar_mount
 from pepin.tsdf import (
     YAW_SEARCH,
@@ -146,6 +148,17 @@ FLAGS = FlagSet(
         " integrated into the map: at 5 degrees a beam is 44 cm off the sensor's plane at 5 m,"
         " so it is looking at another slice of the room. Only with imu_lean on, which is where"
         " the lean is known at all",
+    ),
+    Flag(
+        "lean_min_quality",
+        LEAN_QUALITY_FLOOR,
+        range=(0.0, 1.0),
+        description="how much of the lean gravity must have voted for (pepin.lean's quality,"
+        " printed beside the lean in this line) before a frame or a scan is placed by it: below"
+        " it the lean is treated as unknown — the measurement is placed level and the scan gate"
+        " admits it — because a drifting gyro reports a tip nobody made (0.2 deg/s of bias: 3"
+        " degrees on a level floor, at quality near zero, while a real tip keeps quality 1.0)."
+        " 0: every lean is believed, as before",
     ),
     Flag(
         "self_heal",
@@ -304,6 +317,7 @@ class DepthFusion(Node):
             TfHistory(self._tf, timeout_s=TF_WAIT_S),
             lean=self._lean,
             apply_lean=self._switches.on("imu_lean"),
+            min_lean_quality=float(self._switches["lean_min_quality"]),
         )
         self._read_plane(BAND_TF_WAIT_S)
         # The scan's own answer to the lean: a frame can be placed leaning, a revolution taken
@@ -442,9 +456,9 @@ class DepthFusion(Node):
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
         """A flag changed: ``imu_lean`` is the estimator's switch and the poser's — one name,
         one meaning, in every node that has it — ``lean_gate_deg`` the scan gate's,
-        ``band_half_z`` rebuilds the height band, the two rates retime their timer,
-        ``snapshot_s`` its clock, and the rest are only read
-        where they are used."""
+        ``lean_min_quality`` the poser's floor under a lean, ``band_half_z`` rebuilds the height
+        band, the two rates retime their timer, ``snapshot_s`` its clock, and the rest are only
+        read where they are used."""
         if name == "imu_lean":
             self._poser.apply_lean = bool(new)
             self._lean.use_gyro = bool(new)
@@ -454,6 +468,9 @@ class DepthFusion(Node):
             return
         if name == "lean_gate_deg":
             self._gate.gate_deg = float(new)
+            return
+        if name == "lean_min_quality":
+            self._poser.min_lean_quality = float(new)
             return
         if name == "snapshot_s":
             self._clock = SnapshotClock(float(new), self._clock.last_s)

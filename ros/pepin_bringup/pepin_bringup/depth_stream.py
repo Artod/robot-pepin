@@ -48,14 +48,14 @@ service answers; the report line says which.
 How far the cart leans is one estimator's (``pepin.lean`` through the kit's ``LeanFeed``, off
 ``/imu/data_raw``): the floor plane's up vector, and — with ``imu_lean`` on — the lean the poser
 composes into the scan's carry and the camera's place, so a body tipped over a slipper does not
-place its frame as if it stood level.
+place its frame as if it stood level. A lean gravity did not vote for (``lean_min_quality``,
+the signature of a drifting gyro rather than of a tipping body) is treated as no lean at all.
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): one per stage of
 the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anchor``,
 ``parallax_anchor``, ``affine_law``, ``ray_law``, ``wall_correct``, ``floor_anchor`` — plus
-``depth_backend``, ``scale_ceiling``, the largest 1 / scale the law may be fitted to, and
-``imu_lean``; their
-state is printed in every report line.
+``depth_backend``, ``scale_ceiling``, the largest 1 / scale the law may be fitted to,
+``imu_lean`` and ``lean_min_quality``; their state is printed in every report line.
 """
 
 from __future__ import annotations
@@ -105,6 +105,7 @@ from pepin.depth_service import (
 from pepin.elevation import RayGain
 from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import FramePoser
+from pepin.lean import LEAN_QUALITY_FLOOR
 from pepin.parallax import to_gray
 from pepin.tsdf import RigidPose
 from pepin_bringup.msgs import (
@@ -238,6 +239,16 @@ FLAGS = FlagSet(
         " in the map; off, the floor plane leans with the accelerometer alone, as it always has,"
         " and nothing else is leaned",
     ),
+    Flag(
+        "lean_min_quality",
+        LEAN_QUALITY_FLOOR,
+        range=(0.0, 1.0),
+        description="how much of the lean gravity must have voted for (pepin.lean's quality,"
+        " printed beside the lean in this line) before a frame is placed by it: below it the"
+        " lean is treated as unknown and the frame is placed level, because a drifting gyro"
+        " reports a tip nobody made (0.2 deg/s of bias: 3 degrees on a level floor, at quality"
+        " near zero, while a real tip keeps quality 1.0). 0: every lean is believed, as before",
+    ),
 )
 FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
 
@@ -326,6 +337,7 @@ class DepthStream(Node):
             TfHistory(self._tf, timeout_s=CARRY_WAIT_S),
             lean=self._lean,
             apply_lean=self._switches.on("imu_lean"),
+            min_lean_quality=float(self._switches["lean_min_quality"]),
         )
         self._lidar_mount: RigidPose | None = None
         self._scans: deque[LaserScan] = deque()  # the last SCAN_WINDOW_S of scans, by stamp
@@ -383,8 +395,8 @@ class DepthStream(Node):
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
         """A flag changed: ``depth_backend`` is the switch's mode, ``scale_ceiling`` the law's
-        upper bound, ``imu_lean`` the poser's and the estimator's, a stage's flag switches that
-        stage of the pipeline."""
+        upper bound, ``imu_lean`` the poser's and the estimator's, ``lean_min_quality`` the
+        poser's floor under a lean, a stage's flag switches that stage of the pipeline."""
         if name == "depth_backend":
             self._net.mode = str(new)
         elif name == "scale_ceiling":
@@ -392,6 +404,8 @@ class DepthStream(Node):
         elif name == "imu_lean":
             self._poser.apply_lean = bool(new)
             self._lean.use_gyro = bool(new)
+        elif name == "lean_min_quality":
+            self._poser.min_lean_quality = float(new)
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
 

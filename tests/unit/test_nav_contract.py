@@ -1194,6 +1194,7 @@ def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
     them: it runs on the board and already refuses an IMU subscription for a number the EKF
     gives it."""
     from pepin.deployment import BOARD_PUBLISHES, bridge_allow
+    from pepin.lean import LEAN_QUALITY_FLOOR
 
     assert "imu/data_raw" in BOARD_PUBLISHES
     for mode in ("split", "vision"):
@@ -1233,6 +1234,14 @@ def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
     gate = load_table(REPO / NODES / "depth_fusion.py").flag("lean_gate_deg")
     assert gate.live and gate.default == 3.0 and gate.range == (0.0, 90.0)
     assert "leaned_out" in sf.strings(fusion), "the report line counts what the gate dropped"
+    # and a lean gravity never voted for is no lean: one floor, in both nodes that place a
+    # measurement, read by the poser so the gate and the pose make the same decision
+    for name in ("depth_fusion", "depth_stream"):
+        floor = load_table(REPO / NODES / f"{name}.py").flag("lean_min_quality")
+        assert floor.live and floor.default == LEAN_QUALITY_FLOOR, name
+        assert floor.range == (0.0, 1.0), name
+        attributes = sf.unparsed(sf.tree(f"{NODES}/{name}.py"), ast.Attribute)
+        assert "self._poser.min_lean_quality" in attributes, name
 
 
 def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_prints() -> None:

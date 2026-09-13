@@ -10,7 +10,7 @@ import pytest
 
 from pepin.depth import rotation_matrix
 from pepin.frame_pose import FramePoser, PoseHistory
-from pepin.lean import Lean
+from pepin.lean import LEAN_QUALITY_FLOOR, Lean, LeanGate
 from pepin.tsdf import RigidPose
 
 
@@ -189,6 +189,32 @@ def test_a_source_with_nothing_to_say_about_the_moment_leaves_the_pose_alone() -
     assert got is not None and want is not None
     assert np.array_equal(got.rotation, want.rotation)
     assert poser.lean_at(2.0) is None
+
+
+def test_a_lean_gravity_never_voted_for_is_not_a_lean() -> None:
+    """Gyro bias reports a tip nobody made — 3 degrees on a level floor at 0.2 deg/s, 6 at
+    0.5 — and the one thing that tells it from a real tip is its quality: gravity has been
+    refusing to agree with it for seconds (a real tip the gyro follows keeps quality 1.00,
+    scratch/lean_quality_floor_probe.py). Below the floor the lean is unknown, not wrong — the
+    pose is the planar one, and the scan gate, which asks the poser and not the estimator,
+    admits the revolution instead of throwing a good scan away."""
+
+    class Drifting:
+        """The shape of a gyro bias in the estimator's output: a big lean nobody measured."""
+
+        def lean_at(self, stamp: float) -> Lean | None:
+            return Lean(0.0, math.radians(4.0), stamp, 0.02)
+
+    poser = FramePoser(LevelHistory(), lean=Drifting(), apply_lean=True)
+    assert poser.min_lean_quality == LEAN_QUALITY_FLOOR
+    assert poser.lean_at(1.0) is None, "not believed, and so not applied"
+    placed = poser.to_map(np.array([[3.0, 0.0, 0.0]]), 1.0)
+    assert placed is not None and placed[0, 2] == pytest.approx(0.0), "placed level, as before"
+    gate = LeanGate()
+    assert gate.admits(poser.lean_at(1.0)) and gate.refused == 0, "the revolution is kept"
+    believed = FramePoser(LevelHistory(), lean=Drifting(), apply_lean=True, min_lean_quality=0.0)
+    assert believed.lean_at(1.0) is not None, "0: every lean is believed, as it was"
+    assert not gate.admits(believed.lean_at(1.0)), "and believed, it would cost the scan too"
 
 
 def test_a_history_without_the_camera_s_own_edge_answers_the_plain_lookup() -> None:

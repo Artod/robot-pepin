@@ -24,6 +24,10 @@ turns them into one number every consumer asks for:
   instead of corrected, and the counters of what it did, for a node's report line.
 * :func:`scan_height_shift` — how far a lidar's returns move in height when the body leans: the
   physical size of the problem, in metres, per beam.
+* :data:`LEAN_QUALITY_FLOOR` — how much of a lean gravity must have voted for before a consumer
+  places a measurement by it. A drifting gyro reports a tip nobody made, and its only signature
+  is a quality near zero: below the floor the lean is unknown rather than wrong, and the
+  consumer places the measurement level (:meth:`pepin.frame_pose.FramePoser.lean_at`).
 
 Angles are radians, positive roll is right side down and positive pitch is nose down — the ROS
 convention, the same signs ``pepin.mounts.rotation_from_rpy`` composes.
@@ -53,6 +57,12 @@ HISTORY_S = 5.0  # how far back a consumer may ask for a lean
 HISTORY_MAX = 2000  # and how many samples that may ever cost (50 Hz * 5 s = 250)
 HISTORY_SLACK_S = 0.1  # a stamp this far past the newest sample reads as the newest lean
 SCAN_LEAN_GATE_DEG = 3.0  # a scan taken past this lean is another slice of the room, not the map's
+# How much of a lean gravity must have voted for before a consumer places a measurement by it.
+# A real tip keeps quality 1.00 (the gyro follows it and the accelerometer agrees within the
+# dead band), while a drifting gyro is disbelieved by gravity and its false lean lives near
+# zero: 0.2 deg/s of bias reports 3.0 deg at quality <= 0.02, and nothing past 1.13 deg survives
+# this floor (scratch/lean_quality_floor_probe.py, 2026-09-12).
+LEAN_QUALITY_FLOOR = 0.5
 
 
 def _rotation_xy(roll: float, pitch: float) -> Array:
@@ -432,6 +442,7 @@ __all__ = [
     "LEAN_BIAS_MAX_DEG_S",
     "LEAN_GATE_DEG",
     "LEAN_NORM_TOLERANCE",
+    "LEAN_QUALITY_FLOOR",
     "LEAN_TAU_S",
     "LEVEL",
     "SCAN_LEAN_GATE_DEG",
