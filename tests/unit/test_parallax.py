@@ -5,6 +5,7 @@ motions say so instead of inventing numbers, and the anchor is off until its fla
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import numpy as np
 import pytest
@@ -12,11 +13,14 @@ import pytest
 from pepin.depth import CameraPose, Intrinsics, project_all
 from pepin.depth_pipeline import Frame, FrameContext, ParallaxAnchor, standard_pipeline
 from pepin.parallax import (
+    MAX_SAMPSON_PX,
+    CameraPlacement,
     Motion,
     camera_motion,
     match,
     parallax_truth,
     perpendicular_baseline,
+    sampson,
     to_gray,
     triangulate,
 )
@@ -100,13 +104,80 @@ def test_triangulation_is_exact_on_correspondences_the_projection_itself_produce
     u_b, v_b, fwd_b = project_all(in_b, cam, INTR)
     seen = (fwd_a > 0.3) & (fwd_b > 0.3)
     moved = base_motion(before, after)
-    motion = camera_motion(moved.rotation, moved.translation, cam, cam)
+    motion = camera_motion(
+        moved.rotation, moved.translation, CameraPlacement.of(cam), CameraPlacement.of(cam)
+    )
     pts_a = np.stack([u_a[seen], v_a[seen]], axis=1).astype(np.float32)
     pts_b = np.stack([u_b[seen], v_b[seen]], axis=1).astype(np.float32)
     z, sigma = triangulate(pts_a, pts_b, INTR, motion)
     assert seen.sum() > 50
     assert np.allclose(z, fwd_b[seen], rtol=1e-4, atol=0.0)
     assert np.all(sigma > 0) and np.all(np.isfinite(sigma))
+
+
+def neck_edge(pitch: float, pan: float, height: float = 1.23) -> CameraPlacement:
+    """``base_link <- camera_optical`` for a head pitched down by ``pitch`` and panned left by
+    ``pan`` — TF's own edge, the pose :class:`CameraPose` cannot hold."""
+    c, s = math.cos(pitch), math.sin(pitch)
+    optical_from_level = np.array([[0.0, -1.0, 0.0], [-s, 0.0, -c], [c, 0.0, -s]])
+    cp, sp = math.cos(pan), math.sin(pan)
+    turn = np.array([[cp, -sp, 0.0], [sp, cp, 0.0], [0.0, 0.0, 1.0]])  # base_link <- panned base
+    return CameraPlacement((optical_from_level @ turn.T).T, np.array([0.05, 0.0, height]))
+
+
+def seen_by(
+    points: np.ndarray, base: RigidPose, place: CameraPlacement
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Where odom points land in the picture of a camera placed by ``place`` on a cart standing
+    at ``base``: columns, rows and the depth along the optical axis."""
+    local = (points - base.translation) @ base.rotation
+    optical = (local - place.translation) @ place.rotation
+    return (
+        INTR.fx * optical[:, 0] / optical[:, 2] + INTR.cx,
+        INTR.fy * optical[:, 1] / optical[:, 2] + INTR.cy,
+        optical[:, 2],
+    )
+
+
+@pytest.mark.parametrize("pan_a_deg, pan_b_deg", [(0.0, 0.0), (20.0, 20.0), (0.0, 5.0)])
+def test_the_motion_carries_the_neck_s_pan_and_a_pitch_only_pose_does_not(
+    pan_a_deg: float, pan_b_deg: float
+) -> None:
+    """A head panned 20 degrees, and a head that pans 5 degrees between the two pictures: the
+    depths come back exact, because the motion is built from TF's whole edge at each stamp.
+    Built from the pitch-only pose the pipeline projects with, the same correspondences either
+    die on the epipolar gate (a pan that changes) or survive it carrying a depth that is not
+    the truth (a pan that stands) — the defect this parametrisation exists for."""
+    rng = np.random.default_rng(5)
+    points = np.stack(
+        [rng.uniform(1.0, 5.0, 400), rng.uniform(-2.0, 2.0, 400), rng.uniform(0.0, 1.8, 400)],
+        axis=1,
+    )
+    pitch = math.radians(26.0)
+    before, after = planar_pose(0.0, 0.0, 0.0), planar_pose(0.12, 0.0, 0.0)
+    place_a = neck_edge(pitch, math.radians(pan_a_deg))
+    place_b = neck_edge(pitch, math.radians(pan_b_deg))
+    u_a, v_a, z_a = seen_by(points, before, place_a)
+    u_b, v_b, z_b = seen_by(points, after, place_b)
+    seen = (z_a > 0.3) & (z_b > 0.3)
+    for u, v in ((u_a, v_a), (u_b, v_b)):
+        seen &= (u >= 0) & (u < INTR.width) & (v >= 0) & (v < INTR.height)
+    pts_a = np.stack([u_a[seen], v_a[seen]], axis=1).astype(np.float32)
+    pts_b = np.stack([u_b[seen], v_b[seen]], axis=1).astype(np.float32)
+    moved = base_motion(before, after)
+    motion = camera_motion(moved.rotation, moved.translation, place_a, place_b)
+    assert seen.sum() > 100
+    assert np.median(sampson(pts_a, pts_b, INTR, motion)) < 1e-3  # float32 pixels' own
+    assert np.allclose(triangulate(pts_a, pts_b, INTR, motion)[0], z_b[seen], rtol=1e-4)
+    flat = CameraPlacement.of(CameraPose(0.05, 0.0, 1.23, pitch))  # what a CameraPose can say
+    blind = camera_motion(moved.rotation, moved.translation, flat, flat)
+    survivors = sampson(pts_a, pts_b, INTR, blind) <= MAX_SAMPSON_PX
+    if pan_a_deg == pan_b_deg == 0.0:
+        assert np.all(survivors), "with no pan the pitch-only pose is the same pose"
+        return
+    # NaNs among them are the depths that came out behind a lens: gated out, still not truth
+    ratio = triangulate(pts_a, pts_b, INTR, blind)[0][survivors] / z_b[seen][survivors]
+    assert survivors.sum() == 0 or abs(float(np.nanmedian(ratio)) - 1.0) > 0.1
 
 
 def test_the_sigma_grows_with_the_square_of_the_range_and_falls_with_the_baseline() -> None:
@@ -199,15 +270,27 @@ def test_a_ray_on_the_epipole_sees_none_of_the_baseline() -> None:
 
 
 # ---- the anchor -----------------------------------------------------------------------------
-def context(stamp: float, gray: np.ndarray, odometry: Odometry) -> FrameContext:
-    """A frame's context carrying the picture and the odometry the parallax anchor reads."""
+def context(
+    stamp: float, gray: np.ndarray, odometry: Odometry, place: CameraPlacement | None = None
+) -> FrameContext:
+    """A frame's context carrying the picture and the odometry the parallax anchor reads, and
+    TF's camera edge when a test has a neck to turn."""
     return FrameContext(
         INTR,
         CameraPose(0.0, 0.0, 1.23, math.radians(26.0)),
         stamp=stamp,
         gray=gray,
         motion=odometry,
+        cam_optical=place,
     )
+
+
+def band_error(pairs: Any) -> float:
+    """How far the anchor's depths sit from the rendered planes they came off, as a median
+    relative error (the row each pair came from is its lift, inverted)."""
+    rows = INTR.cy - np.asarray(pairs.lift) * INTR.fy
+    truth = np.select([rows < BANDS[0][1], rows < BANDS[1][1]], [BANDS[0][2], BANDS[1][2]], 4 / 3)
+    return float(np.median(np.abs(np.asarray(pairs.z) / truth - 1.0)))
 
 
 def test_the_anchor_pairs_the_network_s_depth_with_the_triangulated_one() -> None:
@@ -226,6 +309,30 @@ def test_the_anchor_pairs_the_network_s_depth_with_the_triangulated_one() -> Non
     assert np.all(pairs.d == 3.0) and np.all(pairs.z > 0.5) and np.all(pairs.z < 6.0)
     assert np.all(pairs.weight > 0.0) and np.all(pairs.weight <= 1.0)
     assert "baseline" in anchor.describe() and "sigma" in anchor.describe()
+    assert band_error(pairs) < 0.05
+
+
+def test_the_anchor_triangulates_through_a_panned_neck() -> None:
+    """The same rendered sidestep with the head turned 25 degrees: the cart steps along the
+    camera's own right, so the two pictures are the pair the renderer made, and the anchor
+    returns the rendered planes' depths because the context brings TF's whole edge. Fed the
+    pitch-only pose instead, the very same step is read as motion into the picture: the pairs
+    are gone, or the depths they carry are not the planes'."""
+    a, b, _ = rendered_pair()
+    place = neck_edge(math.radians(26.0), math.radians(25.0))
+    step = SIDESTEP_M * np.asarray(place.rotation)[:, 0]  # the camera's own right, in base_link
+    poses = {1.0: planar_pose(0.0, 0.0, 0.0), 1.2: planar_pose(float(step[0]), float(step[1]), 0.0)}
+    odometry = Odometry(poses)
+    network = np.full((INTR.height, INTR.width), 3.0)
+    anchor = ParallaxAnchor()
+    assert anchor.pairs(Frame(network, context(1.0, a, odometry, place))) is None
+    pairs = anchor.pairs(Frame(network, context(1.2, b, odometry, place)))
+    assert pairs is not None and pairs.size >= 50
+    assert band_error(pairs) < 0.05
+    blind = ParallaxAnchor()
+    assert blind.pairs(Frame(network, context(1.0, a, odometry))) is None
+    lost = blind.pairs(Frame(network, context(1.2, b, odometry)))
+    assert lost is None or band_error(lost) > 0.1
 
 
 def test_the_anchor_holds_when_the_context_brings_no_picture_or_no_odometry() -> None:

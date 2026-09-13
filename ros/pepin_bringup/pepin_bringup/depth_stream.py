@@ -460,12 +460,12 @@ class DepthStream(Node):
                 self._no_model(exc)
                 return
         with tally.measure("pose"):  # includes the TF wait for the neck's edge
-            cam = self._camera_at(msg.header.stamp)
+            cam, cam_optical = self._camera_at(msg.header.stamp)
         with tally.measure("samples"):  # includes the TF wait for the carry
             lidar = self._lidar_points(msg)
         # The parallax anchor is the one stage that reads the picture itself; the grey copy is
-        # made only while it is on, and the poser it triangulates against is the same TF the
-        # carry uses.
+        # made only while it is on, the poser it triangulates against is the same TF the carry
+        # uses, and the camera edge goes in whole so its baseline carries the neck's pan.
         ctx = FrameContext(
             self._intr_or_nominal(msg),
             cam,
@@ -474,6 +474,7 @@ class DepthStream(Node):
             stamp=stamp_seconds(msg.header.stamp),
             gray=to_gray(rgb) if self._pipeline.on("parallax_anchor") else None,
             motion=self._poser,
+            cam_optical=cam_optical,
         )
         with tally.measure("pipeline"):
             result = self._pipeline.run(depth, ctx)
@@ -519,19 +520,21 @@ class DepthStream(Node):
             throttle_duration_sec=30,
         )
 
-    def _camera_at(self, stamp: Any) -> CameraPose:
+    def _camera_at(self, stamp: Any) -> tuple[CameraPose, RigidPose | None]:
         """Where the camera sat at ``stamp``: ``base_link <- camera_optical`` from TF (the
-        neck's live edge, or the static one), as the pipeline's pose; config/camera.json's
-        mount, counted, while TF has no such edge. A head turned past PAN_NOTICE_RAD is
+        neck's live edge, or the static one) twice over — as the pipeline's pitch-only pose,
+        and as the edge itself for the stage that needs the whole rotation (the parallax
+        anchor's baseline turns with the neck's pan). Without such an edge in TF:
+        config/camera.json's mount, counted, and no edge. A head turned past PAN_NOTICE_RAD is
         counted too: the projections assume it looks along the cart's x."""
         pose = self._poser.camera_in_base(stamp_seconds(stamp))
         if pose is None:
             self._tally.count("camera_from_config")
-            return self._camera_config
+            return self._camera_config, None
         _pitch, pan = optical_heading(pose.rotation)
         if abs(pan) > PAN_NOTICE_RAD:
             self._tally.count("camera_panned")
-        return CameraPose.from_optical(pose.rotation, pose.translation)
+        return CameraPose.from_optical(pose.rotation, pose.translation), pose
 
     def _as_scan(self, depth: Array, image: Image, ctx: FrameContext) -> LaserScan:
         """The depth folded onto the floor plane, in base_link, stamped like the image."""

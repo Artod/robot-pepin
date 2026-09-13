@@ -47,6 +47,7 @@ from pepin.depth import (  # noqa: E402
     edge_mask,
     floor_anchor,
     floor_depth,
+    optical_heading,
     project,
     quaternion_from_matrix,
     save_law,
@@ -353,8 +354,12 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
     assert "1 lidar verdicts" in line
     # the head turned: the pose is still taken (pitch kept), the pan counted in the report
     node._tf.buffer.transforms[("base_link", "camera_optical")] = _optical_edge(31.5, pan_deg=20.0)
-    turned = node._camera_at(_stamp(1))
+    turned, edge = node._camera_at(_stamp(1))
     assert turned.pitch == pytest.approx(math.radians(31.5)) and turned.z == 1.2
+    # the pose drops the pan, the edge beside it keeps it: the parallax anchor triangulates
+    # against the edge, and its baseline would point 20 deg wrong without it
+    assert edge is not None
+    assert optical_heading(edge.rotation)[1] == pytest.approx(math.radians(20.0))
     frame(node, net, turned, 2.0, 1)  # the second count: the frame's own lookup
     node._report()
     assert "head panned 2 frames (projected as if not)" in node.logger.texts("info")[-1]
@@ -362,7 +367,7 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
 
 def test_without_a_camera_edge_the_config_pose_stands_in_and_is_counted(build: Build) -> None:
     node, _net = build()
-    assert node._camera_at(_stamp(0)) == CONFIG_CAM
+    assert node._camera_at(_stamp(0)) == (CONFIG_CAM, None)
     assert node._tally.take().counts["camera_from_config"] == 1
     assert "camera pose from TF" in node.logger.texts("info")[-1]
     assert (

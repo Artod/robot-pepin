@@ -200,8 +200,9 @@ class FrameContext:
     """What a frame brings besides the network's depth: the optics, the camera's place on the
     cart, which way is up (base_link), the lidar's returns as base_link points carried to the
     frame's moment (``None`` without a scan), the frame's stamp in seconds — and, for the
-    anchors that read the picture rather than a sensor, the frame's grey image and the source
-    of the cart's motion between stamps (both ``None`` unless a node supplies them)."""
+    anchors that read the picture rather than a sensor, the frame's grey image, the source of
+    the cart's motion between stamps, and TF's whole ``base_link <- camera_optical`` edge, the
+    one place a panned neck is carried (all three ``None`` unless a node supplies them)."""
 
     intr: Intrinsics
     cam: CameraPose
@@ -210,6 +211,7 @@ class FrameContext:
     stamp: float = 0.0
     gray: npt.NDArray[np.uint8] | None = None
     motion: MotionSource | None = None
+    cam_optical: Rigid | None = None
 
     @cached_property
     def beams(self) -> Array | None:
@@ -934,12 +936,13 @@ class WallCorrection(WallAnchor):
 # ---- motion as a hoop, with no lidar at all ---------------------------------------------------
 @dataclass(frozen=True, eq=False)
 class PreviousFrame:
-    """The frame the parallax anchor kept: its grey image, its stamp and where the camera sat
-    on the cart when it was taken (the neck may have moved since)."""
+    """The frame the parallax anchor kept: its grey image, its stamp and where the lens sat on
+    the cart when it was taken — the whole ``base_link <- camera_optical``, pan included, since
+    the neck may have turned since."""
 
     gray: npt.NDArray[np.uint8]
     stamp: float
-    cam: CameraPose
+    place: Rigid
 
 
 class ParallaxAnchor(AnchorStage):
@@ -950,8 +953,11 @@ class ParallaxAnchor(AnchorStage):
     other sensor is off, and the only one that measures at every elevation the picture has, so
     it is the pool a law over the ray's angle can be fitted on.
 
-    The anchor keeps the previous frame inside (grey image, stamp, camera pose) and asks
-    :class:`FrameContext`'s motion source for the transform between the two stamps. A pair of
+    The anchor keeps the previous frame inside (grey image, stamp, the lens's whole placement
+    on the cart) and asks :class:`FrameContext`'s motion source for the transform between the
+    two stamps. The placement is TF's ``base_link <- camera_optical`` when the node supplies
+    it, because that is the only pose carrying the neck's pan and a baseline turned by a
+    pan-free pose points the wrong way; without it the mount's pitch stands in. A pair of
     frames closer together than ``min_gap_s`` has no baseline worth triangulating and one
     farther apart than ``max_gap_s`` has changed more than the flow follows; a frame while the
     cart stands still, or turns on the spot, yields nothing at all and says which. Each pair
@@ -991,14 +997,19 @@ class ParallaxAnchor(AnchorStage):
     def pairs(self, frame: Frame) -> Pairs | None:
         """(network, triangulated) pairs at the corners this frame shares with the previous
         one, or ``None`` when there is no usable motion between the two."""
-        from pepin.parallax import camera_motion, parallax_truth
+        from pepin.parallax import CameraPlacement, camera_motion, parallax_truth
 
         ctx = frame.ctx
         gray = ctx.gray
         if gray is None:
             self._count("no image")
             return None
-        previous, self._prev = self._prev, PreviousFrame(gray, ctx.stamp, ctx.cam)
+        # TF's edge when the node read one: it is the only pose that carries the neck's pan,
+        # and a baseline built from a pan-free pose points the wrong way (pepin.parallax).
+        place: Rigid = (
+            ctx.cam_optical if ctx.cam_optical is not None else CameraPlacement.of(ctx.cam)
+        )
+        previous, self._prev = self._prev, PreviousFrame(gray, ctx.stamp, place)
         if previous is None:
             return None
         gap = ctx.stamp - previous.stamp
@@ -1009,7 +1020,7 @@ class ParallaxAnchor(AnchorStage):
         if moved is None:
             self._count("no odometry")
             return None
-        motion = camera_motion(moved.rotation, moved.translation, previous.cam, ctx.cam)
+        motion = camera_motion(moved.rotation, moved.translation, previous.place, place)
         truth = parallax_truth(previous.gray, gray, ctx.intr, motion)
         self.frames += 1
         for reason, n in truth.rejected.items():

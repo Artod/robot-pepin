@@ -122,20 +122,57 @@ def optical_from_base(cam: CameraPose) -> Array:
     return np.array([[0.0, -1.0, 0.0], [-s, 0.0, -c], [c, 0.0, -s]])
 
 
+class Placement(Protocol):
+    """Where the lens sat for one frame: ``base_link <- camera_optical``, a 3x3 rotation and a
+    translation — :class:`pepin.tsdf.RigidPose`, what
+    :meth:`pepin.frame_pose.FramePoser.camera_in_base` reads off the neck's live TF edge."""
+
+    @property
+    def rotation(self) -> Array:
+        """The 3x3 rotation of the optical axes in base_link (pitch and pan alike)."""
+        ...
+
+    @property
+    def translation(self) -> Array:
+        """Where the lens sits in base_link, in metres."""
+        ...
+
+
+@dataclass(frozen=True)
+class CameraPlacement:
+    """A :class:`Placement` built by hand rather than read from TF."""
+
+    rotation: Array
+    translation: Array
+
+    @classmethod
+    def of(cls, cam: CameraPose) -> CameraPlacement:
+        """The placement of a pitch-only pose — config/camera.json's mount, the stand-in while
+        TF has no neck edge. A pan it cannot know about is taken to be zero."""
+        return cls(optical_from_base(cam).T, np.array([cam.x, cam.y, cam.z]))
+
+
 def camera_motion(
-    base_rotation: Array, base_translation: Array, cam_a: CameraPose, cam_b: CameraPose
+    base_rotation: Array, base_translation: Array, cam_a: Placement, cam_b: Placement
 ) -> Motion:
     """The motion between two views in optical coordinates, from the cart's motion between
     their stamps (``base_link`` at A into ``base_link`` at B, what
-    :meth:`pepin.frame_pose.FramePoser.motion` returns) and where the camera sat on the cart at
-    each — the neck may have moved between the two pictures."""
-    ra = optical_from_base(cam_a)
-    rb = optical_from_base(cam_b)
+    :meth:`pepin.frame_pose.FramePoser.motion` returns) and where the lens sat on the cart at
+    each — the whole ``base_link <- camera_optical`` of both frames, so a head that is panned,
+    or that pans between the two pictures, turns the baseline with it.
+
+    The pan is not a detail: fed a pitch-only pose instead (:class:`pepin.depth.CameraPose`
+    carries no pan), exact correspondences under a constant 10 degree pan keep a median 0.89 of
+    their true depth and the spread of a hundred survivors runs 0.42-1.85, while a pan of 5
+    degrees *between* the frames leaves 0 of 209 alive at the epipolar gate
+    (scratch/review_parallax_pan.py, 2026-09-12)."""
+    ra = np.asarray(cam_a.rotation, dtype=float)
+    rb = np.asarray(cam_b.rotation, dtype=float)
     rba = np.asarray(base_rotation, dtype=float)
     tba = np.asarray(base_translation, dtype=float)
-    ta = np.array([cam_a.x, cam_a.y, cam_a.z])
-    tb = np.array([cam_b.x, cam_b.y, cam_b.z])
-    return Motion(rb @ rba @ ra.T, rb @ (rba @ ta + tba - tb))
+    ta = np.asarray(cam_a.translation, dtype=float)
+    tb = np.asarray(cam_b.translation, dtype=float)
+    return Motion(rb.T @ rba @ ra, rb.T @ (rba @ ta + tba - tb))
 
 
 def match(
@@ -447,9 +484,11 @@ __all__ = [
     "MIN_BASELINE_M",
     "MIN_PARALLAX_RATIO",
     "MIN_ROTATION_RAD",
+    "CameraPlacement",
     "Motion",
     "ParallaxTruth",
     "Pixels",
+    "Placement",
     "camera_motion",
     "fundamental",
     "match",
