@@ -30,16 +30,20 @@ pepin_render() {  # "[proc] [LEVEL] [epoch] [node]: text" -> "HH:MM:SS LEVEL nod
     '
 }
 watch_start() {
+    # The viewer runs in a process group of its own (job control on for the fork): the stop
+    # then reaches every member — the ssh streaming the log included — with one signal. Killing
+    # the subshell alone, or pkill by command line, left the ssh alive; it held the caller's
+    # stdout open, and a script whose goto output was piped never returned (2026-09-13: the
+    # cart stood at the printer for nine minutes while goto.sh waited on its own viewer).
+    set -m
     ( ssh "root@$BOARD" "docker logs -f --since 3s pepin-ros 2>&1" \
         | grep --line-buffered -E "$PEPIN_WATCH_KEEP" | grep --line-buffered -vE "$PEPIN_WATCH_DROP" | pepin_render ) 2>/dev/null &
     PEPIN_WATCH_PID=$!
+    set +m
     disown "$PEPIN_WATCH_PID" 2>/dev/null || true
 }
 watch_stop() {  # never blocks: a stuck viewer must not delay the stop that follows it
     [ -n "${PEPIN_WATCH_PID:-}" ] || return 0
-    # Kill the ssh that streams the log by its command line as well as by pid: it is a grandchild
-    # of this shell, and killing the subshell alone left it printing into the terminal for minutes.
-    { pkill -P "$PEPIN_WATCH_PID"; kill "$PEPIN_WATCH_PID"; } 2>/dev/null
-    pkill -f "docker logs -f --since 3s pepin-ros" 2>/dev/null
+    kill -TERM -- "-$PEPIN_WATCH_PID" 2>/dev/null || kill "$PEPIN_WATCH_PID" 2>/dev/null
     PEPIN_WATCH_PID=""
 }
