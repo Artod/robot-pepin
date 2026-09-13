@@ -4,7 +4,7 @@
     "width": 1280,
     "height": 720,
     "hfov_deg": 78.0,
-    "calibrated": false,
+    "calibrated": true,
     "mount": {
       "x_m": 0.0,
       "y_m": 0.0,
@@ -15,6 +15,27 @@
     "frames": {
       "link": "camera_link",
       "optical": "camera_optical"
+    },
+    "intrinsics": {
+      "width": 1280,
+      "height": 720,
+      "hfov_deg": 82.94,
+      "fx": 724.127,
+      "fy": 726.828,
+      "cx": 652.04,
+      "cy": 373.983,
+      "dist": [
+        -0.150009,
+        -0.129449,
+        -0.002416,
+        -0.001635,
+        0.091751
+      ],
+      "model": "plumb_bob",
+      "rms": 0.2304,
+      "views": 45,
+      "board": "9x6 inner corners, 24.5 mm squares",
+      "date": "2026-09-13"
     }
   },
   "notes": "hfov_deg came from the lidar (78 deg, scratch/depth_fit_models.py, 2026-09-10), the AC310's nominal 70 deg placed the image's edges 8 deg wrong; a checkerboard calibration replaces it — run ros/calibrate.sh (print the board with --print), which writes an intrinsics block next to this one and sets calibrated: true. hfov_deg itself is never rewritten: it stays the nominal number pepin.camera.optics answers while calibrated is false (the block carries its own hfov_deg, derived from fx), so that boolean switches a bad calibration off and puts these optics back. The lidar that 78 deg came from was assumed 0.18 m lower than the tape measure of 2026-09-12 says it hangs, so that fit is owed a repeat: see the mount's note."
