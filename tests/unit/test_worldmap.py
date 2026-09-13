@@ -111,6 +111,26 @@ def test_the_inside_is_free_and_the_outside_unknown() -> None:
         assert cell_of(view, x, y) == UNKNOWN, f"({x}, {y}) is behind a wall: never observed"
 
 
+def test_a_wall_on_a_cell_boundary_survives_every_viewpoint() -> None:
+    """The walls of this box fall exactly on cell boundaries, which is the case ray sampling
+    alone loses: no rung of the ladder need land within half a voxel of the wall, both
+    neighbouring cells then read as "no surface here", and every further viewpoint averages
+    the wall away harder (18 % of it left after nine, before the return was sampled).
+    """
+    world = WorldMap(spec(), mount())
+    views = [(0.0, 0.0), (1.0, 1.0), (-1.0, 0.5), (0.5, -1.2)]
+    for i, (x, y) in enumerate(views * 4):
+        world.integrate_scan(*box_scan(x, y), at(x, y), stamp=100.0 + i)
+    view = world.lidar_slice()
+    strip = [wall_at(view, ROOM_M, y) for y in np.arange(-1.5, 1.51, 0.05)]
+    assert np.mean(strip) > 0.95, "the wall on the boundary is in the map, cell by cell"
+    rows, cols = np.nonzero(view.values == OCCUPIED)
+    xs = view.origin[0] + (cols + 0.5) * view.resolution_m
+    ys = view.origin[1] + (rows + 0.5) * view.resolution_m
+    off_wall = np.minimum(np.abs(np.abs(xs) - ROOM_M), np.abs(np.abs(ys) - ROOM_M))
+    assert off_wall.max() <= 0.05, "and it did not grow inward while doing it"
+
+
 def test_a_beam_past_the_sensor_reach_carves_free_space_and_marks_nothing() -> None:
     """An open door: the beam says "nothing out to here", not "a wall here"."""
     world = WorldMap(spec(), PlanarMount(z_m=PLANE_M, max_range_m=1.0))

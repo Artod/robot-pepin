@@ -205,7 +205,11 @@ lidar writes its own layer into it and the volume IS the map (`src/pepin/worldma
 
 - **The lidar's layer.** Every `/scan` is integrated at the height `config/lidar.json` calibrates
   and nowhere else (the plane ± one voxel): each beam carves free space along its run and marks a
-  surface at its return, on the lidar's own weight channel. The camera keeps writing its band
+  surface at its return, on the lidar's own weight channel. The return itself is sampled where it
+  came back, not only on the ray's sampling ladder: a wall that falls on a cell boundary has no
+  ladder rung within half a voxel of it and would otherwise average out of the map (18 % of such a
+  wall left after nine viewpoints; 95-100 % with the return sampled). The camera keeps writing its
+  band
   through the same volume, but inside that layer it may not repaint a cell the lidar has spoken
   for — the network's depth is scale-uncertain, the lidar's returns are metric truth.
 - **Slices.** A horizontal band of the volume reads out as an occupancy grid: `lidar_slice()` at
