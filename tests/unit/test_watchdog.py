@@ -10,11 +10,13 @@ from __future__ import annotations
 import itertools
 import json
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
 from pepin.fusion import sigma_from_fit
 from pepin.odometry import Pose2D
+from pepin.scanmatch import apply_motion
 from pepin.sources import TRACKER, WATCHDOG
 from pepin.watchdog import (
     AMBIGUITY_MAX,
@@ -24,6 +26,7 @@ from pepin.watchdog import (
     CandidateVerdict,
     GlobalCandidate,
     ambiguity,
+    carried,
     judge,
     same_place,
 )
@@ -33,6 +36,28 @@ HERE = Pose2D(-9.5, 2.4, math.radians(50.0))
 ELSEWHERE = Pose2D(-13.5, 2.0, math.radians(-135.0))  # the corner four metres away
 SURE = np.diag([0.02**2, 0.02**2, math.radians(1.0) ** 2])  # a peak as sharp as a real one
 _SCANS = itertools.count(1)  # every candidate comes off its own revolution, as on the wire
+
+
+@dataclass
+class Trail:
+    """A fake :class:`pepin.watchdog.OdomTrail`: the odometry poses it remembers, by their
+    moment, newest last — enough to carry a candidate from its scan to now."""
+
+    poses: dict[float, Pose2D]
+
+    def at(self, t: float) -> Pose2D | None:
+        """The pose at ``t``, or ``None`` when that moment is not remembered."""
+        return self.poses.get(t)
+
+    @property
+    def newest(self) -> Pose2D | None:
+        """The last pose recorded."""
+        return next(reversed(self.poses.values()), None)
+
+    @property
+    def newest_t(self) -> float | None:
+        """When it was recorded."""
+        return next(reversed(self.poses), None)
 
 
 def candidate(
@@ -178,6 +203,40 @@ def test_the_distinct_scans_switch_brings_the_old_behaviour_back() -> None:
     assert gate.observe(candidate(ELSEWHERE, scan=77), HERE, 0.20, MAP).seed is not None
 
 
+def test_the_gate_carries_every_candidate_to_the_tracker_s_own_moment() -> None:
+    """The trail says the cart rolled 0.30 m between the scan the search ran on and now: the
+    seed is that much further along, because the tracked pose it is fused with speaks for NOW.
+    ``carry_candidates`` off is the old reading, the pose of a quarter-second ago installed as
+    the pose now."""
+    trail = Trail({100.0: Pose2D(), 100.25: Pose2D(0.30, 0.0, 0.0)})
+    ahead = apply_motion(ELSEWHERE, Pose2D(0.30, 0.0, 0.0))
+    gate = CandidateGate()
+    for _ in range(3):
+        answer = gate.observe(candidate(ELSEWHERE), HERE, 0.20, MAP, odometry=trail)
+    assert answer.seed is not None and answer.seed.stamp == 100.25
+    assert math.hypot(answer.seed.x - ahead.x, answer.seed.y - ahead.y) < 0.05
+    gate = CandidateGate()
+    gate.switch("carry_candidates", False)
+    for _ in range(3):
+        answer = gate.observe(candidate(ELSEWHERE), HERE, 0.20, MAP, odometry=trail)
+    assert answer.seed is not None
+    assert math.hypot(answer.seed.x - ELSEWHERE.x, answer.seed.y - ELSEWHERE.y) < 0.05
+
+
+def test_a_candidate_that_could_not_be_carried_ends_the_streak() -> None:
+    """The odometry trail no longer reaches the moment of the candidate's scan (the link
+    stalled, the bus dropped out): a gap in the evidence is not agreement, so the run starts
+    again and nothing is seeded on a pose nobody can place in time."""
+    trail = Trail({100.0: Pose2D(), 100.25: Pose2D(0.30, 0.0, 0.0)})
+    gate = CandidateGate()
+    for _ in range(2):
+        gate.observe(candidate(ELSEWHERE), HERE, 0.20, MAP, odometry=trail)
+    gap = gate.observe(candidate(ELSEWHERE, stamp=93.0), HERE, 0.20, MAP, odometry=trail)
+    assert gap.verdict is CandidateVerdict.NOTHING and gap.seed is None
+    assert gate.observe(candidate(ELSEWHERE), HERE, 0.20, MAP, odometry=trail).seed is None
+    assert "stale 1" in gate.report()
+
+
 def test_one_agreement_ends_a_streak() -> None:
     gate = CandidateGate()
     gate.observe(candidate(ELSEWHERE), HERE, 0.20, MAP)
@@ -244,6 +303,26 @@ def test_a_streak_of_unknown_maps_says_the_map_does_not_fit() -> None:
     assert "THE MAP DOES NOT FIT" in gate.report()
     gate.observe(candidate(HERE), HERE, 0.60, MAP)
     assert gate.map_fits, "one candidate that fits gives the map the benefit of the doubt"
+
+
+# ---- the quarter-second between a search and its answer -----------------------------------
+def test_a_candidate_is_read_at_the_moment_it_is_used_not_the_one_it_was_measured_at() -> None:
+    """The laptop's search costs 0.12-0.25 s and the link a hop on top. A cart rolling at
+    0.3 m/s is 7.5 cm further on by the time the answer lands, always backwards along the
+    drive — so the answer is carried over the odometry of those 0.25 s before anyone judges it.
+    The heading it was measured with, known to a degree, is what the carry adds to the
+    position: 1 mm over 7.5 cm, and it shows up as the x-yaw coupling the peak itself had none
+    of."""
+    motion = Pose2D(0.075, 0.0, math.radians(3.0))  # what the wheels did while the answer flew
+    now = carried(candidate(HERE, stamp=100.0), motion, 100.25)
+    ahead = apply_motion(HERE, motion)
+    assert math.hypot(now.x - ahead.x, now.y - ahead.y) < 1e-12
+    assert abs(now.yaw - ahead.theta) < 1e-12
+    assert abs(math.hypot(now.x - HERE.x, now.y - HERE.y) - 0.075) < 1e-12
+    assert now.stamp == 100.25, "the measurement now speaks for the tracker's own moment"
+    assert now.score == 0.65 and now.ambiguity == 0.2 and now.scan_id, "the same answer"
+    assert SURE[0, 2] == 0.0 and now.covariance[0, 2] != 0.0, "the carry couples yaw into x"
+    assert 1.0 < now.covariance[0, 0] / SURE[0, 0] < 1.01, "and widens it by a millimetre"
 
 
 # ---- the wire -----------------------------------------------------------------------------

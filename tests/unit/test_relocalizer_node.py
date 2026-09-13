@@ -38,6 +38,7 @@ from test_localization import PILLAR, furnished_room_map  # noqa: E402
 from test_localizer_sources import drive, error  # noqa: E402
 
 from pepin.odometry import Pose2D  # noqa: E402
+from pepin.scanmatch import apply_motion  # noqa: E402
 from pepin.sources import CONTACT, DEPTH, LIDAR  # noqa: E402
 
 BEAMS = 180
@@ -346,6 +347,65 @@ def test_three_candidates_that_disagree_re_seed_the_tracker(node: Relocalizer) -
     line = node.logger.texts("info")[-1]
     assert "candidates 3 (disagree 3), re-seeds 1" in line
     assert "accept_candidates=on candidate_streak=3" in line
+
+
+def rolled(node: Relocalizer, forward_m: float, at: float = 100.25) -> None:
+    """One more odometry sample: the cart has rolled ``forward_m`` straight ahead by ``at``."""
+    node.clock.seconds = at
+    node.subs["/odometry/filtered"][1](odom_msg(Pose2D(forward_m, 0.0, 0.0), at))
+
+
+def test_a_candidate_is_carried_from_the_moment_of_its_scan_to_now(node: Relocalizer) -> None:
+    """The laptop's search costs 0.12-0.25 s and the link a hop on top; a cart at 0.8 m/s has
+    covered 0.20 m by the time the answer lands. The answer says where the cart WAS, so it is
+    moved over the odometry of those 0.25 s and the tracker is seeded where that place has
+    become — never 20 cm back along the drive, which is where the uncarried pose would put it."""
+    standing(node)
+    on_candidate = node.subs["/localization/candidate"][1]
+    for _ in range(2):
+        on_candidate(candidate_msg(node, CARRIED_TO, stamp=100.0))
+        assert node._pending_seed is None
+    rolled(node, 0.20)
+    on_candidate(candidate_msg(node, CARRIED_TO, stamp=100.0))
+    node._apply_pending_seed()
+    loc = node._localizer
+    assert loc is not None
+    ahead = apply_motion(CARRIED_TO, Pose2D(0.20, 0.0, 0.0))
+    assert math.hypot(loc.pose.x - ahead.x, loc.pose.y - ahead.y) < 0.02
+    assert math.hypot(loc.pose.x - CARRIED_TO.x, loc.pose.y - CARRIED_TO.y) > 0.15
+
+
+def test_the_carry_switch_puts_the_uncarried_pose_back(node: Relocalizer) -> None:
+    """The A/B without a restart: off, the pose measured a quarter-second ago is installed as
+    the pose now, which is what this branch did before the carry."""
+    standing(node)
+    assert node.set_parameters([Parameter("carry_candidates", value=False)])[0].successful
+    on_candidate = node.subs["/localization/candidate"][1]
+    for _ in range(2):
+        on_candidate(candidate_msg(node, CARRIED_TO, stamp=100.0))
+    rolled(node, 0.20)
+    on_candidate(candidate_msg(node, CARRIED_TO, stamp=100.0))
+    node._apply_pending_seed()
+    loc = node._localizer
+    assert loc is not None
+    assert math.hypot(loc.pose.x - CARRIED_TO.x, loc.pose.y - CARRIED_TO.y) < 0.02
+    node._report_tracking()
+    assert "carry_candidates=off" in node.logger.texts("info")[-1]
+
+
+def test_a_candidate_the_odometry_cannot_reach_is_dropped(node: Relocalizer) -> None:
+    """A candidate stamped before the history's horizon (the link stalled, the bus dropped out)
+    cannot be carried to now: it is counted as stale and the streak it was part of ends."""
+    standing(node)
+    on_candidate = node.subs["/localization/candidate"][1]
+    for _ in range(2):
+        on_candidate(candidate_msg(node, CARRIED_TO, stamp=100.0))
+    on_candidate(candidate_msg(node, CARRIED_TO, stamp=93.0))  # older than any odometry held
+    assert node._pending_seed is None
+    node._report_tracking()
+    assert "stale 1" in node.logger.texts("info")[-1]
+    on_candidate(candidate_msg(node, CARRIED_TO, stamp=100.0))
+    assert node._pending_seed is None, "the run starts again after the gap"
 
 
 def test_one_frozen_scan_cannot_re_seed_the_tracker(node: Relocalizer) -> None:

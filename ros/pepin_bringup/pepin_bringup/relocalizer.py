@@ -26,7 +26,10 @@ fan drives the tracker follows it, the watch is off and ``/relocalize`` refuses.
 
 The watchdog: the same whole-map search runs CONTINUOUSLY on the laptop, which does it in a
 tenth of a second instead of seconds (:mod:`pepin_bringup.global_watch`), and its answers arrive
-here on ``/localization/candidate``. :class:`pepin.watchdog.CandidateGate` judges each one
+here on ``/localization/candidate``. Each one is first carried from the moment of its own scan
+to this moment over the odometry between the two (``carry_candidates``) — a search plus a
+wireless hop is a quarter of a second, and on a driving cart that is the difference between
+where the cart was and where it is — and then :class:`pepin.watchdog.CandidateGate` judges it
 against this tracker's own pose and fit; a streak of candidates from different scans that
 disagree with the tracker and agree with each other re-seeds it through the pending seed — the
 very path this node's own search uses, with the ``accept_candidates`` flag as the switch.
@@ -198,6 +201,15 @@ FLAGS = FlagSet(
         range=(1, 10),
         description="how many candidates in a row must disagree with the tracker and agree with"
         " each other before one of them re-seeds it: the price of a teleport, in seconds",
+    ),
+    Flag(
+        "carry_candidates",
+        True,
+        description="a candidate's pose is moved from the moment of its own scan to now over"
+        " the odometry between the two before it is judged and fused (pepin.watchdog.carried),"
+        " and one the odometry history no longer covers is dropped. Off: the pose the laptop"
+        " measured a search and a wireless hop ago is judged and installed as the pose now,"
+        " which on a driving cart is centimetres backwards along the drive every time",
     ),
     Flag(
         "distinct_scans",
@@ -536,8 +548,9 @@ class Relocalizer(Node):
             self._track_pending()
 
     def _on_candidate(self, msg: String) -> None:
-        """The laptop watchdog's whole-map candidate (one JSON message, pepin.watchdog): judged
-        by the gate against this tracker's own pose and fit, on this tracker's own map.
+        """The laptop watchdog's whole-map candidate (one JSON message, pepin.watchdog): carried
+        to this moment, then judged by the gate against this tracker's own pose and fit, on this
+        tracker's own map.
 
         A streak of disagreements about one place becomes a pending seed, which the 0.2 s timer
         applies through :meth:`_seed` — the same door the board's own search uses, so a
@@ -557,6 +570,7 @@ class Relocalizer(Node):
             self.fit,
             map_id=self._map_id,
             allow=not self._navigating,
+            odometry=self._history,  # the trail the candidate is carried to this moment along
         )
         with self._episode:  # the search worker writes _pending_seed from its own thread
             self._pending_seed = answer.pending(self._map_id) or self._pending_seed

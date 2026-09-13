@@ -34,15 +34,16 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
 
 from pepin.fusion import Matrix, PoseMeasurement, from_fit, fuse
 from pepin.odometry import Pose2D, wrap_angle
+from pepin.scanmatch import apply_motion, relative_motion
 from pepin.sources import TRACKER, WATCHDOG
 from pepin.watch import ADMIT_FIT, ADMIT_MARGIN, AGREE_DEG, AGREE_M
 
@@ -51,7 +52,9 @@ __all__ = [
     "CandidateVerdict",
     "GateAnswer",
     "GlobalCandidate",
+    "OdomTrail",
     "ambiguity",
+    "carried",
     "judge",
     "same_place",
 ]
@@ -90,6 +93,23 @@ CANDIDATE_STREAK = 3
 # ...and unknown_map verdicts in a row before the tracker says the map does not fit. The same
 # length for the same reason: one is a blocked lidar, three is a different room.
 UNKNOWN_STREAK = 3
+
+
+class OdomTrail(Protocol):
+    """Where the cart was, in the odom frame, at any moment the tracker still remembers — the
+    little of :class:`pepin.timeline.OdomHistory` a candidate's carry needs, so the gate can be
+    driven by a fake in a test and by any robot's own trail."""
+
+    def at(self, t: float) -> Pose2D | None:
+        """The odometry pose at ``t``, or ``None`` when ``t`` is outside what is remembered."""
+
+    @property
+    def newest(self) -> Pose2D | None:
+        """The newest odometry pose, or ``None`` when nothing has been recorded yet."""
+
+    @property
+    def newest_t(self) -> float | None:
+        """When that newest pose was recorded, or ``None`` when there is none."""
 
 
 class CandidateVerdict(StrEnum):
@@ -222,6 +242,34 @@ class GlobalCandidate:
         )
 
 
+def carried(candidate: GlobalCandidate, motion: Pose2D, stamp: float) -> GlobalCandidate:
+    """The same answer moved from the moment of its own scan to ``stamp``: where the cart is NOW
+    if the search was right about where it was THEN.
+
+    ``motion`` is the odometry's step between the two moments, in the base frame of the
+    candidate's moment (:func:`pepin.scanmatch.relative_motion` over the tracker's odometry
+    history) — the very carry a riding scan gets on its way to the anchor's instant
+    (:meth:`pepin.sources.SourceFeed.gather`). A search costs 0.12-0.25 s and the link another
+    hop, so an uncarried candidate is a pose of a quarter-second ago installed as the pose now:
+    at 0.3 m/s that is 7 cm, and it is a bias, never noise — it always points backwards along
+    the drive.
+
+    The covariance travels through the composition's Jacobian, ``J = [[1, 0, -dy], [0, 1, dx],
+    [0, 0, 1]]`` over the carry's map-frame displacement: a heading the search knew to a degree
+    is 2 mm of position error after 10 cm of carry, and that coupling is the only thing the
+    move adds. The odometry's OWN error over a fraction of a second (millimetres) is not added:
+    it is two orders under the peak's own spread. The score and the ambiguity are the scan's
+    own and do not change — the answer is the same answer, read at a later moment.
+    """
+    pose = apply_motion(candidate.pose, motion)
+    dx, dy = pose.x - candidate.x, pose.y - candidate.y
+    jacobian = np.array([[1.0, 0.0, -dy], [0.0, 1.0, dx], [0.0, 0.0, 1.0]])
+    covariance = jacobian @ np.asarray(candidate.covariance, dtype=float) @ jacobian.T
+    return replace(
+        candidate, x=pose.x, y=pose.y, yaw=pose.theta, covariance=covariance, stamp=stamp
+    )
+
+
 def judge(candidate: GlobalCandidate, current_pose: Pose2D, current_fit: float) -> CandidateVerdict:
     """What ``candidate`` is worth beside the pose the tracker holds and the fit it holds it at.
 
@@ -284,6 +332,7 @@ class CandidateGate:
     accept_candidates: bool = True  # off: candidates are judged and counted, never acted on
     candidate_streak: int = CANDIDATE_STREAK
     distinct_scans: bool = True  # off: a streak may be built out of one scan's answer repeated
+    carry_candidates: bool = True  # off: a candidate's pose is read as the pose now, uncarried
     unknown_streak: int = UNKNOWN_STREAK
     map_fits: bool = True  # False once unknown_streak candidates in a row said it does not
     last: CandidateVerdict | None = None  # the newest verdict, for the status
@@ -298,6 +347,7 @@ class CandidateGate:
         "accept_candidates",
         "candidate_streak",
         "distinct_scans",
+        "carry_candidates",
     )
 
     def switch(self, name: str, value: Any) -> None:
@@ -311,6 +361,27 @@ class CandidateGate:
         self._malformed += 1
         self._reason = reason
 
+    def stale(self) -> None:
+        """A candidate whose moment the odometry trail no longer covers, so it cannot be
+        carried to now: counted, and the streak ends — a gap in the odometry is a gap in the
+        evidence, not agreement."""
+        self._count("stale")
+        self._run = []
+
+    def carry(self, candidate: GlobalCandidate, odometry: OdomTrail) -> GlobalCandidate | None:
+        """``candidate`` moved from the moment of its own scan to the newest odometry sample —
+        the moment a tracked pose read now speaks for — or ``None`` (counted as ``stale``) when
+        ``odometry`` no longer covers the candidate's moment. ``carry_candidates`` off hands
+        the candidate back untouched, which is to read a pose of a quarter-second ago as the
+        pose now."""
+        if not self.carry_candidates:
+            return candidate
+        then, newest, newest_t = odometry.at(candidate.stamp), odometry.newest, odometry.newest_t
+        if then is None or newest is None or newest_t is None:
+            self.stale()
+            return None
+        return carried(candidate, relative_motion(then, newest), newest_t)
+
     def observe(
         self,
         candidate: GlobalCandidate,
@@ -318,9 +389,17 @@ class CandidateGate:
         current_fit: float,
         map_id: str,
         allow: bool = True,
+        odometry: OdomTrail | None = None,
     ) -> GateAnswer:
         """One candidate against the tracker's ``current_pose`` (``None`` before the first fix)
         and ``current_fit``, on the map ``map_id``.
+
+        ``odometry`` is the tracker's own odometry trail: given, the candidate is first carried
+        from the moment of its scan to the moment ``current_pose`` speaks for
+        (:meth:`carry`) — a search plus a wireless hop is a quarter of a second, and the two
+        poses must describe ONE instant or the comparison is between two different nows — and a
+        candidate the trail cannot reach is counted and refused. Omitted, the caller has already
+        put the two in one moment.
 
         A candidate computed on another map is evidence about nothing here and breaks every
         streak (the laptop may be a map behind after a swap). ``allow`` is the node's word on
@@ -341,6 +420,11 @@ class CandidateGate:
         if current_pose is None:
             self._count("no_pose")
             return GateAnswer(CandidateVerdict.NOTHING)
+        if odometry is not None:
+            moved = self.carry(candidate, odometry)
+            if moved is None:
+                return GateAnswer(CandidateVerdict.NOTHING)
+            candidate = moved
         if current_fit != current_fit:  # NaN: the tracker has not matched a scan yet
             current_fit = 0.0
         verdict = judge(candidate, current_pose, current_fit)
