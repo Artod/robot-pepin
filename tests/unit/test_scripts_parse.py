@@ -182,6 +182,7 @@ BOARD="${BOARD:-${PEPIN_HOST:-10.0.0.187}}"
 log() { printf '%s\n' "$*" >> "$FAKE_LOG"; }
 answer() {  # the canned reply of the board or the laptop, by what was asked of it
     case "$1" in
+        *PEPIN_SLAM*) printf '%s\n' "${FAKE_SLAM:-}" ;;
         *PEPIN_SIDE*) printf '%s\n' "${FAKE_SIDE:-}" ;;
         *logs*pepin-ros*) printf '%s\n' "${FAKE_TRACKER_LINE:-}" ;;
         *logs*pepin-vslam*) printf '%s\n' "${FAKE_DEPTH_LINE:-}" "${FAKE_CAMERA_LINE:-}" ;;
@@ -419,6 +420,45 @@ def test_a_node_that_does_not_answer_is_reported_not_guessed(tmp_path) -> None: 
     code, out, sent = _sensor(tmp_path, "camera", "on", FAKE_LAYERS="none")
     assert code == 1 and "did not answer a parameter dump: its layers are unchanged" in out
     assert not [c for c in sent if "param set" in c], sent
+
+
+def test_in_slam_mode_the_costmap_half_switches_and_the_tracker_half_says_it_is_absent(  # type: ignore[no-untyped-def]
+    tmp_path,
+) -> None:
+    """Online SLAM runs no relocalizer at all — RTAB-Map owns the pose — so there is nobody to
+    ask about `sources`. The switch used to fall into the "did not answer" path and exit 1 with
+    the tracker half unexplained; now the costmap half applies, the tracker half is named as
+    absent, and the status is 0: the mode is not a failure."""
+    code, out, sent = _sensor(
+        tmp_path,
+        "camera",
+        "off",
+        FAKE_SLAM="true",
+        FAKE_SOURCES="none",  # the fake flags.sh refuses: nothing may ask it in this mode
+        FAKE_LAYERS="true",
+    )
+    assert code == 0, out
+    assert "tracker: none in slam mode" in out
+    assert "did not answer about its sources" not in out
+    assert not [c for c in sent if c.startswith("flags ")], "no tracker is asked anything"
+    for layer in ("camera_layer", "contact_layer"):
+        assert f"{BOARD} ros2 param set {LOCAL} {layer}.enabled false" in sent
+
+    code, out, sent = _sensor(tmp_path, "status", FAKE_SLAM="true", FAKE_LAYERS="true")
+    assert code == 0, out
+    assert "tracker: none in slam mode" in out
+    assert f"costmap {LOCAL}:  lidar_layer=on  camera_layer=on  contact_layer=on" in out
+
+
+def test_switching_the_camera_on_says_what_it_did_to_the_last_two_drives(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The one command that stalled two drives on 2026-09-13 (near-hull marks, 2 cm of
+    clearance) says so as it is run, not only in the README."""
+    _, out, _ = _sensor(tmp_path, "camera", "on", FAKE_SOURCES="lidar", FAKE_LAYERS="false")
+    assert "stalled two drives on 2026-09-13" in out
+    _, off, _ = _sensor(
+        tmp_path, "camera", "off", FAKE_SOURCES="lidar,depth,contact", FAKE_LAYERS="true"
+    )
+    assert "stalled two drives" not in off, "an off is the safe direction: no sermon"
 
 
 def test_a_source_this_script_has_not_heard_of_survives_the_other_sensor_s_switch(  # type: ignore[no-untyped-def]

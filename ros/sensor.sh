@@ -4,7 +4,9 @@
 # against (the relocalizer's `sources` flag) and what writes into the costmaps (the per-sensor
 # layers of ros/params/nav2_params.yaml, on the local and the global costmap alike). The tracker
 # half needs that flag to exist: it arrives with the fusion wiring, and against a relocalizer
-# that has none this script applies the costmap half, says so, and exits 1.
+# that has none this script applies the costmap half, says so, and exits 1. In online SLAM
+# (ros/thin.sh slam) there is no relocalizer at all — RTAB-Map owns the pose — so the tracker
+# half is skipped with "tracker: none in slam mode" and the costmap half is the whole switch.
 #   ros/sensor.sh status            what the tracker matches on, which layers are on, what is fresh
 #   ros/sensor.sh lidar on|off      the lidar as a tracker source and as lidar_layer
 #   ros/sensor.sh lidar off --hard  ... and the driver deactivated: /scan stops, a real absence
@@ -66,6 +68,13 @@ flags() { "$HERE/flags.sh" "$@"; }  # the one place a feature flag is read or wr
 
 board_side() {  # the board's PEPIN_SIDE ("board" when the stack is split, empty when it is whole)
     ssh "root@$BOARD" "grep -oE '^PEPIN_SIDE=[a-z]*' /etc/default/pepin-ros 2>/dev/null | cut -d= -f2" \
+        2>/dev/null || true
+}
+
+board_slam() {  # the board's PEPIN_SLAM ("true" after ros/thin.sh slam): online SLAM, and then
+    # no relocalizer runs at all — RTAB-Map owns the pose and there is no sources flag anywhere.
+    # Read from the same file as the side, so one ssh answers each and neither guesses.
+    ssh "root@$BOARD" "grep -oE '^PEPIN_SLAM=[a-z]*' /etc/default/pepin-ros 2>/dev/null | cut -d= -f2" \
         2>/dev/null || true
 }
 
@@ -208,6 +217,13 @@ refuse_if_navigating() {  # the lifecycle half never runs under a goal, nor unde
 
 apply_sources() {  # SENSOR on|off: the tracker's sources flag; prints what changed
     local sensor="$1" state="$2" have want
+    if [ "${SLAM:-}" = true ]; then
+        # Online SLAM has no tracker half to switch: the relocalizer does not run, so there is
+        # no sources flag and asking for one is not a failure — it is the mode. The costmap half
+        # below is the whole switch here, and that is what the demo shows in this mode.
+        echo "  tracker: none in slam mode (RTAB-Map owns the pose; no sources flag to switch)"
+        return 0
+    fi
     have="$(tracker_sources)" || {
         # Two ways to get here and the operator must not have to guess which: the node is down,
         # or this build's tracker has no sources flag at all (it arrives with the fusion wiring)
@@ -295,6 +311,7 @@ switch() {  # SENSOR on|off [--hard]: the flag, the layers and, for the lidar, t
     esac
     echo "$sensor $state${hard:+ (hard)}:"
     SIDE="$(board_side)"
+    SLAM="$(board_slam)"
     want="$(driver_wanted "$sensor" "$state" "$hard")"
     was=""
     if [ -n "$want" ]; then
@@ -317,15 +334,27 @@ switch() {  # SENSOR on|off [--hard]: the flag, the layers and, for the lidar, t
     apply_sources "$sensor" "$state"
     apply_layers "$sensor" "$([ "$state" = on ] && echo true || echo false)"
     [ -z "$want" ] || apply_driver "$want" "$was"
+    if [ "$sensor" = camera ] && [ "$state" = on ]; then
+        # 2026-09-13: with these two layers on, the near-field marks (the contact ring at
+        # 1.2-1.5 m, the depth band beside the hull) left 2 cm of clearance ahead and stalled
+        # two drives in a row. Switching them on is a demo of the costmaps, not a drive-safe
+        # state — said here, where the operator is, and not only in the README.
+        echo "  note: the camera's costmap layers stalled two drives on 2026-09-13 (2 cm"
+        echo "  clearance from near-hull marks); switch them off before driving to a goal"
+    fi
     [ "$CHANGED" -gt 0 ] || echo "  already so"
 }
 
 status() {  # what the tracker matches on, what the costmaps take, and what each node last said
     local costmap dump layer line value tracker vslam depth contact sensor
     SIDE="$(board_side)"
+    SLAM="$(board_slam)"
     tracker="$(board_report "$TRACKER\\]: tracker:")"
     value="$(printf '%s' "$tracker" | sed -n 's/.*[ ,]sources=\([a-z,]*\).*/\1/p')"
-    if [ -z "$tracker" ]; then
+    if [ "$SLAM" = true ]; then
+        echo "tracker: none in slam mode (RTAB-Map owns the pose; the costmap layers are the"
+        echo "  whole switch here)"
+    elif [ -z "$tracker" ]; then
         echo "tracker sources: ? ($TRACKER printed no report in ${REPORT_WINDOW_S} s; ros/watch.sh)"
     elif [ -z "$value" ]; then
         echo "tracker sources: ? (its report line carries no sources= flag; ros/flags.sh list $TRACKER)"
