@@ -18,23 +18,29 @@ fused frame — the board's clock) is the zero-crossing of the field, published 
 cloud.
 
 THE WORLD MAP. The same volume is also the map itself (:mod:`pepin.worldmap`): ``/scan`` is
-integrated into it at the lidar's own plane — rays carving free space, a surface at each return,
-on the lidar's own weight channel, which the camera's scale-uncertain depth may not repaint —
-and the layer at that plane reads out as an occupancy grid. With ``map_source=volume`` that grid
-goes out as ``/map`` at ``map_hz`` (transient local), so the tracker and Nav2 localise and plan
-on the volume instead of on a frozen file, and a "known room" is just a volume that was seeded
-(``seed_map``) or resumed from a snapshot (``resume_volume``) instead of an empty one. Exactly
-one publisher of /map, and both halves of that are launch decisions this node is told: the
-bridge mode says which side owns the topic (:func:`pepin.deployment.map_owner`) and the
-``world_map`` parameter says whether the launch kept RTAB-Map's grid off it. Without both, the
-volume is refused on /map however ``map_source`` is set afterwards. The volume is snapshotted to
-``world_path`` every ``snapshot_s`` and at shutdown.
+integrated into it along the beams' own rays — carving free space, a surface at each return, on
+the lidar's own weight channel, which the camera's scale-uncertain depth may not repaint — and
+the layer at the lidar's plane reads out as an occupancy grid. The rays follow the body: with
+``imu_lean`` on the scan is placed by the leaning pose, so a beam that climbs 44 cm over 5 m
+while the cart tips writes a tabletop where it hit one instead of a wall at the plane, and a
+revolution taken past ``lean_gate_deg`` is dropped rather than believed.
+
+With ``map_source=volume`` that grid goes out as ``/map`` at ``map_hz`` (transient local), so
+the tracker and Nav2 localise and plan on the volume instead of on a frozen file, and a "known
+room" is just a volume that was seeded (``seed_map``) or resumed from a snapshot
+(``resume_volume``) instead of an empty one. Exactly one publisher of /map, and both halves of
+that are launch decisions this node is told: the bridge mode says which side owns the topic
+(:func:`pepin.deployment.map_owner`) and the ``world_map`` parameter says whether the launch
+kept RTAB-Map's grid off it. Without both, the volume is refused on /map however ``map_source``
+is set afterwards. The volume is snapshotted to ``world_path`` every ``snapshot_s`` and at
+shutdown.
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
-``fit_gate``, ``self_heal``, ``align``, ``min_weight``, ``map_min_weight``, ``surface_hz``,
-``band_half_z``, ``lidar_layer``, ``no_return_free``, ``map_source``, ``map_hz``,
-``snapshot_s``, ``resume_volume``; their state is printed in every report line, beside the band
-itself and the source of the plane it is centred on. ``/fusion/reset``
+``fit_gate``, ``imu_lean``, ``lean_gate_deg``, ``self_heal``, ``align``, ``min_weight``,
+``map_min_weight``, ``surface_hz``, ``band_half_z``, ``lidar_layer``, ``no_return_free``,
+``map_source``, ``map_hz``, ``snapshot_s``, ``resume_volume``; their state is printed in every
+report line, beside the band itself and the source of the plane it is centred on.
+``/fusion/reset``
 (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
 """
 
@@ -59,6 +65,7 @@ from pepin.deployment import map_owner
 from pepin.depth import Intrinsics
 from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import BASE_FRAME, FramePoser
+from pepin.lean import SCAN_LEAN_GATE_DEG, LeanGate
 from pepin.mounts import LASER_FRAME, load_lidar_mount
 from pepin.tsdf import (
     YAW_SEARCH,
@@ -126,8 +133,19 @@ FLAGS = FlagSet(
         False,
         description="the cart's lean (pepin.lean, from /imu/data_raw) is followed with the gyro"
         " as well as the accelerometer, and a frame is placed with the lean at its stamp composed"
-        " on base_link before the planar odometry instead of as if the cart stood level; off, the"
-        " accelerometer alone, estimated and reported but not applied",
+        " on base_link before the planar odometry instead of as if the cart stood level; the"
+        " lidar's scan follows the same switch — its beams are walked as the 3D rays the leaning"
+        " body sends them along, and lean_gate_deg drops the scans taken too far from level;"
+        " off, the accelerometer alone, estimated and reported but not applied",
+    ),
+    Flag(
+        "lean_gate_deg",
+        SCAN_LEAN_GATE_DEG,
+        range=(0.0, 90.0),
+        description="a scan taken while the cart leans more than this many degrees is not"
+        " integrated into the map: at 5 degrees a beam is 44 cm off the sensor's plane at 5 m,"
+        " so it is looking at another slice of the room. Only with imu_lean on, which is where"
+        " the lean is known at all",
     ),
     Flag(
         "self_heal",
@@ -288,6 +306,9 @@ class DepthFusion(Node):
             apply_lean=self._switches.on("imu_lean"),
         )
         self._read_plane(BAND_TF_WAIT_S)
+        # The scan's own answer to the lean: a frame can be placed leaning, a revolution taken
+        # too far from level can only be dropped (pepin.lean.LeanGate).
+        self._gate = LeanGate(float(self._switches["lean_gate_deg"]))
         self._intr: Intrinsics | None = None
         self._fit = 0.0  # no report yet reads as lost: every gate here compares with <
         self._lock = threading.Lock()  # the model and its last stamp, worker vs publisher
@@ -420,8 +441,9 @@ class DepthFusion(Node):
     # ---- switches ------------------------------------------------------------------------
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
         """A flag changed: ``imu_lean`` is the estimator's switch and the poser's — one name,
-        one meaning, in every node that has it — ``band_half_z`` rebuilds the height band, the
-        two rates retime their timer, ``snapshot_s`` its clock, and the rest are only read
+        one meaning, in every node that has it — ``lean_gate_deg`` the scan gate's,
+        ``band_half_z`` rebuilds the height band, the two rates retime their timer,
+        ``snapshot_s`` its clock, and the rest are only read
         where they are used."""
         if name == "imu_lean":
             self._poser.apply_lean = bool(new)
@@ -429,6 +451,9 @@ class DepthFusion(Node):
             return
         if name == "band_half_z":
             self._set_band()
+            return
+        if name == "lean_gate_deg":
+            self._gate.gate_deg = float(new)
             return
         if name == "snapshot_s":
             self._clock = SnapshotClock(float(new), self._clock.last_s)
@@ -497,7 +522,13 @@ class DepthFusion(Node):
 
     def _on_scan_work(self, msg: LaserScan) -> None:
         """One revolution into the volume at the pose TF gives for its stamp: rays carve free
-        space, returns mark a surface, all of it at the lidar's plane (pepin.worldmap)."""
+        space and returns mark a surface, along the rays the body really sent them
+        (pepin.worldmap).
+
+        The pose is the poser's, so with ``imu_lean`` on it carries the lean of that moment and
+        the beams climb with the body; with it off the pose is the planar one and the beams
+        sweep the plane, as they always did. Past ``lean_gate_deg`` there is nothing worth
+        writing — the beams are in another slice of the room — and the scan is dropped."""
         if not self._switches.on("lidar_layer"):
             return
         if self._laser is None and not self._lookup_laser(msg.header.frame_id):
@@ -508,6 +539,9 @@ class DepthFusion(Node):
         base = self._poser.base_in_map(at)
         if base is None:
             return  # counted by the TF failure handler
+        if not self._gate.admits(self._poser.lean_at(at)):
+            self._tally.count("leaned_out")
+            return
         angles, ranges = scan_arrays(msg)
         with self._tally.measure("scan"), self._lock:
             self._world.law = self._law()
@@ -707,6 +741,7 @@ class DepthFusion(Node):
         skipped = (
             f"low fit {c['low_fit']}, at bound {c['refused_at_bound']},"
             f" self-heals {c['self_heals']}, unleaned {c['unleaned']},"
+            f" leaned out {c['leaned_out']},"
             f" no tf {c['no_tf']}, bad frame {c['bad_frame']}, no intrinsics {c['no_intrinsics']}"
         )
         tf_text = "; ".join(f"{k} {c['tf_' + k]}: {v}" for k, v in w.notes.items())

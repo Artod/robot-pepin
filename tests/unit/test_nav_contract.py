@@ -1225,6 +1225,14 @@ def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
     # the tape carries what an offline replay needs to run that same estimator
     recorder = sf.tree(f"{NODES}/run_recorder.py")
     assert "imu_record" in sf.imported(recorder) and "imu_record" in sf.calls(recorder)
+    # the lidar's path follows the same switch: its scan is placed by the poser's pose (leaning
+    # when imu_lean says so), and a revolution taken too far from level is dropped and counted
+    fusion = sf.tree(f"{NODES}/depth_fusion.py")
+    assert "LeanGate" in sf.imported(fusion) and "self._gate.admits" in sf.calls(fusion)
+    assert "self._poser.base_in_map" in sf.calls(fusion), "the scan's pose is the poser's"
+    gate = load_table(REPO / NODES / "depth_fusion.py").flag("lean_gate_deg")
+    assert gate.live and gate.default == 3.0 and gate.range == (0.0, 90.0)
+    assert "leaned_out" in sf.strings(fusion), "the report line counts what the gate dropped"
 
 
 def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_prints() -> None:
