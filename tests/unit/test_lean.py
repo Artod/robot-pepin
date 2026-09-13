@@ -2,6 +2,8 @@
 samples, and the poser that puts the lean under a planar odometry."""
 
 import math
+import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -211,6 +213,48 @@ def test_the_history_interpolates_between_two_samples_and_refuses_what_it_never_
     assert history.at(9.99) is None
     history.add(Lean(0.0, 0.0, 11.5, 1.0))  # past the horizon: the old samples are dropped
     assert len(history) == 1 and history.at(10.01) is None
+
+
+def test_the_history_answers_a_worker_thread_while_the_imu_callback_trims_it() -> None:
+    """The two threads a node really has: the IMU callback fills the history on the executor
+    while the fusion worker asks for the lean at its frame's stamp, just behind the newest
+    sample. Unlocked, a trim landing inside ``at`` raises IndexError out of the worker (the
+    frame is logged and dropped) or pairs a stamp with another sample's lean; here every answer
+    must come back, and its pitch — a straight line in the stamp, so interpolation keeps it —
+    must belong to its own stamp."""
+    history = LeanHistory()  # the one the nodes ship: 5 s, 50 Hz
+    stop = threading.Event()
+    trouble: list[str] = []
+    reads = 20_000
+
+    def writer() -> None:
+        stamp = 1000.0
+        while not stop.is_set():
+            history.add(Lean(0.0, stamp * 1e-3, stamp))
+            stamp += 0.02
+
+    def read_one() -> None:
+        newest = history.newest
+        if newest is None:
+            return
+        answer = history.at(newest.stamp - 0.005)
+        if answer is None:
+            return
+        if abs(answer.pitch - answer.stamp * 1e-3) > 1e-9:
+            trouble.append(f"{answer.stamp} paired with pitch {answer.pitch}")
+
+    switch = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # make the interpreter change threads as often as it can
+    thread = threading.Thread(target=writer)
+    thread.start()
+    try:
+        for _ in range(reads):
+            read_one()
+    finally:
+        stop.set()
+        thread.join()
+        sys.setswitchinterval(switch)
+    assert trouble == []
 
 
 def test_the_history_is_bounded_by_its_length_as_well_as_by_its_horizon() -> None:

@@ -27,6 +27,7 @@ convention, the same signs ``pepin.mounts.rotation_from_rpy`` composes.
 from __future__ import annotations
 
 import math
+import threading
 from bisect import bisect_left
 from collections import deque
 from dataclasses import dataclass
@@ -120,6 +121,12 @@ class LeanHistory:
     reads as ``None``. Forwards the newest lean is held for ``slack_s`` — a camera frame is
     stamped a few tens of milliseconds ahead of the last IMU sample that reached the node, and
     refusing those would leave every frame unleaned.
+
+    Every method is under one lock: the IMU callback fills the history on the node's executor
+    thread while a worker thread asks it for the lean at its frame's stamp, and the two racing
+    cost frames — a trim landing between the bisect and the index it found raises ``IndexError``
+    out of the worker (the node logs a failed frame and drops it), and one landing between the
+    two ``popleft`` calls pairs a stamp with another sample's lean, silently.
     """
 
     def __init__(
@@ -131,41 +138,46 @@ class LeanHistory:
         self._horizon_s = horizon_s
         self._slack_s = slack_s
         self._max_len = max_len
+        self._lock = threading.Lock()
         self._t: deque[float] = deque()
         self._leans: deque[Lean] = deque()
 
     def add(self, lean: Lean) -> None:
         """Append one lean; one older than the newest is ignored (a late message, a clock step)."""
-        if self._t and lean.stamp <= self._t[-1]:
-            return
-        self._t.append(lean.stamp)
-        self._leans.append(lean)
-        horizon = lean.stamp - self._horizon_s
-        while self._t and (self._t[0] < horizon or len(self._t) > self._max_len):
-            self._t.popleft()
-            self._leans.popleft()
+        with self._lock:
+            if self._t and lean.stamp <= self._t[-1]:
+                return
+            self._t.append(lean.stamp)
+            self._leans.append(lean)
+            horizon = lean.stamp - self._horizon_s
+            while self._t and (self._t[0] < horizon or len(self._t) > self._max_len):
+                self._t.popleft()
+                self._leans.popleft()
 
     def __len__(self) -> int:
-        return len(self._t)
+        with self._lock:
+            return len(self._t)
 
     @property
     def newest(self) -> Lean | None:
         """The last lean taken in, or ``None`` when empty."""
-        return self._leans[-1] if self._leans else None
+        with self._lock:
+            return self._leans[-1] if self._leans else None
 
     def at(self, stamp: float) -> Lean | None:
         """The lean at ``stamp`` (seconds), interpolated between the two samples around it;
         the newest lean within ``slack_s`` past the end, ``None`` before the start or beyond."""
-        if not self._t:
-            return None
-        if stamp >= self._t[-1]:
-            return self._leans[-1] if stamp - self._t[-1] <= self._slack_s else None
-        if stamp < self._t[0]:
-            return None
-        i = bisect_left(self._t, stamp)
-        if self._t[i] == stamp:
-            return self._leans[i]
-        before, after = self._leans[i - 1], self._leans[i]
+        with self._lock:
+            if not self._t:
+                return None
+            if stamp >= self._t[-1]:
+                return self._leans[-1] if stamp - self._t[-1] <= self._slack_s else None
+            if stamp < self._t[0]:
+                return None
+            i = bisect_left(self._t, stamp)
+            if self._t[i] == stamp:
+                return self._leans[i]
+            before, after = self._leans[i - 1], self._leans[i]
         span = after.stamp - before.stamp
         k = 0.0 if span <= 0.0 else (stamp - before.stamp) / span
         return Lean(
