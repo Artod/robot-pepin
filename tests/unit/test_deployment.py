@@ -398,3 +398,115 @@ def test_the_board_serves_no_map_and_tracks_nothing_while_the_laptop_maps() -> N
     # Everything else is untouched by the mode: the reflexes and the recorder stay put.
     for node in ("controller_server", "bt_navigator", "run_recorder", "goal_server"):
         assert runs_here("board", node, slam=True) == runs_here("board", node), node
+
+
+# ---- the bridge's routes, and whether they carry anything --------------------------------------
+
+# Two routes as the REST admin really prints them (scratch/bridge_state_182039_laptop_routes.json,
+# 2026-09-13): the board's zid publishing /imu/data_raw out of its DDS, the laptop's bringing it
+# in for three nodes. One admin answers for both bridges — the zenoh admin space is network-wide,
+# which is the whole reason a "sub" route shows up on a side whose allow-list is pub-only.
+BOARD_ZID = "abee59d7f052e5eeffe2098f0b8ef347"
+LAPTOP_ZID = "ed8b4614af3e4d0f8250fb60d94969c5"
+ADMIN_ROUTES = (
+    '[{"key":"@/' + BOARD_ZID + '/ros2/route/topic/pub/imu/data_raw","value":'
+    '{"dds_reader":"01109a4181cdf60267ddde3100000e04","local_nodes":["/base_bridge"],'
+    '"ros2_name":"/imu/data_raw","ros2_type":"sensor_msgs/msg/Imu","remote_routes":["x:imu"]}},'
+    '{"key":"@/' + LAPTOP_ZID + '/ros2/route/topic/sub/imu/data_raw","value":'
+    '{"dds_writer":"01100073db4cacbc065f74cb00002803","is_active":true,'
+    '"local_nodes":["/contact_scan","/depth_fusion","/bridge_watch"],'
+    '"ros2_name":"/imu/data_raw","ros2_type":"sensor_msgs/msg/Imu"}},'
+    '{"key":"@/' + BOARD_ZID + '/ros2/route/topic/pub/neck/state","value":'
+    '{"dds_reader":"","local_nodes":["/neck_state"],"ros2_name":"/neck/state",'
+    '"ros2_type":"sensor_msgs/msg/JointState","remote_routes":[]}},'
+    '{"key":"@/' + LAPTOP_ZID + '/ros2/route/topic/sub/neck/state","value":'
+    '{"dds_writer":"","is_active":false,"local_nodes":[],"ros2_name":"/neck/state",'
+    '"ros2_type":"sensor_msgs/msg/JointState"}},'
+    '{"key":"@/' + LAPTOP_ZID + '/ros2/route/service/srv/relocalize","value":{}}]'
+)
+
+
+def test_an_allow_list_regex_reads_back_as_the_names_it_was_written_from() -> None:
+    """The watch asks the running bridge for its own allow-list instead of guessing the mode,
+    so the regex the bridge echoes (doubled anchors and all) must parse back to the names."""
+    from pepin.deployment import _names_regex, allowed_names, bridge_allow, incoming_topics
+
+    assert allowed_names(_names_regex(("tf", "imu/data_raw"))) == ("/imu/data_raw", "/tf")
+    assert allowed_names("^^/(scan|tf)$$") == ("/scan", "/tf"), "as the bridge's admin prints it"
+    assert allowed_names("^$") == () and allowed_names("") == () and allowed_names(".*") == ()
+    for mode in ("split", "vision", "slam"):
+        for side in ("board", "laptop"):
+            arriving = allowed_names(bridge_allow(side, mode)["subscribers"][0])
+            assert arriving == incoming_topics(side, mode), (side, mode)
+    assert "/imu/data_raw" in incoming_topics("laptop") and "/scan" in incoming_topics("laptop")
+    assert "/depth_scan" in incoming_topics("board") and "/imu/data_raw" not in incoming_topics(
+        "board"
+    )
+
+
+def test_both_bridges_are_read_from_one_admin_and_told_apart_by_their_zid() -> None:
+    from pepin.deployment import bridge_routes
+
+    routes = bridge_routes(ADMIN_ROUTES)
+    assert len(routes) == 4, "topic routes only; the service route is not one"
+    imu_out = next(r for r in routes if r.topic == "/imu/data_raw" and r.direction == "pub")
+    assert imu_out.zid == BOARD_ZID and imu_out.local_nodes == ("/base_bridge",)
+    assert imu_out.type_name == "sensor_msgs/msg/Imu" and imu_out.active, "a reader = a live route"
+    neck = next(r for r in routes if r.topic == "/neck/state" and r.direction == "pub")
+    assert not neck.active, "no remote wants it, so the bridge built no DDS reader for it"
+    assert bridge_routes("") == () and bridge_routes("{}") == ()
+
+
+def test_a_topic_flows_only_when_one_side_publishes_it_and_the_other_waits_for_it() -> None:
+    """The watch's own subscription never counts as a local subscriber: it must not be the
+    reason a topic looks wanted, or it would keep a route alive for nobody."""
+    from pepin.deployment import bridge_routes, topic_flows
+
+    routes = bridge_routes(ADMIN_ROUTES)
+    allowed = ("/imu/data_raw", "/neck/state", "/tf")
+    flows = {f.topic: f for f in topic_flows(routes, LAPTOP_ZID, allowed, watcher="bridge_watch")}
+    assert set(flows) == {"/imu/data_raw", "/neck/state"}, "/tf has no route at all"
+    imu = flows["/imu/data_raw"]
+    assert imu.should_flow and imu.type_name == "sensor_msgs/msg/Imu"
+    assert imu.subscribers_here == ("/contact_scan", "/depth_fusion"), "the watch is not one"
+    assert flows["/neck/state"].published_there and not flows["/neck/state"].should_flow
+    # Read from the board's side the same routes mean the opposite: it publishes, it waits for
+    # nothing, so nothing is due to arrive there.
+    assert not any(f.should_flow for f in topic_flows(routes, BOARD_ZID, allowed))
+
+
+def test_a_route_that_carries_nothing_is_starved_and_a_quiet_topic_is_not() -> None:
+    """The failure the route count cannot see: the route is there, the far side publishes, and
+    the counter does not move. A topic nobody publishes or nobody here reads never is."""
+    from pepin.deployment import FlowWatch
+
+    watch = FlowWatch(silence_s=20.0, cooldown_s=90.0)
+    for tick in range(4):  # /scan flowing, /imu dead, /neck wanted by no one
+        now = float(tick * 5)
+        watch.observe("/scan", delivered=10 * tick, expected=True, now=now)
+        watch.observe("/imu/data_raw", delivered=0, expected=True, now=now)
+        watch.observe("/neck/state", delivered=0, expected=False, now=now)
+        assert watch.starved(now) == (), f"not yet at {now} s"
+    watch.observe("/scan", delivered=50, expected=True, now=20.0)
+    watch.observe("/imu/data_raw", delivered=0, expected=True, now=20.0)
+    watch.observe("/neck/state", delivered=0, expected=False, now=20.0)
+    assert watch.starved(20.0) == ("/imu/data_raw",)
+    watch.repaired(20.0)
+    assert watch.starved(60.0) == (), "the cooldown: fresh routes need seconds to carry anything"
+    assert not watch.settled(60.0) and watch.settled(210.0)
+    watch.observe("/scan", delivered=99, expected=True, now=115.0)
+    watch.observe("/imu/data_raw", delivered=0, expected=True, now=115.0)
+    assert watch.starved(115.0) == ("/imu/data_raw",), "still dead after the cooldown"
+    assert watch.starved(150.0) == (), "a round that reached no admin observes, and accuses, nobody"
+
+
+def test_a_bridged_topic_carries_one_qos_on_both_sides() -> None:
+    """The route's DDS QoS is whichever declaration created it and is never revised, so the two
+    sides must not disagree: /imu/data_raw is written RELIABLE ten deep by the board."""
+    from pepin.deployment import BRIDGED_QOS, bridged_qos, incoming_topics
+
+    assert bridged_qos("/imu/data_raw") == ("reliable", 10) == bridged_qos("imu/data_raw")
+    assert bridged_qos("/scan") is None
+    for topic in BRIDGED_QOS:
+        assert topic in incoming_topics("laptop") or topic in incoming_topics("board"), topic
+        assert BRIDGED_QOS[topic][0] in ("reliable", "best_effort"), topic

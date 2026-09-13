@@ -9,6 +9,7 @@ recorder. The split is data, so a test can hold it and the launch file merely re
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -408,6 +409,211 @@ def routes_settled(count: int, expected: int | None, stable_s: float, settle_s: 
     routes fewer topics, wait out the whole patience). Unknown ``expected``: any route at all."""
     floor = 1 if expected is None else max(1, expected // 2)
     return stable_s >= settle_s and count >= floor
+
+
+# ---- what crosses, and whether it really does --------------------------------------------------
+
+# The QoS every endpoint of a bridged topic must use, on BOTH sides. Not a style rule: the bridge
+# fixes a route's DDS QoS at the moment the route is created and never revises it. A route is
+# created by whichever declaration arrives first — the local ROS endpoint, or the remote bridge's
+# announcement of its own — and the two carry different QoS ("those are either the QoS announced
+# by a remote bridge on a Reader discovery, either the QoS adapted from a local discovered
+# Writer", zenoh-plugin-ros2dds 1.7.0 route_publisher.rs), while the route itself is keyed by
+# topic name alone, so the loser's QoS is simply never used. Measured on 2026-09-13
+# (scratch/bridge_state_182255_*): /imu/data_raw is written RELIABLE, KEEP_LAST 10 by the board's
+# C++ bridge and read BEST_EFFORT, KEEP_LAST 5 by all three laptop nodes (node_kit.LeanFeed used
+# qos_profile_sensor_data). Whenever the laptop's announcement won the race, the board's side of
+# the route became a BEST_EFFORT reader five deep on a loaded Orange Pi and dropped four samples
+# in five: 48 Hz on the board, 10-11 Hz on the laptop, a burst of 58 when it flushed. With both
+# sides equal there is no race left to lose. The DDS legs are inside one host — the wireless hop
+# is zenoh's, not DDS's — so RELIABLE there costs a memcpy, not a retransmission.
+BRIDGED_QOS: dict[str, tuple[str, int]] = {
+    "/imu/data_raw": ("reliable", 10),  # base_bridge.cpp publishes RELIABLE, KEEP_LAST 10
+}
+
+
+def bridged_qos(topic: str) -> tuple[str, int] | None:
+    """The reliability ("reliable" or "best_effort") and history depth every endpoint of
+    ``topic`` must use, on both sides of the bridge, or ``None`` for a topic with no rule."""
+    return BRIDGED_QOS.get(topic if topic.startswith("/") else f"/{topic}")
+
+
+def incoming_topics(side: str, mode: str = "split") -> tuple[str, ...]:
+    """The topics that ARRIVE on ``side`` in ``mode`` (the other side's publishers), each with
+    its leading slash: what a watch there must see messages on for the link to be working."""
+    other = "laptop" if side == "board" else "board"
+    return tuple(sorted(allowed_names(bridge_allow(other, mode)["publishers"][0])))
+
+
+def allowed_names(regex: str) -> tuple[str, ...]:
+    """The ROS names an allow-list regex admits, in the shape :func:`_names_regex` writes them
+    (``^/(a|b)$``, and ``^^/(a|b)$$`` as the bridge echoes it back through its admin). A regex
+    of any other shape, or the empty ``^$``, is no names at all."""
+    body = regex.strip()
+    while body.startswith("^"):
+        body = body[1:]
+    while body.endswith("$"):
+        body = body[:-1]
+    if not body.startswith("/(") or not body.endswith(")"):
+        return ()
+    return tuple(sorted(f"/{name}" for name in body[2:-1].split("|") if name))
+
+
+@dataclass(frozen=True)
+class BridgeRoute:
+    """One route as the bridge's REST admin describes it: which bridge owns it (``zid``), which
+    way it carries (``direction`` "pub" — local publications out to zenoh — or "sub" — zenoh
+    traffic into the local DDS), the ROS topic and type, the local ROS nodes it serves, whether
+    the bridge has an endpoint for it at all (``active``; a pub route builds its DDS reader only
+    once some remote subscriber wants the topic) and that endpoint's GUID."""
+
+    zid: str
+    direction: str
+    topic: str
+    type_name: str
+    local_nodes: tuple[str, ...]
+    active: bool
+    endpoint: str
+
+
+def bridge_routes(admin_json: str) -> tuple[BridgeRoute, ...]:
+    """Every topic route in a REST admin reply for ``@/*/ros2/route/**``.
+
+    The admin space is network-wide once two bridges are linked: BOTH bridges answer this query
+    with the same set, their own routes and the other's, told apart by the zid in the key. That
+    is why the laptop's admin lists ``topic/sub/depth_scan`` although the laptop's allow-list has
+    depth_scan as a publisher only — the sub route is the board's, read through the laptop's
+    admin (2026-09-13: the two answers were byte-for-byte the same length).
+    """
+    import json
+
+    try:
+        rows = json.loads(admin_json)
+    except ValueError:
+        return ()
+    routes: list[BridgeRoute] = []
+    for row in rows if isinstance(rows, list) else []:
+        parts = str(row.get("key", "")).split("/")  # @ zid ros2 route topic pub|sub name...
+        if len(parts) < 7 or parts[3] != "route" or parts[4] != "topic":
+            continue
+        value = row.get("value")
+        if not isinstance(value, dict):
+            continue
+        endpoint = str(value.get("dds_reader") or value.get("dds_writer") or "")
+        routes.append(
+            BridgeRoute(
+                zid=parts[1],
+                direction=parts[5],
+                topic=str(value.get("ros2_name") or "/" + "/".join(parts[6:])),
+                type_name=str(value.get("ros2_type") or ""),
+                local_nodes=tuple(str(n) for n in value.get("local_nodes") or ()),
+                active=bool(value.get("is_active", bool(endpoint))),
+                endpoint=endpoint,
+            )
+        )
+    return tuple(routes)
+
+
+@dataclass(frozen=True)
+class TopicFlow:
+    """What both bridges say about one topic: the ROS type to subscribe with, whether some node
+    on the other side really publishes it, and which local nodes are waiting for it here."""
+
+    topic: str
+    type_name: str
+    published_there: bool
+    subscribers_here: tuple[str, ...]
+
+    @property
+    def should_flow(self) -> bool:
+        """Whether messages must be arriving: somebody publishes it there, somebody wants it
+        here. Neither half alone is a fault — an unwanted topic is never routed at all."""
+        return self.published_there and bool(self.subscribers_here)
+
+
+def topic_flows(
+    routes: Sequence[BridgeRoute], local_zid: str, allowed: Sequence[str], watcher: str = ""
+) -> tuple[TopicFlow, ...]:
+    """The two bridges' word on every topic of ``allowed`` that should arrive at the bridge
+    ``local_zid``: its type, whether the far side publishes it, which nodes here subscribe
+    (``watcher``, the watch's own node name, never counts as one of them)."""
+    wanted = {t if t.startswith("/") else f"/{t}" for t in allowed}
+    flows: dict[str, TopicFlow] = {}
+    for route in routes:
+        if route.topic not in wanted:
+            continue
+        flow = flows.get(route.topic) or TopicFlow(route.topic, "", False, ())
+        if route.direction == "sub" and route.zid == local_zid:
+            here = tuple(n for n in route.local_nodes if n.lstrip("/") != watcher.lstrip("/"))
+            flow = TopicFlow(
+                route.topic, route.type_name or flow.type_name, flow.published_there, here
+            )
+        elif route.direction == "pub" and route.zid != local_zid:
+            flow = TopicFlow(
+                route.topic,
+                route.type_name or flow.type_name,
+                bool(route.local_nodes),
+                flow.subscribers_here,
+            )
+        flows[route.topic] = flow
+    return tuple(flows[t] for t in sorted(flows))
+
+
+class FlowWatch:
+    """Which bridged topics have a publisher on the far side and carry nothing on this one.
+
+    A route count cannot see this: the route exists, the far side's publisher exists, and the
+    QoS the route was built with never matched it (see :data:`BRIDGED_QOS`), so the admin looks
+    perfect while the topic is dead — /depth_scan on 2026-09-12, /imu/data_raw on 2026-09-13,
+    both cured by restarting a bridge. So the watch counts messages instead: a topic that
+    should flow (:attr:`TopicFlow.should_flow`) and whose count has not moved for ``silence_s``
+    is starved. After a repair every clock is reset and nothing is starved for ``cooldown_s``:
+    fresh routes take seconds to carry their first message, and a repair loop is worse than a
+    dead topic.
+    """
+
+    def __init__(self, silence_s: float = 20.0, cooldown_s: float = 90.0) -> None:
+        self.silence_s = silence_s  # live: the node's flow_silence_s flag writes it
+        self.cooldown_s = cooldown_s
+        self._counts: dict[str, int] = {}
+        self._moved_at: dict[str, float] = {}
+        self._seen_at: dict[str, float] = {}
+        self._quiet_until = 0.0
+
+    def observe(self, topic: str, delivered: int, expected: bool, now: float) -> None:
+        """One reading of ``topic``'s message counter. ``expected`` is whether messages are due
+        at all (:attr:`TopicFlow.should_flow`, and the watch really is counting them): a topic
+        nobody publishes or nobody here reads is never starved, and its clock stays fresh so it
+        is not declared dead the moment it becomes due again."""
+        if not expected or delivered != self._counts.get(topic, -1):
+            self._moved_at[topic] = now
+        self._counts[topic] = delivered
+        self._seen_at[topic] = now
+
+    def starved(self, now: float) -> tuple[str, ...]:
+        """The topics silent for longer than the patience, outside the cooldown after a repair.
+
+        Only the topics of the round just observed (the same ``now``) can be named: a round that
+        could not reach the admins observes nothing and must accuse no one — an unreachable
+        bridge is the identity watch's business, not this one's.
+        """
+        if now < self._quiet_until:
+            return ()
+        return tuple(
+            topic
+            for topic, moved in sorted(self._moved_at.items())
+            if self._seen_at.get(topic) == now and now - moved >= self.silence_s
+        )
+
+    def repaired(self, now: float) -> None:
+        """A repair was just attempted: every clock restarts and the cooldown begins."""
+        self._quiet_until = now + self.cooldown_s
+        self._moved_at = dict.fromkeys(self._moved_at, now)
+
+    def settled(self, now: float) -> bool:
+        """Whether the link has been healthy since well past the last repair — when the next
+        failure deserves the gentle repair again rather than the escalation."""
+        return now >= self._quiet_until + self.cooldown_s
 
 
 # Fully qualified names of the ROS nodes the laptop's SLAM launch creates
