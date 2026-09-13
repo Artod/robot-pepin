@@ -9,10 +9,12 @@ This module makes the volume the map itself:
   a surface at its return, at the height the ray itself is at (the beam plus or minus one
   voxel: the level sweep of a level body, and the climbing ray of a body leaning over a
   slipper, which at 5 degrees is 44 cm off the plane at 5 m), on its own weight channel;
-* the camera keeps writing its band through :class:`pepin.tsdf.Tsdf`, and inside the lidar's
-  layer it is not allowed to overwrite what the lidar has spoken for: the network's depth is
-  scale-uncertain, the lidar's returns are metric truth, and one bad law would otherwise push a
-  wall half a metre in the one layer the cart drives by;
+* the camera keeps writing its band through :class:`pepin.tsdf.Tsdf`, and inside the rows of the
+  lidar's own plane it is not allowed to overwrite what the lidar has spoken for: the network's
+  depth is scale-uncertain, the lidar's returns are metric truth, and one bad law would otherwise
+  push a wall half a metre in the one layer the cart drives by. Only that plane is handed back —
+  where a leaning beam climbs into the camera's band it is an observation like any other, which
+  the camera may correct;
 * a horizontal band of the volume reads out as an occupancy grid (:class:`OccupancySlice`), so
   the lidar localises against the slice at its plane, the camera against its band
   (``camera_band_m``), and Nav2 gets the 2D projection as ``/map`` — one entity, three views;
