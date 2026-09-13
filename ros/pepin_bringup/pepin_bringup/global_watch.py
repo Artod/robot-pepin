@@ -254,7 +254,9 @@ class GlobalWatch(Node):
             yaw=measured.yaw,
             covariance=measured.covariance,
             score=measured.fit,
-            ambiguity=ambiguity([(match.pose, fit) for match, fit in places]),
+            ambiguity=ambiguity(
+                [(match.pose, localizer.rank(match.pose, scan.points)) for match, _ in places]
+            ),
             stamp=scan.stamp,
             map_id=map_id_now,
         )

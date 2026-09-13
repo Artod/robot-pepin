@@ -417,8 +417,8 @@ class Localizer:
         apart = math.hypot(best.pose.x - second.pose.x, best.pose.y - second.pose.y) > 0.5 or abs(
             wrap_angle(best.pose.theta - second.pose.theta)
         ) > math.radians(30.0)
-        best_sharp = self._rank(best.pose, points)
-        second_sharp = self._rank(second.pose, points)
+        best_sharp = self.rank(best.pose, points)
+        second_sharp = self.rank(second.pose, points)
         explains_alike = second_sharp >= best_sharp * (1.0 - TWIN_MARGIN)
         denied = self._matcher.contradiction_fraction(second.pose, points)
         denied_best = self._matcher.contradiction_fraction(best.pose, points)
@@ -470,7 +470,7 @@ class Localizer:
         the twin verdict.
 
         The exhaustive FFT pass over the grid proposes ``GLOBAL_PEAKS`` peaks, each is refined
-        on the fine grid, they are ranked by :meth:`_rank` (how exactly the scan sits on the
+        on the fine grid, they are ranked by :meth:`rank` (how exactly the scan sits on the
         walls, minus a mild charge for points the map puts on open floor) and peaks that refined
         into one basin are merged. The list is what says whether the map answers with ONE place
         or with several alike (:func:`pepin.watchdog.ambiguity`); :meth:`global_search` reads
@@ -500,7 +500,7 @@ class Localizer:
         # truth at the cluttered base (0.56 vs 0.58) where the field score said 1.69 vs 2.16.
         refined = sorted(
             (self.refine(peak.pose, points) for peak in peaks),
-            key=lambda r: -self._rank(r[0].pose, points),
+            key=lambda r: -self.rank(r[0].pose, points),
         )
         distinct: list[tuple[MatchResult, float]] = []  # several peaks refine into one basin
         for candidate in refined:
@@ -556,11 +556,16 @@ class Localizer:
         confidence = self._matcher.inlier_fraction(fine.pose, points, min_known=GLOBAL_MIN_KNOWN)
         return fine, confidence
 
-    def _rank(self, pose: Pose2D, points: NDArray[np.float64]) -> float:
+    def rank(self, pose: Pose2D, points: NDArray[np.float64]) -> float:
         """How a global candidate is ranked: how exactly the scan sits on walls, minus a mild
         charge for points the map puts on open floor. Mild on purpose: at a cluttered spot the
         true pose denies 40% of the scan (furniture moved since the map), a look-alike 30%, and
-        a heavy charge would crown the look-alike; the sharpness term must stay decisive."""
+        a heavy charge would crown the look-alike; the sharpness term must stay decisive.
+
+        Public because it is also the measure of how ALIKE two places explain one scan: the
+        inlier fraction saturates a cell off a wall and called the truth and a look-alike five
+        metres apart 0.56 against 0.58, where this said 1.69 against 2.16
+        (pepin.watchdog.ambiguity reads it)."""
         return self._matcher.field_score(pose, points) - DENIAL_WEIGHT * (
             self._matcher.contradiction_fraction(pose, points)
         )

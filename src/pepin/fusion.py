@@ -164,8 +164,9 @@ def fuse(measurements: Sequence[PoseMeasurement], gate: float = GATE) -> PoseMea
 def sigma_from_fit(fit: float) -> tuple[float, float]:
     """How sure a pose known only by its fit is: ``(position metres, heading radians)``, from
     :data:`SIGMA_XY_M` / :data:`SIGMA_YAW_DEG` at a perfect fit to those plus the LOST pair at
-    a fit of zero. Linear on purpose: it is a report of confidence, not a measurement."""
-    lost = 1.0 - min(max(fit, 0.0), 1.0)
+    a fit of zero. Linear on purpose: it is a report of confidence, not a measurement. NaN — no
+    match yet — is as lost as zero, and never a NaN covariance downstream."""
+    lost = 1.0 if fit != fit else 1.0 - min(max(fit, 0.0), 1.0)
     return (
         SIGMA_XY_M + SIGMA_XY_LOST_M * lost,
         math.radians(SIGMA_YAW_DEG + SIGMA_YAW_LOST_DEG * lost),

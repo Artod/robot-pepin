@@ -77,3 +77,58 @@ def test_the_junk_explains_no_scan_once_the_fine_grid_looks_at_it() -> None:
     points = scan()
     assert loc.refine(IN_THE_JUNK, points)[1] == 0.0
     assert loc.refine(TRUTH, points)[1] > 0.5
+
+
+def test_the_ranked_places_are_what_the_search_chose_from() -> None:
+    """The watchdog needs the whole ranking, not the winner: how alike the runner-up explains
+    the scan is what tells a confident fix from a twin (pepin.watchdog.ambiguity)."""
+    from pepin.watchdog import ambiguity
+
+    loc = Localizer(speckled_map(), Pose2D())
+    points = scan()
+    places = loc.global_candidates(points, theta_step_deg=10.0, thin_to=90)
+    found, confidence = loc.global_search(points, theta_step_deg=10.0, thin_to=90)
+    assert places[0][0].pose == found.pose and places[0][1] == confidence
+    assert len(places) > 1, "several distinct places were weighed"
+    ranked = [(match.pose, loc.rank(match.pose, points)) for match, _ in places]
+    assert ambiguity(ranked) < 0.9, "the furnished room is not a twin of anywhere"
+    fits = [(match.pose, fit) for match, fit in places]
+    assert ambiguity(fits) > ambiguity(ranked), "why the rank, not the fit: the fit saturates"
+
+
+def test_a_place_measured_on_the_map_carries_how_sure_it_is() -> None:
+    """What travels to the board with a candidate: the pose sharpened in the tracking window,
+    the fit of the whole scan there, and a covariance read off the score surface."""
+    from pepin.sources import WATCHDOG
+
+    loc = Localizer(furnished_room_map(), Pose2D())
+    points = scan()
+    measured = loc.measure(TRUTH, points, WATCHDOG, stamp=12.5)
+    assert measured.source == WATCHDOG and measured.stamp == 12.5
+    assert measured.fit > 0.5
+    assert math.hypot(measured.x - TRUTH.x, measured.y - TRUTH.y) < 0.08
+    sx, sy, syaw = measured.sigmas
+    assert 0.0 < sx < 0.1 and 0.0 < sy < 0.1 and 0.0 < syaw < math.radians(10.0)
+    far = loc.measure(IN_THE_JUNK, points, WATCHDOG)
+    assert far.fit == 0.0 and far.sigmas[0] > sx, "a place that fits nothing answers wide"
+
+
+def test_the_tracker_s_own_belief_is_a_measurement_like_any_other() -> None:
+    """So a candidate and the pose it argues with are weighed on one scale."""
+    from pepin.sources import TRACKER
+
+    loc = Localizer(furnished_room_map(), Pose2D())
+    loc.adopt(TRUTH, 0.8)
+    belief = loc.belief(stamp=3.0)
+    assert belief.source == TRACKER and belief.fit == 0.8 and belief.stamp == 3.0
+    assert belief.pose == TRUTH
+    loc.adopt(TRUTH, 0.1)
+    assert loc.belief().sigmas[0] > belief.sigmas[0], "a poor fit is a wide answer"
+
+
+def test_the_tracker_names_the_flags_it_owns() -> None:
+    """A node routes every flag to whichever object names it; the tracker refuses the rest."""
+    loc = Localizer(furnished_room_map(), Pose2D())
+    assert "rest_lock" in loc.switches and "accept_candidates" not in loc.switches
+    for name in loc.switches:
+        loc.switch(name, loc.sources.enabled if name == "sources" else True)

@@ -242,3 +242,25 @@ def test_a_partial_fan_on_one_wall_is_sure_across_it_and_unsure_along_it() -> No
     assert wy > 2 * wx, f"along the wall {wy * 100:.1f} cm, across {wx * 100:.1f} cm"
     assert wy > 2 * fy and wx < 1.5 * fx  # along: the fan is blind; across: as sure as the lidar
     assert wt < math.radians(3.0)
+
+
+def test_a_pose_known_only_by_its_fit_is_still_a_measurement() -> None:
+    """What the tracker's own belief is worth beside a fresh match: isotropic in position, its
+    sigmas from the fit, so the two can be weighed by information instead of by a rule of
+    thumb (pepin.watchdog re-seeds through exactly this)."""
+    import math
+
+    from pepin.fusion import from_fit, sigma_from_fit
+    from pepin.odometry import Pose2D
+
+    sharp_xy, sharp_yaw = sigma_from_fit(1.0)
+    lost_xy, lost_yaw = sigma_from_fit(0.0)
+    assert sharp_xy < lost_xy and sharp_yaw < lost_yaw
+    assert sigma_from_fit(-5.0) == (lost_xy, lost_yaw), "a fit outside 0..1 is clamped"
+    assert sigma_from_fit(9.0) == (sharp_xy, sharp_yaw)
+    held = from_fit(Pose2D(1.0, 2.0, 0.5), 0.8, "tracker", stamp=7.0)
+    assert held.pose == Pose2D(1.0, 2.0, 0.5) and held.fit == 0.8 and held.stamp == 7.0
+    assert held.source == "tracker" and not held.edge
+    sx, sy, syaw = held.sigmas
+    assert sx == sy and math.isclose(sx, sigma_from_fit(0.8)[0])
+    assert np.allclose(held.covariance, np.diag([sx**2, sy**2, syaw**2]))

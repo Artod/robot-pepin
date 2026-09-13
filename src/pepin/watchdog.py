@@ -75,7 +75,8 @@ UNKNOWN_MAP_FIT = ADMIT_FIT
 # (farther apart than the pair below). Above this the map answers "here — or just as well
 # there": a symmetric room, a corridor, a map the scan does not belong to. Such a candidate is
 # never acted on. 0.90 is the margin within which the whole-map search itself calls two places
-# twins (pepin.localization.TWIN_MARGIN, 1 - 0.10), on the fit instead of the field score.
+# twins (pepin.localization.TWIN_MARGIN, 1 - 0.10), read on the very measure that search ranks
+# by — so "ambiguous" here and "twins" there are one judgement made in two places.
 AMBIGUITY_MAX = 0.90
 AMBIGUITY_APART_M = 0.5
 AMBIGUITY_APART_DEG = 30.0
@@ -108,26 +109,30 @@ def same_place(a: Pose2D, b: Pose2D) -> bool:
 
 
 def ambiguity(places: Sequence[tuple[Pose2D, float]]) -> float:
-    """How alike the map's runner-up explains the scan: the best fit among places that are a
-    different place from the first one, over the first one's fit.
+    """How alike the map's runner-up explains the scan: the best score among places that are a
+    DIFFERENT place from the first one, over the first one's score.
 
-    ``places`` is the whole-map search's answer, best first, as
-    (pose, fit) — :meth:`pepin.localization.Localizer.global_candidates`. 0.0 when the map holds
-    one place that fits this scan and nothing else (the happy case); 1.0 when the best place
-    fits nothing at all, because then every rival is its equal.
+    ``places`` is the whole-map search's answer, best first, as (pose, score), where the score
+    is the measure the search itself ranks places by (:meth:`pepin.localization.Localizer.rank`:
+    how exactly the scan sits on the walls, minus a charge for what the map denies). Not the
+    inlier fraction: that saturates one cell off a wall, and on a plain rectangular room it
+    calls two places a metre apart 0.89 and 0.85 — a twin, which they are not.
+
+    0.0 when the map holds one place that fits this scan and nothing else (the happy case);
+    1.0 when the best place scores nothing at all, because then every rival is its equal.
     """
     if not places:
         return 1.0
-    best_pose, best_fit = places[0]
-    if best_fit <= 0.0:
+    best_pose, best_score = places[0]
+    if best_score <= 0.0:
         return 1.0
     rivals = [
-        fit
-        for pose, fit in places[1:]
+        score
+        for pose, score in places[1:]
         if math.hypot(pose.x - best_pose.x, pose.y - best_pose.y) > AMBIGUITY_APART_M
         or abs(wrap_angle(pose.theta - best_pose.theta)) > math.radians(AMBIGUITY_APART_DEG)
     ]
-    return max(rivals, default=0.0) / best_fit
+    return max([*rivals, 0.0]) / best_score
 
 
 @dataclass(frozen=True)
@@ -207,6 +212,10 @@ class GlobalCandidate:
 def judge(candidate: GlobalCandidate, current_pose: Pose2D, current_fit: float) -> CandidateVerdict:
     """What ``candidate`` is worth beside the pose the tracker holds and the fit it holds it at.
 
+    ``current_fit`` NaN — the tracker has not matched a scan yet — reads as 0.0, the convention
+    of :meth:`pepin.watch.LostWatch.reported_fit`: every comparison here is a ``<`` or a ``>=``,
+    and NaN passes them all silently.
+
     In order, because the order is the argument:
 
     1. The map's own answer first. A best place below :data:`UNKNOWN_MAP_FIT`, or a runner-up
@@ -219,6 +228,8 @@ def judge(candidate: GlobalCandidate, current_pose: Pose2D, current_fit: float) 
        :data:`BEAT_MARGIN` to be ``disagree``; otherwise it is a worse explanation of the same
        scan from farther away, and claims ``nothing``.
     """
+    if current_fit != current_fit:  # NaN: the tracker has not matched a scan yet
+        current_fit = 0.0
     if candidate.score < UNKNOWN_MAP_FIT or candidate.ambiguity > AMBIGUITY_MAX:
         return CandidateVerdict.UNKNOWN_MAP
     if same_place(candidate.pose, current_pose):
@@ -305,6 +316,8 @@ class CandidateGate:
         if current_pose is None:
             self._count("no_pose")
             return GateAnswer(CandidateVerdict.NOTHING)
+        if current_fit != current_fit:  # NaN: the tracker has not matched a scan yet
+            current_fit = 0.0
         verdict = judge(candidate, current_pose, current_fit)
         self._count(str(verdict))
         self.last = verdict

@@ -27,6 +27,7 @@ from ros_stubs import (  # noqa: E402
     LaserScan,
     Odometry,
     Parameter,
+    String,
     TransformStamped,
 )
 from ros_stubs import OccupancyGrid as OccupancyGridMsg  # noqa: E402
@@ -47,9 +48,9 @@ def stamp(t: float) -> Any:
     return TimeMsg(sec=whole, nanosec=round((t - whole) * 1e9))
 
 
-def map_msg() -> Any:
-    """The furnished room as the map server publishes it."""
-    grid = furnished_room_map()
+def map_msg(grid: Any = None) -> Any:
+    """A grid as the map server publishes it; the furnished room by default."""
+    grid = furnished_room_map() if grid is None else grid
     rows, cols = grid.spec.shape
     msg = OccupancyGridMsg()
     msg.info.resolution = grid.spec.resolution_m
@@ -280,3 +281,117 @@ def test_with_nothing_fresh_the_node_holds_and_says_so(node: Relocalizer) -> Non
     assert "sources: holding map->odom: no fresh source; lidar absent, depth absent" in line
     res = node.services["relocalize"][1](None, ros_stubs.Trigger.Response())
     assert not res.success and res.message == "no map or no scan yet"
+
+
+# ---- the laptop's watchdog ------------------------------------------------------------------
+CARRIED_TO = Pose2D(1.2, -0.8, math.radians(60.0))  # where the whole-map search says the cart is
+SURE = np.diag([0.02**2, 0.02**2, math.radians(1.0) ** 2]).tolist()
+
+
+def candidate_msg(
+    node: Relocalizer, pose: Pose2D, score: float = 0.70, stamp: float = 100.0
+) -> Any:
+    """What pepin_bringup.global_watch publishes: one JSON message on /localization/candidate."""
+    return String(
+        data=json.dumps(
+            {
+                "x": pose.x,
+                "y": pose.y,
+                "yaw": pose.theta,
+                "covariance": SURE,
+                "score": score,
+                "ambiguity": 0.2,
+                "stamp": stamp,
+                "map": node._map_id,
+                "verdict": "disagree",
+                "search_ms": 140.0,
+            }
+        )
+    )
+
+
+def standing(node: Relocalizer) -> None:
+    """One odometry sample, so the node has a tracked pose to judge a candidate against."""
+    node.clock.seconds = 100.0
+    node.subs["/odometry/filtered"][1](odom_msg(Pose2D(), 100.0))
+
+
+def test_three_candidates_that_disagree_re_seed_the_tracker(node: Relocalizer) -> None:
+    """The kidnap the board cannot see: the tracker holds the old pose, the laptop's search
+    says another place three times in a row, and the tracker adopts it through the very door
+    its own search uses — /initialpose goes out, map -> odom follows at once."""
+    standing(node)
+    on_candidate = node.subs["/localization/candidate"][1]
+    loc = node._localizer
+    assert loc is not None
+    for _ in range(2):
+        on_candidate(candidate_msg(node, CARRIED_TO))
+        assert node._pending_seed is None
+    on_candidate(candidate_msg(node, CARRIED_TO))
+    assert node._pending_seed is not None
+    node._apply_pending_seed()
+    assert math.hypot(loc.pose.x - CARRIED_TO.x, loc.pose.y - CARRIED_TO.y) < 0.1
+    assert node.pubs["/initialpose"].sent, "AMCL is told, as after the board's own search"
+    node._report_tracking()
+    line = node.logger.texts("info")[-1]
+    assert "candidates 3 (disagree 3), re-seeds 1" in line
+    assert "accept_candidates=on candidate_streak=3" in line
+
+
+def test_a_candidate_that_agrees_changes_nothing(node: Relocalizer) -> None:
+    standing(node)
+    node.subs["/localization/candidate"][1](candidate_msg(node, Pose2D(0.1, 0.0, 0.0)))
+    assert node._pending_seed is None
+    node._report_tracking()
+    assert "candidates 1 (agree 1), re-seeds 0" in node.logger.texts("info")[-1]
+
+
+def test_the_flag_leaves_the_candidates_as_a_report_only(node: Relocalizer) -> None:
+    """accept_candidates off: judged, counted, never acted on — the board's own slow search
+    stays the only way back, exactly as before this feature."""
+    standing(node)
+    assert node.set_parameters([Parameter("accept_candidates", value=False)])[0].successful
+    for _ in range(4):
+        node.subs["/localization/candidate"][1](candidate_msg(node, CARRIED_TO))
+    assert node._pending_seed is None
+    node._report_tracking()
+    assert "candidates 4 (disagree 4), re-seeds 0" in node.logger.texts("info")[-1]
+    assert "accept_candidates=off" in node.logger.texts("info")[-1]
+
+
+def test_a_candidate_on_another_map_and_a_broken_one_are_refused(node: Relocalizer) -> None:
+    standing(node)
+    on_candidate = node.subs["/localization/candidate"][1]
+    stale = json.loads(candidate_msg(node, CARRIED_TO).data)
+    stale["map"] = "1x1@0.00,0.00"
+    for _ in range(4):
+        on_candidate(String(data=json.dumps(stale)))
+    on_candidate(String(data="not json at all"))
+    assert node._pending_seed is None
+    node._report_tracking()
+    line = node.logger.texts("info")[-1]
+    assert "elsewhere 4" in line and "malformed 1" in line
+
+
+def test_the_map_that_does_not_fit_reaches_the_operator(node: Relocalizer) -> None:
+    """No mode switch: the verdict is said in the report line and rides /localization/sources."""
+    standing(node)
+    on_candidate = node.subs["/localization/candidate"][1]
+    for _ in range(3):
+        on_candidate(candidate_msg(node, CARRIED_TO, score=0.2))
+    node._report_tracking()
+    assert "THE MAP DOES NOT FIT" in node.logger.texts("info")[-1]
+    truth, odom = drive(2)
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        ts = 101.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        node.subs["/scan"][1](lidar_msg(t, ts))
+        node.subs["/odometry/filtered"][1](odom_msg(o, ts))
+        assert until(lambda: node._tracker_initialised)
+    reported = json.loads(node.pubs["/localization/sources"].sent[-1].data)
+    assert reported["candidates"] == {
+        "verdict": "unknown_map",
+        "map_fits": False,
+        "reseeds": 0,
+        "accept": True,
+    }
