@@ -1,9 +1,11 @@
 """Timestamped session recording: everything the robot saw and did, replayable offline.
 
 One session is one JSON-lines file; every line carries a monotonic timestamp
-and a topic (``pose``, ``scan``, ``cmd``, ``note``). The format is deliberately
-boring — greppable, diffable, readable from any language — because these
-files are the raw material for mapping experiments and post-mortems.
+and a topic (``pose``, ``scan``, ``cmd``, ``imu``, ``note``). The format is
+deliberately boring — greppable, diffable, readable from any language — because
+these files are the raw material for mapping experiments and post-mortems. A key
+is added, never renamed or dropped: a reader of last month's tape must read
+today's.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
@@ -19,7 +21,9 @@ from typing import Any
 
 import numpy as np
 
+from pepin.depth import Array
 from pepin.kinematics import Twist
+from pepin.lean import LeanEstimator, LeanHistory
 from pepin.lidar import LaserScan
 from pepin.odometry import Pose2D
 
@@ -168,3 +172,55 @@ def scan_record_from_ros(
         "intensities": out_intensities,
         "speed_rps": speed,
     }
+
+
+def imu_record(stamp: float, gyro: Sequence[float], accel: Sequence[float]) -> dict[str, Any]:
+    """An ``imu`` record from one ``sensor_msgs/Imu`` already in base_link axes: the gyro's
+    three rates (rad/s) and the accelerometer's three components (m/s^2, gravity included).
+
+    ``wz`` alone was recorded until now — the heading truth the wheels are checked against —
+    and it keeps its name and its four decimals, so every reader of an old tape reads a new one
+    unchanged. The rest is what an offline replay needs to run the very same
+    :class:`pepin.lean.LeanEstimator` the nodes run and place a frame the way the live stack
+    would have: without the accelerometer a tape cannot say which way was up.
+    """
+    wx, wy, wz = (float(v) for v in gyro)
+    ax, ay, az = (float(v) for v in accel)
+    return {
+        "t": stamp,
+        "topic": "imu",
+        "wz": round(wz, 4),
+        "wx": round(wx, 4),
+        "wy": round(wy, 4),
+        "ax": round(ax, 3),  # a millimetre per second squared: far below the chip's noise
+        "ay": round(ay, 3),
+        "az": round(az, 3),
+    }
+
+
+def imu_sample(record: Mapping[str, Any]) -> tuple[Array, Array] | None:
+    """The ``(acceleration, angular_velocity)`` of an ``imu`` record, base_link axes, or
+    ``None`` for a record written before the accelerometer was taped (only ``wz`` in it)."""
+    if "ax" not in record:
+        return None
+    accel = np.array([record["ax"], record["ay"], record["az"]], dtype=float)
+    gyro = np.array([record.get("wx", 0.0), record.get("wy", 0.0), record["wz"]], dtype=float)
+    return accel, gyro
+
+
+def lean_history(records: Iterable[Mapping[str, Any]], *, use_gyro: bool = True) -> LeanHistory:
+    """The lean over a whole tape, replayed through the estimator the nodes run: the history a
+    frame's placement can be asked of offline. Empty when the tape carries no accelerometer
+    (readers should say so rather than place frames level and call it the truth).
+
+    The readings are already in base_link (the C++ bridge turns them), so no mount enters here.
+    """
+    history = LeanHistory(horizon_s=math.inf, max_len=10_000_000)
+    estimator = LeanEstimator(np.eye(3), use_gyro=use_gyro, history=history)
+    for record in records:
+        if record.get("topic") != "imu":
+            continue
+        sample = imu_sample(record)
+        if sample is not None:
+            estimator.observe(sample[0], float(record["t"]), sample[1])
+    return history

@@ -27,7 +27,7 @@ from sensor_msgs.msg import Imu, LaserScan, Range
 from std_msgs.msg import String
 
 from pepin.mounts import Mounts
-from pepin.recording import scan_record_from_ros
+from pepin.recording import imu_record, scan_record_from_ros
 from pepin.runlink import (
     IDLE,
     RECORDING,
@@ -205,12 +205,14 @@ class RunRecorder:
         )
 
     def _on_imu(self, msg: Imu) -> None:
-        """The gyro's yaw rate, raw: the heading truth the wheels are checked against."""
+        """The gyro's rates and the accelerometer, raw and in base_link: the heading truth the
+        wheels are checked against, and which way was up — without the accelerometer no replay
+        can put a frame of a cart tipped over a slipper where it really was
+        (``pepin.recording.lean_history``)."""
         if not self._keep("imu"):
             return
-        self._tape.add(
-            {"t": _stamp(msg.header), "topic": "imu", "wz": round(msg.angular_velocity.z, 4)}
-        )
+        w, a = msg.angular_velocity, msg.linear_acceleration
+        self._tape.add(imu_record(_stamp(msg.header), (w.x, w.y, w.z), (a.x, a.y, a.z)))
 
     def _on_plan(self, msg: PathMsg) -> None:
         """Nav2's global plan as a polyline (at most 200 points), so a replay can draw it."""
