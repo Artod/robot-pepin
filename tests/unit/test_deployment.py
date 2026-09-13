@@ -475,6 +475,22 @@ def test_a_topic_flows_only_when_one_side_publishes_it_and_the_other_waits_for_i
     assert not any(f.should_flow for f in topic_flows(routes, BOARD_ZID, allowed))
 
 
+def test_a_latched_or_on_demand_topic_is_never_judged_for_flow() -> None:
+    """/map goes out once (transient durability), /tf_static likewise, /plan only while a drive
+    runs: quiet by nature, not dead. The watch that judged them restarted a healthy bridge
+    twenty seconds after every start (2026-09-13) and left the real topics at a trickle."""
+    from pepin.deployment import ON_DEMAND_TOPICS, TopicFlow
+
+    waiting = ("/depth_fusion",)
+    for topic in ("/map", "/tf_static", "/plan"):
+        assert topic in ON_DEMAND_TOPICS
+        flow = TopicFlow(topic, "some/msg/Type", True, waiting)
+        assert flow.should_flow and not flow.judged, topic
+    imu = TopicFlow("/imu/data_raw", "sensor_msgs/msg/Imu", True, waiting)
+    assert imu.judged, "a periodic topic that should flow is judged"
+    assert not TopicFlow("/imu/data_raw", "sensor_msgs/msg/Imu", False, waiting).judged
+
+
 def test_a_route_that_carries_nothing_is_starved_and_a_quiet_topic_is_not() -> None:
     """The failure the route count cannot see: the route is there, the far side publishes, and
     the counter does not move. A topic nobody publishes or nobody here reads never is."""

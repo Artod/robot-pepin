@@ -514,6 +514,31 @@ def bridge_routes(admin_json: str) -> tuple[BridgeRoute, ...]:
     return tuple(routes)
 
 
+# Topics that are latched or event-driven on purpose: a map published once with transient
+# durability, the static transforms, a path only while a drive runs, a run status on change.
+# Their silence is not a dead route. A watch that judged them restarted a healthy bridge twenty
+# seconds after every start (2026-09-13 19:12: "/map /plan /tf_static carried nothing" — and
+# the restart it made rebuilt the routes from the far side's announcements, leaving /scan at
+# 0.8 Hz and /imu/data_raw at 3.7 Hz on the laptop until the next ordered restart).
+ON_DEMAND_TOPICS: frozenset[str] = frozenset(
+    {
+        "/map",
+        "/map_camera",
+        "/tf_static",
+        "/plan",
+        "/local_plan",
+        "/amcl_path",
+        "/goal_pose",
+        "/pepin/run_status",
+        "/dynamic_obstacles",
+        "/rtabmap/info",
+        "/rtabmap/map",
+        "/rtabmap/mapGraph",
+        "/rtabmap/mapPath",
+    }
+)
+
+
 @dataclass(frozen=True)
 class TopicFlow:
     """What both bridges say about one topic: the ROS type to subscribe with, whether some node
@@ -529,6 +554,13 @@ class TopicFlow:
         """Whether messages must be arriving: somebody publishes it there, somebody wants it
         here. Neither half alone is a fault — an unwanted topic is never routed at all."""
         return self.published_there and bool(self.subscribers_here)
+
+    @property
+    def judged(self) -> bool:
+        """Whether silence on this topic means a dead route: it should flow AND it is periodic
+        by nature — the latched and event-driven topics of :data:`ON_DEMAND_TOPICS` are never
+        judged, however long they stay quiet."""
+        return self.should_flow and self.topic not in ON_DEMAND_TOPICS
 
 
 def topic_flows(

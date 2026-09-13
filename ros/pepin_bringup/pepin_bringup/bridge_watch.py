@@ -349,7 +349,7 @@ class BridgeWatch(Node):
         self._flow.silence_s = float(self._switches["flow_silence_s"])
         flows = self.flows()
         for flow in flows:
-            expected = flow.should_flow
+            expected = flow.judged  # periodic and due; a latched or on-demand topic is never
             if expected:
                 self._wanted.setdefault(flow.topic, flow.type_name)
             counted = flow.topic not in self._unknown  # an unreadable type is never starved
@@ -428,7 +428,7 @@ class BridgeWatch(Node):
         self._reported_at = now
         carried = []
         for flow in flows:
-            if not flow.should_flow:
+            if not flow.judged:
                 continue
             total = self._counts.get(flow.topic, 0)
             since, self._reported[flow.topic] = total - self._reported.get(flow.topic, 0), total
