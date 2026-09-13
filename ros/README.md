@@ -66,9 +66,11 @@ Who owns what:
 | RTAB-Map's odometry | the tracker's pose (`map`) | the EKF's `odom` |
 | RTAB-Map's map frame | `rtabmap`, beside the real one | `map` — it *is* the real one |
 | its database | kept (`ros/maps/rtabmap.db`) | empty each session (`rtabmap_slam.db`) |
+| what a goal is judged on | the tracker's fit ≥ 0.50 | `map -> base_link` younger than 1 s |
 
-(`/map` can also come from the fused volume in either mode — see [The world map](#the-world-map);
-it is still exactly one publisher, chosen by the mode.)
+(In SLAM mode `/map` can also come from the fused volume — `ros/laptop.sh vslam --world-map`,
+see [The world map](#the-world-map). Still exactly one publisher: the mode's owner and the
+launch's `world_map` must both say so, and the launch is what sets `map_source` accordingly.)
 
 `/tf` crosses the bridge board → laptop only (a topic allowed as a publisher on both sides loops
 until nothing crosses at all), so the correction RTAB-Map computes travels the other way as a
