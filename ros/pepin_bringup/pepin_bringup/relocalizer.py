@@ -197,12 +197,12 @@ FLAGS = FlagSet(
     Flag(
         "sources",
         (LIDAR,),
-        description="what corrects the pose: the lidar's revolution (/scan), matched here; the"
-        " camera (`camera`), whose scans the laptop matches and whose ANSWER arrives on"
-        " /localization/measurement; the camera's raw scans (`depth`, `contact`) matched here,"
-        " which is the old behaviour and costs this board three matches a revolution. The lidar"
-        " drives the updates while it is fresh and the rest ride along, carried to its moment; a"
-        " stale lidar hands the updates to them",
+        description="what corrects the pose: the lidar's revolution (/scan), matched here, and"
+        " the camera (`camera`), whose scans the laptop matches and whose ANSWER arrives on"
+        " /localization/measurement. The lidar drives the updates while it is fresh and the"
+        " camera's word rides along, carried to its moment; a stale lidar hands the updates to"
+        " the measurements. `depth` and `contact` name the camera's raw scans, which this node"
+        " no longer subscribes to — enabling them changes nothing here",
         why="the lidar alone, because the camera cannot carry the map by itself: replayed on run"
         " 0171 against flat3 the depth band alone loses the map in 0.5 s (122 cm, 124 deg) and"
         " the contact line alone in 12 s (80 cm, 28 deg) — the camera's 0.15-1.3 m band is a"
@@ -217,8 +217,10 @@ FLAGS = FlagSet(
         " or a lidar that stopped: the fusion is measured and gated, and the board pays nothing"
         " for it",
         off_when="drop a source the moment /localization/sources shows it disagreeing with the"
-        " others; the lidar alone is the safe state. `depth`/`contact` are the old on-board"
-        " matching, for an A/B on a board with CPU to spare — never for a drive",
+        " others; the lidar alone is the safe state, and it is what the board falls back to by"
+        " itself when the link dies. `depth`/`contact` stay on the roster because the library"
+        " still matches those scans where there is CPU for it — an offline replay"
+        " (scratch/camera_only_localization.py), another robot — not because this board will",
         choices=(LIDAR, DEPTH, CONTACT, CAMERA),
     ),
     Flag(
