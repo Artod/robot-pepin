@@ -361,16 +361,20 @@ class Future:
 
 class Client:
     """A service client: ``ready`` says whether the service exists at all (an absent tracker is
-    a client that never becomes ready), ``response`` is what a call answers with, and every
-    request is kept in ``calls``."""
+    a client that never becomes ready), ``response`` is what a call answers with, every request
+    is kept in ``calls`` and every ``wait_for_service`` timeout in ``waits`` — a wait on a
+    service nobody serves is a second of the robot standing still, and tests say where those
+    are paid."""
 
     def __init__(self, srv_type: Any, name: str) -> None:
         self.srv_type, self.name = srv_type, name
         self.ready = False
         self.response: Any = None
         self.calls: list[Any] = []
+        self.waits: list[float] = []
 
     def wait_for_service(self, timeout_sec: float = 0.0) -> bool:
+        self.waits.append(timeout_sec)
         return self.ready
 
     def service_is_ready(self) -> bool:

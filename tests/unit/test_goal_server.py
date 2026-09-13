@@ -18,7 +18,12 @@ import ros_stubs
 
 ros_stubs.install()
 
-from pepin_bringup.goal_server import CORRECTION_TOPIC, FLAGS, GoalServer  # noqa: E402
+from pepin_bringup.goal_server import (  # noqa: E402
+    CORRECTION_TOPIC,
+    FLAGS,
+    TRACKER_WAIT_S,
+    GoalServer,
+)
 from ros_stubs import Float32, Header, Quaternion, TransformStamped, Vector3  # noqa: E402
 
 from pepin.watch import CORRECTION_FRESH_S, TF_FRESH_S  # noqa: E402
@@ -319,3 +324,29 @@ def test_a_live_correction_lets_the_drive_run(tmp_path) -> None:  # type: ignore
     events = {event["event"]: event for event in wire.events()}
     assert "lost" not in events and handle.cancelled == 0
     assert "detail" not in events["done"]
+
+
+def test_a_stack_with_no_tracker_never_waits_on_the_tracker_s_service(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Every pose read used to open with a full second of standing still on a /where_am_i that
+    has no server in this mode: about four seconds per goal, two of them between arrival and the
+    corrective pivot. The probe for a tracker is paid once per process and never again."""
+    node = server(tmp_path)
+    standing_at(node, at(1.0, 0.0, 0.0, age_s=0.1))
+    correction_landed(node)
+    for _ in range(4):
+        node._pose_now()
+    node._ready()
+    assert node.service_clients["where_am_i"].waits == [], "the service is not there to ask"
+    assert node.service_clients["relocalize"].waits == [TRACKER_WAIT_S], "one probe, then the graph"
+
+
+def test_a_tracker_that_comes_up_late_is_still_found(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The probe's answer is not cached for ever: a known-map stack whose tracker is still
+    starting must be picked up, or the goal server would read TF for the rest of the session."""
+    node = server(tmp_path)
+    standing_at(node, at(1.0, 0.0, 0.0, age_s=0.1))
+    assert not node._tracker_here()
+    node.service_clients["relocalize"].ready = True  # the tracker finished starting
+    assert node._tracker_here()
+    tracker_says(node, 0.8)
+    assert node._pose_now()["fit"] == 0.8, "and its pose is the answer again"

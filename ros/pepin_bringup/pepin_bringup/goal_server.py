@@ -165,6 +165,7 @@ class GoalServer(Node):
         self._where = self.create_client(Trigger, "where_am_i")
         self.fit = 0.0
         self._fit_heard = False  # a tracker has spoken here at least once
+        self._tracker_probed = False  # ...or its service was waited for, once (_tracker_here)
         self.create_subscription(Float32, "localization_fit", self._on_fit, 10)
         # The pose's other source: map -> base_link, which the tracker owns on a saved map and
         # pepin_bringup.slam_frame owns in SLAM mode. Read only when no tracker answers, and the
@@ -452,7 +453,14 @@ class GoalServer(Node):
     def _pose_now(self) -> dict[str, float]:
         """Where the cart stands: the tracker's own pose where a tracker answers, else the TF
         the SLAM correction feeds. Empty when neither does; ``fit`` is in it only from a tracker
-        and ``age_s`` only from TF, so a reader can tell which one spoke."""
+        and ``age_s`` only from TF, so a reader can tell which one spoke.
+
+        Where no tracker runs the service is not asked at all: /where_am_i has no server there,
+        and the probe for it cost a full second of standing still per read — four per goal, two
+        of them between arrival and the corrective pivot.
+        """
+        if self._switches.on("tf_pose") and not self._tracker_here():
+            return self._tf_pose()
         pose = self._tracker_pose()
         if pose or not self._switches.on("tf_pose"):
             return pose
@@ -498,16 +506,28 @@ class GoalServer(Node):
 
     def _tracker_here(self) -> bool:
         """Whether a scan-matching tracker runs beside this node at all: it publishes the fit
-        and serves the whole-map search. In SLAM mode neither exists."""
-        return self._fit_heard or self._relocalize.wait_for_service(timeout_sec=TRACKER_WAIT_S)
+        and serves the whole-map search. In SLAM mode neither exists.
 
-    def _ready(self) -> Readiness:
+        The waiting probe is paid ONCE per process: afterwards the answer comes from the graph
+        (``service_is_ready``) and from the fit, so a tracker that comes up late is still found,
+        while a stack that has none stops paying a second for every pose read.
+        """
+        if self._fit_heard:
+            return True
+        if not self._tracker_probed:
+            self._tracker_probed = True
+            return bool(self._relocalize.wait_for_service(timeout_sec=TRACKER_WAIT_S))
+        return bool(self._relocalize.service_is_ready())
+
+    def _ready(self, pose: dict[str, float] | None = None) -> Readiness:
         """May a goal start now (:class:`pepin.watch.GoalGate`): the tracker's fit where a
         tracker runs; where none does, the age of map -> base_link AND the age of the SLAM
-        correction, which is the only one of the two a dead laptop stops."""
+        correction, which is the only one of the two a dead laptop stops. ``pose`` is a reading
+        already taken by the caller (mark's), so the edge is not looked up twice."""
         if self._switches.on("tf_pose") and not self._tracker_here():
+            edge = self._tf_pose() if pose is None else pose
             watched = self._correction() if self._switches.on("correction_watch") else None
-            return self._gate.verdict(None, self._tf_pose().get("age_s"), watched)
+            return self._gate.verdict(None, edge.get("age_s"), watched)
         return self._gate.verdict(self.fit, None)
 
     def mark(self, name: str) -> dict[str, Any]:
@@ -516,7 +536,7 @@ class GoalServer(Node):
         pose = self._pose_now()
         if not name or not pose:
             return {"event": "error", "detail": "no name, or nothing answered about the pose"}
-        ready = self._ready()
+        ready = self._ready(pose)  # the same reading the mark is written from, not a second one
         if not ready.ready:
             return {"event": "error", "detail": ready.reason}
         places = self.places()
