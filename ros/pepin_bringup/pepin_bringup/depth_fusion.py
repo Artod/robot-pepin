@@ -29,9 +29,10 @@ node says so and stays quiet. The volume is snapshotted to ``world_path`` every
 ``snapshot_s`` and at shutdown.
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
-``align``, ``min_weight``, ``surface_hz``, ``band_half_z``, ``lidar_layer``, ``map_source``,
-``map_hz``, ``snapshot_s``, ``resume_volume``; their state is printed in every report line,
-beside the band itself and the source of the plane it is centred on. ``/fusion/reset``
+``fit_gate``, ``self_heal``, ``align``, ``min_weight``, ``map_min_weight``, ``surface_hz``,
+``band_half_z``, ``lidar_layer``, ``map_source``, ``map_hz``, ``snapshot_s``,
+``resume_volume``; their state is printed in every report line, beside the band itself and the
+source of the plane it is centred on. ``/fusion/reset``
 (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
 """
 
@@ -68,6 +69,7 @@ from pepin.tsdf import (
 )
 from pepin.watch import DRIVE_FIT
 from pepin.worldmap import (
+    LidarLaw,
     PlanarMount,
     SliceLaw,
     SnapshotClock,
@@ -133,7 +135,16 @@ FLAGS = FlagSet(
         "min_weight",
         2.0,
         range=(0.0, 100.0),
-        description="observations a voxel needs before it is shown in /fusion/surface",
+        description="observations a voxel needs before it is shown in /fusion/surface (the"
+        " debug cloud only: /map has map_min_weight)",
+    ),
+    Flag(
+        "map_min_weight",
+        2.0,
+        range=(0.0, LidarLaw.max_weight),
+        description="observations a voxel needs before it speaks in /map. Its own flag, and"
+        " capped at the lidar's own weight cap: a value above that leaves every cell of the"
+        " map unknown, and the cart drives on this one",
     ),
     Flag(
         "surface_hz",
@@ -597,7 +608,7 @@ class DepthFusion(Node):
             self._tally.count("map_refused")
             return
         with self._tally.measure("map"), self._lock:
-            view = self._world.lidar_slice(SliceLaw(min_weight=self._switches["min_weight"]))
+            view = self._world.lidar_slice(SliceLaw(min_weight=self._switches["map_min_weight"]))
             stamp = self._last_stamp
         if self._map_pub is None:  # transient local: a late subscriber still gets the map
             self._map_pub = self.create_publisher(

@@ -18,6 +18,7 @@ import source_facts as sf
 import yaml
 
 from pepin.flags import load_table
+from pepin.worldmap import LidarLaw
 
 REPO = Path(__file__).resolve().parents[2]
 PARAMS = yaml.safe_load((REPO / "ros/params/nav2_params.yaml").read_text())
@@ -1145,6 +1146,13 @@ def test_the_volume_is_the_map_and_only_one_side_publishes_it() -> None:
     passed = sf.unparsed(vslam, ast.JoinedStr)
     assert any("mode:=" in text for text in passed), "the node is told the bridge mode"
     assert any("map_source:=" in text for text in passed)
+    assert load_table(REPO / NODES / "depth_fusion.py").flag("map_min_weight").range == (
+        0.0,
+        LidarLaw.max_weight,
+    ), (
+        "/map has its own maturity flag, capped at the lidar's own weight cap: above it the"
+        " whole published map goes unknown while the cart drives on it"
+    )
 
 
 def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_prints() -> None:
