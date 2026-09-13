@@ -97,3 +97,27 @@ def test_in_slam_the_laptop_sends_the_correction_home_and_touches_no_tf() -> Non
     assert (sent.header.frame_id, sent.child_frame_id) == ("map", "odom")
     assert _xy(sent) == (0.3, 0.1), "as it stands, not inverted"
     assert "slam=on" in node.logger.texts("info")[0]
+
+
+def test_the_board_says_when_the_correction_stops_and_when_it_comes_back() -> None:
+    """The edge cannot show this: it is re-broadcast from the LAST correction at the same rate
+    with a fresh stamp, so a laptop that went away looks exactly like one that is working. The
+    log line is where a running board tells the truth about the other side of the bridge — and
+    the broadcast goes on, because Nav2 here must not lose its global frame to a WiFi hiccup."""
+    node = slam_frame.SlamFrame()
+    _, on_correction = node.subs["/map_odom"]
+    on_correction(_shift(0.4, -0.2))
+    node.clock.seconds = slam_frame.SILENCE_S
+    node.timers[0][1]()
+    assert not node.logger.texts("warning"), "still within the patience"
+
+    node.clock.seconds = 9.0
+    node.timers[0][1]()
+    node.timers[0][1]()
+    warned = node.logger.texts("warning")
+    assert len(warned) == 1, "said once, not ten times a second"
+    assert "nothing on /map_odom for 9.0 s" in warned[0] and "1 heard" in warned[0]
+    assert len(node._tf.sent) == 3, "and the edge is broadcast all the same"
+
+    on_correction(_shift(0.5, -0.2))
+    assert "the correction is back" in node.logger.texts("info")[-1]
