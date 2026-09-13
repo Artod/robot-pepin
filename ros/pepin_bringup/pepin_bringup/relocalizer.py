@@ -31,7 +31,7 @@ each update as JSON for the operator. The watch, the whole-map search and the fi
 full revolutions only (:meth:`pepin.sources.SourceFeed.full_picture`).
 
 The watchdog: the same whole-map search runs CONTINUOUSLY on the laptop, which does it in a
-tenth of a second instead of seconds (:mod:`pepin_bringup.global_watch`), and its answers arrive
+tenth of a second instead of seconds (:mod:`pepin_bringup.laptop_localizer`), and its answers arrive
 here on ``/localization/candidate``. Each one is first carried from the moment of its own scan
 to this moment over the odometry between the two (``carry_candidates``) — a search plus a
 wireless hop is a quarter of a second, and on a driving cart that is the difference between
@@ -801,8 +801,10 @@ class Relocalizer(Node):
 
         Called on every input: a scan usually arrives before the odometry of its last beams and
         is released by the odometry sample that completes it, 30-70 ms later. Which source's
-        scan is released is the feed's call (the lidar while it is fresh, else the camera; a
-        stale lidar's death is what moves the anchor, never a restart). The scan is deskewed
+        scan is released is the feed's call — in practice the lidar's, the only scan source this
+        board still matches, and when nothing of its is fresh or waiting the camera's
+        measurements drive the update instead (:meth:`_track_on_measurements`). The scan is
+        deskewed
         with the history (every beam moved to where the robot was at the stamp) and the pose
         the localizer predicts from is the interpolated pose at that same stamp, so the
         residual the matcher reports is odometry error and nothing else.

@@ -422,7 +422,7 @@ def candidate_msg(
     stamp: float = 100.0,
     scan: int | None = None,
 ) -> Any:
-    """What pepin_bringup.global_watch publishes: one JSON message on /localization/candidate,
+    """What pepin_bringup.laptop_localizer publishes: one JSON message on /localization/candidate,
     off a fresh revolution unless ``scan`` names one."""
     return String(
         data=json.dumps(
