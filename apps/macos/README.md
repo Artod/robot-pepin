@@ -15,5 +15,5 @@ Start it at login: add a Login Item pointing at a one-line launcher such as
 `cd /path/to/pepin && nohup uv run --group macos python apps/macos/tray.py >/dev/null 2>&1 &`
 (a `launchd` plist in `~/Library/LaunchAgents` works too, and restarts it on crash).
 
-It is read-only: the app runs the same quick probes as `scripts/health_check.py`
+Two menu actions move the cart, each in its own Terminal window so the output is visible: *Turn once in place* (`ros/go.sh round`, one recorded 372-degree turn judged by the gyro) and *Teleop* (`ros/teleop.sh`, keys i / , / j / l, k or space stops, Ctrl-C ends). Everything else is read-only: the app runs the same quick probes as `scripts/health_check.py`
 (ssh vitals, servo ping, lidar and ToF stream rates) and never commands the robot.

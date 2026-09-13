@@ -245,6 +245,9 @@ class TrayApp(rumps.App):
             rumps.MenuItem("Open dashboard", callback=self._on_dashboard),
             rumps.MenuItem("Open logs folder", callback=self._on_logs),
             rumps.separator,
+            rumps.MenuItem("Turn once in place (recorded)", callback=self._on_turn),
+            rumps.MenuItem("Teleop in a terminal (i , j l, k stops)", callback=self._on_teleop),
+            rumps.separator,
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
 
@@ -278,6 +281,30 @@ class TrayApp(rumps.App):
         """Reveal the log folder in Finder."""
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self._spawn(["open", str(LOGS_DIR)])
+
+    def _on_turn(self, _sender: Any) -> None:
+        """One full turn in place (ros/go.sh round: 372 deg by the gyro, recorded), in a
+        Terminal window so the sweep and the verdict are visible; the cart moves."""
+        self._in_terminal("ros/go.sh round tray")
+
+    def _on_teleop(self, _sender: Any) -> None:
+        """Keyboard driving in a Terminal window (ros/teleop.sh: i forward, comma back,
+        j/l turn, k or space stops, Ctrl-C ends); the cart moves while keys are held."""
+        self._in_terminal("ros/teleop.sh")
+
+    def _in_terminal(self, command: str) -> None:
+        """Open Terminal.app on the repo root running one command; the window stays for
+        its output. Failures only reach the log."""
+        script = f"cd {REPO_ROOT} && {command}"
+        self._spawn(
+            [
+                "osascript",
+                "-e",
+                'tell application "Terminal" to activate',
+                "-e",
+                f'tell application "Terminal" to do script "{script}"',
+            ]
+        )
 
     @staticmethod
     def _spawn(command: list[str]) -> None:
