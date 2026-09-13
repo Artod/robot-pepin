@@ -1,12 +1,24 @@
 {
-  "origin_m": [-19.5, -5.5, -0.15],
-  "shape": [280, 250, 34],
+  "origin_m": [
+    -19.5,
+    -5.5,
+    -0.15
+  ],
+  "shape": [
+    280,
+    250,
+    34
+  ],
   "voxel_m": 0.05,
-  "truncation_m": 0.10,
+  "truncation_m": 0.1,
   "max_weight": 60.0,
   "range_max_m": 4.0,
   "weight_ref_m": 2.0,
   "weight_cap": 4.0,
   "band_half_z_m": 0.125,
-  "notes": "The grid covers the served map (flat3_straight: 239x215 cells at 5 cm from -18.53, -4.38) with half a metre of margin and 1.7 m of height from 15 cm below the floor. A frame integrates voxels within range_max of the camera; an observation from weight_ref_m weighs 1, nearer ones up to weight_cap, farther ones less. band_half_z_m is half the height band around the lidar's plane whose points are exact by construction and may seat a frame on the model; depth_fusion's live flag band_half_z starts from it. The plane itself is never written in a file twice: the node reads it from the published base_link -> laser edge (config/lidar.json's mount is the fallback)."
+  "camera_band_m": [
+    0.15,
+    1.3
+  ],
+  "notes": "The grid covers the served map (flat3_straight: 239x215 cells at 5 cm from -18.53, -4.38) with half a metre of margin and 1.7 m of height from 15 cm below the floor. A frame integrates voxels within range_max of the camera; an observation from weight_ref_m weighs 1, nearer ones up to weight_cap, farther ones less. band_half_z_m is half the height band around the lidar's plane whose points are exact by construction and may seat a frame on the model; depth_fusion's live flag band_half_z starts from it. The plane itself is never written in a file twice: the node reads it from the published base_link -> laser edge (config/lidar.json's mount is the fallback). camera_band_m is the height band the camera speaks for (the band /depth_scan marks in, pepin.depth): the slice the camera sources localise against and the one that carries seats and tabletops, pepin.worldmap."
 }

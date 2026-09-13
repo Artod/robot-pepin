@@ -633,7 +633,6 @@ class DepthFusion(Node):
         comes from and how old the snapshot is."""
         c = w.counts
         with self._lock:
-            stats = self._world.maturity()
             text = self._world.report()
         source = str(self._switches["map_source"])
         if source == "volume" and not self._map_mine:
@@ -643,8 +642,7 @@ class DepthFusion(Node):
         age = self._clock.age_s(time.monotonic())
         return (
             f"world: {c['revolutions']} revolutions ({c['scans_dropped']} dropped,"
-            f" {w.ms_per('scan', 'revolutions'):.0f} ms), {text}, mean weight"
-            f" {stats['mean_weight']:.1f}; /map from {source}; snapshot"
+            f" {w.ms_per('scan', 'revolutions'):.0f} ms), {text}; /map from {source}; snapshot"
             f" {'never' if age == math.inf else f'{age:.0f} s old'}"
         )
 

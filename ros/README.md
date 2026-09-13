@@ -67,6 +67,9 @@ Who owns what:
 | RTAB-Map's map frame | `rtabmap`, beside the real one | `map` — it *is* the real one |
 | its database | kept (`ros/maps/rtabmap.db`) | empty each session (`rtabmap_slam.db`) |
 
+(`/map` can also come from the fused volume in either mode — see [The world map](#the-world-map);
+it is still exactly one publisher, chosen by the mode.)
+
 `/tf` crosses the bridge board → laptop only (a topic allowed as a publisher on both sides loops
 until nothing crosses at all), so the correction RTAB-Map computes travels the other way as a
 message on `/map_odom` and becomes a transform on the board, where Nav2 and the behaviours look it
@@ -193,6 +196,53 @@ deletes it first, `--known-map` forces the old mode regardless of what the board
   board, so only the *value* is late, never the lookup.
 - `Grid/RangeMax 8.0` for the lidar grid and the camera-only ground/obstacle heights are
   first guesses from the known-map profile, not measurements.
+
+## The world map
+
+One map for both sensors, always alive. The fused volume (`pepin.tsdf`, built by
+`pepin_bringup.depth_fusion` on the laptop) is no longer a picture nobody localises against: the
+lidar writes its own layer into it and the volume IS the map (`src/pepin/worldmap.py`).
+
+- **The lidar's layer.** Every `/scan` is integrated at the height `config/lidar.json` calibrates
+  and nowhere else (the plane ± one voxel): each beam carves free space along its run and marks a
+  surface at its return, on the lidar's own weight channel. The camera keeps writing its band
+  through the same volume, but inside that layer it may not repaint a cell the lidar has spoken
+  for — the network's depth is scale-uncertain, the lidar's returns are metric truth.
+- **Slices.** A horizontal band of the volume reads out as an occupancy grid: `lidar_slice()` at
+  the lidar's plane (what the tracker matches and what goes out as `/map`), `camera_band_slice()`
+  over `camera_band_m` of `config/fusion.json` — the band `/depth_scan` marks in, where seats and
+  tabletops the lidar's plane cannot see are. A column is occupied where the field comes within
+  half a voxel of a surface, free where it stays a voxel away from anything, unknown between; a
+  cell speaks only once it carries `min_weight` observations. **Maturity is the weight in a cell,
+  not a flag**: nothing is ever "finished", a cell that stops being observed simply keeps its
+  weight and a chair that moves is cleared by the beams that cross it.
+- **`/map` has exactly one owner.** `pepin.deployment.map_owner` says who per bridge mode — the
+  board's `map_server` in `split` and `vision`, the laptop in `slam`. With `map_source=volume` the
+  fusion node publishes the lidar slice as `/map` (transient local, `map_hz`) where the laptop
+  owns it, and where the board does it refuses and says so in its report line. In SLAM mode
+  `ros/laptop.sh vslam --world-map` gives `/map` to the volume and leaves RTAB-Map's grid on
+  `/rtabmap/map`: two publishers of `/map` is the failure this table exists to prevent.
+- **Known room, unknown room, one machine.** The volume is written to `world_path`
+  (`/maps/world_live.npz`) every `snapshot_s` and at shutdown, and loaded at start
+  (`resume_volume`). A known room is a resumed snapshot — or a saved map seeded into the lidar's
+  layer with `seed_map:=/maps/flat3_straight.yaml` — and an unknown one an empty volume. There is
+  no mode switch between them, and the map keeps growing either way.
+
+```bash
+ros/laptop.sh vslam --world-map            # /map comes from the volume instead of RTAB-Map's grid
+ros/flags.sh set depth_fusion map_source file    # back to the old behaviour, live
+ros/flags.sh set depth_fusion lidar_layer false  # the volume goes back to being the camera's alone
+ros/flags.sh set depth_fusion snapshot_s 30      # write ros/maps/world_live.npz twice a minute
+```
+
+Offline, `WorldMap.export_pgm_yaml` writes the map_server pair every existing tool already reads
+(`ros/mode.sh nav /maps/NAME.yaml`, `pepin.mapping.grid_from_pgm`), so a volume can be frozen into
+a file exactly like `ros/map.sh save`.
+
+**The next step, not built:** re-fusing after a loop closure. A TSDF cannot be un-integrated, so a
+graph correction leaves the old geometry standing. The cure is to replay the frames at their
+corrected poses, and the snapshot already carries the index for it — every integration's stamp,
+sensor and pose — while the measurements themselves stay in the run tape, where they already live.
 
 ## Feature flags
 
