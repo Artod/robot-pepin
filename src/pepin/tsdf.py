@@ -19,6 +19,7 @@ tried and lagged behind a drive across the room (2026-09-11).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from dataclasses import dataclass
@@ -72,6 +73,15 @@ class GridSpec:
             weight_ref_m=float(data["weight_ref_m"]),
             weight_cap=float(data["weight_cap"]),
             **extra,
+        )
+
+    def centred_on_start(self) -> GridSpec:
+        """The same box with its x-y footprint centred on the map's origin: the shape a session
+        that starts in an unknown place needs (the map frame is born under the cart), against a
+        served map whose box covers that map's coordinates. Height is untouched."""
+        nx, ny, _nz = self.shape
+        return dataclasses.replace(
+            self, origin=(-nx * self.voxel_m / 2, -ny * self.voxel_m / 2, self.origin[2])
         )
 
     def observation_weight(self, depth: Floats) -> Floats:

@@ -412,3 +412,14 @@ def test_the_band_s_half_width_is_a_config_value_with_a_fallback(tmp_path: Path)
     silent.write_text("{}")
     assert band_half_z_m(silent) == BAND_HALF_Z_M
     assert band_half_z_m(tmp_path / "missing.json") == BAND_HALF_Z_M
+
+
+def test_a_slam_session_s_box_is_centred_on_where_the_cart_woke_up() -> None:
+    """The served map's box covers its own coordinates; a session born in an unknown place
+    puts the map origin under the cart, so the box must be centred there, height untouched."""
+    from pepin.tsdf import GridSpec
+
+    spec = GridSpec(origin=(-19.5, -5.5, -0.15), shape=(280, 250, 34), voxel_m=0.05)
+    c = spec.centred_on_start()
+    assert c.origin == (-7.0, -6.25, -0.15) and c.shape == spec.shape
+    assert c.origin[0] + c.shape[0] * c.voxel_m == 7.0  # the cart at (0, 0) sits in the middle

@@ -410,6 +410,12 @@ class DepthFusion(Node):
         super().__init__("depth_fusion")
         config = Path(str(self.declare_parameter("config", CONFIG).value))
         self._spec = GridSpec.load(config)
+        # An unknown place has no coordinates yet: the map frame is born under the cart, and a
+        # box laid out for the served map (flat3's -19.5..-5.5 m) would not even contain it
+        # (2026-09-13: 239 revolutions integrated only the far wall). In SLAM mode the box is
+        # centred on the start; the served-map box stays what the config says.
+        if str(self.declare_parameter("mode", "vision").value) == "slam":
+            self._spec = self._spec.centred_on_start()
         # The band's centre is the lidar's plane, and the only copy of it both sides of the
         # bridge agree on is the published base_link -> laser edge: this process reads
         # config/lidar.json from the laptop's checkout while the beams are published from the
@@ -422,7 +428,7 @@ class DepthFusion(Node):
         # Which side owns /map in the mode the stack was brought up in: with the board serving a
         # saved map, a second publisher here would give the costmaps two maps and the tracker a
         # map to rebuild on every second (2026-09-10 01:00, RTAB-Map's grid beside the board's).
-        self._mode = str(self.declare_parameter("mode", "vision").value)
+        self._mode = str(self.get_parameter("mode").value)
         # The other half of the same question, and it is a launch decision, not a live one: in
         # SLAM the launch remaps RTAB-Map's grid onto /map unless it was brought up with
         # world_map:=true, and no flag set afterwards can move that remap. Told here so that

@@ -35,3 +35,4 @@ ros/maps/last_pose.json
 
 # written by the depth node at run time (the persisted affine law)
 ros/maps/depth_law.json
+ros/maps/world_*.npz
