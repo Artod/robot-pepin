@@ -253,7 +253,7 @@ class BridgeWatch(Node):
         self._local_zid: str | None = None
         self._allowed: tuple[str, ...] = ()
         self._wanted: dict[str, str] = {}  # topic -> ROS type, filled by the worker
-        self._subscriptions: dict[str, Any] = {}  # topic -> subscription
+        self._probes: dict[str, Any] = {}  # topic -> subscription
         self._unknown: set[str] = set()  # topics whose ROS type this image cannot resolve
         self._counts: dict[str, int] = {}
         self._reported: dict[str, int] = {}
@@ -290,7 +290,7 @@ class BridgeWatch(Node):
         and it asks the bridge for no retransmission of its own.
         """
         for topic, type_name in list(self._wanted.items()):
-            if topic in self._subscriptions:
+            if topic in self._probes:
                 continue
             message = self.message_class(type_name)
             if message is None:
@@ -304,7 +304,7 @@ class BridgeWatch(Node):
                 else ReliabilityPolicy.BEST_EFFORT
             )
             self._counts.setdefault(topic, 0)
-            self._subscriptions[topic] = self.create_subscription(
+            self._probes[topic] = self.create_subscription(
                 message,
                 topic,
                 lambda _msg, topic=topic: self.count(topic),

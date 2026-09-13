@@ -2023,7 +2023,10 @@ def test_the_calibration_tool_is_reachable_as_one_command() -> None:
 def test_no_node_shadows_an_rclpy_node_attribute() -> None:
     """rclpy.Node keeps its clock, logger, parameters and handles in private attributes; a node
     that assigns its own `self._clock` dies at its first timer (2026-09-13, the fusion node's
-    snapshot clock). The stubs cannot catch it, so the contract does."""
+    snapshot clock; 2026-09-13 again, the bridge watch's `self._subscriptions: dict = {}`,
+    which the regex without the annotation missed — rclpy appends every new subscription to
+    that list and the node died at its first attach). The stubs cannot catch it, so the
+    contract does."""
     import re
     from pathlib import Path
 
@@ -2048,7 +2051,7 @@ def test_no_node_shadows_an_rclpy_node_attribute() -> None:
         f"{p.name}: self.{name}"
         for p in sorted(nodes.glob("*.py"))
         for name in owned
-        if re.search(rf"self\.{name}\s*=", p.read_text())
+        if re.search(rf"self\.{name}\s*(:[^=\n]*)?=", p.read_text())  # annotated too
     ]
     assert offenders == [], offenders
 
