@@ -149,3 +149,34 @@ def test_an_imu_reading_becomes_two_vectors() -> None:
     )
     accel, gyro = msgs.imu_arrays(imu)
     assert accel.tolist() == [0.1, 9.8, 0.2] and gyro.tolist() == [0.0, 0.0, 0.5]
+
+
+def test_a_world_slice_becomes_the_map_the_tracker_rebuilds_on() -> None:
+    """The whole point of the world map: the volume's lidar layer, packed as a nav_msgs map,
+    is exactly the grid the tracker builds from /map today — so the tracker needs no change
+    when the volume starts publishing it (pepin_bringup.relocalizer.grid_from_msg)."""
+    from pepin_bringup.relocalizer import grid_from_msg
+
+    from pepin.tsdf import GridSpec
+    from pepin.worldmap import PlanarMount, WorldMap
+
+    world = WorldMap(GridSpec(origin=(-2.0, -2.0, -0.15), shape=(80, 80, 20)), PlanarMount(z_m=0.2))
+    angles = np.linspace(-math.pi, math.pi, 360, endpoint=False)
+    ranges = np.full(angles.size, 1.2)
+    pose = RigidPose(np.eye(3), np.zeros(3))
+    for _ in range(8):
+        world.integrate_scan(angles, ranges, pose)
+    view = world.lidar_slice()
+    assert view.counts()["occupied"] > 0 and view.counts()["free"] > 0
+
+    message = msgs.occupancy_grid(view.message_fields(), msgs.stamp_from_seconds(12.5), "map")
+    assert message.header.frame_id == "map" and message.info.resolution == 0.05
+    assert (message.info.width, message.info.height) == (80, 80)
+    assert (message.info.origin.position.x, message.info.origin.position.y) == (-2.0, -2.0)
+    assert len(message.data) == 6400
+
+    grid = grid_from_msg(message)
+    mine = view.to_log_odds()
+    assert grid.spec == mine.spec
+    assert np.array_equal(grid.log_odds, mine.log_odds)
+    assert np.array_equal(np.sort(grid.occupied_xy(), axis=0), np.sort(mine.occupied_xy(), axis=0))

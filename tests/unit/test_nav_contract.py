@@ -1114,6 +1114,9 @@ def test_the_frames_are_fused_into_one_surface_beside_rtabmap_s_cloud() -> None:
     fusion_flags = load_table(REPO / NODES / "depth_fusion.py")
     assert {"enabled", "align", "min_weight", "surface_hz"} <= set(fusion_flags.names)
     assert fusion_flags.flag("surface_hz").range is not None, "a rate is bounded"
+    assert fusion_flags.flag("map_source").choices == ("file", "volume")
+    assert fusion_flags.flag("map_source").default == "file", "the old behaviour is the default"
+    assert not fusion_flags.flag("resume_volume").live, "a start-up choice, not a live switch"
     assert "Switches" in sf.imported(node) and "self._switches.state" in sf.calls(node)
     assert {"/fusion/reset", "/fusion/surface"} <= sf.strings(node)
     for name in ("pepin_3d.json", "pepin_nav.json"):
@@ -1122,6 +1125,26 @@ def test_the_frames_are_fused_into_one_surface_beside_rtabmap_s_cloud() -> None:
         assert panel["topics"]["/fusion/surface"]["visible"] is True
         assert panel["topics"]["/fusion/surface"]["colorMode"] == "rgb"
         assert panel["topics"]["/rtabmap/cloud_map"]["visible"] is False
+
+
+def test_the_volume_is_the_map_and_only_one_side_publishes_it() -> None:
+    """pepin.worldmap in the node: /scan is integrated into the same volume the camera writes,
+    the lidar layer reads out as /map when the flag says volume AND the mode says this side
+    owns /map, and the snapshot is what a next run resumes from. The launch tells the node
+    which mode the stack is in — nothing else can know it."""
+    node = sf.tree(f"{NODES}/depth_fusion.py")
+    assert {"WorldMap", "PlanarMount", "SliceLaw", "SnapshotClock"} <= sf.imported(node)
+    assert "map_owner" in sf.imported(node), "who owns /map is deployment's table, not a guess"
+    assert sf.assignments(node)["LIDAR_CONFIG"] == "'/ws/config/lidar.json'", "the plane is read"
+    assert {"/scan", "/map"} <= sf.strings(node)
+    calls = sf.calls(node)
+    assert "self._world.integrate_scan" in calls and "self._world.integrate_depth" in calls
+    assert "self._world.lidar_slice" in calls and "self._world.save" in calls
+    vslam = sf.tree(VSLAM_LAUNCH)
+    assert "world_map" in sf.strings(vslam), "a launch argument of its own"
+    passed = sf.unparsed(vslam, ast.JoinedStr)
+    assert any("mode:=" in text for text in passed), "the node is told the bridge mode"
+    assert any("map_source:=" in text for text in passed)
 
 
 def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_prints() -> None:
@@ -1594,9 +1617,13 @@ def test_online_slam_has_one_map_and_one_owner_of_map_to_odom() -> None:
     under_slam = [
         ast.unparse(n)
         for n in ast.walk(vslam)
-        if isinstance(n, ast.If) and ast.unparse(n.test) == "slam"
+        if isinstance(n, ast.If) and ast.unparse(n.test) == "slam and (not world_map)"
     ]
-    assert any("remappings.append(('map', '/map'))" in b for b in under_slam), "only in this mode"
+    assert any("remappings.append(('map', '/map'))" in b for b in under_slam), (
+        "only in this mode, and only while the fused volume is not the map itself:"
+        " with world_map:=true pepin_bringup.depth_fusion publishes /map and RTAB-Map"
+        " keeps its own name, because two publishers of /map is the failure this prevents"
+    )
     # An empty database every session, and never the known map's file.
     assert sf.dict_items(vslam)["delete_db_on_start"] == {"slam and (not resume)"}
     names = sf.assignments(vslam)

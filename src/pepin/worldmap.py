@@ -616,6 +616,15 @@ class WorldMap:
         return int(gx.size)
 
 
+def trinary_from_log_odds(grid: OccupancyGrid) -> tuple[Int8, float, tuple[float, float]]:
+    """A log-odds grid — a saved map read by :func:`pepin.mapping.grid_from_pgm`, or the
+    tracker's own — as the (values, resolution, origin) :meth:`WorldMap.seed_from_grid` takes."""
+    values = np.where(
+        grid.log_odds > 0.0, OCCUPIED, np.where(grid.log_odds < 0.0, FREE, UNKNOWN)
+    ).astype(np.int8)
+    return values, grid.spec.resolution_m, (grid.spec.x_min_m, grid.spec.y_min_m)
+
+
 def bearings_in_base(angles: Array, mount_yaw: float, mirrored: bool) -> Array:
     """Sensor-frame beam angles as robot-frame bearings, the conversion
     :func:`pepin.timeline.timed_scan_from_ros` makes on its points: mirrored for an upside-down

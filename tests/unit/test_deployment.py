@@ -190,6 +190,27 @@ def test_the_bridge_s_vision_mode_routes_the_board_s_plan_out_and_nothing_back_b
     assert bridge_admin_for("board") == bridge_admin_for("all") == "http://127.0.0.1:8000"
 
 
+def test_exactly_one_side_owns_the_map_in_every_mode() -> None:
+    """Who publishes /map, mode by mode: the board serves the saved map beside its tracker, and
+    only in SLAM mode is the laptop's own grid the map. The world volume on the laptop asks
+    this before it publishes anything (pepin_bringup.depth_fusion, flag map_source)."""
+    import re
+
+    from pepin.deployment import BRIDGE_MODES, bridge_allow, map_owner
+
+    assert [map_owner(mode) for mode in BRIDGE_MODES] == ["board", "board", "laptop"]
+    for mode in BRIDGE_MODES:
+        owner = map_owner(mode)
+        publishes = re.compile(bridge_allow(owner, mode)["publishers"][0])
+        across = bridge_allow("laptop" if owner == "board" else "board", mode)
+        other = re.compile(across["publishers"][0])
+        assert publishes.search("/map"), f"{mode}: the owner may publish /map over the bridge"
+        assert not other.search("/map"), f"{mode}: the other side may not"
+    assert map_owner() == "board"
+    with pytest.raises(ValueError):
+        map_owner("cloud")
+
+
 def test_the_container_s_names_are_the_ones_its_respawn_must_see_gone() -> None:
     from pepin.deployment import laptop_launch_nodes, nav_container_nodes
 

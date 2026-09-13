@@ -17,27 +17,42 @@ while the tracker reports a fit the cart may drive on (``/localization_fit`` >=
 fused frame — the board's clock) is the zero-crossing of the field, published beside RTAB-Map's
 cloud.
 
+THE WORLD MAP. The same volume is also the map itself (:mod:`pepin.worldmap`): ``/scan`` is
+integrated into it at the lidar's own plane — rays carving free space, a surface at each return,
+on the lidar's own weight channel, which the camera's scale-uncertain depth may not repaint —
+and the layer at that plane reads out as an occupancy grid. With ``map_source=volume`` that grid
+goes out as ``/map`` at ``map_hz`` (transient local), so the tracker and Nav2 localise and plan
+on the volume instead of on a frozen file, and a "known room" is just a volume that was seeded
+(``seed_map``) or resumed from a snapshot (``resume_volume``) instead of an empty one. Exactly
+one side publishes /map (:func:`pepin.deployment.map_owner`): where the board serves it, this
+node says so and stays quiet. The volume is snapshotted to ``world_path`` every
+``snapshot_s`` and at shutdown.
+
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
-``align``, ``min_weight``, ``surface_hz``, ``band_half_z``; their state is printed in every
-report line, beside the band itself and the source of the plane it is centred on.
-``/fusion/reset`` (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
+``align``, ``min_weight``, ``surface_hz``, ``band_half_z``, ``lidar_layer``, ``map_source``,
+``map_hz``, ``snapshot_s``, ``resume_volume``; their state is printed in every report line,
+beside the band itself and the source of the plane it is centred on. ``/fusion/reset``
+(std_srvs/Trigger) empties the model, the pairing queues and the tallies.
 """
 
 from __future__ import annotations
 
 import math
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from message_filters import Subscriber, TimeSynchronizer
+from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import CameraInfo, Image, PointCloud2
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2
 from std_msgs.msg import Float32
 from std_srvs.srv import Trigger
 
+from pepin.deployment import map_owner
 from pepin.depth import Intrinsics
 from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import BASE_FRAME, FramePoser
@@ -47,13 +62,27 @@ from pepin.tsdf import (
     AlignReason,
     GridSpec,
     RigidPose,
-    Tsdf,
     align_yaw,
     backproject,
     band_half_z_m,
 )
 from pepin.watch import DRIVE_FIT
-from pepin_bringup.msgs import array_from_image, cloud_from_points, stamp_seconds
+from pepin.worldmap import (
+    PlanarMount,
+    SliceLaw,
+    SnapshotClock,
+    WorldMap,
+    bearings_in_base,
+    trinary_from_log_odds,
+)
+from pepin_bringup.msgs import (
+    array_from_image,
+    cloud_from_points,
+    occupancy_grid,
+    rpy_from_transform,
+    scan_arrays,
+    stamp_seconds,
+)
 from pepin_bringup.node_kit import (
     Switches,
     Tally,
@@ -65,13 +94,16 @@ from pepin_bringup.node_kit import (
 )
 
 CONFIG = "/ws/config/fusion.json"
+LIDAR_CONFIG = "/ws/config/lidar.json"
+WORLD_PATH = "/maps/world_live.npz"  # the volume's snapshot; ros/maps is mounted there
+SCAN_TOPIC = "/scan"
 TF_WAIT_S = 0.3
 BAND_TF_WAIT_S = 5.0  # the static base_link -> laser edge at start: the board publishes it once
 PAIR_QUEUE = 40  # depth arrives a fraction of a second after its image; pair by exact stamp
 BAND_STRIDE = 3
 BAND_MIN_POINTS = 50  # a frame with fewer points in the band is not worth a yaw search
 AT_BOUND_STREAK = 30  # ~3 s of frames refused at the search's bound: the model no longer fits
-STAGES = ("align", "integrate")
+STAGES = ("align", "integrate", "scan", "map")
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration; their state is printed in every report line.
@@ -119,6 +151,38 @@ FLAGS = FlagSet(
         " plane the published base_link -> laser edge names, and both are printed in the"
         " report line",
     ),
+    Flag(
+        "lidar_layer",
+        True,
+        description="/scan is integrated into the volume at the lidar's plane (rays carve free"
+        " space, returns mark a surface); off, the volume is the camera's alone, as it was",
+    ),
+    Flag(
+        "map_source",
+        "file",
+        choices=("file", "volume"),
+        description="where /map comes from: the saved file another node serves, or the volume's"
+        " own lidar layer published from here at map_hz",
+    ),
+    Flag(
+        "map_hz",
+        1.0,
+        range=(0.1, 5.0),
+        description="how often the volume's layer goes out as /map when map_source is volume",
+    ),
+    Flag(
+        "snapshot_s",
+        60.0,
+        range=(0.0, 3600.0),
+        description="how often the volume is written to world_path (0: only at shutdown)",
+    ),
+    Flag(
+        "resume_volume",
+        True,
+        live=False,
+        description="a volume snapshot at world_path is loaded at start, so a known room is a"
+        " resumed volume; off, the volume starts empty and grows from the sensors",
+    ),
 )
 
 
@@ -149,6 +213,18 @@ class DepthFusion(Node):
         self._plane_z_m = load_lidar_mount().z_m
         self._plane_source = "config"
         self._band_z_m = band_z_m(self._plane_z_m, band_half_z_m())
+        # Which side owns /map in the mode the stack was brought up in: with the board serving a
+        # saved map, a second publisher here would give the costmaps two maps and the tracker a
+        # map to rebuild on every second (2026-09-10 01:00, RTAB-Map's grid beside the board's).
+        self._mode = str(self.declare_parameter("mode", "vision").value)
+        self._map_mine = map_owner(self._mode) == "laptop"
+        self._world_path = Path(str(self.declare_parameter("world_path", WORLD_PATH).value))
+        self._seed_map = str(self.declare_parameter("seed_map", "").value)
+        # The lidar's plane is calibrated, never typed: it comes from config/lidar.json, the one
+        # file the board's launch publishes the laser transform from.
+        self._mount = PlanarMount.from_config(
+            str(self.declare_parameter("lidar_config", LIDAR_CONFIG).value)
+        )
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._tally = Tally(STAGES)
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
@@ -169,26 +245,65 @@ class DepthFusion(Node):
         self._intr: Intrinsics | None = None
         self._fit = 0.0  # no report yet reads as lost: every gate here compares with <
         self._lock = threading.Lock()  # the model and its last stamp, worker vs publisher
-        self._model = Tsdf(self._spec)
+        self._world = WorldMap(self._spec, self._mount)
         self._last_stamp: Any = None  # the last fused frame's header stamp, the board's clock
         self._bound_streak = 0  # consecutive frames refused at the bound (self-healing)
         self._surface_points = 0
         self._worker = Worker(self._on_work, name="fusion", on_error=self._on_work_error).start()
+        # The scan has its own worker: integrating a revolution takes milliseconds, but it waits
+        # for the lock a camera frame holds, and the executor thread must not wait with it.
+        self._scans = Worker(self._on_scan_work, name="scan", on_error=self._on_work_error).start()
+        self.create_subscription(LaserScan, SCAN_TOPIC, self._on_scan, QoSProfile(depth=2))
+        self._laser: tuple[PlanarMount, float, bool] | None = None  # mount, yaw, upside down
+        self._map_pub: Any = None  # made on the first publish: only where this side owns /map
+        self._clock = SnapshotClock(float(self._switches["snapshot_s"]))
+        self._start_state()
         self._surface_timer = self.create_timer(
             self._period(self._switches["surface_hz"]), self._publish_surface
+        )
+        self._map_timer = self.create_timer(
+            self._period(self._switches["map_hz"]), self._publish_map
         )
         self.create_timer(30.0, self._report)
         nx, ny, nz = self._spec.shape
         self.get_logger().info(
             f"fusion up: {nx}x{ny}x{nz} voxels of {self._spec.voxel_m * 100:.0f} cm from"
             f" {self._spec.origin}; {self._switches.state()}; {self._band_text()}; fused while"
-            f" /localization_fit >= {DRIVE_FIT:.2f}"
+            f" /localization_fit >= {DRIVE_FIT:.2f}; mode {self._mode}, /map is the"
+            f" {map_owner(self._mode)}'s; snapshot {self._world_path}"
         )
 
+    def _start_state(self) -> None:
+        """What the volume starts as: a resumed snapshot, else a saved map written into the
+        lidar's layer, else empty. All three are the same machine afterwards — the difference
+        between a known room and an unknown one is only what is already in the cells."""
+        if self._switches.on("resume_volume") and self._world_path.exists():
+            try:
+                self._world = WorldMap.load(self._world_path, self._mount)
+            except (ValueError, OSError) as exc:
+                self.get_logger().warning(f"{self._world_path}: not resumed ({exc})")
+            else:
+                stats = self._world.maturity()
+                self.get_logger().info(
+                    f"resumed {self._world_path}: {stats['voxels']:.0f} voxels,"
+                    f" {stats['frames']:.0f} frames, stamp {self._world.stamp:.0f}"
+                )
+                return
+        if self._seed_map:
+            from pepin.mapping import grid_from_pgm
+
+            seeded = self._world.seed_from_grid(
+                *trinary_from_log_odds(grid_from_pgm(self._seed_map))
+            )
+            self.get_logger().info(f"seeded the lidar layer from {self._seed_map}: {seeded} cells")
+
     def close(self) -> None:
-        """Stop the worker and the TF listener and wait for them, before the node is destroyed."""
+        """Stop the workers and the TF listener, snapshot the volume, and wait for them all,
+        before the node is destroyed: a run's map outlives the run."""
         if not self._worker.stop():
             self.get_logger().warning("the fusion worker did not finish its frame; leaving anyway")
+        self._scans.stop()
+        self._snapshot()
         self._tf.close()
 
     @staticmethod
@@ -233,17 +348,22 @@ class DepthFusion(Node):
 
     # ---- switches ------------------------------------------------------------------------
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
-        """A flag changed: ``band_half_z`` rebuilds the height band, ``surface_hz`` retimes the
-        publisher; every other flag is only read."""
+        """A flag changed: ``band_half_z`` rebuilds the height band, the two rates retime their
+        timer, ``snapshot_s`` its clock, and the rest are only read where they are used."""
         if name == "band_half_z":
             self._set_band()
             return
-        if name != "surface_hz":
+        if name == "snapshot_s":
+            self._clock = SnapshotClock(float(new), self._clock.last_s)
             return
+        timers = {"surface_hz": "_surface_timer", "map_hz": "_map_timer"}
+        if name not in timers:
+            return
+        timer = getattr(self, timers[name])
         try:
-            self._surface_timer.timer_period_ns = int(self._period(float(new)) * 1e9)
+            timer.timer_period_ns = int(self._period(float(new)) * 1e9)
         except (AttributeError, TypeError) as exc:  # an rclpy without a live period
-            raise ValueError(f"surface_hz cannot change live: {exc}") from exc
+            raise ValueError(f"{name} cannot change live: {exc}") from exc
 
     def _on_work_error(self, text: str) -> None:
         self.get_logger().error(f"fusion failed on a frame:\n{text}")
@@ -255,9 +375,10 @@ class DepthFusion(Node):
 
     def _on_reset(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         with self._lock:
-            self._model = Tsdf(self._spec)
+            self._world = WorldMap(self._spec, self._mount)
             self._last_stamp = None
         self._worker.clear()
+        self._scans.clear()
         with self._sync.lock:
             for queue in self._sync.queues:
                 queue.clear()
@@ -280,6 +401,64 @@ class DepthFusion(Node):
         self._tally.count("pairs")
         if self._worker.offer((depth, image)):
             self._tally.count("dropped")
+
+    def _on_scan(self, msg: LaserScan) -> None:
+        """A lidar revolution: straight to its worker, newest first (an older one still waiting
+        is dropped — the volume wants the room as it is, not a backlog)."""
+        self._tally.count("scans_in")
+        if self._scans.offer(msg):
+            self._tally.count("scans_dropped")
+
+    def _on_scan_work(self, msg: LaserScan) -> None:
+        """One revolution into the volume at the pose TF gives for its stamp: rays carve free
+        space, returns mark a surface, all of it at the lidar's plane (pepin.worldmap)."""
+        if not self._switches.on("lidar_layer"):
+            return
+        if self._laser is None and not self._lookup_laser(msg.header.frame_id):
+            return
+        assert self._laser is not None
+        mount, yaw, mirrored = self._laser
+        at = stamp_seconds(msg.header.stamp)
+        base = self._poser.base_in_map(at)
+        if base is None:
+            return  # counted by the TF failure handler
+        angles, ranges = scan_arrays(msg)
+        with self._tally.measure("scan"), self._lock:
+            touched = self._world.integrate_scan(
+                bearings_in_base(angles, yaw, mirrored), ranges, base, mount, stamp=at
+            )
+        self._tally.count("revolutions")
+        self._tally.count("scan_voxels", touched)
+        if self._clock.due(time.monotonic()) and self._switches["snapshot_s"] > 0.0:
+            self._snapshot()
+
+    def _lookup_laser(self, frame: str) -> bool:
+        """The static base_link <- laser transform: the beams' angle domain (the sensor hangs
+        upside down, so its angles run clockwise) and the mount the rays start from. The height
+        stays the calibrated one from config/lidar.json; the ranges are the scan's own."""
+        transform = self._tf.transform("base_link", frame)
+        if transform is None:
+            return False  # not yet there: try on the next scan
+        x, y, z, roll, _pitch, yaw = rpy_from_transform(transform)
+        mirrored = abs(abs(roll) - math.pi) < 0.2
+        self._laser = (self._mount, yaw, mirrored)
+        self.get_logger().info(
+            f"laser mount: x {x:.3f} y {y:.3f} z {z:.3f} yaw {math.degrees(yaw):.1f} deg,"
+            f" {'upside down' if mirrored else 'upright'}; the layer sits at"
+            f" {self._mount.z_m:.3f} m (config/lidar.json)"
+        )
+        return True
+
+    def _snapshot(self) -> None:
+        """Write the volume to ``world_path`` — the warm cache a next run resumes from."""
+        try:
+            with self._lock:
+                self._world.save(self._world_path)
+        except OSError as exc:
+            self.get_logger().warning(f"{self._world_path}: not written ({exc})")
+            return
+        self._clock.done(time.monotonic())
+        self._tally.count("snapshots")
 
     def _on_work(self, pair: tuple[Image, Image]) -> None:
         """The worker's item: a pair is fused unless the node is switched off."""
@@ -322,7 +501,7 @@ class DepthFusion(Node):
                 return  # AT_BOUND: counted, not integrated
             camera = aligned
         with self._tally.measure("integrate"), self._lock:
-            touched = self._model.integrate(depth, rgb, intr, camera)
+            touched = self._world.integrate_depth(depth, rgb, intr, camera, stamp=at)
             self._last_stamp = stamp
         self._tally.count("frames")
         self._tally.count("voxels", touched)
@@ -342,7 +521,7 @@ class DepthFusion(Node):
             return camera
         pivot = (float(base.translation[0]), float(base.translation[1]))
         with self._lock:
-            verdict = align_yaw(self._model, band, pivot)
+            verdict = align_yaw(self._world.volume, band, pivot)
         if verdict.reason is AlignReason.ALIGNED:
             self._bound_streak = 0
             self._tally.sample("yaw_deg", math.degrees(verdict.yaw))
@@ -363,7 +542,7 @@ class DepthFusion(Node):
         room has moved on (a head that turned, a law that drifted) and the surface would stay
         frozen forever; the next frame seeds a fresh model instead."""
         with self._lock:
-            self._model = Tsdf(self._spec)
+            self._world = WorldMap(self._spec, self._mount)
             self._last_stamp = None
         self._bound_streak = 0
         self._tally.count("self_heals")
@@ -378,7 +557,7 @@ class DepthFusion(Node):
     # ---- outputs -------------------------------------------------------------------------
     def _publish_surface(self) -> None:
         with self._lock:  # a copy under the lock (milliseconds), the crossing search outside it
-            snapshot = self._model.snapshot()
+            snapshot = self._world.volume.snapshot()
             stamp = self._last_stamp
         points, colours = snapshot.surface(self._switches["min_weight"])
         self._surface_points = int(points.shape[0])  # a level the report reads, not a tally
@@ -391,6 +570,42 @@ class DepthFusion(Node):
                 "map",
             )
         )
+
+    def _publish_map(self) -> None:
+        """The volume's lidar layer as /map, at ``map_hz``, when the flag says the map comes
+        from the volume and the mode says this side owns /map."""
+        if self._switches["map_source"] != "volume":
+            return
+        if not self._map_mine:
+            self._tally.count("map_refused")
+            return
+        with self._tally.measure("map"), self._lock:
+            view = self._world.lidar_slice(SliceLaw(min_weight=self._switches["min_weight"]))
+            stamp = self._last_stamp
+        if self._map_pub is None:  # transient local: a late subscriber still gets the map
+            self._map_pub = self.create_publisher(
+                OccupancyGridMsg,
+                "/map",
+                QoSProfile(
+                    depth=1,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                ),
+            )
+            self.get_logger().info(
+                f"/map is the volume's now: {view.shape[1]}x{view.shape[0]} cells of"
+                f" {view.resolution_m * 100:.0f} cm from {view.origin}, the layer"
+                f" {view.band_m[0]:.2f}-{view.band_m[1]:.2f} m"
+            )
+        self._map_pub.publish(
+            occupancy_grid(
+                view.message_fields(),
+                stamp if stamp is not None else self.get_clock().now().to_msg(),
+                "map",
+            )
+        )
+        self._tally.count("maps")
+        self._map_counts = view.counts()
 
     def _report(self) -> None:
         self._read_plane(0.0)  # a board that came up after this node still moves the band
@@ -409,8 +624,28 @@ class DepthFusion(Node):
             f" align {w.ms_per('align', 'frames'):.0f} ms, {self._turns(w)};"
             f" refused: {self._refusals(w) or 'none'}; skipped: {skipped};"
             f" no image {c['no_image']}; surface {self._surface_points} points;"
-            f" {self._band_text()};"
+            f" {self._band_text()}; {self._world_line(w)};"
             f" flags: {self._switches.state()}" + (f"; tf: {tf_text}" if tf_text else "")
+        )
+
+    def _world_line(self, w: Window) -> str:
+        """The map half of the report: what the lidar wrote, what the slices hold, where /map
+        comes from and how old the snapshot is."""
+        c = w.counts
+        with self._lock:
+            stats = self._world.maturity()
+            text = self._world.report()
+        source = str(self._switches["map_source"])
+        if source == "volume" and not self._map_mine:
+            source = f"volume (refused {c['map_refused']}x: /map is the {map_owner(self._mode)}'s)"
+        elif source == "volume":
+            source = f"volume ({c['maps']} published, {w.ms_per('map', 'maps'):.0f} ms)"
+        age = self._clock.age_s(time.monotonic())
+        return (
+            f"world: {c['revolutions']} revolutions ({c['scans_dropped']} dropped,"
+            f" {w.ms_per('scan', 'revolutions'):.0f} ms), {text}, mean weight"
+            f" {stats['mean_weight']:.1f}; /map from {source}; snapshot"
+            f" {'never' if age == math.inf else f'{age:.0f} s old'}"
         )
 
     @staticmethod

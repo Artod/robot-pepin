@@ -28,6 +28,7 @@ from pepin.worldmap import (
     SnapshotClock,
     WorldMap,
     bearings_in_base,
+    trinary_from_log_odds,
 )
 
 ROOM_M = 2.0  # the box: walls at x, y = +-2 m
@@ -322,6 +323,15 @@ def test_a_saved_map_seeds_the_layer_as_the_starting_state() -> None:
         fresh.integrate_scan(angles, np.full_like(ranges, 2.5), at())
     assert cell_of(fresh.lidar_slice(), 2.0, 0.0) == FREE
     assert not wall_at(fresh.lidar_slice(), 2.0, 0.0)
+
+
+def test_a_saved_pgm_seeds_the_volume_through_the_existing_loader(tmp_path: Path) -> None:
+    """The path a known room takes today: map_server's pair -> log-odds -> the lidar's layer."""
+    world = room()
+    yaml_path = world.export_pgm_yaml(tmp_path / "flat.npz")
+    fresh = WorldMap(spec(), mount())
+    assert fresh.seed_from_grid(*trinary_from_log_odds(grid_from_pgm(yaml_path))) > 0
+    assert np.array_equal(fresh.lidar_slice().values, world.lidar_slice().values)
 
 
 def test_seeding_a_map_that_misses_the_volume_writes_nothing() -> None:

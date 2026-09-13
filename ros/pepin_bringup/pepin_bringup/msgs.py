@@ -17,6 +17,7 @@ import numpy as np
 import numpy.typing as npt
 from builtin_interfaces.msg import Time as TimeMsg
 from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
+from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import Image, LaserScan, PointCloud2, PointField
 from std_msgs.msg import Header
 
@@ -24,6 +25,7 @@ from pepin.camera import quaternion_from_rpy
 from pepin.depth import decode_rgb, quaternion_from_matrix, rotation_matrix
 from pepin.mounts import Mount
 from pepin.tsdf import RigidPose
+from pepin.worldmap import OccupancyGridFields
 
 Array = npt.NDArray[np.float64]
 
@@ -220,6 +222,22 @@ def scan_arrays(msg: Any) -> tuple[Array, Array]:
     with np.errstate(invalid="ignore"):
         valid = np.isfinite(r) & (r >= msg.range_min) & (r <= msg.range_max)
     return angles, np.where(valid, r, np.nan)
+
+
+# ---- maps ----------------------------------------------------------------------------------
+def occupancy_grid(fields: OccupancyGridFields, stamp: Any, frame_id: str) -> Any:
+    """A grid of 0 free / 100 occupied / -1 unknown as a ``nav_msgs/OccupancyGrid``: the cells
+    row-major from the origin corner, which is where the map's own (0, 0) cell sits. What
+    :meth:`pepin.worldmap.WorldMap.to_occupancy_grid_message_fields` hands over, packed."""
+    msg = OccupancyGrid()
+    msg.header = header(stamp, frame_id)
+    msg.info.resolution = float(fields.resolution)
+    msg.info.width, msg.info.height = int(fields.width), int(fields.height)
+    msg.info.origin.position.x = float(fields.origin_x)
+    msg.info.origin.position.y = float(fields.origin_y)
+    msg.info.origin.orientation.w = 1.0
+    msg.data = fields.as_list()
+    return msg
 
 
 # ---- point clouds --------------------------------------------------------------------------

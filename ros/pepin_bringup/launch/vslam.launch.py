@@ -189,6 +189,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     slam = _flag(context, "slam")
     camera_only = _flag(context, "camera_only")
     resume = _flag(context, "resume")
+    world_map = _flag(context, "world_map")
     database = LaunchConfiguration("database").perform(context) or (
         SLAM_DATABASE if slam else KNOWN_MAP_DATABASE
     )
@@ -273,8 +274,20 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # The same frames fused into one surface (pepin_bringup.depth_fusion): RTAB-Map keeps the
     # graph, the closures and the place recognition; the voxels the operator looks at come from
     # here, beside RTAB-Map's own cloud for comparison.
+    # The volume is also the map (pepin.worldmap): the node is told which bridge mode the stack
+    # is in, because exactly one side may publish /map, and with world_map:=true it is the
+    # laptop's volume rather than RTAB-Map's grid (see the remapping below).
     fusion = ExecuteProcess(
-        cmd=["python3", "-m", "pepin_bringup.depth_fusion"],
+        cmd=[
+            "python3",
+            "-m",
+            "pepin_bringup.depth_fusion",
+            "--ros-args",
+            "-p",
+            f"mode:={'slam' if slam else 'vision'}",
+            "-p",
+            f"map_source:={'volume' if world_map else 'file'}",
+        ],
         output="screen",
         prefix=_after_ghost("/depth_fusion"),
         **RESPAWN,
@@ -285,9 +298,11 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         ("depth/image", "/camera/depth"),
         ("scan", "/scan"),
     ]
-    if slam:
+    if slam and not world_map:
         # In SLAM mode this grid IS the map: /map, transient local, read by the board's global
         # costmap over the bridge. Beside a known map it stays /rtabmap/map, out of Nav2's way.
+        # With world_map the volume publishes /map instead, and RTAB-Map keeps its own name:
+        # two publishers of /map is the failure this whole table exists to prevent.
         remappings.append(("map", "/map"))
     rtabmap = Node(
         package="rtabmap_slam",
@@ -349,6 +364,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("slam", default_value="false"),
             DeclareLaunchArgument("camera_only", default_value="false"),  # SLAM mode only
             DeclareLaunchArgument("resume", default_value="false"),  # SLAM mode only
+            # The volume is /map instead of RTAB-Map's grid (pepin_bringup.depth_fusion)
+            DeclareLaunchArgument("world_map", default_value="false"),
             DeclareLaunchArgument("database", default_value=""),  # empty: by mode
             DeclareLaunchArgument("bridge_admin", default_value="http://pepin-zenoh:8000"),
             DeclareLaunchArgument("static_camera_tf", default_value="true"),

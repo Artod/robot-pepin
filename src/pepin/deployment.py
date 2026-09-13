@@ -264,6 +264,22 @@ SLAM_LAPTOP_PUBLISHES = (
 )
 
 
+# Who publishes /map in each mode — one owner, always. In "split" and "vision" the board serves
+# the saved map (:data:`MAP_NODES` run there, and the tracker beside them needs it local); in
+# "slam" there is no saved map and the laptop's own grid IS /map. A second publisher would feed
+# the costmaps two maps and make the tracker rebuild on whichever arrived last, so anything on
+# the laptop that can publish a map (pepin_bringup.depth_fusion with map_source=volume) asks
+# here first and stays quiet where the answer is "board".
+MAP_OWNER = {"split": "board", "vision": "board", "slam": "laptop"}
+
+
+def map_owner(mode: str = "split") -> str:
+    """The side that publishes /map in ``mode`` ("board" or "laptop")."""
+    if mode not in BRIDGE_MODES:
+        raise ValueError(f"a bridge mode is one of {BRIDGE_MODES}, not {mode!r}")
+    return MAP_OWNER[mode]
+
+
 def bridge_allow(side: str, mode: str = "split") -> dict[str, list[str]]:
     """The bridge's ``allow`` block for ``side`` ("board" or "laptop") in ``mode``: its own
     publishers, servers and action servers; the other side's as its subscribers and clients."""
