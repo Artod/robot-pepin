@@ -24,9 +24,11 @@ and the layer at that plane reads out as an occupancy grid. With ``map_source=vo
 goes out as ``/map`` at ``map_hz`` (transient local), so the tracker and Nav2 localise and plan
 on the volume instead of on a frozen file, and a "known room" is just a volume that was seeded
 (``seed_map``) or resumed from a snapshot (``resume_volume``) instead of an empty one. Exactly
-one side publishes /map (:func:`pepin.deployment.map_owner`): where the board serves it, this
-node says so and stays quiet. The volume is snapshotted to ``world_path`` every
-``snapshot_s`` and at shutdown.
+one publisher of /map, and both halves of that are launch decisions this node is told: the
+bridge mode says which side owns the topic (:func:`pepin.deployment.map_owner`) and the
+``world_map`` parameter says whether the launch kept RTAB-Map's grid off it. Without both, the
+volume is refused on /map however ``map_source`` is set afterwards. The volume is snapshotted to
+``world_path`` every ``snapshot_s`` and at shutdown.
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
 ``fit_gate``, ``self_heal``, ``align``, ``min_weight``, ``map_min_weight``, ``surface_hz``,
@@ -173,7 +175,8 @@ FLAGS = FlagSet(
         "file",
         choices=("file", "volume"),
         description="where /map comes from: the saved file another node serves, or the volume's"
-        " own lidar layer published from here at map_hz",
+        " own lidar layer published from here at map_hz. Only where the stack was launched with"
+        " world_map:=true; anywhere else volume is refused, because another node is on /map",
     ),
     Flag(
         "map_hz",
@@ -228,7 +231,13 @@ class DepthFusion(Node):
         # saved map, a second publisher here would give the costmaps two maps and the tracker a
         # map to rebuild on every second (2026-09-10 01:00, RTAB-Map's grid beside the board's).
         self._mode = str(self.declare_parameter("mode", "vision").value)
-        self._map_mine = map_owner(self._mode) == "laptop"
+        # The other half of the same question, and it is a launch decision, not a live one: in
+        # SLAM the launch remaps RTAB-Map's grid onto /map unless it was brought up with
+        # world_map:=true, and no flag set afterwards can move that remap. Told here so that
+        # flipping map_source live cannot put a second publisher on /map.
+        self._world_map = bool(self.declare_parameter("world_map", False).value)
+        self._map_mine = map_owner(self._mode) == "laptop" and self._world_map
+        self._map_refusal = self._why_not_mine()
         self._world_path = Path(str(self.declare_parameter("world_path", WORLD_PATH).value))
         self._seed_map = str(self.declare_parameter("seed_map", "").value)
         # The lidar's plane is calibrated, never typed: it comes from config/lidar.json, the one
@@ -288,9 +297,19 @@ class DepthFusion(Node):
         self.get_logger().info(
             f"fusion up: {nx}x{ny}x{nz} voxels of {self._spec.voxel_m * 100:.0f} cm from"
             f" {self._spec.origin}; {self._switches.state()}; {self._band_text()}; fused while"
-            f" /localization_fit >= {DRIVE_FIT:.2f}; mode {self._mode}, /map is the"
-            f" {map_owner(self._mode)}'s; snapshot {self._world_path}"
+            f" /localization_fit >= {DRIVE_FIT:.2f}; mode {self._mode}, /map"
+            f" {'is this volume' if self._map_mine else f'not ours ({self._map_refusal})'};"
+            f" snapshot {self._world_path}"
         )
+
+    def _why_not_mine(self) -> str | None:
+        """Why this node may not publish /map in the stack it was launched into, or ``None``
+        when it may: the phrase the report line and the refusal log say."""
+        if map_owner(self._mode) != "laptop":
+            return f"/map is the {map_owner(self._mode)}'s in {self._mode} mode"
+        if not self._world_map:
+            return "launched without world_map: RTAB-Map's grid is on /map"
+        return None
 
     def _start_state(self) -> None:
         """What the volume starts as: a resumed snapshot, else a saved map written into the
@@ -601,7 +620,7 @@ class DepthFusion(Node):
 
     def _publish_map(self) -> None:
         """The volume's lidar layer as /map, at ``map_hz``, when the flag says the map comes
-        from the volume and the mode says this side owns /map."""
+        from the volume and nothing else in this stack is on /map."""
         if self._switches["map_source"] != "volume":
             return
         if not self._map_mine:
@@ -662,8 +681,8 @@ class DepthFusion(Node):
         with self._lock:
             text = self._world.report()
         source = str(self._switches["map_source"])
-        if source == "volume" and not self._map_mine:
-            source = f"volume (refused {c['map_refused']}x: /map is the {map_owner(self._mode)}'s)"
+        if source == "volume" and self._map_refusal is not None:
+            source = f"volume (refused {c['map_refused']}x: {self._map_refusal})"
         elif source == "volume":
             source = f"volume ({c['maps']} published, {w.ms_per('map', 'maps'):.0f} ms)"
         age = self._clock.age_s(time.monotonic())

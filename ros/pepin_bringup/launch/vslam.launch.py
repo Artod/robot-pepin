@@ -275,8 +275,10 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # graph, the closures and the place recognition; the voxels the operator looks at come from
     # here, beside RTAB-Map's own cloud for comparison.
     # The volume is also the map (pepin.worldmap): the node is told which bridge mode the stack
-    # is in, because exactly one side may publish /map, and with world_map:=true it is the
-    # laptop's volume rather than RTAB-Map's grid (see the remapping below).
+    # is in AND whether it was brought up for the world map, because exactly one side may
+    # publish /map and with world_map:=true it is the laptop's volume rather than RTAB-Map's
+    # grid (see the remapping below). Both are launch decisions and the node refuses the volume
+    # on /map without them, so no live flag can put a second publisher there.
     fusion = ExecuteProcess(
         cmd=[
             "python3",
@@ -285,6 +287,8 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             "--ros-args",
             "-p",
             f"mode:={'slam' if slam else 'vision'}",
+            "-p",
+            f"world_map:={'true' if world_map else 'false'}",
             "-p",
             f"map_source:={'volume' if world_map else 'file'}",
         ],

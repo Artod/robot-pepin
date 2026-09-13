@@ -1146,6 +1146,15 @@ def test_the_volume_is_the_map_and_only_one_side_publishes_it() -> None:
     passed = sf.unparsed(vslam, ast.JoinedStr)
     assert any("mode:=" in text for text in passed), "the node is told the bridge mode"
     assert any("map_source:=" in text for text in passed)
+    # The remap that puts RTAB-Map's grid on /map is a launch decision, so the launch's own
+    # answer travels with the mode: a map_source flipped live afterwards must not be able to
+    # put a second publisher on /map (the failure of 2026-09-10 01:00).
+    assert any("world_map:=" in text for text in passed), "and whether the volume owns /map"
+    assert "world_map" in sf.strings(node), "which the node reads before it publishes anything"
+    assert "self._world_map" in sf.unparsed(node, ast.Attribute)
+    assert load_table(REPO / NODES / "depth_fusion.py").flag("map_source").live, (
+        "still an A/B switch where the launch allows it"
+    )
     assert load_table(REPO / NODES / "depth_fusion.py").flag("map_min_weight").range == (
         0.0,
         LidarLaw.max_weight,
