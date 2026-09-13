@@ -25,6 +25,7 @@ import argparse
 import logging
 import sys
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -56,6 +57,8 @@ CONFIG = REPO / "config" / "camera.json"
 BOARD_PDF = REPO / "data" / "checkerboard.pdf"
 FRAMES_DIR = REPO / "data" / "camera_calib"
 STREAM_TIMEOUT_S = 5.0
+STREAM_OPEN_TRIES = 6  # the board's WiFi drops a connect now and then
+STREAM_RETRY_S = 2.0
 WINDOW = "pepin camera calibration"
 GREEN, AMBER, RED, WHITE = (80, 220, 80), (60, 190, 240), (60, 60, 235), (240, 240, 240)
 
@@ -67,7 +70,20 @@ def stream_frames(url: str) -> Iterator[tuple[Any, float]]:
     the camera node uses, not OpenCV's."""
     from pepin.mjpeg import parts
 
-    with urllib.request.urlopen(url, timeout=STREAM_TIMEOUT_S) as response:
+    # The board's WiFi drops a connect now and then (No route to host while the ARP entry is
+    # refreshed); a calibration session must not die on the first one — retry a few times.
+    response = None
+    for attempt in range(1, STREAM_OPEN_TRIES + 1):
+        try:
+            response = urllib.request.urlopen(url, timeout=STREAM_TIMEOUT_S)
+            break
+        except (urllib.error.URLError, OSError) as exc:
+            logger.warning("stream open %d/%d failed: %s", attempt, STREAM_OPEN_TRIES, exc)
+            if attempt == STREAM_OPEN_TRIES:
+                raise
+            time.sleep(STREAM_RETRY_S)
+    assert response is not None
+    with response:
         for _headers, body in parts(response):
             frame = cv2.imdecode(np.frombuffer(body, dtype=np.uint8), cv2.IMREAD_COLOR)
             if frame is not None:
