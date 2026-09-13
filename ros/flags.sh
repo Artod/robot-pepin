@@ -1,6 +1,8 @@
 #!/bin/bash
 # The nodes' feature flags (CLAUDE.md rule 19) from the laptop, wherever the node runs:
 #   ros/flags.sh list [NODE]          every flag of every node (or of NODE): kind, current value, description
+#   ros/flags.sh flag NODE FLAG       one flag in full: what it does, why its default is what it is,
+#                                     when to turn it on, when to turn it off (no host touched)
 #   ros/flags.sh get NODE FLAG        the current value, as the node holds it
 #   ros/flags.sh set NODE FLAG VALUE  change it live; a value the flag refuses is refused here, with
 #                                     the reason, before any host is touched
@@ -14,7 +16,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$HERE/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
-usage() { echo "usage: ros/flags.sh [list [NODE] | get NODE FLAG | set NODE FLAG VALUE]"; exit 2; }
+usage() { echo "usage: ros/flags.sh [list [NODE] | flag NODE FLAG | get NODE FLAG | set NODE FLAG VALUE]"; exit 2; }
 doc() { (cd "$HERE/.." && uv run -q python ros/tools/flags_doc.py "$@"); }
 ros2_in() {  # NODE ros2 ...: the ros2 CLI inside the container NODE runs in
     local node="$1" where side container; shift
@@ -36,6 +38,9 @@ case "${1:-list}" in
             dump="$(ros2_in "$node" ros2 param dump "/$node" 2>/dev/null || true)"
             doc list "$node" <<<"$dump"
         done ;;
+    flag)  # the table alone: the reading matter, no node asked, no container entered
+        [ $# -eq 3 ] || usage
+        doc flag "$2" "$3" ;;
     get)
         [ $# -eq 3 ] || usage
         doc flag "$2" "$3" >/dev/null || exit 2

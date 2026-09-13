@@ -334,7 +334,7 @@ FLAGS = FlagSet(
         on_when="when a beam carries something that separates an open bearing from a mirror or a"
         " black surface — return quality, or the same emptiness confirmed from several"
         " viewpoints; nothing on this robot does today",
-        off_when="off: an open door stays unknown, which a planner may be told to cross"
+        off_when="leave it off: an open door stays unknown, which a planner may be told to cross"
         " (allow_unknown) rather than being told a lie",
     ),
     Flag(

@@ -46,9 +46,25 @@ def test_the_readme_s_feature_flags_section_is_current() -> None:
     )
     assert text.count(DOC.HEADING) == 1
     assert text.index(DOC.HEADING) < text.index("## Build and run")
+    assert DOC.HOW_TO_READ.splitlines()[0] in text, "how to read a flag, above the table"
     for node, flags in DOC.tables().items():
+        assert f"#### `{node}`" in text, node
         for flag in flags:
             assert f"| `{node}` | `{flag.name}` |" in text, (node, flag.name)
+            assert flag.markdown() in text, f"{node}/{flag.name}: the paragraph under the table"
+
+
+def test_the_table_is_the_one_liner_and_the_paragraphs_come_under_it_by_node() -> None:
+    """The short answer for scanning, the long one for deciding: one row per flag in a table
+    over every node, then every flag whole, grouped by the node that owns it."""
+    body = DOC.section()
+    table, details = body.index("| node | flag |"), body.index(DOC.DETAILS)
+    assert body.index(DOC.HOW_TO_READ.splitlines()[0]) < table < details
+    for node, flags in DOC.tables().items():
+        assert body.index(f"#### `{node}`") > table, node
+        for flag in flags:
+            assert f"  - *Default:* {flag.render(flag.default)} — " in body, (node, flag.name)
+    assert body.endswith("\n") and "\n\n\n" not in body
 
 
 def test_the_section_replaces_its_predecessor_or_is_inserted_before_the_build_notes() -> None:
@@ -124,6 +140,13 @@ def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     assert code == 2 and out == "" and err.startswith("nope: no node with a flags table")
     code, out, _ = _main(["flag", "neck_state", "neck_tf"], capsys)
     assert code == 0 and out.startswith("neck_state/neck_tf: bool, default on\n")
+    assert [line.split(":")[0] for line in out.splitlines() if line[:1].isupper()] == [
+        "What",
+        "Default",
+        "On when",
+        "Off when",
+    ], "the whole entry, not just the kind"
+    assert max(len(line) for line in out.splitlines()) <= 100, "it is read in a terminal"
     code, _, err = _main(["flag", "neck_state", "gpu"], capsys)
     assert code == 2 and err.startswith("neck_state: no flag gpu; the flags are neck_tf")
     assert _main(["value", "depth_fusion", "min_weight", "3"], capsys)[1] == "3.0\n"

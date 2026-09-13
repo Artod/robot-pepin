@@ -1277,6 +1277,33 @@ def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_p
     assert {"depth_stream", "depth_fusion", "relocalizer", "neck_state"} <= tables.keys()
 
 
+def test_every_flag_says_why_its_default_is_what_it_is_and_when_to_move_it() -> None:
+    """A switch nobody can argue with is a switch nobody dares touch: every flag carries the
+    measured reason for its default — with the numbers and the file they were measured in — or
+    says plainly that it is `default by design, unmeasured`, plus when to turn it on and when to
+    turn it off (CLAUDE.md rule 19; ros/flags.sh flag NODE FLAG prints all of it)."""
+    from pepin.flags import UNMEASURED
+
+    unmeasured = []
+    for path in sorted((REPO / NODES).glob("*.py")):
+        if "Switches" not in sf.imported(sf.tree(f"{NODES}/{path.name}")):
+            continue
+        for flag in load_table(path):
+            where = f"{path.stem}/{flag.name}"
+            assert flag.why, f"{where}: why this default? (or say {UNMEASURED!r})"
+            assert flag.on_when, f"{where}: when is it turned on?"
+            assert flag.off_when, f"{where}: when is it turned off?"
+            assert len(flag.details()) == 4, where
+            if not flag.measured:
+                unmeasured.append(where)
+                continue
+            assert any(c.isdigit() for c in flag.why), f"{where}: a measured reason has numbers"
+    assert len(unmeasured) <= 17, (
+        "a ratchet, not a budget: measure one of these instead of raising the number"
+        f" ({len(unmeasured)} defaults rest on nothing measured: {unmeasured})"
+    )
+
+
 def test_the_tracker_feeds_every_scan_source_through_one_path_and_reports_each() -> None:
     """The camera's fans reach the tracker beside the lidar — /depth_scan and /contact_scan,
     LaserScans in base_link the bridge already carries to the board — through one path:
@@ -1391,22 +1418,35 @@ def test_the_flags_script_reaches_a_node_where_it_runs_and_refuses_before_any_ho
         assert verb in src, verb
     assert src.count("ssh ") == 1, "one path to the board: ros2_in"
     env = {**os.environ, "PEPIN_HOST": "127.0.0.1"}
-    for args, reason in (
-        (["get", "no_such_node", "x"], "no node with a flags table"),
-        (["get", "depth_fusion", "gpu"], "no flag gpu"),
-        (["set", "depth_stream", "depth_backend", "gpu"], "'gpu' is not one of remote, local"),
-        (["set", "depth_fusion", "min_weight"], "usage"),
-        (["frob"], "usage"),
-    ):
-        refused = subprocess.run(
+
+    def flags_sh(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             ["bash", str(REPO / "ros/flags.sh"), *args],
             env=env,
             capture_output=True,
             text=True,
             timeout=60,
         )
+
+    for args, reason in (
+        (["get", "no_such_node", "x"], "no node with a flags table"),
+        (["get", "depth_fusion", "gpu"], "no flag gpu"),
+        (["set", "depth_stream", "depth_backend", "gpu"], "'gpu' is not one of remote, local"),
+        (["set", "depth_fusion", "min_weight"], "usage"),
+        (["flag", "depth_stream"], "usage"),
+        (["flag", "depth_stream", "nope"], "no flag nope"),
+        (["frob"], "usage"),
+    ):
+        refused = flags_sh(*args)
         assert refused.returncode == 2, (args, refused.stdout, refused.stderr)
         assert reason in refused.stdout + refused.stderr, (args, refused.stdout, refused.stderr)
+    # the reading verb: the whole entry from the table, no node asked, no container entered
+    told = flags_sh("flag", "depth_stream", "wall_anchor")
+    assert told.returncode == 0, told.stderr
+    assert told.stdout.startswith("depth_stream/wall_anchor: bool, default off\n")
+    for label in ("What:", "Default:", "On when:", "Off when:"):
+        assert f"\n{label}" in told.stdout, label
+    assert "2.6x" in told.stdout, "the measured reason, with its numbers"
     readme = (REPO / "ros/README.md").read_text()
     assert "ros/flags.sh" in readme[readme.index("## Feature flags") :]
 
