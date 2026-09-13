@@ -966,9 +966,11 @@ class ParallaxAnchor(AnchorStage):
     thrown away.
 
     Measured offline on runs 0171 and 0165 (scratch/parallax_vs_lidar.py, 2026-09-12): 3-5 ms a
-    frame, 30-190 pairs where the cart really stepped, 10-35 % too far with a +-25 % band at the
-    2-3 cm baselines those slow runs give — the odometry's own band over such a step. It ships
-    switched off until it is seen at driving speed with calibrated optics."""
+    frame, 30-190 pairs where the cart really stepped, and a bias that depends on the range at
+    the 2-3 cm baselines those slow runs give — +25-37 % too far under 1.5 m (19-30 samples a
+    run), unbiased between 1.5 and 3 m. The odometry's own +-25 % scale band over such a step
+    multiplies every depth alike and so does not explain that split; the cause is not yet
+    known. It ships switched off until it is seen at driving speed with calibrated optics."""
 
     name = "parallax_anchor"
 

@@ -171,8 +171,10 @@ FLAGS = FlagSet(
         " no lidar and no assumed plane and that lands at every elevation the picture has; off"
         " by default: measured offline on runs 0171 and 0165 it costs 3-5 ms and gives 30-190"
         " pairs where the cart really stepped, but at those runs' 2-3 cm baselines the depth is"
-        " 10-35 % too far with the odometry's own +-25 % band, and it yields nothing at all"
-        " while the cart stands still or turns on the spot",
+        " +25-37 % too far under 1.5 m (19-30 samples a run) and unbiased from 1.5 to 3 m — a"
+        " range-dependent bias the odometry's own +-25 % scale band cannot explain, cause not"
+        " yet known — and it yields nothing at all while the cart stands still or turns on the"
+        " spot",
     ),
     Flag(
         "affine_law",

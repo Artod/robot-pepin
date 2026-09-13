@@ -39,19 +39,24 @@ Measured on runs 0171 and 0165 against the lidar's own ranges
 frame where the cart really stepped, spread over the whole picture (41-56 % in the bottom third,
 10-23 % in the top, against the lidar's single row). The depth itself is as good as the step,
 and on those two runs the cart crawls: at a 0.5 s gap the median perpendicular baseline is
-2.9 cm, only 8 of 29 frame pairs carry 5 cm of odometry, and what survives the gates is 10-35 %
-too far with a +-25 % band — the same band the odometry's own step has against the tracker's
-(0.79-1.26 on 0171, 0.56-1.24 on 0165), which multiplies every parallax depth one for one. The
-weights already know this: a 3 cm baseline weighs 0.02 of a lidar beam, a 15 cm one 0.4. Two
-things not measured there would move it: a calibrated focal length (the depth is proportional
-to fx and the optics are still the nominal 78 degree guess) and a run at driving speed.
+2.9 cm and only 8 of 29 frame pairs carry 5 cm of odometry. What survives the gates is not
+wrong by one factor but by a factor that depends on the range: +25-37 % too far under 1.5 m
+(1.365 of the lidar on 0171 over 19 samples, 1.246 on 0165 over 30) and unbiased from 1.5 to
+3 m (0.965 over 16, 1.008 over 27). The odometry's own step has a +-25 % band against the
+tracker's (0.79-1.26 on 0171, 0.56-1.24 on 0165) and multiplies every parallax depth one for
+one, but a scale error is the same factor at every range and cannot leave the far band at 1.00
+while the near one reads 1.25-1.37: the cause of that structure is not yet known, and
+0.5-1.5 m is the band a close approach and the costmap live in. The weights know the baseline
+at least: a 3 cm one weighs 0.02 of a lidar beam, a 15 cm one 0.4. Two things not measured
+there would move the number: a calibrated focal length (the depth is proportional to fx and the
+optics are still the nominal 78 degree guess) and a run at driving speed.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
