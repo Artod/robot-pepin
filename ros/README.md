@@ -470,6 +470,7 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `relocalizer` | `sources` | list of: lidar, depth, contact, camera | lidar | yes | what corrects the pose: the lidar's revolution (/scan), matched here, and the camera (`camera`), whose scans the laptop matches and whose ANSWER arrives on /localization/measurement. The lidar drives the updates while it is fresh and the camera's word rides along, carried to its moment; a stale lidar hands the updates to the measurements. `depth` and `contact` name the camera's raw scans, which this node no longer subscribes to — enabling them changes nothing here |
 | `relocalizer` | `measurement_max_age_s` | number 0.05..5 | 0.5 | yes | how old a pose measurement from the laptop may be, in seconds, at the moment of the update that would take it: past this it is dropped instead of carried |
 | `relocalizer` | `fusion` | bool | on | yes | fuse every enabled source's word by its information — a match made here, a measurement made on the laptop; off: the widest source corrects alone and the others only report |
+| `relocalizer` | `local_fit` | bool | on | yes | /localization_fit carries only a fit a scan of THIS machine measured: with no scan here at all — the camera's measurements driving the tracker alone — it carries 0.0, the value it holds before the first match, and the camera's own fit rides /localization/sources per source; off, the remote fit is published there as the tracker's own |
 | `relocalizer` | `toe_reach` | number 0..0.6 | 0.27 | yes | how far past the leg the lidar sees a standing person's toe reaches, metres: the term the dynamic rings are sized on (pepin.dynamic.berth_for). The default is computed from the lidar's mount (config/lidar.json) |
 | `relocalizer` | `near_rings` | bool | on | yes | a return is ringed as soon as it clears the cart's own outline, and only the marks that would land on that outline are dropped; off, nothing within the ring plus the outline is ringed at all — the older rule, whose blind disc grows with the ring |
 | `relocalizer` | `accept_candidates` | bool | on | yes | re-seed from the laptop watchdog's whole-map candidates (/localization/candidate, pepin.watchdog): a place that disagrees with the tracked pose candidate_streak times in a row, about the same place each time, is adopted through the path the board's own search uses |
@@ -783,6 +784,11 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* on — with all three sources the fused pose stays within 0.7-5.7 cm of lidar-only and never loses the map. One defect was found and fixed on the way: an edge-bound lidar used to be out-voted by a blind fan's plateau, so the anchor's bound is now taken alone — a 12 cm slip at rest is carried by the second match instead of held for 2.5 s, and recovery while driving is 3.2 cm against lidar-only's 2.9
   - *On when:* whenever more than one source is enabled
   - *Off when:* to see which source is actually moving the pose: off, the others still report
+- **`local_fit`** — bool, default on
+  - *What:* /localization_fit carries only a fit a scan of THIS machine measured: with no scan here at all — the camera's measurements driving the tracker alone — it carries 0.0, the value it holds before the first match, and the camera's own fit rides /localization/sources per source; off, the remote fit is published there as the tracker's own
+  - *Default:* on — the number is read as 'how well the cart's own scan sits on /map' by everything downstream, and a remote one is neither. The camera's fit is measured on the laptop against /map_camera when depth_fusion publishes it (pepin_bringup.laptop_localizer), and depth_fusion paints that very band only while /localization_fit >= 0.50: published there, the camera's fit would bless the painting of the grid it was itself measured against, a circle no drift can break out of. The replay measures what such a fit cannot see: camera-only (split-no-lidar) sits 1.1 cm from lidar-only at the median, 25.1 at p90 and 43.4 at worst over run 0171, while the fits those same matches reported were 0.41 and 0.62 (scratch/laptop_localizer_replay.txt). 0.0 and not NaN because every gate downstream compares with `<` and NaN passes them all silently (pepin.watch.reported_fit)
+  - *On when:* always on a cart that has a lidar: a fit nothing here measured stops the goal server and the volume rather than vouching for a pose
+  - *Off when:* to drive on the camera alone — a dead lidar, a lidar-less robot — where the laptop's fit is the only word there is; watch /localization/sources for the drift it cannot report
 - **`toe_reach`** — number 0..0.6, default 0.27
   - *What:* how far past the leg the lidar sees a standing person's toe reaches, metres: the term the dynamic rings are sized on (pepin.dynamic.berth_for). The default is computed from the lidar's mount (config/lidar.json) (0..0.6)
   - *Default:* 0.27 — one measured number and three assumed ones: the mount is 0.383 m by tape, and the reach is 0.21 + (z - 0.07) tan 10 deg — a 28 cm shoe whose ankle sits 7 cm back, a shin leaning 10 degrees — typed anthropometry that has never been measured against a person in front of this cart. It matters in metres: a point planner's ring is 0.41 m at the 0.20 that stood here before and 0.48 m at this 0.27. The flag exists because the cart once ran over feet
@@ -941,7 +947,10 @@ Open `ros/foxglove/pepin_nav.json` in Foxglove Studio:
   `/global_costmap/costmap` — switching a layer changes the grid within a costmap cycle, and the
   marks that remain tell you which sensor drew them;
 - the `scan-to-map fit` plot (`/localization_fit`, 0..1) — the tracker's own score of the scan it
-  matched. This is where camera-only localisation fails visibly;
+  matched. This is where camera-only localisation fails visibly; with no scan of the board's own
+  at all (the camera's measurements driving alone) the plot reads 0.0 by design, because a fit the
+  laptop measured against the camera's own band of the volume is not this board's word about
+  `/map` (`local_fit`) — the camera's fit is in `/localization/sources`, per source;
 - the Log panel (filtered to `relocalizer`, `controller_server`, `planner_server`, ...).
 
 The report lines say the same in words, every 30 s, and `ros/sensor.sh status` prints all three:

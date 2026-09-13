@@ -256,6 +256,31 @@ FLAGS = FlagSet(
         off_when="to see which source is actually moving the pose: off, the others still report",
     ),
     Flag(
+        "local_fit",
+        True,
+        description="/localization_fit carries only a fit a scan of THIS machine measured: with"
+        " no scan here at all — the camera's measurements driving the tracker alone — it carries"
+        " 0.0, the value it holds before the first match, and the camera's own fit rides"
+        " /localization/sources per source; off, the remote fit is published there as the"
+        " tracker's own",
+        why="the number is read as 'how well the cart's own scan sits on /map' by everything"
+        " downstream, and a remote one is neither. The camera's fit is measured on the laptop"
+        " against /map_camera when depth_fusion publishes it (pepin_bringup.laptop_localizer),"
+        " and depth_fusion paints that very band only while /localization_fit >= 0.50: published"
+        " there, the camera's fit would bless the painting of the grid it was itself measured"
+        " against, a circle no drift can break out of. The replay measures what such a fit cannot"
+        " see: camera-only (split-no-lidar) sits 1.1 cm from lidar-only at the median, 25.1 at"
+        " p90 and 43.4 at worst over run 0171, while the fits those same matches reported were"
+        " 0.41 and 0.62 (scratch/laptop_localizer_replay.txt). 0.0 and not NaN because"
+        " every gate downstream compares with `<` and NaN passes them all silently"
+        " (pepin.watch.reported_fit)",
+        on_when="always on a cart that has a lidar: a fit nothing here measured stops the goal"
+        " server and the volume rather than vouching for a pose",
+        off_when="to drive on the camera alone — a dead lidar, a lidar-less robot — where the"
+        " laptop's fit is the only word there is; watch /localization/sources for the drift it"
+        " cannot report",
+    ),
+    Flag(
         "toe_reach",
         toe_reach_m(),
         description="how far past the leg the lidar sees a standing person's toe reaches, metres:"
@@ -473,6 +498,7 @@ class Relocalizer(Node):
         self._laser_tf: tuple[float, float, float, bool] | None = None  # x, y, yaw, mirrored
         self._searching = False
         self.fit = float("nan")
+        self._fit_is_local = True  # did a scan of this machine score the pose the topic reports?
         # The laptop's watchdog: its candidates are judged against this tracker's own pose and
         # fit, and a streak of disagreements about one place re-seeds through _pending_seed —
         # the very path the board's own search uses. All the judging is in pepin.watchdog.
@@ -1023,7 +1049,9 @@ class Relocalizer(Node):
             f"failed {self._deskew_failed}; {loc.settings()}; {track.summary()}; "
             f"sources: {self._feed.status(self._now_s())}; "
             f"watch {'fit' if self._watch_on else 'off: no full-turn source, fit'} "
-            f"{self.fit:.2f}, dynamic marks {self._dynamic_count} "
+            f"{self.fit:.2f}"
+            f"{'' if self._fit_is_local else ' (the laptop measured it: published as 0.00)'}"
+            f", dynamic marks {self._dynamic_count} "
             f"(rings {self._berth.ring_m:.2f} m from {self._berth.near_m:.2f} m out, trimmed "
             f"within {self._berth.trim_m:.2f} m), "
             f"scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
@@ -1110,10 +1138,12 @@ class Relocalizer(Node):
         only: while anything narrower drives, the fit is published and the watch is off.
 
         With no scan of our own at all — the camera's measurements driving the tracker — there
-        is nothing here to score, and the fit published is the one the laptop measured and the
-        tracker kept. It is the honest number: the goal server and the watchdog both read this
-        topic, and a tracker running on the camera alone must still be able to say how well it
-        sits on the map.
+        is nothing here to score, and what goes out on ``/localization_fit`` is 0.0 rather than
+        the fit the laptop measured (``local_fit``): that number was scored against the camera's
+        own band of the volume, which depth_fusion paints only while this very topic says the
+        cart is localised, so publishing it here closes a circle instead of reporting anything.
+        The camera's fit is on ``/localization/sources``, per source, where it says whose word
+        it is.
         """
         now = self._now_s()
         full = self._feed.full_picture(now)
@@ -1137,7 +1167,13 @@ class Relocalizer(Node):
             if moving or picture is None
             else self._matcher.inlier_fraction(pose, picture.points)
         )
-        self._fit_pub.publish(Float32(data=float(self._watch.reported_fit(self.fit))))
+        # ...and whether a scan of ours scored it at all. A fit nothing here measured is not this
+        # machine's fit to report: it goes out as 0.0 — "this board cannot vouch for the pose",
+        # the value the topic carries before the first match — and the camera's own number rides
+        # /localization/sources with its source's name on it.
+        self._fit_is_local = picture is not None or not self._switches.on("local_fit")
+        reported = self.fit if self._fit_is_local else 0.0
+        self._fit_pub.publish(Float32(data=float(self._watch.reported_fit(reported))))
         # A fan drives, or nothing here does: such a fit cannot say "lost" (LOST_FIT was tuned on
         # full revolutions) and a search on it would re-seed the tracker on a look-alike the twin
         # check cannot see — the watch is off, and the report line says so.

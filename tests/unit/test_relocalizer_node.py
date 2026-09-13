@@ -381,8 +381,18 @@ def test_the_camera_alone_drives_without_a_first_search_and_the_watch_waits_for_
     assert len(node.pubs["/tracker_pose"].sent) == 8, "one update per measurement"
     node._check()
     assert node._watch_on is False and len(node.pubs["localization_fit"].sent) == 1
+    # Nothing here scored that pose: what goes out is 0.0, not the laptop's own number — which
+    # was measured against the very band depth_fusion paints only while this topic says 0.50.
+    assert node.pubs["localization_fit"].sent[-1].data == 0.0
+    assert loc.confidence > 0.5, "the tracker keeps the remote fit for itself"
     node._report_tracking()
-    assert "watch off: no full-turn source, fit" in node.logger.texts("info")[-1]
+    line = node.logger.texts("info")[-1]
+    assert "watch off: no full-turn source, fit" in line
+    assert "(the laptop measured it: published as 0.00)" in line
+    assert node.set_parameters([Parameter("local_fit", value=False)])[0].successful
+    node._check()
+    assert node.pubs["localization_fit"].sent[-1].data == pytest.approx(loc.confidence)
+    assert node.set_parameters([Parameter("local_fit", value=True)])[0].successful
     res = node.services["relocalize"][1](None, ros_stubs.Trigger.Response())
     assert not res.success and res.message.startswith("no map or no scan yet")
     assert not node._searching
