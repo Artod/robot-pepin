@@ -678,6 +678,19 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *On when:* raise it towards 1.0 on a robot that only ever leans when something real pushes it
   - *Off when:* 0 believes every lean, as before the floor existed: an A/B of the gyro's own drift
 
+#### `goal_server`
+
+- **`tf_pose`** — bool, default on
+  - *What:* where no tracker answers, the cart's pose is read from TF (map -> base_link) and a goal is judged by how fresh that edge is; off, only the tracker is ever asked
+  - *Default:* on — off, this node refused every goal of the first online-SLAM session — 'the tracker is not up' (2026-09-13 14:05), the goals driven by publishing /goal_pose by hand, which is Nav2 without a run, a tape or a verdict. In SLAM mode there IS no tracker: RTAB-Map owns the pose and pepin_bringup.slam_frame re-broadcasts its correction as map -> odom at 10 Hz, so 1.0 s without a transform is ten missed broadcasts, not jitter. The known-map modes are untouched: there the tracker answers first and its fit decides, exactly as before
+  - *On when:* on in online SLAM, and anywhere else the pose is owned by something that publishes map -> base_link instead of a fit
+  - *Off when:* to have a stack without a tracker refuse goals outright again — the old behaviour, and the honest one where a fit is the only evidence trusted
+- **`correction_watch`** — bool, default on
+  - *What:* where no tracker answers, the SLAM correction (/map_odom) must be arriving for a goal to start, and a drive is cut when it stops; off, the age of map -> base_link is the only evidence read
+  - *Default:* on — map -> base_link is no evidence that the SLAM half is alive: slam_frame re-broadcasts the LAST correction at 10 Hz with a fresh stamp, so with the laptop shut down the edge is still 0.1 s old, the gate passes, and Nav2 — whose costmaps read that same edge against a 0.3 s tolerance — does not abort either. The cart would drive a map that stopped growing, on dead reckoning, with nothing to notice. The correction is a 10 Hz pulse whatever the graph does (pepin_bringup.rtabmap_frame publishes between optimisations too), so 2.0 s of silence is twenty missed messages over the bridge, not a hiccup
+  - *On when:* in online SLAM, where the pose is owned by a machine on the other side of the bridge
+  - *Off when:* when this node cannot hear /map_odom in a stack that is otherwise healthy — 'ros/go.sh where' prints 'correction_s' where one has ever landed, and prints none at all in that case; the drive then rests on the transform alone, as it did before
+
 #### `laptop_localizer`
 
 - **`global_watch`** — bool, default on
@@ -725,19 +738,6 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* on — it is the board's own switch and it followed the match here: until 2026-09-13 these two fans were matched inside Localizer.update_from, which builds the vote from the static mask whenever explained_vote is on, and moving the matching to this machine took the vote off them silently. Measured on the furnished room with a person standing in the fan (scratch/camera_vote_probe.py): with 10 to 18 of the 41 beams on his legs, he moves the measured pose by 2.2 cm median and 2.5 cm at worst without the vote, and by 0.3 cm with it — a systematic pull that grows with how much of the fan he fills, replaced by a slide of a few mm. The worst voted case is 3.8 cm, a thinned fan sliding inside its own plateau, and the fan's sigma there is 8-11 cm, so the fusion already discounts it. The fans' floors are on the roster (vote_min_points 20): a mask that would leave a fan too thin to fix a pose is dropped and the whole scan votes
   - *On when:* in a room with people and furniture that moves — the room this robot lives in
   - *Off when:* to measure what the vote costs or buys the camera (A/B against the board's lidar-only pose), or in an empty room where every return should count
-
-#### `goal_server`
-
-- **`tf_pose`** — bool, default on
-  - *What:* where no tracker answers, the cart's pose is read from TF (map -> base_link) and a goal is judged by how fresh that edge is; off, only the tracker is ever asked
-  - *Default:* on — off, this node refused every goal of the first online-SLAM session — 'the tracker is not up' (2026-09-13 14:05), the goals driven by publishing /goal_pose by hand, which is Nav2 without a run, a tape or a verdict. In SLAM mode there IS no tracker: RTAB-Map owns the pose and pepin_bringup.slam_frame re-broadcasts its correction as map -> odom at 10 Hz, so 1.0 s without a transform is ten missed broadcasts, not jitter. The known-map modes are untouched: there the tracker answers first and its fit decides, exactly as before
-  - *On when:* on in online SLAM, and anywhere else the pose is owned by something that publishes map -> base_link instead of a fit
-  - *Off when:* to have a stack without a tracker refuse goals outright again — the old behaviour, and the honest one where a fit is the only evidence trusted
-- **`correction_watch`** — bool, default on
-  - *What:* where no tracker answers, the SLAM correction (/map_odom) must be arriving for a goal to start, and a drive is cut when it stops; off, the age of map -> base_link is the only evidence read
-  - *Default:* on — map -> base_link is no evidence that the SLAM half is alive: slam_frame re-broadcasts the LAST correction at 10 Hz with a fresh stamp, so with the laptop shut down the edge is still 0.1 s old, the gate passes, and Nav2 — whose costmaps read that same edge against a 0.3 s tolerance — does not abort either. The cart would drive a map that stopped growing, on dead reckoning, with nothing to notice. The correction is a 10 Hz pulse whatever the graph does (pepin_bringup.rtabmap_frame publishes between optimisations too), so 2.0 s of silence is twenty missed messages over the bridge, not a hiccup
-  - *On when:* in online SLAM, where the pose is owned by a machine on the other side of the bridge
-  - *Off when:* when this node cannot hear /map_odom in a stack that is otherwise healthy — 'ros/go.sh where' prints 'correction_s' where one has ever landed, and prints none at all in that case; the drive then rests on the transform alone, as it did before
 
 #### `neck_state`
 
