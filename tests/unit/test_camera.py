@@ -25,9 +25,12 @@ def test_the_config_loads_and_names_the_board() -> None:
     cfg = CameraConfig.load(REPO / "config/camera.json", board="10.0.0.187")
     assert cfg.stream == "http://10.0.0.187:8080/stream"
     assert (cfg.width, cfg.height) == (1280, 720)
-    # tilt and field of view measured against the lidar on 2026-09-10 (scratch/depth_fit_models.py)
-    assert cfg.z_m == 1.23 and cfg.x_m == 0.0 and cfg.pitch_deg == 26.0
-    assert cfg.hfov_deg == 78.0  # the nominal pinhole, kept whatever a calibration measures
+    # the mount measured 2026-09-12: the pitch off the encoder and the level frames
+    # (scratch/neck_tilt_scale.txt), the height off a tape
+    assert cfg.z_m == 1.203 and cfg.x_m == 0.0 and cfg.pitch_deg == 23.8
+    # The nominal pinhole the one reader falls back to with calibrated off. A calibration never
+    # rewrites it, but it is the best field of view known: 82.94, what the checkerboard measured.
+    assert cfg.hfov_deg == 82.94
     # calibrated and the block go together: on means there are numbers, off means the fallback
     assert cfg.calibrated == (cfg.calibration is not None)
 
@@ -45,8 +48,8 @@ def test_a_nominal_pinhole_puts_the_field_of_view_across_the_image() -> None:
 def test_the_mount_and_the_optical_frame_follow_rep_103() -> None:
     cfg = CameraConfig.load(REPO / "config/camera.json")
     x, y, z, roll, pitch, yaw = mount_transform(cfg)
-    assert (x, y, z) == (0.0, 0.0, 1.23) and (roll, yaw) == (0.0, 0.0)
-    assert pitch == pytest.approx(math.radians(26.0))  # down is positive (REP 103)
+    assert (x, y, z) == (0.0, 0.0, 1.203) and (roll, yaw) == (0.0, 0.0)
+    assert pitch == pytest.approx(math.radians(23.8))  # down is positive (REP 103)
     q = quaternion_from_rpy(*optical_rotation())
     # rotate the optical z axis (0, 0, 1) back into the link frame: it must point along +x
     x_, y_, z_, w = q

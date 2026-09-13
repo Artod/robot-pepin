@@ -75,7 +75,7 @@ def test_the_camera_s_two_frames_are_exactly_what_the_camera_node_publishes() ->
     cfg = CameraConfig.load(CONFIG / "camera.json")
     camera = Mounts.load(CONFIG).camera
     assert camera.link.transform() == mount_transform(cfg)
-    assert camera.link.pitch_deg == 26.0 and camera.link.z_m == 1.23
+    assert camera.link.pitch_deg == 23.8 and camera.link.z_m == 1.203
     assert camera.optical.transform()[:3] == (0.0, 0.0, 0.0)
     assert camera.optical.transform()[3:] == pytest.approx(optical_rotation(), abs=1e-15)
     assert OPTICAL_MOUNT.transform()[3:] == pytest.approx(OPTICAL_RPY, abs=1e-15)

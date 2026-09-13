@@ -481,10 +481,10 @@ layers a wall) and applied to the whole image — the
 network sees the far end of a room too far by more than the near end, which one scale cannot say
 and a shift can: scaled at the beams' row alone, the wall a metre higher was off by half a metre
 (the network alone saw the
-room 1.5-2x too far). The camera's tilt and field of view are measured against the lidar, not
-read off a datasheet: the tilt (26 degrees) and the field of view (78 degrees, the datasheet's 70
-placed the image's edges 4 degrees wrong) at which the lidar's beams land on the surfaces the
-depth image shows. Frames carry the board's capture
+room 1.5-2x too far). The camera's tilt and field of view are measured, not read off a
+datasheet: the lens with a checkerboard (45 views, 0.23 px RMS: 82.9 degrees, and the datasheet's
+70 placed the image's edges 8 degrees wrong), the tilt off the neck's own encoder against four
+still frames of one room (23.8 degrees), the height with a tape (1.203 m). Frames carry the board's capture
 time (ustreamer's own stamp, the lidar's clock), not the moment the laptop decoded them. RTAB-Map
 fuses the depth with the scans into 5 cm voxels: table tops, seats, cables on the floor enter the
 map the lidar's plane misses; its loop-closure correction is published as `odom -> rtabmap`, so

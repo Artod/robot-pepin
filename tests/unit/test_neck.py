@@ -136,11 +136,22 @@ def test_a_bad_sign_in_the_file_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_pan_turns_the_camera_about_the_vertical_and_a_tilt_dips_it() -> None:
+    """A pan is a turn about base_link's z and nothing else: the yaw follows it, the height does
+    not move, and the lens rides round the pan pivot at the radius the measured arm gives it
+    (config/neck.json's pivot: the lens sits 2.5 cm in front of the tilt axis and 8.6 cm above
+    it, so that radius is not zero and the camera no longer turns about its own point). A tilt
+    is a pitch and nothing else."""
     cfg = NeckConfig.from_json(NECK)
-    z = cfg.reference.z_m
-    left = camera_pose(cfg, NeckAngles(math.radians(30.0), 0.0))
-    assert left[:3] == pytest.approx((cfg.reference.x_m, cfg.reference.y_m, z))  # no lever arm
-    assert left[3:] == pytest.approx((0.0, 0.0, math.radians(30.0)))  # yaw only
+    ref_pitch = math.radians(cfg.reference.pitch_deg)
+    px, py, _pz = pan_pivot(cfg)
+    at_rest = camera_pose(cfg, NeckAngles(0.0, ref_pitch))
+    assert at_rest[:3] == pytest.approx((cfg.reference.x_m, cfg.reference.y_m, cfg.reference.z_m))
+    left = camera_pose(cfg, NeckAngles(math.radians(30.0), ref_pitch))
+    assert left[3:] == pytest.approx((0.0, ref_pitch, math.radians(30.0)))  # the yaw alone moved
+    assert left[2] == pytest.approx(at_rest[2])  # a turn about the vertical cannot lift the lens
+    radius = math.hypot(at_rest[0] - px, at_rest[1] - py)
+    assert math.hypot(left[0] - px, left[1] - py) == pytest.approx(radius)
+    assert radius > 0.01, "the arm is measured, so the lens swings instead of spinning in place"
     down = camera_pose(cfg, NeckAngles(0.0, math.radians(45.0)))
     assert down[3:] == pytest.approx((0.0, math.radians(45.0), 0.0))
 

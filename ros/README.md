@@ -102,7 +102,9 @@ To go back to driving a saved map: `ros/thin.sh vision` (which leaves SLAM mode)
 
 The neck camera's optics were a guess: one field-of-view number (78 deg, fitted against the lidar
 on 2026-09-10) standing in for four — `fx`, `fy`, `cx`, `cy` — and a lens that bends straight
-lines and was not modelled at all. A checkerboard measures all of it in one sitting.
+lines and was not modelled at all. A checkerboard measures all of it in one sitting. It was run
+on 2026-09-13: 45 views, 0.23 px RMS, 82.94 deg wide — so `calibrated: true` and the numbers
+below are in the file.
 
 ```bash
 ros/calibrate.sh --print      # data/checkerboard.pdf: print at 100 %, not "fit to page"
@@ -148,21 +150,28 @@ one function,
 `/camera/camera_info` (scaled to whatever `scale` publishes), and `depth_stream` uses the same
 numbers as its fallback until a `camera_info` arrives. Restart the node to pick them up
 (`ros/laptop.sh kick camera_stream`); its report line then says `optics: calibrated 2026-09-12 on
-9x6 ..., rms 0.31 px, 70.6 deg wide` instead of `optics: nominal 78 deg field of view
+9x6 ..., rms 0.23 px, 82.9 deg wide` instead of `optics: nominal 83 deg field of view
 (uncalibrated)`. The `undistort` flag publishes a rectified picture (`ros/flags.sh set
 camera_stream undistort true`); it is off until the straightened picture has been measured against
 the raw one on the robot. A calibration that turns out bad is switched off with one boolean —
-`calibrated: false` — and the block stays in the file as history, the nominal 78 deg pinhole
-coming back untouched.
+`calibrated: false` — and the block stays in the file as history, the nominal pinhole coming back
+untouched. That nominal is `hfov_deg` 82.94: a calibration never rewrites it, but the best field
+of view known is what a bad calibration must be switched off onto, so it was set by hand to what
+the checkerboard measured when the 78 it held was retired.
 
-**Re-fit the tilt afterwards.** `mount.pitch_deg` (26 deg) was not measured on its own: it came
-out of the same lidar fit as the 78 deg field of view, and in that fit the two traded against
-each other (78/26 with a 1.2 % residual, the nominal 70/28 with 3.0 %). Pinning `fx` with a
-checkerboard therefore leaves the tilt fitted against a focal length that is no longer in use —
-the run says so when it writes. Re-fit `mount.pitch_deg` with the measured `fx` held fixed
-(`scratch/depth_fit_models.py`) before trusting what `depth_stream` projects; `camera_stream`
-broadcasts the same number as the static `base_link -> camera_link` edge, so it moves the whole
-camera in TF too.
+**The tilt was re-measured, and not by a fit.** `mount.pitch_deg` used to be 26 deg out of the
+same lidar fit as the 78 deg field of view, where the two traded against each other (78/26 with a
+1.2 % residual, the nominal 70/28 with 3.0 %) — so pinning `fx` with a checkerboard left that
+tilt standing on a focal length no longer in use. It is now 23.8 deg, from the neck's own encoder
+against four still frames of one room: head level by eye the tilt servo reads 2068 ticks and the
+picture is 1.0 deg down (±1.5), and the reference pose sits 243 ticks further down at the plain
+360/4096 deg a tick — which those frames also verify (1.07 true degrees per commanded degree,
+1.03..1.09 over every variant, so `pepin.neck.RAD_PER_TICK` needs no correction).
+`scratch/neck_tilt_scale.txt` is the whole run. The height came off a tape at the same pose
+(floor to tilt axis 1.134 m, lens 0.086 m above it and 0.025 m in front: 1.203 m), which is also
+where `config/neck.json`'s `pivot` block stopped being zero. `camera_stream` broadcasts
+`mount.pitch_deg` as the static `base_link -> camera_link` edge, so both numbers moved the whole
+camera in TF with them.
 
 **When to redo it.** After anything that changes the optics or the sensor's relation to them: a
 different lens or camera, a knocked or re-seated lens barrel, a re-mounted head that required

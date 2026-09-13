@@ -335,7 +335,7 @@ def test_the_report_line_carries_the_rate_the_optics_and_the_switches(build: Bui
     node._report()
     line = node.logger.texts("info")[-1]
     assert line.startswith("camera: ") and "frames/s" in line
-    assert "optics: nominal 78 deg field of view (uncalibrated)" in line
+    assert "optics: nominal 83 deg field of view (uncalibrated)" in line
     assert "flags: scale=0.5 undistort=off static_camera_tf=on" in line
     node._report()
     assert "camera: 0.0 frames/s" in node.logger.texts("info")[-1], "the period was emptied"

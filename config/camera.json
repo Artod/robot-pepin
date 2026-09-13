@@ -3,14 +3,14 @@
     "stream": "http://{board}:8080/stream",
     "width": 1280,
     "height": 720,
-    "hfov_deg": 78.0,
+    "hfov_deg": 82.94,
     "calibrated": true,
     "mount": {
       "x_m": 0.0,
       "y_m": 0.0,
-      "z_m": 1.23,
-      "pitch_deg": 26.0,
-      "note": "tilt and field of view measured together 2026-09-10 by scratch/depth_fit_models.py: the lidar's beams projected into the depth image agree best at 78 deg / 26 deg (residual 1.2 %, 3.0 % at the nominal 70 deg / 28 deg). STALE twice over: those beams were projected at the lidar mount config/lidar.json carried that day, which a tape measure corrected on 2026-09-12 (the same self-calibration redone at the measured mount votes for a different camera, 76 deg / 35 deg, and 78/26 scores worse than it did); and the tilt and the field of view traded against each other in that fit, so a checkerboard that pins the focal length settles the field of view for good and leaves this tilt to be re-fitted live on the robot with the new fx held fixed."
+      "z_m": 1.203,
+      "pitch_deg": 23.8,
+      "note": "MEASURED, not fitted. pitch_deg 23.8 comes from the encoder and the level frames: with the head level by eye the tilt servo reads 2068 ticks and the picture is 1.0 deg down (+-1.5), and the reference pose sits 2311 - 2068 = 243 ticks further down at 360/4096 deg a tick, which is 23.8 (scratch/neck_tilt_scale.txt, four still frames of one room, 2026-09-12). z_m 1.203 is the tape: floor to tilt axis 1.134 m (reference.axis_z_m in config/neck.json) plus the lens 0.086 m above it and 0.025 m in front, turned down by that pitch. Both replace the 26.0 / 1.23 the lidar-beam fit of 2026-09-10 voted for (scratch/depth_fit_models.py), which was owed a repeat anyway: its beams were projected at a lidar mount the tape corrected on 2026-09-12."
     },
     "frames": {
       "link": "camera_link",
@@ -38,5 +38,5 @@
       "date": "2026-09-13"
     }
   },
-  "notes": "hfov_deg came from the lidar (78 deg, scratch/depth_fit_models.py, 2026-09-10), the AC310's nominal 70 deg placed the image's edges 8 deg wrong; a checkerboard calibration replaces it — run ros/calibrate.sh (print the board with --print), which writes an intrinsics block next to this one and sets calibrated: true. hfov_deg itself is never rewritten: it stays the nominal number pepin.camera.optics answers while calibrated is false (the block carries its own hfov_deg, derived from fx), so that boolean switches a bad calibration off and puts these optics back. The lidar that 78 deg came from was assumed 0.18 m lower than the tape measure of 2026-09-12 says it hangs, so that fit is owed a repeat: see the mount's note."
+  "notes": "The lens is measured: ros/calibrate.sh (45 views of a 9x6 checkerboard, rms 0.23 px, 2026-09-13) wrote the intrinsics block and set calibrated: true, and pepin.camera.optics answers from it. hfov_deg is the nominal pinhole that reader falls back to when calibrated is false — it is 82.94, the field of view the calibration measured, because the best known number is what a bad calibration must be switched off onto; it was 78.0, the lidar-beam fit of 2026-09-10, and 70 is the vendor number that put the image edges 8 deg wrong. The mount beside it is measured too: the pitch from the level frames and the encoder, the height from a tape (see the mount note). The 78 / 26 self-calibration is STALE and is not the source of any number in this file any more."
 }

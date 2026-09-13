@@ -323,11 +323,12 @@ def test_a_calibration_survives_the_config_and_comes_back_as_the_optics(tmp_path
     measured fx implies."""
     config = Path(camera_config(tmp_path))
     nominal_hfov = CameraConfig.load(config).hfov_deg
+    mount_before = json.loads(config.read_text())["overview"]["mount"]
     fit = calibrate(synthetic_views(), BOARD, SIZE)
     write_calibration(config, fit.calibration)
     data = json.loads(config.read_text())["overview"]
     assert data["calibrated"] is True
-    assert data["mount"]["z_m"] == 1.23  # every other key of the file survives the write
+    assert data["mount"] == mount_before  # every other key of the file survives the write
     assert data["hfov_deg"] == nominal_hfov, "the nominal field of view is not rewritten"
     assert data["intrinsics"]["hfov_deg"] == pytest.approx(fit.calibration.hfov_deg(), abs=0.01)
     back = Calibration.from_json(data["intrinsics"])
