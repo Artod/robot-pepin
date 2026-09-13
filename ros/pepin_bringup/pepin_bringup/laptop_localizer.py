@@ -23,7 +23,10 @@ camera refines a pose, it never searches for one — and the result travels as a
 (:class:`pepin.measurements.RemoteMeasurement`) on ``/localization/measurement``: a place, the
 covariance read off the score surface with the source's own trust charged into it, the fit, the
 scan's stamp and the map it means something on. The board carries it to its next update and
-fuses it by information. With this node off, or the link down, the board simply has no camera
+fuses it by information. The match takes the same vote the board's tracker takes on its own
+scans (``explained_vote``): the returns the map cannot explain — a person's legs, a chair that
+moved — are silenced, which matters more to a +-40 degree fan one person can fill than to a
+full revolution. With this node off, or the link down, the board simply has no camera
 measurements and tracks on the lidar as it always did.
 
 In: ``/scan`` and ``/map`` (the board's, over the bridge; the laser mount from ``/tf_static``),
@@ -65,6 +68,7 @@ from std_msgs.msg import Float32, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
 
+from pepin.dynamic import StaticMask
 from pepin.flags import Flag, FlagSet
 from pepin.localization import Localizer
 from pepin.measurements import RemoteMeasurement
@@ -93,7 +97,7 @@ CAMERA_SCANS = ((DEPTH, "/depth_scan"), (CONTACT, "/contact_scan"))
 NO_MOUNT = (0.0, 0.0, 0.0, False)
 TICK_S = 0.2  # how often the period is checked; the period itself is the flag
 MIN_POINTS = 60  # a revolution this thin cannot say where the cart is on a whole map
-STAGES = ("search", "measure", "camera")
+STAGES = ("search", "measure", "camera", "mask")
 # The search's arguments, the board's own (pepin_bringup.relocalizer._relocalize): the same
 # question, so an answer from here and an answer from there are comparable numbers.
 THETA_STEP_DEG = 10.0
@@ -242,6 +246,28 @@ FLAGS = FlagSet(
         " what it is there for",
         range=(0.0, 1.0),
     ),
+    Flag(
+        "explained_vote",
+        True,
+        description="returns the map cannot explain (a person, a moved chair) do not score a"
+        " camera match: the same vote the board's tracker takes on its own scans"
+        " (relocalizer's explained_vote), taken here, on the grid the camera is matched"
+        " against",
+        why="it is the board's own switch and it followed the match here: until 2026-09-13 these"
+        " two fans were matched inside Localizer.update_from, which builds the vote from the"
+        " static mask whenever explained_vote is on, and moving the matching to this machine"
+        " took the vote off them silently. Measured on the furnished room with a person standing"
+        " in the fan (scratch/camera_vote_probe.py): with 10 to 18 of the 41 beams on his legs,"
+        " he moves the measured pose by 2.2 cm median and 2.5 cm at worst without the vote, and"
+        " by 0.3 cm with it — a systematic pull that grows with how much of the fan he fills,"
+        " replaced by a slide of a few mm. The worst voted case is 3.8 cm, a thinned fan sliding"
+        " inside its own plateau, and the fan's sigma there is 8-11 cm, so the fusion already"
+        " discounts it. The fans' floors are on the roster (vote_min_points 20): a mask that"
+        " would leave a fan too thin to fix a pose is dropped and the whole scan votes",
+        on_when="in a room with people and furniture that moves — the room this robot lives in",
+        off_when="to measure what the vote costs or buys the camera (A/B against the board's"
+        " lidar-only pose), or in an empty room where every return should count",
+    ),
 )
 
 
@@ -260,6 +286,8 @@ class LaptopLocalizer(Node):
         self._grid: Any = None  # the board's map, for a camera matcher built without /map_camera
         self._camera: Localizer | None = None  # the matcher the camera scans are refined by
         self._camera_map = ""  # which grid that is: "/map" or "/map_camera"
+        self._mask: StaticMask | None = None  # what that grid explains; built on first use
+        self._mask_of: tuple[Any, int] | None = None  # ...the grid and version it was built on
         self._roster = SourceRegistry(enabled=(DEPTH, CONTACT))  # for the sources' own trust
         self._laser: tuple[float, float, float, bool] | None = None  # x, y, yaw, mirrored
         self._scan: TimedScan | None = None  # the newest revolution, in base_link
@@ -451,6 +479,21 @@ class LaptopLocalizer(Node):
             self._camera_map = "/map"
         return self._camera
 
+    def _camera_mask(self, localizer: Localizer) -> StaticMask | None:
+        """What the grid the camera is matched against explains, for the match's vote
+        (``explained_vote``): ``None`` with the flag off. Built on first use and kept until that
+        grid is replaced — /map_camera arrives once a second and a dilation of the whole grid is
+        not worth doing per scan, while a mask of the PREVIOUS band would silence the returns of
+        a room that has since moved on."""
+        if not self._switches.on("explained_vote"):
+            return None
+        grid = localizer.grid
+        if self._mask is None or self._mask_of != (grid, grid.version):
+            with self._tally.measure("mask"):
+                self._mask = StaticMask(grid)
+            self._mask_of = (grid, grid.version)
+        return self._mask
+
     def _belief_at(self, stamp: float) -> Pose2D | None:
         """The board's pose at ``stamp``: its newest belief carried there over the odometry
         between the two moments. ``None`` — counted with its reason — when there is no belief
@@ -508,6 +551,8 @@ class LaptopLocalizer(Node):
         if belief is None:
             return
         self._last_match[source] = stamp
+        mask = self._camera_mask(localizer)
+        silenced = localizer.stats.silenced_scans
         with self._tally.measure("camera"):
             measured = localizer.measure(
                 belief,
@@ -516,7 +561,10 @@ class LaptopLocalizer(Node):
                 stamp,
                 min_known=TRACK_MIN_KNOWN,
                 trust=self._roster.source(source).trust,
+                mask=mask,
             )
+        if localizer.stats.silenced_scans > silenced:
+            self._tally.count("voted")  # this fan had furniture in it and it did not score
         self._tally.sample(f"fit_{source}", measured.fit)
         if measured.fit < float(self._switches["camera_min_fit"]):
             self._tally.count("low_fit")
@@ -649,7 +697,8 @@ class LaptopLocalizer(Node):
         )
         last = "none yet" if self._sent is None else self._sent.text()
         return (
-            f"measurements: {sent} (against {self._camera_map or 'no map'}), last {last};"
+            f"measurements: {sent} (against {self._camera_map or 'no map'},"
+            f" {c['voted']} with unexplained returns silenced), last {last};"
             f" rejected: no belief {c['no_belief']}, stale belief {c['stale_belief']},"
             f" no odometry {c['no_odometry']}, low fit {c['low_fit']}, thin {c['thin_fan']},"
             f" no map {c['no_map']}; paced {c['paced']}, source off {c['camera_off']}"

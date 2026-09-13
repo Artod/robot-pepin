@@ -393,3 +393,44 @@ def test_a_match_that_explains_nothing_is_not_sent() -> None:
         assert "low fit 1" in node.logger.texts("info")[-1]
     finally:
         node.close()
+
+
+def crowded(truth: Pose2D, t: float, legs: int = 14, person_m: float = 0.7) -> Any:
+    """The camera's fan with a person standing in it: ``legs`` beams around the middle come
+    back off a body 0.7 m ahead that the static map has no wall for."""
+    msg = depth_msg(truth, t)
+    ranges = list(msg.ranges)
+    middle = len(ranges) // 2
+    for i in range(middle - legs // 2, middle - legs // 2 + legs):
+        ranges[i] = person_m
+    msg.ranges = ranges
+    return msg
+
+
+def test_the_returns_the_map_cannot_explain_do_not_score_the_camera_match() -> None:
+    """The board's vote, taken here now that the match is here: a person filling a third of the
+    fan is silenced, the mask is read on the grid the match is scored against, and the pose that
+    crosses the link is still the cart's. The flag off, nothing is silenced and no mask is even
+    built (scratch/camera_vote_probe.py has the centimetres)."""
+    node = watch()
+    try:
+        standing(node)
+        node.subs["/depth_scan"][1](crowded(TRUTH, 100.1))
+        answer = measured(node)
+        assert math.hypot(answer.x - TRUTH.x, answer.y - TRUTH.y) < 0.1
+        assert node._camera is not None and node._mask is not None
+        assert node._mask_of == (node._camera.grid, node._camera.grid.version)
+        node._report()
+        assert "1 with unexplained returns silenced" in node.logger.texts("info")[-1]
+    finally:
+        node.close()
+    node = watch(explained_vote=False)
+    try:
+        standing(node)
+        node.subs["/depth_scan"][1](crowded(TRUTH, 100.1))
+        assert node.pubs["/localization/measurement"].sent and node._mask is None
+        node._report()
+        line = node.logger.texts("info")[-1]
+        assert "0 with unexplained returns silenced" in line and "explained_vote=off" in line
+    finally:
+        node.close()

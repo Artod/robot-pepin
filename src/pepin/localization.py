@@ -276,6 +276,12 @@ class Localizer:
         """True once several scans in a row fit poorly: the wide recovery search is active."""
         return self.weak_scans >= self._lost_after
 
+    @property
+    def grid(self) -> OccupancyGrid:
+        """The occupancy grid every match here is scored against: what a caller builds a
+        :class:`pepin.dynamic.StaticMask` on, so the vote is read on the same map as the match."""
+        return self._grid
+
     def settings(self) -> str:
         """The live switches and constants as one phrase, for the report line."""
         return (
@@ -530,6 +536,7 @@ class Localizer:
         stamp: float = 0.0,
         min_known: float = GLOBAL_MIN_KNOWN,
         trust: float = 1.0,
+        mask: StaticMask | None = None,
     ) -> PoseMeasurement:
         """One place on the map as a measurement: ``pose`` sharpened in the tracking window
         against this scan, the inlier fraction of the whole scan there as its fit, and the
@@ -537,9 +544,17 @@ class Localizer:
         _surface`) — how far the pose may move before the scan stops fitting, per direction.
 
         The same machinery :meth:`_measure` uses for a tracking update, without the odometry's
-        motion and without the static map's vote: for a pose that came from somewhere else — a
-        whole-map search, the laptop's watchdog — so it can be weighed against the tracker's own
-        belief by information instead of by a rule of thumb.
+        motion: for a pose that came from somewhere else — a whole-map search, the laptop's
+        watchdog, a camera scan matched on the machine that produced it — so it can be weighed
+        against the tracker's own belief by information instead of by a rule of thumb.
+
+        ``mask`` is the static map's own explanation of the scan (:class:`pepin.dynamic.Static
+        Mask`, built on the grid THIS matcher holds): given one, the returns it cannot explain
+        — a person's legs, a chair that moved — are silenced in the match exactly as they are
+        in a tracking update, under the source's own floors on the roster
+        (``vote_min_points``, ``min_points``). Passing one is the caller's switch: a whole-map
+        search passes none, because a mask is read at a pose and a searching caller has none to
+        read it at. The fit is always measured on the WHOLE scan, silenced returns included.
 
         ``min_known`` is :data:`GLOBAL_MIN_KNOWN` here, not the tracking default: a place found
         anywhere on the map must put most of the scan on cells the map has SEEN. Judged the
@@ -550,7 +565,15 @@ class Localizer:
         ``trust`` (the source's weight on the roster) so that a camera's answer is widened here,
         where it is measured, and never again on the machine that fuses it.
         """
-        local, surface = self._matcher.match_surface(pose, points, self._window)
+        voting = points
+        if mask is not None:
+            known = self.sources.source(source)
+            vote = voting_mask(points, pose, mask, min_points=known.vote_min_points)
+            voting = self._voting(points, vote, self._min_points_for(known))
+            if vote is not None:
+                self.stats.silenced_scans += 1
+                self.stats.silenced_points += len(points) - len(voting)
+        local, surface = self._matcher.match_surface(pose, voting, self._window)
         fit = self._matcher.inlier_fraction(local.pose, points, min_known=min_known)
         return PoseMeasurement(
             local.pose.x,

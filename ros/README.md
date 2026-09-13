@@ -461,6 +461,7 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `laptop_localizer` | `camera_window_m` | number 0.01..1 | 0.09 | yes | half-width of the window a camera scan is matched in, metres, around the board's belief carried to that scan's moment |
 | `laptop_localizer` | `camera_window_deg` | number 0.5..90 | 9.0 | yes | half-width of the same window in heading, degrees |
 | `laptop_localizer` | `camera_min_fit` | number 0..1 | 0.25 | yes | a camera match whose fit is below this is not sent: it is counted as low fit and the board never hears about it |
+| `laptop_localizer` | `explained_vote` | bool | on | yes | returns the map cannot explain (a person, a moved chair) do not score a camera match: the same vote the board's tracker takes on its own scans (relocalizer's explained_vote), taken here, on the grid the camera is matched against |
 | `neck_state` | `neck_tf` | bool | on | yes | base_link -> camera_link is published live from the neck's encoders; the laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes publish that edge |
 | `relocalizer` | `rest_lock` | bool | on | yes | hold the pose while the cart stands still (wheels quiet 0.6 s and the gyro under 1.5 deg/s): a match's residual is blended in with a time constant instead of taken whole |
 | `relocalizer` | `explained_vote` | bool | on | yes | returns the static map cannot explain (a person, a moved chair) do not score the match |
@@ -718,6 +719,11 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* 0.25 — 0.25 is the fit at which the tracker itself calls a scan weak (pepin.localization's lost_below): below it the scan explains nothing and its pose is the window's tie-break, not a measurement. It refuses only that much — the camera's fans sit at 0.5-0.6 against the lidar's map on run 0171, and the worst live camera-only fits of 2026-09-13 were 0.35-0.46. The covariance already widens a poor match a hundredfold at the bound; this floor is for what is not a match at all
   - *On when:* raise it to send only matches the map really explains — a room the camera sees badly, a map that has moved on
   - *Off when:* lower it to let the board's own disagreement gate do all the judging, which is what it is there for
+- **`explained_vote`** — bool, default on
+  - *What:* returns the map cannot explain (a person, a moved chair) do not score a camera match: the same vote the board's tracker takes on its own scans (relocalizer's explained_vote), taken here, on the grid the camera is matched against
+  - *Default:* on — it is the board's own switch and it followed the match here: until 2026-09-13 these two fans were matched inside Localizer.update_from, which builds the vote from the static mask whenever explained_vote is on, and moving the matching to this machine took the vote off them silently. Measured on the furnished room with a person standing in the fan (scratch/camera_vote_probe.py): with 10 to 18 of the 41 beams on his legs, he moves the measured pose by 2.2 cm median and 2.5 cm at worst without the vote, and by 0.3 cm with it — a systematic pull that grows with how much of the fan he fills, replaced by a slide of a few mm. The worst voted case is 3.8 cm, a thinned fan sliding inside its own plateau, and the fan's sigma there is 8-11 cm, so the fusion already discounts it. The fans' floors are on the roster (vote_min_points 20): a mask that would leave a fan too thin to fix a pose is dropped and the whole scan votes
+  - *On when:* in a room with people and furniture that moves — the room this robot lives in
+  - *Off when:* to measure what the vote costs or buys the camera (A/B against the board's lidar-only pose), or in an empty room where every return should count
 
 #### `goal_server`
 
