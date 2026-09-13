@@ -517,7 +517,12 @@ class Localizer:
         return distinct
 
     def measure(
-        self, pose: Pose2D, points: NDArray[np.float64], source: str, stamp: float = 0.0
+        self,
+        pose: Pose2D,
+        points: NDArray[np.float64],
+        source: str,
+        stamp: float = 0.0,
+        min_known: float = GLOBAL_MIN_KNOWN,
     ) -> PoseMeasurement:
         """One place on the map as a measurement: ``pose`` sharpened in the tracking window
         against this scan, the inlier fraction of the whole scan there as its fit, and the
@@ -528,9 +533,15 @@ class Localizer:
         motion and without the static map's vote: for a pose that came from somewhere else — a
         whole-map search, the laptop's watchdog — so it can be weighed against the tracker's own
         belief by information instead of by a rule of thumb.
+
+        ``min_known`` is :data:`GLOBAL_MIN_KNOWN` here, not the tracking default: a place found
+        anywhere on the map must put most of the scan on cells the map has SEEN. Judged the
+        tracker's way, a scan of another flat scored 0.99 against a map it has nothing to do
+        with — a quarter of its returns on that map's walls and the rest in the unknown
+        (scratch/kidnap_recovery.py, 2026-09-12).
         """
         local, surface = self._matcher.match_surface(pose, points, self._window)
-        fit = self._matcher.inlier_fraction(local.pose, points)
+        fit = self._matcher.inlier_fraction(local.pose, points, min_known=min_known)
         return PoseMeasurement(
             local.pose.x,
             local.pose.y,

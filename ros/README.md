@@ -255,6 +255,74 @@ graph correction leaves the old geometry standing. The cure is to replay the fra
 corrected poses, and the snapshot already carries the index for it — every integration's stamp,
 sensor and pose — while the measurements themselves stay in the run tape, where they already live.
 
+## The whole-map watchdog
+
+The board's tracker follows the cart in a 9 cm window around the odometry's prediction. When it
+loses the world it searches the whole map for itself — FFT correlation over every shift at 40
+headings, **3.7 s** of an A53 (2026-09-06) — but only after the fit has been poor for three
+checks in a row, and never while the cart is moving: a teleport mid-drive is worse than a poor
+fit. The laptop runs the very same search in **0.12 s** and has nothing else to do with it, so
+`pepin_bringup.global_watch` asks the question once a second, healthy or not, and sends the
+answer to the board as a *candidate*.
+
+| | the board alone | with the watchdog |
+| --- | --- | --- |
+| when "where am I really?" is asked | after 3 poor checks, standing still | every second, always |
+| what one answer costs | 3.7 s of the board's CPU | 0.12 s of the laptop's |
+| what the answer is compared with | a fit against a threshold | the tracked pose, place against place |
+| what moves the belief | two searches that agree | 3 candidates that agree with each other and disagree with the tracker |
+
+A candidate is one self-contained JSON message on `/localization/candidate` (laptop → board in
+vision mode): the place, a 3x3 covariance read off the correlation peak's own shape, the fit
+there, how alike the runner-up explained the scan (`ambiguity`), the scan's stamp and the map's
+identity. The board judges it again against its own fresher pose
+(`pepin.watchdog.judge`) — **agree** (the everyday verdict), **disagree** (another place,
+clearly better, and the map is sure of it), **unknown_map** (nothing on this map fits, or two
+places fit alike), **nothing** — and `CandidateGate` turns three disagreements about one place
+into a re-seed through the same door the board's own search uses. The seed is not the candidate
+but the two weighed by their information, so a sure candidate against a lost tracker *is* the
+candidate, and a bounded one barely moves a healthy tracker.
+
+Measured offline on tape 0171 (`scratch/kidnap_recovery.py`, replayed through the very tracker
+the node builds; the cart is carried 1.0 m / 40 deg at t0+20 s while the odometry and the scans
+go on as they were):
+
+| | back under 10 cm |
+| --- | --- |
+| the tracker's local window alone | never (0.69 m after 39 s) |
+| the board's own fallback, as today | never — the cart is driving, so it may not search |
+| the same, told the cart had stopped | never — 4 searches found the truth and none was applied |
+| watchdog, acting on the first candidate | 0.8 s, 8 scans |
+| **watchdog + the streak of 3 (shipped)** | **2.9 s, 28 scans** |
+
+Why the board's own path fails here: a metre from the truth this flat still fits the map at
+**0.53**, just under the `lost_fit` of 0.55 — so the tracker hardly calls itself lost, and every
+time the fit reads over the threshold the watch drops the pending candidate before a second
+search can confirm it (`pepin.watch.LostWatch.observe`). Its four searches all found the right
+place (0.72–0.79 against the tracker's 0.50–0.60) and all four died as unconfirmed candidates. A
+fit against a threshold cannot see a wrong place that fits; two places compared can.
+
+Over the whole undisturbed tape the watchdog re-seeded **0 times** (with a streak of 1 as well
+as 3) and never moved the pose by a millimetre. Searched against another flat's map, 9 of 12
+candidates read `unknown_map` and the gate says "the map does not fit" — in the report line and
+on `/localization/sources`, never as an automatic mode switch.
+
+Flags: `global_watch` and `watch_period_s` on the laptop's node, `accept_candidates` and
+`candidate_streak` on the tracker. All four are live; with `global_watch` or `accept_candidates`
+off the stack is exactly what it was before, the board's own slow search and nothing else.
+
+### Not yet verified on the robot
+
+- Nothing here has run on the robot: the numbers above are a replay of a recorded tape.
+- The link's own latency is modelled as 50 ms; a candidate that arrives late is judged against a
+  pose that has moved on, which can only turn a `disagree` into a `nothing` (the streak breaks),
+  never the other way round.
+- 3 of 12 candidates computed against a *wrong* map still read `disagree` rather than
+  `unknown_map`: the fit floor (0.45) and the ambiguity ceiling (0.90) are the two numbers that
+  decide it, and they are tuned on one flat.
+- A re-seed while a goal is running is refused (`_navigating`); a re-seed while the cart is
+  merely driving is allowed, which no drive has tried yet.
+
 ## Feature flags
 
 Every behaviour that can be switched is a live parameter of the node that owns it, declared

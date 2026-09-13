@@ -531,6 +531,22 @@ def test_the_bridge_routes_only_what_the_split_needs_and_only_one_way() -> None:
         assert re.compile(vision_b["publishers"][0]).search(name), name
         assert re.compile(vision_l["subscribers"][0]).search(name), name
         assert not re.compile(vision_l["publishers"][0]).search(name), f"{name} would loop"
+    # The laptop's whole-map watchdog: its candidates cross to the board, and everything it
+    # needs to compute one (the scan, the map, what the tracker believes) crosses to it. The
+    # pose it publishes beside them for Foxglove stays on the laptop, where Foxglove is.
+    for name in ("/scan", "/map", "/tracker_pose", "/localization_fit", "/tf_static"):
+        assert re.compile(vision_b["publishers"][0]).search(name), name
+        assert re.compile(vision_l["subscribers"][0]).search(name), name
+    assert re.compile(vision_l["publishers"][0]).search("/localization/candidate")
+    assert re.compile(vision_b["subscribers"][0]).search("/localization/candidate")
+    assert not re.compile(vision_b["publishers"][0]).search("/localization/candidate")
+    for block in (*vision_b.values(), *vision_l.values()):
+        assert not re.compile(block[0]).search("/localization/candidate_pose")
+    # SLAM mode has no saved map to search, and the watch is off there: no candidate crosses.
+    for side in ("board", "laptop"):
+        allow = bridge_allow(side, "slam")
+        for block in allow.values():
+            assert not re.compile(block[0]).search("/localization/candidate"), side
     unit = (REPO / "board/pepin-bridge.service").read_text()
     assert "Environment=PEPIN_BRIDGE_CONFIG=zenoh-bridge-board.json" in unit
     assert "/root/pepin-ros/$PEPIN_BRIDGE_CONFIG:/config.json:ro" in unit
