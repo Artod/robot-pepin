@@ -17,12 +17,19 @@ makes an integer flag, a float default a double), and a list of choices (``Flag(
 ("lidar",), choices=("lidar", "depth"))``, written ``lidar,depth`` on the wire). ``env`` names
 an environment variable that overrides the default at start (``PEPIN_DEPTH_BACKEND``);
 ``live=False`` declares a flag the adapter refuses to change once the node runs.
+
+Four texts, not one. ``description`` is the one-line summary the table carries; ``why`` is the
+measured reason the default is what it is (the numbers and the file they were measured in, or
+:data:`UNMEASURED` when nobody has measured it), ``on_when`` and ``off_when`` say what a person
+in front of the robot should see before moving the switch. :meth:`Flag.paragraph` prints all
+four for a terminal (``ros/flags.sh flag NODE FLAG``) and :meth:`Flag.markdown` for the README.
 """
 
 from __future__ import annotations
 
 import ast
 import importlib
+import textwrap
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,16 +40,22 @@ Kind = Literal["bool", "choice", "number", "list"]
 ON_WORDS = ("true", "on", "1", "yes")
 OFF_WORDS = ("false", "off", "0", "no")
 COLUMNS = ("flag", "kind", "default", "live", "description")
+UNMEASURED = "default by design, unmeasured"
+WIDTH = 96
 
 
 @dataclass(frozen=True)
 class Flag:
     """One switch: its name (the feature's), its default, what values it takes, whether it
-    changes while the node runs, and the sentence a person reads about it."""
+    changes while the node runs, and the four texts a person reads about it — what it does,
+    why its default is what it is, when to turn it on, when to turn it off."""
 
     name: str
     default: Any
     description: str = ""
+    why: str = ""
+    on_when: str = ""
+    off_when: str = ""
     choices: tuple[str, ...] = ()
     range: tuple[float, float] | None = None
     env: str | None = None
@@ -208,6 +221,52 @@ class Flag:
             parts.append("(not live: set at the next start)")
         return " ".join(parts)
 
+    @property
+    def measured(self) -> bool:
+        """Whether a measurement stands behind the default: a ``why`` that is not the
+        :data:`UNMEASURED` marker."""
+        return bool(self.why) and not self.why.lstrip().startswith(UNMEASURED)
+
+    def headline(self, prefix: str = "") -> str:
+        """The flag's first line: ``depth_stream/floor_pairs: bool, default off`` (``prefix``
+        is the node, empty for a bare flag), with ``(not live)`` when it is read at start."""
+        where = f"{prefix}/{self.name}" if prefix else self.name
+        live = "" if self.live else ", not live"
+        return f"{where}: {self.kind_text()}, default {self.render(self.default)}{live}"
+
+    def details(self) -> list[tuple[str, str]]:
+        """The long text as (label, text) pairs in reading order — What, Default, On when, Off
+        when — the fields nobody has written left out. ``Default`` carries the value itself, so
+        its reason reads as a sentence about that value."""
+        default = self.render(self.default)
+        pairs = [
+            ("What", self.help()),
+            ("Default", f"{default} — {self.why}" if self.why else default),
+            ("On when", self.on_when),
+            ("Off when", self.off_when),
+        ]
+        return [(label, text.strip()) for label, text in pairs if text.strip()]
+
+    def paragraph(self, prefix: str = "", width: int = WIDTH) -> str:
+        """The whole flag as plain text for a terminal (``ros/flags.sh flag NODE FLAG``): the
+        headline, then the labelled texts wrapped at ``width``, hanging under their label."""
+        details = self.details()
+        lines = [self.headline(prefix)]
+        pad = max((len(label) for label, _ in details), default=0) + 2
+        for label, text in details:
+            body = textwrap.wrap(text, width=max(width - pad, 20))
+            lines.append(f"{label + ':':<{pad}}{body[0]}")
+            lines += [" " * pad + line for line in body[1:]]
+        return "\n".join(lines)
+
+    def markdown(self) -> str:
+        """The whole flag as one markdown bullet with its texts nested under it, for the
+        README's per-flag list below the table."""
+        head = f"{self.kind_text()}, default {self.render(self.default)}"
+        lines = [f"- **`{self.name}`** — {head}{'' if self.live else ', not live'}"]
+        lines += [f"  - *{label}:* {text}" for label, text in self.details()]
+        return "\n".join(lines)
+
     def _range_text(self) -> str:
         assert self.range is not None
         lo, hi = self.range
@@ -313,9 +372,15 @@ class FlagSet:
             )
         return rows
 
+    def details(self) -> str:
+        """The flags one by one as a markdown list: what each does, why its default is what it
+        is, when to turn it on, when to turn it off (:meth:`Flag.markdown`)."""
+        return "\n".join(flag.markdown() for flag in self)
+
     def describe(self) -> str:
-        """The table as markdown: one row per flag, :data:`COLUMNS` as the header."""
-        return markdown_table(COLUMNS, self.rows())
+        """The table as markdown — one row per flag, :data:`COLUMNS` as the header — and the
+        per-flag list under it: the short answer and the long one, in that order."""
+        return f"{markdown_table(COLUMNS, self.rows())}\n\n{self.details()}"
 
 
 def markdown_table(header: Sequence[str], rows: Iterable[Sequence[str]]) -> str:

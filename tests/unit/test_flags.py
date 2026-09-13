@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from pepin.flags import COLUMNS, Flag, FlagSet, load_table, markdown_table
+from pepin.flags import COLUMNS, UNMEASURED, Flag, FlagSet, load_table, markdown_table
 
 
 def _table() -> FlagSet:
@@ -182,15 +182,70 @@ def test_the_table_renders_as_markdown_for_the_readme() -> None:
         Flag("align", True, description="frame-to-model | before fusing"),
         Flag("backend", "remote", choices=("remote", "auto"), env="PEPIN_BACKEND", live=False),
     )
-    assert flags.describe() == (
+    table, details = flags.describe().split("\n\n")
+    assert table == (
         "| flag | kind | default | live | description |\n"
         "| --- | --- | --- | --- | --- |\n"
         "| `align` | bool | on | yes | frame-to-model \\| before fusing |\n"
         "| `backend` | choice: remote, auto | remote (env PEPIN_BACKEND) | at start |  |"
     )
+    assert details == flags.details() and details.startswith("- **`align`** — bool, default on")
     assert markdown_table(("a", "b"), [["1", "2"]]) == "| a | b |\n| --- | --- |\n| 1 | 2 |"
     assert flags.rows()[0] == ["`align`", "bool", "on", "yes", "frame-to-model | before fusing"]
     assert COLUMNS == ("flag", "kind", "default", "live", "description")
+
+
+# ---- the long text: what, why this default, when to move it ----------------------------------
+def _documented() -> Flag:
+    return Flag(
+        "wall_anchor",
+        False,
+        description="the lidar's returns extruded up the image pair with the rows above",
+        why="it pulls the lidar's own row 10 % near (1.010 -> 0.896) on run 0171",
+        on_when="on a robot with no lidar",
+        off_when="whenever the cart drives on the band",
+    )
+
+
+def test_a_flag_carries_what_it_does_why_its_default_and_when_to_move_it() -> None:
+    flag = _documented()
+    assert flag.details() == [
+        ("What", "the lidar's returns extruded up the image pair with the rows above"),
+        ("Default", "off — it pulls the lidar's own row 10 % near (1.010 -> 0.896) on run 0171"),
+        ("On when", "on a robot with no lidar"),
+        ("Off when", "whenever the cart drives on the band"),
+    ]
+    assert flag.measured, "a why that is not the marker is a measured default"
+    unmeasured = Flag("map_hz", 1.0, description="how often", why=f"{UNMEASURED}: 1 Hz is RTAB's")
+    assert not unmeasured.measured and unmeasured.details()[1][0] == "Default"
+    bare = Flag("x", True)
+    assert not bare.measured and [label for label, _ in bare.details()] == ["Default"], (
+        "a flag with no texts says only what its default is"
+    )
+
+
+def test_the_paragraph_is_the_flag_whole_for_a_terminal() -> None:
+    lines = _documented().paragraph("depth_stream", width=60).splitlines()
+    assert lines[0] == "depth_stream/wall_anchor: bool, default off"
+    assert lines[1] == "What:     the lidar's returns extruded up the image pair"
+    assert lines[2] == "          with the rows above", "a hanging indent under the label"
+    assert [line for line in lines if line.startswith("Off when:")] == [
+        "Off when: whenever the cart drives on the band"
+    ]
+    assert max(len(line) for line in lines) <= 60
+    assert (
+        Flag("url", "a", choices=("a",), live=False)
+        .paragraph()
+        .startswith("url: choice: a, default a, not live")
+    )
+
+
+def test_the_markdown_block_is_the_flag_whole_for_the_readme() -> None:
+    lines = _documented().markdown().splitlines()
+    assert lines[0] == "- **`wall_anchor`** — bool, default off"
+    assert lines[1].startswith("  - *What:* the lidar's returns")
+    assert lines[2].startswith("  - *Default:* off — it pulls")
+    assert lines[-1] == "  - *Off when:* whenever the cart drives on the band"
 
 
 # ---- a node's table without the node ---------------------------------------------------------
