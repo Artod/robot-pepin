@@ -34,8 +34,11 @@ room" is just a volume that was seeded (``seed_map``) or resumed from a snapshot
 that are launch decisions this node is told: the bridge mode says which side owns the topic
 (:func:`pepin.deployment.map_owner`) and the ``world_map`` parameter says whether the launch
 kept RTAB-Map's grid off it. Without both, the volume is refused on /map however ``map_source``
-is set afterwards. The volume is snapshotted to ``world_path`` every ``snapshot_s`` and at
-shutdown.
+is set afterwards. Beside /map goes ``/map_camera``, the band the camera speaks for
+(``camera_band_m``, the band /depth_scan marks in): the slice the camera's own scans are matched
+against on the laptop (:mod:`pepin_bringup.laptop_localizer`), because a tabletop the lidar's
+plane never sees is in that picture and in no other. The volume is snapshotted to ``world_path``
+every ``snapshot_s`` and at shutdown.
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
 ``fit_gate``, ``imu_lean``, ``lean_gate_deg``, ``lean_min_quality``, ``self_heal``, ``align``,
@@ -110,6 +113,7 @@ from pepin_bringup.node_kit import (
 CONFIG = "/ws/config/fusion.json"
 LIDAR_CONFIG = "/ws/config/lidar.json"
 WORLD_PATH = "/maps/world_live.npz"  # the volume's snapshot; ros/maps is mounted there
+CAMERA_MAP_TOPIC = "/map_camera"  # the camera's band of the volume, for its own matcher
 SCAN_TOPIC = "/scan"
 TF_WAIT_S = 0.3
 BAND_TF_WAIT_S = 5.0  # the static base_link -> laser edge at start: the board publishes it once
@@ -498,6 +502,7 @@ class DepthFusion(Node):
         )
         self._laser: tuple[PlanarMount, float, bool] | None = None  # mount, yaw, upside down
         self._map_pub: Any = None  # made on the first publish: only where this side owns /map
+        self._camera_map_pub: Any = None  # ...and the camera's own band, beside it
         self._snapshots = SnapshotClock(float(self._switches["snapshot_s"]))
         self._start_state()
         self._surface_timer = self.create_timer(
@@ -869,39 +874,59 @@ class DepthFusion(Node):
             )
         )
 
+    @staticmethod
+    def _latched() -> QoSProfile:
+        """Transient local and reliable: a subscriber that arrives late is still served the
+        last map published, which is what every consumer of a map expects."""
+        return QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+
     def _publish_map(self) -> None:
         """The volume's lidar layer as /map, at ``map_hz``, when the flag says the map comes
-        from the volume and nothing else in this stack is on /map."""
+        from the volume and nothing else in this stack is on /map — and, beside it, the band
+        the camera speaks for as /map_camera.
+
+        Two cross-sections of one room: the lidar's plane is what the lidar localises against
+        and what Nav2 plans on, and the camera's band (``camera_band_m``, the band /depth_scan
+        marks in) holds the seats and tabletops that plane never sees. The camera's scans are
+        matched against their own slice where there is one (pepin_bringup.laptop_localizer),
+        which is why it goes out on a topic of its own instead of staying inside this node.
+        Nobody else publishes /map_camera, so it needs no owner rule — but it is published only
+        where the volume IS the map, because a band of a volume nobody trusts as a map is not a
+        map to localise against either.
+        """
         if self._switches["map_source"] != "volume":
             return
         if not self._map_mine:
             self._tally.count("map_refused")
             return
         with self._tally.measure("map"), self._lock:
-            view = self._world.lidar_slice(SliceLaw(min_weight=self._switches["map_min_weight"]))
+            law = SliceLaw(min_weight=self._switches["map_min_weight"])
+            view = self._world.lidar_slice(law)
+            camera = self._world.camera_band_slice(law)
             stamp = self._last_stamp
         if self._map_pub is None:  # transient local: a late subscriber still gets the map
-            self._map_pub = self.create_publisher(
-                OccupancyGridMsg,
-                "/map",
-                QoSProfile(
-                    depth=1,
-                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                    reliability=ReliabilityPolicy.RELIABLE,
-                ),
-            )
+            self._map_pub = self.create_publisher(OccupancyGridMsg, "/map", self._latched())
             self.get_logger().info(
                 f"/map is the volume's now: {view.shape[1]}x{view.shape[0]} cells of"
                 f" {view.resolution_m * 100:.0f} cm from {view.origin}, the layer"
                 f" {view.band_m[0]:.2f}-{view.band_m[1]:.2f} m"
             )
-        self._map_pub.publish(
-            occupancy_grid(
-                view.message_fields(),
-                stamp if stamp is not None else self.get_clock().now().to_msg(),
-                "map",
+        if self._camera_map_pub is None:
+            self._camera_map_pub = self.create_publisher(
+                OccupancyGridMsg, CAMERA_MAP_TOPIC, self._latched()
             )
-        )
+            self.get_logger().info(
+                f"{CAMERA_MAP_TOPIC} is the volume's camera band now:"
+                f" {camera.band_m[0]:.2f}-{camera.band_m[1]:.2f} m, what the camera's own scans"
+                " are matched against"
+            )
+        when = stamp if stamp is not None else self.get_clock().now().to_msg()
+        self._map_pub.publish(occupancy_grid(view.message_fields(), when, "map"))
+        self._camera_map_pub.publish(occupancy_grid(camera.message_fields(), when, "map"))
         self._tally.count("maps")
 
     def _report(self) -> None:

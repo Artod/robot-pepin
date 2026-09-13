@@ -298,14 +298,21 @@ graph correction leaves the old geometry standing. The cure is to replay the fra
 corrected poses, and the snapshot already carries the index for it — every integration's stamp,
 sensor and pose — while the measurements themselves stay in the run tape, where they already live.
 
-## The whole-map watchdog
+## The laptop's localizer: the whole-map watchdog, and the camera's own poses
+
+Two jobs the board has no CPU for, in one node (`pepin_bringup.laptop_localizer`) that shares a
+map, the board's belief and a report line: the whole-map search below, and the camera's scans
+matched where they are produced — see **Redundancy demo** for that half and why it moved here on
+2026-09-13.
+
+### The whole-map watchdog
 
 The board's tracker follows the cart in a 9 cm window around the odometry's prediction. When it
 loses the world it searches the whole map for itself — FFT correlation over every shift at 40
 headings, **3.7 s** of an A53 (2026-09-06) — but only after the fit has been poor for three
 checks in a row, and never while the cart is moving: a teleport mid-drive is worse than a poor
 fit. The laptop runs the very same search in **0.12 s** and has nothing else to do with it, so
-`pepin_bringup.global_watch` asks the question once a second, healthy or not, and sends the
+the laptop's localizer asks the question once a second, healthy or not, and sends the
 answer to the board as a *candidate*.
 
 | | the board alone | with the watchdog |
@@ -370,6 +377,10 @@ was before, the board's own slow search and nothing else.
 ### Not yet verified on the robot
 
 - Nothing here has run on the robot: the numbers above are a replay of a recorded tape.
+- The camera half of this node has not run on the robot either. Offline
+  (`scratch/laptop_localizer_replay.py`) the split path costs the same as the fused tracker did
+  at full rate; live, only the board's own report line can say whether its match time came back
+  to the lidar-only 45 ms and 9-10 Hz.
 - The link's own latency is modelled as 50 ms in the replay. The board carries every candidate
   over the odometry between its scan and now, so that number sets how far the carry reaches,
   not how wrong the seed is; a candidate older than the odometry history (5 s) is dropped as
@@ -852,9 +863,9 @@ is not a mode, it is a bug that looks like one.
 
 | mode | command | tracker sources | costmap layers |
 | --- | --- | --- | --- |
-| fused | `ros/sensor.sh lidar on` + `ros/sensor.sh camera on` | `lidar,depth,contact` | `lidar_layer`, `camera_layer`, `contact_layer` |
+| fused | `ros/sensor.sh lidar on` + `ros/sensor.sh camera on` | `lidar,camera` | `lidar_layer`, `camera_layer`, `contact_layer` |
 | lidar only | `ros/sensor.sh camera off` | `lidar` | `lidar_layer` |
-| camera only | `ros/sensor.sh lidar off` (`--hard` to stop the driver) | `depth,contact` | `camera_layer`, `contact_layer` |
+| camera only | `ros/sensor.sh lidar off` (`--hard` to stop the driver) | `camera` | `camera_layer`, `contact_layer` |
 
 The tracker column needs the relocalizer's `sources` flag, which arrives with the fusion wiring;
 the generated **Feature flags** table above is the authority on whether this build carries it
@@ -864,7 +875,27 @@ are unchanged and exits 1 — so the costmap column is what holds, and the modes
 
 The camera is one sensor read twice from the same frames: `depth_scan` is the band 8 cm-1.3 m
 above the floor (table tops, seats, a hand) and `contact_scan` is where the floor ends (chair
-feet, a plinth) — so `camera on` moves two sources and two layers at once.
+feet, a plinth) — so `camera on` moves two costmap layers at once. In the tracker it is ONE
+source, `camera`, and the difference is where the matching happens. **The camera's scans are
+matched on the laptop**, where the depth network already runs (`pepin_bringup.laptop_localizer`):
+each scan is matched in a small window around the pose the board believes in, carried to that
+scan's own moment, and what crosses the link is the pose it measured with its covariance
+(`/localization/measurement`, `pepin.measurements`). The board carries that pose to its next
+update and fuses it by information beside the lidar's match, which costs it a 3x3 inverse.
+
+That is the day's verdict, measured on the robot (2026-09-13, `scratch/drive_bisect.py`, runs
+0238-0241): with the camera's scans matched ON THE BOARD the tracker took 147 ms per revolution
+instead of 45, kept only every second revolution (4.7 Hz), and the camera's word — measured on a
+scan that was a fifth of a second old by the time it was used — pulled the live pose 50 cm p90
+and 78 cm max off the lidar-only truth over one drive. The same fusion offline, at full rate,
+costs 0.7 cm. The arithmetic was never the problem; the Orange Pi was.
+
+**No WiFi, no camera measurements.** The board then tracks on the lidar exactly as before — the
+same code path, one source instead of two — and `ros/sensor.sh status` shows `camera` stale in
+the tracker's roster. That is the redundancy the split buys: the link may die, and the robot
+keeps its pose; the lidar may die, and the camera's measurements drive the updates by themselves
+(the board's own report line says `fused camera` and the watch goes off, because a +-40 degree
+fan cannot say "lost").
 
 ```bash
 ros/sensor.sh status            # what the tracker matches on, which layers are on, what each node last said
@@ -910,16 +941,22 @@ Open `ros/foxglove/pepin_nav.json` in Foxglove Studio:
 The report lines say the same in words, every 30 s, and `ros/sensor.sh status` prints all three:
 
 - `relocalizer` on the board: `tracker: ... flags: rest_lock=on explained_vote=on ...`, with
-  `sources=lidar,depth,contact` among those flags once the tracker carries them (`ros/sensor.sh
-  status` prints the sources from this line, and says so plainly when the line has none)
-- `depth_stream` in the laptop's SLAM container: `depth: 3.1 frames/s published ...`
+  `sources=lidar,camera` among those flags (`ros/sensor.sh status` prints the sources from this
+  line, and says so plainly when the line has none), and `measurements N (received N, taken N)`
+  with every reason a camera pose was refused — stale, uncovered by the odometry, from another
+  map
+- `laptop_localizer` in the laptop's SLAM container: `measurements: depth N at fit 0.62,
+  contact N at fit 0.55 (against /map), ... rejected: no belief 0, stale belief 0, ...` beside
+  the whole-map watchdog's own candidates, and `ms median/max` for both
+- `depth_stream` in the same container: `depth: 3.1 frames/s published ...`
 - `contact_scan` in the same container: `contact: 2.9 scans/s published ...`
 
 ### What the numbers already say
 
 Camera-only localisation on the **lidar's** map does not work, and was measured before it was
 demonstrated (`scratch/camera_only_localization.py`, run 0171 replayed offline against
-`ros/maps/flat3_straight.yaml`):
+`ros/maps/flat3_straight.yaml`; the same modes replayed through the new split path in
+`scratch/laptop_localizer_replay.py`):
 
 | tracker sources | error vs lidar-only (median / p90 / max) | verdict |
 | --- | --- | --- |
@@ -931,10 +968,14 @@ demonstrated (`scratch/camera_only_localization.py`, run 0171 replayed offline a
 The camera's band is a different cross-section of the room than the lidar's own plane:
 sofa cushions and table clutter fit "some wall" well (fit 0.90 at the wrong pose, 0.12 at the
 true one), and parked bumper-to-furniture the camera sees nothing of the floor below ~1.2 m.
-Camera-only localisation needs a camera-built map, not the lidar's slice. So the honest demo is:
+Camera-only localisation needs a camera-built map, not the lidar's slice — which is what
+`/map_camera` is for: where the world volume is the map (`pepin_bringup.depth_fusion`,
+`map_source=volume`), the camera's own band of it goes out on that topic and the laptop matches
+the camera's scans against THAT instead of against the lidar's plane. So the honest demo is:
 **the costmap half survives either sensor alone; the tracker half needs the lidar** — and fusing
-all three costs 0.7 cm of median agreement, which is free. `ros/sensor.sh lidar off` prints that
-warning itself when it takes the last lidar out of the tracker's sources.
+the camera in costs 0.7 cm of median agreement, which is free *as long as nobody asks the board
+to do the matching*. `ros/sensor.sh lidar off` prints that warning itself when it takes the last
+lidar out of the tracker's sources.
 
 ## Frames and conventions
 
