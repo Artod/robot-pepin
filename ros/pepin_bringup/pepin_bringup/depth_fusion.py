@@ -122,13 +122,31 @@ STAGES = ("align", "integrate", "scan", "map")
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration; their state is printed in every report line.
 FLAGS = FlagSet(
-    Flag("enabled", True, description="frames are fused into the model; off, they are dropped"),
+    Flag(
+        "enabled",
+        True,
+        description="frames are fused into the model; off, they are dropped",
+        why="default by design, unmeasured: the kill switch, so the model can be stopped growing"
+        " without stopping the node, the camera or the report line",
+        on_when="whenever the fused surface or the volume's map is wanted",
+        off_when="to freeze the model where it stands — a snapshot to save, a picture to read, a"
+        " run where the camera is carried by hand",
+    ),
     Flag(
         "fit_gate",
         True,
         description="frames are fused only while the tracker reports /localization_fit >= 0.50;"
-        " off, every frame is fused: SLAM mode, where RTAB-Map owns the pose and no tracker"
-        " speaks",
+        " off, every frame is fused",
+        why="where a tracker speaks, and the off state is measured: in the first online-SLAM"
+        " session, where nobody publishes /localization_fit and the gate had to come off, the"
+        " fused floor came out rough — offset +4.7 cm, sd 5.5 cm, 34 % within 3 cm at a tilt of"
+        " 0.61 deg — against sd 3.3 cm and 71 % within 3 cm in the known-map mode with a"
+        " centimetre tracker pose. The 0.50 itself is the drive rung of the tracker's own ladder"
+        " (pepin.watch: blind 0.30, drive 0.50, lost 0.55), inherited, not swept for fusion",
+        on_when="in the known-map modes (split, vision), where the board's tracker publishes the"
+        " fit: it keeps a frame taken while the pose was wrong out of the model",
+        off_when="in SLAM mode, where RTAB-Map owns the pose and no tracker speaks — with the"
+        " gate on nothing is ever fused there",
     ),
     Flag(
         "imu_lean",
@@ -137,112 +155,242 @@ FLAGS = FlagSet(
         " as well as the accelerometer, and a frame is placed with the lean at its stamp composed"
         " on base_link before the planar odometry instead of as if the cart stood level; the"
         " lidar's scan follows the same switch — its beams are walked as the 3D rays the leaning"
-        " body sends them along, and lean_gate_deg drops the scans taken too far from level;"
-        " off, the accelerometer alone, estimated and reported but not applied",
+        " body sends them along, and lean_gate_deg drops the scans taken too far from level",
+        why="until the gyro's roll and pitch signs are checked by tipping the cart by hand. What"
+        " a lean costs is measured on the beams themselves: while the body is tipped their world"
+        " height moves a median 8.9 cm, p95 25.3 cm, max 55.7 cm over 8209 returns, 653 beams"
+        " dive into the floor, and integrating them level writes 54 false walls (worst 0.79 m)"
+        " where walking them as 3D rays writes 19 (scratch/lidar_lean_effect.txt). What is not"
+        " measured is the correction's sign: only the yaw axis was ever checked against a 90"
+        " degree turn on the robot, and of 93 tapes with IMU records none carry the"
+        " accelerometer, so every lean proof so far is a synthetic bump replayed over real"
+        " geometry",
+        on_when="after a hand tip through a known angle shows the reported lean following it the"
+        " right way and returning to zero",
+        off_when="wherever the lean in the report line disagrees with the cart's visible"
+        " attitude; off, the lean is still estimated and reported, only not applied",
     ),
     Flag(
         "lean_gate_deg",
         SCAN_LEAN_GATE_DEG,
-        range=(0.0, 90.0),
         description="a scan taken while the cart leans more than this many degrees is not"
-        " integrated into the map: at 5 degrees a beam is 44 cm off the sensor's plane at 5 m,"
-        " so it is looking at another slice of the room. Only with imu_lean on, which is where"
-        " the lean is known at all",
+        " integrated into the map; only with imu_lean on, which is where the lean is known at all",
+        why="default by design, unmeasured: chosen, not fitted. The stake is arithmetic: a beam"
+        " at 5 m lands r sin(lean) off the sensor's plane — 26 cm at this 3 degrees, 44 cm at 5 —"
+        " so a tipped revolution is looking at another slice of the room. The one replay that"
+        " exists (a synthetic 5 degree bump over run 0171, scratch/lidar_lean_effect.txt) has the"
+        " gate refusing 21 of 81 revolutions and keeping fewer walls than simply walking the"
+        " beams as 3D rays (66.7 % against 74.9 % at the top of the bump, 89.2 % against 92.0 %"
+        " six seconds later): there, it cost more than it bought",
+        on_when="lower it where the map must stay clean and revolutions are plentiful",
+        off_when="90 admits every revolution again, as before the gate existed, and the report"
+        " line's leaned_out count says what would have been dropped",
+        range=(0.0, 90.0),
     ),
     Flag(
         "lean_min_quality",
         LEAN_QUALITY_FLOOR,
-        range=(0.0, 1.0),
         description="how much of the lean gravity must have voted for (pepin.lean's quality,"
         " printed beside the lean in this line) before a frame or a scan is placed by it: below"
         " it the lean is treated as unknown — the measurement is placed level and the scan gate"
-        " admits it — because a drifting gyro reports a tip nobody made (0.2 deg/s of bias: 3"
-        " degrees on a level floor, at quality near zero, while a real tip keeps quality 1.0)."
-        " 0: every lean is believed, as before",
+        " admits it",
+        why="chosen on a simulation, not on the robot: in scratch/lean_quality_floor_probe.py a"
+        " 0.2 deg/s gyro bias reports 3.0 degrees of tip on a level floor at quality 0.02 or"
+        " less, nothing past 0.13 degrees of it survives a floor of 0.5, and a real 6 degree"
+        " threshold climb keeps quality 1.00 throughout — so the floor costs the feature nothing."
+        " The 0.2 deg/s is hypothetical: this chip's worst measured axis is 0.074 deg/s"
+        " (config/imu.json's level block). A drifting gyro that reported 3 degrees would"
+        " otherwise sit exactly on lean_gate_deg and refuse every revolution",
+        on_when="raise it towards 1.0 on a robot that only ever leans when something real pushes"
+        " it",
+        off_when="0 believes every lean, as before the floor existed: an A/B of the gyro's own"
+        " drift",
+        range=(0.0, 1.0),
     ),
     Flag(
         "self_heal",
         True,
-        description="a streak of frames refused at the alignment bound empties the model, so it"
-        " re-seeds from the next frame instead of staying frozen until a human resets it",
+        description="a streak of 30 frames refused at the alignment bound empties the model, so"
+        " it re-seeds from the next frame instead of staying frozen until a human resets it",
+        why="after one freeze on the robot: with the head two hours at pitch 31.5 deg against the"
+        " config's 26 and the law swinging 0.94-1.60, every frame was refused at the bound — 284"
+        " refusals in one 30 s window, 0 frames integrated, /fusion/surface republishing a model"
+        " whose stamp was 40 s old ('the layer is gone') — and a hand-sent /fusion/reset brought"
+        " back 273 frames per 30 s, align 25 ms, 0 at the bound. The streak of 30 is a round 3 s"
+        " at the node's measured 9.0-9.5 fps, not a swept value",
+        on_when="on any run nobody is watching: it is the difference between a stale surface and"
+        " a model that comes back by itself",
+        off_when="while the alignment itself is being debugged (off, the streak and its refusals"
+        " stay in the report line instead of being cleared), or on a run where a deliberate stop"
+        " at the bound longer than 3 s must not cost the whole model",
     ),
     Flag(
         "align",
         True,
-        description="frame-to-model: a frame's lidar-height band is turned about the cart to"
-        " fit the model before it is fused, and a frame whose best turn is the search's bound"
-        " is refused",
+        description="frame-to-model: a frame's lidar-height band is turned about the cart to fit"
+        " the model before it is fused, and a frame whose best turn is the search's bound (+-4"
+        " deg) is refused",
+        why="every A/B favours it by a centimetre or two of local surface thickness — 14.0 cm off"
+        " against 12.1 on after the scan-carry fix, 12.6 against 11.6 in the demo, with"
+        " RTAB-Map's cloud on the same turns at 17.5-20.0 cm — and the score curve on live frames"
+        " peaks where it should (0.498 at 0 deg against 0.150 at either +-4 bound). The win is"
+        " small, and it was once entirely fake: before the carry fix 89 % of frames answered AT"
+        " the bound with a 4.00 deg median turn",
+        on_when="on for a model that must stay thin enough to read a wall's face",
+        off_when="where the pose is already better than the search can be (a graph's corrections"
+        " in SLAM mode), or to prove that a thick surface is the pose's fault: off, no frame is"
+        " turned and none is refused",
     ),
     Flag(
         "min_weight",
         2.0,
+        description="observations a voxel needs before it is shown in /fusion/surface (the debug"
+        " cloud only: /map has map_min_weight)",
+        why="inherited from the map slice, where it was measured: at min_weight 2 the lidar slice"
+        " holds 905 walls and at 6 it holds 817, the cells a single pass wrote falling out"
+        " (scratch/worldmap_from_tape.txt). For the debug cloud itself nothing was measured; it"
+        " is the same number so the picture and the map agree",
+        on_when="raise it to show only what several frames agree on",
+        off_when="0 shows every voxel ever touched, noise included — a look at what one pass"
+        " sees; it changes nothing the cart drives on",
         range=(0.0, 100.0),
-        description="observations a voxel needs before it is shown in /fusion/surface (the"
-        " debug cloud only: /map has map_min_weight)",
     ),
     Flag(
         "map_min_weight",
         2.0,
-        range=(0.0, LidarLaw.max_weight),
         description="observations a voxel needs before it speaks in /map. Its own flag, and"
-        " capped at the lidar's own weight cap: a value above that leaves every cell of the"
-        " map unknown, and the cart drives on this one",
+        " capped at the lidar's own weight cap",
+        why="the cap is measured: lidar cells saturate at LidarLaw.max_weight 20 while the"
+        " volume's own cap is 60, so anything above 20 leaves the whole map unknown — a synthetic"
+        " box at min_weight 21 published free 0, occupied 0, unknown 14400, with Nav2 and the"
+        " tracker driving on that. The 2.0 is the slice's own measured maturity (905 walls at 2,"
+        " 817 at 6)",
+        on_when="raise it towards 20 for a map that must be certain — a world the cart has driven"
+        " more than once, saved to file",
+        off_when="lower it towards 0 in a fresh room, where the cart must plan through what a"
+        " single pass saw",
+        range=(0.0, LidarLaw.max_weight),
     ),
     Flag(
         "surface_hz",
         1.0,
+        description="how often /fusion/surface is published (the crossing search costs a fraction"
+        " of a second)",
+        why="default by design, unmeasured; what is measured is the cost it protects — the"
+        " surface build took 45 ms a second and stalled the node's executor until it was moved"
+        " onto a snapshot taken outside the model lock",
+        on_when="raise it for a demo where the surface must follow the head, watching the stage"
+        " timings in the report line",
+        off_when="lower it towards 0.1 on a busy machine, or where the model matters and the"
+        " picture does not",
         range=(0.1, 10.0),
-        description="how often /fusion/surface is published (the crossing search costs a"
-        " fraction of a second)",
     ),
     Flag(
         "band_half_z",
         band_half_z_m(),
-        range=(0.02, 0.50),
-        description="half the height band around the lidar's plane a frame is seated on,"
-        " metres (config/fusion.json's band_half_z_m is the default); the band's centre is the"
-        " plane the published base_link -> laser edge names, and both are printed in the"
-        " report line",
+        description="half the height band around the lidar's plane a frame is seated on, metres"
+        " (config/fusion.json's band_half_z_m is the default); the band's centre is the plane the"
+        " published base_link -> laser edge names, and both are printed in the report line",
+        why="default by design, unmeasured as a width: the centre the band sits on is measured,"
+        " this half-width is not. The lidar's plane is 0.383 m by tape (2026-09-12), where beams"
+        " and vertical walls read the network's scale 3 % apart against 18 % at the 0.200 m that"
+        " had been assumed, and moving the band there took the fused band's distance to the lidar"
+        " from 12.9 cm to 3.8-5.2 cm. The 0.125 m is the width the band has always had (0.10-0.35"
+        " m around the assumed plane) and has never been swept. For scale: the band is the best"
+        " layer the camera has — median 9.2 cm against the beams, against 15.7/39.4/46.7 cm for"
+        " the slices above it — and a 5 degree lean moves a beam's world height by up to 55.7 cm,"
+        " wider than the band itself",
+        on_when="widen it when frames are refused for want of band points (the count is in the"
+        " report line): a narrow band on a leaning cart has nothing to seat on",
+        off_when="narrow it to keep only the rows the beams truly anchor, at the price of fewer"
+        " points to align on",
+        range=(0.02, 0.5),
     ),
     Flag(
         "lidar_layer",
         True,
         description="/scan is integrated into the volume at the lidar's plane (rays carve free"
         " space, returns mark a surface); off, the volume is the camera's alone, as it was",
+        why="replayed from tape 0171 into an empty volume the lidar layer reproduces the saved"
+        " map's walls to a median 0.0 cm, p90 13.0 cm, 79.3 % within one cell, and where the"
+        " volume says free the saved map agrees 91.3 % of the time — for 1 ms a scan (575 scans"
+        " in 0.8 s). It is also protected from the camera: 0 of 13499 lidar cells were changed by"
+        " depth, while the camera filled 922 cells the lidar never reached",
+        on_when="on wherever the volume is the map (map_source volume) or the surface must show"
+        " what the lidar knows",
+        off_when="to measure the camera alone — what the depth adds, and where it lies",
     ),
     Flag(
         "no_return_free",
         False,
         description="a beam that came back with nothing carves free space out to the sensor's"
-        " reach (an open door reads as open); off, it writes nothing at all, because a mirror,"
-        " a black chair leg and anything closer than the minimum say the same nothing",
+        " reach (an open door reads as open); off, it writes nothing at all",
+        why="default by design, unmeasured: no false-carve rate was ever taken, and with the real"
+        " /scan the branch is unreachable anyway — pepin.msgs.scan_arrays turns everything past"
+        " range_max into NaN and config/lidar.json's max_range_m is that same 12.0 m, so a"
+        " doorway carved nothing and stayed unknown. It stays off because a mirror, a black chair"
+        " leg and anything nearer than the 0.05 m minimum all say the identical nothing, and"
+        " carving them out to 12 m would rub out the wall behind them",
+        on_when="when a beam carries something that separates an open bearing from a mirror or a"
+        " black surface — return quality, or the same emptiness confirmed from several"
+        " viewpoints; nothing on this robot does today",
+        off_when="off: an open door stays unknown, which a planner may be told to cross"
+        " (allow_unknown) rather than being told a lie",
     ),
     Flag(
         "map_source",
         "file",
-        choices=("file", "volume"),
         description="where /map comes from: the saved file another node serves, or the volume's"
         " own lidar layer published from here at map_hz. Only where the stack was launched with"
         " world_map:=true; anywhere else volume is refused, because another node is on /map",
+        why="the other state has been seen to break a run: on 2026-09-10 RTAB-Map's own grid"
+        " landed on /map beside the board's static map and fed the laptop's global costmap a"
+        " second, growing map. Two publishers of one /map is the failure, so the deployment's"
+        " map_owner and the launch's world_map:=true must both agree before volume is allowed."
+        " The volume itself is good enough — its walls sit within one cell of the saved map 79.3"
+        " % of the time",
+        on_when="volume where the laptop owns /map (ros/laptop.sh vslam --world-map) and the room"
+        " is being mapped as it is driven",
+        off_when="file wherever a map server or RTAB-Map already publishes /map, which is every"
+        " other mode",
+        choices=("file", "volume"),
     ),
     Flag(
         "map_hz",
         1.0,
-        range=(0.1, 5.0),
         description="how often the volume's layer goes out as /map when map_source is volume",
+        why="default by design, unmeasured: 1 Hz is the cadence RTAB-Map's own map updates at,"
+        " and /map is transient-local, so a subscriber that arrives late is served the last one"
+        " regardless",
+        on_when="raise it when the map is built while driving and the costmap lags visibly behind"
+        " the room",
+        off_when="lower it on a busy laptop: every publication is a whole grid over the bridge",
+        range=(0.1, 5.0),
     ),
     Flag(
         "snapshot_s",
         60.0,
-        range=(0.0, 3600.0),
         description="how often the volume is written to world_path (0: only at shutdown)",
+        why="default by design, unmeasured: the write holds the model lock for about half a"
+        " second on a grid of noise and less on a real one, which at the node's 9.0-9.5 fps is"
+        " four or five frames dropped once a minute",
+        on_when="shorten it for a long mapping run nobody will be there to shut down cleanly",
+        off_when="0 writes only at shutdown — the setting for a demo where no frame may be dropped",
+        range=(0.0, 3600.0),
     ),
     Flag(
         "resume_volume",
         True,
-        live=False,
         description="a volume snapshot at world_path is loaded at start, so a known room is a"
         " resumed volume; off, the volume starts empty and grows from the sensors",
+        why="default by design, unmeasured. The one hard rule around it is a guard: a snapshot is"
+        " resumed only onto the grid config/fusion.json describes (280x250x34 voxels of 5 cm from"
+        " -19.5, -5.5, -0.15), so a changed grid starts empty instead of resuming into the wrong"
+        " place",
+        on_when="on in the room the snapshot was taken in",
+        off_when="off for a new room, after the map's origin moves, or to measure how fast the"
+        " volume fills from nothing",
+        live=False,
     ),
 )
 

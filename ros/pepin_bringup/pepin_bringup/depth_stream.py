@@ -145,66 +145,135 @@ FLAGS = FlagSet(
         True,
         description="flying pixels at object edges are dropped from the published depth and the"
         " scan; the law's beam pairs skip them regardless",
+        why="the band probe found 21 % of the band's pixels more than 15 cm from any lidar return,"
+        " with no bearing trend to blame the focal length or the mount yaw on — flying pixels; the"
+        " 8 % step that drops them costs 1.2-1.6 ms a frame and 2 % of the pixels"
+        " (scratch/pipeline_vs_truth.txt, scratch/band_frame_probe.py). The cause is measured, the"
+        " benefit is not: the one A/B on the robot, one turn each way, showed no difference",
+        on_when="whenever the scan feeds a costmap: the pixels it drops are the ones that become"
+        " an obstacle with nothing behind them",
+        off_when="to see the raw band's tail in Foxglove, or when a thin real object (a chair leg"
+        " at range) is missing from the scan and the 8 % step is the suspect",
     ),
     Flag(
         "lidar_anchor",
         True,
-        description="the lidar fits the depth's law; off, the last law is held (the failure mode"
-        " of a lidar that stops) — with no law yet nothing is published until it is back on",
+        description="the lidar's returns pair with the network's depth and fit the law; off, the"
+        " last law is held (the failure mode of a lidar that stops) — with no law yet nothing is"
+        " published until it is back on",
+        why="the beams are the only metric ruler on board. Without them a floor-only fit reads the"
+        " lidar's own row 1.98-2.46x too far and the raw network 1.62-1.96x"
+        " (scratch/pipeline_vs_truth.txt, scratch/lidar_height_check.txt), and the pairing costs"
+        " 0.0-0.1 ms a frame. The one on/off turn on the robot is split: a held law was better"
+        " above the band (9.6-19.3 cm against 16-46 cm) and worse at it (12.0 cm against 7-9 cm),"
+        " and the band is the row the costmap drives on",
+        on_when="whenever the lidar spins — it is what makes the network's depth metric",
+        off_when="to rehearse a lidar that dies mid-run (the law freezes, nothing else changes),"
+        " or to compare the slices above the band, where the frozen law measured better",
     ),
     Flag(
         "floor_pairs",
         False,
         description="the floor's pixels pair the network's depth with the plane's geometric depth,"
-        " a second hoop for the law that needs no lidar; off by default: measured, it pulls the"
-        " law off the lidar's row (1.4x too far there), where the costmap lives",
+        " a second hoop for the law that needs no lidar",
+        why="useless as measured — it takes the floor pixels the network itself drew and checks"
+        " the network against them, and the median D/E over the pixels it selects is the median"
+        " over every ray that meets the plane (0.86 against 0.89, 1.12 against 1.22, 1.76 against"
+        " 1.69: scratch/horizon_law_eval.txt). What it does change is the law: the lidar's own row"
+        " goes 1.010 -> 1.391 and the band 12.9/38.2 cm -> 24.1/48.7 on run 0171"
+        " (scratch/pipeline_vs_truth.txt), 3.8/20.6 -> 4.8/26.7 cm at the corrected mount"
+        " (scratch/lidar_height_check.txt). A floor anchor needs a floor cue the network did not"
+        " draw itself",
+        on_when="when the floor's depth comes from something independent of the network — a"
+        " measured plane, a second sensor; nothing measured so far supports turning it on",
+        off_when="in every run that drives: it buys nothing above 0.8 m either (65.2 cm against"
+        " 48.2) and moves the row the costmap reads by 38 %",
     ),
     Flag(
         "wall_anchor",
         False,
-        description="the lidar's returns extruded up the image while the network's depth stays"
-        " continuous pair the rows above the lidar's with the wall's depth, a third hoop; off by"
-        " default: measured, it puts the lidar's row 10 % too near while fixing the rows above",
+        description="the lidar's returns extruded up the image, where the network's depth stays"
+        " continuous, pair the rows above the lidar's with the wall's depth — a third hoop",
+        why="redundant with the lidar and worse where the cart drives. The wall extrusion agrees"
+        " with the beams to 3 % once the mount height is right (lidar/wall 0.966 at the tape's"
+        " 0.383 m against 0.816 at the assumed 0.200, scratch/lidar_height_check.txt), and"
+        " switching it on pulls the lidar's own row 10 % near (1.010 -> 0.896) and stretches the"
+        " band's tail 2.6x (p90 20.6 -> 53.6 cm) on run 0171 (scratch/pipeline_vs_truth.txt,"
+        " scratch/lidar_height_check.txt). What it buys is the rows above: the 3D error at z"
+        " 0.80-1.20 m 47.4 -> 31.5 cm",
+        on_when="on a robot with no lidar, where the extrusion is the only wall cue; or when what"
+        " reads the depth is above 0.5 m (a manipulator's reach) and no costmap is reading the"
+        " band",
+        off_when="whenever the cart drives on the band: that is the row the costmap reads, and"
+        " wall pairs move it 10 %",
     ),
     Flag(
         "parallax_anchor",
         False,
-        description="the corners this frame shares with the previous one, triangulated against"
-        " the odometry's transform between the two stamps (pepin.parallax), pair the network's"
-        " depth with a depth in metres measured by the cart's own movement — a hoop that needs"
-        " no lidar and no assumed plane and that lands at every elevation the picture has; off"
-        " by default: measured offline on runs 0171 and 0165 it costs 3-5 ms and gives 30-190"
-        " pairs where the cart really stepped, but at those runs' 2-3 cm baselines the depth is"
-        " +25-37 % too far under 1.5 m (19-30 samples a run) and unbiased from 1.5 to 3 m — a"
-        " range-dependent bias the odometry's own +-25 % scale band cannot explain, cause not"
-        " yet known — and it yields nothing at all while the cart stands still or turns on the"
-        " spot",
+        description="the corners this frame shares with the previous one, triangulated against the"
+        " odometry's transform between the two stamps (pepin.parallax), pair the network's depth"
+        " with a depth in metres the cart measured by moving — a hoop that needs no lidar and no"
+        " assumed plane and that lands at every elevation the picture has",
+        why="not measured live yet: on runs 0171 and 0165 it costs 3.5-3.8 ms a frame and yields"
+        " 30-190 pairs on only 31-36 % of frames (nothing at all while the cart stands still or"
+        " turns on the spot), and at those runs' 2.9 cm median baseline the triangulated depth is"
+        " +25-37 % too far under 1.5 m (19-30 samples a run) while it sits within 3 % of the lidar"
+        " from 1.5 to 3 m (scratch/parallax_vs_lidar.txt). The odometry's own +-25 % scale band"
+        " multiplies near and far alike and cannot make a range-dependent bias; the cause is not"
+        " known",
+        on_when="after a run at driving speed (0.3 s of gap = 10-15 cm of baseline instead of 3"
+        " cm) with the calibrated focal length (fx 724.1, HFOV 82.9 deg) either explains the"
+        " near-field bias or clears it",
+        off_when="wherever the cart stands, turns on the spot or faces blank walls: it yields"
+        " nothing there and costs its 3.5 ms anyway",
     ),
     Flag(
         "affine_law",
         True,
         description="the network's depth through 1 / z = a / D + b, fitted on the pooled pairs;"
-        " off, the raw network's depth goes out unwithheld (1.5-2x too far: an A/B measure of"
-        " the correction, never a way to drive)",
+        " off, the raw network's depth goes out unwithheld",
+        why="the raw network is 1.6-2.0x too far — the lidar's own row reads 1.958 raw against"
+        " 1.033 through the law, and the band against the beams 35.5/112.0 cm against 3.8/20.6 cm,"
+        " 14 % -> 57 % of it within 5 cm (scratch/lidar_height_check.txt). The fit costs 0.4 ms",
+        on_when="always, to drive",
+        off_when="as an A/B measure of the correction, at rest — never a way to drive: every"
+        " published metre is then 1.6-2.0x long",
     ),
     Flag(
         "ray_law",
         False,
         description="the law's scale follows the ray's angle off the optical axis, a / D + b"
         " fitted per elevation (pepin.elevation) instead of one pair of numbers for the whole"
-        " picture; off, the affine law's image stands. Needs wall_anchor on as well: the lidar's"
-        " own beams put a return's elevation on a curve of its range, so on them alone the"
-        " angular fit is refused and this stage is the affine law. A property of the camera and"
-        " the network, so the neck may tilt without refitting; off by default until it is"
-        " measured on the robot (scratch/ray_law_eval.txt: held out, it tightens the beams'"
-        " scatter on three drive halves of four and moves the median 5-10 % near)",
+        " picture; it needs wall_anchor on, because on the lidar's own beams a return's elevation"
+        " and its 1 / z are the same variable (|corr| 1.000) and the angular fit is refused",
+        why="for good, unless new data arrives: the network's error follows the world's elevation,"
+        " not the ray's angle. Across three neck pitches (tapes 0235/0236/0237 at 11.1, 25.8, 40.9"
+        " deg) the confound gate refuses the fit at two of them, and the one law that could be"
+        " fitted helps in sample and hurts at both other pitches (scratch/ray_law_pitch_eval.txt);"
+        " carried between tapes and geometries no angular law beats plain scale out of sample"
+        " (mean |ln ratio| 13.6 % for scale against 15.1-15.4 % for the ray laws, while the room's"
+        " own elevation reaches 12.9 %: scratch/horizon_law_eval.txt). Fixing the camera's pose"
+        " was worth 9 of those 22 points, the best angular term 0.7 more",
+        on_when="only on data that separates the ray's angle from the world's elevation — a pitch"
+        " sweep with the calibrated lens whose fit the confound gate does not refuse",
+        off_when="it ships off; the scale itself still moves 21-25 % over 30 deg of neck pitch,"
+        " which asks for a refit, not for an angular law",
     ),
     Flag(
         "wall_correct",
         False,
         description="after the law, the pixels the wall walk covered are set to the extruded"
-        " plane's depth outright; off by default (the same walk as wall_anchor, applied instead"
-        " of fitted)",
+        " plane's depth outright (the same walk as wall_anchor, applied instead of fitted)",
+        why="default by design, unmeasured as a win — standalone it is a wash — run 0171 keeps the"
+        " same law and the same lidar row (1.010, |·-1| q3 0.320) and the band reads 12.8/39.3 cm"
+        " against today's 12.9/38.2, or 3.6/20.2 against 3.8/20.6 at the corrected mount, with the"
+        " 3D error slightly better at every slice (scratch/pipeline_vs_truth.txt,"
+        " scratch/lidar_height_check.txt). It is off because it is the wall walk and the wall walk"
+        " is off; no number says it hurts",
+        on_when="with wall_anchor on, when what reads the depth is the wall above the beams and a"
+        " plane is a better answer there than a fitted one",
+        off_when="wherever the published depth must stay the network's own measurement rather than"
+        " a plane drawn over it",
     ),
     Flag(
         "floor_anchor",
@@ -212,42 +281,95 @@ FLAGS = FlagSet(
         description="pixels within centimetres of the floor plane snap to it in the published"
         " image (the scan is built before it); the plane leans with the cart, from the IMU's up"
         " vector",
+        why="measured on the robot, one turn each way — the floor's sd 5.8 -> 3.3 cm and 43 % ->"
+        " 71 % of it within 3 cm, for 0.4-0.6 ms a frame. The scan is built before this stage on"
+        " purpose: at 5.8 cm of patchy floor noise a probe called 63 of 161 bearings lethal, which"
+        " is where the scan's 0.15 m floor cut comes from",
+        on_when="whenever the floor should read as floor in the published depth and in"
+        " /fusion/surface",
+        off_when="to measure the raw floor's noise again (the number the 0.15 m scan cut was"
+        " chosen from), or where the floor is not a plane — a ramp, a threshold — and snapping"
+        " would invent one",
     ),
     Flag(
         "depth_backend",
         "local",
+        description="where the network runs: local (the CPU model in this container), remote (the"
+        " laptop's GPU service, ros/depth_host.sh), auto (the service while it answers, the CPU"
+        " model while it does not)",
+        why="default by design, unmeasured as a choice: local is the value that needs nothing else"
+        " running, and ros/laptop.sh exports PEPIN_DEPTH_BACKEND=auto whenever the laptop's Metal"
+        " backend answers, so the field default is auto. What the choice is worth is measured:"
+        " Depth Anything V2 Small is 20.6 ms a frame on MPS against 172-204 ms on the container's"
+        " CPU, 26 ms end to end from the container through the JPEG service — 6.6x"
+        " (scratch/depth_backend_bench.py), and on the robot the remote backend published 9.5 fps"
+        " with 0 frames falling back to local",
+        on_when="remote while the GPU service is up and the frame rate matters; auto for a run"
+        " that must survive the service dying mid-drive",
+        off_when="local when the laptop's service is not there or is being restarted, or to"
+        " measure the container's own worst case (5.8 fps)",
         choices=MODES,
         env="PEPIN_DEPTH_BACKEND",
-        description="where the network runs: local (the CPU model in this container), remote"
-        " (the laptop's GPU service, ros/depth_host.sh), auto (the service while it answers, the"
-        " CPU model while it does not)",
     ),
     Flag(
         "scale_ceiling",
         SCALE_CEILING,
+        description="the largest 1 / scale the law may be fitted to (the upper half of"
+        " pepin.depth.A_BOUNDS); a law that lands on a bound prints AT BOUND",
+        why="at 3.0 the law was a clipped constant once the lidar's plane was measured at its true"
+        " 0.383 m — the fit saturated at a 3.00 with b pinned at -0.200 and stopped being a fit"
+        " (scratch/lidar_height_fix_report.txt). Opened to 5.0 the same run fits a 2.80 in a, and"
+        " the COLMAP control at 0.50-0.80 m reads 1.14 [0.90..1.24] against the clipped law's 1.32"
+        " [1.08..1.43]; the clipped law's tighter band against the beams (3.8 against 5.2 cm"
+        " median) is luck, not fit. b still sits on its own bound, -0.200: the next one to"
+        " question",
+        on_when="raise it above 5.0 only when a law reports AT BOUND in a and the mount height and"
+        " the lens behind that law have been checked first",
+        off_when="set it back to 3.0 to reproduce the clipped law in the field, side by side, with"
+        " no restart",
         range=(0.5, 20.0),
-        description="the largest 1 / scale the law may be fitted to (pepin.depth.A_BOUNDS'"
-        " upper half): raising it from the 3.0 the fit used to saturate at is what stopped the"
-        " law from being a clipped constant once the lidar's plane was measured. Set it back to"
-        " 3.0 to compare the two laws in the field; a law that lands on a bound prints AT BOUND",
     ),
     Flag(
         "imu_lean",
         False,
-        description="the cart's lean (pepin.lean, from /imu/data_raw) is followed with the gyro"
-        " as well as the accelerometer and carried into the scan's carry and the camera's place"
-        " in the map; off, the floor plane leans with the accelerometer alone, as it always has,"
-        " and nothing else is leaned",
+        description="the cart's lean (pepin.lean, from /imu/data_raw) is followed with the gyro as"
+        " well as the accelerometer and carried into the scan's carry and the camera's place in"
+        " the map; off, the floor plane leans with the accelerometer alone, as it always has, and"
+        " nothing else is leaned",
+        why="until the gyro's roll and pitch signs are checked by tipping the cart by hand. What"
+        " is worth is measured — 5 degrees of lean walks a 3 m ray 26 cm off the plane — and so is"
+        " the chip at rest (30 s level: accel mean (-0.051, -0.067, +9.945) m/s2 = roll -0.39 deg,"
+        " pitch +0.29 deg; gyro bias (-0.001, -0.028, +0.074) deg/s at 0.03-0.05 deg/s of noise,"
+        " config/imu.json's level block). What is not measured is the correction's sign: only the"
+        " yaw axis was checked against a 90 degree turn on the robot, roll and pitch come from a"
+        " mount mapping nobody has turned through a known angle, and a level floor hides a swap or"
+        " a flip. The recordings cannot settle it either — of 93 tapes with IMU records none carry"
+        " the accelerometer (scratch/lean_effect.py), so every lean proof so far is a synthetic"
+        " bump replayed over real geometry. With the flag off the report line still prints the"
+        " accelerometer-only lean, which is the A/B",
+        on_when="after a hand tip through a known angle shows the reported lean following it the"
+        " right way and returning to zero",
+        off_when="the moment the lean in the report line disagrees with the cart's visible"
+        " attitude",
     ),
     Flag(
         "lean_min_quality",
         LEAN_QUALITY_FLOOR,
-        range=(0.0, 1.0),
         description="how much of the lean gravity must have voted for (pepin.lean's quality,"
-        " printed beside the lean in this line) before a frame is placed by it: below it the"
-        " lean is treated as unknown and the frame is placed level, because a drifting gyro"
-        " reports a tip nobody made (0.2 deg/s of bias: 3 degrees on a level floor, at quality"
-        " near zero, while a real tip keeps quality 1.0). 0: every lean is believed, as before",
+        " printed beside the lean in this line) before a frame is placed by it: below it the lean"
+        " is treated as unknown and the frame is placed level",
+        why="chosen on a simulation, not on the robot: in scratch/lean_quality_floor_probe.py a"
+        " 0.2 deg/s gyro bias reports 3.0 degrees of tip on a level floor at quality 0.02 or less,"
+        " nothing past 0.13 degrees of it survives a floor of 0.5, and a real 6 degree threshold"
+        " climb keeps quality 1.00 throughout — so the floor costs the feature nothing. The 0.2"
+        " deg/s is hypothetical: this chip's worst measured axis is 0.074 deg/s (config/imu.json's"
+        " level block). The same floor is declared in depth_fusion, so the pose and the scan gate"
+        " make one decision",
+        on_when="raise it towards 1.0 on a robot that only ever leans when something real pushes"
+        " it",
+        off_when="0 believes every lean, as before the floor existed: an A/B of the gyro's own"
+        " drift",
+        range=(0.0, 1.0),
     ),
 )
 FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
