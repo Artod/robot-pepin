@@ -4,11 +4,13 @@ from pepin.odometry import Pose2D
 from pepin.watch import (
     ADMIT_FIT,
     BLIND_FIT,
+    CORRECTION_FRESH_S,
     DRIVE_FIT,
     LOST_FIT,
     PROVISIONAL_FIT_CAP,
     TF_FRESH_S,
     BlindDriveWatch,
+    Correction,
     GoalGate,
     LostWatch,
     Readiness,
@@ -240,3 +242,44 @@ def test_the_gate_never_searches_where_there_is_nothing_to_search_with() -> None
     gate = GoalGate()
     assert not any(gate.verdict(None, age).search for age in (None, 0.0, 0.5, 10.0))
     assert all(gate.verdict(fit, None).tracker for fit in (0.0, 0.49, 0.5, 0.9))
+
+
+def test_a_fresh_edge_is_no_evidence_that_the_slam_half_is_alive() -> None:
+    """The hole this closes: slam_frame re-broadcasts the LAST correction at 10 Hz with a fresh
+    stamp, so map -> base_link stays milliseconds old with the laptop shut down — the gate would
+    pass, and Nav2, whose costmap reads that same fresh edge, would never time out either. The
+    correction's own age is what the laptop cannot fake."""
+    gate = GoalGate()
+    fresh_edge = 0.08
+    assert gate.verdict(None, fresh_edge, Correction(0.1)).ready
+    assert gate.verdict(None, fresh_edge, Correction(CORRECTION_FRESH_S)).ready, "the bound"
+    dead = gate.verdict(None, fresh_edge, Correction(9.0))
+    assert (dead.ready, dead.tracker, dead.search) == (False, False, False)
+    assert "the SLAM correction stopped 9.0 s ago" in dead.reason
+    never = gate.verdict(None, fresh_edge, Correction(None))
+    assert not never.ready and "no SLAM correction has ever arrived" in never.reason
+
+
+def test_a_correction_nobody_watches_leaves_the_gate_as_it_was() -> None:
+    """The default is no correction at all: the known-map stacks, where the fit decides, and
+    SLAM with the watch switched off (CLAUDE.md rule 19 — the old behaviour stays reachable)."""
+    gate = GoalGate()
+    assert gate.verdict(None, 0.08) == Readiness(True, tracker=False)
+    assert gate.verdict(0.71, None, Correction(None)) == Readiness(True, tracker=True)
+
+
+def test_a_missing_edge_is_named_before_the_correction_behind_it() -> None:
+    """Two halves, two refusals: the operator is told which one to go and look at. The edge
+    first — a board that stopped broadcasting is a board-side failure, whatever the laptop
+    does."""
+    gate = GoalGate()
+    assert "nothing publishes map -> base_link" in gate.verdict(None, None, Correction(9.0)).reason
+    assert "map -> base_link is 4.2 s old" in gate.verdict(None, 4.2, Correction(9.0)).reason
+
+
+def test_the_correction_is_stale_the_moment_it_is_older_than_the_patience() -> None:
+    """The pulse is 10 Hz and it crosses the bridge: the patience covers a wireless hiccup, not
+    a laptop that went away. Never heard is stale too — there is no half to trust."""
+    assert not Correction(0.0).stale() and not Correction(CORRECTION_FRESH_S).stale()
+    assert Correction(CORRECTION_FRESH_S + 0.01).stale() and Correction(None).stale()
+    assert not Correction(3.0).stale(patience_s=5.0)

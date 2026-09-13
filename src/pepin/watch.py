@@ -6,7 +6,7 @@ readings and acts on the answer.
 
 :class:`GoalGate` is the same question one step earlier — may a drive START — and it is the one
 rule that also has to answer where no tracker exists at all (online SLAM): there the evidence is
-the age of ``map -> base_link``, not a fit.
+the age of ``map -> base_link`` and of the SLAM correction (:class:`Correction`), not a fit.
 """
 
 from __future__ import annotations
@@ -35,8 +35,16 @@ CONFIRM_TRIES = 4  # fresh searches allowed to agree before the fix is given up 
 # How old the map -> base_link edge may be and still be a pose to start a drive on, where no
 # tracker publishes a fit. The edge is re-broadcast at 10 Hz (pepin_bringup.slam_frame) over
 # odometry published at 50 Hz, so a whole second without one is ten missed broadcasts: the
-# correction or the odometry has stopped, not jittered. Nav2's own transform tolerance is 0.3 s.
+# BROADCASTER or the odometry has stopped, not jittered. It says nothing about the machine that
+# computes the correction — that is what :class:`Correction` is for. Nav2's tolerance is 0.3 s.
 TF_FRESH_S = 1.0
+
+# How long the SLAM correction may be silent before the half of the stack that owns the pose
+# counts as gone. pepin_bringup.rtabmap_frame publishes it at 10 Hz whether or not the graph
+# moved, so it is a pulse and not an event stream — but it crosses the bridge over WiFi, where
+# the laptop's own heartbeat is given 2.5 s (pepin.deployment.LinkWatch). Twenty missed messages
+# is not a hiccup.
+CORRECTION_FRESH_S = 2.0
 
 
 class Verdict(StrEnum):
@@ -226,28 +234,59 @@ class Readiness:
 
 
 @dataclass(frozen=True)
+class Correction:
+    """The last SLAM correction to reach this machine: ``age_s`` seconds ago, or ``None`` when
+    none ever has.
+
+    It is the pulse of the half of the stack that owns the pose in online SLAM, and the only
+    honest one. ``map -> odom`` is not: pepin_bringup.slam_frame re-broadcasts the LAST
+    correction at 10 Hz with a fresh stamp for ever, so the edge — and every transform composed
+    from it — stays milliseconds old with the laptop shut down.
+    """
+
+    age_s: float | None
+
+    def stale(self, patience_s: float = CORRECTION_FRESH_S) -> bool:
+        """True when the correction stopped arriving, or never did: the SLAM half is not here."""
+        return self.age_s is None or self.age_s > patience_s
+
+    def phrase(self) -> str:
+        """What to say about it on a refusal: never heard, or silent for this long."""
+        if self.age_s is None:
+            return "no SLAM correction has ever arrived"
+        return f"the SLAM correction stopped {self.age_s:.1f} s ago"
+
+
+@dataclass(frozen=True)
 class GoalGate:
     """May the cart be sent to a goal: on the tracker's fit where a tracker runs, on the age of
-    ``map -> base_link`` where none does.
+    ``map -> base_link`` and of the SLAM correction where none does.
 
     Two stacks, one question. On a saved map the scan-matching tracker publishes
     ``/localization_fit`` and a drive starts from ``drive_fit`` — under it the goal buys one
     whole-map search first. In online SLAM there is no tracker at all: RTAB-Map owns the pose on
     the laptop and the board only re-broadcasts its correction, so nobody ever publishes a fit
     and the gate that waited for one refused every goal ("the tracker is not up", 2026-09-13
-    14:05). The evidence SLAM mode does have is the transform itself: a goal is accepted while
-    ``map -> base_link`` is younger than ``fresh_s``, and refused otherwise with which of the two
-    it was — missing, or stale and how stale. There is nothing to search with here, so a refusal
-    is final until the frames come back.
+    14:05). SLAM mode has two readings instead. The transform says the board's own half is
+    running: ``map -> base_link`` younger than ``fresh_s``, else missing or stale and how stale.
+    The :class:`Correction` says the laptop's half is — and it is the one that can die without
+    the transform noticing, because the edge goes on being broadcast from the last correction.
+    A caller that passes no correction is not watching one (a known-map stack, or the watch
+    switched off). There is nothing to search with here, so a refusal is final until the half
+    that stopped comes back.
     """
 
     drive_fit: float = DRIVE_FIT
     fresh_s: float = TF_FRESH_S
+    correction_fresh_s: float = CORRECTION_FRESH_S
 
-    def verdict(self, fit: float | None, tf_age_s: float | None) -> Readiness:
+    def verdict(
+        self, fit: float | None, tf_age_s: float | None, correction: Correction | None = None
+    ) -> Readiness:
         """One goal's answer. ``fit`` is the tracker's, or ``None`` where no tracker speaks;
         ``tf_age_s`` is how many seconds ago ``map -> base_link`` was stamped (``None``: nothing
-        publishes it). Returns the :class:`Readiness` the caller acts on."""
+        publishes it); ``correction`` is the SLAM half's pulse where it is watched. Returns the
+        :class:`Readiness` the caller acts on."""
         if fit is not None:
             if fit >= self.drive_fit:
                 return Readiness(True, tracker=True)
@@ -270,6 +309,14 @@ class GoalGate:
                 tracker=False,
                 reason=f"no tracker, and map -> base_link is {tf_age_s:.1f} s old: a drive needs"
                 f" it fresher than {self.fresh_s:.1f} s",
+            )
+        if correction is not None and correction.stale(self.correction_fresh_s):
+            return Readiness(
+                False,
+                tracker=False,
+                reason=f"no tracker, and {correction.phrase()}: the half of the stack that owns"
+                " the pose is not here. map -> base_link stays fresh either way — it is"
+                " re-broadcast from the last correction",
             )
         return Readiness(True, tracker=False)
 
