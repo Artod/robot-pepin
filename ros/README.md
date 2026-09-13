@@ -538,3 +538,12 @@ warning itself when it takes the last lidar out of the tracker's sources.
 
 `base_link` sits between the drive-wheel contact points (our robot frame): x forward, y left.
 Footprint (meters, `base_link`): front 0.0625, rear 0.30, half-width 0.275 — from `config/base.json`.
+
+`odom -> base_link` is planar and stays planar (`ros/params/ekf.yaml`, `two_d_mode`): Nav2 and the
+tracker want it that way. The few degrees the body leans over a slipper or a threshold are a
+separate number, estimated once per node by `pepin.lean` from `/imu/data_raw` (the accelerometer
+for the slow truth, the gyro for the fast part) and composed on base_link's side of that planar
+pose by `pepin.frame_pose.FramePoser` behind each node's `imu_lean` flag. Roll is positive right
+side down, pitch positive nose down. Every node that estimates it prints it in its report line
+(`lean +0.3/-1.8 deg q0.94`) whether the flag is on or off, so it can be watched before it is
+believed.
