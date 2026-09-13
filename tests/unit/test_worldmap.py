@@ -325,18 +325,26 @@ def test_a_tipped_body_writes_its_beams_where_they_really_went() -> None:
     assert not surface_at(leaning, np.array([WALL_X_M, 0.0, PLANE_M])), "nor is the wall there"
 
 
-def test_the_layer_grows_to_the_rows_the_leaning_beams_wrote() -> None:
-    """The band the camera's fusion hands back to the lidar follows the rays: a climbing beam
-    writes above the plane, and the protection inside the band is still per cell, so the camera
-    keeps every voxel the lidar never spoke for."""
+def test_a_tip_does_not_widen_the_band_the_camera_hands_back() -> None:
+    """The beams of a tipped body climb into the camera's band and are written there — but the
+    layer the camera hands back stays the plane's own rows, whatever the body did.
+
+    Ownership never expires (``lidar_weight`` does not decay), so a band that grew with the rays
+    would let one second over a slipper take half the camera's band away for the rest of the
+    run: at the scan gate's 3 degrees an 8 m ray is 40 cm off the plane, and every voxel it
+    crossed on the way would be camera-proof for good."""
     pose = tipped(-TIP_DEG)
     angles, ranges, points = fan_scan(pose, mount())
-    world = WorldMap(tilt_spec(), mount())
+    world, level = WorldMap(tilt_spec(), mount()), WorldMap(tilt_spec(), mount())
     world.integrate_scan(angles, ranges, pose, stamp=100.0)
+    level.integrate_scan(angles, ranges, at(), stamp=100.0)
     written = np.flatnonzero(world.lidar_weight.any(axis=(0, 1)))
     top = world.spec.origin[2] + (written[-1] + 1) * world.spec.voxel_m
-    assert top >= points[:, 2].max(), "the band reaches the highest beam"
-    assert world.lidar_weight[:, :, written[0] : written[-1] + 1].min() == 0.0, "not a full band"
+    assert top >= points[:, 2].max(), "the climbing beams are written at their own height"
+    rows = level.protected_rows
+    assert rows is not None
+    assert world.protected_rows == rows, "the handback band is the plane's layer, not the rays'"
+    assert written[-1] + 1 > rows[1], "and the rays did reach well above it"
 
 
 def test_a_beam_that_climbs_out_of_the_volume_is_carved_as_far_as_it_reaches() -> None:
@@ -420,6 +428,36 @@ def test_the_camera_may_fill_the_layer_where_the_lidar_never_spoke() -> None:
     far = RigidPose(pose.rotation, np.array([2.4, 0.0, PLANE_M]))
     world.integrate_depth(flat_depth(intr, 0.4), None, intr, far)
     assert wall_at(world.lidar_slice(), 2.8, 0.0)
+
+
+def test_what_a_tipped_beam_claimed_above_the_plane_is_the_cameras_again() -> None:
+    """A tip writes returns in the camera's own band — a tabletop at 0.7 m — and those voxels
+    must stay the camera's to correct: ownership never expires, so a band that took them would
+    keep the tabletop of one bad second until the next reset. The plane's layer is defended as
+    it always was, and the band above it is not."""
+    pose = tipped(-TIP_DEG)
+    angles, ranges, points = fan_scan(pose, mount())
+    world = WorldMap(tilt_spec(), mount())
+    world.integrate_scan(angles, ranges, pose, stamp=100.0)
+    ahead = points[points.shape[0] // 2]  # the beam straight ahead, ending on the tabletop
+    assert abs(ahead[2] - TABLE_Z_M) < 1e-9
+    s = world.spec
+    ix, iy, iz = (int((float(ahead[i]) - s.origin[i]) / s.voxel_m) for i in range(3))
+    assert world.lidar_weight[ix, iy, iz] > 0.0, "the climbing beam marked the tabletop here"
+    assert abs(float(world.volume.sdf[ix, iy, iz])) < 0.5, "as a surface, not as free space"
+    rows = world.protected_rows
+    assert rows is not None
+    owned = world.lidar_weight[:, :, rows[0] : rows[1]] > 0.0
+    layer = world.volume.sdf[:, :, rows[0] : rows[1]][owned].copy()
+    intr, camera = looking_ahead(TABLE_Z_M)
+    for i in range(8):
+        world.integrate_depth(flat_depth(intr, 3.5), None, intr, camera, stamp=200.0 + i)
+    # eight frames of open air at 3 m outweigh the one claim (0.44 each against the lidar's 1.0),
+    # so the voxel walks from the surface it was to the free space the camera sees
+    assert float(world.volume.sdf[ix, iy, iz]) > 0.7, "the camera carved its own band free again"
+    np.testing.assert_array_equal(
+        world.volume.sdf[:, :, rows[0] : rows[1]][owned], layer, "the plane's layer is untouched"
+    )
 
 
 # ---- the slice -----------------------------------------------------------------------------
@@ -513,6 +551,22 @@ def test_a_snapshot_round_trip_is_the_same_map(tmp_path: Path) -> None:
     before = back.lidar_slice().values.copy()
     back.integrate_depth(flat_depth(intr, 1.0), None, intr, flat)
     assert np.array_equal(back.lidar_slice().values, before)
+    assert back.protected_rows == world.protected_rows, "and defends that layer, not more"
+
+
+def test_a_snapshot_does_not_bring_back_a_tips_claim_on_the_cameras_band(tmp_path: Path) -> None:
+    """The band is rebuilt from the saved plane, not from every row a beam ever reached: a
+    restart after a tip must not hand the lidar the camera's band for the next run either."""
+    pose = tipped(-TIP_DEG)
+    angles, ranges, _points = fan_scan(pose, mount())
+    world = WorldMap(tilt_spec(), mount())
+    world.integrate_scan(angles, ranges, pose, stamp=100.0)
+    back = WorldMap.load(world.save(tmp_path / "tipped.npz"), mount())
+    written = np.flatnonzero(back.lidar_weight.any(axis=(0, 1)))
+    rows = world.protected_rows
+    assert rows is not None
+    assert back.protected_rows == rows, "the plane's layer, as before the snapshot"
+    assert written[-1] + 1 > rows[1], "though the tipped beams wrote well above it"
 
 
 def test_a_snapshot_of_another_version_is_refused(tmp_path: Path) -> None:

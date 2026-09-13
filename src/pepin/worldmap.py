@@ -271,7 +271,13 @@ class WorldMap:
         # Every integration: (stamp, sensor, 3x4 pose). The measurements stay in the run tape;
         # this is the index a loop closure would replay them by (see the module docstring).
         self.frames: list[tuple[float, str, Array]] = []
-        self._rows: tuple[int, int] | None = None  # z rows the lidar has ever written
+        self._rows: tuple[int, int] | None = None  # z rows the lidar's plane has ever swept
+
+    @property
+    def protected_rows(self) -> tuple[int, int] | None:
+        """The z voxel rows the camera hands back to the lidar (:meth:`integrate_depth`): the
+        layer the lidar's plane has swept, or ``None`` while no scan has been written."""
+        return self._rows
 
     # ---- integration ---------------------------------------------------------------------
     def integrate_scan(
@@ -315,7 +321,6 @@ class WorldMap:
         # the lidar's own cap, below the volume's: a cell it owns stays movable
         self.volume.weight[at] = np.minimum(self.law.max_weight, w_new)
         self.lidar_weight[at] = np.minimum(self.law.max_weight, self.lidar_weight[at] + w_obs)
-        self._widen_rows(at[2])
         self._note(stamp, LIDAR, pose_base_in_map)
         return int(at[0].size)
 
@@ -329,7 +334,12 @@ class WorldMap:
     ) -> int:
         """Fuse one depth frame the way :meth:`pepin.tsdf.Tsdf.integrate` does, then hand the
         lidar's layer back to the lidar: inside that layer the voxels the lidar has spoken for
-        keep the field and the weight they had. Returns the voxels the frame touched."""
+        keep the field and the weight they had. Returns the voxels the frame touched.
+
+        The layer is the rows the lidar's *plane* sweeps (:meth:`_widen_rows`), never the rows a
+        leaning beam happened to climb into: a beam that tips into the camera's band writes there
+        like any other observation, and the camera may write over it on the next frame. Only the
+        layer the cart drives by is defended, and only where the lidar actually spoke."""
         rows = self._rows if self.protect_lidar_layer else None
         if rows is None:
             touched = self.volume.integrate(depth, rgb, intr, pose)
@@ -358,30 +368,39 @@ class WorldMap:
         """The z voxel rows of the sensor's layer at ``pose`` as a level body would sweep it,
         remembered as the lidar's own; ``None`` when that plane misses the volume.
 
-        This is the plane the layer is *read out* at (:meth:`lidar_slice`, ``/map``), which must
-        not wobble with the body — a leaning cart still drives on the same floor. Where the
-        beams of a leaning body actually wrote is :meth:`_widen_rows`' business.
+        This is the plane the layer is *read out* at (:meth:`lidar_slice`, ``/map``) and the
+        layer the camera hands back, and it must not wobble with the body — a leaning cart
+        still drives on the same floor. Where the beams of a leaning body actually wrote is
+        another question, and not one ownership answers.
         """
         plane = float(pose.translation[2]) + mount.z_m
-        origin_z, voxel, nz = self.spec.origin[2], self.spec.voxel_m, self.spec.shape[2]
-        lo = math.floor((plane - self.law.layer_half_m - origin_z) / voxel)
-        hi = math.floor((plane + self.law.layer_half_m - origin_z) / voxel) + 1
-        lo, hi = max(lo, 0), min(hi, nz)
-        if hi <= lo:
+        rows = self._plane_rows(plane)
+        if rows is None:
             return None
         self.lidar_plane_m = plane
-        self._widen_rows(np.array([lo, hi - 1]))
-        return lo, hi
+        self._widen_rows(*rows)
+        return rows
 
-    def _widen_rows(self, iz: Ints | Array) -> None:
-        """Remember that the lidar has written in these z rows: the band the camera's fusion
-        hands back to it (:meth:`integrate_depth`). A leaning beam writes above and below the
-        plane, so the band grows with what the rays touched; inside it the protection is still
-        per cell (``lidar_weight > 0``), so a wider band protects nothing the lidar never
-        wrote."""
-        if iz.size == 0:
-            return
-        lo, hi = int(iz.min()), int(iz.max()) + 1
+    def _plane_rows(self, plane_m: float) -> tuple[int, int] | None:
+        """The z voxel rows a level sweep of ``plane_m`` occupies — the plane plus or minus the
+        layer's half-thickness, clipped to the volume; ``None`` when that plane misses it."""
+        origin_z, voxel, nz = self.spec.origin[2], self.spec.voxel_m, self.spec.shape[2]
+        lo = math.floor((plane_m - self.law.layer_half_m - origin_z) / voxel)
+        hi = math.floor((plane_m + self.law.layer_half_m - origin_z) / voxel) + 1
+        lo, hi = max(lo, 0), min(hi, nz)
+        return (lo, hi) if hi > lo else None
+
+    def _widen_rows(self, lo: int, hi: int) -> None:
+        """Remember that the lidar's plane has swept these z rows: the band the camera's fusion
+        hands back to it (:meth:`integrate_depth`).
+
+        The band is the plane's own layer and grows only with the plane (the cart's z on a ramp),
+        never with a leaning beam's climb: a tip of 3 degrees puts an 8 m ray 40 cm off the plane,
+        and a band that grew with it would hand the lidar half the camera's band for good — the
+        claim outlives the tip, because ``lidar_weight`` never decays. Inside the band the
+        protection is still per cell (``lidar_weight > 0``), so it defends nothing the lidar
+        never wrote there.
+        """
         self._rows = (
             (lo, hi) if self._rows is None else (min(self._rows[0], lo), max(self._rows[1], hi))
         )
@@ -656,8 +675,10 @@ class WorldMap:
             (float(row[0]), LIDAR if row[1] else CAMERA, row[2:].reshape(3, 4))
             for row in data["frames"]
         ]
-        rows = np.flatnonzero(world.lidar_weight.any(axis=(0, 1)))
-        world._rows = (int(rows[0]), int(rows[-1]) + 1) if rows.size else None
+        # The band the camera hands back is the plane's own layer, so it is rebuilt from the
+        # saved plane — not from every row a leaning beam reached, which is what ``lidar_weight``
+        # carries and would hand the lidar the camera's band across a restart.
+        world._rows = world._plane_rows(world.lidar_plane_m) if world.lidar_weight.any() else None
         return world
 
     def seed_from_grid(
