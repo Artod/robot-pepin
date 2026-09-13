@@ -480,6 +480,14 @@ class Relocalizer(Node):
         # the matched pose: the two part ways while a carry is being absorbed.
         self._published_fit_pub = self.create_publisher(Float32, "localization_fit_published", 5)
         self._pose_pub = self.create_publisher(PoseWithCovarianceStamped, "/initialpose", 5)
+        # The operator's own word (Foxglove's "set pose", ros/goto.sh seed): the map has twins —
+        # 2026-09-13 the whole-map search seeded the cart 6 m from its base at fit 0.77 and the
+        # watchdog's true candidate (0.72 vs 0.69) could not beat it by the margin — and nothing
+        # else lets a person who can see the cart say where it is. A message this node sent
+        # itself (the AMCL-era echo above) re-seeds the same pose and changes nothing.
+        self.create_subscription(
+            PoseWithCovarianceStamped, "/initialpose", self._on_operator_seed, 5
+        )
         self._tf_pub = TransformBroadcaster(self)
         self._tracker_pub = self.create_publisher(PoseWithCovarianceStamped, "/tracker_pose", 5)
         self._slip_pub = self.create_publisher(Bool, "/slip", 5)  # wheels move, the world does not
@@ -1149,6 +1157,16 @@ class Relocalizer(Node):
         else:
             self.get_logger().warning(text)
         return text
+
+    def _on_operator_seed(self, msg: PoseWithCovarianceStamped) -> None:
+        """A pose handed in on /initialpose is adopted as the truth at full confidence."""
+        p = msg.pose.pose
+        pose = Pose2D(float(p.position.x), float(p.position.y), yaw_of(p.orientation))
+        self.get_logger().info(
+            f"seeded by the operator at ({pose.x:.2f}, {pose.y:.2f},"
+            f" {math.degrees(pose.theta):.0f} deg)"
+        )
+        self._seed(pose, 1.0)
 
     def _seed(self, pose: Pose2D, confidence: float) -> None:
         """Adopt ``pose`` with the confidence it was measured at; AMCL is told via /initialpose."""
