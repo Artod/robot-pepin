@@ -641,7 +641,18 @@ def test_the_laptop_half_restarts_with_the_board_s_bridge() -> None:
     assert "BridgeIdentity(silence_s=SILENCE_S)" in sf.unparsed(watch, ast.Call)
     settled = sf.calls_to(watch, "routes_settled")
     assert settled and not any(isinstance(c.args[1], ast.Constant) for c in settled)
-    assert "identity.observe(zid, time.monotonic())" in sf.unparsed(watch, ast.Call)
+    assert "self._identity.observe(zid, now)" in sf.unparsed(watch, ast.Call)
+    # ...and the watch verifies FLOW, not route counts: it counts the messages of every topic
+    # both bridges say should arrive here, and repairs the bridge container before this half
+    # (a route can exist, carry nothing, and look perfect on both admins — 2026-09-12/13).
+    calls = sf.unparsed(watch, ast.Call)
+    assert "FlowWatch()" in calls and "self._flow.starved(now)" in calls
+    assert "self._repair.restart()" in calls and "self._repair.available()" in calls
+    assert "topic_flows(routes, self._local_zid, self._allowed, watcher=WATCH_NODE)" in calls
+    mend = sf.unparsed(watch, ast.FunctionDef)
+    assert "self.restart_half" in next(m for m in mend if m.startswith("def mend")), (
+        "the whole half stays as the escalation"
+    )
     # The board's unit fails itself when the REST admin stays silent, so Restart= fires.
     unit = (REPO / "board/pepin-bridge.service").read_text()
     post = next(line for line in unit.splitlines() if line.startswith("ExecStartPost="))

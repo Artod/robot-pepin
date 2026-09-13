@@ -87,7 +87,11 @@ MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/pyth
         -v "$HERE/pepin_bringup/launch:/ws/install/pepin_bringup/share/pepin_bringup/launch:ro"
         -v "$HERE/tools:/tools:ro" -v "$HERE/entrypoint.sh:/pepin_entrypoint.sh:ro"
         -v "$HERE/../src/pepin:/ws/pepin_src/pepin:ro" -v "$HERE/params:/params:ro" -v "$HERE/maps:/maps"
-        -v "$HERE/../config:/ws/config:ro")
+        -v "$HERE/../config:/ws/config:ro"
+        # pepin_bringup.bridge_watch restarts the bridge container alone when a route goes dead
+        # (Docker Engine API, POST /containers/pepin-zenoh/restart); without this mount it falls
+        # back to restarting the whole half, which throws the fusion model away.
+        -v /var/run/docker.sock:/var/run/docker.sock)
 case "${1:-start}" in
     stop)
         stop_gently pepin-laptop pepin-vslam; docker rm -f pepin-zenoh >/dev/null 2>&1 || true

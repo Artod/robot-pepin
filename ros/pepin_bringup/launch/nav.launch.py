@@ -235,7 +235,13 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         # (pepin_bringup.bridge_watch).
         actions.append(
             ExecuteProcess(
-                cmd=["python3", "-m", "pepin_bringup.bridge_watch", LaunchConfiguration("board")],
+                cmd=[
+                    "python3",
+                    "-m",
+                    "pepin_bringup.bridge_watch",
+                    LaunchConfiguration("board"),
+                    admin,  # this side's bridge: what the flow watch reads the allow-list from
+                ],
                 output="screen",
                 on_exit=[Shutdown(reason="the board's bridge restarted")],
             )

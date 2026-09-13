@@ -429,6 +429,7 @@ def generate_launch_description() -> LaunchDescription:
                     "-m",
                     "pepin_bringup.bridge_watch",
                     LaunchConfiguration("board"),
+                    LaunchConfiguration("bridge_admin"),  # this side's bridge: the flow watch
                 ],
                 output="screen",
                 on_exit=[Shutdown(reason="the board's bridge restarted")],
