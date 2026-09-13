@@ -1862,3 +1862,36 @@ def test_the_calibration_tool_is_reachable_as_one_command() -> None:
     assert any("pitch" in text and "depth_fit_models" in text for text in sf.strings(runner))
     readme = (REPO / "ros/README.md").read_text()
     assert "## Camera calibration" in readme and "mount.pitch_deg" in readme
+
+
+def test_no_node_shadows_an_rclpy_node_attribute() -> None:
+    """rclpy.Node keeps its clock, logger, parameters and handles in private attributes; a node
+    that assigns its own `self._clock` dies at its first timer (2026-09-13, the fusion node's
+    snapshot clock). The stubs cannot catch it, so the contract does."""
+    import re
+    from pathlib import Path
+
+    owned = (
+        "_clock",
+        "_logger",
+        "_parameters",
+        "_handle",
+        "_context",
+        "_executor",
+        "_publishers",
+        "_subscriptions",
+        "_timers",
+        "_clients",
+        "_services",
+        "_guards",
+        "_waitables",
+        "_default_callback_group",
+    )
+    nodes = Path(__file__).resolve().parents[2] / "ros" / "pepin_bringup" / "pepin_bringup"
+    offenders = [
+        f"{p.name}: self.{name}"
+        for p in sorted(nodes.glob("*.py"))
+        for name in owned
+        if re.search(rf"self\.{name}\s*=", p.read_text())
+    ]
+    assert offenders == [], offenders
