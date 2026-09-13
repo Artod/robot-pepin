@@ -59,13 +59,14 @@ image() { docker image inspect pepin-laptop:latest >/dev/null 2>&1 && echo pepin
 # The nodes a kick can reach here, the container each lives in and the line it prints once up
 # (the kick waits for that line): the Python modules of vslam.launch.py, and the goal server of
 # the navigation half (it runs here on side=board only; on side=all: ros/thin.sh kick goal_server).
-KICKABLE="camera_stream depth_stream contact_scan depth_fusion rtabmap_frame goal_server"
+KICKABLE="camera_stream depth_stream contact_scan depth_fusion global_watch rtabmap_frame goal_server"
 kick_target() {  # node name -> "container|start-up line"
     case "$1" in
         camera_stream) echo "pepin-vslam|camera stream from " ;;
         depth_stream) echo "pepin-vslam|depth stream up" ;;
         contact_scan) echo "pepin-vslam|contact scan up" ;;
         depth_fusion) echo "pepin-vslam|fusion up: " ;;
+        global_watch) echo "pepin-vslam|global watch up: " ;;
         rtabmap_frame) echo "pepin-vslam|rtabmap frame up: " ;;
         goal_server) echo "pepin-laptop|goal server ready on port" ;;
         *) return 1 ;;

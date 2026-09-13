@@ -243,6 +243,10 @@ VISION_LAPTOP_PUBLISHES = (
     "rtabmap/info",
     "depth_scan",
     "contact_scan",
+    # The laptop's whole-map watchdog (pepin_bringup.global_watch) proposing a place to the
+    # board's tracker, once a second, as JSON. Vision mode only: this is where the laptop sees
+    # the board's /scan and /map, and in SLAM mode there is no saved map to search.
+    "localization/candidate",
 )
 # The saved map's own topics, the ones SLAM mode has no publisher for: /map is the laptop's here,
 # and the rest are the tracker's, which does not run because nothing matches a scan against a map
@@ -407,6 +411,7 @@ LAPTOP_SLAM_NODES = (
     "/depth_stream",
     "/contact_scan",
     "/depth_fusion",
+    "/global_watch",
     "/rtabmap/rtabmap",
     "/rtabmap_frame",
     "/foxglove_bridge",

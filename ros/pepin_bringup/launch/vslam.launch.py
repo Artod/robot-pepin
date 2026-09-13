@@ -5,7 +5,8 @@ stream becomes images (pepin_bringup.camera_stream), a depth network scaled by t
 them into depth images (pepin_bringup.depth_stream), the same frames are read once more at floor
 height (pepin_bringup.contact_scan) and fused into one surface (pepin_bringup.depth_fusion), and
 the operator's Foxglove connects here for the 3D view. What the mode changes is which map the
-robot drives on.
+robot drives on — and, with it, whether the whole-map watchdog (pepin_bringup.global_watch) has
+a saved map to search for the cart on.
 
 KNOWN MAP (the default). The board's tracker owns ``map -> odom`` on a saved map and RTAB-Map's
 "odometry" is that tracker's pose (``odom_frame_id: map``), so RTAB-Map keeps its graph in a
@@ -229,6 +230,25 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         prefix=_after_ghost("/contact_scan"),
         **RESPAWN,
     )
+    # The board's own whole-map search, run here instead (pepin_bringup.global_watch): once a
+    # second on the board's /scan against the board's /map, and the place it finds goes back over
+    # the bridge as a candidate the tracker judges (pepin.watchdog). A tenth of a second here, a
+    # few seconds on the board — which is why the board only ever asks once it is already lost.
+    # Off in SLAM mode: there the map is RTAB-Map's, it is still being built, and there is no
+    # saved map to search. Live either way: ros/flags.sh set global_watch global_watch on.
+    watch = ExecuteProcess(
+        cmd=[
+            "python3",
+            "-m",
+            "pepin_bringup.global_watch",
+            "--ros-args",
+            "-p",
+            f"global_watch:={'false' if slam else 'true'}",
+        ],
+        output="screen",
+        prefix=_after_ghost("/global_watch"),
+        **RESPAWN,
+    )
     # RTAB-Map's correction, put where the mode needs it (pepin_bringup.rtabmap_frame): beside a
     # known map it is map -> rtabmap on this laptop's own /tf, so the voxels and the cart stay
     # together after a closure; in SLAM it is map -> odom and goes to the board as a message.
@@ -345,9 +365,11 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     scan = "camera only (no /scan)" if camera_only else "lidar + camera"
     start = "resumed" if resume else "empty"
     report = (
-        f"vslam up: online SLAM, {scan}, {start} database {database}, grid -> /map"
+        f"vslam up: online SLAM, {scan}, {start} database {database}, grid -> /map;"
+        " the global watch is off (the map is being built)"
         if slam
-        else f"vslam up: beside the known map, lidar + camera, database {database}"
+        else f"vslam up: beside the known map, lidar + camera, database {database};"
+        " the global watch proposes a place to the board's tracker once a second"
     )
     return [
         LogInfo(msg=report),
@@ -355,7 +377,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         RegisterEventHandler(
             OnProcessExit(
                 target_action=ghost_wait,
-                on_exit=[camera, depth, contact, fusion, rtabmap, frame, foxglove],
+                on_exit=[camera, depth, contact, fusion, watch, rtabmap, frame, foxglove],
             )
         ),
     ]

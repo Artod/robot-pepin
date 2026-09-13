@@ -611,6 +611,7 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
         "/depth_stream",
         "/contact_scan",
         "/depth_fusion",
+        "/global_watch",
         "/rtabmap/rtabmap",
         "/rtabmap_frame",
         "/foxglove_bridge",
@@ -1458,6 +1459,7 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         "depth_stream",
         "contact_scan",
         "depth_fusion",
+        "global_watch",
         "rtabmap_frame",
         "foxglove_bridge",
     }
