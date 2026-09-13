@@ -189,3 +189,21 @@ def test_a_source_with_nothing_to_say_about_the_moment_leaves_the_pose_alone() -
     assert got is not None and want is not None
     assert np.array_equal(got.rotation, want.rotation)
     assert poser.lean_at(2.0) is None
+
+
+def test_a_history_without_the_camera_s_own_edge_answers_the_plain_lookup() -> None:
+    """The split chain needs base_link <- camera_optical of its own. A history that has only
+    the composed one (an old tape, a TF without the neck's edge) must still place the camera —
+    unleaned, which is what it did before — instead of dropping the frame."""
+
+    class NoCameraEdge(FakeHistory):
+        def pose_at(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
+            if fixed == "base_link":
+                return None
+            return super().pose_at(stamp, frame, fixed)
+
+    poser = FramePoser(NoCameraEdge(), lean=FakeLean(pitch_deg=5.0), apply_lean=True)
+    placed = poser.camera_in_map(2.0)
+    plain = FramePoser(FakeHistory()).camera_in_map(2.0)
+    assert placed is not None and plain is not None
+    assert np.array_equal(placed.rotation, plain.rotation)

@@ -90,14 +90,14 @@ class FramePoser:
 
         Level, that is one lookup. Leaning, the chain is split at base_link — the frame that
         leans — and the lean composed between the halves, so the camera swings about the wheels
-        by roll and pitch as the body does."""
-        lean = self.lean_at(stamp)
-        if lean is None:
+        by roll and pitch as the body does; a history that cannot serve the split (no edge to
+        the camera on its own) answers the one lookup unleaned rather than nothing at all."""
+        if self.lean_at(stamp) is None:
             return self._history.pose_at(stamp, self.camera, self.map_frame)
         base = self._leaned(self._history.pose_at(stamp, self.base, self.map_frame), stamp)
         on_cart = self.camera_in_base(stamp)
         if base is None or on_cart is None:
-            return None
+            return self._history.pose_at(stamp, self.camera, self.map_frame)
         return _compose(base, on_cart)
 
     def camera_in_base(self, stamp: float) -> RigidPose | None:

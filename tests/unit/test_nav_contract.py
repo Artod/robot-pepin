@@ -1185,6 +1185,37 @@ def test_the_volume_is_the_map_and_only_one_side_publishes_it() -> None:
     )
 
 
+def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
+    """One estimator (pepin.lean through the kit's LeanFeed, off /imu/data_raw — which crosses
+    the bridge in both modes, so a laptop node reads it directly and no /lean topic is needed),
+    one flag name in every node that uses it, off until it is measured on the robot, and the
+    lean in each of their report lines. The tracker is deliberately not among them: it runs on
+    the board and already refuses an IMU subscription for a number the EKF gives it."""
+    from pepin.deployment import BOARD_PUBLISHES, bridge_allow
+
+    assert "imu/data_raw" in BOARD_PUBLISHES
+    for mode in ("split", "vision"):
+        allowed = bridge_allow("laptop", mode)["subscribers"][0]
+        assert re.compile(allowed).search("/imu/data_raw"), mode
+    kit = sf.tree(f"{NODES}/node_kit.py")
+    assert "/imu/data_raw" in sf.strings(kit) and "LeanEstimator" in sf.imported(kit)
+    for name in ("depth_fusion", "depth_stream", "contact_scan"):
+        node = sf.tree(f"{NODES}/{name}.py")
+        flags = load_table(REPO / NODES / f"{name}.py")
+        assert flags["imu_lean"] is False, f"{name}: off until measured on the robot"
+        assert "LeanFeed" in sf.imported(node), name
+        assert "/imu/data_raw" not in sf.strings(node), f"{name}: the kit owns the subscription"
+        assert "self._lean.report" in sf.calls(node), f"{name}: the lean in the report line"
+    # the poser is where the lean meets the pose, and only the two nodes that place a frame
+    for name in ("depth_fusion", "depth_stream"):
+        node = sf.tree(f"{NODES}/{name}.py")
+        assert "self._poser.apply_lean" in sf.unparsed(node, ast.Attribute), name
+    assert "apply_lean" not in sf.unparsed(sf.tree(f"{NODES}/contact_scan.py"), ast.Attribute)
+    # the tape carries what an offline replay needs to run that same estimator
+    recorder = sf.tree(f"{NODES}/run_recorder.py")
+    assert "imu_record" in sf.imported(recorder) and "imu_record" in sf.calls(recorder)
+
+
 def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_prints() -> None:
     """CLAUDE.md rule 19, in one place per node: a node that has live switches builds them from
     its module-level FLAGS table (pepin.flags), which loads without the node (the README and
