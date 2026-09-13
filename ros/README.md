@@ -86,12 +86,30 @@ ros/teleop.sh                    # or drive by goal, below — the map grows as 
 ros/map.sh save flat3_slam       # freeze the grid into ros/maps/flat3_slam.{yaml,pgm}
 ```
 
-Goals work with no places book: `ros/go.sh -1.0 0.3 90` drives to map coordinates, and a click in
-Foxglove (Publish → `/goal_pose`, frame `map`) does the same. The saved map's places are not
-offered — they are coordinates in a frame this new map does not share — and the session's own book
-(`/maps/slam.places.yaml` on the board) stays empty: `ros/go.sh mark` and `ros/go.sh where` read
-the pose from the tracker's `/where_am_i`, and in SLAM mode there is no tracker, so both answer
-without one. Mark places after the map is saved and the board is back on it.
+Goals work with no places book: `ros/go.sh -1.0 0.3 90` drives to map coordinates (recorded like
+any other drive), and a click in Foxglove (Publish → `/goal_pose`, frame `map`) does the same
+without a tape. There is no tracker here to ask "am I localised", so **the goal server takes the
+cart's pose from `map -> base_link`** — the edge `slam_frame` broadcasts from RTAB-Map's
+correction — and accepts a goal while that edge is younger than 1 second; older, or missing, the
+goal is refused with which of the two it was, and no whole-map search is attempted (there is
+nothing to search). `ros/go.sh where` says `"pose": "tf"` where that is what answered, and
+`ros/go.sh mark` fills the session's own book (`/maps/slam.places.yaml` on the board) on the same
+evidence, writing no `fit` at all rather than a `0.00`. The saved map's places are not offered:
+they are coordinates in a frame this new map does not share. The old behaviour — only ever ask
+the tracker — is `ros/flags.sh set goal_server tf_pose false`.
+
+Two things this mode needs that are **not** the operator's to remember:
+
+- **The camera's costmap layers stay off for driving.** They marked within 2 cm of the hull and
+  stalled two drives on 2026-09-13 (the contact ring at 1.2–1.5 m, the depth band beside the
+  hull); `ros/sensor.sh camera off` before a goal, and `ros/sensor.sh status` to see where they
+  stand. In this mode `ros/sensor.sh` prints `tracker: none in slam mode` for its other half and
+  switches the costmaps alone — that is the whole switch here, not a failure.
+- **`fit_gate` is handled by the launch.** The fusion fuses only while `/localization_fit` is
+  healthy, and in SLAM mode nobody publishes that topic — with the gate on, the first session
+  fused 0 frames until it was switched off by hand. `vslam.launch.py` now passes
+  `fit_gate:=false` in SLAM mode (and `map_source:=volume` where the volume owns `/map`). Both
+  remain live flags: `ros/flags.sh set depth_fusion fit_gate true` puts the gate back.
 
 Watch the map grow with the `ros/foxglove/pepin_slam.json` layout at `ws://localhost:8765`: `/map` under the fused surface, the graph's path, the head camera.
 
