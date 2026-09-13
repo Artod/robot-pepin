@@ -5,13 +5,18 @@ motions say so instead of inventing numbers, and the anchor is off until its fla
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import numpy as np
 import pytest
 
 from pepin.depth import CameraPose, Intrinsics, project_all
-from pepin.depth_pipeline import Frame, FrameContext, ParallaxAnchor, standard_pipeline
+from pepin.depth_pipeline import (
+    Frame,
+    FrameContext,
+    Pairs,
+    ParallaxAnchor,
+    standard_pipeline,
+)
 from pepin.parallax import (
     MAX_SAMPSON_PX,
     CameraPlacement,
@@ -285,7 +290,7 @@ def context(
     )
 
 
-def band_error(pairs: Any) -> float:
+def band_error(pairs: Pairs) -> float:
     """How far the anchor's depths sit from the rendered planes they came off, as a median
     relative error (the row each pair came from is its lift, inverted)."""
     rows = INTR.cy - np.asarray(pairs.lift) * INTR.fy
