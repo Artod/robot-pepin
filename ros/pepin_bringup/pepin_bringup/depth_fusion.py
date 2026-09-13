@@ -209,20 +209,21 @@ FLAGS = FlagSet(
     ),
     Flag(
         "self_heal",
-        True,
+        False,
         description="a streak of 30 frames refused at the alignment bound empties the model, so"
         " it re-seeds from the next frame instead of staying frozen until a human resets it",
-        why="after one freeze on the robot: with the head two hours at pitch 31.5 deg against the"
-        " config's 26 and the law swinging 0.94-1.60, every frame was refused at the bound — 284"
-        " refusals in one 30 s window, 0 frames integrated, /fusion/surface republishing a model"
-        " whose stamp was 40 s old ('the layer is gone') — and a hand-sent /fusion/reset brought"
-        " back 273 frames per 30 s, align 25 ms, 0 at the bound. The streak of 30 is a round 3 s"
-        " at the node's measured 9.0-9.5 fps, not a swept value",
-        on_when="on any run nobody is watching: it is the difference between a stale surface and"
-        " a model that comes back by itself",
-        off_when="while the alignment itself is being debugged (off, the streak and its refusals"
-        " stay in the report line instead of being cleared), or on a run where a deliberate stop"
-        " at the bound longer than 3 s must not cost the whole model",
+        why="off: measured harmful in its first evening (2026-09-11). It was written after one"
+        " freeze (the head two hours at 31.5 deg against the config's 26, the law swinging"
+        " 0.94-1.60: 284 refusals in one 30 s window, a surface 40 s stale, one hand-sent"
+        " /fusion/reset brought back 273 frames per 30 s) — and then fired three times in the"
+        " next two hours (19:54, 19:55, 20:05) on ordinary turns and a lidar-off test, wiping"
+        " a good model each time: 30 frames at the bound is 3 s, which any pivot reaches. The"
+        " cure for the freeze it was written for was the mount (0.383 m) and the TF camera pose,"
+        " not the wipe",
+        on_when="only with a much longer streak (a minute) and only at rest — as written it is a"
+        " model-wiper; until then a stale surface is reset by hand (/fusion/reset)",
+        off_when="always, as shipped: the report line keeps 'at bound N' visible, and a model"
+        " that stops accepting frames is a mount or pose problem to fix, not to hide",
     ),
     Flag(
         "align",
