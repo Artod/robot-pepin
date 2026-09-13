@@ -1155,6 +1155,9 @@ def test_the_volume_is_the_map_and_only_one_side_publishes_it() -> None:
     assert load_table(REPO / NODES / "depth_fusion.py").flag("map_source").live, (
         "still an A/B switch where the launch allows it"
     )
+    assert not load_table(REPO / NODES / "depth_fusion.py").flag("no_return_free").default, (
+        "the old behaviour is the default"
+    )
     assert load_table(REPO / NODES / "depth_fusion.py").flag("map_min_weight").range == (
         0.0,
         LidarLaw.max_weight,

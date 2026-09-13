@@ -32,9 +32,9 @@ volume is refused on /map however ``map_source`` is set afterwards. The volume i
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
 ``fit_gate``, ``self_heal``, ``align``, ``min_weight``, ``map_min_weight``, ``surface_hz``,
-``band_half_z``, ``lidar_layer``, ``map_source``, ``map_hz``, ``snapshot_s``,
-``resume_volume``; their state is printed in every report line, beside the band itself and the
-source of the plane it is centred on. ``/fusion/reset``
+``band_half_z``, ``lidar_layer``, ``no_return_free``, ``map_source``, ``map_hz``,
+``snapshot_s``, ``resume_volume``; their state is printed in every report line, beside the band
+itself and the source of the plane it is centred on. ``/fusion/reset``
 (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
 """
 
@@ -169,6 +169,13 @@ FLAGS = FlagSet(
         True,
         description="/scan is integrated into the volume at the lidar's plane (rays carve free"
         " space, returns mark a surface); off, the volume is the camera's alone, as it was",
+    ),
+    Flag(
+        "no_return_free",
+        False,
+        description="a beam that came back with nothing carves free space out to the sensor's"
+        " reach (an open door reads as open); off, it writes nothing at all, because a mirror,"
+        " a black chair leg and anything closer than the minimum say the same nothing",
     ),
     Flag(
         "map_source",
@@ -469,6 +476,7 @@ class DepthFusion(Node):
             return  # counted by the TF failure handler
         angles, ranges = scan_arrays(msg)
         with self._tally.measure("scan"), self._lock:
+            self._world.law = self._law()
             touched = self._world.integrate_scan(
                 bearings_in_base(angles, yaw, mirrored), ranges, base, mount, stamp=at
             )
@@ -476,6 +484,11 @@ class DepthFusion(Node):
         self._tally.count("scan_voxels", touched)
         if self._clock.due(time.monotonic()) and self._switches["snapshot_s"] > 0.0:
             self._snapshot()
+
+    def _law(self) -> LidarLaw:
+        """How a beam writes into the volume right now: the defaults with the live flags in
+        them, rebuilt per scan so a flag set mid-run takes effect on the next revolution."""
+        return LidarLaw(no_return_free=self._switches.on("no_return_free"))
 
     def _lookup_laser(self, frame: str) -> bool:
         """The static base_link <- laser transform: the beams' angle domain (the sensor hangs

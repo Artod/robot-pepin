@@ -132,7 +132,8 @@ def test_a_wall_on_a_cell_boundary_survives_every_viewpoint() -> None:
 
 
 def test_a_beam_past_the_sensor_reach_carves_free_space_and_marks_nothing() -> None:
-    """An open door: the beam says "nothing out to here", not "a wall here"."""
+    """A range beyond the mount's reach: the beam says "nothing out to here", not "a wall
+    here", because the reach is how far this sensor may be believed."""
     world = WorldMap(spec(), PlanarMount(z_m=PLANE_M, max_range_m=1.0))
     angles, ranges = box_scan()
     for _ in range(8):
@@ -141,6 +142,30 @@ def test_a_beam_past_the_sensor_reach_carves_free_space_and_marks_nothing() -> N
     assert cell_of(view, 0.5, 0.0) == FREE
     assert cell_of(view, 1.99, 0.0) == UNKNOWN, "the wall is out of reach: not marked"
     assert not np.any(view.values == OCCUPIED)
+
+
+def test_a_beam_with_no_return_writes_nothing_until_the_flag_opens_the_door() -> None:
+    """What the lidar really delivers for an open door is NaN, not a long range: everything
+    past ``range_max`` comes back as no return at all. Off by default it writes nothing (a
+    mirror and a black chair leg say NaN too); on, it carves free space to the reach."""
+    angles, ranges = box_scan()
+    doorway = np.abs(angles) < 0.2  # a wedge of beams that came back with nothing
+    open_door = np.where(doorway, np.nan, ranges)
+
+    shut = WorldMap(spec(), mount())
+    for _ in range(20):
+        shut.integrate_scan(angles, open_door, at())
+    view = shut.lidar_slice()
+    assert cell_of(view, 1.0, 0.0) == UNKNOWN, "no return, no claim: nothing is written"
+    assert cell_of(view, 0.0, 1.0) == FREE, "the beams that did return still carve"
+
+    carving = WorldMap(spec(), mount(), LidarLaw(no_return_free=True))
+    for _ in range(20):
+        carving.integrate_scan(angles, open_door, at())
+    through = carving.lidar_slice()
+    assert cell_of(through, 1.0, 0.0) == FREE, "the door is open all the way out"
+    assert not wall_at(through, ROOM_M, 0.0), "and nothing is marked at the end of the beam"
+    assert wall_at(through, 0.0, ROOM_M), "the walls the other beams found are still there"
 
 
 def test_a_scan_that_misses_the_volume_changes_nothing() -> None:

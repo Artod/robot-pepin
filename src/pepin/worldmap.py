@@ -88,6 +88,12 @@ class LidarLaw:
     rub out a wall seen edge-on. ``max_weight`` is the lidar's own cap, well below the volume's:
     a cell the lidar owns saturates in a couple of seconds and a chair that moves is cleared in
     a couple more, which is what keeps the map alive instead of frozen.
+
+    ``no_return_free`` is the open door: a beam that came back with nothing carves free space
+    out to the mount's reach and marks nothing there. It is off by default because a beam comes
+    back with nothing from a mirror, from a black chair leg and from anything closer than the
+    sensor's minimum too — carrying any of those out to twelve metres would rub out the wall
+    behind them.
     """
 
     hit_weight: float = 1.0
@@ -95,6 +101,7 @@ class LidarLaw:
     max_weight: float = 20.0
     layer_half_m: float = 0.05  # the plane plus or minus this: one voxel either side
     step_voxels: float = 0.5  # how finely a beam is sampled, in voxels
+    no_return_free: bool = False  # a beam with no return carves to the reach, or writes nothing
 
 
 @dataclass(frozen=True)
@@ -280,10 +287,13 @@ class WorldMap:
         ``angles`` are robot-frame bearings (radians, CCW from forward — what ``pepin.lidar``
         and the run tape carry) and ``ranges`` the metres along them, NaN where there was no
         return. A beam carves free space along its whole run and marks a surface at its end; a
-        beam longer than the mount's reach carves free space to that reach and marks nothing,
-        which is how an open door stays open. Everything is written into the layer at the
-        sensor's plane and one voxel either side, on the lidar's weight channel, and one scan
-        speaks at most once about a voxel however many of its beams cross it.
+        beam whose range is beyond the mount's reach carves free space out to that reach and
+        marks nothing, because the reach is how far this sensor may be believed. A beam with no
+        return at all (NaN) writes nothing, unless ``LidarLaw.no_return_free`` is on — then it
+        too carves to the reach and marks nothing, which is how an open door stays open.
+        Everything is written into the layer at the sensor's plane and one voxel either side, on
+        the lidar's weight channel, and one scan speaks at most once about a voxel however many
+        of its beams cross it.
         """
         mount = mount if mount is not None else self.mount
         rows = self._layer_rows(pose_base_in_map, mount)
@@ -380,11 +390,15 @@ class WorldMap:
         s = self.spec
         r = np.asarray(ranges, dtype=float)
         a = np.asarray(angles, dtype=float)
-        valid = np.isfinite(r) & (r >= mount.min_range_m)
+        finite = np.isfinite(r)
+        # a beam with no return is a beam to the reach with nothing at its end, or no beam at all
+        empty = ~finite if self.law.no_return_free else np.zeros(r.shape, dtype=bool)
+        valid = (finite & (r >= mount.min_range_m)) | empty
         if not np.any(valid):
             return None
-        reach = np.minimum(r[valid], mount.max_range_m)
-        hit = r[valid] <= mount.max_range_m
+        seen = r[valid]
+        hit = np.isfinite(seen) & (seen <= mount.max_range_m)
+        reach = np.where(hit, seen, mount.max_range_m)
         yaw = math.atan2(float(pose.rotation[1, 0]), float(pose.rotation[0, 0]))
         bearing = a[valid] + yaw
         ox = float(pose.translation[0]) + math.cos(yaw) * mount.x_m - math.sin(yaw) * mount.y_m
