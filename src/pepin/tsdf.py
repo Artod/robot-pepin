@@ -49,12 +49,19 @@ class GridSpec:
     range_max_m: float = 4.0  # farther depth is noise and geometry error, not information
     weight_ref_m: float = 2.0  # an observation from this distance weighs 1; (ref/d)^2 otherwise
     weight_cap: float = 4.0  # a very near observation weighs at most this
+    # The height band the camera speaks for, the one /depth_scan marks in (``pepin.depth``):
+    # what :meth:`pepin.worldmap.WorldMap.camera_band_slice` reads out of the volume.
+    camera_band_m: tuple[float, float] = (0.15, 1.30)
 
     @classmethod
     def load(cls, path: str | Path) -> GridSpec:
         """The grid from ``config/fusion.json``."""
         with open(path) as f:
             data = json.load(f)
+        extra: dict[str, Any] = {}
+        if "camera_band_m" in data:  # absent in an older file: the default band stands
+            lo, hi = data["camera_band_m"]
+            extra["camera_band_m"] = (float(lo), float(hi))
         return cls(
             origin=tuple(data["origin_m"]),
             shape=tuple(data["shape"]),
@@ -64,6 +71,7 @@ class GridSpec:
             range_max_m=float(data["range_max_m"]),
             weight_ref_m=float(data["weight_ref_m"]),
             weight_cap=float(data["weight_cap"]),
+            **extra,
         )
 
     def observation_weight(self, depth: Floats) -> Floats:
