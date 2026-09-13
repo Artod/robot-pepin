@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
 
 from pepin.odometry import Pose2D, wrap_angle
-from pepin.scanmatch import ScoreSurface
+from pepin.scanmatch import ScoreSurface, apply_motion
 
 Matrix = NDArray[np.float64]
 
@@ -105,6 +105,34 @@ class PoseMeasurement:
             f"+- {sx * 100:.1f}/{sy * 100:.1f} cm, {math.degrees(st):.1f} deg, fit {self.fit:.2f}"
             + (", edge" if self.edge else "")
         )
+
+
+def carry_pose(pose: Pose2D, covariance: Matrix, motion: Pose2D) -> tuple[Pose2D, Matrix]:
+    """A measured pose and its covariance moved forward over ``motion`` — the odometry's step,
+    in the base frame of the moment the pose was measured at: where that place has become.
+
+    The covariance travels through the composition's Jacobian, ``J = [[1, 0, -dy], [0, 1, dx],
+    [0, 0, 1]]`` over the carry's map-frame displacement: a heading known to a degree is 2 mm of
+    position error after 10 cm of carry, and that coupling is the only thing the move adds. The
+    odometry's OWN error over a fraction of a second (millimetres) is not added: it is two
+    orders under the spread of any match this carries.
+    """
+    moved = apply_motion(pose, motion)
+    dx, dy = moved.x - pose.x, moved.y - pose.y
+    jacobian = np.array([[1.0, 0.0, -dy], [0.0, 1.0, dx], [0.0, 0.0, 1.0]])
+    return moved, np.asarray(
+        jacobian @ np.asarray(covariance, dtype=float) @ jacobian.T, dtype=np.float64
+    )
+
+
+def carried(measurement: PoseMeasurement, motion: Pose2D, stamp: float) -> PoseMeasurement:
+    """The same measurement read at a later moment: its pose and covariance carried over
+    ``motion`` (:func:`carry_pose`) and re-stamped to ``stamp``. The fit is the scan's own and
+    does not change — the answer is the same answer, read from where the cart has got to."""
+    pose, covariance = carry_pose(measurement.pose, measurement.covariance, motion)
+    return replace(
+        measurement, x=pose.x, y=pose.y, yaw=pose.theta, covariance=covariance, stamp=stamp
+    )
 
 
 def disagreement(a: PoseMeasurement, b: PoseMeasurement) -> float:

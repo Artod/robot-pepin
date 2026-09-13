@@ -13,7 +13,7 @@ from pepin.dynamic import StaticMask, voting_mask
 from pepin.localization import Localizer, ScanObservation
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow, apply_motion, relative_motion
-from pepin.sources import CONTACT, DEPTH, LIDAR, SourceFeed, SourceRegistry
+from pepin.sources import CAMERA, CONTACT, DEPTH, LIDAR, SourceFeed, SourceRegistry
 from pepin.timeline import OdomHistory, TimedScan
 
 WINDOW = SearchWindow(xy_m=0.09, xy_step_m=0.03, theta_deg=9.0, theta_step_deg=1.5)
@@ -286,7 +286,7 @@ def test_the_switch_goes_by_flag_name_and_the_sources_report_is_ready_for_the_wi
     report = loc.sources_report(1.02)
     assert report["anchor"] == LIDAR and report["fused"] == "lidar+depth"
     assert report["rejected"] == [] and report["fit"] == round(loc.confidence, 3)
-    assert list(report["sources"]) == [LIDAR, DEPTH, CONTACT]
+    assert list(report["sources"]) == [LIDAR, DEPTH, CONTACT, CAMERA]
     lidar = report["sources"][LIDAR]
     assert lidar["health"].startswith("fresh") and 0.0 < lidar["fit"] <= 1.0
     assert -8.5 < lidar["delta"][0] < -3.5, "the lidar proposes the 6 cm back, in centimetres"

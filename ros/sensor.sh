@@ -11,9 +11,10 @@
 #   ros/sensor.sh lidar on|off      the lidar as a tracker source and as lidar_layer
 #   ros/sensor.sh lidar off --hard  ... and the driver deactivated: /scan stops, a real absence
 #                                   instead of an ignored scan; `lidar on` activates it again
-#   ros/sensor.sh camera on|off     the camera as the depth and contact sources and as
-#                                   camera_layer and contact_layer — one camera, two readings of
-#                                   the same frames: the band 8 cm-1.3 m, and where the floor ends
+#   ros/sensor.sh camera on|off     the camera as the tracker's `camera` source (the poses the
+#                                   laptop measures from its scans) and as camera_layer and
+#                                   contact_layer — one camera, two readings of the same frames:
+#                                   the band 8 cm-1.3 m, and where the floor ends
 # Idempotent: only what differs is set, and only what changed is printed. This script writes no
 # velocity and restarts nothing. The lifecycle half is refused while a navigation goal runs, and
 # refused when that check itself cannot be made: taking /scan away from a moving robot is an
@@ -34,7 +35,7 @@ LIDAR_DRIVER=/ldlidar_node
 LOCAL_COSTMAP=/local_costmap/local_costmap
 GLOBAL_COSTMAP=/global_costmap/global_costmap
 COSTMAPS="$LOCAL_COSTMAP $GLOBAL_COSTMAP"
-SOURCE_ORDER="lidar depth contact"  # pepin.sources' own order, so two lists compare as text.
+SOURCE_ORDER="lidar depth contact camera"  # pepin.sources' own order, two lists as text.
 # Only an ORDER: a name outside it is carried through, never dropped (normalize_sources), and
 # tests/unit/test_scripts_parse.py fails when it drifts from src/pepin/sources.py.
 LAYER_ORDER="lidar_layer camera_layer contact_layer"
@@ -122,7 +123,9 @@ last_line() {  # LOG PATTERN -> the last matching line of LOG
 sensor_sources() {  # lidar|camera -> the tracker sources this sensor owns
     case "$1" in
         lidar) echo "lidar" ;;
-        camera) echo "depth contact" ;;  # one camera read twice: the band, and the floor's end
+        # One tracker source since 2026-09-13: the laptop matches both camera scans (the
+        # band and the floor's end) and the board fuses the pose they measured.
+        camera) echo "camera" ;;
         *) return 1 ;;
     esac
 }

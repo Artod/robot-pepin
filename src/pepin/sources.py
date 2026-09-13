@@ -11,6 +11,12 @@ trigger path on top of it: every source's newest scan waits at its own gate for 
 that covers it, one source — the anchor — drives the updates, and the others ride along, each
 carried to the anchor's moment through the odometry. No ROS here: the node feeds stamps and
 scans in and reads verdicts out.
+
+A source may also be REMOTE (:data:`CAMERA`): its scans are matched on the machine that
+produces them and only the pose they measured travels here (:mod:`pepin.measurements`). Such a
+source sits on the roster like any other — the ``sources`` flag switches it, its health is in
+the report line, its word is fused — but it has no gate, never anchors and is never matched
+here, so the feed passes it by and the node hands its measurements straight to the tracker.
 """
 
 from __future__ import annotations
@@ -30,6 +36,13 @@ from pepin.timeline import GateStats, OdomHistory, ScanGate, TimedScan
 LIDAR = "lidar"
 DEPTH = "depth"
 CONTACT = "contact"
+# The camera as the board sees it since 2026-09-13: not a scan to match but a pose MEASUREMENT
+# computed on the laptop out of the camera's own scans (pepin.measurements). Matching those
+# scans on the Orange Pi took the tracker from 45 ms a scan to 147 and dropped it to 4.7 Hz,
+# and the measurements it fused were then stale enough to pull the live pose 50 cm p90 off the
+# lidar's truth (scratch/drive_bisect.py on run 0238). The camera keeps its seat on the roster —
+# the ``sources`` flag, the health line, the fusion — and only the matching moved.
+CAMERA = "camera"
 # Two POSE sources, not scan sources: the tracker's own belief and the laptop's whole-map
 # watchdog (:mod:`pepin.watchdog`), which answers with a place on the map instead of a scan.
 # Neither is ever on the roster — no gate, no health, never an anchor, never matched — they
@@ -44,8 +57,10 @@ RATE_TAU_S = 2.0  # the rate's time constant: a few seconds of intervals, not th
 class ScanSource:
     """One sensor as the tracker sees it: its name (the flag's word for it), the frame its
     returns arrive in, the fan it sees (degrees), ``trust`` (a weight on its information in a
-    fusion, 1.0 for the lidar), ``stale_after_s`` (older than this it is not alive), and
-    ``min_points`` / ``vote_min_points`` (fewer returns fix no pose / may not vote alone)."""
+    fusion, 1.0 for the lidar), ``stale_after_s`` (older than this it is not alive),
+    ``min_points`` / ``vote_min_points`` (fewer returns fix no pose / may not vote alone), and
+    ``remote`` — a source whose word arrives as a pose MEASUREMENT computed elsewhere rather
+    than as a scan to match here (:data:`CAMERA`)."""
 
     name: str
     frame: str
@@ -54,6 +69,7 @@ class ScanSource:
     stale_after_s: float = 0.5
     min_points: int = 50
     vote_min_points: int = 60
+    remote: bool = False
 
     @property
     def partial(self) -> bool:
@@ -73,6 +89,12 @@ DEFAULT_SOURCES: tuple[ScanSource, ...] = (
     ScanSource(
         CONTACT, "base_link", 80.0, trust=0.5, stale_after_s=1.0, min_points=20, vote_min_points=20
     ),
+    # The camera's measurements, made where the camera's data already is. ``trust`` is 1.0 here
+    # because the matcher that produced them has already charged the camera's own trust into
+    # their covariance (:func:`pepin.fusion.covariance_from_score_surface`), and charging it
+    # twice would silence a sensor for the wrong reason. It never anchors and has no gate:
+    # ``remote`` is what says so.
+    ScanSource(CAMERA, "map", 80.0, trust=1.0, stale_after_s=1.0, remote=True),
 )
 
 
@@ -141,6 +163,17 @@ class SourceRegistry:
     def enabled(self) -> tuple[str, ...]:
         """The sources the flag has switched on, in roster order."""
         return self._enabled
+
+    @property
+    def scan_names(self) -> tuple[str, ...]:
+        """Every source that delivers a scan to match here, in roster order: the roster minus
+        the remote ones, whose word arrives already matched (:attr:`ScanSource.remote`)."""
+        return tuple(name for name, s in self._sources.items() if not s.remote)
+
+    @property
+    def enabled_scans(self) -> tuple[str, ...]:
+        """The enabled sources that deliver scans: what the feed gates, anchors and gathers."""
+        return tuple(name for name in self._enabled if not self._sources[name].remote)
 
     def enable(self, names: Iterable[str]) -> None:
         """Set the ``sources`` flag: exactly these sources feed the tracker from now on. An
@@ -250,7 +283,7 @@ class SourceFeed:
 
     def __init__(self, registry: SourceRegistry | None = None, max_wait_s: float = 0.5) -> None:
         self.registry = registry if registry is not None else SourceRegistry()
-        self._gates = {name: ScanGate(max_wait_s) for name in self.registry.names}
+        self._gates = {name: ScanGate(max_wait_s) for name in self.registry.scan_names}
         self._newest: dict[str, TimedScan] = {}
         self._last_release: tuple[str, float] | None = None  # who drove last, and when
         self.stats = FeedStats()
@@ -267,15 +300,17 @@ class SourceFeed:
         a scan of its waits at the gate or it is fresh (its gate decides the release, by
         coverage); when it is stale with nothing waiting, the fresh enabled source heard from
         last; with nothing fresh, the enabled source that still has a scan waiting, widest
-        first; ``None`` when nothing is enabled or nothing waits."""
+        first; ``None`` when no scan source is enabled or nothing waits — which is also the
+        answer when the camera's measurements are all that is left (a remote source anchors
+        nothing: there is no scan of it here to match)."""
         by_width = sorted(
-            (self.registry.source(name) for name in self.registry.enabled),
+            (self.registry.source(name) for name in self.registry.enabled_scans),
             key=lambda source: -source.fov_deg,  # stable: the roster's order breaks a tie
         )
         if not by_width:
             return None
         widest = by_width[0]
-        alive = self.registry.alive(now)
+        alive = [source for source in self.registry.alive(now) if not source.remote]
         if widest in alive or self._gates[widest.name].pending is not None:
             return widest.name
         if alive:
@@ -306,7 +341,7 @@ class SourceFeed:
         not cover yet keeps waiting for the next update."""
         out: list[ScanObservation] = []
         at_anchor = history.at(stamp)
-        for name in self.registry.enabled:
+        for name in self.registry.enabled_scans:
             scan = self._gates[name].pending
             if name == anchor or scan is None:
                 continue
@@ -331,7 +366,7 @@ class SourceFeed:
         anchor = self.anchor(now)
         if anchor is not None:
             return self._newest.get(anchor)
-        heard = [self._newest[name] for name in self.registry.enabled if name in self._newest]
+        heard = [self._newest[name] for name in self.registry.enabled_scans if name in self._newest]
         return max(heard, key=lambda scan: scan.stamp, default=None)
 
     def full_picture(self, now: float) -> TimedScan | None:
@@ -342,7 +377,7 @@ class SourceFeed:
         the same view agree on the same look-alike, so a fan alone can neither say "lost" nor
         find the cart (:attr:`ScanSource.partial`)."""
         anchor = self.anchor(now)
-        names = (anchor,) if anchor is not None else self.registry.enabled
+        names = (anchor,) if anchor is not None else self.registry.enabled_scans
         full = [
             self._newest[name]
             for name in names
@@ -369,7 +404,7 @@ class SourceFeed:
         """The counters since the previous report, which are reset: the enabled sources'
         gates, in roster order."""
         stats, self.stats = self.stats, FeedStats()
-        stats.gates = {name: self._gates[name].report() for name in self.registry.enabled}
-        for name in set(self._gates) - set(self.registry.enabled):
+        stats.gates = {name: self._gates[name].report() for name in self.registry.enabled_scans}
+        for name in set(self._gates) - set(self.registry.enabled_scans):
             self._gates[name].report()  # a source the flag has off: its counters reset too
         return stats

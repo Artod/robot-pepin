@@ -36,15 +36,16 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar
 
 import numpy as np
 from numpy.typing import NDArray
 
-from pepin.fusion import Matrix, PoseMeasurement, from_fit, fuse
+from pepin.fusion import Matrix, PoseMeasurement, carry_pose, from_fit, fuse
 from pepin.odometry import Pose2D, wrap_angle
-from pepin.scanmatch import apply_motion, relative_motion
+from pepin.scanmatch import relative_motion
 from pepin.sources import TRACKER, WATCHDOG
+from pepin.timeline import OdomTrail  # the trail a carry reads; re-exported here
 from pepin.watch import ADMIT_FIT, ADMIT_MARGIN, AGREE_DEG, AGREE_M
 
 __all__ = [
@@ -93,23 +94,6 @@ CANDIDATE_STREAK = 3
 # ...and unknown_map verdicts in a row before the tracker says the map does not fit. The same
 # length for the same reason: one is a blocked lidar, three is a different room.
 UNKNOWN_STREAK = 3
-
-
-class OdomTrail(Protocol):
-    """Where the cart was, in the odom frame, at any moment the tracker still remembers — the
-    little of :class:`pepin.timeline.OdomHistory` a candidate's carry needs, so the gate can be
-    driven by a fake in a test and by any robot's own trail."""
-
-    def at(self, t: float) -> Pose2D | None:
-        """The odometry pose at ``t``, or ``None`` when ``t`` is outside what is remembered."""
-
-    @property
-    def newest(self) -> Pose2D | None:
-        """The newest odometry pose, or ``None`` when nothing has been recorded yet."""
-
-    @property
-    def newest_t(self) -> float | None:
-        """When that newest pose was recorded, or ``None`` when there is none."""
 
 
 class CandidateVerdict(StrEnum):
@@ -254,17 +238,15 @@ def carried(candidate: GlobalCandidate, motion: Pose2D, stamp: float) -> GlobalC
     at 0.3 m/s that is 7 cm, and it is a bias, never noise — it always points backwards along
     the drive.
 
-    The covariance travels through the composition's Jacobian, ``J = [[1, 0, -dy], [0, 1, dx],
-    [0, 0, 1]]`` over the carry's map-frame displacement: a heading the search knew to a degree
-    is 2 mm of position error after 10 cm of carry, and that coupling is the only thing the
-    move adds. The odometry's OWN error over a fraction of a second (millimetres) is not added:
-    it is two orders under the peak's own spread. The score and the ambiguity are the scan's
-    own and do not change — the answer is the same answer, read at a later moment.
+    The covariance travels through the composition's Jacobian (:func:`pepin.fusion.carry_pose`,
+    the very carry the laptop's pose measurements get on their way into an update): a heading
+    the search knew to a degree is 2 mm of position error after 10 cm of carry, and that
+    coupling is the only thing the move adds. The odometry's OWN error over a fraction of a
+    second (millimetres) is not added: it is two orders under the peak's own spread. The score
+    and the ambiguity are the scan's own and do not change — the answer is the same answer,
+    read at a later moment.
     """
-    pose = apply_motion(candidate.pose, motion)
-    dx, dy = pose.x - candidate.x, pose.y - candidate.y
-    jacobian = np.array([[1.0, 0.0, -dy], [0.0, 1.0, dx], [0.0, 0.0, 1.0]])
-    covariance = jacobian @ np.asarray(candidate.covariance, dtype=float) @ jacobian.T
+    pose, covariance = carry_pose(candidate.pose, candidate.covariance, motion)
     return replace(
         candidate, x=pose.x, y=pose.y, yaw=pose.theta, covariance=covariance, stamp=stamp
     )

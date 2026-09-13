@@ -5,6 +5,7 @@ import pytest
 
 from pepin.odometry import Pose2D
 from pepin.sources import (
+    CAMERA,
     CONTACT,
     DEPTH,
     LIDAR,
@@ -18,7 +19,8 @@ from pepin.timeline import OdomHistory, ScanGate, TimedScan
 
 def test_the_lidar_alone_is_on_by_default_and_the_flag_picks_the_rest() -> None:
     registry = SourceRegistry()
-    assert registry.enabled == (LIDAR,) and registry.names == (LIDAR, DEPTH, CONTACT)
+    assert registry.enabled == (LIDAR,) and registry.names == (LIDAR, DEPTH, CONTACT, CAMERA)
+    assert registry.scan_names == (LIDAR, DEPTH, CONTACT), "the camera is measured elsewhere"
     registry.enable([CONTACT, LIDAR])
     assert registry.enabled == (LIDAR, CONTACT)  # roster order, whatever the flag's
     assert registry.is_enabled(CONTACT) and not registry.is_enabled(DEPTH)
@@ -133,7 +135,7 @@ def test_nothing_fresh_holds_a_stale_rider_is_dropped_and_an_uncovered_one_waits
     assert feed.anchor(0.0) is None and feed.take(history, 0.0) is None
     assert feed.picture(0.0) is None and feed.full_picture(0.0) is None
     assert feed.status(0.0) == (
-        "holding map->odom: no fresh source; lidar absent, depth absent, contact off"
+        "holding map->odom: no fresh source; lidar absent, depth absent, contact off, camera off"
     )
     feed.offer(DEPTH, scan(0.5))
     assert feed.anchor(5.0) == DEPTH, "nothing fresh but a frame waiting: its gate decides"

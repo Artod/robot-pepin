@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -36,6 +36,7 @@ __all__ = [
     "MatchPacer",
     "MotionFilter",
     "OdomHistory",
+    "OdomTrail",
     "PacerStats",
     "ScanGate",
     "TimedScan",
@@ -43,6 +44,23 @@ __all__ = [
     "deskew",
     "standing_still",
 ]
+
+
+class OdomTrail(Protocol):
+    """Where the cart was, in the odom frame, at any moment still remembered — the little of
+    :class:`OdomHistory` that carrying a measurement from its own moment to another one needs,
+    so a pure gate can be driven by a fake in a test and by any robot's own trail."""
+
+    def at(self, t: float) -> Pose2D | None:
+        """The odometry pose at ``t``, or ``None`` when ``t`` is outside what is remembered."""
+
+    @property
+    def newest(self) -> Pose2D | None:
+        """The newest odometry pose, or ``None`` when nothing has been recorded yet."""
+
+    @property
+    def newest_t(self) -> float | None:
+        """When that newest pose was recorded, or ``None`` when there is none."""
 
 
 class OdomHistory:

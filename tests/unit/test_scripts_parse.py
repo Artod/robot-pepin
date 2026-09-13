@@ -273,19 +273,21 @@ def test_sensor_sh_parses() -> None:
 
 
 def test_camera_on_sets_the_tracker_s_sources_and_both_costmaps_layers(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """One command, the two ends of the same switch: the camera's two scans join the tracker's
-    sources and its two layers come up on the local AND the global costmap. The global costmap
-    lives with the planner, which a split stack (PEPIN_SIDE=board) puts on the laptop."""
+    """One command, the two ends of the same switch: the camera joins the tracker's sources —
+    as one name, `camera`, since the laptop matches both its scans and sends the pose they
+    measured (pepin.measurements) — and its two layers come up on the local AND the global
+    costmap. The global costmap lives with the planner, which a split stack (PEPIN_SIDE=board)
+    puts on the laptop."""
     code, out, sent = _sensor(
         tmp_path, "camera", "on", FAKE_SIDE="board", FAKE_SOURCES="lidar", FAKE_LAYERS="false"
     )
     assert code == 0, out
-    assert "flags set relocalizer sources lidar,depth,contact" in sent
+    assert "flags set relocalizer sources lidar,camera" in sent
     for layer in ("camera_layer", "contact_layer"):
         assert f"{BOARD} ros2 param set {LOCAL} {layer}.enabled true" in sent
         assert f"{LAPTOP} ros2 param set {GLOBAL} {layer}.enabled true" in sent
     assert not [c for c in sent if "lifecycle" in c], "the camera owns no lifecycle node"
-    assert "relocalizer sources lidar -> lidar,depth,contact" in out
+    assert "relocalizer sources lidar -> lidar,camera" in out
 
 
 def test_a_whole_stack_keeps_both_costmaps_on_the_board(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -471,13 +473,13 @@ def test_a_source_this_script_has_not_heard_of_survives_the_other_sensor_s_switc
         tmp_path, "camera", "on", FAKE_SOURCES="lidar,sonar,depth", FAKE_LAYERS="false"
     )
     assert code == 0, out
-    assert "flags set relocalizer sources lidar,depth,contact,sonar" in sent, sent
-    assert "relocalizer sources lidar,depth,sonar -> lidar,depth,contact,sonar" in out
+    assert "flags set relocalizer sources lidar,depth,camera,sonar" in sent, sent
+    assert "relocalizer sources lidar,depth,sonar -> lidar,depth,camera,sonar" in out
     # and the same on the way out: switching the camera off keeps it too
     _, out, sent = _sensor(
-        tmp_path, "camera", "off", FAKE_SOURCES="lidar,sonar,depth,contact", FAKE_LAYERS="true"
+        tmp_path, "camera", "off", FAKE_SOURCES="lidar,sonar,depth,camera", FAKE_LAYERS="true"
     )
-    assert "flags set relocalizer sources lidar,sonar" in sent, sent
+    assert "flags set relocalizer sources lidar,depth,sonar" in sent, sent
 
 
 def test_the_navigation_guard_separates_no_goal_from_could_not_see() -> None:

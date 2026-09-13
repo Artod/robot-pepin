@@ -10,6 +10,12 @@ floor-contact scan (:mod:`pepin.sources`). Each enabled source is matched separa
 the same map with the same machinery, each match carries a covariance read off its score
 surface, and the matches are fused by their information (:mod:`pepin.fusion`) before the pose
 is corrected — so lidar-only, camera-only and both go through one code path.
+
+A source's match need not be made here: a pose somebody else measured, with the covariance it
+was measured with, is handed to :meth:`Localizer.update_from` as a measurement and joins the
+same fusion (:mod:`pepin.measurements` — the camera's scans are matched on the laptop, where
+they are produced, since 2026-09-13). The arithmetic of a fused pose does not care which
+machine did the matching; only the CPU it cost does.
 """
 
 from __future__ import annotations
@@ -523,6 +529,7 @@ class Localizer:
         source: str,
         stamp: float = 0.0,
         min_known: float = GLOBAL_MIN_KNOWN,
+        trust: float = 1.0,
     ) -> PoseMeasurement:
         """One place on the map as a measurement: ``pose`` sharpened in the tracking window
         against this scan, the inlier fraction of the whole scan there as its fit, and the
@@ -538,7 +545,10 @@ class Localizer:
         anywhere on the map must put most of the scan on cells the map has SEEN. Judged the
         tracker's way, a scan of another flat scored 0.99 against a map it has nothing to do
         with — a quarter of its returns on that map's walls and the rest in the unknown
-        (scratch/kidnap_recovery.py, 2026-09-12).
+        (scratch/kidnap_recovery.py, 2026-09-12). A caller refining a known belief rather than
+        searching — the laptop's camera matcher — passes the tracking default instead, and
+        ``trust`` (the source's weight on the roster) so that a camera's answer is widened here,
+        where it is measured, and never again on the machine that fuses it.
         """
         local, surface = self._matcher.match_surface(pose, points, self._window)
         fit = self._matcher.inlier_fraction(local.pose, points, min_known=min_known)
@@ -546,7 +556,7 @@ class Localizer:
             local.pose.x,
             local.pose.y,
             local.pose.theta,
-            covariance_from_score_surface(surface, fit),
+            covariance_from_score_surface(surface, fit, trust=trust),
             source,
             stamp,
             fit,
@@ -799,6 +809,7 @@ class Localizer:
         odom: Pose2D,
         scans: Sequence[ScanObservation],
         *,
+        measurements: Sequence[PoseMeasurement] = (),
         trust_odometry: bool = True,
         at_rest: bool = False,
         dt_s: float | None = None,
@@ -809,6 +820,15 @@ class Localizer:
         the matches are fused by their information (or, with ``fusion`` off, the widest
         source's is taken alone) and the fused pose corrects the belief under the same rules
         as ever — the rest lock, the carry, the driving gain, the lost recovery.
+
+        ``measurements`` are poses somebody else already matched — the camera's, measured on
+        the laptop out of scans this machine never sees (:mod:`pepin.measurements`) — carried
+        by the caller to the moment of THIS update. They join the fusion exactly like a scan's
+        own match, weighed by the covariance they arrive with, and a source the ``sources``
+        flag has off is ignored here as a scan of it would be. With no scan at all (a dead
+        lidar) they correct the pose by themselves: the belief is then whatever the remote
+        matcher says, blended in under the same gain, and the fit reported is the one it
+        measured — there is no scan here to measure a fit on.
 
         ``trust_odometry=False`` discards the wheel step (slipping wheels): the pose is
         corrected from where it was, and the step is still consumed so it is never re-applied.
@@ -857,10 +877,12 @@ class Localizer:
             (observation, self.sources.source(observation.source))
             for observation in scans
             if self.sources.is_enabled(observation.source)
+            and not self.sources.source(observation.source).remote
             and len(observation.points)
             >= self._min_points_for(self.sources.source(observation.source))
         ]
-        if not usable:
+        external = [m for m in measurements if self.sources.is_enabled(m.source)]
+        if not usable and not external:
             self.pose = prediction
             self.confidence = self.published_fit = 0.0
             self.weak_scans += 1
@@ -870,26 +892,34 @@ class Localizer:
             return self.pose
         # The anchor: the widest fan on offer (the lidar when it is enabled and thick enough).
         # Its whole scan measures the confidence, the recovery searches with it, the carry and
-        # the published fit are judged on it — a +-40 degree fan alone cannot say "lost".
-        anchor, _ = max(usable, key=lambda pair: pair[1].fov_deg)
-        points = anchor.points
+        # the published fit are judged on it — a +-40 degree fan alone cannot say "lost". With
+        # no scan at all there is no anchor, and the remote measurements carry the update.
+        anchor = max(usable, key=lambda pair: pair[1].fov_deg)[0] if usable else None
+        points = anchor.points if anchor is not None else None
         self.measurements = [
             self._measure(observation, source, prediction, motion, mask)
             for observation, source in usable
-        ]
+        ] + external
         for measurement in self.measurements:
             stats.source_fit.setdefault(measurement.source, Running()).add(measurement.fit)
-        anchored = next(m for m in self.measurements if m.source == anchor.source)
+        anchored = (
+            next(m for m in self.measurements if m.source == anchor.source)
+            if anchor is not None
+            else None
+        )
         # The anchor's bound is taken alone (see the docstring): a fan blind along a wall is a
         # plateau whose winner is the guess, and un-widened it out-voted the edge-bound lidar
         # and held a 12 cm slip for seconds under the rest lock (a review probe, 2026-09-11).
         # The covariance now widens such a plateau too (fusion.bound_directions); this rule is
         # what makes the fused tracker provably no slower than the lidar alone on a bound.
-        fused = fuse(self.measurements) if self.fusion and not anchored.edge else anchored
-        assert fused is not None  # usable is not empty
-        self.fused, self.anchor = fused, anchor.source
+        alone = anchored if anchored is not None else self.measurements[0]
+        fused = alone if not self.fusion or (anchored is not None and anchored.edge) else None
+        if fused is None:
+            fused = fuse(self.measurements)
+        assert fused is not None  # neither usable nor external is empty
+        self.fused, self.anchor = fused, None if anchor is None else anchor.source
         if len(self.measurements) > 1 and self.fusion:
-            if anchored.edge:
+            if anchored is not None and anchored.edge:
                 stats.bound += 1
             else:
                 stats.fused += 1
@@ -898,12 +928,12 @@ class Localizer:
         pose = matched
         confidence = (
             fused.fit
-            if fused.source == anchor.source
+            if points is None or anchor is None or fused.source == anchor.source
             else self._matcher.inlier_fraction(matched, points)
         )
 
         was_lost = self.lost
-        if was_lost:
+        if was_lost and points is not None:
             stats.lost += 1
             # The whole scan, never the mask: a mask is read at a pose, and a lost tracker's pose
             # is the thing in doubt. Silencing what it cannot explain would silence the evidence.
@@ -947,7 +977,7 @@ class Localizer:
         carry_gain = (
             self._matcher.field_score(matched, points)
             - self._matcher.field_score(prediction, points)
-            if at_rest and self.rest_lock
+            if at_rest and self.rest_lock and points is not None
             else 0.0
         )
         self.pose, gain = self._blend(
@@ -959,7 +989,9 @@ class Localizer:
             carry_gain=carry_gain,
         )
         self.published_fit = (
-            confidence if gain >= 1.0 else self._matcher.inlier_fraction(self.pose, points)
+            confidence
+            if gain >= 1.0 or points is None
+            else self._matcher.inlier_fraction(self.pose, points)
         )
         stats.matched += 1
         stats.fit.add(confidence)
