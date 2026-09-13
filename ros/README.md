@@ -965,6 +965,24 @@ demonstrated (`scratch/camera_only_localization.py`, run 0171 replayed offline a
 | `depth,contact` | 29 / 52 / 90 cm | loses the map |
 | `lidar,depth,contact` | 0.7 / 1.6 / 5.7 cm, 0.21 / 0.56 / 1.9 deg | never lost |
 
+And the split path against the same stick, on the same tape
+(`scratch/laptop_localizer_replay.py`, 2026-09-13: 5 Hz per camera source, a 50 ms uplink for
+the board's pose and a 100 ms link for the measurement, the shipped 0.5 s age gate):
+
+| where the camera is matched | error vs lidar-only (median / p90 / max) | matches per board update |
+| --- | --- | --- |
+| on the board (`lidar,depth,contact`) | 0.8 / 1.9 / 7.5 cm | 2.91 |
+| **on the laptop (`lidar,camera`)** | **0.7 / 1.5 / 3.1 cm** | **1.00** |
+| on the laptop, lidar off at t+25 s | 1.1 / 25.1 / 43.4 cm | 0.70 |
+
+The accuracy is the fused tracker's — slightly better at the tail, because a measurement is
+carried to the update that uses it instead of being matched from a scan that was carried — at
+the lidar-only cost on the board. One camera match costs 12.7 ms median on the laptop, and the
+link carried 348 measurements over the 45 s run with none refused as stale. Live on the board,
+where it was the other way round, the recorded pose of run 0238 sits 2.5 / 50.5 / 78.7 cm from
+the same truth; that is the number this split exists to remove, and only the robot can confirm
+it did.
+
 The camera's band is a different cross-section of the room than the lidar's own plane:
 sofa cushions and table clutter fit "some wall" well (fit 0.90 at the wrong pose, 0.12 at the
 true one), and parked bumper-to-furniture the camera sees nothing of the floor below ~1.2 m.
