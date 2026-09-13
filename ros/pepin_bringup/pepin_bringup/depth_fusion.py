@@ -345,7 +345,7 @@ class DepthFusion(Node):
         )
         self._laser: tuple[PlanarMount, float, bool] | None = None  # mount, yaw, upside down
         self._map_pub: Any = None  # made on the first publish: only where this side owns /map
-        self._clock = SnapshotClock(float(self._switches["snapshot_s"]))
+        self._snapshots = SnapshotClock(float(self._switches["snapshot_s"]))
         self._start_state()
         self._surface_timer = self.create_timer(
             self._period(self._switches["surface_hz"]), self._publish_surface
@@ -473,7 +473,7 @@ class DepthFusion(Node):
             self._poser.min_lean_quality = float(new)
             return
         if name == "snapshot_s":
-            self._clock = SnapshotClock(float(new), self._clock.last_s)
+            self._snapshots = SnapshotClock(float(new), self._snapshots.last_s)
             return
         timers = {"surface_hz": "_surface_timer", "map_hz": "_map_timer"}
         if name not in timers:
@@ -567,7 +567,7 @@ class DepthFusion(Node):
             )
         self._tally.count("revolutions")
         self._tally.count("scan_voxels", touched)
-        if self._clock.due(time.monotonic()) and self._switches["snapshot_s"] > 0.0:
+        if self._snapshots.due(time.monotonic()) and self._switches["snapshot_s"] > 0.0:
             self._snapshot()
 
     def _law(self) -> LidarLaw:
@@ -602,7 +602,7 @@ class DepthFusion(Node):
         except OSError as exc:
             self.get_logger().warning(f"{self._world_path}: not written ({exc})")
             return
-        self._clock.done(time.monotonic())
+        self._snapshots.done(time.monotonic())
         self._tally.count("snapshots")
 
     def _on_work(self, pair: tuple[Image, Image]) -> None:
@@ -784,7 +784,7 @@ class DepthFusion(Node):
             source = f"volume (refused {c['map_refused']}x: {self._map_refusal})"
         elif source == "volume":
             source = f"volume ({c['maps']} published, {w.ms_per('map', 'maps'):.0f} ms)"
-        age = self._clock.age_s(time.monotonic())
+        age = self._snapshots.age_s(time.monotonic())
         return (
             f"world: {c['revolutions']} revolutions ({c['scans_dropped']} dropped,"
             f" {w.ms_per('scan', 'revolutions'):.0f} ms), {text}; /map from {source}; snapshot"
