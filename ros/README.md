@@ -49,6 +49,55 @@ restarts it with the RTAB-Map database kept, `ros/laptop.sh vslam --fresh` delet
 first and starts an empty map (in SLAM mode the session starts empty anyway: see below). Only a Dockerfile change (apt packages, the C++
 driver) needs `ros/build.sh`, which stops the container first and uses BuildKit's apt cache.
 
+## Restarting
+
+`ros/restart.sh board|laptop|both [--deploy] [--fresh-graph] [--no-check]` is the whole restart in
+one command, followed by every check we have learned to run afterwards.
+
+- **board** — `systemctl restart pepin-ros` over the multiplexed ssh, or the full deploy
+  (`ros/sync.sh`: code, library and config, then the restart and its census) with `--deploy`.
+  It then waits up to 90 s for the tracker's first report line.
+- **laptop** — `ros/laptop.sh start`, then `ros/laptop.sh vslam --neck --seed-map=<map>`, where
+  the map is the one the board serves, read from its `/etc/default/pepin-ros` (`PEPIN_MAP`), never
+  guessed: the fused volume is snapped to the lattice of the map it is seeded with.
+- **both** — the board first, then the laptop; nothing is checked until both are up, because
+  `/depth_scan` and `/vo` are fed by the laptop.
+- **`--fresh-graph`** — the camera half starts on an empty RTAB-Map database *and* the graph
+  anchor of the served map is deleted (`ros/maps/<map id>.graph_anchor.json`). The anchor is a
+  property of the map ↔ database PAIR (`pepin.anchors`); an empty database beside a kept anchor
+  speaks in the previous database's frame.
+- **`--no-check`** — restart only. `PEPIN_RESTART_WAIT_S` / `PEPIN_RESTART_POLL_S` change how long
+  a half is given to come back and how often it is looked at.
+
+Every check is one `PASS`/`FAIL` line with its number, a `WARN` is shown but never fails the run,
+and the script exits 1 if anything failed. A check that cannot be answered says so; it never reads
+silence as good news. What is checked:
+
+| # | board |
+|---|---|
+| 1.1 | `ros/board.sh census`: every process accounted for, every budget kept |
+| 1.2 | the tracker's report line is there, with its `sources=`, its `map_topic=`, its fit and the map id |
+| 1.3 | the pose: `ros/goto.sh where` answers |
+| 1.4 | no `Failed to meet update rate` in the last 60 s |
+| 1.5 | no `Extrapolation` / `out of map bounds` / `Off Grid` in the last 60 s |
+| 1.6, 1.7 | `/depth_scan` and `/vo` really reach the board (`ros/tools/topic_rate.py`, one 5 s measurement each — not `ros2 topic hz`, which costs ~4.5 s of A53 before it measures anything) |
+| 1.8 | `pepin-base` is active and no `torque on` is left standing in its journal |
+
+| # | laptop |
+|---|---|
+| 2.1 | `bridge_watch`'s last line: 10 topics carried, `dead routes 0` |
+| 2.2 | `depth_stream` over 5 frames/s, with a fitted law in its line |
+| 2.3 | `depth_fusion` over 5 frames/s, `at bound 0` |
+| 2.4 | `visual_odometry` over 5 poses/s from rtabmap |
+| 2.5 | `laptop_localizer` hears the board's belief (`tracker fit` above 0) |
+| 2.6 | the rtabmap process is alive in `pepin-vslam` |
+| 2.7 | `rtabmap_frame` has an anchor (from file or learned) and `over N infos` with N > 0 — 0 means the graph's trust is deaf |
+| 2.8 | no `process has died` in the container since it started |
+
+| # | flags |
+|---|---|
+| 3.x | every live flag of the restarted half is its `FLAGS` table default (`ros/flags.sh drift`). A difference is a `WARN`, not a failure: a flag set on purpose is legitimate, but a restart puts every flag back to its default, so this is where a switch you meant to keep shows up as gone. |
+
 ## The zenoh bridge
 
 The board and the laptop are two ROS graphs joined by `zenoh-bridge-ros2dds` 1.7.0, a router on
