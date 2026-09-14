@@ -256,10 +256,14 @@ FLAGS = FlagSet(
         " (pepin.depth.depth_to_scan) against a band holding 743 occupied cells over 14 x 12.5"
         " m. The fit cannot tell the good answers from the bad either (1.00 at the true pose"
         " and 1.00 at a top place 4.5 m away), which is what camera_search_max_ambiguity is"
-        " for. Everything here is built and tested so the switch can be flipped the day the"
-        " band is dense enough to answer; nothing about it is fixed by tuning",
-        on_when="when the camera's band has become a real map (measure it again with the"
-        " kidnap script) — or in a carry test where a wrong answer costs nothing and the"
+        " for. Re-run on the snapshot the deploy left on disk that same night — a band four"
+        " times denser, 2912 occupied cells at weight >= 20 instead of 743 — the same 60"
+        " kidnaps found the cart 0 times, and the truth was still not among the places"
+        " returned: density alone does not buy this fan a fix. Everything here is built and"
+        " tested so the switch can be flipped the day the band can answer; nothing about it"
+        " is fixed by tuning",
+        on_when="when the kidnap script says the band can answer — it is the number to move,"
+        " and a denser band on its own did not move it — or in a carry test where a wrong answer costs nothing and the"
         " report line is what is being read",
         off_when="now, and until that number moves: a search that finds the cart 3-8 % of the"
         " time cannot recover a pose, and a streak of 3 makes its real recovery rate lower"
