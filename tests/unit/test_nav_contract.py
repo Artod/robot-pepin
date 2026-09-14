@@ -2277,7 +2277,11 @@ def test_the_visual_odometry_runs_on_the_laptop_behind_one_launch_switch() -> No
     table = dict(ast.literal_eval(sf.assignments(vslam)["VISUAL_ODOMETRY"]))
     assert table["publish_tf"] is False and table["odom_frame_id"] == "odom"
     assert table["guess_frame_id"] == ""
-    assert table["approx_sync"] is True, "the depth is ~8 Hz and the picture ~15: no shared stamp"
+    assert table["approx_sync"] is False, (
+        "the depth carries its own picture's stamp and the CameraInfo the same one"
+        " (1024/1024 and 1397/1397 bit-equal on the wire, 2026-09-14): there is one correct"
+        " pair per depth frame, and ApproximateTime took the neighbouring picture instead"
+    )
     assert table["publish_null_when_lost"] is True, "a lost frame must be countable"
     node = _node_named(vslam, "rgbd_odometry")
     keywords = sf.keywords(node)

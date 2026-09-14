@@ -175,7 +175,40 @@ VISUAL_ODOMETRY = {
     # No guess from TF: a visual odometry seeded with the filter's own answer is not a third
     # opinion, and the loop would hide exactly the slip it exists to catch.
     "guess_frame_id": "",
-    "approx_sync": True,  # the depth arrives ~8 Hz, the picture ~15: they never share a stamp
+    # All three streams share a stamp by construction: depth_stream publishes /camera/depth
+    # carrying the exact header.stamp and frame_id of the /camera/image it was computed from
+    # (depth_stream.py, the only publish there), and camera_stream stamps /camera/camera_info
+    # with the picture's stamp in the same call. Measured on the wire 2026-09-14 with the whole
+    # stack up (scratch/vo_stamp_pairs.py, 120 s): the picture and its CameraInfo at 11.6 Hz,
+    # the depth at 8.5 Hz, and 1024 of 1024 depth frames plus 1397 of 1397 CameraInfos had a
+    # bit-equal image stamp among the images received — nearest-image offset 0.0 ms at the
+    # median, at p90 and at the worst. The depth is not stamped differently, it merely ARRIVES
+    # 77 ms later (p90 119 ms, worst 497 ms), and sync_queue_size below holds 2.6 s of pictures
+    # at that rate, five times the worst lag. So there is exactly one correct pair per depth
+    # frame and nothing to approximate. ApproximateTime, which this table used to ask for on the
+    # false claim that "they never share a stamp", took the NEIGHBOURING picture 213 times in
+    # 6 h (rgbd_odometry's own "the time difference between rgb and depth frames is high":
+    # offset median 0.101 s, p90 0.267 s, worst 0.997 s — one to nine frames off), and a pose
+    # built from two different moments is the "jump of 11 cm in 0.100 s" the gate drops. Exact
+    # sync cannot make that pair at all. Measured side by side for 5 min, a second rgbd_odometry
+    # on /vo/exact against the launch's own on /vo/raw (scratch/vo_exact_node.sh,
+    # scratch/vo_exact_ab.py): 8.92 vs 8.91 poses/s, 0 lost frames either way, the same gap
+    # profile (median 99 ms, p90 200 ms, worst 1.10 s, 14 gaps over 0.5 s), exact sync covering
+    # 8 camera stamps the approximate one missed against 3 the other way. No mis-pairing fired
+    # in that window, so the rate is parity; what changes is that the mis-pairing is now
+    # impossible. RTAB-Map's own node below keeps approx_sync: it syncs /scan and the board's
+    # odometry too, which carry the board's stamps and share none of ours, and it has never
+    # logged this warning.
+    # What this does NOT fix is the "no pose on /vo/raw" starvation that the same warning was
+    # blamed for. Caught live 2026-09-14 15:21 with both nodes running: BOTH published exactly
+    # zero poses for three minutes, and the reason is rgbd_odometry's other warning — "Could not
+    # find a connection between 'base_link' and 'camera_optical' ... Tf has two or more
+    # unconnected trees". The board's bridge had gone silent (bridge_watch: /odom, /scan and the
+    # board's /tf all at 0.0 Hz), so base_link was not in the tree and no pair of any kind could
+    # become a pose; the depth had also fallen to 3.3 frames/s against the picture's 11.5, which
+    # is when the approximation's guesses were worst (0.4-0.5 s off). Starvation is a bridge
+    # outage and belongs to bridge_watch; the mis-pairing is this table's business.
+    "approx_sync": False,
     "sync_queue_size": 30,
     "topic_queue_size": 10,
     "wait_for_transform": 0.5,
