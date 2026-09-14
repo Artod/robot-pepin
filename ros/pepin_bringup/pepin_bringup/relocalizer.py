@@ -620,6 +620,7 @@ class Relocalizer(Node):
         self._last_scan_age_s = 0.0
         self._last_map_odom = (0.0, 0.0, 0.0)  # the belief until the first fix: the base
         self._slip = SlipWatch()  # wheels claiming a step the picture does not show
+        # The map in use, as every candidate and measurement is judged against.
         self._map_id = ""
         self._pending_seed: tuple[str, Pose2D, float] | None = None
         self._scan_id = 0
@@ -688,7 +689,6 @@ class Relocalizer(Node):
         # Both maps are subscribed and the newest of each kept; the flag says which is adopted,
         # so moving the tracker from the served file to the volume needs no restart.
         self._maps: dict[str, Any] = {}  # the newest message per topic name, adopted or not
-        self._map_id = ""  # the map in use, as every candidate and measurement is judged against
         # Which map is adopted, and when a newer one replaces it, is pepin.mapping's decision;
         # the node keeps the messages and does as it is told.
         self._choice = MapChoice()
