@@ -325,7 +325,11 @@ FLAGS = FlagSet(
         " against the lidar's 359 (scratch/tape_odometry_error.py), the per-carry error's RMS is"
         " 0.77 of the reported turn and 0.70 with the lidar's own noise taken out — the wheels'"
         " 40-60 % in-place slip on this carpet, which is the odometry the tracker is left holding"
-        " when the IMU drops (that tape carries no ekf and no imu at all)",
+        " when the IMU drops (that tape carries no ekf and no imu at all). With the gyro alive it"
+        " is some 2.5x conservative: on tape 0240_20260913_204114, which does carry ekf and imu,"
+        " the same measurement is 678 deg of odometry against 716 of lidar and a per-carry RMS of"
+        " 0.28, and the check there goes from 48 of 895 updates widened (max 1.31x) to 18"
+        " (max 1.10x)",
         on_when="whenever more than one source is fused — it is the only thing standing between"
         " the fusion and a source whose covariance is a formula rather than a measurement",
         off_when="to measure what the check is worth on a tape (the ratios are still measured"

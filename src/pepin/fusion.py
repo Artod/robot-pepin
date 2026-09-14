@@ -151,9 +151,11 @@ def carry_pose(pose: Pose2D, covariance: Matrix, motion: Pose2D) -> tuple[Pose2D
 # (scratch/tape_odometry_error.py). It is the same 40-60 % in-place slip the gyro measured on
 # 2026-09-11 (0.344 rad/s at the encoders, 0.20 and 0.14 rad/s by the gyro): a differential
 # drive's heading is the difference of two wheels, and on carpet that difference is half fiction.
-# With the IMU up /odometry/filtered is far better than this — it and the lidar agreed to 0.3 deg
-# over an 89 deg turn — but 0.7 is the wheels-only end on purpose, because that is what the
-# tracker is left holding when the IMU drops, and that tape recorded no ekf and no imu at all.
+# With the IMU up /odometry/filtered is far better than this, measured the same way on tape
+# 0240_20260913_204114 (which does carry ekf and imu): 678 deg of odometry against 716 of lidar
+# and a per-carry RMS of 0.28, the lidar's own noise still inside it. 0.7 is the wheels-only end
+# on purpose — it is what the tracker is left holding when the IMU drops, and tape 20260913_190024
+# recorded no ekf and no imu at all — so with the gyro alive the term is some 2.5x conservative.
 # What it costs: while the cart turns, this term IS the denominator's heading and the check
 # cannot see a source over-claiming its heading. That price is paid only while turning, and not
 # on what the check exists for — a camera claiming 25 cm while its own answers fall 0.8-1.5 cm
