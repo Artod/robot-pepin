@@ -486,6 +486,31 @@ def test_the_recorder_is_its_own_node_on_the_board_side() -> None:
     assert {"RUN_COMMAND_TOPIC", "RUN_STATUS_TOPIC"} <= sf.names(server)
 
 
+def test_both_doors_to_a_goal_open_the_numbered_tape() -> None:
+    """Two clients send this robot to a place: the goal server (ros/go.sh) and goto_ros.py
+    (ros/goto.sh). Only the first ever asked the recorder for a tape, so every drive started at
+    the second went unrecorded by it while its own session log kept running — the numbered tapes
+    stop at 0248 on 2026-09-13 18:00 and the goto ones continue to midnight. Both speak
+    pepin.runlink now, and goto names the tape it got in its own log."""
+    goto = sf.tree("ros/tools/goto_ros.py")
+    assert {"RUN_COMMAND_TOPIC", "RUN_STATUS_TOPIC"} <= sf.names(goto)
+    assert {"start_command", "stop_command"} <= sf.calls(goto)
+    assert any("taped" in text for text in sf.strings(goto)), "the log must name the tape"
+    assert "--no-tape" in sf.strings(goto), "the drive without a numbered tape stays reachable"
+    script = (REPO / "ros/goto.sh").read_text()
+    assert "--no-tape" in script and "PEPIN_GOTO_TAPE" in script
+
+
+def test_the_numbered_tape_says_which_clock_named_it() -> None:
+    """The recorder runs in a container on UTC while the board's shell, the laptop and every
+    ros/goto.sh file are on local time: a bare 220039 was read as a drive four hours later than
+    it was (2026-09-13). The stamp is UTC and carries the letter that says so."""
+    recorder = sf.tree(f"{NODES}/run_recorder.py")
+    assert "time.gmtime" in sf.calls(recorder), "the stamp is UTC on purpose, not by accident"
+    assert any(text == "Z" for text in sf.strings(recorder)), "and the name says which clock"
+    assert (REPO / "ros/maps/README.md").exists(), "the two clocks are written down beside rec/"
+
+
 def test_the_camera_slam_lives_beside_the_tracker_never_over_it() -> None:
     """RTAB-Map on the laptop publishes its own frame and no map -> odom: the board's tracker
     keeps the reflexes' frame; the camera is nominal until calibrated and says so."""

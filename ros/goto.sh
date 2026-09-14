@@ -8,9 +8,14 @@
 #   ros/goto.sh cancel           stop the current task (the base's deadman stops the wheels)
 #   ros/goto.sh where            pose and scan-to-map fit right now
 #   ros/goto.sh relocalize       whole-map search now (after a carry or a push)
-# Every run is taped to ros/maps/rec/<stamp>_goto.jsonl: scans, odometry, the tracked pose, the
-# commands, the camera's measurements (meas) and the tracker's account of each update (srcs).
-# PEPIN_REC_CAMERA_SCANS=1 adds /depth_scan and /contact_scan to the tape.
+# Every run is taped twice. This script's own session log, named by the LAPTOP's local clock:
+# ros/maps/rec/<stamp>_goto.jsonl — scans, odometry, the tracked pose, the commands, the camera's
+# measurements (meas) and the tracker's account of each update (srcs). And the board's numbered
+# tape, 0249_<utc>Z_<place>.jsonl, opened by the run recorder on the goal's word (costmap, EKF
+# and IMU records, the camera clip beside it); goto names it in its log. The two clocks are
+# explained in ros/maps/README.md.
+# PEPIN_REC_CAMERA_SCANS=1 adds /depth_scan and /contact_scan to this script's tape.
+# PEPIN_GOTO_TAPE=off drives without asking the recorder for a numbered one.
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
@@ -53,6 +58,14 @@ finish() {  # everything recorded, always: scans, odometry, tracked pose, the go
     sleep 1
     rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$rec/" >> "$trace" 2>&1 || { sleep 2; rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$rec/" >> "$trace" 2>&1; }
     echo "fetched: $?" >> "$trace"
+    # The numbered tape the recorder opened for this goal, named in the log we just fetched: its
+    # jsonl comes home too (the clip stays on the board — this script films the drive itself).
+    local taped
+    taped=$(grep -o 'taped /maps/rec/[^ ]*\.jsonl' "$rec/${STAMP}_goto.log" 2>/dev/null | tail -1 | cut -d' ' -f2 || true)
+    if [ -n "$taped" ]; then
+        rsync -aq "root@$BOARD:/root/pepin-ros$taped" "$rec/" >> "$trace" 2>&1 || true
+        echo "numbered tape: ros/maps/rec/$(basename "$taped")"
+    fi
     echo "recorded: $(ls "$rec" | grep -c "^${STAMP}_goto") files ros/maps/rec/${STAMP}_goto* (jsonl, log, board log, camera; cleanup trace in _goto_finish.log)"
 }
 trap finish EXIT HUP TERM  # a closed terminal must still stop the logger and fetch the run
@@ -65,7 +78,9 @@ REC_FLAGS=""
 if [ -n "${PEPIN_REC_CAMERA_SCANS:-}" ]; then REC_FLAGS="--camera-scans"; fi
 ssh "root@$BOARD" "docker exec -d pepin-ros /pepin_entrypoint.sh python3 /tools/session_logger.py $REC $MAX_REC_S $REC_FLAGS"
 # The goal lives on the board (a WiFi hiccup must not become a cancel); this terminal only watches.
-ssh "root@$BOARD" "touch /root/pepin-ros$LOG; docker exec -d -e PYTHONUNBUFFERED=1 pepin-ros /pepin_entrypoint.sh sh -c 'python3 /tools/goto_ros.py --places $PLACES $* > $LOG 2>&1; echo GOTO_EXIT=\$? >> $LOG'"
+TAPE_FLAG=""
+if [ "${PEPIN_GOTO_TAPE:-on}" = off ]; then TAPE_FLAG="--no-tape"; fi
+ssh "root@$BOARD" "touch /root/pepin-ros$LOG; docker exec -d -e PYTHONUNBUFFERED=1 pepin-ros /pepin_entrypoint.sh sh -c 'python3 /tools/goto_ros.py --places $PLACES $TAPE_FLAG $* > $LOG 2>&1; echo GOTO_EXIT=\$? >> $LOG'"
 echo "laptop: the goal was sent at $(date +%H:%M:%S.%2N)"
 watch_start
 ssh "root@$BOARD" "tail -n +1 -F /root/pepin-ros$LOG 2>/dev/null | sed -u '/^GOTO_EXIT=/q'" 2>/dev/null || true

@@ -97,9 +97,16 @@ class RunRecorder:
         return self._tape.recording
 
     def start(self, name: str) -> Path:
-        """Open a numbered tape for this run; returns the path, prelude already in it."""
+        """Open a numbered tape for this run; returns the path, prelude already in it.
+
+        The stamp is UTC and says so with a trailing ``Z``. This process runs in a container
+        whose clock is UTC while the board's own shell, the laptop and ros/goto.sh's files are
+        all on the flat's local time, and a bare ``220039`` was read as a drive four hours later
+        than it was (2026-09-13). The letter is what stops that; ros/maps/README.md says the
+        rest. Set a TZ in the container and this becomes local time on its own.
+        """
         self.number = next_run_number(self._directory)
-        stamp = time.strftime("%Y%m%d_%H%M%S")
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime()) + "Z"
         return self._tape.start(self._directory / f"{self.number:04d}_{stamp}_{name}.jsonl")
 
     def stop(self) -> None:

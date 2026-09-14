@@ -11,6 +11,8 @@ Runs inside the container (rclpy + nav2_simple_commander):
     goto_ros.py NAME              drive to a remembered place
     goto_ros.py places            list the remembered places
 Places live in the file named by --places (default /maps/places.yaml), one per map.
+--no-tape drives without asking the run recorder for a numbered tape (the behaviour before
+2026-09-14, when every drive through this door went unrecorded by it).
 
 A goal pose published once on /goal_pose can be lost to discovery timing and gives
 no feedback; the action client here waits for Nav2, watches the task and prints
@@ -27,12 +29,89 @@ import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from nav_msgs.msg import Odometry
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
+
+from pepin.runlink import (
+    RUN_COMMAND_TOPIC,
+    RUN_STATUS_TOPIC,
+    RunLink,
+    RunStatus,
+    start_command,
+    stop_command,
+)
 
 LOST_FIT, LOST_FOR_S = 0.30, 15.0  # fit below this for this long...
 LOST_TRAVEL_M = 1.0  # ...while the wheels carried it this far: that is driving blind. Spinning on a
 # stuck wheel with a lost fit is not — the recoveries (odom frame) can still work it free.
+
+
+RECORDER_PATIENCE_S = 8.0  # the recorder may answer over a bridge; the goal server waits as long
+
+
+class Tape:
+    """The numbered tape of this drive, asked of the run recorder (pepin_bringup.run_recorder).
+
+    The recorder is a node where the sensors are and it opens a tape on one word published on
+    ``pepin/run``; the goal server has always sent that word, and this client never did — so
+    every drive started here went unrecorded by it while its own session log kept running
+    (2026-09-13: the numbered tapes stop at 0248 and the goto tapes continue). Same protocol,
+    second caller: :meth:`open` names the tape in this run's log, :meth:`close` ends it.
+    """
+
+    def __init__(self, nav: BasicNavigator) -> None:
+        self._nav = nav
+        self._runs = RunLink()
+        latched = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self._pub = nav.create_publisher(String, RUN_COMMAND_TOPIC, 10)
+        nav.create_subscription(String, RUN_STATUS_TOPIC, self._heard, latched)
+        self.path: str | None = None
+
+    def _heard(self, msg: String) -> None:
+        status = RunStatus.from_json(msg.data)
+        if status is not None:
+            self._runs.observe(status)
+
+    def _await(self, done) -> bool:  # type: ignore[no-untyped-def]
+        """Spin this client until ``done()`` or the recorder's patience runs out."""
+        deadline = time.monotonic() + RECORDER_PATIENCE_S
+        while not done() and time.monotonic() < deadline:
+            rclpy.spin_once(self._nav, timeout_sec=0.1)
+        return bool(done())
+
+    def open(self, name: str) -> None:
+        """Ask for a tape called ``name`` and say which numbered one came back.
+
+        A drive is never held hostage by its recorder: after the patience it goes anyway, and
+        says so, exactly as the goal server does.
+        """
+        self._pub.publish(String(data=start_command(name)))
+        if not self._await(lambda: self._runs.started(name)):
+            print(
+                f"no recorder confirmed run {name!r} in {RECORDER_PATIENCE_S:.0f} s:"
+                " driving unrecorded",
+                flush=True,
+            )
+            return
+        self.path = self._runs.recording
+        print(f"run {self._runs.run:04d}: taped {self.path}", flush=True)
+
+    def close(self) -> None:
+        """Close the tape; harmless when none was opened."""
+        if self.path is None:
+            return
+        self._pub.publish(String(data=stop_command()))
+        closed = self._await(self._runs.stopped)
+        print(
+            f"run {self._runs.run:04d}: tape {'closed' if closed else 'NOT confirmed closed'}"
+            f" {self.path}",
+            flush=True,
+        )
 
 
 def pose(nav: BasicNavigator, x: float, y: float, yaw_deg: float) -> PoseStamped:
@@ -172,10 +251,13 @@ def main() -> None:
     places_path = Path("/maps/places.yaml")
     if len(args) >= 2 and args[0] == "--places":
         places_path, args = Path(args[1]), args[2:]
+    taping = "--no-tape" not in args  # the switch back to the unrecorded drive
+    args = [a for a in args if a != "--no-tape"]
     if not args:
         print(__doc__)
         sys.exit(2)
     startup = time.monotonic()
+    tape: Tape | None = None
     rclpy.init()
     nav = BasicNavigator()
     print(
@@ -254,6 +336,11 @@ def main() -> None:
 
         nav.create_subscription(Float32, "/localization_fit", on_fit, 10)
         nav.create_subscription(Odometry, "/odom", on_odom, 10)
+        # The numbered tape, the one the replays and the reports are named by: opened before the
+        # goal so its prelude holds the seconds before the cart moves, closed in `finally`.
+        if taping:
+            tape = Tape(nav)
+            tape.open(name or f"{x:.0f}_{y:.0f}")
         nav.goToPose(pose(nav, x, y, yaw))
         print(
             f"goal {name + ' ' if name else ''}({x:.2f}, {y:.2f}) yaw {yaw:.0f} deg accepted",
@@ -300,6 +387,8 @@ def main() -> None:
             time.sleep(0.1)
         print("cancelled" if nav.isTaskComplete() else "cancel NOT confirmed — use ros/stop.sh")
     finally:
+        if tape is not None:
+            tape.close()
         nav.destroy_node()
         rclpy.shutdown()
 
