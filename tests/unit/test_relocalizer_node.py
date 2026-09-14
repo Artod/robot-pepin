@@ -42,6 +42,7 @@ from test_localizer_sources import drive, error  # noqa: E402
 from pepin.odometry import Pose2D  # noqa: E402
 from pepin.scanmatch import apply_motion, relative_motion  # noqa: E402
 from pepin.sources import CAMERA, DEPTH, LIDAR  # noqa: E402
+from pepin.watch import DRIVE_FIT, SOURCE_PATIENCE_S  # noqa: E402
 
 BEAMS = 180
 FAN = [*range(160, 180), *range(0, 21)]  # the raycast's beams within +-40 degrees, in order
@@ -721,6 +722,7 @@ def test_a_standing_cart_is_matched_about_once_a_second_even_after_a_seed() -> N
     assert node._rested >= 30
 
 
+<<<<<<< HEAD
 # ---- which map the tracker matches on --------------------------------------------------------
 def volume_map_msg() -> Any:
     """The lidar layer of the laptop's fused volume as depth_fusion publishes it (/map_lidar):
@@ -766,3 +768,79 @@ def test_a_republished_volume_map_does_not_rebuild_the_tracker(node: Relocalizer
     changed.data[0] = 100 if changed.data[0] != 100 else 0
     node.subs["/map_lidar"][1](changed)
     assert node._matcher is not first, "old enough and its cells differ: adopted"
+=======
+def test_the_published_fit_falls_to_zero_once_every_source_has_gone_silent(
+    node: Relocalizer,
+) -> None:
+    """No source, no confidence. On 2026-09-14 this node published fit 0.70 for 141 s with
+    sources=camera and not one measurement arriving, and the goal server — which reads only that
+    number — took `printer` and then `home` and drove both on dead reckoning. Silence longer than
+    source_patience_s now publishes 0.00, which is under every rung of the ladder at once: a new
+    goal is refused (drive_fit 0.50) and the running one is stopped (blind_fit 0.30). The watch
+    that searches the whole map hears nothing of it — it reads the tracker's OWN fit — so a dead
+    sensor cannot start a re-seed frenzy on a scan that is not there."""
+    truth, odom = drive(3)
+    on_scan, on_odom = node.subs["/scan"][1], node.subs["/odometry/filtered"][1]
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_scan(lidar_msg(t, ts))
+        on_odom(odom_msg(o, ts))
+        if i == 0:
+            assert until(lambda: node._tracker_initialised)
+    fit = node.pubs["localization_fit"]
+    node.clock.seconds = 100.3
+    node._check()  # the first search's candidate is dropped here: the tracker found its own feet
+    node._check()
+    measured = fit.sent[-1].data
+    assert measured > DRIVE_FIT, "a source just spoke: the fit it earned goes out"
+    node.clock.seconds = 100.2 + SOURCE_PATIENCE_S  # still inside the patience
+    node._check()
+    assert fit.sent[-1].data == pytest.approx(measured)
+    node.clock.seconds = 100.2 + SOURCE_PATIENCE_S + 0.5
+    node._check()
+    assert fit.sent[-1].data == 0.0 < node.fit, "published 0.00, the tracker's own fit untouched"
+    assert not node._searching, "silence is not evidence that the pose is wrong"
+    node._report_tracking()
+    line = node.logger.texts("info")[-1]
+    assert "no source for 3.5 s (published as 0.00)" in line
+    assert "fit_needs_a_source=on source_patience_s=3.0" in line
+    # Off, the old behaviour: the last fit measured stands until a source corrects it again.
+    assert node.set_parameters([Parameter("fit_needs_a_source", value=False)])[0].successful
+    node._check()
+    assert fit.sent[-1].data == pytest.approx(measured)
+    node._report_tracking()
+    assert "no source for 3.5 s," in node.logger.texts("info")[-1], "still said, never hidden"
+    # ...and the patience is live: a link that stutters for seconds keeps its fit.
+    assert node.set_parameters([Parameter("fit_needs_a_source", value=True)])[0].successful
+    assert node.set_parameters([Parameter("source_patience_s", value=10.0)])[0].successful
+    node._check()
+    assert fit.sent[-1].data == pytest.approx(measured)
+
+
+def test_a_cart_standing_still_is_not_a_cart_without_a_source(node: Relocalizer) -> None:
+    """The trap the patience must not fall into: a still cart is matched about once a second
+    (the motion filter spares the matcher) while its lidar keeps turning at 10 Hz. Silence is
+    measured on what the SOURCES deliver, never on when the pose last moved, so ten seconds of
+    standing still cost the published fit nothing."""
+    truth, odom = drive(3)
+    on_scan, on_odom = node.subs["/scan"][1], node.subs["/odometry/filtered"][1]
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_scan(lidar_msg(t, ts))
+        on_odom(odom_msg(o, ts))
+        if i == 0:
+            assert until(lambda: node._tracker_initialised)
+    node.clock.seconds = 100.3
+    node._check()  # the first search's candidate is dropped: nothing is capped after this
+    standing, rested = truth[-1], odom[-1]
+    for i in range(100):  # ten seconds of revolutions from the same place, no motion at all
+        ts = 100.3 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_scan(lidar_msg(standing, ts))
+        on_odom(odom_msg(rested, ts))
+    node._check()
+    assert node.pubs["localization_fit"].sent[-1].data > DRIVE_FIT
+    assert node._rested > 50, "the matcher was spared while the lidar went on speaking"
+>>>>>>> 7496cef (tracker: /localization_fit falls to 0.00 when no source has spoken for 3 s)
