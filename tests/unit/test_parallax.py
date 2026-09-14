@@ -408,3 +408,80 @@ def test_every_kept_point_s_rounded_pixel_indexes_the_second_image() -> None:
         assert row.min() >= 0 and row.max() < INTR.height
         assert depth[row, column].shape == truth.z.shape
         assert truth.rejected["outside"] >= 0
+
+
+def crawling_frames(step_m: float, count: int) -> tuple[list[np.ndarray], dict[float, RigidPose]]:
+    """A cart crawling ``step_m`` to its right between frames 0.1 s apart: the views of the
+    three planes it sees, and the cart pose at each stamp (0.0, 0.1, ... ). Every band's shift
+    is whole pixels, so the tracker has the same corners to follow however far back it pairs."""
+    wide = texture()
+    frames = []
+    poses = {}
+    for i in range(count):
+        view = np.empty((INTR.height, INTR.width), dtype=np.uint8)
+        for top, bottom, z in BANDS:
+            shift = round(INTR.fx * step_m * i / z)
+            view[top:bottom] = wide[top:bottom, MARGIN + shift : MARGIN + shift + INTR.width]
+        frames.append(np.ascontiguousarray(view))
+        poses[round(0.1 * i, 3)] = planar_pose(0.0, -step_m * i, 0.0)
+    return frames, poses
+
+
+def test_the_partner_frame_is_chosen_for_its_baseline_not_for_being_the_last_one() -> None:
+    """A cart crawling 2 cm a frame: the frame before this one carries 2 cm of baseline, and
+    the anchor walks back through its ring until it finds the 10 cm it asks for — five frames,
+    half a second. The depths it triangulates across that baseline are the rendered planes'."""
+    frames, poses = crawling_frames(0.02, 6)
+    odometry = Odometry(poses)
+    anchor = ParallaxAnchor()
+    network = np.full((INTR.height, INTR.width), 3.0)
+    pairs = None
+    for i, view in enumerate(frames):
+        pairs = anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, odometry)))
+    assert anchor.gap_s == pytest.approx(0.5)
+    assert pairs is not None and pairs.size >= 50
+    assert band_error(pairs) < 0.05
+    assert "asks 10 cm" in anchor.describe()
+
+
+def test_a_zero_ask_pairs_with_the_frame_before_as_the_anchor_always_did() -> None:
+    """The flag's off position: asked for no baseline at all, the walk stops at the newest
+    partner in the window — the frame before this one, 0.1 s and 2 cm back."""
+    frames, poses = crawling_frames(0.02, 6)
+    anchor = ParallaxAnchor(min_baseline_m=0.0)
+    network = np.full((INTR.height, INTR.width), 3.0)
+    for i, view in enumerate(frames):
+        anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, Odometry(poses))))
+    assert anchor.gap_s == pytest.approx(0.1)
+    assert "asks 0 cm" in anchor.describe()
+
+
+def test_a_ring_that_reaches_no_baseline_pairs_across_the_widest_it_has() -> None:
+    """A cart that has not moved: no partner in the ring reaches the asked-for 10 cm, the
+    widest one is taken anyway, and the triangulation says ``still`` rather than inventing a
+    depth. Nothing is tracked, so the stage costs a standing cart nothing."""
+    frames, poses = crawling_frames(0.0, 6)
+    anchor = ParallaxAnchor()
+    network = np.full((INTR.height, INTR.width), 3.0)
+    for i, view in enumerate(frames):
+        assert (
+            anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, Odometry(poses)))) is None
+        )
+    assert anchor.gap_s is None and anchor.frames == 5
+    assert anchor.rejected["still"] == 5
+
+
+def test_the_ring_forgets_frames_older_than_the_window() -> None:
+    """The ring holds the gap window and no more: a frame a second and a half old is gone by
+    the time a partner is looked for, so a long stall pairs nothing rather than tracking across
+    a view that has changed completely."""
+    frames, poses = crawling_frames(0.02, 2)
+    late = round(0.1 * 1 + 1.5, 3)
+    poses[late] = planar_pose(0.0, -0.40, 0.0)
+    anchor = ParallaxAnchor()
+    network = np.full((INTR.height, INTR.width), 3.0)
+    odometry = Odometry(poses)
+    assert anchor.pairs(Frame(network, context(0.0, frames[0], odometry))) is None
+    assert anchor.pairs(Frame(network, context(0.1, frames[1], odometry))) is not None
+    assert anchor.pairs(Frame(network, context(late, frames[0], odometry))) is None
+    assert anchor.rejected["gap"] == 1

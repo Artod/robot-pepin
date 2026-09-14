@@ -47,11 +47,12 @@ return's elevation is a curve of its range, so there the angle and the depth are
 from __future__ import annotations
 
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import pairwise
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -86,6 +87,9 @@ from pepin.depth import (
 )
 from pepin.elevation import RAY_AZIMUTH_DEGREE, RAY_DEGREE, RayGain, fit_ray, ray_angles
 
+if TYPE_CHECKING:  # the tracker's own module stays a lazy import inside the parallax stage
+    from pepin.parallax import Motion
+
 LEAN_STEP = 0.003  # the floor's expected depth is recomputed when the up vector moves this much
 FLOOR_PAIR_STRIDE = 8  # every 8th row and column of the floor: 3600 candidates of a 640x360 frame
 FLOOR_PAIR_WEIGHT = 0.1  # a floor pixel's share against a lidar beam's 1: the lidar keeps its row
@@ -99,6 +103,10 @@ MIN_LIFT_SPREAD = 0.15  # the pool's elevation span (5th-95th of lift) before an
 ROW_BANDS = 6  # bands of elevation of the row law
 PARALLAX_MIN_GAP_S = 0.08  # a partner frame nearer in time than this has no baseline to speak of
 PARALLAX_MAX_GAP_S = 0.60  # farther back than this the view has changed more than the flow follows
+PARALLAX_MIN_BASELINE_M = 0.10  # the parallax a partner is chosen to reach: 0.4 s at 0.25 m/s
+PARALLAX_RING_FRAMES = (
+    16  # frames kept to choose a partner from: a second at any rate the node runs
+)
 PARALLAX_WEIGHT = 1.0  # the share of a parallax pair's own inverse-depth precision that counts
 
 
@@ -995,9 +1003,9 @@ class WallCorrection(WallAnchor):
 # ---- motion as a hoop, with no lidar at all ---------------------------------------------------
 @dataclass(frozen=True, eq=False)
 class PreviousFrame:
-    """The frame the parallax anchor kept: its grey image, its stamp and where the lens sat on
-    the cart when it was taken — the whole ``base_link <- camera_optical``, pan included, since
-    the neck may have turned since."""
+    """A frame the parallax anchor keeps in its ring: its grey image, its stamp and where the
+    lens sat on the cart when it was taken — the whole ``base_link <- camera_optical``, pan
+    included, since the neck may have turned since."""
 
     gray: npt.NDArray[np.uint8]
     stamp: float
@@ -1012,24 +1020,33 @@ class ParallaxAnchor(AnchorStage):
     other sensor is off, and the only one that measures at every elevation the picture has, so
     it is the pool a law over the ray's angle can be fitted on.
 
-    The anchor keeps the previous frame inside (grey image, stamp, the lens's whole placement
-    on the cart) and asks :class:`FrameContext`'s motion source for the transform between the
-    two stamps. The placement is TF's ``base_link <- camera_optical`` when the node supplies
-    it, because that is the only pose carrying the neck's pan and a baseline turned by a
-    pan-free pose points the wrong way; without it the mount's pitch stands in. A pair of
-    frames closer together than ``min_gap_s`` has no baseline worth triangulating and one
-    farther apart than ``max_gap_s`` has changed more than the flow follows; a frame while the
-    cart stands still, or turns on the spot, yields nothing at all and says which. Each pair
-    carries its own weight: the ratio of its inverse-depth variance to a lidar beam's, capped
-    at 1, so a short baseline or a badly tracked corner counts for little without being
-    thrown away.
+    The anchor keeps the last second of frames in a ring (grey image, stamp, the lens's whole
+    placement on the cart) and asks :class:`FrameContext`'s motion source for the transform
+    between two stamps. The partner is not the frame before this one: walking back from the
+    newest, it is the first frame inside the gap window whose baseline reaches
+    ``min_baseline_m``, and the widest baseline in the window when none does
+    (:meth:`_partner`). Pairing with the frame before meant pairing 0.1 s apart, which at a
+    cart's 0.2-0.3 m/s is 2 cm of baseline and a 23 cm sigma with most corners rejected for
+    too little parallax (live run 2026-09-14 14:12); 10 cm asked for is 0.3-0.5 s back. The
+    placement is TF's ``base_link <- camera_optical`` when the node supplies it, because that
+    is the only pose carrying the neck's pan and a baseline turned by a pan-free pose points
+    the wrong way; without it the mount's pitch stands in. A partner closer in time than
+    ``min_gap_s`` has no baseline worth triangulating and one farther back than ``max_gap_s``
+    has changed more than the flow follows; a frame while the cart stands still, or turns on
+    the spot, yields nothing at all and says which. Each pair carries its own weight: the
+    ratio of its inverse-depth variance to a lidar beam's, capped at 1, so a short baseline or
+    a badly tracked corner counts for little without being thrown away.
 
-    Measured offline on runs 0171 and 0165 (scratch/parallax_vs_lidar.py, 2026-09-12): 3-5 ms a
-    frame, 30-190 pairs where the cart really stepped, and a bias that depends on the range at
-    the 2-3 cm baselines those slow runs give — +25-37 % too far under 1.5 m (19-30 samples a
-    run), unbiased between 1.5 and 3 m. The odometry's own +-25 % scale band over such a step
-    multiplies every depth alike and so does not explain that split; the cause is not yet
-    known. It ships switched off until it is seen at driving speed with calibrated optics."""
+    Measured offline on both legs of the errand of 2026-09-14 at 0.2-0.3 m/s
+    (scratch/parallax_baseline_sweep.py, 4700 points matched to the lidar's own ranges, the
+    calibrated fx 724.1): the parallax a pair rests on decides its noise, sigma 16.3 cm at
+    2 cm of it, 12.2 at 5, 6.9 at 9, 4.1 at 18, and it decides the far field, 0.75 and 0.49 of
+    the lidar at 1.5-2 and 2-3 m on a 2 cm baseline against 1.02-1.13 from 5 cm on. What it
+    does not decide is a +9 to +13 % offset at 1.0-1.5 m, the same at every baseline — a
+    scale-like error still unexplained, and not the range-dependent one reported on 2026-09-12
+    (that shape was the thin baseline's skew, not the near field). Under a metre nothing can be
+    checked this way: the lidar's plane leaves the bottom of the picture below 1.0 m. The stage
+    costs 3-5 ms a frame and ships switched off."""
 
     name = "parallax_anchor"
 
@@ -1039,26 +1056,68 @@ class ParallaxAnchor(AnchorStage):
         weight: float = PARALLAX_WEIGHT,
         min_gap_s: float = PARALLAX_MIN_GAP_S,
         max_gap_s: float = PARALLAX_MAX_GAP_S,
+        min_baseline_m: float = PARALLAX_MIN_BASELINE_M,
     ) -> None:
         self.weight = weight
         self.min_gap_s = min_gap_s
         self.max_gap_s = max_gap_s
+        self.min_baseline_m = min_baseline_m
         self.frames = 0  # pairs of frames that reached the triangulation
         self.contributed = 0  # of those, the ones that gave at least one pair
         self.rejected: dict[str, int] = {}
-        self._prev: PreviousFrame | None = None
+        self._ring: deque[PreviousFrame] = deque(maxlen=PARALLAX_RING_FRAMES)
         self._baseline: list[float] = []
         self._sigma: list[float] = []
+        self._gap: list[float] = []
+
+    @property
+    def gap_s(self) -> float | None:
+        """How far back in time the partner of the last triangulated frame sat, in seconds, or
+        ``None`` before the first one — the number the report's median is taken over."""
+        return self._gap[-1] if self._gap else None
 
     def _count(self, reason: str, n: int = 1) -> None:
         """Tally one cause of a lost pair or a lost frame, for the report line."""
         if n:
             self.rejected[reason] = self.rejected.get(reason, 0) + n
 
+    def _partner(self, ctx: FrameContext, place: Rigid) -> tuple[PreviousFrame, Motion] | None:
+        """The frame of the ring this one is paired with and the camera motion between them:
+        walking back from the newest, the first partner inside the gap window whose baseline
+        reaches ``min_baseline_m``, and the widest baseline in the window when none does.
+
+        Newest-first is the point of it: the shortest gap that carries the asked-for parallax
+        is the one whose view has changed least, so the flow still tracks. A cart at 0.25 m/s
+        reaches 10 cm about 0.4 s back and pairs across four frames; a cart standing still
+        never reaches it and pairs with the widest it has, as the stage always did."""
+        from pepin.parallax import camera_motion
+
+        best: tuple[PreviousFrame, Motion] | None = None
+        candidates = 0
+        for previous in reversed(self._ring):
+            gap = ctx.stamp - previous.stamp
+            if gap < self.min_gap_s:
+                continue
+            if gap > self.max_gap_s:
+                break
+            candidates += 1
+            moved = None if ctx.motion is None else ctx.motion.motion(previous.stamp, ctx.stamp)
+            if moved is None:
+                continue
+            motion = camera_motion(moved.rotation, moved.translation, previous.place, place)
+            if best is None or motion.baseline > best[1].baseline:
+                best = (previous, motion)
+            if motion.baseline >= self.min_baseline_m:
+                break
+        if best is None and self._ring:
+            self._count("gap" if candidates == 0 else "no odometry")
+        return best
+
     def pairs(self, frame: Frame) -> Pairs | None:
-        """(network, triangulated) pairs at the corners this frame shares with the previous
-        one, or ``None`` when there is no usable motion between the two."""
-        from pepin.parallax import CameraPlacement, camera_motion, parallax_truth
+        """(network, triangulated) pairs at the corners this frame shares with the partner
+        frame chosen out of the ring, or ``None`` when there is no usable motion between the
+        two."""
+        from pepin.parallax import CameraPlacement, parallax_truth
 
         ctx = frame.ctx
         gray = ctx.gray
@@ -1070,18 +1129,13 @@ class ParallaxAnchor(AnchorStage):
         place: Rigid = (
             ctx.cam_optical if ctx.cam_optical is not None else CameraPlacement.of(ctx.cam)
         )
-        previous, self._prev = self._prev, PreviousFrame(gray, ctx.stamp, place)
-        if previous is None:
+        chosen = self._partner(ctx, place)
+        while self._ring and ctx.stamp - self._ring[0].stamp > self.max_gap_s:
+            self._ring.popleft()  # older than the window: no later frame can pair with it
+        self._ring.append(PreviousFrame(gray, ctx.stamp, place))
+        if chosen is None:
             return None
-        gap = ctx.stamp - previous.stamp
-        if not self.min_gap_s <= gap <= self.max_gap_s:
-            self._count("gap")
-            return None
-        moved = None if ctx.motion is None else ctx.motion.motion(previous.stamp, ctx.stamp)
-        if moved is None:
-            self._count("no odometry")
-            return None
-        motion = camera_motion(moved.rotation, moved.translation, previous.place, place)
+        previous, motion = chosen
         truth = parallax_truth(previous.gray, gray, ctx.intr, motion)
         self.frames += 1
         for reason, n in truth.rejected.items():
@@ -1099,7 +1153,8 @@ class ParallaxAnchor(AnchorStage):
         self.contributed += 1
         self._baseline.append(float(np.median(truth.baseline[ok])))
         self._sigma.append(float(np.median(truth.sigma[ok])))
-        del self._baseline[:-POOL_FRAMES], self._sigma[:-POOL_FRAMES]
+        self._gap.append(ctx.stamp - previous.stamp)
+        del self._baseline[:-POOL_FRAMES], self._sigma[:-POOL_FRAMES], self._gap[:-POOL_FRAMES]
         return Pairs.of(
             d[ok],
             truth.z[ok],
@@ -1109,14 +1164,16 @@ class ParallaxAnchor(AnchorStage):
         )
 
     def describe(self) -> str:
-        """The verdict for the report line: the frames that triangulated, the median baseline
-        and sigma of the pairs they gave, and what was thrown away and why."""
-        if not self._baseline:
-            dropped = ", ".join(f"{k} {v}" for k, v in self.rejected.items())
-            return f"weight {self.weight:g}, no pairs yet" + (f" ({dropped})" if dropped else "")
+        """The verdict for the report line: the parallax a partner is chosen to reach, the
+        frames that triangulated, the gap and the baseline they were paired across, the sigma
+        of the pairs they gave, and what was thrown away and why."""
+        asked = f"weight {self.weight:g}, asks {self.min_baseline_m * 100:.0f} cm"
         dropped = ", ".join(f"{k} {v}" for k, v in self.rejected.items())
+        if not self._baseline:
+            return f"{asked}, no pairs yet" + (f" ({dropped})" if dropped else "")
         return (
-            f"weight {self.weight:g}, {self.contributed}/{self.frames} frames,"
+            f"{asked}, {self.contributed}/{self.frames} frames,"
+            f" gap {np.median(self._gap):.2f} s,"
             f" baseline {np.median(self._baseline) * 100:.1f} cm,"
             f" sigma {np.median(self._sigma) * 100:.1f} cm"
             + (f", rejected: {dropped}" if dropped else "")
