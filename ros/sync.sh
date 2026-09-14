@@ -19,3 +19,7 @@ rsync -a --delete "$HERE/../config/" "root@$BOARD:/root/pepin-ros/pepin_src/conf
 if [ "${1:-}" != "--no-restart" ]; then
     ssh "root@$BOARD" "systemctl restart pepin-ros && sleep 8 && systemctl is-active pepin-ros"
 fi
+# What the board now runs, against config/board_manifest.json (ros/README.md, "What runs on the
+# board"). A red census is information, never a failed deploy: the code is already on the robot
+# by this line, and a sync that exits 1 would read as "the sync broke".
+"$HERE/board.sh" census || true
