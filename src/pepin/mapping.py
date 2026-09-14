@@ -9,6 +9,7 @@ far dead reckoning drifts — and later the same grid takes corrected poses.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import astuple, dataclass
 from pathlib import Path
 
@@ -152,3 +153,88 @@ def grid_from_pgm(yaml_path: str | Path) -> OccupancyGrid:
         pixels < 64, OCCUPIED_LOG_ODDS, np.where(pixels > 250, FREE_LOG_ODDS, 0.0)
     )
     return grid
+
+
+MAP_TOPIC = "map"  # the map a tracker matches on unless it is told otherwise
+MAP_REFRESH_S = 0.0  # ...and how long before a newer one on that same topic may replace it
+
+
+class MapChoice:
+    """Which of several maps a tracker matches on, and when a newly arrived one replaces it.
+
+    A robot can be handed more than one picture of the same room: the file a map server serves,
+    and a slice of a volume that is still being built while the cart drives. The node keeps the
+    newest message of every topic; this holds the decision, so the node itself branches on
+    nothing. A map on a topic nobody asked for is kept and not adopted; the first map on the
+    asked-for topic is adopted; a later one on the SAME topic is adopted only once
+    ``refresh_s`` seconds have passed AND its cells have actually changed.
+
+    That gate is the point. Adopting a map is expensive and destructive — the caller rebuilds
+    its matcher and its tracker and forgets the evidence gathered on the old map — while a
+    volume's slice is republished every second. ``refresh_s`` 0 is the behaviour a served file
+    has always had: the first map, and no other.
+    """
+
+    def __init__(self, wanted: str = MAP_TOPIC, refresh_s: float = MAP_REFRESH_S) -> None:
+        self._wanted = wanted
+        self._refresh_s = refresh_s
+        self._on_choice: Callable[[], None] = lambda: None
+        self.source = ""  # the topic the map in use came from ("" until the first is adopted)
+        self.digest = ""  # and what its cells were
+        self.taken_s = 0.0  # when it was adopted, on the caller's clock
+        self._ignored = 0  # arrivals turned away since the last report
+
+    switches = ("map_topic", "map_refresh_s")
+
+    def on_choice(self, callback: Callable[[], None]) -> None:
+        """Call ``callback`` whenever the wanted topic changes: the caller offers it whatever
+        each topic last published, so a map published once and latched long ago is adopted now
+        rather than never."""
+        self._on_choice = callback
+
+    def switch(self, name: str, value: object) -> None:
+        """Move one of :attr:`switches` (the node's live flags) — the topic to match on, or the
+        least time between two adoptions of it."""
+        if name == "map_refresh_s":
+            self._refresh_s = float(value)  # type: ignore[arg-type]
+            return
+        moved = str(value) != self._wanted
+        self._wanted = str(value)
+        if moved:
+            self._on_choice()
+
+    @property
+    def wanted(self) -> str:
+        """The topic the tracker is asking for, whether or not a map has arrived on it."""
+        return self._wanted
+
+    def take_ignored(self) -> int:
+        """How many arrivals the gate turned away since this was last asked, and reset."""
+        count, self._ignored = self._ignored, 0
+        return count
+
+    def offer(
+        self, source: str, digest: Callable[[], str], now: float, adopt: Callable[[], None]
+    ) -> bool:
+        """A map has arrived on ``source``: call ``adopt`` and answer ``True`` when it becomes
+        the map in use, else turn it away and answer ``False``.
+
+        ``digest`` is a function, not a string, because reading a whole grid's cells costs
+        something and the answer usually does not hang on them.
+        """
+        if source != self._wanted:
+            return False
+        fresh = ""
+        if self.source == source:
+            if self._refresh_s <= 0.0 or now - self.taken_s < self._refresh_s:
+                self._ignored += 1
+                return False
+            fresh = digest()
+            if fresh == self.digest:
+                self._ignored += 1
+                return False
+        self.source = source
+        self.taken_s = now
+        self.digest = fresh or digest()
+        adopt()
+        return True
