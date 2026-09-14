@@ -922,16 +922,18 @@ def test_a_dead_sensor_cannot_stall_a_costmap_that_the_others_still_feed() -> No
 
 
 def test_only_the_measured_layer_is_on_by_default() -> None:
-    """The split gives the camera a grid of its own that the lidar can no longer scrub, and that
-    is a behaviour nobody has driven: the only measurement of /depth_scan (run 0171, p50 41
-    lethal cells vs 40 in 0160) was taken with it inside the lidar's layer, being scrubbed, and
-    the scan is not yet cleared of false marks (2026-09-11). So both camera layers ship off, as
-    the contact layers do, and what is enabled is the lidar — what run 0171 actually measured.
-    Each flips live (``camera_layer.enabled true``), and the default follows the numbers."""
+    """The split gives the camera a grid of its own that the lidar can no longer scrub. Both
+    camera layers ship ON since 2026-09-14: the drives of 2026-09-13 measured the table top the
+    lidar cannot see (the camera marked it, the lidar-only costmap drove into it), and the
+    working state had lived in a live flip that every restart of 2026-09-14 reverted. The lidar
+    and the contact layers stay on; each flips live (``camera_layer.enabled false``)."""
     for costmap in ("local_costmap", "global_costmap"):
         params = _p(costmap)
         assert params["lidar_layer"]["enabled"] is True
-        assert params["camera_layer"]["enabled"] is False, f"{costmap}: the split is unmeasured"
+        assert params["camera_layer"]["enabled"] is True, (
+            f"{costmap}: the camera layer ships on — 2026-09-13 measured the table top the lidar"
+            " cannot see, and a live flip was lost at every restart of 2026-09-14"
+        )
         for sensor in ("front", "left", "right"):
             assert params[f"tof_{sensor}_layer"]["enabled"] is True
 

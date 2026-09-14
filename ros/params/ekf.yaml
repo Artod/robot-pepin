@@ -22,9 +22,12 @@ ekf_filter_node:
     # the gyro exists to correct — the heading comes out right and the path is still drawn along
     # the wrong one (found 2026-09-08). Speed plus gyro yaw rate is honest dead reckoning.
     odom0: odom
+    # vx from the wheels, and vy too: a differential-drive cart cannot move sideways, so the
+    # wheels' vy = 0 is a real measurement. Without it vy was unobservable — nothing pulled it
+    # back — and one bad VO sample on 2026-09-14 flew odom -> base_link 43 km at 60 m/s.
     odom0_config: [false, false, false,
                    false, false, false,
-                   true, false, false,
+                   true, true, false,
                    false, false, false,
                    false, false, false]
     odom0_differential: false
