@@ -23,6 +23,9 @@ MAP=$(ssh "root@$BOARD" "grep -oE 'PEPIN_MAP=.*' /etc/default/pepin-ros" | cut -
 PLACES="/maps/$(basename "${MAP:-places}" .yaml).places.yaml"  # one book of places per map
 case "${1:-}" in
   where) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/call.py /where_am_i"; exit ;;
+  # The header promised this for weeks while the case fell through to "drive to a place called
+  # cancel" (2026-09-14 11:20: the cart went on butting a table for a minute after the "cancel").
+  cancel) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh timeout 5 python3 /tools/goto_ros.py cancel"; exit ;;
   relocalize) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/call.py /relocalize 90"; exit ;;
   mark|places) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/goto_ros.py --places $PLACES $*"
                rsync -aq "root@$BOARD:/root/pepin-ros$PLACES" "$(dirname "$0")/maps/" 2>/dev/null; exit ;;  # the book is backed up on the laptop too
@@ -45,7 +48,7 @@ finish() {  # everything recorded, always: scans, odometry, tracked pose, the go
     if [ "$FINISHED" = 1 ]; then return 0; fi   # TERM runs this, then EXIT runs it again
     FINISHED=1
     if [ -n "$TAILPID" ]; then kill "$TAILPID" 2>/dev/null || true; fi
-    kill -INT $FFPID 2>/dev/null; wait $FFPID 2>/dev/null
+    kill -INT $FFPID 2>/dev/null; wait $FFPID 2>/dev/null || true  # ffmpeg exits 255 on INT: not an error here
     watch_stop
     if [ "$INTERRUPTED" = 1 ]; then
         echo; echo "Ctrl-C: cancelling the navigation task on the board..."
