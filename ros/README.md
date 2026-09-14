@@ -812,7 +812,7 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 - **`lidar_anchor`** — bool, default on
   - *What:* the lidar's returns pair with the network's depth and fit the law; off, the last law is held (the failure mode of a lidar that stops) — with no law yet nothing is published until it is back on
   - *Default:* on — the beams are the only metric ruler on board. Without them a floor-only fit reads the lidar's own row 1.98-2.46x too far and the raw network 1.62-1.96x (scratch/pipeline_vs_truth.txt, scratch/lidar_height_check.txt), and the pairing costs 0.0-0.1 ms a frame. The one on/off turn on the robot is split: a held law was better above the band (9.6-19.3 cm against 16-46 cm) and worse at it (12.0 cm against 7-9 cm), and the band is the row the costmap drives on
-  - *On when:* whenever the lidar spins — it is what makes the network's depth metric
+  - *On when:* whenever the lidar spins — it is what makes the network's depth metric. It can only judge past the range at which its own plane enters the picture (pepin.depth.plane_in_view_from: 0.71 m with the head 23.7 deg down, the lens 0.82 m above the plane, a 640x360 frame). Parked closer than that — the working case at a desk — not one beam lands in the image, the report says so (lidar plane out of the picture N frames) instead of asking whether /scan is alive, and the law is held
   - *Off when:* to rehearse a lidar that dies mid-run (the law freezes, nothing else changes), or to compare the slices above the band, where the frozen law measured better
 - **`floor_pairs`** — bool, default off
   - *What:* the floor's pixels pair the network's depth with the plane's geometric depth, a second hoop for the law that needs no lidar
