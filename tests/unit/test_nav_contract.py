@@ -1624,7 +1624,7 @@ def test_every_matcher_is_handed_heavy_cells_and_the_lidar_may_localise_on_the_v
         "a matcher's reference is cut in the tens of observations, a map in the units"
     )
     assert fusion.flag("camera_map_min_weight").range == (0.0, GridSpec.max_weight)
-    assert fusion["lidar_map"] is False, "the old behaviour is the default"
+    assert fusion["lidar_map"] is True, "the layer is on the wire where it can be compared"
     node = sf.tree(f"{NODES}/depth_fusion.py")
     assert sf.assignments(node)["LIDAR_MAP_TOPIC"] == "'/map_lidar'"
     assert "self._world.hardness" in sf.calls(node) or "self._world.report" in sf.calls(node)
@@ -1633,8 +1633,14 @@ def test_every_matcher_is_handed_heavy_cells_and_the_lidar_may_localise_on_the_v
     assert "map_lidar" in VISION_LAPTOP_PUBLISHES and "/map_lidar" in ON_DEMAND_TOPICS
     tracker = load_table(REPO / NODES / "relocalizer.py")
     assert tracker.flag("map_topic").choices == ("map", "map_lidar")
-    assert tracker["map_topic"] == "map", "the served map is still the default"
+    assert tracker["map_topic"] == "map", (
+        "the served map is still the default: the live volume's lidar layer holds 69.7 % of the"
+        " file's walls (scratch/map_lidar_vs_pgm.py, 2026-09-14) and a tracker moved onto it"
+        " scored fit 0.00 at the true pose and re-seated 4 m away at 0.99"
+    )
     assert tracker["map_refresh_s"] == 0.0, "and it is adopted once, as a served map always was"
+    assert tracker["map_fallback_s"] == 10.0, "a laptop topic never spoken for is not a blindfold"
+    assert tracker["carry_pose_across_maps"] is True, "a new picture of the room is not a kidnap"
     relocalizer = sf.tree(f"{NODES}/relocalizer.py")
     assert "MapChoice" in sf.imported(relocalizer), "the decision lives in pepin, not in the node"
     assert "self._choice.offer" in sf.calls(relocalizer)

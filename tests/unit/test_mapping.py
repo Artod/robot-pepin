@@ -117,3 +117,46 @@ def test_the_digest_is_read_only_when_the_answer_hangs_on_the_cells() -> None:
     choice.offer("map", digest, 1.0, Adopted())  # another topic
     choice.offer("map_lidar", digest, 2.0, Adopted())  # a republication under refresh 0
     assert reads.count == 1
+
+
+def test_the_wanted_map_never_speaking_falls_back_to_the_one_that_is_there() -> None:
+    """The board serves /map itself and reads /map_lidar from the laptop: a tracker asking for
+    the laptop's map with the wifi down must not wait for ever (CLAUDE.md rule 20)."""
+    choice, taken = MapChoice("map_lidar", fallback="map", fallback_after_s=10.0), Adopted()
+    assert choice.lapsed(0.0) is None, "the clock starts at the first ask"
+    assert choice.lapsed(9.0) is None
+    assert choice.lapsed(10.0) == "map"
+    assert offer(choice, "map", "file", 10.0, taken)
+    assert (taken.count, choice.source, choice.fell_back) == (1, "map", True)
+
+    assert choice.lapsed(60.0) is None, "a map is in use: the fallback is over"
+    assert offer(choice, "map_lidar", "volume", 61.0, taken), "the wanted map still replaces it"
+    assert (taken.count, choice.source, choice.fell_back) == (2, "map_lidar", False)
+
+
+def test_a_map_in_use_is_never_dropped_because_its_publisher_went_quiet() -> None:
+    """A grid in memory does not stop working when the laptop does; a rebuild on a lesser map
+    would cost the board 15 s of lattice and every candidate it holds, for nothing."""
+    choice, taken = MapChoice("map_lidar", fallback="map", fallback_after_s=10.0), Adopted()
+    offer(choice, "map_lidar", "volume", 0.0, taken)
+    assert choice.lapsed(1000.0) is None and not choice.fell_back
+
+
+def test_the_fallback_is_a_live_switch_and_zero_waits_for_ever() -> None:
+    choice = MapChoice("map_lidar", fallback="map", fallback_after_s=10.0)
+    choice.switch("map_fallback_s", 0.0)
+    choice.lapsed(0.0)
+    assert choice.lapsed(1000.0) is None, "0: the behaviour before the fallback existed"
+    choice.switch("map_fallback_s", 5.0)
+    choice.lapsed(1000.0)
+    assert choice.lapsed(1006.0) == "map"
+
+
+def test_moving_the_flag_restarts_the_wait_for_the_new_map() -> None:
+    """The tracker asked for another map at this moment; the seconds it spent waiting for the
+    previous one are not seconds it waited for this one."""
+    choice = MapChoice("map", fallback="map", fallback_after_s=10.0)
+    choice.lapsed(0.0)
+    choice.switch("map_topic", "map_lidar")
+    assert choice.lapsed(11.0) is None, "the wait for map_lidar starts here"
+    assert choice.lapsed(21.0) == "map"

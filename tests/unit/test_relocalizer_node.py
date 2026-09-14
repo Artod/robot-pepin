@@ -889,6 +889,74 @@ def test_the_tracker_matches_on_the_served_map_until_the_flag_moves_it(node: Rel
     assert node._map_id == served, "and back, without a restart"
 
 
+def test_a_map_switch_keeps_the_cart_where_it_is(node: Relocalizer) -> None:
+    """The incident of 2026-09-14 18:13, in a test.
+
+    A live ``map_topic=map_lidar`` with the cart at home restarted the tracker at the ORIGIN —
+    the saved-pose file is keyed by map id, and the volume's grid has an id of its own — and the
+    next measurement-driven update published map -> odom for that origin pose. Nav2 logged
+    "global_costmap: Sensor origin at (0.01, -0.00) is out of map bounds" 110 times, the local
+    costmap stopped following the cart, and no goal succeeded until the stack was restarted.
+
+    Both maps are the same room on grids aligned to the same file, so the pose survives the
+    switch and so does the transform the node broadcasts.
+    """
+    stand(node, 100.0, 2.0)
+    node.clock.seconds = 103.0
+    here = Pose2D(0.30, -0.20, math.radians(20.0))
+    node.subs["/initialpose"][1](seed_msg(here))
+    echo_initialpose(node)
+    stand(node, 103.1, 1.0)
+    loc = node._localizer
+    assert loc is not None and math.hypot(loc.pose.x, loc.pose.y) > 0.1, "not at the origin"
+    before, frame = loc.pose, node._last_map_odom
+
+    node.subs["/map_lidar"][1](volume_map_msg())
+    assert node.set_parameters([Parameter("map_topic", value="map_lidar")])[0].successful
+    after = node._localizer
+    assert after is not None and after is not loc, "the tracker was rebuilt on the volume"
+    assert (after.pose.x, after.pose.y, after.pose.theta) == (before.x, before.y, before.theta)
+    assert node._tracker_initialised, "it knows where it is: no whole-map search, no origin pose"
+    assert node._last_map_odom == frame, "and it broadcasts the very frame it broadcast before"
+
+
+def test_the_switch_can_be_told_to_find_the_cart_again(node: Relocalizer) -> None:
+    """The old behaviour stays reachable: with ``carry_pose_across_maps`` off the tracker looks
+    for itself on the new map before it trusts anything (a map of another place on the same
+    topic)."""
+    stand(node, 100.0, 2.0)
+    assert node.set_parameters([Parameter("carry_pose_across_maps", value=False)])[0].successful
+    node.subs["/map_lidar"][1](volume_map_msg())
+    node.set_parameters([Parameter("map_topic", value="map_lidar")])
+    assert not node._tracker_initialised
+
+
+def test_the_tracker_takes_the_served_map_when_the_volume_never_speaks() -> None:
+    """A board that starts with the laptop down: /map_lidar has no publisher at all and the
+    tracker must not sit blind waiting for it (CLAUDE.md rule 20). The served map is latched and
+    already in hand; ten seconds later it is the map in use, and the volume still replaces it
+    whenever it turns up."""
+    with ros_stubs.parameters(map_topic="map_lidar", min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
+    assert node._matcher is None, "nothing adopted: the tracker was asked for the volume"
+
+    node.clock.seconds = 1.0
+    node._check()
+    node.clock.seconds = 5.0
+    node._check()
+    assert node._matcher is None, "five seconds is not ten"
+
+    node.clock.seconds = 12.0
+    node._check()
+    assert node._choice.source == "map" and node._choice.fell_back
+    assert node._matcher is not None, "matching on the served file"
+
+    node.subs["/map_lidar"][1](volume_map_msg())
+    assert node._choice.source == "map_lidar" and not node._choice.fell_back
+
+
 def test_a_republished_volume_map_does_not_rebuild_the_tracker(node: Relocalizer) -> None:
     """/map_lidar arrives at the fusion's map_hz, once a second, and every adoption rebuilds the
     matcher and forgets the episode's evidence. The refresh gate is what makes it safe to point
