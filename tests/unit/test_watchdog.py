@@ -10,24 +10,27 @@ from __future__ import annotations
 import itertools
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from pepin.fusion import sigma_from_fit
 from pepin.odometry import Pose2D
 from pepin.scanmatch import apply_motion
-from pepin.sources import TRACKER, WATCHDOG
+from pepin.sources import CONTACT, DEPTH, LIDAR, TRACKER, WATCHDOG
 from pepin.watchdog import (
     AMBIGUITY_MAX,
     BEAT_MARGIN,
+    CAMERA_ADMIT_FIT,
     UNKNOWN_MAP_FIT,
     CandidateGate,
     CandidateVerdict,
     GlobalCandidate,
     ambiguity,
+    camera_search_need,
     carried,
     judge,
+    min_fit_for,
     same_place,
 )
 
@@ -66,11 +69,15 @@ def candidate(
     ambiguity: float = 0.2,
     stamp: float = 100.0,
     scan: int | None = None,
+    source: str = LIDAR,
 ) -> GlobalCandidate:
     """A candidate at ``pose``, as sure as a good peak on this flat's map; off a fresh
-    revolution unless ``scan`` names one (what a frozen /scan on the laptop would send)."""
+    revolution unless ``scan`` names one (what a frozen /scan on the laptop would send), and off
+    the lidar unless ``source`` names another sensor."""
     scan_id = next(_SCANS) if scan is None else scan
-    return GlobalCandidate(pose.x, pose.y, pose.theta, SURE, score, ambiguity, stamp, MAP, scan_id)
+    return GlobalCandidate(
+        pose.x, pose.y, pose.theta, SURE, score, ambiguity, stamp, MAP, scan_id, source
+    )
 
 
 # ---- one candidate ----------------------------------------------------------------------
@@ -379,3 +386,69 @@ def test_a_tracker_that_has_not_matched_anything_yet_does_not_silence_a_candidat
     """The node's fit is NaN until its first check; NaN passes every ``<`` silently, so it is
     read as 0.0 exactly as pepin.watch does."""
     assert judge(candidate(ELSEWHERE), HERE, float("nan")) is CandidateVerdict.DISAGREE
+
+
+# ---- the camera's candidates ------------------------------------------------------------
+def test_a_fan_s_fit_is_read_against_the_fan_s_own_floor() -> None:
+    """A camera fan and a lidar revolution do not score on one scale, so they are not judged by
+    one floor: 0.35 is nothing from a revolution and an answer from a fan."""
+    assert min_fit_for(LIDAR) == UNKNOWN_MAP_FIT
+    assert min_fit_for(DEPTH) == min_fit_for(CONTACT) == CAMERA_ADMIT_FIT
+    assert min_fit_for("sonar") == UNKNOWN_MAP_FIT, "an unmeasured sensor gets no discount"
+    weak = candidate(ELSEWHERE, score=0.35)
+    assert judge(weak, HERE, 0.20) is CandidateVerdict.UNKNOWN_MAP
+    assert judge(replace(weak, source=DEPTH), HERE, 0.20) is CandidateVerdict.DISAGREE
+    assert judge(replace(weak, source=DEPTH), HERE, 0.20, min_fit=0.5) is (
+        CandidateVerdict.UNKNOWN_MAP
+    ), "the caller's own floor wins over the table"
+
+
+def test_a_fan_may_never_say_the_map_does_not_fit() -> None:
+    """A +-40 degree fan that cannot place itself is the normal state of a camera search on a
+    young band — it is not evidence that the room changed. Only the lidar's candidates latch
+    that, and the fan's unknown verdicts are still counted and reported."""
+    gate = CandidateGate()
+    for _ in range(gate.unknown_streak + 2):
+        gate.observe(candidate(ELSEWHERE, score=0.1, source=DEPTH), HERE, 0.6, MAP)
+    assert gate.map_fits, "a fan latched the map away"
+    for _ in range(gate.unknown_streak):
+        gate.observe(candidate(ELSEWHERE, score=0.1), HERE, 0.6, MAP)
+    assert not gate.map_fits
+    line = gate.report()
+    assert "from depth 5, lidar 3" in line and "unknown_map 8" in line
+
+
+def test_a_streak_is_one_sensor_s_evidence_three_times() -> None:
+    """Three disagreements about one place re-seed the tracker — but only from ONE sensor. A
+    lidar answer and a camera answer are two measurements of two maps at two scales, and three
+    of them alternating are not three of anything."""
+    gate = CandidateGate()
+    assert gate.observe(candidate(ELSEWHERE), HERE, 0.2, MAP).seed is None
+    assert gate.observe(candidate(ELSEWHERE, source=DEPTH), HERE, 0.2, MAP).seed is None
+    assert gate.observe(candidate(ELSEWHERE), HERE, 0.2, MAP).seed is None, "the run was broken"
+    assert gate.observe(candidate(ELSEWHERE), HERE, 0.2, MAP).seed is None
+    answer = gate.observe(candidate(ELSEWHERE), HERE, 0.2, MAP)
+    assert answer.seed is not None and gate.last_source == LIDAR
+
+
+def test_a_fan_looks_for_the_cart_only_where_the_lidar_is_not_answering() -> None:
+    """When the camera's whole-map search is worth its CPU: the lidar is not driving the
+    tracker, or the lidar's own search cannot place the cart on this map. A healthy lidar that
+    knows where it is is never second-guessed by a fan."""
+    assert camera_search_need(True, CandidateVerdict.AGREE) == ""
+    assert camera_search_need(True, None) == ""
+    assert camera_search_need(True, CandidateVerdict.DISAGREE) == ""
+    assert camera_search_need(False, CandidateVerdict.AGREE) == "no_lidar"
+    assert camera_search_need(True, CandidateVerdict.UNKNOWN_MAP) == "unknown_map"
+
+
+def test_the_source_travels_with_the_candidate_and_an_unnamed_one_is_the_lidar() -> None:
+    """The wire keeps the sensor's name, and a message from before it existed reads as the
+    lidar's — never as a fan's, which would hand it the camera's lower floor for free."""
+    sent = candidate(ELSEWHERE, source=DEPTH)
+    back = GlobalCandidate.from_json(sent.to_json(verdict="disagree"))
+    assert back.source == DEPTH and back.scan_id == sent.scan_id
+    assert back.text().startswith("depth (")
+    old = json.loads(sent.to_json())
+    del old["source"]
+    assert GlobalCandidate.from_json(json.dumps(old)).source == LIDAR

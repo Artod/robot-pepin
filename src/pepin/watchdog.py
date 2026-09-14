@@ -44,19 +44,22 @@ from numpy.typing import NDArray
 from pepin.fusion import Matrix, PoseMeasurement, carry_pose, from_fit, fuse
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import relative_motion
-from pepin.sources import TRACKER, WATCHDOG
+from pepin.sources import CONTACT, DEPTH, LIDAR, TRACKER, WATCHDOG
 from pepin.timeline import OdomTrail  # the trail a carry reads; re-exported here
 from pepin.watch import ADMIT_FIT, ADMIT_MARGIN, AGREE_DEG, AGREE_M
 
 __all__ = [
+    "CAMERA_ADMIT_FIT",
     "CandidateGate",
     "CandidateVerdict",
     "GateAnswer",
     "GlobalCandidate",
     "OdomTrail",
     "ambiguity",
+    "camera_search_need",
     "carried",
     "judge",
+    "min_fit_for",
     "same_place",
 ]
 
@@ -92,8 +95,34 @@ AMBIGUITY_APART_DEG = 30.0
 # opened) from moving a healthy tracker.
 CANDIDATE_STREAK = 3
 # ...and unknown_map verdicts in a row before the tracker says the map does not fit. The same
-# length for the same reason: one is a blocked lidar, three is a different room.
+# length for the same reason: one is a blocked lidar, three is a different room. Only the
+# LIDAR's candidates ever count towards it: a narrow fan that fails to place itself says
+# nothing about whether the room is the mapped one.
 UNKNOWN_STREAK = 3
+# The same floor for a candidate found on a CAMERA fan instead of a lidar revolution. A fan of
+# +-40 degrees and 3 m, matched against the camera's own band of the volume, is judged on the
+# few beams the band can speak for at all, so its inlier fraction saturates: on the raycast
+# kidnap of 2026-09-14 (scratch/camera_kidnap_offline.py, ros/maps/world_live.npz) the fit was
+# 1.00 median at the TRUE pose and 1.00 median at a top place 4.3 m away from it. A fit floor
+# therefore refuses nothing on a camera fan and is not the judge here — :func:`ambiguity` is.
+# The number is kept only so a fan with no judgeable beams at all cannot travel; it is the
+# floor a camera MATCH is refused at on the laptop (laptop_localizer's camera_min_fit, the
+# tracker's own lost_below), and it is deliberately not the lidar's 0.45.
+CAMERA_ADMIT_FIT = 0.25
+# Which floor a candidate's fit is read against, by the source that found it. A source not on
+# this table is read against the lidar's floor: a new sensor is not given a discount for being
+# new.
+MIN_FIT_BY_SOURCE: dict[str, float] = {
+    LIDAR: UNKNOWN_MAP_FIT,
+    DEPTH: CAMERA_ADMIT_FIT,
+    CONTACT: CAMERA_ADMIT_FIT,
+}
+
+
+def min_fit_for(source: str) -> float:
+    """The fit floor a whole-map answer found on ``source`` must clear to be an answer at all
+    (:data:`MIN_FIT_BY_SOURCE`); the lidar's floor for a source nobody has measured."""
+    return MIN_FIT_BY_SOURCE.get(source, UNKNOWN_MAP_FIT)
 
 
 class CandidateVerdict(StrEnum):
@@ -103,6 +132,32 @@ class CandidateVerdict(StrEnum):
     DISAGREE = "disagree"  # another place, clearly better, and the map is sure of it
     UNKNOWN_MAP = "unknown_map"  # nothing on this map fits, or two places fit alike
     NOTHING = "nothing"  # another place, but no better than what the tracker already has
+
+
+def camera_search_need(lidar_driving: bool, lidar_verdict: CandidateVerdict | None) -> str:
+    """Why searching the whole map on a CAMERA fan can help right now, or ``""`` when it cannot.
+
+    A camera fan is a worse global sensor than a lidar revolution in every way — a fifth of the
+    field of view, a tenth of the reach, and a map slice that is mostly unknown — so it is
+    allowed to look for the cart only where the lidar is not already answering:
+
+    * ``no_lidar`` — the lidar is not driving the tracker (switched off, dead, stale, or the
+      board is anchoring on the camera's measurements). Then a camera fan is the only sensor
+      that can find a lost cart at all, and a bad answer from it is judged by the same gate
+      every answer is.
+    * ``unknown_map`` — the lidar IS driving, but its own whole-map search says nothing on this
+      map fits what it sees. The two sensors then disagree about the room itself, and the
+      camera's band holds surfaces the lidar's plane never sees; a second opinion is worth its
+      CPU.
+
+    Anything else is a healthy lidar answering for itself, and the camera stays out of it: a
+    fan must never out-vote a revolution.
+    """
+    if not lidar_driving:
+        return "no_lidar"
+    if lidar_verdict is CandidateVerdict.UNKNOWN_MAP:
+        return "unknown_map"
+    return ""
 
 
 def same_place(a: Pose2D, b: Pose2D) -> bool:
@@ -151,6 +206,11 @@ class GlobalCandidate:
     are one search's answer said twice, and a streak built of them is one scan's evidence
     repeated (:meth:`CandidateGate.observe`). 0 means the sender did not say, and is read as
     "not a new scan" — the conservative half of the same rule.
+
+    ``source`` names the sensor the search ran on (:data:`pepin.sources.LIDAR`, ``depth``,
+    ``contact``): which floor its fit is read against (:func:`min_fit_for`), which run its
+    disagreement lengthens, and what the report line counts it under. A message that does not
+    say is the lidar's, which is what every candidate was before 2026-09-14.
     """
 
     x: float
@@ -162,6 +222,7 @@ class GlobalCandidate:
     stamp: float
     map_id: str
     scan_id: int = 0
+    source: str = LIDAR
 
     @property
     def pose(self) -> Pose2D:
@@ -191,6 +252,7 @@ class GlobalCandidate:
                 "stamp": self.stamp,
                 "scan": self.scan_id,
                 "map": self.map_id,
+                "source": self.source,
                 **extra,
             }
         )
@@ -216,12 +278,16 @@ class GlobalCandidate:
             # like a replay of the previous one: a version skew loses the re-seeds and says so
             # in the report line, instead of building a streak out of one scan.
             scan_id=int(raw.get("scan", 0)),
+            # A sender that does not name its sensor is the lidar: every candidate was one
+            # until 2026-09-14, and reading an unnamed one as a camera fan would hand it the
+            # camera's lower floor on the strength of a missing field.
+            source=str(raw.get("source", LIDAR)),
         )
 
     def text(self) -> str:
-        """``(x, y, yaw deg) fit 0.63, ambiguity 0.21`` for a report line."""
+        """``lidar (x, y, yaw deg) fit 0.63, ambiguity 0.21`` for a report line."""
         return (
-            f"({self.x:+.2f}, {self.y:+.2f}, {math.degrees(self.yaw):+.0f} deg) "
+            f"{self.source} ({self.x:+.2f}, {self.y:+.2f}, {math.degrees(self.yaw):+.0f} deg) "
             f"fit {self.score:.2f}, ambiguity {self.ambiguity:.2f}"
         )
 
@@ -256,28 +322,44 @@ def carried(candidate: GlobalCandidate, motion: Pose2D, stamp: float) -> GlobalC
     )
 
 
-def judge(candidate: GlobalCandidate, current_pose: Pose2D, current_fit: float) -> CandidateVerdict:
+def judge(
+    candidate: GlobalCandidate,
+    current_pose: Pose2D,
+    current_fit: float,
+    min_fit: float | None = None,
+) -> CandidateVerdict:
     """What ``candidate`` is worth beside the pose the tracker holds and the fit it holds it at.
 
     ``current_fit`` NaN — the tracker has not matched a scan yet — reads as 0.0, the convention
     of :meth:`pepin.watch.LostWatch.reported_fit`: every comparison here is a ``<`` or a ``>=``,
     and NaN passes them all silently.
 
+    ``min_fit`` is the floor the candidate's own fit is read against; omitted, it is the floor
+    of the sensor the search ran on (:func:`min_fit_for`), the lidar's for a candidate that
+    does not name one. A fan's fits and a revolution's fits are not one scale, and the same
+    number cannot judge both.
+
     In order, because the order is the argument:
 
-    1. The map's own answer first. A best place below :data:`UNKNOWN_MAP_FIT`, or a runner-up
-       explaining the scan within :data:`AMBIGUITY_MAX` of it from somewhere else, means the
-       search could not say where the cart is — ``unknown_map``. Judging such an answer against
-       the tracker would be reading tea leaves.
+    1. The map's own answer first. A best place below ``min_fit``, or a runner-up explaining
+       the scan within :data:`AMBIGUITY_MAX` of it from somewhere else, means the search could
+       not say where the cart is — ``unknown_map``. Judging such an answer against the tracker
+       would be reading tea leaves. On a camera fan the ambiguity is the whole of this test:
+       its fit saturates (1.00 at the true pose and 1.00 four metres away, measured
+       2026-09-14), and only the twin check can tell a fix from a look-alike.
     2. Then the cheap case: within :data:`SAME_PLACE_M` / :data:`SAME_PLACE_DEG` of the tracked
        pose the candidate confirms it — ``agree``.
     3. Elsewhere, it must also explain the scan better than the tracker's own fit by
        :data:`BEAT_MARGIN` to be ``disagree``; otherwise it is a worse explanation of the same
-       scan from farther away, and claims ``nothing``.
+       scan from farther away, and claims ``nothing``. That comparison holds only while the
+       two fits ARE one scale — which is why a camera search runs only where the camera also
+       drives the tracker (:func:`camera_search_need`), and the fit it is held against is then
+       the camera's own.
     """
     if current_fit != current_fit:  # NaN: the tracker has not matched a scan yet
         current_fit = 0.0
-    if candidate.score < UNKNOWN_MAP_FIT or candidate.ambiguity > AMBIGUITY_MAX:
+    floor = min_fit_for(candidate.source) if min_fit is None else min_fit
+    if candidate.score < floor or candidate.ambiguity > AMBIGUITY_MAX:
         return CandidateVerdict.UNKNOWN_MAP
     if same_place(candidate.pose, current_pose):
         return CandidateVerdict.AGREE
@@ -322,9 +404,11 @@ class CandidateGate:
     unknown_streak: int = UNKNOWN_STREAK
     map_fits: bool = True  # False once unknown_streak candidates in a row said it does not
     last: CandidateVerdict | None = None  # the newest verdict, for the status
+    last_source: str = LIDAR  # ...and whose candidate it was
     _run: list[GlobalCandidate] = field(default_factory=list, init=False)  # the disagreeing ones
     _unknown_run: int = field(default=0, init=False)
     _counts: dict[str, int] = field(default_factory=dict, init=False)
+    _by_source: dict[str, int] = field(default_factory=dict, init=False)
     _reseeds: int = field(default=0, init=False)
     _malformed: int = field(default=0, init=False)
     _reason: str = field(default="", init=False)  # the last malformed message's complaint
@@ -415,16 +499,27 @@ class CandidateGate:
             current_fit = 0.0
         verdict = judge(candidate, current_pose, current_fit)
         self._count(str(verdict))
-        self.last = verdict
+        self._by_source[candidate.source] = self._by_source.get(candidate.source, 0) + 1
+        self.last, self.last_source = verdict, candidate.source
         if verdict is CandidateVerdict.UNKNOWN_MAP:
             self._run = []
-            self._unknown_run += 1
-            self.map_fits = self.map_fits and self._unknown_run < self.unknown_streak
+            # Only a LIDAR revolution may say the room is not the mapped one. A +-40 degree fan
+            # that cannot place itself is the normal state of a camera search on a young band
+            # (0 of 60 offline kidnaps placed one, 2026-09-14) and has no business latching the
+            # map away from a tracker that is following the walls perfectly well.
+            if candidate.source == LIDAR:
+                self._unknown_run += 1
+                self.map_fits = self.map_fits and self._unknown_run < self.unknown_streak
             return GateAnswer(verdict)
         self._unknown_run = 0
         if verdict is not CandidateVerdict.DISAGREE:
             self.forget()  # a candidate that confirms, or claims nothing, ends any run
             return GateAnswer(verdict)
+        if self._run and self._run[-1].source != candidate.source:
+            # A streak is one sensor's evidence, three times. A lidar answer and a camera answer
+            # are two different measurements of two different maps at two different scales, and
+            # three of them alternating are not three of anything.
+            self._run = []
         if self._run and not same_place(self._run[-1].pose, candidate.pose):
             self._run = []  # disagreeing about a DIFFERENT place each time proves nothing
         if self.distinct_scans and any(held.scan_id == candidate.scan_id for held in self._run):
@@ -445,6 +540,7 @@ class CandidateGate:
         started and how many re-seeds came of them."""
         return {
             "verdict": None if self.last is None else str(self.last),
+            "source": self.last_source,
             "map_fits": self.map_fits,
             "reseeds": self._reseeds,
             "accept": self.accept_candidates,
@@ -456,9 +552,11 @@ class CandidateGate:
         counts, reseeds, malformed = self._counts, self._reseeds, self._malformed
         seen = sum(counts.values())
         body = ", ".join(f"{name} {n}" for name, n in sorted(counts.items())) or "none"
+        whose = ", ".join(f"{name} {n}" for name, n in sorted(self._by_source.items())) or "none"
         self._counts, self._reseeds, self._malformed = {}, 0, 0
+        self._by_source = {}
         return (
-            f"candidates {seen} ({body}), re-seeds {reseeds}, "
+            f"candidates {seen} ({body}) from {whose}, re-seeds {reseeds}, "
             f"malformed {malformed}{f' ({self._reason})' if self._reason else ''}"
             + ("" if self.map_fits else "; THE MAP DOES NOT FIT what the lidar sees")
         )

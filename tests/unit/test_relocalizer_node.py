@@ -509,7 +509,7 @@ def test_three_candidates_that_disagree_re_seed_the_tracker(node: Relocalizer) -
     )
     node._report_tracking()
     line = node.logger.texts("info")[-1]
-    assert "candidates 3 (disagree 3), re-seeds 1" in line
+    assert "candidates 3 (disagree 3) from lidar 3, re-seeds 1" in line
     assert "accept_candidates=on candidate_streak=3" in line
 
 
@@ -590,7 +590,7 @@ def test_a_candidate_that_agrees_changes_nothing(node: Relocalizer) -> None:
     node.subs["/localization/candidate"][1](candidate_msg(node, Pose2D(0.1, 0.0, 0.0)))
     assert node._pending_seed is None
     node._report_tracking()
-    assert "candidates 1 (agree 1), re-seeds 0" in node.logger.texts("info")[-1]
+    assert "candidates 1 (agree 1) from lidar 1, re-seeds 0" in node.logger.texts("info")[-1]
 
 
 def test_the_flag_leaves_the_candidates_as_a_report_only(node: Relocalizer) -> None:
@@ -602,7 +602,7 @@ def test_the_flag_leaves_the_candidates_as_a_report_only(node: Relocalizer) -> N
         node.subs["/localization/candidate"][1](candidate_msg(node, CARRIED_TO))
     assert node._pending_seed is None
     node._report_tracking()
-    assert "candidates 4 (disagree 4), re-seeds 0" in node.logger.texts("info")[-1]
+    assert "candidates 4 (disagree 4) from lidar 4, re-seeds 0" in node.logger.texts("info")[-1]
     assert "accept_candidates=off" in node.logger.texts("info")[-1]
 
 
@@ -638,6 +638,7 @@ def test_the_map_that_does_not_fit_reaches_the_operator(node: Relocalizer) -> No
     reported = json.loads(node.pubs["/localization/sources"].sent[-1].data)
     assert reported["candidates"] == {
         "verdict": "unknown_map",
+        "source": "lidar",
         "map_fits": False,
         "reseeds": 0,
         "accept": True,
