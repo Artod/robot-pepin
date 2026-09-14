@@ -1,6 +1,7 @@
 """The anchor kept beside its map: what the file holds, what it refuses, when it is re-learned."""
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -10,9 +11,11 @@ from pepin.anchors import (
     Anchor,
     AnchorWatch,
     anchor_path,
+    describe_sigma,
     load_anchor,
     map_slug,
     save_anchor,
+    seating_refusal,
 )
 from pepin.odometry import Pose2D
 
@@ -92,3 +95,27 @@ def test_a_turn_alone_is_enough_and_an_untrusted_tracker_is_never_evidence() -> 
     watch.update(0.0, False, 9.0, 90.0)
     assert watch.since is None
     assert not watch.update(100.0, False, 9.0, 90.0)
+
+
+def test_a_seating_the_scan_pins_in_one_axis_only_is_no_place_to_learn_a_frame() -> None:
+    """The anchor is a constant of the pair: whatever seating it is learned off is baked into
+    every word the graph says until the file is rewritten. A scan sliding along a sofa reports
+    an honest fit and half a metre of freedom in y, so the gate reads the error bar the tracker
+    publishes, not its score — and refuses with a reason a person can read in a log."""
+    sharp = (0.008, 0.012, math.radians(0.4))
+    assert seating_refusal(sharp) is None
+
+    along_a_sofa = seating_refusal((0.008, 0.40, math.radians(0.4)))
+    assert along_a_sofa is not None and "soft" in along_a_sofa and "40.0 cm" in along_a_sofa
+
+    free_to_turn = seating_refusal((0.008, 0.012, math.radians(4.0)))
+    assert free_to_turn is not None and "heading" in free_to_turn
+
+    assert seating_refusal(None) is not None, "no covariance is not a sharp seating"
+    assert seating_refusal((0.008, 0.40, math.radians(4.0)), 1.0, 180.0) is None, "wide open"
+
+
+def test_a_seating_reads_as_centimetres_and_degrees_in_a_report_line() -> None:
+    """An operator reads the report line, not the covariance: metres and radians are neither."""
+    assert describe_sigma((0.008, 0.012, math.radians(0.23))) == "0.8/1.2 cm, 0.23 deg"
+    assert describe_sigma(None) == "unknown"

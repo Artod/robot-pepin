@@ -651,6 +651,45 @@ def test_a_fan_may_not_re_seed_a_tracker_the_lidar_is_still_feeding(node: Reloca
     assert node._pending_seed is not None, "with the lidar gone the fan is the only word there is"
 
 
+def test_the_graph_may_re_seed_a_driving_cart_when_it_is_the_only_localizer(
+    node: Relocalizer,
+) -> None:
+    """No re-seed while a goal runs, because a teleport mid-drive is worse than a poor fit — but
+    that assumes something else will correct the pose, and with the lidar off the roster nothing
+    will: on 2026-09-14 21:12 the cart drove 64 s on a belief 2 m wrong while the graph
+    recognised the place the whole way, every candidate refused for the single reason that a
+    goal was running. With the lidar alive the rule is unchanged: the graph waits."""
+    standing(node)
+    node._navigating = True
+    on_candidate = node.subs["/localization/candidate"][1]
+
+    node._registry.observe(LIDAR, 100.0)  # the lidar is feeding this tracker
+    for _ in range(4):
+        on_candidate(candidate_msg(node, CARRIED_TO, source=GRAPH))
+    assert node._pending_seed is None, "the lidar is there to correct the drive; the graph waits"
+
+    node.clock.seconds = 120.0  # ...and now nothing of the lidar's is fresh any more
+    for _ in range(3):
+        on_candidate(candidate_msg(node, CARRIED_TO, source=GRAPH))
+    assert node._pending_seed is not None, "the graph is the only thing that knows the place"
+    node._report_tracking()
+    assert "graph_reseed_while_driving=on" in node.logger.texts("info")[-1]
+
+
+def test_the_graph_s_re_seed_while_driving_can_be_switched_off(node: Relocalizer) -> None:
+    """CLAUDE.md rule 19: the old rule stays reachable — nothing re-seeds a cart that is driving,
+    which is what a fresh database or an anchor learned off a soft seating calls for."""
+    standing(node)
+    node._navigating = True
+    assert node.set_parameters([Parameter("graph_reseed_while_driving", value=False)])[0].successful
+    node.clock.seconds = 120.0  # no lidar on the roster at all
+    for _ in range(4):
+        node.subs["/localization/candidate"][1](candidate_msg(node, CARRIED_TO, source=GRAPH))
+    assert node._pending_seed is None
+    node._report_tracking()
+    assert "graph_reseed_while_driving=off" in node.logger.texts("info")[-1]
+
+
 def rolled(node: Relocalizer, forward_m: float, at: float = 100.25) -> None:
     """One more odometry sample: the cart has rolled ``forward_m`` straight ahead by ``at``."""
     node.clock.seconds = at
