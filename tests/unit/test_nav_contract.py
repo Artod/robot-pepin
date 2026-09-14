@@ -501,6 +501,20 @@ def test_both_doors_to_a_goal_open_the_numbered_tape() -> None:
     assert "--no-tape" in script and "PEPIN_GOTO_TAPE" in script
 
 
+def test_goto_waits_on_its_log_watcher_instead_of_blocking_on_it() -> None:
+    """bash defers a trap until the running foreground command returns. goto.sh's last command
+    was a foreground `ssh | sed` that ends only when the board writes GOTO_EXIT, and a TERM to
+    the script never reached that ssh: three goto.sh survived their SIGTERM on 2026-09-13, 1-2 h
+    old, each holding an ssh. The watcher is a background job now, `wait`ed on — which a trapped
+    signal does interrupt — killed by a `finish` that runs exactly once."""
+    script = (REPO / "ros/goto.sh").read_text()
+    assert "trap finish EXIT\n" in script and "trap 'finish; exit 143' HUP TERM" in script
+    assert 'wait "$TAILPID"' in script and "TAILPID=$!" in script
+    assert 'if [ "$FINISHED" = 1 ]; then return 0; fi' in script, "finish must not run twice"
+    watcher = next(ln for ln in script.splitlines() if "GOTO_EXIT=/q" in ln)
+    assert watcher.rstrip().endswith("&"), "the watcher must never be the foreground command"
+
+
 def test_the_numbered_tape_says_which_clock_named_it() -> None:
     """The recorder runs in a container on UTC while the board's shell, the laptop and every
     ros/goto.sh file are on local time: a bare 220039 was read as a drive four hours later than

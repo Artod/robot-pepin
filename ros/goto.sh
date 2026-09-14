@@ -38,8 +38,13 @@ FFPID=$!
 MAX_REC_S=900          # the logger's own stop, in seconds: a recorder nobody stops is a bug
 LOG="/maps/rec/${STAMP}_goto.log"   # goto_ros' own words, kept on the board next to the recording
 INTERRUPTED=0
+FINISHED=0
+TAILPID=""   # the ssh streaming the goal's log: a signal must not wait for it (see the tail below)
 trap 'INTERRUPTED=1' INT
 finish() {  # everything recorded, always: scans, odometry, tracked pose, the goal's own log, the board log
+    if [ "$FINISHED" = 1 ]; then return 0; fi   # TERM runs this, then EXIT runs it again
+    FINISHED=1
+    if [ -n "$TAILPID" ]; then kill "$TAILPID" 2>/dev/null || true; fi
     kill -INT $FFPID 2>/dev/null; wait $FFPID 2>/dev/null
     watch_stop
     if [ "$INTERRUPTED" = 1 ]; then
@@ -68,7 +73,15 @@ finish() {  # everything recorded, always: scans, odometry, tracked pose, the go
     fi
     echo "recorded: $(ls "$rec" | grep -c "^${STAMP}_goto") files ros/maps/rec/${STAMP}_goto* (jsonl, log, board log, camera; cleanup trace in _goto_finish.log)"
 }
-trap finish EXIT HUP TERM  # a closed terminal must still stop the logger and fetch the run
+trap finish EXIT
+# ...and a signal ENDS the run, it does not merely mark it. bash defers a trap until the running
+# foreground command returns, and the last thing this script did was a foreground `ssh | sed`
+# that blocks until the board writes GOTO_EXIT: a TERM to this pid never reached that ssh, so the
+# pipeline never ended, the trap never ran and the script sat there holding its ssh for hours
+# (three of them, 1-2 h old, 2026-09-13). The watcher is a background job waited on instead —
+# `wait` is interrupted by a trapped signal, the foreground pipeline was not — and `finish` kills
+# it. `exit` here so the run really ends; `finish` runs once, whichever trap gets there first.
+trap 'finish; exit 143' HUP TERM
 # Any recorder left over from a run whose cleanup never ran would keep a core busy: clear it first.
 ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f session_logger.py >/dev/null 2>&1; true"
 # PEPIN_REC_CAMERA_SCANS=1 also tapes /depth_scan and /contact_scan on the board. Off by
@@ -83,4 +96,8 @@ if [ "${PEPIN_GOTO_TAPE:-on}" = off ]; then TAPE_FLAG="--no-tape"; fi
 ssh "root@$BOARD" "touch /root/pepin-ros$LOG; docker exec -d -e PYTHONUNBUFFERED=1 pepin-ros /pepin_entrypoint.sh sh -c 'python3 /tools/goto_ros.py --places $PLACES $TAPE_FLAG $* > $LOG 2>&1; echo GOTO_EXIT=\$? >> $LOG'"
 echo "laptop: the goal was sent at $(date +%H:%M:%S.%2N)"
 watch_start
-ssh "root@$BOARD" "tail -n +1 -F /root/pepin-ros$LOG 2>/dev/null | sed -u '/^GOTO_EXIT=/q'" 2>/dev/null || true
+# Backgrounded on purpose: see the trap above. `sed -u /q` ends it when the board writes
+# GOTO_EXIT, and `finish` kills it when a signal ends the run first.
+ssh "root@$BOARD" "tail -n +1 -F /root/pepin-ros$LOG 2>/dev/null | sed -u '/^GOTO_EXIT=/q'" 2>/dev/null &
+TAILPID=$!
+wait "$TAILPID" 2>/dev/null || true
