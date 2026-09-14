@@ -195,9 +195,75 @@ def test_a_new_map_forgets_what_was_measured_against_the_old_one() -> None:
 
 def test_the_age_the_gate_refuses_past_is_a_live_switch() -> None:
     gate = MeasurementGate()
-    assert gate.switches == ("measurement_max_age_s",)
+    assert gate.switches == ("measurement_max_age_s", "self_check")
     gate.switch("measurement_max_age_s", 1.0)
     gate.offer(remote(stamp=100.0), "map1")
     assert len(gate.take(100.8, rolling(steps=11))) == 1, "0.8 s is inside the new age"
     with pytest.raises(ValueError, match="not a switch"):
         gate.switch("rest_lock", True)
+
+
+def standing(seconds: float = 3.0) -> OdomHistory:
+    """The cart standing still, a sample every 0.1 s: a carry that adds nothing, so what is
+    left between two measurements is the source's own scatter."""
+    return trail(*((100.0 + 0.1 * k, Pose2D()) for k in range(int(seconds / 0.1) + 1)))
+
+
+def jumpy(gate: MeasurementGate, steps: int = 20, jump_m: float = 0.24) -> list[PoseMeasurement]:
+    """``steps`` measurements of a source that alternates ``jump_m`` while the cart stands and
+    claims SURE (4 cm) throughout; the last update's taken measurements."""
+    still, taken = standing(), []
+    for k in range(steps):
+        stamp = 100.0 + 0.1 * k
+        gate.offer(remote(Pose2D(1.0 + (jump_m if k % 2 else 0.0), 2.0, 0.5), stamp=stamp), "map1")
+        taken = gate.take(stamp, still)
+    return taken
+
+
+def test_a_remote_source_that_does_not_repeat_loses_its_weight() -> None:
+    """The day of 2026-09-13 in one test: the camera claimed a sigma a formula gave it while
+    nobody had measured how far apart two of its answers fall. Here it claims 4 cm and jumps 24
+    at rest, which is a variance ratio of 24^2 / (2 * 4^2) over three degrees of freedom — 6 —
+    and its covariance is multiplied by exactly that before anything is fused with it."""
+    gate = MeasurementGate()
+    taken = jumpy(gate)
+    assert gate.self_check.ratio(DEPTH) == pytest.approx(6.0)
+    assert taken[0].covariance[0, 0] == pytest.approx(SURE[0, 0] * 6.0)
+    assert gate.status()["self_check"][DEPTH] == [6.0, 6.0]
+    assert "self_check on: depth r 6.00 x6.00" in gate.report()
+
+
+def test_the_self_check_is_a_live_switch_and_off_is_the_old_behaviour() -> None:
+    """Off, the covariance arrives exactly as the laptop sent it — and the ratio is still
+    measured, so the report line shows what the switch would do before it is moved."""
+    gate = MeasurementGate()
+    gate.switch("self_check", False)
+    taken = jumpy(gate)
+    assert taken[0].covariance[0, 0] == pytest.approx(SURE[0, 0])
+    assert gate.self_check.ratio(DEPTH) == pytest.approx(6.0)
+    assert gate.status()["self_check"][DEPTH] == [6.0, 1.0]
+
+
+def test_each_remote_source_is_judged_on_its_own_record() -> None:
+    """A wild depth and a steady contact line arrive together: the contact line's covariance is
+    untouched, and its record is the same whether depth is there or not."""
+    gate, alone = MeasurementGate(), MeasurementGate()
+    still = standing()
+    for k in range(20):
+        stamp = 100.0 + 0.1 * k
+        wild = Pose2D(1.0 + (0.24 if k % 2 else 0.0), 2.0, 0.5)
+        gate.offer(remote(wild, source=DEPTH, stamp=stamp), "map1")
+        for g in (gate, alone):
+            g.offer(remote(SOMEWHERE, source=CONTACT, stamp=stamp), "map1")
+            g.take(stamp, still)
+    assert gate.self_check.inflation(CONTACT) == 1.0
+    assert gate.self_check.inflation(DEPTH) == pytest.approx(6.0)
+    assert gate.self_check.ratio(CONTACT) == alone.self_check.ratio(CONTACT)
+
+
+def test_a_new_map_forgets_the_self_check_too() -> None:
+    """A source's repeatability was measured against poses on the old map; it starts over."""
+    gate = MeasurementGate()
+    jumpy(gate)
+    gate.forget()
+    assert gate.self_check.ratio(DEPTH) == 1.0 and gate.status()["self_check"] == {}

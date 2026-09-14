@@ -51,6 +51,7 @@ from pepin.scanmatch import (
     apply_motion,
     relative_motion,
 )
+from pepin.selfcheck import SelfCheck
 from pepin.sources import LIDAR, TRACKER, ScanObservation, ScanSource, SourceRegistry
 
 __all__ = ["Localizer", "Running", "ScanObservation", "TrackStats", "pooled"]
@@ -66,6 +67,7 @@ SWITCHES = (
     "rest_gain",
     "fusion",
     "covariance",
+    "self_check",
 )
 
 logger = logging.getLogger(__name__)
@@ -237,6 +239,7 @@ class Localizer:
         sources: SourceRegistry | None = None,  # which sensors correct; the lidar alone by default
         fusion: bool = True,  # off: the widest enabled source corrects alone, the rest only report
         covariance: str = PEAK,  # how a match's covariance is read: its score peak, or the fit
+        self_check: bool = True,  # every source's covariance widened by its own repeatability
     ) -> None:
         self._grid = grid
         # The tracker wants a continuous correction: quantised to the search step it corrects the
@@ -254,6 +257,11 @@ class Localizer:
         self.sources = sources if sources is not None else SourceRegistry()
         self.fusion = fusion
         self.covariance = covariance
+        # Each scan source matched HERE vouches for itself: its match is checked against its own
+        # previous match carried over the odometry, and its covariance is widened by what that
+        # says about it (pepin.selfcheck). Never against another source's pose. Measurements
+        # matched elsewhere (``measurements``) were already checked where they were made.
+        self._self_check = SelfCheck(enabled=self_check)
         # The last update, source by source: every source's word, the one they were fused into
         # (the anchor's own when it stood alone or was a bound), who anchored, and the pose it
         # all corrected from — what /localization/sources shows (``sources_report``).
@@ -294,6 +302,16 @@ class Localizer:
         self._last_odom: Pose2D | None = None
 
     @property
+    def self_check(self) -> bool:
+        """Whether every source's covariance is widened by its own measured repeatability
+        (:class:`pepin.selfcheck.SelfCheck`); off, the ratio is still measured and reported."""
+        return self._self_check.enabled
+
+    @self_check.setter
+    def self_check(self, value: bool) -> None:
+        self._self_check.enabled = bool(value)
+
+    @property
     def lost(self) -> bool:
         """True once several scans in a row fit poorly: the wide recovery search is active."""
         return self.weak_scans >= self._lost_after
@@ -313,7 +331,8 @@ class Localizer:
             f"carry {self._carry_m * 100:.0f} cm / {self._carry_deg:.0f} deg, "
             f"sources {','.join(self.sources.enabled) or 'none'}, "
             f"fusion {'on' if self.fusion else 'off'}, "
-            f"covariance {self.covariance}"
+            f"covariance {self.covariance}, "
+            f"{self._self_check.text()}"
         )
 
     def report(self) -> TrackStats:
@@ -346,7 +365,9 @@ class Localizer:
         fused, the ones a fusion rejected, and per source on the roster its health at ``now``
         (``off`` when the flag has it off) with, when it measured, its fit, the correction it
         proposed from the prediction (``delta``: cm, cm, deg), the roots of its covariance
-        diagonal (``sigma``: cm, cm, deg) and whether its match was a bound (``edge``)."""
+        diagonal (``sigma``: cm, cm, deg), whether its match was a bound (``edge``) and what
+        the source's own repeatability says about its covariance (``self_check``: the running
+        ratio and the factor it was widened by, :class:`pepin.selfcheck.SelfCheck`)."""
         fused = self.fused
         report: dict[str, Any] = {
             "anchor": self.anchor,
@@ -372,6 +393,10 @@ class Localizer:
                     ],
                     sigma=[round(sx * 100.0, 2), round(sy * 100.0, 2), round(math.degrees(st), 2)],
                     edge=measurement.edge,
+                    self_check=[
+                        round(self._self_check.record(name).ratio, 3),
+                        round(self._self_check.inflation(name), 3),
+                    ],
                 )
             report["sources"][name] = entry
         return report
@@ -931,6 +956,13 @@ class Localizer:
         off, and scans thinner than their source's floor, are ignored; with nothing left to
         match the prediction stands (``thin``). Every source's measurement is kept in
         ``measurements``.
+
+        With ``self_check`` on, each match made HERE is first held against that same source's
+        own previous match carried over ``odom`` and its covariance widened by how far the two
+        disagree in units of what they claimed (:class:`pepin.selfcheck.SelfCheck`) — a source
+        whose answers scatter four times as far as it claims loses sixteen times its weight,
+        and no source is ever judged by another's pose. ``measurements`` arrive already checked
+        on the machine that matched them.
         """
         motion = (
             Pose2D()
@@ -971,7 +1003,11 @@ class Localizer:
         points = anchor.points if anchor is not None else None
         self.surfaces = {}  # this update's lattices only: a source that fell silent leaves none
         self.measurements = [
-            self._measure(observation, source, prediction, motion, mask)
+            self._self_check.checked(
+                self._measure(observation, source, prediction, motion, mask),
+                odom,
+                trust_odometry=trust_odometry,
+            )
             for observation, source in usable
         ] + external
         for measurement in self.measurements:

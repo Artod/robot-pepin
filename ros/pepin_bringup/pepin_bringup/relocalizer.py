@@ -290,6 +290,31 @@ FLAGS = FlagSet(
         choices=COVARIANCE_CHOICES,
     ),
     Flag(
+        "self_check",
+        True,
+        description="every source vouches for itself: its covariance is widened by how far its"
+        " answers fall from where its OWN previous answer, carried over the odometry, said they"
+        " would (pepin.selfcheck). A source that scatters four times as far as it claims loses"
+        " sixteen times its weight; one that is honest, or better, is not touched. Per source,"
+        " never across sources: no lidar pose enters the camera's number and no camera pose the"
+        " lidar's",
+        why="2026-09-13: the camera's measurements claimed 25 cm from a linear formula over the"
+        " fit (pepin.fusion.sigma_from_fit: fit 0.34 -> 24.8 cm) while nobody had measured how"
+        " far apart two of its own answers fall a tenth of a second apart. On that claim they"
+        " took 20-45 % of the fused weight and pulled the board's pose 0.8-1.5 cm off the"
+        " lidar's, whose real error at fit >= 0.7 is 0.5-0.6 cm median against the replay truth"
+        " (tapes 20260913_190024/190422, scratch/drive_bisect.py). A covariance nobody measured"
+        " is a claim; this makes every source pay for its weight with its own repeatability."
+        " The ratio is a chi-square of 3 dof averaged over the last 20 measurements, so 1.0 is"
+        " an honest covariance and the factor is capped at 25",
+        on_when="whenever more than one source is fused — it is the only thing standing between"
+        " the fusion and a source whose covariance is a formula rather than a measurement",
+        off_when="to measure what the check is worth on a tape (the ratios are still measured"
+        " and printed with it off, so the A/B is one parameter set apart), or if a source that"
+        " is known good is ever inflated by a real correction the odometry could not predict"
+        " — a push by hand, a wheel slipping while the flag says the step was trusted",
+    ),
+    Flag(
         "local_fit",
         True,
         description="/localization_fit carries only a fit a scan of THIS machine measured: with"

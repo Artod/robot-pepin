@@ -32,6 +32,7 @@ from numpy.typing import NDArray
 from pepin.fusion import Matrix, PoseMeasurement, carried, fuse
 from pepin.odometry import Pose2D
 from pepin.scanmatch import relative_motion
+from pepin.selfcheck import SelfCheck
 from pepin.sources import CAMERA, SourceRegistry
 from pepin.timeline import OdomTrail
 
@@ -188,9 +189,14 @@ class MeasurementGate:
         sources: SourceRegistry | None = None,
         measurement_max_age_s: float = MEASUREMENT_MAX_AGE_S,
         name: str = CAMERA,
+        self_check: bool = True,
     ) -> None:
         self.sources = sources
         self.measurement_max_age_s = measurement_max_age_s
+        # Every remote source vouches for itself here, BEFORE the sources are fused into one
+        # word: each is checked against its own previous measurement carried over this
+        # machine's odometry, never against another sensor's pose (pepin.selfcheck).
+        self.self_check = SelfCheck(enabled=self_check)
         self.name = name  # what the fused measurement is called on the tracker's roster
         self._pending: dict[str, RemoteMeasurement] = {}
         self._counts: dict[str, int] = {}
@@ -202,13 +208,16 @@ class MeasurementGate:
         self._rejected: tuple[str, ...] = ()  # sources the last fusion dropped
         self._used: tuple[str, ...] = ()  # ...and the ones it was made of
 
-    switches: ClassVar[tuple[str, ...]] = ("measurement_max_age_s",)
+    switches: ClassVar[tuple[str, ...]] = ("measurement_max_age_s", "self_check")
 
     def switch(self, name: str, value: Any) -> None:
         """A live flag by its name (:attr:`switches`); ``ValueError`` for any other name."""
-        if name not in self.switches:
+        if name == "self_check":
+            self.self_check.enabled = bool(value)
+        elif name == "measurement_max_age_s":
+            self.measurement_max_age_s = float(value)
+        else:
             raise ValueError(f"{name}: not a switch of the measurement gate")
-        setattr(self, name, float(value))
 
     def malformed(self, reason: str) -> None:
         """A message that was not a measurement arrived; counted, with the complaint kept."""
@@ -276,7 +285,11 @@ class MeasurementGate:
             self._age_s = max(age, 0.0)
             self._taken[source] = self._taken.get(source, 0) + 1
             self._count("taken")
-            taken.append(carried(remote.measurement(), relative_motion(at_scan, at_stamp), stamp))
+            # Checked at its own moment, against its own previous word (this source's alone),
+            # and only then carried to the update: the widening is the source's repeatability,
+            # so what the carry adds is never counted as the sensor scattering.
+            checked = self.self_check.checked(remote.measurement(), at_scan)
+            taken.append(carried(checked, relative_motion(at_scan, at_stamp), stamp))
         self._used = tuple(m.source for m in taken)
         fused = fuse(taken)
         if fused is None:
@@ -316,8 +329,10 @@ class MeasurementGate:
         return MeasurementUpdate(stamp, odom, taken[0]) if taken else None
 
     def forget(self) -> None:
-        """Drop everything waiting: what a new map means for measurements made on the old one."""
+        """Drop everything waiting and every source's self-check record: what a new map means
+        for measurements made on the old one."""
         self._pending.clear()
+        self.self_check.forget()
 
     def status(self) -> dict[str, Any]:
         """The gate as the operator sees it on ``/localization/sources``: which sources the last
@@ -328,6 +343,7 @@ class MeasurementGate:
             "rejected": list(self._rejected),
             "age_ms": round(self._age_s * 1e3, 1),
             "max_age_s": self.measurement_max_age_s,
+            "self_check": self.self_check.status(),  # per source: [ratio, inflation]
         }
 
     def report(self) -> str:
@@ -340,6 +356,7 @@ class MeasurementGate:
         self._counts, self._taken, self._malformed = {}, {}, 0
         return (
             f"measurements {seen} ({body}), per source: {per_source}, last {last}, "
+            f"{self.self_check.text()}, "
             f"malformed {malformed}{f' ({self._reason})' if self._reason else ''}"
         )
 
