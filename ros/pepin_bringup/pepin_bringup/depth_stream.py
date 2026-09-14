@@ -103,6 +103,7 @@ from pepin.depth import (
     to_base,
 )
 from pepin.depth_pipeline import (
+    PARALLAX_MATCHER,
     PARALLAX_MIN_BASELINE_M,
     AffineLaw,
     FrameContext,
@@ -123,7 +124,7 @@ from pepin.elevation import RayGain
 from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import FramePoser
 from pepin.lean import LEAN_QUALITY_FLOOR
-from pepin.parallax import to_gray
+from pepin.parallax import MATCHERS, to_gray
 from pepin.tsdf import RigidPose
 from pepin_bringup.msgs import (
     array_from_image,
@@ -475,6 +476,31 @@ FLAGS = FlagSet(
         " the walk stops at the newest one — the frame before this one",
         range=(0.0, 1.0),
     ),
+    Flag(
+        "parallax_matcher",
+        PARALLAX_MATCHER,
+        description="who finds the corners two frames share: klt follows them with optical flow,"
+        " orb describes and recognises them. The matcher sets how far back a partner may sit —"
+        " 0.60 s for the flow, 1.5 s for the describer — and what a point's place is trusted to,"
+        " half a pixel against a whole one",
+        why="klt wins at every gap this cart reaches. Both matchers over both errands of"
+        " 2026-09-14 on the same frame pairs (scratch/parallax_matcher_sweep.txt, runs"
+        " 0267/0268/0273/0274): at the 0.5 s gap the anchor actually pairs across, the flow reads"
+        " 0.993 of the lidar at 1.5-2 m against the describer's 1.031, with half the noise"
+        " (13.5 cm against 29.6 per pair) at half the cost (3.9 ms a frame against 8.3). What the"
+        " describer does buy is the long gap: 11 pairs a frame at 1.0 and 1.5 s where the flow"
+        " gives 2 and 0, having lost 70-78 % of its corners. It buys them at the wrong depth —"
+        " both matchers read 1.28-1.45 of the lidar at 1.5-2 m once the gap passes a second,"
+        " because a second of this odometry's drift inflates the baseline every depth is"
+        " proportional to. The gap is capped by the odometry, not by the matcher",
+        on_when="orb on a cart whose pose over 1.5 s is better than its wheels and gyro (a"
+        " loop-closing graph, a second odometry), where the describer's 12.8 cm of baseline at"
+        " 1.5 s is worth its noise; or on a robot that pauses between steps, where the flow has"
+        " no short gap to work with",
+        off_when="klt whenever the cart drives on wheel odometry: measured better, quieter and"
+        " cheaper at every gap under a second",
+        choices=MATCHERS,
+    ),
 )
 FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
 
@@ -551,6 +577,7 @@ class DepthStream(Node):
         set_scale_ceiling(float(self._switches["scale_ceiling"]))  # and the law's bound
         self._law.slew_per_s = float(self._switches["law_slew"])  # how fast the law may move
         self._ask_parallax(float(self._switches["parallax_min_baseline_m"]))  # and the ring's ask
+        self._ask_matcher(str(self._switches["parallax_matcher"]))  # and who matches its corners
         self._tally = Tally(STAGES)
         self._lean = LeanFeed(
             self,
@@ -648,6 +675,8 @@ class DepthStream(Node):
             self._poser.min_lean_quality = float(new)
         elif name == "parallax_min_baseline_m":
             self._ask_parallax(float(new))
+        elif name == "parallax_matcher":
+            self._ask_matcher(str(new))
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
 
@@ -656,6 +685,13 @@ class DepthStream(Node):
         stage = self._pipeline.stage("parallax_anchor")
         if isinstance(stage, ParallaxAnchor):
             stage.min_baseline_m = baseline_m
+
+    def _ask_matcher(self, matcher: str) -> None:
+        """Tell the parallax anchor who finds the corners two frames share; the gap window it
+        looks back over follows the choice (0.60 s for the flow, 1.5 s for the describer)."""
+        stage = self._pipeline.stage("parallax_anchor")
+        if isinstance(stage, ParallaxAnchor):
+            stage.matcher = matcher
 
     def _on_work_error(self, text: str) -> None:
         self.get_logger().error(f"depth failed on a frame:\n{text}")

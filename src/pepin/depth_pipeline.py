@@ -111,10 +111,10 @@ MIN_LIFT_SPREAD = 0.15  # the pool's elevation span (5th-95th of lift) before an
 ROW_BANDS = 6  # bands of elevation of the row law
 PARALLAX_MIN_GAP_S = 0.08  # a partner frame nearer in time than this has no baseline to speak of
 PARALLAX_MAX_GAP_S = 0.60  # farther back than this the view has changed more than the flow follows
+PARALLAX_ORB_MAX_GAP_S = 1.5  # the describer's window: a keypoint is recognised, not followed
 PARALLAX_MIN_BASELINE_M = 0.10  # the parallax a partner is chosen to reach: 0.4 s at 0.25 m/s
-PARALLAX_RING_FRAMES = (
-    16  # frames kept to choose a partner from: a second at any rate the node runs
-)
+PARALLAX_MATCHER = "klt"  # who finds the correspondences: the flow or the describer
+PARALLAX_RING_FRAMES = 24  # frames kept to choose a partner from: 1.5 s at any rate the node runs
 PARALLAX_WEIGHT = 1.0  # the share of a parallax pair's own inverse-depth precision that counts
 
 
@@ -1054,7 +1054,18 @@ class ParallaxAnchor(AnchorStage):
     scale-like error still unexplained, and not the range-dependent one reported on 2026-09-12
     (that shape was the thin baseline's skew, not the near field). Under a metre nothing can be
     checked this way: the lidar's plane leaves the bottom of the picture below 1.0 m. The stage
-    costs 3-5 ms a frame and ships switched off."""
+    costs 3-5 ms a frame and ships switched off.
+
+    Who matches the corners is a switch (``matcher``, the node's ``parallax_matcher``) and it
+    moves the gap window with it: the flow may look 0.60 s back, the describer 1.5 s, because a
+    keypoint is recognised rather than followed. Measured on all four errands of 2026-09-14,
+    both matchers on the same frame pairs (scratch/parallax_matcher_sweep.txt): ORB keeps 11
+    pairs a frame at 1.0 and 1.5 s where the flow keeps 2 and 0, but at 0.5 s — the gap a 10 cm
+    ask lands on at this speed — the flow reads 0.993 of the lidar at 1.5-2 m against ORB's
+    1.031, with half the per-pair sigma (13.5 cm against 29.6) at half the cost (3.9 ms a frame
+    against 8.3). Past a second of gap both read 1.25-1.45: the odometry's own drift over that
+    second, not the matcher's doing. So the flow is the default and the longer window is there
+    for a pose that deserves it."""
 
     name = "parallax_anchor"
 
@@ -1063,13 +1074,15 @@ class ParallaxAnchor(AnchorStage):
         *,
         weight: float = PARALLAX_WEIGHT,
         min_gap_s: float = PARALLAX_MIN_GAP_S,
-        max_gap_s: float = PARALLAX_MAX_GAP_S,
+        max_gap_s: float | None = None,
         min_baseline_m: float = PARALLAX_MIN_BASELINE_M,
+        matcher: str = PARALLAX_MATCHER,
     ) -> None:
         self.weight = weight
         self.min_gap_s = min_gap_s
-        self.max_gap_s = max_gap_s
+        self._max_gap_s = max_gap_s  # None: whatever window the matcher in use can carry
         self.min_baseline_m = min_baseline_m
+        self.matcher = matcher
         self.frames = 0  # pairs of frames that reached the triangulation
         self.contributed = 0  # of those, the ones that gave at least one pair
         self.rejected: dict[str, int] = {}
@@ -1077,6 +1090,22 @@ class ParallaxAnchor(AnchorStage):
         self._baseline: list[float] = []
         self._sigma: list[float] = []
         self._gap: list[float] = []
+        self._kept: list[int] = []
+
+    @property
+    def max_gap_s(self) -> float:
+        """How far back a partner frame may sit, in seconds: the window the constructor was
+        given, or the one the matcher in use can carry — 0.60 s for the flow, which loses three
+        corners in four by 1.5 s, and 1.5 s for the describer, which recognises a keypoint
+        instead of following it."""
+        if self._max_gap_s is not None:
+            return self._max_gap_s
+        return PARALLAX_ORB_MAX_GAP_S if self.matcher == "orb" else PARALLAX_MAX_GAP_S
+
+    @max_gap_s.setter
+    def max_gap_s(self, seconds: float | None) -> None:
+        """Pin the window to a number of seconds, or to ``None`` to let the matcher set it."""
+        self._max_gap_s = seconds
 
     @property
     def gap_s(self) -> float | None:
@@ -1144,7 +1173,7 @@ class ParallaxAnchor(AnchorStage):
         if chosen is None:
             return None
         previous, motion = chosen
-        truth = parallax_truth(previous.gray, gray, ctx.intr, motion)
+        truth = parallax_truth(previous.gray, gray, ctx.intr, motion, matcher=self.matcher)
         self.frames += 1
         for reason, n in truth.rejected.items():
             self._count(reason, n)
@@ -1162,7 +1191,9 @@ class ParallaxAnchor(AnchorStage):
         self._baseline.append(float(np.median(truth.baseline[ok])))
         self._sigma.append(float(np.median(truth.sigma[ok])))
         self._gap.append(ctx.stamp - previous.stamp)
+        self._kept.append(int(ok.sum()))
         del self._baseline[:-POOL_FRAMES], self._sigma[:-POOL_FRAMES], self._gap[:-POOL_FRAMES]
+        del self._kept[:-POOL_FRAMES]
         return Pairs.of(
             d[ok],
             truth.z[ok],
@@ -1172,10 +1203,14 @@ class ParallaxAnchor(AnchorStage):
         )
 
     def describe(self) -> str:
-        """The verdict for the report line: the parallax a partner is chosen to reach, the
-        frames that triangulated, the gap and the baseline they were paired across, the sigma
-        of the pairs they gave, and what was thrown away and why."""
-        asked = f"weight {self.weight:g}, asks {self.min_baseline_m * 100:.0f} cm"
+        """The verdict for the report line: who matched the corners and how far back it may
+        look, the parallax a partner is chosen to reach, the frames that triangulated, the gap
+        and the baseline they were paired across, the pairs a frame yields and their sigma, and
+        what was thrown away and why."""
+        asked = (
+            f"{self.matcher} <= {self.max_gap_s:.2f} s, weight {self.weight:g},"
+            f" asks {self.min_baseline_m * 100:.0f} cm"
+        )
         dropped = ", ".join(f"{k} {v}" for k, v in self.rejected.items())
         if not self._baseline:
             return f"{asked}, no pairs yet" + (f" ({dropped})" if dropped else "")
@@ -1183,6 +1218,7 @@ class ParallaxAnchor(AnchorStage):
             f"{asked}, {self.contributed}/{self.frames} frames,"
             f" gap {np.median(self._gap):.2f} s,"
             f" baseline {np.median(self._baseline) * 100:.1f} cm,"
+            f" {np.median(self._kept):.0f} pairs a frame,"
             f" sigma {np.median(self._sigma) * 100:.1f} cm"
             + (f", rejected: {dropped}" if dropped else "")
         )

@@ -61,13 +61,26 @@ places with the gap: the epipolar test takes ~45 % of the corners at every short
 parallax test 15.9 % at 0.1 s against 2.0 % at 1.5 s, and the flow 7.8 % against 76.1 % — the
 tracker's window follows the longer step up to about 0.6 s, past which the points kept per frame
 fall to single figures.
+
+Which is what the describer is for, and what it is not (scratch/parallax_matcher_sweep.py over
+all four errands of 2026-09-14, both matchers on the same frame pairs, 2026-09-14): ORB keeps 11
+pairs a frame at gaps of 1.0 and 1.5 s where the flow keeps 2 and 0, at 8.4 ms a frame against
+the flow's 4.6, and it does reach a baseline the flow cannot hold a pair across. It reaches it at
+the wrong depth. At the 0.5 s gap the anchor really pairs across, the flow reads 0.993 of the
+lidar at 1.5-2 m against the describer's 1.031, with half the noise (13.5 cm a pair against
+29.6): a keypoint is placed to about a pixel where a tracked corner is placed to half of one,
+which is why ``orb`` is credited with :data:`ORB_DISPARITY_SIGMA_PX`. And past a second of gap
+both matchers read 1.25-1.45 of the lidar at 1.5-2 m, together: the odometry's drift over that
+second inflates the baseline every depth is proportional to, so the gap is capped by the pose,
+not by the matcher. The flow is the default; the describer is the path for a robot whose pose
+over 1.5 s is better than this cart's wheels and gyro.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -83,6 +96,17 @@ CORNER_MIN_DISTANCE = 8  # pixels between two corners: a cluster on one poster i
 LK_WINDOW = 21  # the flow's window in pixels, at every pyramid level
 LK_LEVELS = 3  # pyramid levels: 3 follows ~40 px of motion, a tenth of a second at walking pace
 FB_TOL_PX = 0.5  # a corner tracked to B and back must land this close to where it started
+
+# ---- the describer ------------------------------------------------------------------------
+# The flow follows a corner; the describer recognises one. Past about half a second of gap the
+# view has moved further than the flow's window and the tracker loses three corners in four,
+# while a descriptor does not care how far a point travelled as long as it still looks the same.
+ORB_FEATURES = 1200  # keypoints asked of one frame: 640x360 has that many corners in a room
+ORB_FAST_THRESHOLD = 12  # how much brighter than its ring a pixel must be to start a keypoint
+ORB_RATIO = 0.75  # Lowe: a match whose second-best is this close is ambiguous, not a match
+ORB_DISPARITY_SIGMA_PX = 1.0  # what a keypoint's octave knows its place to, against the flow's 0.5
+MATCHERS = ("klt", "orb")
+Matcher = Literal["klt", "orb"]
 
 # ---- the gates ----------------------------------------------------------------------------
 MIN_BASELINE_M = 0.02  # a shorter move than this is standing still: 2 cm is the odometry's own
@@ -195,16 +219,48 @@ def match(
     gray_a: npt.NDArray[np.uint8],
     gray_b: npt.NDArray[np.uint8],
     *,
+    matcher: str = "klt",
     max_corners: int = MAX_CORNERS,
     quality: float = CORNER_QUALITY,
     min_distance: int = CORNER_MIN_DISTANCE,
     fb_tol_px: float = FB_TOL_PX,
 ) -> tuple[Pixels, Pixels]:
-    """Corresponding points of two grey images: corners of A tracked into B by pyramidal
-    Lucas-Kanade and back again, keeping only those that return to within ``fb_tol_px`` of
-    where they started. Returns (points in A, points in B), both (n, 2) sub-pixel columns and
-    rows, possibly empty."""
-    pts_a, pts_b, _found = _track(
+    """Corresponding points of two grey images. With ``matcher`` ``klt`` (the default) corners
+    of A are tracked into B by pyramidal Lucas-Kanade and back again, keeping only those that
+    return to within ``fb_tol_px`` of where they started; with ``orb`` both frames are described
+    and the descriptors matched (:func:`_describe`), which costs more and survives a far longer
+    gap. Returns (points in A, points in B), both (n, 2) sub-pixel columns and rows, possibly
+    empty."""
+    pts_a, pts_b, _found = _correspond(
+        gray_a,
+        gray_b,
+        matcher,
+        max_corners=max_corners,
+        quality=quality,
+        min_distance=min_distance,
+        fb_tol_px=fb_tol_px,
+    )
+    return pts_a, pts_b
+
+
+def _correspond(
+    gray_a: npt.NDArray[np.uint8],
+    gray_b: npt.NDArray[np.uint8],
+    matcher: str,
+    *,
+    max_corners: int = MAX_CORNERS,
+    quality: float = CORNER_QUALITY,
+    min_distance: int = CORNER_MIN_DISTANCE,
+    fb_tol_px: float = FB_TOL_PX,
+) -> tuple[Pixels, Pixels, int]:
+    """The named matcher's correspondences with the number of candidates it started from, so a
+    caller can say what share it lost: ``klt`` is :func:`_track`, ``orb`` is :func:`_describe`.
+    Raises ``ValueError`` on any other name — a misspelt flag is not silently the default."""
+    if matcher == "orb":
+        return _describe(gray_a, gray_b)
+    if matcher != "klt":
+        raise ValueError(f"unknown matcher {matcher!r}: one of {', '.join(MATCHERS)}")
+    return _track(
         gray_a,
         gray_b,
         max_corners=max_corners,
@@ -212,7 +268,50 @@ def match(
         min_distance=min_distance,
         fb_tol_px=fb_tol_px,
     )
-    return pts_a, pts_b
+
+
+def _describe(
+    gray_a: npt.NDArray[np.uint8],
+    gray_b: npt.NDArray[np.uint8],
+    *,
+    features: int = ORB_FEATURES,
+    fast_threshold: int = ORB_FAST_THRESHOLD,
+    ratio: float = ORB_RATIO,
+) -> tuple[Pixels, Pixels, int]:
+    """Correspondences by recognition rather than by tracking: ORB keypoints and their binary
+    descriptors in both frames, matched on Hamming distance under Lowe's ratio test (a match
+    whose runner-up is within ``ratio`` of it is ambiguous and dropped) and a cross-check (B's
+    own best match for the point must be that point again). Returns (points in A, points in B,
+    keypoints found in A), the last being what the losses are a share of — the describer's
+    equivalent of the flow's corner count."""
+    import cv2
+
+    empty: Pixels = np.zeros((0, 2), dtype=np.float32)
+    # cv2's stubs type neither the detector's tuple return nor a DMatch's fields
+    detector: Any = cv2.ORB.create(nfeatures=features, fastThreshold=fast_threshold)
+    kp_a, des_a = detector.detectAndCompute(np.ascontiguousarray(gray_a), None)
+    kp_b, des_b = detector.detectAndCompute(np.ascontiguousarray(gray_b), None)
+    found = len(kp_a)
+    if des_a is None or des_b is None or len(des_a) < 2 or len(des_b) < 2:
+        return empty, empty, found
+    brute: Any = cv2.BFMatcher(cv2.NORM_HAMMING)
+    mirror = {
+        pair[0].queryIdx: pair[0].trainIdx for pair in brute.knnMatch(des_b, des_a, k=2) if pair
+    }
+    rows_a: list[int] = []
+    rows_b: list[int] = []
+    for pair in brute.knnMatch(des_a, des_b, k=2):
+        if len(pair) < 2 or pair[0].distance > ratio * pair[1].distance:
+            continue
+        if mirror.get(pair[0].trainIdx) != pair[0].queryIdx:
+            continue
+        rows_a.append(pair[0].queryIdx)
+        rows_b.append(pair[0].trainIdx)
+    if not rows_a:
+        return empty, empty, found
+    pts_a: Pixels = np.array([kp_a[i].pt for i in rows_a], dtype=np.float32)
+    pts_b: Pixels = np.array([kp_b[i].pt for i in rows_b], dtype=np.float32)
+    return pts_a, pts_b, found
 
 
 def _track(
@@ -303,7 +402,12 @@ def perpendicular_baseline(points: Pixels, intr: Intrinsics, motion: Motion) -> 
 
 
 def triangulate(
-    pts_a: Pixels, pts_b: Pixels, intr: Intrinsics, motion_ab: Motion
+    pts_a: Pixels,
+    pts_b: Pixels,
+    intr: Intrinsics,
+    motion_ab: Motion,
+    *,
+    disparity_sigma_px: float = DISPARITY_SIGMA_PX,
 ) -> tuple[Array, Array]:
     """Where each correspondence sits in front of view B: the depth along B's optical axis in
     metres (the midpoint of the two rays' closest approach) and its one-sigma uncertainty.
@@ -312,16 +416,25 @@ def triangulate(
     into B's frame, so ``z_b * d_b - z_a * (R d_a) = t`` is three equations in two unknowns —
     solved by least squares, one 2x2 system per point. A depth that comes out behind either
     lens is returned as NaN (with an infinite sigma), never as a negative number."""
-    z, sigma, _residual, _baseline = _triangulate_full(pts_a, pts_b, intr, motion_ab)
+    z, sigma, _residual, _baseline = _triangulate_full(
+        pts_a, pts_b, intr, motion_ab, disparity_sigma_px=disparity_sigma_px
+    )
     return z, sigma
 
 
 def _triangulate_full(
-    pts_a: Pixels, pts_b: Pixels, intr: Intrinsics, motion: Motion
+    pts_a: Pixels,
+    pts_b: Pixels,
+    intr: Intrinsics,
+    motion: Motion,
+    *,
+    disparity_sigma_px: float = DISPARITY_SIGMA_PX,
 ) -> tuple[Array, Array, Array, Array]:
     """:func:`triangulate` with the two numbers the gates need as well: each point's
     reprojection residual in B (pixels) and the part of the baseline perpendicular to its ray
-    (metres), which is the parallax the depth actually rests on."""
+    (metres), which is the parallax the depth actually rests on. ``disparity_sigma_px`` is what
+    the matcher that produced these points knows a pixel to — the flow's half a pixel, a
+    keypoint's whole one."""
     d_a = _rays(pts_a, intr)
     d_b = _rays(pts_b, intr)
     t = np.asarray(motion.translation, dtype=float)
@@ -346,7 +459,7 @@ def _triangulate_full(
     ok = np.isfinite(z_b) & np.isfinite(z_a) & (z_b > NEAR_M) & (z_a > NEAR_M) & (det > 0)
     z = np.where(ok, middle[:, 2], np.nan)
     focal = 0.5 * (intr.fx + intr.fy)
-    sigma_px = np.hypot(DISPARITY_SIGMA_PX, np.where(np.isfinite(residual), residual, 0.0))
+    sigma_px = np.hypot(disparity_sigma_px, np.where(np.isfinite(residual), residual, 0.0))
     with np.errstate(divide="ignore", invalid="ignore"):
         sigma = np.where(ok & (baseline > 0), z**2 * sigma_px / (focal * baseline), np.inf)
     return z, sigma, residual, baseline
@@ -414,6 +527,7 @@ def parallax_truth(
     intr: Intrinsics,
     motion: Motion,
     *,
+    matcher: str = "klt",
     min_baseline_m: float = MIN_BASELINE_M,
     min_parallax_ratio: float = MIN_PARALLAX_RATIO,
     epipole_min_deg: float = EPIPOLE_MIN_DEG,
@@ -421,7 +535,12 @@ def parallax_truth(
     max_reproj_px: float = MAX_REPROJ_PX,
     max_weight: float = MAX_WEIGHT,
 ) -> ParallaxTruth:
-    """The whole measurement for one pair of frames: track, gate, triangulate, weigh.
+    """The whole measurement for one pair of frames: match, gate, triangulate, weigh.
+
+    ``matcher`` picks who finds the correspondences: ``klt`` tracks corners with optical flow
+    (cheap, and the one that wins at short gaps), ``orb`` describes and matches keypoints
+    (dearer, and the only one left past about half a second of gap). The sigma of every pair
+    follows the choice: a tracked corner is placed to half a pixel, a keypoint to one.
 
     The gates, in the order a point meets them: the motion itself (nothing under
     ``min_baseline_m`` of travel can triangulate — ``still`` when the camera did not turn
@@ -435,10 +554,10 @@ def parallax_truth(
         return ParallaxTruth.nothing(
             "rotation-only" if motion.angle > MIN_ROTATION_RAD else "still"
         )
-    pts_a, pts_b, found = _track(gray_a, gray_b)
+    pts_a, pts_b, found = _correspond(gray_a, gray_b, matcher)
     tracked = len(pts_a)
     rejected = dict.fromkeys(REASONS, 0)
-    rejected["flow"] = found - tracked
+    rejected["flow"] = found - tracked  # 'flow' is whatever the matcher lost, tracker or not
     if tracked == 0:
         return ParallaxTruth.nothing("flow", rejected=rejected)
     # The flow happily follows a corner off the edge of B; a kept point's rounded pixel is a
@@ -449,7 +568,10 @@ def parallax_truth(
     rejected["outside"] = int((~keep).sum())
     keep &= sampson(pts_a, pts_b, intr, motion) <= max_sampson_px
     rejected["epipolar"] = int((~keep).sum()) - rejected["outside"]
-    z, sigma, residual, baseline = _triangulate_full(pts_a, pts_b, intr, motion)
+    sigma_px = ORB_DISPARITY_SIGMA_PX if matcher == "orb" else DISPARITY_SIGMA_PX
+    z, sigma, residual, baseline = _triangulate_full(
+        pts_a, pts_b, intr, motion, disparity_sigma_px=sigma_px
+    )
     behind = keep & ~np.isfinite(z)
     rejected["behind"] = int(behind.sum())
     keep &= np.isfinite(z)
@@ -495,12 +617,17 @@ __all__ = [
     "DISPARITY_SIGMA_PX",
     "EPIPOLE_MIN_DEG",
     "LIDAR_SIGMA_INV",
+    "MATCHERS",
     "MAX_REPROJ_PX",
     "MAX_SAMPSON_PX",
     "MIN_BASELINE_M",
     "MIN_PARALLAX_RATIO",
     "MIN_ROTATION_RAD",
+    "ORB_DISPARITY_SIGMA_PX",
+    "ORB_FEATURES",
+    "ORB_RATIO",
     "CameraPlacement",
+    "Matcher",
     "Motion",
     "ParallaxTruth",
     "Pixels",

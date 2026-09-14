@@ -11,6 +11,8 @@ import pytest
 
 from pepin.depth import CameraPose, Intrinsics, project_all
 from pepin.depth_pipeline import (
+    PARALLAX_MAX_GAP_S,
+    PARALLAX_ORB_MAX_GAP_S,
     Frame,
     FrameContext,
     Pairs,
@@ -18,9 +20,12 @@ from pepin.depth_pipeline import (
     standard_pipeline,
 )
 from pepin.parallax import (
+    DISPARITY_SIGMA_PX,
     MAX_SAMPSON_PX,
+    ORB_DISPARITY_SIGMA_PX,
     CameraPlacement,
     Motion,
+    ParallaxTruth,
     camera_motion,
     match,
     parallax_truth,
@@ -215,6 +220,68 @@ def test_a_ten_centimetre_sidestep_recovers_two_metres_within_one_percent() -> N
         assert abs(ratio - 1.0) < 0.01, f"band {z} m came back at {ratio:.3f} of its depth"
 
 
+def test_the_describer_recovers_the_rendered_depths_within_two_percent() -> None:
+    """The same three planes and the same 10 cm sidestep read by ORB instead of the flow:
+    keypoints matched by description recover every band's depth within 2 % — a keypoint is
+    placed to about a pixel where a tracked corner is placed to half of one."""
+    a, b, motion = rendered_pair()
+    truth = parallax_truth(a, b, INTR, motion, matcher="orb")
+    assert truth.kept >= 50
+    rows = truth.points[:, 1]
+    for top, bottom, z in BANDS:
+        inside = (rows >= top + 16) & (rows < bottom - 16)
+        assert int(inside.sum()) >= 10, f"band {z} m has {int(inside.sum())} pairs"
+        ratio = float(np.median(truth.z[inside] / z))
+        assert abs(ratio - 1.0) < 0.02, f"band {z} m came back at {ratio:.3f} of its depth"
+
+
+def test_the_describer_returns_the_same_disparity_the_flow_does() -> None:
+    """The match itself, by description: every kept correspondence sits on the sidestep's own
+    disparity, to within the pixel a keypoint is placed to."""
+    a, b, _motion = rendered_pair()
+    pts_a, pts_b = match(a, b, matcher="orb")
+    assert len(pts_a) >= 50
+    middle = (pts_a[:, 1] >= 136) & (pts_a[:, 1] < 224)  # the 2 m band, away from its seams
+    shift = pts_a[middle, 0] - pts_b[middle, 0]
+    assert float(np.median(shift)) == pytest.approx(INTR.fx * SIDESTEP_M / 2.0, abs=0.5)
+
+
+def test_a_keypoint_is_trusted_to_a_pixel_and_a_tracked_corner_to_half_of_one() -> None:
+    """The matcher decides the noise it is credited with: the same geometry read by ORB carries
+    the wider sigma, because a keypoint's octave places it less precisely than the flow does."""
+    a, b, motion = rendered_pair()
+    flow = parallax_truth(a, b, INTR, motion)
+    orb = parallax_truth(a, b, INTR, motion, matcher="orb")
+
+    def middle_band(truth: ParallaxTruth) -> float:
+        """The median sigma of the 2 m band, away from the rendered seams."""
+        rows = truth.points[:, 1]
+        return float(np.median(truth.sigma[(rows >= 136) & (rows < 224)]))
+
+    assert float(np.median(orb.sigma)) > float(np.median(flow.sigma))
+    assert middle_band(orb) == pytest.approx(
+        middle_band(flow) * ORB_DISPARITY_SIGMA_PX / DISPARITY_SIGMA_PX, rel=0.5
+    )
+
+
+def test_a_misspelt_matcher_is_refused_rather_than_silently_the_default() -> None:
+    """A flag nobody implements must not quietly become the flow: the name is checked."""
+    a, b, motion = rendered_pair()
+    with pytest.raises(ValueError, match="unknown matcher"):
+        parallax_truth(a, b, INTR, motion, matcher="sift")
+
+
+def test_a_blank_pair_describes_nothing_and_says_so() -> None:
+    """Two grey walls have no keypoints: the describer returns empty rather than raising, and
+    the anchor's verdict is the matcher's own loss."""
+    blank = np.full((INTR.height, INTR.width), 128, dtype=np.uint8)
+    pts_a, pts_b = match(blank, blank, matcher="orb")
+    assert len(pts_a) == len(pts_b) == 0
+    _, _, motion = rendered_pair()
+    truth = parallax_truth(blank, blank, INTR, motion, matcher="orb")
+    assert truth.kept == 0
+
+
 def test_the_flow_returns_the_same_corners_it_was_given() -> None:
     """The match itself: every kept correspondence sits on the sidestep's own disparity."""
     a, b, _motion = rendered_pair()
@@ -381,6 +448,40 @@ def test_the_flag_is_off_by_default_and_the_stage_contributes_nothing() -> None:
     assert result.verdict("parallax_anchor").on is False
     assert result.verdict("parallax_anchor").pairs == 0
     assert standard_pipeline(parallax_anchor=True).switches["parallax_anchor"] is True
+
+
+def test_the_window_follows_the_matcher_and_a_given_one_pins_it() -> None:
+    """How far back a partner may sit is the matcher's own limit, not a constant: the flow is
+    given 0.60 s and the describer 1.5, switching the matcher live moves the window with it,
+    and a window asked for by name outranks both."""
+    anchor = ParallaxAnchor()
+    assert anchor.matcher == "klt"
+    assert anchor.max_gap_s == PARALLAX_MAX_GAP_S
+    anchor.matcher = "orb"
+    assert anchor.max_gap_s == PARALLAX_ORB_MAX_GAP_S
+    pinned = ParallaxAnchor(max_gap_s=0.25, matcher="orb")
+    assert pinned.max_gap_s == 0.25
+
+
+def test_the_report_line_names_the_matcher_and_its_window() -> None:
+    """The report line says who matched and how far back it looked, so an A/B in the field is
+    readable without asking the node what its parameters are."""
+    line = ParallaxAnchor().describe()
+    assert line.startswith("klt <= 0.60 s")
+    assert ParallaxAnchor(matcher="orb").describe().startswith("orb <= 1.50 s")
+
+
+def test_the_anchor_hands_its_matcher_to_the_triangulation() -> None:
+    """The stage's switch reaches pepin.parallax: an anchor set to a matcher nobody implements
+    fails at the match rather than quietly tracking corners."""
+    a, b, _ = rendered_pair()
+    poses = {1.0: planar_pose(0.0, 0.0, 0.0), 1.3: planar_pose(0.0, -SIDESTEP_M, 0.0)}
+    odometry = Odometry(poses)
+    anchor = ParallaxAnchor(matcher="sift")
+    network = np.full((INTR.height, INTR.width), 3.0)
+    assert anchor.pairs(Frame(network, context(1.0, a, odometry))) is None  # the ring's first
+    with pytest.raises(ValueError, match="unknown matcher"):
+        anchor.pairs(Frame(network, context(1.3, b, odometry)))
 
 
 def test_a_colour_frame_becomes_the_grey_the_tracker_reads() -> None:
