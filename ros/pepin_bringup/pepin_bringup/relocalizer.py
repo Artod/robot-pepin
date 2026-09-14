@@ -294,10 +294,13 @@ FLAGS = FlagSet(
         True,
         description="every source vouches for itself: its covariance is widened by how far its"
         " answers fall from where its OWN previous answer, carried over the odometry, said they"
-        " would (pepin.selfcheck). A source that scatters four times as far as it claims loses"
-        " sixteen times its weight; one that is honest, or better, is not touched. Per source,"
-        " never across sources: no lidar pose enters the camera's number and no camera pose the"
-        " lidar's",
+        " would (pepin.selfcheck). A source four times out in ALL THREE directions loses sixteen"
+        " times its weight; the factor is that over-claim averaged over the three, so a source"
+        " out in fewer of them loses proportionally less (a camera fan bound along a wall, four"
+        " times out in the two directions it measures, is widened 9.7x not 16x —"
+        " scratch/selfcheck_audit.py). One that is honest, or better, is not touched. Per"
+        " source, never across sources: no lidar pose enters the camera's number and no camera"
+        " pose the lidar's",
         why="2026-09-13: the camera's measurements claimed 25 cm from a linear formula over the"
         " fit (pepin.fusion.sigma_from_fit: fit 0.34 -> 24.8 cm) while nobody had measured how"
         " far apart two of its own answers fall a tenth of a second apart. On that claim they"
@@ -306,7 +309,10 @@ FLAGS = FlagSet(
         " (tapes 20260913_190024/190422, scratch/drive_bisect.py). A covariance nobody measured"
         " is a claim; this makes every source pay for its weight with its own repeatability."
         " The ratio is a chi-square of 3 dof averaged over the last 20 measurements, so 1.0 is"
-        " an honest covariance and the factor is capped at 25",
+        " an honest covariance and the factor is capped at 25. One number for the whole matrix:"
+        " an over-claim in one direction of three arrives divided by three (a depth source"
+        " jumping 24 cm at rest against a 4 cm claim is widened 6x, not 36x), so the check takes"
+        " back the over-claim a source's whole covariance carries, never a single direction's",
         on_when="whenever more than one source is fused — it is the only thing standing between"
         " the fusion and a source whose covariance is a formula rather than a measurement",
         off_when="to measure what the check is worth on a tape (the ratios are still measured"

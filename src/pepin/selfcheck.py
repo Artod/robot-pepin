@@ -11,7 +11,11 @@ previous measurement carried over the odometry (wheels + gyro, the same trail a 
 rides to an update) is a PREDICTION of the current one; the normalised squared distance
 between the two under the sum of their covariances (:func:`pepin.fusion.disagreement`) is a
 chi-square of 3 degrees of freedom whose mean is 1 when the covariance tells the truth, 16 when
-the source scatters four times as far as it claims. The running mean over the last
+the source scatters four times as far as it claims in all three directions. One number for the
+whole matrix: it is the over-claim averaged over the three, so a source out only in the
+directions it actually measures gets proportionally less back (a camera fan bound along a wall,
+:data:`pepin.fusion.BOUND_INFLATION`, four times out in its two sharp directions, is widened
+9.7x and not 16x — scratch/selfcheck_audit.py). The running mean over the last
 :data:`WINDOW` measurements is the ratio ``r``; at ``r > 1`` the covariance is multiplied by
 ``r`` (capped at :data:`MAX_INFLATION`) before it is fused, which makes the fused weight the
 one the source's OWN repeatability earns. At ``r <= 1`` nothing is touched: a source that is
