@@ -315,6 +315,7 @@ class LaptopLocalizer(Node):
         self._grid: Any = None  # the board's map, for a camera matcher built without /map_camera
         self._camera: Localizer | None = None  # the matcher the camera scans are refined by
         self._camera_map = ""  # which grid that is: "/map" or "/map_camera"
+        self._camera_map_id = ""  # the band's shape and origin: a new one is worth a log line
         self._mask: StaticMask | None = None  # what that grid explains; built on first use
         self._mask_of: tuple[Any, int] | None = None  # ...the grid and version it was built on
         self._roster = SourceRegistry(enabled=(DEPTH, CONTACT))  # for the sources' own trust
@@ -439,10 +440,17 @@ class LaptopLocalizer(Node):
         )
         self._camera_map = CAMERA_MAP_TOPIC
         self._tally.count("camera_maps")
-        self.get_logger().info(
-            f"camera map received: {msg.info.width}x{msg.info.height} cells; the camera's scans"
-            " are matched against the volume's own band from now on"
-        )
+        # The volume republishes its band once a second whether or not it changed shape, and one
+        # line per publication buried the log (3600 identical lines an hour, 2026-09-13). The
+        # line a person needs is the one where the band becomes a different grid; the rest are a
+        # count in the report.
+        shape = map_id(msg)
+        if shape != self._camera_map_id:
+            self._camera_map_id = shape
+            self.get_logger().info(
+                f"camera map received: {msg.info.width}x{msg.info.height} cells, id {shape};"
+                " the camera's scans are matched against the volume's own band from now on"
+            )
 
     def _on_scan(self, msg: LaserScan) -> None:
         """The board's lidar revolution, moved into base_link by the mount read once.
@@ -748,7 +756,8 @@ class LaptopLocalizer(Node):
         )
         last = "none yet" if self._sent is None else self._sent.text()
         return (
-            f"measurements: {sent} (against {self._camera_map or 'no map'},"
+            f"measurements: {sent} (against {self._camera_map or 'no map'}"
+            f" {self._camera_map_id or '-'}, received {c['camera_maps']}x,"
             f" {c['voted']} with unexplained returns silenced), last {last};"
             f" rejected: no belief {c['no_belief']}, stale belief {c['stale_belief']},"
             f" no odometry {c['no_odometry']}, low fit {c['low_fit']}, thin {c['thin_fan']},"
