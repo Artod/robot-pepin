@@ -8,6 +8,9 @@
 #   ros/goto.sh cancel           stop the current task (the base's deadman stops the wheels)
 #   ros/goto.sh where            pose and scan-to-map fit right now
 #   ros/goto.sh relocalize       whole-map search now (after a carry or a push)
+# Every run is taped to ros/maps/rec/<stamp>_goto.jsonl: scans, odometry, the tracked pose, the
+# commands, the camera's measurements (meas) and the tracker's account of each update (srcs).
+# PEPIN_REC_CAMERA_SCANS=1 adds /depth_scan and /contact_scan to the tape.
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
@@ -27,6 +30,7 @@ mkdir -p "$(dirname "$0")/maps/rec"
 # The head camera, always: any goal may be the clip for the tweet (mjpeg copied as-is, no CPU).
 ffmpeg -loglevel error -y -f mjpeg -use_wallclock_as_timestamps 1 -i "http://$BOARD:8080/stream" -c copy "$CAM" &
 FFPID=$!
+MAX_REC_S=900          # the logger's own stop, in seconds: a recorder nobody stops is a bug
 LOG="/maps/rec/${STAMP}_goto.log"   # goto_ros' own words, kept on the board next to the recording
 INTERRUPTED=0
 trap 'INTERRUPTED=1' INT
@@ -54,7 +58,12 @@ finish() {  # everything recorded, always: scans, odometry, tracked pose, the go
 trap finish EXIT HUP TERM  # a closed terminal must still stop the logger and fetch the run
 # Any recorder left over from a run whose cleanup never ran would keep a core busy: clear it first.
 ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f session_logger.py >/dev/null 2>&1; true"
-ssh "root@$BOARD" "docker exec -d pepin-ros /pepin_entrypoint.sh python3 /tools/session_logger.py $REC"
+# PEPIN_REC_CAMERA_SCANS=1 also tapes /depth_scan and /contact_scan on the board. Off by
+# default: /contact_scan has no other consumer there, so recording it opens a bridge route from
+# the laptop (the board carries what is real-time critical and nothing else).
+REC_FLAGS=""
+if [ -n "${PEPIN_REC_CAMERA_SCANS:-}" ]; then REC_FLAGS="--camera-scans"; fi
+ssh "root@$BOARD" "docker exec -d pepin-ros /pepin_entrypoint.sh python3 /tools/session_logger.py $REC $MAX_REC_S $REC_FLAGS"
 # The goal lives on the board (a WiFi hiccup must not become a cancel); this terminal only watches.
 ssh "root@$BOARD" "touch /root/pepin-ros$LOG; docker exec -d -e PYTHONUNBUFFERED=1 pepin-ros /pepin_entrypoint.sh sh -c 'python3 /tools/goto_ros.py --places $PLACES $* > $LOG 2>&1; echo GOTO_EXIT=\$? >> $LOG'"
 echo "laptop: the goal was sent at $(date +%H:%M:%S.%2N)"

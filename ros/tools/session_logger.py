@@ -6,6 +6,20 @@ a host-mounted path, flushes every line
 and fsyncs every two seconds, so a power cut mid-drive costs at most the last
 two seconds — the file is the meteor-proof copy (a rosbag runs alongside it).
 
+Also logs, since 2026-09-13, what the fusion did with the camera: ``meas`` is every pose the
+laptop measured out of a camera scan (/localization/measurement, the JSON of
+`pepin.measurements.RemoteMeasurement` kept verbatim — the recorder parses nothing) and ``srcs``
+is the tracker's own account of each update (/localization/sources: who anchored, what was
+fused, what a fusion rejected, every source's fit, delta, sigma and self-check ratio). The two
+together answer offline what the day of 2026-09-13 could not answer live: how far the camera's
+word was from the lidar's truth, per source (`scratch/camera_error.py`).
+
+``--camera-scans`` adds the camera's raw scans (/depth_scan, /contact_scan) as ``depth_scan`` /
+``contact_scan`` records, off by default: /depth_scan is already consumed on this board by the
+costmap's depth layer, but /contact_scan's layer is off, so subscribing to it here would open a
+new bridge route from the laptop for a recording — the board carries what is real-time critical
+and nothing else (CLAUDE.md rule 20), and this is the owner's switch, not the recorder's habit.
+
 Format: exactly `pepin.recording.SessionRecorder`'s (topics ``scan`` and
 ``pose``), so `scripts/build_map.py --match --loop` consumes it unchanged.
 The recorded angles are ROBOT-frame radians (that is what `LaserScan.angles`
@@ -16,13 +30,13 @@ upside-down mount mirrors, the head points 87.5 degrees off; scan-vs-map fit
 inside the cart's own hull (its rear posts) are written as null, as the old
 stack's masked sectors did — otherwise every pose grows phantom dots on the map.
 
-    python3 /tools/session_logger.py /maps/rec/NAME.jsonl
+    python3 /tools/session_logger.py /maps/rec/NAME.jsonl [SECONDS] [--camera-scans]
 """
 
+import argparse
 import json
 import math
 import os
-import sys
 import time
 
 import rclpy
@@ -31,10 +45,13 @@ from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
 
 from pepin.recording import scan_record_from_ros
 
 FSYNC_EVERY_S = 2.0
+# The camera's virtual scans, by the topic they arrive on and the record they are written as.
+CAMERA_SCANS = (("/depth_scan", "depth_scan"), ("/contact_scan", "contact_scan"))
 
 
 def _stop_if_stale(node: "SessionLogger", started: float, limit: float) -> None:
@@ -49,7 +66,7 @@ def _stop_if_stale(node: "SessionLogger", started: float, limit: float) -> None:
 class SessionLogger(Node):
     """Subscribes to the raw scan and odometry; appends one jsonl record per message."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, camera_scans: bool = False) -> None:
         super().__init__("session_logger")
         # Deliberately not a context manager: the file must outlive __init__ and is closed in
         # main()'s finally with a final fsync. Line-buffered: every record hits the OS at once.
@@ -57,13 +74,28 @@ class SessionLogger(Node):
         self._last_sync = time.monotonic()
         self.scans = 0
         self.poses = 0
+        self.measurements = 0  # camera poses measured on the laptop
+        self.camera_scans = 0  # depth/contact scans, only with --camera-scans
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self.create_subscription(LaserScan, "/ldlidar_node/scan", self._on_scan, qos)
         self.create_subscription(Odometry, "/odom", self._on_odom, 20)
         self.create_subscription(PoseWithCovarianceStamped, "/tracker_pose", self._on_amcl, 10)
         self.create_subscription(Path, "/plan", self._on_plan, 5)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd, 20)
-        self.get_logger().info(f"logging to {path}")
+        # What the camera said and what the tracker did with it: two String topics this board
+        # already carries (the tracker subscribes to the first and publishes the second), so a
+        # second local subscriber costs a copy and no new route.
+        strings = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
+        self.create_subscription(String, "/localization/measurement", self._on_measurement, strings)
+        self.create_subscription(String, "/localization/sources", self._on_sources, strings)
+        for topic, name in CAMERA_SCANS if camera_scans else ():
+            self.create_subscription(
+                LaserScan, topic, lambda msg, name=name: self._on_camera_scan(msg, name), 5
+            )
+        self.get_logger().info(
+            f"logging to {path}"
+            + (", camera scans included" if camera_scans else ", camera scans off")
+        )
 
     def _write(self, record: dict) -> None:
         self._file.write(json.dumps(record, separators=(",", ":")) + "\n")
@@ -115,6 +147,37 @@ class SessionLogger(Node):
             }
         )
 
+    def _on_measurement(self, msg: String) -> None:
+        """One pose the laptop measured out of a camera scan, kept verbatim: the recorder does
+        not parse it, so a malformed message is on the tape as evidence instead of lost. ``t``
+        is when it ARRIVED here; the moment it speaks for is ``stamp`` inside the JSON."""
+        self._write({"t": time.time(), "topic": "meas", "json": msg.data})
+        self.measurements += 1
+
+    def _on_sources(self, msg: String) -> None:
+        """The tracker's own account of one update (Localizer.sources_report), verbatim: who
+        anchored, what was fused, what was rejected, and every source's fit, delta, sigma and
+        self-check ratio."""
+        self._write({"t": time.time(), "topic": "srcs", "json": msg.data})
+
+    def _on_camera_scan(self, msg: LaserScan, name: str) -> None:
+        """One virtual scan of the camera (the depth band or the floor-contact line) as a
+        compact record: the first angle, the step, and the ranges in millimetres with the
+        infinities as null — the same shape a replay reads the lidar's with."""
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self._write(
+            {
+                "t": stamp if stamp > 0 else time.time(),
+                "topic": name,
+                "angle_min": round(msg.angle_min, 5),
+                "angle_increment": round(msg.angle_increment, 6),
+                "ranges": [
+                    None if not math.isfinite(r) or r <= 0.0 else round(r, 3) for r in msg.ranges
+                ],
+            }
+        )
+        self.camera_scans += 1
+
     def _on_plan(self, msg: Path) -> None:
         """Nav2's global plan as a polyline (at most 200 points), so a replay can draw it."""
         step = max(1, len(msg.poses) // 200)
@@ -153,9 +216,21 @@ MAX_SECONDS = 900.0  # a recording nobody stops is a bug, not a feature: two orp
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="record one drive as jsonl")
+    parser.add_argument("path", help="the jsonl file to append to")
+    parser.add_argument(
+        "seconds", nargs="?", type=float, default=MAX_SECONDS, help="stop after this long"
+    )
+    parser.add_argument(
+        "--camera-scans",
+        action="store_true",
+        help="also record /depth_scan and /contact_scan (see the module docstring: /contact_scan"
+        " has no other consumer on the board, so this opens a bridge route)",
+    )
+    args = parser.parse_args()
     rclpy.init()
-    node = SessionLogger(sys.argv[1])
-    limit = float(sys.argv[2]) if len(sys.argv) > 2 else MAX_SECONDS
+    node = SessionLogger(args.path, camera_scans=args.camera_scans)
+    limit = args.seconds
     started = time.monotonic()
     node.create_timer(5.0, lambda: _stop_if_stale(node, started, limit))
     try:
@@ -163,7 +238,10 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        node.get_logger().info(f"logged {node.scans} scans, {node.poses} poses")
+        node.get_logger().info(
+            f"logged {node.scans} scans, {node.poses} poses, {node.measurements} camera "
+            f"measurements, {node.camera_scans} camera scans"
+        )
         node._file.flush()
         os.fsync(node._file.fileno())
         node._file.close()
