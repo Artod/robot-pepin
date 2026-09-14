@@ -3,9 +3,9 @@
 One component container (high CPU priority) holds the LD19 driver, the hull
 box filter that turns its scan into /scan, the static base_link->laser
 transform, the lifecycle manager that activates the driver, and — only when it is
-asked for — the Foxglove bridge. A separate Python process runs ``base_bridge`` (odometry, TF, /cmd_vel
-to the wheels). Every extra ROS process costs ~140 MB on this 1.5 GB board, so
-composition is not a nicety here.
+asked for — the Foxglove bridge. A separate Python process runs ``base_bridge``
+(odometry, TF, /cmd_vel to the wheels). Every extra ROS process costs ~140 MB on
+this 1.5 GB board, so composition is not a nicety here.
 
 The sensor mounts are not arguments: base_link -> laser comes from config/lidar.json (the LD19
 hangs upside down, roll pi, yaw -87.5 deg: the calibration's one home) and base_link -> imu_link

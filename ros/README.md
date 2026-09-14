@@ -583,6 +583,7 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `laptop_localizer` | `covariance` | choice: peak, fit | peak | yes | how sure a camera measurement says it is: peak — the spread of that match's own score peak at the camera matcher's temperature (config/matcher.json); fit — the fit-scaled second moment of the whole surface, with the source's trust in it, that shipped before it. It is the number the board's information filter weighs the fan by |
 | `laptop_localizer` | `explained_vote` | bool | on | yes | returns the map cannot explain (a person, a moved chair) do not score a camera match: the same vote the board's tracker takes on its own scans (relocalizer's explained_vote), taken here, on the grid the camera is matched against |
 | `neck_state` | `neck_tf` | bool | on | yes | base_link -> camera_link is published live from the neck's encoders; the laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes publish that edge |
+| `neck_state` | `tf_republish` | bool | on | yes | base_link -> camera_link is republished at tf_hz between polls, carrying the last measured angles with a fresh stamp; with it off the edge is published only when a reading arrives, i.e. at poll_hz |
 | `relocalizer` | `rest_lock` | bool | on | yes | hold the pose while the cart stands still (wheels quiet 0.6 s and the gyro under 1.5 deg/s): a match's residual is blended in with a time constant instead of taken whole |
 | `relocalizer` | `explained_vote` | bool | on | yes | returns the static map cannot explain (a person, a moved chair) do not score the match |
 | `relocalizer` | `rest_tau_s` | number 0.1..60 | 6.0 | yes | the rest lock's time constant: seconds for a residual to die at rest |
@@ -973,6 +974,11 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* on — the encoders are honest and their signs are checked by hand: the tilt reads 26 -> 103 degrees as the head goes down and the pan 0 -> -124 degrees to the left (config/neck.json's tilt_sign +1, pan_sign -1), 50 reads of a still head gave the same ticks every time, a read costs 9.7 ms, and the tick scale solved from the level frames is 1.067 true degrees per commanded degree, so 360/4096 stands (scratch/neck_tilt_scale.txt). At the reference pose the live transform equals the static one, so turning it on moves nothing until the head does
   - *On when:* whenever the head moves at all: with it off a turned head is a camera the map places where it is not
   - *Off when:* when the laptop broadcasts the static edge instead (camera_stream's static_camera_tf), or when the neck bus is suspect and a frozen edge is better than a wrong one
+- **`tf_republish`** — bool, default on
+  - *What:* base_link -> camera_link is republished at tf_hz between polls, carrying the last measured angles with a fresh stamp; with it off the edge is published only when a reading arrives, i.e. at poll_hz
+  - *Default:* on — a servo-bus read costs 13.5 ms of a core and the node polled at 10 Hz for 11 % of an A53 (top, 2026-09-14) to answer a question that does not change while the cart drives: the head is still. Polling at 2 Hz and republishing at 10 Hz keeps the stream RTAB-Map and the depth fusion look poses up in (a 2 Hz TF stream fails a lookup at a recent stamp) and leaves four fifths of the reads unmade
+  - *On when:* whenever the head is still or moves slowly: driving, mapping, everything but a commanded sweep
+  - *Off when:* while the head is being swept and every degree must be measured rather than held — then raise poll_hz to 10 in the same breath, which is the pre-2026-09-14 node
 
 #### `relocalizer`
 
