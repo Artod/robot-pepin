@@ -115,6 +115,7 @@ class TrayApp(rumps.App):
     def __init__(self) -> None:
         super().__init__("Pepin", title=None, icon=str(ICON), template=True, quit_button=None)
         self._results: queue.Queue[Poll] = queue.Queue()
+        self._notes: queue.Queue[tuple[str, str]] = queue.Queue()  # (title, body) from helpers
         self._wake = threading.Event()
         self._fast_until = time.monotonic() + FAST_FOR_S
         self._forced = False
@@ -168,6 +169,9 @@ class TrayApp(rumps.App):
     def _drain(self, _timer: Any) -> None:
         """Main-thread tick: apply the newest result, or show that a poll is in flight."""
         try:
+            while not self._notes.empty():
+                title, body = self._notes.get_nowait()
+                rumps.notification("Pepin", title, body)
             latest: Poll | None = None
             while not self._results.empty():
                 latest = self._results.get_nowait()
@@ -205,7 +209,12 @@ class TrayApp(rumps.App):
 
     def _items(self, poll: Poll | None) -> list[Any]:
         """The whole menu: header, probes, vitals, battery note, actions."""
-        items: list[Any] = [_line(self._header(poll)), rumps.separator]
+        items: list[Any] = [
+            rumps.MenuItem("■ STOP THE ROBOT", callback=self._on_stop),
+            rumps.separator,
+            _line(self._header(poll)),
+            rumps.separator,
+        ]
         if poll is not None and poll.report is not None:
             items += [_probe_line(p) for p in poll.report.probes]
             items += [rumps.separator, *(_line(text) for text in _vitals_lines(poll.report))]
@@ -281,6 +290,31 @@ class TrayApp(rumps.App):
         """Reveal the log folder in Finder."""
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self._spawn(["open", str(LOGS_DIR)])
+
+    def _on_stop(self, _sender: Any) -> None:
+        """The red button: ros/stop.sh right now, in the background (no Terminal window to
+        wait for) — Nav2 is asked to cancel, and if that is not confirmed in 3 s the ROS
+        processes are killed so the base's deadman cuts the wheels (then the stack restarts).
+        Its last line comes back as a notification."""
+        log.info("STOP requested from the tray")
+
+        def run() -> None:
+            try:
+                done = subprocess.run(
+                    ["bash", "ros/stop.sh"],
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                )
+                lines = (done.stdout + done.stderr).strip().splitlines()
+                body = lines[-1] if lines else f"stop.sh exited {done.returncode}"
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                body = f"stop.sh failed: {exc}"
+            log.info("STOP: %s", body)
+            self._notes.put(("STOP", body))
+
+        threading.Thread(target=run, name="stop-robot", daemon=True).start()
 
     def _on_turn(self, _sender: Any) -> None:
         """One full turn in place (ros/go.sh round: 372 deg by the gyro, recorded), in a
