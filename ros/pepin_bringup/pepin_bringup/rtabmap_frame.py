@@ -17,7 +17,17 @@ With the anchor known, the graph's answer about the cart is a measurement on the
 ``anchor . map_to_odom . (odom -> base_link at the graph's stamp)`` — the graph's own opinion,
 built from its own odometry and every closure it has accepted — published on
 :data:`MEASUREMENT_TOPIC` for the board's fusion to weigh like any other word
-(``graph_measurement``, off until measured). Nothing here owns ``map -> odom``.
+(``graph_measurement``). Nothing here owns ``map -> odom``.
+
+A measurement, though, can only correct a pose that is already nearly right: this node refuses a
+word further than :data:`MAX_DISAGREEMENT_M` from the tracker's belief, and the board's
+information filter gates what it does take by chi-square. So the one word that matters after the
+cart is CARRIED by hand — the graph recognising the place, metres from where the tracker thinks
+it stands — is exactly the word both gates throw away. That word goes out on the whole-map
+CANDIDATE channel instead (:data:`CANDIDATE_TOPIC`, source ``graph``, ``graph_candidates``), the
+same door the lidar's own whole-map search uses: three agreeing candidates re-seed the tracker
+(:class:`pepin.watchdog.CandidateGate`), and the board's rules for a source that is not the
+lidar apply to the graph unchanged.
 
 With ``graph_odom`` off the old arrangement is back: RTAB-Map's "odometry" IS the tracker's
 pose, ``map -> rtabmap`` is the inverse of the correction (a fixed identity in its place let
@@ -73,9 +83,10 @@ from tf2_ros import TransformBroadcaster
 
 from pepin.anchors import Anchor, AnchorWatch, load_anchor, save_anchor
 from pepin.flags import Flag, FlagSet
-from pepin.measurements import compose, graph_anchor, graph_measurement
+from pepin.measurements import RemoteMeasurement, compose, graph_anchor, graph_measurement
 from pepin.odometry import Pose2D
 from pepin.tsdf import RigidPose
+from pepin.watchdog import GlobalCandidate, same_place
 from pepin_bringup.msgs import (
     map_id,
     pose_from_transform,
@@ -96,6 +107,11 @@ CORRECTION_TOPIC = "/map_odom"
 # the camera's name. The board gains a gate of its own for this one, named "graph", the day its
 # roster does.
 MEASUREMENT_TOPIC = "/localization/graph_measurement"
+# ...and the other door into the board's tracker, the one a measurement cannot open: the
+# whole-map candidate channel the lidar's own search publishes on (pepin.watchdog,
+# pepin_bringup.laptop_localizer). A measurement corrects a pose that is nearly right; a
+# candidate MOVES a pose that is simply in the wrong place, which is what a carry leaves behind.
+CANDIDATE_TOPIC = "/localization/candidate"
 TRACKER_POSE_TOPIC = "/tracker_pose"
 FIT_TOPIC = "/localization_fit"
 ODOM_FRAME, BASE_FRAME = "odom", "base_link"
@@ -113,6 +129,15 @@ FIT_FRESH_S = 2.0
 # them, and anything past this is the graph having blown up, or an anchor that no longer holds
 # (two database sessions merged by a closure), rather than a place found.
 MAX_DISAGREEMENT_M = 1.5
+# What the board's tracker must have behind its pose for the graph's word to be a measurement
+# and nothing more: a published fit at least this good and a belief no older than this. Below
+# either, the tracker is holding a pose no source is confirming — dead reckoning, a lidar that
+# matches nothing, a bridge that has gone quiet — and the graph's word is then not a correction
+# to an almost-right pose but the only thing that knows where the cart is, which is what the
+# candidate channel is for. 0.3 sits just above the tracker's own lost_below (0.25,
+# pepin.localization.Localizer): a fit at that floor explains nothing.
+TRACKER_TRUSTED_FIT = 0.3
+BELIEF_FRESH_S = 3.0
 # How far apart in time the tracker's belief and the graph's own place may be when the anchor
 # between the two frames is learned from them: at the cart's 0.3 m/s half a second is 15 cm of
 # frame error, baked in for the whole session, and the tracker publishes at 10 Hz.
@@ -187,6 +212,35 @@ FLAGS = FlagSet(
         " offset, since the two frames are only tied at the start pose",
     ),
     Flag(
+        "graph_candidates",
+        True,
+        description="a graph word the board's fusion cannot act on goes out as a whole-map"
+        f' CANDIDATE on {CANDIDATE_TOPIC} (source "graph", the same covariance floor, at most one'
+        " per graph message): a word refused as further than"
+        f" {MAX_DISAGREEMENT_M:.1f} m from the tracker's belief, and a word naming a DIFFERENT"
+        " place while the tracker has no trusted source behind its pose (published fit below"
+        f" {TRACKER_TRUSTED_FIT:.1f}, or no belief for {BELIEF_FRESH_S:.0f} s). Off, such a word"
+        " is counted here and reaches nothing",
+        why="on, because without it the graph cannot undo a carry at all — by construction, not"
+        " by measurement: a measurement further than the disagreement gate is refused in this"
+        " node, and one that passes is gated again on the board by the information filter's"
+        " chi-square (11.34), so the word that is RIGHT after the cart is carried by hand — the"
+        " one the graph produces the moment it recognises the place — is exactly the word both"
+        " gates throw away (2026-09-14: the carry test could not work by construction). The"
+        " candidate channel is the door the lidar's own whole-map search uses for this, and the"
+        " board guards it with the same rules for every source: three agreeing candidates from"
+        " one sensor, no re-seed while a goal runs, and no re-seed at all from a source that is"
+        " not the lidar while the lidar is alive",
+        on_when="always on a known map, and above all in a carry test: it is the graph's only"
+        " path to a pose that is not merely inaccurate but in the wrong room",
+        off_when="whenever the anchor may be stale and the lidar cannot say so — a board restart"
+        " with anchor_relearn off, a database read in another odom frame: a stale anchor puts"
+        " every word off by one constant offset, and three constant offsets agree with each"
+        " other perfectly. Off, too, if a graph candidate is seen breaking the lidar's own"
+        " re-seed streak (the board's gate holds one run, and candidates of two sources"
+        " alternating end each other's)",
+    ),
+    Flag(
         "anchor_relearn",
         True,
         description="re-learn the stored anchor (and rewrite its file) when the lidar is driving"
@@ -227,6 +281,7 @@ class RtabmapFrame(Node):
         self._correction2d = Pose2D()  # the same correction in the plane, as the fusion reads it
         self._belief: Pose2D | None = None  # what the board's tracker says, and when
         self._belief_stamp = 0.0
+        self._belief_at = -math.inf  # ...and when that belief reached this node, by our clock
         self._map_id = ""  # the map that belief is on; the board refuses a word about another
         self._anchor: Pose2D | None = None  # map <- rtabmap: read from the file, or learned once
         self._origin = "none"  # ...and where this copy of it came from, for the report line
@@ -238,6 +293,8 @@ class RtabmapFrame(Node):
         self._sent = 0  # graph measurements published
         self._refused = 0  # ...and places too far from the tracker's to be a closure
         self._blind = 0  # ...and graphs with no odom -> base_link to compose with
+        self._proposed = 0  # ...and words offered as whole-map candidates instead
+        self._proposed_at = -1  # the graph whose word became one: at most one candidate each
         self._lookup = TfLookup(self)  # the EKF's odom -> base_link, at the graph's own stamp
         self._tf = None if self._slam else TransformBroadcaster(self)
         self._correction = (
@@ -248,6 +305,20 @@ class RtabmapFrame(Node):
             if self._slam
             else self.create_publisher(
                 String, MEASUREMENT_TOPIC, bridged_qos_profile(MEASUREMENT_TOPIC)
+            )
+        )
+        # Depth 1, RELIABLE: the QoS both ends of this channel already ask for
+        # (pepin_bringup.laptop_localizer's publisher, pepin_bringup.relocalizer's subscription).
+        # A candidate is a snapshot of a moment and only the newest is worth judging, and two
+        # publishers on one bridged topic must declare one QoS or the route's is decided by a
+        # race (pepin.deployment.BRIDGED_QOS' reason, measured on /imu/data_raw 2026-09-13).
+        self._candidate = (
+            None
+            if self._slam
+            else self.create_publisher(
+                String,
+                CANDIDATE_TOPIC,
+                QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
             )
         )
         self.create_subscription(MapGraph, "/rtabmap/mapGraph", self._on_graph, 5)
@@ -281,11 +352,11 @@ class RtabmapFrame(Node):
         self.create_timer(30.0, self._report)
 
     def _report(self) -> None:
-        """Every 30 s: how many graphs arrived, how many became measurements, how many were
-        refused for putting the cart too far from the tracker's belief and how many found no
-        odometry to compose with, with the anchor and where it came from (the file beside the map,
-        learned here at the first graph, or re-learned N times since), the last word's gap to the
-        tracker and the switches."""
+        """Every 30 s: how many graphs arrived, how many became measurements, how many went out
+        as whole-map candidates instead, how many were refused for putting the cart too far from
+        the tracker's belief and how many found no odometry to compose with, with the anchor and
+        where it came from (the file beside the map, learned here at the first graph, or
+        re-learned N times since), the last word's gap to the tracker and the switches."""
         anchor = (
             "not yet"
             if self._anchor is None
@@ -302,6 +373,7 @@ class RtabmapFrame(Node):
         )
         self.get_logger().info(
             f"rtabmap frame: {self._graphs} graphs, {self._sent} graph measurements sent,"
+            f" {self._proposed} candidates sent,"
             f" {self._refused} refused as too far, {self._blind} without odometry;"
             f" correction ({self._correction2d.x:+.2f}, {self._correction2d.y:+.2f},"
             f" {math.degrees(self._correction2d.theta):+.1f} deg), anchor {anchor},"
@@ -315,6 +387,9 @@ class RtabmapFrame(Node):
         position = msg.pose.pose.position
         self._belief = Pose2D(position.x, position.y, yaw_of(msg.pose.pose.orientation))
         self._belief_stamp = stamp_seconds(msg.header.stamp)
+        # By OUR clock, not the message's: what this says is "the board is still talking to us",
+        # and a stamp compared across two machines answers a different question.
+        self._belief_at = self._now()
 
     def _on_fit(self, msg: Float32) -> None:
         """How well the lidar's last scan matched the map, and when: what says the tracker's
@@ -484,6 +559,11 @@ class RtabmapFrame(Node):
         name, and a place no further from the tracker's belief than :data:`MAX_DISAGREEMENT_M`:
         past that the graph has blown up or the anchor no longer holds.
 
+        What the measurement cannot carry goes out on the candidate channel instead
+        (:meth:`_propose`, ``graph_candidates``): a word too far to be fused is the very word a
+        carried cart needs, and a re-seed is the only mechanism that moves a pose that is not
+        almost right but simply in the wrong place.
+
         With NO belief at all the word still goes out, but only on an anchor read from the file:
         that is the wake-up (a lidar-less start, nothing on ``/tracker_pose`` yet), and it is the
         one case where the graph is the only thing that knows where the cart is. An anchor
@@ -494,6 +574,7 @@ class RtabmapFrame(Node):
         self._gap_m = (
             math.hypot(remote.x - belief.x, remote.y - belief.y) if belief is not None else math.inf
         )
+        self._propose(remote)
         if self._measurement is None or not self._switches.on("graph_measurement"):
             return
         if not self._map_id:
@@ -506,6 +587,73 @@ class RtabmapFrame(Node):
             return
         self._sent += 1
         self._measurement.publish(String(data=remote.to_json(graphs=self._graphs)))
+
+    def _lost(self) -> bool:
+        """Whether the board's tracker has nothing trustworthy behind the pose it publishes: a
+        fit below :data:`TRACKER_TRUSTED_FIT` (or no fit at all within :data:`FIT_FRESH_S`), or
+        no belief heard for :data:`BELIEF_FRESH_S`. It is what turns the graph's word from a
+        correction to an almost-right pose into the only opinion anyone has."""
+        now = self._now()
+        fit = self._fit if now - self._fit_at <= FIT_FRESH_S else 0.0
+        return fit < TRACKER_TRUSTED_FIT or now - self._belief_at > BELIEF_FRESH_S
+
+    def _propose(self, remote: RemoteMeasurement) -> None:
+        """The same word on the whole-map candidate channel — the door a measurement cannot
+        open — when it is the kind of word only that door admits:
+
+        * further from the tracker's belief than :data:`MAX_DISAGREEMENT_M`, so it is refused as
+          a measurement here and would be refused again by the board's chi-square gate: exactly
+          the word a carried cart produces once the graph recognises the place;
+        * or naming a DIFFERENT place (:func:`pepin.watchdog.same_place`) while the tracker has
+          no trusted source behind its pose (:meth:`_lost`) — including a tracker this node has
+          not heard from at all, the wake-up.
+
+        A word that says the place the tracker already holds is never sent: the board's gate
+        would call it agreement, act on nothing, and end whatever streak the LIDAR's own search
+        had built — the graph has no business costing the lidar its recovery.
+
+        At most one candidate per graph message (:attr:`_proposed_at`), carrying the graph's
+        own count as its scan id: a streak on the board is three DISTINCT pieces of evidence,
+        and one graph message repeated is one piece. The covariance is the measurement's, floor
+        and nothing else (:func:`pepin.measurements.graph_measurement`); the board re-judges the
+        word against its own pose and fit, and its rules do the rest — three agreeing
+        candidates, no re-seed while a goal runs, and no re-seed from a source that is not the
+        lidar while the lidar is alive.
+        """
+        if self._candidate is None or not self._switches.on("graph_candidates"):
+            return
+        if not self._map_id or self._proposed_at == self._graphs:
+            return
+        belief = self._belief
+        elsewhere = belief is None or not same_place(remote.pose, belief)
+        too_far = self._gap_m > MAX_DISAGREEMENT_M
+        if not (too_far or (elsewhere and self._lost())):
+            return
+        candidate = GlobalCandidate(
+            x=remote.x,
+            y=remote.y,
+            yaw=remote.yaw,
+            covariance=remote.covariance,
+            score=remote.fit,
+            # The graph answers with one place: a closure is a recognition, not a correlation
+            # surface with a runner-up to be compared against.
+            ambiguity=0.0,
+            stamp=remote.stamp,
+            map_id=remote.map_id,
+            scan_id=self._graphs,
+            source=remote.source,
+        )
+        self._proposed += 1
+        self._proposed_at = self._graphs
+        self._candidate.publish(
+            String(
+                data=candidate.to_json(
+                    reason="too far for a measurement" if too_far else "the tracker has no source",
+                    gap_cm=None if math.isinf(self._gap_m) else round(self._gap_m * 100.0, 1),
+                    graphs=self._graphs,
+                )
+            )
+        )
 
     def _publish(self) -> None:
         """The edge this mode owns, at :data:`RATE_HZ`: the anchor (identity until it is

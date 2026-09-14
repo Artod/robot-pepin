@@ -452,3 +452,28 @@ def test_the_source_travels_with_the_candidate_and_an_unnamed_one_is_the_lidar()
     old = json.loads(sent.to_json())
     del old["source"]
     assert GlobalCandidate.from_json(json.dumps(old)).source == LIDAR
+
+
+def test_the_graph_s_word_is_admitted_like_any_other_source() -> None:
+    """RTAB-Map's word after a carry arrives on this channel, not in the fusion: too far from
+    the tracker's belief to be a measurement, and a re-seed is the only thing that moves a pose
+    that is in the wrong place rather than merely inaccurate (pepin_bringup.rtabmap_frame's
+    graph_candidates). The gate has no allow-list to add it to — a source names the floor its
+    fit is read against, and one nobody has measured a floor for is read against the lidar's —
+    so the graph pays the same price as the camera: three agreeing candidates, and no shortcut."""
+    from pepin.sources import GRAPH
+
+    assert min_fit_for(GRAPH) == UNKNOWN_MAP_FIT, "no discount for being new"
+    gate = CandidateGate()
+
+    def word() -> GlobalCandidate:
+        """One graph word off a fresh graph message, as the laptop sends it after a carry: the
+        floor's covariance, a fit of 1.0 it claims rather than measures, and one place only."""
+        return candidate(ELSEWHERE, score=1.0, ambiguity=0.0, source=GRAPH)
+
+    for i in range(gate.candidate_streak - 1):
+        answer = gate.observe(word(), HERE, 0.15, MAP)
+        assert answer.verdict is CandidateVerdict.DISAGREE and answer.seed is None, i
+    answer = gate.observe(word(), HERE, 0.15, MAP)
+    assert answer.seed is not None and gate.last_source == GRAPH
+    assert gate.candidate_streak == 3 and "from graph 3" in gate.report()

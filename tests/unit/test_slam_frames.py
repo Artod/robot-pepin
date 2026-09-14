@@ -346,3 +346,72 @@ def test_the_re_learn_can_be_switched_off_in_the_field(tmp_path: Any) -> None:
             _fit(node, 0.9, at=moment)
             node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
     assert node._relearns == 0 and node._origin == "learned"
+
+
+def test_the_word_the_fusion_cannot_use_goes_out_as_a_candidate(tmp_path: Any) -> None:
+    """A measurement can only correct a pose that is already nearly right: this node refuses a
+    word further than MAX_DISAGREEMENT_M and the board's filter gates what it does take. The
+    word that undoes a CARRY is exactly that refused word, so it goes out on the whole-map
+    candidate channel instead — the door the lidar's own search re-seeds through."""
+    import json
+
+    with ros_stubs.parameters(anchor_dir=str(tmp_path)):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _fit(node, 0.9, at=5.0)  # the lidar is driving and the board is talking to us
+        _belief(node, 1.0, 2.0)
+        _odom(node, 0.2, 0.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert len(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent) == 1, "the word is a word"
+        assert not node.pubs[rtabmap_frame.CANDIDATE_TOPIC].sent, "the tracker is already there"
+
+        # the graph recognises the place and puts the cart two metres from the tracker's belief
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(2.0, 0.0).transform))
+        assert len(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent) == 1, "refused as too far"
+        (sent,) = node.pubs[rtabmap_frame.CANDIDATE_TOPIC].sent
+        word = json.loads(sent.data)
+        assert (word["x"], word["y"]) == (3.0, 2.0) and word["source"] == "graph"
+        assert word["map"] == "3x4@1.00,2.00" and word["ambiguity"] == 0.0
+        assert word["scan"] == 2, "the graph's own count: three graphs are three pieces of evidence"
+        assert node._proposed == 1 and node._refused == 1
+
+        # ...and with the board quiet for three seconds the tracker has no source behind its
+        # pose, so a word about ANOTHER place travels as a candidate even within the gate (it is
+        # a measurement too: the fusion may still use what it can)
+        node.clock.seconds = 5.0 + rtabmap_frame.BELIEF_FRESH_S + 0.1
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.6, 0.0).transform))
+        assert node._proposed == 2 and len(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent) == 2
+        assert json.loads(node.pubs[rtabmap_frame.CANDIDATE_TOPIC].sent[-1].data)["x"] == 1.6
+    node.timers[1][1]()
+    assert "2 candidates sent" in node.logger.texts("info")[-1]
+
+
+def test_a_word_the_tracker_can_confirm_asks_for_nothing(tmp_path: Any) -> None:
+    """The other half of the rule, and what keeps the graph out of the lidar's way: a word about
+    the place the tracker already holds would be called agreement by the board's gate, act on
+    nothing, and end whatever streak the LIDAR's own search had built."""
+    with ros_stubs.parameters(anchor_dir=str(tmp_path)):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _belief(node, 1.0, 2.0)  # no fit at all: the tracker has nothing behind its pose
+        _odom(node, 0.2, 0.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.3, 0.0).transform))
+        assert node._lost() and not node.pubs[rtabmap_frame.CANDIDATE_TOPIC].sent, "30 cm"
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.8, 0.0).transform))
+        assert node._proposed == 1, "80 cm is another place, and nothing is confirming the pose"
+
+
+def test_the_candidate_channel_can_be_switched_off(tmp_path: Any) -> None:
+    """CLAUDE.md rule 19: the old behaviour stays reachable. Off, a word too far to fuse is
+    counted here and reaches nothing — which is what a stale anchor calls for, since three
+    words off by one constant offset agree with each other perfectly."""
+    with ros_stubs.parameters(anchor_dir=str(tmp_path), graph_candidates=False):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _belief(node, 1.0, 2.0)
+        _odom(node, 0.2, 0.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(2.0, 0.0).transform))
+    assert not node.pubs[rtabmap_frame.CANDIDATE_TOPIC].sent and node._proposed == 0
+    assert node._refused == 1, "refused as before, and now it is the end of the road again"
