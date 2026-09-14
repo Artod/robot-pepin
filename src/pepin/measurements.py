@@ -210,6 +210,7 @@ def graph_measurement(
     stamp: float,
     map_id: str,
     source: str = GRAPH,
+    fit: float = 1.0,
     floor_xy_m: float = REMOTE_FLOOR_XY_M,
     floor_yaw_deg: float = REMOTE_FLOOR_YAW_DEG,
 ) -> RemoteMeasurement:
@@ -230,6 +231,15 @@ def graph_measurement(
     the camera's measured floor for the same reason it exists there: a remote word about a place
     is worth centimetres, whatever its own arithmetic claims.
 
+    ``fit`` is what the word CLAIMS, and it is the graph's confidence in its own recognition
+    rather than anything measured against a scan: 1.0 is "the graph has just tied this place to
+    one it knows", and it decays with the distance driven since that tie
+    (:class:`pepin.graphtrust.GraphTrust`). It is not a discount on the covariance -- the floor
+    above is what the word is worth geometrically either way -- but it is what the receiver
+    publishes as its confidence when nothing local measured one, and what the whole-map
+    candidate channel reads as a score. 1.0 by default: a caller with no trust clock claims what
+    this function claimed before there was one.
+
     Returns the measurement, ready to travel (:meth:`RemoteMeasurement.to_json`).
     """
     place = compose(anchor, pose)
@@ -238,7 +248,14 @@ def graph_measurement(
         [floor_xy_m**2, floor_xy_m**2, math.radians(floor_yaw_deg) ** 2]
     )
     return RemoteMeasurement(
-        x=x, y=y, yaw=yaw, covariance=covariance, source=source, stamp=stamp, fit=1.0, map_id=map_id
+        x=x,
+        y=y,
+        yaw=yaw,
+        covariance=covariance,
+        source=source,
+        stamp=stamp,
+        fit=float(fit),
+        map_id=map_id,
     )
 
 

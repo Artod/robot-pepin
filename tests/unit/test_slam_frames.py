@@ -27,9 +27,19 @@ class _MapGraph:
         self.header = types.SimpleNamespace(stamp=stamp if stamp is not None else _stamp(0.0))
 
 
+class _Info:
+    """rtabmap_msgs/Info as the laptop's node reads it: RTAB-Map's statistics table, the keys
+    and the values in two parallel arrays."""
+
+    def __init__(self, stats: dict[str, float]) -> None:
+        self.stats_keys = list(stats)
+        self.stats_values = [float(value) for value in stats.values()]
+
+
 sys.modules.setdefault("rtabmap_msgs", types.ModuleType("rtabmap_msgs"))
 sys.modules.setdefault("rtabmap_msgs.msg", types.ModuleType("rtabmap_msgs.msg"))
 sys.modules["rtabmap_msgs.msg"].MapGraph = _MapGraph  # type: ignore[attr-defined]
+sys.modules["rtabmap_msgs.msg"].Info = _Info  # type: ignore[attr-defined]
 
 from pepin_bringup import rtabmap_frame, slam_frame  # noqa: E402
 from pepin_bringup.msgs import transform_from_pose  # noqa: E402
@@ -67,6 +77,20 @@ def _belief(node: Any, x: float, y: float, seconds: float = 7.0) -> None:
     msg.header.stamp = _stamp(seconds)
     msg.pose.pose.position.x, msg.pose.pose.position.y = x, y
     node.subs["/tracker_pose"][1](msg)
+
+
+def _info(node: Any, travelled: float, loop: float = 0.0, hypothesis: float = 0.0) -> None:
+    """One /rtabmap/info into the node: how far RTAB-Map's odometry has travelled, whether this
+    message tied the present to an older node, and how close the last hypothesis came."""
+    node.subs[rtabmap_frame.INFO_TOPIC][1](
+        _Info(
+            {
+                "Memory/Distance_travelled/m": travelled,
+                "Loop/Id/": loop,
+                "Loop/Highest_hypothesis_value/": hypothesis,
+            }
+        )
+    )
 
 
 def _xy(message: Any) -> tuple[float, float]:
@@ -415,3 +439,91 @@ def test_the_candidate_channel_can_be_switched_off(tmp_path: Any) -> None:
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(2.0, 0.0).transform))
     assert not node.pubs[rtabmap_frame.CANDIDATE_TOPIC].sent and node._proposed == 0
     assert node._refused == 1, "refused as before, and now it is the end of the road again"
+
+
+def test_the_word_s_fit_is_what_the_graph_has_recognised() -> None:
+    """The hole the carry test of 2026-09-14 found: the graph recognised nothing for 64 s, its
+    word was the old anchor plus odometry, and it still claimed fit 1.00 — so the board
+    published 1.00 as its own confidence and goto drove on a belief 1.5-2 m wrong. The word now
+    carries what the GRAPH knows: 1.0 at a tie to an older node, decaying with the metres driven
+    since (pepin.graphtrust), and the whole-map candidate floor and the lost ladder act on it."""
+    import json
+
+    from pepin.graphtrust import FILE_ANCHOR_TRUST
+    from pepin.watch import ADMIT_FIT
+
+    def word(node: Any) -> dict[str, Any]:
+        sent = node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent[-1]
+        return dict(json.loads(sent.data))
+
+    with ros_stubs.parameters(graph_measurement=True):
+        node = rtabmap_frame.RtabmapFrame()
+        node._map_id = "flat3"
+        _belief(node, 1.0, 2.0)
+        _odom(node, 0.2, 0.0)
+        _info(node, 0.0, hypothesis=0.04)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert word(node)["fit"] == 1.0, "the anchor was just learned from the tracker"
+
+        # ...and now the carry: the graph recognises nothing while the cart drives on
+        _info(node, 4.0, hypothesis=0.04)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert word(node)["fit"] < ADMIT_FIT, "no candidate is admitted on this any more"
+        _info(node, 6.1, hypothesis=0.04)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert word(node)["fit"] < FILE_ANCHOR_TRUST
+
+        # ...and the closure that finds the place puts the word back where it belongs
+        _info(node, 6.1, loop=41.0, hypothesis=0.81)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert word(node)["fit"] == 1.0
+        assert "graph tie 1:" in node.logger.texts("info")[-1]
+
+        node.timers[1][1]()
+        report = node.logger.texts("info")[-1]
+        assert "graph 1.00 trust, 0.0 m since tie 1, hypothesis 0.81 over 4 infos" in report
+        assert "graph_trust=on" in report
+
+
+def test_a_wake_up_word_is_a_guess_until_the_graph_recognises_something(tmp_path: Any) -> None:
+    """An anchor read from a file was measured in ANOTHER session and a board restart moves the
+    odom frame under it: the word it makes is capped, so it can be fused as a measurement but
+    can neither re-seed the pose nor make a lost tracker look found."""
+    import json
+
+    from pepin.anchors import Anchor, save_anchor
+    from pepin.graphtrust import FILE_ANCHOR_TRUST
+    from pepin.odometry import Pose2D
+
+    save_anchor(tmp_path, Anchor(Pose2D(0.8, 2.0, 0.0), "3x4@1.00,2.00", origin="learned"))
+    with ros_stubs.parameters(anchor_dir=str(tmp_path), graph_measurement=True):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _odom(node, 0.2, 0.0)
+        _info(node, 12.0, hypothesis=0.04)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        word = json.loads(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent[-1].data)
+        assert word["fit"] == FILE_ANCHOR_TRUST, "nothing has confirmed this frame yet"
+
+        _info(node, 12.0, loop=7.0, hypothesis=0.74)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        word = json.loads(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent[-1].data)
+        assert word["fit"] == 1.0, "the graph recognised the place: the cap is gone"
+
+
+def test_with_graph_trust_off_every_word_claims_what_it_claimed_before() -> None:
+    """The old behaviour, one live flag away: the switch is what a regression is turned off
+    with in the field, and it is what an A/B on one drive compares."""
+    import json
+
+    with ros_stubs.parameters(graph_measurement=True, graph_trust=False):
+        node = rtabmap_frame.RtabmapFrame()
+        node._map_id = "flat3"
+        _belief(node, 1.0, 2.0)
+        _odom(node, 0.2, 0.0)
+        _info(node, 0.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        _info(node, 30.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+    word = json.loads(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent[-1].data)
+    assert word["fit"] == 1.0, "30 m past anything recognised, and still claiming everything"
