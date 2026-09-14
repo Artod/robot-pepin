@@ -12,6 +12,7 @@ from pepin.depth import (
     MIN_SAMPLES,
     CameraPose,
     Intrinsics,
+    plane_in_view_from,
     project,
     scan_points,
     to_base,
@@ -39,6 +40,30 @@ def test_the_lidar_plane_appears_low_in_the_image_and_only_far_enough_away() -> 
         np.array([[2.0, 0.0, 0.15]]), CameraPose(0.0, 0.0, 1.23, math.radians(15)), INTR
     )
     assert tilted.shape[0] == 1 and 180.0 < tilted[0, 1] < 360.0
+
+
+def test_the_distance_the_lidar_plane_enters_the_picture_is_the_one_projection_agrees_with() -> (
+    None
+):
+    """``plane_in_view_from`` answers the near edge of the band the test above walks by hand:
+    a beam at that distance lands on the picture's last row, a tenth nearer falls out of it, a
+    tenth farther is in. Tilting the head down brings the edge closer, which is
+    why a parked cart's law can be refitted by looking at its own feet."""
+    plane_z = 0.383  # config/lidar.json's mount
+    for pitch_deg in (0.0, 15.0, 23.7, 35.0):
+        cam = CameraPose(0.0, 0.0, 1.203, math.radians(pitch_deg))
+        near = plane_in_view_from(INTR, cam, plane_z)
+        assert near is not None
+        on_edge = project(np.array([[near, 0.0, plane_z]]), cam, INTR)
+        assert on_edge.shape[0] == 1
+        assert on_edge[0, 1] == pytest.approx(INTR.height - 1, abs=0.5)
+        assert project(np.array([[near * 0.9, 0.0, plane_z]]), cam, INTR).shape[0] == 0
+        assert project(np.array([[near * 1.1, 0.0, plane_z]]), cam, INTR).shape[0] == 1
+    level = plane_in_view_from(INTR, CameraPose(0.0, 0.0, 1.203), plane_z)
+    tilted = plane_in_view_from(INTR, CameraPose(0.0, 0.0, 1.203, math.radians(23.7)), plane_z)
+    assert level is not None and tilted is not None and tilted < level
+    # A plane through the lens itself never enters the picture at any distance ahead.
+    assert plane_in_view_from(INTR, CameraPose(0.0, 0.0, 1.203), 1.203) is None
 
 
 def test_left_is_left_and_behind_is_dropped() -> None:

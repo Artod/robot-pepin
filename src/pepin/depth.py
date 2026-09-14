@@ -156,6 +156,33 @@ def project(points_base: Array, cam: CameraPose, intr: Intrinsics) -> Array:
     return np.stack([u[keep], v[keep], forward[keep]], axis=1)
 
 
+def plane_in_view_from(intr: Intrinsics, cam: CameraPose, plane_z: float) -> float | None:
+    """How far ahead of the cart a horizontal plane at height ``plane_z`` (base_link metres)
+    first shows in the picture, or ``None`` when no distance puts it there.
+
+    The lidar's returns all lie on one such plane — ``config/lidar.json``'s mount — so this is
+    the nearest range at which a beam can judge the depth at all. Parked closer than it, with
+    the head where it is, the beams fall under the bottom row and the anchor is blind through
+    no fault of the lidar: measured 0.71 m for the reference head pitch of 23.7 degrees, the
+    lens 0.82 m above the lidar's plane and a 640x360 picture (2026-09-14).
+    """
+    c, s = math.cos(cam.pitch), math.sin(cam.pitch)
+    dz = plane_z - cam.z
+    nearest: float | None = None
+    for row in (0.0, float(intr.height - 1)):
+        k = (row - intr.cy) / intr.fy  # -up / forward along that row
+        denominator = s + k * c
+        if abs(denominator) < 1e-9:
+            continue  # that row is parallel to the plane: it never meets it
+        dx = -dz * (c - k * s) / denominator
+        forward = c * dx - s * dz
+        if dx <= 0.0 or forward <= NEAR_M:
+            continue  # behind the cart, or inside the lens
+        if nearest is None or dx < nearest:
+            nearest = dx
+    return None if nearest is None else cam.x + nearest
+
+
 def rotation_matrix(qx: float, qy: float, qz: float, qw: float) -> Array:
     """The 3x3 rotation of a unit quaternion (x, y, z, w), as TF carries it."""
     xx, yy, zz = qx * qx, qy * qy, qz * qz
