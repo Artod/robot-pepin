@@ -141,10 +141,13 @@ def camera_search_need(lidar_driving: bool, lidar_verdict: CandidateVerdict | No
     field of view, a tenth of the reach, and a map slice that is mostly unknown — so it is
     allowed to look for the cart only where the lidar is not already answering:
 
-    * ``no_lidar`` — the lidar is not driving the tracker (switched off, dead, stale, or the
-      board is anchoring on the camera's measurements). Then a camera fan is the only sensor
-      that can find a lost cart at all, and a bad answer from it is judged by the same gate
-      every answer is.
+    * ``no_lidar`` — the lidar is not feeding the tracker: switched off, dead, stale, or the
+      board itself unheard (the caller reads ``sources.lidar.health`` off
+      ``/localization/sources`` and counts silence as not driving; it does NOT read which
+      source anchored the last update, so a board whose lidar is fresh while it anchors on the
+      camera still counts as driving — the conservative half of the rule). Then a camera fan is
+      the only sensor that can find a lost cart at all, and a bad answer from it is judged by
+      the same gate every answer is.
     * ``unknown_map`` — the lidar IS driving, but its own whole-map search says nothing on this
       map fits what it sees. The two sensors then disagree about the room itself, and the
       camera's band holds surfaces the lidar's plane never sees; a second opinion is worth its
