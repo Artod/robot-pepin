@@ -617,6 +617,7 @@ def test_with_graph_trust_off_every_word_claims_what_it_claimed_before() -> None
         node = rtabmap_frame.RtabmapFrame()
         node._map_id = "flat3"
         _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # the lidar is behind that belief: the anchor may be learned
         _odom(node, 0.2, 0.0)
         _info(node, 0.0)
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
