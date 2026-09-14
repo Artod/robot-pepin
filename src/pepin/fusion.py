@@ -267,9 +267,16 @@ def peak_covariance(surface: ScoreSurface, temperature: float) -> Matrix:
     equally well anywhere along a corridor keeps its weight along the corridor and loses it
     across, so the answer is a ridge, which is the anisotropy a fusion needs.
 
-    Nothing invented is charged on top: no division by the fit, no per-source discount, no
-    lattice quantisation (the peak itself is refined between the cells, :meth:`pepin.scanmatch.
-    ScoreSurface.peak`). The diagonal is floored at :data:`MIN_SIGMA_XY_M` /
+    Nothing invented is charged on top: no division by the fit, no per-source discount, and no
+    lattice quantisation term (the ``step^2 / 12`` :func:`covariance_from_score_surface` adds).
+    Dropping that term is not free, and the honest statement of what it costs: this moment is a
+    SUM OVER THE LATTICE'S OWN NODES, so a peak sharper than the step is read through whichever
+    phase of the grid it happens to fall on. Swept across one 3 cm cell on the furnished room's
+    whole revolution (scratch/peak_skeptic.py) the reported sigma_x walks 0.82 to 1.65 cm, a
+    factor of two, with nothing but that phase — which is exactly the spread ``step^2 / 12``
+    (0.87 cm per axis at a 3 cm step) used to cover. The calibration absorbs it on AVERAGE and
+    only on average: at T = 0.016 the position comes out 2-3x conservative in variance, so the
+    phase noise sits inside that margin. The diagonal is floored at :data:`MIN_SIGMA_XY_M` /
     :data:`MIN_SIGMA_YAW_RAD` so a one-cell peak stays invertible. What a window's edge and a
     plateau do to it is :func:`from_peak`'s business, because those are bounds, not spreads.
     """
