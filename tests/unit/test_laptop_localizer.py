@@ -622,3 +622,24 @@ def test_a_fan_is_never_searched_over_the_lidar_s_map() -> None:
         assert published(node).source == DEPTH
     finally:
         node.close()
+
+
+def test_a_frozen_fan_is_one_scan_however_often_it_arrives() -> None:
+    """The board counts a candidate streak in SCANS, so the id a fan travels with must be the
+    fan's and not the message's: a depth node that republishes the same frame must not be able
+    to build a streak of three out of one picture. The rule /scan has had since 2026-09-09."""
+    node = watch(camera_search=True)
+    try:
+        standing(node)
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
+        first = node._camera_scan[DEPTH].scan_id
+        arrived = node._camera_scan_at[DEPTH]
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))  # the very same frame again
+        assert node._camera_scan[DEPTH].scan_id == first, "a repeat took a fresh scan id"
+        assert node._camera_scan_at[DEPTH] == arrived, "a repeat refreshed the fan's age"
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.3))  # a new one
+        assert node._camera_scan[DEPTH].scan_id > first
+        node._report()
+        assert "fans heard twice 1" in node.logger.texts("info")[-1]
+    finally:
+        node.close()

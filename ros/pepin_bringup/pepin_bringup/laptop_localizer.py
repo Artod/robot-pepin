@@ -834,7 +834,16 @@ class LaptopLocalizer(Node):
         counted with its own name, so the report line says why the board heard nothing.
         """
         stamp = Time.from_msg(msg.header.stamp).nanoseconds * 1e-9
-        self._camera_scan_id += 1
+        # A fan whose stamp is not newer than the one in hand is the SAME fan over again (a
+        # frozen depth node, a message delivered twice), and the id below is the identity the
+        # board's gate counts a streak in: three searches of one frozen fan must never look
+        # like three distinct scans, which is the rule :meth:`_on_scan` has had since the
+        # frozen /scan of 2026-09-09. A repeat keeps the previous id and does not refresh the
+        # arrival time either, so ``cam_stale`` sees the fan for what it is.
+        held = self._camera_scan.get(source)
+        again = held is not None and stamp <= held.stamp
+        if not again:
+            self._camera_scan_id += 1
         scan = timed_scan_from_ros(
             stamp,
             msg.ranges,
@@ -843,13 +852,16 @@ class LaptopLocalizer(Node):
             msg.range_max,
             msg.scan_time,
             NO_MOUNT,
-            self._camera_scan_id,
+            held.scan_id if again and held is not None else self._camera_scan_id,
         )
-        # The fan is kept whatever happens to it here: the whole-map search (``camera_search``)
+        # The fan is kept whatever happens to it below: the whole-map search (``camera_search``)
         # runs on the newest one at its own period, and it is not the matching half's business
         # whether that source is enabled for matching or whether this frame was paced away.
-        self._camera_scan[source] = scan
-        self._camera_scan_at[source] = time.monotonic()
+        if again:
+            self._tally.count("camera_repeat")
+        else:
+            self._camera_scan[source] = scan
+            self._camera_scan_at[source] = time.monotonic()
         if source not in self._switches["camera_sources"]:
             self._tally.count("camera_off")
             return
@@ -1167,7 +1179,8 @@ class LaptopLocalizer(Node):
             f" rejected: no belief {c['no_belief']}, stale belief {c['stale_belief']},"
             f" no tf {c['no_tf_belief']}{tf_failures},"
             f" no odometry {c['no_odometry']}, low fit {c['low_fit']}, thin {c['thin_fan']},"
-            f" no map {c['no_map']}; paced {c['paced']}, source off {c['camera_off']}"
+            f" no map {c['no_map']}; paced {c['paced']}, source off {c['camera_off']},"
+            f" fans heard twice {c['camera_repeat']}"
         )
 
     def _camera_search_line(self, w: Any) -> str:
