@@ -22,6 +22,7 @@ from pepin_bringup.laptop_localizer import (  # noqa: E402
     FLAGS,
     LaptopLocalizer,
 )
+from pepin_bringup.msgs import transform_from_rpy  # noqa: E402
 from ros_stubs import (  # noqa: E402
     Float32,
     Header,
@@ -434,3 +435,87 @@ def test_the_returns_the_map_cannot_explain_do_not_score_the_camera_match() -> N
         assert "0 with unexplained returns silenced" in line and "explained_vote=off" in line
     finally:
         node.close()
+
+
+def tf_belief(node: LaptopLocalizer, pose: Pose2D, t: float = 100.0) -> None:
+    """``map -> base_link`` at ``t`` in the live TF tree — what the board broadcasts 20 times a
+    second whatever its tracker is doing (map -> odom over odom -> base_link)."""
+    node._tf_live.buffer.transforms[("map", "base_link")] = transform_from_rpy(
+        "map", "base_link", (pose.x, pose.y, 0.0), (0.0, 0.0, pose.theta), stamp(t)
+    )
+
+
+def test_tf_answers_where_the_board_cannot_speak_yet() -> None:
+    """The deadlock of 2026-09-13 night, broken: on sources=camera the board publishes
+    /tracker_pose only after an update, an update needs a measurement, and a measurement needed
+    a belief — 413 camera scans were rejected with "no belief" in one evening. TF has no such
+    circle: map -> odom is broadcast 20 times a second whatever the tracker does, so the pose at
+    the scan's own stamp is there before the board has said anything at all, and it needs no
+    carry over the odometry to reach that stamp."""
+    node = watch()
+    try:
+        tf_belief(node, TRUTH, 100.1)
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
+        answer = measured(node)
+        assert math.hypot(answer.x - TRUTH.x, answer.y - TRUTH.y) < 0.1
+        assert abs(answer.yaw - TRUTH.theta) < math.radians(5.0)
+        sent = node.pubs["/localization/measurement"].sent[-1].data
+        assert '"belief_from": "tf"' in sent and '"belief_age_ms": 0.0' in sent
+        node._report()
+        line = node.logger.texts("info")[-1]
+        assert "belief: tracker 0, tf 1" in line and "tf_belief=on" in line
+    finally:
+        node.close()
+
+
+def test_the_board_s_own_pose_is_preferred_while_it_is_fresh() -> None:
+    """/tracker_pose is the board's fused answer and the only belief that carries a covariance:
+    while it is fresher than a second it wins, TF is not even asked, and the measurement says
+    how old it was. Once it goes quiet the same scan is matched around TF instead."""
+    node = watch()
+    try:
+        tf_belief(node, ELSEWHERE, 100.1)  # there to be taken, and not taken
+        standing(node, t=100.0)
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
+        sent = node.pubs["/localization/measurement"].sent[-1].data
+        assert '"belief_from": "tracker"' in sent and '"belief_age_ms": 100.0' in sent
+        assert math.hypot(measured(node).x - TRUTH.x, measured(node).y - TRUTH.y) < 0.1
+        tf_belief(node, TRUTH, 101.5)
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 101.5))  # the board has said nothing since
+        assert '"belief_from": "tf"' in node.pubs["/localization/measurement"].sent[-1].data
+        node._report()
+        assert "belief: tracker 1, tf 1" in node.logger.texts("info")[-1]
+    finally:
+        node.close()
+
+
+def test_the_flag_off_leaves_the_old_rule_and_a_tf_that_answers_nothing_is_counted() -> None:
+    """Off, the belief is the board's pose or none at all — the behaviour before tonight. On
+    with an empty TF tree, the old rule still stands behind it: a pose younger than two seconds
+    is carried as it always was, and the lookups that answered nothing are counted by tf2's own
+    name for the failure."""
+    node = watch(tf_belief=False)
+    try:
+        assert FLAGS["tf_belief"] is True, "the module's default: on"
+        tf_belief(node, TRUTH, 100.1)
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
+        assert not node.pubs["/localization/measurement"].sent
+        node._report()
+        assert "no belief 1" in node.logger.texts("info")[-1]
+        assert node.set_parameters([Parameter("tf_belief", value=True)])[0].successful
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.3))
+        assert '"belief_from": "tf"' in node.pubs["/localization/measurement"].sent[-1].data
+    finally:
+        node.close()
+    blind = watch()
+    try:
+        standing(blind, t=100.0)  # the board's word, then 1.4 s of silence and no TF at all
+        blind.subs["/odometry/filtered"][1](odom_msg(Pose2D(), 101.4))
+        blind.subs["/depth_scan"][1](depth_msg(TRUTH, 101.4))
+        sent = blind.pubs["/localization/measurement"].sent[-1].data
+        assert '"belief_from": "tracker"' in sent, "TF silent: the old carry still answers"
+        blind._report()
+        line = blind.logger.texts("info")[-1]
+        assert "no tf 1 (" in line and "belief: tracker 1, tf 0" in line
+    finally:
+        blind.close()

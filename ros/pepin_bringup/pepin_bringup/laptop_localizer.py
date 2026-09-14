@@ -115,6 +115,13 @@ CAMERA_STEP_DEG = 0.75
 # not moving and the carry is exact — so two seconds is a dead board or a dead bridge, not a
 # quiet one.
 BELIEF_MAX_AGE_S = 2.0
+# How fresh /tracker_pose must be to be PREFERRED over TF: it is the only belief that carries a
+# covariance and the moment it speaks for, so it wins whenever it is current. The board publishes
+# one per matched scan — 10 Hz driving, about 1 Hz at rest — so a second of silence is already a
+# board that is not updating, and TF answers instead (``tf_belief``).
+BELIEF_FRESH_S = 1.0
+MAP_FRAME = "map"
+BASE_FRAME = "base_link"
 # A camera match is made in the tracker's own terms, not a whole-map search's: a fan of a few
 # dozen returns is judged by how many of them land on walls the map knows, with the tracking
 # floor for how much of the scan must be judgeable at all (pepin.scanmatch.inlier_fraction).
@@ -122,6 +129,27 @@ TRACK_MIN_KNOWN = 0.25
 ODOM_HORIZON_S = 5.0
 
 FLAGS = FlagSet(
+    Flag(
+        "tf_belief",
+        True,
+        description="when /tracker_pose has been silent for a second, the pose a camera scan is"
+        " matched around is looked up from TF (map -> base_link at that scan's stamp) instead of"
+        " carried from the last /tracker_pose; off, a silent board means no camera measurements"
+        " at all",
+        why="it breaks a deadlock measured on 2026-09-13 night: with sources=camera the board"
+        " publishes /tracker_pose only after an UPDATE, an update needs a measurement, and a"
+        ' measurement needs a belief — 413 camera scans were rejected with "no belief" in one'
+        " evening and not one measurement was ever sent. TF has no such circle: the board"
+        " broadcasts map -> odom 20 times a second whatever happens to the tracker"
+        " (pepin_bringup.relocalizer, the 0.05 s timer) and odom -> base_link carries the"
+        " motion, so map -> base_link at the scan's own stamp is the same belief the carry was"
+        " reconstructing — without the carry, and without waiting for the board to speak",
+        on_when="always where the board broadcasts map -> odom: the camera cannot start"
+        " otherwise, and the belief is exact at the scan's stamp rather than carried to it",
+        off_when="where TF reaches this machine from somewhere else than the tracker that owns"
+        " the pose — a second broadcaster of map -> odom — or to measure how much the camera"
+        " depends on the board speaking at all",
+    ),
     Flag(
         "global_watch",
         True,
@@ -324,6 +352,7 @@ class LaptopLocalizer(Node):
         self._scan_at = 0.0  # monotonic, when that revolution arrived here
         self._pose: Pose2D | None = None  # what the board's tracker believes
         self._pose_stamp = 0.0  # ...and the moment that belief speaks for
+        self._belief_from = ""  # which belief the last camera match started from: tracker or tf
         self._fit = 0.0  # ...and how well its scan fits the map there
         self._history = OdomHistory(horizon_s=ODOM_HORIZON_S)  # the trail a belief is carried on
         self._last_search = 0.0  # monotonic, of the last search STARTED
@@ -348,6 +377,12 @@ class LaptopLocalizer(Node):
         )
         self.create_subscription(Float32, "/localization_fit", self._on_fit, 5)
         self._tf = TfLookup(self, buffer=Buffer())  # no listener: /tf_static is read below
+        # ...and a second buffer, this one with tf2's own listener on /tf, for the belief a
+        # camera scan is matched around when the board's /tracker_pose has gone quiet
+        # (``tf_belief``). Kept apart from the static-only buffer above on purpose: that one is
+        # fed by hand from the latched /tf_static and must not start answering map -> base_link
+        # from a dynamic tree it never subscribed to.
+        self._tf_live = TfLookup(self, on_failure=self._on_tf_failure)
         self.create_subscription(
             TFMessage,
             "/tf_static",
@@ -386,6 +421,13 @@ class LaptopLocalizer(Node):
         if not self._worker.stop():
             self.get_logger().warning("the search did not finish in time; leaving anyway")
         self._tf.close()
+        self._tf_live.close()
+
+    def _on_tf_failure(self, kind: str, text: str) -> None:
+        """A TF lookup that answered nothing, by tf2's own name for the failure (``Lookup``,
+        ``Extrapolation``): counted for the report line, and the last one kept as a note."""
+        self._tally.count(f"tf_{kind.lower()}")
+        self._tally.note("tf", text)
 
     def _on_error(self, text: str) -> None:
         self._tally.count("failed")
@@ -554,22 +596,61 @@ class LaptopLocalizer(Node):
         return self._mask
 
     def _belief_at(self, stamp: float) -> Pose2D | None:
-        """The board's pose at ``stamp``: its newest belief carried there over the odometry
-        between the two moments. ``None`` — counted with its reason — when there is no belief
-        yet, when it is older than :data:`BELIEF_MAX_AGE_S` (a dead board, a dead bridge), or
-        when the odometry trail does not cover both moments, because a carry over a gap is a
-        guess and a guess is not a place to start a match from."""
-        if self._pose is None:
+        """The pose a camera scan is matched around, at the scan's own stamp; ``None`` — counted
+        with its reason, and the choice counted too — when there is none to start from.
+
+        Two beliefs, in this order. ``/tracker_pose`` while it is fresher than
+        :data:`BELIEF_FRESH_S` is the preferred one: it is the board's own fused answer and the
+        only one that carries a covariance, and it is carried to this scan's moment over the
+        odometry between the two. Once it has been silent for longer than that, TF answers
+        instead (``tf_belief``): ``map -> base_link`` at this very stamp, which needs no carry
+        and — unlike the board's pose — does not wait for an update, because ``map -> odom`` is
+        broadcast 20 times a second whatever the tracker is doing. That is the deadlock the flag
+        exists for: on ``sources=camera`` the board updates only on a measurement, a measurement
+        needs a belief, and the belief used to be a pose the board could not publish yet.
+
+        With the flag off, or with TF silent too, the old rule stands: the newest belief carried
+        up to :data:`BELIEF_MAX_AGE_S` old, and nothing past it — a dead board or a dead bridge.
+        A carry the odometry trail does not cover both ends of is a guess, and a guess is not a
+        place to start a match from.
+        """
+        pose, age = self._pose, stamp - self._pose_stamp
+        if pose is not None and age <= BELIEF_FRESH_S:
+            return self._carried(pose, stamp)
+        if self._switches.on("tf_belief"):
+            from_tf = self._tf_belief(stamp)
+            if from_tf is not None:
+                return from_tf
+        if pose is None:
             self._tally.count("no_belief")
             return None
-        if stamp - self._pose_stamp > BELIEF_MAX_AGE_S:
+        if age > BELIEF_MAX_AGE_S:
             self._tally.count("stale_belief")
             return None
+        return self._carried(pose, stamp)
+
+    def _carried(self, pose: Pose2D, stamp: float) -> Pose2D | None:
+        """The board's belief moved from the moment it speaks for to ``stamp`` over the
+        odometry between the two; ``None`` when the trail does not cover both moments."""
         then, now = self._history.at(self._pose_stamp), self._history.at(stamp)
         if then is None or now is None:
             self._tally.count("no_odometry")
             return None
-        return apply_motion(self._pose, relative_motion(then, now))
+        self._belief_from = "tracker"
+        self._tally.count("belief_tracker")
+        return apply_motion(pose, relative_motion(then, now))
+
+    def _tf_belief(self, stamp: float) -> Pose2D | None:
+        """``map -> base_link`` at ``stamp`` as a planar pose, from the live TF tree; ``None``
+        when the buffer cannot answer for that moment (counted, with tf2's own name for why)."""
+        transform = self._tf_live.transform(MAP_FRAME, BASE_FRAME, stamp_from_seconds(stamp))
+        if transform is None:
+            self._tally.count("no_tf_belief")
+            return None
+        position = transform.transform.translation
+        self._belief_from = "tf"
+        self._tally.count("belief_tf")
+        return Pose2D(position.x, position.y, yaw_of(transform.transform.rotation))
 
     def _on_camera_scan(self, source: str, msg: LaserScan) -> None:
         """One camera scan (``/depth_scan``, ``/contact_scan``): matched around the board's
@@ -634,7 +715,14 @@ class LaptopLocalizer(Node):
         self._measurement_pub.publish(
             String(
                 data=remote.to_json(
-                    belief_age_ms=round((stamp - self._pose_stamp) * 1e3, 1),
+                    # TF answered for the scan's own stamp: nothing was carried, and the age of
+                    # a /tracker_pose that did not speak would be a number about nothing.
+                    belief_age_ms=(
+                        0.0
+                        if self._belief_from == "tf"
+                        else round((stamp - self._pose_stamp) * 1e3, 1)
+                    ),
+                    belief_from=self._belief_from,
                     matched_on=self._camera_map,
                 )
             )
@@ -748,8 +836,14 @@ class LaptopLocalizer(Node):
 
     def _camera_line(self, w: Any) -> str:
         """The camera half of the report: what each source sent and at what fit, what the
-        matcher matched against, and every reason a scan did not become a measurement."""
+        matcher matched against, which belief each match started from — the board's
+        ``/tracker_pose`` or TF (``tf_belief``) — and every reason a scan did not become a
+        measurement, with tf2's own name for each TF lookup that answered nothing."""
         c = w.counts
+        kinds = {name[3:]: n for name, n in c.items() if name.startswith("tf_") and n}
+        tf_failures = (
+            f" ({', '.join(f'{k} {n}' for k, n in sorted(kinds.items()))})" if kinds else ""
+        )
         sent = ", ".join(
             f"{name} {c[f'sent_{name}']} at fit {self._median(w, name)}"
             for name, _topic in CAMERA_SCANS
@@ -759,7 +853,9 @@ class LaptopLocalizer(Node):
             f"measurements: {sent} (against {self._camera_map or 'no map'}"
             f" {self._camera_map_id or '-'}, received {c['camera_maps']}x,"
             f" {c['voted']} with unexplained returns silenced), last {last};"
+            f" belief: tracker {c['belief_tracker']}, tf {c['belief_tf']};"
             f" rejected: no belief {c['no_belief']}, stale belief {c['stale_belief']},"
+            f" no tf {c['no_tf_belief']}{tf_failures},"
             f" no odometry {c['no_odometry']}, low fit {c['low_fit']}, thin {c['thin_fan']},"
             f" no map {c['no_map']}; paced {c['paced']}, source off {c['camera_off']}"
         )
