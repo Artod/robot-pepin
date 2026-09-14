@@ -14,6 +14,17 @@ service on demand, and ``/where_am_i`` reports pose and fit as text.
 Frames: the scan is transformed into ``base_link`` with the static laser
 transform looked up once; poses are in ``map``.
 
+The map: whichever of ``/map`` (the served file, or whatever the mode's owner publishes) and
+``/map_lidar`` (the laptop volume's own lidar layer, :mod:`pepin_bringup.depth_fusion`) the
+``map_topic`` flag names. Both are subscribed always and the newest of each is kept, so the
+flag moves the tracker from the frozen file to the volume and back without a restart. Which of
+them is ADOPTED — matcher, static mask and tracker rebuilt, the episode's evidence forgotten —
+is :class:`pepin.mapping.MapChoice`'s decision, not this node's: the named topic only, and a
+second map on the same topic only once ``map_refresh_s`` has passed and its cells have actually
+changed. That gate is the whole reason the volume is safe to point at: it is republished every
+second, and adopting every publication would rebuild the matcher on four A53 cores once a
+second and throw away every candidate and measurement in between.
+
 Sources: the lidar's revolution is matched here, on the board, through the one trigger path
 (:class:`pepin.sources.SourceFeed`) — the scan waits at its gate until the odometry covers its
 whole revolution and then drives an update. The camera is a source too, but its scans are
@@ -74,7 +85,7 @@ from pepin.flags import Flag, FlagSet
 from pepin.fusion import COVARIANCE_CHOICES, PEAK, published_covariance
 from pepin.localization import SWITCHES as TRACKER_SWITCHES
 from pepin.localization import Localizer
-from pepin.mapping import OccupancyGrid
+from pepin.mapping import MAP_REFRESH_S, MAP_TOPIC, MapChoice, OccupancyGrid
 from pepin.measurements import (
     MEASUREMENT_MAX_AGE_S,
     REMOTE_FLOOR_XY_M,
@@ -101,6 +112,7 @@ from pepin.watchdog import CANDIDATE_STREAK, CandidateGate, GlobalCandidate
 from pepin_bringup.msgs import (
     cloud_from_points,
     grid_from_msg,
+    map_digest,
     map_id,
     planar_mount,
     pose_with_matrix,
@@ -126,6 +138,10 @@ CANDIDATE_TOPIC = "/localization/candidate"
 # (pepin.measurements.RemoteMeasurement): the same shape of message, judged the same way — a
 # map id that is not ours is refused, a message that does not parse is counted, not obeyed.
 MEASUREMENT_TOPIC = "/localization/measurement"
+# The two maps this tracker can match on, by the name the ``map_topic`` flag calls each: what
+# the mode's map owner serves, and the lidar layer of the laptop's fused volume
+# (pepin_bringup.depth_fusion, flag lidar_map). Both are subscribed; one is adopted.
+MAP_TOPICS = {"map": "/map", "map_lidar": "/map_lidar"}
 
 
 def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
@@ -464,6 +480,47 @@ FLAGS = FlagSet(
         range=(1, 10),
     ),
     Flag(
+        "map_topic",
+        MAP_TOPIC,
+        description="which map this tracker matches on: /map, whatever the stack's map owner"
+        " publishes there (the served pgm in split and vision mode), or /map_lidar, the lidar"
+        " layer of the laptop's fused volume (pepin_bringup.depth_fusion, flag lidar_map)",
+        why="map is the default because the volume is unmeasured on the moving robot and"
+        " because of one known cost: the volume's grid is 280x250 cells and the served map"
+        " 239x215, so a tracker on /map_lidar answers to another map id, and the laptop's"
+        " candidates and camera measurements — stamped with the id of /map"
+        " (pepin_bringup.laptop_localizer) — are refused as evidence about another map until"
+        " that half moves too. Offline a SEEDED volume is the same map: its slice agrees with"
+        " flat3_straight.pgm on all 18274 cells that map knows, and the four tapes of"
+        " 2026-09-13 replayed on the exported slice give live error medians 0.6/0.5/1.3/0.7 cm"
+        " against the file's own 0.6/0.5/1.3/0.6 (scratch/volume_vs_pgm.py,"
+        " scratch/drive_bisect.py --map). An UNSEEDED volume is not: today's live snapshot holds"
+        " 52.1 % of the saved map's walls",
+        on_when="map_lidar to drive on the room as it is now — the volume carries what the cart"
+        " has seen since the file was frozen, and it hardens where the cart drives",
+        off_when="map wherever the laptop's watchdog and camera measurements must be believed,"
+        " and wherever the laptop may go away: /map is served on the board and the volume is"
+        " not",
+        choices=("map", "map_lidar"),
+    ),
+    Flag(
+        "map_refresh_s",
+        MAP_REFRESH_S,
+        description="the least time between two adoptions of the map topic: a newer map on the"
+        " topic in use is taken only after this many seconds AND only if its cells changed."
+        " 0 takes the first map and no other, which is what a served file has always done",
+        why="the cost is the measured one: adopting a map rebuilds the correlative matcher, the"
+        " static mask and the tracker and forgets the episode's candidates and measurements —"
+        " the whole-map lattice alone is 15 s on these four A53 cores — while /map_lidar is"
+        " republished at the fusion's map_hz, once a second. 0 is the old behaviour exactly: the"
+        " served map arrives once, latched, and is adopted once",
+        on_when="30-60 s with map_topic map_lidar in a room being mapped as it is driven: the"
+        " tracker then follows the volume as it hardens, at one rebuild a minute",
+        off_when="0 for a frozen map, and any time a rebuild mid-drive would cost more than a"
+        " stale map does",
+        range=(0.0, 600.0),
+    ),
+    Flag(
         "carry_candidates",
         True,
         description="a candidate's pose is moved from the moment of its own scan to now over the"
@@ -628,7 +685,21 @@ class Relocalizer(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             reliability=ReliabilityPolicy.RELIABLE,
         )
-        self.create_subscription(OccupancyGridMsg, "/map", self._on_map, latched)
+        # Both maps are subscribed and the newest of each kept; the flag says which is adopted,
+        # so moving the tracker from the served file to the volume needs no restart.
+        self._maps: dict[str, Any] = {}  # the newest message per topic name, adopted or not
+        self._map_id = ""  # the map in use, as every candidate and measurement is judged against
+        # Which map is adopted, and when a newer one replaces it, is pepin.mapping's decision;
+        # the node keeps the messages and does as it is told.
+        self._choice = MapChoice()
+        self._choice.on_choice(self._offer_waiting)
+        for name, topic in MAP_TOPICS.items():
+            self.create_subscription(
+                OccupancyGridMsg,
+                topic,
+                lambda msg, name=name: self._on_map_message(name, msg),
+                latched,
+            )
         # Depth 1: a match takes 40 ms and scans come every 100 ms; a deeper queue let the tracker
         # fall half a second behind reality and lose the lock in every turn (2026-09-06).
         self.create_subscription(
@@ -714,7 +785,7 @@ class Relocalizer(Node):
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._registry.enable(self._switches["sources"])
         self._resize_berth()
-        for gate in (self._candidates, self._measurements):  # a launch override reaches them too
+        for gate in (self._candidates, self._measurements, self._choice):  # a launch override too
             for name in gate.switches:
                 gate.switch(name, self._switches[name])
         self.get_logger().info("relocalizer up: watching the scan-to-map fit")
@@ -735,7 +806,7 @@ class Relocalizer(Node):
         if name in BERTH_FLAGS:
             self._resize_berth()  # the switches already hold the new value
             return
-        for target in (self._localizer, self._candidates, self._measurements):
+        for target in (self._localizer, self._candidates, self._measurements, self._choice):
             if target is not None and name in target.switches:
                 target.switch(name, new)
 
@@ -750,6 +821,31 @@ class Relocalizer(Node):
         self.get_logger().info(
             f"planner {self._planner_id}: dynamic rings {self._berth.ring_m:.2f} m, none within"
             f" {self._berth.near_m:.2f} m, marks trimmed within {self._berth.trim_m:.2f} m"
+        )
+
+    def _on_map_message(self, source: str, msg: OccupancyGridMsg) -> None:
+        """A map arrived on one of :data:`MAP_TOPICS`: keep it as that topic's newest and offer
+        it to the choice, which adopts it or turns it away (:class:`pepin.mapping.MapChoice`)."""
+        self._maps[source] = msg
+        self._choice.offer(
+            source, lambda: map_digest(msg), self._now_s(), lambda: self._adopt(source, msg)
+        )
+
+    def _offer_waiting(self) -> None:
+        """The ``map_topic`` flag moved: offer the choice whatever each topic last published, so
+        a map published once and latched long ago (every served map) is adopted now — waiting for
+        its publisher to speak again would be waiting for ever."""
+        for source, msg in list(self._maps.items()):
+            self._on_map_message(source, msg)
+
+    def _adopt(self, source: str, msg: OccupancyGridMsg) -> None:
+        """Take ``msg`` as the map this tracker matches on: rebuild the matcher, the mask and the
+        tracker on it (:meth:`_on_map`) and say so. Called by the choice, never directly — a
+        rebuild costs seconds on this board and throws away the episode's evidence."""
+        self._on_map(msg)
+        self.get_logger().info(
+            f"map adopted from {MAP_TOPICS[source]}: {msg.info.width}x{msg.info.height} cells,"
+            f" id {self._map_id}, digest {self._choice.digest.split('#')[-1]}"
         )
 
     def _on_map(self, msg: OccupancyGridMsg) -> None:
@@ -1180,6 +1276,9 @@ class Relocalizer(Node):
             f"(rings {self._berth.ring_m:.2f} m from {self._berth.near_m:.2f} m out, trimmed "
             f"within {self._berth.trim_m:.2f} m), "
             f"scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
+            f"map {MAP_TOPICS.get(self._choice.source, 'none')} "
+            f"(id {self._map_id or 'none'}, {self._choice.take_ignored()} republications "
+            f"ignored); "
             f"{self._candidates.report()}; {self._measurements.report()}; "
             f"flags: {self._switches.state()}"
         )

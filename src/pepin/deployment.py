@@ -253,6 +253,11 @@ VISION_LAPTOP_PUBLISHES = (
     # costmap; what used to cross for the POSE was the matching, and that cost the board 147 ms a
     # scan and 50 cm p90 of live error (scratch/drive_bisect.py, run 0238).
     "localization/measurement",
+    # ...and the lidar layer of that same volume, on a topic of its own (depth_fusion's
+    # lidar_map flag): the map the board's tracker matches on when its map_topic flag names it.
+    # NOT /map — the board's map_server owns that in this mode, and two publishers of one /map
+    # is the failure of 2026-09-10. This one nobody else publishes, so it needs no owner rule.
+    "map_lidar",
 )
 # The saved map's own topics, the ones SLAM mode has no publisher for: /map is the laptop's here,
 # and the rest are the tracker's, which does not run because nothing matches a scan against a map
@@ -524,6 +529,7 @@ ON_DEMAND_TOPICS: frozenset[str] = frozenset(
     {
         "/map",
         "/map_camera",
+        "/map_lidar",
         "/tf_static",
         "/plan",
         "/local_plan",

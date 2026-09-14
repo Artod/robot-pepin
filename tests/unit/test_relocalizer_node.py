@@ -719,3 +719,50 @@ def test_a_standing_cart_is_matched_about_once_a_second_even_after_a_seed() -> N
     node._rested = 0
     assert stand(node, 104.1, 4.0) <= 6, "the seed is taken once, not once per scan"
     assert node._rested >= 30
+
+
+# ---- which map the tracker matches on --------------------------------------------------------
+def volume_map_msg() -> Any:
+    """The lidar layer of the laptop's fused volume as depth_fusion publishes it (/map_lidar):
+    the same room on a larger, differently placed grid — which is exactly why it carries another
+    map id, and why the laptop's candidates about /map are no evidence about this one."""
+    msg = map_msg()
+    msg.info.width += 2
+    msg.info.origin.position.x -= 0.10
+    msg.data = (list(msg.data) + [-1] * (2 * msg.info.height))[: msg.info.width * msg.info.height]
+    return msg
+
+
+def test_the_tracker_matches_on_the_served_map_until_the_flag_moves_it(node: Relocalizer) -> None:
+    """Both maps are subscribed always; /map_lidar arriving changes nothing while the flag says
+    map, and moving the flag adopts the map already in hand — a served map is published once and
+    latched, so waiting for the next publication would be waiting for ever."""
+    served = node._map_id
+    node.subs["/map_lidar"][1](volume_map_msg())
+    assert node._map_id == served and node._choice.source == "map"
+
+    assert node.set_parameters([Parameter("map_topic", value="map_lidar")])[0].successful
+    assert node._choice.source == "map_lidar" and node._map_id != served
+    assert node._grid.spec.width_m > 0.0 and node._matcher is not None, "rebuilt on the volume"
+
+    assert node.set_parameters([Parameter("map_topic", value="map")])[0].successful
+    assert node._map_id == served, "and back, without a restart"
+
+
+def test_a_republished_volume_map_does_not_rebuild_the_tracker(node: Relocalizer) -> None:
+    """/map_lidar arrives at the fusion's map_hz, once a second, and every adoption rebuilds the
+    matcher and forgets the episode's evidence. The refresh gate is what makes it safe to point
+    the tracker at a map that is still being built."""
+    node.set_parameters([Parameter("map_topic", value="map_lidar")])
+    node.subs["/map_lidar"][1](volume_map_msg())
+    first = node._matcher
+    for _ in range(3):
+        node.subs["/map_lidar"][1](volume_map_msg())
+    assert node._matcher is first, "the same matcher: nothing was adopted"
+
+    node.clock.seconds = 100.0
+    assert node.set_parameters([Parameter("map_refresh_s", value=30.0)])[0].successful
+    changed = volume_map_msg()
+    changed.data[0] = 100 if changed.data[0] != 100 else 0
+    node.subs["/map_lidar"][1](changed)
+    assert node._matcher is not first, "old enough and its cells differ: adopted"

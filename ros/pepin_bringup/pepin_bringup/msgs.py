@@ -212,6 +212,17 @@ def grid_from_msg(msg: Any) -> OccupancyGrid:
     return grid
 
 
+def map_digest(msg: Any) -> str:
+    """A map's identity and the CRC of its cells (``239x215@-18.53,-4.38#1a2b3c4d``): what tells
+    a republished map from a changed one without keeping a copy of the old one. Cheap enough to
+    take on every arrival — a CRC over 70000 cells is well under a millisecond."""
+    import zlib
+
+    data = msg.data
+    raw = data.tobytes() if hasattr(data, "tobytes") else np.asarray(data, dtype=np.int8).tobytes()
+    return f"{map_id(msg)}#{zlib.crc32(raw) & 0xFFFFFFFF:08x}"
+
+
 def map_id(msg: Any) -> str:
     """A map's identity as every node here spells it: ``239x215@-18.53,-4.38``, its size in
     cells and its origin. Two nodes on two machines must agree letter for letter — a candidate
