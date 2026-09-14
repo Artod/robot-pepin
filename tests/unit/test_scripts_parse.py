@@ -145,13 +145,14 @@ def test_neck_sh_asks_the_base_server_and_prints_ticks_and_degrees() -> None:
         )
 
     port, asked, thread = board(
-        [{"type": "neck", "pan_ticks": 2021, "tilt_ticks": 2311, "age_s": 0.01}]
+        [{"type": "neck", "pan_ticks": 1993, "tilt_ticks": 2311, "age_s": 0.01}]
     )
     read = run_script(port, "read")
     thread.join(timeout=5)
     assert read.returncode == 0, read.stderr[-400:]
     assert asked == [{"cmd": "neck"}]
-    assert "pan 2021 ticks (+0.0 deg left)" in read.stdout, read.stdout
+    # the reference ticks of config/neck.json read as straight ahead (1993 since 2026-09-13)
+    assert "pan 1993 ticks (+0.0 deg left)" in read.stdout, read.stdout
     assert "tilt 2311 ticks (+23.8 deg down)" in read.stdout, read.stdout
 
     port, asked, thread = board(
