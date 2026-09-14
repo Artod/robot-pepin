@@ -526,3 +526,61 @@ def test_a_bridged_topic_carries_one_qos_on_both_sides() -> None:
     for topic in BRIDGED_QOS:
         assert topic in incoming_topics("laptop") or topic in incoming_topics("board"), topic
         assert BRIDGED_QOS[topic][0] in ("reliable", "best_effort"), topic
+
+
+# Four routes of a live dump, taken from the laptop through pepin-vslam on 2026-09-14 (62 routes
+# in the reply, 0 of them dead): the laptop's bridge publishing /vo and /depth_scan out, the
+# board's bringing both in. Trimmed to the keys the reading uses, otherwise verbatim.
+LIVE_LAPTOP_ZID = "8f5e481e794a4ff3eb664f7dbead5870"
+LIVE_BOARD_ZID = "1dcf0420b2c8f50a264578889510f6f3"
+LIVE_ROUTES = (
+    '[{"key":"@/' + LIVE_LAPTOP_ZID + '/ros2/route/topic/pub/depth_scan","value":'
+    '{"dds_reader":"01108106ded89678d760c22100002b04","local_nodes":["/depth_stream"],'
+    '"remote_routes":["' + LIVE_BOARD_ZID + ':depth_scan"],"ros2_name":"/depth_scan",'
+    '"ros2_type":"sensor_msgs/msg/LaserScan"}},'
+    '{"key":"@/' + LIVE_LAPTOP_ZID + '/ros2/route/topic/pub/vo","value":'
+    '{"dds_reader":"01108106ded89678d760c22100001d04","local_nodes":["/visual_odometry"],'
+    '"remote_routes":["' + LIVE_BOARD_ZID + ':vo"],"ros2_name":"/vo",'
+    '"ros2_type":"nav_msgs/msg/Odometry"}},'
+    '{"key":"@/' + LIVE_BOARD_ZID + '/ros2/route/topic/sub/depth_scan","value":'
+    '{"dds_writer":"0110b40e222108dd30e3933e00001e03","is_active":true,'
+    '"local_nodes":["/local_costmap/local_costmap","/global_costmap/global_costmap"],'
+    '"remote_routes":["' + LIVE_LAPTOP_ZID + ':depth_scan"],"ros2_name":"/depth_scan",'
+    '"ros2_type":"sensor_msgs/msg/LaserScan"}},'
+    '{"key":"@/' + LIVE_BOARD_ZID + '/ros2/route/topic/sub/vo","value":'
+    '{"dds_writer":"0110b40e222108dd30e3933e00001803","is_active":true,'
+    '"local_nodes":["/ekf_filter_node"],"remote_routes":["' + LIVE_LAPTOP_ZID + ':vo"],'
+    '"ros2_name":"/vo","ros2_type":"nav_msgs/msg/Odometry"}}]'
+)
+
+
+def test_a_healthy_live_dump_has_no_dead_route() -> None:
+    """The reading is checked against the real thing first: a bridge that works has an endpoint
+    on every route both sides hold."""
+    from pepin.deployment import bridge_routes, dead_routes
+
+    routes = bridge_routes(LIVE_ROUTES)
+    assert len(routes) == 4
+    assert dead_routes(routes, LIVE_LAPTOP_ZID) == ()
+    assert dead_routes(routes, LIVE_BOARD_ZID) == ()
+
+
+def test_a_pub_route_with_a_publisher_a_remote_and_no_reader_is_dead() -> None:
+    """The failure of 2026-09-14: /vo had the publisher and the board's matching route and no
+    dds_reader, so the EKF got nothing while every count in the admin looked right."""
+    from pepin.deployment import bridge_routes, dead_routes
+
+    routes = bridge_routes(LIVE_ROUTES.replace("01108106ded89678d760c22100001d04", ""))
+    assert dead_routes(routes, LIVE_LAPTOP_ZID) == ("/vo",), "and /depth_scan beside it is fine"
+    assert dead_routes(routes, LIVE_BOARD_ZID) == (), "the board's own routes are unharmed"
+
+
+def test_a_sub_route_without_its_writer_is_dead_and_a_route_nobody_wants_is_not() -> None:
+    """The mirror on the incoming side, and the two innocents: a route with no local node to
+    serve and a route no bridge on the far side holds are both endpoint-less on purpose."""
+    from pepin.deployment import bridge_routes, dead_routes
+
+    routes = bridge_routes(LIVE_ROUTES.replace("0110b40e222108dd30e3933e00001803", ""))
+    assert dead_routes(routes, LIVE_BOARD_ZID) == ("/vo",)
+    quiet = bridge_routes(ADMIN_ROUTES)  # /neck/state: no reader, but no remote route either
+    assert dead_routes(quiet, BOARD_ZID) == () and dead_routes(quiet, LAPTOP_ZID) == ()

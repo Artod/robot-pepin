@@ -595,3 +595,14 @@ def test_the_camera_pose_is_read_off_the_optical_edge_pitch_kept_pan_reported() 
     assert optical_heading(panned) == pytest.approx((math.radians(31.5), math.radians(-20.0)))
     # the optical axis of the level, unturned camera is base_link's x: no pitch, no pan
     assert optical_heading(optical) == pytest.approx((0.0, 0.0))
+
+
+def test_the_speed_a_carry_implies_tells_a_drive_from_a_runaway_frame() -> None:
+    """A scan carried to a frame 25 ms younger: 7 mm is the cart driving, 1.5 m is the EKF of
+    2026-09-14 at 60 m/s."""
+    from pepin.depth import carry_speed
+
+    assert carry_speed(np.array([0.007, 0.0, 0.0]), 0.025) == pytest.approx(0.28, abs=0.01)
+    assert carry_speed(np.array([1.5, 0.0, 0.0]), 0.025) == pytest.approx(60.0, abs=0.1)
+    assert carry_speed(np.array([0.0, 0.0, 0.0]), 0.0) == 0.0, "no motion, no speed"
+    assert carry_speed(np.array([0.001, 0.0, 0.0]), 0.0) == pytest.approx(1.0), "a gap of nothing"

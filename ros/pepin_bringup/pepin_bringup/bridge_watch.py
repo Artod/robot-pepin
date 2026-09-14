@@ -1,15 +1,22 @@
 """Watch the bridge from the laptop: whose bridge it is, and whether the topics really flow.
 
-Two failures, two answers.
+Three failures, one repair.
 
 *A different bridge.* Subscriptions made against one bridge do not follow it through a restart:
 after the board rebooted, the laptop's costmap kept an old transform listener that never saw the
 new bridge's /tf, no plan was ever produced and the tree spun the cart for 139 s (run 0148).
 This node polls the board bridge's REST admin; when its zenoh id changes, or the admin has
 answered nothing for a minute, or it answers for the first time to a watch that started without
-it (``pepin.deployment.BridgeIdentity``), it waits for the routes to settle and ends the
-process. The launch is told to shut down on that exit and the container's restart policy brings
-the whole half back with fresh subscriptions.
+it (``pepin.deployment.BridgeIdentity``), it waits for the routes to settle and repairs.
+
+*A route with no endpoint of its own.* Restarting this whole half on that identity change is
+what broke the next thing (2026-09-14): the laptop bridge came back with a pub route for /vo
+that had the publisher, had the board's matching route, and had ``dds_reader ""`` — no DDS
+reader, so the EKF received not one visual-odometry message while every count in the admin
+looked right. The bridge builds a pub route's reader once and never revises it, so a publisher
+that declared after the bridge started leaves it readerless for the bridge's life. That is a
+fact about the admin's JSON, not a wait (:attr:`pepin.deployment.BridgeRoute.dead`), and it is
+read from the same reply this watch already fetches.
 
 *A route that carries nothing.* The route count says nothing about flow: a route exists on both
 admins, the far side's publisher exists, and not one message crosses — /depth_scan on
@@ -20,7 +27,8 @@ that never matches the local writer. So this watch counts messages. It subscribe
 BOTH bridges agree should arrive here — the far side has a publisher, some node here is waiting
 — and when the count stands still for ``flow_silence_s`` it repairs, least destructive first:
 the laptop's bridge container alone (the fusion model and RTAB-Map's database live on), and the
-whole half only if that did not bring the topic back.
+whole half only if that did not bring the topic back. All three faults take that same repair,
+and the whole half stays one ``bridge_restart false`` away.
 
 The watch never subscribes to a topic no local node has asked for: its subscription would
 otherwise create the route, pin that route's QoS to the watch's own, and pay for a topic to
@@ -56,6 +64,7 @@ from pepin.deployment import (
     bridge_routes,
     bridge_zid,
     bridged_qos,
+    dead_routes,
     routes_settled,
     topic_flows,
 )
@@ -113,17 +122,40 @@ FLAGS = FlagSet(
         " and not the bridge",
     ),
     Flag(
+        "dead_routes",
+        True,
+        description="a route wired at both ends and missing its own DDS endpoint — a pub route"
+        " with local publishers and a remote route but no dds_reader, a sub route with local"
+        " subscribers and a remote route but no dds_writer — is repaired without waiting for the"
+        " silence to be counted; off, only the message counters of flow_watch can find it",
+        why="2026-09-14, after the board's bridge changed identity: the laptop bridge's pub route"
+        " for /vo had local_nodes ['/visual_odometry'] and a remote route and dds_reader \"\","
+        " while /depth_scan's route beside it had its reader and carried. The EKF got no visual"
+        " odometry and nothing in the admin said so — the route count was right. The only cure"
+        " was restarting the laptop's bridge alone, with every node alive. The endpoints are in"
+        " the same REST reply this watch already fetches, so the test costs no query: a dead"
+        " route is a fact about the JSON, not a twenty-second wait for a counter that will never"
+        " move (a live dump on 2026-09-14 15:5x, 62 routes, had 0 dead)",
+        on_when="always on a split stack: it is the earliest and cheapest signal there is",
+        off_when="while bisecting the bridge by hand, or if a bridge version ever built a route's"
+        " endpoint lazily enough that a healthy route reads as dead",
+    ),
+    Flag(
         "bridge_restart",
         True,
-        description="repair a dead route by restarting the laptop's bridge container alone"
-        " (Docker Engine API over /var/run/docker.sock); off, the repair is the old one — this"
-        " whole half restarts, which throws away the fusion model and RTAB-Map's working set",
+        description="repair a dead route, a starved topic or a board bridge that changed identity"
+        " by restarting the laptop's bridge container alone (Docker Engine API over"
+        " /var/run/docker.sock); off, the repair is the old one — this whole half restarts, which"
+        " throws away the fusion model and RTAB-Map's working set",
         why="the bridge offers nothing gentler: its REST admin is read-only in 1.7.0 (the"
         " running config prints permissions { read: true, write: false }), so there is no reload"
         " and no way to drop a single route. Restarting the container re-creates every route in"
         " a few seconds and leaves pepin-vslam alive. It falls back by itself when the docker"
-        " socket is not mounted, and escalates to the whole half when the silence returns after"
-        f" a restart. {UNMEASURED}",
+        " socket is not mounted, and escalates to the whole half when the fault returns after a"
+        " restart. It is also the answer to a board bridge that changed identity: on 2026-09-14"
+        " restarting this whole half on that event left the laptop bridge's /vo route without a"
+        " DDS reader, and what cured it was a restart of the laptop's bridge alone with the nodes"
+        f" up. {UNMEASURED}",
         on_when="always: it is strictly less destructive than the fallback",
         off_when="when the laptop's bridge must not be touched — bisecting it by hand, or"
         " running without the docker socket mounted",
@@ -256,6 +288,7 @@ class BridgeWatch(Node):
         self._probes: dict[str, Any] = {}  # topic -> subscription
         self._unknown: set[str] = set()  # topics whose ROS type this image cannot resolve
         self._counts: dict[str, int] = {}
+        self._dead_since: dict[str, float] = {}  # topic -> when its route first read as dead
         self._reported: dict[str, int] = {}
         self._reported_at = 0.0
         self._attempts = 0
@@ -339,42 +372,73 @@ class BridgeWatch(Node):
             self.get_logger().info(f"bridge watch: {zid} has {self._expected or 0} routes")
         if self._identity.observe(zid, now):
             why = f"is a new one ({zid})" if zid else f"answered nothing for {SILENCE_S:.0f} s"
-            self.restart_half(f"the board's bridge {why}")
+            # The board's bridge changed under us and this side's routes are the ones that come
+            # back wrong: the gentle repair is the one that cured it on 2026-09-14, and the whole
+            # half stays one bridge_restart=false away.
+            self.mend(f"the board's bridge {why}", now, settle=True)
             return
-        if self._switches.on("flow_watch") and zid is not None:
+        watching = self._switches.on("flow_watch") or self._switches.on("dead_routes")
+        if watching and zid is not None:
             self.check_flow(now)
 
     def check_flow(self, now: float) -> None:
-        """Ask both bridges what should arrive here, count it, repair what is silent."""
+        """Ask both bridges what should arrive here, count it, repair what is silent or dead."""
         self._flow.silence_s = float(self._switches["flow_silence_s"])
-        flows = self.flows()
-        for flow in flows:
-            expected = flow.judged  # periodic and due; a latched or on-demand topic is never
-            if expected:
-                self._wanted.setdefault(flow.topic, flow.type_name)
-            counted = flow.topic not in self._unknown  # an unreadable type is never starved
-            self._flow.observe(
-                flow.topic, self._counts.get(flow.topic, 0), expected and counted, now
-            )
-        starved = self._flow.starved(now)
+        flows, dead = self.flows()
+        if self._switches.on("flow_watch"):
+            for flow in flows:
+                expected = flow.judged  # periodic and due; a latched or on-demand topic is never
+                if expected:
+                    self._wanted.setdefault(flow.topic, flow.type_name)
+                counted = flow.topic not in self._unknown  # an unreadable type is never starved
+                self._flow.observe(
+                    flow.topic, self._counts.get(flow.topic, 0), expected and counted, now
+                )
+        starved = self._flow.starved(now) if self._switches.on("flow_watch") else ()
+        rotten = self.rotten(dead if self._switches.on("dead_routes") else (), now)
         if now - self._reported_at >= REPORT_S:
-            self.report(flows, starved, now)
-        if starved:
-            self.mend(starved, now)
+            self.report(flows, starved, dead, now)
+        if starved or rotten:
+            self.mend(self.fault(starved, rotten), now, grace=True)
         elif self._flow.settled(now):
             self._attempts = 0  # a link healthy well past the last repair earns the gentle one
 
-    def flows(self) -> tuple[TopicFlow, ...]:
-        """What both bridges say about every allowed incoming topic. One query: the zenoh admin
-        space is network-wide, so the board's admin answers for the laptop's bridge too."""
+    def flows(self) -> tuple[tuple[TopicFlow, ...], tuple[str, ...]]:
+        """What both bridges say about every allowed incoming topic, and the topics whose route
+        on this side is dead by its own endpoints (:func:`pepin.deployment.dead_routes`).
+
+        One query for both: the zenoh admin space is network-wide, so the board's admin answers
+        for the laptop's bridge too.
+        """
         if self._local_zid is None:
             self._local_zid = bridge_zid(fetch(f"{self._local_admin}/@/local/router") or "")
         if not self._allowed:
             self._allowed = self.allowed()
-        if self._local_zid is None or not self._allowed:
-            return ()
+        if self._local_zid is None:
+            return (), ()
         routes = bridge_routes(fetch(f"http://{self._board}:8000/@/*/ros2/route/**", 6.0) or "")
-        return topic_flows(routes, self._local_zid, self._allowed, watcher=WATCH_NODE)
+        dead = dead_routes(routes, self._local_zid)
+        if not self._allowed:
+            return (), dead
+        return topic_flows(routes, self._local_zid, self._allowed, watcher=WATCH_NODE), dead
+
+    def rotten(self, dead: tuple[str, ...], now: float) -> tuple[str, ...]:
+        """The dead routes that have stayed dead for the patience (``flow_silence_s``), so a
+        route caught in the seconds between its creation and its endpoint is not a fault."""
+        self._dead_since = {t: self._dead_since.get(t, now) for t in dead}
+        return tuple(
+            t for t, since in self._dead_since.items() if now - since >= self._flow.silence_s
+        )
+
+    @staticmethod
+    def fault(starved: tuple[str, ...], rotten: tuple[str, ...]) -> str:
+        """One line naming what is wrong, for the log and for the escalation."""
+        said = []
+        if starved:
+            said.append(f"{' '.join(starved)} carried nothing")
+        if rotten:
+            said.append(f"{' '.join(rotten)} has a route with no DDS endpoint")
+        return " and ".join(said)
 
     def allowed(self) -> tuple[str, ...]:
         """The topics this side's bridge may bring in, read from the bridge's own config through
@@ -388,30 +452,38 @@ class BridgeWatch(Node):
             return ()
         return allowed_names(allow if isinstance(allow, str) else str(allow[0]))
 
-    def mend(self, starved: tuple[str, ...], now: float) -> None:
+    def mend(self, why: str, now: float, grace: bool = False, settle: bool = False) -> None:
         """Put the routes back, least destructive first: the laptop's bridge container alone,
-        and the whole half only when a restart has already failed to bring the topics back."""
-        topics = " ".join(starved)
-        if self._started is not None and now - self._started < self._grace_s:
+        and the whole half only when a restart has already failed to mend the same fault.
+
+        One repair for all three faults — a starved topic, a dead route, a board bridge that
+        changed identity — because one thing cured all three by hand. ``grace`` holds off while
+        this half is younger than :data:`STARTUP_GRACE_S` (the routes are still being built, so
+        a fault read off them is not one); ``settle`` waits for the board's route count to stop
+        moving first, which a new bridge needs and a dead route does not.
+        """
+        if grace and self._started is not None and now - self._started < self._grace_s:
             self.get_logger().warning(
-                f"bridge watch: {topics} silent while this half is still coming up; waiting"
+                f"bridge watch: {why} while this half is still coming up; waiting"
             )
             return
         if self._switches.on("bridge_restart") and not self._attempts and self._repair.available():
             self._attempts += 1
+            if settle:
+                count = wait_for_routes(self._board, self._expected)
+                self.get_logger().info(f"bridge watch: routes settled at {count}")
             try:
                 said = self._repair.restart()
             except Exception as exc:
-                self.restart_half(
-                    f"{topics} carried nothing and the bridge would not restart: {exc}"
-                )
+                self.restart_half(f"{why} and the bridge would not restart: {exc}")
                 return
             self._flow.repaired(now)
+            self._dead_since.clear()  # fresh routes: every clock starts again
             self._local_zid = None  # a new bridge has a new id; its routes are new too
-            self.get_logger().error(f"bridge watch: {topics} carried nothing; {said}")
+            self.get_logger().error(f"bridge watch: {why}; {said}")
             return
-        why = "again after a bridge restart" if self._attempts else "and the gentle repair is off"
-        self.restart_half(f"{topics} carried nothing {why}")
+        again = "again after a bridge restart" if self._attempts else "and the gentle repair is off"
+        self.restart_half(f"{why} {again}")
 
     def restart_half(self, why: str) -> None:
         """The old action, kept: wait for the routes to settle, then end the process so the
@@ -421,9 +493,15 @@ class BridgeWatch(Node):
         self.get_logger().error(f"bridge watch: routes settled at {count}; restarting this half")
         self._exit(BRIDGE_CHANGED_EXIT)
 
-    def report(self, flows: tuple[TopicFlow, ...], starved: tuple[str, ...], now: float) -> None:
-        """One line: what each watched topic carried since the last line, what is silent, and
-        the switches (CLAUDE.md rule 19)."""
+    def report(
+        self,
+        flows: tuple[TopicFlow, ...],
+        starved: tuple[str, ...],
+        dead: tuple[str, ...],
+        now: float,
+    ) -> None:
+        """One line: what each watched topic carried since the last line, what is silent, how
+        many routes on this side have no DDS endpoint, and the switches (CLAUDE.md rule 19)."""
         window = max(1e-3, now - self._reported_at)
         self._reported_at = now
         carried = []
@@ -434,8 +512,9 @@ class BridgeWatch(Node):
             since, self._reported[flow.topic] = total - self._reported.get(flow.topic, 0), total
             carried.append(f"{flow.topic.lstrip('/')} {since / window:.1f}")
         silent = f"; SILENT {' '.join(starved)}" if starved else ""
+        rotten = f"; DEAD ROUTES {len(dead)} [{' '.join(dead)}]" if dead else "; dead routes 0"
         self.get_logger().info(
-            f"bridge watch: {len(carried)} topics Hz [{', '.join(carried)}]{silent};"
+            f"bridge watch: {len(carried)} topics Hz [{', '.join(carried)}]{silent}{rotten};"
             f" {self._switches.state()}"
         )
 

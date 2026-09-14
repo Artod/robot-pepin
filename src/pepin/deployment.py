@@ -490,9 +490,11 @@ def allowed_names(regex: str) -> tuple[str, ...]:
 class BridgeRoute:
     """One route as the bridge's REST admin describes it: which bridge owns it (``zid``), which
     way it carries (``direction`` "pub" — local publications out to zenoh — or "sub" — zenoh
-    traffic into the local DDS), the ROS topic and type, the local ROS nodes it serves, whether
+    traffic into the local DDS), the ROS topic and type, the local ROS nodes it serves, the
+    routes the other bridges hold for the same topic (``remote_routes``, "<zid>:<key>"), whether
     the bridge has an endpoint for it at all (``active``; a pub route builds its DDS reader only
-    once some remote subscriber wants the topic) and that endpoint's GUID."""
+    once some remote subscriber wants the topic) and that endpoint's GUID — the DDS reader of a
+    pub route, the DDS writer of a sub route, empty when the bridge never built one."""
 
     zid: str
     direction: str
@@ -501,6 +503,22 @@ class BridgeRoute:
     local_nodes: tuple[str, ...]
     active: bool
     endpoint: str
+    remote_routes: tuple[str, ...] = ()
+
+    @property
+    def dead(self) -> bool:
+        """Whether this route is wired at both ends and carries nothing by construction: a local
+        ROS endpoint to serve, a bridge on the far side that holds the matching route, and no
+        DDS endpoint of its own — so not a byte can cross it.
+
+        2026-09-14: after the board's bridge changed identity, the laptop bridge's
+        ``topic/pub/vo`` route had ``local_nodes ['/visual_odometry']`` and a remote route, and
+        ``dds_reader ""``; ``topic/pub/depth_scan`` beside it had its reader and flowed. The
+        bridge builds a pub route's reader when the route is created and never revises it, so a
+        publisher that undeclared and declared again after the bridge started leaves the route
+        readerless for as long as the bridge lives. Only restarting the bridge made one.
+        """
+        return bool(self.local_nodes) and bool(self.remote_routes) and not self.endpoint
 
 
 def bridge_routes(admin_json: str) -> tuple[BridgeRoute, ...]:
@@ -526,7 +544,11 @@ def bridge_routes(admin_json: str) -> tuple[BridgeRoute, ...]:
         value = row.get("value")
         if not isinstance(value, dict):
             continue
-        endpoint = str(value.get("dds_reader") or value.get("dds_writer") or "")
+        # The endpoint of the direction: a pub route carries the local publications out through a
+        # DDS reader, a sub route brings zenoh traffic in through a DDS writer. Which one is
+        # missing is the whole point (:attr:`BridgeRoute.dead`), so they are not collapsed.
+        key = "dds_writer" if parts[5] == "sub" else "dds_reader"
+        endpoint = str(value.get(key) or "")
         routes.append(
             BridgeRoute(
                 zid=parts[1],
@@ -536,9 +558,20 @@ def bridge_routes(admin_json: str) -> tuple[BridgeRoute, ...]:
                 local_nodes=tuple(str(n) for n in value.get("local_nodes") or ()),
                 active=bool(value.get("is_active", bool(endpoint))),
                 endpoint=endpoint,
+                remote_routes=tuple(str(r) for r in value.get("remote_routes") or ()),
             )
         )
     return tuple(routes)
+
+
+def dead_routes(routes: Sequence[BridgeRoute], zid: str) -> tuple[str, ...]:
+    """The topics of the bridge ``zid`` whose route is wired at both ends and has no DDS
+    endpoint of its own (:attr:`BridgeRoute.dead`), sorted, each topic once.
+
+    Only that one bridge's own routes are judged: the repair is a restart of that bridge, and a
+    dead route on the far side is not something this side can mend.
+    """
+    return tuple(sorted({route.topic for route in routes if route.zid == zid and route.dead}))
 
 
 # Topics that are latched or event-driven on purpose: a map published once with transient

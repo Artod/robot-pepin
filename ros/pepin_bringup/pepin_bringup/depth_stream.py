@@ -84,6 +84,8 @@ from pepin.depth import (
     Array,
     CameraPose,
     Intrinsics,
+    carry,
+    carry_speed,
     depth_to_scan,
     load_law,
     load_ray,
@@ -335,6 +337,24 @@ FLAGS = FlagSet(
         off_when="set it back to 3.0 to reproduce the clipped law in the field, side by side, with"
         " no restart",
         range=(0.5, 20.0),
+    ),
+    Flag(
+        "carry_max_speed_mps",
+        1.0,
+        range=(0.1, 20.0),
+        description="metres per second the carry from the scan's moment to the frame's may imply"
+        " before the frame's lidar beams are thrown away instead of anchoring the law; the frame"
+        " still publishes its depth, it simply judges nothing",
+        why="2026-09-14: with the EKF running away (43 km at 60 m/s) the carry moved the scan"
+        " 1-2 m over the 0.02-0.03 s between the scan and the frame, dragged beams across the"
+        " picture and refitted the law from those pairs — a went 1.65 -> 2.05 and the law file"
+        " had to be thrown away (ros/maps/depth_law.json.corrupt-20260914). This cart's top"
+        " speed is 0.3 m/s, so one metre per second is three times anything it can drive and"
+        " still far under what a runaway frame shows. The board's own guard"
+        " (relocalizer's odometry_guard) stops the pose; this one stops the law",
+        on_when="raise it only on a faster base",
+        off_when="raise it to 20 to reproduce the old behaviour, where any carry was applied"
+        " whatever it implied",
     ),
     Flag(
         "imu_lean",
@@ -720,7 +740,9 @@ class DepthStream(Node):
         moment (the cart's own motion between the two stamps taken out through the odometry;
         without it a 100 ms older scan is 2 degrees stale at 20 deg/s, and the points pass as
         they are, counted): needs the camera's optics, a scan within SCAN_MAX_AGE_S and the
-        lidar's mount; ``None`` otherwise, or with the lidar anchor off."""
+        lidar's mount; ``None`` otherwise, or with the lidar anchor off — and ``None`` as well
+        when the carry itself is impossible (``carry_max_speed_mps``), so a runaway odometry
+        frame cannot drag the beams into the picture and refit the law from them."""
         intr = self._intr
         if intr is None or not self._switches.on("lidar_anchor"):
             return None
@@ -740,11 +762,16 @@ class DepthStream(Node):
             np.asarray(scan.ranges), scan.angle_min, scan.angle_increment, SCAN_RANGE_M
         )
         in_base = to_base(xy, mount.rotation, mount.translation)
-        carried = self._poser.carry(in_base, scan_t, frame_t)
-        if carried is None:
+        moved = self._poser.motion(scan_t, frame_t)
+        if moved is None:
             self._tally.count("uncarried")
             return in_base
-        return carried
+        # A carry the cart could not have driven (pepin.depth.carry_speed): the odometry is
+        # lying, and these beams would land on the wrong pixels and refit the law from them.
+        if carry_speed(moved.translation, frame_t - scan_t) > self._switches["carry_max_speed_mps"]:
+            self._tally.count("carry_insane")
+            return None
+        return carry(in_base, moved.rotation, moved.translation)
 
     def _mount_of(self, frame: str) -> RigidPose | None:
         """base_link <- the laser's frame, looked up once and kept: where the beams start."""
@@ -851,6 +878,8 @@ class DepthStream(Node):
             extra += f", scan age median {float(np.median(ages)):.2f} s max {max(ages):.2f} s"
         if c["uncarried"]:
             extra += f", scans uncarried {c['uncarried']}"
+        if c["carry_insane"]:
+            extra += f", carry insane {c['carry_insane']} frames (the odometry ran away)"
         if c["camera_from_config"]:
             extra += f", camera pose from config {c['camera_from_config']} frames (no TF edge)"
         if c["camera_panned"]:

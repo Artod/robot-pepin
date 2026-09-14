@@ -606,3 +606,50 @@ def test_the_imu_lean_flag_places_the_frame_and_carries_the_scan_with_the_body(
     node._switches.set("imu_lean", False)
     assert not node._poser.apply_lean and not node._lean.use_gyro
     assert node._poser.lean_at(at) is None
+
+
+class FakePoser:
+    """The frame poser with the odometry replaced: every carry moves the cart by ``step`` metres
+    along x, whatever the stamps. The camera's pose is still the real one's."""
+
+    def __init__(self, real: Any, step: float) -> None:
+        self._real = real
+        self._step = step
+
+    def camera_in_base(self, stamp: float) -> Any:
+        return self._real.camera_in_base(stamp)
+
+    def motion(self, from_stamp: float, to_stamp: float) -> Any:
+        return SimpleNamespace(rotation=np.eye(3), translation=np.array([self._step, 0.0, 0.0]))
+
+
+def test_a_carry_the_cart_could_not_have_driven_throws_the_frame_s_beams_away(
+    build: Build,
+) -> None:
+    """2026-09-14: the runaway EKF moved the scan one to two metres over the 25 ms between the
+    scan and the frame, the beams landed on the wrong pixels and the law was refitted from
+    them (a 1.65 -> 2.05). The frame still publishes; it just judges nothing."""
+    node, net = build(law=LAW)
+    node._poser = FakePoser(node._poser, 0.05)  # type: ignore[assignment]
+    frame(node, net, CONFIG_CAM, 2.0, 0)
+    counts = node._tally.take().counts
+    assert counts["carry_insane"] == 1 and counts["verdicts"] == 0, "no pair from this frame"
+    assert counts["frames"] == 1 and counts["uncarried"] == 0, "the depth still went out"
+
+
+def test_a_carry_within_the_cart_s_speed_anchors_the_law_as_before(build: Build) -> None:
+    node, net = build(law=LAW)
+    node._poser = FakePoser(node._poser, 0.0002)  # type: ignore[assignment]
+    frame(node, net, CONFIG_CAM, 2.0, 0)
+    counts = node._tally.take().counts
+    assert counts["carry_insane"] == 0 and counts["verdicts"] == 1
+
+
+def test_the_insane_carry_is_named_in_the_report_line(build: Build) -> None:
+    node, net = build(law=LAW)
+    node._poser = FakePoser(node._poser, 0.05)  # type: ignore[assignment]
+    frame(node, net, CONFIG_CAM, 2.0, 0)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "carry insane 1 frames (the odometry ran away)" in line
+    assert "carry_max_speed_mps=1.0" in line

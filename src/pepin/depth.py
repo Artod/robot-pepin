@@ -123,6 +123,20 @@ def carry(points: Array, rotation: Array, translation: Array) -> Array:
     return moved
 
 
+def carry_speed(translation: Array, dt_s: float) -> float:
+    """Metres per second a carry implies: how far base_link travelled between the two stamps,
+    over the gap between them (a gap under a millisecond reads as a millisecond).
+
+    The sanity test on the carry itself. On 2026-09-14 a runaway EKF (43 km at 60 m/s) moved
+    the scan 1-2 m across the 0.02-0.03 s between a scan and a frame; the beams landed on the
+    wrong pixels, the law was refitted from those pairs and a went 1.65 -> 2.05 until the law
+    file was thrown away. This cart's top speed is 0.3 m/s, so anything near a metre per second
+    is the odometry talking, not the robot.
+    """
+    step = float(np.linalg.norm(np.asarray(translation, dtype=float)))
+    return step / max(abs(dt_s), 1e-3)
+
+
 def project_all(
     points_base: Array, cam: CameraPose, intr: Intrinsics
 ) -> tuple[Array, Array, Array]:

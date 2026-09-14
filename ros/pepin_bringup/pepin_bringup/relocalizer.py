@@ -93,7 +93,7 @@ from pepin.measurements import (
     MeasurementGate,
     RemoteMeasurement,
 )
-from pepin.odometry import Pose2D, wrap_angle
+from pepin.odometry import Pose2D, RunawayWatch, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
 from pepin.slip import SlipWatch
 from pepin.sources import CAMERA, CONTACT, DEPTH, LIDAR, ScanObservation, SourceFeed, SourceRegistry
@@ -562,6 +562,28 @@ FLAGS = FlagSet(
         " search and a hop ago is installed as the pose now",
     ),
     Flag(
+        "odometry_guard",
+        True,
+        description="an odometry sample whose step from the last trusted one is impossible (over"
+        " 1.5 m/s, or over 0.5 m in one sample) while its twist cannot account for it — the"
+        " wheels at rest, or a twist faster than this cart can drive — is refused: it never"
+        " reaches the history, so the carry keeps the last pose that made sense; off, every"
+        " sample is carried, as before",
+        why="2026-09-14: a bad /vo input sent the board's EKF to 43 km from the flat at 60 m/s,"
+        " and everything downstream followed — two costmaps chased the pose at 200 % CPU and the"
+        " depth pipeline carried its scans metres across 25 ms and refitted the depth law from"
+        " the wreckage (a 1.65 -> 2.05, the law file corrupted). The thresholds are from the tape"
+        " of that evening (ros/maps/rec/0260_20260914_155145Z_home.jsonl, 146 ekf records over"
+        " 7.3 s): the frame sat at x 3493.7 m with |vx| never over 0.031 m/s, and its worst"
+        " single step was 0.045 m in 55 ms — 0.83 m/s, still under the 1.5 m/s limit, which is"
+        " itself five times this cart's 0.3 m/s top speed. Nothing a drive does comes near it",
+        on_when="always: the cart cannot move that fast, so a step that says it did is the"
+        " filter, not the robot",
+        off_when="when the odometry frame legitimately jumps — a fresh EKF whose frame starts"
+        " somewhere else while this node keeps running. The guard holds the last trusted pose"
+        " until the frame comes back to somewhere reachable from it, or until this node restarts",
+    ),
+    Flag(
         "distinct_scans",
         True,
         description="a streak is counted in scans, not in messages: a candidate whose scan id is"
@@ -588,11 +610,15 @@ class _RosLogHandler(logging.Handler):
         self._node = node
 
     def emit(self, record: logging.LogRecord) -> None:
-        text = f"[{record.name}] {record.getMessage()}"
-        if record.levelno >= logging.WARNING:
-            self._node.get_logger().warning(text)
-        else:
-            self._node.get_logger().info(text)
+        """One line of the Python-side logger at the same severity on the ROS side: an ERROR
+        from pepin (a refused odometry step, say) must not reach the operator as a warning."""
+        log = self._node.get_logger()
+        say = {
+            logging.CRITICAL: log.error,
+            logging.ERROR: log.error,
+            logging.WARNING: log.warning,
+        }.get(record.levelno, log.info)
+        say(f"[{record.name}] {record.getMessage()}")
 
 
 class Relocalizer(Node):
@@ -646,6 +672,8 @@ class Relocalizer(Node):
         self._last_scan_age_s = 0.0
         self._last_map_odom = (0.0, 0.0, 0.0)  # the belief until the first fix: the base
         self._slip = SlipWatch()  # wheels claiming a step the picture does not show
+        self._runaway = RunawayWatch()  # the mirror: the odometry frame flying, the wheels still
+        self._runaways = 0  # odometry samples refused because of it (per report)
         # The map in use, as every candidate and measurement is judged against.
         self._map_id = ""
         self._pending_seed: tuple[str, Pose2D, float] | None = None
@@ -933,14 +961,25 @@ class Relocalizer(Node):
         self._track_pending()
 
     def _on_odom(self, msg: Odometry) -> None:
-        """Every fused odometry sample feeds the history; a scan waiting for it gets matched."""
+        """Every fused odometry sample feeds the history; a scan waiting for it gets matched.
+
+        A sample the guard refuses (:class:`pepin.odometry.RunawayWatch`: an impossible step
+        with a twist that cannot account for it) never reaches the history, so the carry keeps
+        the last pose that made sense and the tracker stands where it stood. The wheels' word is
+        this message's own twist field — the EKF fuses /odom into it, and subscribing to /odom
+        beside it would cost the board a second reader for a number that is already here.
+        """
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
-        self._history.add(
-            Time.from_msg(msg.header.stamp).nanoseconds * 1e-9, Pose2D(p.x, p.y, yaw_of(q))
-        )
+        stamp = Time.from_msg(msg.header.stamp).nanoseconds * 1e-9
+        pose = Pose2D(p.x, p.y, yaw_of(q))
+        vx = float(msg.twist.twist.linear.x)
         # The gyro's word on whether the cart turns, taken from the filter that already fuses it:
         # subscribing to /imu/data_raw here would cost a slice of a core for a number we have.
         self._odom_wz = float(msg.twist.twist.angular.z)
+        carried = self._runaway.feed(
+            self._history, pose, stamp, vx, self._odom_wz, self._switches.on("odometry_guard")
+        )
+        self._runaways += not carried
         self._track_pending()
 
     def _on_candidate(self, msg: String) -> None:
@@ -1272,7 +1311,8 @@ class Relocalizer(Node):
         feed, pacer, track = self._feed.report(), self._pacer.report(), loc.report()
         self.get_logger().info(
             f"tracker: {feed.summary()}, rested {self._rested}, {pacer.summary()}, deskew "
-            f"failed {self._deskew_failed}; {loc.settings()}; {track.summary()}; "
+            f"failed {self._deskew_failed}, odometry runaway {self._runaways}; "
+            f"{loc.settings()}; {track.summary()}; "
             f"sources: {self._feed.status(self._now_s())}; "
             f"watch {'fit' if self._watch_on else 'off: no full-turn source, fit'} "
             f"{self.fit:.2f}"
@@ -1291,7 +1331,7 @@ class Relocalizer(Node):
                 f"odometry ran late: {feed.expired} scans were never covered by {self._odom_topic} "
                 "and matched nothing"
             )
-        self._rested = self._deskew_failed = 0
+        self._rested = self._deskew_failed = self._runaways = 0
 
     def _lookup_laser(self, frame: str) -> bool:
         """The static base_link <- laser transform, as x, y, yaw and whether roll is pi."""
