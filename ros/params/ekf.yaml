@@ -40,10 +40,20 @@ ekf_filter_node:
     # origin — wherever rgbd_odometry happened to start, and wherever it restarts after losing
     # its tracking — can never move odom -> base_link. NO YAW: the gyro owns heading (with it the
     # EKF's turn error is ~5 %; the wheels alone over-report a turn by 40-70 %, 2026-09-13), and
-    # a camera that sees a blank wall would only spoil it. The rejection threshold is in sigmas
-    # of the differenced measurement (2 cm a pose over ~0.11 s is 0.26 m/s, so 3 sigma is 0.78
-    # m/s of disagreement): it catches an outlier the node's own gate let through and never a
-    # real slip, which is a few centimetres per second.
+    # a camera that sees a blank wall would only spoil it.
+    #
+    # WHAT THE FILTER ACTUALLY WEIGHS. The differential path does not divide the pose covariance
+    # by the square of the gap; it adds this pose's to the previous one's and MULTIPLIES by the
+    # gap (robot_localization/src/ros_filter.cpp 3249-3257, jazzy-devel), so the velocity
+    # variance is 2 * sigma^2 * dt. At the node's 9.4 poses/s its shipped 7 cm sigma is 3.2 cm/s
+    # — one camera sample worth one wheel sample (0.001 m^2/s^2 on vx, pepin_base_cpp's
+    # protocol.hpp) and, at 9.4 Hz against 20, 45 % of the wheels' information per second. The
+    # same arithmetic is why 2 cm would have made the camera the odometry (5.5x the wheels) and
+    # why vo_covariance=rtabmap is not a harmless comparison (325x): scratch/vo_weight.py.
+    # The rejection threshold is in sigmas of the innovation, sqrt(P + R): with R = 1.0e-3 and
+    # the filter's own P around 1e-3 between updates, 3 sigma is roughly 0.14 m/s of
+    # disagreement — half this cart's top speed, so it catches an outlier the node's gate let
+    # through and not a slip, which is a few centimetres per second.
     #
     # Measured at rest on the laptop 2026-09-14 (scratch/vo_probe.py, 85 s on the charger): 9.1
     # poses/s, one lost frame (the first), 0.48 cm and 0.075 deg of drift while the wheels

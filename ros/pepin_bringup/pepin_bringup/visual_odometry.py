@@ -79,26 +79,37 @@ FLAGS = FlagSet(
         " is the scale of the depth those features sit on, and that scale is a network's law"
         " fitted against the lidar (0.94 to 1.98 across one afternoon, 2026-09-11), which no"
         " registration can see. So the topic carries a constant a person can argue with, and"
-        " rtabmap's own is one flag away for the session that wants to compare them",
-        on_when="never as such — it is a choice: 'rtabmap' while comparing the two on a tape",
+        " rtabmap's own is one flag away for the session that wants to compare them — one flag"
+        " away and worth reading twice before it is turned on with vo_publish: 3.8 mm through"
+        " robot_localization's differential conversion (2 * sigma^2 * dt) is a velocity sigma of"
+        " 1.8 mm/s, 325x the wheels' certainty per sample, which is no longer a third opinion"
+        " but the whole odometry (scratch/vo_weight.py)",
+        on_when="never as such — it is a choice: 'rtabmap' while comparing the two on a tape,"
+        " and with vo_publish off unless the point of the session is that comparison",
         off_when="'constant' is the shipping value; leave it there unless a session is about the"
         " covariance itself",
     ),
     Flag(
         "vo_sigma_m",
-        0.02,
+        0.07,
         range=(0.001, 1.0),
         description="the constant position sigma of one visual-odometry pose, in metres; the EKF"
-        " differences two of them into a velocity and the covariance rides along",
-        why="2 cm is a deliberate 1.3x on what rtabmap itself claimed at rest on this robot:"
-        " its own registration reported a position standard deviation of 3.8 mm at the median"
-        " and 15.9 mm at p90 over 85 s (2026-09-14, scratch/vo_probe.py), and that number"
-        " answers for the FEATURES, not for the scale of the depth they sit on — which is this"
-        " source's real error and is a network's (0.94 to 1.98 across one afternoon,"
-        " 2026-09-11). It also deliberately leaves the wheels dominant (their distance is honest"
-        " to 3 %, 2026-09-06): this ships as a third opinion that can pull the filter when the"
-        " wheels slip, not as the measurement the odometry rests on. Tighten it only against a"
-        " drive where a lidar-measured distance says who was right",
+        " differences two of them into a velocity and the covariance rides along — as"
+        " (this pose's + the previous pose's) TIMES the gap, so what the filter actually weighs"
+        " is a velocity variance of 2 * sigma^2 * dt",
+        why="7 cm is not a claim about the registration — it is the sigma at which the wheels"
+        " stay dominant once robot_localization has done its arithmetic, which is the shape this"
+        " source was designed to have. That arithmetic is not the obvious one: the differential"
+        " path multiplies the summed pose covariance BY the gap (ros_filter.cpp 3249-3257,"
+        " jazzy-devel) instead of dividing by its square, so at 9.4 poses/s a 2 cm pose sigma"
+        " becomes a velocity sigma of 0.9 cm/s — against the wheels' own 3.2 cm/s"
+        " (pepin_base_cpp/protocol.hpp, 0.001 m^2/s^2 on vx) that is 11.8x their certainty per"
+        " sample and 5.5x their information per second, i.e. the camera would BE the odometry"
+        " (scratch/vo_weight.py). At 7 cm the same conversion gives 3.2 cm/s: one camera sample"
+        " is worth one wheel sample and, at 9.4 Hz against 20 Hz, the camera carries 45 % of the"
+        " wheels' information — a third opinion that can pull the filter when a wheel slips, on"
+        " top of a distance the wheels are honest about to 3 % (2026-09-06). Tighten it only"
+        " against a drive where a lidar-measured distance says who was right",
         on_when="not a switch: raise it when the visual odometry argues with the wheels on a"
         " drive where the wheels were right, lower it when it was right and was not heard",
         off_when="not a switch",
