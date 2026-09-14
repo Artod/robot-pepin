@@ -215,10 +215,10 @@
       "match": "foxglove_bridge",
       "role": "The Foxglove websocket. Being removed: the laptop reads the board through the zenoh bridge, and a second serialiser of every topic is a luxury on four A53 cores.",
       "on_board_because": [],
-      "owner": "was a component of sensors_container (ros/pepin_bringup/launch/robot.launch.py, foxglove:=true)",
+      "owner": "a component of sensors_container behind foxglove:=true, which defaults to false since 2026-09-14 (ros/pepin_bringup/launch/robot.launch.py)",
       "expected": false,
       "budget": {"cpu_percent": 0.0, "rss_mb": 0.0},
-      "note": "Not expected on the board any more: if a process with this name appears, the removal was reverted. As a component inside sensors_container it is invisible to ps — the census cannot prove its absence, only catch it as a standalone process. Check the launch argument, not this line."
+      "note": "Not expected on the board any more: the laptop runs one Foxglove bridge and it sees the board through the zenoh bridge. If a process with this name appears, someone passed foxglove:=true. As a component inside sensors_container it is invisible to ps — the census cannot prove its absence, only catch it as a standalone process. Check the launch argument, not this line."
     }
   ]
 }
