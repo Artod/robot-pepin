@@ -722,7 +722,6 @@ def test_a_standing_cart_is_matched_about_once_a_second_even_after_a_seed() -> N
     assert node._rested >= 30
 
 
-<<<<<<< HEAD
 # ---- which map the tracker matches on --------------------------------------------------------
 def volume_map_msg() -> Any:
     """The lidar layer of the laptop's fused volume as depth_fusion publishes it (/map_lidar):
@@ -768,7 +767,8 @@ def test_a_republished_volume_map_does_not_rebuild_the_tracker(node: Relocalizer
     changed.data[0] = 100 if changed.data[0] != 100 else 0
     node.subs["/map_lidar"][1](changed)
     assert node._matcher is not first, "old enough and its cells differ: adopted"
-=======
+
+
 def test_the_published_fit_falls_to_zero_once_every_source_has_gone_silent(
     node: Relocalizer,
 ) -> None:
@@ -843,4 +843,3 @@ def test_a_cart_standing_still_is_not_a_cart_without_a_source(node: Relocalizer)
     node._check()
     assert node.pubs["localization_fit"].sent[-1].data > DRIVE_FIT
     assert node._rested > 50, "the matcher was spared while the lidar went on speaking"
->>>>>>> 7496cef (tracker: /localization_fit falls to 0.00 when no source has spoken for 3 s)

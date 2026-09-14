@@ -415,7 +415,6 @@ FLAGS = FlagSet(
         " cannot report",
     ),
     Flag(
-<<<<<<< HEAD
         "map_grow",
         STATIC_M,
         description="how far a mapped obstacle's explanation reaches, metres: a return within"
@@ -435,7 +434,8 @@ FLAGS = FlagSet(
         " one (0.05 m on this map), so anything below that, 0 included, is the mapped cell and"
         " its neighbours and nothing more",
         range=(0.0, 1.0),
-=======
+    ),
+    Flag(
         "fit_needs_a_source",
         True,
         description="/localization_fit falls to 0.00 once no enabled source has spoken for"
@@ -469,42 +469,6 @@ FLAGS = FlagSet(
         off_when="lower it towards the sources' own stale_after_s (0.5 s lidar, 1.0 s camera)"
         " where a drive must stop the moment the sensors go quiet",
         range=(0.1, 60.0),
-    ),
-    Flag(
-        "toe_reach",
-        toe_reach_m(),
-        description="how far past the leg the lidar sees a standing person's toe reaches, metres:"
-        " the term the dynamic rings are sized on (pepin.dynamic.berth_for). The default is"
-        " computed from the lidar's mount (config/lidar.json)",
-        why="one measured number and three assumed ones: the mount is 0.383 m by tape, and the"
-        " reach is 0.21 + (z - 0.07) tan 10 deg — a 28 cm shoe whose ankle sits 7 cm back, a shin"
-        " leaning 10 degrees — typed anthropometry that has never been measured against a person"
-        " in front of this cart. It matters in metres: a point planner's ring is 0.41 m at the"
-        " 0.20 that stood here before and 0.48 m at this 0.27. The flag exists because the cart"
-        " once ran over feet",
-        on_when="raise it for boots, or for a cart that must give more room: every dynamic ring"
-        " widens by the same amount",
-        off_when="lower it to compare berths in the field without a restart; 0 rings only what"
-        " the beams themselves see",
-        range=(0.0, 0.6),
-    ),
-    Flag(
-        "near_rings",
-        True,
-        description="a return is ringed as soon as it clears the cart's own outline, and only the"
-        " marks that would land on that outline are dropped; off, nothing within the ring plus"
-        " the outline is ringed at all — the older rule, whose blind disc grows with the ring",
-        why="exact geometry, no field A/B of the two rules. The old rule blanks a disc of ring +"
-        " 0.457 m (the cart's circumscribed radius plus one costmap cell), so at the ring today's"
-        " reach asks for, 0.48 m, a person standing 0.90 m ahead would not be ringed at all — the"
-        " very case the ring exists for. The new rule trims only the marks that land on the"
-        " cart's own outline, which is what the run-0087 failure actually was: a mark on itself"
-        " that refuses its every command",
-        on_when="wherever a person may come within a metre of the cart — the close approach this"
-        " robot is built for",
-        off_when="to reproduce the older rule side by side; remember its blind disc grows with"
-        " the ring (7 cm of extra ring stopped a person at 0.90 m from being ringed at all)",
->>>>>>> 7496cef (tracker: /localization_fit falls to 0.00 when no source has spoken for 3 s)
     ),
     Flag(
         "accept_candidates",
@@ -1303,14 +1267,8 @@ class Relocalizer(Node):
             f"watch {'fit' if self._watch_on else 'off: no full-turn source, fit'} "
             f"{self.fit:.2f}"
             f"{'' if self._fit_is_local else ' (the laptop measured it: published as 0.00)'}"
-<<<<<<< HEAD
-=======
             f", {self._silence.phrase(self._source_age_s)}"
             f"{' (published as 0.00)' if self._silence.held_at_zero(self._source_age_s) else ''}"
-            f", dynamic marks {self._dynamic_count} "
-            f"(rings {self._berth.ring_m:.2f} m from {self._berth.near_m:.2f} m out, trimmed "
-            f"within {self._berth.trim_m:.2f} m), "
->>>>>>> 7496cef (tracker: /localization_fit falls to 0.00 when no source has spoken for 3 s)
             f"scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
             f"map {MAP_TOPICS.get(self._choice.source, 'none')} "
             f"(id {self._map_id or 'none'}, {self._choice.take_ignored()} republications "
