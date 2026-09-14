@@ -41,6 +41,20 @@ def apply_motion(pose: Pose2D, motion: Pose2D) -> Pose2D:
     )
 
 
+def apex(before: float, at: float, after: float) -> float:
+    """Where a parabola through three scores peaks, in lattice steps from the middle one.
+
+    The three samples are the winner and its two neighbours along one axis; the fraction
+    returned is added to the winner's coordinate, so a peak that really lies between two
+    candidates is not quantised to the step. Returns 0.0 when the three do not describe a
+    maximum, and never leaves the winning cell (clipped to +-0.5).
+    """
+    denominator = before - 2.0 * at + after
+    if not np.isfinite(denominator) or denominator >= -1e-12:
+        return 0.0
+    return float(np.clip(0.5 * (before - after) / denominator, -0.5, 0.5))
+
+
 @dataclass(frozen=True)
 class SearchWindow:
     """Candidate poses around the guess: +-xy_m by xy_step_m, +-theta_deg by theta_step_deg."""
@@ -124,6 +138,40 @@ class ScoreSurface:
     def theta_step(self) -> float:
         """The lattice's heading step in radians (0 for a single heading)."""
         return float(self.headings[1] - self.headings[0]) if len(self.headings) > 1 else 0.0
+
+    @property
+    def side(self) -> int:
+        """Cells per axis of the square position lattice (dx outer, dy inner); 0 when the
+        positions are not a square lattice (a single candidate, a hand-built surface)."""
+        side = round(math.sqrt(len(self.positions)))
+        return side if side * side == len(self.positions) and side >= 1 else 0
+
+    def peak(self) -> Pose2D:
+        """Where the score really peaks, off the lattice: the winning candidate with a parabola
+        through its two neighbours in x, y and heading (:func:`apex`).
+
+        The lattice samples a smooth surface, so the argmax is only as fine as the step — 3 cm
+        and 1.5 degrees on the board. The three scores around the winner in each axis put the
+        apex between them, which is the pose the covariance of that peak belongs to. The winner
+        itself is returned when it sits on the lattice's border, where there is no parabola.
+        """
+        k, i, side = self.k, self.i, self.side
+        x, y = float(self.positions[i, 0]), float(self.positions[i, 1])
+        theta = float(self.headings[k])
+        scores = self.scores
+        if 0 < k < len(self.headings) - 1:
+            theta += self.theta_step * apex(scores[k - 1, i], scores[k, i], scores[k + 1, i])
+        if side >= 3:
+            ix, iy = divmod(i, side)
+            if 0 < ix < side - 1:
+                step = float(self.positions[(ix + 1) * side + iy, 0] - self.positions[i, 0])
+                x += step * apex(
+                    scores[k, (ix - 1) * side + iy], scores[k, i], scores[k, (ix + 1) * side + iy]
+                )
+            if 0 < iy < side - 1:
+                step = float(self.positions[i + 1, 1] - self.positions[i, 1])
+                y += step * apex(scores[k, i - 1], scores[k, i], scores[k, i + 1])
+        return Pose2D(x, y, wrap_angle(theta))
 
 
 class CorrelativeMatcher:
@@ -490,17 +538,6 @@ class CorrelativeMatcher:
         return scores, positions, guess.theta + theta_offsets
 
     @staticmethod
-    def _apex(before: float, at: float, after: float) -> float:
-        """Where a parabola through three scores peaks, in lattice steps from the middle one.
-
-        Returns 0.0 when the three do not describe a maximum, and never leaves the winning cell.
-        """
-        denominator = before - 2.0 * at + after
-        if not np.isfinite(denominator) or denominator >= -1e-12:
-            return 0.0
-        return float(np.clip(0.5 * (before - after) / denominator, -0.5, 0.5))
-
-    @staticmethod
     def _winner(
         scores: NDArray[np.float64], mask: NDArray[np.bool_] | None = None
     ) -> tuple[NDArray[np.float64], int, int]:
@@ -533,16 +570,16 @@ class CorrelativeMatcher:
         ix, iy = divmod(i, side)
         if 0 < k < len(headings) - 1:
             step = float(headings[k + 1] - headings[k])
-            theta += step * self._apex(field[k - 1, i], field[k, i], field[k + 1, i])
+            theta += step * apex(field[k - 1, i], field[k, i], field[k + 1, i])
         if side * side == len(positions):
             if 0 < ix < side - 1:
                 step = float(positions[(ix + 1) * side + iy, 0] - positions[i, 0])
-                x += step * self._apex(
+                x += step * apex(
                     field[k, (ix - 1) * side + iy], field[k, i], field[k, (ix + 1) * side + iy]
                 )
             if 0 < iy < side - 1:
                 step = float(positions[i + 1, 1] - positions[i, 1])
-                y += step * self._apex(field[k, i - 1], field[k, i], field[k, i + 1])
+                y += step * apex(field[k, i - 1], field[k, i], field[k, i + 1])
         return Pose2D(x, y, wrap_angle(theta))
 
     def _peak(

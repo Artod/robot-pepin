@@ -7,13 +7,12 @@ from synthetic import raycast_room
 from test_localization import PILLAR, furnished_room_map
 
 from pepin.odometry import Pose2D, wrap_angle
-from pepin.scanmatch import CorrelativeMatcher, SearchWindow
+from pepin.scanmatch import CorrelativeMatcher, SearchWindow, apex
 
 WINDOW = SearchWindow(xy_m=0.09, xy_step_m=0.03, theta_deg=9.0, theta_step_deg=1.5)
 
 
 def test_a_parabola_apex_is_found_between_samples() -> None:
-    apex = CorrelativeMatcher._apex
     assert apex(1.0, 2.0, 1.0) == 0.0  # symmetric: the middle sample is the peak
     assert 0.2 < apex(1.0, 2.0, 1.8) < 0.5  # leaning right
     assert -0.5 < apex(1.8, 2.0, 1.0) < -0.2  # leaning left
