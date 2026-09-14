@@ -238,13 +238,17 @@ def carried(candidate: GlobalCandidate, motion: Pose2D, stamp: float) -> GlobalC
     at 0.3 m/s that is 7 cm, and it is a bias, never noise — it always points backwards along
     the drive.
 
-    The covariance travels through the composition's Jacobian (:func:`pepin.fusion.carry_pose`,
-    the very carry the laptop's pose measurements get on their way into an update): a heading
-    the search knew to a degree is 2 mm of position error after 10 cm of carry, and that
-    coupling is the only thing the move adds. The odometry's OWN error over a fraction of a
-    second (millimetres) is not added: it is two orders under the peak's own spread. The score
-    and the ambiguity are the scan's own and do not change — the answer is the same answer,
-    read at a later moment.
+    The covariance travels through the composition's Jacobian (:func:`pepin.fusion.carry_pose`):
+    a heading the search knew to a degree is 2 mm of position error after 10 cm of carry, and
+    that coupling is the only thing the move adds. What the odometry's own error over the carry
+    costs (:func:`pepin.fusion.odometry_covariance`, which the laptop's pose measurements DO get
+    on their way into an update) is deliberately NOT added here, and that is a gap, not a proof:
+    :func:`judge` reads only the score, the ambiguity and the distance, so every verdict is
+    untouched by it, but :class:`CandidateGate`'s re-seed fuses the candidate with the tracker's
+    own word by information, and there a carry of a quarter-second through a turn would move the
+    seed a little towards the tracker. Nobody has measured which is better on a tape. The score
+    and the ambiguity are the scan's own and do not change — the answer is the same answer, read
+    at a later moment.
     """
     pose, covariance = carry_pose(candidate.pose, candidate.covariance, motion)
     return replace(
