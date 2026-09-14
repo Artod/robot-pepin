@@ -1563,7 +1563,9 @@ def test_the_pose_graph_reaches_the_tracker_as_a_measurement_of_its_own() -> Non
     assert topic in sf.strings(laptop)
     assert {"graph_measurement", "graph_anchor", "compose"} <= sf.imported(laptop)
     flags = load_table(REPO / NODES / "rtabmap_frame.py")
-    assert flags["graph_measurement"] is False, "off until a closure has been seen to move it"
+    assert flags["graph_measurement"] is True, (
+        "on since 2026-09-14: harmless beside the lidar (test A), the pose of a lidar-less cart"
+    )
     assert flags["graph_odom"] is True and flags.flag("graph_odom").live is False
 
 

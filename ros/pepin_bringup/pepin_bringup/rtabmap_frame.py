@@ -132,12 +132,18 @@ FLAGS = FlagSet(
     ),
     Flag(
         "graph_measurement",
-        False,
+        True,
         description="beside a known map, publish where RTAB-Map's graph says the cart is as a"
         f' measurement on {MEASUREMENT_TOPIC} (source "graph") every time the graph moves, for'
         " the board's fusion to weigh like any other word; off, the graph's answer stays on this"
         " laptop and nothing reaches the pose",
-        why="OFF, because on the stack as it stands the correction never moves at all: over 3 h"
+        why="on since 2026-09-14 16:20: with the lidar driving (sources=lidar,graph, tapes"
+        " 0275/0276)"
+        " the tracker took 5 of 27 words and sat 0.7-0.8 cm from the lidar truth, and at rest the"
+        " word"
+        " stays 0-8 cm from the tracker; the word is what a lidar-less cart localises on (test C)."
+        " Before: OFF, because on the stack as it stands the correction never moves at all: over 3"
+        " h"
         " on 2026-09-14 every closure RTAB-Map found was thrown away by RGBD/OptimizeMaxError"
         " (5 links an iteration, rejected on a NEIGHBOUR edge 28042->28043 whose residual is"
         " 0.888 m against a 0.244 m sigma, ratio 3.64 over the 3.0 the parameter allows), so"
