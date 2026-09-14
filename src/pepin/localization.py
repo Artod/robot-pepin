@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -617,17 +617,65 @@ class Localizer:
         ``trust`` (the source's weight on the roster) so that a camera's answer is widened here,
         where it is measured, and never again on the machine that fuses it.
         """
-        voting = points
-        if mask is not None:
-            known = self.sources.source(source)
-            vote = voting_mask(points, pose, mask, min_points=known.vote_min_points)
-            voting = self._voting(points, vote, self._min_points_for(known))
-            if vote is not None:
-                self.stats.silenced_scans += 1
-                self.stats.silenced_points += len(points) - len(voting)
+        voting = self._voted(points, pose, source, mask)
         local, surface = self._matcher.match_surface(pose, voting, self._window)
         fit = self._matcher.inlier_fraction(local.pose, points, min_known=min_known)
         return self._as_measurement(surface, local.pose, fit, source, stamp, trust)
+
+    def coarse_measure(
+        self,
+        pose: Pose2D,
+        points: NDArray[np.float64],
+        source: str,
+        stamp: float = 0.0,
+        coarse: SearchWindow | None = None,
+        min_known: float = GLOBAL_MIN_KNOWN,
+        trust: float = 1.0,
+        mask: StaticMask | None = None,
+    ) -> PoseMeasurement:
+        """:meth:`measure` over a window too wide to score at the tracking step: the whole of
+        ``coarse`` scored on a coarse lattice first, then the tracking window around its winner.
+
+        A window's cost is its area times its headings, so scoring a half-metre window at the
+        1.5 cm step costs 57 times what the 9 cm one does (1.2 s a scan against 21 ms on this
+        flat's tapes) — far past what a camera match may spend. A coarse pass with the steps
+        stretched to keep the candidate count keeps the cost, and the fine window that follows
+        restores the resolution: the caller sizes ``coarse`` so that its OWN step is no larger
+        than this tracker's window, or the fine pass cannot reach into the coarse cell it was
+        handed.
+
+        ``edge`` is the COARSE lattice's bound and not the fine one's: what was searched is the
+        coarse window, and a fine winner on its border simply sits between two coarse
+        candidates that were both scored. Everything else — the pose, the fit, the covariance —
+        is the fine pass's, so a measurement made this way is read exactly like any other.
+        """
+        window = coarse or self._window
+        voting = self._voted(points, pose, source, mask, count=False)
+        first, wide = self._matcher.match_surface(pose, voting, window)
+        fine = self.measure(first.pose, points, source, stamp, min_known, trust, mask)
+        return replace(fine, edge=at_edge(wide))
+
+    def _voted(
+        self,
+        points: NDArray[np.float64],
+        pose: Pose2D,
+        source: str,
+        mask: StaticMask | None,
+        count: bool = True,
+    ) -> NDArray[np.float64]:
+        """The returns a match may score at ``pose``: the whole scan without a mask, else the
+        part of it the static map explains (:func:`pepin.dynamic.voting_mask`) under this
+        source's floors. ``count`` off leaves the silencing tallies alone, for a caller that
+        votes twice over one scan (:meth:`coarse_measure`)."""
+        if mask is None:
+            return points
+        known = self.sources.source(source)
+        vote = voting_mask(points, pose, mask, min_points=known.vote_min_points)
+        voting = self._voting(points, vote, self._min_points_for(known))
+        if vote is not None and count:
+            self.stats.silenced_scans += 1
+            self.stats.silenced_points += len(points) - len(voting)
+        return voting
 
     def belief(self, stamp: float = 0.0) -> PoseMeasurement:
         """What this tracker currently believes, as a measurement: its pose, its confidence as
