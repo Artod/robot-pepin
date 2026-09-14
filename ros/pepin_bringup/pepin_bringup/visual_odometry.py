@@ -34,7 +34,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from pepin.flags import Flag, FlagSet
 from pepin.visual_odometry import RestWatch, VoGate, VoPose, is_lost, planar_covariance
 from pepin_bringup.msgs import stamp_seconds, yaw_of
-from pepin_bringup.node_kit import Switches, Tally, spin_main
+from pepin_bringup.node_kit import Switches, Tally, bridged_qos_profile, spin_main
 
 RAW_TOPIC = "/vo/raw"  # rgbd_odometry's own output, on this laptop only
 VO_TOPIC = "/vo"  # what crosses to the board's EKF
@@ -177,10 +177,16 @@ class VisualOdometry(Node):
         self._rest = RestWatch()
         self._tally = Tally()
         self._drop: str | None = None  # the last reason, for the report line
-        reliable = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
-        self._pub = self.create_publisher(Odometry, VO_TOPIC, reliable)
-        self.create_subscription(Odometry, RAW_TOPIC, self._on_vo, reliable)
-        self.create_subscription(Odometry, WHEELS_TOPIC, self._on_wheels, reliable)
+        # Both of these cross the bridge, so their QoS is not this node's to choose: it is
+        # pinned on both sides in pepin.deployment.BRIDGED_QOS (reliable, ten deep — what the
+        # board's EKF subscribes with and what base_bridge.cpp writes /odom with). /vo/raw never
+        # leaves this laptop; rtabmap writes it RELIABLE.
+        local = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+        self._pub = self.create_publisher(Odometry, VO_TOPIC, bridged_qos_profile(VO_TOPIC))
+        self.create_subscription(Odometry, RAW_TOPIC, self._on_vo, local)
+        self.create_subscription(
+            Odometry, WHEELS_TOPIC, self._on_wheels, bridged_qos_profile(WHEELS_TOPIC)
+        )
         self.create_timer(REPORT_S, self._report)
         self.get_logger().info(
             f"visual odometry up: {RAW_TOPIC} -> {VO_TOPIC} for the board's EKF (x and y,"

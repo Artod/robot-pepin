@@ -2205,6 +2205,16 @@ def test_the_visual_odometry_reaches_the_ekf_without_being_able_to_move_the_odom
         "robot_localization subscribes RELIABLE at odom1_queue_size: the laptop's publisher and"
         " the bridge route must agree, or the route's QoS is decided by a race"
     )
+    assert bridged_qos("/odom") == ("reliable", 10), (
+        "the rest watch reads the board's wheels over the bridge, and base_bridge.cpp writes"
+        " /odom RELIABLE ten deep: a best-effort endpoint here would let the route's QoS be"
+        " decided by a race no one can see losing"
+    )
+    source = (REPO / "ros/pepin_bringup/pepin_bringup/visual_odometry.py").read_text()
+    for topic in ("VO_TOPIC", "WHEELS_TOPIC"):
+        assert f"bridged_qos_profile({topic})" in source, (
+            f"{topic} crosses the bridge: its endpoint takes the pinned QoS, not one of its own"
+        )
 
 
 def test_the_visual_odometry_runs_on_the_laptop_behind_one_launch_switch() -> None:

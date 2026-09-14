@@ -448,6 +448,14 @@ BRIDGED_QOS: dict[str, tuple[str, int]] = {
     # publisher matches it exactly, so the route's QoS cannot depend on which side announced it
     # first (the failure that starved /imu/data_raw at 10 Hz on 2026-09-13).
     f"/{VO_TOPIC}": ("reliable", 10),
+    # base_bridge.cpp publishes /odom with create_publisher(..., 10): RELIABLE, KEEP_LAST 10.
+    # It became a bridged topic the day a laptop node started reading it (the visual odometry's
+    # rest watch, which needs the wheels to know the cart stands still), and the laptop has two
+    # endpoints on it — that node and bridge_watch's own flow probe — which would otherwise ask
+    # for different reliabilities and let the route's QoS be decided by whichever declaration
+    # the bridge saw first. A RELIABLE reader does not match a BEST_EFFORT writer at all, and
+    # the loser of that race receives nothing, in silence.
+    "/odom": ("reliable", 10),
 }
 
 
