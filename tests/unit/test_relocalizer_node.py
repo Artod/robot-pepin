@@ -181,7 +181,10 @@ def test_the_node_takes_the_camera_as_a_measurement_and_never_as_a_scan(
     assert node._localizer.fusion is False
     assert node.set_parameters([Parameter("sources", value="camera")])[0].successful
     assert node._registry.enabled == (CAMERA,)
-    assert "sources=camera measurement_max_age_s=0.5 fusion=off" in node._switches.state()
+    assert (
+        "sources=camera measurement_max_age_s=0.5 remote_floor_xy_m=0.08"
+        " remote_floor_yaw_deg=5.0 fusion=off" in node._switches.state()
+    )
 
 
 def test_a_dead_lidar_hands_the_node_to_the_camera_s_measurements_and_back(
@@ -256,7 +259,10 @@ def test_a_dead_lidar_hands_the_node_to_the_camera_s_measurements_and_back(
     # the four replaced are the ones offered while the feed still waited for the lidar:
     # each was overtaken by a newer one before any update could take it
     assert "flags: rest_lock=on" in line and "sources=lidar,camera" in line
-    assert "measurement_max_age_s=0.5 fusion=on" in line
+    assert (
+        "measurement_max_age_s=0.5 remote_floor_xy_m=0.08 remote_floor_yaw_deg=5.0 fusion=on"
+        in line
+    )
 
 
 def test_a_measurement_is_carried_from_its_own_scan_to_the_update_that_takes_it(

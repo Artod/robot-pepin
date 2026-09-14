@@ -195,7 +195,12 @@ def test_a_new_map_forgets_what_was_measured_against_the_old_one() -> None:
 
 def test_the_age_the_gate_refuses_past_is_a_live_switch() -> None:
     gate = MeasurementGate()
-    assert gate.switches == ("measurement_max_age_s", "self_check")
+    assert gate.switches == (
+        "measurement_max_age_s",
+        "self_check",
+        "remote_floor_xy_m",
+        "remote_floor_yaw_deg",
+    )
     gate.switch("measurement_max_age_s", 1.0)
     gate.offer(remote(stamp=100.0), "map1")
     assert len(gate.take(100.8, rolling(steps=11))) == 1, "0.8 s is inside the new age"
@@ -245,7 +250,9 @@ def test_the_self_check_is_a_live_switch_and_off_is_the_old_behaviour() -> None:
     own cost and nothing else (:func:`pepin.fusion.odometry_covariance` — here the standing
     floors alone). The ratio is still measured, so the report line shows what the switch would
     do before it is moved."""
-    gate = MeasurementGate()
+    gate = MeasurementGate(
+        remote_floor_xy_m=0.0, remote_floor_yaw_deg=0.0
+    )  # the floor is its own switch
     gate.switch("self_check", False)
     taken = jumpy(gate)
     assert taken[0].covariance[0, 0] == pytest.approx(SURE[0, 0] + ODOM_XY_FLOOR_M**2)
@@ -277,3 +284,32 @@ def test_a_new_map_forgets_the_self_check_too() -> None:
     jumpy(gate)
     gate.forget()
     assert gate.self_check.ratio(DEPTH) == 1.0 and gate.status()["self_check"] == {}
+
+
+def test_a_remote_word_is_never_fused_tighter_than_the_measured_floor() -> None:
+    """2026-09-13: the camera's word was 10 cm and 2-5 deg off the lidar's truth while a fan on a
+    wall claimed 1 deg; fused on that claim the pose spun. The gate raises a claim under the
+    floor to the floor and leaves a wider claim alone; zero floors change nothing."""
+    import math
+
+    import numpy as np
+
+    from pepin.fusion import PoseMeasurement
+    from pepin.measurements import MeasurementGate
+
+    gate = MeasurementGate(remote_floor_xy_m=0.08, remote_floor_yaw_deg=5.0)
+    tight = PoseMeasurement(
+        0.0, 0.0, 0.0, np.diag([0.01**2, 0.01**2, math.radians(1.0) ** 2]), "depth", 0.0, 0.9
+    )
+    wide = PoseMeasurement(
+        0.0, 0.0, 0.0, np.diag([0.3**2, 0.3**2, math.radians(20.0) ** 2]), "depth", 0.0, 0.9
+    )
+    floored = gate._floored(tight)
+    assert math.isclose(math.sqrt(floored.covariance[0, 0]), 0.08) and math.isclose(
+        math.sqrt(floored.covariance[1, 1]), 0.08
+    )
+    assert math.isclose(math.degrees(math.sqrt(floored.covariance[2, 2])), 5.0)
+    assert gate._floored(wide) is wide, "a wider claim is left alone"
+    gate.switch("remote_floor_xy_m", 0.0)
+    gate.switch("remote_floor_yaw_deg", 0.0)
+    assert gate._floored(tight) is tight, "zero floors change nothing"

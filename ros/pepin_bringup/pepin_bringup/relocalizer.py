@@ -77,6 +77,8 @@ from pepin.localization import Localizer
 from pepin.mapping import OccupancyGrid
 from pepin.measurements import (
     MEASUREMENT_MAX_AGE_S,
+    REMOTE_FLOOR_XY_M,
+    REMOTE_FLOOR_YAW_DEG,
     MeasurementGate,
     RemoteMeasurement,
 )
@@ -240,6 +242,35 @@ FLAGS = FlagSet(
         off_when="lower it towards the measurement's own age (0.3 s) where the cart drives fast"
         " and a carry over a tenth of a second is already a decimetre",
         range=(0.05, 5.0),
+    ),
+    Flag(
+        "remote_floor_xy_m",
+        REMOTE_FLOOR_XY_M,
+        description="the least position sigma, metres, a measurement from the laptop is fused"
+        " with, whatever its own peak claims; 0 takes the claim as it comes",
+        why="measured 2026-09-13 with the camera recorded but not fused (scratch/camera_error.py,"
+        " tapes 221822 and 221909): against its own band of the volume the camera's word was"
+        " 8.5-10.6 cm off the lidar's truth at the median and 12-14 cm at p90, on both legs and"
+        " both sources (depth, contact). 8 cm is the median; the self-check still inflates a"
+        " source that scatters beyond its claim on top of the floor",
+        on_when="always while the camera's covariance is a peak at a provisional temperature:"
+        " the floor is what its measured error says the word is worth",
+        off_when="0, to fuse the laptop's claim untouched: only to measure what a calibrated"
+        " camera temperature does on a tape",
+        range=(0.0, 1.0),
+    ),
+    Flag(
+        "remote_floor_yaw_deg",
+        REMOTE_FLOOR_YAW_DEG,
+        description="the least heading sigma, degrees, a measurement from the laptop is fused"
+        " with; 0 takes the claim",
+        why="the same tapes: the camera's heading was 1.6-4.9 deg off at the median and 7-9 deg"
+        " at p90, while a fan on one wall claimed 1.06 deg. Fused on that claim (22:08, sources"
+        " lidar,camera) the pose spun 14-22 cm and 33-40 deg per update and the lidar's +-9 deg"
+        " window could not find the truth back. 5 deg is the median of the worse source",
+        on_when="always, for the reason above",
+        off_when="0, only on a tape, never on the cart",
+        range=(0.0, 90.0),
     ),
     Flag(
         "fusion",

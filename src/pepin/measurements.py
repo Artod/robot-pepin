@@ -51,6 +51,15 @@ __all__ = [
 # this number exists to stop — a measurement made before a bridge stall arriving after it — is
 # seconds, not tenths.
 MEASUREMENT_MAX_AGE_S = 0.5
+# The least a remote source may claim, whatever its peak says. Measured 2026-09-13 with the
+# camera recorded but not fused (scratch/camera_error.py on tapes 221822/221909): its word
+# against its own band of the volume was 8.5-10.6 cm and 1.6-4.9 deg off the lidar's truth at
+# the median, 12-14 cm and 7-9 deg at p90 — while a fan on a wall claimed 1 deg of heading.
+# Fused on that claim the pose spun 20 cm and 40 deg per update (22:08). A floor is what the
+# measured error says a camera word is worth; a source that scatters more is still inflated
+# by its own self-check on top.
+REMOTE_FLOOR_XY_M = 0.08
+REMOTE_FLOOR_YAW_DEG = 5.0
 
 
 @dataclass(frozen=True)
@@ -190,9 +199,13 @@ class MeasurementGate:
         measurement_max_age_s: float = MEASUREMENT_MAX_AGE_S,
         name: str = CAMERA,
         self_check: bool = True,
+        remote_floor_xy_m: float = REMOTE_FLOOR_XY_M,
+        remote_floor_yaw_deg: float = REMOTE_FLOOR_YAW_DEG,
     ) -> None:
         self.sources = sources
         self.measurement_max_age_s = measurement_max_age_s
+        self.remote_floor_xy_m = remote_floor_xy_m  # 0 switches the floor off
+        self.remote_floor_yaw_deg = remote_floor_yaw_deg
         # Every remote source vouches for itself here, BEFORE the sources are fused into one
         # word: each is checked against its own previous measurement carried over this
         # machine's odometry, never against another sensor's pose (pepin.selfcheck).
@@ -208,12 +221,21 @@ class MeasurementGate:
         self._rejected: tuple[str, ...] = ()  # sources the last fusion dropped
         self._used: tuple[str, ...] = ()  # ...and the ones it was made of
 
-    switches: ClassVar[tuple[str, ...]] = ("measurement_max_age_s", "self_check")
+    switches: ClassVar[tuple[str, ...]] = (
+        "measurement_max_age_s",
+        "self_check",
+        "remote_floor_xy_m",
+        "remote_floor_yaw_deg",
+    )
 
     def switch(self, name: str, value: Any) -> None:
         """A live flag by its name (:attr:`switches`); ``ValueError`` for any other name."""
         if name == "self_check":
             self.self_check.enabled = bool(value)
+        elif name == "remote_floor_xy_m":
+            self.remote_floor_xy_m = float(value)
+        elif name == "remote_floor_yaw_deg":
+            self.remote_floor_yaw_deg = float(value)
         elif name == "measurement_max_age_s":
             self.measurement_max_age_s = float(value)
         else:
@@ -255,6 +277,35 @@ class MeasurementGate:
         """Whether the tracker's roster has this source switched on (always, without one)."""
         return self.sources is None or self.sources.is_enabled(self.name)
 
+    def _floored(self, measurement: PoseMeasurement) -> PoseMeasurement:
+        """The measurement with its covariance raised to the remote floor: a variance under the
+        floor's square gets the difference added on its diagonal (a diagonal addition keeps the
+        matrix positive definite where a clamp would not). Zero floors change nothing."""
+        cov = np.array(measurement.covariance, dtype=float)
+        floors = (
+            self.remote_floor_xy_m**2,
+            self.remote_floor_xy_m**2,
+            math.radians(self.remote_floor_yaw_deg) ** 2,
+        )
+        raised = False
+        for i, floor in enumerate(floors):
+            if cov[i, i] < floor:
+                cov[i, i] += floor - cov[i, i]
+                raised = True
+        if not raised:
+            return measurement
+        return PoseMeasurement(
+            measurement.x,
+            measurement.y,
+            measurement.yaw,
+            cov,
+            measurement.source,
+            measurement.stamp,
+            measurement.fit,
+            rejected=measurement.rejected,
+            edge=measurement.edge,
+        )
+
     def take(self, stamp: float, odometry: OdomTrail) -> list[PoseMeasurement]:
         """Every waiting measurement carried to ``stamp`` and fused into one, as a list of one —
         or an empty list when the source is switched off or nothing survives the carry.
@@ -289,7 +340,8 @@ class MeasurementGate:
             # and only then carried to the update: the widening is the source's repeatability,
             # so what the carry adds is never counted as the sensor scattering.
             checked = self.self_check.checked(remote.measurement(), at_scan)
-            taken.append(carried(checked, relative_motion(at_scan, at_stamp), stamp))
+            moved = carried(checked, relative_motion(at_scan, at_stamp), stamp)
+            taken.append(self._floored(moved))
         self._used = tuple(m.source for m in taken)
         fused = fuse(taken)
         if fused is None:
