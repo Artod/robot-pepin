@@ -1269,7 +1269,7 @@ class Relocalizer(Node):
             f"{'' if self._fit_is_local else ' (the laptop measured it: published as 0.00)'}"
             f", {self._silence.phrase(self._source_age_s)}"
             f"{' (published as 0.00)' if self._silence.held_at_zero(self._source_age_s) else ''}"
-            f"scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
+            f", scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
             f"map {MAP_TOPICS.get(self._choice.source, 'none')} "
             f"(id {self._map_id or 'none'}, {self._choice.take_ignored()} republications "
             f"ignored); "
