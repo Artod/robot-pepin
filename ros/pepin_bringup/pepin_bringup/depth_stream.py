@@ -103,8 +103,10 @@ from pepin.depth import (
     to_base,
 )
 from pepin.depth_pipeline import (
+    PARALLAX_MIN_BASELINE_M,
     AffineLaw,
     FrameContext,
+    ParallaxAnchor,
     RangeLawStage,
     RayLaw,
     standard_pipeline,
@@ -448,6 +450,31 @@ FLAGS = FlagSet(
         " drift",
         range=(0.0, 1.0),
     ),
+    Flag(
+        "parallax_min_baseline_m",
+        PARALLAX_MIN_BASELINE_M,
+        description="how much parallax the anchor picks its partner frame to reach: walking back"
+        " through the last second of frames it pairs with the first one inside the gap window"
+        " whose baseline reaches this, and with the widest baseline it has when none does",
+        why="the frame before this one is 0.1 s back, and 0.1 s at the cart's 0.2-0.3 m/s is 2 cm"
+        " of baseline: the live errand of 2026-09-14 14:12 paired every frame 2.1 cm apart, kept a"
+        " 22.8 cm sigma and threw 13885 corners away for too little parallax. Both legs of that"
+        " errand re-measured offline against the lidar's own ranges"
+        " (scratch/parallax_baseline_sweep.txt, 4700 matched points): the per-pair sigma falls"
+        " 16.3 cm at 2 cm of parallax to 12.2 at 5 cm, 6.9 at 9 and 4.1 at 18, and the depth from"
+        " 1.5 to 3 m goes from 0.75 and 0.49 of the lidar at 2 cm — too near, the thin baseline's"
+        " own skew — to 1.02-1.13 from 5 cm on. The cost is the flow: 7.8 % of corners lost at a"
+        " 0.1 s gap, 25 % at 0.4 s, 32 % at 0.5 s, and the points kept per frame peak at the 0.4 s"
+        " gap (median 17) before collapsing past 0.6 s. 10 cm of baseline is that 0.4-0.5 s at"
+        " this speed. What no baseline touches is a +9 to +13 % offset at 1.0-1.5 m, flat across"
+        " every bin: a scale-like error, not the range-dependent one reported on 2026-09-12",
+        on_when="raise it towards 0.15 on a cart that drives faster than 0.3 m/s, where the"
+        " longer gap still tracks — measured, not assumed: past a 0.6 s gap the points kept per"
+        " frame fall to single figures",
+        off_when="0 restores the old behaviour exactly: every partner reaches a baseline of 0, so"
+        " the walk stops at the newest one — the frame before this one",
+        range=(0.0, 1.0),
+    ),
 )
 FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
 
@@ -523,6 +550,7 @@ class DepthStream(Node):
             self._pipeline.set(name, self._switches.on(name))
         set_scale_ceiling(float(self._switches["scale_ceiling"]))  # and the law's bound
         self._law.slew_per_s = float(self._switches["law_slew"])  # how fast the law may move
+        self._ask_parallax(float(self._switches["parallax_min_baseline_m"]))  # and the ring's ask
         self._tally = Tally(STAGES)
         self._lean = LeanFeed(
             self,
@@ -618,8 +646,16 @@ class DepthStream(Node):
             self._lean.use_gyro = bool(new)
         elif name == "lean_min_quality":
             self._poser.min_lean_quality = float(new)
+        elif name == "parallax_min_baseline_m":
+            self._ask_parallax(float(new))
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
+
+    def _ask_parallax(self, baseline_m: float) -> None:
+        """Tell the parallax anchor how much baseline to pick its partner frame to reach."""
+        stage = self._pipeline.stage("parallax_anchor")
+        if isinstance(stage, ParallaxAnchor):
+            stage.min_baseline_m = baseline_m
 
     def _on_work_error(self, text: str) -> None:
         self.get_logger().error(f"depth failed on a frame:\n{text}")

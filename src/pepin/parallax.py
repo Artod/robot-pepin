@@ -50,6 +50,17 @@ while the near one reads 1.25-1.37: the cause of that structure is not yet known
 at least: a 3 cm one weighs 0.02 of a lidar beam, a 15 cm one 0.4. Two things not measured
 there would move the number: a calibrated focal length (the depth is proportional to fx and the
 optics are still the nominal 78 degree guess) and a run at driving speed.
+
+Both arrived on 2026-09-14 (scratch/parallax_baseline_sweep.py over the errand of 14:12 at
+0.2-0.3 m/s, fx 724.1, 4700 points matched to the lidar): the range-dependent bias was the thin
+baseline's own skew. Binned by each point's perpendicular baseline, the far field reads 0.75 and
+0.49 of the lidar at 1.5-2 and 2-3 m on 2 cm of parallax and 1.02-1.13 from 5 cm on, while the
+sigma follows 1 / b as the model says (16.3 cm at 2 cm, 12.2 at 5, 6.9 at 9, 4.1 at 18). A
++9 to +13 % offset at 1.0-1.5 m survives every baseline and is not explained. The gates trade
+places with the gap: the epipolar test takes ~45 % of the corners at every short gap, the
+parallax test 15.9 % at 0.1 s against 2.0 % at 1.5 s, and the flow 7.8 % against 76.1 % — the
+tracker's window follows the longer step up to about 0.6 s, past which the points kept per frame
+fall to single figures.
 """
 
 from __future__ import annotations
