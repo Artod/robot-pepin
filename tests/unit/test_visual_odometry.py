@@ -83,8 +83,8 @@ def test_drift_is_measured_only_while_the_wheels_report_a_hard_zero() -> None:
     own. A drive, and the stretch is thrown away — the motion was real."""
     watch = RestWatch(settle_s=1.0)
     watch.wheels(0.0, 0.0, 0.0)
-    watch.pose(VoPose(0.0, 0.0, 0.0, 0.0))
-    watch.pose(VoPose(60.0, 0.004, 0.003, math.radians(0.1)))
+    watch.pose(VoPose(0.0, 0.0, 0.0, 0.0), now=0.0)
+    watch.pose(VoPose(60.0, 0.004, 0.003, math.radians(0.1)), now=60.0)
     drift = watch.drift
     assert drift is not None
     assert drift.metres == pytest.approx(0.005)
@@ -92,33 +92,52 @@ def test_drift_is_measured_only_while_the_wheels_report_a_hard_zero() -> None:
     assert drift.seconds == pytest.approx(60.0)
     assert "0.5 cm" in str(drift)
     watch.wheels(61.0, 0.2, 0.0)  # a drive starts
-    watch.pose(VoPose(61.5, 0.3, 0.0, 0.0))
+    watch.pose(VoPose(61.5, 0.3, 0.0, 0.0), now=61.5)
     assert watch.drift is None, "what moved while the wheels turned is not drift"
     assert watch.worst is not None and watch.worst.metres == pytest.approx(0.005)
 
 
-def test_the_settling_second_after_a_drive_is_not_counted() -> None:
+def test_without_a_single_wheel_message_there_is_no_such_thing_as_drift_at_rest() -> None:
+    """The number that decides whether this source may be fused is "what it walked while the
+    wheels stood still". With no /odom — a dead bridge route, a QoS that never matched — nothing
+    says the wheels stood still, and a drift printed then would be a drive's, not a drift's."""
+    watch = RestWatch(settle_s=0.0)
+    watch.pose(VoPose(0.0, 0.0, 0.0, 0.0), now=0.0)
+    watch.pose(VoPose(1.0, 0.5, 0.0, 0.0), now=1.0)  # half a metre: the cart was driving
+    assert watch.drift is None and watch.worst is None
+    assert "no /odom" in watch.report()
+    watch.wheels(1.5, 0.0, 0.0)  # the route comes up: only now is stillness known
+    watch.pose(VoPose(2.0, 0.5, 0.0, 0.0), now=2.0)
+    watch.pose(VoPose(3.0, 0.502, 0.0, 0.0), now=3.0)
+    assert watch.drift is not None and watch.drift.metres == pytest.approx(0.002)
+
+
+def test_the_settling_second_is_counted_on_the_receiving_clock() -> None:
     """A cart that has just stopped is still rocking; that motion is the body's, not the
-    camera's."""
+    camera's. The window is measured on the node's own clock because the wheels are stamped by
+    the board and the poses by the laptop — here two clocks a minute apart, the way they were on
+    2026-09-04 — and a window compared across them would count the rocking as drift."""
     watch = RestWatch(settle_s=1.0)
-    watch.wheels(10.0, 0.3, 0.0)
-    watch.pose(VoPose(10.5, 0.05, 0.0, 0.0))
+    watch.wheels(10.0, 0.3, 0.0)  # the wheels turn; the board's stamps say 70.0
+    watch.pose(VoPose(70.5, 0.05, 0.0, 0.0), now=10.5)
     assert watch.drift is None
-    watch.pose(VoPose(11.5, 0.10, 0.0, 0.0))  # past the settling time: the anchor
-    watch.pose(VoPose(12.5, 0.101, 0.0, 0.0))
+    watch.pose(VoPose(71.5, 0.10, 0.0, 0.0), now=11.5)  # past the settling time: the anchor
+    watch.pose(VoPose(72.5, 0.101, 0.0, 0.0), now=12.5)
     assert watch.drift is not None and watch.drift.metres == pytest.approx(0.001)
+    assert watch.drift.seconds == pytest.approx(1.0), "the duration is the visual stamps'"
 
 
 def test_a_restart_starts_the_rest_measurement_again() -> None:
     """The origin moved under the watch: a drift measured across it would be the restart's."""
     watch = RestWatch(settle_s=0.0)
-    watch.pose(VoPose(0.0, 0.0, 0.0, 0.0))
-    watch.pose(VoPose(1.0, 0.002, 0.0, 0.0))
+    watch.wheels(0.0, 0.0, 0.0)
+    watch.pose(VoPose(0.0, 0.0, 0.0, 0.0), now=0.0)
+    watch.pose(VoPose(1.0, 0.002, 0.0, 0.0), now=1.0)
     assert watch.drift is not None
     watch.restart()
     assert watch.drift is None
-    watch.pose(VoPose(2.0, 5.0, 0.0, 0.0))  # the new origin, metres away from the old one
-    watch.pose(VoPose(3.0, 5.001, 0.0, 0.0))
+    watch.pose(VoPose(2.0, 5.0, 0.0, 0.0), now=2.0)  # the new origin, metres from the old one
+    watch.pose(VoPose(3.0, 5.001, 0.0, 0.0), now=3.0)
     assert watch.drift is not None and watch.drift.metres == pytest.approx(0.001)
     assert "at rest" in watch.report()
 
@@ -126,7 +145,7 @@ def test_a_restart_starts_the_rest_measurement_again() -> None:
 def test_a_moving_cart_reports_no_drift_at_all() -> None:
     watch = RestWatch()
     watch.wheels(0.0, 0.0, 0.5)  # turning in place: the wheels say so
-    watch.pose(VoPose(0.1, 0.0, 0.0, 0.0))
-    watch.pose(VoPose(0.2, 0.05, 0.0, 0.0))
+    watch.pose(VoPose(0.1, 0.0, 0.0, 0.0), now=0.1)
+    watch.pose(VoPose(0.2, 0.05, 0.0, 0.0), now=0.2)
     assert watch.drift is None
     assert "moving" in watch.report()

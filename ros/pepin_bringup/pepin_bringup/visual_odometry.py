@@ -25,6 +25,8 @@ before this node existed), ``vo_covariance`` (the constant or rtabmap's own), ``
 
 from __future__ import annotations
 
+import time
+
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -196,9 +198,13 @@ class VisualOdometry(Node):
 
     def _on_wheels(self, msg: Odometry) -> None:
         """The board's wheel odometry: only its twist is read, and only to know whether the cart
-        is standing still (the drift at rest is what says this source may be fused at all)."""
+        is standing still (the drift at rest is what says this source may be fused at all).
+
+        Timed by this node's own clock, not by the message's stamp: this one is the board's and
+        the visual poses are the laptop's (:class:`pepin.visual_odometry.RestWatch`).
+        """
         self._rest.wheels(
-            stamp_seconds(msg.header.stamp),
+            time.monotonic(),
             float(msg.twist.twist.linear.x),
             float(msg.twist.twist.angular.z),
         )
@@ -219,7 +225,7 @@ class VisualOdometry(Node):
             self._drop = refused
             self._rest.restart()  # a drift measured across a re-initialised origin is not one
             return
-        self._rest.pose(pose)
+        self._rest.pose(pose, time.monotonic())
         if not self._switches.on("vo_publish"):
             self._tally.count("withheld")
             return

@@ -167,20 +167,34 @@ class RestWatch:
 
     Fed the wheels' twist (``wheels``) and every pose that passed the gate (``pose``); ``drift``
     is the current stretch of stillness, ``worst`` the largest one this node has seen.
+
+    Both are fed the RECEIVING node's own clock, not the messages' stamps: the wheels are
+    stamped by the board and the visual poses by the laptop, and those two clocks have been
+    seconds apart (the board ran 2.3-2.8 s ahead of the Mac on 2026-09-04; measured 0.13 s apart
+    on 2026-09-14). A stillness window compared across them would either swallow a real drive or
+    count the seconds a cart spends rocking after one. The drift's own duration is still the
+    difference of two visual stamps, which are one clock's.
+
+    And nothing is measured before a single wheel message has arrived: with no ``/odom`` — a
+    dead bridge route, a QoS that never matched — the cart's stillness is not known, and a drift
+    reported then would be a number about nothing (:meth:`report` says so instead).
     """
 
     def __init__(self, settle_s: float = REST_SETTLE_S) -> None:
         self._settle_s = settle_s
+        self._heard_wheels = False
         self._moving_until: float | None = None
         self._anchor: VoPose | None = None
         self._drift: RestDrift | None = None
         self._worst: RestDrift | None = None
 
-    def wheels(self, stamp: float, linear_m_s: float, yaw_rad_s: float) -> None:
-        """One wheel-odometry twist: while it is above the rest thresholds the drift is not
-        being measured, and the next stretch of stillness starts from a fresh anchor."""
+    def wheels(self, now: float, linear_m_s: float, yaw_rad_s: float) -> None:
+        """One wheel-odometry twist, ``now`` by the receiving node's clock: while it is above
+        the rest thresholds the drift is not being measured, and the next stretch of stillness
+        starts from a fresh anchor."""
+        self._heard_wheels = True
         if abs(linear_m_s) > REST_LINEAR_M_S or abs(yaw_rad_s) > REST_YAW_RAD_S:
-            self._moving_until = stamp + self._settle_s
+            self._moving_until = now + self._settle_s
             self._anchor = None
             self._drift = None
 
@@ -191,10 +205,13 @@ class RestWatch:
         self._anchor = None
         self._drift = None
 
-    def pose(self, pose: VoPose) -> None:
-        """One visual-odometry pose the gate admitted; counted only while the wheels are still
-        and have been for the settling time."""
-        if self._moving_until is not None and pose.stamp < self._moving_until:
+    def pose(self, pose: VoPose, now: float) -> None:
+        """One visual-odometry pose the gate admitted, ``now`` by the receiving node's clock;
+        counted only once the wheels have been heard from and have been still for the settling
+        time."""
+        if not self._heard_wheels:
+            return
+        if self._moving_until is not None and now < self._moving_until:
             return
         if self._anchor is None:
             self._anchor = pose
@@ -221,6 +238,8 @@ class RestWatch:
 
     def report(self) -> str:
         """The drift in a few words for a report line."""
+        if not self._heard_wheels:
+            return "no /odom yet: nothing says whether the cart stands still, so no drift"
         if self._drift is None:
             return "moving (no drift measured)"
         worst = f", worst so far {self._worst}" if self._worst is not None else ""
