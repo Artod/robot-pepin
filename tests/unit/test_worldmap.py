@@ -709,3 +709,47 @@ def test_the_snapshot_clock_fires_on_the_period() -> None:
     assert not clock.due(30.0)
     assert clock.age_s(30.0) == 20.0
     assert clock.due(70.0)
+
+
+def test_the_message_packs_the_slice_the_way_map_server_decodes_it() -> None:
+    """The row order of /map, /map_lidar and /map_camera, pinned.
+
+    A tracker pointed at /map_lidar scored fit 0.00 at the true pose on 2026-09-14 and re-seated
+    four metres away at 0.99, and a flipped row order was the first suspect. It is not the fault
+    (scratch/map_lidar_vs_pgm.py: the live slice agrees with the served file on 69.7 % of its
+    walls as packed and on 15-21 % under every flip — the volume is simply not the file yet), so
+    this fixes the convention in a test instead of in a memory: data row 0 is the ORIGIN row,
+    the lowest y, and the pgm's first row is the top one, the highest y.
+    """
+    values = np.full((3, 4), UNKNOWN, dtype=np.int8)
+    values[0, 1] = OCCUPIED  # the second cell of the origin row
+    values[2, 3] = FREE  # the far corner: highest y, highest x
+    slice_ = OccupancySlice(
+        values=values,
+        sdf=np.zeros((3, 4), dtype=np.float32),
+        weight=np.zeros((3, 4), dtype=np.float32),
+        resolution_m=0.5,
+        origin=(-1.0, -2.0),
+        band_m=(0.3, 0.4),
+    )
+    fields = slice_.message_fields()
+    assert (fields.width, fields.height) == (4, 3)
+    assert (fields.origin_x, fields.origin_y) == (-1.0, -2.0)
+
+    data = fields.as_list()
+    assert len(data) == 12
+    # map_server's own decoding: index = row * width + col, cell centre at
+    # (origin_x + (col + 0.5) * res, origin_y + (row + 0.5) * res).
+    occupied = [i for i, v in enumerate(data) if v == OCCUPIED]
+    assert occupied == [1]
+    row, col = divmod(occupied[0], fields.width)
+    x = fields.origin_x + (col + 0.5) * fields.resolution
+    y = fields.origin_y + (row + 0.5) * fields.resolution
+    assert (x, y) == (-0.25, -1.75), "the occupied cell is where the slice put it"
+    assert data[2 * fields.width + 3] == FREE
+
+    # ...and the pgm the same volume writes is that grid with its rows the other way up, which
+    # is what map_server reads back (pepin.mapping.grid_from_pgm flips it again).
+    body = slice_.to_pgm().split(b"\n", 3)[3]
+    pixels = np.frombuffer(body, dtype=np.uint8).reshape(3, 4)
+    assert pixels[2, 1] < 64, "the occupied cell sits in the pgm's LAST row: row 0 is the top"

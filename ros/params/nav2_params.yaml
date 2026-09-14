@@ -633,6 +633,29 @@ global_costmap:
         input_sensor_type: ALL
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
+        # It reads /map and only /map: the map_server on THIS board serving the pgm named by
+        # nav.launch.py, latched (transient local, hence the line below), taken once at startup
+        # and re-taken whenever a new /map is published. subscribe_to_updates is left at its
+        # default False — nobody publishes /map_updates and a partial update is not something
+        # this stack has ever needed.
+        # Asked on 2026-09-14 whether it should read /map_lidar instead (the lidar layer of the
+        # laptop's fused volume) — no, and not for QoS reasons: that topic is latched too and a
+        # transient-local reader on the board does receive it (the tracker's own subscription
+        # does). Three reasons, in order:
+        #  1. content: the live volume's layer holds 69.7 % of this file's walls and 67.6 % of
+        #     its own walls are in the file (scratch/map_lidar_vs_pgm.py, 2026-09-14). A planner
+        #     on that map plans through the missing third.
+        #  2. rule 20: the static layer has no fallback. With the laptop down at startup the
+        #     global costmap would hold no static map at all — the board could not plan a metre
+        #     on its own. The map_server stays the seed and the fallback.
+        #  3. geometry: the volume's grid is 280x250 cells against this map's 239x215, and a
+        #     static map of another size makes the layered costmap resize itself, which
+        #     matchSize()s every other layer and throws away the marks the lidar, camera,
+        #     contact and ToF layers had gathered. The slice is republished every second, so
+        #     every change of the volume's extent repeats that mid-drive.
+        # And it is not the way to plan on the volume in any case: depth_fusion's map_source
+        # flag publishes the volume ON /map under the one-owner rule, which is the topic this
+        # layer already reads.
         map_subscribe_transient_local: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"

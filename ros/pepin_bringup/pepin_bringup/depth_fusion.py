@@ -366,26 +366,33 @@ FLAGS = FlagSet(
     ),
     Flag(
         "lidar_map",
-        False,
+        True,
         description="the volume's lidar layer also goes out on /map_lidar, at map_hz, whoever"
         " owns /map: a topic of its own the board's tracker can be pointed at (the relocalizer's"
         " map_topic flag) while Nav2 and the map_server keep the /map they have",
-        why="a SEEDED volume's layer is the served map itself: slice it and 18274 of the pgm's"
-        " 18274 known cells agree, every wall of each inside one cell of the other, and the four"
-        " tapes of 2026-09-13 replayed on the exported slice give live pose error medians"
-        " 0.6/0.5/1.3/0.7 cm against the file's own 0.6/0.5/1.3/0.6 — the same map"
-        " (scratch/volume_vs_pgm.py, scratch/drive_bisect.py --map). Today's UNSEEDED live"
-        " volume is not: only 52.1 % of the saved map's walls lie within a cell of it and 25.6 %"
-        " of its own walls lie within a cell of the saved map, which is why this ships off and"
-        " why seed_map exists. The second cost is the map id: the volume's grid is 280x250 cells"
+        why="it ships ON as a PUBLICATION and nothing more: no consumer is pointed at it by"
+        " default (the tracker's map_topic stays `map`), and it is the only way to see, live,"
+        " how far the volume's lidar layer has come from the served file — the question that"
+        " decided 2026-09-14, when a tracker moved onto it scored fit 0.00 at the true pose and"
+        " re-seated 4 m away at 0.99. The packing is not the fault: slicing the live volume and"
+        " decoding the message the way map_server does puts 69.7 % of the file's walls within a"
+        " cell of the volume's and 67.6 % the other way, while every flipped packing scores"
+        " 0.15-0.21 (scratch/map_lidar_vs_pgm.py). Those two numbers, not the topic, are what"
+        " the tracker's default waits for. A SEEDED volume's layer IS the served map: 18274 of"
+        " the pgm's 18274 known cells agree, every wall of each inside one cell of the other,"
+        " and the four tapes of 2026-09-13 replayed on the exported slice give live pose error"
+        " medians 0.6/0.5/1.3/0.7 cm against the file's own 0.6/0.5/1.3/0.6 — the same map"
+        " (scratch/volume_vs_pgm.py, scratch/drive_bisect.py --map). The cost to know about is"
+        " the map id: the volume's grid is 280x250 cells"
         " and the served map 239x215, so a tracker that adopts /map_lidar answers to another map"
         " id and the laptop's candidates and camera measurements — stamped with the id of /map"
         " (pepin_bringup.laptop_localizer) — are refused as evidence about another map until"
         " that half moves too",
-        on_when="with a volume seeded from the served map (seed_map), to point the board's"
-        " tracker at the room as it is now instead of at the frozen file",
-        off_when="the default, and mandatory for a volume nobody seeded: one slice per map_hz"
-        " saved on the laptop, and nothing on the bridge the board does not read",
+        on_when="the default: the layer is on the wire where anyone can compare it with the"
+        " file, and the board's tracker can be moved onto it live (map_topic) the day the two"
+        " agree",
+        off_when="on a laptop with nothing to spare, or a bring-up where the bridge must carry"
+        " only what is read: it costs one slice per map_hz and one latched topic",
     ),
     Flag(
         "surface_hz",

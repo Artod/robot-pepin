@@ -156,7 +156,15 @@ def grid_from_pgm(yaml_path: str | Path) -> OccupancyGrid:
 
 
 MAP_TOPIC = "map"  # the map a tracker matches on unless it is told otherwise
+MAP_LIDAR_TOPIC = "map_lidar"  # ...and the other one: the lidar layer of the fused volume
 MAP_REFRESH_S = 0.0  # ...and how long before a newer one on that same topic may replace it
+# How long a tracker waits for the map it was asked to match on before it takes the one that is
+# there instead. Only ever while NOTHING has been adopted yet: a map already in use survives its
+# publisher going away (it is a grid in memory, not a subscription), so a link lost mid-drive
+# costs nothing, while a link that was never up would otherwise leave the board with no map at
+# all. Ten seconds because the served file is latched and arrives in the first second, while the
+# volume's slice only starts when the laptop's fusion is up.
+MAP_FALLBACK_S = 10.0
 
 
 class MapChoice:
@@ -173,18 +181,36 @@ class MapChoice:
     its matcher and its tracker and forgets the evidence gathered on the old map — while a
     volume's slice is republished every second. ``refresh_s`` 0 is the behaviour a served file
     has always had: the first map, and no other.
+
+    And the wanted map may never come. The volume's slice is published by the laptop and the
+    served file by the board itself, so a tracker asking for the volume with the wifi down would
+    wait for ever with a map sitting on the other topic (CLAUDE.md rule 20: nothing on the board
+    may depend on the laptop to start). After ``fallback_after_s`` with nothing adopted at all,
+    :meth:`lapsed` names ``fallback`` and the caller offers what is waiting there; the wanted
+    map still replaces it the moment it arrives. Once something IS adopted the fallback is over
+    for good — a grid in memory does not stop working because its publisher went away.
     """
 
-    def __init__(self, wanted: str = MAP_TOPIC, refresh_s: float = MAP_REFRESH_S) -> None:
+    def __init__(
+        self,
+        wanted: str = MAP_TOPIC,
+        refresh_s: float = MAP_REFRESH_S,
+        fallback: str = MAP_TOPIC,
+        fallback_after_s: float = MAP_FALLBACK_S,
+    ) -> None:
         self._wanted = wanted
         self._refresh_s = refresh_s
+        self._fallback = fallback
+        self._fallback_after_s = fallback_after_s
         self._on_choice: Callable[[], None] = lambda: None
         self.source = ""  # the topic the map in use came from ("" until the first is adopted)
         self.digest = ""  # and what its cells were
         self.taken_s = 0.0  # when it was adopted, on the caller's clock
+        self.fell_back = False  # is the map in use the fallback, taken while the wanted one hid?
+        self._waiting_since_s: float | None = None  # when the wait for the wanted map began
         self._ignored = 0  # arrivals turned away since the last report
 
-    switches = ("map_topic", "map_refresh_s")
+    switches = ("map_topic", "map_refresh_s", "map_fallback_s")
 
     def on_choice(self, callback: Callable[[], None]) -> None:
         """Call ``callback`` whenever the wanted topic changes: the caller offers it whatever
@@ -198,9 +224,13 @@ class MapChoice:
         if name == "map_refresh_s":
             self._refresh_s = float(value)  # type: ignore[arg-type]
             return
+        if name == "map_fallback_s":
+            self._fallback_after_s = float(value)  # type: ignore[arg-type]
+            return
         moved = str(value) != self._wanted
         self._wanted = str(value)
         if moved:
+            self._waiting_since_s = None  # the wait for THIS map starts now
             self._on_choice()
 
     @property
@@ -222,7 +252,7 @@ class MapChoice:
         ``digest`` is a function, not a string, because reading a whole grid's cells costs
         something and the answer usually does not hang on them.
         """
-        if source != self._wanted:
+        if source != self._wanted and not (self.fell_back and source == self._fallback):
             return False
         fresh = ""
         if self.source == source:
@@ -236,5 +266,26 @@ class MapChoice:
         self.source = source
         self.taken_s = now
         self.digest = fresh or digest()
+        self.fell_back = source != self._wanted
         adopt()
         return True
+
+    def lapsed(self, now: float) -> str | None:
+        """The topic to take a map from instead, because the wanted one has never spoken: the
+        fallback's name once ``fallback_after_s`` has passed with nothing adopted at all, else
+        None. The caller then offers whatever is waiting on that topic and :meth:`offer` does
+        the rest; calling this every second is the intended use.
+
+        Silent for ever once a map is in use: a tracker that HAS a map has nothing to gain from
+        a rebuild on a lesser one, whatever happened to the publisher (CLAUDE.md rule 20 is
+        about starting without the laptop, not about surviving it).
+        """
+        if self.source or self._wanted == self._fallback or self._fallback_after_s <= 0.0:
+            return None
+        if self._waiting_since_s is None:
+            self._waiting_since_s = now  # the clock starts the first time it is asked
+            return None
+        if now - self._waiting_since_s < self._fallback_after_s:
+            return None
+        self.fell_back = True  # so the fallback's map is accepted by offer()
+        return self._fallback

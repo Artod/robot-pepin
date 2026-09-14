@@ -85,7 +85,13 @@ from pepin.flags import Flag, FlagSet
 from pepin.fusion import COVARIANCE_CHOICES, PEAK, published_covariance
 from pepin.localization import SWITCHES as TRACKER_SWITCHES
 from pepin.localization import Localizer
-from pepin.mapping import MAP_REFRESH_S, MAP_TOPIC, MapChoice, OccupancyGrid
+from pepin.mapping import (
+    MAP_FALLBACK_S,
+    MAP_REFRESH_S,
+    MAP_TOPIC,
+    MapChoice,
+    OccupancyGrid,
+)
 from pepin.measurements import (
     MEASUREMENT_MAX_AGE_S,
     REMOTE_FLOOR_XY_M,
@@ -570,6 +576,42 @@ FLAGS = FlagSet(
         range=(0.0, 600.0),
     ),
     Flag(
+        "carry_pose_across_maps",
+        True,
+        description="adopting another map keeps the pose the tracker holds instead of starting"
+        " again from the saved pose or the map origin: the two maps are the same room on grids"
+        " aligned to the same file, so a new picture of the room is no reason to forget where"
+        " the cart is",
+        why="measured by its absence. On 2026-09-14 18:13 a live map_topic=map_lidar with the"
+        " cart at home restarted the tracker at (0, 0, 0) — the saved-pose file is keyed by map"
+        " id and the volume's grid has another one — and the very next measurement-driven update"
+        " published map -> odom for that origin pose: Nav2 logged 'global_costmap: Sensor origin"
+        " at (0.01, -0.00) is out of map bounds' 110 times, the local costmap stopped following"
+        " the cart, and no goal succeeded until the board's stack was restarted. The evidence IS"
+        " dropped at a switch (candidates, measurements, the graph's word, the LostWatch); the"
+        " POSE is not evidence about the map, it is where the cart is",
+        on_when="always, while both maps are the same room",
+        off_when="a map of a DIFFERENT place arriving on the same topic, where a carried pose"
+        " would be a lie: off makes the tracker find itself again before it publishes anything",
+    ),
+    Flag(
+        "map_fallback_s",
+        MAP_FALLBACK_S,
+        description="how long this tracker waits for the map map_topic names before it matches"
+        " on /map instead — only while it has adopted no map at all, and the wanted one still"
+        " replaces it the moment it arrives. 0 waits for ever, which is what the tracker did"
+        " before this existed",
+        why="the board must know where it is without the laptop (CLAUDE.md rule 20). /map is"
+        " served here, latched, and arrives in the first second; /map_lidar is the laptop's and"
+        " arrives only once the fusion is up — with the wifi down, never. A map already in use"
+        " needs no fallback at all: it is a grid in memory, and losing its publisher mid-drive"
+        " changes nothing, which is why this only ever fires before the first adoption",
+        on_when="10 s wherever map_topic names a laptop topic",
+        off_when="0 to see the tracker wait for the map it was asked for and nothing else — a"
+        " bring-up where a silent /map_lidar must be visible as silence, not papered over",
+        range=(0.0, 600.0),
+    ),
+    Flag(
         "carry_candidates",
         True,
         description="a candidate's pose is moved from the moment of its own scan to now over the"
@@ -591,7 +633,9 @@ FLAGS = FlagSet(
         " 1.5 m/s, or over 0.5 m in one sample) while its twist cannot account for it — the"
         " wheels at rest, or a twist faster than this cart can drive — is refused: it never"
         " reaches the history, so the carry keeps the last pose that made sense; off, every"
-        " sample is carried, as before",
+        " sample is carried, as before. The same guard watches the HEADING: with the wheels at"
+        " rest, a yaw step beyond what the twist's own rate could have turned in the interval"
+        " (plus 5 deg) is refused the same way",
         why="2026-09-14: a bad /vo input sent the board's EKF to 43 km from the flat at 60 m/s,"
         " and everything downstream followed — two costmaps chased the pose at 200 % CPU and the"
         " depth pipeline carried its scans metres across 25 ms and refitted the depth law from"
@@ -599,9 +643,14 @@ FLAGS = FlagSet(
         " of that evening (ros/maps/rec/0260_20260914_155145Z_home.jsonl, 146 ekf records over"
         " 7.3 s): the frame sat at x 3493.7 m with |vx| never over 0.031 m/s, and its worst"
         " single step was 0.045 m in 55 ms — 0.83 m/s, still under the 1.5 m/s limit, which is"
-        " itself five times this cart's 0.3 m/s top speed. Nothing a drive does comes near it",
-        on_when="always: the cart cannot move that fast, so a step that says it did is the"
-        " filter, not the robot",
+        " itself five times this cart's 0.3 m/s top speed. Nothing a drive does comes near it."
+        " The heading arm is from the same day, 14:48-14:50: the EKF turned odom -> base_link by"
+        " about 90 deg with the cart standing on its charger (x, y never left the origin) and"
+        " the tracker, refusing corrections under occlusion, went round with it. At rest the"
+        " gyro reads 0.3 deg/s on average and 1 deg/s at worst, so 5 deg between two samples"
+        " 20-50 ms apart is already a hundred times the noise",
+        on_when="always: the cart cannot move that fast or turn that quickly, so a step that"
+        " says it did is the filter, not the robot",
         off_when="when the odometry frame legitimately jumps — a fresh EKF whose frame starts"
         " somewhere else while this node keeps running. The guard holds the last trusted pose"
         " until the frame comes back to somewhere reachable from it, or until this node restarts",
@@ -697,6 +746,7 @@ class Relocalizer(Node):
         self._slip = SlipWatch()  # wheels claiming a step the picture does not show
         self._runaway = RunawayWatch()  # the mirror: the odometry frame flying, the wheels still
         self._runaways = 0  # odometry samples refused because of it (per report)
+        self._yaw_runaways = 0  # ...and how many of those were the frame spinning on the spot
         # The map in use, as every candidate and measurement is judged against.
         self._map_id = ""
         self._pending_seed: tuple[str, Pose2D, float] | None = None
@@ -923,6 +973,26 @@ class Relocalizer(Node):
         for source, msg in list(self._maps.items()):
             self._on_map_message(source, msg)
 
+    def _take_fallback_map(self) -> None:
+        """Once a second, before anything else this node does: when the map ``map_topic`` names
+        has never arrived, match on the one that has (:meth:`pepin.mapping.MapChoice.lapsed`).
+
+        This board serves /map itself and reads /map_lidar from the laptop, so a tracker asking
+        for the laptop's map with the wifi down would otherwise never start tracking at all
+        (CLAUDE.md rule 20). Silent once any map is adopted, and the wanted map replaces the
+        fallback the moment it speaks.
+        """
+        source = self._choice.lapsed(self._now_s())
+        msg = self._maps.get(source) if source is not None else None
+        if source is None or msg is None:
+            return
+        self.get_logger().warning(
+            f"nothing on {MAP_TOPICS[self._choice.wanted]} after"
+            f" {float(self._switches['map_fallback_s']):.0f} s: matching on {MAP_TOPICS[source]}"
+            " instead, and taking the wanted map as soon as it arrives"
+        )
+        self._on_map_message(source, msg)
+
     def _adopt(self, source: str, msg: OccupancyGridMsg) -> None:
         """Take ``msg`` as the map this tracker matches on: rebuild the matcher, the mask and the
         tracker on it (:meth:`_on_map`) and say so. Called by the choice, never directly — a
@@ -934,6 +1004,19 @@ class Relocalizer(Node):
         )
 
     def _on_map(self, msg: OccupancyGridMsg) -> None:
+        # The belief, before the old tracker is thrown away. Both maps are the same room on
+        # grids aligned to the same pgm, so where the cart is does not change because the
+        # picture of the room did; only the map id does, and the saved-pose file is keyed by
+        # that id — which is how the live switch of 2026-09-14 18:13 restarted the tracker at
+        # the ORIGIN, published map -> odom for it, and left Nav2 logging "Sensor origin out of
+        # map bounds" 110 times with a rolling window that never came back.
+        carried = (
+            self._localizer.pose
+            if self._localizer is not None
+            and self._tracker_initialised
+            and self._switches.on("carry_pose_across_maps")
+            else None
+        )
         self._grid = grid_from_msg(msg)
         with self._episode:  # a candidate found on the old map is evidence about nothing here
             self._watch = LostWatch(**self._watch_args)  # type: ignore[arg-type]
@@ -955,7 +1038,9 @@ class Relocalizer(Node):
         self._registry.enable(flags.pop("sources"))  # the roster is the feed's and the tracker's
         self._localizer = Localizer(
             self._grid,
-            self._last_known_pose(),  # a restart is not a trip back to the base
+            # The pose this tracker already holds, or — at a start, where there is none — the one
+            # the previous run saved (a restart is not a trip back to the base).
+            carried if carried is not None else self._last_known_pose(),
             window=SearchWindow(xy_m=0.09, xy_step_m=0.03, theta_deg=9.0, theta_step_deg=1.5),
             # Lost (five weak scans): a wider, coarser local search every scan re-locks after a
             # slip; the whole map stays the worker's job (global_retry False).
@@ -973,8 +1058,19 @@ class Relocalizer(Node):
             sources=self._registry,
             **flags,
         )
-        self.get_logger().info(f"map received: {msg.info.width}x{msg.info.height} cells")
-        self._tracker_initialised = False  # a new map: find ourselves on it again
+        self.get_logger().info(
+            f"map received: {msg.info.width}x{msg.info.height} cells"
+            + (
+                f"; the cart stays where it was ({carried.x:+.2f}, {carried.y:+.2f},"
+                f" {math.degrees(carried.theta):+.0f} deg)"
+                if carried is not None
+                else "; looking for the cart on it"
+            )
+        )
+        # A carried pose keeps the tracker tracking: nothing is published for a pose nobody
+        # accepted, and a carry onto a map that is NOT this room is caught by the fresh
+        # LostWatch above, which re-seeds through the whole-map search like any other loss.
+        self._tracker_initialised = carried is not None
         self._motion.reset()
         self._last_match_stamp_s = None  # the next match is the first one on this map
 
@@ -1021,6 +1117,7 @@ class Relocalizer(Node):
             self._history, pose, stamp, vx, self._odom_wz, self._switches.on("odometry_guard")
         )
         self._runaways += not carried
+        self._yaw_runaways += not carried and self._runaway.reason == "yaw"
         self._track_pending()
 
     def _on_candidate(self, msg: String) -> None:
@@ -1373,9 +1470,12 @@ class Relocalizer(Node):
         if loc is None:
             return
         feed, pacer, track = self._feed.report(), self._pacer.report(), loc.report()
+        wanted = MAP_TOPICS.get(self._choice.wanted, self._choice.wanted)
+        fallback = f"; fallback, nothing on {wanted}" if self._choice.fell_back else ""
         self.get_logger().info(
             f"tracker: {feed.summary()}, rested {self._rested}, {pacer.summary()}, deskew "
-            f"failed {self._deskew_failed}, odometry runaway {self._runaways}; "
+            f"failed {self._deskew_failed}, odometry runaway {self._runaways} "
+            f"({self._yaw_runaways} yaw); "
             f"{loc.settings()}; {track.summary()}; "
             f"sources: {self._feed.status(self._now_s())}; "
             f"watch {'fit' if self._watch_on else 'off: no full-turn source, fit'} "
@@ -1386,7 +1486,7 @@ class Relocalizer(Node):
             f", scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
             f"map {MAP_TOPICS.get(self._choice.source, 'none')} "
             f"(id {self._map_id or 'none'}, {self._choice.take_ignored()} republications "
-            f"ignored); "
+            f"ignored{fallback}); "
             f"{self._candidates.report()}; {self._measurements.report()}; "
             f"graph: {self._graph.report()}; "
             f"flags: {self._switches.state()}"
@@ -1396,7 +1496,7 @@ class Relocalizer(Node):
                 f"odometry ran late: {feed.expired} scans were never covered by {self._odom_topic} "
                 "and matched nothing"
             )
-        self._rested = self._deskew_failed = self._runaways = 0
+        self._rested = self._deskew_failed = self._runaways = self._yaw_runaways = 0
 
     def _lookup_laser(self, frame: str) -> bool:
         """The static base_link <- laser transform, as x, y, yaw and whether roll is pi."""
@@ -1478,6 +1578,7 @@ class Relocalizer(Node):
         The camera's fit is on ``/localization/sources``, per source, where it says whose word
         it is.
         """
+        self._take_fallback_map()  # before every return below: a node with no map takes them all
         now = self._now_s()
         # Measured before anything can return: the silence is a fact about the SENSORS, not
         # about whether this node has a map and a pose yet. Left behind the early return below,

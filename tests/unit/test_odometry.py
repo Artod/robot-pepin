@@ -147,3 +147,48 @@ def test_the_history_is_fed_everything_but_the_runaway_and_the_switch_puts_it_ba
     assert not guarded.feed(loose, Pose2D(0.0, 0.0, 0.0), 0.10, 0.01, 0.0, True), (
         "and the reference followed the frame, so the switch can be thrown back live"
     )
+
+
+def test_a_frame_that_spins_on_the_spot_is_refused_while_the_wheels_stand_still() -> None:
+    """2026-09-14, 14:48-14:50: the EKF turned its odom -> base_link yaw by about 90 degrees
+    while the cart stood on its charger — x and y never left (0, 0) — and the tracker, refusing
+    corrections under occlusion, followed it round. The gyro at rest reads 0.3 deg/s on average
+    and 1 deg/s at worst; ninety degrees in one sample is not something this cart did."""
+    import math
+
+    from pepin.odometry import Pose2D, RunawayWatch
+
+    watch = RunawayWatch()
+    watch.adopt(Pose2D(0.0, 0.0, math.radians(55.0)), 100.0)
+    spun = Pose2D(0.0, 0.0, math.radians(145.0))
+    assert watch.judge(spun, 100.05, 0.0, math.radians(0.3)), "90 deg in 50 ms at rest"
+    assert watch.streak == 1 and watch.reason == "yaw"
+    assert watch.judge(spun, 100.10, 0.0, 0.0), "still turned away: still refused"
+    assert watch.streak == 2, "one episode, said once"
+    assert not watch.judge(Pose2D(0.0, 0.0, math.radians(56.0)), 100.15, 0.0, 0.0), "back"
+
+
+def test_a_cart_that_is_turning_may_turn_as_fast_as_its_twist_says() -> None:
+    """The arm only judges a cart at rest, and even then it allows what the rate itself claims:
+    a pivot at 1 rad/s turns 3 degrees between two 50 ms samples and is never touched."""
+    import math
+
+    from pepin.odometry import Pose2D, RunawayWatch
+
+    watch = RunawayWatch()
+    watch.adopt(Pose2D(), 0.0)
+    assert not watch.judge(Pose2D(0.0, 0.0, math.radians(3.0)), 0.05, 0.0, 1.0), "a pivot"
+    watch.adopt(Pose2D(0.0, 0.0, math.radians(3.0)), 0.05)
+    assert not watch.judge(Pose2D(0.0, 0.0, math.radians(6.0)), 0.10, 0.1, 0.05), "drifting by"
+    assert watch.streak == 0
+
+
+def test_the_wrap_at_pi_is_not_a_jump() -> None:
+    """A heading crossing +-180 deg steps by a hundredth of a degree, not by 360."""
+    import math
+
+    from pepin.odometry import Pose2D, RunawayWatch
+
+    watch = RunawayWatch()
+    watch.adopt(Pose2D(0.0, 0.0, math.radians(179.99)), 0.0)
+    assert not watch.judge(Pose2D(0.0, 0.0, math.radians(-179.99)), 0.05, 0.0, 0.0)

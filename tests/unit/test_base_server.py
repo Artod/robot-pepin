@@ -86,6 +86,68 @@ def test_ping_is_refused_while_the_wheels_turn() -> None:
     assert "servos" in (core.command({"cmd": "ping"}, now=1.3) or {})
 
 
+def test_wheels_that_never_turn_are_released_however_hard_they_are_commanded() -> None:
+    """2026-09-14: Artem found the servos locked with the cart standing and had to power-cycle
+    it. A controller (a stalled Nav2 after a cancelled drive) kept sending small non-zero twists,
+    so the release clock — which counted from the last non-zero TWIST — was refreshed for ever
+    while the encoders showed nothing at all. The encoders now have the last word."""
+    core, bus = make_core()
+    for i in range(1, 12):  # a twist every second, and a cart that does not move a millimetre
+        core.command({"cmd": "twist", "v": 0.01, "w": 0.0}, now=float(i))
+        core.tick(float(i) + 0.5)
+        if i < 10:
+            assert core.armed, "still trying"
+    assert not core.armed and bus.torque[-1][0] == "off"
+
+    core.command({"cmd": "twist", "v": 0.1, "w": 0.0}, now=20.0)
+    assert core.armed and bus.torque[-1][0] == "on", "the next twist arms it again"
+
+
+def test_a_cart_that_really_travels_keeps_its_torque() -> None:
+    """The other half: the same commands with the wheels turning must never release them."""
+    core, bus = make_core()
+    ticks = 0
+    for i in range(1, 30):
+        core.command({"cmd": "twist", "v": 0.1, "w": 0.0}, now=float(i))
+        ticks += 30  # about 3 mm a second at 0.096 mm a tick: a slow creep, but travel
+        bus.positions[LEFT], bus.positions[RIGHT] = -ticks, ticks
+        core.tick(float(i) + 0.5)
+        assert core.armed, f"travelling at second {i}"
+    assert [state for state, _ in bus.torque] == ["on"]
+
+
+def test_the_travel_release_can_be_turned_off() -> None:
+    """The behaviour before 2026-09-14 stays reachable (config/base.json)."""
+    bus = PingableBus()
+    core = BaseServerCore(bus, CFG, servo_names=[LEFT, RIGHT], disarm_without_travel=False)
+    core.tick(0.0)
+    for i in range(1, 30):
+        core.command({"cmd": "twist", "v": 0.01, "w": 0.0}, now=float(i))
+        core.tick(float(i) + 0.5)
+    assert core.armed, "commanded, so armed, however little the cart moved"
+
+
+def test_encoder_noise_alone_never_counts_as_travel() -> None:
+    """The threshold is signed travel, not the sum of its absolute values: a reading that
+    jitters by a tick each way for ten seconds is a cart standing still — and at 50 Hz the sum
+    of the absolute values would have reached the threshold in a second and armed it for ever.
+
+    It also shows the one limit of the rule as it is asked for: a controller that keeps
+    commanding at 20 Hz re-arms the wheels with its very next twist, so each release lasts until
+    then. The torque does come off, and it stays off as soon as the commands stop.
+    """
+    core, bus = make_core()
+    for i in range(1, 300):
+        core.command({"cmd": "twist", "v": 0.01, "w": 0.0}, now=i * 0.05)
+        bus.positions[LEFT] = i % 2
+        bus.positions[RIGHT] = -(i % 2)
+        core.tick(i * 0.05 + 0.02)
+    releases = [state for state, _ in bus.torque].count("off")
+    assert releases >= 1, "ten seconds of jitter released it"
+    core.tick(26.0)  # the commands stop: ten seconds later it is released for good
+    assert not core.armed
+
+
 def test_idle_release_counts_from_the_last_motion_not_the_last_message() -> None:
     core, bus = make_core()
     core.command({"cmd": "twist", "v": 0.1, "w": 0.0}, now=1.0)
