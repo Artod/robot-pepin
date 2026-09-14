@@ -50,6 +50,8 @@ owns heading). Nothing reaches the filter until that node's ``vo_publish`` flag 
 
 Arguments: ``board`` (the robot's address for the camera stream), ``slam``, ``camera_only``,
 ``resume``, ``graph_odom`` (known-map mode: whose odometry the graph is built on),
+``neighbor_refining`` (known-map mode: whether ICP refines the neighbour links and stiffens them
+with its own covariance — false, or no closure the graph finds survives RGBD/OptimizeMaxError),
 ``vo``, ``database`` (empty: chosen by the mode), ``bridge_admin`` (the laptop
 bridge's REST admin, asked whether it still lists this launch's previous incarnation),
 ``static_camera_tf``
@@ -144,7 +146,44 @@ KNOWN_MAP = {
     "Grid/3D": "true",
     "Grid/RangeMax": "5.0",
     "Grid/RayTracing": "false",  # 3D ray tracing costs more than it clears at 1 Hz
-    "RGBD/NeighborLinkRefining": "true",
+    # WHY THE NEIGHBOUR LINKS ARE NOT REFINED HERE (2026-09-14, the second rejection disease).
+    # With the graph on the EKF's odometry RTAB-Map finds its closures — 5 or 6 an iteration,
+    # 8459 against 1, 1137, 1462, 1813, 2398, registered with 211 visual inliers against a
+    # Vis/MinInliers of 20 — and throws every one of them away on RGBD/OptimizeMaxError, which
+    # compares each link's residual after optimisation with that link's own standard deviation:
+    #   "Rejecting all added loop closures (5, first is 8459 <-> 1) ... maximum graph error ratio
+    #    11.737604 (edge 7083->7084, type=0, abs error=0.217136 m, stddev=0.018499)"
+    #   "... ratio 3.530088 (edge 962->1023, type=0, abs error=0.435329 deg, stddev=0.002152)"
+    # Both culprits are NEIGHBOUR links (type=0), and the stddev is why. Refined, a neighbour
+    # link carries ICP's own fit residual as its covariance, and ICP on two scans of a flat is
+    # sure of itself: over the 607 neighbour links in ros/maps/rtabmap.db the median sigma is
+    # 0.75 cm and 0.135 deg (scratch/graph_link_sigmas.py). At OptimizeMaxError's 3.0 that means
+    # the optimised graph may not disagree with ANY neighbour link by more than 2.2 cm or 0.40
+    # deg — while a closure across a session boundary asks for tens of centimetres by
+    # construction, and the whole correction lands on whichever link joins the two parts (node
+    # 7083 and 7084 are one second and 0.4 cm apart; nothing is wrong with that edge, it is
+    # simply the hinge). The check could therefore never accept a closure on this graph, however
+    # right the closure was.
+    # Unrefined, the link carries the ODOMETRY's uncertainty instead (odom_tf_*_variance below),
+    # which is what the check was written to compare against — how far the chain may have
+    # drifted, not how well two clouds overlay. Nothing that decides whether a closure is CORRECT
+    # is touched: Vis/MinInliers, the ICP checks and OptimizeMaxError itself all stand, and a
+    # wrong closure asking metres of one link is still refused. What is given up is the scan's
+    # correction of the wheels between two nodes 5 cm apart — a centimetre of local metric
+    # accuracy, against a graph that can close a loop at all. Back with neighbor_refining:=true.
+    "RGBD/NeighborLinkRefining": "false",
+}
+
+# RTAB-Map reads its odometry from TF here (odom_frame_id above), and TF carries no covariance,
+# so rtabmap_slam gives every odometry link a constant one from these two — which is what the
+# neighbour links above are worth once ICP no longer overwrites them. 0.001 m2 is 3.2 cm per
+# link, rtabmap_launch's own default; 0.0001 rad2 is 0.57 deg. Per link, over an evening's 600
+# links, that is a chain 1-sigma of 78 cm and 14 deg: honest for wheels and a gyro, and loose
+# enough that a real loop closure's correction has somewhere to go, while 3 sigma on one link
+# (9.5 cm, 1.7 deg) still catches the closure that is simply wrong.
+TF_ODOMETRY_VARIANCE = {
+    "odom_tf_linear_variance": 0.001,
+    "odom_tf_angular_variance": 0.0001,
 }
 
 # The old known-map table, one launch argument away (``graph_odom:=false``): RTAB-Map's
@@ -286,15 +325,21 @@ def _after_ghost(*names: str) -> list:  # type: ignore[type-arg]
     ]
 
 
-def rtabmap_parameters(slam: bool, camera_only: bool, graph_odom: bool = True) -> dict[str, object]:
+def rtabmap_parameters(
+    slam: bool, camera_only: bool, graph_odom: bool = True, neighbor_refining: bool = False
+) -> dict[str, object]:
     """Everything RTAB-Map is told for one mode: the common table under the mode's frames and
     grid. ``camera_only`` is read in SLAM mode alone — beside a known map the lidar is what
     makes the graph metric; ``graph_odom`` is read there alone too (false puts the graph back on
-    the tracker's pose, :data:`TRACKER_ODOM`)."""
+    the tracker's pose, :data:`TRACKER_ODOM`), and so is ``neighbor_refining`` (true puts ICP's
+    own covariance back on the neighbour links, on which no loop closure survives the error-ratio
+    check — see :data:`KNOWN_MAP`)."""
     mode: dict[str, object] = dict(KNOWN_MAP) if graph_odom else {**KNOWN_MAP, **TRACKER_ODOM}
+    if not slam and neighbor_refining:
+        mode["RGBD/NeighborLinkRefining"] = "true"
     if slam:
         mode = {**SLAM, **(SLAM_CAMERA_ONLY if camera_only else SLAM_LIDAR)}
-    return {**RTABMAP, **mode}
+    return {**RTABMAP, **TF_ODOMETRY_VARIANCE, **mode}
 
 
 def _flag(context: LaunchContext, name: str) -> bool:
@@ -310,6 +355,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     resume = _flag(context, "resume")
     world_map = _flag(context, "world_map")
     graph_odom = _flag(context, "graph_odom")
+    neighbor_refining = _flag(context, "neighbor_refining")
     mode = "slam" if slam else "vision"
     # Whether the fused volume may be /map at all: the mode's owner (pepin.deployment) and the
     # launch's own world_map, the two halves the node checks before it publishes anything.
@@ -532,7 +578,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 "odom_sensor_sync": False,
                 # the grid is republished every second: the operator watches it grow
                 "map_always_update": True,
-                **rtabmap_parameters(slam, camera_only, graph_odom),
+                **rtabmap_parameters(slam, camera_only, graph_odom, neighbor_refining),
             }
         ],
         remappings=remappings,
@@ -553,7 +599,9 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         if slam
         else f"vslam up: beside the known map, lidar + camera, database {database};"
         " the laptop localizer proposes a place once a second and measures the camera's pose"
-        " at 5 Hz for the board's tracker;" + vo_note
+        f" at 5 Hz for the board's tracker; neighbor_refining="
+        f"{'on' if neighbor_refining else 'off'} (off: the neighbour links carry the odometry's"
+        " own covariance, so a loop closure has somewhere to go);" + vo_note
     )
     return [
         LogInfo(msg=report),
@@ -589,6 +637,11 @@ def generate_launch_description() -> LaunchDescription:
             # TRACKER_ODOM). A mode, not a tunable — it decides which frame every node of the
             # database was placed in, so it is set at a launch and never mid-session.
             DeclareLaunchArgument("graph_odom", default_value="true"),
+            # Known-map mode only: ICP refines the neighbour links and its own covariance
+            # comes with them (RGBD/NeighborLinkRefining, see KNOWN_MAP). Default false
+            # since 2026-09-14: refined links are stiffer than the odometry they replace and
+            # RGBD/OptimizeMaxError then rejects every closure the graph finds.
+            DeclareLaunchArgument("neighbor_refining", default_value="false"),
             # The volume is /map instead of RTAB-Map's grid (pepin_bringup.depth_fusion)
             DeclareLaunchArgument("world_map", default_value="false"),
             # The map the fused volume's lidar layer is seeded from (a map_server yaml as the
