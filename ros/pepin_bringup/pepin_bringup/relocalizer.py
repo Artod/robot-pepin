@@ -633,7 +633,9 @@ FLAGS = FlagSet(
         " 1.5 m/s, or over 0.5 m in one sample) while its twist cannot account for it — the"
         " wheels at rest, or a twist faster than this cart can drive — is refused: it never"
         " reaches the history, so the carry keeps the last pose that made sense; off, every"
-        " sample is carried, as before",
+        " sample is carried, as before. The same guard watches the HEADING: with the wheels at"
+        " rest, a yaw step beyond what the twist's own rate could have turned in the interval"
+        " (plus 5 deg) is refused the same way",
         why="2026-09-14: a bad /vo input sent the board's EKF to 43 km from the flat at 60 m/s,"
         " and everything downstream followed — two costmaps chased the pose at 200 % CPU and the"
         " depth pipeline carried its scans metres across 25 ms and refitted the depth law from"
@@ -641,9 +643,14 @@ FLAGS = FlagSet(
         " of that evening (ros/maps/rec/0260_20260914_155145Z_home.jsonl, 146 ekf records over"
         " 7.3 s): the frame sat at x 3493.7 m with |vx| never over 0.031 m/s, and its worst"
         " single step was 0.045 m in 55 ms — 0.83 m/s, still under the 1.5 m/s limit, which is"
-        " itself five times this cart's 0.3 m/s top speed. Nothing a drive does comes near it",
-        on_when="always: the cart cannot move that fast, so a step that says it did is the"
-        " filter, not the robot",
+        " itself five times this cart's 0.3 m/s top speed. Nothing a drive does comes near it."
+        " The heading arm is from the same day, 14:48-14:50: the EKF turned odom -> base_link by"
+        " about 90 deg with the cart standing on its charger (x, y never left the origin) and"
+        " the tracker, refusing corrections under occlusion, went round with it. At rest the"
+        " gyro reads 0.3 deg/s on average and 1 deg/s at worst, so 5 deg between two samples"
+        " 20-50 ms apart is already a hundred times the noise",
+        on_when="always: the cart cannot move that fast or turn that quickly, so a step that"
+        " says it did is the filter, not the robot",
         off_when="when the odometry frame legitimately jumps — a fresh EKF whose frame starts"
         " somewhere else while this node keeps running. The guard holds the last trusted pose"
         " until the frame comes back to somewhere reachable from it, or until this node restarts",
@@ -739,6 +746,7 @@ class Relocalizer(Node):
         self._slip = SlipWatch()  # wheels claiming a step the picture does not show
         self._runaway = RunawayWatch()  # the mirror: the odometry frame flying, the wheels still
         self._runaways = 0  # odometry samples refused because of it (per report)
+        self._yaw_runaways = 0  # ...and how many of those were the frame spinning on the spot
         # The map in use, as every candidate and measurement is judged against.
         self._map_id = ""
         self._pending_seed: tuple[str, Pose2D, float] | None = None
@@ -1109,6 +1117,7 @@ class Relocalizer(Node):
             self._history, pose, stamp, vx, self._odom_wz, self._switches.on("odometry_guard")
         )
         self._runaways += not carried
+        self._yaw_runaways += not carried and self._runaway.reason == "yaw"
         self._track_pending()
 
     def _on_candidate(self, msg: String) -> None:
@@ -1465,7 +1474,8 @@ class Relocalizer(Node):
         fallback = f"; fallback, nothing on {wanted}" if self._choice.fell_back else ""
         self.get_logger().info(
             f"tracker: {feed.summary()}, rested {self._rested}, {pacer.summary()}, deskew "
-            f"failed {self._deskew_failed}, odometry runaway {self._runaways}; "
+            f"failed {self._deskew_failed}, odometry runaway {self._runaways} "
+            f"({self._yaw_runaways} yaw); "
             f"{loc.settings()}; {track.summary()}; "
             f"sources: {self._feed.status(self._now_s())}; "
             f"watch {'fit' if self._watch_on else 'off: no full-turn source, fit'} "
@@ -1486,7 +1496,7 @@ class Relocalizer(Node):
                 f"odometry ran late: {feed.expired} scans were never covered by {self._odom_topic} "
                 "and matched nothing"
             )
-        self._rested = self._deskew_failed = self._runaways = 0
+        self._rested = self._deskew_failed = self._runaways = self._yaw_runaways = 0
 
     def _lookup_laser(self, frame: str) -> bool:
         """The static base_link <- laser transform, as x, y, yaw and whether roll is pi."""
