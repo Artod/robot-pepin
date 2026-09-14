@@ -504,6 +504,27 @@ def test_both_doors_to_a_goal_open_the_numbered_tape() -> None:
     assert "--no-tape" in script and "PEPIN_GOTO_TAPE" in script
 
 
+def test_one_recorder_writes_a_drive_not_two() -> None:
+    """ros/goto.sh started ros/tools/session_logger.py for every drive while the board's run
+    recorder was already subscribed to the same topics: two rclpy processes turning the same
+    10 Hz LaserScan into Python objects on four A53 cores (15 % of a core and ~140 MB for the
+    second one). The numbered tape carries the fusion's two String topics now — the only records
+    the session logger had to itself — so goto starts it only when there is no numbered tape."""
+    recorder = sf.tree(f"{NODES}/run_recorder.py")
+    assert {"/localization/measurement", "/localization/sources"} <= set(sf.strings(recorder)) or {
+        "measurement",
+        "sources",
+    } <= set(sf.strings(recorder)), "the tape carries what the session logger alone carried"
+    assert {"meas", "srcs"} <= set(sf.strings(recorder)), "under the names camera_error.py reads"
+    flags = load_table(REPO / NODES / "run_recorder.py")
+    assert flags.flag("fusion_records").live and flags["fusion_records"] is True
+    script = (REPO / "ros/goto.sh").read_text()
+    starter = next(ln for ln in script.splitlines() if "session_logger.py $REC" in ln)
+    assert starter.startswith("    "), "the session logger is started inside a condition now"
+    assert "PEPIN_SESSION_LOGGER" in script, "and by name when a drive wants it anyway"
+    assert "NO TAPE" in script, "a drive with no tape at all must say so loudly"
+
+
 def test_goto_waits_on_its_log_watcher_instead_of_blocking_on_it() -> None:
     """bash defers a trap until the running foreground command returns. goto.sh's last command
     was a foreground `ssh | sed` that ends only when the board writes GOTO_EXIT, and a TERM to

@@ -606,6 +606,7 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `relocalizer` | `carry_candidates` | bool | on | yes | a candidate's pose is moved from the moment of its own scan to now over the odometry between the two stamps (pepin.watchdog.carried) before it is judged and fused, and one the odometry history no longer covers is dropped |
 | `relocalizer` | `distinct_scans` | bool | on | yes | a streak is counted in scans, not in messages: a candidate whose scan id is already in the run is a second opinion that heard the first one's scan, counted as replay and not lengthening the streak |
 | `rtabmap_frame` | `slam` | bool | off | at start | RTAB-Map is the map (online SLAM): its correction is map -> odom and goes to the board as a message on /map_odom, where pepin_bringup.slam_frame broadcasts it; off, the board's tracker owns map -> odom and this node broadcasts map -> rtabmap here |
+| `run_recorder` | `fusion_records` | bool | on | yes | the camera's measurements (/localization/measurement) and the tracker's account of each update (/localization/sources) go on the numbered tape as the 'meas' and 'srcs' records scratch/camera_error.py reads |
 | `visual_odometry` | `vo_publish` | bool | off | yes | the gated visual odometry leaves this laptop as /vo, where the board's EKF fuses it as a third input beside the wheels and the gyro; off, the node still measures and reports and the EKF is exactly what it was without it |
 | `visual_odometry` | `vo_covariance` | choice: constant, rtabmap | constant | yes | whose covariance rides on the published pose: the documented constant (vo_sigma_m, vo_yaw_sigma_deg) or the one rtabmap's registration computed |
 | `visual_odometry` | `vo_sigma_m` | number 0.001..1 | 0.07 | yes | the constant position sigma of one visual-odometry pose, in metres; the EKF differences two of them into a velocity and the covariance rides along — as (this pose's + the previous pose's) TIMES the gap, so what the filter actually weighs is a velocity variance of 2 * sigma^2 * dt |
@@ -1095,6 +1096,14 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* off — default by design, unmeasured: this says which edge is published — a mode, not a tunable — and the two modes are two different graphs of frames, which is also why it is not live. What the mode is worth was measured in the first session: from an empty database a room came up as a 341x341 map over 21 and then 55 graph nodes, a 1 m goal with a 90 degree turn landed within 2.8 cm and home within 6.6 cm after about 4 m of driving, one loop-closure hypothesis was rejected by the scan check (5 % against the 10 % it needs) and none was accepted
   - *On when:* in an unknown room, launched as one mode end to end (ros/thin.sh slam on the board, ros/laptop.sh vslam --slam): set at start, never mid-run
   - *Off when:* in every known-map mode, where the board's tracker owns map -> odom: the two publishers must never both run
+
+#### `run_recorder`
+
+- **`fusion_records`** — bool, default on
+  - *What:* the camera's measurements (/localization/measurement) and the tracker's account of each update (/localization/sources) go on the numbered tape as the 'meas' and 'srcs' records scratch/camera_error.py reads
+  - *Default:* on — they were recorded only by ros/tools/session_logger.py, a second recorder that ros/goto.sh started for every drive: another rclpy process on a 4-core A53, 15 % of a core and ~140 MB, deserialising the same 10 Hz lidar stream this node already deserialises. Two JSON strings a revolution cost this node almost nothing, and one tape then holds a whole drive
+  - *On when:* always: without them a camera measurement cannot be compared to the lidar's truth after the fact
+  - *Off when:* when the fusion is off anyway and the tape should stay small
 
 #### `visual_odometry`
 
