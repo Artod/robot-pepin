@@ -90,7 +90,11 @@ must agree live in `pepin.deployment.BRIDGED_QOS`, which `node_kit.bridged_qos_p
 every subscription that reads one. The first entry is `/imu/data_raw`: the board's C++ bridge
 writes it RELIABLE, KEEP_LAST 10, the three laptop nodes read it through `node_kit.LeanFeed`, and
 while they asked for the sensor-data default (BEST_EFFORT, 5) the laptop saw 10-11 Hz of the
-board's 48 whenever the announcement won the race. The DDS legs are inside one host — the
+board's 48 whenever the announcement won the race. Beside it: `/vo` (the laptop's visual
+odometry out to the board's EKF, which subscribes RELIABLE at its `odom1_queue_size` of 10) and
+`/odom` (the board's wheels in — `base_bridge.cpp` writes them RELIABLE ten deep, and the laptop
+now has two readers on that route, the visual odometry's rest watch and the flow probe below, so
+the pin is what keeps them from asking for different things). The DDS legs are inside one host — the
 wireless hop is zenoh's, not DDS's — so RELIABLE there costs a memcpy, not a retransmission.
 
 **The watch verifies flow, not route counts** (`pepin_bringup.bridge_watch`, flags `flow_watch`,
