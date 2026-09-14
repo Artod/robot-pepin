@@ -947,6 +947,8 @@ class LaptopLocalizer(Node):
 
         The fan is searched against the camera's own slice of the world (``/map_camera``), the
         grid its matches are made on: a fan cut from the band can only be placed on the band.
+        Until that band has arrived there is no camera search at all — the board's ``/map`` is
+        the matcher's fallback for refining a pose, never for finding one.
         Everything that stops a search is counted with its own name, so the report line says why
         the board heard nothing from this half.
         """
@@ -959,9 +961,20 @@ class LaptopLocalizer(Node):
         if not need:
             self._tally.count("cam_not_needed")
             return
+        # The camera's band, or nothing. _camera_matcher falls back to the board's own /map
+        # until /map_camera has arrived — which is right for REFINING a pose somebody already
+        # holds, and wrong for a global search: every number this feature was measured on
+        # (scratch/camera_kidnap_offline.py, and the 0.80 twin cut that is its only judge) was
+        # taken on the volume's camera band, and a fan cut from the band searched over the
+        # lidar's plane is a regime nobody has measured. The board's map id must be in hand
+        # too: a candidate carrying "" is refused as "elsewhere" by the board's gate and breaks
+        # a lidar streak on the way out.
+        if self._camera is None or self._camera_map != CAMERA_MAP_TOPIC or not self._map_id:
+            self._tally.count("cam_no_band")
+            return
         source = str(self._switches["camera_search_source"])
         scan = self._camera_scan.get(source)
-        if scan is None or self._camera_matcher() is None:
+        if scan is None:
             self._tally.count("cam_nothing_to_search")
             return
         if now - self._camera_scan_at.get(source, 0.0) > float(
@@ -1004,8 +1017,12 @@ class LaptopLocalizer(Node):
         source, so the board reads its fit against the camera's floor
         (:func:`pepin.watchdog.min_fit_for`) and never lengthens a lidar streak with it.
         """
-        localizer, map_id_now = self._camera_matcher(), self._map_id
-        if localizer is None:
+        localizer, map_id_now = self._camera, self._map_id
+        # The band and the board's map id are checked again on this thread: the job was offered
+        # a moment ago and a map may have been replaced since (:meth:`_on_map` drops the camera
+        # matcher when the band is not what it holds).
+        if localizer is None or self._camera_map != CAMERA_MAP_TOPIC or not map_id_now:
+            self._tally.count("cam_no_band")
             return
         started = time.perf_counter()
         places = localizer.global_candidates(scan.points, CAMERA_THETA_STEP_DEG, THIN_TO)
@@ -1166,7 +1183,8 @@ class LaptopLocalizer(Node):
             f" refused: ambiguous {c['cam_ambiguous']}, low fit {c['cam_low_fit']},"
             f" found nothing {c['cam_found_nothing']};"
             f" skipped: off {c['cam_off']}, lidar healthy {c['cam_not_needed']},"
-            f" no fan or map {c['cam_nothing_to_search']}, nothing new {c['cam_stale']},"
+            f" no fan {c['cam_nothing_to_search']}, no camera map {c['cam_no_band']},"
+            f" nothing new {c['cam_stale']},"
             f" thin {c['cam_thin']}, still searching {c['cam_busy']};"
             f" last {last}; lidar verdict"
             f" {self._lidar_verdict or 'none'}, lidar driving {self._lidar_driving()}"

@@ -563,6 +563,7 @@ def test_a_fan_searches_the_whole_map_when_the_lidar_is_not_driving() -> None:
     node = watch(camera_search=True, camera_search_max_ambiguity=1.0, camera_search_min_fit=0.0)
     try:
         standing(node)
+        node.subs[CAMERA_MAP_TOPIC][1](map_msg(furnished_room_map()))  # the band, not /map
         node.subs["/localization/sources"][1](sources_msg("off"))
         node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
         node._tick_camera(time.monotonic())
@@ -587,6 +588,7 @@ def test_an_ambiguous_fan_is_never_published() -> None:
     node = watch(camera_search=True, camera_search_max_ambiguity=0.0)
     try:
         standing(node)
+        node.subs[CAMERA_MAP_TOPIC][1](map_msg(furnished_room_map()))
         node.subs["/localization/sources"][1](sources_msg("stale 2.1 s"))
         node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
         node._tick_camera(time.monotonic())
@@ -594,5 +596,29 @@ def test_an_ambiguous_fan_is_never_published() -> None:
         assert not node.pubs["/localization/candidate"].sent
         node._report()
         assert "ambiguous 1" in node.logger.texts("info")[-1]
+    finally:
+        node.close()
+
+
+def test_a_fan_is_never_searched_over_the_lidar_s_map() -> None:
+    """The band is the only grid a fan may be SEARCHED on. Until /map_camera arrives the
+    camera's matcher falls back to the board's /map — right for refining a pose somebody holds,
+    and a regime nobody measured for finding one — so the search does not run and says so."""
+    node = watch(camera_search=True, camera_search_max_ambiguity=1.0, camera_search_min_fit=0.0)
+    try:
+        standing(node)
+        node.subs["/localization/sources"][1](sources_msg("off"))
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
+        node._tick_camera(time.monotonic())
+        assert node._camera_map != CAMERA_MAP_TOPIC, "the fallback grid is what is in hand here"
+        assert not node.pubs["/localization/candidate"].sent
+        node._report()
+        assert "no camera map 1" in node.logger.texts("info")[-1]
+        # ...and the moment the band arrives, the next fan is searched.
+        node.subs[CAMERA_MAP_TOPIC][1](map_msg(furnished_room_map()))
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.2))
+        node._tick_camera(time.monotonic())
+        assert until(lambda: node.pubs["/localization/candidate"].sent)
+        assert published(node).source == DEPTH
     finally:
         node.close()
