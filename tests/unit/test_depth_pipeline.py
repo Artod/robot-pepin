@@ -32,6 +32,7 @@ from pepin.depth_pipeline import (
     FloorPairs,
     Frame,
     FrameContext,
+    FrameLaw,
     LidarAnchor,
     Pairs,
     RangeLawStage,
@@ -115,7 +116,8 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
     law is the node's law to the last bit, its output the node's output, and it withholds
     exactly the frames the node withheld."""
     node_law = AffineScale()
-    pipeline = standard_pipeline(range_law=False)  # the affine law alone, as the node ran then
+    pipeline = standard_pipeline(range_law=False, frame_law=False)  # the affine law alone,
+    # as the node ran then
     law = pipeline.stage("affine_law")
     assert isinstance(law, AffineLaw)
     assert pipeline.names == [
@@ -127,6 +129,7 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
         "affine_law",
         "ray_law",
         "range_law",
+        "frame_law",
         "wall_correct",
         "floor_anchor",
     ]
@@ -179,6 +182,7 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
         "affine_law": True,
         "ray_law": False,
         "range_law": True,
+        "frame_law": True,
         "wall_correct": False,
         "floor_anchor": True,
     }
@@ -218,7 +222,7 @@ def test_the_depth_before_a_stage_is_the_last_output_before_it_or_the_raw() -> N
     raw = _network(_scene(2.0), 1.4, 0.01, noise=0.0, seed=0)
     pipeline = standard_pipeline(law)
     result = pipeline.run(raw, _context(_wall_returns(2.0)))
-    assert result.before("floor_anchor") is result.after["range_law"]
+    assert result.before("floor_anchor") is result.after["frame_law"]
     assert result.before("edge_filter") is result.frame.raw
     assert result.before("lidar_anchor") is result.after["edge_filter"]
     corrected = standard_pipeline(law, wall_correct=True)
@@ -551,6 +555,7 @@ def test_the_range_law_is_the_chain_s_live_law_and_the_flag_gives_the_affine_one
     assert np.array_equal(np.isnan(affine), np.isnan(ranged)), "and the same holes"
     assert "range_law on [D" in live.report() and "pairs]" in live.report()
     live.set("range_law", False)
+    live.set("frame_law", False)
     back = live.run(raw, _context(_wall_returns(2.0)))
     assert back.before("floor_anchor") is back.after["affine_law"]
     assert "range_law off" in live.report()
@@ -589,3 +594,61 @@ def test_a_seeded_range_law_is_applied_at_once_and_written_back_whole() -> None:
     assert not verdict.withhold
     assert np.array_equal(out, saved.apply(raw), equal_nan=True)
     assert stage.describe().endswith("(seed)") and stage.saved_state() == saved.state()
+
+
+# ---- the law of the frame in hand --------------------------------------------------------------
+def test_the_frame_law_corrects_what_the_pool_law_left_on_this_frame() -> None:
+    """A camera whose scale changes between frames — a neck that tilts, a room that changes —
+    is followed by the frame law and not by the pool's: after a pool fitted at one scale the
+    next frame's own beams put its depth right, and the stage's numbers are the pool law's
+    residual, near 1.0, not the raw network's 1.8."""
+    live = standard_pipeline()
+    assert live.on("frame_law")
+    assert live.names.index("range_law") < live.names.index("frame_law")
+    stage = live.stage("frame_law")
+    assert isinstance(stage, FrameLaw)
+    for k, wall_x in enumerate((1.0, 1.5, 2.0, 2.5, 3.0, 3.5) * 2):  # a pool at scale 1.3
+        live.run(
+            _network(_scene(wall_x), 1.3, 0.0, noise=0.01, seed=k), _context(_wall_returns(wall_x))
+        )
+    assert stage.fits > 0 and stage.a == pytest.approx(1.0, abs=0.1)
+    moved = _network(_scene(2.0), 1.9, 0.0, noise=0.0, seed=99)  # the network's scale jumps
+    result = live.run(moved, _context(_wall_returns(2.0)))
+    beams = result.frame.ctx.beams
+    assert beams is not None
+    rows, cols = beams[:, 1].astype(int), beams[:, 0].astype(int)
+    pooled = float(np.median(result.after["range_law"][rows, cols] / beams[:, 2]))
+    own = float(np.median(result.after["frame_law"][rows, cols] / beams[:, 2]))
+    assert abs(own - 1.0) < abs(pooled - 1.0) / 3.0, "the frame's own beams win on its own frame"
+    assert "frame_law on [a " in live.report() and "frames held" in live.report()
+    live.set("frame_law", False)
+    back = live.run(moved, _context(_wall_returns(2.0)))
+    assert back.before("floor_anchor") is back.after["range_law"]
+
+
+def test_a_frame_without_beams_decays_back_to_the_law_behind_it() -> None:
+    """A frame carrying too few pairs holds the last frame's law, which fades toward the pool's
+    over the time constant; with no law of its own the prior's image goes out untouched, and
+    with no law at all the frame is withheld."""
+    now = [0.0]
+    law = AffineLaw()
+    law.seed(1.3, 0.0)
+    stage = FrameLaw(law, tau_s=2.0, clock=lambda: now[0])
+    raw = _network(_scene(2.0), 1.6, 0.0, noise=0.0, seed=0)
+    blind = Frame(raw, _context(None))
+    out, verdict = stage.run(raw, blind)  # no beams: the seeded affine law stands alone
+    assert not verdict.withhold and stage.held == 1 and stage.weight == 0.0
+    assert np.array_equal(out, law.apply(raw, blind.ctx), equal_nan=True)
+    assert stage.describe() == "prior stands, 1/1 frames held"
+    seen = Frame(raw, _context(_wall_returns(2.0)))
+    seen.pairs.append(LidarAnchor().pairs(seen) or Pairs.of(np.empty(0), np.empty(0), np.empty(0)))
+    own, _verdict = stage.run(raw, seen)
+    assert stage.fits == 1 and stage.weight == 1.0 and stage.pairs > 0
+    now[0] += 2.0  # one time constant later, with nothing to fit
+    faded, _verdict = stage.run(raw, Frame(raw, _context(None)))
+    assert stage.weight == pytest.approx(math.exp(-1.0), abs=1e-6)
+    between = 1.0 / (stage.weight / own + (1.0 - stage.weight) / law.apply(raw, blind.ctx))
+    assert np.allclose(faded, between, equal_nan=True)
+    bare = FrameLaw(AffineLaw())  # nothing of its own, nothing behind it
+    _depth, verdict = bare.run(raw, Frame(raw, _context(None)))
+    assert verdict.withhold and verdict.note == "no law yet"

@@ -279,10 +279,11 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     is the pose, as it was): after every frame the node's law is the reference's law to the
     last bit, it withholds exactly the frames the reference withheld, and every published
     image and scan is byte for byte the reference's."""
-    node, net = build(range_law=False)  # the affine law alone: the chain this reference is
+    node, net = build(range_law=False, frame_law=False)  # the affine law alone: this reference
     assert node._pipeline.switches == {name: FLAGS[name] for name in node._pipeline.names} | {
-        "range_law": False
-    }, "the flags' defaults are the chain's, bar the one switched here"
+        "range_law": False,
+        "frame_law": False,
+    }, "the flags' defaults are the chain's, bar the two switched here"
 
     reference = AffineScale()
     withheld = 0
@@ -319,7 +320,8 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     assert "backend fake (CPU model not loaded)" in line
     assert (
         "flags: edge_filter=on lidar_anchor=on floor_pairs=off wall_anchor=off"
-        " parallax_anchor=off affine_law=on ray_law=off range_law=off wall_correct=off"
+        " parallax_anchor=off affine_law=on ray_law=off range_law=off frame_law=off"
+        " wall_correct=off"
         " floor_anchor=on"
         " depth_backend=local" in line
     )
@@ -338,7 +340,7 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
     reference's with that pose, and not the reference's with the config's — and the report
     line no longer counts a config fallback. A head panned 20 deg is counted as such."""
     edge = _optical_edge(31.5)
-    node, net = build(camera_edge=edge, law=LAW)
+    node, net = build(camera_edge=edge, law=LAW, range_law=False, frame_law=False)
     on_neck = pose_from_transform(edge)
     tf_cam = CameraPose.from_optical(on_neck.rotation, on_neck.translation)
     assert tf_cam.pitch == pytest.approx(math.radians(31.5)) and tf_cam.z == 1.2
@@ -427,7 +429,7 @@ def test_the_scan_is_built_from_the_depth_before_the_floor_anchor(
     monkeypatch.setattr(node._pipeline, "run", spy_run)
     monkeypatch.setattr(node, "_as_scan", spy_scan)
     frame(node, net, CONFIG_CAM, 2.0, 0)
-    assert seen["scan_depth"] is seen["result"].after["range_law"]
+    assert seen["scan_depth"] is seen["result"].after["frame_law"]
     node.set_parameters([Param("wall_correct", True)])
     frame(node, net, CONFIG_CAM, 2.0, 1)
     assert seen["scan_depth"] is seen["result"].after["wall_correct"]

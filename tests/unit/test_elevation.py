@@ -311,9 +311,9 @@ def test_the_stage_is_off_by_default_and_leaves_the_affine_image_untouched() -> 
     """The chain carries the ray law switched off: the published image is the affine law's, bit
     for bit, and the flag is what turns it into the ray law's without a restart."""
     raw, ctx = _frames()
-    plain = standard_pipeline(wall_anchor=True, range_law=False)
+    plain = standard_pipeline(wall_anchor=True, range_law=False, frame_law=False)
     assert standard_pipeline().switches["ray_law"] is False
-    switched = standard_pipeline(ray_law=True, wall_anchor=True, range_law=False)
+    switched = standard_pipeline(ray_law=True, wall_anchor=True, range_law=False, frame_law=False)
     switched.set("ray_law", False)
     for _ in range(3):
         first = plain.run(raw, ctx)

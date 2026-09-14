@@ -53,6 +53,7 @@ return's elevation is a curve of its range, so there the angle and the depth are
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -69,6 +70,8 @@ from pepin.depth import (
     B_BOUNDS,
     EDGE_REL_STEP,
     FLOOR_HEIGHT_TOLERANCE,
+    FRAME_HOLD_TAU_S,
+    FRAME_MIN_PAIRS,
     MIN_DEPTH_SPREAD,
     MIN_SAMPLES,
     NEAR_M,
@@ -87,6 +90,7 @@ from pepin.depth import (
     drop_edges,
     edge_mask,
     fit_affine,
+    fit_frame,
     floor_anchor,
     floor_depth,
     in_image,
@@ -1558,27 +1562,157 @@ class RangeLawStage(LawStage):
         return f"{self.law.describe()} on {self.pooled} pairs{source}"
 
 
+class FrameLaw(LawStage):
+    """The law of THIS frame: scale and shift fitted on the beams of the frame in hand
+    (:func:`pepin.depth.fit_frame`), not on the pool — the alignment the field performs.
+
+    Depth Anything V2's metric heads are evaluated after a per-image scale-and-shift alignment
+    against sparse ground truth, and a robot carrying a depth sensor aligns its monocular depth
+    against that sensor's points frame by frame. The pool's laws (:class:`AffineLaw`,
+    :class:`RangeLawStage`) describe the camera over the last ``POOL_FRAMES`` frames, which is
+    the right thing when the network's error is a property of the lens and the wrong thing when
+    it is a property of the scene: a new room, a new light, a neck that has tilted. This stage
+    asks each frame's own beams what the network is doing right now.
+
+    It corrects what ``prior`` published, not the raw network: the law behind it in the chain
+    (the range law, or the affine one) keeps the shape it measured over the pool, and this
+    stage removes only what that law left on this frame. Measured on 2026-09-14
+    (scratch/frame_law_eval.py, every frame's pairs split odd / even, odd fitting, even
+    judging): over the raw network the per-frame law reads a median |residual| of 10.2 % on run
+    0171's drive against the range law's 23.2 %, and over the range law 7.5 %; the far band
+    (2.0-2.5 m), where the network saturates and no scale can help, is the one place the pool's
+    shape still earns its keep. ``prior`` must therefore be a law that maps depth to depth pixel
+    by pixel (both pool laws are); an angular law is not one.
+
+    A frame carrying at least ``min_pairs`` pairs gets its own law. A frame carrying fewer
+    holds the last one, decaying back to the prior with a time constant of ``tau_s``: the blend
+    is of the two published inverse depths, weight ``exp(-held / tau_s)`` on the frame's own, so
+    a cart that turns away from every surface the lidar and the camera share returns to the
+    pool's law in a few seconds instead of carrying one frame's numbers forever. With no law of
+    its own yet the prior's image goes out untouched, so switching this stage on never withholds
+    a frame the chain would otherwise have published."""
+
+    name = "frame_law"
+
+    def __init__(
+        self,
+        prior: Law,
+        min_pairs: int = FRAME_MIN_PAIRS,
+        tau_s: float = FRAME_HOLD_TAU_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.prior = prior
+        self.a = 1.0
+        self.b = 0.0
+        self.min_pairs = min_pairs
+        self.tau_s = tau_s
+        self.frames = 0
+        self.fits = 0
+        self.held = 0
+        self.pairs = 0  # pairs behind the law in hand
+        self._fitted = False
+        self._clock = clock
+        self._last_fit: float | None = None  # when a frame last spoke for itself
+
+    @property
+    def ready(self) -> bool:
+        """Whether a law worth applying exists — this frame's, or the prior behind it."""
+        return self._fitted or self.prior.ready
+
+    @property
+    def weight(self) -> float:
+        """How much of the frame's own law stands right now: 1.0 the moment it was fitted,
+        decaying as ``exp(-seconds held / tau_s)`` toward the prior's law, 0.0 with no law of
+        its own. A ``tau_s`` at or below zero drops to the prior as soon as a frame is held."""
+        if not self._fitted or self._last_fit is None:
+            return 0.0
+        if self.tau_s <= 0.0:
+            return 1.0 if self.held == 0 else 0.0
+        return float(math.exp(-max(0.0, self._clock() - self._last_fit) / self.tau_s))
+
+    def fit(self, pairs: Pairs | None, ctx: FrameContext | None = None) -> None:
+        """Feed this frame's pairs and its context (the prior is asked what it makes of those
+        pairs' depths, and the fit is that law's residual): they fit this frame's law outright,
+        or the last law is held and starts decaying toward the prior's. Without a context there
+        is no prior to correct and the frame is held."""
+        self.frames += 1
+        law = None
+        if pairs is not None and pairs.size and ctx is not None:
+            law = fit_frame(self.prior.apply(pairs.d, ctx), pairs.z, pairs.weight, self.min_pairs)
+        if law is None or pairs is None:
+            self.held += 1
+            return
+        self.a, self.b = law
+        self.pairs, self._fitted = pairs.size, True
+        self.fits += 1
+        self._last_fit = self._clock()
+
+    def apply(self, depth: Array, ctx: FrameContext) -> Array:
+        """The prior's depth through this frame's own law, the prior's alone where this one has
+        decayed (the blend is of the published inverse depths) or while no frame has spoken."""
+        prior = self.prior.apply(depth, ctx)
+        w = self.weight
+        if w <= 0.0:
+            return prior
+        own = apply_affine(prior, self.a, self.b)
+        if w >= 1.0:
+            return own
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inv = w / own + (1.0 - w) / prior
+            out: Array = np.where(np.isfinite(inv) & (inv > 1e-6), 1.0 / inv, np.nan)
+        return out
+
+    def run(self, depth: Array, frame: Frame) -> tuple[Array, Verdict]:
+        """Fit on this frame's pairs and correct the frame's raw depth, keeping the holes of
+        the depth handed in (the edge filter's, and the laws' that ran before); the frame is
+        withheld only while no law of any kind exists."""
+        pool = frame.pool
+        self.fit(pool, frame.ctx)
+        n = 0 if pool is None else pool.size
+        if not self.ready:
+            return depth, Verdict(self.name, True, pairs=n, note="no law yet", withhold=True)
+        out = np.where(np.isfinite(depth), self.apply(frame.raw, frame.ctx), np.nan)
+        return out, Verdict(self.name, True, pairs=n, pixels=int(out.size), note=self.describe())
+
+    def describe(self) -> str:
+        """The law for the report line: this frame's two numbers over the prior's depth, the
+        pairs behind them, how many frames have been held against how many seen, and how much
+        of the frame's own law still stands against the prior's."""
+        if not self._fitted:
+            return f"prior stands, {self.held}/{self.frames} frames held"
+        clipped = at_bound(self.a, self.b)
+        edge = f" [{clipped} AT BOUND]" if clipped else ""
+        return (
+            f"a {self.a:.2f} b {self.b:+.3f} on {self.pairs} pairs{edge}, "
+            f"{self.held}/{self.frames} frames held (own {self.weight:.2f})"
+        )
+
+
 # ---- the chain ----------------------------------------------------------------------------------
 def standard_pipeline(
     law: AffineLaw | None = None,
     *,
     ray: RayLaw | None = None,
     range_stage: RangeLawStage | None = None,
+    frame_stage: FrameLaw | None = None,
     floor_pairs: bool = False,
     wall_anchor: bool = False,
     parallax_anchor: bool = False,
     ray_law: bool = False,
     range_law: bool = True,
+    frame_law: bool = True,
     wall_correct: bool = False,
 ) -> DepthPipeline:
     """The node's chain: edges -> lidar -> (floor pairs) -> (wall pairs) -> (parallax) -> law
-    -> (ray law) -> range law -> (wall correction) -> floor anchor; the six switchable stages
-    are in the list and switched by the flags of the same name (``wall_anchor`` is the pairs
-    role, ``wall_correct`` the pixels). The ray law and the range law both sit behind the
-    affine one and correct the same raw depth by their own rule instead — by the ray's angle,
-    by the range — and on, each replaces the image of the law before it; off, that law's
-    stands. ``range_law`` is the only one of the six on by default: one affine law leaves a
-    residual that tilts 12 % per metre (:class:`pepin.depth.RangeLaw`).
+    -> (ray law) -> range law -> frame law -> (wall correction) -> floor anchor; the seven
+    switchable stages are in the list and switched by the flags of the same name
+    (``wall_anchor`` is the pairs role, ``wall_correct`` the pixels). The ray law, the range law
+    and the frame law all sit behind the affine one and correct the same raw depth by their own
+    rule instead — by the ray's angle, by the range, by this frame's own beams — and on, each
+    replaces the image of the law before it; off, that law's stands. ``range_law`` and
+    ``frame_law`` are the two of the seven on by default: one affine law leaves a residual that
+    tilts 12 % per metre (:class:`pepin.depth.RangeLaw`), and a law fitted on a minute of pool
+    describes the last minute's scene rather than this frame's (:class:`FrameLaw`).
 
     Every law may be handed in so the caller keeps them: the affine and the ray law pool and
     fit on their own, so a saved law must be seeded into **both** (:meth:`AffineLaw.seed`), or
@@ -1588,6 +1722,7 @@ def standard_pipeline(
     the_law = law if law is not None else AffineLaw()
     the_ray = ray if ray is not None else RayLaw()
     the_range = range_stage if range_stage is not None else RangeLawStage(the_law)
+    the_frame = frame_stage if frame_stage is not None else FrameLaw(the_range)
     geometry = FloorGeometry()
     stages: list[Stage] = [
         EdgeFilter(),
@@ -1598,6 +1733,7 @@ def standard_pipeline(
         the_law,
         the_ray,
         the_range,
+        the_frame,
         WallCorrection(),
         FloorAnchor(geometry),
     ]
@@ -1607,6 +1743,7 @@ def standard_pipeline(
         ("parallax_anchor", parallax_anchor),
         ("ray_law", ray_law),
         ("range_law", range_law),
+        ("frame_law", frame_law),
         ("wall_correct", wall_correct),
     )
     return DepthPipeline(stages, off=[name for name, on in flags if not on])
@@ -1624,6 +1761,7 @@ __all__ = [
     "FloorPairs",
     "Frame",
     "FrameContext",
+    "FrameLaw",
     "Law",
     "LawStage",
     "LidarAnchor",
