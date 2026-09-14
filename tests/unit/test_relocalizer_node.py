@@ -843,3 +843,22 @@ def test_a_cart_standing_still_is_not_a_cart_without_a_source(node: Relocalizer)
     node._check()
     assert node.pubs["localization_fit"].sent[-1].data > DRIVE_FIT
     assert node._rested > 50, "the matcher was spared while the lidar went on speaking"
+
+
+def test_the_silence_is_measured_before_the_tracker_is_ready() -> None:
+    """The silence is a fact about the SENSORS, not about this node's readiness. While the map,
+    the matcher or the first pose are still missing the fit check returns early and publishes
+    nothing — and the number the report line prints beside the fit must already be the lidar's
+    real age, not the `no source ever` it starts at, or every boot reads as a blind cart until
+    the whole-map search lands (seconds on the board, minutes when it has to retry)."""
+    with ros_stubs.parameters(sources="lidar,camera", min_match_gap_s=0.0):
+        node = Relocalizer()  # no /map: _check cannot get past its early return
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    assert node._source_age_s == math.inf, "nothing has spoken yet"
+    node.clock.seconds = 100.05
+    node.subs["/scan"][1](lidar_msg(Pose2D(), 100.0))
+    node._check()
+    assert not node.pubs["localization_fit"].sent, "no map, no matcher: nothing is published"
+    assert node._source_age_s == pytest.approx(0.05), "the lidar spoke 50 ms ago and is heard"
+    assert node._silence.phrase(node._source_age_s) == "last source 0.1 s ago"
+    assert not node._silence.held_at_zero(node._source_age_s)

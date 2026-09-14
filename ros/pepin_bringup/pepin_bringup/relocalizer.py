@@ -1364,6 +1364,15 @@ class Relocalizer(Node):
         it is.
         """
         now = self._now_s()
+        # Measured before anything can return: the silence is a fact about the SENSORS, not
+        # about whether this node has a map and a pose yet. Left behind the early return below,
+        # the report line said "no source ever" for as long as the map took to arrive, with the
+        # lidar turning at 10 Hz the whole time — and said "(published as 0.00)" about a topic
+        # nothing had published to.
+        self._source_age_s = self._registry.silence_s(now)
+        self._silence = SourceSilence(
+            float(self._switches["source_patience_s"]), self._switches.on("fit_needs_a_source")
+        )
         full = self._feed.full_picture(now)
         picture = full if full is not None else self._feed.picture(now)
         loc = self._localizer
@@ -1396,11 +1405,8 @@ class Relocalizer(Node):
         # server drove two goals on dead reckoning. Silent for longer than the patience, it goes
         # out as 0.00 — under every rung of the ladder the goal server and its blind-drive watch
         # read. The watch below is untouched: it takes the tracker's OWN fit, so a silent sensor
-        # cannot start a whole-map search on a scan that is not there.
-        self._silence = SourceSilence(
-            float(self._switches["source_patience_s"]), self._switches.on("fit_needs_a_source")
-        )
-        self._source_age_s = self._registry.silence_s(now)
+        # cannot start a whole-map search on a scan that is not there. Both the silence and the
+        # switches behind it were read at the top of this tick, before any early return.
         self._fit_pub.publish(
             Float32(data=float(self._silence.reported(reported, self._source_age_s)))
         )
