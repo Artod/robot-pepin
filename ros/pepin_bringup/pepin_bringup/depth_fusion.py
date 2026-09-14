@@ -40,13 +40,25 @@ against on the laptop (:mod:`pepin_bringup.laptop_localizer`), because a tableto
 plane never sees is in that picture and in no other. The volume is snapshotted to ``world_path``
 every ``snapshot_s`` and at shutdown.
 
+EVERY MATCHER IS HANDED HEAVY CELLS. ``/map_camera`` is cut with its own threshold
+(``camera_map_min_weight``, 20 against the map's 2): a cell the camera painted two frames ago at
+the pose it is now asking about is not evidence about that pose, and that circle is how
+camera-only localisation walked away in 20-33 cm steps (2026-09-13). Painting is untouched — the
+cell is in the volume from the first frame and simply does not appear in the matcher's slice
+until it is heavy — and the report line says what the threshold costs: the share of the band's
+occupied cells it keeps. The lidar's own layer can be matched on too: with ``lidar_map`` the same
+slice that would be ``/map`` also goes out as ``/map_lidar``, a topic of its own the board's
+tracker can be pointed at (its ``map_topic`` flag) while Nav2 and the map_server keep the ``/map``
+they own. A volume the tracker is pointed at must have been seeded from the served map
+(``seed_map``), which also snaps the grid to that map's cell lattice.
+
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
 ``fit_gate``, ``imu_lean``, ``lean_gate_deg``, ``lean_min_quality``, ``self_heal``, ``align``,
-``min_weight``, ``map_min_weight``, ``surface_hz``, ``band_half_z``, ``lidar_layer``,
-``no_return_free``, ``map_source``, ``map_hz``, ``snapshot_s``, ``resume_volume``; their state
-is printed in every report line, beside the band itself and the source of the plane it is
-centred on. ``/fusion/reset``
-(std_srvs/Trigger) empties the model, the pairing queues and the tallies.
+``min_weight``, ``map_min_weight``, ``camera_map_min_weight``, ``lidar_map``, ``surface_hz``,
+``band_half_z``, ``lidar_layer``, ``no_return_free``, ``map_source``, ``map_hz``, ``snapshot_s``,
+``resume_volume``; their state is printed in every report line, beside the band itself and the
+source of the plane it is centred on. ``/fusion/reset`` (std_srvs/Trigger) empties the model, the
+pairing queues and the tallies.
 """
 
 from __future__ import annotations
@@ -114,6 +126,7 @@ CONFIG = "/ws/config/fusion.json"
 LIDAR_CONFIG = "/ws/config/lidar.json"
 WORLD_PATH = "/maps/world_live.npz"  # the volume's snapshot; ros/maps is mounted there
 CAMERA_MAP_TOPIC = "/map_camera"  # the camera's band of the volume, for its own matcher
+LIDAR_MAP_TOPIC = "/map_lidar"  # the volume's own lidar layer, for the board's tracker
 SCAN_TOPIC = "/scan"
 TF_WAIT_S = 0.3
 BAND_TF_WAIT_S = 5.0  # the static base_link -> laser edge at start: the board publishes it once
@@ -293,6 +306,56 @@ FLAGS = FlagSet(
         range=(0.0, LidarLaw.max_weight),
     ),
     Flag(
+        "camera_map_min_weight",
+        20.0,
+        description="observations a voxel needs before it speaks in /map_camera — the band the"
+        " camera's own scans are MATCHED against. Its own flag, far above map_min_weight: a"
+        " picture may show what one frame saw, a reference may not",
+        why="measured on the live volume (scratch/camera_band_weights.py on ros/maps/"
+        "world_live.npz, 190066 frames): the band's occupied columns carry weight p25 20.0,"
+        " median 29.3, and the band holds 21276 occupied cells at weight 2, 14285 at 20 (67 %),"
+        " 9510 at 50 — so the tens are reachable, with two thirds of the walls surviving. The"
+        " columns the lidar never wrote, the camera's own, fall from 148 to 26 over the same"
+        " step. The number itself is the volume's weighting read at the frame rate: at"
+        " weight_ref_m 2.0 m an observation weighs 1 and the stream runs 8-9 frames a second, so"
+        " 20 is 20 frames, 2.5 s of watching one cell from 2 m (5.6 s from 3 m, 10 s at the 4 m"
+        " range limit, and 0.6 s at the weight_cap 4.0, a metre and nearer). Below that a cell"
+        " is one glance from one place — which is how camera-only localisation walked away in"
+        " 20-33 cm and 15-23 deg steps on 2026-09-13, matching a band it had painted itself at"
+        " the drifting pose. 20 is also the lidar's own cap (LidarLaw.max_weight): a saturated"
+        " lidar cell still speaks in the band at exactly 20 and nothing the lidar wrote speaks"
+        " above it (the lidar slice holds 3561 occupied cells at 20 and 0 at 30)",
+        on_when="raise it toward the volume's cap 60 for a room the cart has driven more than"
+        " once: only walls integrated for many seconds from several places would remain",
+        off_when="lower it to map_min_weight to reproduce the old behaviour — the matcher handed"
+        " every cell two frames had touched. The report line says what the band costs: the share"
+        " of its occupied cells this threshold keeps",
+        range=(0.0, GridSpec.max_weight),
+    ),
+    Flag(
+        "lidar_map",
+        False,
+        description="the volume's lidar layer also goes out on /map_lidar, at map_hz, whoever"
+        " owns /map: a topic of its own the board's tracker can be pointed at (the relocalizer's"
+        " map_topic flag) while Nav2 and the map_server keep the /map they have",
+        why="a SEEDED volume's layer is the served map itself: slice it and 18274 of the pgm's"
+        " 18274 known cells agree, every wall of each inside one cell of the other, and the four"
+        " tapes of 2026-09-13 replayed on the exported slice give live pose error medians"
+        " 0.6/0.5/1.3/0.7 cm against the file's own 0.6/0.5/1.3/0.6 — the same map"
+        " (scratch/volume_vs_pgm.py, scratch/drive_bisect.py --map). Today's UNSEEDED live"
+        " volume is not: only 52.1 % of the saved map's walls lie within a cell of it and 25.6 %"
+        " of its own walls lie within a cell of the saved map, which is why this ships off and"
+        " why seed_map exists. The second cost is the map id: the volume's grid is 280x250 cells"
+        " and the served map 239x215, so a tracker that adopts /map_lidar answers to another map"
+        " id and the laptop's candidates and camera measurements — stamped with the id of /map"
+        " (pepin_bringup.laptop_localizer) — are refused as evidence about another map until"
+        " that half moves too",
+        on_when="with a volume seeded from the served map (seed_map), to point the board's"
+        " tracker at the room as it is now instead of at the frozen file",
+        off_when="the default, and mandatory for a volume nobody seeded: one slice per map_hz"
+        " saved on the laptop, and nothing on the bridge the board does not read",
+    ),
+    Flag(
         "surface_hz",
         1.0,
         description="how often /fusion/surface is published (the crossing search costs a fraction"
@@ -461,7 +524,17 @@ class DepthFusion(Node):
         self._map_mine = map_owner(self._mode) == "laptop" and self._world_map
         self._map_refusal = self._why_not_mine()
         self._world_path = Path(str(self.declare_parameter("world_path", WORLD_PATH).value))
+        # A known room starts as the served map written into the lidar's layer, and the grid is
+        # then snapped to that map's own cell lattice: the box moves by less than a voxel and
+        # every voxel column of the volume becomes a cell of the file. Unsnapped, the config's
+        # grid sits 0.34 and 0.36 of a cell off flat3_straight's, and a tracker matching on the
+        # slice answered a median 2.3-2.9 cm from where the very same map as a file put it on
+        # the four tapes of 2026-09-13 — a bias, not noise; snapped, the two agree to 0.1 cm
+        # (scratch/volume_vs_pgm.py, scratch/drive_bisect.py --map).
         self._seed_map = str(self.declare_parameter("seed_map", "").value)
+        self._seed = self._load_seed(self._seed_map)
+        if self._seed is not None:
+            self._spec = self._spec.aligned_to(self._seed[2], self._seed[1])
         # The lidar's plane is calibrated, never typed: it comes from config/lidar.json, the one
         # file the board's launch publishes the laser transform from.
         self._mount = PlanarMount.from_config(
@@ -521,6 +594,7 @@ class DepthFusion(Node):
         self._laser: tuple[PlanarMount, float, bool] | None = None  # mount, yaw, upside down
         self._map_pub: Any = None  # made on the first publish: only where this side owns /map
         self._camera_map_pub: Any = None  # ...and the camera's own band, beside it
+        self._lidar_map_pub: Any = None  # ...and the lidar layer on a topic of its own
         self._snapshots = SnapshotClock(float(self._switches["snapshot_s"]))
         self._start_state()
         self._surface_timer = self.create_timer(
@@ -538,6 +612,16 @@ class DepthFusion(Node):
             f" {'is this volume' if self._map_mine else f'not ours ({self._map_refusal})'};"
             f" snapshot {self._world_path}"
         )
+
+    @staticmethod
+    def _load_seed(path: str) -> tuple[Any, float, tuple[float, float]] | None:
+        """The saved map ``path`` as the (values, resolution, origin) the volume is seeded with,
+        or ``None`` when no seed map was named: what a known room starts as."""
+        if not path:
+            return None
+        from pepin.mapping import grid_from_pgm
+
+        return trinary_from_log_odds(grid_from_pgm(path))
 
     def _why_not_mine(self) -> str | None:
         """Why this node may not publish /map in the stack it was launched into, or ``None``
@@ -571,13 +655,13 @@ class DepthFusion(Node):
                         f" {stats['frames']:.0f} frames, stamp {resumed.stamp:.0f}"
                     )
                     return
-        if self._seed_map:
-            from pepin.mapping import grid_from_pgm
-
-            seeded = self._world.seed_from_grid(
-                *trinary_from_log_odds(grid_from_pgm(self._seed_map))
+        if self._seed is not None:
+            seeded = self._world.seed_from_grid(*self._seed)
+            self.get_logger().info(
+                f"seeded the lidar layer from {self._seed_map}: {seeded} cells, on the grid"
+                f" snapped to that map's lattice ({self._spec.origin[0]:.3f},"
+                f" {self._spec.origin[1]:.3f})"
             )
-            self.get_logger().info(f"seeded the lidar layer from {self._seed_map}: {seeded} cells")
 
     def close(self) -> None:
         """Stop the workers and the TF listener, snapshot the volume, and wait for them all,
@@ -892,6 +976,17 @@ class DepthFusion(Node):
             )
         )
 
+    def _map_law(self) -> SliceLaw:
+        """How a cell earns a voice in /map and /map_lidar: the lidar layer's own maturity flag
+        (``map_min_weight``), which the planner and the board's tracker read."""
+        return SliceLaw(min_weight=float(self._switches["map_min_weight"]))
+
+    def _camera_map_law(self) -> SliceLaw:
+        """How a cell earns a voice in /map_camera: ``camera_map_min_weight``, far above the
+        map's own, because that band is a MATCHER's reference and not a picture — a cell the
+        camera painted two frames ago at the pose it is being asked about is not evidence."""
+        return SliceLaw(min_weight=float(self._switches["camera_map_min_weight"]))
+
     @staticmethod
     def _latched() -> QoSProfile:
         """Transient local and reliable: a subscriber that arrives late is still served the
@@ -913,7 +1008,11 @@ class DepthFusion(Node):
         matched against their own slice where there is one (pepin_bringup.laptop_localizer),
         which is why it goes out on a topic of its own instead of staying inside this node.
         Nobody else publishes /map_camera, so it needs no owner rule: with ``camera_map`` on
-        it goes out beside a known map too, where /map stays the served file. The band is
+        it goes out beside a known map too, where /map stays the served file. The same is true
+        of ``/map_lidar`` (flag ``lidar_map``), which carries the lidar layer — the very cut
+        /map would carry — on a topic of its own, so the board's tracker can be pointed at the
+        volume (the relocalizer's ``map_topic``) while Nav2 and the map_server keep the /map
+        they own and the owner rule above is not touched at all. The band is
         painted by the camera itself at the tracker's pose, and it is the only reference the
         camera's scans can honestly be matched against — held to the lidar's plane instead,
         the whole-height fan scored fit 0.34 at the right pose and pulled the fused pose a
@@ -923,12 +1022,18 @@ class DepthFusion(Node):
         if self._switches["map_source"] == "volume" and not self._map_mine:
             self._tally.count("map_refused")
         camera_map = self._switches.on("camera_map")
-        if not mine and not camera_map:
+        lidar_map = self._switches.on("lidar_map")
+        if not mine and not camera_map and not lidar_map:
             return
         with self._tally.measure("map"), self._lock:
-            law = SliceLaw(min_weight=self._switches["map_min_weight"])
+            law = self._map_law()
+            camera_law = self._camera_map_law()
             view = self._world.lidar_slice(law) if mine else None
-            camera = self._world.camera_band_slice(law) if camera_map else None
+            camera = self._world.camera_band_slice(camera_law) if camera_map else None
+            # The same cut as /map, so the two can never disagree; taken once when both go out.
+            lidar_view = (
+                (view if view is not None else self._world.lidar_slice(law)) if lidar_map else None
+            )
             stamp = self._last_stamp
         when = stamp if stamp is not None else self.get_clock().now().to_msg()
         if view is not None:
@@ -951,6 +1056,19 @@ class DepthFusion(Node):
                     " scans are matched against"
                 )
             self._camera_map_pub.publish(occupancy_grid(camera.message_fields(), when, "map"))
+        if lidar_view is not None:
+            if self._lidar_map_pub is None:
+                self._lidar_map_pub = self.create_publisher(
+                    OccupancyGridMsg, LIDAR_MAP_TOPIC, self._latched()
+                )
+                self.get_logger().info(
+                    f"{LIDAR_MAP_TOPIC} is the volume's lidar layer now:"
+                    f" {lidar_view.shape[1]}x{lidar_view.shape[0]} cells of"
+                    f" {lidar_view.resolution_m * 100:.0f} cm from {lidar_view.origin}, the layer"
+                    f" {lidar_view.band_m[0]:.2f}-{lidar_view.band_m[1]:.2f} m — the map a"
+                    " tracker pointed at this topic matches on"
+                )
+            self._lidar_map_pub.publish(occupancy_grid(lidar_view.message_fields(), when, "map"))
         self._tally.count("maps")
 
     def _report(self) -> None:
@@ -980,17 +1098,20 @@ class DepthFusion(Node):
         comes from and how old the snapshot is."""
         c = w.counts
         with self._lock:
-            text = self._world.report()
+            text = self._world.report(self._map_law(), self._camera_map_law())
         source = str(self._switches["map_source"])
         if source == "volume" and self._map_refusal is not None:
             source = f"volume (refused {c['map_refused']}x: {self._map_refusal})"
         elif source == "volume":
             source = f"volume ({c['maps']} published, {w.ms_per('map', 'maps'):.0f} ms)"
         age = self._snapshots.age_s(time.monotonic())
+        lidar_map = (
+            f"{LIDAR_MAP_TOPIC} on" if self._switches.on("lidar_map") else f"{LIDAR_MAP_TOPIC} off"
+        )
         return (
             f"world: {c['revolutions']} revolutions ({c['scans_dropped']} dropped,"
-            f" {w.ms_per('scan', 'revolutions'):.0f} ms), {text}; /map from {source}; snapshot"
-            f" {'never' if age == math.inf else f'{age:.0f} s old'}"
+            f" {w.ms_per('scan', 'revolutions'):.0f} ms), {text}; /map from {source};"
+            f" {lidar_map}; snapshot {'never' if age == math.inf else f'{age:.0f} s old'}"
         )
 
     @staticmethod

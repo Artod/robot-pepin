@@ -142,7 +142,7 @@ case "${1:-start}" in
         # read once on the only path that talks to it. This subcommand asks the board nothing.
         MODE="$(cat "$HERE/.mode" 2>/dev/null || echo vision)"
         if [ "$MODE" = slam ]; then SLAM=true; else SLAM=false; fi
-        CAMERA_ONLY=false; RESUME=false; FRESH=false; WORLD_MAP=false
+        CAMERA_ONLY=false; RESUME=false; FRESH=false; WORLD_MAP=false; SEED_MAP=""
         # --neck: the board's neck node publishes base_link -> camera_link live (ros/feature.sh
         # neck on), so the camera node's static edge goes off. Explicit on purpose: a wrong guess
         # would be two publishers of one edge; the camera node's report warns of a mismatch.
@@ -154,9 +154,14 @@ case "${1:-start}" in
                 --camera-only) CAMERA_ONLY=true ;;
                 --resume) RESUME=true ;;
                 --world-map) WORLD_MAP=true ;;
+                # The served map the fused volume's lidar layer starts as, and whose cell
+                # lattice its grid is snapped to (pepin_bringup.depth_fusion): the path as the
+                # container sees it, /maps/NAME.yaml. Without it the volume grows from the
+                # sensors alone, as it always has.
+                --seed-map=*) SEED_MAP="${arg#--seed-map=}" ;;
                 --fresh) FRESH=true ;;
                 --neck) STATIC_CAMERA_TF=false ;;
-                *) echo "usage: ros/laptop.sh vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck] [--world-map]"; exit 2 ;;
+                *) echo "usage: ros/laptop.sh vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck] [--world-map] [--seed-map=/maps/NAME.yaml]"; exit 2 ;;
             esac
         done
         if [ "$FRESH" = true ] && [ "$SLAM" = true ]; then
@@ -183,7 +188,8 @@ case "${1:-start}" in
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
             -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} \
             "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
-            "slam:=$SLAM" "camera_only:=$CAMERA_ONLY" "resume:=$RESUME" "world_map:=$WORLD_MAP" >/dev/null
+            "slam:=$SLAM" "camera_only:=$CAMERA_ONLY" "resume:=$RESUME" "world_map:=$WORLD_MAP" \
+            "seed_map:=$SEED_MAP" >/dev/null
         [ "$SLAM" = true ] \
             && echo "vslam up in SLAM mode (camera_only $CAMERA_ONLY, resume $RESUME, static camera tf $STATIC_CAMERA_TF): the map grows on /map; board must be on ros/thin.sh slam. Foxglove ws://localhost:8765, save with ros/map.sh save NAME" \
             || echo "vslam up beside the known map (static camera tf $STATIC_CAMERA_TF): Foxglove at ws://localhost:8765, ros/laptop.sh logs vslam"

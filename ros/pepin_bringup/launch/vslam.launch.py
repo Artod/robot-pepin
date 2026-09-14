@@ -201,6 +201,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # Whether the fused volume may be /map at all: the mode's owner (pepin.deployment) and the
     # launch's own world_map, the two halves the node checks before it publishes anything.
     volume_owns_map = world_map and map_owner(mode) == "laptop"
+    seed_map = LaunchConfiguration("seed_map").perform(context)
     database = LaunchConfiguration("database").perform(context) or (
         SLAM_DATABASE if slam else KNOWN_MAP_DATABASE
     )
@@ -334,6 +335,12 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             # operator can put it back on with ros/flags.sh set depth_fusion fit_gate true.
             "-p",
             f"fit_gate:={'false' if slam else 'true'}",
+            # The served map the volume's lidar layer starts as, and whose cell lattice the
+            # volume's grid is snapped to (empty: the volume starts from the sensors alone).
+            # A known room is a seeded volume and nothing else — and a slice seeded from the
+            # file IS that file, cell for cell (scratch/volume_vs_pgm.py).
+            "-p",
+            f"seed_map:={seed_map}",
         ],
         output="screen",
         prefix=_after_ghost("/depth_fusion"),
@@ -418,6 +425,9 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("resume", default_value="false"),  # SLAM mode only
             # The volume is /map instead of RTAB-Map's grid (pepin_bringup.depth_fusion)
             DeclareLaunchArgument("world_map", default_value="false"),
+            # The map the fused volume's lidar layer is seeded from (a map_server yaml as the
+            # container sees it, e.g. /maps/flat3_straight.yaml); empty seeds nothing.
+            DeclareLaunchArgument("seed_map", default_value=""),
             DeclareLaunchArgument("database", default_value=""),  # empty: by mode
             DeclareLaunchArgument("bridge_admin", default_value="http://pepin-zenoh:8000"),
             DeclareLaunchArgument("static_camera_tf", default_value="true"),
