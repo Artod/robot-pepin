@@ -14,9 +14,16 @@ import numpy as np
 import pytest
 
 from pepin.fusion import ODOM_XY_FLOOR_M, ODOM_YAW_FLOOR_RAD, PoseMeasurement
-from pepin.measurements import MEASUREMENT_MAX_AGE_S, MeasurementGate, RemoteMeasurement
+from pepin.measurements import (
+    MEASUREMENT_MAX_AGE_S,
+    REMOTE_FLOOR_XY_M,
+    REMOTE_FLOOR_YAW_DEG,
+    MeasurementGate,
+    RemoteMeasurement,
+    graph_measurement,
+)
 from pepin.odometry import Pose2D
-from pepin.sources import CAMERA, CONTACT, DEPTH, LIDAR, SourceRegistry
+from pepin.sources import CAMERA, CONTACT, DEPTH, GRAPH, LIDAR, SourceRegistry
 from pepin.timeline import OdomHistory
 
 SOMEWHERE = Pose2D(1.0, 2.0, 0.5)  # a place with a heading, so a carry rotates as it must
@@ -313,3 +320,33 @@ def test_a_remote_word_is_never_fused_tighter_than_the_measured_floor() -> None:
     gate.switch("remote_floor_xy_m", 0.0)
     gate.switch("remote_floor_yaw_deg", 0.0)
     assert gate._floored(tight) is tight, "zero floors change nothing"
+
+
+def test_a_graph_correction_moves_the_belief_it_was_computed_on() -> None:
+    """The graph's word is the tracker's own pose put through the correction: identity leaves it
+    alone, and a correction rotates and shifts it as one rigid move."""
+    belief = Pose2D(2.0, 1.0, math.pi / 2)
+    still = graph_measurement(belief, Pose2D(), 10.0, "map-a")
+    assert still.source == GRAPH
+    assert (still.x, still.y) == pytest.approx((2.0, 1.0))
+    assert still.yaw == pytest.approx(math.pi / 2)
+    assert still.map_id == "map-a" and still.stamp == 10.0
+
+    moved = graph_measurement(belief, Pose2D(0.1, -0.2, math.pi / 2), 10.0, "map-a")
+    # a quarter turn of the map, then the shift: (2, 1) -> (-1, 2) -> (-0.9, 1.8)
+    assert (moved.x, moved.y) == pytest.approx((-0.9, 1.8))
+    assert moved.yaw == pytest.approx(math.pi)
+
+
+def test_a_graph_measurement_claims_no_more_than_the_remote_floor() -> None:
+    """RTAB-Map's own numbers are useless in both directions (706 m of standard deviation with no
+    closure, 8 mm right after one), so the word is worth the camera's measured floor and no more."""
+    m = graph_measurement(Pose2D(1.0, 0.0, 0.0), Pose2D(), 1.0, "map-a")
+    cov = np.asarray(m.covariance, dtype=float)
+    assert cov[0, 0] == pytest.approx(REMOTE_FLOOR_XY_M**2)
+    assert cov[1, 1] == pytest.approx(REMOTE_FLOOR_XY_M**2)
+    assert cov[2, 2] == pytest.approx(math.radians(REMOTE_FLOOR_YAW_DEG) ** 2)
+    assert np.count_nonzero(cov - np.diag(np.diagonal(cov))) == 0
+    # and it travels: the board reads back exactly what was measured
+    back = RemoteMeasurement.from_json(m.to_json())
+    assert back.source == GRAPH and back.x == pytest.approx(1.0)

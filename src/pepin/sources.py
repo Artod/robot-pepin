@@ -50,6 +50,12 @@ CAMERA = "camera"
 # of that JSON can tell whose word moved the pose.
 TRACKER = "tracker"
 WATCHDOG = "watchdog"
+# A third pose source, and the only one that is not a sensor: RTAB-Map's pose graph on the
+# laptop, whose correction of the tracker's own belief travels as a measurement
+# (:func:`pepin.measurements.graph_measurement`). Like the two above it never joins the roster --
+# it has no scan, no gate and no health -- it only names a word in a fusion and in the
+# ``/localization/sources`` report.
+GRAPH = "graph"
 RATE_TAU_S = 2.0  # the rate's time constant: a few seconds of intervals, not the whole run
 
 

@@ -90,6 +90,23 @@ RTABMAP = {
     "Kp/DetectorStrategy": "8",
     "Kp/MaxFeatures": "400",
     "Mem/RehearsalSimilarity": "0.30",
+    # What a node costs on disk. Measured on the known map's database 2026-09-14 (20.93 GB,
+    # 33020 nodes, 85 m travelled, one evening): 634 KB a node, of which the depth PNG is 432 KB,
+    # the JPEG 78 KB and the keypoint descriptors 28 KB. Both values below are free for loop
+    # detection and neither touches the graph.
+    #   ImagePostDecimation is applied when the frame is COMPRESSED FOR THE DATABASE, after the
+    # words, their 3D positions and the local grid have been computed from the full-resolution
+    # frame: quartering the pixels of what is stored costs the detector nothing (it never reads
+    # them again -- RGBD/LoopClosureReextractFeatures is false) and takes the two images from
+    # 510 KB a node to about 155.
+    #   NotLinkedNodesKept false deletes the nodes RTAB-Map itself has already dropped out of the
+    # graph. 13891 of the 33020 above -- 42 % -- appear in no link at all, neighbour or closure:
+    # the cart stood still, the node failed RGBD/LinearUpdate and was unlinked, and only this
+    # parameter's default kept its 634 KB. An unlinked node is in no path, so no proximity search
+    # reaches it and no closure can be computed against it; what it still costs is its words in
+    # the dictionary. Together: about 20 GB a day becomes about 5.
+    "Mem/ImagePostDecimation": "2",
+    "Mem/NotLinkedNodesKept": "false",
     "Optimizer/GravitySigma": "0",
     # a mono network's depth frays at object edges and far away: lone voxels go
     "Grid/NoiseFilteringRadius": "0.10",
