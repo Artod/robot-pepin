@@ -591,6 +591,12 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `relocalizer` | `carry_candidates` | bool | on | yes | a candidate's pose is moved from the moment of its own scan to now over the odometry between the two stamps (pepin.watchdog.carried) before it is judged and fused, and one the odometry history no longer covers is dropped |
 | `relocalizer` | `distinct_scans` | bool | on | yes | a streak is counted in scans, not in messages: a candidate whose scan id is already in the run is a second opinion that heard the first one's scan, counted as replay and not lengthening the streak |
 | `rtabmap_frame` | `slam` | bool | off | at start | RTAB-Map is the map (online SLAM): its correction is map -> odom and goes to the board as a message on /map_odom, where pepin_bringup.slam_frame broadcasts it; off, the board's tracker owns map -> odom and this node broadcasts map -> rtabmap here |
+| `visual_odometry` | `vo_publish` | bool | off | yes | the gated visual odometry leaves this laptop as /vo, where the board's EKF fuses it as a third input beside the wheels and the gyro; off, the node still measures and reports and the EKF is exactly what it was without it |
+| `visual_odometry` | `vo_covariance` | choice: constant, rtabmap | constant | yes | whose covariance rides on the published pose: the documented constant (vo_sigma_m, vo_yaw_sigma_deg) or the one rtabmap's registration computed |
+| `visual_odometry` | `vo_sigma_m` | number 0.001..1 | 0.02 | yes | the constant position sigma of one visual-odometry pose, in metres; the EKF differences two of them into a velocity and the covariance rides along |
+| `visual_odometry` | `vo_yaw_sigma_deg` | number 0.1..180 | 5.0 | yes | the constant yaw sigma of one visual-odometry pose, in degrees; the board's EKF does not fuse yaw from this source at all, so it is carried for whoever reads the message rather than for the filter |
+| `visual_odometry` | `vo_max_speed` | number 0.05..10 | 1.0 | yes | a step between two visual-odometry poses faster than this, in m/s, is dropped: rtabmap restarting its tracking moves the pose without moving the cart |
+| `visual_odometry` | `vo_max_turn` | number 5..720 | 180.0 | yes | a turn between two visual-odometry poses faster than this, in deg/s, is dropped, for the same reason as vo_max_speed |
 
 ### The flags one by one
 
@@ -1018,6 +1024,39 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* off — default by design, unmeasured: this says which edge is published — a mode, not a tunable — and the two modes are two different graphs of frames, which is also why it is not live. What the mode is worth was measured in the first session: from an empty database a room came up as a 341x341 map over 21 and then 55 graph nodes, a 1 m goal with a 90 degree turn landed within 2.8 cm and home within 6.6 cm after about 4 m of driving, one loop-closure hypothesis was rejected by the scan check (5 % against the 10 % it needs) and none was accepted
   - *On when:* in an unknown room, launched as one mode end to end (ros/thin.sh slam on the board, ros/laptop.sh vslam --slam): set at start, never mid-run
   - *Off when:* in every known-map mode, where the board's tracker owns map -> odom: the two publishers must never both run
+
+#### `visual_odometry`
+
+- **`vo_publish`** — bool, default off
+  - *What:* the gated visual odometry leaves this laptop as /vo, where the board's EKF fuses it as a third input beside the wheels and the gyro; off, the node still measures and reports and the EKF is exactly what it was without it
+  - *Default:* off — off because the half that matters is unmeasured. AT REST it is measured and it passes: on this laptop's live topics, with the launch's own parameters, this node gated 9.4-9.7 poses/s and dropped none, and the drift over 60 s with the wheels reporting a hard zero was 0.2 cm and 0.0 deg (worst stretch 0.4 cm); the same camera read by scratch/vo_probe.py for 85 s gave 9.1 poses/s, 630 inlier features a frame, one lost frame (the first) and 0.48 cm / 0.075 deg — against the centimetre and half-degree a minute this source has to stay under (2026-09-14). IN MOTION nobody has compared it with anything, and the EKF's odom -> base_link is what every other measurement in the stack is carried over: the tracker's scans, the camera's measurements, the costmaps. The scale is why the caution is not ceremony — the translation rgbd_odometry reports is the depth image's, and that depth is a network's corrected by a law fitted against the lidar (0.94 to 1.98 across one afternoon, 2026-09-11)
+  - *On when:* after one drive compares odom -> base_link with it on and off over the same path (it is a live flag exactly so the two runs are a minute apart) and the visual odometry did not disagree with a lidar-measured distance by more than the wheels did
+  - *Off when:* the moment odom -> base_link must be the wheels and the gyro alone: a dark room, a blank wall, a depth law that has not been fitted this session, or any drive whose odometry is the measurement
+- **`vo_covariance`** — choice: constant, rtabmap, default constant
+  - *What:* whose covariance rides on the published pose: the documented constant (vo_sigma_m, vo_yaw_sigma_deg) or the one rtabmap's registration computed (one of: constant, rtabmap)
+  - *Default:* constant — the constant, because rtabmap's own number answers the wrong question. Measured at rest on this robot (2026-09-14, scratch/vo_probe.py, 85 s): its registration claimed a position standard deviation of 3.8 mm at the median and 15.9 mm at p90 — an honest spread of the feature matches, and a claim about the PICTURE. The error that matters is the scale of the depth those features sit on, and that scale is a network's law fitted against the lidar (0.94 to 1.98 across one afternoon, 2026-09-11), which no registration can see. So the topic carries a constant a person can argue with, and rtabmap's own is one flag away for the session that wants to compare them
+  - *On when:* never as such — it is a choice: 'rtabmap' while comparing the two on a tape
+  - *Off when:* 'constant' is the shipping value; leave it there unless a session is about the covariance itself
+- **`vo_sigma_m`** — number 0.001..1, default 0.02
+  - *What:* the constant position sigma of one visual-odometry pose, in metres; the EKF differences two of them into a velocity and the covariance rides along (0.001..1)
+  - *Default:* 0.02 — 2 cm is a deliberate 1.3x on what rtabmap itself claimed at rest on this robot: its own registration reported a position standard deviation of 3.8 mm at the median and 15.9 mm at p90 over 85 s (2026-09-14, scratch/vo_probe.py), and that number answers for the FEATURES, not for the scale of the depth they sit on — which is this source's real error and is a network's (0.94 to 1.98 across one afternoon, 2026-09-11). It also deliberately leaves the wheels dominant (their distance is honest to 3 %, 2026-09-06): this ships as a third opinion that can pull the filter when the wheels slip, not as the measurement the odometry rests on. Tighten it only against a drive where a lidar-measured distance says who was right
+  - *On when:* not a switch: raise it when the visual odometry argues with the wheels on a drive where the wheels were right, lower it when it was right and was not heard
+  - *Off when:* not a switch
+- **`vo_yaw_sigma_deg`** — number 0.1..180, default 5.0
+  - *What:* the constant yaw sigma of one visual-odometry pose, in degrees; the board's EKF does not fuse yaw from this source at all, so it is carried for whoever reads the message rather than for the filter (0.1..180)
+  - *Default:* 5.0 — unmeasured on purpose, because nothing fuses it: the gyro owns heading — with it the EKF's turn error is ~5 % against the wheels' 40-70 % (2026-09-13) — and ros/params/ekf.yaml fuses no yaw from this topic. 5 degrees is a deliberately weak claim so that a future consumer of /vo cannot mistake this for a heading source
+  - *On when:* not a switch
+  - *Off when:* not a switch
+- **`vo_max_speed`** — number 0.05..10, default 1.0
+  - *What:* a step between two visual-odometry poses faster than this, in m/s, is dropped: rtabmap restarting its tracking moves the pose without moving the cart (0.05..10)
+  - *Default:* 1.0 — 1.0 m/s is over three times the fastest this cart can go — the base's own cap is 0.30 m/s (pepin.deployment's BASE_MAX_LINEAR_M_S) and the C++ bridge clamps /cmd_vel at 0.25 — and 26 times the largest step this source took at rest, where 85 s of poses were at most 4.2 mm apart over ~0.11 s, a median of 1.0 mm (2026-09-14, scratch/vo_probe.py). So it cannot refuse a real motion and still refuses the metre-scale jump a re-initialised visual odometry publishes — which, differenced into a velocity, is the one thing that could move the odom frame
+  - *On when:* not a switch: lower it towards 0.4 m/s on a tape where the camera argued with the wheels about the speed itself
+  - *Off when:* not a switch
+- **`vo_max_turn`** — number 5..720, default 180.0
+  - *What:* a turn between two visual-odometry poses faster than this, in deg/s, is dropped, for the same reason as vo_max_speed (5..720)
+  - *Default:* 180.0 — 180 deg/s is three times the base's own angular cap of 1.0 rad/s = 57 deg/s (pepin.deployment's BASE_MAX_ANGULAR_RAD_S) and some two thousand times what this source turned at rest (0.075 deg over 85 s, 2026-09-14, scratch/vo_probe.py): it catches a tracking restart and nothing a cart could do
+  - *On when:* not a switch
+  - *Off when:* not a switch
 
 ## Build and run (on the board)
 

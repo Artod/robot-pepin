@@ -716,6 +716,8 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
         "/rtabmap/rtabmap",
         "/rtabmap_frame",
         "/foxglove_bridge",
+        "/rgbd_odometry",
+        "/visual_odometry",
     )
     nav = sf.tree(NAV_LAUNCH)
     composed = {ast.unparse(sf.keywords(c)["name"]) for c in sf.calls_to(nav, "ComposableNode")}
@@ -1793,6 +1795,11 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         "laptop_localizer",
         "rtabmap_frame",
         "foxglove_bridge",
+        # The camera as a third odometry: rtabmap's node and ours. Neither carries state the
+        # way RTAB-Map's graph does — rgbd_odometry's is the last frame, and a restart of it is
+        # a jump pepin.visual_odometry.VoGate drops.
+        "rgbd_odometry",
+        "visual_odometry",
     }
     assert _respawning(nav) == {"relocalizer", "run_recorder", "goal_server", "slam_frame"}
     # The board's sensor launch runs one of our processes too: the neck node (ros/feature.sh
@@ -1944,7 +1951,10 @@ def test_one_node_can_be_kicked_without_a_container_restart() -> None:
         known[script] = {name for name, _ in rows}
     vslam, nav = _launch_processes("vslam.launch.py"), _launch_processes("nav.launch.py")
     robot = _launch_processes("robot.launch.py")
-    assert known["laptop.sh"] == (_respawning(vslam) - {"foxglove_bridge"}) | {"goal_server"}
+    # Foxglove's bridge and rtabmap's rgbd_odometry are not ours to kick: the kick sends SIGINT
+    # to a "pepin_bringup.<module>" command line, and neither is one.
+    kickable = (_respawning(vslam) - {"foxglove_bridge", "rgbd_odometry"}) | {"goal_server"}
+    assert known["laptop.sh"] == kickable
     # Everything of ours the board respawns is kickable: the navigation half and the neck node
     # of the sensor launch (a code change on the board is one kicked process, never a restart).
     assert known["thin.sh"] == _respawning(nav) | _respawning(robot)
@@ -2166,3 +2176,99 @@ def test_no_node_publishes_on_a_topic_it_listens_to() -> None:
         listened = set(re.findall(r"create_subscription" + literal, source))
         offenders += [f"{p.name}: {topic}" for topic in sorted(published & listened)]
     assert not offenders, f"a node would hear itself on: {offenders}"
+
+
+def test_the_visual_odometry_reaches_the_ekf_without_being_able_to_move_the_odom_frame() -> None:
+    """The camera's own odometry is a third input to the EKF, and the shape of that input is
+    the whole safety argument: rtabmap_odom's rgbd_odometry on the laptop, gated by
+    pepin_bringup.visual_odometry, fused DIFFERENTIALLY (two poses differenced into a velocity,
+    so this source's origin — and its restarts — can never move odom -> base_link) in x and y
+    only, with no yaw at all because the gyro owns heading (measured 2026-09-13: with the gyro
+    the EKF's turn error is ~5 %, the wheels alone over-report a turn by 40-70 %)."""
+    ekf = yaml.safe_load((REPO / "ros/params/ekf.yaml").read_text())["ekf_filter_node"][
+        "ros__parameters"
+    ]
+    assert ekf["odom0"] == "odom" and ekf["imu0"] == "imu/data_raw", "the wheels and the gyro stay"
+    assert ekf["odom0_config"][6] is True and ekf["odom0_config"][:6] == [False] * 6
+    assert ekf["imu0_config"][11] is True, "the gyro's yaw rate, as before"
+    assert ekf["odom1"] == "vo"
+    pose_x, pose_y, *_rest = ekf["odom1_config"]
+    assert pose_x is True and pose_y is True
+    assert ekf["odom1_config"][5] is False, "no yaw from the camera: the gyro owns heading"
+    assert ekf["odom1_config"][11] is False, "nor yaw rate"
+    assert not any(ekf["odom1_config"][2:5]), "z, roll and pitch are not the camera's either"
+    assert ekf["odom1_differential"] is True, "a VO restart must never jump the odom frame"
+    assert ekf["odom1_pose_rejection_threshold"] > 0, "an outlier may not yank odom"
+    from pepin.deployment import bridged_qos
+
+    assert bridged_qos("/vo") == ("reliable", ekf["odom1_queue_size"]), (
+        "robot_localization subscribes RELIABLE at odom1_queue_size: the laptop's publisher and"
+        " the bridge route must agree, or the route's QoS is decided by a race"
+    )
+
+
+def test_the_visual_odometry_runs_on_the_laptop_behind_one_launch_switch() -> None:
+    """CLAUDE.md rule 20: what consumes the camera lives on the laptop, and the board gets a
+    finished measurement. Nothing new runs there — the EKF reads one more topic. On this side
+    both processes are one argument (``vo``), they start after the ghost wait like every other
+    node of this launch, rgbd_odometry publishes no transform (the EKF owns odom -> base_link)
+    and takes no guess from TF (a visual odometry seeded with the filter's own answer is not a
+    third opinion)."""
+    vslam = sf.tree(VSLAM_LAUNCH)
+    argument = next(
+        c for c in sf.calls_to(vslam, "DeclareLaunchArgument") if ast.unparse(c.args[0]) == "'vo'"
+    )
+    assert ast.unparse(sf.keywords(argument)["default_value"]) == "'true'"
+    table = dict(ast.literal_eval(sf.assignments(vslam)["VISUAL_ODOMETRY"]))
+    assert table["publish_tf"] is False and table["odom_frame_id"] == "odom"
+    assert table["guess_frame_id"] == ""
+    assert table["approx_sync"] is True, "the depth is ~8 Hz and the picture ~15: no shared stamp"
+    assert table["publish_null_when_lost"] is True, "a lost frame must be countable"
+    node = _node_named(vslam, "rgbd_odometry")
+    keywords = sf.keywords(node)
+    assert ast.unparse(keywords["package"]) == "'rtabmap_odom'"
+    assert "VISUAL_ODOMETRY" in ast.unparse(keywords["parameters"])
+    assert "'base_link'" in ast.unparse(keywords["parameters"]), "the pose is the cart's"
+    remapped = ast.unparse(keywords["remappings"])
+    for pair in (
+        "('rgb/image', '/camera/image')",
+        "('rgb/camera_info', '/camera/camera_info')",
+        "('depth/image', '/camera/depth')",
+        "('odom', VO_RAW_TOPIC)",
+    ):
+        assert pair in remapped, remapped
+    assert ast.literal_eval(sf.assignments(vslam)["VO_RAW_TOPIC"]) == "/vo/raw", (
+        "rgbd_odometry's raw output is kept off /vo until the gate has seen it"
+    )
+    assert "LaunchConfiguration('vo')" in ast.unparse(keywords["condition"])
+    gate = next(
+        c
+        for c in sf.calls_to(vslam, "ExecuteProcess")
+        if "pepin_bringup.visual_odometry" in ast.unparse(c)
+    )
+    assert "LaunchConfiguration('vo')" in ast.unparse(sf.keywords(gate)["condition"])
+    started = _started_after_ghost_wait(vslam)
+    assert {"rgbd_odometry", "vo"} <= started, "both wait for the bridge to forget their ghosts"
+    from pepin.deployment import LAPTOP_SLAM_NODES
+
+    assert {"/rgbd_odometry", "/visual_odometry"} <= set(LAPTOP_SLAM_NODES), (
+        "a ghost of either would strand the next launch's routes"
+    )
+
+
+def test_the_camera_odometry_crosses_to_the_board_and_never_back() -> None:
+    """/vo is published on the laptop and subscribed on the board in every bridge mode; a topic
+    allowed as a publisher on both sides loops until nothing crosses at all."""
+    import re
+
+    from pepin.deployment import BRIDGE_MODES, bridge_allow
+
+    for mode in BRIDGE_MODES:
+        board, laptop = bridge_allow("board", mode), bridge_allow("laptop", mode)
+        assert re.compile(laptop["publishers"][0]).search("/vo"), mode
+        assert re.compile(board["subscribers"][0]).search("/vo"), mode
+        assert not re.compile(board["publishers"][0]).search("/vo"), f"{mode}: /vo would loop"
+        for block in (*board.values(), *laptop.values()):
+            assert not re.compile(block[0]).search("/vo/raw"), (
+                f"{mode}: rgbd_odometry's raw output stays on the laptop"
+            )
