@@ -294,6 +294,26 @@ afternoon) and a map the cart plans on may not be built out of that.
 Other flags: `--resume` continues the session's database instead of starting empty, `--fresh`
 deletes it first, `--known-map` forces the old mode regardless of what the board is doing.
 
+### The depth law, and what the field does with a monocular metric network
+
+Depth Anything V2's metric heads (ours is Metric-Indoor-Small) are fine-tuned on one indoor
+dataset and carry its scale, not the room's: the papers that report them evaluate metric depth
+after a **per-image scale-and-shift alignment** of the prediction against sparse ground truth, and
+a robot that ships such a network does the same — it aligns each frame against the metric points
+it has, from a depth sensor, a stereo pair or a lidar. Nothing in the method promises that one
+alignment carries to the next picture, and on this camera it does not: the scale we fit runs 1.4
+at 11 deg of neck pitch and 2.1 at 41 deg, and a law carried from one of those pitches to another
+leaves 37-50 % of error. So `depth_stream` fits three laws over the same lidar pairs, each
+correcting what the one before it published: the **affine** law over a 600-frame pool (the shape
+of the camera, and what a restart is seeded with), the **range** law over the same pool binned by
+the network's own depth (that pool's residual tilts 12 % per metre — one affine law is the wrong
+shape), and the **frame** law, this frame's own beams, which is the field's per-image alignment
+and the only one a moving neck cannot leave stale. Measured held out on 2026-09-14
+(`scratch/frame_law_eval.py`): median |residual| 7.5 % on a drive against the range law's 23.2 %,
+and 4.5-16.3 % against 36.7-49.5 % across neck pitches. What none of them fix is the network's
+saturation past ~1.8 m at this pitch, where the picture stops changing with distance — the reason
+the camera-only grid is capped at 3 m.
+
 ### Not yet verified on the robot
 
 - RTAB-Map's own `map -> odom` quality against the wheels-plus-gyro EKF: on a known map its
@@ -560,6 +580,7 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `depth_stream` | `affine_law` | bool | on | yes | the network's depth through 1 / z = a / D + b, fitted on the pooled pairs; off, the raw network's depth goes out unwithheld |
 | `depth_stream` | `ray_law` | bool | off | yes | the law's scale follows the ray's angle off the optical axis, a / D + b fitted per elevation (pepin.elevation) instead of one pair of numbers for the whole picture; it needs wall_anchor on, because on the lidar's own beams a return's elevation and its 1 / z are the same variable (\|corr\| 1.000) and the angular fit is refused |
 | `depth_stream` | `range_law` | bool | on | yes | the law's scale follows the range: the same pooled pairs binned by the network's own depth (17 log bins, 0.3-12 m, 50 pairs a bin) with a robust ratio true / network measured in each, interpolated between the filled bins (pepin.depth.RangeLaw), instead of one pair of numbers for the whole picture; on, its image replaces the affine law's, off, the affine law's stands. Until two bins fill it falls back to the affine law rather than withholding the frame |
+| `depth_stream` | `frame_law` | bool | on | yes | after the range law, THIS frame's own beams fit a scale (and, where the frame's depths span 2.5x, a shift) over what the range law published, and that correction is applied to the whole image (pepin.depth.fit_frame, Huber IRLS on 30 pairs or more); a frame with too few beams holds the last one, decaying back to the range law with a 2 s time constant. This is the per-image scale-and-shift alignment the monocular-depth field performs: Depth Anything V2's metric heads are evaluated after exactly such an alignment against sparse truth, and a robot with a depth sensor aligns its monocular depth against that sensor's points frame by frame |
 | `depth_stream` | `wall_correct` | bool | off | yes | after the law, the pixels the wall walk covered are set to the extruded plane's depth outright (the same walk as wall_anchor, applied instead of fitted) |
 | `depth_stream` | `floor_anchor` | bool | on | yes | pixels within centimetres of the floor plane snap to it in the published image (the scan is built before it); the plane leans with the cart, from the IMU's up vector |
 | `depth_stream` | `depth_backend` | choice: remote, local, auto | local (env PEPIN_DEPTH_BACKEND) | yes | where the network runs: local (the CPU model in this container), remote (the laptop's GPU service, ros/depth_host.sh), auto (the service while it answers, the CPU model while it does not) |
@@ -862,6 +883,11 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* on — one affine law is the wrong shape for this camera. Standing at home on 2026-09-14 (scratch/depth_scale_by_range.py, 182 frames, 18 879 beams) the PUBLISHED depth — a 1.76 b 0, median ratio 0.996 over the whole pool — ran +8.7 % (+9.3 cm) at 0.8-1.2 m, +5.2 % (+7.0 cm) at 1.2-1.6 m and -3.3 % (-5.9 cm) at 1.6-2.0 m: 12 % of tilt per metre of range. Which ranges the pool holds then decides the law — a drive brings 0.5 m and 4 m pairs, the shift term opens and the same tilt is described as a 2.3 b -0.19, back at rest as a 1.75 b 0 — so the fused volume is painted under one law and scored under another, and depth_fusion refuses those frames at the yaw search's bound
   - *On when:* always, until a law that follows the range is measured to be worse than one that does not
   - *Off when:* as an A/B against the affine law at rest, and the moment a report line shows a bin's ratio jumping between windows (a pool that has gone degenerate, not a lens)
+- **`frame_law`** — bool, default on
+  - *What:* after the range law, THIS frame's own beams fit a scale (and, where the frame's depths span 2.5x, a shift) over what the range law published, and that correction is applied to the whole image (pepin.depth.fit_frame, Huber IRLS on 30 pairs or more); a frame with too few beams holds the last one, decaying back to the range law with a 2 s time constant. This is the per-image scale-and-shift alignment the monocular-depth field performs: Depth Anything V2's metric heads are evaluated after exactly such an alignment against sparse truth, and a robot with a depth sensor aligns its monocular depth against that sensor's points frame by frame
+  - *Default:* on — the pool's law describes the last 64 s, not this picture. Measured on 2026-09-14 (scratch/frame_law_eval.py; every frame's pairs split odd / even, the odd fitting, the even judging, so no law grades its own pairs): on run 0171's drive the median |residual| reads 7.5 % against the range law's 23.2 % and the affine law's 26.6 %, and the residual's spread across the top, middle and bottom third of the image falls from 38.0 % (range) and 24.2 % (affine) to 10.0 % — the pitch question. Carried across neck pitches it is the whole answer: tape 0235's pool laws read on 0236 and 0237 leave 36.7 % and 49.5 %, where the frame law, refitting itself, reads 16.3 % and 4.5 %. At one pitch with the pool law fresh it is a wash (0236: 5.9 % against 5.9 %; 0237: 3.7 % against 3.7 %; 0235: 15.6 % against 15.2 %), so it never pays to switch it off. It does not fix the network's saturation past ~1.8 m: no scale can
+  - *On when:* always, while the lidar's beams reach the picture — a law fitted on the frame in hand cannot be stale, and at one steady pitch it costs nothing
+  - *Off when:* to A/B the pool's law against it, and where the beams are known to pair with the wrong surface (a mirror, a glass front): a bad frame then moves the whole image instead of a bin of the pool. The report line names the frames held
 - **`wall_correct`** — bool, default off
   - *What:* after the law, the pixels the wall walk covered are set to the extruded plane's depth outright (the same walk as wall_anchor, applied instead of fitted)
   - *Default:* off — default by design, unmeasured as a win — standalone it is a wash — run 0171 keeps the same law and the same lidar row (1.010, |·-1| q3 0.320) and the band reads 12.8/39.3 cm against today's 12.9/38.2, or 3.6/20.2 against 3.8/20.6 at the corrected mount, with the 3D error slightly better at every slice (scratch/pipeline_vs_truth.txt, scratch/lidar_height_check.txt). It is off because it is the wall walk and the wall walk is off; no number says it hurts

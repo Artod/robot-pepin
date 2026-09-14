@@ -20,7 +20,10 @@ law's own records beside them, each written whenever its stage has fitted one on
 and restored only when it still stands on its own terms. One affine law is not the shape of
 this camera's error — its residual tilts 12 % per metre of range — so the law that ships live
 is the range law, the same pooled pairs read per bin of the network's own depth
-(:class:`pepin.depth.RangeLaw`, the ``range_law`` flag). The depth as it stands before the floor
+(:class:`pepin.depth.RangeLaw`, the ``range_law`` flag), and behind it the frame law
+(:class:`pepin.depth_pipeline.FrameLaw`, the ``frame_law`` flag) corrects what the range law
+published by the beams of the frame in hand — the per-image alignment the field performs, and
+the only law a pitch of the neck cannot leave stale. The depth as it stands before the floor
 anchor, cut between 8 cm and 1.3 m above the floor and folded onto the plane, is ``/depth_scan``
 (a LaserScan in base_link): the board's local costmap marks and clears with it like with the
 lidar, so a
@@ -56,10 +59,10 @@ the signature of a drifting gyro rather than of a tipping body) is treated as no
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): one per stage of
 the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anchor``,
-``parallax_anchor``, ``affine_law``, ``ray_law``, ``range_law``, ``wall_correct``,
-``floor_anchor`` — plus ``depth_backend``, ``scale_ceiling``, the largest 1 / scale the law may
-be fitted to, ``law_slew``, how fast that law may move between fits, ``imu_lean`` and
-``lean_min_quality``; their state is printed in every report line.
+``parallax_anchor``, ``affine_law``, ``ray_law``, ``range_law``, ``frame_law``,
+``wall_correct``, ``floor_anchor`` — plus ``depth_backend``, ``scale_ceiling``, the largest
+1 / scale the law may be fitted to, ``law_slew``, how fast that law may move between fits,
+``imu_lean`` and ``lean_min_quality``; their state is printed in every report line.
 """
 
 from __future__ import annotations
@@ -302,6 +305,34 @@ FLAGS = FlagSet(
         " does not",
         off_when="as an A/B against the affine law at rest, and the moment a report line shows a"
         " bin's ratio jumping between windows (a pool that has gone degenerate, not a lens)",
+    ),
+    Flag(
+        "frame_law",
+        True,
+        description="after the range law, THIS frame's own beams fit a scale (and, where the"
+        " frame's depths span 2.5x, a shift) over what the range law published, and that"
+        " correction is applied to the whole image (pepin.depth.fit_frame, Huber IRLS on 30"
+        " pairs or more); a frame with too few beams holds the last one, decaying back to the"
+        " range law with a 2 s time constant. This is the per-image scale-and-shift alignment"
+        " the monocular-depth field performs: Depth Anything V2's metric heads are evaluated"
+        " after exactly such an alignment against sparse truth, and a robot with a depth sensor"
+        " aligns its monocular depth against that sensor's points frame by frame",
+        why="the pool's law describes the last 64 s, not this picture. Measured on 2026-09-14"
+        " (scratch/frame_law_eval.py; every frame's pairs split odd / even, the odd fitting, the"
+        " even judging, so no law grades its own pairs): on run 0171's drive the median"
+        " |residual| reads 7.5 % against the range law's 23.2 % and the affine law's 26.6 %, and"
+        " the residual's spread across the top, middle and bottom third of the image falls from"
+        " 38.0 % (range) and 24.2 % (affine) to 10.0 % — the pitch question. Carried across neck"
+        " pitches it is the whole answer: tape 0235's pool laws read on 0236 and 0237 leave"
+        " 36.7 % and 49.5 %, where the frame law, refitting itself, reads 16.3 % and 4.5 %. At"
+        " one pitch with the pool law fresh it is a wash (0236: 5.9 % against 5.9 %; 0237: 3.7 %"
+        " against 3.7 %; 0235: 15.6 % against 15.2 %), so it never pays to switch it off. It"
+        " does not fix the network's saturation past ~1.8 m: no scale can",
+        on_when="always, while the lidar's beams reach the picture — a law fitted on the frame"
+        " in hand cannot be stale, and at one steady pitch it costs nothing",
+        off_when="to A/B the pool's law against it, and where the beams are known to pair with"
+        " the wrong surface (a mirror, a glass front): a bad frame then moves the whole image"
+        " instead of a bin of the pool. The report line names the frames held",
     ),
     Flag(
         "wall_correct",
