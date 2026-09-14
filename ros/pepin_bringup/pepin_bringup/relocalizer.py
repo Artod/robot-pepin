@@ -423,7 +423,9 @@ FLAGS = FlagSet(
         on_when="raise it where the map is coarse or the pose is loose and honest wall returns"
         " are being called news (watch `silenced` in the tracker's report climb)",
         off_when="lower it to let the mask see smaller changes — a chair moved 10 cm is news at"
-        " 0.05 and the map at 0.15; 0 explains only the occupied cell itself",
+        " 0.05 and the map at 0.15. The floor is one cell: the mask always grows by at least"
+        " one (0.05 m on this map), so anything below that, 0 included, is the mapped cell and"
+        " its neighbours and nothing more",
         range=(0.0, 1.0),
     ),
     Flag(
