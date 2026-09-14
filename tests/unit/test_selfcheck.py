@@ -186,3 +186,34 @@ def test_the_tracker_s_lidar_is_never_judged_by_the_camera(with_camera: bool) ->
     entry = loc.sources_report(0.0)["sources"][LIDAR]
     assert entry["self_check"][1] == 1.0  # the lidar vouched for itself, nothing widened
     assert loc.sources_report(0.0)["sources"][LIDAR]["self_check"][0] < 1.0
+
+
+def test_a_re_seed_is_not_the_sensor_scattering() -> None:
+    """``Localizer.adopt`` — the whole-map search's re-seed, the operator's /initialpose — moves
+    the belief metres; the next match is searched around the new place, so its distance from the
+    previous one is the seed and not the lidar. Unforgotten, a 2 m seed reads as a ratio of 2.0
+    and a 6 m one as 18.3, widening the one measurement this robot trusts for two seconds
+    (scratch/selfcheck_audit.py). The record starts over instead."""
+    truth, odom = drive(steps=10)
+    loc = tracker()
+    for t, o in zip(truth, odom, strict=True):
+        loc.update_from(o, [ScanObservation(LIDAR, whole(t))])
+    assert loc.sources_report(0.0)["sources"][LIDAR]["self_check"][0] < 1.0
+    loc.adopt(Pose2D(loc.pose.x + 6.0, loc.pose.y, loc.pose.theta), 0.8)
+    loc.update_from(odom[-1], [ScanObservation(LIDAR, whole(truth[-1]))])
+    entry = loc.sources_report(0.0)["sources"][LIDAR]
+    assert entry["self_check"] == [1.0, 1.0], "the first match after a seed is judged by nothing"
+
+
+def test_a_seed_that_moved_nothing_still_starts_the_record_over() -> None:
+    """Directly on the check, with the board's own numbers (12.8 cm at fit 0.74): a 6 m seed
+    left in the record is a ratio of 18.3 for a whole window of updates."""
+    cov = np.diag([0.128**2, 0.128**2, math.radians(8.2) ** 2])
+    check = SelfCheck()
+    for k in range(20):
+        check.checked(PoseMeasurement(0.0, 0.0, 0.0, cov, LIDAR, 0.1 * k, 0.74), Pose2D())
+    assert check.inflation(LIDAR) == 1.0
+    check.checked(PoseMeasurement(6.0, 0.0, 0.0, cov, LIDAR, 2.0, 0.74), Pose2D())
+    assert check.inflation(LIDAR) > 15.0  # what a re-seed would cost the lidar, unforgotten
+    check.forget()
+    assert check.inflation(LIDAR) == 1.0

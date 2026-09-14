@@ -669,7 +669,11 @@ class Localizer:
 
         The one door for writing the belief from outside. It clears everything the old belief
         implied — the lost counter and the drift that widens the recovery window — because a
-        re-seed that left the drift behind kept searching as if the robot were still lost.
+        re-seed that left the drift behind kept searching as if the robot were still lost. Every
+        source's self-check record goes with them: the next match is searched around the new
+        place, so its distance from the previous one is the seed, not the sensor scattering (a
+        2 m seed read as a ratio of 2.0 and a 6 m one as 18.3, inflating the LIDAR for the two
+        seconds after a re-seed — scratch/selfcheck_audit.py).
         """
         self.pose = pose
         self.confidence = self.published_fit = confidence
@@ -677,6 +681,7 @@ class Localizer:
         self._drift = Pose2D()
         self._rest_hint = None
         self._last_odom = None  # the next update measures its step from the next reading
+        self._self_check.forget()
 
     def _voting(
         self, points: NDArray[np.float64], vote: NDArray[np.bool_] | None, min_points: int
