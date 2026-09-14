@@ -14,11 +14,14 @@ counted and timed per frame, the node owning none of the arithmetic. Nothing is 
 until the law exists: the raw network's depth is 1.5-2x too far and would put the costmap's
 obstacles where there are none, so frames are withheld until POOL_MIN_SAMPLES beam pairs are
 pooled — or until the law saved by the last run (``/maps/depth_law.json``, a day old at most)
-is loaded at start. That file carries both laws: the affine numbers, seeded into every law of
-the chain so none of them withholds while another publishes, and the ray law's own record
-beside them, written whenever that stage has fitted one on the live pool and restored only
-when it still stands on its own terms. The depth as it stands before the floor anchor, cut
-between 8 cm and 1.3 m above the floor and folded onto the plane, goes out as ``/depth_scan``
+is loaded at start. That file carries every law: the affine numbers, seeded into every law of
+the chain so none of them withholds while another publishes, and the ray law's and the range
+law's own records beside them, each written whenever its stage has fitted one on the live pool
+and restored only when it still stands on its own terms. One affine law is not the shape of
+this camera's error — its residual tilts 12 % per metre of range — so the law that ships live
+is the range law, the same pooled pairs read per bin of the network's own depth
+(:class:`pepin.depth.RangeLaw`, the ``range_law`` flag). The depth as it stands before the floor
+anchor, cut between 8 cm and 1.3 m above the floor and folded onto the plane, is ``/depth_scan``
 (a LaserScan in base_link): the board's local costmap marks and clears with it like with the
 lidar, so a
 table top stops the cart the way a wall does. The floor anchor (pixels within centimetres of
@@ -53,10 +56,10 @@ the signature of a drifting gyro rather than of a tipping body) is treated as no
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): one per stage of
 the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anchor``,
-``parallax_anchor``, ``affine_law``, ``ray_law``, ``wall_correct``, ``floor_anchor`` — plus
-``depth_backend``, ``scale_ceiling``, the largest 1 / scale the law may be fitted to,
-``law_slew``, how fast that law may move between fits, ``imu_lean`` and ``lean_min_quality``;
-their state is printed in every report line.
+``parallax_anchor``, ``affine_law``, ``ray_law``, ``range_law``, ``wall_correct``,
+``floor_anchor`` — plus ``depth_backend``, ``scale_ceiling``, the largest 1 / scale the law may
+be fitted to, ``law_slew``, how fast that law may move between fits, ``imu_lean`` and
+``lean_min_quality``; their state is printed in every report line.
 """
 
 from __future__ import annotations
@@ -89,6 +92,7 @@ from pepin.depth import (
     carry_speed,
     depth_to_scan,
     load_law,
+    load_range,
     load_ray,
     nearest_stamp,
     optical_heading,
@@ -98,7 +102,13 @@ from pepin.depth import (
     set_scale_ceiling,
     to_base,
 )
-from pepin.depth_pipeline import AffineLaw, FrameContext, RayLaw, standard_pipeline
+from pepin.depth_pipeline import (
+    AffineLaw,
+    FrameContext,
+    RangeLawStage,
+    RayLaw,
+    standard_pipeline,
+)
 from pepin.depth_service import (
     DEFAULT_URL,
     MODES,
@@ -268,6 +278,28 @@ FLAGS = FlagSet(
         " sweep with the calibrated lens whose fit the confound gate does not refuse",
         off_when="it ships off; the scale itself still moves 21-25 % over 30 deg of neck pitch,"
         " which asks for a refit, not for an angular law",
+    ),
+    Flag(
+        "range_law",
+        True,
+        description="the law's scale follows the range: the same pooled pairs binned by the"
+        " network's own depth (17 log bins, 0.3-12 m, 50 pairs a bin) with a robust ratio"
+        " true / network measured in each, interpolated between the filled bins"
+        " (pepin.depth.RangeLaw), instead of one pair of numbers for the whole picture; on, its"
+        " image replaces the affine law's, off, the affine law's stands. Until two bins fill it"
+        " falls back to the affine law rather than withholding the frame",
+        why="one affine law is the wrong shape for this camera. Standing at home on 2026-09-14"
+        " (scratch/depth_scale_by_range.py, 182 frames, 18 879 beams) the PUBLISHED depth — a"
+        " 1.76 b 0, median ratio 0.996 over the whole pool — ran +8.7 % (+9.3 cm) at 0.8-1.2 m,"
+        " +5.2 % (+7.0 cm) at 1.2-1.6 m and -3.3 % (-5.9 cm) at 1.6-2.0 m: 12 % of tilt per metre"
+        " of range. Which ranges the pool holds then decides the law — a drive brings 0.5 m and"
+        " 4 m pairs, the shift term opens and the same tilt is described as a 2.3 b -0.19, back"
+        " at rest as a 1.75 b 0 — so the fused volume is painted under one law and scored under"
+        " another, and depth_fusion refuses those frames at the yaw search's bound",
+        on_when="always, until a law that follows the range is measured to be worse than one that"
+        " does not",
+        off_when="as an A/B against the affine law at rest, and the moment a report line shows a"
+        " bin's ratio jumping between windows (a pool that has gone degenerate, not a lens)",
     ),
     Flag(
         "wall_correct",
@@ -482,9 +514,10 @@ class DepthStream(Node):
         )
         self._law = AffineLaw()
         self._ray = RayLaw()
+        self._range = RangeLawStage(self._law)
         self._last_verdict_wall = time.time()  # the law's age is the beams', not the node's
         self._seed_laws(time.time())
-        self._pipeline = standard_pipeline(self._law, ray=self._ray)
+        self._pipeline = standard_pipeline(self._law, ray=self._ray, range_stage=self._range)
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         for name in self._pipeline.names:  # a launch override reaches the stage it names
             self._pipeline.set(name, self._switches.on(name))
@@ -537,12 +570,14 @@ class DepthStream(Node):
         self._tf.close()
 
     def _seed_laws(self, now: float) -> None:
-        """Hand both laws what the last run saved in the law file, and say so in the log: the
+        """Hand every law what the last run saved in the law file, and say so in the log: the
         affine numbers to the affine law *and* to the ray law (each pools and fits on its own,
         so a ray law left unseeded would withhold every frame of the warm-up while the affine
-        law publishes), and the angular gain to the ray law when the file holds one that still
-        stands (:meth:`pepin.elevation.RayGain.restore` judges it). Without a file nothing is
-        published until POOL_MIN_SAMPLES beam pairs are pooled."""
+        law publishes), the angular gain to the ray law and the range law's bins to the range
+        law when the file holds them and they still stand
+        (:meth:`pepin.elevation.RayGain.restore`, :meth:`pepin.depth.RangeLaw.restore` judge
+        them). Without a file nothing is published until POOL_MIN_SAMPLES beam pairs are
+        pooled."""
         saved = load_law(self._law_file, now)
         if saved is None:
             self.get_logger().info(
@@ -557,9 +592,15 @@ class DepthStream(Node):
         if gain is not None:
             self._ray.seed_gain(gain)
         ray_note = f"; ray law {gain.describe()}" if gain is not None else "; no ray law saved"
+        ranged = load_range(self._law_file, now)
+        if ranged is not None:
+            self._range.seed(ranged)
+        range_note = (
+            f"; range law {ranged.describe()}" if ranged is not None else "; no range law saved"
+        )
         self.get_logger().info(
             f"depth law from {self._law_file}: a {saved[0]:.2f} b {saved[1]:+.3f}"
-            f" on {saved[2]} beams; publishing at once{ray_note}"
+            f" on {saved[2]} beams; publishing at once{ray_note}{range_note}"
         )
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
@@ -846,6 +887,7 @@ class DepthStream(Node):
                     law.pooled,
                     self._last_verdict_wall,
                     ray=self._ray.saved_state(),
+                    range_law=self._range.saved_state(),
                 )
             except OSError as exc:
                 self.get_logger().warning(

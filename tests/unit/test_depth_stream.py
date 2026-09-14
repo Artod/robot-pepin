@@ -41,6 +41,7 @@ from pepin.camera import (  # noqa: E402
     mount_transform,
 )
 from pepin.depth import (  # noqa: E402
+    LAW_VERSION,
     UP_LEVEL,
     AffineScale,
     CameraPose,
@@ -278,10 +279,11 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     is the pose, as it was): after every frame the node's law is the reference's law to the
     last bit, it withholds exactly the frames the reference withheld, and every published
     image and scan is byte for byte the reference's."""
-    node, net = build()
-    assert node._pipeline.switches == {name: FLAGS[name] for name in node._pipeline.names}, (
-        "the flags' defaults are the chain's"
-    )
+    node, net = build(range_law=False)  # the affine law alone: the chain this reference is
+    assert node._pipeline.switches == {name: FLAGS[name] for name in node._pipeline.names} | {
+        "range_law": False
+    }, "the flags' defaults are the chain's, bar the one switched here"
+
     reference = AffineScale()
     withheld = 0
     for k, wall_x in enumerate(WALLS):
@@ -317,7 +319,8 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     assert "backend fake (CPU model not loaded)" in line
     assert (
         "flags: edge_filter=on lidar_anchor=on floor_pairs=off wall_anchor=off"
-        " parallax_anchor=off affine_law=on ray_law=off wall_correct=off floor_anchor=on"
+        " parallax_anchor=off affine_law=on ray_law=off range_law=off wall_correct=off"
+        " floor_anchor=on"
         " depth_backend=local" in line
     )
     assert "ms median/max: network" in line and "pipeline" in line
@@ -424,7 +427,7 @@ def test_the_scan_is_built_from_the_depth_before_the_floor_anchor(
     monkeypatch.setattr(node._pipeline, "run", spy_run)
     monkeypatch.setattr(node, "_as_scan", spy_scan)
     frame(node, net, CONFIG_CAM, 2.0, 0)
-    assert seen["scan_depth"] is seen["result"].after["affine_law"]
+    assert seen["scan_depth"] is seen["result"].after["range_law"]
     node.set_parameters([Param("wall_correct", True)])
     frame(node, net, CONFIG_CAM, 2.0, 1)
     assert seen["scan_depth"] is seen["result"].after["wall_correct"]
@@ -563,7 +566,7 @@ def test_both_laws_go_through_the_file_from_one_run_to_the_next(
     assert first._ray.ray_fitted and first._ray.gain is not None
     first._report()
     saved = json.loads(path.read_text())
-    assert saved["version"] == 2 and saved["ray"] == first._ray.gain.state()
+    assert saved["version"] == LAW_VERSION and saved["ray"] == first._ray.gain.state()
     second, _net = build(law_file=path, ray_law=True, wall_anchor=True)
     assert second._ray.ray_ready and not second._ray.ray_fitted, "restored, not refitted"
     assert second._ray.gain is not None and second._ray.gain.state() == saved["ray"]
@@ -653,3 +656,24 @@ def test_the_insane_carry_is_named_in_the_report_line(build: Build) -> None:
     line = node.logger.texts("info")[-1]
     assert "carry insane 1 frames (the odometry ran away)" in line
     assert "carry_max_speed_mps=1.0" in line
+
+
+def test_the_range_law_ships_live_and_goes_through_the_file(build: Build, tmp_path: Path) -> None:
+    """The node's live law is the one that follows the range: it fits on the same pooled beams,
+    says so in the report line and in the flags, is written beside the affine numbers, and the
+    next start applies it before any live pool."""
+    path = tmp_path / "range_law.json"
+    first, net = build(law=LAW, law_file=path)
+    for k, wall_x in enumerate(WALLS * 2):
+        frame(first, net, CONFIG_CAM, wall_x, k)
+    stage = first._range
+    assert stage.fitted and stage.law is not None and stage.law.centres.size >= 2
+    first._report()
+    line = first.logger.texts("info")[-1]
+    assert "range_law on [D" in line and "range_law=on" in line
+    saved = json.loads(path.read_text())
+    assert saved["range"] == stage.law.state() and saved["a"] == first._law.a
+    second, _net = build(law_file=path)
+    assert second._range.law is not None and second._range.law.state() == stage.law.state()
+    assert second._range.ready and not second._range.fitted, "a seed until the live pool answers"
+    assert "range law D" in second.logger.texts("info")[0]

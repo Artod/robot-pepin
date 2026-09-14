@@ -31,7 +31,14 @@ Floor pairs alone put the lidar's row 2.0x too far (a camera without lidar sees 
 raw network does); wall pairs at 0.2 of a beam put it 10 % too near while fixing the 0.5-0.8 m
 slice (0.86 -> 1.00 of the truth); the elevation term is real (c +0.1) but linear in lift is the
 wrong shape (the error steps within 60 rows of the lidar's row and is flat above), and the row
-law overfits. The lidar-only affine law stays the default; the new anchors ship switched off.
+law overfits. The lidar-only anchor stays the default; the new anchors ship switched off.
+
+The law that ships live is :class:`RangeLawStage`, not the affine one: fitted on the same pool,
+it bins the pairs by the network's own depth and measures a ratio in each bin, because the
+affine law's residual tilts 12 % per metre of range (:class:`pepin.depth.RangeLaw`, measured
+2026-09-14 in scratch/depth_scale_by_range.py). The affine law keeps running before it — it is
+what the law file carries, what seeds every law at start, and the fallback the range law
+publishes through until two of its bins fill.
 
 :class:`RayLaw` (:mod:`pepin.elevation`) is the third such law and the one parameterised the
 way the error is: by the ray's angle off the optical axis, so the neck may tilt without
@@ -71,6 +78,7 @@ from pepin.depth import (
     CameraPose,
     Intrinsics,
     Mask,
+    RangeLaw,
     a_bounds,
     apply_affine,
     at_bound,
@@ -1362,28 +1370,131 @@ class RayLaw(AffineLaw):
         return super().describe() + "; " + self.gain.describe() + source
 
 
+class RangeLawStage(LawStage):
+    """The law whose scale follows the range: the pooled pairs binned by the network's own
+    depth and a robust ratio measured in each bin (:class:`pepin.depth.RangeLaw`), applied to
+    the same raw depth the affine law reads. On, its image replaces the affine law's.
+
+    The affine law it is built on stays its fallback and its readiness: while the pool has not
+    filled :data:`pepin.depth.RANGE_MIN_BINS` bins — the warm-up, or a cart facing one wall at
+    one range — the frame goes out through the affine law rather than being withheld, which is
+    also what a seed of the saved affine numbers means here. The pool is this stage's own queue
+    of the last ``pool_frames`` frames' pairs (the same objects the affine law pools: the
+    references cost nothing), so switching the affine law off for an A/B does not blind it."""
+
+    name = "range_law"
+
+    def __init__(self, affine: AffineLaw, pool_frames: int = POOL_FRAMES) -> None:
+        self.affine = affine
+        self.law: RangeLaw | None = None
+        self._live = False  # whether the law rests on the live pool rather than on a seed
+        self._pool: list[Pairs] = []
+        self._pool_frames = pool_frames
+
+    def seed(self, law: RangeLaw) -> None:
+        """Start from a saved range law (the map's): applied until the live pool can fit one."""
+        self.law, self._live = law, False
+
+    @property
+    def ready(self) -> bool:
+        """Whether a law worth applying exists — this one's, or the affine law behind it."""
+        return self.law is not None or self.affine.ready
+
+    @property
+    def fitted(self) -> bool:
+        """Whether the range law rests on the live pool (worth saving)."""
+        return self._live
+
+    @property
+    def pooled(self) -> int:
+        """How many live pairs the pool holds."""
+        return int(sum(p.size for p in self._pool))
+
+    @property
+    def pool(self) -> Pairs | None:
+        """Everything in the pool, as one."""
+        return Pairs.join(self._pool)
+
+    def saved_state(self) -> dict[str, Any] | None:
+        """The range law that stands as plain JSON values for :func:`pepin.depth.save_law`,
+        ``None`` while there is none. A seed the live pool has not replaced is written back
+        rather than dropped: the file holds one record for every law, so anything left out of
+        a save is erased."""
+        return self.law.state() if self.law is not None else None
+
+    def fit(self, pairs: Pairs | None) -> None:
+        """Feed a frame's pairs (or ``None``); the law is refitted on the pool. A pool that
+        cannot fill two bins leaves the seeded law, or none, and the affine law stands."""
+        if pairs is None or pairs.size == 0:
+            return
+        self._pool.append(pairs)
+        del self._pool[: -self._pool_frames]
+        if self.pooled < POOL_MIN_SAMPLES:
+            return
+        pool = self.pool
+        assert pool is not None
+        law = RangeLaw.fit(pool.d, pool.z, pool.weight)
+        if law is not None:
+            self.law, self._live = law, True
+
+    def apply(self, depth: Array, ctx: FrameContext) -> Array:
+        """The depth through the range law — each pixel scaled by the ratio measured at its own
+        range — or through the plain affine law while no range law stands."""
+        if self.law is None:
+            return apply_affine(depth, self.affine.a, self.affine.b)
+        return self.law.apply(depth)
+
+    def run(self, depth: Array, frame: Frame) -> tuple[Array, Verdict]:
+        """Fit on the pool and correct the frame's raw depth, keeping the holes of the depth
+        handed in (the edge filter's, and the affine law's where it ran before this stage);
+        the frame is withheld only while no law of any kind exists."""
+        pool = frame.pool
+        self.fit(pool)
+        n = 0 if pool is None else pool.size
+        if not self.ready:
+            return depth, Verdict(self.name, True, pairs=n, note="no law yet", withhold=True)
+        out = np.where(np.isfinite(depth), self.apply(frame.raw, frame.ctx), np.nan)
+        return out, Verdict(self.name, True, pairs=n, pixels=int(out.size), note=self.describe())
+
+    def describe(self) -> str:
+        """The law for the report line: its bins and their ratios — marked ``(seed)`` while it
+        is the one the last run saved — or that the affine law is standing in for it."""
+        if self.law is None:
+            return f"affine fallback on {self.pooled} pairs"
+        source = "" if self._live else " (seed)"
+        return f"{self.law.describe()} on {self.pooled} pairs{source}"
+
+
 # ---- the chain ----------------------------------------------------------------------------------
 def standard_pipeline(
-    law: LawStage | None = None,
+    law: AffineLaw | None = None,
     *,
     ray: RayLaw | None = None,
+    range_stage: RangeLawStage | None = None,
     floor_pairs: bool = False,
     wall_anchor: bool = False,
     parallax_anchor: bool = False,
     ray_law: bool = False,
+    range_law: bool = True,
     wall_correct: bool = False,
 ) -> DepthPipeline:
     """The node's chain: edges -> lidar -> (floor pairs) -> (wall pairs) -> (parallax) -> law
-    -> (ray law) -> (wall correction) -> floor anchor; the five new stages are in the list and
-    switched by the flags of the same name (``wall_anchor`` is the pairs role, ``wall_correct``
-    the pixels). The ray law sits behind the affine one and corrects the same raw depth by the
-    ray's angle instead: on, its image replaces the affine law's; off, the affine law's stands.
+    -> (ray law) -> range law -> (wall correction) -> floor anchor; the six switchable stages
+    are in the list and switched by the flags of the same name (``wall_anchor`` is the pairs
+    role, ``wall_correct`` the pixels). The ray law and the range law both sit behind the
+    affine one and correct the same raw depth by their own rule instead — by the ray's angle,
+    by the range — and on, each replaces the image of the law before it; off, that law's
+    stands. ``range_law`` is the only one of the six on by default: one affine law leaves a
+    residual that tilts 12 % per metre (:class:`pepin.depth.RangeLaw`).
 
-    Both laws may be handed in so the caller keeps them: each pools and fits on its own, so a
-    saved law must be seeded into **both** (:meth:`AffineLaw.seed`), or the ray law withholds
-    every frame of the warm-up while the affine law publishes from the seed."""
+    Every law may be handed in so the caller keeps them: the affine and the ray law pool and
+    fit on their own, so a saved law must be seeded into **both** (:meth:`AffineLaw.seed`), or
+    the ray law withholds every frame of the warm-up while the affine law publishes from the
+    seed; the range law falls back to the affine law it is built on and needs no seed of its
+    own to publish."""
     the_law = law if law is not None else AffineLaw()
     the_ray = ray if ray is not None else RayLaw()
+    the_range = range_stage if range_stage is not None else RangeLawStage(the_law)
     geometry = FloorGeometry()
     stages: list[Stage] = [
         EdgeFilter(),
@@ -1393,6 +1504,7 @@ def standard_pipeline(
         ParallaxAnchor(),
         the_law,
         the_ray,
+        the_range,
         WallCorrection(),
         FloorAnchor(geometry),
     ]
@@ -1401,6 +1513,7 @@ def standard_pipeline(
         ("wall_anchor", wall_anchor),
         ("parallax_anchor", parallax_anchor),
         ("ray_law", ray_law),
+        ("range_law", range_law),
         ("wall_correct", wall_correct),
     )
     return DepthPipeline(stages, off=[name for name, on in flags if not on])
@@ -1425,6 +1538,7 @@ __all__ = [
     "Pairs",
     "ParallaxAnchor",
     "PreviousFrame",
+    "RangeLawStage",
     "RayLaw",
     "Result",
     "Rigid",

@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from pepin.depth import (
+    LAW_VERSION,
     POOL_MIN_SAMPLES,
     CameraPose,
     Intrinsics,
@@ -281,7 +282,7 @@ def test_a_saved_law_comes_back_whole_beside_the_affine_one(tmp_path: Path) -> N
     assert gain is not None
     path = tmp_path / "depth_law.json"
     save_law(path, 1.82, -0.03, pool.size, 1000.0, ray=gain.state())
-    assert json.loads(path.read_text())["version"] == 2
+    assert json.loads(path.read_text())["version"] == LAW_VERSION
     assert load_law(path, 1000.0) == (1.82, -0.03, pool.size)
     back = RayGain.restore(load_ray(path, 1000.0))
     assert back is not None
@@ -310,9 +311,9 @@ def test_the_stage_is_off_by_default_and_leaves_the_affine_image_untouched() -> 
     """The chain carries the ray law switched off: the published image is the affine law's, bit
     for bit, and the flag is what turns it into the ray law's without a restart."""
     raw, ctx = _frames()
-    plain = standard_pipeline(wall_anchor=True)
+    plain = standard_pipeline(wall_anchor=True, range_law=False)
     assert standard_pipeline().switches["ray_law"] is False
-    switched = standard_pipeline(ray_law=True, wall_anchor=True)
+    switched = standard_pipeline(ray_law=True, wall_anchor=True, range_law=False)
     switched.set("ray_law", False)
     for _ in range(3):
         first = plain.run(raw, ctx)

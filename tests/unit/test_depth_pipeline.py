@@ -34,6 +34,7 @@ from pepin.depth_pipeline import (
     FrameContext,
     LidarAnchor,
     Pairs,
+    RangeLawStage,
     RowLaw,
     WallAnchor,
     lift_of,
@@ -114,7 +115,7 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
     law is the node's law to the last bit, its output the node's output, and it withholds
     exactly the frames the node withheld."""
     node_law = AffineScale()
-    pipeline = standard_pipeline()
+    pipeline = standard_pipeline(range_law=False)  # the affine law alone, as the node ran then
     law = pipeline.stage("affine_law")
     assert isinstance(law, AffineLaw)
     assert pipeline.names == [
@@ -125,6 +126,7 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
         "parallax_anchor",
         "affine_law",
         "ray_law",
+        "range_law",
         "wall_correct",
         "floor_anchor",
     ]
@@ -176,6 +178,7 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
         "parallax_anchor": False,
         "affine_law": True,
         "ray_law": False,
+        "range_law": True,
         "wall_correct": False,
         "floor_anchor": True,
     }
@@ -215,7 +218,7 @@ def test_the_depth_before_a_stage_is_the_last_output_before_it_or_the_raw() -> N
     raw = _network(_scene(2.0), 1.4, 0.01, noise=0.0, seed=0)
     pipeline = standard_pipeline(law)
     result = pipeline.run(raw, _context(_wall_returns(2.0)))
-    assert result.before("floor_anchor") is result.after["affine_law"]
+    assert result.before("floor_anchor") is result.after["range_law"]
     assert result.before("edge_filter") is result.frame.raw
     assert result.before("lidar_anchor") is result.after["edge_filter"]
     corrected = standard_pipeline(law, wall_correct=True)
@@ -524,3 +527,65 @@ def test_the_law_walks_to_a_far_fit_no_faster_than_the_slew_allows() -> None:
     now[0] += 1.0
     quick.fit(far)
     assert (quick.a, quick.b) == pytest.approx((2.30, -0.15), abs=0.01)
+
+
+# ---- the law that follows the range ------------------------------------------------------------
+def test_the_range_law_is_the_chain_s_live_law_and_the_flag_gives_the_affine_one_back() -> None:
+    """The chain ships the range law on, behind the affine one: once its pool fills two bins
+    its image is what goes out — not the affine law's — with the holes of the image it was
+    handed, and the flag puts the affine law back without a restart."""
+    live = standard_pipeline()
+    assert live.on("range_law")
+    assert live.names.index("affine_law") < live.names.index("range_law")
+    stage = live.stage("range_law")
+    assert isinstance(stage, RangeLawStage)
+    result = None
+    for k, wall_x in enumerate((1.0, 1.5, 2.0, 2.5, 3.0, 3.5) * 2):
+        raw = _network(_scene(wall_x), 1.3, 0.03, noise=0.03, seed=k)
+        raw[100:200, 300:340] = np.nan  # a hole the stages before the law left
+        result = live.run(raw, _context(_wall_returns(wall_x)))
+    assert result is not None and not result.withheld
+    assert stage.fitted and stage.law is not None and stage.law.centres.size >= 2
+    affine, ranged = result.after["affine_law"], result.after["range_law"]
+    assert not np.array_equal(affine, ranged, equal_nan=True), "the range law's image goes out"
+    assert np.array_equal(np.isnan(affine), np.isnan(ranged)), "and the same holes"
+    assert "range_law on [D" in live.report() and "pairs]" in live.report()
+    live.set("range_law", False)
+    back = live.run(raw, _context(_wall_returns(2.0)))
+    assert back.before("floor_anchor") is back.after["affine_law"]
+    assert "range_law off" in live.report()
+
+
+def test_the_range_law_publishes_through_the_affine_law_until_two_bins_fill() -> None:
+    """A cart facing one wall at one range fills one bin and learns nothing about range: the
+    frame goes out through the affine law rather than being withheld, and the stage says so."""
+    law = AffineLaw()
+    law.seed(1.3, 0.0)
+    stage = RangeLawStage(law)
+    pipeline = standard_pipeline(law, range_stage=stage)
+    raw = _network(_scene(2.0), 1.3, 0.0, noise=0.0, seed=0)
+    result = pipeline.run(raw, _context(_wall_returns(2.0)))
+    assert not result.withheld and stage.law is None and not stage.fitted
+    assert np.array_equal(result.after["range_law"], result.after["affine_law"], equal_nan=True)
+    assert stage.describe().startswith("affine fallback on ")
+    assert stage.saved_state() is None
+    bare = RangeLawStage(AffineLaw())  # nothing seeded, nothing pooled: nothing to publish
+    _depth, verdict = bare.run(raw, Frame(raw, _context(None)))
+    assert verdict.withhold and verdict.note == "no law yet"
+
+
+def test_a_seeded_range_law_is_applied_at_once_and_written_back_whole() -> None:
+    """The law the last run saved is the law of the first frame — no warm-up at the affine
+    law — and it is written back until the live pool replaces it."""
+    from pepin.depth import RangeLaw
+
+    saved = RangeLaw.fit(np.linspace(1.0, 4.0, 2000) * 1.8, np.linspace(1.0, 4.0, 2000))
+    assert saved is not None
+    stage = RangeLawStage(AffineLaw())
+    stage.seed(saved)
+    assert stage.ready and not stage.fitted
+    raw = _network(_scene(2.0), 1.3, 0.0, noise=0.0, seed=0)
+    out, verdict = stage.run(raw, Frame(raw, _context(None)))
+    assert not verdict.withhold
+    assert np.array_equal(out, saved.apply(raw), equal_nan=True)
+    assert stage.describe().endswith("(seed)") and stage.saved_state() == saved.state()
