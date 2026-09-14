@@ -389,7 +389,7 @@ local_costmap:
         # measured: `ros2 param set /local_costmap/local_costmap camera_layer.enabled true` is
         # the camera-only drive and the measurement, and True becomes the default when it says so.
         plugin: "nav2_costmap_2d::ObstacleLayer"
-        enabled: False
+        enabled: True  # measured 2026-09-13: the table top the lidar cannot see; a live flip was lost at every restart of 2026-09-14
         observation_sources: depth_scan
         depth_scan:
           # The camera's depth folded onto the plane (pepin_bringup.depth_stream on the laptop):
