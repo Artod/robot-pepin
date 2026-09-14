@@ -438,9 +438,10 @@ def candidate_msg(
     score: float = 0.70,
     stamp: float = 100.0,
     scan: int | None = None,
+    source: str = LIDAR,
 ) -> Any:
     """What pepin_bringup.laptop_localizer publishes: one JSON message on /localization/candidate,
-    off a fresh revolution unless ``scan`` names one."""
+    off a fresh revolution unless ``scan`` names one, found on ``source``."""
     return String(
         data=json.dumps(
             {
@@ -453,6 +454,7 @@ def candidate_msg(
                 "stamp": stamp,
                 "scan": next(_SCANS) if scan is None else scan,
                 "map": node._map_id,
+                "source": source,
                 "verdict": "disagree",
                 "search_ms": 140.0,
             }
@@ -511,6 +513,26 @@ def test_three_candidates_that_disagree_re_seed_the_tracker(node: Relocalizer) -
     line = node.logger.texts("info")[-1]
     assert "candidates 3 (disagree 3) from lidar 3, re-seeds 1" in line
     assert "accept_candidates=on candidate_streak=3" in line
+
+
+def test_a_fan_may_not_re_seed_a_tracker_the_lidar_is_still_feeding(node: Relocalizer) -> None:
+    """The last line under the camera's own whole-map search: while this board's roster says the
+    lidar is fresh, a candidate found on a FAN is judged, counted and reported — and cannot move
+    the pose, however long its streak. The laptop has the same rule, but it reads this board's
+    health off a topic that can go quiet for reasons that have nothing to do with the lidar, and
+    a fan's fit saturates at 1.00 where a revolution's honest fit is 0.67. Once the lidar really
+    has gone stale, the next fan closes the streak that was waiting."""
+    standing(node)
+    node._registry.observe(LIDAR, 100.0)  # the board's own word: the lidar is feeding it
+    on_candidate = node.subs["/localization/candidate"][1]
+    for _ in range(4):
+        on_candidate(candidate_msg(node, CARRIED_TO, score=1.0, source=DEPTH))
+        assert node._pending_seed is None, "a fan moved a tracker the lidar was still feeding"
+    node._report_tracking()
+    assert "from depth 4" in node.logger.texts("info")[-1]
+    node.clock.seconds = 120.0  # ...and now nothing of the lidar's is fresh any more
+    on_candidate(candidate_msg(node, CARRIED_TO, score=1.0, source=DEPTH))
+    assert node._pending_seed is not None, "with the lidar gone the fan is the only word there is"
 
 
 def rolled(node: Relocalizer, forward_m: float, at: float = 100.25) -> None:

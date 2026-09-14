@@ -960,12 +960,22 @@ class Relocalizer(Node):
         except (KeyError, TypeError, ValueError) as exc:
             self._candidates.malformed(str(exc))
             return
+        # A candidate found on a CAMERA fan may not move a tracker the lidar is still feeding,
+        # whatever the laptop thought when it published one. The laptop has the same rule
+        # (pepin.watchdog.camera_search_need), but it reads this board's own health off a topic
+        # that can go quiet for reasons that have nothing to do with the lidar — and the fits of
+        # the two sensors are not one scale, so a fan's saturating 1.00 beats a revolution's
+        # honest 0.67 from anywhere in the flat. The roster here is the board's own word, taken
+        # at the moment the candidate is judged: the candidate is still judged, counted and
+        # reported, it simply cannot become a re-seed.
+        lidar_alive = any(s.name == LIDAR for s in self._registry.alive(self._now_s()))
+        from_a_fan = candidate.source != LIDAR
         answer = self._candidates.observe(
             candidate,
             self._tracked_pose(),
             self.fit,
             map_id=self._map_id,
-            allow=not self._navigating,
+            allow=not self._navigating and not (from_a_fan and lidar_alive),
             odometry=self._history,  # the trail the candidate is carried to this moment along
         )
         with self._episode:  # the search worker writes _pending_seed from its own thread
