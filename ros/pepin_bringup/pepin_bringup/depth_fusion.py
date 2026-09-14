@@ -155,6 +155,24 @@ FLAGS = FlagSet(
         " mode, so nobody has to remember it at the start of a session",
     ),
     Flag(
+        "camera_map",
+        True,
+        description="the volume's camera band goes out on /map_camera at map_hz whoever owns"
+        " /map: beside a known map the lidar keeps the served file and the camera's scans are"
+        " matched against this band of the volume, their own cross-section of the room; off,"
+        " /map_camera is published only where the volume is the map (SLAM with world_map)",
+        why="the camera's fan is the whole height 0.15-1.3 m and the lidar's map is one plane"
+        " at 0.38 m: held to that plane the fan scored fit 0.34 at the right pose and the fused"
+        " pose moved 0.8-1.5 cm off the lidar's (2026-09-13, drive_bisect on runs 190024 and"
+        " 190422 against 184701 and 185621). Nobody else publishes /map_camera, so the owner"
+        " rule that protects /map has nothing to protect here",
+        on_when="always beside a known map: it is the only reference the camera's scans can"
+        " honestly be matched against, and it costs one slice per map_hz",
+        off_when="to reproduce the old behaviour, the camera matched against the lidar's /map;"
+        " or where the band is known to be wrong (a volume painted at a wrong pose) until it is"
+        " wiped",
+    ),
+    Flag(
         "imu_lean",
         True,
         description="the cart's lean (pepin.lean, from /imu/data_raw) is followed with the gyro"
@@ -894,39 +912,45 @@ class DepthFusion(Node):
         marks in) holds the seats and tabletops that plane never sees. The camera's scans are
         matched against their own slice where there is one (pepin_bringup.laptop_localizer),
         which is why it goes out on a topic of its own instead of staying inside this node.
-        Nobody else publishes /map_camera, so it needs no owner rule — but it is published only
-        where the volume IS the map, because a band of a volume nobody trusts as a map is not a
-        map to localise against either.
+        Nobody else publishes /map_camera, so it needs no owner rule: with ``camera_map`` on
+        it goes out beside a known map too, where /map stays the served file. The band is
+        painted by the camera itself at the tracker's pose, and it is the only reference the
+        camera's scans can honestly be matched against — held to the lidar's plane instead,
+        the whole-height fan scored fit 0.34 at the right pose and pulled the fused pose a
+        centimetre off (2026-09-13, runs 190024/190422).
         """
-        if self._switches["map_source"] != "volume":
-            return
-        if not self._map_mine:
+        mine = self._switches["map_source"] == "volume" and self._map_mine
+        if self._switches["map_source"] == "volume" and not self._map_mine:
             self._tally.count("map_refused")
+        camera_map = self._switches.on("camera_map")
+        if not mine and not camera_map:
             return
         with self._tally.measure("map"), self._lock:
             law = SliceLaw(min_weight=self._switches["map_min_weight"])
-            view = self._world.lidar_slice(law)
-            camera = self._world.camera_band_slice(law)
+            view = self._world.lidar_slice(law) if mine else None
+            camera = self._world.camera_band_slice(law) if camera_map else None
             stamp = self._last_stamp
-        if self._map_pub is None:  # transient local: a late subscriber still gets the map
-            self._map_pub = self.create_publisher(OccupancyGridMsg, "/map", self._latched())
-            self.get_logger().info(
-                f"/map is the volume's now: {view.shape[1]}x{view.shape[0]} cells of"
-                f" {view.resolution_m * 100:.0f} cm from {view.origin}, the layer"
-                f" {view.band_m[0]:.2f}-{view.band_m[1]:.2f} m"
-            )
-        if self._camera_map_pub is None:
-            self._camera_map_pub = self.create_publisher(
-                OccupancyGridMsg, CAMERA_MAP_TOPIC, self._latched()
-            )
-            self.get_logger().info(
-                f"{CAMERA_MAP_TOPIC} is the volume's camera band now:"
-                f" {camera.band_m[0]:.2f}-{camera.band_m[1]:.2f} m, what the camera's own scans"
-                " are matched against"
-            )
         when = stamp if stamp is not None else self.get_clock().now().to_msg()
-        self._map_pub.publish(occupancy_grid(view.message_fields(), when, "map"))
-        self._camera_map_pub.publish(occupancy_grid(camera.message_fields(), when, "map"))
+        if view is not None:
+            if self._map_pub is None:  # transient local: a late subscriber still gets the map
+                self._map_pub = self.create_publisher(OccupancyGridMsg, "/map", self._latched())
+                self.get_logger().info(
+                    f"/map is the volume's now: {view.shape[1]}x{view.shape[0]} cells of"
+                    f" {view.resolution_m * 100:.0f} cm from {view.origin}, the layer"
+                    f" {view.band_m[0]:.2f}-{view.band_m[1]:.2f} m"
+                )
+            self._map_pub.publish(occupancy_grid(view.message_fields(), when, "map"))
+        if camera is not None:
+            if self._camera_map_pub is None:
+                self._camera_map_pub = self.create_publisher(
+                    OccupancyGridMsg, CAMERA_MAP_TOPIC, self._latched()
+                )
+                self.get_logger().info(
+                    f"{CAMERA_MAP_TOPIC} is the volume's camera band now:"
+                    f" {camera.band_m[0]:.2f}-{camera.band_m[1]:.2f} m, what the camera's own"
+                    " scans are matched against"
+                )
+            self._camera_map_pub.publish(occupancy_grid(camera.message_fields(), when, "map"))
         self._tally.count("maps")
 
     def _report(self) -> None:
