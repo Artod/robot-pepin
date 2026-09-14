@@ -15,6 +15,12 @@ few candidate yaws and scored against the model; the best turn corrects the pose
 integrated with. The tracker's heading jitter at rest thus never reaches the model. The frame
 is placed by TF at its own stamp, nothing else: a smoothed copy of the tracker's correction was
 tried and lagged behind a drive across the room (2026-09-11).
+
+The model can also be carried. Every frame in it was placed through a correction (``map ->
+odom``), so when a pose graph optimises and that correction jumps, the whole model belongs one
+rigid move away: :class:`PlanarShift` is that move and :meth:`Tsdf.shift` applies it, resampling
+the field through the same weighted average the fusion itself uses. The grid never moves — the
+content does.
 """
 
 from __future__ import annotations
@@ -161,6 +167,131 @@ class RigidPose:
         return RigidPose(rz @ self.rotation, t)
 
 
+@dataclass(frozen=True)
+class PlanarShift:
+    """A rigid move of everything in the map's plane: metres along x and y, and a turn about
+    the map's origin. What a changed ``map -> odom`` does to every point painted under the old
+    one — the graph optimised, and the room it built moves with it as one body.
+
+    Planar on purpose. A graph correction of a cart on a floor is x, y and yaw; the volume's z
+    lattice is the lidar's plane and the camera's band, and the slices are cut horizontally, so
+    a roll or a pitch in the correction would tilt every one of them. The out-of-plane part is
+    left where it is (a centimetre of z at worst) and reported, not silently baked in.
+    """
+
+    dx: float
+    dy: float
+    dyaw: float
+
+    @classmethod
+    def between(cls, old: RigidPose, new: RigidPose) -> PlanarShift:
+        """The move from one correction to another: ``new`` after the inverse of ``old``, of
+        which the planar part is kept. A point sitting at ``p`` because it was placed under
+        ``old`` belongs at ``moved(p)`` now that ``new`` is in force."""
+        rotation = new.rotation @ old.rotation.T
+        translation = new.translation - rotation @ old.translation
+        return cls(
+            float(translation[0]),
+            float(translation[1]),
+            float(math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))),
+        )
+
+    @property
+    def translation_m(self) -> float:
+        """How far the move carries the map's origin, metres."""
+        return math.hypot(self.dx, self.dy)
+
+    @property
+    def yaw_deg(self) -> float:
+        """The turn, degrees (signed, CCW)."""
+        return math.degrees(self.dyaw)
+
+    @property
+    def nothing(self) -> bool:
+        """True when the move is below a micrometre and a millionth of a degree: nothing to do."""
+        return self.translation_m < 1e-6 and abs(self.dyaw) < 1e-8
+
+    def text(self) -> str:
+        """The move for a report line: centimetres and degrees."""
+        return f"{self.dx * 100:+.1f}, {self.dy * 100:+.1f} cm, {self.yaw_deg:+.2f} deg"
+
+    def moved(self, x: Floats, y: Floats) -> tuple[Floats, Floats]:
+        """Where the map points ``x``, ``y`` land after the move."""
+        c, s = math.cos(self.dyaw), math.sin(self.dyaw)
+        return (c * x - s * y + self.dx, s * x + c * y + self.dy)
+
+    def source_of(self, x: Floats, y: Floats) -> tuple[Floats, Floats]:
+        """Where whatever now belongs at ``x``, ``y`` used to be: the move undone."""
+        c, s = math.cos(self.dyaw), math.sin(self.dyaw)
+        px, py = x - self.dx, y - self.dy
+        return (c * px + s * py, -s * px + c * py)
+
+    def applied_to(self, pose: RigidPose) -> RigidPose:
+        """A pose in the map after the move — how the frame a measurement was placed by
+        travels with the room it painted."""
+        c, s = math.cos(self.dyaw), math.sin(self.dyaw)
+        rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+        t: Array = rz @ pose.translation + np.array([self.dx, self.dy, 0.0])
+        return RigidPose(rz @ pose.rotation, t)
+
+
+class ShiftedColumns:
+    """Where every voxel column of a grid reads from after a :class:`PlanarShift`: the four
+    columns around its source and their bilinear weights, computed once for the grid and used
+    for every channel on it.
+
+    A planar move leaves z alone, so a whole column of voxels travels together: one set of
+    (x, y) indices moves the field, both weights and the colour, and the resample costs four
+    gathers per channel instead of eight. Columns whose source falls off the grid read as
+    nothing at all (weight zero), which is what a map that just grew a new edge should say.
+    """
+
+    def __init__(self, spec: GridSpec, shift: PlanarShift) -> None:
+        nx, ny, _nz = spec.shape
+        cx = spec.origin[0] + (np.arange(nx) + 0.5) * spec.voxel_m
+        cy = spec.origin[1] + (np.arange(ny) + 0.5) * spec.voxel_m
+        x, y = np.meshgrid(cx, cy, indexing="ij")
+        sx, sy = shift.source_of(x, y)
+        gx = (sx - spec.origin[0]) / spec.voxel_m - 0.5
+        gy = (sy - spec.origin[1]) / spec.voxel_m - 0.5
+        i0 = np.floor(gx).astype(np.intp)
+        j0 = np.floor(gy).astype(np.intp)
+        fx = (gx - i0).astype(np.float32)
+        fy = (gy - j0).astype(np.float32)
+        self.inside: npt.NDArray[np.bool_] = (i0 >= 0) & (i0 + 1 < nx) & (j0 >= 0) & (j0 + 1 < ny)
+        keep = self.inside.astype(np.float32)
+        self._i0 = np.clip(i0, 0, max(nx - 2, 0))
+        self._j0 = np.clip(j0, 0, max(ny - 2, 0))
+        self._w = (
+            (1.0 - fx) * (1.0 - fy) * keep,
+            fx * (1.0 - fy) * keep,
+            (1.0 - fx) * fy * keep,
+            fx * fy * keep,
+        )
+        self._ix = np.clip(np.rint(gx).astype(np.intp), 0, nx - 1)
+        self._iy = np.clip(np.rint(gy).astype(np.intp), 0, ny - 1)
+
+    def blend(self, field: Float32) -> Float32:
+        """One channel of the grid after the move: the bilinear average of the four source
+        columns, zero where the source is off the grid."""
+        i0, j0 = self._i0, self._j0
+        i1, j1 = i0 + 1, j0 + 1
+        w00, w10, w01, w11 = self._w
+        out: Float32 = w00[:, :, None] * field[i0, j0]
+        out += w10[:, :, None] * field[i1, j0]
+        out += w01[:, :, None] * field[i0, j1]
+        out += w11[:, :, None] * field[i1, j1]
+        return out
+
+    def nearest[T: np.generic](self, field: npt.NDArray[T]) -> npt.NDArray[T]:
+        """One channel after the move, taken from the nearest source column and zeroed off the
+        grid: what a picture takes (the colour), where half a voxel of blur buys nothing and
+        the bytes would only be rounded back."""
+        taken: npt.NDArray[T] = field[self._ix, self._iy]
+        taken[~self.inside] = 0
+        return taken
+
+
 def backproject(
     depth: Array, intr: Intrinsics, stride: int = 1, range_max: float = math.inf
 ) -> Array:
@@ -197,6 +328,30 @@ class Tsdf:
         twin.spec = self.spec
         twin.sdf, twin.weight, twin.rgb = self.sdf.copy(), self.weight.copy(), self.rgb.copy()
         return twin
+
+    def shift(self, shift: PlanarShift) -> ShiftedColumns:
+        """Move everything in the model by a rigid planar ``shift`` — the volume follows the
+        graph's correction instead of standing where the pose used to be — and return the
+        column map it was resampled through, so another channel on the same grid (the lidar's
+        weight) moves with exactly the same one.
+
+        The grid itself does not move: the box, its origin and its z lattice are what every
+        slice and every seeded cell are cut on. The content moves through it by the same law
+        the fusion itself uses — a weighted average, the field carried as ``sdf * weight`` and
+        divided back out, so an unknown neighbour (weight zero) pulls no surface toward it and
+        a wall stays a wall. The colour follows its voxel (:meth:`ShiftedColumns.nearest`): it
+        is a picture, not a measurement, and blurring bytes buys nothing.
+        """
+        columns = ShiftedColumns(self.spec, shift)
+        weight = columns.blend(self.weight)
+        carried = columns.blend(self.sdf * self.weight)
+        self.sdf = np.where(weight > 0.0, carried / np.maximum(weight, 1e-6), 1.0).astype(
+            np.float32
+        )
+        self.weight = weight
+        self.rgb = columns.nearest(self.rgb)
+        self.colour_weight = columns.nearest(self.colour_weight)
+        return columns
 
     # ---- geometry helpers ----------------------------------------------------------------
     def _index_box(self, lo_m: Array, hi_m: Array) -> tuple[slice, slice, slice] | None:

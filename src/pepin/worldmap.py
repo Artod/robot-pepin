@@ -25,11 +25,15 @@ This module makes the volume the map itself:
 No ROS here (the message is returned as plain fields), no file formats beyond the snapshot and
 the map_server pair the existing tooling already reads.
 
-Out of scope, next step: re-fusing after a loop closure. When a pose graph corrects itself the
-volume keeps the old geometry, because a TSDF cannot be un-integrated. The cure is to replay the
-frames at their corrected poses, so the snapshot records every integration's stamp, sensor and
-pose (:attr:`WorldMap.frames`) — the measurements themselves stay in the run tape, which is
-where they already live; the snapshot is a warm cache, never the only copy.
+A loop closure moves the whole map, not the pose alone. Every frame in here was placed through
+``map -> odom`` at its own stamp, so when a pose graph optimises and that edge jumps, the room
+this volume drew is stale by exactly that difference: :meth:`WorldMap.shift` carries the content
+rigidly through it (:class:`pepin.tsdf.PlanarShift`), and the node that paints decides when
+(``follow_correction``, pepin_bringup.depth_fusion). Out of scope, still: a graph that corrects
+its nodes differently from one another — that deformation cannot be a rigid move and wants the
+frames replayed at their corrected poses, which is why the snapshot records every integration's
+stamp, sensor and pose (:attr:`WorldMap.frames`). The measurements themselves stay in the run
+tape, which is where they already live; the snapshot is a warm cache, never the only copy.
 """
 
 from __future__ import annotations
@@ -44,7 +48,7 @@ import numpy as np
 import numpy.typing as npt
 
 from pepin.depth import Intrinsics
-from pepin.tsdf import Array, Float32, GridSpec, RigidPose, Tsdf, Uint8
+from pepin.tsdf import Array, Float32, GridSpec, PlanarShift, RigidPose, Tsdf, Uint8
 
 if TYPE_CHECKING:
     from pepin.mapping import OccupancyGrid
@@ -356,6 +360,36 @@ class WorldMap:
         np.copyto(self.volume.weight[:, :, lo:hi], keep_weight, where=owned)
         self._note(stamp, CAMERA, pose)
         return touched
+
+    def shift(self, shift: PlanarShift) -> None:
+        """Move the whole map by a rigid planar ``shift``: the volume, the lidar's own weight
+        channel and the index of the frames that painted it.
+
+        This is how the map follows a graph correction. Every frame in here was placed through
+        ``map -> odom`` at its own stamp; when the graph optimises and that edge jumps, the same
+        observations belong ``shift`` away — the room is not re-measured, it is carried, as one
+        body. The lidar's weight travels through the very same column map as the field, so the
+        layer the camera must hand back stays the layer the lidar wrote, cell for cell.
+
+        What does not move: the grid (the box and its lattice are the frame everything is cut
+        on), the plane and the rows the lidar's layer occupies (a planar move has no z in it),
+        and the stamp. The move also re-seeds nothing and re-publishes nothing by itself — the
+        trackers follow ``map -> odom`` already, and the next slice out of this volume is simply
+        the moved one.
+        """
+        if shift.nothing:
+            return
+        columns = self.volume.shift(shift)
+        self.lidar_weight = columns.blend(self.lidar_weight)
+        self.frames = [
+            (stamp, sensor, self._shifted_frame(shift, pose)) for stamp, sensor, pose in self.frames
+        ]
+
+    @staticmethod
+    def _shifted_frame(shift: PlanarShift, pose: Array) -> Array:
+        """One row of the frame index (a 3x4 map pose) after the move."""
+        moved = shift.applied_to(RigidPose(pose[:, :3], pose[:, 3]))
+        return np.hstack([moved.rotation, moved.translation.reshape(3, 1)])
 
     def _note(self, stamp: float | None, sensor: str, pose: RigidPose) -> None:
         """Record that a frame went in: its stamp, its sensor and where it was placed."""
@@ -786,6 +820,46 @@ def bearings_in_base(angles: Array, mount_yaw: float, mirrored: bool) -> Array:
     sensor, then turned by the mount's yaw."""
     a = np.asarray(angles, dtype=float)
     return (mount_yaw - a) if mirrored else (mount_yaw + a)
+
+
+@dataclass
+class CorrectionFollower:
+    """Which ``map -> odom`` the volume's content is painted under, and the move it owes the
+    graph when that edge has moved on.
+
+    Every frame in the volume was placed through the correction in force at its own stamp, so
+    the volume as a whole stands in one of them — the one this remembers. A graph optimisation
+    replaces the correction, and from that moment the painted room is stale by the difference:
+    :meth:`pending` is that difference as a :class:`pepin.tsdf.PlanarShift` once it is worth the
+    resample, and ``None`` while it is not. A refused difference is not forgotten — it is
+    measured against the same anchor next time, so a run of corrections too small to move the
+    volume one by one accumulates and moves it together.
+    """
+
+    painted_in: RigidPose | None = None
+    applied: int = 0
+    last: PlanarShift = field(default_factory=lambda: PlanarShift(0.0, 0.0, 0.0))
+
+    def anchor(self, correction: RigidPose) -> None:
+        """The correction the content is painted under from now on: the first one ever seen
+        (an empty volume is born in it) and the one in force after every move."""
+        self.painted_in = correction
+
+    def pending(self, correction: RigidPose, min_m: float, min_deg: float) -> PlanarShift | None:
+        """The move the volume owes the graph, or ``None`` when it stands close enough already
+        (below ``min_m`` and ``min_deg``) or when nothing has anchored it yet."""
+        if self.painted_in is None:
+            return None
+        shift = PlanarShift.between(self.painted_in, correction)
+        if shift.translation_m < min_m and abs(shift.yaw_deg) < min_deg:
+            return None
+        return shift
+
+    def moved(self, correction: RigidPose, shift: PlanarShift) -> None:
+        """The volume has just been moved by ``shift``: it is painted under ``correction`` now."""
+        self.anchor(correction)
+        self.applied += 1
+        self.last = shift
 
 
 @dataclass
