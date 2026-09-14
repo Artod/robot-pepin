@@ -102,18 +102,31 @@ def planar_covariance(sigma_m: float, yaw_sigma_deg: float, unfused: float = 1e6
 class VoGate:
     """Lets through the visual-odometry poses the EKF may see, and says why it dropped the rest.
 
-    Two reasons, both cheap and both about the same failure: rtabmap losing its tracking. A lost
+    Three reasons, all cheap and all about the same failure: rtabmap losing its tracking. A lost
     frame it announces itself (:func:`is_lost`); a RE-START of the tracking it does not — the
     pose simply jumps, and a jump differenced into a velocity is the one thing that can yank an
     odometry frame nothing else in this stack can move. So a step faster than a cart that cannot
     exceed 0.30 m/s and 1.0 rad/s (pepin.deployment) is not a measurement of anything.
 
+    The third is the hole in the first two: both ceilings are RATIOS, and a long enough gap
+    makes any jump legal. The source runs at 9-10 poses/s, so a gap is a stalled or restarted
+    process — and a restarted ``rgbd_odometry`` comes back with its pose at the origin, metres
+    from where it left off, after a gap of seconds. At one metre per second, a jump of X metres
+    passes whenever the gap exceeds X seconds; the gap ceiling is what stops the very case the
+    speed ceiling was written for.
+
     ``admit`` answers ``None`` for a pose the node may publish, or the reason it may not.
     """
 
-    def __init__(self, max_speed_m_s: float = 1.0, max_turn_deg_s: float = 180.0) -> None:
+    def __init__(
+        self,
+        max_speed_m_s: float = 1.0,
+        max_turn_deg_s: float = 180.0,
+        max_gap_s: float = 1.0,
+    ) -> None:
         self.max_speed_m_s = max_speed_m_s  # live: the node's vo_max_speed flag writes it
         self.max_turn_deg_s = max_turn_deg_s  # live: the node's vo_max_turn flag writes it
+        self.max_gap_s = max_gap_s  # live: the node's vo_max_gap_s flag writes it
         self._last: VoPose | None = None
 
     def admit(self, pose: VoPose, lost: bool) -> str | None:
@@ -124,7 +137,9 @@ class VoGate:
         pose back at its origin, and a gate that kept the old anchor would call every pose after
         that a jump and go deaf for the rest of the session. One restart costs one sample. A
         pose that arrives out of order is refused WITHOUT moving the anchor — there is nothing
-        to re-anchor to in the past.
+        to re-anchor to in the past. A pose that arrives after a gap is refused and re-anchors
+        too: across a gap the speed and turn ceilings measure nothing (a jump divided by
+        seconds is a walking pace), and the gap itself is the evidence.
         """
         if lost:
             return "rtabmap lost the frame"
@@ -135,6 +150,8 @@ class VoGate:
         if dt <= 0.0:
             self._last = previous
             return f"a pose {abs(dt):.3f} s out of order"
+        if dt > self.max_gap_s:
+            return f"a gap of {dt:.1f} s (the speed of a jump across it means nothing)"
         step = math.hypot(pose.x - previous.x, pose.y - previous.y)
         turn = abs(_wrapped(pose.yaw - previous.yaw))
         if step / dt > self.max_speed_m_s:

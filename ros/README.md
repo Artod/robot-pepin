@@ -596,6 +596,7 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `visual_odometry` | `vo_sigma_m` | number 0.001..1 | 0.07 | yes | the constant position sigma of one visual-odometry pose, in metres; the EKF differences two of them into a velocity and the covariance rides along — as (this pose's + the previous pose's) TIMES the gap, so what the filter actually weighs is a velocity variance of 2 * sigma^2 * dt |
 | `visual_odometry` | `vo_yaw_sigma_deg` | number 0.1..180 | 5.0 | yes | the constant yaw sigma of one visual-odometry pose, in degrees; the board's EKF does not fuse yaw from this source at all, so it is carried for whoever reads the message rather than for the filter |
 | `visual_odometry` | `vo_max_speed` | number 0.05..10 | 1.0 | yes | a step between two visual-odometry poses faster than this, in m/s, is dropped: rtabmap restarting its tracking moves the pose without moving the cart |
+| `visual_odometry` | `vo_max_gap_s` | number 0.1..60 | 1.0 | yes | a pose that arrives more than this many seconds after the previous one is dropped and becomes the new anchor: across a gap the speed and turn ceilings are ratios and measure nothing |
 | `visual_odometry` | `vo_max_turn` | number 5..720 | 180.0 | yes | a turn between two visual-odometry poses faster than this, in deg/s, is dropped, for the same reason as vo_max_speed |
 
 ### The flags one by one
@@ -1051,6 +1052,11 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *What:* a step between two visual-odometry poses faster than this, in m/s, is dropped: rtabmap restarting its tracking moves the pose without moving the cart (0.05..10)
   - *Default:* 1.0 — 1.0 m/s is over three times the fastest this cart can go — the base's own cap is 0.30 m/s (pepin.deployment's BASE_MAX_LINEAR_M_S) and the C++ bridge clamps /cmd_vel at 0.25 — and 26 times the largest step this source took at rest, where 85 s of poses were at most 4.2 mm apart over ~0.11 s, a median of 1.0 mm (2026-09-14, scratch/vo_probe.py). So it cannot refuse a real motion and still refuses the metre-scale jump a re-initialised visual odometry publishes — which, differenced into a velocity, is the one thing that could move the odom frame
   - *On when:* not a switch: lower it towards 0.4 m/s on a tape where the camera argued with the wheels about the speed itself
+  - *Off when:* not a switch
+- **`vo_max_gap_s`** — number 0.1..60, default 1.0
+  - *What:* a pose that arrives more than this many seconds after the previous one is dropped and becomes the new anchor: across a gap the speed and turn ceilings are ratios and measure nothing (0.1..60)
+  - *Default:* 1.0 — one second is nine missed frames of a source measured at 9.4-9.7 poses/s (2026-09-14), so nothing short of a stall reaches it — and a stall is exactly when the other two ceilings stop working. rgbd_odometry is respawned two seconds after a crash (vslam.launch.py RESPAWN) and comes back with its pose at the origin, metres from where it left off: at vo_max_speed 1.0 m/s a jump of X metres passes whenever the gap exceeds X seconds, so a 0.5 m jump after a 4 s restart would have been fused as 0.125 m/s of motion the cart never made — a third of its top speed, and inside the EKF's own 3-sigma rejection
+  - *On when:* not a switch: lengthen it only for a session that must keep its anchor across a known camera stall, and then knowing a restart inside that stall passes as motion
   - *Off when:* not a switch
 - **`vo_max_turn`** — number 5..720, default 180.0
   - *What:* a turn between two visual-odometry poses faster than this, in deg/s, is dropped, for the same reason as vo_max_speed (5..720)

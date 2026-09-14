@@ -20,7 +20,8 @@ minute is its own drift (:class:`pepin.visual_odometry.RestWatch`, fed from the 
 The flags (:data:`FLAGS`, ``ros/flags.sh set visual_odometry <flag> <value>``): ``vo_publish``
 (whether the measured odometry leaves this laptop at all — off, the EKF is exactly what it was
 before this node existed), ``vo_covariance`` (the constant or rtabmap's own), ``vo_sigma_m`` and
-``vo_yaw_sigma_deg`` (the constant), ``vo_max_speed`` and ``vo_max_turn`` (the gate's ceilings).
+``vo_yaw_sigma_deg`` (the constant), ``vo_max_speed``, ``vo_max_turn`` and ``vo_max_gap_s``
+(the gate's ceilings).
 """
 
 from __future__ import annotations
@@ -149,6 +150,25 @@ FLAGS = FlagSet(
         off_when="not a switch",
     ),
     Flag(
+        "vo_max_gap_s",
+        1.0,
+        range=(0.1, 60.0),
+        description="a pose that arrives more than this many seconds after the previous one is"
+        " dropped and becomes the new anchor: across a gap the speed and turn ceilings are"
+        " ratios and measure nothing",
+        why="one second is nine missed frames of a source measured at 9.4-9.7 poses/s"
+        " (2026-09-14), so nothing short of a stall reaches it — and a stall is exactly when the"
+        " other two ceilings stop working. rgbd_odometry is respawned two seconds after a crash"
+        " (vslam.launch.py RESPAWN) and comes back with its pose at the origin, metres from"
+        " where it left off: at vo_max_speed 1.0 m/s a jump of X metres passes whenever the gap"
+        " exceeds X seconds, so a 0.5 m jump after a 4 s restart would have been fused as"
+        " 0.125 m/s of motion the cart never made — a third of its top speed, and inside the"
+        " EKF's own 3-sigma rejection",
+        on_when="not a switch: lengthen it only for a session that must keep its anchor across a"
+        " known camera stall, and then knowing a restart inside that stall passes as motion",
+        off_when="not a switch",
+    ),
+    Flag(
         "vo_max_turn",
         180.0,
         range=(5.0, 720.0),
@@ -173,6 +193,7 @@ class VisualOdometry(Node):
         self._gate = VoGate(
             max_speed_m_s=float(self._switches["vo_max_speed"]),
             max_turn_deg_s=float(self._switches["vo_max_turn"]),
+            max_gap_s=float(self._switches["vo_max_gap_s"]),
         )
         self._rest = RestWatch()
         self._tally = Tally()
@@ -196,11 +217,13 @@ class VisualOdometry(Node):
 
     # ---- inputs ------------------------------------------------------------------------------
     def _on_switch(self, name: str, _old: object, new: object) -> None:
-        """A flag changed: the two ceilings are the gate's, the rest are read where they act."""
+        """A flag changed: the three ceilings are the gate's, the rest are read where they act."""
         if name == "vo_max_speed":
             self._gate.max_speed_m_s = float(new)  # type: ignore[arg-type]
         elif name == "vo_max_turn":
             self._gate.max_turn_deg_s = float(new)  # type: ignore[arg-type]
+        elif name == "vo_max_gap_s":
+            self._gate.max_gap_s = float(new)  # type: ignore[arg-type]
 
     def _on_wheels(self, msg: Odometry) -> None:
         """The board's wheel odometry: only its twist is read, and only to know whether the cart

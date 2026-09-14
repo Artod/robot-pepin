@@ -66,6 +66,19 @@ def test_a_tracking_restart_costs_one_sample_and_never_the_session() -> None:
     assert gate.admit(VoPose(1.2, 0.01, 0.0, 0.0), lost=False) is None, "deaf after one restart"
 
 
+def test_a_jump_across_a_gap_is_refused_even_when_it_looks_slow() -> None:
+    """The speed and turn ceilings are ratios: divided by seconds, a metre-scale jump is a
+    walking pace. That is exactly what a respawned rgbd_odometry produces — the pose back at its
+    origin after a gap of seconds — so the gap is refused on its own evidence and re-anchors."""
+    gate = VoGate(max_speed_m_s=1.0, max_gap_s=1.0)
+    gate.admit(VoPose(0.0, 0.0, 0.0, 0.0), lost=False)
+    gate.admit(VoPose(0.1, 0.02, 0.0, 0.0), lost=False)
+    # 0.5 m in 4 s is 0.125 m/s: under the speed ceiling, and pure fiction.
+    refused = gate.admit(VoPose(4.1, 0.52, 0.0, 0.0), lost=False)
+    assert refused is not None and "gap" in refused
+    assert gate.admit(VoPose(4.2, 0.53, 0.0, 0.0), lost=False) is None, "the gap re-anchored"
+
+
 def test_the_gate_refuses_a_turn_no_cart_could_make_and_a_pose_out_of_order() -> None:
     gate = VoGate(max_turn_deg_s=180.0)
     gate.admit(VoPose(0.0, 0.0, 0.0, 0.0), lost=False)
