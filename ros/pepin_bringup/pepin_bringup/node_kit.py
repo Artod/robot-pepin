@@ -113,6 +113,13 @@ class Worker[T]:
             self._wake.notify()
         return dropped
 
+    @property
+    def waiting(self) -> bool:
+        """Whether an item is queued that ``offer`` would replace: for a caller with two kinds
+        of work on one thread, where dropping the other kind's item is the harm."""
+        with self._wake:
+            return self._pending is not None
+
     def clear(self) -> None:
         """Forget the item waiting, if any (a reset)."""
         with self._wake:

@@ -22,6 +22,7 @@ from pepin_bringup.laptop_localizer import (  # noqa: E402
     CAMERA_MAP_TOPIC,
     FLAGS,
     LaptopLocalizer,
+    SearchJob,
 )
 from pepin_bringup.msgs import transform_from_rpy  # noqa: E402
 from ros_stubs import (  # noqa: E402
@@ -39,7 +40,7 @@ from test_relocalizer_node import depth_msg, map_msg, odom_msg, stamp  # noqa: E
 
 from pepin.measurements import RemoteMeasurement  # noqa: E402
 from pepin.odometry import Pose2D  # noqa: E402
-from pepin.sources import CONTACT, DEPTH  # noqa: E402
+from pepin.sources import CONTACT, DEPTH, LIDAR  # noqa: E402
 from pepin.watchdog import CandidateVerdict, GlobalCandidate  # noqa: E402
 
 # The fixture room is a 6 x 4 m rectangle with one small box in a corner, so it is very nearly
@@ -641,5 +642,28 @@ def test_a_frozen_fan_is_one_scan_however_often_it_arrives() -> None:
         assert node._camera_scan[DEPTH].scan_id > first
         node._report()
         assert "fans heard twice 1" in node.logger.texts("info")[-1]
+    finally:
+        node.close()
+
+
+def test_a_fan_never_throws_away_the_lidar_s_waiting_search() -> None:
+    """One thread carries both searches and ``offer`` replaces what waits: a camera fan offered
+    on top of a revolution that has not run yet would drop the lidar's own watchdog search. The
+    fan gives way, is counted as still searching, and does not spend its period."""
+    node = watch(camera_search=True, camera_search_max_ambiguity=1.0, camera_search_min_fit=0.0)
+    try:
+        standing(node)
+        node.subs[CAMERA_MAP_TOPIC][1](map_msg(furnished_room_map()))
+        node.subs["/localization/sources"][1](sources_msg("off"))
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
+        node._worker.stop()  # the thread is gone; what is offered now stays waiting
+        assert node._scan is not None
+        node._worker.offer(SearchJob(LIDAR, node._scan))
+        node._tick_camera(time.monotonic())
+        assert node._worker.waiting, "the lidar's revolution is still the item that waits"
+        assert not node.pubs["/localization/candidate"].sent
+        assert node._last_camera_search == 0.0, "a fan that gave way must not spend its period"
+        node._report()
+        assert "still searching 1" in node.logger.texts("info")[-1]
     finally:
         node.close()

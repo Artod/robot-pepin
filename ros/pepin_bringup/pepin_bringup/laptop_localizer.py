@@ -957,6 +957,9 @@ class LaptopLocalizer(Node):
         the board's tracker, or the lidar's own whole-map search here says nothing on this map
         fits. A healthy lidar answering for itself is never second-guessed by a +-40 degree fan.
 
+        The fan is offered only to an idle worker: ``offer`` replaces what waits, and the
+        lidar's own search is never the thing that gets thrown away.
+
         The fan is searched against the camera's own slice of the world (``/map_camera``), the
         grid its matches are made on: a fan cut from the band can only be placed on the band.
         Until that band has arrived there is no camera search at all — the board's ``/map`` is
@@ -997,10 +1000,16 @@ class LaptopLocalizer(Node):
         if len(scan.points) < self._roster.source(source).min_points:
             self._tally.count("cam_thin")
             return
+        if self._worker.waiting:
+            # One thread, two kinds of work, and ``offer`` REPLACES what waits: a camera fan
+            # offered on top of a revolution that has not run yet would throw the lidar's own
+            # watchdog search away, which is the one thing this half may never do. The fan
+            # waits for the next tick instead; the period is not spent either.
+            self._tally.count("cam_busy")
+            return
         self._last_camera_search = now
         self._tally.count(f"cam_need_{need}")
-        if self._worker.offer(SearchJob(source, scan)):
-            self._tally.count("cam_busy")
+        self._worker.offer(SearchJob(source, scan))
 
     def _run_search(self, job: SearchJob) -> None:
         """The search thread: one job, whichever half offered it."""
