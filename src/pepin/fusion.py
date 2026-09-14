@@ -12,13 +12,16 @@ candidate pose before the scan stops fitting, per direction.
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from functools import lru_cache
 
 import numpy as np
 from numpy.typing import NDArray
 
+from pepin.deployment import config_file
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import ScoreSurface, apply_motion
 
@@ -215,6 +218,161 @@ def from_fit(pose: Pose2D, fit: float, source: str, stamp: float = 0.0) -> PoseM
         stamp,
         fit,
     )
+
+
+# -- the covariance of the score peak ------------------------------------------------------
+# Which covariance a match carries: the spread of its own score peak (:func:`peak_covariance`,
+# a temperature calibrated against the replay's truth) or the fit-scaled surface moment that
+# shipped before it (:func:`covariance_from_score_surface`, whose scale nobody measured). The
+# words of the ``covariance`` flag on the tracker and on the laptop's matcher.
+PEAK = "peak"
+FIT = "fit"
+COVARIANCE_CHOICES = (PEAK, FIT)
+# A peak sharper than this is the lattice's own resolution speaking, not a measurement: the
+# floor keeps a one-cell peak's covariance invertible and its information finite. A millimetre
+# is a fifth of the lidar's measured error at a good fit (0.5-0.6 cm, scratch/drive_bisect.py
+# on the four goto tapes of 2026-09-13), so it never sets the answer, only bounds it.
+MIN_SIGMA_XY_M = 0.001
+MIN_SIGMA_YAW_RAD = math.radians(0.05)
+
+
+@lru_cache(maxsize=1)
+def _peak_temperatures() -> dict[str, float]:
+    """``config/matcher.json``'s ``peak_temperature`` block: one temperature per matcher."""
+    block = json.loads(config_file("matcher.json").read_text())["peak_temperature"]
+    return {str(name): float(value) for name, value in block.items()}
+
+
+def peak_temperature(matcher: str) -> float:
+    """The temperature :func:`peak_covariance` reads ``matcher``'s score peak with, from
+    ``config/matcher.json`` (``KeyError`` for a matcher the file does not name).
+
+    One number per matcher — the lidar's revolution, the camera's fans — in units of per-beam
+    score: a candidate a temperature below the peak weighs 1/e. It is the only free scale in
+    the covariance, and it is calibrated, not chosen (scratch/peak_temperature.py).
+    """
+    return _peak_temperatures()[matcher]
+
+
+def peak_covariance(surface: ScoreSurface, temperature: float) -> Matrix:
+    """How sure a match is, per direction, as the spread of its own score peak: the 3x3
+    covariance over x, y, yaw in metres^2 and radians^2.
+
+    Olson's correlative scan matching, done as he does it. Every candidate of the lattice is
+    weighted ``w_i = exp((s_i - s_max) / T)`` with ``s`` the per-beam score in units of the
+    field's peak (so no map's log-odds scale enters and a 40-beam fan is on the lidar's scale),
+    and the covariance is the weighted second moment of the candidate poses about their
+    weighted MEAN — ``K = sum(w x x^T) / sum(w) - u u^T / sum(w)^2`` — not about the winner.
+    A sharp peak keeps weight only on its own cell and reads as millimetres; a scan that fits
+    equally well anywhere along a corridor keeps its weight along the corridor and loses it
+    across, so the answer is a ridge, which is the anisotropy a fusion needs.
+
+    Nothing invented is charged on top: no division by the fit, no per-source discount, no
+    lattice quantisation (the peak itself is refined between the cells, :meth:`pepin.scanmatch.
+    ScoreSurface.peak`). The diagonal is floored at :data:`MIN_SIGMA_XY_M` /
+    :data:`MIN_SIGMA_YAW_RAD` so a one-cell peak stays invertible. What a window's edge and a
+    plateau do to it is :func:`from_peak`'s business, because those are bounds, not spreads.
+    """
+    weights = peak_weights(surface, temperature)
+    positions, headings = surface.positions, surface.headings
+    total = float(weights.sum())
+    if total <= 0.0:  # every candidate underflowed: the winner alone, at the floor
+        return np.diag([MIN_SIGMA_XY_M**2, MIN_SIGMA_XY_M**2, MIN_SIGMA_YAW_RAD**2])
+    w_xy = weights.sum(axis=0)  # (P,)
+    w_theta = weights.sum(axis=1)  # (T,)
+    dtheta = _wrapped(headings - headings[surface.k])  # about the winner: never across +-pi
+    dxy = positions - positions[surface.i]
+    mean_xy = w_xy @ dxy / total
+    mean_theta = float(w_theta @ dtheta / total)
+    dxy = dxy - mean_xy
+    dtheta = dtheta - mean_theta
+    # einsum, not matmul: Accelerate's BLAS raises spurious divide-by-zero warnings on these
+    cov = np.zeros((3, 3))
+    cov[:2, :2] = np.einsum("p,pi,pj->ij", w_xy, dxy, dxy) / total
+    cov[2, 2] = float((w_theta * dtheta * dtheta).sum() / total)
+    cov[2, :2] = cov[:2, 2] = np.einsum("kp,k,pj->j", weights, dtheta, dxy) / total
+    cov[0, 0] = max(cov[0, 0], MIN_SIGMA_XY_M**2)
+    cov[1, 1] = max(cov[1, 1], MIN_SIGMA_XY_M**2)
+    cov[2, 2] = max(cov[2, 2], MIN_SIGMA_YAW_RAD**2)
+    return np.asarray((cov + cov.T) / 2.0, dtype=np.float64)
+
+
+def peak_weights(surface: ScoreSurface, temperature: float) -> Matrix:
+    """Every candidate's likelihood weight (T, P), ``exp((s - s_max) / temperature)`` on the
+    per-beam score — the lattice as a probability, before any moment is taken of it."""
+    denominator = max(surface.n_points, 1) * (surface.top if surface.top > 0.0 else 1.0)
+    per_beam = surface.scores / denominator
+    best = float(per_beam[surface.k, surface.i])
+    return np.asarray(np.exp((per_beam - best) / max(temperature, 1e-9)), dtype=np.float64)
+
+
+def _wrapped(angles: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Angles wrapped into +-pi (a lattice never spans a half turn, but a test may)."""
+    return np.asarray(np.arctan2(np.sin(angles), np.cos(angles)), dtype=np.float64)
+
+
+def from_peak(
+    surface: ScoreSurface,
+    pose: Pose2D,
+    fit: float,
+    source: str,
+    stamp: float = 0.0,
+    temperature: float | None = None,
+    trust: float = 1.0,
+    matcher: str | None = None,
+) -> PoseMeasurement:
+    """A match as a measurement whose covariance is its score peak's (:func:`peak_covariance`).
+
+    ``pose`` is the pose the matcher decided (already refined between the cells when it
+    interpolates; :meth:`pepin.scanmatch.ScoreSurface.peak` is the same apex read off the
+    lattice alone). ``temperature`` defaults to ``matcher``'s in ``config/matcher.json``, or
+    the lidar's when neither is given. ``trust`` widens the answer by the source's own weight
+    the way the fit-scaled path did — the camera's depth is not a range measurement — and is
+    the one discount the temperature does not model.
+
+    A bound is still not a spread: a winner on the window's edge (:func:`at_edge`), and every
+    direction the likelihood never falls along inside the window (:func:`bound_directions`),
+    are widened by :data:`BOUND_INFLATION` exactly as before, so a scan that fits nowhere
+    cannot vote for the prediction as if it had measured it. WHETHER a direction is a bound is
+    still judged by the old adaptive likelihood — that test and its :data:`PLATEAU_RATIO` were
+    tuned on this robot's plateaus and are not what this change is about; only HOW WIDE the
+    directions that are measurements come out is new.
+    """
+    if temperature is None:
+        temperature = peak_temperature(matcher if matcher is not None else "lidar")
+    cov = peak_covariance(surface, temperature)
+    cov = cov / max(trust, 1e-6)
+    if at_edge(surface):
+        cov = cov * BOUND_INFLATION
+    else:
+        for v in bound_directions(surface):
+            widen = np.eye(3) + (math.sqrt(BOUND_INFLATION) - 1.0) * np.outer(v, v)
+            cov = widen @ cov @ widen
+    return PoseMeasurement(
+        pose.x,
+        pose.y,
+        pose.theta,
+        np.asarray((cov + cov.T) / 2.0, dtype=np.float64),
+        source,
+        stamp,
+        fit,
+        edge=at_edge(surface),
+    )
+
+
+def published_covariance(fused: PoseMeasurement | None, fit: float, choice: str = PEAK) -> Matrix:
+    """The 3x3 a tracker publishes beside its pose, under the ``covariance`` switch.
+
+    ``peak`` with a fused match in hand: that match's own covariance — the spread of the score
+    peak the pose was corrected by, anisotropic, so a corridor reads as a ridge along the
+    corridor. Otherwise (``fit``, or no match yet: a carried belief, a re-seed, the moment
+    before the first scan) the isotropic pair :func:`sigma_from_fit` draws from the inlier
+    fraction, which is what every tape before 2026-09-13 carries.
+    """
+    if choice == PEAK and fused is not None:
+        return np.asarray(fused.covariance, dtype=np.float64)
+    sigma_xy, sigma_yaw = sigma_from_fit(fit)
+    return np.diag([sigma_xy**2, sigma_xy**2, sigma_yaw**2])
 
 
 def covariance_from_score_surface(surface: ScoreSurface, fit: float, trust: float = 1.0) -> Matrix:
