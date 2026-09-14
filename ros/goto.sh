@@ -50,6 +50,8 @@ FINISHED=0
 TAILPID=""   # the ssh streaming the goal's log: a signal must not wait for it (see the tail below)
 trap 'INTERRUPTED=1' INT
 finish() {  # everything recorded, always: scans, odometry, tracked pose, the goal's own log, the board log
+    set +e  # nothing here may end the cleanup: a dead ffmpeg (the board rebooted mid-run, 2026-09-14)
+           # made `kill` fail and set -e dropped every step below it, tapes included
     if [ "$FINISHED" = 1 ]; then return 0; fi   # TERM runs this, then EXIT runs it again
     FINISHED=1
     if [ -n "$TAILPID" ]; then kill "$TAILPID" 2>/dev/null || true; fi
