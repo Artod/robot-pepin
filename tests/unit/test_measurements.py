@@ -13,7 +13,7 @@ import math
 import numpy as np
 import pytest
 
-from pepin.fusion import PoseMeasurement
+from pepin.fusion import ODOM_XY_FLOOR_M, ODOM_YAW_FLOOR_RAD, PoseMeasurement
 from pepin.measurements import MEASUREMENT_MAX_AGE_S, MeasurementGate, RemoteMeasurement
 from pepin.odometry import Pose2D
 from pepin.sources import CAMERA, CONTACT, DEPTH, LIDAR, SourceRegistry
@@ -223,25 +223,35 @@ def jumpy(gate: MeasurementGate, steps: int = 20, jump_m: float = 0.24) -> list[
 def test_a_remote_source_that_does_not_repeat_loses_its_weight() -> None:
     """The day of 2026-09-13 in one test: the camera claimed a sigma a formula gave it while
     nobody had measured how far apart two of its answers fall. Here it claims 4 cm and jumps 24
-    at rest, which is a variance ratio of 24^2 / (2 * 4^2) over three degrees of freedom — 6 —
-    and its covariance is multiplied by exactly that before anything is fused with it."""
+    at rest, which is a variance ratio of 24^2 / (2 * 4^2) over three degrees of freedom — 6,
+    less the tenth of a percent the standing carry's own floors take off the denominator
+    (:func:`pepin.fusion.odometry_covariance`: 2 mm and 0.05 deg when the odometry reports no
+    motion at all) — and its covariance is multiplied by exactly that before anything is fused
+    with it."""
     gate = MeasurementGate()
     taken = jumpy(gate)
-    assert gate.self_check.ratio(DEPTH) == pytest.approx(6.0)
-    assert taken[0].covariance[0, 0] == pytest.approx(SURE[0, 0] * 6.0)
-    assert gate.status()["self_check"][DEPTH] == [6.0, 6.0]
-    assert "self_check on: depth r 6.00 x6.00" in gate.report()
+    assert gate.self_check.ratio(DEPTH) == pytest.approx(5.9925, abs=0.001)
+    # Widened at its own moment, then carried: the check's factor rides the claim, and the
+    # carry's own cost is added after it, never multiplied by it.
+    assert taken[0].covariance[0, 0] == pytest.approx(
+        SURE[0, 0] * gate.self_check.ratio(DEPTH) + ODOM_XY_FLOOR_M**2
+    )
+    assert gate.status()["self_check"][DEPTH] == [5.993, 5.993]
+    assert "self_check on: depth r 5.99 x5.99" in gate.report()
 
 
 def test_the_self_check_is_a_live_switch_and_off_is_the_old_behaviour() -> None:
-    """Off, the covariance arrives exactly as the laptop sent it — and the ratio is still
-    measured, so the report line shows what the switch would do before it is moved."""
+    """Off, the check widens nothing: what the covariance picks up on the way is the carry's
+    own cost and nothing else (:func:`pepin.fusion.odometry_covariance` — here the standing
+    floors alone). The ratio is still measured, so the report line shows what the switch would
+    do before it is moved."""
     gate = MeasurementGate()
     gate.switch("self_check", False)
     taken = jumpy(gate)
-    assert taken[0].covariance[0, 0] == pytest.approx(SURE[0, 0])
-    assert gate.self_check.ratio(DEPTH) == pytest.approx(6.0)
-    assert gate.status()["self_check"][DEPTH] == [6.0, 1.0]
+    assert taken[0].covariance[0, 0] == pytest.approx(SURE[0, 0] + ODOM_XY_FLOOR_M**2)
+    assert taken[0].covariance[2, 2] == pytest.approx(SURE[2, 2] + ODOM_YAW_FLOOR_RAD**2)
+    assert gate.self_check.ratio(DEPTH) == pytest.approx(5.9925, abs=0.001)
+    assert gate.status()["self_check"][DEPTH] == [5.993, 1.0]
 
 
 def test_each_remote_source_is_judged_on_its_own_record() -> None:
@@ -257,7 +267,7 @@ def test_each_remote_source_is_judged_on_its_own_record() -> None:
             g.offer(remote(SOMEWHERE, source=CONTACT, stamp=stamp), "map1")
             g.take(stamp, still)
     assert gate.self_check.inflation(CONTACT) == 1.0
-    assert gate.self_check.inflation(DEPTH) == pytest.approx(6.0)
+    assert gate.self_check.inflation(DEPTH) == pytest.approx(5.9925, abs=0.001)
     assert gate.self_check.ratio(CONTACT) == alone.self_check.ratio(CONTACT)
 
 

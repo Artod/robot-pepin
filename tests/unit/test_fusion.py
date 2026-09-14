@@ -13,13 +13,19 @@ from pepin.fusion import (
     FIT_FLOOR,
     MIN_SIGMA_XY_M,
     MIN_SIGMA_YAW_RAD,
+    ODOM_XY_FLOOR_M,
+    ODOM_XY_PER_M,
+    ODOM_YAW_FLOOR_RAD,
+    ODOM_YAW_PER_TURN,
     PoseMeasurement,
     at_edge,
     bound_directions,
+    carried,
     covariance_from_score_surface,
     disagreement,
     from_peak,
     fuse,
+    odometry_covariance,
     peak_covariance,
     peak_temperature,
     sigma_from_fit,
@@ -382,3 +388,42 @@ def test_a_real_fan_on_one_wall_peaks_as_a_ridge_along_that_wall() -> None:
     assert wall[1] > 3 * wall[0], f"along {wall[1] * 100:.1f} cm, across {wall[0] * 100:.1f} cm"
     assert wall[1] > 3 * full[1], f"fan {wall[1] * 100:.1f} cm, revolution {full[1] * 100:.1f} cm"
     assert full[0] < 0.02 and full[1] < 0.02, f"the revolution: {full[:2] * 100} cm"
+
+
+def test_a_carry_costs_what_the_odometry_costs() -> None:
+    """A carry is not free, and :func:`odometry_covariance` is the price list: the floors when
+    the odometry reports no motion at all, a share of the turn once the cart rotates, a share of
+    the distance plus the heading's lever once it drives. The heading term is the big one — on
+    this cart's wheels a 3 degree carry is worth more than 2 degrees of doubt — and it is why an
+    honest sharp source is not read as a scatterer while the cart turns."""
+    still = odometry_covariance(Pose2D())
+    assert math.sqrt(still[0, 0]) == pytest.approx(ODOM_XY_FLOOR_M)
+    assert math.sqrt(still[2, 2]) == pytest.approx(ODOM_YAW_FLOOR_RAD)
+    turning = odometry_covariance(Pose2D(0.0, 0.0, math.radians(3.0)))
+    assert math.degrees(math.sqrt(turning[2, 2])) == pytest.approx(
+        math.degrees(ODOM_YAW_FLOOR_RAD) + 3.0 * ODOM_YAW_PER_TURN
+    )
+    assert turning[0, 0] == still[0, 0], "a turn in place carries the position nowhere"
+    driving = odometry_covariance(Pose2D(0.10, 0.0, 0.0))
+    assert math.sqrt(driving[0, 0]) == pytest.approx(
+        ODOM_XY_FLOOR_M + ODOM_XY_PER_M * 0.10 + ODOM_YAW_FLOOR_RAD * 0.10
+    )
+    assert driving[2, 2] == still[2, 2], "driving straight adds no heading error of its own"
+
+
+def test_a_carried_measurement_is_less_sure_than_the_one_that_was_measured() -> None:
+    """``carried`` is the same answer read from where the cart has got to: the pose moves with
+    the odometry and the covariance grows by the trail's own cost, never shrinks. A carry over
+    nothing still costs the floors — there is no free prediction here."""
+    measured = measurement(1.0, 2.0, 0.0, 0.01, 0.01, math.radians(0.5))
+    moved = carried(measured, Pose2D(0.10, 0.0, math.radians(3.0)), 1.13)
+    assert moved.x == pytest.approx(1.10) and moved.stamp == pytest.approx(1.13)
+    assert moved.yaw == pytest.approx(math.radians(3.0))
+    assert moved.fit == measured.fit and moved.source == measured.source
+    grown = np.sqrt(np.diag(moved.covariance)) - np.sqrt(np.diag(measured.covariance))
+    assert (grown > 0.0).all(), "every direction pays for the carry"
+    assert math.degrees(math.sqrt(moved.covariance[2, 2])) > 2.0  # the wheels' 3 degree turn
+    unmoved = carried(measured, Pose2D(), 1.13)
+    assert math.sqrt(unmoved.covariance[0, 0]) == pytest.approx(
+        math.sqrt(measured.covariance[0, 0] + ODOM_XY_FLOOR_M**2)
+    )

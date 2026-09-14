@@ -116,9 +116,11 @@ def carry_pose(pose: Pose2D, covariance: Matrix, motion: Pose2D) -> tuple[Pose2D
 
     The covariance travels through the composition's Jacobian, ``J = [[1, 0, -dy], [0, 1, dx],
     [0, 0, 1]]`` over the carry's map-frame displacement: a heading known to a degree is 2 mm of
-    position error after 10 cm of carry, and that coupling is the only thing the move adds. The
-    odometry's OWN error over a fraction of a second (millimetres) is not added: it is two
-    orders under the spread of any match this carries.
+    position error after 10 cm of carry, and that coupling is the only thing the move adds. This
+    is the GEOMETRY of the move alone; what the odometry's own error over the trail costs is
+    :func:`odometry_covariance`, added by :func:`carried` — the caller that reads the result as
+    a measurement of the new moment. A caller that only wants a pose put somewhere else (a
+    prediction the matcher will search around) wants this one.
     """
     moved = apply_motion(pose, motion)
     dx, dy = moved.x - pose.x, moved.y - pose.y
@@ -128,13 +130,83 @@ def carry_pose(pose: Pose2D, covariance: Matrix, motion: Pose2D) -> tuple[Pose2D
     )
 
 
+# -- what the odometry's own trail costs a measurement carried over it ----------------------
+# A measurement carried to a later moment is only as sure as the odometry that carried it, and
+# this cart's odometry is not free. Until the peak covariance landed the carry added nothing and
+# said so: at a match covariance of 12.8 cm (:func:`sigma_from_fit` at fit 0.74) the odometry's
+# error over a fraction of a second really was two orders under it. At 1 cm / 0.5 deg
+# (:func:`peak_covariance`) the claim is false, and the self-check read the odometry's own turn
+# error as the lidar scattering: on tape 20260913_190024 it widened the lidar on 172 of the 307
+# updates the cart was moving for (scratch/lidar_selfcheck_replay.py).
+#
+# The model is one sigma per direction, growing with the carry's own geometry:
+#     sigma_yaw = ODOM_YAW_FLOOR_RAD + ODOM_YAW_PER_TURN * |turn|
+#     sigma_xy  = ODOM_XY_FLOOR_M + ODOM_XY_PER_M * distance + sigma_yaw * distance
+#
+# ODOM_YAW_PER_TURN is the rotation this cart's WHEELS report and do not perform, and it is
+# large. Over that tape the odometry turned 604 deg against the lidar's 359 (41 % of the
+# reported turn never happened), and per carry the error is 0.52 of the reported turn at the
+# median with an RMS of 0.77 — 0.7 once the lidar's own per-match noise (0.84 deg joint against
+# a 2.8 deg median carry, a share of 0.30) is taken back out in quadrature
+# (scratch/tape_odometry_error.py). It is the same 40-60 % in-place slip the gyro measured on
+# 2026-09-11 (0.344 rad/s at the encoders, 0.20 and 0.14 rad/s by the gyro): a differential
+# drive's heading is the difference of two wheels, and on carpet that difference is half fiction.
+# With the IMU up /odometry/filtered is far better than this — it and the lidar agreed to 0.3 deg
+# over an 89 deg turn — but 0.7 is the wheels-only end on purpose, because that is what the
+# tracker is left holding when the IMU drops, and that tape recorded no ekf and no imu at all.
+# What it costs: while the cart turns, this term IS the denominator's heading and the check
+# cannot see a source over-claiming its heading. That price is paid only while turning, and not
+# on what the check exists for — a camera claiming 25 cm while its own answers fall 0.8-1.5 cm
+# apart is a POSITION over-claim, and the position term is under 3 mm at these carries.
+# ODOM_XY_PER_M is a class, not a measurement: the same tape's per-carry distance share is 0.96
+# and its whole-drive path lengths are 4.37 m of odometry against 4.81 m of lidar, but a 1-3 cm
+# carry is buried in the lidar's own 1 cm, so nothing sharper can be read off it. 2 % is the
+# class of a wheel-odometry scale error, and it is 2 mm over the longest carry made here (the
+# camera's 0.3 s, ~10 cm at 0.3 m/s).
+# The floors are what a carry costs when the odometry reports no motion at all: a wheel quantum,
+# and the gyro's bias over one carry (-0.02 to -0.17 deg/s measured at rest, 0.02 deg over
+# 0.13 s). Both are a fifth or less of what the peak gives a good match, so they never set the
+# answer — they only keep the sum from being zero.
+ODOM_XY_FLOOR_M = 0.002
+ODOM_XY_PER_M = 0.02
+ODOM_YAW_FLOOR_RAD = math.radians(0.05)
+ODOM_YAW_PER_TURN = 0.7
+
+
+def odometry_covariance(motion: Pose2D) -> Matrix:
+    """The odometry's OWN error over one carry as a 3x3 covariance over x, y, yaw (metres^2,
+    radians^2): the floors plus what the carry's distance and turn are worth.
+
+    ``motion`` is the carry's step in the base frame of the moment carried FROM
+    (:func:`pepin.scanmatch.relative_motion` over the odometry). Diagonal: a differential
+    drive's two scale errors are not correlated in any way this cart has measured, and the one
+    coupling that matters — a heading wrong by ``sigma_yaw`` puts the end of a carry of
+    ``distance`` that far to the side — is folded into the position sigma rather than modelled
+    as an off-diagonal term nobody could calibrate.
+    """
+    distance = math.hypot(motion.x, motion.y)
+    sigma_yaw = ODOM_YAW_FLOOR_RAD + ODOM_YAW_PER_TURN * abs(motion.theta)
+    sigma_xy = ODOM_XY_FLOOR_M + ODOM_XY_PER_M * distance + sigma_yaw * distance
+    return np.asarray(np.diag([sigma_xy**2, sigma_xy**2, sigma_yaw**2]), dtype=np.float64)
+
+
 def carried(measurement: PoseMeasurement, motion: Pose2D, stamp: float) -> PoseMeasurement:
     """The same measurement read at a later moment: its pose and covariance carried over
-    ``motion`` (:func:`carry_pose`) and re-stamped to ``stamp``. The fit is the scan's own and
-    does not change — the answer is the same answer, read from where the cart has got to."""
+    ``motion`` (:func:`carry_pose`), widened by what the odometry's own error over that carry
+    costs (:func:`odometry_covariance`), and re-stamped to ``stamp``.
+
+    The answer is the same answer, read from where the cart has got to — and it is only as sure
+    as the trail that moved it, which is why the odometry term belongs HERE and not in the
+    geometry. The fit is the scan's own and does not change.
+    """
     pose, covariance = carry_pose(measurement.pose, measurement.covariance, motion)
     return replace(
-        measurement, x=pose.x, y=pose.y, yaw=pose.theta, covariance=covariance, stamp=stamp
+        measurement,
+        x=pose.x,
+        y=pose.y,
+        yaw=pose.theta,
+        covariance=covariance + odometry_covariance(motion),
+        stamp=stamp,
     )
 
 
