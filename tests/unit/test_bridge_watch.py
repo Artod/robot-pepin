@@ -36,11 +36,24 @@ def routes(local_nodes: str = '["/depth_fusion"]', publishers: str = '["/base_br
     """Both bridges' routes for /imu/data_raw as one network-wide admin reply."""
     return (
         f'[{{"key":"@/{BOARD_ZID}/ros2/route/topic/pub/imu/data_raw","value":'
-        f'{{"dds_reader":"abc","local_nodes":{publishers},"ros2_name":"/imu/data_raw",'
+        f'{{"dds_reader":"abc","local_nodes":{publishers},'
+        f'"remote_routes":["{LAPTOP_ZID}:imu/data_raw"],"ros2_name":"/imu/data_raw",'
         f'"ros2_type":"{IMU}"}}}},'
         f'{{"key":"@/{LAPTOP_ZID}/ros2/route/topic/sub/imu/data_raw","value":'
         f'{{"dds_writer":"def","is_active":true,"local_nodes":{local_nodes},'
+        f'"remote_routes":["{BOARD_ZID}:imu/data_raw"],'
         f'"ros2_name":"/imu/data_raw","ros2_type":"{IMU}"}}}}]'
+    )
+
+
+def dead_vo() -> str:
+    """The laptop bridge's pub route for /vo as the admin printed it on 2026-09-14: a publisher,
+    the board's matching route, and no DDS reader at all."""
+    return (
+        f'{{"key":"@/{LAPTOP_ZID}/ros2/route/topic/pub/vo","value":'
+        f'{{"dds_reader":"","local_nodes":["/visual_odometry"],'
+        f'"remote_routes":["{BOARD_ZID}:vo"],"ros2_name":"/vo",'
+        f'"ros2_type":"nav_msgs/msg/Odometry"}}}}'
     )
 
 
@@ -190,16 +203,65 @@ def test_a_far_side_with_no_publisher_is_not_a_dead_route(monkeypatch: Any) -> N
     assert repair.restarts == 0 and codes == []
 
 
-def test_a_new_board_bridge_still_restarts_the_half(monkeypatch: Any) -> None:
-    """The behaviour this watch already had, kept: subscriptions do not follow a bridge through
-    a restart (run 0148)."""
+def test_a_new_board_bridge_restarts_the_laptop_s_bridge_not_the_half(monkeypatch: Any) -> None:
+    """The fault this watch already had an answer for, with the answer it earned on 2026-09-14:
+    restarting the whole half on a board-bridge change left /vo with a route and no DDS reader,
+    and what cured it was restarting the laptop's bridge alone with the nodes up."""
     repair = FakeRepair()
     node, admin, codes = build(monkeypatch, repair)
+    drive(node, admin, [0.0], messages=48)
+    admin.board_zid = "0000000000000000000000000000ffff"
+    node.round(5.0)
+    assert repair.restarts == 1 and codes == [], "the bridge alone; this half lives on"
+
+
+def test_a_new_board_bridge_restarts_the_half_when_the_gentle_repair_is_off(
+    monkeypatch: Any,
+) -> None:
+    """The old action stays one flag away (CLAUDE.md rule 19)."""
+    repair = FakeRepair()
+    node, admin, codes = build(monkeypatch, repair)
+    node._switches.set("bridge_restart", False)
     drive(node, admin, [0.0], messages=48)
     admin.board_zid = "0000000000000000000000000000ffff"
     with contextlib.suppress(ExitsError):
         node.round(5.0)
     assert codes == [watch_module.BRIDGE_CHANGED_EXIT] and repair.restarts == 0
+
+
+def test_a_route_with_no_dds_endpoint_is_dead_and_the_bridge_is_restarted(
+    monkeypatch: Any,
+) -> None:
+    """2026-09-14: the laptop bridge's pub route for /vo had the publisher, had the board's
+    matching route, and had no dds_reader. No counter can find that — the topic is published
+    here, not received here — so the endpoints are read straight off the admin."""
+    repair = FakeRepair()
+    admin = Admin()
+    admin.routes = routes()[:-1] + "," + dead_vo() + "]"
+    node, admin, codes = build(monkeypatch, repair, admin)
+    drive(node, admin, [0.0, 10.0], messages=48)
+    assert repair.restarts == 0, "not yet: a route caught between its creation and its endpoint"
+    drive(node, admin, [20.0], messages=48)
+    assert repair.restarts == 1 and codes == [], "the bridge alone, with every topic flowing"
+
+
+def test_dead_routes_off_leaves_the_endpoints_unjudged(monkeypatch: Any) -> None:
+    repair = FakeRepair()
+    admin = Admin()
+    admin.routes = routes()[:-1] + "," + dead_vo() + "]"
+    node, admin, codes = build(monkeypatch, repair, admin)
+    node._switches.set("dead_routes", False)
+    drive(node, admin, [0.0, 20.0, 40.0], messages=48)
+    assert repair.restarts == 0 and codes == []
+
+
+def test_the_report_line_counts_the_dead_routes(monkeypatch: Any) -> None:
+    repair = FakeRepair()
+    node, admin, _codes = build(monkeypatch, repair)
+    drive(node, admin, [0.0], messages=48)
+    node.round(60.0)
+    line = next(line for line in node.get_logger().texts("info") if "topics Hz" in line)
+    assert "dead routes 0" in line and "dead_routes=on" in line
 
 
 def test_flow_watch_off_leaves_the_watch_as_it_was(monkeypatch: Any) -> None:
@@ -292,5 +354,10 @@ def test_the_report_line_is_a_rate_per_topic_and_the_switches(monkeypatch: Any) 
 
 
 def test_every_switch_is_in_the_table_and_printed() -> None:
-    assert {flag.name for flag in FLAGS} == {"flow_watch", "flow_silence_s", "bridge_restart"}
+    assert {flag.name for flag in FLAGS} == {
+        "flow_watch",
+        "flow_silence_s",
+        "dead_routes",
+        "bridge_restart",
+    }
     assert all(flag.why and flag.on_when and flag.off_when for flag in FLAGS)
