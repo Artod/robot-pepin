@@ -536,7 +536,7 @@ global_costmap:
         # it on for the camera-only demo (`ros2 param set /global_costmap/global_costmap
         # camera_layer.enabled true`), and by default once a drive says the marks are real.
         plugin: "nav2_costmap_2d::ObstacleLayer"
-        enabled: False
+        enabled: True  # measured 2026-09-13: the table top the lidar cannot see; a live flip was lost at every restart of 2026-09-14
         observation_sources: depth_scan
         depth_scan:
           topic: /depth_scan
