@@ -312,7 +312,20 @@ FLAGS = FlagSet(
         " an honest covariance and the factor is capped at 25. One number for the whole matrix:"
         " an over-claim in one direction of three arrives divided by three (a depth source"
         " jumping 24 cm at rest against a 4 cm claim is widened 6x, not 36x), so the check takes"
-        " back the over-claim a source's whole covariance carries, never a single direction's",
+        " back the over-claim a source's whole covariance carries, never a single direction's."
+        " The prediction it judges against pays for the odometry that carried it"
+        " (pepin.fusion.odometry_covariance: 2 mm + 2 % of the distance, 0.05 deg + 70 % of the"
+        " turn). Without that term the peak covariance made the check accuse the lidar itself:"
+        " replayed over tape 20260913_190024 (scratch/lidar_selfcheck_replay.py) the lidar's own"
+        " ratio ran at a median of 1.97 and a p90 of 6.23 while the cart moved and it was widened"
+        " on 172 of the 307 moving updates — a false inflation of the one measurement this robot"
+        " trusts. With it the same replay reads 0.59 median / 0.97 p90 in motion and 0.30 / 0.44"
+        " at rest, inflated on 25 of 2271 updates by at most 1.9x (23 of those in motion, by at"
+        " most 1.09x). The 70 % is measured, not chosen: that tape's odometry turned 604 deg"
+        " against the lidar's 359 (scratch/tape_odometry_error.py), the per-carry error's RMS is"
+        " 0.77 of the reported turn and 0.70 with the lidar's own noise taken out — the wheels'"
+        " 40-60 % in-place slip on this carpet, which is the odometry the tracker is left holding"
+        " when the IMU drops (that tape carries no ekf and no imu at all)",
         on_when="whenever more than one source is fused — it is the only thing standing between"
         " the fusion and a source whose covariance is a formula rather than a measurement",
         off_when="to measure what the check is worth on a tape (the ratios are still measured"
