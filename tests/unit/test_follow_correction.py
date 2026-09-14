@@ -273,3 +273,22 @@ def test_an_unknown_room_is_where_the_correction_puts_it() -> None:
     assert moved.values[row, col + 3 : col + 5].max() == OCCUPIED, "four cells along"
     assert moved.values[row, col - 1 : col + 1].max() != OCCUPIED, "and gone from where it was"
     assert moved.values[row, 0] == UNKNOWN
+
+
+def test_the_lidars_claim_does_not_grow_by_a_ring_at_every_move() -> None:
+    """The claim is a fact about cells the lidar swept, and a move carries it — it does not
+    spread it. A bilinear blend of the weight channel alone would hand the lidar every cell with
+    one owned source column among its four, +18 % of the layer over ten corrections
+    (scratch/follow_refute.py), and lock the camera out of room nobody ever saw."""
+    world = room()
+    rows = world.protected_rows
+    assert rows is not None
+    lo, hi = rows
+
+    def claimed() -> int:
+        return int(np.count_nonzero(world.lidar_weight[:, :, lo:hi].max(axis=2) > 0.0))
+
+    before = claimed()
+    world.shift(PlanarShift(0.10, -0.04, math.radians(3.0)))
+    assert claimed() <= before + 5, "a move carries the claim, it does not spread it"
+    assert claimed() >= 0.97 * before, "and it does not eat it either"

@@ -48,7 +48,16 @@ import numpy as np
 import numpy.typing as npt
 
 from pepin.depth import Intrinsics
-from pepin.tsdf import Array, Float32, GridSpec, PlanarShift, RigidPose, Tsdf, Uint8
+from pepin.tsdf import (
+    Array,
+    Float32,
+    GridSpec,
+    PlanarShift,
+    RigidPose,
+    ShiftedColumns,
+    Tsdf,
+    Uint8,
+)
 
 if TYPE_CHECKING:
     from pepin.mapping import OccupancyGrid
@@ -380,10 +389,30 @@ class WorldMap:
         if shift.nothing:
             return
         columns = self.volume.shift(shift)
-        self.lidar_weight = columns.blend(self.lidar_weight)
+        self.lidar_weight = self._moved_claim(columns)
         self.frames = [
             (stamp, sensor, self._shifted_frame(shift, pose)) for stamp, sensor, pose in self.frames
         ]
+
+    def _moved_claim(self, columns: ShiftedColumns) -> Float32:
+        """The lidar's weight channel after the move: its magnitude by the same weighted average
+        as the field, its EXTENT by the majority of what the cell was made of.
+
+        Where the lidar has spoken is a fact, not a quantity, and a blend of a non-negative
+        channel spreads a fact: every cell with one owned column among its four sources comes
+        back owned, so the claim grows by a ring at every move and :meth:`integrate_depth` then
+        hands the camera's work to a lidar that never wrote there. Measured on the synthetic box
+        (scratch/follow_refute.py, 2026-09-14): 7058 owned cells of the layer became 8305 over
+        ten corrections of 10 cm / 3 deg — +18 % of room nobody swept, and monotone, because
+        ``lidar_weight`` never decays. So the claim is carried by the same bilinear vote as the
+        field and kept where that vote is more than half the lidar's: the count then stands
+        (7058 -> 7060 after one move, and what it loses over ten is the room walking off the
+        grid), and every occupied cell of a moved seeded wall is still the lidar's.
+        """
+        moved = columns.blend(self.lidar_weight)
+        share = columns.blend((self.lidar_weight > 0.0).astype(np.float32))
+        moved[share < 0.5] = 0.0
+        return moved
 
     @staticmethod
     def _shifted_frame(shift: PlanarShift, pose: Array) -> Array:
