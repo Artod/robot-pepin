@@ -163,6 +163,27 @@ def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     assert code == 0 and out == ""
 
 
+def test_the_nodes_of_one_side_and_the_flags_that_are_not_their_default(capsys: Any) -> None:
+    """What ros/restart.sh asks after a restart: the nodes of the half it restarted, and, per
+    node, only the flags that are NOT what the table declares — a restart puts every flag back
+    to its default, so anything listed is a switch someone set on purpose."""
+    board, laptop = (
+        _main(["nodes", "board"], capsys)[1].split(),
+        _main(["nodes", "laptop"], capsys)[1].split(),
+    )
+    assert "relocalizer" in board and "depth_fusion" not in board
+    assert "depth_fusion" in laptop and "relocalizer" not in laptop
+    assert sorted(board + laptop) == sorted(_main(["nodes"], capsys)[1].split())
+    code, _, err = _main(["nodes", "orbit"], capsys)
+    assert code == 2 and err.startswith("orbit: no such side")
+
+    dump = "/depth_fusion:\n  ros__parameters:\n    align: false\n    min_weight: 2.0\n"
+    code, out, _ = _main(["drift", "depth_fusion"], capsys, stdin=dump)
+    assert code == 0 and out == "depth_fusion/align off (default on)\n"
+    code, out, _ = _main(["drift", "depth_fusion"], capsys, stdin="")
+    assert code == 1 and out.strip() == "depth_fusion: no answer to a parameter dump (is it up?)"
+
+
 @pytest.mark.parametrize("verb", ["where", "flag", "value"])
 def test_a_verb_with_the_wrong_number_of_words_prints_the_usage(verb: str, capsys: Any) -> None:
     code, out, _ = _main([verb], capsys)

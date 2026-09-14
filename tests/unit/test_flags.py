@@ -158,6 +158,24 @@ def test_a_table_reads_its_values_and_changes_them_with_the_flag_s_own_check() -
         FlagSet(Flag("align", True), Flag("align", False))
 
 
+def test_only_the_flags_someone_moved_are_reported_as_moved() -> None:
+    """After a restart every flag is its table default, so a difference is a switch someone set
+    on purpose — the one thing a restart silently throws away. A parameter the node does not
+    carry is not a difference; a value the flag refuses is one, reported as it came."""
+    flags = _table()
+    same = {"align": True, "backend": "remote", "min_weight": 2.0, "sources": "lidar"}
+    assert flags.drift(same) == ()
+    assert flags.drift({}) == (), "an empty dump is a node that did not answer, not a drift"
+    assert flags.drift({"align": False}) == (("align", "off", "on"),)
+    assert flags.drift({"sources": "lidar,depth"}) == (("sources", "lidar,depth", "lidar"),)
+    assert flags.drift({"min_weight": 3}) == (("min_weight", "3.0", "2.0"),)
+    assert flags.drift({"min_weight": 2}) == (), "an int 2 for a double 2.0 is the same value"
+    assert flags.drift({"backend": "gpu"}) == (("backend", "'gpu'", "remote"),)
+    assert flags.drift({"threads": 8, "url": "a"}) == (), "a start-up parameter is read too"
+    moved = flags.drift({"align": False, "threads": 8, "url": "b", "nothing": 1})
+    assert moved == (("align", "off", "on"), ("url", "b", "a")), "declaration order, unknowns out"
+
+
 def test_a_copy_starts_at_the_defaults_and_the_original_keeps_them() -> None:
     table = _table()
     mine = FlagSet(*table)

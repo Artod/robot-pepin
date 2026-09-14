@@ -7,13 +7,18 @@ ros/pepin_bringup/pepin_bringup/<node>.py; this tool reads those tables from the
 
     ros/tools/flags_doc.py                 rewrite the "Feature flags" section of ros/README.md
     ros/tools/flags_doc.py --check         exit 1 when that section is stale (the unit test)
-    ros/tools/flags_doc.py nodes           the nodes that carry a table, one per line
+    ros/tools/flags_doc.py nodes [SIDE]    the nodes that carry a table, one per line; SIDE
+                                           (board / laptop) keeps the ones that run there
     ros/tools/flags_doc.py where NODE      "laptop pepin-vslam" / "board pepin-ros": NODE's home
     ros/tools/flags_doc.py flag NODE FLAG  one flag whole — what it does, why its default is
                                            what it is, when to turn it on, when to turn it off;
                                            exit 2 when there is none
     ros/tools/flags_doc.py list NODE       NODE's flags with their current values, read from a
                                            ``ros2 param dump /NODE`` on stdin (empty: node down)
+    ros/tools/flags_doc.py drift NODE      the same dump on stdin, but only the flags that differ
+                                           from the table's default, one per line; nothing at all
+                                           when the node is as it shipped, exit 1 when it did not
+                                           answer
     ros/tools/flags_doc.py value NODE FLAG VALUE
                                            VALUE checked by the flag and printed the way
                                            ``ros2 param set`` reads it (a double as 3.0, a
@@ -186,8 +191,11 @@ def main(argv: list[str]) -> int:
         README.write_text(fresh)
         print(f"{README}: Feature flags section written")
         return 0
-    if verb == "nodes":
-        print("\n".join(tables()))
+    if verb == "nodes" and len(argv) <= 2:
+        side = argv[1] if len(argv) == 2 else None
+        if side is not None and side not in ("board", "laptop"):
+            _refuse(f"{side}: no such side; the sides are board, laptop")
+        print("\n".join(n for n in tables() if side is None or node_host(n)[0] == side))
         return 0
     if verb == "where" and len(argv) == 2:
         node, _ = _node(argv[1])
@@ -202,6 +210,15 @@ def main(argv: list[str]) -> int:
     if verb == "list" and len(argv) == 2:
         node, flags = _node(argv[1])
         print(listing(node, flags, sys.stdin.read() if not sys.stdin.isatty() else ""))
+        return 0
+    if verb == "drift" and len(argv) == 2:
+        node, flags = _node(argv[1])
+        values = current_values(sys.stdin.read() if not sys.stdin.isatty() else "")
+        if not values:
+            print(f"{node}: no answer to a parameter dump (is it up?)")
+            return 1
+        for name, live, default in flags.drift(values):
+            print(f"{node}/{name} {live} (default {default})")
         return 0
     if verb == "value" and len(argv) == 4:
         node, flags = _node(argv[1])

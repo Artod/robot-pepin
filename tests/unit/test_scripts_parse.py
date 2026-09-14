@@ -559,3 +559,257 @@ def test_status_says_so_when_a_node_printed_no_report(tmp_path) -> None:  # type
     assert code == 0
     assert "tracker sources: ? (relocalizer printed no report in 90 s" in out
     assert "(nothing)" in out
+
+
+# ---- ros/restart.sh -----------------------------------------------------------------------------
+# One command brings a half back and then checks, in one place, every failure a restart has hidden
+# from us. The fakes below are the two hosts: a board answering over ssh and a laptop answering
+# `docker`, both scripted by environment variables so one test can break one thing at a time.
+TRACKER_LINE = (
+    "[python3-6] [INFO] [1789428031.2] [relocalizer]: tracker: scans 227, matched 133, "
+    "silenced 4155 returns over 133 scans, fit 0.66/0.47/0.83 at the match; "
+    "sources: anchor lidar; watch fit 0.80, last source 0.2 s ago; "
+    "map /map (id 239x215@-18.53,-4.38, 0 republications ignored); "
+    "flags: rest_lock=on sources=lidar,graph map_topic=map"
+)
+VSLAM_LOG = "\n".join(
+    (
+        "[bridge_watch-9] [INFO] [1.0] [bridge_watch]: bridge watch: 10 topics Hz [scan 9.7]; "
+        "flow_watch=on; dead routes 0",
+        "[depth_stream-3] [INFO] [2.0] [depth_stream]: depth: 9.4 frames/s published (282 through "
+        "the net, 0 dropped); lidar_anchor on [a 1.71 b +0.004 on 600 pairs], backend remote",
+        "[depth_fusion-5] [INFO] [3.0] [depth_fusion]: fusion: 281 frames (9.3/s, 0 dropped, 0 "
+        "unpaired), integrate 7 ms; skipped: low fit 0, at bound 0, self-heals 0",
+        "[visual_odometry-7] [INFO] [4.0] [visual_odometry]: vo: 9.1 poses/s from rtabmap, 9.1 "
+        "published, 0 dropped",
+        "[laptop_localizer-6] [INFO] [5.0] [laptop_localizer]: laptop localizer: 4 candidates "
+        "from 27 scans; tracker fit 0.66; skipped: off 0",
+        "[rtabmap_frame-8] [INFO] [6.0] [rtabmap_frame]: rtabmap frame: 27 graphs, anchor "
+        "(-0.11, +0.02, +1.3 deg) from file, last word (-11.32, +0.71, +132 deg), 6 cm from the "
+        "tracker; graph trusted 1.00 over 27 infos; flags: graph_trust=on",
+    )
+)
+FAKE_RESTART_LIB = r"""#!/bin/bash
+BOARD="${BOARD:-10.0.0.187}"
+log() { printf '%s\n' "$*" >> "$FAKE_LOG"; }
+ssh() {
+    log "ssh $*"
+    case "$*" in
+        *"PEPIN_MAP"*) printf '%s\n' "PEPIN_MAP=${FAKE_MAP-/maps/flat3.yaml}" ;;
+        *"relocalizer"*) printf '%s\n' "${FAKE_TRACKER-$FAKE_TRACKER_DEFAULT}" ;;
+        *Failed*update*rate*) printf '%s\n' "${FAKE_LATE-0}" ;;
+        *Extrapolation*) printf '%s\n' "${FAKE_TF_ERRORS-0}" ;;
+        *topic_rate.py*) printf '%s\n' "${FAKE_RATE-${*##*topic_rate.py }: 9.1 Hz over 5 s}" ;;
+        *"is-active pepin-base"*)
+            printf '%s\n%s\n' "${FAKE_BASE-active}" "${FAKE_TORQUE-idle: parked, torque off}" ;;
+        *"restart pepin-ros"*) printf 'active\n' ;;
+    esac
+    return 0
+}
+docker() {
+    log "docker $*"
+    case "$*" in
+        *inspect*) [ -n "${FAKE_VSLAM-x}" ] && printf '2026-09-14T19:00:00Z\n' || return 1 ;;
+        *logs*vslam*) printf '%s\n' "${FAKE_VSLAM-$FAKE_VSLAM_DEFAULT}" ;;
+        *"ps -eo"*) printf '%s\n' "${FAKE_PROCS-rtabmap
+rgbd_odometry
+python3}" ;;
+    esac
+    return 0
+}
+"""
+FAKE_SUB = """#!/bin/bash
+printf '%s %s\\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
+case "$(basename "$0")$*" in
+    board.shcensus) printf '%s\\n' "${FAKE_CENSUS-VERDICT: green — every process accounted for}"
+                    [ -z "${FAKE_CENSUS_RED-}" ] || exit 1 ;;
+    goto.shwhere) printf '%s\\n' "${FAKE_WHERE-at (-11.32, 0.71) facing 132 deg, fit 0.66}"
+                  [ -z "${FAKE_WHERE_DOWN-}" ] || exit 1 ;;
+    flags.shdrift*) printf '%s' "${FAKE_DRIFT-}" ;;
+esac
+exit 0
+"""
+
+
+def _restart(tmp_path, *args, **env):  # type: ignore[no-untyped-def]
+    """Run ros/restart.sh against a faked board and laptop; (exit status, output, commands)."""
+    import os
+
+    here = tmp_path / "ros"
+    here.mkdir(exist_ok=True)
+    (here / "lib.sh").write_text(FAKE_RESTART_LIB)
+    for name in ("sync.sh", "board.sh", "goto.sh", "laptop.sh", "flags.sh"):
+        (here / name).write_text(FAKE_SUB)
+        (here / name).chmod(0o755)
+    (here / "restart.sh").write_text((REPO / "ros/restart.sh").read_text())
+    (here / "maps").mkdir(exist_ok=True)
+    log = tmp_path / "log"
+    log.write_text("")
+    run = subprocess.run(
+        ["bash", str(here / "restart.sh"), *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}",
+            "FAKE_LOG": str(log),
+            # One poll per wait: the fakes answer at once, and a wait that never sees its line
+            # must not sit here for the 90 s a real board is given.
+            "PEPIN_RESTART_WAIT_S": "0",
+            "PEPIN_RESTART_POLL_S": "0",
+            "FAKE_TRACKER_DEFAULT": TRACKER_LINE,
+            "FAKE_VSLAM_DEFAULT": VSLAM_LOG,
+            **env,
+        },
+    )
+    sent = [line.strip() for line in log.read_text().splitlines() if line.strip()]
+    return run.returncode, run.stdout + run.stderr, sent
+
+
+def test_restart_sh_parses_and_never_drives() -> None:
+    result = subprocess.run(
+        ["bash", "-n", str(REPO / "ros/restart.sh")], capture_output=True, text=True, timeout=20
+    )
+    assert result.returncode == 0, result.stderr
+    code = "\n".join(
+        line
+        for line in (REPO / "ros/restart.sh").read_text().splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert "cmd_vel" not in code and "goto_ros" not in code, "a restart is not a drive"
+    # One rate probe per topic and no `ros2` CLI on the board: the CLI is seconds of A53 per call.
+    assert code.count("topic_rate.py") == 1 and "ros2 topic" not in code
+    for half in ("board", "laptop", "both"):
+        assert f"{half} " in code or f"{half})" in code
+
+
+def test_the_laptop_half_is_seeded_with_the_map_the_board_serves(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The camera half's fused volume is snapped to the lattice of the map it is seeded with, so
+    the seed is read from the board's own /etc/default/pepin-ros — never guessed, never a default.
+    The neck owns base_link -> camera_link, so --neck always goes with it."""
+    code, out, sent = _restart(
+        tmp_path, "laptop", "--no-check", FAKE_MAP="/maps/flat3_straight.yaml"
+    )
+    assert code == 0, out
+    assert "laptop.sh start" in sent
+    assert "laptop.sh vslam --neck --seed-map=/maps/flat3_straight.yaml" in sent
+    assert not [c for c in sent if "--fresh" in c], "no --fresh without --fresh-graph"
+    assert not [c for c in sent if c.startswith("ssh") and "restart pepin-ros" in c], sent
+    assert "checks skipped" in out
+
+
+def test_a_board_without_a_map_refuses_instead_of_seeding_the_wrong_one(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    code, out, sent = _restart(tmp_path, "laptop", "--no-check", FAKE_MAP="")
+    assert code == 0, out  # --no-check: the restart failed, its reason printed, nothing checked
+    assert "the board does not say which map it serves" in out
+    assert not [c for c in sent if c.startswith("laptop.sh")], "nothing started on a guess"
+
+
+def test_fresh_graph_empties_the_database_and_takes_the_anchor_of_that_map_with_it(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """The anchor ties one map to one graph database (pepin.anchors). A fresh database beside a
+    kept anchor speaks in the previous database's frame, so --fresh-graph removes both, and says
+    which file it removed."""
+    anchor = tmp_path / "ros/maps/239x215_-18.53_-4.38.graph_anchor.json"
+    anchor.parent.mkdir(parents=True, exist_ok=True)
+    anchor.write_text("{}")
+    (tmp_path / "bin").mkdir(exist_ok=True)
+    (tmp_path / "bin/uv").write_text(f'#!/bin/bash\nprintf "%s\\n" "{anchor}"\n')  # pepin.anchors
+    (tmp_path / "bin/uv").chmod(0o755)
+    code, out, sent = _restart(tmp_path, "laptop", "--no-check", "--fresh-graph")
+    assert code == 0, out
+    assert "laptop.sh vslam --neck --seed-map=/maps/flat3.yaml --fresh" in sent
+    assert not anchor.exists(), out
+    assert str(anchor) in out and "map <-> database" in out
+
+
+def test_fresh_graph_is_refused_on_the_board_half_that_owns_neither(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    code, out, sent = _restart(tmp_path, "board", "--fresh-graph")
+    assert code == 2, out
+    assert sent == [], "refused before a host is touched"
+
+
+def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_it(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """Order matters twice: the board restarts first, and NOTHING is checked until the laptop is
+    up — /depth_scan and /vo are fed by the laptop, so checking the board first would fail two
+    checks by construction."""
+    code, out, sent = _restart(tmp_path, "both")
+    assert code == 0, out
+    order = [i for i, c in enumerate(sent) if "restart pepin-ros" in c or c.startswith("laptop.sh")]
+    assert sent[order[0]].endswith("restart pepin-ros && sleep 8 && systemctl is-active pepin-ros")
+    assert sent[order[1]] == "laptop.sh start"
+    first_rate = next(i for i, c in enumerate(sent) if "topic_rate.py" in c)
+    assert first_rate > order[-1], "the board is asked about the laptop's topics after it is up"
+    for number in ("1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "2.1", "2.8", "3.1"):
+        assert f"PASS {number}" in out, out
+    assert "green: " in out and "none failed" in out
+
+
+def test_every_check_runs_even_when_the_first_ones_fail_and_the_run_goes_red(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A check that fails is one line and never the end of the run: the point of the script is
+    the whole picture. The three below are the three that cost us a session each."""
+    code, out, _ = _restart(
+        tmp_path,
+        "both",
+        FAKE_TRACKER="",  # the tracker never reported
+        FAKE_TORQUE="arming: torque on",  # the wheels left armed
+        FAKE_VSLAM=VSLAM_LOG.replace("dead routes 0", "DEAD ROUTES 2 [/scan /odom]"),
+    )
+    assert code == 1, out
+    assert "FAIL 1.2" in out and "no report line" in out
+    assert "FAIL 1.8" in out and "still armed" in out
+    assert "FAIL 2.1" in out and "DEAD ROUTES 2" in out
+    assert "PASS 1.4" in out and "PASS 2.8" in out, "the checks after a failure still ran"
+    assert "red: 3 of " in out
+
+
+@pytest.mark.parametrize(
+    ("broken", "number", "why"),
+    [
+        ({"FAKE_CENSUS_RED": "1"}, "1.1", "census"),
+        ({"FAKE_LATE": "7"}, "1.4", "Failed to meet update rate"),
+        ({"FAKE_TF_ERRORS": "3"}, "1.5", "error(s)"),
+        # a log that cannot be read is never counted as zero errors
+        ({"FAKE_LATE": "ssh: connect to host: No route"}, "1.4", "could not be read"),
+        ({"FAKE_RATE": "/vo: not advertised"}, "1.6", "does not reach the board"),
+        ({"FAKE_WHERE_DOWN": "1"}, "1.3", "did not answer"),
+        ({"FAKE_PROCS": "python3"}, "2.6", "no rtabmap process"),
+    ],
+)
+def test_each_known_failure_is_named_on_its_own_line(tmp_path, broken, number, why) -> None:  # type: ignore[no-untyped-def]
+    code, out, _ = _restart(tmp_path, "both", **broken)
+    assert code == 1, out
+    assert f"FAIL {number}" in out and why in out, out
+
+
+def test_a_thin_report_line_fails_the_node_it_belongs_to_not_the_run(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Rates and counters are read from the nodes' own report lines; a number below the floor is
+    that node's failure, with the number in the line so it can be read at a glance."""
+    code, out, _ = _restart(
+        tmp_path,
+        "laptop",
+        FAKE_VSLAM=VSLAM_LOG.replace("9.4 frames/s", "1.2 frames/s")
+        .replace("at bound 0", "at bound 14")
+        .replace("over 27 infos", "over 0 infos"),
+    )
+    assert code == 1, out
+    assert "FAIL 2.2" in out and "1.2 frames/s" in out
+    assert "FAIL 2.3" in out and "14 frames refused at bound" in out
+    assert "FAIL 2.7" in out and "trust is deaf" in out
+
+
+def test_a_flag_off_its_default_is_seen_but_never_fails_the_run(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A restart puts every flag back to its default, so a flag that is NOT its default was set
+    on purpose — legitimate, and the one thing a restart silently throws away. It is shown, and
+    the run stays green."""
+    code, out, sent = _restart(
+        tmp_path, "laptop", FAKE_DRIFT="relocalizer/sources lidar,camera (default lidar)\n"
+    )
+    assert code == 0, out
+    assert "WARN 3.1" in out and "relocalizer/sources lidar,camera (default lidar)" in out
+    assert "flags.sh drift laptop" in sent
+    assert "green: " in out
