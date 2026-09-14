@@ -23,8 +23,14 @@ better than it claims is not rewarded, only the over-claim is taken back.
 
 Blind on purpose: no lidar pose ever enters the camera's ratio and no camera pose the lidar's,
 so this can never become "the camera is judged by the sensor it was supposed to check". The
-only outside input is the odometry, which both share anyway and which is millimetres over the
-tenths of a second between two measurements of one source.
+only outside input is the odometry, which both share anyway — and the odometry is not free.
+Its own error over the carry is in the denominator with the two covariances
+(:func:`pepin.fusion.odometry_covariance`, added by :func:`pepin.fusion.carried`), because a
+source must never pay for a turn the wheels reported and the cart did not perform: at the
+12.8 cm match covariance this was written against the carry's error was two orders down and
+could be ignored, and at the peak covariance's 1 cm it is the whole of the disagreement in
+motion — it read an honest lidar at a ratio of 19 on the synthetic drive and widened it on 172
+of 307 moving updates of a real tape before the term was put in.
 """
 
 from __future__ import annotations
@@ -106,7 +112,9 @@ class SelfCheck:
 
         ``odom`` is where the wheels say the cart was at the moment this measurement was
         measured (the odom frame; only differences between two of them are ever used), and it
-        is the ONLY thing this brings in from outside the source. A sample that is not finite —
+        is the ONLY thing this brings in from outside the source — carried with its own error
+        in the denominator (:func:`pepin.fusion.carried`), so the sample is what the SENSOR did
+        and not what the odometry did. A sample that is not finite —
         a covariance that arrived NaN over the link (``NaN`` is a literal Python's json reads) —
         is dropped instead of recorded: averaged in, one of them would multiply that source's
         covariance by NaN for a whole window of updates, and the fused pose with it.

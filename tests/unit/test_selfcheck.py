@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from test_localizer_sources import drive, tracker, whole
 
+from pepin import fusion
 from pepin.fusion import PoseMeasurement
 from pepin.localization import SWITCHES
 from pepin.odometry import Pose2D
@@ -233,3 +234,52 @@ def test_a_measurement_that_is_not_a_number_is_not_evidence() -> None:
         out = check.checked(measurement(Pose2D(), stamp=0.1 * k), Pose2D())
         assert np.all(np.isfinite(out.covariance))
     assert np.isfinite(check.ratio(DEPTH)) and check.inflation(DEPTH) == 1.0
+
+
+def turning_in_place(steps: int, turn_deg: float, over: float) -> tuple[list[Pose2D], list[Pose2D]]:
+    """A cart turning ``turn_deg`` in place per step, and the odometry that reports every turn
+    ``over`` too large — this cart's wheels on carpet, where the heading is the difference of
+    two slipping wheels."""
+    truth = [Pose2D(0.0, 0.0, math.radians(turn_deg) * k) for k in range(steps)]
+    odom = [Pose2D(0.0, 0.0, math.radians(turn_deg) * (1.0 + over) * k) for k in range(steps)]
+    return truth, odom
+
+
+def test_a_turn_the_odometry_over_reports_is_not_the_sensor_scattering() -> None:
+    """The failure the peak covariance uncovered. A source that repeats itself PERFECTLY — every
+    match exactly where the cart is — while the wheels over-report each 3 degree turn by 70 %
+    (this cart's own per-carry figure on tape 20260913_190024: 604 degrees of odometry against
+    359 of lidar, RMS 0.77 of the reported turn) is not scattering, and the check must not say it
+    is. It stays untouched only because the odometry's own error over the carry is in the
+    denominator: with that term taken out, the same drive reads as a source three times worse
+    than it claims."""
+    sharp = np.diag([0.01**2, 0.01**2, math.radians(0.5) ** 2])  # what a peak gives a good match
+    truth, odom = turning_in_place(steps=21, turn_deg=3.0, over=0.7)
+
+    def ratio(check: SelfCheck) -> float:
+        for k, (t, o) in enumerate(zip(truth, odom, strict=True)):
+            check.checked(PoseMeasurement(t.x, t.y, t.theta, sharp, LIDAR, 0.1 * k, 0.8), o)
+        return check.ratio(LIDAR)
+
+    honest = SelfCheck()
+    assert ratio(honest) < 1.0
+    assert honest.inflation(LIDAR) == 1.0
+
+
+def test_without_the_odometry_s_own_error_an_honest_lidar_is_called_a_scatterer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the same claim, so the test above cannot pass by accident: with the
+    carry's error model switched off (the state this check shipped in, when a match's covariance
+    was 12.8 cm and the odometry really was two orders under it), the very same perfect source
+    over the very same drive is inflated — which is what it did to the lidar on a real tape."""
+    monkeypatch.setattr(fusion, "ODOM_YAW_PER_TURN", 0.0)
+    monkeypatch.setattr(fusion, "ODOM_YAW_FLOOR_RAD", 0.0)
+    monkeypatch.setattr(fusion, "ODOM_XY_FLOOR_M", 0.0)
+    monkeypatch.setattr(fusion, "ODOM_XY_PER_M", 0.0)
+    sharp = np.diag([0.01**2, 0.01**2, math.radians(0.5) ** 2])
+    truth, odom = turning_in_place(steps=21, turn_deg=3.0, over=0.7)
+    check = SelfCheck()
+    for k, (t, o) in enumerate(zip(truth, odom, strict=True)):
+        check.checked(PoseMeasurement(t.x, t.y, t.theta, sharp, LIDAR, 0.1 * k, 0.8), o)
+    assert check.inflation(LIDAR) > 2.0
