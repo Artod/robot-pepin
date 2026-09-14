@@ -263,8 +263,8 @@ FLAGS = FlagSet(
         " tested so the switch can be flipped the day the band can answer; nothing about it"
         " is fixed by tuning",
         on_when="when the kidnap script says the band can answer — it is the number to move,"
-        " and a denser band on its own did not move it — or in a carry test where a wrong answer costs nothing and the"
-        " report line is what is being read",
+        " and a denser band on its own did not move it — or in a carry test where a wrong"
+        " answer costs nothing and the report line is what is being read",
         off_when="now, and until that number moves: a search that finds the cart 3-8 % of the"
         " time cannot recover a pose, and a streak of 3 makes its real recovery rate lower"
         " still",
