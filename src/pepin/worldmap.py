@@ -49,6 +49,8 @@ import numpy.typing as npt
 
 from pepin.depth import Intrinsics
 from pepin.tsdf import (
+    BLEND,
+    NEAREST,
     Array,
     Float32,
     GridSpec,
@@ -370,9 +372,11 @@ class WorldMap:
         self._note(stamp, CAMERA, pose)
         return touched
 
-    def shift(self, shift: PlanarShift) -> None:
+    def shift(self, shift: PlanarShift, law: str = BLEND) -> None:
         """Move the whole map by a rigid planar ``shift``: the volume, the lidar's own weight
-        channel and the index of the frames that painted it.
+        channel and the index of the frames that painted it. ``law`` is how the content is
+        resampled (:meth:`pepin.tsdf.Tsdf.shift`): the fusion's weighted average, or the
+        nearest source column.
 
         This is how the map follows a graph correction. Every frame in here was placed through
         ``map -> odom`` at its own stamp; when the graph optimises and that edge jumps, the same
@@ -388,13 +392,13 @@ class WorldMap:
         """
         if shift.nothing:
             return
-        columns = self.volume.shift(shift)
-        self.lidar_weight = self._moved_claim(columns)
+        columns = self.volume.shift(shift, law)
+        self.lidar_weight = self._moved_claim(columns, law)
         self.frames = [
             (stamp, sensor, self._shifted_frame(shift, pose)) for stamp, sensor, pose in self.frames
         ]
 
-    def _moved_claim(self, columns: ShiftedColumns) -> Float32:
+    def _moved_claim(self, columns: ShiftedColumns, law: str = BLEND) -> Float32:
         """The lidar's weight channel after the move: its magnitude by the same weighted average
         as the field, its EXTENT by the majority of what the cell was made of.
 
@@ -409,6 +413,8 @@ class WorldMap:
         (7058 -> 7060 after one move, and what it loses over ten is the room walking off the
         grid), and every occupied cell of a moved seeded wall is still the lidar's.
         """
+        if law == NEAREST:
+            return columns.nearest(self.lidar_weight)  # a nearest move cannot spread anything
         moved = columns.blend(self.lidar_weight)
         share = columns.blend((self.lidar_weight > 0.0).astype(np.float32))
         moved[share < 0.5] = 0.0

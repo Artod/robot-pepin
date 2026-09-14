@@ -1308,6 +1308,13 @@ def test_the_graphs_correction_moves_the_volume_only_where_the_graph_owns_it() -
     for name in ("follow_correction_min_m", "follow_correction_min_deg", "follow_correction_min_s"):
         assert flags.flag(name).range is not None, f"{name}: a threshold is bounded"
         assert flags.flag(name).live, f"{name}: tunable while a map is being built"
+    # ...and the resample law itself is a live switch, because no real correction has judged it:
+    # on the live snapshot of 2026-09-14 the default blend costs 108 ms and puts the 99th
+    # occupied cell 9.7 cm out, the rejected nearest 9 ms and 2.5 cm (scratch/volume_shift_cost.py)
+    law = flags.flag("follow_correction_law")
+    assert law.choices == ("blend", "nearest") and law.live and law.default == "blend"
+    reads = sf.unparsed(follow, ast.Subscript)
+    assert "self._switches['follow_correction_law']" in reads, "the move reads the law it uses"
 
 
 def test_the_slam_mode_s_two_fusion_switches_come_from_the_launch_not_the_operator() -> None:

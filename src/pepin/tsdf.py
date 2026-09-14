@@ -167,6 +167,11 @@ class RigidPose:
         return RigidPose(rz @ self.rotation, t)
 
 
+# How a planar move resamples the volume. Neither law has yet been judged by a real graph
+# correction, so the node carries both behind follow_correction_law.
+BLEND, NEAREST = "blend", "nearest"
+
+
 @dataclass(frozen=True)
 class PlanarShift:
     """A rigid move of everything in the map's plane: metres along x and y, and a turn about
@@ -329,26 +334,40 @@ class Tsdf:
         twin.sdf, twin.weight, twin.rgb = self.sdf.copy(), self.weight.copy(), self.rgb.copy()
         return twin
 
-    def shift(self, shift: PlanarShift) -> ShiftedColumns:
+    def shift(self, shift: PlanarShift, law: str = BLEND) -> ShiftedColumns:
         """Move everything in the model by a rigid planar ``shift`` — the volume follows the
         graph's correction instead of standing where the pose used to be — and return the
         column map it was resampled through, so another channel on the same grid (the lidar's
         weight) moves with exactly the same one.
 
         The grid itself does not move: the box, its origin and its z lattice are what every
-        slice and every seeded cell are cut on. The content moves through it by the same law
-        the fusion itself uses — a weighted average, the field carried as ``sdf * weight`` and
-        divided back out, so an unknown neighbour (weight zero) pulls no surface toward it and
-        a wall stays a wall. The colour follows its voxel (:meth:`ShiftedColumns.nearest`): it
-        is a picture, not a measurement, and blurring bytes buys nothing.
+        slice and every seeded cell are cut on. Two laws carry the content through it and
+        neither has yet been judged by a real graph correction, so ``law`` is a switch, not a
+        constant (``follow_correction_law`` on pepin_bringup.depth_fusion):
+
+        ``blend`` is the fusion's own weighted average — the field carried as ``sdf * weight``
+        and divided back out, so an unknown neighbour (weight zero) pulls no surface toward it.
+        It keeps no quantisation bias and pays for it in cells: a surface averaged with the free
+        space in front of it thins, and on the live snapshot of 2026-09-14 (297 k painted
+        voxels) one move of 10 cm / 3 deg cost 108 ms and left the 99th occupied cell 9.7 cm
+        from where the correction points.
+
+        ``nearest`` takes the nearest source column for every channel: 9 ms on the same volume,
+        every cell kept, and a wall put within half a voxel (measured: 2.5 cm at the 99th cell)
+        of where it belongs — sharp, cheap, and systematically quantised.
+
+        The colour is a picture, not a measurement, and always takes its nearest voxel.
         """
         columns = ShiftedColumns(self.spec, shift)
-        weight = columns.blend(self.weight)
-        carried = columns.blend(self.sdf * self.weight)
-        self.sdf = np.where(weight > 0.0, carried / np.maximum(weight, 1e-6), 1.0).astype(
-            np.float32
-        )
-        self.weight = weight
+        if law == NEAREST:
+            weight = columns.nearest(self.weight)
+            sdf = columns.nearest(self.sdf)
+            sdf[weight == 0.0] = 1.0
+        else:
+            weight = columns.blend(self.weight)
+            carried = columns.blend(self.sdf * self.weight)
+            sdf = np.where(weight > 0.0, carried / np.maximum(weight, 1e-6), 1.0).astype(np.float32)
+        self.sdf, self.weight = sdf, weight
         self.rgb = columns.nearest(self.rgb)
         self.colour_weight = columns.nearest(self.colour_weight)
         return columns

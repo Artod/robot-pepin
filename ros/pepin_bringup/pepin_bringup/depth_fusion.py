@@ -60,8 +60,9 @@ close in the map itself (2026-09-13). With ``follow_correction`` the volume foll
 frame or a revolution is integrated, the correction TF gives for ITS stamp — the very transform
 that places it — is compared with the one the volume is painted under, and past
 ``follow_correction_min_m`` / ``follow_correction_min_deg`` the whole content is carried rigidly
-by the difference (:meth:`pepin.worldmap.WorldMap.shift`, tens of milliseconds on the laptop for
-2.4 M voxels, on the worker thread, no oftener than ``follow_correction_min_s``). Smaller
+by the difference (:meth:`pepin.worldmap.WorldMap.shift`, 108 ms on the laptop for the live
+2.4 M-voxel grid as it stood on 2026-09-14, 9 ms under ``follow_correction_law`` nearest, on the
+worker thread, no oftener than ``follow_correction_min_s``). Smaller
 corrections are measured against the same anchor and move the volume together when they add up.
 While a move is owed but the rate has not let it through, nothing is painted at all: an
 observation placed under the new correction and fused into a volume still standing in the old
@@ -76,8 +77,9 @@ The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``e
 ``min_weight``, ``map_min_weight``, ``camera_map_min_weight``, ``lidar_map``, ``surface_hz``,
 ``band_half_z``, ``lidar_layer``, ``no_return_free``, ``map_source``, ``map_hz``, ``snapshot_s``,
 ``resume_volume``, ``follow_correction``, ``follow_correction_min_m``,
-``follow_correction_min_deg``, ``follow_correction_min_s``; their state is printed in every
-report line, beside the band itself and the source of the plane it is centred on.
+``follow_correction_min_deg``, ``follow_correction_min_s``, ``follow_correction_law``; their
+state is printed in every report line, beside the band itself and the source of the plane it is
+centred on.
 ``/fusion/reset`` (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
 """
 
@@ -516,17 +518,14 @@ FLAGS = FlagSet(
         " follows however this is set",
         why="the correction never reached the voxels (2026-09-13): RTAB-Map closed a loop, the"
         " cloud moved with the graph, and the painted room stayed where the pose used to be, so"
-        " no loop drive could close in the map itself. The move costs 46-58 ms on this laptop"
-        " for the live 280x250x34 grid (2.4 M voxels, scratch/volume_shift_cost.py) — a third of"
-        " a frame at 6 fps, on the worker thread — and it is not free in the map either: one"
-        " move of 10 cm / 3 deg leaves 87 % of the occupied cells of the seeded snapshot (68 %"
-        " of a freshly painted room), each within one voxel of where the correction points,"
-        " because a resampled field is a weighted average and a surface averaged with the free"
-        " space in front of it thins. The sensors repaint what thins within a second of driving;"
-        " a map left behind the graph never comes back. The nearest-column law keeps more cells"
-        " (100 %) and costs 8 ms, and was refused: it quantises every wall to half a voxel"
-        " (measured: 2.5 cm), the same class of bias the grid snapping was introduced to kill"
-        " on 2026-09-13",
+        " no loop drive could close in the map itself. The move is not free: on the live"
+        " 280x250x34 grid as it stood on 2026-09-14 (2.4 M voxels, 297 k of them painted,"
+        " scratch/volume_shift_cost.py) one move of 10 cm / 3 deg costs 108 ms of the worker"
+        " thread under the default law and leaves 91 % of the occupied cells, each of the 99th"
+        " percentile 9.7 cm from where the correction points — a resampled field is a weighted"
+        " average and a surface averaged with the free space in front of it thins. The sensors"
+        " repaint what thins within a second of driving; a map left behind the graph never comes"
+        " back. Which law pays best is follow_correction_law's question, not this one's",
         on_when="online SLAM (ros/laptop.sh vslam --slam): the drive where loops close",
         off_when="to see the old behaviour under the same graph — the cloud and the pose move,"
         " the voxels stay — or if a closure is ever seen to smear the map instead of moving it",
@@ -537,8 +536,8 @@ FLAGS = FlagSet(
         description="how far map -> odom must have moved before the volume is resampled; smaller"
         " corrections are kept against the same anchor and move it together when they add up",
         why="one voxel of the grid (5 cm): below it a move cannot change which cell a wall is"
-        " in, and the move is not free — 46-58 ms on this laptop for the live 280x250x34 grid,"
-        " and 13 % of the occupied cells of the seeded snapshot thinned away per move"
+        " in, and the move is not free — 108 ms on this laptop for the live 280x250x34 grid"
+        " under the default law, and 9 % of its occupied cells thinned away per move"
         " (scratch/volume_shift_cost.py, 2026-09-14). A smaller threshold spends both to move"
         " the map within the cell it is already in",
         on_when="raise it if graph noise moves the volume more often than the drive needs",
@@ -555,7 +554,7 @@ FLAGS = FlagSet(
         why="1 degree is 1.7 cm at a metre (a third of a voxel, where the cart is) and 9 cm at"
         " the 5 m end of the flat — the whole +-9 cm window the laptop's matcher searches. Below"
         " it a turn cannot move a near wall out of its cell; above it a far wall leaves the"
-        " matcher's window, and the move costs the measured 46-58 ms"
+        " matcher's window, and the move costs the measured 108 ms"
         " (scratch/volume_shift_cost.py, 2026-09-14)",
         on_when="raise it with a graph that jitters in heading without closing anything",
         off_when="lower it when a closure's turn must reach the map before its translation does",
@@ -569,9 +568,9 @@ FLAGS = FlagSet(
         " against the same anchor and applied at the next move) — but the frames and"
         " revolutions of that window are not painted, because a volume that owes a move is not"
         " the map they were placed in",
-        why="a move costs 46-58 ms of the worker thread on the live grid"
+        why="a move costs 108 ms of the worker thread on the live grid"
         " (scratch/volume_shift_cost.py, 2026-09-14), so one every 2 s holds the resample under"
-        " 3 % of that thread however hard RTAB-Map optimises. Its price is the observations of"
+        " 6 % of that thread however hard RTAB-Map optimises. Its price is the observations of"
         " that window: painting them into a volume still standing in the old correction and then"
         " moving the lot puts them past the truth by the whole move — a 30 cm closure left a"
         " freshly painted wall 20 cm beyond where the graph says it is"
@@ -580,6 +579,25 @@ FLAGS = FlagSet(
         on_when="raise it if a mapping run is ever seen to spend its frames on resampling",
         off_when="0 applies every correction that clears the thresholds, at once",
         range=(0.0, 60.0),
+    ),
+    Flag(
+        "follow_correction_law",
+        "blend",
+        description="how the move resamples the volume: blend is the fusion's own weighted"
+        " average of the four source columns, nearest takes the one column the cell came from",
+        why="neither law has been judged by a real graph correction — this one is a switch, not"
+        " a decision. On the live snapshot of 2026-09-14 (280x250x34, 297 k painted voxels) one"
+        " move of 10 cm / 3 deg costs blend 108 ms and leaves the 99th occupied cell 9.7 cm from"
+        " where the correction points (91 % of the cells survive); nearest costs 9 ms, keeps"
+        " every cell and puts the 99th within half a voxel, 2.5 cm — sharp, cheap, and"
+        " systematically quantised, which is the bias class the grid snapping of 2026-09-13 was"
+        " written to kill. blend is the default because a bias is not repainted by the sensors"
+        " and a thinned wall is; the 9.7 cm says that argument is not settled, and the morning's"
+        " loop drive is what settles it (scratch/volume_shift_cost.py)",
+        on_when="blend while the question is open: no systematic bias in the walls",
+        off_when="nearest when a closure is seen to smear the map, or when the resample's"
+        " milliseconds are eating the frames — the A/B is a live flag, no restart",
+        choices=("blend", "nearest"),
     ),
 )
 
@@ -1039,7 +1057,7 @@ class DepthFusion(Node):
                 self._tally.count("follow_held")  # owed against the same anchor, paid at the next
                 return False  # ...and nothing is painted into a volume that owes a move
             started = time.perf_counter()
-            self._world.shift(shift)
+            self._world.shift(shift, str(self._switches["follow_correction_law"]))
             self._follow_ms = (time.perf_counter() - started) * 1e3
             self._followed_at = now
             self._follower.moved(correction, shift)

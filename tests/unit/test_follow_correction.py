@@ -292,3 +292,24 @@ def test_the_lidars_claim_does_not_grow_by_a_ring_at_every_move() -> None:
     world.shift(PlanarShift(0.10, -0.04, math.radians(3.0)))
     assert claimed() <= before + 5, "a move carries the claim, it does not spread it"
     assert claimed() >= 0.97 * before, "and it does not eat it either"
+
+
+def test_the_nearest_law_moves_the_same_room_without_thinning_it() -> None:
+    """The other resample law the node carries (``follow_correction_law`` nearest): every cell
+    the map had it still has, each within half a voxel of where the correction points, and the
+    lidar's claim travels whole. It buys that with quantisation, which is why it is not the
+    default — and why it is a live flag rather than a decision (scratch/volume_shift_cost.py)."""
+    world, sharp = room(), room()
+    shift = PlanarShift(0.10, -0.04, math.radians(3.0))
+    before = world.lidar_slice().counts()["occupied"]
+    lo, hi = world.protected_rows or (0, 0)
+    claim = int(np.count_nonzero(world.lidar_weight[:, :, lo:hi].max(axis=2) > 0.0))
+    world.shift(shift, "blend")
+    sharp.shift(shift, "nearest")
+    keen = sharp.lidar_slice()
+    assert keen.counts()["occupied"] >= before * 0.95, "nearest keeps the cells blend averages"
+    assert keen.counts()["occupied"] > world.lidar_slice().counts()["occupied"]
+    assert off_the_moved_wall(keen, shift).max() <= 0.05, "and each is on the moved wall"
+    moved_claim = int(np.count_nonzero(sharp.lidar_weight[:, :, lo:hi].max(axis=2) > 0.0))
+    assert moved_claim <= claim + 5, "a nearest move cannot spread the lidar's claim either"
+    assert np.all(sharp.volume.sdf[sharp.volume.weight == 0.0] == 1.0), "unknown reads empty"
