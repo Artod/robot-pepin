@@ -108,6 +108,8 @@ from pepin.depth import (
 from pepin.depth_pipeline import (
     PARALLAX_MATCHER,
     PARALLAX_MIN_BASELINE_M,
+    PARALLAX_MOTION,
+    PARALLAX_MOTIONS,
     AffineLaw,
     FrameContext,
     ParallaxAnchor,
@@ -532,6 +534,32 @@ FLAGS = FlagSet(
         " cheaper at every gap under a second",
         choices=MATCHERS,
     ),
+    Flag(
+        "parallax_motion",
+        PARALLAX_MOTION,
+        description="whose word the parallax anchor's baseline is: tracker takes the motion"
+        " between the two frames from the lidar tracker's map pose (TF map -> base_link at both"
+        " stamps), odom from the EKF's wheels and gyro (odom -> base_link, what the stage always"
+        " used). A window the tracker cannot answer — no map pose at those stamps, a silent or"
+        " stale tracker — falls back to the odometry on its own, and the report line counts how"
+        " many windows each source actually gave",
+        why="a baseline is a length and every triangulated depth is proportional to it, and over"
+        " a second the wheels and gyro do not know one: the distance per interval scatters"
+        " p10/p90 0.5-2.0 of the tracker's on carpet (scratch/tape_odometry_error.py) while the"
+        " tracker's map pose is good to 1-2 cm over a second. The four errands of 2026-09-14"
+        " re-measured with each motion on the same frame pairs (scratch/parallax_pose_sweep.txt,"
+        " runs 0267/0268/0273/0274): the odometry reads 15.8 cm of travel at a 1.0 s gap and"
+        " 25.5 cm at 1.5 s where the tracker reads 13.9 and 18.6, and the depth follows — at"
+        " 1-2 m the flow reads 1.263 and 1.342 of the lidar on the odometry's motion against"
+        " 1.138 and 0.944 on the tracker's, the describer 1.347 and 1.506 against 0.951 and"
+        " 0.968. The 1.25-1.45 over-reading past a second of gap, the one both matchers shared,"
+        " was the baseline",
+        on_when="tracker wherever the tracker is alive, which is the default: it is the one pose"
+        " on this cart measured against the map rather than integrated",
+        off_when="odom on a robot with no tracker at all, or to A/B the baseline against the"
+        " numbers above without restarting the node",
+        choices=PARALLAX_MOTIONS,
+    ),
 )
 FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
 
@@ -609,6 +637,7 @@ class DepthStream(Node):
         self._law.slew_per_s = float(self._switches["law_slew"])  # how fast the law may move
         self._ask_parallax(float(self._switches["parallax_min_baseline_m"]))  # and the ring's ask
         self._ask_matcher(str(self._switches["parallax_matcher"]))  # and who matches its corners
+        self._ask_motion(str(self._switches["parallax_motion"]))  # and whose motion it triangulates
         self._tally = Tally(STAGES)
         self._lean = LeanFeed(
             self,
@@ -708,6 +737,8 @@ class DepthStream(Node):
             self._ask_parallax(float(new))
         elif name == "parallax_matcher":
             self._ask_matcher(str(new))
+        elif name == "parallax_motion":
+            self._ask_motion(str(new))
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
 
@@ -723,6 +754,13 @@ class DepthStream(Node):
         stage = self._pipeline.stage("parallax_anchor")
         if isinstance(stage, ParallaxAnchor):
             stage.matcher = matcher
+
+    def _ask_motion(self, source: str) -> None:
+        """Tell the parallax anchor whose motion its baseline is, the tracker's map pose or the
+        EKF's odometry; a window the chosen source cannot answer falls back to the odometry."""
+        stage = self._pipeline.stage("parallax_anchor")
+        if isinstance(stage, ParallaxAnchor):
+            stage.motion_source = source
 
     def _on_work_error(self, text: str) -> None:
         self.get_logger().error(f"depth failed on a frame:\n{text}")

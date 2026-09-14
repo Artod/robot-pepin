@@ -95,6 +95,35 @@ class Odometry:
         return base_motion(self._poses[from_stamp], self._poses[to_stamp])
 
 
+class Tracked(Odometry):
+    """A motion source that can also answer through the map, as a node's FramePoser does: the
+    tracker's poses are the truth, the odometry's are whatever ``drift`` stretches the step by —
+    the wheels' own over-reading. ``blind`` is a tracker that says nothing, the silence the
+    anchor must fall back from."""
+
+    def __init__(
+        self, poses: dict[float, RigidPose], drift: float = 1.0, blind: bool = False
+    ) -> None:
+        super().__init__({t: _stretched(pose, drift) for t, pose in poses.items()})
+        self._map = poses
+        self._blind = blind
+        self.map_asks = 0
+
+    def map_motion(self, from_stamp: float, to_stamp: float) -> RigidPose | None:
+        """How base_link moved between the two stamps according to the tracker, or ``None``
+        when this tracker is silent."""
+        self.map_asks += 1
+        if self._blind or from_stamp not in self._map or to_stamp not in self._map:
+            return None
+        return base_motion(self._map[from_stamp], self._map[to_stamp])
+
+
+def _stretched(pose: RigidPose, drift: float) -> RigidPose:
+    """The same pose with its position scaled: a metre of travel the wheels call ``drift``
+    metres."""
+    return RigidPose(pose.rotation, drift * np.asarray(pose.translation))
+
+
 # ---- the geometry, with no tracker in the way ---------------------------------------------
 def test_triangulation_is_exact_on_correspondences_the_projection_itself_produced() -> None:
     """A scene of base_link points seen from two cart poses: the depths triangulated from the
@@ -469,6 +498,56 @@ def test_the_report_line_names_the_matcher_and_its_window() -> None:
     line = ParallaxAnchor().describe()
     assert line.startswith("klt <= 0.60 s")
     assert ParallaxAnchor(matcher="orb").describe().startswith("orb <= 1.50 s")
+
+
+def test_the_baseline_is_the_tracker_s_word_and_the_odometry_s_drift_scales_the_depth() -> None:
+    """The same two rendered pictures, the same corners, one difference: whose motion the
+    baseline is. The tracker knows the 12 cm sidestep; the wheels call it 15 cm (the measured
+    over-reading past a second of gap, scratch/parallax_pose_sweep.txt). Every depth is
+    proportional to the baseline, so the default reads the rendered planes and the odometry
+    reads them a quarter too far — and the report line says which source answered."""
+    a, b, _ = rendered_pair()
+    poses = {1.0: planar_pose(0.0, 0.0, 0.0), 1.2: planar_pose(0.0, -SIDESTEP_M, 0.0)}
+    network = np.full((INTR.height, INTR.width), 3.0)
+    source = Tracked(poses, drift=1.25)
+    anchor = ParallaxAnchor()
+    assert anchor.motion_source == "tracker"
+    assert anchor.pairs(Frame(network, context(1.0, a, source))) is None
+    pairs = anchor.pairs(Frame(network, context(1.2, b, source)))
+    assert pairs is not None and pairs.size >= 50
+    assert band_error(pairs) < 0.05
+    assert anchor.used == {"tracker": 1, "odom": 0}
+    assert "on the tracker's motion (tracker 1)" in anchor.describe()
+    wheels = ParallaxAnchor(motion_source="odom")
+    assert wheels.pairs(Frame(network, context(1.0, a, source))) is None
+    stretched = wheels.pairs(Frame(network, context(1.2, b, source)))
+    assert stretched is not None and stretched.size >= 50
+    assert float(np.median(np.asarray(stretched.z) / np.asarray(pairs.z))) == pytest.approx(
+        1.25, rel=0.02
+    )
+    assert wheels.used == {"tracker": 0, "odom": 1} and "(odom 1)" in wheels.describe()
+
+
+def test_a_silent_tracker_falls_back_to_the_odometry_for_that_window() -> None:
+    """A tracker that cannot answer these two stamps — none yet, or a map pose too stale for TF
+    to interpolate — costs the frame nothing: the window is triangulated on the odometry
+    instead, counted as such, and a source with no map at all (a tape, another robot) is that
+    same fallback. The tracker is asked once per frame, not once per candidate partner."""
+    a, b, _ = rendered_pair()
+    poses = {1.0: planar_pose(0.0, 0.0, 0.0), 1.2: planar_pose(0.0, -SIDESTEP_M, 0.0)}
+    network = np.full((INTR.height, INTR.width), 3.0)
+    silent = Tracked(poses, blind=True)
+    anchor = ParallaxAnchor()
+    assert anchor.pairs(Frame(network, context(1.0, a, silent))) is None
+    pairs = anchor.pairs(Frame(network, context(1.2, b, silent)))
+    assert pairs is not None and pairs.size >= 50
+    assert anchor.used == {"tracker": 0, "odom": 1}
+    assert silent.map_asks == 1  # the second frame's walk; the first has an empty ring
+    plain = Odometry(poses)  # no map_motion at all: the protocol simply does not match
+    bare = ParallaxAnchor()
+    assert bare.pairs(Frame(network, context(1.0, a, plain))) is None
+    assert bare.pairs(Frame(network, context(1.2, b, plain))) is not None
+    assert bare.used == {"tracker": 0, "odom": 1}
 
 
 def test_the_anchor_hands_its_matcher_to_the_triangulation() -> None:
