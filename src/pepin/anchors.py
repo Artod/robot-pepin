@@ -41,6 +41,18 @@ SUFFIX = ".graph_anchor.json"
 RELEARN_GAP_M = 0.5
 RELEARN_GAP_DEG = 20.0
 RELEARN_HOLD_S = 5.0
+# What a seating must be worth for the WHOLE graph's frame to be learned from it. A fit is not an
+# error bar: at "home" (the charger, along a sofa) the lidar's seatings spread up to 55 cm in y
+# within minutes at fit 0.67-0.79, because the scan there is pinned in one axis only — and an
+# anchor learned from such a seating carries that error into every word the graph ever says
+# (2026-09-14: after the first accepted closure the graph's word sat 24-28 cm from the lidar).
+# The peak's own covariance is the error bar (/tracker_pose, covariance=peak, NEES-calibrated),
+# so the anchor waits for a seating the scan pins in BOTH axes. 3 cm because that is where the
+# gate starts to be a gate: over tapes 0293-0298 the worse of the two position sigmas has a
+# median of 1.50 cm and a p90 of 3.18 cm, so 3 cm refuses the worst 11 % of seatings and 1 cm
+# would refuse 79 % — an anchor that is never learned is its own failure.
+ANCHOR_MAX_SIGMA_M = 0.03
+ANCHOR_MAX_SIGMA_DEG = 1.0
 
 
 @dataclass(frozen=True)
@@ -61,6 +73,41 @@ class Anchor:
             f" from {self.origin}"
             + (f" {self.relearns}" if self.relearns and self.origin != "file" else "")
         )
+
+
+def describe_sigma(sigma: tuple[float, float, float] | None) -> str:
+    """One seating's uncertainty for a report line: ``1.0/1.3 cm, 0.30 deg`` (x, y, heading),
+    or ``unknown`` when the belief carried no covariance."""
+    if sigma is None:
+        return "unknown"
+    return f"{sigma[0] * 100.0:.1f}/{sigma[1] * 100.0:.1f} cm, {math.degrees(sigma[2]):.2f} deg"
+
+
+def seating_refusal(
+    sigma: tuple[float, float, float] | None,
+    max_sigma_m: float = ANCHOR_MAX_SIGMA_M,
+    max_sigma_deg: float = ANCHOR_MAX_SIGMA_DEG,
+) -> str | None:
+    """Why this seating may not be learned from, in one phrase for a log, or ``None`` when it may.
+
+    ``sigma`` is the tracker's own error bar at the moment — the roots of its covariance diagonal
+    (x, y in metres, heading in radians) — and the anchor is a constant of the pair: whatever it
+    is learned from is baked into every word the graph says until the file is rewritten. So the
+    seating must be sharp in BOTH position axes, not merely well-matched: a scan pinned along a
+    corridor reports an honest fit and a metre of freedom in the other axis.
+    """
+    if sigma is None:
+        return "the tracker's belief carries no covariance"
+    if max(sigma[0], sigma[1]) > max_sigma_m:
+        return (
+            f"the lidar's seating is soft ({describe_sigma(sigma)}, over"
+            f" {max_sigma_m * 100.0:.1f} cm)"
+        )
+    if math.degrees(sigma[2]) > max_sigma_deg:
+        return (
+            f"the lidar's heading is soft ({describe_sigma(sigma)}, over {max_sigma_deg:.1f} deg)"
+        )
+    return None
 
 
 def map_slug(map_id: str) -> str:
