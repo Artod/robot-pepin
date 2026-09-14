@@ -10,11 +10,21 @@ robot drives on — and, with it, whether the whole-map watchdog half of the lap
 camera's scans matched here and sent to the board as pose measurements — runs in both modes and
 simply finds no belief to start from where no tracker publishes one.
 
-KNOWN MAP (the default). The board's tracker owns ``map -> odom`` on a saved map and RTAB-Map's
-"odometry" is that tracker's pose (``odom_frame_id: map``), so RTAB-Map keeps its graph in a
-frame of its own (``map_frame_id: rtabmap``, tied to ``map`` by pepin_bringup.rtabmap_frame) and
-never publishes into the tracker's tree: two localisations coexist and its grid is the map the
-tracker will be handed one day.
+KNOWN MAP (the default). The board's tracker owns ``map -> odom`` on a saved map, and RTAB-Map
+is built on the SAME continuous odometry every other consumer rides — the board EKF's
+``odom -> base_link`` over the bridge (``odom_frame_id: odom``) — with its graph in a frame of
+its own (``map_frame_id: rtabmap``, tied to ``map`` by pepin_bringup.rtabmap_frame's anchor).
+It never publishes into anyone's tree (``publish_tf`` false): two localisations coexist, its
+grid is the map the tracker will be handed one day, and what it learns about the cart's place
+travels to the board as ONE MORE MEASUREMENT for the tracker's fusion (rtabmap_frame's
+``graph_measurement``), never as a second owner of ``map -> odom``.
+
+Until 2026-09-14 that odometry was the tracker's own pose (``graph_odom:=false`` still is), and
+the price was the whole point of the graph: the tracker's pose teleports when it relocalises, a
+neighbour edge between two nodes one second apart then carried 0.888 m against its 0.244 m
+sigma, and on that 3.64 error ratio RTAB-Map rejected EVERY loop closure it found for three
+hours. The graph's answer is only worth fusing because it is now built on odometry that never
+jumps.
 
 ONLINE SLAM (``slam:=true`` — ros/laptop.sh vslam --slam). There is no saved map: the robot is
 put somewhere unknown and RTAB-Map builds ONE map while it drives. Its "odometry" is then the
@@ -39,7 +49,8 @@ owns heading). Nothing reaches the filter until that node's ``vo_publish`` flag 
 ``vo:=false`` neither process starts at all.
 
 Arguments: ``board`` (the robot's address for the camera stream), ``slam``, ``camera_only``,
-``resume``, ``vo``, ``database`` (empty: chosen by the mode), ``bridge_admin`` (the laptop
+``resume``, ``graph_odom`` (known-map mode: whose odometry the graph is built on),
+``vo``, ``database`` (empty: chosen by the mode), ``bridge_admin`` (the laptop
 bridge's REST admin, asked whether it still lists this launch's previous incarnation),
 ``static_camera_tf``
 (default true: the camera node broadcasts base_link -> camera_link from config/camera.json; false
@@ -123,11 +134,10 @@ RTABMAP = {
 # shelves). Grid/3D keeps the voxels so the operator sees the room in three dimensions
 # (cloud_map). Nothing here reaches Nav2: the tracker's saved map is what the robot drives on.
 KNOWN_MAP = {
-    # RTAB-Map's "odometry" is the tracker's pose (map -> odom -> base_link), not the wheels': a
-    # node lands where the lidar says the cart is, to a centimetre, and two clouds a few degrees
-    # apart coincide (2026-09-10: with raw odometry, the graph rejected most closures as
-    # inconsistent and the voxels smeared).
-    "odom_frame_id": "map",
+    # RTAB-Map's "odometry" is the EKF's odom -> base_link, the same continuous odometry every
+    # other consumer rides, and its graph keeps a frame of its own tied to the map by
+    # pepin_bringup.rtabmap_frame (``graph_odom``, the default).
+    "odom_frame_id": "odom",
     "map_frame_id": "rtabmap",
     "subscribe_scan": True,
     "Grid/Sensor": "2",  # 0=scan, 1=depth, 2=both (0.22's name for the old Grid/FromDepth)
@@ -136,6 +146,18 @@ KNOWN_MAP = {
     "Grid/RayTracing": "false",  # 3D ray tracing costs more than it clears at 1 Hz
     "RGBD/NeighborLinkRefining": "true",
 }
+
+# The old known-map table, one launch argument away (``graph_odom:=false``): RTAB-Map's
+# "odometry" is the TRACKER's pose (map -> odom -> base_link), so a node lands where the lidar
+# says the cart is and two clouds a few degrees apart coincide (2026-09-10: with raw odometry,
+# the graph rejected most closures as inconsistent and the voxels smeared). What it cost is the
+# reason for the default above: that pose teleports on a relocalisation, and a neighbour edge
+# between two nodes a second apart then carries a jump no graph can accept — 0.888 m against a
+# 0.244 m sigma, a ratio of 3.64 over the 3.0 of RGBD/OptimizeMaxError, on which RTAB-Map
+# rejected EVERY loop closure it found for three hours ("Rejecting all added loop closures (5,
+# first is 31448 <-> 30978) ... maximum graph error ratio 3.64 (edge 28042->28043)", 2026-09-14),
+# though each was registered with 67 visual inliers against a Vis/MinInliers of 20.
+TRACKER_ODOM = {"odom_frame_id": "map"}
 
 # Online SLAM: the EKF's odometry under it, the map frame its own, the grid the one Nav2 plans
 # on. Grid/Sensor 0 — the 2D grid is the LIDAR's alone even though the depth is subscribed for
@@ -264,11 +286,12 @@ def _after_ghost(*names: str) -> list:  # type: ignore[type-arg]
     ]
 
 
-def rtabmap_parameters(slam: bool, camera_only: bool) -> dict[str, object]:
+def rtabmap_parameters(slam: bool, camera_only: bool, graph_odom: bool = True) -> dict[str, object]:
     """Everything RTAB-Map is told for one mode: the common table under the mode's frames and
     grid. ``camera_only`` is read in SLAM mode alone — beside a known map the lidar is what
-    makes the graph metric."""
-    mode: dict[str, object] = dict(KNOWN_MAP)
+    makes the graph metric; ``graph_odom`` is read there alone too (false puts the graph back on
+    the tracker's pose, :data:`TRACKER_ODOM`)."""
+    mode: dict[str, object] = dict(KNOWN_MAP) if graph_odom else {**KNOWN_MAP, **TRACKER_ODOM}
     if slam:
         mode = {**SLAM, **(SLAM_CAMERA_ONLY if camera_only else SLAM_LIDAR)}
     return {**RTABMAP, **mode}
@@ -286,6 +309,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     camera_only = _flag(context, "camera_only")
     resume = _flag(context, "resume")
     world_map = _flag(context, "world_map")
+    graph_odom = _flag(context, "graph_odom")
     mode = "slam" if slam else "vision"
     # Whether the fused volume may be /map at all: the mode's owner (pepin.deployment) and the
     # launch's own world_map, the two halves the node checks before it publishes anything.
@@ -364,6 +388,8 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             "--ros-args",
             "-p",
             f"slam:={'true' if slam else 'false'}",
+            "-p",
+            f"graph_odom:={'true' if graph_odom else 'false'}",
         ],
         output="screen",
         prefix=_after_ghost("/rtabmap_frame"),
@@ -506,7 +532,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 "odom_sensor_sync": False,
                 # the grid is republished every second: the operator watches it grow
                 "map_always_update": True,
-                **rtabmap_parameters(slam, camera_only),
+                **rtabmap_parameters(slam, camera_only, graph_odom),
             }
         ],
         remappings=remappings,
@@ -559,6 +585,10 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("slam", default_value="false"),
             DeclareLaunchArgument("camera_only", default_value="false"),  # SLAM mode only
             DeclareLaunchArgument("resume", default_value="false"),  # SLAM mode only
+            # Known-map mode only: whose odometry the graph is built on (see KNOWN_MAP and
+            # TRACKER_ODOM). A mode, not a tunable — it decides which frame every node of the
+            # database was placed in, so it is set at a launch and never mid-session.
+            DeclareLaunchArgument("graph_odom", default_value="true"),
             # The volume is /map instead of RTAB-Map's grid (pepin_bringup.depth_fusion)
             DeclareLaunchArgument("world_map", default_value="false"),
             # The map the fused volume's lidar layer is seeded from (a map_server yaml as the
