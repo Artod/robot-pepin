@@ -63,6 +63,9 @@ that places it — is compared with the one the volume is painted under, and pas
 by the difference (:meth:`pepin.worldmap.WorldMap.shift`, tens of milliseconds on the laptop for
 2.4 M voxels, on the worker thread, no oftener than ``follow_correction_min_s``). Smaller
 corrections are measured against the same anchor and move the volume together when they add up.
+While a move is owed but the rate has not let it through, nothing is painted at all: an
+observation placed under the new correction and fused into a volume still standing in the old
+one is carried past the truth by the whole of that move when it lands.
 The grid never moves, nothing is re-seeded and nothing extra is published: the trackers follow
 ``map -> odom`` themselves, and the next slice out of this node is simply the moved one. Only in
 SLAM mode, where the graph owns that edge — on a known map the board's tracker owns it, the
@@ -562,13 +565,18 @@ FLAGS = FlagSet(
         "follow_correction_min_s",
         2.0,
         description="the shortest time between two moves of the volume: a burst of graph"
-        " optimisations costs one resample, not one each (the rest is not lost — it is owed"
-        " against the same anchor and applied at the next move)",
+        " optimisations costs one resample, not one each. The correction is not lost (it is owed"
+        " against the same anchor and applied at the next move) — but the frames and"
+        " revolutions of that window are not painted, because a volume that owes a move is not"
+        " the map they were placed in",
         why="a move costs 46-58 ms of the worker thread on the live grid"
         " (scratch/volume_shift_cost.py, 2026-09-14), so one every 2 s holds the resample under"
-        " 3 % of that thread however hard RTAB-Map optimises — and a map two seconds behind a"
-        " burst of closures is still a map that closes, because nothing is dropped: what is owed"
-        " is measured against the same anchor and applied at the next move",
+        " 3 % of that thread however hard RTAB-Map optimises. Its price is the observations of"
+        " that window: painting them into a volume still standing in the old correction and then"
+        " moving the lot puts them past the truth by the whole move — a 30 cm closure left a"
+        " freshly painted wall 20 cm beyond where the graph says it is"
+        " (scratch/follow_refute.py, 2026-09-14) — so they are refused instead, and two seconds"
+        " of a drive is the cheap half of that trade",
         on_when="raise it if a mapping run is ever seen to spend its frames on resampling",
         off_when="0 applies every correction that clears the thresholds, at once",
         range=(0.0, 60.0),
@@ -935,8 +943,11 @@ class DepthFusion(Node):
 
         The graph's correction is followed before the layer's own gate: the volume follows the
         map even where this node writes no lidar layer at all, and a revolution is the steady
-        pulse that carries it between camera frames."""
-        self._follow(msg.header.stamp)
+        pulse that carries it between camera frames. A revolution that arrives while the volume
+        owes the graph a move is dropped, not written into a map that is about to move under
+        it."""
+        if not self._follow(msg.header.stamp):
+            return  # the volume owes the graph a move: nothing goes in until it has been made
         if not self._switches.on("lidar_layer"):
             return
         if self._laser is None and not self._lookup_laser(msg.header.frame_id):
@@ -984,41 +995,49 @@ class DepthFusion(Node):
         return True
 
     # ---- the graph's correction ----------------------------------------------------------
-    def _follow(self, stamp: Any) -> None:
+    def _follow(self, stamp: Any) -> bool:
         """Carry the volume to where the graph now says the room is, before anything is painted
-        into it at ``stamp``.
+        into it at ``stamp``; returns whether that observation may go in at all.
 
         The correction is read from TF at the frame's OWN stamp — the same edge that places the
         frame, through the same buffer — so the volume and the observation about to go into it
         are always expressed in one correction and no race with the bridge can put them in two.
-        Below the thresholds nothing moves and nothing is lost: the difference is owed against
-        the same anchor and applied when it grows. Above them the whole content is carried
-        rigidly (:meth:`pepin.worldmap.WorldMap.shift`), at most once every
-        ``follow_correction_min_s``, on the caller's worker thread. The whole of it — what is
-        owed, the rate and the move — happens under the model lock, because both workers come
-        through here and two of them that read the same debt would pay it twice.
+        Below the thresholds nothing moves: the difference is owed against the same anchor and
+        applied when it grows, and the observation goes in, at most a voxel out. Above them the
+        whole content is carried rigidly (:meth:`pepin.worldmap.WorldMap.shift`) on the caller's
+        worker thread — and if the rate (``follow_correction_min_s``) will not let that move
+        through yet, the observation is REFUSED rather than painted. An observation placed under
+        the new correction and painted into a volume still standing in the old one is carried
+        past the truth by the whole of the move when it finally lands: measured on the synthetic
+        box (scratch/follow_refute.py, 2026-09-14), a 30 cm closure left a freshly painted wall
+        20 cm beyond where the graph puts it. Losing two seconds of frames after a burst of
+        optimisations is the cheap half of that trade; the correction itself is never lost.
+
+        The whole of it — what is owed, the rate and the move — happens under the model lock,
+        because both workers come through here and two of them that read the same debt would
+        pay it twice.
         """
         if not self._graph_map or not self._switches.on("follow_correction"):
-            return
+            return True
         correction = self._tf.pose(MAP_FRAME, ODOM_FRAME, stamp)
         if correction is None:
             self._tally.count("no_correction")  # the failure itself is counted by the tf handler
-            return
+            return True
         with self._lock:
             if self._follower.painted_in is None:
                 self._follower.anchor(correction)  # an empty volume is born in what is in force
-                return
+                return True
             shift = self._follower.pending(
                 correction,
                 float(self._switches["follow_correction_min_m"]),
                 float(self._switches["follow_correction_min_deg"]),
             )
             if shift is None:
-                return
+                return True
             now = time.monotonic()
             if now - self._followed_at < float(self._switches["follow_correction_min_s"]):
                 self._tally.count("follow_held")  # owed against the same anchor, paid at the next
-                return
+                return False  # ...and nothing is painted into a volume that owes a move
             started = time.perf_counter()
             self._world.shift(shift)
             self._follow_ms = (time.perf_counter() - started) * 1e3
@@ -1029,6 +1048,7 @@ class DepthFusion(Node):
             f"the graph moved map -> odom: the volume follows it by {shift.text()}"
             f" ({self._follow_ms:.0f} ms, {self._follower.applied} moves this run)"
         )
+        return True
 
     def _snapshot(self) -> None:
         """Write the volume to ``world_path`` — the warm cache a next run resumes from. The
@@ -1077,7 +1097,8 @@ class DepthFusion(Node):
         if rgb is None or rgb.ndim != 3 or rgb.shape[:2] != depth.shape:
             self._tally.count("no_image")  # an encoding or size the decoder cannot pair
             rgb = None
-        self._follow(stamp)  # the model this frame is seated on and fused into is the moved one
+        if not self._follow(stamp):
+            return  # the model this frame would be seated on still owes the graph a move
         if self._switches.on("align"):
             with self._tally.measure("align"):
                 aligned = self._aligned(depth, intr, camera, base)
@@ -1301,8 +1322,8 @@ class DepthFusion(Node):
         all, how many times it has moved, the last move and what the resample cost."""
         if not self._graph_map:
             return (
-                f"follow: not in {self._mode} mode (map -> odom is the tracker's there and the"
-                " served map is the reference)"
+                f"follow: not in SLAM mode (this is {self._mode}: map -> odom is the tracker's"
+                " own output there and the served map is the reference)"
             )
         if not self._switches.on("follow_correction"):
             return "follow: off (the graph moves the pose, the voxels stay)"
@@ -1311,8 +1332,8 @@ class DepthFusion(Node):
         return (
             f"follow: {self._follower.applied} moves ({anchored}), last"
             f" {self._follower.last.text()} in {self._follow_ms:.0f} ms,"
-            f" {int(w.counts['follows'])} this window, {held} held by the rate,"
-            f" {int(w.counts['no_correction'])} frames without a correction"
+            f" {int(w.counts['follows'])} this window, {held} observations refused while a"
+            f" move was owed, {int(w.counts['no_correction'])} frames without a correction"
         )
 
     @staticmethod

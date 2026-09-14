@@ -1290,6 +1290,19 @@ def test_the_graphs_correction_moves_the_volume_only_where_the_graph_owns_it() -
     assert "self._tf.pose" in sf.calls(follow), "the correction comes from TF, at the stamp"
     for path in ("_fuse", "_on_scan_work"):
         assert "self._follow" in sf.calls(body[path]), f"{path} follows before it paints"
+        # ...and refuses to paint while a move is owed: an observation placed under the new
+        # correction and fused into a volume still standing in the old one is carried past the
+        # truth by the whole of that move when it lands (30 cm closure -> a wall 20 cm out,
+        # scratch/follow_refute.py, 2026-09-14)
+        guards = [
+            n
+            for n in ast.walk(body[path])
+            if isinstance(n, ast.If) and "self._follow(" in ast.unparse(n.test)
+        ]
+        assert guards, f"{path} paints only when the follower lets it"
+        assert all(any(isinstance(b, ast.Return) for b in guard.body) for guard in guards), (
+            f"{path} returns when the volume owes the graph a move"
+        )
     flags = load_table(REPO / NODES / "depth_fusion.py")
     assert flags.flag("follow_correction").default is True
     for name in ("follow_correction_min_m", "follow_correction_min_deg", "follow_correction_min_s"):
