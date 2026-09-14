@@ -30,6 +30,10 @@ pepin_render() {  # "[proc] [LEVEL] [epoch] [node]: text" -> "HH:MM:SS LEVEL nod
     '
 }
 watch_start() {
+    # A viewer is for a person at a terminal. Run with its output piped (an agent, a script),
+    # it has no reader, and every way of stopping it has left some member alive holding the
+    # pipe open, so the caller never returned (2026-09-13, three times): no terminal, no viewer.
+    [ -t 1 ] || return 0
     # The viewer runs in a process group of its own, so the stop reaches every member — the
     # ssh streaming the log included — with one signal. Killing the subshell alone, or pkill
     # by command line, left the ssh alive; it held the caller's stdout open, and a script whose
