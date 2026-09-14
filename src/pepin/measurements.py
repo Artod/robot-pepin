@@ -41,7 +41,10 @@ __all__ = [
     "MeasurementGate",
     "MeasurementUpdate",
     "RemoteMeasurement",
+    "compose",
+    "graph_anchor",
     "graph_measurement",
+    "inverse",
 ]
 
 # How old a measurement may be, in seconds, when the update it rides on happens: past this the
@@ -162,9 +165,46 @@ class RemoteMeasurement:
         )
 
 
+def compose(outer: Pose2D, inner: Pose2D) -> Pose2D:
+    """``inner`` expressed in the frame ``outer`` is expressed in: the planar transform
+    ``outer`` applied to the planar pose ``inner``."""
+    cos, sin = math.cos(outer.theta), math.sin(outer.theta)
+    return Pose2D(
+        outer.x + cos * inner.x - sin * inner.y,
+        outer.y + sin * inner.x + cos * inner.y,
+        math.atan2(math.sin(outer.theta + inner.theta), math.cos(outer.theta + inner.theta)),
+    )
+
+
+def inverse(pose: Pose2D) -> Pose2D:
+    """The transform the other way: the frame ``pose`` places, seen from the pose itself."""
+    cos, sin = math.cos(pose.theta), math.sin(pose.theta)
+    return Pose2D(
+        -(cos * pose.x + sin * pose.y),
+        -(-sin * pose.x + cos * pose.y),
+        math.atan2(math.sin(-pose.theta), math.cos(-pose.theta)),
+    )
+
+
+def graph_anchor(tracker: Pose2D, graph: Pose2D) -> Pose2D:
+    """The edge from a pose graph's own frame to the lidar map, learned once at the start of a
+    session: where the graph's frame sits on the map, so that the graph's answer about the cart
+    reads as a place on the map.
+
+    ``tracker`` is where the board's tracker says the cart is (map frame) and ``graph`` is where
+    the same cart is according to the graph at that instant (the graph's frame). Returns the
+    transform that carries the second onto the first -- ``map <- graph`` -- and it is a constant
+    of the session: RTAB-Map refuses an initial pose in mapping mode ("Initial pose can only be
+    set in localization mode (Mem/IncrementalMemory=false), ignoring it", librtabmap_core
+    0.22.1), so the graph starts at ITS odometry's origin and the offset is learned here instead
+    of imposed there.
+    """
+    return compose(tracker, inverse(graph))
+
+
 def graph_measurement(
-    belief: Pose2D,
-    correction: Pose2D,
+    pose: Pose2D,
+    anchor: Pose2D,
     stamp: float,
     map_id: str,
     source: str = GRAPH,
@@ -172,13 +212,14 @@ def graph_measurement(
     floor_yaw_deg: float = REMOTE_FLOOR_YAW_DEG,
 ) -> RemoteMeasurement:
     """A pose graph's verdict about where the cart is, as a measurement on the SAME map the
-    tracker drives on: the tracker's own belief moved by the graph's correction.
+    tracker drives on: the place the graph has the cart at, moved onto the map by the anchor.
 
-    ``belief`` is the pose the graph was fed (the tracker's, in the map frame) and ``correction``
-    is what the graph says about that frame -- RTAB-Map's ``map_to_odom``, identity until an
-    optimisation moves it. Beside a known map the graph's frame and the lidar map's are the same
-    frame at the session's start pose, so composing the two reads the graph's answer straight
-    back in map coordinates: no second owner of ``map -> odom``, one more word in the fusion.
+    ``pose`` is where the graph says the cart is IN THE GRAPH'S OWN FRAME (RTAB-Map's
+    ``map_to_odom`` composed with the filter's ``odom -> base_link``: the graph's opinion, built
+    from its own odometry and every closure it has accepted) and ``anchor`` is where that frame
+    sits on the lidar map (:func:`graph_anchor`, learned once at the start of the session).
+    Composing the two reads the graph's answer back in map coordinates: no second owner of
+    ``map -> odom``, one more word in the fusion.
 
     The covariance is the floor and nothing else. A graph that has never closed a loop reports
     its own pose variance as the whole session's accumulated odometry (497985 m2, a standard
@@ -189,11 +230,8 @@ def graph_measurement(
 
     Returns the measurement, ready to travel (:meth:`RemoteMeasurement.to_json`).
     """
-    cos, sin = math.cos(correction.theta), math.sin(correction.theta)
-    x = correction.x + cos * belief.x - sin * belief.y
-    y = correction.y + sin * belief.x + cos * belief.y
-    turned = correction.theta + belief.theta
-    yaw = math.atan2(math.sin(turned), math.cos(turned))
+    place = compose(anchor, pose)
+    x, y, yaw = place.x, place.y, place.theta
     covariance: NDArray[np.float64] = np.diag(
         [floor_xy_m**2, floor_xy_m**2, math.radians(floor_yaw_deg) ** 2]
     )

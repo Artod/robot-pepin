@@ -519,12 +519,21 @@ def test_a_route_that_carries_nothing_is_starved_and_a_quiet_topic_is_not() -> N
 def test_a_bridged_topic_carries_one_qos_on_both_sides() -> None:
     """The route's DDS QoS is whichever declaration created it and is never revised, so the two
     sides must not disagree: /imu/data_raw is written RELIABLE ten deep by the board."""
-    from pepin.deployment import BRIDGED_QOS, bridged_qos, incoming_topics
+    from pepin.deployment import BRIDGE_MODES, BRIDGED_QOS, bridged_qos, incoming_topics
 
     assert bridged_qos("/imu/data_raw") == ("reliable", 10) == bridged_qos("imu/data_raw")
     assert bridged_qos("/scan") is None
+    assert bridged_qos("/localization/graph_measurement") == ("reliable", 5), "vision mode's"
+    # A rule is about a topic that crosses in SOME mode: the graph's word only exists beside a
+    # known map, where the tracker it is measured for runs.
+    crossing = {
+        t
+        for mode in BRIDGE_MODES
+        for side in ("laptop", "board")
+        for t in incoming_topics(side, mode)
+    }
     for topic in BRIDGED_QOS:
-        assert topic in incoming_topics("laptop") or topic in incoming_topics("board"), topic
+        assert topic in crossing, topic
         assert BRIDGED_QOS[topic][0] in ("reliable", "best_effort"), topic
 
 

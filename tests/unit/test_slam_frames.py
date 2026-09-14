@@ -19,10 +19,12 @@ ros_stubs.install()
 
 
 class _MapGraph:
-    """rtabmap_msgs/MapGraph as these nodes read it: the correction and nothing else."""
+    """rtabmap_msgs/MapGraph as these nodes read it: the correction, and the stamp the
+    laptop's node reads the cart's odometry at."""
 
-    def __init__(self, map_to_odom: Any) -> None:
+    def __init__(self, map_to_odom: Any, stamp: Any = None) -> None:
         self.map_to_odom = map_to_odom
+        self.header = types.SimpleNamespace(stamp=stamp if stamp is not None else _stamp(0.0))
 
 
 sys.modules.setdefault("rtabmap_msgs", types.ModuleType("rtabmap_msgs"))
@@ -33,10 +35,38 @@ from pepin_bringup import rtabmap_frame, slam_frame  # noqa: E402
 from pepin_bringup.msgs import transform_from_pose  # noqa: E402
 
 
+def _stamp(seconds: float) -> Any:
+    """A builtin_interfaces/Time at ``seconds``."""
+    from builtin_interfaces.msg import Time as TimeMsg
+
+    stamp = TimeMsg()
+    stamp.sec = int(seconds)
+    stamp.nanosec = round((seconds - int(seconds)) * 1e9)
+    return stamp
+
+
+def _odom(node: Any, x: float, y: float, seconds: float = 7.0) -> None:
+    """The EKF's odom -> base_link, as the laptop's node looks it up at a graph's stamp."""
+    pose = RigidPose(np.eye(3), np.array([x, y, 0.0]))
+    transform = transform_from_pose("odom", "base_link", pose, _stamp(seconds))
+    node._lookup.buffer.transforms[("odom", "base_link")] = transform
+
+
 def _shift(x: float, y: float) -> Any:
     """A correction of x, y metres with no rotation, as a stamped transform."""
     pose = RigidPose(np.eye(3), np.array([x, y, 0.0]))
     return transform_from_pose("a", "b", pose, ros_stubs.Time())
+
+
+def _belief(node: Any, x: float, y: float, seconds: float = 7.0) -> None:
+    """The board's tracker saying where the cart is, on map "flat3"."""
+    from geometry_msgs.msg import PoseWithCovarianceStamped
+
+    msg = PoseWithCovarianceStamped()
+    msg.header.frame_id = "flat3"
+    msg.header.stamp = _stamp(seconds)
+    msg.pose.pose.position.x, msg.pose.pose.position.y = x, y
+    node.subs["/tracker_pose"][1](msg)
 
 
 def _xy(message: Any) -> tuple[float, float]:
@@ -71,55 +101,84 @@ def test_the_board_holds_the_last_correction_and_re_stamps_it_every_tick() -> No
     assert first.header.stamp.nanosec == 0 and second.header.stamp.nanosec == 500_000_000
 
 
-def test_on_a_known_map_the_laptop_broadcasts_the_inverse_and_sends_nothing() -> None:
-    """RTAB-Map's odometry is then the tracker's pose, so its correction reads rtabmap -> map
-    and the edge our tree needs is the other way round: map is the root."""
+def test_on_a_known_map_the_laptop_broadcasts_the_anchor_it_learned_once() -> None:
+    """RTAB-Map runs on the EKF's odometry, so its graph starts at the odom frame's origin: the
+    edge our tree needs is where that frame sits on the map, learned from the tracker at the
+    first graph and then held. Identity until it is known — a tree with a hole in it is worse
+    than one edge that is not yet right."""
     node = rtabmap_frame.RtabmapFrame()
     assert node.frames == ("map", "rtabmap")
     assert rtabmap_frame.CORRECTION_TOPIC not in node.pubs, "the board owns nothing here"
-    _, on_graph = node.subs["/rtabmap/mapGraph"]
-    on_graph(_MapGraph(_shift(0.3, 0.0).transform))
     node.timers[0][1]()
+    (identity,) = node._tf.sent
+    assert _xy(identity) == (0.0, 0.0), "no graph, no anchor"
+
+    _belief(node, 1.0, 2.0)
+    _odom(node, 0.2, 0.0)
+    node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+    node.timers[0][1]()
+    sent = node._tf.sent[-1]
+    assert (sent.header.frame_id, sent.child_frame_id) == ("map", "rtabmap")
+    assert _xy(sent) == (0.8, 2.0), "the tracker at (1, 2), the graph's cart at (0.2, 0)"
+
+    # ...and it is learned once: a later graph moves the word, never the frame
+    node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.1, 0.0).transform))
+    node.timers[0][1]()
+    assert _xy(node._tf.sent[-1]) == (0.8, 2.0)
+
+
+def test_with_graph_odom_off_the_laptop_broadcasts_the_inverse_correction() -> None:
+    """The arrangement before 2026-09-14, one launch argument away: RTAB-Map's odometry is the
+    tracker's pose, its correction reads rtabmap -> map, and the edge our tree needs is the
+    other way round."""
+    with ros_stubs.parameters(graph_odom=False):
+        node = rtabmap_frame.RtabmapFrame()
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.3, 0.0).transform))
+        node.timers[0][1]()
     (sent,) = node._tf.sent
     assert (sent.header.frame_id, sent.child_frame_id) == ("map", "rtabmap")
     assert _xy(sent) == (-0.3, 0.0), "the inverse of the correction"
 
 
-def test_the_graph_s_word_is_the_tracker_s_pose_corrected_and_only_with_the_flag_on() -> None:
-    """With graph_measurement off the correction stays a frame here; on, every graph that moves
-    publishes the board's own belief put through it, as one measurement on its own topic."""
+def test_the_graph_s_word_is_where_the_graph_puts_the_cart_on_the_map() -> None:
+    """With graph_measurement off the graph's answer stays here; on, every graph that moves
+    publishes where the GRAPH says the cart is — its correction composed with the EKF's
+    odometry and read through the anchor — as one measurement on its own topic."""
     import json
-
-    from geometry_msgs.msg import PoseWithCovarianceStamped
-
-    def _belief(node: object, x: float, y: float) -> None:
-        msg = PoseWithCovarianceStamped()
-        msg.header.frame_id = "flat3"
-        msg.header.stamp.sec = 7
-        msg.pose.pose.position.x, msg.pose.pose.position.y = x, y
-        node.subs["/tracker_pose"][1](msg)  # type: ignore[attr-defined]
 
     node = rtabmap_frame.RtabmapFrame()
     _belief(node, 1.0, 2.0)
-    node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.3, 0.0).transform))
+    _odom(node, 0.2, 0.0)
+    node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
     assert not node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent, "off by default"
 
     with ros_stubs.parameters(graph_measurement=True):
         node = rtabmap_frame.RtabmapFrame()
-        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.3, 0.0).transform))
-        assert not node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent, "no belief to correct yet"
+        _odom(node, 0.2, 0.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert not node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent, "no belief to anchor to yet"
         _belief(node, 1.0, 2.0)
-        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.3, 0.0).transform))
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
         (sent,) = node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent
         word = json.loads(sent.data)
-        # map_to_odom is rtabmap <- map: the graph says the cart is 0.3 m further along +x
-        # than the tracker thinks, and the word is the belief put through exactly that. The
-        # BROADCAST edge is the inverse of it (the test above) — a frame, not an opinion.
-        assert (word["x"], word["y"]) == (1.3, 2.0)
+        # The anchor was learned from exactly this pair, so the first word IS the tracker's
+        # pose: a graph that has closed no loop knows nothing the tracker does not.
+        assert (word["x"], word["y"]) == (1.0, 2.0)
         assert word["source"] == "graph" and word["map"] == "flat3" and word["stamp"] == 7.0
-        # a graph that has jumped further than a closure ever does is refused, not believed
+
+        # the graph closes a loop and moves its odom frame 0.3 m along +x: the cart moves with it
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.3, 0.0).transform))
+        word = json.loads(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent[-1].data)
+        assert (word["x"], word["y"]) == (1.3, 2.0)
+
+        # a graph that has jumped further from the tracker than a closure ever does is refused
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(9.0, 0.0).transform))
-        assert len(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent) == 1
+        assert len(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent) == 2
+
+        # ...and with no odometry to compose with (a silent bridge) there is no word at all
+        node._lookup.buffer.transforms.clear()
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.1, 0.0).transform))
+        assert len(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent) == 2
 
 
 def test_in_slam_the_laptop_sends_the_correction_home_and_touches_no_tf() -> None:

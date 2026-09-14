@@ -884,8 +884,8 @@ def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph(
     frame = sf.tree(f"{NODES}/rtabmap_frame.py")
     assert "/rtabmap/mapGraph" in sf.strings(frame)
     assert "('map', 'rtabmap')" in sf.unparsed(frame, ast.Tuple)
-    # RTAB-Map's odometry is the tracker's pose on a known map
-    assert _rtabmap("KNOWN_MAP")["odom_frame_id"] == "map"
+    # RTAB-Map's odometry is the EKF's own, beside the known map as in SLAM
+    assert _rtabmap("KNOWN_MAP")["odom_frame_id"] == "odom"
     room = json.loads((REPO / "ros/foxglove/pepin_3d.json").read_text())["configById"]["3D!room"]
     assert room["topics"]["/depth_scan"]["visible"]
     assert room["topics"]["/local_costmap/costmap"]["visible"]
@@ -1530,11 +1530,57 @@ def test_the_tracker_matches_the_lidar_here_and_takes_the_camera_as_a_measuremen
     assert len(sf.calls_to(node, "loc.update_from")) == 2, "the scan's update and the camera's"
     flags = load_table(REPO / NODES / "relocalizer.py")
     assert flags["sources"] == ("lidar",) and flags["fusion"] is True
-    assert flags.flag("sources").choices == ("lidar", "depth", "contact", "camera")
+    assert flags.flag("sources").choices == ("lidar", "depth", "contact", "camera", "graph")
     assert flags["measurement_max_age_s"] == 0.5
     # The camera's scans still cross for the costmap; the pose it measures crosses beside them.
     assert {"depth_scan", "contact_scan"} <= set(LAPTOP_PUBLISHES)
     assert "localization/measurement" in VISION_LAPTOP_PUBLISHES
+
+
+def test_the_pose_graph_reaches_the_tracker_as_a_measurement_of_its_own() -> None:
+    """RTAB-Map's graph is the second localisation on this robot and it never owns a frame on
+    the board: its answer travels as one more measurement, on a topic of its own, into a gate of
+    its own named `graph` (the camera's gate fuses everything it holds into one word called
+    `camera`, so a graph word dropped in there would move the pose under the camera's name).
+    The route is pinned on both ends — a bridged topic whose two ends ask for different QoS gets
+    a route decided by a race — and the word is refused unless the sources flag names it."""
+    from pepin.deployment import VISION_LAPTOP_PUBLISHES, bridged_qos
+    from pepin.sources import DEFAULT_SOURCES, GRAPH
+
+    topic = "/localization/graph_measurement"
+    assert "localization/graph_measurement" in VISION_LAPTOP_PUBLISHES, "vision mode only"
+    assert bridged_qos(topic) == ("reliable", 5), "one QoS, both ends, no race"
+    board = sf.tree(f"{NODES}/relocalizer.py")
+    assert topic in sf.strings(board)
+    assert f"bridged_qos_profile({'GRAPH_MEASUREMENT_TOPIC'})" in sf.unparsed(board, ast.Call)
+    assert {"self._graph.offer", "self._graph.take", "self._graph.forget"} <= sf.calls(board)
+    assert "MeasurementGate" in sf.imported(board) and "GRAPH" in sf.imported(board)
+    graph = next(s for s in DEFAULT_SOURCES if s.name == GRAPH)
+    assert graph.remote, "no scan of it here: it is never matched and never anchors"
+    laptop = sf.tree(f"{NODES}/rtabmap_frame.py")
+    assert topic in sf.strings(laptop)
+    assert {"graph_measurement", "graph_anchor", "compose"} <= sf.imported(laptop)
+    flags = load_table(REPO / NODES / "rtabmap_frame.py")
+    assert flags["graph_measurement"] is False, "off until a closure has been seen to move it"
+    assert flags["graph_odom"] is True and flags.flag("graph_odom").live is False
+
+
+def test_the_known_map_graph_rides_the_filter_s_own_odometry() -> None:
+    """CLAUDE.md's one odometry: RTAB-Map beside the known map is built on the EKF's
+    odom -> base_link, not on the tracker's pose, which teleports when it relocalises and made
+    every loop closure unacceptable (a neighbour edge of 0.888 m against a 0.244 m sigma, error
+    ratio 3.64 over RGBD/OptimizeMaxError's 3.0, 2026-09-14). It owns no transform either way."""
+    assert _rtabmap("KNOWN_MAP")["odom_frame_id"] == "odom"
+    assert _rtabmap("KNOWN_MAP")["map_frame_id"] == "rtabmap", "a frame of its own"
+    assert _rtabmap("TRACKER_ODOM")["odom_frame_id"] == "map", "the old one, one argument away"
+    assert _rtabmap("SLAM")["odom_frame_id"] == "odom", "SLAM is untouched"
+    assert _rtabmap("SLAM")["map_frame_id"] == "map"
+    vslam = sf.tree(VSLAM_LAUNCH)
+    assert "graph_odom" in sf.strings(vslam), "the switch between the two, a launch argument"
+    assert "publish_tf" in sf.strings(vslam), "and RTAB-Map owns no transform in either"
+    frame = sf.tree(f"{NODES}/rtabmap_frame.py")
+    assert {"odom", "base_link"} <= sf.strings(frame), "the odometry the graph is composed with"
+    assert "self._lookup.transform" in sf.calls(frame)
 
 
 def test_the_laptop_localizer_matches_the_camera_where_the_camera_is() -> None:

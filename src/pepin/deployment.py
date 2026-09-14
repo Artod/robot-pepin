@@ -260,6 +260,11 @@ VISION_LAPTOP_PUBLISHES = (
     # costmap; what used to cross for the POSE was the matching, and that cost the board 147 ms a
     # scan and 50 cm p90 of live error (scratch/drive_bisect.py, run 0238).
     "localization/measurement",
+    # ...and RTAB-Map's pose graph's own answer about where the cart is on the SAME map, sent
+    # whenever the graph moves (pepin_bringup.rtabmap_frame, flag graph_measurement) and fused
+    # by a gate of its own on the board. A topic apart from the camera's because the board's
+    # measurement gate fuses everything on one topic into one word under one name.
+    "localization/graph_measurement",
     # ...and the lidar layer of that same volume, on a topic of its own (depth_fusion's
     # lidar_map flag): the map the board's tracker matches on when its map_topic flag names it.
     # NOT /map — the board's map_server owns that in this mode, and two publishers of one /map
@@ -456,6 +461,11 @@ BRIDGED_QOS: dict[str, tuple[str, int]] = {
     # the bridge saw first. A RELIABLE reader does not match a BEST_EFFORT writer at all, and
     # the loser of that race receives nothing, in silence.
     "/odom": ("reliable", 10),
+    # The graph's word to the board's tracker: RELIABLE, five deep on both ends (the tracker
+    # keeps a few tenths of a second of history rather than only the newest, since every
+    # measurement carries the stamp it was made at). A word that arrives late is dropped by the
+    # gate's own age rule; one that never arrives because the route lost a QoS race is invisible.
+    "/localization/graph_measurement": ("reliable", 5),
 }
 
 

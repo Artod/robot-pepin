@@ -51,10 +51,13 @@ CAMERA = "camera"
 TRACKER = "tracker"
 WATCHDOG = "watchdog"
 # A third pose source, and the only one that is not a sensor: RTAB-Map's pose graph on the
-# laptop, whose correction of the tracker's own belief travels as a measurement
-# (:func:`pepin.measurements.graph_measurement`). Like the two above it never joins the roster --
-# it has no scan, no gate and no health -- it only names a word in a fusion and in the
-# ``/localization/sources`` report.
+# laptop, which says where the cart is on the lidar map out of its own loop closures and sends
+# that place as a measurement (:func:`pepin.measurements.graph_measurement`). It IS on the
+# roster, like the camera and for the same reason — the ``sources`` flag switches it, its
+# health reads in the report line, its word is fused — and like the camera it is ``remote``: it
+# has no scan here, no gate at the feed, and it never anchors an update. It also never drives
+# one by itself: a graph that has closed no loop says exactly what the tracker already believes,
+# so a tracker driven by it alone would be told its own answer back.
 GRAPH = "graph"
 RATE_TAU_S = 2.0  # the rate's time constant: a few seconds of intervals, not the whole run
 
@@ -118,6 +121,10 @@ DEFAULT_SOURCES: tuple[ScanSource, ...] = (
     # twice would silence a sensor for the wrong reason. It never anchors and has no gate:
     # ``remote`` is what says so.
     ScanSource(CAMERA, "map", 80.0, trust=1.0, stale_after_s=1.0, remote=True, matcher=CAMERA),
+    # RTAB-Map's graph, measured on the laptop out of the camera's own loop closures. A word
+    # arrives only when the graph moves — RTAB-Map publishes /rtabmap/mapGraph once a node is
+    # added (Rtabmap/DetectionRate 1.0), so a second of silence is normal and three is not.
+    ScanSource(GRAPH, "map", 360.0, trust=1.0, stale_after_s=3.0, remote=True, matcher=CAMERA),
 )
 
 

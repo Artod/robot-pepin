@@ -96,7 +96,16 @@ from pepin.measurements import (
 from pepin.odometry import Pose2D, RunawayWatch, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
 from pepin.slip import SlipWatch
-from pepin.sources import CAMERA, CONTACT, DEPTH, LIDAR, ScanObservation, SourceFeed, SourceRegistry
+from pepin.sources import (
+    CAMERA,
+    CONTACT,
+    DEPTH,
+    GRAPH,
+    LIDAR,
+    ScanObservation,
+    SourceFeed,
+    SourceRegistry,
+)
 from pepin.timeline import (
     MatchPacer,
     MotionEdge,
@@ -125,7 +134,7 @@ from pepin_bringup.msgs import (
     transform_from_rpy,
     yaw_of,
 )
-from pepin_bringup.node_kit import Switches, TfLookup, spin_main
+from pepin_bringup.node_kit import Switches, TfLookup, bridged_qos_profile, spin_main
 
 DUMP_DIR = (
     "/maps/rec"  # every failed whole-map search leaves its scan here, for the offline autopsy
@@ -143,6 +152,12 @@ CANDIDATE_TOPIC = "/localization/candidate"
 # (pepin.measurements.RemoteMeasurement): the same shape of message, judged the same way — a
 # map id that is not ours is refused, a message that does not parse is counted, not obeyed.
 MEASUREMENT_TOPIC = "/localization/measurement"
+# ...and on this one, whenever RTAB-Map's pose graph moves, where THAT says the cart is
+# (pepin_bringup.rtabmap_frame, flag graph_measurement): the same shape of message, judged the
+# same way, but a gate of its own. The camera's gate fuses everything waiting in it into one
+# word named `camera`, so a graph word dropped in there would move the pose under the camera's
+# name, with the camera's health and the camera's switch.
+GRAPH_MEASUREMENT_TOPIC = "/localization/graph_measurement"
 # The two maps this tracker can match on, by the name the ``map_topic`` flag calls each: what
 # the mode's map owner serves, and the lidar layer of the laptop's fused volume
 # (pepin_bringup.depth_fusion, flag lidar_map). Both are subscribed; one is adopted.
@@ -225,7 +240,9 @@ FLAGS = FlagSet(
         " /localization/measurement. The lidar drives the updates while it is fresh and the"
         " camera's word rides along, carried to its moment; a stale lidar hands the updates to"
         " the measurements. `depth` and `contact` name the camera's raw scans, which this node"
-        " no longer subscribes to — enabling them changes nothing here",
+        " no longer subscribes to — enabling them changes nothing here. `graph` is RTAB-Map's pose"
+        " graph on the laptop, whose answer arrives on /localization/graph_measurement with a"
+        " gate of its own: it rides an update like the camera's word and never drives one",
         why="the lidar alone, because the camera cannot carry the map by itself: replayed on run"
         " 0171 against flat3 the depth band alone loses the map in 0.5 s (122 cm, 124 deg) and"
         " the contact line alone in 12 s (80 cm, 28 deg) — the camera's 0.15-1.3 m band is a"
@@ -238,13 +255,15 @@ FLAGS = FlagSet(
         " (scratch/drive_bisect.py, runs 0238-0241), while a measurement costs a matrix inverse",
         on_when="add `camera` where the lidar is blocked or blind — parked bumper to furniture,"
         " or a lidar that stopped: the fusion is measured and gated, and the board pays nothing"
-        " for it",
+        " for it. Add `graph` (e.g. lidar,graph) once the laptop's graph measurement has been"
+        " watched beside /tracker_pose for a drive: a loop closure is the one correction nothing"
+        " else on this robot can make",
         off_when="drop a source the moment /localization/sources shows it disagreeing with the"
         " others; the lidar alone is the safe state, and it is what the board falls back to by"
         " itself when the link dies. `depth`/`contact` stay on the roster because the library"
         " still matches those scans where there is CPU for it — an offline replay"
         " (scratch/camera_only_localization.py), another robot — not because this board will",
-        choices=(LIDAR, DEPTH, CONTACT, CAMERA),
+        choices=(LIDAR, DEPTH, CONTACT, CAMERA, GRAPH),
     ),
     Flag(
         "measurement_max_age_s",
@@ -695,6 +714,11 @@ class Relocalizer(Node):
         # update takes it, carried to that update's moment over the same history a riding scan
         # would have been carried along (pepin.measurements).
         self._measurements = MeasurementGate(self._registry)
+        # RTAB-Map's graph, one more word with one more name: its own gate, its own seat on the
+        # roster (`graph` in the sources flag), the same carry, the same information filter and
+        # the same disagreement gate. It never drives an update by itself — see
+        # pepin.sources.GRAPH — it only rides the one a scan or the camera drives.
+        self._graph = MeasurementGate(self._registry, name=GRAPH)
         self._motion = MotionFilter(min_m=0.005, min_deg=0.3, max_gap_s=1.0)
         self._rested = 0  # scans left unmatched because the cart stood still (per report)
         # What the map does not explain (a person, a moved chair): the mask the match votes with
@@ -777,6 +801,15 @@ class Relocalizer(Node):
             self._on_measurement,
             QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE),
         )
+        # The graph's word, on the QoS pinned for the route (pepin.deployment.BRIDGED_QOS): both
+        # ends of a bridged topic must ask for the same thing or the route's QoS is decided by a
+        # race, and the loser receives nothing in silence.
+        self.create_subscription(
+            String,
+            GRAPH_MEASUREMENT_TOPIC,
+            self._on_graph_measurement,
+            bridged_qos_profile(GRAPH_MEASUREMENT_TOPIC),
+        )
         self._fit_pub = self.create_publisher(Float32, "localization_fit", 5)
         # Every source's word on each update, as JSON (Localizer.sources_report): the demo's
         # view of the lidar and the camera agreeing, disagreeing, or one of them gone.
@@ -834,7 +867,8 @@ class Relocalizer(Node):
         # declarations too, and it refuses everything that is not a flag.
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._registry.enable(self._switches["sources"])
-        for gate in (self._candidates, self._measurements, self._choice):  # a launch override too
+        gates = (self._candidates, self._measurements, self._graph, self._choice)
+        for gate in gates:  # a launch override too
             for name in gate.switches:
                 gate.switch(name, self._switches[name])
         self.get_logger().info("relocalizer up: watching the scan-to-map fit")
@@ -855,7 +889,8 @@ class Relocalizer(Node):
         if name in MASK_FLAGS:
             self._rebuild_mask()  # the switches already hold the new value
             return
-        for target in (self._localizer, self._candidates, self._measurements, self._choice):
+        targets = (self._localizer, self._candidates, self._measurements, self._graph, self._choice)
+        for target in targets:
             if target is not None and name in target.switches:
                 target.switch(name, new)
 
@@ -900,6 +935,7 @@ class Relocalizer(Node):
             self._pending_seed = None
             self._candidates.forget()
             self._measurements.forget()  # nor is a pose measured against the old one
+            self._graph.forget()  # nor the graph's word about it
         self._matcher = CorrelativeMatcher(self._grid)
         self._static_mask = StaticMask(self._grid, float(self._switches["map_grow"]))
         # lost_after huge: update() must never run a whole-map search in the executor thread on
@@ -1038,6 +1074,21 @@ class Relocalizer(Node):
         self._measurements.offer(remote, self._map_id)
         self._track_pending()
 
+    def _on_graph_measurement(self, msg: String) -> None:
+        """RTAB-Map's word about where the cart is (one JSON message, pepin.measurements),
+        measured on the laptop out of its pose graph: it waits at its own gate for the next
+        update, which carries it from the graph's moment to that update's and fuses it beside
+        the lidar's and the camera's. Judged exactly as the camera's is — another map's word is
+        refused by the gate, a message that does not parse is counted — and it moves nothing
+        unless the sources flag names `graph`."""
+        try:
+            remote = RemoteMeasurement.from_json(msg.data)
+        except (KeyError, TypeError, ValueError) as exc:
+            self._graph.malformed(str(exc))
+            return
+        self._graph.offer(remote, self._map_id)
+        self._track_pending()
+
     def _track_on_measurements(self, now: float) -> None:
         """An update driven by the camera's measurements alone, at the stamp of the newest one.
 
@@ -1073,7 +1124,7 @@ class Relocalizer(Node):
         pose = loc.update_from(
             plan.odom,
             [],
-            measurements=[plan.measurement],
+            measurements=[plan.measurement, *self._graph.take(plan.stamp, self._history)],
             at_rest=standing_still(self._history, plan.stamp, self._odom_wz),
             dt_s=dt_s,
         )
@@ -1095,6 +1146,7 @@ class Relocalizer(Node):
         report = loc.sources_report(now)
         report["candidates"] = self._candidates.status()  # the laptop's word, beside the scans'
         report["measurements"] = self._measurements.status()
+        report["graph"] = self._graph.status()
         self._sources_pub.publish(String(data=json.dumps(report)))
 
     def _track_pending(self) -> None:
@@ -1182,7 +1234,10 @@ class Relocalizer(Node):
         pose = loc.update_from(
             odom,
             scans,
-            measurements=self._measurements.take(scan.stamp, self._history),
+            measurements=[
+                *self._measurements.take(scan.stamp, self._history),
+                *self._graph.take(scan.stamp, self._history),
+            ],
             trust_odometry=not slip,
             at_rest=at_rest,
             dt_s=dt_s,
@@ -1324,6 +1379,7 @@ class Relocalizer(Node):
             f"(id {self._map_id or 'none'}, {self._choice.take_ignored()} republications "
             f"ignored); "
             f"{self._candidates.report()}; {self._measurements.report()}; "
+            f"graph: {self._graph.report()}; "
             f"flags: {self._switches.state()}"
         )
         if feed.expired:

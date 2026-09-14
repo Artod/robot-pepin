@@ -20,7 +20,10 @@ from pepin.measurements import (
     REMOTE_FLOOR_YAW_DEG,
     MeasurementGate,
     RemoteMeasurement,
+    compose,
+    graph_anchor,
     graph_measurement,
+    inverse,
 )
 from pepin.odometry import Pose2D
 from pepin.sources import CAMERA, CONTACT, DEPTH, GRAPH, LIDAR, SourceRegistry
@@ -322,20 +325,62 @@ def test_a_remote_word_is_never_fused_tighter_than_the_measured_floor() -> None:
     assert gate._floored(tight) is tight, "zero floors change nothing"
 
 
-def test_a_graph_correction_moves_the_belief_it_was_computed_on() -> None:
-    """The graph's word is the tracker's own pose put through the correction: identity leaves it
-    alone, and a correction rotates and shifts it as one rigid move."""
-    belief = Pose2D(2.0, 1.0, math.pi / 2)
-    still = graph_measurement(belief, Pose2D(), 10.0, "map-a")
+def test_a_graph_word_is_its_own_place_read_through_the_anchor() -> None:
+    """The graph's word is where the GRAPH has the cart, moved onto the map by the anchor: an
+    identity anchor leaves it alone, and a real one rotates and shifts it as one rigid move."""
+    place = Pose2D(2.0, 1.0, math.pi / 2)
+    still = graph_measurement(place, Pose2D(), 10.0, "map-a")
     assert still.source == GRAPH
     assert (still.x, still.y) == pytest.approx((2.0, 1.0))
     assert still.yaw == pytest.approx(math.pi / 2)
     assert still.map_id == "map-a" and still.stamp == 10.0
 
-    moved = graph_measurement(belief, Pose2D(0.1, -0.2, math.pi / 2), 10.0, "map-a")
-    # a quarter turn of the map, then the shift: (2, 1) -> (-1, 2) -> (-0.9, 1.8)
+    moved = graph_measurement(place, Pose2D(0.1, -0.2, math.pi / 2), 10.0, "map-a")
+    # a quarter turn of the frame, then the shift: (2, 1) -> (-1, 2) -> (-0.9, 1.8)
     assert (moved.x, moved.y) == pytest.approx((-0.9, 1.8))
     assert moved.yaw == pytest.approx(math.pi)
+
+
+def test_the_anchor_is_what_makes_the_graph_s_first_word_the_tracker_s_own_pose() -> None:
+    """The anchor is learned from one pair — where the tracker says the cart is, where the graph
+    has it — and it is exactly the transform that reads the second back as the first. A graph
+    that has closed no loop therefore tells the tracker its own answer, which is why the graph
+    never drives an update by itself; once a closure moves the graph's place, the word moves with
+    it, by the closure and by nothing else."""
+    tracker, place = Pose2D(3.0, -1.0, math.pi / 4), Pose2D(0.5, 0.25, -math.pi / 3)
+    anchor = graph_anchor(tracker, place)
+    first = graph_measurement(place, anchor, 1.0, "map-a")
+    assert (first.x, first.y, first.yaw) == pytest.approx((tracker.x, tracker.y, tracker.theta))
+
+    closed = compose(Pose2D(0.12, -0.04, 0.0), place)  # the graph moves the cart 12 cm
+    after = graph_measurement(closed, anchor, 2.0, "map-a")
+    assert math.hypot(after.x - first.x, after.y - first.y) == pytest.approx(0.126491, abs=1e-5)
+
+
+def test_compose_and_inverse_are_each_other_s_undoing() -> None:
+    """The two planar helpers the whole graph path is built of: a pose put through a transform
+    and then through its inverse is the pose again, whatever the angles."""
+    frame, pose = Pose2D(1.5, -2.5, 2.0), Pose2D(-0.25, 0.75, -1.25)
+    back = compose(inverse(frame), compose(frame, pose))
+    assert (back.x, back.y, back.theta) == pytest.approx((pose.x, pose.y, pose.theta))
+
+
+def test_a_graph_gate_takes_nothing_until_the_roster_switches_it_on() -> None:
+    """The graph rides the same gate the camera does, under a name of its own: with `graph`
+    missing from the sources flag its word is never taken, and naming it is the whole switch."""
+    registry = SourceRegistry(enabled=(LIDAR,))
+    gate = MeasurementGate(registry, name=GRAPH)
+    history = trail((1.0, Pose2D()), (2.0, Pose2D()))
+    word = graph_measurement(Pose2D(1.0, 0.0, 0.0), Pose2D(), 1.5, "map-a")
+    assert gate.offer(word, "map-a") and gate.pending == (GRAPH,)
+    assert gate.take(1.6, history) == [], "the roster has not switched it on"
+
+    registry.enable((LIDAR, GRAPH))
+    assert gate.offer(word, "map-a")
+    (taken,) = gate.take(1.6, history)
+    assert taken.source == GRAPH, "one word, under the gate's own name"
+    assert (taken.x, taken.y) == pytest.approx((1.0, 0.0))
+    assert not gate.offer(word, "another-map"), "a word about another map is evidence here"
 
 
 def test_a_graph_measurement_claims_no_more_than_the_remote_floor() -> None:
