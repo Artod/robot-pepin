@@ -74,6 +74,17 @@ both matchers read 1.25-1.45 of the lidar at 1.5-2 m, together: the odometry's d
 second inflates the baseline every depth is proportional to, so the gap is capped by the pose,
 not by the matcher. The flow is the default; the describer is the path for a robot whose pose
 over 1.5 s is better than this cart's wheels and gyro.
+
+This cart has one, and it is not its wheels (scratch/parallax_pose_sweep.txt, the same four
+errands with the motion taken from the lidar tracker's map pose instead of the EKF's odometry,
+2026-09-14). Over a 1.0 s gap the odometry claims 15.8 cm of travel where the tracker reads
+13.9, and over 1.5 s it claims 25.5 against 18.6; at 1-2 m the flow then reads 1.263 and 1.342
+of the lidar on the wheels' baseline against 1.138 and 0.944 on the tracker's, and the describer
+1.347 and 1.506 against 0.951 and 0.968. The over-reading past a second was the baseline itself,
+and :class:`pepin.depth_pipeline.ParallaxAnchor` triangulates on the tracker's motion by default
+(``parallax_motion``). What no pose has cured is the per-pair noise: 7-10 cm for the flow and
+15-30 for the describer at every gap measured, which is why a pair is still a measurement to be
+weighed and not a truth to be trusted.
 """
 
 from __future__ import annotations

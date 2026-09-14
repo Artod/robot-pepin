@@ -128,11 +128,37 @@ class FramePoser:
         transform taking a base_link point of ``from_stamp`` to base_link at ``to_stamp``;
         ``None`` when the odometry does not cover both moments. With ``apply_lean`` the lean
         of each moment rides along, so a scan taken while the cart leaned one way is carried
-        into a frame taken while it leaned another."""
-        before = self._leaned(
-            self._history.pose_at(from_stamp, self.base, self.odom_frame), from_stamp
-        )
-        after = self._leaned(self._history.pose_at(to_stamp, self.base, self.odom_frame), to_stamp)
+        into a frame taken while it leaned another.
+
+        Through the odometry and not the map on purpose: this is what :meth:`carry` moves a
+        scan with, and a tracker correction landing between the two stamps would tear the scan
+        in two. A caller that wants the correction — a baseline over a whole second, where the
+        odometry's own drift is the error — asks :meth:`map_motion` instead."""
+        return self._motion(from_stamp, to_stamp, self.odom_frame)
+
+    def map_motion(self, from_stamp: float, to_stamp: float) -> RigidPose | None:
+        """The same motion seen through the map frame: the tracker's word on how base_link
+        moved between two stamps, ``None`` when the map pose does not cover both.
+
+        The two differ by whatever the odometry drifted and the tracker corrected in between,
+        which over a tenth of a second is nothing and over a second is the measurement. The
+        wheels and gyro scatter the distance per interval p10/p90 0.5-2.0 of the tracker's on
+        carpet (scratch/tape_odometry_error.py, 2026-09-14) while the tracker's map pose is good
+        to 1-2 cm over a second, and a baseline is a length: measured over the four errands of
+        2026-09-14 (scratch/parallax_pose_sweep.txt), the parallax anchor triangulating on this
+        motion reads 1.14 and 0.94 of the lidar at 1-2 m across gaps of 1.0 and 1.5 s where the
+        odometry's baseline reads 1.26 and 1.34.
+
+        Not for carrying a scan (:meth:`carry`): a correction between the two stamps is a jump,
+        and a jump inside one revolution of the lidar is a tear."""
+        return self._motion(from_stamp, to_stamp, self.map_frame)
+
+    def _motion(self, from_stamp: float, to_stamp: float, fixed: str) -> RigidPose | None:
+        """base_link at ``from_stamp`` into base_link at ``to_stamp`` through a fixed frame,
+        each end leaned when a lean applies; ``None`` when that frame cannot say where the cart
+        was at both moments."""
+        before = self._leaned(self._history.pose_at(from_stamp, self.base, fixed), from_stamp)
+        after = self._leaned(self._history.pose_at(to_stamp, self.base, fixed), to_stamp)
         if before is None or after is None:
             return None
         return _compose(after.inverse(), before)

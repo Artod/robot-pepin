@@ -60,7 +60,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
@@ -118,6 +118,8 @@ PARALLAX_MAX_GAP_S = 0.60  # farther back than this the view has changed more th
 PARALLAX_ORB_MAX_GAP_S = 1.5  # the describer's window: a keypoint is recognised, not followed
 PARALLAX_MIN_BASELINE_M = 0.10  # the parallax a partner is chosen to reach: 0.4 s at 0.25 m/s
 PARALLAX_MATCHER = "klt"  # who finds the correspondences: the flow or the describer
+PARALLAX_MOTION = "tracker"  # whose word on the baseline: the lidar tracker's map pose, or odometry
+PARALLAX_MOTIONS = ("tracker", "odom")
 PARALLAX_RING_FRAMES = 24  # frames kept to choose a partner from: 1.5 s at any rate the node runs
 PARALLAX_WEIGHT = 1.0  # the share of a parallax pair's own inverse-depth precision that counts
 
@@ -212,6 +214,19 @@ class MotionSource(Protocol):
     def motion(self, from_stamp: float, to_stamp: float) -> Rigid | None:
         """base_link at ``from_stamp`` into base_link at ``to_stamp``, or ``None`` when the
         odometry does not cover both moments."""
+        ...
+
+
+@runtime_checkable
+class MapMotionSource(Protocol):
+    """A motion source that can also answer through the map, where the lidar tracker's
+    corrections live (:meth:`pepin.frame_pose.FramePoser.map_motion`) — what the parallax
+    anchor asks for a baseline over a whole second. A source without the method is simply an
+    odometry-only one; the anchor falls back to it."""
+
+    def map_motion(self, from_stamp: float, to_stamp: float) -> Rigid | None:
+        """base_link at ``from_stamp`` into base_link at ``to_stamp`` through the map, or
+        ``None`` when the map pose does not cover both moments (no tracker, or a stale one)."""
         ...
 
 
@@ -1069,7 +1084,23 @@ class ParallaxAnchor(AnchorStage):
     1.031, with half the per-pair sigma (13.5 cm against 29.6) at half the cost (3.9 ms a frame
     against 8.3). Past a second of gap both read 1.25-1.45: the odometry's own drift over that
     second, not the matcher's doing. So the flow is the default and the longer window is there
-    for a pose that deserves it."""
+    for a pose that deserves it.
+
+    Which pose that is, is the second switch (``motion_source``, the node's ``parallax_motion``).
+    A baseline is a length, and over a second the wheels and gyro do not know one: the same four
+    errands re-measured with the motion taken from the lidar tracker's map pose instead
+    (scratch/parallax_pose_sweep.txt, 2026-09-14) show the odometry reading 15.8 cm of travel at
+    a 1.0 s gap and 25.5 at 1.5 s where the tracker reads 13.9 and 18.6 — and every depth is
+    proportional to that length. At 1-2 m the flow reads 1.263 and 1.342 of the lidar on the
+    odometry's motion at those two gaps and 1.138 and 0.944 on the tracker's; the describer
+    1.347 and 1.506 against 0.951 and 0.968. The over-reading past a second was the baseline all
+    along, and ``tracker`` is the default. It is not free of its own: at the 0.5 s gap the anchor
+    really pairs across, the tracker's motion reads 0.932 at 1-2 m where the odometry's reads
+    1.067 — the two bracket the truth — and the per-pair sigma stays 7-10 cm either way, which
+    is why these pairs are still measured against the lidar rather than trusted under it. A
+    source with no map to ask (a tape's bare odometry, a cart whose tracker is silent, a stale
+    map -> odom TF cannot interpolate at these stamps) falls back to the odometry per window,
+    and the report line counts both."""
 
     name = "parallax_anchor"
 
@@ -1081,12 +1112,15 @@ class ParallaxAnchor(AnchorStage):
         max_gap_s: float | None = None,
         min_baseline_m: float = PARALLAX_MIN_BASELINE_M,
         matcher: str = PARALLAX_MATCHER,
+        motion_source: str = PARALLAX_MOTION,
     ) -> None:
         self.weight = weight
         self.min_gap_s = min_gap_s
         self._max_gap_s = max_gap_s  # None: whatever window the matcher in use can carry
         self.min_baseline_m = min_baseline_m
         self.matcher = matcher
+        self.motion_source = motion_source  # live: the node's parallax_motion flag writes it
+        self.used: dict[str, int] = dict.fromkeys(PARALLAX_MOTIONS, 0)  # who gave each baseline
         self.frames = 0  # pairs of frames that reached the triangulation
         self.contributed = 0  # of those, the ones that gave at least one pair
         self.rejected: dict[str, int] = {}
@@ -1122,6 +1156,26 @@ class ParallaxAnchor(AnchorStage):
         if n:
             self.rejected[reason] = self.rejected.get(reason, 0) + n
 
+    def _moved(
+        self, ctx: FrameContext, then: float, now: float, ask_tracker: bool
+    ) -> tuple[Rigid | None, str]:
+        """How the cart moved between two frame stamps and whose word it is: the tracker's map
+        pose while ``ask_tracker`` and the source can answer through the map
+        (:class:`MapMotionSource`), the odometry otherwise — the fallback a node needs when the
+        tracker is silent or its map pose too stale for TF to interpolate at these stamps.
+
+        ``ask_tracker`` is the caller's memory of that fallback within one walk of the ring: a
+        TF lookup that cannot be answered costs its whole timeout, and a dead tracker must cost
+        it once a frame rather than once a candidate."""
+        source = ctx.motion
+        if source is None:
+            return None, ""
+        if ask_tracker and isinstance(source, MapMotionSource):
+            through_map = source.map_motion(then, now)
+            if through_map is not None:
+                return through_map, "tracker"
+        return source.motion(then, now), "odom"
+
     def _partner(self, ctx: FrameContext, place: Rigid) -> tuple[PreviousFrame, Motion] | None:
         """The frame of the ring this one is paired with and the camera motion between them:
         walking back from the newest, the first partner inside the gap window whose baseline
@@ -1134,7 +1188,9 @@ class ParallaxAnchor(AnchorStage):
         from pepin.parallax import camera_motion
 
         best: tuple[PreviousFrame, Motion] | None = None
+        spoke = ""
         candidates = 0
+        ask_tracker = self.motion_source == "tracker"
         for previous in reversed(self._ring):
             gap = ctx.stamp - previous.stamp
             if gap < self.min_gap_s:
@@ -1142,16 +1198,20 @@ class ParallaxAnchor(AnchorStage):
             if gap > self.max_gap_s:
                 break
             candidates += 1
-            moved = None if ctx.motion is None else ctx.motion.motion(previous.stamp, ctx.stamp)
+            moved, source = self._moved(ctx, previous.stamp, ctx.stamp, ask_tracker)
+            ask_tracker &= source != "odom"  # a silent tracker is discovered once, not per frame
             if moved is None:
                 continue
             motion = camera_motion(moved.rotation, moved.translation, previous.place, place)
             if best is None or motion.baseline > best[1].baseline:
-                best = (previous, motion)
+                best, spoke = (previous, motion), source
             if motion.baseline >= self.min_baseline_m:
                 break
-        if best is None and self._ring:
-            self._count("gap" if candidates == 0 else "no odometry")
+        if best is None:
+            if self._ring:
+                self._count("gap" if candidates == 0 else "no odometry")
+            return None
+        self.used[spoke] = self.used.get(spoke, 0) + 1
         return best
 
     def pairs(self, frame: Frame) -> Pairs | None:
@@ -1208,11 +1268,14 @@ class ParallaxAnchor(AnchorStage):
 
     def describe(self) -> str:
         """The verdict for the report line: who matched the corners and how far back it may
-        look, the parallax a partner is chosen to reach, the frames that triangulated, the gap
-        and the baseline they were paired across, the pairs a frame yields and their sigma, and
-        what was thrown away and why."""
+        look, whose motion the baseline came from and how many windows each source actually
+        answered, the parallax a partner is chosen to reach, the frames that triangulated, the
+        gap and the baseline they were paired across, the pairs a frame yields and their sigma,
+        and what was thrown away and why."""
+        spoke = ", ".join(f"{k} {v}" for k, v in self.used.items() if v)
         asked = (
-            f"{self.matcher} <= {self.max_gap_s:.2f} s, weight {self.weight:g},"
+            f"{self.matcher} <= {self.max_gap_s:.2f} s on the {self.motion_source}'s motion"
+            f" ({spoke or 'none yet'}), weight {self.weight:g},"
             f" asks {self.min_baseline_m * 100:.0f} cm"
         )
         dropped = ", ".join(f"{k} {v}" for k, v in self.rejected.items())
@@ -1765,6 +1828,7 @@ __all__ = [
     "Law",
     "LawStage",
     "LidarAnchor",
+    "MapMotionSource",
     "MotionSource",
     "Pairs",
     "ParallaxAnchor",

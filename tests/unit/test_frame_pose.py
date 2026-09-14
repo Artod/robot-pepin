@@ -65,6 +65,26 @@ def test_a_scan_is_carried_through_the_odometry_to_the_frame_s_moment() -> None:
     assert same is not None and same == pytest.approx(ahead, abs=1e-12)
 
 
+def test_the_motion_between_two_stamps_is_asked_of_the_frame_the_caller_names() -> None:
+    """The cart's own motion comes through the odometry, so no tracker correction tears a scan;
+    the same question through the map (the baseline a parallax pair rests on, where the
+    odometry's drift over a second IS the error) asks the map frame and answers a different
+    transform. Neither can speak for a moment the history does not cover."""
+    history = FakeHistory()
+    poser = FramePoser(history)
+    through_odom = poser.motion(0.0, 1.0)
+    assert through_odom is not None
+    assert {fixed for _, _, fixed in history.asked} == {"odom"}
+    history.asked.clear()
+    through_map = poser.map_motion(0.0, 1.0)
+    assert through_map is not None
+    assert {fixed for _, _, fixed in history.asked} == {"map"}
+    assert {frame for _, frame, _ in history.asked} == {"base_link"}
+    assert through_map.rotation == pytest.approx(through_odom.rotation, abs=1e-12)
+    assert through_map.translation != pytest.approx(through_odom.translation, abs=1e-3)
+    assert poser.map_motion(-1.0, 1.0) is None and poser.map_motion(0.0, -1.0) is None
+
+
 def test_the_camera_and_the_cart_are_placed_in_the_map_at_the_stamp() -> None:
     poser = FramePoser(FakeHistory())
     camera = poser.camera_in_map(2.0)
