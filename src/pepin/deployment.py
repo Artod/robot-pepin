@@ -24,6 +24,13 @@ MAP_NODES = ("map_server",)  # the map is served from the board: the tracker nee
 HEARTBEAT_TOPIC = "laptop/heartbeat"
 HEARTBEAT_HZ = 2.0
 
+# The camera's own odometry (rtabmap_odom's rgbd_odometry, gated by pepin_bringup.visual_odometry
+# on the laptop) on its way to the board's EKF, which fuses it as odom1 (ros/params/ekf.yaml).
+# The laptop's, by CLAUDE.md rule 20: it consumes the camera, it costs a quarter of a core at
+# 9 Hz (measured 2026-09-14, scratch/vo_probe.py), and a cart that loses the laptop loses one of
+# three odometry inputs and drives on the wheels and the gyro exactly as it does today.
+VO_TOPIC = "vo"
+
 # The base's speed caps (config/base.json, the base server's own clamp). The C++ bridge on the
 # board clamps /cmd_vel too, at 0.25 m/s by default: for half a day every tape sat at 0.20 and
 # the bridge would have cut anything faster — one cap, the base's, passed to it at launch.
@@ -190,6 +197,7 @@ LAPTOP_PUBLISHES = (
     "rtabmap/info",
     "depth_scan",  # the camera's depth folded onto the plane, for the board's local costmap
     "contact_scan",  # the same depth read at the floor: where bodies touch it (pepin.contact)
+    VO_TOPIC,  # the camera's own odometry, gated here, fused by the board's EKF as odom1
 )
 BOARD_SERVES = (
     "relocalize",
@@ -257,6 +265,7 @@ VISION_LAPTOP_PUBLISHES = (
     # NOT /map — the board's map_server owns that in this mode, and two publishers of one /map
     # is the failure of 2026-09-10. This one nobody else publishes, so it needs no owner rule.
     "map_lidar",
+    VO_TOPIC,
 )
 # The saved map's own topics, the ones SLAM mode has no publisher for: /map is the laptop's here,
 # and the rest are the tracker's, which does not run because nothing matches a scan against a map
@@ -276,6 +285,7 @@ SLAM_LAPTOP_PUBLISHES = (
     "rtabmap/info",
     "depth_scan",
     "contact_scan",
+    VO_TOPIC,
 )
 
 
@@ -433,6 +443,11 @@ def routes_settled(count: int, expected: int | None, stable_s: float, settle_s: 
 # is zenoh's, not DDS's — so RELIABLE there costs a memcpy, not a retransmission.
 BRIDGED_QOS: dict[str, tuple[str, int]] = {
     "/imu/data_raw": ("reliable", 10),  # base_bridge.cpp publishes RELIABLE, KEEP_LAST 10
+    # robot_localization subscribes to every odomN with rclcpp's default (RELIABLE) at the
+    # depth of its odomN_queue_size, which ros/params/ekf.yaml sets to 10 for /vo: the laptop's
+    # publisher matches it exactly, so the route's QoS cannot depend on which side announced it
+    # first (the failure that starved /imu/data_raw at 10 Hz on 2026-09-13).
+    f"/{VO_TOPIC}": ("reliable", 10),
 }
 
 
@@ -663,6 +678,8 @@ LAPTOP_SLAM_NODES = (
     "/rtabmap/rtabmap",
     "/rtabmap_frame",
     "/foxglove_bridge",
+    "/rgbd_odometry",  # the camera's odometry (vo:=true, the default)
+    "/visual_odometry",  # and the node that gates it for the board's EKF
 )
 
 

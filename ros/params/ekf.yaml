@@ -1,4 +1,5 @@
-# robot_localization EKF: wheel odometry fused with the gyro, in the plane.
+# robot_localization EKF: wheel odometry fused with the gyro — and, when the laptop publishes it,
+# with the camera's own visual odometry — in the plane.
 #
 # Why: on carpet the wheels over-report rotation by 10-25% whenever the cart turns in place
 # (measured 2026-09-06 across three drives; it varies by direction and run, so no track-width
@@ -29,6 +30,37 @@ ekf_filter_node:
     odom0_differential: false
     odom0_relative: false
     odom0_queue_size: 10
+    # /vo from the laptop's camera: rtabmap_odom's rgbd_odometry on the neck camera's picture and
+    # the network's metric depth, gated by pepin_bringup.visual_odometry (a lost frame and a jump
+    # no cart of this speed could have made never arrive here). The one input that cannot be
+    # fooled by a wheel turning on carpet without the cart moving.
+    #
+    # x and y only, and DIFFERENTIALLY: robot_localization then differences two consecutive
+    # visual poses, divides by the gap and fuses the result as a velocity, so this source's own
+    # origin — wherever rgbd_odometry happened to start, and wherever it restarts after losing
+    # its tracking — can never move odom -> base_link. NO YAW: the gyro owns heading (with it the
+    # EKF's turn error is ~5 %; the wheels alone over-report a turn by 40-70 %, 2026-09-13), and
+    # a camera that sees a blank wall would only spoil it. The rejection threshold is in sigmas
+    # of the differenced measurement (2 cm a pose over ~0.11 s is 0.26 m/s, so 3 sigma is 0.78
+    # m/s of disagreement): it catches an outlier the node's own gate let through and never a
+    # real slip, which is a few centimetres per second.
+    #
+    # Measured at rest on the laptop 2026-09-14 (scratch/vo_probe.py, 85 s on the charger): 9.1
+    # poses/s, one lost frame (the first), 0.48 cm and 0.075 deg of drift while the wheels
+    # reported a hard zero. In MOTION it is unmeasured, which is why the laptop withholds the
+    # topic until pepin_bringup.visual_odometry's vo_publish flag is turned on: with nothing
+    # published, this block subscribes to a silent topic and the filter is the wheels and the
+    # gyro exactly as it was before.
+    odom1: vo
+    odom1_config: [true,  true,  false,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom1_differential: true
+    odom1_relative: false
+    odom1_queue_size: 10
+    odom1_pose_rejection_threshold: 3.0
     # /imu/data_raw from the MPU6050: yaw rate. No orientation (the chip gives none), no
     # accelerations (double-integrated they drift metres in seconds at our speeds).
     imu0: imu/data_raw
