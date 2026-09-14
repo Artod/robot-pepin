@@ -35,7 +35,7 @@ LIDAR_DRIVER=/ldlidar_node
 LOCAL_COSTMAP=/local_costmap/local_costmap
 GLOBAL_COSTMAP=/global_costmap/global_costmap
 COSTMAPS="$LOCAL_COSTMAP $GLOBAL_COSTMAP"
-SOURCE_ORDER="lidar depth contact camera"  # pepin.sources' own order, two lists as text.
+SOURCE_ORDER="lidar depth contact camera graph"  # pepin.sources' own order, two lists as text.
 # Only an ORDER: a name outside it is carried through, never dropped (normalize_sources), and
 # tests/unit/test_scripts_parse.py fails when it drifts from src/pepin/sources.py.
 LAYER_ORDER="lidar_layer camera_layer contact_layer"
