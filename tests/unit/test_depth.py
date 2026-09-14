@@ -728,3 +728,24 @@ def test_the_range_law_describes_itself_by_bin_for_the_report_line() -> None:
     assert words.startswith(f"D{float(law.centres[0]):.2f}:{float(law.ratios[0]):.3f} ")
     assert words.count(":") == law.centres.size
     assert f"(n {int(law.counts[0])}/" in words and words.endswith(")")
+
+
+def test_a_bin_that_turns_the_depth_order_around_is_dropped_not_held() -> None:
+    """The network's depth rises with the true one whatever it gets wrong about the size. A bin
+    that asks for less depth than the bin before it is a bad pairing — a panned head, a stale
+    scan — and the one resting on fewer pairs goes, rather than publishing a wall that steps
+    backwards: on 2026-09-14 the outermost bin (1 076 pairs against 14 301) put 2.0-2.5 m out
+    41 cm short."""
+    from pepin.depth import RANGE_EDGES, RangeLaw
+
+    d, z = _range_pool()
+    far = np.full(500, float(np.sqrt(RANGE_EDGES[20] * RANGE_EDGES[21])))
+    good = RangeLaw.fit(d, z)
+    assert good is not None
+    kept = RangeLaw.fit(np.concatenate([d, far]), np.concatenate([z, far * 0.30]))
+    assert kept is not None and np.array_equal(kept.centres, good.centres), "the bad bin went"
+    strong = RangeLaw.fit(
+        np.concatenate([d, np.repeat(far, 20)]), np.concatenate([z, np.repeat(far, 20) * 0.40])
+    )
+    assert strong is not None and float(strong.centres[-1]) == pytest.approx(float(far[0]))
+    assert np.all(np.diff(strong.centres * strong.ratios) > 0.0), "and its neighbours went instead"

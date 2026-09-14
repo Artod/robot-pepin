@@ -644,6 +644,25 @@ RANGE_MIN_PAIRS = 50  # pairs in a bin before its ratio is its own; fewer and th
 RANGE_MIN_BINS = 2  # filled bins before the law says anything about range (one is a plain scale)
 
 
+def _rising(centres: list[float], ratios: list[float], counts: list[int]) -> list[int]:
+    """Which bins to keep so that the corrected depth grows with the network's depth: where two
+    neighbours disagree about that, the one resting on fewer pairs is dropped, and the check
+    runs again. Measured 2026-09-14 at home: the outermost bin (1 076 pairs against the next
+    one's 14 301) asked for 1.74 m where the bin before it asked for 1.85, and the published
+    depth came out 41 cm short over 2.0-2.5 m. A network's depth is a rising function of the
+    true one whatever it gets wrong about the size, so a bin that inverts that order is a bad
+    pairing — a panned head, a stale scan — not a lens."""
+    kept = list(range(len(centres)))
+    while len(kept) > 1:
+        depth = [centres[i] * ratios[i] for i in kept]
+        falls = [k for k in range(len(kept) - 1) if depth[k + 1] <= depth[k]]
+        if not falls:
+            break
+        k = falls[0]
+        kept.pop(k if counts[kept[k]] < counts[kept[k + 1]] else k + 1)
+    return kept
+
+
 def ratio_bounds() -> tuple[float, float]:
     """What a bin's true / network ratio is allowed to be: the reciprocal of :func:`a_bounds`,
     so the range law and the affine law are held to the same physics."""
@@ -673,7 +692,8 @@ class RangeLaw:
     residual in the 1.2-1.6 m band on the synthetic tilt of tests/unit/test_depth.py) —
     :attr:`counts` how many pairs each rests on. Between two filled centres the
     ratio is linear in the network's depth; outside them it is held at the nearest filled
-    centre's, never extrapolated. Corrected depth = network depth x ratio(network depth)."""
+    centre's, never extrapolated. Corrected depth = network depth x ratio(network depth), and
+    that corrected depth must rise from bin to bin (:func:`_rising`)."""
 
     centres: Array
     ratios: Array
@@ -690,9 +710,11 @@ class RangeLaw:
         min_bins: int = RANGE_MIN_BINS,
     ) -> RangeLaw | None:
         """The law over (network depth ``d``, true depth ``z``) pairs, each counting ``weight``
-        times, or ``None`` when under ``min_bins`` bins hold ``min_pairs`` pairs — a pool that
-        sees one range says nothing about range, and the affine law's fit over all of it is the
-        better answer there. Each bin's ratio is clipped to :func:`ratio_bounds`."""
+        times, or ``None`` when under ``min_bins`` bins survive — a pool that sees one range
+        says nothing about range, and the affine law's fit over all of it is the better answer
+        there. A bin needs ``min_pairs`` pairs; its ratio is clipped to :func:`ratio_bounds`;
+        and a bin that puts the corrected depth below its nearer neighbour's is dropped
+        (:func:`_rising`)."""
         d = np.asarray(d, dtype=float)
         z = np.asarray(z, dtype=float)
         ok = np.isfinite(d) & np.isfinite(z) & (d > NEAR_M) & (z > NEAR_M)
@@ -708,9 +730,14 @@ class RangeLaw:
             centres.append(weighted_median(d[inside], share))
             ratios.append(float(np.clip(weighted_median(z[inside] / d[inside], share), lo, hi)))
             counts.append(n)
-        if len(centres) < min_bins:
+        kept = _rising(centres, ratios, counts)
+        if len(kept) < min_bins:
             return None
-        return cls(np.asarray(centres), np.asarray(ratios), np.asarray(counts, dtype=np.intp))
+        return cls(
+            np.asarray([centres[i] for i in kept]),
+            np.asarray([ratios[i] for i in kept]),
+            np.asarray([counts[i] for i in kept], dtype=np.intp),
+        )
 
     def ratio(self, depth: Array) -> Array:
         """The true / network ratio this law gives each pixel of ``depth``: interpolated
