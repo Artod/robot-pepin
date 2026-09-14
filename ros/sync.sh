@@ -18,6 +18,10 @@ rsync -a --delete --exclude '__pycache__' "$HERE/../src/pepin/" "root@$BOARD:/ro
 rsync -a --delete "$HERE/../config/" "root@$BOARD:/root/pepin-ros/pepin_src/config/"
 if [ "${1:-}" != "--no-restart" ]; then
     ssh "root@$BOARD" "systemctl restart pepin-ros && sleep 8 && systemctl is-active pepin-ros"
+    # The last nodes wait for the bridge to forget the previous incarnation of their names
+    # (pepin_bringup.ghost_wait) before they start: a census taken now would call them MISSING
+    # and read every CPU number as the start-up burst it is.
+    echo "letting the stack settle before the census"; sleep 25
 fi
 # What the board now runs, against config/board_manifest.json (ros/README.md, "What runs on the
 # board"). A red census is information, never a failed deploy: the code is already on the robot
