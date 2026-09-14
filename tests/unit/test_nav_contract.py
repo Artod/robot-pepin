@@ -495,6 +495,9 @@ def test_both_doors_to_a_goal_open_the_numbered_tape() -> None:
     goto = sf.tree("ros/tools/goto_ros.py")
     assert {"RUN_COMMAND_TOPIC", "RUN_STATUS_TOPIC"} <= sf.names(goto)
     assert {"start_command", "stop_command"} <= sf.calls(goto)
+    # ...and the drive must actually use it: the protocol being imported proved nothing about
+    # the goal path calling it, which is exactly how this went unnoticed for four hours.
+    assert {"Tape", "tape.open", "tape.close"} <= sf.calls(goto)
     assert any("taped" in text for text in sf.strings(goto)), "the log must name the tape"
     assert "--no-tape" in sf.strings(goto), "the drive without a numbered tape stays reachable"
     script = (REPO / "ros/goto.sh").read_text()
