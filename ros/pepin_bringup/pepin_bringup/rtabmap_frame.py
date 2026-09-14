@@ -46,7 +46,9 @@ import math
 
 import numpy as np
 from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
+from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rtabmap_msgs.msg import MapGraph
 from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
@@ -56,6 +58,7 @@ from pepin.measurements import compose, graph_anchor, graph_measurement
 from pepin.odometry import Pose2D
 from pepin.tsdf import RigidPose
 from pepin_bringup.msgs import (
+    map_id,
     pose_from_transform,
     stamp_seconds,
     transform_from_pose,
@@ -184,6 +187,14 @@ class RtabmapFrame(Node):
             )
         )
         self.create_subscription(MapGraph, "/rtabmap/mapGraph", self._on_graph, 5)
+        # The map the word is about, named the way the board names it (size@origin, msgs.map_id):
+        # the tracker refuses a word about another map, and a frame id is not a map id.
+        latched = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.create_subscription(OccupancyGridMsg, "/map", self._on_map, latched)
         self.create_subscription(
             PoseWithCovarianceStamped, TRACKER_POSE_TOPIC, self._on_tracker_pose, 5
         )
@@ -237,7 +248,10 @@ class RtabmapFrame(Node):
         position = msg.pose.pose.position
         self._belief = Pose2D(position.x, position.y, yaw_of(msg.pose.pose.orientation))
         self._belief_stamp = stamp_seconds(msg.header.stamp)
-        self._map_id = msg.header.frame_id
+
+    def _on_map(self, msg: OccupancyGridMsg) -> None:
+        """The served map's identity (size@origin), the name the board checks a word against."""
+        self._map_id = map_id(msg)
 
     @property
     def frames(self) -> tuple[str, str]:

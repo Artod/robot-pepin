@@ -63,7 +63,7 @@ def _belief(node: Any, x: float, y: float, seconds: float = 7.0) -> None:
     from geometry_msgs.msg import PoseWithCovarianceStamped
 
     msg = PoseWithCovarianceStamped()
-    msg.header.frame_id = "flat3"
+    msg.header.frame_id = "map"
     msg.header.stamp = _stamp(seconds)
     msg.pose.pose.position.x, msg.pose.pose.position.y = x, y
     node.subs["/tracker_pose"][1](msg)
@@ -158,6 +158,7 @@ def test_the_graph_s_word_is_where_the_graph_puts_the_cart_on_the_map() -> None:
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
         assert not node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent, "no belief to anchor to yet"
         _belief(node, 1.0, 2.0)
+        node._map_id = "flat3"  # what /map would have named itself (msgs.map_id)
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
         (sent,) = node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent
         word = json.loads(sent.data)
