@@ -55,7 +55,8 @@ The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): one
 the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anchor``,
 ``parallax_anchor``, ``affine_law``, ``ray_law``, ``wall_correct``, ``floor_anchor`` — plus
 ``depth_backend``, ``scale_ceiling``, the largest 1 / scale the law may be fitted to,
-``imu_lean`` and ``lean_min_quality``; their state is printed in every report line.
+``law_slew``, how fast that law may move between fits, ``imu_lean`` and ``lean_min_quality``;
+their state is printed in every report line.
 """
 
 from __future__ import annotations
@@ -339,6 +340,29 @@ FLAGS = FlagSet(
         range=(0.5, 20.0),
     ),
     Flag(
+        "law_slew",
+        0.0,
+        range=(0.0, 1.0),
+        description="how fast the affine law may move, as the largest relative change of the"
+        " published inverse depth over the pool's own depth range, per second; 0 applies every"
+        " fit whole, as the node always did. A law still walking to its fit says so in the"
+        " report line (slewing to a X b Y)",
+        why="2026-09-14: standing at home the law reads a 1.74 b 0.000 on 62 000 pairs; 30 s of"
+        " driving takes it to a 2.33 b -0.200 and back. Neither the camera nor the room changed:"
+        " the pool is 600 frames, which at 9.4 frames/s is 64 s, so half a minute replaces half"
+        " of it, and the drive's wider depth range opens the shift term"
+        " (pepin.depth.MIN_DEPTH_SPREAD 2.5 — standing, the beams span 0.8-2.0 m, a ratio of"
+        " 2.05). The same resting beams fitted with a free shift give a 2.26 b -0.183"
+        " (scratch/depth_scale_by_range.py), which is the drive's law: one set of pairs, two"
+        " descriptions, 11 % apart in metres at 1 m. The volume is painted with whichever was in"
+        " force, and the next frame no longer fits it — 220-270 frames per 30 s refused at the"
+        " alignment bound, a pure 5 % scale mismatch being enough to pin that search at its edge"
+        " (scratch/align_vs_scale.py)",
+        on_when="0.005 (30 % a minute) to let the law follow the room but not one drive's worth"
+        " of pairs; raise it only after a drive has been read with it on",
+        off_when="0 to reproduce today's behaviour, where every fit is applied whole",
+    ),
+    Flag(
         "carry_max_speed_mps",
         1.0,
         range=(0.1, 20.0),
@@ -465,6 +489,7 @@ class DepthStream(Node):
         for name in self._pipeline.names:  # a launch override reaches the stage it names
             self._pipeline.set(name, self._switches.on(name))
         set_scale_ceiling(float(self._switches["scale_ceiling"]))  # and the law's bound
+        self._law.slew_per_s = float(self._switches["law_slew"])  # how fast the law may move
         self._tally = Tally(STAGES)
         self._lean = LeanFeed(
             self,
@@ -545,6 +570,8 @@ class DepthStream(Node):
             self._net.mode = str(new)
         elif name == "scale_ceiling":
             set_scale_ceiling(float(new))  # the next fit is bounded by it; the law in hand is not
+        elif name == "law_slew":
+            self._law.slew_per_s = float(new)  # from the next fit on
         elif name == "imu_lean":
             self._poser.apply_lean = bool(new)
             self._lean.use_gyro = bool(new)
