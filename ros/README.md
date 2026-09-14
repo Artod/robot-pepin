@@ -334,6 +334,27 @@ lidar writes its own layer into it and the volume IS the map (`src/pepin/worldma
   debug cloud's). **Maturity is the weight in a cell,
   not a flag**: nothing is ever "finished", a cell that stops being observed simply keeps its
   weight and a chair that moves is cleared by the beams that cross it.
+- **A matcher gets hard cells only.** `/map_camera` — the band the camera's own scans are matched
+  against on the laptop — is cut with its own, far higher threshold (`camera_map_min_weight`, 20
+  against the map's 2). A cell the camera painted two frames ago at the pose it is now asking
+  about is not evidence about that pose: that circle is how camera-only localisation walked away
+  in 20-33 cm and 15-23° steps (2026-09-13). At `weight_ref_m` 2.0 m an observation weighs 1 and
+  the stream runs 8-9 frames a second, so 20 is 2.5 s of watching one cell from 2 m — and it is
+  also the lidar's own weight cap, so a saturated lidar cell still speaks in the band. Painting is
+  untouched: a cell is in the volume from the first frame and simply does not appear in the
+  matcher's slice until it is heavy. The report line says what that costs — the share of the
+  band's occupied cells the threshold keeps.
+- **The lidar may localise on the volume too.** With `lidar_map` on, the same lidar slice that
+  would go out as `/map` also goes out as **`/map_lidar`**, a topic of its own that crosses to the
+  board, and the tracker's `map_topic` flag points it there instead of at the served file —
+  Nav2, the `map_server` and the owner rule above are not touched at all. The tracker adopts the
+  first map on the topic it is asked for and no other, unless `map_refresh_s` says how often it
+  may take a changed one: adopting rebuilds the matcher and the tracker and forgets the episode's
+  evidence, and `/map_lidar` is republished every second (`pepin.mapping.MapChoice`). Two things
+  to know before pointing it there: the volume must have been **seeded** from the served map (an
+  unseeded live volume held 52 % of that map's walls; a seeded one IS it, cell for cell), and the
+  two grids have different sizes, so the map id differs and the laptop's candidates and camera
+  measurements are refused until that half moves too.
 - **`/map` has exactly one owner.** Two launch decisions, both told to the node, decide whether
   it may publish: `pepin.deployment.map_owner` per bridge mode — the board's `map_server` in
   `split` and `vision`, the laptop in `slam` — and `world_map:=true`, which is what keeps
@@ -345,8 +366,14 @@ lidar writes its own layer into it and the volume IS the map (`src/pepin/worldma
 - **Known room, unknown room, one machine.** The volume is written to `world_path`
   (`/maps/world_live.npz`) every `snapshot_s` and at shutdown, and loaded at start
   (`resume_volume`). A known room is a resumed snapshot — or a saved map seeded into the lidar's
-  layer with `seed_map:=/maps/flat3_straight.yaml` — and an unknown one an empty volume. There is
-  no mode switch between them, and the map keeps growing either way.
+  layer with `ros/laptop.sh vslam --seed-map=/maps/flat3_straight.yaml` — and an unknown one an
+  empty volume. There is no mode switch between them, and the map keeps growing either way.
+  Seeding also **snaps the volume's grid to that map's own cell lattice** (the box moves by less
+  than one voxel): unsnapped, the config's grid sits a third of a cell off `flat3_straight`'s, and
+  a tracker matching on the slice answered a median 2.3-2.9 cm from where the very same map as a
+  file put it on the four tapes of 2026-09-13 — snapped, the two agree to 0.1 cm. The seeded rows
+  become the lidar's own layer at once, so the camera cannot repaint the file's walls before the
+  first revolution arrives.
 
 ```bash
 ros/laptop.sh vslam --world-map            # /map comes from the volume instead of RTAB-Map's grid
@@ -354,6 +381,10 @@ ros/flags.sh set depth_fusion map_source file    # back to the old behaviour, li
 ros/flags.sh set depth_fusion no_return_free true # beams with no return carve an open door
 ros/flags.sh set depth_fusion lidar_layer false  # the volume goes back to being the camera's alone
 ros/flags.sh set depth_fusion snapshot_s 30      # write ros/maps/world_live.npz twice a minute
+ros/laptop.sh vslam --seed-map=/maps/flat3_straight.yaml  # the volume starts as the served map
+ros/flags.sh set depth_fusion lidar_map true     # the lidar slice goes out on /map_lidar too
+ros/flags.sh set relocalizer map_topic map_lidar # ...and the board's tracker matches on it
+ros/flags.sh set relocalizer map_refresh_s 60    # it may take a changed one once a minute
 ```
 
 Offline, `WorldMap.export_pgm_yaml` writes the map_server pair every existing tool already reads
@@ -501,6 +532,8 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `depth_fusion` | `align` | bool | on | yes | frame-to-model: a frame's lidar-height band is turned about the cart to fit the model before it is fused, and a frame whose best turn is the search's bound (+-4 deg) is refused |
 | `depth_fusion` | `min_weight` | number 0..100 | 2.0 | yes | observations a voxel needs before it is shown in /fusion/surface (the debug cloud only: /map has map_min_weight) |
 | `depth_fusion` | `map_min_weight` | number 0..20 | 2.0 | yes | observations a voxel needs before it speaks in /map. Its own flag, and capped at the lidar's own weight cap |
+| `depth_fusion` | `camera_map_min_weight` | number 0..60 | 20.0 | yes | observations a voxel needs before it speaks in /map_camera — the band the camera's own scans are MATCHED against. Its own flag, far above map_min_weight: a picture may show what one frame saw, a reference may not |
+| `depth_fusion` | `lidar_map` | bool | off | yes | the volume's lidar layer also goes out on /map_lidar, at map_hz, whoever owns /map: a topic of its own the board's tracker can be pointed at (the relocalizer's map_topic flag) while Nav2 and the map_server keep the /map they have |
 | `depth_fusion` | `surface_hz` | number 0.1..10 | 1.0 | yes | how often /fusion/surface is published (the crossing search costs a fraction of a second) |
 | `depth_fusion` | `band_half_z` | number 0.02..0.5 | 0.125 | yes | half the height band around the lidar's plane a frame is seated on, metres (config/fusion.json's band_half_z_m is the default); the band's centre is the plane the published base_link -> laser edge names, and both are printed in the report line |
 | `depth_fusion` | `lidar_layer` | bool | on | yes | /scan is integrated into the volume at the lidar's plane (rays carve free space, returns mark a surface); off, the volume is the camera's alone, as it was |
@@ -551,6 +584,8 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `relocalizer` | `near_rings` | bool | on | yes | a return is ringed as soon as it clears the cart's own outline, and only the marks that would land on that outline are dropped; off, nothing within the ring plus the outline is ringed at all — the older rule, whose blind disc grows with the ring |
 | `relocalizer` | `accept_candidates` | bool | on | yes | re-seed from the laptop watchdog's whole-map candidates (/localization/candidate, pepin.watchdog): a place that disagrees with the tracked pose candidate_streak times in a row, about the same place each time, is adopted through the path the board's own search uses |
 | `relocalizer` | `candidate_streak` | integer 1..10 | 3 | yes | how many candidates in a row must disagree with the tracker and agree with each other before one of them re-seeds it: the price of a teleport, in seconds |
+| `relocalizer` | `map_topic` | choice: map, map_lidar | map | yes | which map this tracker matches on: /map, whatever the stack's map owner publishes there (the served pgm in split and vision mode), or /map_lidar, the lidar layer of the laptop's fused volume (pepin_bringup.depth_fusion, flag lidar_map) |
+| `relocalizer` | `map_refresh_s` | number 0..600 | 0.0 | yes | the least time between two adoptions of the map topic: a newer map on the topic in use is taken only after this many seconds AND only if its cells changed. 0 takes the first map and no other, which is what a served file has always done |
 | `relocalizer` | `carry_candidates` | bool | on | yes | a candidate's pose is moved from the moment of its own scan to now over the odometry between the two stamps (pepin.watchdog.carried) before it is judged and fused, and one the odometry history no longer covers is dropped |
 | `relocalizer` | `distinct_scans` | bool | on | yes | a streak is counted in scans, not in messages: a candidate whose scan id is already in the run is a second opinion that heard the first one's scan, counted as replay and not lengthening the streak |
 | `rtabmap_frame` | `slam` | bool | off | at start | RTAB-Map is the map (online SLAM): its correction is map -> odom and goes to the board as a message on /map_odom, where pepin_bringup.slam_frame broadcasts it; off, the board's tracker owns map -> odom and this node broadcasts map -> rtabmap here |
@@ -668,6 +703,16 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* 2.0 — the cap is measured: lidar cells saturate at LidarLaw.max_weight 20 while the volume's own cap is 60, so anything above 20 leaves the whole map unknown — a synthetic box at min_weight 21 published free 0, occupied 0, unknown 14400, with Nav2 and the tracker driving on that. The 2.0 is the slice's own measured maturity (905 walls at 2, 817 at 6)
   - *On when:* raise it towards 20 for a map that must be certain — a world the cart has driven more than once, saved to file
   - *Off when:* lower it towards 0 in a fresh room, where the cart must plan through what a single pass saw
+- **`camera_map_min_weight`** — number 0..60, default 20.0
+  - *What:* observations a voxel needs before it speaks in /map_camera — the band the camera's own scans are MATCHED against. Its own flag, far above map_min_weight: a picture may show what one frame saw, a reference may not (0..60)
+  - *Default:* 20.0 — measured on the live volume (scratch/camera_band_weights.py on ros/maps/world_live.npz, 190066 frames): the band's occupied columns carry weight p25 20.0, median 29.3, and the band holds 21276 occupied cells at weight 2, 14285 at 20 (67 %), 9510 at 50 — so the tens are reachable, with two thirds of the walls surviving. The columns the lidar never wrote, the camera's own, fall from 148 to 26 over the same step. The number itself is the volume's weighting read at the frame rate: at weight_ref_m 2.0 m an observation weighs 1 and the stream runs 8-9 frames a second, so 20 is 20 frames, 2.5 s of watching one cell from 2 m (5.6 s from 3 m, 10 s at the 4 m range limit, and 0.6 s at the weight_cap 4.0, a metre and nearer). Below that a cell is one glance from one place — which is how camera-only localisation walked away in 20-33 cm and 15-23 deg steps on 2026-09-13, matching a band it had painted itself at the drifting pose. 20 is also the lidar's own cap (LidarLaw.max_weight): a saturated lidar cell still speaks in the band at exactly 20 and nothing the lidar wrote speaks above it (the lidar slice holds 3561 occupied cells at 20 and 0 at 30)
+  - *On when:* raise it toward the volume's cap 60 for a room the cart has driven more than once: only walls integrated for many seconds from several places would remain
+  - *Off when:* lower it to map_min_weight to reproduce the old behaviour — the matcher handed every cell two frames had touched. The report line says what the band costs: the share of its occupied cells this threshold keeps
+- **`lidar_map`** — bool, default off
+  - *What:* the volume's lidar layer also goes out on /map_lidar, at map_hz, whoever owns /map: a topic of its own the board's tracker can be pointed at (the relocalizer's map_topic flag) while Nav2 and the map_server keep the /map they have
+  - *Default:* off — a SEEDED volume's layer is the served map itself: slice it and 18274 of the pgm's 18274 known cells agree, every wall of each inside one cell of the other, and the four tapes of 2026-09-13 replayed on the exported slice give live pose error medians 0.6/0.5/1.3/0.7 cm against the file's own 0.6/0.5/1.3/0.6 — the same map (scratch/volume_vs_pgm.py, scratch/drive_bisect.py --map). Today's UNSEEDED live volume is not: only 52.1 % of the saved map's walls lie within a cell of it and 25.6 % of its own walls lie within a cell of the saved map, which is why this ships off and why seed_map exists. The second cost is the map id: the volume's grid is 280x250 cells and the served map 239x215, so a tracker that adopts /map_lidar answers to another map id and the laptop's candidates and camera measurements — stamped with the id of /map (pepin_bringup.laptop_localizer) — are refused as evidence about another map until that half moves too
+  - *On when:* with a volume seeded from the served map (seed_map), to point the board's tracker at the room as it is now instead of at the frozen file
+  - *Off when:* the default, and mandatory for a volume nobody seeded: one slice per map_hz saved on the laptop, and nothing on the bridge the board does not read
 - **`surface_hz`** — number 0.1..10, default 1.0
   - *What:* how often /fusion/surface is published (the crossing search costs a fraction of a second) (0.1..10)
   - *Default:* 1.0 — default by design, unmeasured; what is measured is the cost it protects — the surface build took 45 ms a second and stalled the node's executor until it was moved onto a snapshot taken outside the model lock
@@ -933,6 +978,16 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* 3 — deliberate conservatism above a measurement that was neutral: on the kidnap tape a streak of 1 recovered in 0.8 s (8 scans) and this streak of 3 in 2.9 s (28 scans), and both re-seeded 0 times over the undisturbed tape, where the pose never left the reference by more than 0.000 m. Nothing measured prefers 3; the argument is that a look-alike keeps looking alike, so one agreement is not proof
   - *On when:* raise it in a room of look-alike corners, where a wrong teleport costs more than three seconds of being lost
   - *Off when:* 1 is the fastest recovery measured (0.8 s) and on that tape just as safe — the value to try when a demo has to show the cart coming back
+- **`map_topic`** — choice: map, map_lidar, default map
+  - *What:* which map this tracker matches on: /map, whatever the stack's map owner publishes there (the served pgm in split and vision mode), or /map_lidar, the lidar layer of the laptop's fused volume (pepin_bringup.depth_fusion, flag lidar_map) (one of: map, map_lidar)
+  - *Default:* map — map is the default because the volume is unmeasured on the moving robot and because of one known cost: the volume's grid is 280x250 cells and the served map 239x215, so a tracker on /map_lidar answers to another map id, and the laptop's candidates and camera measurements — stamped with the id of /map (pepin_bringup.laptop_localizer) — are refused as evidence about another map until that half moves too. Offline a SEEDED volume is the same map: its slice agrees with flat3_straight.pgm on all 18274 cells that map knows, and the four tapes of 2026-09-13 replayed on the exported slice give live error medians 0.6/0.5/1.3/0.7 cm against the file's own 0.6/0.5/1.3/0.6 (scratch/volume_vs_pgm.py, scratch/drive_bisect.py --map). An UNSEEDED volume is not: today's live snapshot holds 52.1 % of the saved map's walls
+  - *On when:* map_lidar to drive on the room as it is now — the volume carries what the cart has seen since the file was frozen, and it hardens where the cart drives
+  - *Off when:* map wherever the laptop's watchdog and camera measurements must be believed, and wherever the laptop may go away: /map is served on the board and the volume is not
+- **`map_refresh_s`** — number 0..600, default 0.0
+  - *What:* the least time between two adoptions of the map topic: a newer map on the topic in use is taken only after this many seconds AND only if its cells changed. 0 takes the first map and no other, which is what a served file has always done (0..600)
+  - *Default:* 0.0 — the cost is the measured one: adopting a map rebuilds the correlative matcher, the static mask and the tracker and forgets the episode's candidates and measurements — the whole-map lattice alone is 15 s on these four A53 cores — while /map_lidar is republished at the fusion's map_hz, once a second. 0 is the old behaviour exactly: the served map arrives once, latched, and is adopted once
+  - *On when:* 30-60 s with map_topic map_lidar in a room being mapped as it is driven: the tracker then follows the volume as it hardens, at one rebuild a minute
+  - *Off when:* 0 for a frozen map, and any time a rebuild mid-drive would cost more than a stale map does
 - **`carry_candidates`** — bool, default on
   - *What:* a candidate's pose is moved from the moment of its own scan to now over the odometry between the two stamps (pepin.watchdog.carried) before it is judged and fused, and one the odometry history no longer covers is dropped
   - *Default:* on — by argument from a measured latency, not by a measured gain: a whole-map search takes 0.12-0.25 s plus a wireless hop, so at 0.8 m/s an uncarried pose is installed about 20 cm backwards along the drive every time — a bias, not noise. On the kidnap tape the carry changes nothing measurable (2.9 s, 28 scans, 0 false re-seeds either way), because that cart was barely moving when it was lost

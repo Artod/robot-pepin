@@ -18,6 +18,7 @@ import source_facts as sf
 import yaml
 
 from pepin.flags import load_table
+from pepin.tsdf import GridSpec
 from pepin.worldmap import LidarLaw
 
 REPO = Path(__file__).resolve().parents[2]
@@ -1452,6 +1453,37 @@ def test_the_laptop_localizer_matches_the_camera_where_the_camera_is() -> None:
     assert flags["camera_match_hz"] == 5.0 and flags["camera_min_fit"] == 0.25
     assert flags["camera_window_m"] == 0.09 and flags["camera_window_deg"] == 9.0
     assert flags["global_watch"] is True, "the watchdog half is untouched"
+
+
+def test_every_matcher_is_handed_heavy_cells_and_the_lidar_may_localise_on_the_volume() -> None:
+    """One volume, two references, each cut with its own maturity. /map_camera — the band the
+    camera's own scans are matched against — is cut far above the map's own threshold, because a
+    cell the camera painted two frames ago at the pose it is asking about is not evidence about
+    that pose (2026-09-13: camera-only localisation walked away in 20-33 cm steps). /map_lidar
+    carries the lidar layer on a topic of its own, so the board's tracker can be pointed at the
+    volume (its map_topic flag) while Nav2 and the map_server keep the /map they own — the owner
+    rule that protects /map is not touched at all."""
+    from pepin.deployment import ON_DEMAND_TOPICS, VISION_LAPTOP_PUBLISHES
+
+    fusion = load_table(REPO / NODES / "depth_fusion.py")
+    assert fusion["camera_map_min_weight"] >= 10.0 * fusion["map_min_weight"], (
+        "a matcher's reference is cut in the tens of observations, a map in the units"
+    )
+    assert fusion.flag("camera_map_min_weight").range == (0.0, GridSpec.max_weight)
+    assert fusion["lidar_map"] is False, "the old behaviour is the default"
+    node = sf.tree(f"{NODES}/depth_fusion.py")
+    assert sf.assignments(node)["LIDAR_MAP_TOPIC"] == "'/map_lidar'"
+    assert "self._world.hardness" in sf.calls(node) or "self._world.report" in sf.calls(node)
+    # It crosses to the board, and its silence is not a dead route: it is latched and off by
+    # default, like /map and /map_camera.
+    assert "map_lidar" in VISION_LAPTOP_PUBLISHES and "/map_lidar" in ON_DEMAND_TOPICS
+    tracker = load_table(REPO / NODES / "relocalizer.py")
+    assert tracker.flag("map_topic").choices == ("map", "map_lidar")
+    assert tracker["map_topic"] == "map", "the served map is still the default"
+    assert tracker["map_refresh_s"] == 0.0, "and it is adopted once, as a served map always was"
+    relocalizer = sf.tree(f"{NODES}/relocalizer.py")
+    assert "MapChoice" in sf.imported(relocalizer), "the decision lives in pepin, not in the node"
+    assert "self._choice.offer" in sf.calls(relocalizer)
 
 
 def test_the_depth_network_runs_where_the_backend_flag_says_and_the_cpu_model_waits() -> None:
