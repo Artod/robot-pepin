@@ -91,11 +91,16 @@ def depth_msg(truth: Pose2D, t: float) -> Any:
     )
 
 
-def odom_msg(pose: Pose2D, t: float) -> Any:
+def odom_msg(pose: Pose2D, t: float, vx: float = 0.1, wz: float = 0.0) -> Any:
+    """One /odometry/filtered sample. The twist is part of the message the EKF publishes and
+    the runaway guard reads it, so it is filled here: the drives of this file cover 0.2 m per
+    scan — faster than this cart really moves — and a twist of zero beside such a step is
+    exactly the signature of a frame that ran away (pepin.odometry.RunawayWatch)."""
     msg = Odometry(header=Header(stamp=stamp(t), frame_id="odom"))
     msg.pose.pose.position.x, msg.pose.pose.position.y = pose.x, pose.y
     msg.pose.pose.orientation.z = math.sin(pose.theta / 2.0)
     msg.pose.pose.orientation.w = math.cos(pose.theta / 2.0)
+    msg.twist.twist.linear.x, msg.twist.twist.angular.z = vx, wz
     return msg
 
 
@@ -465,7 +470,7 @@ def candidate_msg(
 def standing(node: Relocalizer) -> None:
     """One odometry sample, so the node has a tracked pose to judge a candidate against."""
     node.clock.seconds = 100.0
-    node.subs["/odometry/filtered"][1](odom_msg(Pose2D(), 100.0))
+    node.subs["/odometry/filtered"][1](odom_msg(Pose2D(), 100.0, vx=0.0))
 
 
 def test_an_operator_seed_is_adopted_once_and_never_echoed(node: Relocalizer) -> None:
@@ -885,3 +890,43 @@ def test_the_silence_is_measured_before_the_tracker_is_ready() -> None:
     assert node._source_age_s == pytest.approx(0.05), "the lidar spoke 50 ms ago and is heard"
     assert node._silence.phrase(node._source_age_s) == "last source 0.1 s ago"
     assert not node._silence.held_at_zero(node._source_age_s)
+
+
+def runaway(node: Relocalizer, at: float = 100.05) -> None:
+    """The EKF frame 3.5 km away, one sample after the cart stood at the origin."""
+    node.clock.seconds = at
+    node.subs["/odometry/filtered"][1](odom_msg(Pose2D(3493.7, -395.6, 0.0), at, vx=0.01))
+
+
+def test_an_odometry_sample_that_ran_away_never_reaches_the_carry(node: Relocalizer) -> None:
+    """2026-09-14: the EKF flew to 43 km at 60 m/s and every consumer followed. The guard
+    refuses the step, counts it, and says it once for the episode."""
+    standing(node)
+    runaway(node)
+    assert node._runaways == 1
+    assert node._history.at(100.05) is None, "the history stops at the last sample that made sense"
+    runaway(node, 100.10)
+    assert node._runaways == 2 and node._runaway.streak == 2, "one episode: one line, two counts"
+    said = [line for line in node.get_logger().texts("error") if "ran away" in line]
+    assert len(said) == 1 and "the pose stays where it was" in said[0]
+
+
+def test_the_guard_off_carries_the_runaway_as_before(node: Relocalizer) -> None:
+    node._switches.set("odometry_guard", False)
+    standing(node)
+    runaway(node)
+    assert node._runaways == 0
+    assert node._history.at(100.05) is not None, "the old behaviour, reachable"
+
+
+def test_a_normal_drive_is_never_refused_and_the_report_line_carries_the_count(
+    node: Relocalizer,
+) -> None:
+    standing(node)
+    for i, t in enumerate((100.05, 100.10, 100.15), start=1):
+        node.clock.seconds = t
+        node.subs["/odometry/filtered"][1](odom_msg(Pose2D(0.015 * i, 0.0, 0.0), t, vx=0.3))
+    assert node._runaways == 0
+    node._report_tracking()
+    line = next(line for line in node.get_logger().texts("info") if line.startswith("tracker:"))
+    assert "odometry runaway 0" in line and "odometry_guard=on" in line
