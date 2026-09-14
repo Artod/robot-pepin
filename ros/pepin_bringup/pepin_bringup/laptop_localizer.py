@@ -29,6 +29,19 @@ moved — are silenced, which matters more to a +-40 degree fan one person can f
 full revolution. With this node off, or the link down, the board simply has no camera
 measurements and tracks on the lidar as it always did.
 
+THE CAMERA'S OWN SEARCH (``camera_search``, off). The same whole-map search, run on a camera
+fan over the camera's own slice of the world, so that a cart whose lidar is gone can be FOUND
+and not only followed. It runs only where it can help — the board says its lidar is not feeding
+its tracker, or this node's own lidar search says nothing on this map fits
+(:func:`pepin.watchdog.camera_search_need`, fed by ``/localization/sources``) — because a
++-40 degree fan must never out-vote a revolution. Its candidates ride the same channel with
+their source named, so the board reads their fit against the camera's own floor and never
+lengthens a lidar streak with them. It ships OFF: on the offline kidnap of 2026-09-14
+(scratch/camera_kidnap_offline.py) the top place landed within 20 cm / 10 deg of the truth 5
+times in 60 on the heavy band and 2 in 60 with a roughened fan, and in every miss the truth was
+not among the places the search returned at all. The machinery is here, measured, and waiting
+for a band dense enough to answer.
+
 In: ``/scan`` and ``/map`` (the board's, over the bridge; the laser mount from ``/tf_static``),
 ``/depth_scan`` and ``/contact_scan`` (local — no bridge hop), ``/odometry/filtered`` (the trail
 a belief is carried along), and the board's own word, ``/tracker_pose`` with
@@ -53,7 +66,9 @@ adopting it. The cost of a search and of a camera match is in every report line.
 
 from __future__ import annotations
 
+import json
 import time
+from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -75,9 +90,16 @@ from pepin.localization import Localizer
 from pepin.measurements import RemoteMeasurement
 from pepin.odometry import Pose2D
 from pepin.scanmatch import SearchWindow, apply_motion, relative_motion
-from pepin.sources import CONTACT, DEPTH, WATCHDOG, SourceRegistry
+from pepin.sources import CONTACT, DEPTH, LIDAR, WATCHDOG, SourceRegistry
 from pepin.timeline import OdomHistory, TimedScan, timed_scan_from_ros
-from pepin.watchdog import CandidateVerdict, GlobalCandidate, ambiguity, judge
+from pepin.watchdog import (
+    CandidateVerdict,
+    GlobalCandidate,
+    ambiguity,
+    camera_search_need,
+    judge,
+    min_fit_for,
+)
 from pepin_bringup.msgs import (
     grid_from_msg,
     map_id,
@@ -88,6 +110,7 @@ from pepin_bringup.msgs import (
 )
 from pepin_bringup.node_kit import Switches, Tally, TfLookup, Worker, spin_main
 
+SOURCES_TOPIC = "/localization/sources"  # the board's own account of who drives its tracker
 CANDIDATE_TOPIC = "/localization/candidate"  # what pepin_bringup.relocalizer subscribes to
 CANDIDATE_POSE_TOPIC = "/localization/candidate_pose"  # the same, for Foxglove
 MEASUREMENT_TOPIC = "/localization/measurement"  # the camera's poses, for the board's tracker
@@ -98,7 +121,7 @@ CAMERA_SCANS = ((DEPTH, "/depth_scan"), (CONTACT, "/contact_scan"))
 NO_MOUNT = (0.0, 0.0, 0.0, False)
 TICK_S = 0.2  # how often the period is checked; the period itself is the flag
 MIN_POINTS = 60  # a revolution this thin cannot say where the cart is on a whole map
-STAGES = ("search", "measure", "camera", "mask")
+STAGES = ("search", "measure", "camera", "mask", "camera_search")
 # The search's arguments, the board's own (pepin_bringup.relocalizer._relocalize): the same
 # question, so an answer from here and an answer from there are comparable numbers.
 THETA_STEP_DEG = 10.0
@@ -127,6 +150,24 @@ BASE_FRAME = "base_link"
 # floor for how much of the scan must be judgeable at all (pepin.scanmatch.inlier_fraction).
 TRACK_MIN_KNOWN = 0.25
 ODOM_HORIZON_S = 5.0
+# The board says who drives its tracker about once a second on SOURCES_TOPIC. Silence this long
+# is a board or a bridge that is not speaking, and a lidar nobody can hear is not a healthy one:
+# the camera's search is then allowed to look for the cart (it can do no harm either — a
+# candidate cannot cross a link that is down).
+SOURCES_MAX_AGE_S = 5.0
+# The whole-map search of a camera fan runs on a coarser heading lattice than the lidar's: a
+# +-40 degree fan has no rear half to disambiguate a heading with, so a finer step buys nothing
+# and doubles the cost. The same thinning as the lidar's (a fan rarely reaches it anyway).
+CAMERA_THETA_STEP_DEG = 10.0
+
+
+@dataclass(frozen=True)
+class SearchJob:
+    """One whole-map search waiting for the search thread: whose scan it is and the scan."""
+
+    source: str
+    scan: TimedScan
+
 
 FLAGS = FlagSet(
     Flag(
@@ -196,6 +237,98 @@ FLAGS = FlagSet(
         off_when="a huge value is the old behaviour, which searched whatever was held — including"
         " a frozen scan, publishing the same answer again as if it were news",
         range=(0.1, 3600.0),
+    ),
+    Flag(
+        "camera_search",
+        False,
+        description="search the WHOLE camera map for the cart on a camera fan, the way"
+        " global_watch searches it on a lidar revolution, and publish what it finds on"
+        f" {CANDIDATE_TOPIC} with the fan's source named; off, the camera only ever refines a"
+        " pose somebody else holds and a camera-only cart that loses its pose stays lost",
+        why="OFF, and the measurement is why. The offline kidnap of 2026-09-14"
+        " (scratch/camera_kidnap_offline.py: fans raycast out of the volume's own camera band"
+        " at 60 lidar-truth poses of the two goto tapes of 2026-09-13, searched from scratch"
+        " with no belief) put the top place within 20 cm / 10 deg of the truth 5 times out of"
+        " 60 on the heavy band (weight >= 20) and 1 of 60 on the lenient one; with 5 cm of"
+        " range noise and 20 % dropout, 2 of 60 and 0 of 60. The truth was not merely ranked"
+        " below a rival — it was not among the places the search returned at all in every miss,"
+        " so this is the fan's geometry and not the ranking: +-40 degrees and 3 m of reach"
+        " (pepin.depth.depth_to_scan) against a band holding 743 occupied cells over 14 x 12.5"
+        " m. The fit cannot tell the good answers from the bad either (1.00 at the true pose"
+        " and 1.00 at a top place 4.5 m away), which is what camera_search_max_ambiguity is"
+        " for. Everything here is built and tested so the switch can be flipped the day the"
+        " band is dense enough to answer; nothing about it is fixed by tuning",
+        on_when="when the camera's band has become a real map (measure it again with the"
+        " kidnap script) — or in a carry test where a wrong answer costs nothing and the"
+        " report line is what is being read",
+        off_when="now, and until that number moves: a search that finds the cart 3-8 % of the"
+        " time cannot recover a pose, and a streak of 3 makes its real recovery rate lower"
+        " still",
+    ),
+    Flag(
+        "camera_search_source",
+        DEPTH,
+        description="which camera fan the whole-map search runs on: the depth band or the"
+        " floor-contact line",
+        why="the depth fan, because it is cut from the very band the search matches against"
+        f" ({CAMERA_MAP_TOPIC}, the volume's camera band) while the contact line marks where the"
+        " floor meets an obstacle, which that band does not hold. The live tapes of 2026-09-13"
+        " say the same in fits against /map_camera: depth 1.00 median (p10 0.78, 557 matches),"
+        " contact 0.54 median (p10 0.35, 431 matches) — the contact line explains that map half"
+        " as well, and a global fix is exactly where the weaker explanation cannot be afforded",
+        on_when="depth wherever the volume's camera band is what is being searched",
+        off_when="contact to measure the floor line against the same band, or where the depth"
+        " network is the thing in doubt",
+        choices=(DEPTH, CONTACT),
+    ),
+    Flag(
+        "camera_search_period_s",
+        2.0,
+        description="seconds between whole-map searches on a camera fan",
+        why="one camera search costs 74-115 ms of a core on this laptop (median 85-100 over the"
+        " 240 offline kidnaps of 2026-09-14), the same order as the lidar's 125 ms, and it only"
+        " ever runs while the lidar is NOT answering — so its worth is measured in how fast a"
+        " lost cart comes back, not in how current it is. Two seconds is half the lidar's rate:"
+        " a streak of 3 is then 6 seconds of standing still, and the search shares one thread"
+        " with the lidar's watchdog, which must never wait behind it",
+        on_when="shorten it in a carry test, where the whole point is how fast a candidate"
+        " streak forms",
+        off_when="lengthen it on a busy laptop; the camera's search is the one that can be late",
+        range=(0.2, 60.0),
+    ),
+    Flag(
+        "camera_search_min_fit",
+        0.25,
+        description="a camera candidate whose fit is below this is not published at all",
+        why="the tracker's own lost_below, the floor a camera MATCH is refused at"
+        " (camera_min_fit) and pepin.watchdog.CAMERA_ADMIT_FIT, which is the floor the board"
+        " reads a depth or contact candidate's fit against. It is deliberately NOT the lidar's"
+        " 0.45 and it is deliberately not the judge: a fan is scored on the few beams the band"
+        " can speak for, so its fit saturates — 1.00 median at the true pose AND 1.00 median at"
+        " a top place 4.5 m away over the 240 offline kidnaps, with every one of the 232 wrong"
+        " answers scoring above 0.50. This floor stops a fan with nothing judgeable in it from"
+        " travelling; the twin check does the judging",
+        on_when="raise it only with a measurement that says a higher fit means a better place"
+        " for a fan — the 2026-09-14 numbers say it does not",
+        off_when="0 lets the board's own gate do all the refusing",
+        range=(0.0, 1.0),
+    ),
+    Flag(
+        "camera_search_max_ambiguity",
+        0.80,
+        description="a camera candidate whose runner-up explains the fan this well from another"
+        " place is not published: the twin check (pepin.watchdog.ambiguity) read on the ranking"
+        " measure the search itself uses",
+        why="0.80 and not the lidar's 0.90 (pepin.watchdog.AMBIGUITY_MAX), measured on the same"
+        " 240 offline kidnaps: at 0.80 not ONE of the 232 wrong answers survived, in any of the"
+        " four configurations, while 5 of the 8 true fixes did; at 0.90 between 1 and 6 wrong"
+        " answers per configuration got through, and a wrong candidate is the one thing this"
+        " whole path must never produce. It costs recall the camera does not have anyway",
+        on_when="0.90 to read the same numbers the lidar's candidates are read with, when what"
+        " is being measured is how ambiguous the band is rather than where the cart is",
+        off_when="tighten it further (0.7) in a room of repeated furniture, where a fan's"
+        " look-alikes are the rule",
+        range=(0.0, 1.0),
     ),
     Flag(
         "camera_sources",
@@ -356,6 +489,14 @@ class LaptopLocalizer(Node):
         self._fit = 0.0  # ...and how well its scan fits the map there
         self._history = OdomHistory(horizon_s=ODOM_HORIZON_S)  # the trail a belief is carried on
         self._last_search = 0.0  # monotonic, of the last search STARTED
+        self._camera_scan: dict[str, TimedScan] = {}  # the newest fan, per camera source
+        self._camera_scan_at: dict[str, float] = {}  # ...and when it arrived, monotonic
+        self._camera_scan_id = 0  # a fan's identity, as a revolution has one
+        self._last_camera_search = 0.0  # monotonic, of the last camera search STARTED
+        self._lidar_fresh = False  # what the board says about its own lidar
+        self._sources_at = 0.0  # ...and when it last said anything, monotonic
+        self._lidar_verdict: CandidateVerdict | None = None  # our own last lidar verdict
+        self._last_camera: GlobalCandidate | None = None  # the newest camera candidate
         self._last_match: dict[str, float] = {}  # scan stamp of the last match, per camera source
         self._last: GlobalCandidate | None = None  # the newest candidate, for the report line
         self._sent: RemoteMeasurement | None = None  # ...and the newest measurement
@@ -376,6 +517,7 @@ class LaptopLocalizer(Node):
             PoseWithCovarianceStamped, "/tracker_pose", self._on_tracker_pose, 5
         )
         self.create_subscription(Float32, "/localization_fit", self._on_fit, 5)
+        self.create_subscription(String, SOURCES_TOPIC, self._on_sources, 5)
         self._tf = TfLookup(self, buffer=Buffer())  # no listener: /tf_static is read below
         # ...and a second buffer, this one with tf2's own listener on /tf, for the belief a
         # camera scan is matched around when the board's /tracker_pose has gone quiet
@@ -403,8 +545,8 @@ class LaptopLocalizer(Node):
         self._measurement_pub = self.create_publisher(
             String, MEASUREMENT_TOPIC, QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         )
-        self._worker = Worker(
-            self._search, name="laptop_localizer", on_error=self._on_error
+        self._worker: Worker[SearchJob] = Worker(
+            self._run_search, name="laptop_localizer", on_error=self._on_error
         ).start()
         self.create_timer(TICK_S, self._tick)
         self.create_timer(30.0, self._report)
@@ -413,6 +555,8 @@ class LaptopLocalizer(Node):
             f" {float(self._switches['watch_period_s']):.1f} s on {self._scan_topic}"
             f" -> {CANDIDATE_TOPIC}; the camera matched at"
             f" {float(self._switches['camera_match_hz']):.1f} Hz -> {MEASUREMENT_TOPIC};"
+            f" the camera's own whole-map search"
+            f" {'on' if self._switches.on('camera_search') else 'off'};"
             f" flags: {self._switches.state()}"
         )
 
@@ -556,6 +700,34 @@ class LaptopLocalizer(Node):
         """The tracker's own scan-to-map fit: what a candidate must beat to disagree."""
         self._fit = float(msg.data)
 
+    def _on_sources(self, msg: String) -> None:
+        """The board's own account of its tracker (pepin.localization's sources report): read
+        here for ONE thing — whether the lidar is still feeding it.
+
+        ``sources.lidar.health`` is the roster's own word (``fresh 9.9 Hz`` / ``stale 2.1 s`` /
+        ``off``), so a lidar that is switched off, dead or late says so itself. That is what
+        decides whether a camera fan may go looking for the cart at all
+        (:func:`pepin.watchdog.camera_search_need`). A message that does not parse is counted
+        and changes nothing; the freshness of the message itself is taken on this machine's
+        monotonic clock, never on the board's stamp (the two clocks are seconds apart).
+        """
+        try:
+            report = json.loads(msg.data)
+            health = str(report.get("sources", {}).get(LIDAR, {}).get("health", ""))
+        except (AttributeError, TypeError, ValueError):
+            self._tally.count("bad_sources")
+            return
+        self._lidar_fresh = health.startswith("fresh")
+        self._sources_at = time.monotonic()
+
+    def _lidar_driving(self) -> bool:
+        """Whether the board's tracker is being fed by its lidar right now, as the board itself
+        last said. A board that has not spoken for :data:`SOURCES_MAX_AGE_S` counts as not
+        driving: a lidar nobody can hear cannot be the reason to keep the camera from looking."""
+        if not self._sources_at or time.monotonic() - self._sources_at > SOURCES_MAX_AGE_S:
+            return False
+        return self._lidar_fresh
+
     # ---- the camera ------------------------------------------------------------------------
     def _camera_window(self) -> SearchWindow:
         """The window a camera scan is refined in, from the two flags that size it."""
@@ -661,10 +833,26 @@ class LaptopLocalizer(Node):
         frames after a stall cannot become a burst of matches. Everything that stops a match is
         counted with its own name, so the report line says why the board heard nothing.
         """
+        stamp = Time.from_msg(msg.header.stamp).nanoseconds * 1e-9
+        self._camera_scan_id += 1
+        scan = timed_scan_from_ros(
+            stamp,
+            msg.ranges,
+            msg.angle_min,
+            msg.angle_increment,
+            msg.range_max,
+            msg.scan_time,
+            NO_MOUNT,
+            self._camera_scan_id,
+        )
+        # The fan is kept whatever happens to it here: the whole-map search (``camera_search``)
+        # runs on the newest one at its own period, and it is not the matching half's business
+        # whether that source is enabled for matching or whether this frame was paced away.
+        self._camera_scan[source] = scan
+        self._camera_scan_at[source] = time.monotonic()
         if source not in self._switches["camera_sources"]:
             self._tally.count("camera_off")
             return
-        stamp = Time.from_msg(msg.header.stamp).nanoseconds * 1e-9
         period = 1.0 / max(float(self._switches["camera_match_hz"]), 1e-6)
         last = self._last_match.get(source)
         if last is not None and 0.0 <= stamp - last < period:
@@ -674,16 +862,6 @@ class LaptopLocalizer(Node):
         if localizer is None:
             self._tally.count("no_map")
             return
-        scan = timed_scan_from_ros(
-            stamp,
-            msg.ranges,
-            msg.angle_min,
-            msg.angle_increment,
-            msg.range_max,
-            msg.scan_time,
-            NO_MOUNT,
-            0,
-        )
         if len(scan.points) < self._roster.source(source).min_points:
             self._tally.count("thin_fan")
             return
@@ -742,6 +920,7 @@ class LaptopLocalizer(Node):
         """
         now = time.monotonic()
         scan = self._scan
+        self._tick_camera(now)
         if not self._switches.on("global_watch"):
             self._tally.count("off")
             return
@@ -757,8 +936,117 @@ class LaptopLocalizer(Node):
             self._tally.count("thin")
             return
         self._last_search = now
-        if self._worker.offer(scan):
+        if self._worker.offer(SearchJob(LIDAR, scan)):
             self._tally.count("busy")  # the previous search is still running: it is replaced
+
+    def _tick_camera(self, now: float) -> None:
+        """The same offer for a CAMERA fan, at ``camera_search_period_s`` — and only while the
+        search can help (:func:`pepin.watchdog.camera_search_need`): the lidar is not driving
+        the board's tracker, or the lidar's own whole-map search here says nothing on this map
+        fits. A healthy lidar answering for itself is never second-guessed by a +-40 degree fan.
+
+        The fan is searched against the camera's own slice of the world (``/map_camera``), the
+        grid its matches are made on: a fan cut from the band can only be placed on the band.
+        Everything that stops a search is counted with its own name, so the report line says why
+        the board heard nothing from this half.
+        """
+        if not self._switches.on("camera_search"):
+            self._tally.count("cam_off")
+            return
+        if now - self._last_camera_search < float(self._switches["camera_search_period_s"]):
+            return
+        need = camera_search_need(self._lidar_driving(), self._lidar_verdict)
+        if not need:
+            self._tally.count("cam_not_needed")
+            return
+        source = str(self._switches["camera_search_source"])
+        scan = self._camera_scan.get(source)
+        if scan is None or self._camera_matcher() is None:
+            self._tally.count("cam_nothing_to_search")
+            return
+        if now - self._camera_scan_at.get(source, 0.0) > float(
+            self._switches["watch_max_scan_age_s"]
+        ):
+            self._tally.count("cam_stale")
+            return
+        if len(scan.points) < self._roster.source(source).min_points:
+            self._tally.count("cam_thin")
+            return
+        self._last_camera_search = now
+        self._tally.count(f"cam_need_{need}")
+        if self._worker.offer(SearchJob(source, scan)):
+            self._tally.count("cam_busy")
+
+    def _run_search(self, job: SearchJob) -> None:
+        """The search thread: one job, whichever half offered it."""
+        if job.source == LIDAR:
+            self._search(job.scan)
+        else:
+            self._search_camera(job.source, job.scan)
+
+    def _search_camera(self, source: str, scan: TimedScan) -> None:
+        """The search thread, camera half: the whole of ``/map_camera`` searched on one fan,
+        with no belief and no prior, and the winner published as a candidate naming its source.
+
+        Two things stand between a place found here and the board's tracker, and neither is the
+        fit — a fan's fit saturates (1.00 at the true pose and 1.00 four metres away over the
+        240 offline kidnaps of 2026-09-14, scratch/camera_kidnap_offline.py):
+
+        * the twin check (``camera_search_max_ambiguity``, 0.80): the runner-up's share of the
+          winner's rank. At 0.80 not one of the 232 wrong answers of that offline test survived,
+          and 5 of the 8 right ones did.
+        * the fit floor (``camera_search_min_fit``), which only stops a fan with nothing
+          judgeable in it from travelling at all.
+
+        A candidate that fails either is counted here and never published: the board's own gate
+        counts ``unknown_map`` towards "the map does not fit", and a fan is not allowed to say
+        that about a room the lidar is following perfectly well. What is published carries the
+        source, so the board reads its fit against the camera's floor
+        (:func:`pepin.watchdog.min_fit_for`) and never lengthens a lidar streak with it.
+        """
+        localizer, map_id_now = self._camera_matcher(), self._map_id
+        if localizer is None:
+            return
+        started = time.perf_counter()
+        places = localizer.global_candidates(scan.points, CAMERA_THETA_STEP_DEG, THIN_TO)
+        self._tally.spent("camera_search", time.perf_counter() - started)
+        if not places:
+            self._tally.count("cam_found_nothing")
+            return
+        best, _fit = places[0]
+        measured = localizer.measure(
+            best.pose, scan.points, source, scan.stamp, min_known=TRACK_MIN_KNOWN
+        )
+        candidate = GlobalCandidate(
+            x=measured.x,
+            y=measured.y,
+            yaw=measured.yaw,
+            covariance=measured.covariance,
+            score=measured.fit,
+            ambiguity=ambiguity(
+                [(match.pose, localizer.rank(match.pose, scan.points)) for match, _ in places]
+            ),
+            stamp=scan.stamp,
+            map_id=map_id_now,  # the board's map: the id the board judges a candidate on
+            scan_id=scan.scan_id,
+            source=source,
+        )
+        self._last_camera = candidate
+        if candidate.ambiguity > float(self._switches["camera_search_max_ambiguity"]):
+            self._tally.count("cam_ambiguous")
+            return
+        if candidate.score < max(
+            float(self._switches["camera_search_min_fit"]), min_fit_for(source)
+        ):
+            self._tally.count("cam_low_fit")
+            return
+        pose = self._pose
+        verdict = CandidateVerdict.NOTHING if pose is None else judge(candidate, pose, self._fit)
+        self._tally.count(f"cam_{verdict}")
+        self._tally.count("cam_published")
+        self._pub.publish(
+            String(data=candidate.to_json(verdict=str(verdict), matched_on=self._camera_map))
+        )
 
     def _search(self, scan: TimedScan) -> None:
         """The search thread: the whole map on one revolution, then the winner re-measured in
@@ -798,6 +1086,10 @@ class LaptopLocalizer(Node):
         self._tally.count(str(verdict))
         self._tally.count("published")
         self._last = candidate
+        # What the lidar's own search thinks of this map is half of whether the camera's search
+        # is allowed to run at all (pepin.watchdog.camera_search_need): unknown_map means the
+        # lidar cannot place itself here, and a second sensor's opinion is then worth its CPU.
+        self._lidar_verdict = verdict
         self._pub.publish(
             String(data=candidate.to_json(verdict=str(verdict), search_ms=round(took_s * 1e3, 1)))
         )
@@ -829,6 +1121,7 @@ class LaptopLocalizer(Node):
             f" nothing new {c['stale']}, thin {c['thin']}, still searching {c['busy']},"
             f" found nothing {c['found_nothing']}, failed {c['failed']};"
             f" revolutions heard twice {c['repeat']}; {self._camera_line(w)};"
+            f" {self._camera_search_line(w)};"
             f" ms median/max: {w.stages()}; flags: {self._switches.state()}"
         )
         if c["failed"]:
@@ -858,6 +1151,25 @@ class LaptopLocalizer(Node):
             f" no tf {c['no_tf_belief']}{tf_failures},"
             f" no odometry {c['no_odometry']}, low fit {c['low_fit']}, thin {c['thin_fan']},"
             f" no map {c['no_map']}; paced {c['paced']}, source off {c['camera_off']}"
+        )
+
+    def _camera_search_line(self, w: Any) -> str:
+        """The camera's whole-map search half of the report: how many searches ran and why they
+        were allowed to, what they said, what refused the rest, and the newest candidate."""
+        c = w.counts
+        verdicts = ", ".join(f"{v} {c[f'cam_{v}']}" for v in CandidateVerdict)
+        last = "none yet" if self._last_camera is None else self._last_camera.text()
+        return (
+            f"camera search: {c['cam_published']} candidates published ({verdicts}),"
+            f" needed because no lidar {c['cam_need_no_lidar']},"
+            f" unknown map {c['cam_need_unknown_map']};"
+            f" refused: ambiguous {c['cam_ambiguous']}, low fit {c['cam_low_fit']},"
+            f" found nothing {c['cam_found_nothing']};"
+            f" skipped: off {c['cam_off']}, lidar healthy {c['cam_not_needed']},"
+            f" no fan or map {c['cam_nothing_to_search']}, nothing new {c['cam_stale']},"
+            f" thin {c['cam_thin']}, still searching {c['cam_busy']};"
+            f" last {last}; lidar verdict"
+            f" {self._lidar_verdict or 'none'}, lidar driving {self._lidar_driving()}"
         )
 
     @staticmethod

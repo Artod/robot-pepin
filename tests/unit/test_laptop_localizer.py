@@ -8,6 +8,7 @@ measurement really carry.
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from collections.abc import Callable
@@ -28,6 +29,7 @@ from ros_stubs import (  # noqa: E402
     Header,
     LaserScan,
     Parameter,
+    String,
     TransformStamped,
 )
 from ros_stubs import PoseWithCovarianceStamped as PoseMsg  # noqa: E402
@@ -519,3 +521,78 @@ def test_the_flag_off_leaves_the_old_rule_and_a_tf_that_answers_nothing_is_count
         assert "no tf 1 (" in line and "belief: tracker 1, tf 0" in line
     finally:
         blind.close()
+
+
+# ---- the camera's own whole-map search --------------------------------------------------------
+def sources_msg(health: str) -> Any:
+    """The board's account of its own tracker, as /localization/sources carries it: here only
+    the lidar's health line matters (``fresh 9.9 Hz``, ``stale 2.1 s``, ``off``)."""
+    return String(
+        data=json.dumps({"anchor": "lidar", "fit": 0.9, "sources": {"lidar": {"health": health}}})
+    )
+
+
+def test_the_camera_search_stays_out_of_a_healthy_lidar_s_way() -> None:
+    """The rule that keeps a +-40 degree fan from out-voting a revolution: while the board says
+    its lidar is fresh, and this node's own lidar search has not called the map unknown, no
+    camera search runs at all — the fan is held, the tick counts it and says so."""
+    node = watch(camera_search=True)
+    try:
+        assert FLAGS["camera_search"] is False, "the module's default: off, and the flag says why"
+        standing(node)
+        node.subs["/localization/sources"][1](sources_msg("fresh 9.9 Hz"))
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
+        node._tick()
+        assert until(lambda: node.pubs["/localization/candidate"].sent), "the lidar's own search"
+        assert all(
+            GlobalCandidate.from_json(msg.data).source == "lidar"
+            for msg in node.pubs["/localization/candidate"].sent
+        ), "a camera candidate went out while the lidar was healthy"
+        node._report()
+        line = node.logger.texts("info")[-1]
+        assert "lidar healthy 1" in line and "lidar driving True" in line
+    finally:
+        node.close()
+
+
+def test_a_fan_searches_the_whole_map_when_the_lidar_is_not_driving() -> None:
+    """The lidar off on the board: the camera's fan is searched over the whole camera map with
+    no belief at all, and what it finds travels on the same channel the lidar's candidates use —
+    naming its source, its own fan's id and the board's map, so the board reads its fit against
+    the camera's floor and never lengthens a lidar streak with it."""
+    node = watch(camera_search=True, camera_search_max_ambiguity=1.0, camera_search_min_fit=0.0)
+    try:
+        standing(node)
+        node.subs["/localization/sources"][1](sources_msg("off"))
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
+        node._tick_camera(time.monotonic())
+        assert until(lambda: node.pubs["/localization/candidate"].sent)
+        candidate = published(node)
+        assert candidate.source == DEPTH and candidate.scan_id > 0
+        assert candidate.map_id == node._map_id
+        assert 0.0 <= candidate.ambiguity <= 1.0 and candidate.covariance.shape == (3, 3)
+        node._report()
+        line = node.logger.texts("info")[-1]
+        assert "camera search: 1 candidates published" in line
+        assert "no lidar 1" in line and "lidar driving False" in line
+        assert "camera_search=on camera_search_source=depth" in line
+    finally:
+        node.close()
+
+
+def test_an_ambiguous_fan_is_never_published() -> None:
+    """The twin check is the only judge a fan has — its fit says 1.00 at the true pose and 1.00
+    metres away — so a fix whose runner-up explains the fan as well is counted here and dies
+    here: the board never hears it, and so can never count it towards "the map does not fit"."""
+    node = watch(camera_search=True, camera_search_max_ambiguity=0.0)
+    try:
+        standing(node)
+        node.subs["/localization/sources"][1](sources_msg("stale 2.1 s"))
+        node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
+        node._tick_camera(time.monotonic())
+        assert until(lambda: node._last_camera is not None)
+        assert not node.pubs["/localization/candidate"].sent
+        node._report()
+        assert "ambiguous 1" in node.logger.texts("info")[-1]
+    finally:
+        node.close()
