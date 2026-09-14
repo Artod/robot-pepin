@@ -31,17 +31,22 @@ from numpy.typing import NDArray
 
 from pepin.dynamic import StaticMask, voting_mask
 from pepin.fusion import (
+    COVARIANCE_CHOICES,
+    PEAK,
     PoseMeasurement,
     at_edge,
     covariance_from_score_surface,
     from_fit,
+    from_peak,
     fuse,
+    peak_temperature,
 )
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import (
     CorrelativeMatcher,
     MatchResult,
+    ScoreSurface,
     SearchWindow,
     apply_motion,
     relative_motion,
@@ -53,7 +58,15 @@ __all__ = ["Localizer", "Running", "ScanObservation", "TrackStats", "pooled"]
 # The flags a node may route into :meth:`Localizer.switch` — every live switch this tracker
 # owns, by the name its Flag carries. A node with flags of its own (the candidate gate's, say)
 # asks this tuple first, so a set of a flag that is not the tracker's is never refused by it.
-SWITCHES = ("sources", "rest_lock", "explained_vote", "rest_tau_s", "rest_gain", "fusion")
+SWITCHES = (
+    "sources",
+    "rest_lock",
+    "explained_vote",
+    "rest_tau_s",
+    "rest_gain",
+    "fusion",
+    "covariance",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +236,7 @@ class Localizer:
         carry_deg: float = 4.0,
         sources: SourceRegistry | None = None,  # which sensors correct; the lidar alone by default
         fusion: bool = True,  # off: the widest enabled source corrects alone, the rest only report
+        covariance: str = PEAK,  # how a match's covariance is read: its score peak, or the fit
     ) -> None:
         self._grid = grid
         # The tracker wants a continuous correction: quantised to the search step it corrects the
@@ -239,10 +253,15 @@ class Localizer:
         self.explained_vote = explained_vote
         self.sources = sources if sources is not None else SourceRegistry()
         self.fusion = fusion
+        self.covariance = covariance
         # The last update, source by source: every source's word, the one they were fused into
         # (the anchor's own when it stood alone or was a bound), who anchored, and the pose it
         # all corrected from — what /localization/sources shows (``sources_report``).
         self.measurements: list[PoseMeasurement] = []
+        # ...and the lattice each of those was read off, by source: what a calibration of the
+        # peak temperature needs (scratch/peak_temperature.py) and what a report may read the
+        # sharpness of the last match from. Kept only for the last update.
+        self.surfaces: dict[str, ScoreSurface] = {}
         self.fused: PoseMeasurement | None = None
         self.anchor: str | None = None
         self.prediction = initial
@@ -290,7 +309,8 @@ class Localizer:
             f"rest_tau_s {self.rest_tau_s:.1f}, gain {self._correction_gain:.2f}, "
             f"carry {self._carry_m * 100:.0f} cm / {self._carry_deg:.0f} deg, "
             f"sources {','.join(self.sources.enabled) or 'none'}, "
-            f"fusion {'on' if self.fusion else 'off'}"
+            f"fusion {'on' if self.fusion else 'off'}, "
+            f"covariance {self.covariance}"
         )
 
     def report(self) -> TrackStats:
@@ -309,6 +329,10 @@ class Localizer:
         names (``rest_lock``, ``fusion``, ...); ``ValueError`` for a name that is neither."""
         if name == "sources":
             self.sources.enable(value)
+        elif name == "covariance":
+            if value not in COVARIANCE_CHOICES:
+                raise ValueError(f"covariance is one of {COVARIANCE_CHOICES}, not {value!r}")
+            self.covariance = str(value)
         elif hasattr(self, name) and not name.startswith("_"):
             setattr(self, name, value)
         else:
@@ -575,16 +599,7 @@ class Localizer:
                 self.stats.silenced_points += len(points) - len(voting)
         local, surface = self._matcher.match_surface(pose, voting, self._window)
         fit = self._matcher.inlier_fraction(local.pose, points, min_known=min_known)
-        return PoseMeasurement(
-            local.pose.x,
-            local.pose.y,
-            local.pose.theta,
-            covariance_from_score_surface(surface, fit, trust=trust),
-            source,
-            stamp,
-            fit,
-            edge=at_edge(surface),
-        )
+        return self._as_measurement(surface, local.pose, fit, source, stamp, trust)
 
     def belief(self, stamp: float = 0.0) -> PoseMeasurement:
         """What this tracker currently believes, as a measurement: its pose, its confidence as
@@ -815,14 +830,45 @@ class Localizer:
             prediction, voting, motion, self._window
         )
         fit = self._matcher.inlier_fraction(local.pose, points)
-        covariance = covariance_from_score_surface(surface, fit, trust=source.trust)
+        return self._as_measurement(
+            surface, local.pose, fit, observation.source, observation.stamp, source.trust
+        )
+
+    def _as_measurement(
+        self,
+        surface: ScoreSurface,
+        pose: Pose2D,
+        fit: float,
+        source: str,
+        stamp: float,
+        trust: float,
+    ) -> PoseMeasurement:
+        """One match as a measurement, with the covariance the ``covariance`` switch asks for.
+
+        ``peak``: the spread of the match's own score peak at this source's matcher temperature
+        (:func:`pepin.fusion.from_peak`) — calibrated against the replay's truth, so the sigma
+        it reports is the error it makes. ``fit``: the fit-scaled surface moment that shipped
+        before it (:func:`pepin.fusion.covariance_from_score_surface`), kept reachable so a
+        regression is switched off in the field rather than reverted.
+        """
+        self.surfaces[source] = surface
+        if self.covariance == PEAK:
+            return from_peak(
+                surface,
+                pose,
+                fit,
+                source,
+                stamp,
+                temperature=peak_temperature(self.sources.matcher(source)),
+                trust=trust,
+            )
         return PoseMeasurement(
-            local.pose.x,
-            local.pose.y,
-            local.pose.theta,
-            covariance,
-            observation.source,
-            observation.stamp,
+            pose.x,
+            pose.y,
+            pose.theta,
+            covariance_from_score_surface(surface, fit, trust=trust),
+            source,
+            stamp,
             fit,
             edge=at_edge(surface),
         )

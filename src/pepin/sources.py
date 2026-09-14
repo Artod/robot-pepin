@@ -60,7 +60,9 @@ class ScanSource:
     fusion, 1.0 for the lidar), ``stale_after_s`` (older than this it is not alive),
     ``min_points`` / ``vote_min_points`` (fewer returns fix no pose / may not vote alone), and
     ``remote`` — a source whose word arrives as a pose MEASUREMENT computed elsewhere rather
-    than as a scan to match here (:data:`CAMERA`)."""
+    than as a scan to match here (:data:`CAMERA`). ``matcher`` names whose score peak this
+    source's match is read with (:func:`pepin.fusion.peak_temperature`): the lidar's
+    revolution is one matcher, every fan the camera produces is the other."""
 
     name: str
     frame: str
@@ -70,6 +72,7 @@ class ScanSource:
     min_points: int = 50
     vote_min_points: int = 60
     remote: bool = False
+    matcher: str = LIDAR
 
     @property
     def partial(self) -> bool:
@@ -84,17 +87,31 @@ class ScanSource:
 DEFAULT_SOURCES: tuple[ScanSource, ...] = (
     ScanSource(LIDAR, "laser", 360.0, trust=1.0, stale_after_s=0.5),
     ScanSource(
-        DEPTH, "base_link", 80.0, trust=0.5, stale_after_s=1.0, min_points=20, vote_min_points=20
+        DEPTH,
+        "base_link",
+        80.0,
+        trust=0.5,
+        stale_after_s=1.0,
+        min_points=20,
+        vote_min_points=20,
+        matcher=CAMERA,
     ),
     ScanSource(
-        CONTACT, "base_link", 80.0, trust=0.5, stale_after_s=1.0, min_points=20, vote_min_points=20
+        CONTACT,
+        "base_link",
+        80.0,
+        trust=0.5,
+        stale_after_s=1.0,
+        min_points=20,
+        vote_min_points=20,
+        matcher=CAMERA,
     ),
     # The camera's measurements, made where the camera's data already is. ``trust`` is 1.0 here
     # because the matcher that produced them has already charged the camera's own trust into
     # their covariance (:func:`pepin.fusion.covariance_from_score_surface`), and charging it
     # twice would silence a sensor for the wrong reason. It never anchors and has no gate:
     # ``remote`` is what says so.
-    ScanSource(CAMERA, "map", 80.0, trust=1.0, stale_after_s=1.0, remote=True),
+    ScanSource(CAMERA, "map", 80.0, trust=1.0, stale_after_s=1.0, remote=True, matcher=CAMERA),
 )
 
 
@@ -196,6 +213,13 @@ class SourceRegistry:
     def health(self, name: str) -> SourceHealth:
         """The source's health record."""
         return self._health[name]
+
+    def matcher(self, name: str) -> str:
+        """Whose score peak a match of this source is read with (:attr:`ScanSource.matcher`):
+        the lidar's for a name the roster does not know — a whole-map search's :data:`WATCHDOG`
+        is the lidar's own revolution under another name."""
+        source = self._sources.get(name)
+        return LIDAR if source is None else source.matcher
 
     def observe(self, name: str, stamp: float) -> None:
         """A scan from ``name`` arrived with ``stamp``: its health record takes note."""
