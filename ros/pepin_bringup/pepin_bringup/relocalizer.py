@@ -268,16 +268,25 @@ FLAGS = FlagSet(
         " 2026-09-13 (10047 matches off the window's edge, replayed against the lidar-only"
         " trace) solves T = 0.016 for a mean NEES of 3.00 (2.99 measured), and at that"
         " temperature a fit >= 0.7 match predicts 0.9/1.2 cm and 0.47 deg against an actual"
-        " 0.72/0.77 cm and 0.40 deg. Position comes out half a sigma conservative and the"
-        " heading optimistic in the poor-fit band (variance of error/sigma x 0.45, y 0.34, yaw"
-        " 1.77). The lidar being honestly sharp is what stops a broad camera peak from moving"
-        " the fused pose: a measurement 5 cm off with a 6.3 cm peak moves it 0.24 mm while the"
-        " lidar's peak is 0.44 cm sharp, and takes the pose over — 4.84 cm of the 5 — once the"
-        " lidar's own covariance is inflated to the 35 cm a lost tracker is worth",
+        " 0.72/0.77 cm and 0.40 deg. That, and only that, is the reason for the default: the"
+        " sigma a match reports is the error it makes. It is NOT a reason to expect the camera"
+        " to weigh less — both covariances shrink about sixfold together, and on the real"
+        " matcher's own lattices (scratch/peak_skeptic_fuse.py, the furnished room of the unit"
+        " tests) a +-40 deg fan 5 cm off the truth pulls the fused pose 17.4 mm here against"
+        " 15.9 mm on fit, its share of the across-wall information going UP, 29.8 % to 34.8 %."
+        " The 0.24 mm of tests/unit/test_fusion.py is a synthetic lidar made 13 times sharper"
+        " than the fan, where a real revolution is 3.5 times sharper. The balance is uneven too:"
+        " position comes out 2-3x conservative and the heading optimistic (variance of"
+        " error/sigma x 0.45, y 0.34, yaw 1.77)",
         on_when="on: the sigma a match reports is the error it makes, which is what an"
         " information filter needs to weigh the camera against the lidar",
         off_when="fit puts back the numbers every tape before 2026-09-13 was recorded with —"
-        " for an A/B against them, or if a calibrated covariance ever misbehaves in the field",
+        " for an A/B against them, or if a calibrated covariance ever misbehaves in the field."
+        " Flip it TOGETHER with laptop_localizer's flag of the same name: the board weighs the"
+        " laptop's fan against its own match, this path is about sixfold sharper in variance,"
+        " and a board on fit with a laptop on peak hands the same fan 75 % of the across-wall"
+        " information and 38.9 mm of a 5 cm pull instead of 34.8 % and 17.4 mm"
+        " (scratch/peak_skeptic_fuse.py)",
         choices=COVARIANCE_CHOICES,
     ),
     Flag(

@@ -255,20 +255,24 @@ FLAGS = FlagSet(
         " fit-scaled second moment of the whole surface, with the source's trust in it, that"
         " shipped before it. It is the number the board's information filter weighs the fan by",
         why="the fan's covariance decides everything the camera is allowed to do to the pose,"
-        " and the fit-scaled one was never held against an error. On the peak path the lidar's"
-        " own covariance is calibrated (T = 0.016, mean NEES 2.99 over 10047 matches of the four"
-        " goto tapes of 2026-09-13: scratch/peak_temperature.py) and reads 0.9-1.2 cm at a good"
-        " fit, so a fan whose peak is a handful of centimetres wide can no longer carry the fused"
-        " pose — a measurement 5 cm off with a 6.3 cm peak moves a 0.44 cm lidar by 0.24 mm,"
-        " where the camera measurements of those same tapes took 20-45 % of the weight and"
-        " pulled the pose 0.8-1.5 cm off the lidar. The camera's own temperature is"
+        " and the fit-scaled one was never held against an error. On the peak path the scale is"
+        " calibrated (T = 0.016, mean NEES 2.99 over 10047 lidar matches of the four goto tapes"
+        " of 2026-09-13: scratch/peak_temperature.py) and reads 0.9-1.2 cm at a good fit, so the"
+        " number a fan sends means something. It does not by itself weigh the camera down: both"
+        " covariances shrink about sixfold together, and on the real matcher's own lattices a"
+        " +-40 deg fan 5 cm off the truth keeps its share of the across-wall information —"
+        " 29.8 % on fit, 34.8 % here, pulling the fused pose 17.4 mm of the 5 cm against 15.9"
+        " (scratch/peak_skeptic_fuse.py). The camera's own temperature is"
         " PROVISIONAL, the lidar's"
         " number: no camera scan is on those tapes, and until an operator records"
         " /localization/measurement against /tracker_pose and runs scratch/peak_temperature.py"
         " --camera, the source's trust (0.5) keeps widening the fan on top of its peak",
         on_when="on: the board weighs the camera by a spread that means something",
         off_when="fit is what every tape before 2026-09-13 was recorded with, for an A/B; and"
-        " the switch to reach for if a calibrated fan ever misbehaves in the field",
+        " the switch to reach for if a calibrated fan ever misbehaves in the field. Flip it"
+        " TOGETHER with relocalizer's flag of the same name: a laptop on peak against a board on"
+        " fit hands the same fan 75 % of the across-wall information and 38.9 mm of a 5 cm pull"
+        " instead of 34.8 % and 17.4 mm (scratch/peak_skeptic_fuse.py)",
         choices=COVARIANCE_CHOICES,
     ),
     Flag(
