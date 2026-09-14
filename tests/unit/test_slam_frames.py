@@ -428,6 +428,7 @@ def test_the_stored_anchor_is_re_learned_only_on_evidence_that_holds(tmp_path: A
 
         # the tracker relocalises 2 m away and stays there: the graph's word no longer fits
         _belief(node, 3.0, 2.0, seconds=7.0)
+        _fit(node, 0.7, at=0.0)  # a lidar behind the belief: the anchor may be learned
         for moment in (0.0, 2.0, 4.0):  # ...but the lidar is silent, so nothing is re-learned
             node.clock.seconds = moment
             node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
@@ -557,6 +558,7 @@ def test_the_word_s_fit_is_what_the_graph_has_recognised() -> None:
         node = rtabmap_frame.RtabmapFrame()
         node._map_id = "flat3"
         _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # a lidar behind the belief: the anchor may be learned
         _odom(node, 0.2, 0.0)
         _info(node, 0.0, hypothesis=0.04)
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
