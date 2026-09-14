@@ -1161,6 +1161,69 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *On when:* raise it towards 9 only on a board that is measurably keeping its 20 Hz with Nav2 running, and read the EKF's update-rate warnings after
   - *Off when:* lower it further if the EKF still misses its rate
 
+## What runs on the board
+
+Four A53 cores and 1.5 GB. Everything the board is allowed to run is declared once, with a
+budget, in [`config/board_manifest.json`](../config/board_manifest.json); `ros/board.sh census`
+compares that file against a live `ps` and `ros/board.sh manifest` prints the registry itself.
+Two rules hold this together:
+
+- **Nothing is added to the board without a manifest entry with a measured budget.** The entry
+  says what the process is, which of the three reasons of CLAUDE.md rule 20 puts it here
+  (real-time, survives a WiFi loss, wired to the board's own pins), which systemd unit or launch
+  file owns it, and what it may cost in CPU and resident memory. A feature that only works while
+  the laptop is alive belongs on the laptop.
+- **The census runs after every deploy.** `ros/sync.sh` ends with it; it never fails the deploy,
+  it only prints. Run it by hand whenever the board feels slow.
+
+```bash
+ros/board.sh census          # the table and the verdict; exit 1 when red
+ros/board.sh census --json   # the same as data
+ros/board.sh manifest        # the registry: what we run there and why (touches no host)
+```
+
+A census is one `ps` over the multiplexed ssh — no `ros2` CLI (one `ros2 node list` costs
+seconds of CPU on this board), no `docker exec`, nothing restarted. The verdict is red when
+anything is **OVER** its budget, **MISSING** (expected always, not running), **FORBIDDEN**
+(declared `expected: false` and running anyway) or **UNLISTED** (a process above 1 % CPU that no
+entry claims — usually a `ros2 topic hz` left behind, which is what takes this board to load 12).
+Entries marked `sometimes` (the per-drive recorder, the reaper, the SLAM-only and split-only
+nodes) are **IDLE** when absent, never missing. The census is also a health probe (`board
+budget`) in `scripts/health_check.py` and the tray.
+
+Two things to know about the numbers before reading a table: ps's `%CPU` is the process's
+average over its whole **life**, not an instant sample — a census taken a minute after a restart
+shows start-up cost, and the report says so — and it is a percentage of **one** core, so 400 %
+is the whole board.
+
+| process | what it is | why on the board | budget | owner |
+| --- | --- | --- | --- | --- |
+| `nav2_container` | Nav2 in one process: map server, planner, controller, behaviours, tree, smoother (nice 5) | real-time, wifi-loss | 120 % / 152 MB | `pepin-ros.service` -> `nav.launch.py` |
+| `relocalizer` | scan matching against the map, owns `map -> odom`, kidnap recovery | real-time, wifi-loss | 90 % / 121 MB | `pepin-ros.service` -> `nav.launch.py` |
+| `sensors_container` | LD19 driver, hull filter, base bridge, static sensor transforms (nice -10) | real-time, hardware-attached | 32 % / 90 MB | `pepin-ros.service` -> `robot.launch.py` |
+| `run_recorder` | every drive on disk: scans, odometry, pose, commands, camera | wifi-loss | 24 % / 93 MB | `pepin-ros.service` -> `nav.launch.py` |
+| `tof_bridge` | the three VL53L1X ranges as ROS `Range` for the contact layer | real-time, hardware-attached | 20 % / 102 MB | `pepin-ros.service` -> `robot.launch.py` |
+| `zenoh_bridge` | the board's ROS graph over one TCP link to the laptop | real-time | 18 % / 78 MB | `pepin-bridge.service` |
+| `neck_state` | the neck's encoders, and `base_link -> camera_link` behind its flag | hardware-attached | 16 % / 99 MB | `pepin-ros.service` -> `robot.launch.py` |
+| `base_server` | wheels, odometry and the deadman next to the UART (TCP 3336) | real-time, wifi-loss, hardware-attached | 16 % / 27 MB | `pepin-base.service` |
+| `ekf_node` | wheels + gyro fused in the plane, owns `odom -> base_link` | real-time, wifi-loss | 14 % / 42 MB | `pepin-ros.service` -> `robot.launch.py` |
+| `tof_server` | the ToF sensors on I2C as a TCP stream (3335) | real-time, hardware-attached | 13 % / 22 MB | `pepin-tof.service` |
+| `goal_server` | goals on a socket, with the places book of the map in use | wifi-loss | 10 % / 113 MB | `pepin-ros.service` -> `nav.launch.py` |
+| `ros2_launch` | the launch process that started and respawns the ROS nodes | wifi-loss | 10 % / 105 MB | `pepin-ros.service` ExecStart |
+| `ser2net` | servo bus and lidar as TCP ports 3333/3334 | hardware-attached | 6 % / 5 MB | `ser2net.service` |
+| `ustreamer` | the overview camera as MJPEG on 8080 — frames copied, never decoded | hardware-attached | 3 % / 19 MB | `pepin-camera.service` |
+| `docker` | dockerd, containerd and one supervisor per container | wifi-loss | 3 % / 225 MB | `docker.service`, `containerd.service` |
+| `session_logger` | the per-drive jsonl recorder (`sometimes`) | wifi-loss | 25 % / 90 MB | `ros/goto.sh`, `ros/tour.sh`, `ros/teleop.sh` |
+| `slam_frame` | the laptop's correction as `map -> odom`, SLAM mode only (`sometimes`) | real-time | 20 % / 90 MB | `pepin-ros.service` -> `nav.launch.py` |
+| `link_watch` | stops the cart when the laptop half goes away, `side=board` only (`sometimes`) | real-time, wifi-loss | 15 % / 90 MB | `pepin-ros.service` -> `nav.launch.py` |
+| `reap_ros2_cli` | kills ros2 CLI tools older than 90 s, once a minute (`sometimes`) | real-time | 5 % / 10 MB | `pepin-reap.timer` |
+| `foxglove_bridge` | **not expected**: the websocket is being removed, the laptop reads the board through zenoh | - | 0 % | was a component of `sensors_container` |
+
+The entries that must always run promise **377 % of 400 %** — the whole board minus one busy
+core — and 1215 MB of the 1.5 GB. That is the budget, not the measurement: the same stack idling
+on 2026-09-14 measured 235 % and 850 MB. The gap is the +50 % headroom every entry carries, and
+it is the reason a new process needs a number before it needs a launch line.
+
 ## Build and run (on the board)
 
 ```bash
