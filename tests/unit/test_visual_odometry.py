@@ -1,17 +1,32 @@
 """What may reach the EKF from the camera's own odometry, and what the drift at rest means."""
 
 import math
+from itertools import pairwise
 
 import pytest
 
 from pepin.visual_odometry import (
     LOST_VARIANCE,
+    PublishCap,
     RestWatch,
     VoGate,
     VoPose,
+    VoTrack,
     is_lost,
     planar_covariance,
 )
+
+
+def _gated(gate: VoGate, track: VoTrack, poses: list[VoPose]) -> list[VoPose]:
+    """Run poses through a gate and its track exactly as pepin_bringup.visual_odometry does;
+    returns what would have been published."""
+    published = []
+    for pose in poses:
+        if gate.admit(pose, lost=False) is not None:
+            track.anchor(gate.anchor)
+            continue
+        published.append(track.advance(pose))
+    return published
 
 
 def _covariance(variance: float = 0.001) -> list[float]:
@@ -56,13 +71,14 @@ def test_the_gate_drops_a_lost_frame_and_lets_a_walking_pace_through() -> None:
 
 
 def test_a_tracking_restart_costs_one_sample_and_never_the_session() -> None:
-    """rtabmap re-initialising puts the pose back at its origin. The jump is refused — and it
-    becomes the anchor, or every pose after it would be a jump too and the gate would go deaf."""
+    """rtabmap re-initialising puts the pose back at its origin. It is refused — by the origin
+    check, which names it, or by the speed ceiling when it lands far enough out — and it becomes
+    the anchor, or every pose after it would be a jump too and the gate would go deaf."""
     gate = VoGate()
     gate.admit(VoPose(0.0, 0.0, 0.0, 0.0), lost=False)
     gate.admit(VoPose(1.0, 0.2, 0.0, 0.0), lost=False)
     refused = gate.admit(VoPose(1.1, 0.0, 0.0, 0.0), lost=False)  # back to the origin
-    assert refused is not None and "jump" in refused
+    assert refused is not None and "origin" in refused
     assert gate.admit(VoPose(1.2, 0.01, 0.0, 0.0), lost=False) is None, "deaf after one restart"
 
 
@@ -162,3 +178,86 @@ def test_a_moving_cart_reports_no_drift_at_all() -> None:
     watch.pose(VoPose(0.2, 0.05, 0.0, 0.0), now=0.2)
     assert watch.drift is None
     assert "moving" in watch.report()
+
+
+def test_a_refused_jump_never_reaches_the_filter_inside_the_next_pose() -> None:
+    """The bug of 2026-09-14: the gate re-anchors on a tracking restart, the EKF does not, and
+    the next pose that passes carries the whole discontinuity. The published track walks the
+    admitted centimetres and stands still across the jump."""
+    track = VoTrack()
+    poses = [
+        VoPose(stamp=0.0, x=3.00, y=1.00, yaw=0.0),
+        VoPose(stamp=0.1, x=3.02, y=1.00, yaw=0.0),
+        VoPose(stamp=0.2, x=0.00, y=0.00, yaw=0.0),  # rtabmap re-initialised at its origin
+        VoPose(stamp=0.3, x=0.02, y=0.00, yaw=0.0),
+        VoPose(stamp=0.4, x=0.04, y=0.00, yaw=0.0),
+    ]
+    published = _gated(VoGate(), track, poses)
+    assert len(published) == 4, "only the reset itself is dropped"
+    steps = [math.hypot(b.x - a.x, b.y - a.y) for a, b in pairwise(published)]
+    assert max(steps) == pytest.approx(0.02, abs=1e-9), (
+        "the largest step the filter can difference is a real one, not the 3.16 m of the reset"
+    )
+    assert published[-1].x == pytest.approx(0.06), "the two centimetres before the reset count"
+
+
+def test_the_track_stands_still_across_a_gap_and_keeps_walking_after() -> None:
+    """A stalled camera re-anchors both the gate and the track: the seconds nobody measured are
+    not motion, and the poses after them are."""
+    track = VoTrack()
+    published = _gated(
+        VoGate(max_gap_s=1.0),
+        track,
+        [
+            VoPose(stamp=0.0, x=0.0, y=0.0, yaw=0.0),
+            VoPose(stamp=0.1, x=0.1, y=0.0, yaw=0.0),
+            VoPose(stamp=5.0, x=4.0, y=0.0, yaw=0.0),  # a 4.9 s gap: dropped, re-anchors
+            VoPose(stamp=5.1, x=4.1, y=0.0, yaw=0.0),
+        ],
+    )
+    assert [round(p.x, 6) for p in published] == [0.0, 0.1, 0.2]
+    assert track.pose[0] == pytest.approx(0.2)
+
+
+def test_a_reset_to_rtabmap_origin_is_refused_even_when_it_is_close() -> None:
+    """Odom/ResetCountdown puts a lost tracking back at the origin; within 11 cm of it the speed
+    ceiling calls that a walking pace, so the origin itself is the evidence."""
+    gate = VoGate(reset_radius_m=0.05)
+    assert gate.admit(VoPose(stamp=0.0, x=0.09, y=0.0, yaw=0.0), lost=False) is None
+    refused = gate.admit(VoPose(stamp=0.1, x=0.0, y=0.0, yaw=0.0), lost=False)
+    assert refused is not None and "origin" in refused
+    assert gate.anchor is not None and gate.anchor.x == 0.0, "and it re-anchors there"
+    assert gate.admit(VoPose(stamp=0.2, x=0.01, y=0.0, yaw=0.0), lost=False) is None
+    off = VoGate(reset_radius_m=0.0)
+    assert off.admit(VoPose(stamp=0.0, x=0.09, y=0.0, yaw=0.0), lost=False) is None
+    assert off.admit(VoPose(stamp=0.1, x=0.0, y=0.0, yaw=0.0), lost=False) is None
+
+
+def test_a_pose_that_starts_at_the_origin_is_not_a_reset() -> None:
+    """Every session's first poses sit on rtabmap's origin; only leaving it and coming back is a
+    re-initialisation."""
+    gate = VoGate()
+    assert gate.admit(VoPose(stamp=0.0, x=0.0, y=0.0, yaw=0.0), lost=False) is None
+    assert gate.admit(VoPose(stamp=0.1, x=0.01, y=0.0, yaw=0.0), lost=False) is None
+
+
+def test_the_publish_cap_holds_the_rate_and_refuses_a_stamp_that_goes_backwards() -> None:
+    """Three hertz is three hertz, and two messages the filter cannot order are a division by a
+    gap of zero."""
+    cap = PublishCap(hz=3.0)
+    assert cap.refuse(100.0) is None
+    assert cap.refuse(100.1) is not None, "9 Hz is what the board could not carry"
+    assert cap.refuse(100.2) is not None
+    assert cap.refuse(100.34) is None
+    repeated = cap.refuse(100.34)
+    assert repeated is not None and "behind" in repeated
+    behind = cap.refuse(100.2)
+    assert behind is not None and "behind" in behind
+
+
+def test_the_cap_at_zero_publishes_every_pose_but_still_orders_them() -> None:
+    """0 Hz is the old behaviour; the stamp rule is not a rate and never switches off."""
+    cap = PublishCap(hz=0.0)
+    assert cap.refuse(10.0) is None
+    assert cap.refuse(10.001) is None
+    assert cap.refuse(10.001) is not None

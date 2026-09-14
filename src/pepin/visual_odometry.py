@@ -12,7 +12,10 @@ So nothing here passes rtabmap's word on unchanged. :class:`VoGate` drops what t
 never see — a frame the tracker lost, and a step no cart of this speed could have made — and
 :func:`planar_covariance` replaces rtabmap's own covariance with a documented constant, because
 a number that came out of a registration on a scaled depth is not a measurement of that scale's
-error. :class:`RestWatch` is the measurement this module exists to make possible: with the
+error. :class:`VoTrack` publishes the sum of the steps that passed instead of rtabmap's own pose,
+because the EKF differences the stream it RECEIVES and a gate that only re-anchors itself hands
+it every refused jump as a velocity; :class:`PublishCap` says how often that may happen.
+:class:`RestWatch` is the measurement this module exists to make possible: with the
 wheels standing still, every centimetre the visual odometry walks is its own drift, and that
 number decides whether it may be fused at all.
 
@@ -30,10 +33,12 @@ __all__ = [
     "LOST_VARIANCE",
     "REST_LINEAR_M_S",
     "REST_YAW_RAD_S",
+    "PublishCap",
     "RestDrift",
     "RestWatch",
     "VoGate",
     "VoPose",
+    "VoTrack",
     "is_lost",
     "planar_covariance",
 ]
@@ -46,6 +51,11 @@ LOST_VARIANCE = 9999.0
 # against a tick of quantisation rather than a threshold anything is tuned to.
 REST_LINEAR_M_S = 0.01
 REST_YAW_RAD_S = 0.02
+# How close to rtabmap's own origin a pose has to land to be its re-initialisation rather than a
+# drive: the source's poses at rest are millimetres apart (4.2 mm the largest step in 85 s,
+# 2026-09-14), and a cart that drove away and came back would have to park within 5 cm of where
+# rgbd_odometry started to be mistaken for one.
+RESET_RADIUS_M = 0.05
 # How long the wheels must have been still before the drift counts as drift. A drive ends with
 # the cart rocking on its own suspension for a moment; that motion is real and not the camera's.
 REST_SETTLE_S = 1.0
@@ -123,11 +133,22 @@ class VoGate:
         max_speed_m_s: float = 1.0,
         max_turn_deg_s: float = 180.0,
         max_gap_s: float = 1.0,
+        reset_radius_m: float = RESET_RADIUS_M,
     ) -> None:
         self.max_speed_m_s = max_speed_m_s  # live: the node's vo_max_speed flag writes it
         self.max_turn_deg_s = max_turn_deg_s  # live: the node's vo_max_turn flag writes it
         self.max_gap_s = max_gap_s  # live: the node's vo_max_gap_s flag writes it
+        self.reset_radius_m = reset_radius_m  # live: the node's vo_reset_radius_m flag writes it
         self._last: VoPose | None = None
+
+    @property
+    def anchor(self) -> VoPose | None:
+        """The pose the next step will be measured from: the last one this gate saw and kept.
+
+        It is what :class:`VoTrack` has to continue from after a refusal — the two must anchor
+        on the same pose or the published stream would carry the jump the gate just refused.
+        """
+        return self._last
 
     def admit(self, pose: VoPose, lost: bool) -> str | None:
         """``None`` when this pose may go to the filter, else the reason it may not.
@@ -150,6 +171,10 @@ class VoGate:
         if dt <= 0.0:
             self._last = previous
             return f"a pose {abs(dt):.3f} s out of order"
+        radius = self.reset_radius_m
+        if radius > 0.0 and _at_origin(pose, radius) and not _at_origin(previous, radius):
+            was = math.hypot(previous.x, previous.y)
+            return f"a reset to rtabmap's origin from {was:.2f} m out"
         if dt > self.max_gap_s:
             return f"a gap of {dt:.1f} s (the speed of a jump across it means nothing)"
         step = math.hypot(pose.x - previous.x, pose.y - previous.y)
@@ -158,6 +183,81 @@ class VoGate:
             return f"a jump of {step * 100:.0f} cm in {dt:.3f} s"
         if math.degrees(turn) / dt > self.max_turn_deg_s:
             return f"a turn of {math.degrees(turn):.0f} deg in {dt:.3f} s"
+        return None
+
+
+class VoTrack:
+    """The pose the EKF is allowed to difference: the steps the gate admitted, summed.
+
+    The board's filter fuses ``/vo`` differentially — it subtracts the previous message IT
+    received from this one and divides by the gap — so what has to be continuous is the
+    PUBLISHED stream, and the gate alone cannot make it so. A refused jump re-anchors the gate
+    and nothing else: the filter still holds the pose from before the jump, and the next pose
+    that passes hands it the whole discontinuity as one velocity. That is how a tracking restart
+    at rtabmap's origin, three metres from where the cart was, became tens of metres per second
+    of vy in the board's EKF — a velocity no wheel and no gyro measures, so nothing ever pulls it
+    back (2026-09-14: odom -> base_link 43 km out, still travelling at 60 m/s a quarter of an
+    hour after the topic went silent).
+
+    So this carries the sum of the steps that passed, and across a refusal it simply stands
+    still: a restart costs one sample of motion instead of a teleport. The published pose is
+    absolute, which is also what makes a rate cap (:class:`PublishCap`) lossless — the filter
+    differences whatever two messages reached it, and a skipped one only lengthens the gap.
+    """
+
+    def __init__(self) -> None:
+        self._from: VoPose | None = None
+        self._x = 0.0
+        self._y = 0.0
+        self._yaw = 0.0
+
+    def advance(self, pose: VoPose) -> VoPose:
+        """Add an admitted pose's step to the running total; returns the pose to publish — the
+        same stamp, the summed position and heading."""
+        if self._from is not None:
+            self._x += pose.x - self._from.x
+            self._y += pose.y - self._from.y
+            self._yaw = _wrapped(self._yaw + _wrapped(pose.yaw - self._from.yaw))
+        self._from = pose
+        return VoPose(stamp=pose.stamp, x=self._x, y=self._y, yaw=self._yaw)
+
+    def anchor(self, pose: VoPose | None) -> None:
+        """A pose the gate refused: the total stands still across it and the next step is
+        measured from ``pose`` — the gate's own new anchor (:attr:`VoGate.anchor`)."""
+        self._from = pose
+
+    @property
+    def pose(self) -> tuple[float, float, float]:
+        """Where the published track stands now: metres, metres, radians since the node came up."""
+        return self._x, self._y, self._yaw
+
+
+class PublishCap:
+    """How often a gated pose may leave for the board's EKF, and that its stamps only go forward.
+
+    The rate is a load decision, not a quality one: the board's filter runs at 20 Hz on four
+    A53s, and with 9 visual poses a second reaching it, it logged "Failed to meet update rate"
+    continuously (it took 56-94 ms of every 50 ms period) while Nav2's costmaps sat at 200 % CPU
+    (2026-09-14). A source measured at 9.4 poses/s carries the same distance in three.
+
+    The stamp rule is not a rate at all but the invariant the differential fusion rests on: two
+    messages the filter cannot order are a division by a gap of zero or a negative one. Both
+    refusals are harmless to a :class:`VoTrack`, whose published pose is absolute.
+    """
+
+    def __init__(self, hz: float = 3.0) -> None:
+        self.hz = hz  # live: the node's vo_publish_hz flag writes it; 0 publishes every pose
+        self._last: float | None = None
+
+    def refuse(self, stamp: float) -> str | None:
+        """``None`` when a pose with this stamp may be published — and it is then remembered as
+        the last published one — else the reason it may not."""
+        if self._last is not None:
+            if stamp <= self._last:
+                return f"a stamp {self._last - stamp:.3f} s behind the last published"
+            if self.hz > 0.0 and stamp - self._last < 1.0 / self.hz:
+                return f"the {self.hz:.1f} Hz cap ({(stamp - self._last) * 1000:.0f} ms since)"
+        self._last = stamp
         return None
 
 
@@ -261,6 +361,12 @@ class RestWatch:
             return "moving (no drift measured)"
         worst = f", worst so far {self._worst}" if self._worst is not None else ""
         return f"at rest {self._drift}{worst}"
+
+
+def _at_origin(pose: VoPose, radius_m: float) -> bool:
+    """Whether a pose sits within ``radius_m`` of rtabmap's own origin — where a re-initialised
+    ``rgbd_odometry`` puts it (``Odom/ResetCountdown``)."""
+    return math.hypot(pose.x, pose.y) <= radius_m
 
 
 def _wrapped(angle: float) -> float:

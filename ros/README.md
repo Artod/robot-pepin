@@ -612,6 +612,9 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `visual_odometry` | `vo_max_speed` | number 0.05..10 | 1.0 | yes | a step between two visual-odometry poses faster than this, in m/s, is dropped: rtabmap restarting its tracking moves the pose without moving the cart |
 | `visual_odometry` | `vo_max_gap_s` | number 0.1..60 | 1.0 | yes | a pose that arrives more than this many seconds after the previous one is dropped and becomes the new anchor: across a gap the speed and turn ceilings are ratios and measure nothing |
 | `visual_odometry` | `vo_max_turn` | number 5..720 | 180.0 | yes | a turn between two visual-odometry poses faster than this, in deg/s, is dropped, for the same reason as vo_max_speed |
+| `visual_odometry` | `vo_reset_radius_m` | number 0..1 | 0.05 | yes | a pose that lands this close to rtabmap's own origin while the previous one was farther out is its re-initialisation, not a drive, and is dropped; 0 turns the check off |
+| `visual_odometry` | `vo_continuous` | bool | on | yes | what the published pose is: the sum of the steps this gate admitted (on) or rtabmap's own pose passed through (off, the behaviour of 2026-09-14 and before) |
+| `visual_odometry` | `vo_publish_hz` | number 0..30 | 3.0 | yes | how often a gated pose may leave for the board's EKF, in hertz; 0 publishes every one of them |
 
 ### The flags one by one
 
@@ -1127,6 +1130,21 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* 180.0 — 180 deg/s is three times the base's own angular cap of 1.0 rad/s = 57 deg/s (pepin.deployment's BASE_MAX_ANGULAR_RAD_S) and some two thousand times what this source turned at rest (0.075 deg over 85 s, 2026-09-14, scratch/vo_probe.py): it catches a tracking restart and nothing a cart could do
   - *On when:* not a switch
   - *Off when:* not a switch
+- **`vo_reset_radius_m`** — number 0..1, default 0.05
+  - *What:* a pose that lands this close to rtabmap's own origin while the previous one was farther out is its re-initialisation, not a drive, and is dropped; 0 turns the check off (0..1)
+  - *Default:* 0.05 — Odom/ResetCountdown=1 (vslam.launch.py) puts a lost tracking back at its origin, and the speed ceiling only catches that when the cart is far enough from it: at vo_max_speed 1.0 m/s and the source's 0.11 s between poses, a reset inside 11 cm of the origin passes as motion. 5 cm is the radius at which no drive can be mistaken for a reset — the largest step this source took at rest was 4.2 mm and the median 1.0 mm (2026-09-14, scratch/vo_probe.py), so a cart would have to park within 5 cm of where rgbd_odometry started
+  - *On when:* not a switch: widen it only if a reset is ever seen landing farther out than this, which would mean rtabmap re-initialises somewhere other than its origin
+  - *Off when:* 0 while comparing against the old behaviour on a tape
+- **`vo_continuous`** — bool, default on
+  - *What:* what the published pose is: the sum of the steps this gate admitted (on) or rtabmap's own pose passed through (off, the behaviour of 2026-09-14 and before)
+  - *Default:* on — on, because the gate cannot protect a filter that differences the stream it RECEIVES. A refused jump re-anchors the gate and nothing else: the board's EKF still holds the pose from before the jump, and the next pose that passes hands it the whole discontinuity divided by one frame time. That is what happened at 11:49 on 2026-09-14 — with vo_publish on for seven minutes, odom -> base_link left the room and was 3.5 km out by 11:51 (tape ros/maps/rec/0260_20260914_155145Z_home.jsonl, the wheels reporting a hard zero at (-13.96, 3.21) throughout) and 43 km out at 12:10, still travelling at 60 m/s a quarter of an hour after the topic went silent. It never stops because the velocity it was given is vy, and ros/params/ekf.yaml has nothing that measures vy: the wheels give vx, the gyro gives the yaw rate. With the steps summed, a tracking restart costs one sample of motion
+  - *On when:* it is the shipping value; the published pose is absolute, which is what makes vo_publish_hz lossless
+  - *Off when:* only to reproduce the old behaviour on a tape, and never with vo_publish on
+- **`vo_publish_hz`** — number 0..30, default 3.0
+  - *What:* how often a gated pose may leave for the board's EKF, in hertz; 0 publishes every one of them (0..30)
+  - *Default:* 3.0 — 3 Hz because the board could not carry nine. With /vo flowing at ~9 poses/s the EKF logged 'Failed to meet update rate' continuously — 56-94 ms of every 50 ms period at its 20 Hz — and Nav2's container sat at 200 % CPU (2026-09-14). The distance is the same distance: the published pose is absolute (vo_continuous), so the filter differences whatever two messages reached it and a skipped one only lengthens the gap. What changes is the weight — robot_localization's differential path multiplies the summed pose covariance BY the gap, so a longer gap is a wider velocity sigma: at 3 Hz the shipped 7 cm sigma becomes 5.7 cm/s against 3.2 cm/s at 9.4 Hz, which is a third opinion that costs the board three updates a second instead of nine
+  - *On when:* raise it towards 9 only on a board that is measurably keeping its 20 Hz with Nav2 running, and read the EKF's update-rate warnings after
+  - *Off when:* lower it further if the EKF still misses its rate
 
 ## Build and run (on the board)
 

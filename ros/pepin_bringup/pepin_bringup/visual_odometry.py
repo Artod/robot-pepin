@@ -20,12 +20,14 @@ minute is its own drift (:class:`pepin.visual_odometry.RestWatch`, fed from the 
 The flags (:data:`FLAGS`, ``ros/flags.sh set visual_odometry <flag> <value>``): ``vo_publish``
 (whether the measured odometry leaves this laptop at all — off, the EKF is exactly what it was
 before this node existed), ``vo_covariance`` (the constant or rtabmap's own), ``vo_sigma_m`` and
-``vo_yaw_sigma_deg`` (the constant), ``vo_max_speed``, ``vo_max_turn`` and ``vo_max_gap_s``
-(the gate's ceilings).
+``vo_yaw_sigma_deg`` (the constant), ``vo_max_speed``, ``vo_max_turn``, ``vo_max_gap_s`` and
+``vo_reset_radius_m`` (the gate's ceilings), ``vo_continuous`` (whether the published pose is
+the sum of the admitted steps or rtabmap's own) and ``vo_publish_hz`` (how often it is published).
 """
 
 from __future__ import annotations
 
+import math
 import time
 
 from nav_msgs.msg import Odometry
@@ -33,7 +35,15 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from pepin.flags import Flag, FlagSet
-from pepin.visual_odometry import RestWatch, VoGate, VoPose, is_lost, planar_covariance
+from pepin.visual_odometry import (
+    PublishCap,
+    RestWatch,
+    VoGate,
+    VoPose,
+    VoTrack,
+    is_lost,
+    planar_covariance,
+)
 from pepin_bringup.msgs import stamp_seconds, yaw_of
 from pepin_bringup.node_kit import Switches, Tally, bridged_qos_profile, spin_main
 
@@ -181,6 +191,63 @@ FLAGS = FlagSet(
         on_when="not a switch",
         off_when="not a switch",
     ),
+    Flag(
+        "vo_reset_radius_m",
+        0.05,
+        range=(0.0, 1.0),
+        description="a pose that lands this close to rtabmap's own origin while the previous one"
+        " was farther out is its re-initialisation, not a drive, and is dropped; 0 turns the"
+        " check off",
+        why="Odom/ResetCountdown=1 (vslam.launch.py) puts a lost tracking back at its origin, and"
+        " the speed ceiling only catches that when the cart is far enough from it: at"
+        " vo_max_speed 1.0 m/s and the source's 0.11 s between poses, a reset inside 11 cm of the"
+        " origin passes as motion. 5 cm is the radius at which no drive can be mistaken for a"
+        " reset — the largest step this source took at rest was 4.2 mm and the median 1.0 mm"
+        " (2026-09-14, scratch/vo_probe.py), so a cart would have to park within 5 cm of where"
+        " rgbd_odometry started",
+        on_when="not a switch: widen it only if a reset is ever seen landing farther out than"
+        " this, which would mean rtabmap re-initialises somewhere other than its origin",
+        off_when="0 while comparing against the old behaviour on a tape",
+    ),
+    Flag(
+        "vo_continuous",
+        True,
+        description="what the published pose is: the sum of the steps this gate admitted (on) or"
+        " rtabmap's own pose passed through (off, the behaviour of 2026-09-14 and before)",
+        why="on, because the gate cannot protect a filter that differences the stream it"
+        " RECEIVES. A refused jump re-anchors the gate and nothing else: the board's EKF still"
+        " holds the pose from before the jump, and the next pose that passes hands it the whole"
+        " discontinuity divided by one frame time. That is what happened at 11:49 on 2026-09-14 —"
+        " with vo_publish on for seven minutes, odom -> base_link left the room and was 3.5 km"
+        " out by 11:51 (tape ros/maps/rec/0260_20260914_155145Z_home.jsonl, the wheels reporting"
+        " a hard zero at (-13.96, 3.21) throughout) and 43 km out at 12:10, still travelling at"
+        " 60 m/s a quarter of an hour after the topic went silent. It never stops because the"
+        " velocity it was given is vy, and ros/params/ekf.yaml has nothing that measures vy: the"
+        " wheels give vx, the gyro gives the yaw rate. With the steps summed, a tracking restart"
+        " costs one sample of motion",
+        on_when="it is the shipping value; the published pose is absolute, which is what makes"
+        " vo_publish_hz lossless",
+        off_when="only to reproduce the old behaviour on a tape, and never with vo_publish on",
+    ),
+    Flag(
+        "vo_publish_hz",
+        3.0,
+        range=(0.0, 30.0),
+        description="how often a gated pose may leave for the board's EKF, in hertz; 0 publishes"
+        " every one of them",
+        why="3 Hz because the board could not carry nine. With /vo flowing at ~9 poses/s the"
+        " EKF logged 'Failed to meet update rate' continuously — 56-94 ms of every 50 ms period"
+        " at its 20 Hz — and Nav2's container sat at 200 % CPU (2026-09-14). The distance is the"
+        " same distance: the published pose is absolute (vo_continuous), so the filter"
+        " differences whatever two messages reached it and a skipped one only lengthens the gap."
+        " What changes is the weight — robot_localization's differential path multiplies the"
+        " summed pose covariance BY the gap, so a longer gap is a wider velocity sigma: at 3 Hz"
+        " the shipped 7 cm sigma becomes 5.7 cm/s against 3.2 cm/s at 9.4 Hz, which is a third"
+        " opinion that costs the board three updates a second instead of nine",
+        on_when="raise it towards 9 only on a board that is measurably keeping its 20 Hz with"
+        " Nav2 running, and read the EKF's update-rate warnings after",
+        off_when="lower it further if the EKF still misses its rate",
+    ),
 )
 
 
@@ -194,10 +261,14 @@ class VisualOdometry(Node):
             max_speed_m_s=float(self._switches["vo_max_speed"]),
             max_turn_deg_s=float(self._switches["vo_max_turn"]),
             max_gap_s=float(self._switches["vo_max_gap_s"]),
+            reset_radius_m=float(self._switches["vo_reset_radius_m"]),
         )
+        self._track = VoTrack()
+        self._cap = PublishCap(float(self._switches["vo_publish_hz"]))
         self._rest = RestWatch()
         self._tally = Tally()
         self._drop: str | None = None  # the last reason, for the report line
+        self._hold: str | None = None  # the last reason a pose was not published, for the same
         # Both of these cross the bridge, so their QoS is not this node's to choose: it is
         # pinned on both sides in pepin.deployment.BRIDGED_QOS (reliable, ten deep — what the
         # board's EKF subscribes with and what base_bridge.cpp writes /odom with). /vo/raw never
@@ -224,6 +295,10 @@ class VisualOdometry(Node):
             self._gate.max_turn_deg_s = float(new)  # type: ignore[arg-type]
         elif name == "vo_max_gap_s":
             self._gate.max_gap_s = float(new)  # type: ignore[arg-type]
+        elif name == "vo_reset_radius_m":
+            self._gate.reset_radius_m = float(new)  # type: ignore[arg-type]
+        elif name == "vo_publish_hz":
+            self._cap.hz = float(new)  # type: ignore[arg-type]
 
     def _on_wheels(self, msg: Odometry) -> None:
         """The board's wheel odometry: only its twist is read, and only to know whether the cart
@@ -252,12 +327,23 @@ class VisualOdometry(Node):
         if refused is not None:
             self._tally.count("dropped")
             self._drop = refused
+            # The gate's anchor moved; the track's must move with it, or the jump the gate just
+            # refused would reach the EKF inside the next pose that passes.
+            self._track.anchor(self._gate.anchor)
             self._rest.restart()  # a drift measured across a re-initialised origin is not one
             return
+        published = self._track.advance(pose)
         self._rest.pose(pose, time.monotonic())
         if not self._switches.on("vo_publish"):
             self._tally.count("withheld")
             return
+        held = self._cap.refuse(published.stamp)
+        if held is not None:
+            self._tally.count("skipped")
+            self._hold = held
+            return
+        if self._switches.on("vo_continuous"):
+            _write_planar_pose(msg, published)
         if self._switches["vo_covariance"] == "constant":
             msg.pose.covariance = planar_covariance(
                 float(self._switches["vo_sigma_m"]), float(self._switches["vo_yaw_sigma_deg"])
@@ -271,9 +357,12 @@ class VisualOdometry(Node):
         w = self._tally.take()
         c = w.counts
         drop = f" (last: {self._drop})" if self._drop else ""
+        hold = f" (last: {self._hold})" if self._hold else ""
+        x, y, _ = self._track.pose
         self.get_logger().info(
             f"vo: {w.rate('in'):.1f} poses/s from rtabmap, {w.rate('out'):.1f} published,"
-            f" {c['dropped']} dropped{drop}, {c['withheld']} withheld from the EKF;"
+            f" {c['dropped']} dropped{drop}, {c['skipped']} skipped{hold},"
+            f" {c['withheld']} withheld from the EKF; track at ({x:.2f}, {y:.2f});"
             f" {self._rest.report()}; flags: {self._switches.state()}"
         )
         if c["in"] == 0:
@@ -281,6 +370,15 @@ class VisualOdometry(Node):
                 f"no pose on {RAW_TOPIC} in this window: is rgbd_odometry running (vslam.launch.py"
                 " vo:=true) and is /camera/depth alive (the depth law needs the lidar)?"
             )
+
+
+def _write_planar_pose(msg: Odometry, pose: VoPose) -> None:
+    """Put a planar pose into an ``Odometry`` message in place: x, y and yaw, the floor at z=0."""
+    msg.pose.pose.position.x = pose.x
+    msg.pose.pose.position.y = pose.y
+    msg.pose.pose.position.z = 0.0
+    q = msg.pose.pose.orientation
+    q.x, q.y, q.z, q.w = 0.0, 0.0, math.sin(pose.yaw / 2.0), math.cos(pose.yaw / 2.0)
 
 
 def main() -> None:
