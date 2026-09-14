@@ -102,14 +102,20 @@ class Tape:
         print(f"run {self._runs.run:04d}: taped {self.path}", flush=True)
 
     def close(self) -> None:
-        """Close the tape; harmless when none was opened."""
-        if self.path is None:
+        """Close whatever tape the recorder says is open; harmless when none is.
+
+        On the recorder's own word, never on ours: a start it heard but confirmed too late for
+        :meth:`open`'s patience leaves a tape this client believes it never got, and a tape
+        nobody closes keeps the board deserialising every scan onto the card until the run
+        limit (900 s) runs out. The goal server closes on the same condition.
+        """
+        if self._runs.stopped():
             return
         self._pub.publish(String(data=stop_command()))
         closed = self._await(self._runs.stopped)
         print(
             f"run {self._runs.run:04d}: tape {'closed' if closed else 'NOT confirmed closed'}"
-            f" {self.path}",
+            f" {self.path or self._runs.recording}",
             flush=True,
         )
 
