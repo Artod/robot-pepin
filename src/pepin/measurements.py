@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -45,6 +46,7 @@ __all__ = [
     "graph_anchor",
     "graph_measurement",
     "inverse",
+    "remote_update",
 ]
 
 # How old a measurement may be, in seconds, when the update it rides on happens: past this the
@@ -244,11 +246,19 @@ def graph_measurement(
 class MeasurementUpdate:
     """An update the remote measurements drive by themselves — what a dead lidar leaves: the
     moment it happens at (the newest measurement's own stamp, so nothing has to be carried
-    forward), the odometry pose there, and the camera's word fused into one measurement."""
+    forward), the odometry pose there, the word that drove it (one gate's sources fused into
+    one measurement) and ``riders`` — the other gates' words carried to the same moment
+    (:func:`remote_update`), so several remote sources make one update and not one each."""
 
     stamp: float
     odom: Pose2D
     measurement: PoseMeasurement
+    riders: tuple[PoseMeasurement, ...] = ()
+
+    @property
+    def measurements(self) -> list[PoseMeasurement]:
+        """Everything this update fuses: the driving word first, then the riders."""
+        return [self.measurement, *self.riders]
 
 
 class MeasurementGate:
@@ -493,3 +503,34 @@ class MeasurementGate:
 
     def _count(self, name: str) -> None:
         self._counts[name] = self._counts.get(name, 0) + 1
+
+
+def remote_update(
+    gates: Sequence[MeasurementGate], anchor: str | None, odometry: OdomTrail
+) -> MeasurementUpdate | None:
+    """The update the remote gates drive between them when no scan does, or ``None``.
+
+    Each gate is one remote NAME on the tracker's roster — the camera's word, the pose graph's —
+    and any of them may drive: the freshest waiting word does, at its own stamp, and every other
+    gate's waiting word RIDES it, carried to that same moment (:meth:`MeasurementGate.take`).
+    One update per call whatever arrived, because two updates in one breath would fuse the same
+    odometry twice and count a second step the cart never took.
+
+    Whether the chosen gate may drive at all stays its own decision
+    (:meth:`MeasurementGate.drive`): a scan source driving (``anchor`` not ``None``), a source
+    the ``sources`` flag has off, or odometry that does not reach the moment all answer ``None``,
+    and then nothing is consumed from any gate.
+    """
+    driver: MeasurementGate | None = None
+    newest = -math.inf
+    for gate in gates:
+        stamp = gate.pending_stamp() if gate.enabled() else None
+        if stamp is not None and stamp > newest:
+            newest, driver = stamp, gate
+    if driver is None:
+        return None
+    plan = driver.drive(anchor, odometry)
+    if plan is None:
+        return None
+    riders = [m for gate in gates if gate is not driver for m in gate.take(plan.stamp, odometry)]
+    return MeasurementUpdate(plan.stamp, plan.odom, plan.measurement, tuple(riders))

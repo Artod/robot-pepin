@@ -1521,7 +1521,9 @@ def test_the_tracker_matches_the_lidar_here_and_takes_the_camera_as_a_measuremen
         "self._feed.status",
         "self._measurements.offer",
         "self._measurements.take",
-        "self._measurements.drive",  # the camera drives an update when no scan does
+        # With no scan source driving, the remote gates drive between them — the camera's word,
+        # the pose graph's — one update per call and never one per gate (pepin.measurements).
+        "remote_update",
         "loc.update_from",
         "loc.sources_report",
         "target.switch",  # every flag is written to whichever object names it (``switches``)

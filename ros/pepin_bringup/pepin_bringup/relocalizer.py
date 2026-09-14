@@ -92,6 +92,7 @@ from pepin.measurements import (
     REMOTE_FLOOR_YAW_DEG,
     MeasurementGate,
     RemoteMeasurement,
+    remote_update,
 )
 from pepin.odometry import Pose2D, RunawayWatch, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
@@ -242,7 +243,10 @@ FLAGS = FlagSet(
         " the measurements. `depth` and `contact` name the camera's raw scans, which this node"
         " no longer subscribes to — enabling them changes nothing here. `graph` is RTAB-Map's pose"
         " graph on the laptop, whose answer arrives on /localization/graph_measurement with a"
-        " gate of its own: it rides an update like the camera's word and never drives one",
+        " gate of its own: it rides the lidar's update, and with no scan source driving it drives"
+        " one of its own exactly as the camera's word does (pepin.measurements.remote_update) —"
+        " so `graph` alone is a tracker on the graph alone, and `camera,graph` is one update"
+        " between the two of them, never one each",
         why="the lidar alone, because the camera cannot carry the map by itself: replayed on run"
         " 0171 against flat3 the depth band alone loses the map in 0.5 s (122 cm, 124 deg) and"
         " the contact line alone in 12 s (80 cm, 28 deg) — the camera's 0.15-1.3 m band is a"
@@ -716,8 +720,9 @@ class Relocalizer(Node):
         self._measurements = MeasurementGate(self._registry)
         # RTAB-Map's graph, one more word with one more name: its own gate, its own seat on the
         # roster (`graph` in the sources flag), the same carry, the same information filter and
-        # the same disagreement gate. It never drives an update by itself — see
-        # pepin.sources.GRAPH — it only rides the one a scan or the camera drives.
+        # the same disagreement gate. It rides the update a scan drives, and with no scan source
+        # driving it drives one itself, beside the camera's word and through the same path
+        # (pepin.measurements.remote_update): one update per word, never two.
         self._graph = MeasurementGate(self._registry, name=GRAPH)
         self._motion = MotionFilter(min_m=0.005, min_deg=0.3, max_gap_s=1.0)
         self._rested = 0  # scans left unmatched because the cart stood still (per report)
@@ -1090,28 +1095,32 @@ class Relocalizer(Node):
         self._track_pending()
 
     def _track_on_measurements(self, now: float) -> None:
-        """An update driven by the camera's measurements alone, at the stamp of the newest one.
+        """An update driven by the remote words alone — the camera's measurements, the pose
+        graph's, whichever of them is the freshest waiting — at the stamp of that word.
 
         This is what a dead lidar leaves: no scan waits at the feed and nothing is fresh, so the
-        feed has no anchor and the only word about where the cart is comes over the link. What
-        may drive such an update, and when, is the gate's decision
-        (:meth:`pepin.measurements.MeasurementGate.drive`); here it is carried out. The rest
-        filter that spares the matcher while the cart stands does not apply — there is nothing
-        to match, the match was made on the laptop — and the rest LOCK still does its work
-        inside the tracker. The tracker takes its first fix this way too, from its saved pose,
-        with no whole-map search: a fan cannot find the cart, and a pose measured off one cannot
-        either.
+        feed has no anchor and the only word about where the cart is comes over the link. Which
+        gate drives and which ride it is :func:`pepin.measurements.remote_update`'s decision and
+        each gate's own (:meth:`pepin.measurements.MeasurementGate.drive`); here it is carried
+        out, once per call, so two remote sources never make two updates out of one breath. The
+        rest filter that spares the matcher while the cart stands does not apply — there is
+        nothing to match, the match was made on the laptop — and the rest LOCK still does its
+        work inside the tracker. The tracker takes its first fix this way too, from its saved
+        pose, with no whole-map search: a fan cannot find the cart, and a pose measured off one
+        cannot either.
         """
         loc = self._localizer
-        plan = self._measurements.drive(self._feed.anchor(now), self._history)
+        plan = remote_update(
+            (self._measurements, self._graph), self._feed.anchor(now), self._history
+        )
         if loc is None or plan is None:
             return
         if not self._tracker_initialised:
             self._tracker_initialised = True
             self.get_logger().warning(
                 f"tracker starts at ({loc.pose.x:+.2f}, {loc.pose.y:+.2f}, "
-                f"{math.degrees(loc.pose.theta):+.0f} deg) on the camera's measurements without "
-                "a first search: a fan cannot find the cart"
+                f"{math.degrees(loc.pose.theta):+.0f} deg) on the {plan.measurement.source}'s "
+                "measurements without a first search: a fan cannot find the cart"
             )
         previous_stamp = self._last_match_stamp_s
         self._last_match_stamp_s = plan.stamp
@@ -1124,7 +1133,7 @@ class Relocalizer(Node):
         pose = loc.update_from(
             plan.odom,
             [],
-            measurements=[plan.measurement, *self._graph.take(plan.stamp, self._history)],
+            measurements=plan.measurements,
             at_rest=standing_still(self._history, plan.stamp, self._odom_wz),
             dt_s=dt_s,
         )

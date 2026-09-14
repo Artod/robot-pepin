@@ -55,9 +55,12 @@ WATCHDOG = "watchdog"
 # that place as a measurement (:func:`pepin.measurements.graph_measurement`). It IS on the
 # roster, like the camera and for the same reason — the ``sources`` flag switches it, its
 # health reads in the report line, its word is fused — and like the camera it is ``remote``: it
-# has no scan here, no gate at the feed, and it never anchors an update. It also never drives
-# one by itself: a graph that has closed no loop says exactly what the tracker already believes,
-# so a tracker driven by it alone would be told its own answer back.
+# has no scan here, no gate at the feed, and it never anchors an update. With no scan source
+# driving it DOES drive one, through the same path the camera's word drives its own
+# (:func:`pepin.measurements.remote_update`), which is what ``sources=graph`` means: before
+# 2026-09-14 its words piled up at the gate unused and the tracker's pose froze while the cart
+# drove. What it is worth alone is another question — a graph that has closed no loop says
+# roughly what the tracker already believes — and that is the ``sources`` flag's decision.
 GRAPH = "graph"
 RATE_TAU_S = 2.0  # the rate's time constant: a few seconds of intervals, not the whole run
 

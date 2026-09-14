@@ -41,7 +41,7 @@ from test_localizer_sources import drive, error  # noqa: E402
 
 from pepin.odometry import Pose2D  # noqa: E402
 from pepin.scanmatch import apply_motion, relative_motion  # noqa: E402
-from pepin.sources import CAMERA, DEPTH, LIDAR  # noqa: E402
+from pepin.sources import CAMERA, DEPTH, GRAPH, LIDAR  # noqa: E402
 from pepin.watch import DRIVE_FIT, SOURCE_PATIENCE_S  # noqa: E402
 
 BEAMS = 180
@@ -165,6 +165,12 @@ def measurement_msg(
             }
         )
     )
+
+
+def graph_msg(node: Relocalizer, pose: Pose2D, t: float, fit: float = 1.0) -> Any:
+    """What pepin_bringup.rtabmap_frame publishes on /localization/graph_measurement: RTAB-Map's
+    own word about where the cart is on this map, out of a graph that moved at ``t``."""
+    return measurement_msg(node, pose, t, source=GRAPH, fit=fit)
 
 
 def test_the_node_takes_the_camera_as_a_measurement_and_never_as_a_scan(
@@ -417,6 +423,111 @@ def test_the_camera_alone_drives_without_a_first_search_and_the_watch_waits_for_
     assert node._watch_on is True
     node._report_tracking()
     assert "watch fit" in node.logger.texts("info")[-1]
+
+
+def test_the_graph_alone_drives_the_updates_it_used_to_pile_up_at_its_gate() -> None:
+    """sources=graph: RTAB-Map's word is the only thing that says where the cart is, so it drives
+    the updates itself, exactly as the camera's word does.
+
+    The hole measured 2026-09-14 16:01 (test C): 28 graph words in a row received, replaced and
+    never taken, `max step 0.0 cm`, the tracker's pose frozen while the cart drove, and goto
+    cancelling after 15 s of "localization lost". Nothing triggered a fusion step — the lidar was
+    not a source and only the camera's gate could drive one.
+    """
+    with ros_stubs.parameters(sources="graph", local_fit=False, min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
+    truth, odom = drive(8)
+    on_graph, on_odom = (
+        node.subs["/localization/graph_measurement"][1],
+        node.subs["/odometry/filtered"][1],
+    )
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_odom(odom_msg(o, ts))
+        on_graph(graph_msg(node, t, ts))
+        assert node._tracker_initialised and not node._tracker_initialising
+    assert "on the graph's measurements without a first search" in node.logger.texts("warning")[0]
+    loc = node._localizer
+    assert loc is not None
+    metres, degrees = error(loc, truth[-1])
+    assert metres < 0.05 and degrees < 2.0, "the graph's word alone carried the pose"
+    assert len(node.pubs["/tracker_pose"].sent) == 8, "one update per graph word"
+    node._check()
+    # local_fit off, as it must be for any source whose match was made elsewhere: no scan of this
+    # board's scored the pose, and the fit published is the tracker's own confidence in the
+    # fusion it last made. The watch stays off — a word is not a full revolution.
+    assert node._watch_on is False
+    assert node.pubs["localization_fit"].sent[-1].data == pytest.approx(loc.confidence)
+    assert loc.confidence > DRIVE_FIT, "a drive may start on it"
+    node._report_tracking()
+    line = node.logger.texts("info")[-1]
+    assert "graph: measurements 8 (received 8, taken 8), per source: graph 8" in line
+
+
+def test_the_lidar_drives_and_a_graph_word_only_rides_its_revolution() -> None:
+    """sources=lidar,graph: the graph's words arrive between revolutions and none of them drives
+    an update — the lidar does, and each word rides the next revolution, carried to its moment.
+    Eight revolutions and eight words make seven updates (the first revolution is the search),
+    not fifteen."""
+    with ros_stubs.parameters(sources="lidar,graph", min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
+    truth, odom = drive(8)
+    on_scan, on_odom = node.subs["/scan"][1], node.subs["/odometry/filtered"][1]
+    on_graph = node.subs["/localization/graph_measurement"][1]
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_odom(odom_msg(o, ts))
+        on_scan(lidar_msg(t, ts))
+        if i == 0:
+            assert until(lambda: node._tracker_initialised)
+        on_graph(graph_msg(node, t, ts))  # between two revolutions: it waits for the next
+    assert len(node.pubs["/tracker_pose"].sent) == 7, "one update per revolution, none per word"
+    loc = node._localizer
+    assert loc is not None
+    assert {m.source for m in loc.measurements} == {LIDAR, GRAPH}, "the word rode the revolution"
+    node._report_tracking()
+    line = node.logger.texts("info")[-1]
+    assert "graph: measurements 8 (received 8, taken 7)" in line, "the last one still waits"
+
+
+def test_the_camera_and_the_graph_make_one_update_between_them_never_two_per_word() -> None:
+    """sources=camera,graph with no lidar: each word drives one update of its own, and two words
+    waiting for the same odometry sample are taken by ONE update — fusing the same odometry step
+    twice would count a step the cart never took."""
+    with ros_stubs.parameters(sources="camera,graph", local_fit=False, min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
+    truth, odom = drive(6)
+    on_measure = node.subs["/localization/measurement"][1]
+    on_graph, on_odom = (
+        node.subs["/localization/graph_measurement"][1],
+        node.subs["/odometry/filtered"][1],
+    )
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_odom(odom_msg(o, ts))
+        on_measure(measurement_msg(node, t, ts))
+        on_graph(graph_msg(node, t, ts))
+    assert len(node.pubs["/tracker_pose"].sent) == 12, "one update per word, and no more"
+    # Both words stamped ahead of the newest odometry sample: neither can drive until it arrives,
+    # and then one update takes both — the driver is the fresher word, the other rides it.
+    ahead = 100.0 + 0.1 * len(truth)
+    on_measure(measurement_msg(node, truth[-1], ahead + 0.04))
+    on_graph(graph_msg(node, truth[-1], ahead + 0.05))
+    assert len(node.pubs["/tracker_pose"].sent) == 12, "nothing the odometry does not reach yet"
+    node.clock.seconds = ahead + 0.12
+    on_odom(odom_msg(odom[-1], ahead + 0.1))
+    assert len(node.pubs["/tracker_pose"].sent) == 13, "one update, not one per gate"
+    report = json.loads(node.pubs["/localization/sources"].sent[-1].data)
+    assert report["graph"]["used"] == [GRAPH] and report["measurements"]["used"] == [DEPTH]
 
 
 def test_with_nothing_fresh_the_node_holds_and_says_so(node: Relocalizer) -> None:
