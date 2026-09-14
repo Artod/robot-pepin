@@ -260,7 +260,10 @@ class Localizer:
         self.measurements: list[PoseMeasurement] = []
         # ...and the lattice each of those was read off, by source: what a calibration of the
         # peak temperature needs (scratch/peak_temperature.py) and what a report may read the
-        # sharpness of the last match from. Kept only for the last update.
+        # sharpness of the last match from. Emptied at the head of every update, so a source
+        # that has fallen silent never leaves an old lattice to be read as this update's; a
+        # :meth:`measure` outside an update (the laptop's fans, a whole-map candidate) adds to
+        # whatever the last update left.
         self.surfaces: dict[str, ScoreSurface] = {}
         self.fused: PoseMeasurement | None = None
         self.anchor: str | None = None
@@ -957,6 +960,7 @@ class Localizer:
             self.weak_scans += 1
             stats.thin += 1
             self.measurements = []
+            self.surfaces = {}
             self.fused = self.anchor = None
             return self.pose
         # The anchor: the widest fan on offer (the lidar when it is enabled and thick enough).
@@ -965,6 +969,7 @@ class Localizer:
         # no scan at all there is no anchor, and the remote measurements carry the update.
         anchor = max(usable, key=lambda pair: pair[1].fov_deg)[0] if usable else None
         points = anchor.points if anchor is not None else None
+        self.surfaces = {}  # this update's lattices only: a source that fell silent leaves none
         self.measurements = [
             self._measure(observation, source, prediction, motion, mask)
             for observation, source in usable
