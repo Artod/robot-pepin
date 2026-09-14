@@ -423,3 +423,22 @@ def test_a_slam_session_s_box_is_centred_on_where_the_cart_woke_up() -> None:
     c = spec.centred_on_start()
     assert c.origin == (-7.0, -6.25, -0.15) and c.shape == spec.shape
     assert c.origin[0] + c.shape[0] * c.voxel_m == 7.0  # the cart at (0, 0) sits in the middle
+
+
+def test_a_seeded_box_is_snapped_to_the_saved_map_s_own_cell_lattice() -> None:
+    """A volume seeded from a file must have the file's cells, not cells a third of a cell
+    aside: the slice a tracker matches on carries every wall wherever the lattice puts it, and
+    on the four tapes of 2026-09-13 that third of a cell was a median 2.3-2.9 cm of live pose
+    error against the very same map as a file (scratch/volume_vs_pgm.py + drive_bisect)."""
+    from pepin.tsdf import GridSpec
+
+    spec = GridSpec(origin=(-19.5, -5.5, -0.15), shape=(280, 250, 34), voxel_m=0.05)
+    served = (-18.533, -4.382)  # ros/maps/flat3_straight.yaml
+    snapped = spec.aligned_to(served, 0.05)
+    for axis in (0, 1):
+        offset = (snapped.origin[axis] - served[axis]) / spec.voxel_m
+        assert abs(offset - round(offset)) < 1e-9, "a whole number of cells from the file's"
+        assert abs(snapped.origin[axis] - spec.origin[axis]) < spec.voxel_m, "within one voxel"
+    assert snapped.origin[2] == spec.origin[2] and snapped.shape == spec.shape
+    assert spec.aligned_to(served, 0.10) == spec, "another resolution: nothing can be aligned"
+    assert snapped.aligned_to(served, 0.05) == snapped, "already on the lattice"

@@ -84,6 +84,28 @@ class GridSpec:
             self, origin=(-nx * self.voxel_m / 2, -ny * self.voxel_m / 2, self.origin[2])
         )
 
+    def aligned_to(self, origin_xy: tuple[float, float], resolution_m: float) -> GridSpec:
+        """The same box moved by less than one voxel so that its x-y cell lattice is the saved
+        map's: every voxel column of the volume is then a cell of that file, not a third of a
+        cell away from one.
+
+        A slice cut from a grid a third of a cell off the map it was seeded from carries every
+        wall up to half a voxel aside, and a tracker matching on it answers there: replayed on
+        the four tapes of 2026-09-13 the live pose sat a median 2.3-2.9 cm from where the very
+        same map as a file put it, a bias and not noise (scratch/volume_vs_pgm.py,
+        scratch/drive_bisect.py --map). Height is untouched, and the box only ever moves within
+        one voxel, so what it covers is what it covered. Grids of another resolution are left
+        alone: nothing can make their cells the same cells.
+        """
+        if abs(resolution_m - self.voxel_m) > 1e-9:
+            return self
+        x, y, z = self.origin
+        snapped = tuple(
+            o - (o - m) + round((o - m) / self.voxel_m) * self.voxel_m
+            for o, m in ((x, origin_xy[0]), (y, origin_xy[1]))
+        )
+        return dataclasses.replace(self, origin=(snapped[0], snapped[1], z))
+
     def observation_weight(self, depth: Floats) -> Floats:
         """How much a measurement at ``depth`` metres counts: (ref / d)^2, capped."""
         w: Floats = np.minimum(self.weight_cap, (self.weight_ref_m / np.maximum(depth, 1e-3)) ** 2)

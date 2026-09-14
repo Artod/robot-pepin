@@ -555,9 +555,34 @@ class WorldMap:
     def camera_band_slice(self, law: SliceLaw | None = None) -> OccupancySlice:
         """The band the camera speaks for (``camera_band_m`` of config/fusion.json, the band
         /depth_scan marks in): what the camera sources localise against — seats and tabletops
-        the lidar's plane never sees are in here and in no other view of the map."""
+        the lidar's plane never sees are in here and in no other view of the map.
+
+        The band a MATCHER is handed is cut with its own, far higher ``min_weight`` than the
+        one a picture is cut with (:meth:`hardness`): a cell the camera painted two frames ago
+        at the pose it is now asking about is not evidence about that pose.
+        """
         lo, hi = self.spec.camera_band_m
         return self.slice(lo, hi, law)
+
+    def hardness(self, law: SliceLaw, floor: SliceLaw | None = None) -> dict[str, float]:
+        """How much of the camera's band is hard enough to localise on: the occupied cells the
+        matcher's cut (``law``) keeps, the occupied cells a lenient cut (``floor``, the default
+        law) finds, and the share of the second the first keeps.
+
+        A share near 1 means the band is as hard as it is big — every wall in it has been
+        integrated for seconds from more than one frame. A share near 0 means the matcher would
+        be handed a band the camera painted a moment ago at the very pose it is asking about,
+        which is how camera-only localisation walked away in 20-33 cm steps (2026-09-13).
+        """
+        hard = self.camera_band_slice(law).counts()
+        soft = self.camera_band_slice(floor if floor is not None else SliceLaw()).counts()
+        share = hard["occupied"] / soft["occupied"] if soft["occupied"] else 0.0
+        return {
+            "occupied": float(hard["occupied"]),
+            "occupied_floor": float(soft["occupied"]),
+            "share": float(share),
+            "min_weight": float(law.min_weight),
+        }
 
     def to_occupancy_grid_message_fields(
         self, slice_: OccupancySlice | None = None
@@ -592,14 +617,24 @@ class WorldMap:
             "plane_m": self.lidar_plane_m,
         }
 
-    def report(self) -> str:
-        """One phrase for the node's report line: both slices and how mature the volume is."""
+    def report(self, lidar_law: SliceLaw | None = None, camera_law: SliceLaw | None = None) -> str:
+        """One phrase for the node's report line: both slices as the node actually cuts them,
+        how hard the camera's band is, and how mature the volume is.
+
+        The laws are the live ones (the node's flags), not the defaults: a report that shows a
+        slice nobody publishes says nothing about what the matchers were handed.
+        """
         stats = self.maturity()
-        lidar, camera = self.lidar_slice().counts(), self.camera_band_slice().counts()
+        lidar = self.lidar_slice(lidar_law).counts()
+        law = camera_law if camera_law is not None else SliceLaw()
+        camera = self.camera_band_slice(law).counts()
+        hard = self.hardness(law)
         return (
             f"lidar slice {lidar['occupied']} occupied / {lidar['free']} free /"
             f" {lidar['unknown']} unknown, camera band {camera['occupied']} occupied /"
-            f" {camera['free']} free, {stats['voxels']:.0f} voxels"
+            f" {camera['free']} free (hard {hard['share'] * 100:.0f} % of"
+            f" {hard['occupied_floor']:.0f} above weight {hard['min_weight']:.0f}),"
+            f" {stats['voxels']:.0f} voxels"
             f" ({stats['lidar_voxels']:.0f} the lidar's, mean weight {stats['mean_weight']:.1f})"
         )
 
@@ -693,12 +728,19 @@ class WorldMap:
 
         Returns how many cells were seeded. Cells are matched by their centres, so a saved map
         of a different resolution or origin still lands where it belongs.
+
+        The seeded rows become the lidar's layer (:meth:`_widen_rows`), so the camera hands them
+        back from the very first frame: a seeded wall is the lidar's word until the lidar itself
+        says otherwise. Without that claim the depth repainted the pgm's walls in the seconds
+        before the first revolution arrived, and the slice a tracker would match on started out
+        worse than the file it was seeded from.
         """
         rows = self._rows
         if rows is None:
             rows = self._layer_rows(RigidPose(np.eye(3), np.zeros(3)), self.mount)
             if rows is None:
                 return 0
+        self._widen_rows(*rows)
         s = self.spec
         nx, ny, _nz = s.shape
         cx = s.origin[0] + (np.arange(nx) + 0.5) * s.voxel_m

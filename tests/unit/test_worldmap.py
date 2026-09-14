@@ -421,6 +421,38 @@ def test_the_camera_writes_its_own_band_and_the_flag_can_let_it_in() -> None:
     assert wall_at(open_world.lidar_slice(), 1.0, 0.0), "unprotected: the camera wins"
 
 
+def test_the_matchers_band_holds_only_cells_many_frames_agree_on() -> None:
+    """The camera's reference is cut with its own, far higher threshold: a tabletop two frames
+    painted is a picture, not evidence about the pose those two frames were placed at. Painting
+    is untouched — the cell is in the volume from the first frame, and simply does not appear in
+    the slice until it is heavy."""
+    world = room()
+    intr, pose = looking_ahead(0.8)
+    for _ in range(2):  # two frames at 1 m: weight 4 each, the cap
+        world.integrate_depth(flat_depth(intr, 1.0), None, intr, pose, stamp=200.0)
+    assert wall_at(world.camera_band_slice(SliceLaw(min_weight=2.0)), 1.0, 0.0)
+    assert not wall_at(world.camera_band_slice(SliceLaw(min_weight=20.0)), 1.0, 0.0)
+    for _ in range(4):  # six frames in all: 24, over the threshold
+        world.integrate_depth(flat_depth(intr, 1.0), None, intr, pose, stamp=200.0)
+    assert wall_at(world.camera_band_slice(SliceLaw(min_weight=20.0)), 1.0, 0.0)
+
+
+def test_the_band_says_how_hard_it_is_and_the_report_line_carries_it() -> None:
+    """The share is what tells an operator whether the matcher has a reference at all: at the
+    threshold the map is cut with it is 1, and above everything in the volume it is 0."""
+    world = room()
+    intr, pose = looking_ahead(0.8)
+    for _ in range(3):
+        world.integrate_depth(flat_depth(intr, 1.0), None, intr, pose, stamp=200.0)
+    soft = SliceLaw()
+    assert world.hardness(soft)["share"] == 1.0, "the cut and the floor are the same cut"
+    empty = world.hardness(SliceLaw(min_weight=1e6))
+    assert empty["occupied"] == 0.0 and empty["share"] == 0.0
+    assert empty["occupied_floor"] > 0.0 and empty["min_weight"] == 1e6
+    line = world.report(camera_law=SliceLaw(min_weight=20.0))
+    assert "hard" in line and "above weight 20" in line
+
+
 def test_the_camera_may_fill_the_layer_where_the_lidar_never_spoke() -> None:
     """Protection is per cell, not per height: the layer is the lidar's only where it looked."""
     world = room()  # nothing behind the wall was ever seen by the lidar
@@ -612,6 +644,23 @@ def test_seeding_a_map_that_misses_the_volume_writes_nothing() -> None:
 
 
 # ---- odds and ends -------------------------------------------------------------------------
+def test_a_seeded_map_becomes_the_lidars_own_layer_at_once() -> None:
+    """The pgm a known room starts from is the lidar's word: the camera hands those rows back
+    from the first frame. Without the claim the depth repainted the seeded walls in the seconds
+    before the first revolution arrived, and the slice a tracker matches on started out worse
+    than the file it was seeded from."""
+    world = room()
+    view = world.lidar_slice()
+    fresh = WorldMap(spec(), mount())
+    assert fresh.protected_rows is None
+    assert fresh.seed_from_grid(view.values, view.resolution_m, view.origin) > 0
+    assert fresh.protected_rows is not None, "the seeded rows are the lidar's layer"
+    intr, pose = looking_ahead(PLANE_M)
+    for _ in range(8):  # the camera insisting the wall is at 1 m, into the seeded layer
+        fresh.integrate_depth(flat_depth(intr, 1.0), None, intr, pose)
+    assert np.array_equal(fresh.lidar_slice().values, view.values), "the seed stands"
+
+
 def test_maturity_and_the_report_line_say_what_is_in_the_volume() -> None:
     world = room()
     stats = world.maturity()
