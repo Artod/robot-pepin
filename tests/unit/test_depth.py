@@ -749,3 +749,24 @@ def test_a_bin_that_turns_the_depth_order_around_is_dropped_not_held() -> None:
     )
     assert strong is not None and float(strong.centres[-1]) == pytest.approx(float(far[0]))
     assert np.all(np.diff(strong.centres * strong.ratios) > 0.0), "and its neighbours went instead"
+
+
+def test_one_frame_s_own_law_is_robust_and_refuses_a_shift_it_cannot_identify() -> None:
+    """The per-frame fit (the field's per-image alignment): it needs FRAME_MIN_PAIRS beams,
+    it recovers the frame's scale through a tenth of wild beams, and on a frame whose depths
+    span too little it returns the scale alone rather than a shift fitted on nothing."""
+    from pepin.depth import FRAME_MIN_PAIRS, fit_frame
+
+    z = np.linspace(0.8, 4.0, 200)  # a frame that does span the room
+    d = z * 1.8
+    assert fit_frame(d[:10], z[:10]) is None, "under FRAME_MIN_PAIRS there is no law"
+    assert len(d) > FRAME_MIN_PAIRS
+    a, b = fit_frame(d, z)
+    assert (a, b) == pytest.approx((1.8, 0.0), abs=0.02)
+    spoiled = d.copy()
+    spoiled[::10] = 0.4  # a tenth of the beams on a blurred edge, metres short
+    a, b = fit_frame(spoiled, z)
+    assert 1.0 / (a / (1.8 * 2.0) + b) == pytest.approx(2.0, abs=0.06), "a 2 m wall stays 2 m"
+    narrow = np.linspace(1.2, 2.4, 200)  # 2.0x: spread enough to look fittable, not to be
+    a, b = fit_frame(narrow * 1.8, narrow)
+    assert b == 0.0 and a == pytest.approx(1.8, abs=0.02), "the scale alone, no shift"

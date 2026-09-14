@@ -625,6 +625,80 @@ def apply_affine(depth: Array, a: float, b: float) -> Array:
     return out
 
 
+# ---- the same pairs read one frame at a time --------------------------------------------------
+FRAME_MIN_PAIRS = 30  # beams in a frame before it may fit its own law
+FRAME_MIN_SPREAD = MIN_DEPTH_SPREAD  # this frame's own 95th / 5th of true depth before a shift.
+# The pool's gate, not a looser one: a frame's beams span a fraction of the room, and a shift
+# fitted on what looks like enough spread is noise. Measured on 2026-09-14
+# (scratch/frame_law_eval.py, the pairs of every frame split odd / even, odd fitting, even
+# judging): with the gate at 1.5 the per-frame law read -58 % on tape 0235, whose frames span
+# 1.2-2.5 m — spread enough to open the shift, not enough to identify it — while at 2.5 the same
+# frames read +0.9 %. On the frames that do span the room (run 0171's drive) the two gates are
+# a wash (7.8 % against 7.5 % of median |residual|), so the safe gate costs nothing.
+FRAME_HOLD_TAU_S = 2.0  # seconds over which a frame with no beams decays back to the pool's law
+IRLS_ROUNDS = 3  # re-weightings of the per-frame fit; the third moves the law by under 0.1 %
+IRLS_HUBER = 1.345  # sigmas past which a pair's weight falls off as 1 / |residual| (Huber's 95 %)
+
+
+def _irls(x: Array, y: Array, weight: Array | None = None) -> tuple[float, float]:
+    """(alpha, beta) of x = alpha * y + beta by iteratively reweighted least squares with
+    Huber's weights: the fit is repeated :data:`IRLS_ROUNDS` times, each pair counted the less
+    the further its residual sits past :data:`IRLS_HUBER` robust sigmas (the MAD's), so a beam
+    that grazed an edge or landed on a moving hand bends the law by a bounded amount instead of
+    by its whole residual. ``x`` is the noisy variable (the network's 1 / D), ``y`` the exact
+    one (the lidar's 1 / z); ``weight`` counts each pair that many times."""
+    base = np.ones_like(x) if weight is None else np.asarray(weight, dtype=float)
+    alpha, beta = np.polyfit(y, x, 1, w=np.sqrt(base))
+    for _ in range(IRLS_ROUNDS):
+        res = x - (alpha * y + beta)
+        sigma = 1.4826 * float(np.median(np.abs(res - np.median(res))))
+        if not math.isfinite(sigma) or sigma <= 0.0:
+            break
+        huber = np.minimum(1.0, IRLS_HUBER * sigma / np.maximum(np.abs(res), 1e-12))
+        alpha, beta = np.polyfit(y, x, 1, w=np.sqrt(base * huber))
+    return float(alpha), float(beta)
+
+
+def fit_frame(
+    d: Array,
+    z: Array,
+    weight: Array | None = None,
+    min_pairs: int = FRAME_MIN_PAIRS,
+    min_spread: float = FRAME_MIN_SPREAD,
+) -> tuple[float, float] | None:
+    """The law 1 / z = a / D + b of ONE frame's pairs, or ``None`` under ``min_pairs`` of them.
+    ``d`` is whatever depth the frame is to be corrected from — the raw network's, or a pool
+    law's output, in which case the numbers that come back are that law's residual.
+
+    This is what the field does with a metric monocular network: the Depth Anything V2 papers
+    report metric depth after a per-image scale-and-shift alignment against sparse truth, and a
+    robot with a real depth sensor aligns the monocular image against its points frame by
+    frame. The pool's law describes the camera over a minute of views; this one describes the
+    picture in hand, so a scene the pool never held (a corridor after a room, a new light) is
+    corrected by its own beams rather than by the average of the last 64 seconds.
+
+    The regression is the pool's — the noisy 1 / D on the exact 1 / z, inverted
+    (:func:`fit_affine`) — because a frame's pairs span little range and regressing the other
+    way collapses the slope towards zero exactly when the fit is weakest. The robustness is
+    heavier instead (:func:`_irls`), a frame having no other frames to outvote a bad beam. A
+    shift is fitted only when the frame's own depths span ``min_spread`` (1.5, not the pool's
+    2.5: one picture of one wall spans little, and a shift fitted on it is noise), otherwise the
+    scale alone, the weighted median ratio. The result is bounded like every other law
+    (:func:`_bounded`)."""
+    d = np.asarray(d, dtype=float)
+    z = np.asarray(z, dtype=float)
+    if d.size < min_pairs:
+        return None
+    x, y = 1.0 / d, 1.0 / z
+    lo, hi = np.percentile(z, (5, 95))
+    if not math.isfinite(hi / lo) or float(hi / lo) < min_spread:
+        return float(np.clip(weighted_median(y / x, weight), *a_bounds())), 0.0
+    alpha, beta = _irls(x, y, weight)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        a, b = float(np.divide(1.0, alpha)), float(np.divide(-beta, alpha))
+    return _bounded(a, b, x, y, weight)
+
+
 # ---- the same pairs read as a curve over the network's range ----------------------------------
 RANGE_NEAR = 0.3  # network metres: the network places no scene point nearer than this
 RANGE_FAR = 12.0  # nor further out than this indoors; past it the pairs are reflections
