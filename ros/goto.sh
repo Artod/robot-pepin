@@ -66,7 +66,7 @@ finish() {  # everything recorded, always: scans, odometry, tracked pose, the go
     local rec trace
     rec="$(dirname "$0")/maps/rec"; trace="$rec/${STAMP}_goto_finish.log"
     mkdir -p "$rec"
-    ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f 'session_logger.py $REC'" >> "$trace" 2>&1; echo "logger stopped: $?" >> "$trace"
+    ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f 'session_logger.py $REC'" >> "$trace" 2>&1 || true; echo "logger stopped: $?" >> "$trace"  # no logger to stop is the normal case now: pkill's 1 must not end finish under set -e
     ssh "root@$BOARD" "docker logs --since 10m pepin-ros 2>&1" > "$rec/${STAMP}_goto_board.log" 2>> "$trace"; echo "board log: $? $(wc -c < "$rec/${STAMP}_goto_board.log") bytes" >> "$trace"
     sleep 1
     rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$rec/" >> "$trace" 2>&1 || { sleep 2; rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$rec/" >> "$trace" 2>&1; }
