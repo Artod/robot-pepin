@@ -219,3 +219,130 @@ def test_the_board_says_when_the_correction_stops_and_when_it_comes_back() -> No
 
     on_correction(_shift(0.5, -0.2))
     assert "the correction is back" in node.logger.texts("info")[-1]
+
+
+def _map(node: Any, map_id: str = "3x4@1.00,2.00") -> None:
+    """The board's served map arriving latched, spelled the way pepin_bringup.msgs.map_id does."""
+    from nav_msgs.msg import OccupancyGrid
+
+    msg = OccupancyGrid()
+    msg.info.width, msg.info.height = 3, 4
+    msg.info.origin.position.x, msg.info.origin.position.y = 1.0, 2.0
+    assert map_id == f"{msg.info.width}x{msg.info.height}@1.00,2.00"
+    node.subs["/map"][1](msg)
+
+
+def _fit(node: Any, value: float, at: float) -> None:
+    """The lidar's own match score arriving at ``at`` seconds on the node's clock."""
+    from std_msgs.msg import Float32
+
+    node.clock.seconds = at
+    node.subs["/localization_fit"][1](Float32(data=value))
+
+
+def test_the_anchor_is_written_beside_the_map_it_belongs_to(tmp_path: Any) -> None:
+    """The anchor ties THIS graph database to THIS lidar map, so it is a property of the pair and
+    not of a session: learned once from the tracker, it is written beside the map under the map's
+    own identity, for the next session and the next wake-up to read."""
+    from pepin.anchors import anchor_path, load_anchor
+
+    with ros_stubs.parameters(anchor_dir=str(tmp_path)):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _belief(node, 1.0, 2.0)
+        _odom(node, 0.2, 0.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+    stored = load_anchor(tmp_path, "3x4@1.00,2.00")
+    assert stored is not None and (stored.pose.x, stored.pose.y) == (0.8, 2.0)
+    assert anchor_path(tmp_path, "3x4@1.00,2.00").exists()
+    node.timers[1][1]()
+    assert "from learned" in node.logger.texts("info")[-1], "the report says where it came from"
+
+
+def test_a_stored_anchor_lets_the_graph_speak_before_the_tracker_does(tmp_path: Any) -> None:
+    """The wake-up: the cart comes off the charger with no lidar and nothing on /tracker_pose,
+    and the graph recognising the place IS the answer — the anchor on file is what turns it into
+    a place on the map. An anchor learned in this session could not do that: it came FROM a
+    belief, and there is none."""
+    import json
+
+    from pepin.anchors import Anchor, save_anchor
+    from pepin.odometry import Pose2D
+
+    save_anchor(tmp_path, Anchor(Pose2D(0.8, 2.0, 0.0), "3x4@1.00,2.00", origin="learned"))
+    with ros_stubs.parameters(anchor_dir=str(tmp_path), graph_measurement=True):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        assert node._anchor is not None, "adopted the moment the served map is known"
+        _odom(node, 0.2, 0.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+    (sent,) = node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent
+    word = json.loads(sent.data)
+    assert (word["x"], word["y"]) == (1.0, 2.0), "no tracker said this: the graph did"
+    assert word["map"] == "3x4@1.00,2.00"
+
+
+def test_a_graph_that_recognises_nothing_says_nothing(tmp_path: Any) -> None:
+    """The other half of the wake-up, and the reason it is safe: with no graph message there is
+    no word at all. The tracker keeps its saved pose and the owner carries the cart to a place
+    it knows."""
+    with ros_stubs.parameters(anchor_dir=str(tmp_path), graph_measurement=True):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        node.timers[0][1]()
+    assert not node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent
+    (identity,) = node._tf.sent
+    assert _xy(identity) == (0.0, 0.0), "no anchor on file either: the tree keeps its hole"
+
+
+def test_the_stored_anchor_is_re_learned_only_on_evidence_that_holds(tmp_path: Any) -> None:
+    """A board restart moves the odom frame the graph rides and the stored anchor is then stale
+    by exactly that reset. The evidence is narrow on purpose: the LIDAR driving with a good fit,
+    disagreeing for five seconds. A momentary gap is a closure landing, and a gap with no lidar
+    behind it is no evidence at all."""
+    from pepin.anchors import load_anchor
+
+    with ros_stubs.parameters(anchor_dir=str(tmp_path)):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _belief(node, 1.0, 2.0)
+        _odom(node, 0.2, 0.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert node._origin == "learned"
+
+        # the tracker relocalises 2 m away and stays there: the graph's word no longer fits
+        _belief(node, 3.0, 2.0, seconds=7.0)
+        for moment in (0.0, 2.0, 4.0):  # ...but the lidar is silent, so nothing is re-learned
+            node.clock.seconds = moment
+            node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert node._origin == "learned" and node._relearns == 0
+
+        _fit(node, 0.9, at=10.0)  # the lidar is driving now, and the gap holds
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        _fit(node, 0.9, at=14.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert node._relearns == 0, "four seconds is not five"
+        _fit(node, 0.9, at=16.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+
+    assert node._relearns == 1 and node._origin == "relearned"
+    stored = load_anchor(tmp_path, "3x4@1.00,2.00")
+    assert stored is not None and (stored.pose.x, stored.pose.y) == (2.8, 2.0), "rewritten"
+    node.timers[1][1]()
+    assert "from relearned 1" in node.logger.texts("info")[-1]
+
+
+def test_the_re_learn_can_be_switched_off_in_the_field(tmp_path: Any) -> None:
+    """CLAUDE.md rule 19: the old behaviour stays reachable. With anchor_relearn off the stored
+    anchor is kept whatever happens and a disagreeing word is simply refused as too far."""
+    with ros_stubs.parameters(anchor_dir=str(tmp_path), anchor_relearn=False):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _belief(node, 1.0, 2.0)
+        _odom(node, 0.2, 0.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        _belief(node, 3.0, 2.0, seconds=7.0)
+        for moment in (0.0, 10.0, 20.0):
+            _fit(node, 0.9, at=moment)
+            node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+    assert node._relearns == 0 and node._origin == "learned"

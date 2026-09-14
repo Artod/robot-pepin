@@ -24,12 +24,29 @@ pose, ``map -> rtabmap`` is the inverse of the correction (a fixed identity in i
 the voxels drift away from the cart after every closure — the cloud moved with the graph, the
 cart did not), and the measurement is the tracker's belief moved by that correction.
 
+THE ANCHOR IS A PROPERTY OF THE PAIR (this lidar map, this graph database), not of a session, so
+it is kept where the pair can find it: ``<map id>.graph_anchor.json`` beside the map the board
+serves (:mod:`pepin.anchors`, the node's ``anchor_dir``). At start the file for the served map is
+read and its anchor adopted; with no file the anchor is learned from the tracker as before and
+written. It is re-learned — and the file rewritten — only on evidence that holds: the lidar
+driving with a fit at or above :data:`TRUSTED_FIT` and its belief disagreeing with the graph's
+word by more than half a metre or 20 degrees for five seconds (``anchor_relearn``, on). With the
+lidar silent nothing is re-learned: there is nothing to re-learn FROM.
+
+THE WAKE-UP is what the file buys. The cart sleeps on the charger, the board restarts, the odom
+frame resets — and the tracker's saved pose is the only thing anyone knows. With the anchor on
+file, the FIRST graph message already reads as a place on the map, before the tracker has said
+anything at all, and the word goes out with no belief to check it against (a word is only checked
+against a belief that exists). If the graph does NOT recognise the place — an unseen corner, the
+camera blind — no word is published at all: the tracker keeps its saved pose, and the owner
+carries the cart to a place it knows, or to the charger.
+
 ON A RESTART the database is kept, and RTAB-Map opens a new session whose nodes are placed at
 the odometry's poses again: with the board's EKF still running, the odom frame is the one the
-previous session was built in and the anchor learned here lands on the same relation. A BOARD
-restart resets the odom frame, so the sessions no longer share one; each one's anchor is right
-for its own nodes until a loop closure merges them, and the jump that merge makes is refused by
-:data:`MAX_DISAGREEMENT_M` rather than fused.
+previous session was built in and the anchor on file lands on the same relation. A BOARD restart
+resets the odom frame, so the sessions no longer share one; the stored anchor is then stale by
+exactly that reset, which is what ``anchor_relearn`` is for — until it fires, a word too far from
+the tracker's own belief is refused by :data:`MAX_DISAGREEMENT_M` rather than fused.
 
 In online SLAM (``slam`` on, ros/laptop.sh vslam --slam) RTAB-Map IS the map and the correction
 is literally ``map -> odom`` — but it must become a transform ON THE BOARD, where Nav2 and the
@@ -43,6 +60,7 @@ one owner.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
@@ -50,9 +68,10 @@ from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rtabmap_msgs.msg import MapGraph
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
 from tf2_ros import TransformBroadcaster
 
+from pepin.anchors import Anchor, AnchorWatch, load_anchor, save_anchor
 from pepin.flags import Flag, FlagSet
 from pepin.measurements import compose, graph_anchor, graph_measurement
 from pepin.odometry import Pose2D
@@ -78,7 +97,17 @@ CORRECTION_TOPIC = "/map_odom"
 # roster does.
 MEASUREMENT_TOPIC = "/localization/graph_measurement"
 TRACKER_POSE_TOPIC = "/tracker_pose"
+FIT_TOPIC = "/localization_fit"
 ODOM_FRAME, BASE_FRAME = "odom", "base_link"
+# Where the anchors live, as the container sees them: the same /maps the map yaml and the graph
+# database are served from, so the pair's anchor travels with the pair.
+ANCHOR_DIR = "/maps"
+# What makes the tracker's belief worth re-learning the anchor from: a lidar scan matched this
+# well, this recently. /localization_fit carries only a fit a scan measured (relocalizer.py) and
+# falls to 0.0 when no source has spoken, so a fresh 0.6 IS "the lidar is driving"; depth_fusion
+# paints its band at 0.50 and this is the stricter half of that.
+TRUSTED_FIT = 0.6
+FIT_FRESH_S = 2.0
 # How far from the tracker's own belief the graph may put the cart before the word is refused:
 # an accepted closure on a flat of this size moves the pose by centimetres to a few tens of
 # them, and anything past this is the graph having blown up, or an anchor that no longer holds
@@ -157,6 +186,29 @@ FLAGS = FlagSet(
         " truth -- a session begun while the cart was lost puts every graph word off by that"
         " offset, since the two frames are only tied at the start pose",
     ),
+    Flag(
+        "anchor_relearn",
+        True,
+        description="re-learn the stored anchor (and rewrite its file) when the lidar is driving"
+        f" with a fit of at least {TRUSTED_FIT:.1f} and its belief disagrees with the graph's word"
+        " by more than half a metre or 20 degrees for five seconds; off, the anchor read from the"
+        " file (or learned at the first graph) is kept whatever happens and a disagreeing word is"
+        " simply refused",
+        why="on, because the anchor ties the graph's frame to the ODOM frame's origin and a board"
+        " restart moves that origin: without this the file would be a lie from the first restart"
+        " and every word after it refused by the 1.5 m disagreement gate. The evidence is"
+        " deliberately narrow because a wrongly re-learned anchor is a cart confidently in the"
+        " wrong room, while a stale one only costs the graph's vote: 0.5 m or 20 deg is past"
+        " anything a closure accounts for (the word sat 2.2-3.2 cm from the lidar truth over a"
+        " printer errand, 2026-09-14), the 5 s hold is what tells a closure landing from a frame"
+        f" that has moved, and a fit of {TRUSTED_FIT:.1f} within {FIT_FRESH_S:.0f} s is what says"
+        " the lidar, not dead reckoning, is behind the belief being learned from",
+        on_when="always, on a known map: it is what keeps the stored anchor honest across a board"
+        " restart",
+        off_when="while reading a database recorded in another odom frame on purpose, or in any"
+        " session where the file must not change (a measurement of what the stored anchor is"
+        " worth)",
+    ),
 )
 
 
@@ -165,6 +217,8 @@ class RtabmapFrame(Node):
 
     def __init__(self) -> None:
         super().__init__("rtabmap_frame")
+        # Declared before the switches: rclpy runs the flags' callback on every declaration.
+        self._anchor_dir = Path(str(self.declare_parameter("anchor_dir", ANCHOR_DIR).value))
         self._switches = Switches(self, FLAGS)
         self._slam = self._switches.on("slam")
         self._graph_odom = self._switches.on("graph_odom")
@@ -174,7 +228,11 @@ class RtabmapFrame(Node):
         self._belief: Pose2D | None = None  # what the board's tracker says, and when
         self._belief_stamp = 0.0
         self._map_id = ""  # the map that belief is on; the board refuses a word about another
-        self._anchor: Pose2D | None = None  # map <- rtabmap, learned once at the first graph
+        self._anchor: Pose2D | None = None  # map <- rtabmap: read from the file, or learned once
+        self._origin = "none"  # ...and where this copy of it came from, for the report line
+        self._relearns = 0  # ...and how many times it has been re-learned since the node came up
+        self._watch = AnchorWatch()  # what says the stored anchor no longer holds
+        self._fit, self._fit_at = 0.0, -math.inf  # the lidar's own fit, and when it last spoke
         self._word: Pose2D | None = None  # the last place the graph put the cart, on the map
         self._gap_m = 0.0  # ...and how far that was from the tracker's own belief
         self._sent = 0  # graph measurements published
@@ -204,6 +262,7 @@ class RtabmapFrame(Node):
         self.create_subscription(
             PoseWithCovarianceStamped, TRACKER_POSE_TOPIC, self._on_tracker_pose, 5
         )
+        self.create_subscription(Float32, FIT_TOPIC, self._on_fit, 5)
         self.create_timer(1.0 / RATE_HZ, self._publish)
         where = (
             f"map -> odom on {CORRECTION_TOPIC}, for the board"
@@ -224,13 +283,15 @@ class RtabmapFrame(Node):
     def _report(self) -> None:
         """Every 30 s: how many graphs arrived, how many became measurements, how many were
         refused for putting the cart too far from the tracker's belief and how many found no
-        odometry to compose with, with the anchor, the last word's gap to the tracker and the
-        switches."""
+        odometry to compose with, with the anchor and where it came from (the file beside the map,
+        learned here at the first graph, or re-learned N times since), the last word's gap to the
+        tracker and the switches."""
         anchor = (
             "not yet"
             if self._anchor is None
             else f"({self._anchor.x:+.2f}, {self._anchor.y:+.2f},"
-            f" {math.degrees(self._anchor.theta):+.1f} deg)"
+            f" {math.degrees(self._anchor.theta):+.1f} deg) from {self._origin}"
+            + (f" {self._relearns}" if self._relearns else "")
         )
         word = (
             "none yet"
@@ -255,9 +316,56 @@ class RtabmapFrame(Node):
         self._belief = Pose2D(position.x, position.y, yaw_of(msg.pose.pose.orientation))
         self._belief_stamp = stamp_seconds(msg.header.stamp)
 
+    def _on_fit(self, msg: Float32) -> None:
+        """How well the lidar's last scan matched the map, and when: what says the tracker's
+        belief is worth re-learning the anchor from."""
+        self._fit, self._fit_at = float(msg.data), self._now()
+
     def _on_map(self, msg: OccupancyGridMsg) -> None:
-        """The served map's identity (size@origin), the name the board checks a word against."""
-        self._map_id = map_id(msg)
+        """The served map's identity (size@origin), the name the board checks a word against —
+        and the name of the anchor file this pair keeps, adopted the moment the map is known."""
+        served = map_id(msg)
+        if served == self._map_id:
+            return
+        self._map_id = served
+        if self._anchor is None and self._graph_odom and not self._slam:
+            self._adopt(served)
+
+    def _now(self) -> float:
+        """This node's clock in seconds: when a fit arrived, how long a disagreement has held."""
+        return stamp_seconds(self.get_clock().now().to_msg())
+
+    def _adopt(self, served: str) -> None:
+        """Take the anchor stored for the served map, if there is one worth believing: this is
+        the wake-up path — with it the first graph already reads as a place on the map, before
+        the tracker has said anything at all."""
+        try:
+            stored = load_anchor(self._anchor_dir, served)
+        except (OSError, ValueError) as error:
+            self.get_logger().warning(f"stored anchor ignored: {error}")
+            return
+        if stored is None:
+            self.get_logger().info(
+                f"no anchor stored for map {served} in {self._anchor_dir}: it will be learned"
+                " from the tracker at the first graph, and written there"
+            )
+            return
+        self._anchor, self._origin = stored.pose, "file"
+        self.get_logger().info(f"graph anchor read from file: {stored.described()}, map {served}")
+
+    def _keep(self, anchor: Pose2D, origin: str) -> None:
+        """Remember an anchor learned here and write it beside its map, so the next session —
+        and the next wake-up — starts from it. Nothing is written without a map to name it."""
+        self._anchor, self._origin = anchor, origin
+        if not self._map_id:
+            return
+        record = Anchor(anchor, self._map_id, self._now(), origin, self._relearns)
+        try:
+            path = save_anchor(self._anchor_dir, record)
+        except OSError as error:
+            self.get_logger().warning(f"anchor not stored: {error}")
+            return
+        self.get_logger().info(f"graph anchor stored in {path}: {record.described()}")
 
     @property
     def frames(self) -> tuple[str, str]:
@@ -289,11 +397,48 @@ class RtabmapFrame(Node):
             self._blind += 1
             return
         place, stamp = cart
-        if self._anchor is None:
-            self._anchor = self._learn_anchor(place, stamp)
-            if self._anchor is None:
+        anchor = self._anchor
+        if anchor is None:
+            anchor = self._learn_anchor(place, stamp)
+            if anchor is None:
                 return
-        self._offer(place, self._anchor, stamp)
+            self._keep(anchor, "learned")
+        elif self._stale(anchor, place, stamp):
+            relearned = self._learn_anchor(place, stamp)
+            if relearned is not None:
+                self._relearns += 1
+                anchor = relearned
+                self._keep(anchor, "relearned")
+        self._offer(place, anchor, stamp)
+
+    def _stale(self, anchor: Pose2D, place: Pose2D, stamp: float) -> bool:
+        """Whether the anchor in hand no longer holds: the word it makes of this graph and the
+        tracker's belief of the same instant, disagreeing past what a closure accounts for, for
+        longer than :data:`pepin.anchors.RELEARN_HOLD_S`, while the LIDAR is what the tracker is
+        believing (a fresh :data:`TRUSTED_FIT`). Every other case feeds the watch a "not
+        trusted", which is also what resets its clock."""
+        now = self._now()
+        belief = self._belief
+        trusted = (
+            self._switches.on("anchor_relearn")
+            and belief is not None
+            and self._fit >= TRUSTED_FIT
+            and now - self._fit_at <= FIT_FRESH_S
+            and abs(stamp - self._belief_stamp) <= ANCHOR_MAX_SKEW_S
+        )
+        if belief is None:
+            return self._watch.update(now, False, 0.0, 0.0)
+        word = compose(anchor, place)
+        turn = math.atan2(math.sin(word.theta - belief.theta), math.cos(word.theta - belief.theta))
+        gap_m = math.hypot(word.x - belief.x, word.y - belief.y)
+        if self._watch.update(now, trusted, gap_m, math.degrees(turn)):
+            self.get_logger().warning(
+                f"graph anchor stale: the word sits {gap_m * 100:.0f} cm and"
+                f" {math.degrees(turn):+.1f} deg from a tracker driving on the lidar"
+                f" (fit {self._fit:.2f}) — re-learning it"
+            )
+            return True
+        return False
 
     def _cart_in_graph(self, msg: MapGraph) -> tuple[Pose2D, float] | None:
         """Where the graph has the cart, in the graph's own frame, and at which moment: the
@@ -336,9 +481,13 @@ class RtabmapFrame(Node):
 
         The word is remembered whatever the flag says — the report line is how a session is
         judged before it is allowed to move anything — and sent only with the flag on, a map to
-        name, a belief to compare against, and a place no further from that belief than
-        :data:`MAX_DISAGREEMENT_M`: past that the graph has blown up or the anchor no longer
-        holds."""
+        name, and a place no further from the tracker's belief than :data:`MAX_DISAGREEMENT_M`:
+        past that the graph has blown up or the anchor no longer holds.
+
+        With NO belief at all the word still goes out, but only on an anchor read from the file:
+        that is the wake-up (a lidar-less start, nothing on ``/tracker_pose`` yet), and it is the
+        one case where the graph is the only thing that knows where the cart is. An anchor
+        learned in this session cannot produce that word — it was learned FROM a belief."""
         remote = graph_measurement(place, frame, stamp, self._map_id)
         belief = self._belief
         self._word = remote.pose
@@ -347,9 +496,12 @@ class RtabmapFrame(Node):
         )
         if self._measurement is None or not self._switches.on("graph_measurement"):
             return
-        if belief is None or not self._map_id:
+        if not self._map_id:
             return
-        if self._gap_m > MAX_DISAGREEMENT_M:
+        if belief is None:
+            if self._origin != "file":
+                return
+        elif self._gap_m > MAX_DISAGREEMENT_M:
             self._refused += 1
             return
         self._sent += 1
