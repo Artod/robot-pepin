@@ -31,9 +31,17 @@ session starts from, not a lock. With ``camera_only:=true`` the lidar is not sub
 and the grid comes from the camera's depth — the honest test of "the camera as the primary
 sense", and the one case where the map is only as true as the network's scale.
 
+THE CAMERA AS A THIRD ODOMETRY (``vo``, on by default). Beside all of that, rtabmap_odom's
+``rgbd_odometry`` reads the same picture and depth and answers with a pose per frame, and
+pepin_bringup.visual_odometry gates it, gives it a documented covariance and publishes ``/vo``
+for the board's EKF (ros/params/ekf.yaml's ``odom1``: x and y differentially, no yaw — the gyro
+owns heading). Nothing reaches the filter until that node's ``vo_publish`` flag is on; with
+``vo:=false`` neither process starts at all.
+
 Arguments: ``board`` (the robot's address for the camera stream), ``slam``, ``camera_only``,
-``resume``, ``database`` (empty: chosen by the mode), ``bridge_admin`` (the laptop bridge's REST
-admin, asked whether it still lists this launch's previous incarnation), ``static_camera_tf``
+``resume``, ``vo``, ``database`` (empty: chosen by the mode), ``bridge_admin`` (the laptop
+bridge's REST admin, asked whether it still lists this launch's previous incarnation),
+``static_camera_tf``
 (default true: the camera node broadcasts base_link -> camera_link from config/camera.json; false
 when the board's neck node publishes that edge live — ros/feature.sh neck on, ``ros/laptop.sh
 vslam --neck`` — since two publishers of one edge fight).
@@ -48,6 +56,7 @@ from launch.actions import (
     RegisterEventHandler,
     Shutdown,
 )
+from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -147,6 +156,36 @@ SLAM_CAMERA_ONLY = {
 # restarts this container whenever the board's bridge is new, and a launch that wiped it lost
 # the map every time); a SLAM session starts empty by default and writes a file of its own, so
 # an evening of mapping can never delete the graph the known-map mode accumulated.
+# The camera as a third odometry (rtabmap_odom's rgbd_odometry, ros/params/ekf.yaml's odom1).
+# Measured on this laptop 2026-09-14 at rest, on /camera/image + /camera/depth + the camera's
+# own CameraInfo: 9.1 poses/s out of a ~8-10 Hz depth stream, 20 ms of CPU a frame (p90 25 ms,
+# a quarter of one core), 162 ms median from the image's stamp to the pose, 630 inlier features
+# a frame, and 0.48 cm / 0.075 deg of drift over 85 s with the wheels reporting a hard zero
+# (scratch/vo_probe.py, one lost frame: the first). Reg/Force3DoF (the whole stack is planar;
+# every other table here says the same) and Odom/ResetCountdown — a lost tracking re-initialises
+# instead of staying lost, and the jump that costs is dropped by pepin.visual_odometry.VoGate,
+# which then measures from the new origin — were measured with this table as it stands: 9.4-9.7
+# poses/s through the gate, none dropped, 0.2 cm and 0.0 deg of drift over 60 s at rest.
+VO_RAW_TOPIC = "/vo/raw"  # rgbd_odometry's own output; /vo is what the gate publishes for the EKF
+VISUAL_ODOMETRY = {
+    # The EKF owns odom -> base_link. This node names its frame "odom" because that is the frame
+    # its poses are differences in, and publishes no transform at all.
+    "odom_frame_id": "odom",
+    "publish_tf": False,
+    # No guess from TF: a visual odometry seeded with the filter's own answer is not a third
+    # opinion, and the loop would hide exactly the slip it exists to catch.
+    "guess_frame_id": "",
+    "approx_sync": True,  # the depth arrives ~8 Hz, the picture ~15: they never share a stamp
+    "sync_queue_size": 30,
+    "topic_queue_size": 10,
+    "wait_for_transform": 0.5,
+    # A lost frame is published (9999 on the covariance diagonal) rather than swallowed: the
+    # gate drops it and the report line counts it, which is how a blind minute becomes visible.
+    "publish_null_when_lost": True,
+    "Reg/Force3DoF": "true",
+    "Odom/ResetCountdown": "1",
+}
+
 KNOWN_MAP_DATABASE = "/maps/rtabmap.db"
 SLAM_DATABASE = "/maps/rtabmap_slam.db"
 
@@ -347,6 +386,35 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         prefix=_after_ghost("/depth_fusion"),
         **RESPAWN,
     )
+    # The camera's own opinion of how the cart moved: rtabmap's rgbd_odometry on the same three
+    # topics RTAB-Map itself reads, and pepin_bringup.visual_odometry between it and the board's
+    # EKF (the gate, the covariance, the drift at rest). Off (vo:=false) neither runs and the
+    # board's odometry is the wheels and the gyro exactly as before. It never publishes a
+    # transform: the EKF owns odom -> base_link, and it takes no guess from TF either
+    # (guess_frame_id empty), so this measurement stays independent of the filter it feeds.
+    rgbd_odometry = Node(
+        package="rtabmap_odom",
+        executable="rgbd_odometry",
+        name="rgbd_odometry",
+        output="screen",
+        parameters=[{"frame_id": "base_link", **VISUAL_ODOMETRY}],
+        remappings=[
+            ("rgb/image", "/camera/image"),
+            ("rgb/camera_info", "/camera/camera_info"),
+            ("depth/image", "/camera/depth"),
+            ("odom", VO_RAW_TOPIC),
+        ],
+        condition=IfCondition(LaunchConfiguration("vo")),
+        prefix=_after_ghost("/rgbd_odometry"),
+        **RESPAWN,
+    )
+    vo = ExecuteProcess(
+        cmd=["python3", "-m", "pepin_bringup.visual_odometry"],
+        output="screen",
+        prefix=_after_ghost("/visual_odometry"),
+        condition=IfCondition(LaunchConfiguration("vo")),
+        **RESPAWN,
+    )
     remappings = [
         ("rgb/image", "/camera/image"),
         ("rgb/camera_info", "/camera/camera_info"),
@@ -396,14 +464,20 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     scan = "camera only (no /scan)" if camera_only else "lidar + camera"
     start = "resumed" if resume else "empty"
     grid = "the fused volume" if volume_owns_map else "RTAB-Map's grid"
+    vo_note = (
+        f" rgbd_odometry -> {VO_RAW_TOPIC} -> /vo for the board's EKF (withheld until"
+        " visual_odometry's vo_publish is on)"
+        if _flag(context, "vo")
+        else " no visual odometry (vo:=false): the board's odometry is the wheels and the gyro"
+    )
     report = (
         f"vslam up: online SLAM, {scan}, {start} database {database}, /map from {grid};"
         " the fusion's fit_gate is off (no tracker publishes a fit here) and"
-        " the global watch is off (the map is being built)"
+        " the global watch is off (the map is being built);" + vo_note
         if slam
         else f"vslam up: beside the known map, lidar + camera, database {database};"
         " the laptop localizer proposes a place once a second and measures the camera's pose"
-        " at 5 Hz for the board's tracker"
+        " at 5 Hz for the board's tracker;" + vo_note
     )
     return [
         LogInfo(msg=report),
@@ -411,7 +485,18 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         RegisterEventHandler(
             OnProcessExit(
                 target_action=ghost_wait,
-                on_exit=[camera, depth, contact, fusion, watch, rtabmap, frame, foxglove],
+                on_exit=[
+                    camera,
+                    depth,
+                    contact,
+                    fusion,
+                    watch,
+                    rtabmap,
+                    frame,
+                    foxglove,
+                    rgbd_odometry,
+                    vo,
+                ],
             )
         ),
     ]
@@ -429,6 +514,11 @@ def generate_launch_description() -> LaunchDescription:
             # The map the fused volume's lidar layer is seeded from (a map_server yaml as the
             # container sees it, e.g. /maps/flat3_straight.yaml); empty seeds nothing.
             DeclareLaunchArgument("seed_map", default_value=""),
+            # The camera as a third odometry: rtabmap_odom's rgbd_odometry and the node that
+            # gates it (pepin_bringup.visual_odometry). On by default because it is measured at
+            # rest and costs only this laptop (0.25 core); what it costs the ROBOT is still
+            # nothing until visual_odometry's vo_publish flag is turned on.
+            DeclareLaunchArgument("vo", default_value="true"),
             DeclareLaunchArgument("database", default_value=""),  # empty: by mode
             DeclareLaunchArgument("bridge_admin", default_value="http://pepin-zenoh:8000"),
             DeclareLaunchArgument("static_camera_tf", default_value="true"),

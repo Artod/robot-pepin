@@ -14,6 +14,8 @@
 #   ros/laptop.sh vslam --world-map  /map comes from the fused volume (pepin.worldmap) instead of
 #                                 RTAB-Map's grid: one map both sensors write into, snapshotted
 #   ros/laptop.sh vslam --fresh   delete this mode's database before the run
+#   ros/laptop.sh vslam --no-vo   no visual odometry: rgbd_odometry and pepin_bringup.visual_odometry
+#                            do not start, and the board's EKF is the wheels and the gyro alone
 #   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
 #                            neck on): the camera node here keeps its static edge off
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
@@ -59,7 +61,7 @@ image() { docker image inspect pepin-laptop:latest >/dev/null 2>&1 && echo pepin
 # The nodes a kick can reach here, the container each lives in and the line it prints once up
 # (the kick waits for that line): the Python modules of vslam.launch.py, and the goal server of
 # the navigation half (it runs here on side=board only; on side=all: ros/thin.sh kick goal_server).
-KICKABLE="camera_stream depth_stream contact_scan depth_fusion laptop_localizer rtabmap_frame goal_server"
+KICKABLE="camera_stream depth_stream contact_scan depth_fusion laptop_localizer rtabmap_frame visual_odometry goal_server"
 kick_target() {  # node name -> "container|start-up line"
     case "$1" in
         camera_stream) echo "pepin-vslam|camera stream from " ;;
@@ -68,6 +70,7 @@ kick_target() {  # node name -> "container|start-up line"
         depth_fusion) echo "pepin-vslam|fusion up: " ;;
         laptop_localizer) echo "pepin-vslam|laptop localizer up: " ;;
         rtabmap_frame) echo "pepin-vslam|rtabmap frame up: " ;;
+        visual_odometry) echo "pepin-vslam|visual odometry up: " ;;
         goal_server) echo "pepin-laptop|goal server ready on port" ;;
         *) return 1 ;;
     esac
@@ -143,6 +146,11 @@ case "${1:-start}" in
         MODE="$(cat "$HERE/.mode" 2>/dev/null || echo vision)"
         if [ "$MODE" = slam ]; then SLAM=true; else SLAM=false; fi
         CAMERA_ONLY=false; RESUME=false; FRESH=false; WORLD_MAP=false; SEED_MAP=""
+        # The camera as a third odometry (rtabmap_odom's rgbd_odometry + pepin_bringup.visual_odometry):
+        # on unless --no-vo. It costs this laptop a quarter of a core and the robot nothing at
+        # all until the node's vo_publish flag is turned on (ros/flags.sh set visual_odometry
+        # vo_publish true).
+        VO=true
         # --neck: the board's neck node publishes base_link -> camera_link live (ros/feature.sh
         # neck on), so the camera node's static edge goes off. Explicit on purpose: a wrong guess
         # would be two publishers of one edge; the camera node's report warns of a mismatch.
@@ -161,7 +169,8 @@ case "${1:-start}" in
                 --seed-map=*) SEED_MAP="${arg#--seed-map=}" ;;
                 --fresh) FRESH=true ;;
                 --neck) STATIC_CAMERA_TF=false ;;
-                *) echo "usage: ros/laptop.sh vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck] [--world-map] [--seed-map=/maps/NAME.yaml]"; exit 2 ;;
+                --no-vo) VO=false ;;
+                *) echo "usage: ros/laptop.sh vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck] [--world-map] [--no-vo] [--seed-map=/maps/NAME.yaml]"; exit 2 ;;
             esac
         done
         if [ "$FRESH" = true ] && [ "$SLAM" = true ]; then
@@ -189,13 +198,13 @@ case "${1:-start}" in
             -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} \
             "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "slam:=$SLAM" "camera_only:=$CAMERA_ONLY" "resume:=$RESUME" "world_map:=$WORLD_MAP" \
-            "seed_map:=$SEED_MAP" >/dev/null
+            "seed_map:=$SEED_MAP" "vo:=$VO" >/dev/null
         [ "$SLAM" = true ] \
             && echo "vslam up in SLAM mode (camera_only $CAMERA_ONLY, resume $RESUME, static camera tf $STATIC_CAMERA_TF): the map grows on /map; board must be on ros/thin.sh slam. Foxglove ws://localhost:8765, save with ros/map.sh save NAME" \
             || echo "vslam up beside the known map (static camera tf $STATIC_CAMERA_TF): Foxglove at ws://localhost:8765, ros/laptop.sh logs vslam"
         exit 0 ;;
     start) ;;
-    *) echo "usage: ros/laptop.sh [start | stop | logs [vslam] | vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck] | kick NODE]"; exit 2 ;;
+    *) echo "usage: ros/laptop.sh [start | stop | logs [vslam] | vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck] [--no-vo] | kick NODE]"; exit 2 ;;
 esac
 # Which half the board expects: on side=all (ros/thin.sh vision) the board drives by itself and
 # this side starts only the bridge — RTAB-Map and the camera come with "ros/laptop.sh vslam".
