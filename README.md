@@ -204,8 +204,8 @@ live while teleoperating.
 
 **LD19 lidar**, 10 Hz, 455 beams, mounted upside down at the height `config/lidar.json` carries
 (0.383 m, floor to the middle of the window, tape-measured 2026-09-12) with a yaw of −87.5°. That
-file is the only place the height is written: every band and berth derived from it reads the
-mount. The driver
+file is the only place the height is written: every band derived from it reads the mount. The
+driver
 emits a counter-clockwise scan for an upright sensor, so the static transform carries a roll of
 π to mirror it back. A box filter removes the cart's own hull plus the contact band — those
 returns are its posts and cables, they travel with it, and the costmap used to turn them into a
@@ -246,21 +246,20 @@ cross unknown cells: the survey does not cover every corner of the flat, and a c
 looked at is floor until the lidar says otherwise — a robot must always be able to plan its way
 out of where it already stands.
 
-**What the map cannot explain gets a berth** (`src/pepin/dynamic.py`). The tracker already holds
-the pose and the map, so it is what spots new objects: on every matched scan, returns that no
-mapped obstacle accounts for — a person, a moved chair, a bag on the floor — go out on
-`/dynamic_obstacles` as lethal rings, a second observation source in both costmaps. Marking only;
-the lidar's own rays clear those cells when the object leaves. The ring is sized for the planner
-in charge: 0.32 m under a footprint planner, which is a toe's 0.27 m of reach past the leg the
-lidar sees plus a hand's width, and 0.48 m under a point planner, which is that reach plus the
-21 cm of half-width its 6 cm disc leaves out. The reach is computed from the mount, not typed:
-the beam crosses a standing person on the upper shin, a relaxed shin leans back off vertical,
-and the shoe still reaches 0.21 m past the ankle. A mark that would land on the cart's own
-outline is dropped — a lethal cell there refuses its every command (run 0087) — and a return
-inside that outline is not ringed at all; the blind disc is the cart's size and stays there
-however wide the ring grows, because an exclusion that grew with the ring would have stopped
-ringing a person at 0.90 m the day the reach went up by 7 cm. Mapped furniture is never ringed,
-so the cart still parks against it.
+**What the map cannot explain is not a costmap's business** (`src/pepin/dynamic.py`). The tracker
+holds the pose and the map, so it is what can tell a return the map accounts for from one it
+does not — a person, a moved chair, a bag on the floor. That answer is spent on the pose and
+nowhere else: those returns do not score the scan match (`explained_vote`), and a near scan full
+of them while the walls beyond still fit is a person beside the cart rather than a lost cart.
+How far a mapped obstacle's explanation reaches is the `map_grow` flag, 0.15 m.
+
+For the costmaps a new object is simply the cell the beam found: the lidar's own layer marks it
+and the lidar's own rays clear it when it leaves. Until 2026-09-14 the tracker also painted a
+lethal ring of a standing person's toe reach around every such return and published it as
+`/dynamic_obstacles`. It was an overfit to one obstacle and it was redundant besides — the marks
+went into the lidar's own layer, at cells the scan had already marked from the same returns —
+and it cost real driving: a 70 cm gap between two strips of tape read 58 cm lethal-to-lethal and
+took four minutes of recoveries, where the same gap with the rings off took 36 s.
 
 ## Planning and control
 
@@ -379,8 +378,8 @@ short shell scripts, one job each, no client to boot.
 
 **The Python library** (`src/pepin`, Python 3.12, numpy) is imported by the ROS package and never
 imports it back. It holds the board servers, the algorithms (scan matching, occupancy mapping,
-pose graph, localisation, the timeline, slip detection, ToF horizon, the hull and the berth
-around new objects, places) and the tape. Every
+pose graph, localisation, the timeline, slip detection, ToF horizon, the hull, what the map
+cannot explain, places) and the tape. Every
 decision that can be pure is pure, which is why it can be tested without a robot: the unit tests
 need no hardware and run on every commit. `ruff`, `mypy --strict` and a pre-commit hook with an 86% coverage floor
 run on every commit; hardware tests live in `tests/hardware` behind `--hardware`.

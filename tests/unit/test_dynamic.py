@@ -1,25 +1,12 @@
-"""New objects get a berth; the mapped world keeps its close approach."""
+"""What the static map does not explain, and what that costs the pose."""
 
 import math
 
 import numpy as np
 
-from pepin.dynamic import (
-    COSTMAP_CELL_M,
-    StaticMask,
-    berth_for,
-    dedupe,
-    dynamic_marks,
-    ring_points,
-    rings,
-    to_map,
-)
+from pepin.dynamic import STATIC_M, StaticMask, to_map
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D
-
-POINT = berth_for("GridBased")
-RING_M, NEAR_M = POINT.ring_m, POINT.near_m
-PER_CENTRE = 1 + ring_points(RING_M)  # the centre itself, then the ring closing around it
 
 
 def room() -> OccupancyGrid:
@@ -40,74 +27,22 @@ def test_the_mask_explains_the_wall_and_its_surroundings_but_not_the_middle_of_t
     assert mask.explains(off_grid)[0], "unknown ground is not evidence of a person"
 
 
-def test_a_person_in_the_room_becomes_a_lethal_ring_and_the_wall_does_not() -> None:
-    mask = StaticMask(room())
-    pose = Pose2D(0.5, 2.0, 0.0)
-    legs = np.array([[1.50, 0.02], [1.52, -0.03], [1.55, 0.05]])  # 1.5 m ahead, in the base frame
-    wall = np.array([[2.49, 0.10], [2.49, -0.10]])  # the mapped wall at x = 3.0
-    marks = dynamic_marks(np.vstack([legs, wall]), pose, mask, POINT)
-    legs_map = to_map(legs, pose)
-    near_legs = np.hypot(marks[:, 0] - legs_map[:, 0].mean(), marks[:, 1] - legs_map[:, 1].mean())
-    centres = marks[near_legs < 0.10]
-    assert 1 <= len(centres) <= 3, "three returns 5 cm apart are one object, or nearly"
-    assert len(marks) == len(centres) * PER_CENTRE, (
-        "each centre carries its ring; the wall carries none"
-    )
-    ring = marks[near_legs >= 0.10]
-    to_centre = np.hypot(
-        ring[:, None, 0] - centres[None, :, 0], ring[:, None, 1] - centres[None, :, 1]
-    ).min(axis=1)
-    # a ring point may sit nearer a neighbouring centre (5 cm apart) than its own
-    assert np.all(to_centre <= RING_M + 0.02) and np.all(to_centre >= RING_M - 0.06)
-
-
-def test_what_stands_beside_a_parked_cart_gets_no_ring() -> None:
-    mask = StaticMask(room())
-    pose = Pose2D(0.5, 2.0, 0.0)
-    beside = np.array([[0.30, 0.30]])  # 42 cm away: the contact band and the footprint handle it
-    assert len(dynamic_marks(beside, pose, mask, POINT)) == 0
-    farther = np.array([[NEAR_M + 0.05, 0.0]])
-    marks = dynamic_marks(farther, pose, mask, POINT)
-    # The ring is drawn; the arc of it that would land on the cart's own outline is dropped, and
-    # nothing else is. A whole return is never thrown away for the sake of one bad mark.
-    assert 0 < len(marks) < PER_CENTRE
-    from_cart = np.hypot(marks[:, 0] - pose.x, marks[:, 1] - pose.y)
-    assert from_cart.min() >= POINT.trim_m - 1e-9
-
-
-def test_a_wider_ring_does_not_blind_the_band_it_widened() -> None:
-    """The failure the near exclusion used to cause: it was the ring plus the cart's outline, so
-    every centimetre added to the ring took a centimetre of berth away from the returns just
-    outside it. A person 0.90 m ahead was ringed with the old 0.41 m ring and would have stopped
-    being ringed at all by the 0.48 m one — in exactly the case the ring exists for."""
-    from pepin.dynamic import berth_for, near_exclusion_m
-
-    mask = StaticMask(room())
-    pose = Pose2D(0.5, 2.0, 0.0)
-    person = np.array([[0.90, 0.0]])
-    assert near_exclusion_m(POINT.ring_m) > 0.90, "the case this test is about"
-    assert len(dynamic_marks(person, pose, mask, POINT)) > 0
-    old = berth_for("GridBased", near_rings=False)  # the old rule, still one flag away
-    assert old.near_m == near_exclusion_m(old.ring_m)
-    assert len(dynamic_marks(person, pose, mask, old)) == 0
-
-
-def test_a_ring_leaves_no_gap_a_point_planner_could_walk_through() -> None:
-    """A point planner is stopped by lethal cells, never by the gaps between them: twelve marks
-    on a half-metre ring stand 0.26 m apart and the plan goes straight between two of them."""
-    ring = rings(np.zeros((1, 2)), RING_M)[1:]
-    step = np.hypot(*(ring - np.roll(ring, 1, axis=0)).T)
-    assert step.max() <= COSTMAP_CELL_M + 1e-9
-    assert ring_points(RING_M) == len(ring) > 12
-    assert ring_points(0.001) == 12, "a tiny ring still gets a full dozen"
+def test_the_reach_of_the_explanation_is_a_number_the_mask_is_built_with() -> None:
+    """``map_grow`` (the tracker's flag) is this argument: at 0.15 m a wall's returns and the
+    12 cm of map error beside them are the map; at 0.02 m only the mapped cell itself is."""
+    grid = room()
+    wide, narrow = StaticMask(grid, STATIC_M), StaticMask(grid, 0.02)
+    beside = np.array([[2.90, 1.0]])  # 12 cm off the mapped wall at x = 3.0
+    assert wide.grow_m == STATIC_M == 0.15 and narrow.grow_m == 0.02
+    assert wide.explains(beside)[0] and not narrow.explains(beside)[0]
+    assert narrow.explains(np.array([[3.02, 1.0]]))[0], "the mapped cell is always the map"
 
 
 def test_helpers() -> None:
-    assert len(dedupe(np.array([[0.01, 0.01], [0.02, 0.03], [0.5, 0.5]]))) == 2
-    assert rings(np.zeros((0, 2)), RING_M).shape == (0, 2)
     moved = to_map(np.array([[1.0, 0.0]]), Pose2D(1.0, 1.0, math.pi / 2))
     assert np.allclose(moved, [[1.0, 2.0]])
-    assert len(dynamic_marks(np.zeros((0, 2)), Pose2D(), StaticMask(room()), POINT)) == 0
+    assert to_map(np.zeros((0, 2)), Pose2D()).shape == (0, 2)
+    assert len(StaticMask(room()).explains(np.zeros((0, 2)))) == 0
 
 
 def test_occlusion_is_near_and_unexplained_while_the_far_scan_is_the_judge() -> None:
@@ -122,47 +57,6 @@ def test_occlusion_is_near_and_unexplained_while_the_far_scan_is_the_judge() -> 
     assert share == 0.0 and far.all()
     share, far = occlusion_split(np.zeros((0, 2)), np.zeros(0, dtype=bool))
     assert share == 0.0 and len(far) == 0
-
-
-def test_the_berth_is_the_toes_for_a_footprint_planner_and_the_hull_for_a_point_one() -> None:
-    from pepin.dynamic import (
-        COSTMAP_CELL_M,
-        HAND_M,
-        berth_for,
-        footprint_planner_ring_m,
-        hull_clearance_m,
-        near_exclusion_m,
-        point_planner_ring_m,
-        toe_reach_m,
-    )
-    from pepin.footprint import HULL
-    from pepin.mounts import load_lidar_mount
-
-    # The reach is computed from the mount, never a second copy of it. The numbers below are
-    # its consequences at the mount config/lidar.json carries today; re-measure the lidar and
-    # this test fails on purpose, because the berth a person gets must be looked at again.
-    reach = toe_reach_m()
-    assert reach == toe_reach_m(load_lidar_mount().z_m) == 0.27
-    assert toe_reach_m(0.20) == 0.24 and toe_reach_m(0.0) == 0.21
-    assert point_planner_ring_m() == HULL.half_width_m - HULL.inscribed_radius_m + reach
-    assert footprint_planner_ring_m() == reach + HAND_M
-    assert hull_clearance_m() == HULL.circumscribed_radius_m + COSTMAP_CELL_M
-    assert near_exclusion_m(0.25) == 0.25 + hull_clearance_m()
-    hybrid = berth_for("Hybrid")
-    assert hybrid.ring_m == footprint_planner_ring_m() == 0.32
-    assert berth_for("Lattice") == hybrid
-    for point in ("GridBased", "Smac2D", "ThetaStar", ""):
-        b = berth_for(point)
-        assert b.ring_m == point_planner_ring_m()
-        # The blind disc is the cart's own outline and nothing more, whatever the ring grows to;
-        # the old rule that added the ring to it is one flag away.
-        assert b.near_m == b.trim_m == hull_clearance_m()
-        assert berth_for(point, near_rings=False).near_m == near_exclusion_m(b.ring_m)
-    assert hybrid.near_m == berth_for("GridBased").near_m == hull_clearance_m()
-    # The reach is the live knob over the ring (the tracker's toe_reach flag), and only over it.
-    wider = berth_for("GridBased", reach_m=reach + 0.10)
-    assert abs(wider.ring_m - (berth_for("GridBased").ring_m + 0.10)) < 1e-9
-    assert wider.near_m == hull_clearance_m()
 
 
 # -- who may vote in the scan match -------------------------------------------
@@ -199,24 +93,6 @@ def test_too_few_explained_returns_let_everything_vote() -> None:
     mask = StaticMask(room())
     assert voting_mask(wall_scan(VOTE_MIN_POINTS - 1), Pose2D(), mask) is None
     assert voting_mask(wall_scan(VOTE_MIN_POINTS), Pose2D(), mask) is not None
-
-
-def test_a_wrong_pose_rings_only_the_nearest_news() -> None:
-    """120 returns the map has no wall for, 12 cm apart: a person is a handful, this is a pose
-    that is wrong. The MAX_NEWS_POINTS nearest to the wheels are ringed — what is close is what
-    the wheels meet — and the far ones are not."""
-    from pepin.dynamic import MAX_NEWS_POINTS
-
-    mask = StaticMask(room())
-    pose = Pose2D(0.2, 2.0, 0.0)
-    xs, ys = np.meshgrid(np.linspace(1.0, 2.4, 12), np.linspace(-0.6, 0.6, 10))
-    points = np.column_stack((xs.ravel(), ys.ravel()))
-    ranges = np.sort(np.hypot(points[:, 0], points[:, 1]))
-    assert len(points) == 120 > MAX_NEWS_POINTS and ranges[0] >= NEAR_M
-    marks = dynamic_marks(points, pose, mask, POINT)
-    assert len(marks) == MAX_NEWS_POINTS * PER_CENTRE
-    centres = marks[:MAX_NEWS_POINTS] - (pose.x, pose.y)  # rings() lists the centres first
-    assert np.hypot(centres[:, 0], centres[:, 1]).max() <= ranges[MAX_NEWS_POINTS - 1] + 1e-9
 
 
 def test_exactly_half_explained_votes_and_one_under_half_does_not() -> None:

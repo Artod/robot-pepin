@@ -346,7 +346,7 @@ local_costmap:
       # is the order they write into the master grid, and every layer here combines by maximum,
       # so a mark is a mark whoever wrote it.
       #
-      # What the split changes is the point of it: while scan, dynamic and depth_scan shared one
+      # What the split changes is the point of it: while the scan and depth_scan shared one
       # grid, the LIDAR's rays cleared the CAMERA's marks — a beam passing through the lidar's
       # own plane (config/lidar.json's mount) under a table erased the table top the camera had
       # just seen. Now each sensor clears only
@@ -364,7 +364,7 @@ local_costmap:
       lidar_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
-        observation_sources: scan dynamic
+        observation_sources: scan
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -376,21 +376,6 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.0
           obstacle_min_range: 0.10
-        # Lethal rings around whatever the static map does not explain (pepin.dynamic): the point
-        # planners' berth around a person or a moved chair, since their inscribed band is 6 cm
-        # on this hull. Marking only: the lidar's own rays clear the cells when the object leaves
-        # — which is why this source stays in the LIDAR's layer and not in one of its own.
-        dynamic:
-          topic: /dynamic_obstacles
-          data_type: "PointCloud2"
-          sensor_frame: base_link
-          expected_update_rate: 0.0
-          marking: True
-          clearing: False
-          min_obstacle_height: -1.0
-          max_obstacle_height: 1.0
-          obstacle_max_range: 2.0  # no farther than the scan raytraces (2.5): a ring nobody can clear is a wall
-          obstacle_min_range: 0.0
       camera_layer:
         # The camera's depth in a grid the lidar cannot reach — and OFF by default, because that
         # is a change nobody has measured yet. Until now this source sat inside the shared
@@ -513,7 +498,7 @@ global_costmap:
       # is the order they write into the master grid, and every layer here combines by maximum,
       # so a mark is a mark whoever wrote it.
       #
-      # What the split changes is the point of it: while scan, dynamic and depth_scan shared one
+      # What the split changes is the point of it: while the scan and depth_scan shared one
       # grid, the LIDAR's rays cleared the CAMERA's marks — a beam passing through the lidar's
       # own plane (config/lidar.json's mount) under a table erased the table top the camera had
       # just seen. Now each sensor clears only
@@ -531,7 +516,7 @@ global_costmap:
       lidar_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
-        observation_sources: scan dynamic
+        observation_sources: scan
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -543,21 +528,6 @@ global_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.0
           obstacle_min_range: 0.10
-        # Lethal rings around whatever the static map does not explain (pepin.dynamic): the point
-        # planners' berth around a person or a moved chair, since their inscribed band is 6 cm
-        # on this hull. Marking only: the lidar's own rays clear the cells when the object leaves
-        # — which is why this source stays in the LIDAR's layer and not in one of its own.
-        dynamic:
-          topic: /dynamic_obstacles
-          data_type: "PointCloud2"
-          sensor_frame: base_link
-          expected_update_rate: 0.0
-          marking: True
-          clearing: False
-          min_obstacle_height: -1.0
-          max_obstacle_height: 1.0
-          obstacle_max_range: 2.0  # no farther than the scan raytraces (2.5): a ring nobody can clear is a wall
-          obstacle_min_range: 0.0
       camera_layer:
         # The same depth scan the local costmap marks with, offered to the planner as well — and
         # OFF until that is measured. The global costmap does not roll: a phantom from a depth

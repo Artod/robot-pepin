@@ -369,35 +369,22 @@ def test_a_blocked_retreat_gives_up_within_seconds() -> None:
     assert reverse_cap >= 0.15, "a retreat at 0.075 m/s timed out every progress check"
 
 
-def test_new_objects_get_a_berth_in_both_costmaps() -> None:
-    """The rings around unexplained returns are derived from the hull, never typed twice: a point
-    planner's ring makes up the width its 6 cm band lacks plus the toes, a footprint planner's
-    only the toes; nothing is ringed so close that a ring could touch the cart's own outline.
-    Both costmaps mark the rings and never raytrace-clear through them."""
-    from pepin.dynamic import (
-        COSTMAP_CELL_M,
-        berth_for,
-        hull_clearance_m,
-        near_exclusion_m,
-        point_planner_ring_m,
-    )
-    from pepin.footprint import HULL
+def test_a_new_object_is_the_cell_the_beam_found_and_nothing_more() -> None:
+    """No ring, no second observation source: what the static map cannot explain is a lidar
+    return, and the lidar's own layer marks it at the cell it came from and clears it with its
+    own rays. The rings that stood here until 2026-09-14 were an overfit to a standing person's
+    feet (a 70 cm tape gap read 58 cm lethal-to-lethal, four minutes of recoveries against 36 s
+    with them off) and they were redundant besides: every mark they published landed in this
+    same layer, at a cell `scan` had already marked from the same return."""
+    from pepin.footprint import COSTMAP_CELL_M
 
-    point = berth_for("GridBased")
-    assert point.ring_m == point_planner_ring_m(HULL) >= HULL.half_width_m - HULL.inscribed_radius_m
-    # A mark on the cart's outline is what run 0087 refused to drive away from, so that is what
-    # is dropped; the blind disc no longer grows with the ring (the old rule: near_rings off).
-    assert point.trim_m == point.near_m == hull_clearance_m(HULL)
-    assert berth_for("GridBased", near_rings=False).near_m == near_exclusion_m(point.ring_m, HULL)
     for costmap in ("local_costmap", "global_costmap"):
         params = _p(costmap)
         assert params["resolution"] == COSTMAP_CELL_M
-        # The rings stay in the LIDAR's layer: marking only, they are cleared by the scan's own
-        # rays, which only happens while the two share one layer's grid.
         layer = params["lidar_layer"]
-        assert "dynamic" in layer["observation_sources"].split()
-        assert "scan" in layer["observation_sources"].split(), "nothing else would clear a ring"
-        assert layer["dynamic"]["marking"] is True and layer["dynamic"]["clearing"] is False
+        assert layer["observation_sources"].split() == ["scan"]
+        assert "dynamic" not in layer, f"{costmap}: the ring's source is gone"
+        assert layer["scan"]["marking"] is True and layer["scan"]["clearing"] is True
 
 
 def test_the_nav2_footprint_is_the_hull() -> None:
@@ -539,7 +526,6 @@ def test_the_bridge_routes_only_what_the_split_needs_and_only_one_way() -> None:
         "/tof/front",
         "/tracker_pose",
         "/localization/sources",
-        "/dynamic_obstacles",
         "/pepin/run_status",
     ):
         assert pub_b.search(name) and sub_l.search(name), name

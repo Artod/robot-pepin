@@ -23,6 +23,12 @@ from pepin.kinematics import STOP, Twist
 
 HULL_STEP_M = 0.005  # how far any point of the hull may move between two sweep samples
 
+# The Nav2 costmaps' resolution (tests/unit/test_nav_contract pins the YAML to it). It lives
+# beside the hull because every clearance question on this cart is the hull measured in these
+# cells: the contact band below is 1.5 of them, the inscribed band the point planners plan with
+# is a little over one.
+COSTMAP_CELL_M = 0.05
+
 # Anything closer than this to the hull is contact, not an obstacle. The cart parks bumper-to-
 # furniture on purpose, and a mark inside this band lands in the very cells of the footprint
 # outline that the controller checks first: one such cell refused every command, including the
@@ -39,7 +45,7 @@ class Footprint:
     The defaults are the cart as measured on 2026-09-04 — the same numbers as the ``footprint``
     block of ``config/base.json``, which the base server reads; ``tests/unit/test_footprint.py``
     keeps the two equal. Everything else that needs the shape (the Nav2 polygon, the scan
-    filter's box, the berth around new objects) derives from :data:`HULL`.
+    filter's box, the contact band) derives from :data:`HULL`.
     """
 
     front_m: float = 0.0625  # the drive wheels are the front of the cart

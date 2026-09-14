@@ -174,7 +174,6 @@ BOARD_PUBLISHES = (
     "tracker_pose",
     "localization_fit",
     "localization/sources",  # every scan source's word on each update, JSON (the tracker)
-    "dynamic_obstacles",
     "local_costmap/costmap",
     "pepin/run_status",
     "neck/state",  # the neck's joint angles (pepin_bringup.neck_state); its transform rides /tf
@@ -536,7 +535,6 @@ ON_DEMAND_TOPICS: frozenset[str] = frozenset(
         "/amcl_path",
         "/goal_pose",
         "/pepin/run_status",
-        "/dynamic_obstacles",
         "/rtabmap/info",
         "/rtabmap/map",
         "/rtabmap/mapGraph",

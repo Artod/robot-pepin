@@ -74,13 +74,13 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import LaserScan, PointCloud2
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformBroadcaster
 
-from pepin.dynamic import StaticMask, berth_for, dynamic_marks, occluded, toe_reach_m
+from pepin.dynamic import STATIC_M, StaticMask, occluded
 from pepin.flags import Flag, FlagSet
 from pepin.fusion import COVARIANCE_CHOICES, PEAK, published_covariance
 from pepin.localization import SWITCHES as TRACKER_SWITCHES
@@ -110,13 +110,11 @@ from pepin.timeline import (
 from pepin.watch import DRIVE_FIT, LOST_FIT, LostWatch, Verdict
 from pepin.watchdog import CANDIDATE_STREAK, CandidateGate, GlobalCandidate
 from pepin_bringup.msgs import (
-    cloud_from_points,
     grid_from_msg,
     map_digest,
     map_id,
     planar_mount,
     pose_with_matrix,
-    stamp_from_seconds,
     transform_from_rpy,
     yaw_of,
 )
@@ -410,39 +408,23 @@ FLAGS = FlagSet(
         " cannot report",
     ),
     Flag(
-        "toe_reach",
-        toe_reach_m(),
-        description="how far past the leg the lidar sees a standing person's toe reaches, metres:"
-        " the term the dynamic rings are sized on (pepin.dynamic.berth_for). The default is"
-        " computed from the lidar's mount (config/lidar.json)",
-        why="one measured number and three assumed ones: the mount is 0.383 m by tape, and the"
-        " reach is 0.21 + (z - 0.07) tan 10 deg — a 28 cm shoe whose ankle sits 7 cm back, a shin"
-        " leaning 10 degrees — typed anthropometry that has never been measured against a person"
-        " in front of this cart. It matters in metres: a point planner's ring is 0.41 m at the"
-        " 0.20 that stood here before and 0.48 m at this 0.27. The flag exists because the cart"
-        " once ran over feet",
-        on_when="raise it for boots, or for a cart that must give more room: every dynamic ring"
-        " widens by the same amount",
-        off_when="lower it to compare berths in the field without a restart; 0 rings only what"
-        " the beams themselves see",
-        range=(0.0, 0.6),
-    ),
-    Flag(
-        "near_rings",
-        True,
-        description="a return is ringed as soon as it clears the cart's own outline, and only the"
-        " marks that would land on that outline are dropped; off, nothing within the ring plus"
-        " the outline is ringed at all — the older rule, whose blind disc grows with the ring",
-        why="exact geometry, no field A/B of the two rules. The old rule blanks a disc of ring +"
-        " 0.457 m (the cart's circumscribed radius plus one costmap cell), so at the ring today's"
-        " reach asks for, 0.48 m, a person standing 0.90 m ahead would not be ringed at all — the"
-        " very case the ring exists for. The new rule trims only the marks that land on the"
-        " cart's own outline, which is what the run-0087 failure actually was: a mark on itself"
-        " that refuses its every command",
-        on_when="wherever a person may come within a metre of the cart — the close approach this"
-        " robot is built for",
-        off_when="to reproduce the older rule side by side; remember its blind disc grows with"
-        " the ring (7 cm of extra ring stopped a person at 0.90 m from being ringed at all)",
+        "map_grow",
+        STATIC_M,
+        description="how far a mapped obstacle's explanation reaches, metres: a return within"
+        " this distance of an occupied cell of the served map is the map itself, anything"
+        " farther is news (pepin.dynamic.StaticMask). It is what explained_vote silences and"
+        " what tells a person beside the cart from a lost cart",
+        why="0.15 m has stood since the mask was written and every number explained_vote carries"
+        " was measured at it (tape 0173: the rest band 10.5 -> 2.38 deg alone, 0.51 with the rest"
+        " lock). It is not a measured optimum: it is about three costmap cells, the room a"
+        " wall's returns wander in at this map's 5 cm resolution plus the pose error the tracker"
+        " is allowed. The flag exists because the number matters in both directions and nobody"
+        " had a knob for it",
+        on_when="raise it where the map is coarse or the pose is loose and honest wall returns"
+        " are being called news (watch `silenced` in the tracker's report climb)",
+        off_when="lower it to let the mask see smaller changes — a chair moved 10 cm is news at"
+        " 0.05 and the map at 0.15; 0 explains only the occupied cell itself",
+        range=(0.0, 1.0),
     ),
     Flag(
         "accept_candidates",
@@ -551,7 +533,7 @@ FLAGS = FlagSet(
         " re-seed the tracker",
     ),
 )
-BERTH_FLAGS = ("toe_reach", "near_rings")  # the flags that resize the berth, not the tracker
+MASK_FLAGS = ("map_grow",)  # the flags that rebuild the static mask, not the tracker
 
 
 class _RosLogHandler(logging.Handler):
@@ -643,19 +625,10 @@ class Relocalizer(Node):
         self._measurements = MeasurementGate(self._registry)
         self._motion = MotionFilter(min_m=0.005, min_deg=0.3, max_gap_s=1.0)
         self._rested = 0  # scans left unmatched because the cart stood still (per report)
-        # What the map does not explain (a person, a moved chair) is published as lethal rings for
-        # both costmaps: the point planners' berth around new objects (pepin.dynamic).
+        # What the map does not explain (a person, a moved chair): the mask the match votes with
+        # and the occlusion test reads (pepin.dynamic). It reaches no costmap — the lidar layer
+        # marks a new object from the same return, at the same cell (2026-09-14).
         self._static_mask: StaticMask | None = None
-        self._dynamic_pub = self.create_publisher(PointCloud2, "/dynamic_obstacles", 5)
-        self._dynamic_count = 0  # marks published since the last report
-        self._planner_id = "GridBased"  # until the goal server says who plans
-        self._berth = berth_for(self._planner_id)  # resized once the switches exist
-        self.create_subscription(
-            String,
-            "planner_selector",
-            self._on_planner,
-            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
-        )
         self._deskew_failed = 0  # scans matched raw because the history had a hole (per report)
 
         self._motion_edge = MotionEdge()  # odom->base_link moved since the previous check
@@ -784,7 +757,6 @@ class Relocalizer(Node):
         # declarations too, and it refuses everything that is not a flag.
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._registry.enable(self._switches["sources"])
-        self._resize_berth()
         for gate in (self._candidates, self._measurements, self._choice):  # a launch override too
             for name in gate.switches:
                 gate.switch(name, self._switches[name])
@@ -797,31 +769,27 @@ class Relocalizer(Node):
         return float(self.get_clock().now().nanoseconds) * 1e-9
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
-        """A flag changed (``ros2 param set``): a berth flag resizes the rings around new
-        objects at once; every other one is written through to whichever object owns it — the
+        """A flag changed (``ros2 param set``): a mask flag re-grows the map's explanation at
+        once; every other one is written through to whichever object owns it — the
         Localizer (``sources`` reaches the roster the feed shares with it, so the anchor moves
         with the flag) or the candidate gate — so the next scan, and the next candidate, are
         handled with it. Each object names its own flags (``switches``), so a set of one
         object's flag is never refused by the other."""
-        if name in BERTH_FLAGS:
-            self._resize_berth()  # the switches already hold the new value
+        if name in MASK_FLAGS:
+            self._rebuild_mask()  # the switches already hold the new value
             return
         for target in (self._localizer, self._candidates, self._measurements, self._choice):
             if target is not None and name in target.switches:
                 target.switch(name, new)
 
-    def _resize_berth(self) -> None:
-        """Rebuild the berth around new objects from the planner in charge and the berth flags,
-        and log the two distances it comes down to."""
-        self._berth = berth_for(
-            self._planner_id,
-            reach_m=float(self._switches["toe_reach"]),
-            near_rings=bool(self._switches["near_rings"]),
-        )
-        self.get_logger().info(
-            f"planner {self._planner_id}: dynamic rings {self._berth.ring_m:.2f} m, none within"
-            f" {self._berth.near_m:.2f} m, marks trimmed within {self._berth.trim_m:.2f} m"
-        )
+    def _rebuild_mask(self) -> None:
+        """Re-grow the static map's explanation to the ``map_grow`` the switches now hold, and
+        say how far it reaches. Harmless before the map arrives: the mask is built there too."""
+        if self._grid is None:
+            return
+        grow = float(self._switches["map_grow"])
+        self._static_mask = StaticMask(self._grid, grow)
+        self.get_logger().info(f"static mask: the map explains a return within {grow:.2f} m")
 
     def _on_map_message(self, source: str, msg: OccupancyGridMsg) -> None:
         """A map arrived on one of :data:`MAP_TOPICS`: keep it as that topic's newest and offer
@@ -856,15 +824,15 @@ class Relocalizer(Node):
             self._candidates.forget()
             self._measurements.forget()  # nor is a pose measured against the old one
         self._matcher = CorrelativeMatcher(self._grid)
-        self._static_mask = StaticMask(self._grid)
+        self._static_mask = StaticMask(self._grid, float(self._switches["map_grow"]))
         # lost_after huge: update() must never run a whole-map search in the executor thread on
         # this board (10-20 s); the 1 Hz watcher below does that in a worker and re-seeds.
         # Tracking window sized for this board: 7x7 positions x 13 headings x 120 beams is about
         # 60 ms per scan on an A53 (the laptop default, 9x9x49x200, took 360 ms: 2 Hz).
         self._map_id = map_id(msg)
         # The tracker's own flags only: the gate's (accept_candidates, candidate_streak) are
-        # this node's and the berth's (BERTH_FLAGS) size the rings around new objects, so
-        # neither belongs to a Localizer — each object names what it owns.
+        # this node's and the mask's (MASK_FLAGS) grows the map's explanation, so neither
+        # belongs to a Localizer — each object names what it owns.
         flags = {n: v for n, v in self._switches.flags.as_dict().items() if n in TRACKER_SWITCHES}
         self._registry.enable(flags.pop("sources"))  # the roster is the feed's and the tracker's
         self._localizer = Localizer(
@@ -1081,7 +1049,6 @@ class Relocalizer(Node):
             return
         if not self._motion.due(odom, scan.stamp):
             self._rested += 1  # standing still: the last match still holds, and so does the pose
-            self._publish_dynamic(scan.points, loc.pose, scan.stamp)
             return
         # Seconds of robot time since the previous match, from the scan stamps (never the wall
         # clock): the rest lock's gain is a time constant, and this cadence is what it needs.
@@ -1125,7 +1092,6 @@ class Relocalizer(Node):
         )
         self._pacer.matched(mono, time.perf_counter() - t0)
         self._publish_update(loc, pose, odom, scan.stamp, now)
-        self._publish_dynamic(points, pose, scan.stamp)  # the pose of this scan's own moment
 
     def _last_known_pose(self) -> Pose2D:
         """The pose saved by the previous run if it is recent and was good, else the map origin."""
@@ -1196,26 +1162,6 @@ class Relocalizer(Node):
         judged on the newest scan ``points`` at ``pose``."""
         return occluded(points, pose, self._static_mask, self._matcher, self._watch.lost_fit)
 
-    def _on_planner(self, msg: String) -> None:
-        """The berth around new objects depends on who plans: a footprint planner brings the
-        hull itself, a point planner needs it in the ring (pepin.dynamic.berth_for)."""
-        self._planner_id = msg.data
-        self._resize_berth()
-
-    def _publish_dynamic(self, points: Any, pose: Pose2D, stamp_s: float) -> None:
-        """Lethal rings around the returns the map does not explain, in the map frame.
-
-        Only from a pose the tracker trusts: with the pose off by more than the static mask's
-        margin the whole scan is "news", and the rings would paint the costmaps lethal exactly
-        when localisation is already in trouble (review, 2026-09-09).
-        """
-        if self._static_mask is None or self.fit < DRIVE_FIT:
-            return
-        marks = dynamic_marks(points, pose, self._static_mask, self._berth)
-        self._dynamic_count += len(marks)
-        xyz = np.column_stack([marks, np.zeros(len(marks))])  # the marks lie on the floor
-        self._dynamic_pub.publish(cloud_from_points(xyz, None, stamp_from_seconds(stamp_s), "map"))
-
     def _send_map_odom(self) -> None:
         """Broadcast the current map -> odom, 20 times a second and after every match, dated
         ``tf_future_s`` (0.1 s) ahead like AMCL does.
@@ -1272,9 +1218,6 @@ class Relocalizer(Node):
             f"watch {'fit' if self._watch_on else 'off: no full-turn source, fit'} "
             f"{self.fit:.2f}"
             f"{'' if self._fit_is_local else ' (the laptop measured it: published as 0.00)'}"
-            f", dynamic marks {self._dynamic_count} "
-            f"(rings {self._berth.ring_m:.2f} m from {self._berth.near_m:.2f} m out, trimmed "
-            f"within {self._berth.trim_m:.2f} m), "
             f"scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
             f"map {MAP_TOPICS.get(self._choice.source, 'none')} "
             f"(id {self._map_id or 'none'}, {self._choice.take_ignored()} republications "
@@ -1287,7 +1230,7 @@ class Relocalizer(Node):
                 f"odometry ran late: {feed.expired} scans were never covered by {self._odom_topic} "
                 "and matched nothing"
             )
-        self._rested = self._deskew_failed = self._dynamic_count = 0
+        self._rested = self._deskew_failed = 0
 
     def _lookup_laser(self, frame: str) -> bool:
         """The static base_link <- laser transform, as x, y, yaw and whether roll is pi."""
