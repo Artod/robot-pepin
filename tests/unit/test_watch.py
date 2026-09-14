@@ -1,5 +1,7 @@
 """When the whole map is searched, and what may be done with the answer."""
 
+import math
+
 from pepin.odometry import Pose2D
 from pepin.watch import (
     ADMIT_FIT,
@@ -8,12 +10,14 @@ from pepin.watch import (
     DRIVE_FIT,
     LOST_FIT,
     PROVISIONAL_FIT_CAP,
+    SOURCE_PATIENCE_S,
     TF_FRESH_S,
     BlindDriveWatch,
     Correction,
     GoalGate,
     LostWatch,
     Readiness,
+    SourceSilence,
     Verdict,
 )
 
@@ -283,3 +287,33 @@ def test_the_correction_is_stale_the_moment_it_is_older_than_the_patience() -> N
     assert not Correction(0.0).stale() and not Correction(CORRECTION_FRESH_S).stale()
     assert Correction(CORRECTION_FRESH_S + 0.01).stale() and Correction(None).stale()
     assert not Correction(3.0).stale(patience_s=5.0)
+
+
+def test_a_fit_no_source_earned_is_published_as_nothing() -> None:
+    """2026-09-14: the tracker published 0.70 for 141 s with no source arriving and the goal
+    server drove two goals on it. The number falls the moment the silence passes the patience,
+    and it falls all the way to 0.0 — under DRIVE_FIT so the next goal is refused, and under
+    BLIND_FIT so the drive already running is stopped by its own watch."""
+    silence = SourceSilence()
+    assert not silence.silent(SOURCE_PATIENCE_S) and silence.silent(SOURCE_PATIENCE_S + 0.01)
+    assert silence.reported(0.70, 0.4) == 0.70
+    assert silence.reported(0.70, 141.0) == 0.0 < BLIND_FIT
+    assert SourceSilence(patience_s=10.0).reported(0.70, 5.0) == 0.70
+    assert silence.silent(math.inf), "a source that never spoke is the loudest silence"
+
+
+def test_the_silence_says_how_long_it_has_lasted() -> None:
+    """The report line an operator reads to tell a quiet cart from a blind one."""
+    silence = SourceSilence()
+    assert silence.phrase(0.4) == "last source 0.4 s ago"
+    assert silence.phrase(141.0) == "no source for 141.0 s"
+    assert silence.phrase(math.inf) == "no source ever"
+
+
+def test_the_switch_off_reports_the_silence_and_publishes_the_fit_anyway() -> None:
+    """The flag's off state, so the old behaviour stays reachable in the field: the silence is
+    still measured and still said out loud, and only the withholding stops."""
+    silence = SourceSilence(zeroes_fit=False)
+    assert silence.reported(0.70, 141.0) == 0.70
+    assert silence.silent(141.0) and not silence.held_at_zero(141.0)
+    assert silence.phrase(141.0) == "no source for 141.0 s"

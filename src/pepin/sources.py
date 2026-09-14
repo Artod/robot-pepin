@@ -225,6 +225,14 @@ class SourceRegistry:
         """A scan from ``name`` arrived with ``stamp``: its health record takes note."""
         self._health[name].observe(stamp)
 
+    def silence_s(self, now: float) -> float:
+        """Seconds since the freshest ENABLED source last spoke; ``inf`` when none ever has (or
+        none is enabled). The tracker's own "is anybody still telling me where I am": a lidar
+        delivering at rest keeps it near zero even while the motion filter spares the matcher,
+        and it only runs away when every enabled source — the camera's measurements included
+        (:meth:`pepin.measurements.MeasurementGate.offer` feeds that health) — has gone quiet."""
+        return min((self._health[name].age_s(now) for name in self._enabled), default=math.inf)
+
     def alive(self, now: float) -> list[ScanSource]:
         """The sources the tracker may use at ``now``: enabled, and fresh."""
         return [

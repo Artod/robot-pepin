@@ -1,5 +1,7 @@
 """The source roster: the ``sources`` flag, who is alive, and whose scan drives the update."""
 
+import math
+
 import numpy as np
 import pytest
 
@@ -239,3 +241,16 @@ def test_a_fan_is_no_picture_for_the_watch_or_a_search() -> None:
     fans.offer(DEPTH, scan(1.0))
     fans.offer(CONTACT, scan(1.0))
     assert fans.picture(1.1) is not None and fans.full_picture(1.1) is None
+
+
+def test_the_roster_says_how_long_every_source_has_been_quiet_at_once() -> None:
+    """What the tracker publishes its fit on: the freshest ENABLED source's age. A disabled
+    source speaking says nothing, and a roster nobody has ever spoken to is infinitely quiet."""
+    registry = SourceRegistry(enabled=(LIDAR, CAMERA))
+    assert registry.silence_s(100.0) == math.inf
+    registry.observe(DEPTH, 100.0)  # off the flag: it does not count
+    assert registry.silence_s(100.0) == math.inf
+    registry.observe(LIDAR, 100.0)
+    assert registry.silence_s(103.5) == pytest.approx(3.5)
+    registry.observe(CAMERA, 103.0)
+    assert registry.silence_s(103.5) == pytest.approx(0.5), "the freshest one answers"

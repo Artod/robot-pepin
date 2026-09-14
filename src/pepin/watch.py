@@ -7,6 +7,10 @@ readings and acts on the answer.
 :class:`GoalGate` is the same question one step earlier — may a drive START — and it is the one
 rule that also has to answer where no tracker exists at all (online SLAM): there the evidence is
 the age of ``map -> base_link`` and of the SLAM correction (:class:`Correction`), not a fit.
+
+:class:`SourceSilence` is the question under both of those: is there still a sensor speaking at
+all? A fit measured minutes ago is not a fit, and the tracker published one for 141 s while it
+drove on dead reckoning alone (2026-09-14).
 """
 
 from __future__ import annotations
@@ -45,6 +49,13 @@ TF_FRESH_S = 1.0
 # the laptop's own heartbeat is given 2.5 s (pepin.deployment.LinkWatch). Twenty missed messages
 # is not a hiccup.
 CORRECTION_FRESH_S = 2.0
+
+# How long every scan source and every remote measurement may be silent at once before the fit
+# this machine publishes stops meaning anything. The lidar delivers at 10 Hz and the camera's
+# measurements at 5 Hz per source, so three seconds is thirty missed revolutions, not a hiccup —
+# and a cart standing still is NOT silent: its lidar keeps turning while the tracker's motion
+# filter spares the matcher.
+SOURCE_PATIENCE_S = 3.0
 
 
 class Verdict(StrEnum):
@@ -342,3 +353,51 @@ class BlindDriveWatch:
         if self._lost_since is None:
             self._lost_since = now
         return now - self._lost_since > self.patience_s
+
+
+@dataclass(frozen=True)
+class SourceSilence:
+    """What a tracker may claim about its pose once no source has spoken for ``patience_s``.
+
+    On 2026-09-14 the board published fit 0.70 for 141 s with ``sources=camera`` and not one
+    measurement arriving: the tracker had nothing but dead reckoning, and the goal server —
+    which reads only that number — accepted `printer` and `home` and drove them. The fit is the
+    one word the rest of the stack has for "do I know where I am", so a fit nobody measured
+    recently must not be published as if somebody had.
+
+    It goes to 0.0 rather than decaying: 0.0 is under every rung of the ladder above at once —
+    under :data:`DRIVE_FIT` so :class:`GoalGate` refuses the next goal, and under
+    :data:`BLIND_FIT` so :class:`BlindDriveWatch` stops the one already running after its own
+    patience — and a decay would only choose the second at which each of those happens while
+    saying the same thing. Nothing here reaches :meth:`LostWatch.observe`, which takes the
+    tracker's OWN fit: a silent sensor is not evidence that the pose is wrong, and a whole-map
+    search on no scan at all would re-seed on nothing.
+    """
+
+    patience_s: float = SOURCE_PATIENCE_S
+    zeroes_fit: bool = True  # the node's switch: off, the silence is reported and nothing else
+
+    def silent(self, age_s: float) -> bool:
+        """True when the freshest source has been quiet for longer than the patience
+        (``age_s`` is ``inf`` where no source has ever spoken)."""
+        return age_s > self.patience_s
+
+    def held_at_zero(self, age_s: float) -> bool:
+        """Whether the fit is being published as 0.0 right now: silent past the patience, with
+        the switch on. What a report line says out loud, so a reader is never left guessing
+        whether the number in front of them is measured or withheld."""
+        return self.zeroes_fit and self.silent(age_s)
+
+    def reported(self, fit: float, age_s: float) -> float:
+        """The fit to publish: the measured one while a source still speaks, 0.0 once none
+        has for longer than the patience; with the switch off, always the measured one."""
+        return 0.0 if self.held_at_zero(age_s) else fit
+
+    def phrase(self, age_s: float) -> str:
+        """How long since a source last spoke, for a report line: ``no source ever``,
+        ``last source 0.4 s ago``, or ``no source for 141.0 s``."""
+        if age_s == math.inf:
+            return "no source ever"
+        if self.silent(age_s):
+            return f"no source for {age_s:.1f} s"
+        return f"last source {age_s:.1f} s ago"
