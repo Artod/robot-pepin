@@ -769,9 +769,23 @@ class DepthFusion(Node):
         self._tally.count("tf_" + kind)
         self._tally.note(kind, text)
 
+    def _fresh_world(self) -> WorldMap:
+        """An empty volume in its STARTING state: the saved map written back into the lidar's
+        layer wherever the launch named one (``seed_map``).
+
+        A reset returns a known room to the file it began as, not to nothing. Emptying it
+        outright would hand /map, /map_lidar and any tracker pointed at them a blank room from
+        one service call — and with the relocalizer's map_topic on /map_lidar and a refresh
+        turned on, the board would adopt that blank room and lose the flat.
+        """
+        world = WorldMap(self._spec, self._mount)
+        if self._seed is not None:
+            world.seed_from_grid(*self._seed)
+        return world
+
     def _on_reset(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         with self._lock:
-            self._world = WorldMap(self._spec, self._mount)
+            self._world = self._fresh_world()
             self._last_stamp = None
         self._worker.clear()
         self._scans.clear()
@@ -780,8 +794,11 @@ class DepthFusion(Node):
                 queue.clear()
         self._tally.take()
         response.success = True
-        response.message = "the model is empty"
-        self.get_logger().info("fusion: model, pairing queues and tallies reset")
+        started_as = f"the seed of {self._seed_map}" if self._seed is not None else "empty"
+        response.message = f"the model is {started_as}"
+        self.get_logger().info(
+            f"fusion: model, pairing queues and tallies reset; the model starts as {started_as}"
+        )
         return response
 
     # ---- inputs --------------------------------------------------------------------------
@@ -955,7 +972,7 @@ class DepthFusion(Node):
         room has moved on (a head that turned, a law that drifted) and the surface would stay
         frozen forever; the next frame seeds a fresh model instead."""
         with self._lock:
-            self._world = WorldMap(self._spec, self._mount)
+            self._world = self._fresh_world()
             self._last_stamp = None
         self._bound_streak = 0
         self._tally.count("self_heals")

@@ -1505,6 +1505,19 @@ def test_no_launch_argument_reaches_a_node_as_an_empty_parameter_override() -> N
     assert '"seed_map", default_value=""' in launch, "and empty is the unseeded default"
 
 
+def test_a_reset_returns_a_seeded_volume_to_the_map_it_started_as() -> None:
+    """``/fusion/reset`` and the self-heal empty the model; where the launch named a seed map,
+    "empty" is the file, not a blank room. A blank room is what /map, /map_lidar and any tracker
+    pointed at them would carry from one service call — and with the relocalizer's map_topic on
+    /map_lidar and a refresh turned on, the board would adopt it and lose the flat."""
+    src = (REPO / NODES / "depth_fusion.py").read_text()
+    assert src.count("WorldMap(self._spec, self._mount)") == 2, (
+        "the volume is built in two places only: the start, and the one that re-seeds"
+    )
+    assert src.count("self._world = self._fresh_world()") == 2, "the reset and the self-heal"
+    assert "self._fresh_world" in sf.calls(sf.tree(f"{NODES}/depth_fusion.py"))
+
+
 def test_the_depth_network_runs_where_the_backend_flag_says_and_the_cpu_model_waits() -> None:
     """The depth node calls one backend where it called the model (``self._net(rgb)``); that
     backend is the switch between the laptop's GPU service and the CPU model in the container
