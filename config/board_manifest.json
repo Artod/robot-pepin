@@ -1,0 +1,224 @@
+{
+  "cores": 4,
+  "unlisted_cpu_percent": 1.0,
+  "note": "Everything the Orange Pi Zero 3 (4x A53 @ 1.5 GHz, 1.5 GB) is allowed to run, and what each thing may cost. CLAUDE.md rule 20: the board carries only what is real-time critical or must survive a WiFi loss or is wired to its own pins; everything that consumes the camera lives on the laptop. Nothing is added to the board without an entry here with a measured budget (pepin.census reads this file; ros/board.sh census compares it against a live ps). Budgets are today's measurement +50 % unless the entry's note says the number is a guess. The measurement is ps's %CPU, which is the process's average over its whole life, not an instant sample: read a census taken in the first minute after a start as start-up cost, not as the running cost (the census prints the age of the youngest process for that reason). Percentages are of ONE core: 400 % is the whole board. Census of 2026-09-14 12:40 EDT, stack up 2 min 22 s, nav:=true imu:=true tof:=true neck:=true side:=all, load 7.3.",
+  "ignore": [
+    {
+      "match": "^\\[",
+      "why": "kernel threads (kworker, SPRDWL/sdiohal for the WiFi-over-SDIO, ksoftirqd): no RSS, not started by us, not ours to budget. They do cost real CPU — the WiFi threads alone run 5-8 % — which is why the manifest promises well under 400 %."
+    },
+    {
+      "match": "(^|/)sshd|^ssh:",
+      "why": "the ssh session the census itself arrives on"
+    },
+    {
+      "match": "ps -eo pid,ppid,ni,pcpu,rss,etime,args|^bash -c .*ps -eo",
+      "why": "the census's own ps and the shell around it (they read 300-400 % because they lived for a fraction of a second)"
+    }
+  ],
+  "processes": [
+    {
+      "name": "nav2_container",
+      "match": "component_container_isolated .*__node:=nav2_container",
+      "role": "Nav2 in one process: the map server, the AMCL-seat tracker, the planner, the controller loop that drives the wheels, the behaviours and the behaviour tree.",
+      "on_board_because": ["real-time", "wifi-loss"],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (ComposableNodeContainer, nice 5)",
+      "components": [
+        {"name": "map_server", "role": "serves the saved map (absent in SLAM mode)"},
+        {"name": "planner_server", "role": "global path (absent when side=board: the laptop plans)"},
+        {"name": "controller_server", "role": "the 8 Hz loop that turns a path into wheel speeds"},
+        {"name": "behavior_server", "role": "spin, back up, wait"},
+        {"name": "bt_navigator", "role": "the behaviour tree that calls the rest"},
+        {"name": "velocity_smoother", "role": "cmd_vel_nav -> /cmd_vel, acceleration-limited"},
+        {"name": "lifecycle_manager_navigation_all", "role": "brings those nodes up and bonds with them"}
+      ],
+      "budget": {"cpu_percent": 120.0, "rss_mb": 152.0},
+      "note": "Measured 80 % / 101 MB with a goal running nothing — this is the idle cost of a stack that is merely alive. The single biggest consumer on the board and the reason nice 5 exists: the sensors must not wait for the planner."
+    },
+    {
+      "name": "sensors_container",
+      "match": "component_container_isolated .*__node:=sensors_container",
+      "role": "The sensing half in one process at high priority: the lidar driver, the hull filter that makes /scan, the wheel bridge and the static sensor transforms.",
+      "on_board_because": ["real-time", "hardware-attached"],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (ComposableNodeContainer, nice -10)",
+      "components": [
+        {"name": "ldlidar_node", "role": "the LD19 over /dev/lidar at 230400 baud"},
+        {"name": "scan_filter", "role": "cuts the cart's own hull out of the scan and republishes /scan"},
+        {"name": "base_bridge", "role": "wheel speeds and odometry over TCP 3336, /cmd_vel in, /odom out (C++ build when base_bridge_cpp:=true, else its own Python process)"},
+        {"name": "base_to_laser", "role": "static base_link -> laser from config/lidar.json"},
+        {"name": "base_to_imu", "role": "static base_link -> imu_link from config/imu.json (imu:=true only)"},
+        {"name": "lifecycle_manager_sensors", "role": "activates the lidar driver"}
+      ],
+      "budget": {"cpu_percent": 32.0, "rss_mb": 90.0},
+      "note": "Measured 21 % / 60 MB. ps sees the container, never the components: a component's own cost can only be read from the node's rate, not from this table."
+    },
+    {
+      "name": "relocalizer",
+      "match": "pepin_bringup/relocalizer|pepin_bringup\\.relocalizer",
+      "role": "Scan-matching pose tracker and kidnapped-robot recovery: matches /scan against the saved map, owns map -> odom, searches the whole map when the fit dies.",
+      "on_board_because": ["real-time", "wifi-loss"],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn, ghost wait)",
+      "budget": {"cpu_percent": 90.0, "rss_mb": 121.0},
+      "note": "Measured 60 % / 80 MB standing still; a whole-map search is a burst well above that and short. Second biggest consumer on the board."
+    },
+    {
+      "name": "run_recorder",
+      "match": "pepin_bringup\\.run_recorder",
+      "role": "Writes every drive to disk (scans, odometry, pose, cmd_vel, camera): any run may be the one worth showing.",
+      "on_board_because": ["wifi-loss"],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn, ghost wait)",
+      "budget": {"cpu_percent": 24.0, "rss_mb": 93.0},
+      "note": "Measured 16 % / 62 MB while idle (subscribed, nothing driving)."
+    },
+    {
+      "name": "tof_bridge",
+      "match": "pepin_bringup/tof_bridge|pepin_bringup\\.tof_bridge",
+      "role": "Publishes the three VL53L1X ranges from the ToF server as ROS Range messages for Nav2's contact layer.",
+      "on_board_because": ["real-time", "hardware-attached"],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (tof:=true)",
+      "budget": {"cpu_percent": 20.0, "rss_mb": 102.0},
+      "note": "Measured 13 % / 68 MB. An rclpy process costs ~65 MB before it does anything."
+    },
+    {
+      "name": "neck_state",
+      "match": "pepin_bringup\\.neck_state",
+      "role": "Reads the neck's encoders and publishes /neck/state and, behind its neck_tf flag, the live base_link -> camera_link.",
+      "on_board_because": ["hardware-attached"],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (neck:=true, respawn, ghost wait)",
+      "budget": {"cpu_percent": 16.0, "rss_mb": 99.0},
+      "note": "Measured 10 % / 66 MB."
+    },
+    {
+      "name": "ekf_node",
+      "match": "robot_localization/ekf_node",
+      "role": "Fuses the wheels and the gyro in the plane and owns odom -> base_link (the wheels over-report rotation on carpet, the gyro does not).",
+      "on_board_because": ["real-time", "wifi-loss"],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (imu:=true and base_bridge_cpp:=true), ros/params/ekf.yaml, nice -5",
+      "budget": {"cpu_percent": 14.0, "rss_mb": 42.0},
+      "note": "Measured 9 % / 28 MB."
+    },
+    {
+      "name": "goal_server",
+      "match": "pepin_bringup/goal_server|pepin_bringup\\.goal_server",
+      "role": "Takes goals on a socket so ordering a drive costs a socket write instead of a client boot; keeps the places book of the map in use.",
+      "on_board_because": ["wifi-loss"],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn, ghost wait)",
+      "budget": {"cpu_percent": 10.0, "rss_mb": 113.0},
+      "note": "Measured 7 % / 76 MB. Moves to the laptop when side=laptop."
+    },
+    {
+      "name": "ros2_launch",
+      "match": "ros2 launch pepin_bringup bringup\\.launch\\.py",
+      "role": "The launch process itself: it started every ROS node above and respawns the ones that may come back alone.",
+      "on_board_because": ["wifi-loss"],
+      "owner": "pepin-ros.service ExecStart -> ros/run.sh -> ros/pepin_bringup/launch/bringup.launch.py",
+      "budget": {"cpu_percent": 10.0, "rss_mb": 105.0},
+      "note": "Measured 7 % / 70 MB. One launch process for sensors and Nav2 together, on purpose: two cost ~110 MB of Python each."
+    },
+    {
+      "name": "zenoh_bridge",
+      "match": "zenoh-bridge-ros2dds -c|docker run .*--name zenoh-bridge",
+      "role": "The board's ROS graph over one TCP link to the laptop: only the topics the split needs cross.",
+      "on_board_because": ["real-time"],
+      "owner": "pepin-bridge.service (docker run eclipse/zenoh-bridge-ros2dds, config ros/zenoh-bridge-board*.json)",
+      "when": "sometimes",
+      "budget": {"cpu_percent": 18.0, "rss_mb": 78.0},
+      "note": "Measured 12 % / 52 MB for the pair: the bridge itself is 11 % / 23 MB and the `docker run` supervisor that holds it is ~1 % / 29 MB — the same regex claims both, because killing one kills the other. Runs only when PEPIN_SIDE=board or PEPIN_BRIDGE=on, but by then it is part of every drive, so it is expected whenever it is configured; a census with no bridge running is not red on its own (see `when`)."
+    },
+    {
+      "name": "base_server",
+      "match": "pepin\\.base_server",
+      "role": "The wheels next to the UART: speed commands, odometry ticks and the deadman, on TCP 3336. The last thing between a runaway and a stopped cart.",
+      "on_board_because": ["real-time", "wifi-loss", "hardware-attached"],
+      "owner": "pepin-base.service (/opt/pepin, systemd, Restart=on-failure), config/base.json",
+      "budget": {"cpu_percent": 16.0, "rss_mb": 27.0},
+      "note": "Measured 10 % / 18 MB. Outside Docker on purpose: it must survive a container restart."
+    },
+    {
+      "name": "tof_server",
+      "match": "pepin\\.tof_server",
+      "role": "Streams the three VL53L1X ranges over TCP 3335 from the I2C bus.",
+      "on_board_because": ["real-time", "hardware-attached"],
+      "owner": "pepin-tof.service (/opt/pepin, systemd; tof-init.service re-addresses the sensors first)",
+      "budget": {"cpu_percent": 13.0, "rss_mb": 22.0},
+      "note": "Measured 9 % / 15 MB."
+    },
+    {
+      "name": "ser2net",
+      "match": "(^|/)ser2net ",
+      "role": "The servo bus and the lidar as TCP ports (3333/3334) so the laptop's tools can reach them without a serial cable.",
+      "on_board_because": ["hardware-attached"],
+      "owner": "ser2net.service, config board/ser2net.yaml",
+      "budget": {"cpu_percent": 6.0, "rss_mb": 5.0},
+      "note": "Measured 4 % / 3 MB."
+    },
+    {
+      "name": "ustreamer",
+      "match": "(^|/)ustreamer ",
+      "role": "The overview camera as MJPEG on http 8080: the one camera consumer that stays on the board, because it only copies frames out of the USB stack and never decodes them.",
+      "on_board_because": ["hardware-attached"],
+      "owner": "pepin-camera.service (on the board only; the unit is not yet in board/)",
+      "budget": {"cpu_percent": 3.0, "rss_mb": 19.0},
+      "note": "Measured 2 % / 13 MB at 1280x720, 15 fps, --drop-same-frames 30. The image is passed through, not encoded; anything that LOOKS at these frames (depth, scans, matching) belongs on the laptop — rule 20."
+    },
+    {
+      "name": "docker",
+      "match": "(^|/)(dockerd|containerd|containerd-shim-runc-v2)( |$)|(^|/)docker run ",
+      "role": "The container runtime and one supervisor per container: what keeps pepin-ros and the bridge alive across a crash.",
+      "on_board_because": ["wifi-loss"],
+      "owner": "docker.service and containerd.service (Debian packages)",
+      "budget": {"cpu_percent": 3.0, "rss_mb": 225.0},
+      "note": "Measured ~1 % total and ~150 MB across dockerd, containerd, two shims and the pepin-ros `docker run`. Memory, not CPU, is what it costs us."
+    },
+    {
+      "name": "reap_ros2_cli",
+      "match": "reap_ros2_cli\\.sh",
+      "role": "Every minute, kills ros2 CLI tools older than 90 s left inside the container — a dozen leftovers took the board to load 12 on 2026-09-13.",
+      "on_board_because": ["real-time"],
+      "owner": "pepin-reap.timer -> pepin-reap.service -> board/reap_ros2_cli.sh",
+      "when": "sometimes",
+      "budget": {"cpu_percent": 5.0, "rss_mb": 10.0},
+      "note": "A guess: the oneshot lives under a second and a census almost never catches it. Its point is that it is cheap and that a census that DOES catch it should not go red."
+    },
+    {
+      "name": "session_logger",
+      "match": "session_logger\\.py",
+      "role": "The per-drive recorder started by ros/goto.sh, ros/tour.sh and ros/teleop.sh: scans, odometry, pose and commands into one jsonl for the post-drive plots.",
+      "on_board_because": ["wifi-loss"],
+      "owner": "started inside the pepin-ros container by ros/goto.sh:95, ros/tour.sh:26, ros/teleop.sh:32 (ros/tools/session_logger.py)",
+      "when": "sometimes",
+      "budget": {"cpu_percent": 25.0, "rss_mb": 90.0},
+      "note": "A guess: it has never been measured on its own, and it only runs during a drive, which is when the board is busiest. Measure it on the next recorded drive and replace this number."
+    },
+    {
+      "name": "slam_frame",
+      "match": "pepin_bringup\\.slam_frame",
+      "role": "In online SLAM, broadcasts the laptop's RTAB-Map correction as map -> odom — the tracker's seat while there is no saved map.",
+      "on_board_because": ["real-time"],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (slam:=true, respawn)",
+      "when": "sometimes",
+      "budget": {"cpu_percent": 20.0, "rss_mb": 90.0},
+      "note": "A guess from the other small rclpy nodes: it runs only in SLAM mode (never together with the relocalizer, which it replaces), and no census has caught it yet."
+    },
+    {
+      "name": "link_watch",
+      "match": "pepin_bringup\\.link_watch",
+      "role": "In the thin-client split, watches the link to the laptop and stops the cart when the planner half goes away.",
+      "on_board_because": ["real-time", "wifi-loss"],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (side=board, no respawn: its exit is the signal)",
+      "when": "sometimes",
+      "budget": {"cpu_percent": 15.0, "rss_mb": 90.0},
+      "note": "A guess from the other small rclpy nodes; it runs only when side=board."
+    },
+    {
+      "name": "foxglove_bridge",
+      "match": "foxglove_bridge",
+      "role": "The Foxglove websocket. Being removed: the laptop reads the board through the zenoh bridge, and a second serialiser of every topic is a luxury on four A53 cores.",
+      "on_board_because": [],
+      "owner": "was a component of sensors_container (ros/pepin_bringup/launch/robot.launch.py, foxglove:=true)",
+      "expected": false,
+      "budget": {"cpu_percent": 0.0, "rss_mb": 0.0},
+      "note": "Not expected on the board any more: if a process with this name appears, the removal was reverted. As a component inside sensors_container it is invisible to ps — the census cannot prove its absence, only catch it as a standalone process. Check the launch argument, not this line."
+    }
+  ]
+}
