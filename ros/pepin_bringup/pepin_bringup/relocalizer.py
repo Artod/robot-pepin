@@ -670,6 +670,25 @@ FLAGS = FlagSet(
         off_when="only to reproduce the old counting, where one scan's answer repeated could"
         " re-seed the tracker",
     ),
+    Flag(
+        "graph_reseed_while_driving",
+        True,
+        description=f'a candidate from the pose graph (source "{GRAPH}") may re-seed the tracker'
+        " WHILE a goal is running, but only when the lidar is not on the roster: with no scan"
+        " source alive the graph is the only thing that knows the place, and a drive on a belief"
+        " nobody can correct is worse than a teleport. With the lidar alive, and for every other"
+        " source, the rule is unchanged: no re-seed mid-drive",
+        why="the carry test of 2026-09-14 21:12: with the lidar off the cart drove 64 s on a"
+        " belief 2 m wrong, the graph recognising the place the whole way and every candidate"
+        " refused for the single reason that a goal was running. The teleport this allows is"
+        " bounded by everything else in the gate — the candidate is still carried to now, still"
+        " judged against this tracker's pose, fit and map, and still needs its re-seed streak",
+        on_when="always on a cart that can lose its lidar mid-drive, which is this one",
+        off_when="to reproduce the old rule (no re-seed of any source while navigating), or when"
+        " the graph itself is suspect — a fresh database, an anchor learned off a soft seating:"
+        " then a graph candidate is a confident wrong room and the drive's own watches are the"
+        " better judge",
+    ),
 )
 MASK_FLAGS = ("map_grow",)  # the flags that rebuild the static mask, not the tracker
 
@@ -1128,7 +1147,9 @@ class Relocalizer(Node):
         A streak of disagreements about one place becomes a pending seed, which the 0.2 s timer
         applies through :meth:`_seed` — the same door the board's own search uses, so a
         candidate can do nothing a search could not. No re-seed while a goal runs: a teleport
-        mid-drive is worse than a poor fit, and the drive's own watches stop it soon enough.
+        mid-drive is worse than a poor fit, and the drive's own watches stop it soon enough —
+        unless the graph is the only localizer left (no lidar on the roster), where nothing else
+        will ever correct the belief the cart is driving on (``graph_reseed_while_driving``).
         Nothing is decided here; the verdicts reach the operator in the report line and in the
         ``candidates`` block of /localization/sources.
         """
@@ -1147,12 +1168,23 @@ class Relocalizer(Node):
         # reported, it simply cannot become a re-seed.
         lidar_alive = any(s.name == LIDAR for s in self._registry.alive(self._now_s()))
         from_a_fan = candidate.source != LIDAR
+        # ...and the one candidate a running goal does NOT stop: the graph's, with no lidar on
+        # the roster. The no-re-seed-while-driving rule exists because a teleport mid-drive is
+        # worse than a poor fit — but that reasoning assumes something else will correct the
+        # pose, and with the lidar gone nothing will: on 2026-09-14 21:12 the cart drove 64 s on
+        # a belief 2 m wrong with the graph recognising the place the whole way, every candidate
+        # refused for the single reason that a goal was running.
+        only_localizer = (
+            candidate.source == GRAPH
+            and not lidar_alive
+            and self._switches.on("graph_reseed_while_driving")
+        )
         answer = self._candidates.observe(
             candidate,
             self._tracked_pose(),
             self.fit,
             map_id=self._map_id,
-            allow=not self._navigating and not (from_a_fan and lidar_alive),
+            allow=(not self._navigating or only_localizer) and not (from_a_fan and lidar_alive),
             odometry=self._history,  # the trail the candidate is carried to this moment along
         )
         with self._episode:  # the search worker writes _pending_seed from its own thread
