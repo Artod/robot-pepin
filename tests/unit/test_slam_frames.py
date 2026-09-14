@@ -58,14 +58,25 @@ def _shift(x: float, y: float) -> Any:
     return transform_from_pose("a", "b", pose, ros_stubs.Time())
 
 
-def _belief(node: Any, x: float, y: float, seconds: float = 7.0) -> None:
-    """The board's tracker saying where the cart is, on map "flat3"."""
+def _belief(
+    node: Any,
+    x: float,
+    y: float,
+    seconds: float = 7.0,
+    sigma: tuple[float, float, float] = (0.01, 0.01, 0.005),
+) -> None:
+    """The board's tracker saying where the cart is, on map "flat3", and how sharply it says it:
+    ``sigma`` is the score peak's width per axis (m, m, rad), the default a seating the scan
+    pins in both axes."""
     from geometry_msgs.msg import PoseWithCovarianceStamped
 
     msg = PoseWithCovarianceStamped()
     msg.header.frame_id = "map"
     msg.header.stamp = _stamp(seconds)
     msg.pose.pose.position.x, msg.pose.pose.position.y = x, y
+    covariance = list(msg.pose.covariance)
+    covariance[0], covariance[7], covariance[35] = (s * s for s in sigma)
+    msg.pose.covariance = covariance
     node.subs["/tracker_pose"][1](msg)
 
 
@@ -114,6 +125,7 @@ def test_on_a_known_map_the_laptop_broadcasts_the_anchor_it_learned_once() -> No
     assert _xy(identity) == (0.0, 0.0), "no graph, no anchor"
 
     _belief(node, 1.0, 2.0)
+    _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
     _odom(node, 0.2, 0.0)
     node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
     node.timers[0][1]()
@@ -148,6 +160,7 @@ def test_the_graph_s_word_is_where_the_graph_puts_the_cart_on_the_map() -> None:
 
     node = rtabmap_frame.RtabmapFrame()
     _belief(node, 1.0, 2.0)
+    _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
     _odom(node, 0.2, 0.0)
     node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
     assert not node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent, "off by default"
@@ -158,6 +171,7 @@ def test_the_graph_s_word_is_where_the_graph_puts_the_cart_on_the_map() -> None:
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
         assert not node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent, "no belief to anchor to yet"
         _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
         node._map_id = "flat3"  # what /map would have named itself (msgs.map_id)
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
         (sent,) = node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent
@@ -240,6 +254,82 @@ def _fit(node: Any, value: float, at: float) -> None:
     node.subs["/localization_fit"][1](Float32(data=value))
 
 
+def test_the_anchor_waits_for_a_seating_the_lidar_pins_in_both_axes(tmp_path: Any) -> None:
+    """A fit is not an error bar. Along a sofa the scan matches beautifully and slides in y, and
+    an anchor learned off that seating carries the slide into every word the graph ever says —
+    for the life of the file. So a soft seating is refused: the frame stays identity, nothing is
+    published, the graphs are counted as pending, and the anchor waits for a scan the peak pins
+    in BOTH axes. Nothing about the file changes but the moment it is written."""
+    from pepin.anchors import anchor_path
+
+    with ros_stubs.parameters(anchor_dir=str(tmp_path), graph_measurement=True):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _odom(node, 0.2, 0.0)
+        _belief(node, 1.0, 2.0, sigma=(0.01, 0.40, 0.005))  # pinned in x, free along the sofa
+        _fit(node, 0.75, at=0.0)  # ...and matching as well as it ever does
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        node.timers[0][1]()
+        assert node._anchor is None and node._pending == 1
+        assert _xy(node._tf.sent[-1]) == (0.0, 0.0), "identity until a seating is worth it"
+        assert not node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent, "and the graph says nothing"
+        assert not anchor_path(tmp_path, "3x4@1.00,2.00").exists()
+
+        # a soft heading is refused the same way: a cart that knows where it stands and not
+        # which way it faces would rotate the whole graph about itself
+        _belief(node, 1.0, 2.0, sigma=(0.01, 0.01, 0.05))
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert node._anchor is None and node._pending == 2
+
+        _belief(node, 1.0, 2.0, sigma=(0.008, 0.012, 0.004))  # the cart reaches a corner
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        node.timers[0][1]()
+    assert node._anchor is not None and node._pending == 2
+    assert _xy(node._tf.sent[-1]) == (0.8, 2.0), "learned off the sharp seating, not the soft one"
+    assert anchor_path(tmp_path, "3x4@1.00,2.00").exists(), "the same file, written later"
+    node.timers[1][1]()
+    report = node.logger.texts("info")[-1]
+    assert "off a seating of 0.8/1.2 cm, 0.23 deg" in report, "the report says how sharp it was"
+
+
+def test_a_lidar_that_is_not_driving_the_tracker_anchors_nothing(tmp_path: Any) -> None:
+    """The other half of the gate, and the older half: the covariance of a belief the lidar is
+    not behind describes nothing at all. With no fresh fit the anchor is pending, whatever the
+    numbers on the belief say."""
+    with ros_stubs.parameters(anchor_dir=str(tmp_path)):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _odom(node, 0.2, 0.0)
+        _belief(node, 1.0, 2.0)
+        _fit(node, 0.75, at=0.0)
+        node.clock.seconds = rtabmap_frame.FIT_FRESH_S + 0.1  # the lidar went quiet
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert node._anchor is None and node._pending == 1
+        assert "not driving the tracker" in node.logger.texts("info")[-1]
+        _fit(node, 0.2, at=node.clock.seconds)  # ...and comes back matching nothing
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert node._anchor is None and node._pending == 2
+    node.timers[1][1]()
+    assert "not yet, pending 2" in node.logger.texts("info")[-1]
+
+
+def test_the_sharpness_gate_can_be_opened_in_the_field(tmp_path: Any) -> None:
+    """CLAUDE.md rule 19: the old behaviour stays reachable. With anchor_max_sigma_m wide open
+    the anchor is learned off whatever seating the first graph finds, as before 2026-09-14 —
+    which is what a room where no seating is ever sharp needs."""
+    with ros_stubs.parameters(
+        anchor_dir=str(tmp_path), anchor_max_sigma_m=1.0, anchor_max_sigma_deg=180.0
+    ):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _odom(node, 0.2, 0.0)
+        _belief(node, 1.0, 2.0, sigma=(0.01, 0.40, 0.05))
+        _fit(node, 0.75, at=0.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+    assert node._anchor is not None and node._pending == 0
+    assert (node._anchor.x, node._anchor.y) == (0.8, 2.0)
+
+
 def test_the_anchor_is_written_beside_the_map_it_belongs_to(tmp_path: Any) -> None:
     """The anchor ties THIS graph database to THIS lidar map, so it is a property of the pair and
     not of a session: learned once from the tracker, it is written beside the map under the map's
@@ -250,6 +340,7 @@ def test_the_anchor_is_written_beside_the_map_it_belongs_to(tmp_path: Any) -> No
         node = rtabmap_frame.RtabmapFrame()
         _map(node)
         _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
         _odom(node, 0.2, 0.0)
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
     stored = load_anchor(tmp_path, "3x4@1.00,2.00")
@@ -306,6 +397,7 @@ def test_the_stored_anchor_is_re_learned_only_on_evidence_that_holds(tmp_path: A
         node = rtabmap_frame.RtabmapFrame()
         _map(node)
         _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
         _odom(node, 0.2, 0.0)
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
         assert node._origin == "learned"
@@ -339,6 +431,7 @@ def test_the_re_learn_can_be_switched_off_in_the_field(tmp_path: Any) -> None:
         node = rtabmap_frame.RtabmapFrame()
         _map(node)
         _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
         _odom(node, 0.2, 0.0)
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
         _belief(node, 3.0, 2.0, seconds=7.0)
@@ -360,6 +453,7 @@ def test_the_word_the_fusion_cannot_use_goes_out_as_a_candidate(tmp_path: Any) -
         _map(node)
         _fit(node, 0.9, at=5.0)  # the lidar is driving and the board is talking to us
         _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
         _odom(node, 0.2, 0.0)
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
         assert len(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent) == 1, "the word is a word"
@@ -393,9 +487,11 @@ def test_a_word_the_tracker_can_confirm_asks_for_nothing(tmp_path: Any) -> None:
     with ros_stubs.parameters(anchor_dir=str(tmp_path)):
         node = rtabmap_frame.RtabmapFrame()
         _map(node)
-        _belief(node, 1.0, 2.0)  # no fit at all: the tracker has nothing behind its pose
+        _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # the sharp seating the anchor is learned off
         _odom(node, 0.2, 0.0)
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        _fit(node, 0.0, at=0.0)  # ...and now nothing is confirming the tracker's pose
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.3, 0.0).transform))
         assert node._lost() and not node.pubs[rtabmap_frame.CANDIDATE_TOPIC].sent, "30 cm"
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.8, 0.0).transform))
@@ -410,6 +506,7 @@ def test_the_candidate_channel_can_be_switched_off(tmp_path: Any) -> None:
         node = rtabmap_frame.RtabmapFrame()
         _map(node)
         _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
         _odom(node, 0.2, 0.0)
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(2.0, 0.0).transform))

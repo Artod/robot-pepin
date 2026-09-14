@@ -37,8 +37,13 @@ cart did not), and the measurement is the tracker's belief moved by that correct
 THE ANCHOR IS A PROPERTY OF THE PAIR (this lidar map, this graph database), not of a session, so
 it is kept where the pair can find it: ``<map id>.graph_anchor.json`` beside the map the board
 serves (:mod:`pepin.anchors`, the node's ``anchor_dir``). At start the file for the served map is
-read and its anchor adopted; with no file the anchor is learned from the tracker as before and
-written. It is re-learned — and the file rewritten — only on evidence that holds: the lidar
+read and its anchor adopted; with no file the anchor is learned from the tracker and written —
+but only off a seating the lidar has PINNED IN BOTH AXES, its published covariance under
+``anchor_max_sigma_m`` / ``anchor_max_sigma_deg``, because a fit is not an error bar and an
+anchor learned off a scan free to slide along a sofa carries that slide into every word the graph
+ever says. Until such a seating comes the frame stays identity and nothing is published, counted
+as "anchor pending N" in the report line. It is re-learned — and the file rewritten — only on
+evidence that holds: the lidar
 driving with a fit at or above :data:`TRUSTED_FIT` and its belief disagreeing with the graph's
 word by more than half a metre or 20 degrees for five seconds (``anchor_relearn``, on). With the
 lidar silent nothing is re-learned: there is nothing to re-learn FROM.
@@ -81,7 +86,16 @@ from rtabmap_msgs.msg import MapGraph
 from std_msgs.msg import Float32, String
 from tf2_ros import TransformBroadcaster
 
-from pepin.anchors import Anchor, AnchorWatch, load_anchor, save_anchor
+from pepin.anchors import (
+    ANCHOR_MAX_SIGMA_DEG,
+    ANCHOR_MAX_SIGMA_M,
+    Anchor,
+    AnchorWatch,
+    describe_sigma,
+    load_anchor,
+    save_anchor,
+    seating_refusal,
+)
 from pepin.flags import Flag, FlagSet
 from pepin.measurements import RemoteMeasurement, compose, graph_anchor, graph_measurement
 from pepin.odometry import Pose2D
@@ -263,6 +277,43 @@ FLAGS = FlagSet(
         " session where the file must not change (a measurement of what the stored anchor is"
         " worth)",
     ),
+    Flag(
+        "anchor_max_sigma_m",
+        ANCHOR_MAX_SIGMA_M,
+        range=(0.0, 1.0),
+        description="the widest the tracker's own error bar may be, metres per position axis"
+        " (the roots of the covariance /tracker_pose carries, which is the lidar's score peak),"
+        " for the anchor to be learned or re-learned from that seating; a softer seating is"
+        " refused and the graph keeps its identity frame until a sharp one comes. 1.0 lets"
+        " anything through, which is the behaviour of before 2026-09-14",
+        why="0.03, because a fit is not an error bar: at home (the charger, along a sofa) the"
+        " lidar's seatings spread up to 55 cm in y within minutes at fit 0.67-0.79 — the scan is"
+        " pinned in one axis there — and the anchor learned from one of those carried that error"
+        " into every graph word (the word then sat 23-30 cm from a SHARP lidar seating over tape"
+        " 0296, scratch/graph_vs_lidar_sharp.py). 3 cm is where the gate starts to be a gate:"
+        " over tapes 0293-0298 the worse of the two position sigmas has a median of 1.50 cm and"
+        " a p90 of 3.18 cm, so this refuses the worst 11 % of seatings, while 1 cm would refuse"
+        " 79 % and the anchor would never be learned at all",
+        on_when="always: the anchor is a constant of the pair and whatever it is learned from is"
+        " baked into every word the graph says until the file is rewritten",
+        off_when="raise it (to 1.0) only to reproduce a session recorded before the gate, or to"
+        " get an anchor at all in a room where no seating is ever sharp — and then read the"
+        " sigmas the report line prints beside the anchor before believing a word",
+    ),
+    Flag(
+        "anchor_max_sigma_deg",
+        ANCHOR_MAX_SIGMA_DEG,
+        range=(0.0, 180.0),
+        description="the same gate for heading, degrees: the anchor is learned only from a"
+        " seating whose heading sigma is at most this",
+        why="1.0, because a heading error rotates the whole graph about the cart: over tapes"
+        " 0293-0298 the lidar's heading sigma at a sharp seating is 0.06-1.14 deg (median 0.4),"
+        " so this is the loose end of what the peak reports when it is pinned at all, and one"
+        " degree over the 4 m of the flat is 7 cm at the far wall",
+        on_when="always, with anchor_max_sigma_m: a seating sharp in x and y and free in heading"
+        " is a cart that knows where it stands and not which way it faces",
+        off_when="raise it only with anchor_max_sigma_m, and for the same reasons",
+    ),
 )
 
 
@@ -281,11 +332,18 @@ class RtabmapFrame(Node):
         self._correction2d = Pose2D()  # the same correction in the plane, as the fusion reads it
         self._belief: Pose2D | None = None  # what the board's tracker says, and when
         self._belief_stamp = 0.0
+        # ...and how sharply it says it: the roots of the covariance diagonal (m, m, rad), which
+        # with covariance=peak is the lidar score peak's own width per axis — the one thing that
+        # tells a seating pinned in both axes from one free to slide along a sofa.
+        self._belief_sigma: tuple[float, float, float] | None = None
         self._belief_at = -math.inf  # ...and when that belief reached this node, by our clock
         self._map_id = ""  # the map that belief is on; the board refuses a word about another
         self._anchor: Pose2D | None = None  # map <- rtabmap: read from the file, or learned once
         self._origin = "none"  # ...and where this copy of it came from, for the report line
         self._relearns = 0  # ...and how many times it has been re-learned since the node came up
+        self._anchor_sigma: tuple[float, float, float] | None = None  # the seating it came from
+        self._pending = 0  # graphs that found no seating sharp enough to learn the anchor from
+        self._pending_reason = ""  # ...and why the last of them was refused, said once per reason
         self._watch = AnchorWatch()  # what says the stored anchor no longer holds
         self._fit, self._fit_at = 0.0, -math.inf  # the lidar's own fit, and when it last spoke
         self._word: Pose2D | None = None  # the last place the graph put the cart, on the map
@@ -354,15 +412,23 @@ class RtabmapFrame(Node):
     def _report(self) -> None:
         """Every 30 s: how many graphs arrived, how many became measurements, how many went out
         as whole-map candidates instead, how many were refused for putting the cart too far from
-        the tracker's belief and how many found no odometry to compose with, with the anchor and
+        the tracker's belief and how many found no odometry to compose with, with the anchor,
         where it came from (the file beside the map, learned here at the first graph, or
-        re-learned N times since), the last word's gap to the tracker and the switches."""
+        re-learned N times since), how sharp the seating it was learned off was and how many
+        graphs are pending a sharp one, the last word's gap to the tracker and the switches."""
         anchor = (
-            "not yet"
+            f"not yet, pending {self._pending}"
+            + (f" ({self._pending_reason})" if self._pending_reason else "")
             if self._anchor is None
             else f"({self._anchor.x:+.2f}, {self._anchor.y:+.2f},"
             f" {math.degrees(self._anchor.theta):+.1f} deg) from {self._origin}"
             + (f" {self._relearns}" if self._relearns else "")
+            + (
+                f" off a seating of {describe_sigma(self._anchor_sigma)}"
+                if self._anchor_sigma is not None
+                else ""
+            )
+            + (f", pending {self._pending}" if self._pending else "")
         )
         word = (
             "none yet"
@@ -382,11 +448,18 @@ class RtabmapFrame(Node):
         )
 
     def _on_tracker_pose(self, msg: PoseWithCovarianceStamped) -> None:
-        """The board's belief: the pose RTAB-Map is fed as its odometry, and the one a graph
-        correction is applied to."""
+        """The board's belief: the pose RTAB-Map is fed as its odometry, the one a graph
+        correction is applied to — and its error bar, which is what says whether the anchor may
+        be learned from this seating at all."""
         position = msg.pose.pose.position
         self._belief = Pose2D(position.x, position.y, yaw_of(msg.pose.pose.orientation))
         self._belief_stamp = stamp_seconds(msg.header.stamp)
+        covariance = list(msg.pose.covariance)
+        self._belief_sigma = (
+            math.sqrt(max(covariance[0], 0.0)),
+            math.sqrt(max(covariance[7], 0.0)),
+            math.sqrt(max(covariance[35], 0.0)),
+        )
         # By OUR clock, not the message's: what this says is "the board is still talking to us",
         # and a stamp compared across two machines answers a different question.
         self._belief_at = self._now()
@@ -534,20 +607,62 @@ class RtabmapFrame(Node):
         )
         return compose(self._correction2d, planar), stamp_seconds(transform.header.stamp)
 
+    def _unsharp(self) -> str | None:
+        """Why the tracker's present seating may not have the graph's whole frame learned from
+        it — one phrase for the log — or ``None`` when it may.
+
+        Two things, in the order a person would ask them: is the LIDAR behind this belief at all
+        (a fresh fit of at least :data:`TRUSTED_FIT`, the same evidence a re-learn already
+        demands), and is its seating pinned in both axes and in heading (the covariance the
+        belief carries, against ``anchor_max_sigma_m`` / ``anchor_max_sigma_deg``). A fit answers
+        the first question and says nothing about the second: a scan sliding along a sofa matches
+        beautifully everywhere it slides to.
+        """
+        if self._fit < TRUSTED_FIT or self._now() - self._fit_at > FIT_FRESH_S:
+            return (
+                f"the lidar is not driving the tracker (fit {self._fit:.2f}, last heard"
+                f" {self._now() - self._fit_at:.1f} s ago)"
+            )
+        return seating_refusal(
+            self._belief_sigma,
+            float(self._switches["anchor_max_sigma_m"]),
+            float(self._switches["anchor_max_sigma_deg"]),
+        )
+
     def _learn_anchor(self, place: Pose2D, stamp: float) -> Pose2D | None:
         """The session's anchor (``map <- rtabmap``) from the tracker's belief and the graph's
-        own place for the same cart, or ``None`` while there is no belief close enough in time
-        to learn it from. Learned once and never again: it is the frame the graph is read in."""
+        own place for the same cart, or ``None`` while there is nothing worth learning it from:
+        no belief close enough in time, or a seating too soft to bake into the graph's frame
+        (:meth:`_unsharp`). Every refusal counts one "anchor pending" and leaves the frame at
+        identity — the graph says nothing until a sharp seating comes, which is the whole point:
+        the anchor is learned once and then read into every word the graph ever says."""
         if self._belief is None or abs(stamp - self._belief_stamp) > ANCHOR_MAX_SKEW_S:
+            self._pend("the tracker's belief is not within half a second of this graph")
+            return None
+        refusal = self._unsharp()
+        if refusal is not None:
+            self._pend(refusal)
             return None
         anchor = graph_anchor(self._belief, place)
+        self._anchor_sigma = self._belief_sigma
         self.get_logger().info(
             f"graph anchored: map <- rtabmap = ({anchor.x:+.2f}, {anchor.y:+.2f},"
             f" {math.degrees(anchor.theta):+.1f} deg), from the tracker at"
-            f" ({self._belief.x:+.2f}, {self._belief.y:+.2f}) and the graph at"
+            f" ({self._belief.x:+.2f}, {self._belief.y:+.2f}) seated to"
+            f" {describe_sigma(self._belief_sigma)} at fit {self._fit:.2f} and the graph at"
             f" ({place.x:+.2f}, {place.y:+.2f}) on map {self._map_id}"
         )
         return anchor
+
+    def _pend(self, reason: str) -> None:
+        """Count one graph that found no seating worth learning the anchor from, and say why
+        the first time each reason appears: a node that publishes nothing must say what it is
+        waiting for, and a line per graph would say it 3600 times an hour."""
+        self._pending += 1
+        if reason == self._pending_reason:
+            return
+        self._pending_reason = reason
+        self.get_logger().info(f"graph anchor pending ({self._pending}): {reason}")
 
     def _offer(self, place: Pose2D, frame: Pose2D, stamp: float) -> None:
         """One graph word: ``place`` (where the graph has the cart) read on the tracker's own
