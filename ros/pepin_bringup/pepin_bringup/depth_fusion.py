@@ -88,6 +88,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -772,7 +773,9 @@ class DepthFusion(Node):
         if self._switches.on("resume_volume") and self._world_path.exists():
             try:
                 resumed = WorldMap.load(self._world_path, self._mount)
-            except (ValueError, OSError) as exc:
+            except (ValueError, OSError, zipfile.BadZipFile, KeyError) as exc:
+                # a snapshot cut mid-write by a hard reset is a 403-byte zip (2026-09-14):
+                # start on the seed instead of dying at every respawn
                 self.get_logger().warning(f"{self._world_path}: not resumed ({exc})")
             else:
                 if resumed.spec != self._spec:  # the config is the truth, not the old file

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -723,8 +724,12 @@ class WorldMap:
             if self.frames
             else np.zeros((0, 14))
         )
+        # Written beside the target and renamed into place: a process killed mid-write (a hard
+        # reset, 2026-09-14) must not leave a truncated snapshot the next start chokes on.
+        final = out if out.suffix else out.with_suffix(".npz")
+        tmp = final.with_name(final.stem + ".writing.npz")
         np.savez_compressed(
-            out,
+            tmp,
             version=np.array(SNAPSHOT_VERSION),
             spec=np.frombuffer(json.dumps(self._spec_json()).encode(), dtype=np.uint8),
             sdf=self.volume.sdf,
@@ -736,7 +741,8 @@ class WorldMap:
             plane_m=np.array(self.lidar_plane_m),
             frames=frames,
         )
-        return out if out.suffix else out.with_suffix(".npz")
+        os.replace(tmp, final)
+        return final
 
     def _spec_json(self) -> dict[str, Any]:
         return {
