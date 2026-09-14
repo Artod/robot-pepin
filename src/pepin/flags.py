@@ -353,6 +353,28 @@ class FlagSet:
             if flag.live or not live_only
         )
 
+    def drift(self, values: Mapping[str, Any]) -> tuple[tuple[str, str, str], ...]:
+        """Every flag whose live value differs from this table's default, as ``(name, live,
+        default)`` spelled the way a report line spells them.
+
+        ``values`` is what the node actually holds (a ``ros2 param dump``). A flag the node does
+        not carry is left out — an absent parameter is not a changed one — and a value the flag
+        refuses is a difference reported as it came, never silently read as the default. After a
+        restart every flag is its default, so anything here is a switch someone moved.
+        """
+        moved = []
+        for flag in self:
+            if flag.name not in values:
+                continue
+            try:
+                live = flag.render(flag.parse(values[flag.name]))
+            except ValueError:
+                live = repr(values[flag.name])
+            default = flag.render(flag.default)
+            if live != default:
+                moved.append((flag.name, live, default))
+        return tuple(moved)
+
     def rows(self) -> list[list[str]]:
         """One row per flag for a table: name, kind, default (with its env variable), live or
         not, description — the columns of :data:`COLUMNS`."""

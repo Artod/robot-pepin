@@ -6,6 +6,9 @@
 #   ros/flags.sh get NODE FLAG        the current value, as the node holds it
 #   ros/flags.sh set NODE FLAG VALUE  change it live; a value the flag refuses is refused here, with
 #                                     the reason, before any host is touched
+#   ros/flags.sh drift [NODE|board|laptop]   only what has been moved: every flag whose live value
+#                                     differs from its table default, one per line, nothing at all
+#                                     when every node is as it shipped (ros/restart.sh reads this)
 # Each node declares its flags once, in the FLAGS table of ros/pepin_bringup/pepin_bringup/NODE.py
 # (pepin.flags; ros/README.md lists them). ros/tools/flags_doc.py reads the tables, and
 # pepin.deployment says where a node runs: the laptop's SLAM or navigation container (docker
@@ -16,7 +19,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$HERE/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
-usage() { echo "usage: ros/flags.sh [list [NODE] | flag NODE FLAG | get NODE FLAG | set NODE FLAG VALUE]"; exit 2; }
+usage() { echo "usage: ros/flags.sh [list [NODE] | drift [NODE|board|laptop] | flag NODE FLAG | get NODE FLAG | set NODE FLAG VALUE]"; exit 2; }
 doc() { (cd "$HERE/.." && uv run -q python ros/tools/flags_doc.py "$@"); }
 ros2_in() {  # NODE ros2 ...: the ros2 CLI inside the container NODE runs in
     local node="$1" where side container; shift
@@ -37,6 +40,20 @@ case "${1:-list}" in
             # the kinds and the descriptions come from the table
             dump="$(ros2_in "$node" ros2 param dump "/$node" 2>/dev/null || true)"
             doc list "$node" <<<"$dump"
+        done ;;
+    drift)
+        # What is NOT as the table declares it. A restart puts every flag back to its default, so
+        # a line here is a switch someone moved — the one thing a restart silently throws away
+        # (2026-09-14: a live flag lost at a node restart went unnoticed for an hour).
+        [ $# -le 2 ] || usage
+        case "${2:-}" in
+            "") NODES="$(doc nodes)" ;;
+            board | laptop) NODES="$(doc nodes "$2")" ;;
+            *) NODES="$(doc where "$2" >/dev/null && echo "$2")" || exit 2 ;;
+        esac
+        for node in $NODES; do
+            dump="$(ros2_in "$node" ros2 param dump "/$node" 2>/dev/null || true)"
+            doc drift "$node" <<<"$dump" || true  # a node that is down says so and does not end the sweep
         done ;;
     flag)  # the table alone: the reading matter, no node asked, no container entered
         [ $# -eq 3 ] || usage
