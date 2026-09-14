@@ -70,6 +70,7 @@ from tf2_ros import Buffer
 
 from pepin.dynamic import StaticMask
 from pepin.flags import Flag, FlagSet
+from pepin.fusion import COVARIANCE_CHOICES, PEAK
 from pepin.localization import Localizer
 from pepin.measurements import RemoteMeasurement
 from pepin.odometry import Pose2D
@@ -247,6 +248,28 @@ FLAGS = FlagSet(
         range=(0.0, 1.0),
     ),
     Flag(
+        "covariance",
+        PEAK,
+        description="how sure a camera measurement says it is: peak — the spread of that match's"
+        " own score peak at the camera matcher's temperature (config/matcher.json); fit — the"
+        " fit-scaled second moment of the whole surface, with the source's trust in it, that"
+        " shipped before it. It is the number the board's information filter weighs the fan by",
+        why="the fan's covariance decides everything the camera is allowed to do to the pose,"
+        " and the fit-scaled one was never held against an error. On the peak path the lidar's"
+        " own covariance is calibrated (T = 0.016, mean NEES 2.99 over 10047 matches of the four"
+        " goto tapes of 2026-09-13: scratch/peak_temperature.py) and reads 0.9-1.2 cm at a good"
+        " fit, so a fan whose peak is a decimetre wide can no longer move the fused pose — the"
+        " camera measurements of those same tapes took 20-45 % of the weight and pulled the pose"
+        " 0.8-1.5 cm off the lidar. The camera's own temperature is PROVISIONAL, the lidar's"
+        " number: no camera scan is on those tapes, and until an operator records"
+        " /localization/measurement against /tracker_pose and runs scratch/peak_temperature.py"
+        " --camera, the source's trust (0.5) keeps widening the fan on top of its peak",
+        on_when="on: the board weighs the camera by a spread that means something",
+        off_when="fit is what every tape before 2026-09-13 was recorded with, for an A/B; and"
+        " the switch to reach for if a calibrated fan ever misbehaves in the field",
+        choices=COVARIANCE_CHOICES,
+    ),
+    Flag(
         "explained_vote",
         True,
         description="returns the map cannot explain (a person, a moved chair) do not score a"
@@ -364,10 +387,16 @@ class LaptopLocalizer(Node):
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
         """A flag changed: the two that size the camera's window rebuild its matcher, so the
-        next scan is matched in the window just asked for; the rest are read where they are
-        used."""
+        next scan is matched in the window just asked for; ``covariance`` is written through to
+        both matchers, so the next measurement carries the covariance just asked for; the rest
+        are read where they are used."""
         if name in ("camera_window_m", "camera_window_deg"):
             self._camera = None
+            return
+        if name == "covariance":
+            for target in (self._localizer, self._camera):
+                if target is not None:
+                    target.switch(name, new)
 
     # ---- inputs ----------------------------------------------------------------------------
     def _on_map(self, msg: OccupancyGridMsg) -> None:
@@ -375,7 +404,13 @@ class LaptopLocalizer(Node):
         and, until ``/map_camera`` says otherwise, for the camera's matches too."""
         self._grid = grid_from_msg(msg)
         self._map_id = map_id(msg)
-        self._localizer = Localizer(self._grid, Pose2D(), window=WINDOW, global_retry=False)
+        self._localizer = Localizer(
+            self._grid,
+            Pose2D(),
+            window=WINDOW,
+            global_retry=False,
+            covariance=str(self._switches["covariance"]),
+        )
         if self._camera_map != CAMERA_MAP_TOPIC:
             self._camera = None  # rebuilt on the next camera scan, on this grid
         self._tally.count("maps")
@@ -389,7 +424,13 @@ class LaptopLocalizer(Node):
         tabletops in it are in no other view of the map; the measurement is still labelled with
         /map's id, because that is the map the board holds."""
         grid = grid_from_msg(msg)
-        self._camera = Localizer(grid, Pose2D(), window=self._camera_window(), global_retry=False)
+        self._camera = Localizer(
+            grid,
+            Pose2D(),
+            window=self._camera_window(),
+            global_retry=False,
+            covariance=str(self._switches["covariance"]),
+        )
         self._camera_map = CAMERA_MAP_TOPIC
         self._tally.count("camera_maps")
         self.get_logger().info(
@@ -474,7 +515,11 @@ class LaptopLocalizer(Node):
         ``/map_camera`` has arrived, else the board's own map; ``None`` before any map."""
         if self._camera is None and self._grid is not None:
             self._camera = Localizer(
-                self._grid, Pose2D(), window=self._camera_window(), global_retry=False
+                self._grid,
+                Pose2D(),
+                window=self._camera_window(),
+                global_retry=False,
+                covariance=str(self._switches["covariance"]),
             )
             self._camera_map = "/map"
         return self._camera

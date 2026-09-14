@@ -71,7 +71,7 @@ from tf2_ros import Buffer, TransformBroadcaster
 
 from pepin.dynamic import StaticMask, berth_for, dynamic_marks, occluded, toe_reach_m
 from pepin.flags import Flag, FlagSet
-from pepin.fusion import sigma_from_fit
+from pepin.fusion import COVARIANCE_CHOICES, PEAK, published_covariance
 from pepin.localization import SWITCHES as TRACKER_SWITCHES
 from pepin.localization import Localizer
 from pepin.mapping import OccupancyGrid
@@ -101,7 +101,7 @@ from pepin_bringup.msgs import (
     grid_from_msg,
     map_id,
     planar_mount,
-    pose_with_covariance,
+    pose_with_matrix,
     stamp_from_seconds,
     transform_from_rpy,
     yaw_of,
@@ -254,6 +254,31 @@ FLAGS = FlagSet(
         " recovery while driving is 3.2 cm against lidar-only's 2.9",
         on_when="whenever more than one source is enabled",
         off_when="to see which source is actually moving the pose: off, the others still report",
+    ),
+    Flag(
+        "covariance",
+        PEAK,
+        description="how sure a match says it is: peak — the spread of its own score peak at the"
+        " matcher's calibrated temperature (config/matcher.json); fit — the fit-scaled second"
+        " moment of the whole surface that shipped before it. Both the covariance the lidar's"
+        " match is fused by and the one /tracker_pose carries",
+        why="the fit-scaled numbers were never held against an error: the published sigma was a"
+        " straight line from the inlier fraction (5 cm at a perfect fit, 35 cm at none). The"
+        " peak's is calibrated — scratch/peak_temperature.py over the four goto tapes of"
+        " 2026-09-13 (10047 matches off the window's edge, replayed against the lidar-only"
+        " trace) solves T = 0.016 for a mean NEES of 3.00 (2.99 measured), and at that"
+        " temperature a fit >= 0.7 match predicts 0.9/1.2 cm and 0.47 deg against an actual"
+        " 0.72/0.77 cm and 0.40 deg. Position comes out half a sigma conservative and the"
+        " heading optimistic in the poor-fit band (variance of error/sigma x 0.45, y 0.34, yaw"
+        " 1.77). The lidar being honestly sharp is what stops a broad camera peak from moving"
+        " the fused pose: a 5 cm camera error with a decimetre-wide peak moves it under a"
+        " hundredth of a millimetre while the lidar is sharp, and takes the pose over once the"
+        " lidar's own covariance is inflated to a lost-like value",
+        on_when="on: the sigma a match reports is the error it makes, which is what an"
+        " information filter needs to weigh the camera against the lidar",
+        off_when="fit puts back the numbers every tape before 2026-09-13 was recorded with —"
+        " for an A/B against them, or if a calibrated covariance ever misbehaves in the field",
+        choices=COVARIANCE_CHOICES,
     ),
     Flag(
         "local_fit",
@@ -1026,11 +1051,23 @@ class Relocalizer(Node):
         )
 
     def _publish_tracker_pose(self, pose: Pose2D, confidence: float, stamp: Any) -> None:
-        """The tracked pose for the operator's view and the trail; sigma grows as the fit drops
-        (:func:`pepin.fusion.sigma_from_fit` — the same numbers a fusion weighs this pose by,
-        so what the operator sees and what the watchdog's candidate is weighed against agree)."""
-        sigma_xy, sigma_yaw = sigma_from_fit(confidence)
-        msg = pose_with_covariance(pose.x, pose.y, pose.theta, sigma_xy, sigma_yaw, stamp, "map")
+        """The tracked pose for the operator's view and the trail, with the covariance the
+        ``covariance`` flag asks for.
+
+        ``peak``: the full 3x3 of the last update's fused match — the spread of the score peak
+        the pose was actually corrected by, anisotropic, so a corridor reads as a ridge along
+        the corridor and the laptop's watchdog is judged against a real one. ``fit``: the
+        isotropic pair :func:`pepin.fusion.sigma_from_fit` draws from the inlier fraction, which
+        is what every tape before 2026-09-13 carries. Before the first match, and whenever the
+        tracker has no fused measurement to publish (a carried belief, a re-seed), the fit's
+        numbers are used either way: there is no peak to report.
+        """
+        covariance = published_covariance(
+            None if self._localizer is None else self._localizer.fused,
+            confidence,
+            str(self._switches["covariance"]),
+        )
+        msg = pose_with_matrix(pose.x, pose.y, pose.theta, covariance, stamp, "map")
         self._tracker_pub.publish(msg)
         self._append_trail(msg)
 
