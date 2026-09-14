@@ -1078,6 +1078,10 @@ class Localizer:
                         anywhere.pose, anywhere_confidence, confidence,
                     )  # fmt: skip
                     pose, confidence = anywhere.pose, anywhere_confidence
+                    # The belief moved across the map, so the next match will land metres from
+                    # where this update's did: that distance is the relocalisation, not a
+                    # source scattering (see ``adopt``).
+                    self._self_check.forget()
 
         # The counter first, the blend after: the scan that makes the tracker lost must not be
         # averaged in under the rest lock, and the scan that finds it again (the fit is back,
