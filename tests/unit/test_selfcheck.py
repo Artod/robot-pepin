@@ -217,3 +217,19 @@ def test_a_seed_that_moved_nothing_still_starts_the_record_over() -> None:
     assert check.inflation(LIDAR) > 15.0  # what a re-seed would cost the lidar, unforgotten
     check.forget()
     assert check.inflation(LIDAR) == 1.0
+
+
+def test_a_measurement_that_is_not_a_number_is_not_evidence() -> None:
+    """A covariance that arrived NaN over the link (Python's json reads the literal) must not
+    enter the record: averaged in, one of them would multiply that source's covariance by NaN
+    for a whole window of updates, and every pose fused with it."""
+    check = SelfCheck()
+    good = np.diag([CLAIM_XY_M**2] * 2 + [math.radians(CLAIM_YAW_DEG) ** 2])
+    check.checked(measurement(Pose2D(), stamp=0.0), Pose2D())
+    broken = PoseMeasurement(0.1, 0.0, 0.0, good * np.nan, DEPTH, 0.1, 0.6)
+    assert check.checked(broken, Pose2D()) is broken
+    assert check.record(DEPTH).samples == 0
+    for k in range(2, 8):
+        out = check.checked(measurement(Pose2D(), stamp=0.1 * k), Pose2D())
+        assert np.all(np.isfinite(out.covariance))
+    assert np.isfinite(check.ratio(DEPTH)) and check.inflation(DEPTH) == 1.0

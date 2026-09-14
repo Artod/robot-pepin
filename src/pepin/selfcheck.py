@@ -102,7 +102,11 @@ class SelfCheck:
 
         ``odom`` is where the wheels say the cart was at the moment this measurement was
         measured (the odom frame; only differences between two of them are ever used), and it
-        is the ONLY thing this brings in from outside the source. ``trust_odometry`` False —
+        is the ONLY thing this brings in from outside the source. A sample that is not finite —
+        a covariance that arrived NaN over the link (``NaN`` is a literal Python's json reads) —
+        is dropped instead of recorded: averaged in, one of them would multiply that source's
+        covariance by NaN for a whole window of updates, and the fused pose with it.
+        ``trust_odometry`` False —
         a slipping wheel, an untrusted step — records no sample: the prediction would be wrong
         for a reason that has nothing to do with the sensor. The measurement is returned
         unchanged while the flag is off, for the first measurement of a source, after a gap
@@ -122,7 +126,10 @@ class SelfCheck:
             record.samples = 0
             return measurement
         predicted = carried(previous, relative_motion(previous_odom, odom), measurement.stamp)
-        record.history.append(disagreement(predicted, measurement) / DOF)
+        sample = disagreement(predicted, measurement) / DOF
+        if not np.isfinite(sample):
+            return measurement  # a NaN covariance is not evidence; recorded, it is 20 of them
+        record.history.append(sample)
         record.samples = len(record.history)
         record.ratio = sum(record.history) / len(record.history)
         record.inflation = min(max(record.ratio, 1.0), self.max_inflation)
