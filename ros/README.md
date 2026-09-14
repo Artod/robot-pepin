@@ -16,8 +16,8 @@ What stays from the Python stack:
 
 ```
 laptop (Mac)                      board (Orange Pi Zero 3, 1.5 GB + zram)
-Foxglove Studio  <-- ws 8765 -->  docker: foxglove_bridge, ldlidar_node -> laser_filters box filter (/scan), base_bridge
-                                          (/odom, tf), tof_bridge, Nav2 (amcl, costmaps,
+Foxglove Studio                   docker: ldlidar_node -> laser_filters box filter (/scan), base_bridge
+  ^ ws 8765, foxglove_bridge ON THE LAPTOP  (/odom, tf), tof_bridge, Nav2 (amcl, costmaps,
                                           planner, controller, bt_navigator), slam_toolbox
                                   host:   pepin-base.service (:3336), pepin-tof.service (:3335),
                                           ser2net (:3333 servo bus for bench tools only)
@@ -1134,14 +1134,17 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 # from the laptop: copy ros/ to the board and build the image (15-30 min the first time)
 rsync -a --delete ros/ root@pepin.local:/root/pepin-ros/
 ssh root@pepin.local 'cd /root/pepin-ros && docker build -t pepin-ros .'
-# on the board: sensors + bridges + foxglove_bridge
+# on the board: sensors + bridges (no Foxglove bridge here: the laptop serves it)
 ssh root@pepin.local '/root/pepin-ros/run.sh ros2 launch pepin_bringup robot.launch.py'
 # on the board, second terminal: navigation on a saved map
 ssh root@pepin.local '/root/pepin-ros/run.sh ros2 launch pepin_bringup nav.launch.py map:=/maps/lap3.yaml'
 ```
 
 Laptop: install Foxglove Studio (`brew install --cask foxglove-studio`), open a connection
-to `ws://pepin.local:8765`, add the 3D panel with `/map`, `/scan`, `/tf`, the costmaps and
+to `ws://localhost:8765` — the LAPTOP's bridge (`ros/laptop.sh vslam`), which sees the board's
+topics through the zenoh bridge; the board's own bridge is off since 2026-09-14 (it cost a
+second serialisation of every topic on four A53 cores) and comes back with
+`robot.launch.py foxglove:=true`, on `ws://pepin.local:8765`. Add the 3D panel with `/map`, `/scan`, `/tf`, the costmaps and
 `/plan`; send a goal with the "Publish" panel on `/goal_pose` (`geometry_msgs/PoseStamped`,
 frame `map`).
 
