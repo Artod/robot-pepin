@@ -271,9 +271,9 @@ FLAGS = FlagSet(
         " 0.72/0.77 cm and 0.40 deg. Position comes out half a sigma conservative and the"
         " heading optimistic in the poor-fit band (variance of error/sigma x 0.45, y 0.34, yaw"
         " 1.77). The lidar being honestly sharp is what stops a broad camera peak from moving"
-        " the fused pose: a 5 cm camera error with a decimetre-wide peak moves it under a"
-        " hundredth of a millimetre while the lidar is sharp, and takes the pose over once the"
-        " lidar's own covariance is inflated to a lost-like value",
+        " the fused pose: a measurement 5 cm off with a 6.3 cm peak moves it 0.24 mm while the"
+        " lidar's peak is 0.44 cm sharp, and takes the pose over — 4.84 cm of the 5 — once the"
+        " lidar's own covariance is inflated to the 35 cm a lost tracker is worth",
         on_when="on: the sigma a match reports is the error it makes, which is what an"
         " information filter needs to weigh the camera against the lidar",
         off_when="fit puts back the numbers every tape before 2026-09-13 was recorded with —"
