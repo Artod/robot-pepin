@@ -546,6 +546,10 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `depth_fusion` | `map_hz` | number 0.1..5 | 1.0 | yes | how often the volume's layer goes out as /map when map_source is volume |
 | `depth_fusion` | `snapshot_s` | number 0..3600 | 60.0 | yes | how often the volume is written to world_path (0: only at shutdown) |
 | `depth_fusion` | `resume_volume` | bool | on | at start | a volume snapshot at world_path is loaded at start, so a known room is a resumed volume; off, the volume starts empty and grows from the sensors |
+| `depth_fusion` | `follow_correction` | bool | on | yes | the graph's correction moves the voxels, not only the pose: when map -> odom at a frame's own stamp differs from the one the volume is painted under by more than follow_correction_min_m / _min_deg, the whole content is carried rigidly by that difference before the frame goes in. SLAM mode only — on a known map the board's tracker owns map -> odom, the served map is the reference, and the volume never follows however this is set |
+| `depth_fusion` | `follow_correction_min_m` | number 0..5 | 0.05 | yes | how far map -> odom must have moved before the volume is resampled; smaller corrections are kept against the same anchor and move it together when they add up |
+| `depth_fusion` | `follow_correction_min_deg` | number 0..180 | 1.0 | yes | how far map -> odom must have turned before the volume is resampled: the other half of the threshold, because a turn moves the far end of the flat metres while the origin stands still |
+| `depth_fusion` | `follow_correction_min_s` | number 0..60 | 2.0 | yes | the shortest time between two moves of the volume: a burst of graph optimisations costs one resample, not one each (the rest is not lost — it is owed against the same anchor and applied at the next move) |
 | `depth_stream` | `edge_filter` | bool | on | yes | flying pixels at object edges are dropped from the published depth and the scan; the law's beam pairs skip them regardless |
 | `depth_stream` | `lidar_anchor` | bool | on | yes | the lidar's returns pair with the network's depth and fit the law; off, the last law is held (the failure mode of a lidar that stops) — with no law yet nothing is published until it is back on |
 | `depth_stream` | `floor_pairs` | bool | off | yes | the floor's pixels pair the network's depth with the plane's geometric depth, a second hoop for the law that needs no lidar |
@@ -771,6 +775,26 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
   - *Default:* on — default by design, unmeasured. The one hard rule around it is a guard: a snapshot is resumed only onto the grid config/fusion.json describes (280x250x34 voxels of 5 cm from -19.5, -5.5, -0.15), so a changed grid starts empty instead of resuming into the wrong place
   - *On when:* on in the room the snapshot was taken in
   - *Off when:* off for a new room, after the map's origin moves, or to measure how fast the volume fills from nothing
+- **`follow_correction`** — bool, default on
+  - *What:* the graph's correction moves the voxels, not only the pose: when map -> odom at a frame's own stamp differs from the one the volume is painted under by more than follow_correction_min_m / _min_deg, the whole content is carried rigidly by that difference before the frame goes in. SLAM mode only — on a known map the board's tracker owns map -> odom, the served map is the reference, and the volume never follows however this is set
+  - *Default:* on — the correction never reached the voxels (2026-09-13): RTAB-Map closed a loop, the cloud moved with the graph, and the painted room stayed where the pose used to be, so no loop drive could close in the map itself. The move costs 46-58 ms on this laptop for the live 280x250x34 grid (2.4 M voxels, scratch/volume_shift_cost.py) — a third of a frame at 6 fps, on the worker thread — and it is not free in the map either: one move of 10 cm / 3 deg leaves 87 % of the occupied cells of the seeded snapshot (68 % of a freshly painted room), each within one voxel of where the correction points, because a resampled field is a weighted average and a surface averaged with the free space in front of it thins. The sensors repaint what thins within a second of driving; a map left behind the graph never comes back. The nearest-column law keeps more cells (100 %) and costs 8 ms, and was refused: it quantises every wall to half a voxel (measured: 2.5 cm), the same class of bias the grid snapping was introduced to kill on 2026-09-13
+  - *On when:* online SLAM (ros/laptop.sh vslam --slam): the drive where loops close
+  - *Off when:* to see the old behaviour under the same graph — the cloud and the pose move, the voxels stay — or if a closure is ever seen to smear the map instead of moving it
+- **`follow_correction_min_m`** — number 0..5, default 0.05
+  - *What:* how far map -> odom must have moved before the volume is resampled; smaller corrections are kept against the same anchor and move it together when they add up (0..5)
+  - *Default:* 0.05 — one voxel of the grid (5 cm): below it a move cannot change which cell a wall is in, and the move is not free — 46-58 ms on this laptop for the live 280x250x34 grid, and 13 % of the occupied cells of the seeded snapshot thinned away per move (scratch/volume_shift_cost.py, 2026-09-14). A smaller threshold spends both to move the map within the cell it is already in
+  - *On when:* raise it if graph noise moves the volume more often than the drive needs
+  - *Off when:* lower it toward zero only to watch the mechanism work on tiny corrections; the map thins at every move
+- **`follow_correction_min_deg`** — number 0..180, default 1.0
+  - *What:* how far map -> odom must have turned before the volume is resampled: the other half of the threshold, because a turn moves the far end of the flat metres while the origin stands still (0..180)
+  - *Default:* 1.0 — 1 degree is 1.7 cm at a metre (a third of a voxel, where the cart is) and 9 cm at the 5 m end of the flat — the whole +-9 cm window the laptop's matcher searches. Below it a turn cannot move a near wall out of its cell; above it a far wall leaves the matcher's window, and the move costs the measured 46-58 ms (scratch/volume_shift_cost.py, 2026-09-14)
+  - *On when:* raise it with a graph that jitters in heading without closing anything
+  - *Off when:* lower it when a closure's turn must reach the map before its translation does
+- **`follow_correction_min_s`** — number 0..60, default 2.0
+  - *What:* the shortest time between two moves of the volume: a burst of graph optimisations costs one resample, not one each (the rest is not lost — it is owed against the same anchor and applied at the next move) (0..60)
+  - *Default:* 2.0 — a move costs 46-58 ms of the worker thread on the live grid (scratch/volume_shift_cost.py, 2026-09-14), so one every 2 s holds the resample under 3 % of that thread however hard RTAB-Map optimises — and a map two seconds behind a burst of closures is still a map that closes, because nothing is dropped: what is owed is measured against the same anchor and applied at the next move
+  - *On when:* raise it if a mapping run is ever seen to spend its frames on resampling
+  - *Off when:* 0 applies every correction that clears the thresholds, at once
 
 #### `depth_stream`
 

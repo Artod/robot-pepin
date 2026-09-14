@@ -52,13 +52,30 @@ tracker can be pointed at (its ``map_topic`` flag) while Nav2 and the map_server
 they own. A volume the tracker is pointed at must have been seeded from the served map
 (``seed_map``), which also snaps the grid to that map's cell lattice.
 
+THE GRAPH MOVES THE MAP. In online SLAM the graph is the skeleton and ``map -> odom`` is its
+correction: RTAB-Map optimises, pepin_bringup.rtabmap_frame sends the new edge to the board and
+pepin_bringup.slam_frame broadcasts it, and from that moment every voxel painted under the old
+edge is stale by the difference — the pose moved, the room did not, and a loop drive could never
+close in the map itself (2026-09-13). With ``follow_correction`` the volume follows: before a
+frame or a revolution is integrated, the correction TF gives for ITS stamp — the very transform
+that places it — is compared with the one the volume is painted under, and past
+``follow_correction_min_m`` / ``follow_correction_min_deg`` the whole content is carried rigidly
+by the difference (:meth:`pepin.worldmap.WorldMap.shift`, tens of milliseconds on the laptop for
+2.4 M voxels, on the worker thread, no oftener than ``follow_correction_min_s``). Smaller
+corrections are measured against the same anchor and move the volume together when they add up.
+The grid never moves, nothing is re-seeded and nothing extra is published: the trackers follow
+``map -> odom`` themselves, and the next slice out of this node is simply the moved one. Only in
+SLAM mode, where the graph owns that edge — on a known map the board's tracker owns it, the
+served map is the reference, and the volume stands still whatever the flag says.
+
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
 ``fit_gate``, ``imu_lean``, ``lean_gate_deg``, ``lean_min_quality``, ``self_heal``, ``align``,
 ``min_weight``, ``map_min_weight``, ``camera_map_min_weight``, ``lidar_map``, ``surface_hz``,
 ``band_half_z``, ``lidar_layer``, ``no_return_free``, ``map_source``, ``map_hz``, ``snapshot_s``,
-``resume_volume``; their state is printed in every report line, beside the band itself and the
-source of the plane it is centred on. ``/fusion/reset`` (std_srvs/Trigger) empties the model, the
-pairing queues and the tallies.
+``resume_volume``, ``follow_correction``, ``follow_correction_min_m``,
+``follow_correction_min_deg``, ``follow_correction_min_s``; their state is printed in every
+report line, beside the band itself and the source of the plane it is centred on.
+``/fusion/reset`` (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
 """
 
 from __future__ import annotations
@@ -81,7 +98,7 @@ from std_srvs.srv import Trigger
 from pepin.deployment import map_owner
 from pepin.depth import Intrinsics
 from pepin.flags import Flag, FlagSet
-from pepin.frame_pose import BASE_FRAME, FramePoser
+from pepin.frame_pose import BASE_FRAME, MAP_FRAME, ODOM_FRAME, FramePoser
 from pepin.lean import LEAN_QUALITY_FLOOR, SCAN_LEAN_GATE_DEG, LeanGate
 from pepin.mounts import LASER_FRAME, load_lidar_mount
 from pepin.tsdf import (
@@ -95,6 +112,7 @@ from pepin.tsdf import (
 )
 from pepin.watch import DRIVE_FIT
 from pepin.worldmap import (
+    CorrectionFollower,
     LidarLaw,
     PlanarMount,
     SliceLaw,
@@ -484,6 +502,77 @@ FLAGS = FlagSet(
         " volume fills from nothing",
         live=False,
     ),
+    Flag(
+        "follow_correction",
+        True,
+        description="the graph's correction moves the voxels, not only the pose: when map ->"
+        " odom at a frame's own stamp differs from the one the volume is painted under by more"
+        " than follow_correction_min_m / _min_deg, the whole content is carried rigidly by that"
+        " difference before the frame goes in. SLAM mode only — on a known map the board's"
+        " tracker owns map -> odom, the served map is the reference, and the volume never"
+        " follows however this is set",
+        why="the correction never reached the voxels (2026-09-13): RTAB-Map closed a loop, the"
+        " cloud moved with the graph, and the painted room stayed where the pose used to be, so"
+        " no loop drive could close in the map itself. The move costs 46-58 ms on this laptop"
+        " for the live 280x250x34 grid (2.4 M voxels, scratch/volume_shift_cost.py) — a third of"
+        " a frame at 6 fps, on the worker thread — and it is not free in the map either: one"
+        " move of 10 cm / 3 deg leaves 87 % of the occupied cells of the seeded snapshot (68 %"
+        " of a freshly painted room), each within one voxel of where the correction points,"
+        " because a resampled field is a weighted average and a surface averaged with the free"
+        " space in front of it thins. The sensors repaint what thins within a second of driving;"
+        " a map left behind the graph never comes back. The nearest-column law keeps more cells"
+        " (100 %) and costs 8 ms, and was refused: it quantises every wall to half a voxel"
+        " (measured: 2.5 cm), the same class of bias the grid snapping was introduced to kill"
+        " on 2026-09-13",
+        on_when="online SLAM (ros/laptop.sh vslam --slam): the drive where loops close",
+        off_when="to see the old behaviour under the same graph — the cloud and the pose move,"
+        " the voxels stay — or if a closure is ever seen to smear the map instead of moving it",
+    ),
+    Flag(
+        "follow_correction_min_m",
+        0.05,
+        description="how far map -> odom must have moved before the volume is resampled; smaller"
+        " corrections are kept against the same anchor and move it together when they add up",
+        why="one voxel of the grid (5 cm): below it a move cannot change which cell a wall is"
+        " in, and the move is not free — 46-58 ms on this laptop for the live 280x250x34 grid,"
+        " and 13 % of the occupied cells of the seeded snapshot thinned away per move"
+        " (scratch/volume_shift_cost.py, 2026-09-14). A smaller threshold spends both to move"
+        " the map within the cell it is already in",
+        on_when="raise it if graph noise moves the volume more often than the drive needs",
+        off_when="lower it toward zero only to watch the mechanism work on tiny corrections; the"
+        " map thins at every move",
+        range=(0.0, 5.0),
+    ),
+    Flag(
+        "follow_correction_min_deg",
+        1.0,
+        description="how far map -> odom must have turned before the volume is resampled: the"
+        " other half of the threshold, because a turn moves the far end of the flat metres while"
+        " the origin stands still",
+        why="1 degree is 1.7 cm at a metre (a third of a voxel, where the cart is) and 9 cm at"
+        " the 5 m end of the flat — the whole +-9 cm window the laptop's matcher searches. Below"
+        " it a turn cannot move a near wall out of its cell; above it a far wall leaves the"
+        " matcher's window, and the move costs the measured 46-58 ms"
+        " (scratch/volume_shift_cost.py, 2026-09-14)",
+        on_when="raise it with a graph that jitters in heading without closing anything",
+        off_when="lower it when a closure's turn must reach the map before its translation does",
+        range=(0.0, 180.0),
+    ),
+    Flag(
+        "follow_correction_min_s",
+        2.0,
+        description="the shortest time between two moves of the volume: a burst of graph"
+        " optimisations costs one resample, not one each (the rest is not lost — it is owed"
+        " against the same anchor and applied at the next move)",
+        why="a move costs 46-58 ms of the worker thread on the live grid"
+        " (scratch/volume_shift_cost.py, 2026-09-14), so one every 2 s holds the resample under"
+        " 3 % of that thread however hard RTAB-Map optimises — and a map two seconds behind a"
+        " burst of closures is still a map that closes, because nothing is dropped: what is owed"
+        " is measured against the same anchor and applied at the next move",
+        on_when="raise it if a mapping run is ever seen to spend its frames on resampling",
+        off_when="0 applies every correction that clears the thresholds, at once",
+        range=(0.0, 60.0),
+    ),
 )
 
 
@@ -604,6 +693,14 @@ class DepthFusion(Node):
         self._camera_map_pub: Any = None  # ...and the camera's own band, beside it
         self._lidar_map_pub: Any = None  # ...and the lidar layer on a topic of its own
         self._snapshots = SnapshotClock(float(self._switches["snapshot_s"]))
+        # The volume follows map -> odom only where the GRAPH owns that edge: in SLAM mode it is
+        # RTAB-Map's correction and the room it built must travel with it. On a known map the
+        # same edge is the board tracker's own output, which wanders with every measurement it
+        # fuses, and the served map is the reference nothing may drag around.
+        self._graph_map = self._mode == "slam"
+        self._follower = CorrectionFollower()
+        self._follow_ms = 0.0  # the last resample's cost, a level the report line reads
+        self._followed_at = 0.0  # monotonic seconds of the last move: the throttle
         self._start_state()
         self._surface_timer = self.create_timer(
             self._period(self._switches["surface_hz"]), self._publish_surface
@@ -618,7 +715,9 @@ class DepthFusion(Node):
             f" {self._spec.origin}; {self._switches.state()}; {self._band_text()}; fused while"
             f" /localization_fit >= {DRIVE_FIT:.2f}; mode {self._mode}, /map"
             f" {'is this volume' if self._map_mine else f'not ours ({self._map_refusal})'};"
-            f" snapshot {self._world_path}"
+            f" snapshot {self._world_path}; the volume"
+            f" {'follows' if self._graph_map else 'does not follow'} map -> odom"
+            f" ({'the graph owns it here' if self._graph_map else 'the tracker owns it here'})"
         )
 
     @staticmethod
@@ -787,6 +886,8 @@ class DepthFusion(Node):
         with self._lock:
             self._world = self._fresh_world()
             self._last_stamp = None
+            self._follower = CorrectionFollower()  # a new volume is painted under what is in
+            # force now, not under the correction the emptied one was standing in
         self._worker.clear()
         self._scans.clear()
         with self._sync.lock:
@@ -830,7 +931,12 @@ class DepthFusion(Node):
         The pose is the poser's, so with ``imu_lean`` on it carries the lean of that moment and
         the beams climb with the body; with it off the pose is the planar one and the beams
         sweep the plane, as they always did. Past ``lean_gate_deg`` there is nothing worth
-        writing — the beams are in another slice of the room — and the scan is dropped."""
+        writing — the beams are in another slice of the room — and the scan is dropped.
+
+        The graph's correction is followed before the layer's own gate: the volume follows the
+        map even where this node writes no lidar layer at all, and a revolution is the steady
+        pulse that carries it between camera frames."""
+        self._follow(msg.header.stamp)
         if not self._switches.on("lidar_layer"):
             return
         if self._laser is None and not self._lookup_laser(msg.header.frame_id):
@@ -876,6 +982,53 @@ class DepthFusion(Node):
             f" {self._mount.z_m:.3f} m (config/lidar.json)"
         )
         return True
+
+    # ---- the graph's correction ----------------------------------------------------------
+    def _follow(self, stamp: Any) -> None:
+        """Carry the volume to where the graph now says the room is, before anything is painted
+        into it at ``stamp``.
+
+        The correction is read from TF at the frame's OWN stamp — the same edge that places the
+        frame, through the same buffer — so the volume and the observation about to go into it
+        are always expressed in one correction and no race with the bridge can put them in two.
+        Below the thresholds nothing moves and nothing is lost: the difference is owed against
+        the same anchor and applied when it grows. Above them the whole content is carried
+        rigidly (:meth:`pepin.worldmap.WorldMap.shift`), at most once every
+        ``follow_correction_min_s``, on the caller's worker thread. The whole of it — what is
+        owed, the rate and the move — happens under the model lock, because both workers come
+        through here and two of them that read the same debt would pay it twice.
+        """
+        if not self._graph_map or not self._switches.on("follow_correction"):
+            return
+        correction = self._tf.pose(MAP_FRAME, ODOM_FRAME, stamp)
+        if correction is None:
+            self._tally.count("no_correction")  # the failure itself is counted by the tf handler
+            return
+        with self._lock:
+            if self._follower.painted_in is None:
+                self._follower.anchor(correction)  # an empty volume is born in what is in force
+                return
+            shift = self._follower.pending(
+                correction,
+                float(self._switches["follow_correction_min_m"]),
+                float(self._switches["follow_correction_min_deg"]),
+            )
+            if shift is None:
+                return
+            now = time.monotonic()
+            if now - self._followed_at < float(self._switches["follow_correction_min_s"]):
+                self._tally.count("follow_held")  # owed against the same anchor, paid at the next
+                return
+            started = time.perf_counter()
+            self._world.shift(shift)
+            self._follow_ms = (time.perf_counter() - started) * 1e3
+            self._followed_at = now
+            self._follower.moved(correction, shift)
+        self._tally.count("follows")
+        self.get_logger().info(
+            f"the graph moved map -> odom: the volume follows it by {shift.text()}"
+            f" ({self._follow_ms:.0f} ms, {self._follower.applied} moves this run)"
+        )
 
     def _snapshot(self) -> None:
         """Write the volume to ``world_path`` — the warm cache a next run resumes from. The
@@ -924,6 +1077,7 @@ class DepthFusion(Node):
         if rgb is None or rgb.ndim != 3 or rgb.shape[:2] != depth.shape:
             self._tally.count("no_image")  # an encoding or size the decoder cannot pair
             rgb = None
+        self._follow(stamp)  # the model this frame is seated on and fused into is the moved one
         if self._switches.on("align"):
             with self._tally.measure("align"):
                 aligned = self._aligned(depth, intr, camera, base)
@@ -974,6 +1128,8 @@ class DepthFusion(Node):
         with self._lock:
             self._world = self._fresh_world()
             self._last_stamp = None
+            self._follower = CorrectionFollower()  # as after a reset: the new model is born in
+            # the correction in force, and owes the graph nothing the old one owed
         self._bound_streak = 0
         self._tally.count("self_heals")
         self.get_logger().warning(
@@ -1114,7 +1270,8 @@ class DepthFusion(Node):
             f" align {w.ms_per('align', 'frames'):.0f} ms, {self._turns(w)};"
             f" refused: {self._refusals(w) or 'none'}; skipped: {skipped};"
             f" no image {c['no_image']}; surface {self._surface_points} points;"
-            f" {self._band_text()}; {self._world_line(w)}; {self._lean.report()};"
+            f" {self._band_text()}; {self._world_line(w)}; {self._follow_line(w)};"
+            f" {self._lean.report()};"
             f" flags: {self._switches.state()}" + (f"; tf: {tf_text}" if tf_text else "")
         )
 
@@ -1137,6 +1294,25 @@ class DepthFusion(Node):
             f"world: {c['revolutions']} revolutions ({c['scans_dropped']} dropped,"
             f" {w.ms_per('scan', 'revolutions'):.0f} ms), {text}; /map from {source};"
             f" {lidar_map}; snapshot {'never' if age == math.inf else f'{age:.0f} s old'}"
+        )
+
+    def _follow_line(self, w: Window) -> str:
+        """The graph half of the report: whether the volume follows map -> odom in this mode at
+        all, how many times it has moved, the last move and what the resample cost."""
+        if not self._graph_map:
+            return (
+                f"follow: not in {self._mode} mode (map -> odom is the tracker's there and the"
+                " served map is the reference)"
+            )
+        if not self._switches.on("follow_correction"):
+            return "follow: off (the graph moves the pose, the voxels stay)"
+        held = int(w.counts["follow_held"])
+        anchored = "anchored" if self._follower.painted_in is not None else "no correction yet"
+        return (
+            f"follow: {self._follower.applied} moves ({anchored}), last"
+            f" {self._follower.last.text()} in {self._follow_ms:.0f} ms,"
+            f" {int(w.counts['follows'])} this window, {held} held by the rate,"
+            f" {int(w.counts['no_correction'])} frames without a correction"
         )
 
     @staticmethod

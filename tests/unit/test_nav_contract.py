@@ -1272,6 +1272,31 @@ def test_the_volume_is_the_map_and_only_one_side_publishes_it() -> None:
     )
 
 
+def test_the_graphs_correction_moves_the_volume_only_where_the_graph_owns_it() -> None:
+    """The map follows the loop closure: the node carries the volume by the change of
+    map -> odom before it paints into it, on both paint paths (a camera frame and a
+    revolution), taking the edge from TF at the frame's own stamp. And it does so only in SLAM
+    mode, where the graph owns that edge — on a known map the board's tracker owns it, the
+    served map is the reference, and dragging the volume with the tracker's own wander is the
+    one thing this must never do."""
+    node = sf.tree(f"{NODES}/depth_fusion.py")
+    assert "CorrectionFollower" in sf.imported(node)
+    assert {"MAP_FRAME", "ODOM_FRAME"} <= sf.imported(node), "the edge is named, not typed"
+    body = {f.name: f for f in ast.walk(node) if isinstance(f, ast.FunctionDef)}
+    follow = body["_follow"]
+    assert "self._world.shift" in sf.calls(follow), "the move lives in pepin.worldmap"
+    assert "self._world.shift" not in sf.calls(node) - sf.calls(follow), "and nowhere else"
+    assert "self._graph_map" in sf.unparsed(follow, ast.Attribute), "the mode gates the move"
+    assert "self._tf.pose" in sf.calls(follow), "the correction comes from TF, at the stamp"
+    for path in ("_fuse", "_on_scan_work"):
+        assert "self._follow" in sf.calls(body[path]), f"{path} follows before it paints"
+    flags = load_table(REPO / NODES / "depth_fusion.py")
+    assert flags.flag("follow_correction").default is True
+    for name in ("follow_correction_min_m", "follow_correction_min_deg", "follow_correction_min_s"):
+        assert flags.flag(name).range is not None, f"{name}: a threshold is bounded"
+        assert flags.flag(name).live, f"{name}: tunable while a map is being built"
+
+
 def test_the_slam_mode_s_two_fusion_switches_come_from_the_launch_not_the_operator() -> None:
     """Both were set by hand in the first world-map SLAM session (2026-09-13 14:05): the volume
     fused 0 frames until fit_gate came off (no tracker runs in SLAM, so /localization_fit never
