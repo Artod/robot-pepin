@@ -335,13 +335,14 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             # operator can put it back on with ros/flags.sh set depth_fusion fit_gate true.
             "-p",
             f"fit_gate:={'false' if slam else 'true'}",
-            # The served map the volume's lidar layer starts as, and whose cell lattice the
-            # volume's grid is snapped to (empty: the volume starts from the sensors alone).
-            # A known room is a seeded volume and nothing else — and a slice seeded from the
-            # file IS that file, cell for cell (scratch/volume_vs_pgm.py).
-            "-p",
-            f"seed_map:={seed_map}",
-        ],
+        ]
+        # The served map the volume's lidar layer starts as, and whose cell lattice the volume's
+        # grid is snapped to. A known room is a seeded volume and nothing else — and a slice
+        # seeded from the file IS that file, cell for cell (scratch/volume_vs_pgm.py).
+        # Only when there IS one: rcl refuses to parse an override with an empty value
+        # ("Couldn't parse parameter override rule: '-p seed_map:='"), and the node would die
+        # at rclpy.init on every unseeded launch — which is every launch there has ever been.
+        + (["-p", f"seed_map:={seed_map}"] if seed_map else []),
         output="screen",
         prefix=_after_ghost("/depth_fusion"),
         **RESPAWN,

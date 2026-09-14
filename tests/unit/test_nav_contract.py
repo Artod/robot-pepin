@@ -1486,6 +1486,25 @@ def test_every_matcher_is_handed_heavy_cells_and_the_lidar_may_localise_on_the_v
     assert "self._choice.offer" in sf.calls(relocalizer)
 
 
+def test_no_launch_argument_reaches_a_node_as_an_empty_parameter_override() -> None:
+    """An override with nothing after the ``:=`` is not "the default": rcl refuses to parse the
+    rule and the process dies inside ``rclpy.init`` — "Couldn't parse parameter override rule:
+    '-p seed_map:='" — every launch, before a line of the node runs. An argument that may be
+    empty is passed only when it has a value.
+
+    Measured in the laptop container on 2026-09-14: ``rclpy.init(args=[..., "-p",
+    "seed_map:="])`` raises RCLError, ``"-p", "seed_map:=/maps/flat3_straight.yaml"`` does not.
+    """
+    launch = (REPO / VSLAM_LAUNCH).read_text()
+    overrides = [ln.strip() for ln in launch.splitlines() if ":={" in ln]
+    assert overrides, "the launch still hands the nodes parameter overrides"
+    may_be_empty = [ln for ln in overrides if "seed_map:=" in ln]
+    assert may_be_empty == ['+ (["-p", f"seed_map:={seed_map}"] if seed_map else []),'], (
+        "the only override whose value may be empty is passed only when it has one"
+    )
+    assert '"seed_map", default_value=""' in launch, "and empty is the unseeded default"
+
+
 def test_the_depth_network_runs_where_the_backend_flag_says_and_the_cpu_model_waits() -> None:
     """The depth node calls one backend where it called the model (``self._net(rgb)``); that
     backend is the switch between the laptop's GPU service and the CPU model in the container
