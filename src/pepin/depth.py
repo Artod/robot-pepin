@@ -9,6 +9,9 @@ the scan's beams name the true depth at a few hundred pixels; those (network, tr
 pooled over minutes of frames so they span the room's depths, fit an affine law in inverse
 depth, 1 / z = a / D + b — what a relative-depth network is built to be right up to — and the
 law corrects the whole image (:class:`AffineScale`, :func:`fit_affine`, :func:`apply_affine`).
+One affine law is not enough for this camera: what it leaves behind tilts with range (+8.7 % at
+a metre, -3.3 % at two, 2026-09-14), so the same pairs are also read per bin of the network's
+own depth (:class:`RangeLaw`), which is the law the node ships live.
 Two more corrections act where they measure: pixels on an object's edge carry a depth blurred
 between the object and what is behind it and are dropped (:func:`edge_mask`); pixels within a
 few centimetres of the floor plane snap to it, the plane leaning with the cart
@@ -622,7 +625,147 @@ def apply_affine(depth: Array, a: float, b: float) -> Array:
     return out
 
 
-LAW_VERSION = 2  # 1: the affine law alone; 2: the same file with the ray law's record beside it
+# ---- the same pairs read as a curve over the network's range ----------------------------------
+RANGE_NEAR = 0.3  # network metres: the network places no scene point nearer than this
+RANGE_FAR = 12.0  # nor further out than this indoors; past it the pairs are reflections
+RANGE_BINS = 27  # log-spaced between the two: 15 % of range per bin
+RANGE_EDGES: Array = np.geomspace(RANGE_NEAR, RANGE_FAR, RANGE_BINS + 1, dtype=np.float64)
+# Log-spaced, not 0.25 m steps, because the correction is a ratio: a constant *relative* bin
+# width keeps the resolution constant in the quantity being fitted, and the network's depth is
+# itself stretched (1.6-2.0x), so 0.25 m of true range is 0.4-0.5 m of network depth near the
+# cart and more further out. Linear 0.25 m bins would leave the whole far half of the picture
+# empty and held from its nearest neighbour, which is the affine law again under another name.
+# 15 % a bin, not 24 %: at the measured 12 % of tilt per metre a 24 % bin leaves 1-2 % of tilt
+# inside itself and 2.3 % past the outermost centre, where the law holds flat
+# (scratch/range_law_bins.py); at 15 % that falls under 1 % and the pool still fills every bin
+# it reaches — at rest the 62 000 pooled pairs sit in a dozen of them, hundreds to thousands
+# each, against the 50 a bin needs.
+RANGE_MIN_PAIRS = 50  # pairs in a bin before its ratio is its own; fewer and the bin is empty
+RANGE_MIN_BINS = 2  # filled bins before the law says anything about range (one is a plain scale)
+
+
+def ratio_bounds() -> tuple[float, float]:
+    """What a bin's true / network ratio is allowed to be: the reciprocal of :func:`a_bounds`,
+    so the range law and the affine law are held to the same physics."""
+    a_lo, a_hi = a_bounds()
+    return 1.0 / a_hi, 1.0 / a_lo
+
+
+@dataclass(frozen=True, eq=False)
+class RangeLaw:
+    """The correction as a curve over the network's own depth: per bin of network depth, the
+    robust ratio true / network measured there.
+
+    One affine law in inverse depth cannot describe this camera. Fitted on a pool that spans
+    the room it leaves a residual that tilts with range — measured on 2026-09-14 at home
+    (scratch/depth_scale_by_range.py, 182 frames, 18 879 beams): the published depth ran +8.7 %
+    at 0.8-1.2 m, +5.2 % at 1.2-1.6 m and -3.3 % at 1.6-2.0 m, 12 % per metre, while the whole
+    pool's median ratio was a healthy 0.996. Which ranges the pool happens to hold then decides
+    the law: a drive brings 0.5 m and 4 m pairs, the shift term switches on, and the same camera
+    is described as a 1.75 b 0 standing and a 2.3 b -0.19 driving. The volume is painted under
+    one law and scored under the other.
+
+    This law asks the pairs the question they answer — how wrong is the network *here* — and
+    answers it per range: for every bin that held at least :data:`RANGE_MIN_PAIRS` pairs,
+    :attr:`ratios` is the weighted median of true / network inside it and :attr:`centres` the
+    median network depth of those same pairs — where the ratio was measured, not the bin's
+    nominal middle, which a pool that fills a bin unevenly would put it beside (2.8 % of
+    residual in the 1.2-1.6 m band on the synthetic tilt of tests/unit/test_depth.py) —
+    :attr:`counts` how many pairs each rests on. Between two filled centres the
+    ratio is linear in the network's depth; outside them it is held at the nearest filled
+    centre's, never extrapolated. Corrected depth = network depth x ratio(network depth)."""
+
+    centres: Array
+    ratios: Array
+    counts: npt.NDArray[np.intp]
+
+    @classmethod
+    def fit(
+        cls,
+        d: Array,
+        z: Array,
+        weight: Array | None = None,
+        edges: Array = RANGE_EDGES,
+        min_pairs: int = RANGE_MIN_PAIRS,
+        min_bins: int = RANGE_MIN_BINS,
+    ) -> RangeLaw | None:
+        """The law over (network depth ``d``, true depth ``z``) pairs, each counting ``weight``
+        times, or ``None`` when under ``min_bins`` bins hold ``min_pairs`` pairs — a pool that
+        sees one range says nothing about range, and the affine law's fit over all of it is the
+        better answer there. Each bin's ratio is clipped to :func:`ratio_bounds`."""
+        d = np.asarray(d, dtype=float)
+        z = np.asarray(z, dtype=float)
+        ok = np.isfinite(d) & np.isfinite(z) & (d > NEAR_M) & (z > NEAR_M)
+        lo, hi = ratio_bounds()
+        index = np.digitize(d, edges) - 1
+        centres, ratios, counts = [], [], []
+        for b in range(edges.size - 1):
+            inside = ok & (index == b)
+            n = int(inside.sum())
+            if n < min_pairs:
+                continue
+            share = None if weight is None else np.asarray(weight, dtype=float)[inside]
+            centres.append(weighted_median(d[inside], share))
+            ratios.append(float(np.clip(weighted_median(z[inside] / d[inside], share), lo, hi)))
+            counts.append(n)
+        if len(centres) < min_bins:
+            return None
+        return cls(np.asarray(centres), np.asarray(ratios), np.asarray(counts, dtype=np.intp))
+
+    def ratio(self, depth: Array) -> Array:
+        """The true / network ratio this law gives each pixel of ``depth``: interpolated
+        between the filled bins' centres, held flat beyond the outermost of them."""
+        out: Array = np.interp(np.asarray(depth, dtype=float), self.centres, self.ratios)
+        return out
+
+    def apply(self, depth: Array) -> Array:
+        """The network's depth in metres, each pixel scaled by the ratio measured at its own
+        range; pixels the law cannot place (non-finite, or non-positive) become NaN."""
+        d = np.asarray(depth, dtype=float)
+        with np.errstate(invalid="ignore"):
+            z = d * self.ratio(d)
+            out: Array = np.where(np.isfinite(z) & (z > 0.0), z, np.nan)
+        return out
+
+    def describe(self) -> str:
+        """The law for the report line: every filled bin as ``centre:ratio`` over the network's
+        depth, then the pairs behind each of them."""
+        bins = " ".join(f"D{c:.2f}:{r:.3f}" for c, r in zip(self.centres, self.ratios, strict=True))
+        return f"{bins} (n {'/'.join(str(int(n)) for n in self.counts)})"
+
+    def state(self) -> dict[str, Any]:
+        """The law as plain JSON values for :func:`save_law`."""
+        return {
+            "centres": [round(float(c), 4) for c in self.centres],
+            "ratios": [round(float(r), 5) for r in self.ratios],
+            "counts": [int(n) for n in self.counts],
+        }
+
+    @classmethod
+    def restore(cls, record: Any) -> RangeLaw | None:
+        """The law a past run saved (:meth:`state`), or ``None`` when the record is missing,
+        malformed, too short to say anything about range, or asks for a ratio outside
+        :func:`ratio_bounds` — a file is not a measurement until it passes the same gates."""
+        try:
+            centres = np.asarray([float(c) for c in record["centres"]])
+            ratios = np.asarray([float(r) for r in record["ratios"]])
+            counts = np.asarray([int(n) for n in record["counts"]], dtype=np.intp)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not (centres.size == ratios.size == counts.size) or centres.size < RANGE_MIN_BINS:
+            return None
+        lo, hi = ratio_bounds()
+        sane = (
+            bool(np.all(np.isfinite(centres)))
+            and bool(np.all(np.diff(centres) > 0.0))
+            and bool(np.all(np.isfinite(ratios)))
+            and bool(np.all((ratios >= lo) & (ratios <= hi)))
+            and bool(np.all(counts >= RANGE_MIN_PAIRS))
+        )
+        return cls(centres, ratios, counts) if sane else None
+
+
+LAW_VERSION = 3  # 1: the affine law alone; 2: the ray law's record beside it; 3: the range law's
 
 
 def save_law(
@@ -632,11 +775,13 @@ def save_law(
     pooled: int,
     now: float,
     ray: dict[str, Any] | None = None,
+    range_law: dict[str, Any] | None = None,
 ) -> None:
     """Write the law next to the maps, atomically (a temp file, then ``os.replace``): a restart
     begins from it instead of the raw network's depth. ``now`` is the wall clock in seconds.
     ``ray`` is the angle-dependent law's record beside the affine one
-    (:meth:`pepin.elevation.RayGain.state`), in the same file under its own key so one law is
+    (:meth:`pepin.elevation.RayGain.state`) and ``range_law`` the range-dependent one's
+    (:meth:`RangeLaw.state`), in the same file each under its own key so one law is
     never read with another's map: a reader of version 1 sees the affine law it expects and
     ignores the rest."""
     tmp = path.with_name(path.name + ".tmp")
@@ -649,8 +794,25 @@ def save_law(
     }
     if ray is not None:
         record["ray"] = ray
+    if range_law is not None:
+        record["range"] = range_law
     tmp.write_text(json.dumps(record))
     os.replace(tmp, path)
+
+
+def load_range(path: Path, now: float, max_age_s: float = LAW_MAX_AGE_S) -> RangeLaw | None:
+    """The range law the last run saved when the file is there, holds one no older than
+    ``max_age_s`` and it passes :meth:`RangeLaw.restore`; ``None`` otherwise — a file written
+    before this law existed simply has none, and the affine law seeds the warm-up instead."""
+    try:
+        data = json.loads(path.read_text())
+        saved_at = float(data["saved_at"])
+        record = data.get("range")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if record is None or now - saved_at > max_age_s:
+        return None
+    return RangeLaw.restore(record)
 
 
 def load_ray(path: Path, now: float, max_age_s: float = LAW_MAX_AGE_S) -> Any | None:

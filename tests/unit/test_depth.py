@@ -2,6 +2,7 @@
 scan the costmap reads, the floor anchor (the lean behind it is tests/unit/test_lean.py), the
 saved law."""
 
+import json
 import math
 from pathlib import Path
 
@@ -606,3 +607,124 @@ def test_the_speed_a_carry_implies_tells_a_drive_from_a_runaway_frame() -> None:
     assert carry_speed(np.array([1.5, 0.0, 0.0]), 0.025) == pytest.approx(60.0, abs=0.1)
     assert carry_speed(np.array([0.0, 0.0, 0.0]), 0.0) == 0.0, "no motion, no speed"
     assert carry_speed(np.array([0.001, 0.0, 0.0]), 0.0) == pytest.approx(1.0), "a gap of nothing"
+
+
+# ---- the law that follows the range ----------------------------------------------------------
+def _residual(z: np.ndarray) -> np.ndarray:
+    """The residual the affine law left on 2026-09-14 (scratch/depth_scale_by_range.py): the
+    published depth over the true one, +8.7 % at 1.0 m, +5.2 % at 1.4 m, -3.3 % at 1.8 m — the
+    quadratic through those three measured points. It has to be curved: a residual linear in
+    range is 1 / z = a / D + b to first order and the affine law absorbs it whole."""
+    return 1.052 - 0.15 * (z - 1.4) - 0.15625 * (z - 1.4) ** 2
+
+
+def _tilted(z: np.ndarray, scale: float = 1.76) -> np.ndarray:
+    """What the network reads at true depth ``z``: the global stretch the affine law fits,
+    times the residual it cannot."""
+    return scale * z * _residual(z)
+
+
+def _range_pool(n: int = 6000, near: float = 0.7, far: float = 2.0) -> tuple[np.ndarray, ...]:
+    """(network, true) pairs over a room that spans ``near`` to ``far`` metres."""
+    z = np.linspace(near, far, n)
+    return _tilted(z), z
+
+
+def test_the_range_law_flattens_the_tilt_one_affine_law_leaves() -> None:
+    """A network whose error runs 12 % per metre: one affine law cannot describe it, the law
+    binned by the network's own depth can — every band of the room within 1 % of the truth."""
+    from pepin.depth import RangeLaw, fit_affine
+
+    d, z = _range_pool()
+    law = RangeLaw.fit(d, z)
+    assert law is not None and law.centres.size >= 4
+    assert np.all(np.diff(law.centres) > 0.0) and np.all(law.counts >= 50)
+    a, b = fit_affine(d, z)
+    affine = 1.0 / (a / d + b)
+    corrected = law.apply(d)
+    for lo, hi in ((0.8, 1.2), (1.2, 1.6), (1.6, 2.0)):  # the bands the probe prints
+        band = (z >= lo) & (z < hi)
+        assert abs(float(np.median(corrected[band] / z[band])) - 1.0) < 0.01, (lo, hi)
+    worst_affine = max(
+        abs(float(np.median(affine[(z >= lo) & (z < hi)] / z[(z >= lo) & (z < hi)])) - 1.0)
+        for lo, hi in ((0.8, 1.2), (1.6, 2.0))
+    )
+    assert worst_affine > 0.03, "the affine law is the one that tilts; this test is about that"
+
+
+def test_the_range_law_interpolates_between_its_bins_and_holds_beyond_them() -> None:
+    """Between two filled centres the ratio is linear in the network's depth; past the outermost
+    filled centre it is held, never extrapolated into a ratio nobody measured."""
+    from pepin.depth import RangeLaw
+
+    d, z = _range_pool()
+    law = RangeLaw.fit(d, z)
+    assert law is not None
+    lo_c, hi_c = float(law.centres[0]), float(law.centres[-1])
+    middle = 0.5 * (float(law.centres[0]) + float(law.centres[1]))
+    expected = 0.5 * (float(law.ratios[0]) + float(law.ratios[1]))
+    assert float(law.ratio(np.array([middle]))[0]) == pytest.approx(expected)
+    held = law.ratio(np.array([0.05, lo_c / 2.0, hi_c * 3.0, 40.0]))
+    assert held[0] == held[1] == pytest.approx(float(law.ratios[0]))
+    assert held[2] == held[3] == pytest.approx(float(law.ratios[-1]))
+    assert np.isnan(law.apply(np.array([np.nan, -1.0, 0.0]))).all(), "no pixel the law cannot place"
+
+
+def test_the_range_law_needs_two_bins_and_stays_inside_the_affine_law_s_bounds() -> None:
+    """A pool that sees one range says nothing about range (the affine law's fit over all of it
+    is the better answer there), a bin under 50 pairs is not a bin, and no bin may ask for a
+    ratio the scale bounds forbid."""
+    from pepin.depth import RangeLaw, ratio_bounds
+
+    z = np.full(4000, 1.5)
+    assert RangeLaw.fit(_tilted(z), z) is None, "one range, one bin: no law"
+    d, z = _range_pool(n=60)  # 60 pairs over the whole room: no bin fills
+    assert RangeLaw.fit(d, z) is None
+    z = np.linspace(2.0, 6.0, 4000)
+    mad = RangeLaw.fit(z / 5.0, z)  # a network reading five times too near: past the scale floor
+    assert mad is not None and np.all(mad.ratios <= ratio_bounds()[1] + 1e-9)
+    assert mad.ratios[0] == pytest.approx(ratio_bounds()[1])
+
+
+def test_the_range_law_is_written_beside_the_affine_one_and_comes_back_whole(
+    tmp_path: Path,
+) -> None:
+    """One versioned file carries every law: a reader of the old file still finds the affine
+    numbers where they were, the range law comes back to the bit, and a record that fails its
+    own gates comes back as nothing at all."""
+    from pepin.depth import LAW_VERSION, RangeLaw, load_law, load_range, save_law
+
+    d, z = _range_pool()
+    law = RangeLaw.fit(d, z)
+    assert law is not None
+    path = tmp_path / "depth_law.json"
+    save_law(path, 1.76, 0.0, 12000, 1000.0, range_law=law.state())
+    assert json.loads(path.read_text())["version"] == LAW_VERSION
+    assert load_law(path, 1000.0) == (1.76, 0.0, 12000)
+    back = load_range(path, 1000.0)
+    assert back is not None
+    assert np.allclose(back.centres, law.centres, atol=1e-4)
+    assert np.allclose(back.ratios, law.ratios, atol=1e-5)
+    assert np.array_equal(back.counts, law.counts)
+    assert load_range(path, 1000.0 + 2 * 24 * 3600) is None, "a day-old law is another day's room"
+    save_law(path, 1.76, 0.0, 12000, 1000.0)
+    assert load_range(path, 1000.0) is None and load_law(path, 1000.0) is not None
+    assert RangeLaw.restore({"centres": [1.0], "ratios": [0.5], "counts": [500]}) is None
+    wild = {"centres": [1.0, 2.0], "ratios": [0.5, 9.9], "counts": [99, 99]}
+    backwards = {"centres": [2.0, 1.0], "ratios": [0.5, 0.5], "counts": [99, 99]}
+    assert RangeLaw.restore(wild) is None and RangeLaw.restore(backwards) is None
+    assert RangeLaw.restore(None) is None and RangeLaw.restore({"ratios": []}) is None
+
+
+def test_the_range_law_describes_itself_by_bin_for_the_report_line() -> None:
+    """The report line carries the law itself: every filled bin of the network's depth, its
+    ratio, and the pairs behind it."""
+    from pepin.depth import RangeLaw
+
+    d, z = _range_pool()
+    law = RangeLaw.fit(d, z)
+    assert law is not None
+    words = law.describe()
+    assert words.startswith(f"D{float(law.centres[0]):.2f}:{float(law.ratios[0]):.3f} ")
+    assert words.count(":") == law.centres.size
+    assert f"(n {int(law.counts[0])}/" in words and words.endswith(")")
