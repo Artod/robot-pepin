@@ -10,7 +10,7 @@ from synthetic import raycast_room
 from pepin.localization import Localizer
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D
-from pepin.scanmatch import apply_motion, relative_motion
+from pepin.scanmatch import SearchWindow, apply_motion, relative_motion
 from pepin.sources import LIDAR
 
 SPEC = GridSpec(0.05, -4, -3, 8, 6)
@@ -278,3 +278,23 @@ def test_the_covariance_switch_chooses_which_spread_a_match_carries() -> None:
     assert loc.measure(truth, points, LIDAR).covariance == pytest.approx(fit.covariance)
     with pytest.raises(ValueError):
         loc.switch("covariance", "surface")
+
+
+def test_a_coarse_pass_reaches_what_the_tracking_window_cannot_and_names_its_own_bound() -> None:
+    """``coarse_measure`` reaches a pose 10 cm from the guess that a 3 cm tracking window can
+    only walk to its own edge, and its ``edge`` is the COARSE window's bound: a wide search
+    that got to its optimum does not report itself as clipped, while one still held by the
+    outer window does."""
+    grid = furnished_room_map()
+    truth = Pose2D(0.5, 0.0, 0.0)
+    points = raycast_room(truth, beams=360, pillar=PILLAR)
+    guess = Pose2D(0.4, 0.0, 0.0)  # 10 cm behind the truth, three windows away
+    loc = Localizer(grid, guess, window=SearchWindow(0.03, 0.015, 3.0, 0.75))
+    near = loc.measure(guess, points, LIDAR)
+    assert near.edge and math.hypot(near.x - truth.x, near.y - truth.y) > 0.05, "held at the bound"
+    wide = loc.coarse_measure(guess, points, LIDAR, coarse=SearchWindow(0.2, 0.04, 8.0, 2.0))
+    assert math.hypot(wide.x - truth.x, wide.y - truth.y) < 0.05, "the coarse pass reaches it"
+    assert wide.fit > near.fit, "and the scan fits the map better where it got to"
+    assert not wide.edge, "the answer sits inside the coarse window: not a bound"
+    clipped = loc.coarse_measure(guess, points, LIDAR, coarse=SearchWindow(0.03, 0.015, 3.0, 0.75))
+    assert clipped.edge, "a coarse window the optimum lies outside of is still a bound"
