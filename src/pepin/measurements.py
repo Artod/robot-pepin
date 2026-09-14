@@ -33,7 +33,7 @@ from pepin.fusion import Matrix, PoseMeasurement, carried, fuse
 from pepin.odometry import Pose2D
 from pepin.scanmatch import relative_motion
 from pepin.selfcheck import SelfCheck
-from pepin.sources import CAMERA, SourceRegistry
+from pepin.sources import CAMERA, GRAPH, SourceRegistry
 from pepin.timeline import OdomTrail
 
 __all__ = [
@@ -41,6 +41,7 @@ __all__ = [
     "MeasurementGate",
     "MeasurementUpdate",
     "RemoteMeasurement",
+    "graph_measurement",
 ]
 
 # How old a measurement may be, in seconds, when the update it rides on happens: past this the
@@ -159,6 +160,46 @@ class RemoteMeasurement:
             f"{self.source} ({self.x:+.2f}, {self.y:+.2f}, {math.degrees(self.yaw):+.0f} deg) "
             f"fit {self.fit:.2f}" + (", edge" if self.edge else "")
         )
+
+
+def graph_measurement(
+    belief: Pose2D,
+    correction: Pose2D,
+    stamp: float,
+    map_id: str,
+    source: str = GRAPH,
+    floor_xy_m: float = REMOTE_FLOOR_XY_M,
+    floor_yaw_deg: float = REMOTE_FLOOR_YAW_DEG,
+) -> RemoteMeasurement:
+    """A pose graph's verdict about where the cart is, as a measurement on the SAME map the
+    tracker drives on: the tracker's own belief moved by the graph's correction.
+
+    ``belief`` is the pose the graph was fed (the tracker's, in the map frame) and ``correction``
+    is what the graph says about that frame -- RTAB-Map's ``map_to_odom``, identity until an
+    optimisation moves it. Beside a known map the graph's frame and the lidar map's are the same
+    frame at the session's start pose, so composing the two reads the graph's answer straight
+    back in map coordinates: no second owner of ``map -> odom``, one more word in the fusion.
+
+    The covariance is the floor and nothing else. A graph that has never closed a loop reports
+    its own pose variance as the whole session's accumulated odometry (497985 m2, a standard
+    deviation of 706 m, measured on this stack 2026-09-14), and one that just closed one reports
+    the loop link's alone (6.9e-05 m2, 8 mm) -- neither is what the answer is worth. The floor is
+    the camera's measured floor for the same reason it exists there: a remote word about a place
+    is worth centimetres, whatever its own arithmetic claims.
+
+    Returns the measurement, ready to travel (:meth:`RemoteMeasurement.to_json`).
+    """
+    cos, sin = math.cos(correction.theta), math.sin(correction.theta)
+    x = correction.x + cos * belief.x - sin * belief.y
+    y = correction.y + sin * belief.x + cos * belief.y
+    turned = correction.theta + belief.theta
+    yaw = math.atan2(math.sin(turned), math.cos(turned))
+    covariance: NDArray[np.float64] = np.diag(
+        [floor_xy_m**2, floor_xy_m**2, math.radians(floor_yaw_deg) ** 2]
+    )
+    return RemoteMeasurement(
+        x=x, y=y, yaw=yaw, covariance=covariance, source=source, stamp=stamp, fit=1.0, map_id=map_id
+    )
 
 
 @dataclass(frozen=True)
