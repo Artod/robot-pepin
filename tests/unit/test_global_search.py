@@ -130,5 +130,6 @@ def test_the_tracker_names_the_flags_it_owns() -> None:
     """A node routes every flag to whichever object names it; the tracker refuses the rest."""
     loc = Localizer(furnished_room_map(), Pose2D())
     assert "rest_lock" in loc.switches and "accept_candidates" not in loc.switches
+    settings: dict[str, object] = {"sources": loc.sources.enabled, "covariance": "fit"}
     for name in loc.switches:
-        loc.switch(name, loc.sources.enabled if name == "sources" else True)
+        loc.switch(name, settings.get(name, True))

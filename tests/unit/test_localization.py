@@ -11,6 +11,7 @@ from pepin.localization import Localizer
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D
 from pepin.scanmatch import apply_motion, relative_motion
+from pepin.sources import LIDAR
 
 SPEC = GridSpec(0.05, -4, -3, 8, 6)
 MAPPING_POSES = (Pose2D(0, 0, 0), Pose2D(1, 0.5, 0.7), Pose2D(-1, -0.5, -2.0), Pose2D(0.5, -1, 2.5))
@@ -257,3 +258,23 @@ def test_two_agreeing_rest_residuals_beyond_the_carry_thresholds_are_taken_whole
     loc._blend(here, lifted, at_rest=True, dt_s=1.0, carry_gain=CARRY_MIN_GAIN / 2)
     _, gain = loc._blend(here, again, at_rest=True, dt_s=1.0, carry_gain=CARRY_MIN_GAIN / 2)
     assert gain < 1.0 and loc.stats.carries == 0, "agreeing twice is not enough: the map must fit"
+
+
+def test_the_covariance_switch_chooses_which_spread_a_match_carries() -> None:
+    """``peak`` reads the match's own score peak at the matcher's calibrated temperature;
+    ``fit`` is the fit-scaled surface moment that shipped before it, and both stay reachable
+    between two scans. The lidar's revolution in a furnished room is sharp, so the peak's
+    answer is the tighter of the two — which is the whole point of calibrating it."""
+    grid = furnished_room_map()
+    truth = Pose2D(0.5, 0.0, 0.0)
+    points = raycast_room(truth, beams=360, pillar=PILLAR)
+    peak = Localizer(grid, truth, covariance="peak").measure(truth, points, LIDAR)
+    fit = Localizer(grid, truth, covariance="fit").measure(truth, points, LIDAR)
+    assert peak.sigmas[0] < fit.sigmas[0], f"{peak.sigmas[0]:.4f} vs {fit.sigmas[0]:.4f} m"
+    assert (peak.x, peak.y) == pytest.approx((fit.x, fit.y))  # the same pose, another spread
+    loc = Localizer(grid, truth)
+    assert loc.covariance == "peak" and "covariance peak" in loc.settings()
+    loc.switch("covariance", "fit")
+    assert loc.measure(truth, points, LIDAR).covariance == pytest.approx(fit.covariance)
+    with pytest.raises(ValueError):
+        loc.switch("covariance", "surface")
