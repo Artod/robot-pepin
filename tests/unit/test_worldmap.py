@@ -661,6 +661,28 @@ def test_a_seeded_map_becomes_the_lidars_own_layer_at_once() -> None:
     assert np.array_equal(fresh.lidar_slice().values, view.values), "the seed stands"
 
 
+def test_a_seeded_volume_hands_a_matcher_cut_above_the_seed_s_weight_nothing() -> None:
+    """What a seeded start costs the camera, stated once so nobody discovers it on the robot:
+    seeding writes ONE weight per cell (4.0), so the map's own cut carries every seeded wall
+    while a matcher's cut in the tens carries none of them, and /map_camera goes out
+    all-unknown until the camera has painted its own frames on a cell. The band then hardens at
+    the lidar's poses, which is the point — but the camera says nothing while it does."""
+    world = room()
+    view = world.lidar_slice()
+    fresh = WorldMap(spec(), mount())
+    seeded = fresh.seed_from_grid(view.values, view.resolution_m, view.origin)
+    assert seeded > 0
+    walls = view.counts()["occupied"]
+    assert fresh.camera_band_slice(SliceLaw(min_weight=2.0)).counts()["occupied"] == walls
+    hard = fresh.hardness(SliceLaw(min_weight=20.0), SliceLaw(min_weight=2.0))
+    assert hard == {
+        "occupied": 0.0,
+        "occupied_floor": float(walls),
+        "share": 0.0,
+        "min_weight": 20.0,
+    }, "a seeded wall is invisible to any cut above the weight seeding wrote"
+
+
 def test_maturity_and_the_report_line_say_what_is_in_the_volume() -> None:
     world = room()
     stats = world.maturity()

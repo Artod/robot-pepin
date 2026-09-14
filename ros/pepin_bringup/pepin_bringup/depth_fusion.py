@@ -329,7 +329,15 @@ FLAGS = FlagSet(
         " once: only walls integrated for many seconds from several places would remain",
         off_when="lower it to map_min_weight to reproduce the old behaviour — the matcher handed"
         " every cell two frames had touched. The report line says what the band costs: the share"
-        " of its occupied cells this threshold keeps",
+        " of its occupied cells this threshold keeps. Those numbers are a volume painted through"
+        " 190066 frames; a volume that was just SEEDED (seed_map) or started fresh has nothing"
+        " hard in it at all — WorldMap.seed_from_grid writes weight 4.0 per cell, so a seeded"
+        " flat3_straight gives 3837 occupied cells at the map's cut and 0 at this one, and"
+        " /map_camera goes out all-unknown until the camera has painted its own 20 frames on a"
+        " cell. That is the architecture and not a fault — the band hardens at the lidar's poses"
+        " while the camera says nothing — but it means the camera contributes no measurement for"
+        " the first minutes of a seeded drive (laptop_localizer counts them low_fit), and the"
+        " report line reads 'hard 0 % of 3837' while it lasts",
         range=(0.0, GridSpec.max_weight),
     ),
     Flag(

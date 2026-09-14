@@ -566,13 +566,17 @@ class WorldMap:
 
     def hardness(self, law: SliceLaw, floor: SliceLaw | None = None) -> dict[str, float]:
         """How much of the camera's band is hard enough to localise on: the occupied cells the
-        matcher's cut (``law``) keeps, the occupied cells a lenient cut (``floor``, the default
-        law) finds, and the share of the second the first keeps.
+        matcher's cut (``law``) keeps, the occupied cells the map's own, lenient cut (``floor``,
+        the default law where the caller has none) finds, and the share of the second the first
+        keeps.
 
         A share near 1 means the band is as hard as it is big — every wall in it has been
         integrated for seconds from more than one frame. A share near 0 means the matcher would
         be handed a band the camera painted a moment ago at the very pose it is asking about,
-        which is how camera-only localisation walked away in 20-33 cm steps (2026-09-13).
+        which is how camera-only localisation walked away in 20-33 cm steps (2026-09-13) — or,
+        on a volume just seeded from a saved map, a band with nothing in it at all:
+        :meth:`seed_from_grid` writes one weight per cell and a matcher cut above it sees none
+        of them.
         """
         hard = self.camera_band_slice(law).counts()
         soft = self.camera_band_slice(floor if floor is not None else SliceLaw()).counts()
@@ -628,7 +632,7 @@ class WorldMap:
         lidar = self.lidar_slice(lidar_law).counts()
         law = camera_law if camera_law is not None else SliceLaw()
         camera = self.camera_band_slice(law).counts()
-        hard = self.hardness(law)
+        hard = self.hardness(law, lidar_law)
         return (
             f"lidar slice {lidar['occupied']} occupied / {lidar['free']} free /"
             f" {lidar['unknown']} unknown, camera band {camera['occupied']} occupied /"
