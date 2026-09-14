@@ -47,7 +47,7 @@ return's elevation is a curve of its range, so there the angle and the depth are
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import pairwise
@@ -578,18 +578,37 @@ class AffineLaw(LawStage):
     a frame without pairs keeps the law. Until POOL_MIN_SAMPLES pairs are pooled there is no
     law worth applying (``ready`` is false: the raw network's depth is 1.5-2x too far and must
     not reach the costmap) — unless a saved law was ``seed``-ed, which holds until the live
-    pool can replace it. Bit for bit :class:`pepin.depth.AffineScale` on unit weights."""
+    pool can replace it.
+
+    ``slew_per_s`` caps how fast the law may move: the largest relative change of the published
+    inverse depth over the pool's own depth range, per second (0 applies every fit whole, which
+    is bit for bit :class:`pepin.depth.AffineScale` on unit weights). The pool is a queue of
+    frames, not of seconds, so at 9.4 frames/s a 600-frame pool is 64 s deep and half a minute
+    of driving replaces half of it; and the shift term switches on and off with the pool's
+    depth spread (:data:`pepin.depth.MIN_DEPTH_SPREAD`), so the same pairs are described first
+    as a scale alone and then as a scale and a shift. Both were seen on 2026-09-14: a 1.74 b 0
+    standing, a 2.33 b -0.200 within 30 s of driving, and back — while the volume kept the
+    paint of whichever law was in force."""
 
     name = "affine_law"
 
-    def __init__(self, pool_frames: int = POOL_FRAMES) -> None:
+    def __init__(
+        self,
+        pool_frames: int = POOL_FRAMES,
+        slew_per_s: float = 0.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.a = 1.0
         self.b = 0.0
         self.frames = 0
         self.held = 0
+        self.slew_per_s = slew_per_s
         self._pool: list[Pairs] = []
         self._pool_frames = pool_frames
         self._seeded = False
+        self._clock = clock
+        self._last_fit: float | None = None  # when the law last moved, for the slew's seconds
+        self._asked: tuple[float, float] | None = None  # the fit the slew is still walking to
 
     def seed(self, a: float, b: float) -> None:
         """Start from a saved law (the map's): applied until POOL_MIN_SAMPLES live pairs exist."""
@@ -627,7 +646,44 @@ class AffineLaw(LawStage):
             return  # the map's law outranks a fit on a handful of pairs
         pool = self.pool
         assert pool is not None
-        self.a, self.b = fit_affine(pool.d, pool.z, pool.weight)
+        self.a, self.b = self._toward(*fit_affine(pool.d, pool.z, pool.weight), pool)
+
+    def _toward(self, a_fit: float, b_fit: float, pool: Pairs) -> tuple[float, float]:
+        """The law to hold now, walking toward the fresh fit no faster than ``slew_per_s``.
+
+        The step is measured where it hurts: the largest relative move of the published inverse
+        depth over the pool's own depth range (its 5th and 95th percentiles of network depth),
+        not in ``a``, because the fit's two parameters trade against each other and agree near
+        the pool's middle while they differ at its ends. Over the allowance the law takes the
+        blend of old and new that exactly spends it — a blend of two affine laws is affine.
+        ``slew_per_s`` at or below zero, or the first live fit (nothing to walk from), applies
+        the fit whole."""
+        now = self._clock()
+        last, self._last_fit = self._last_fit, now
+        if self.slew_per_s <= 0.0 or last is None:
+            self._asked = None
+            return a_fit, b_fit
+        step = self._reach(a_fit, b_fit, pool)
+        allowed = self.slew_per_s * max(0.0, now - last)
+        if step <= allowed:
+            self._asked = None
+            return a_fit, b_fit
+        self._asked = (a_fit, b_fit)
+        t = allowed / step
+        return self.a + t * (a_fit - self.a), self.b + t * (b_fit - self.b)
+
+    def _reach(self, a_fit: float, b_fit: float, pool: Pairs) -> float:
+        """How far the fresh law is from the one in hand: the largest relative change of the
+        published inverse depth at the pool's 5th and 95th percentiles of network depth."""
+        d = pool.d[np.isfinite(pool.d) & (pool.d > 0.0)]
+        if d.size == 0:
+            return 0.0
+        ends = np.percentile(d, (5, 95))
+        old = self.a / ends + self.b
+        new = a_fit / ends + b_fit
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rel = np.abs(new - old) / np.abs(old)
+        return float(np.max(rel[np.isfinite(rel)], initial=0.0))
 
     def apply(self, depth: Array, ctx: FrameContext) -> Array:
         """The depth through 1 / z = a / D + b."""
@@ -640,7 +696,10 @@ class AffineLaw(LawStage):
         source = "" if self.fitted else " (seed)" if self._seeded else " (none yet)"
         clipped = at_bound(self.a, self.b)
         edge = f" [{clipped} AT BOUND]" if clipped else ""
-        return f"a {self.a:.2f} b {self.b:+.3f} on {self.pooled} pairs{source}{edge}"
+        asked = ""
+        if self._asked is not None:
+            asked = f", slewing to a {self._asked[0]:.2f} b {self._asked[1]:+.3f}"
+        return f"a {self.a:.2f} b {self.b:+.3f} on {self.pooled} pairs{source}{edge}{asked}"
 
 
 class FloorGeometry:

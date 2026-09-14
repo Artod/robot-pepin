@@ -475,3 +475,52 @@ def test_the_floor_geometry_is_recomputed_only_when_the_lean_moves() -> None:
     assert leaning is not level and not np.array_equal(leaning, level, equal_nan=True)
     other = geometry.expected(FrameContext(Intrinsics(400.0, 400.0, 320.0, 180.0, 640, 360), CAM))
     assert other is not leaning
+
+
+# ---- the law's speed limit ----------------------------------------------------------------------
+def _law_pairs(a: float, b: float, n: int = 400) -> Pairs:
+    """``n`` pairs a network obeying 1 / z = a / D + b would give over 1-4 m of true depth."""
+    z = np.linspace(1.0, 4.0, n)
+    d = a / (1.0 / z - b)
+    return Pairs.of(d, z, lift_of(np.full(n, INTR.cy), INTR))
+
+
+def _reach(law: AffineLaw, a: float, b: float, pairs: Pairs) -> float:
+    """The relative move of the inverse depth at the pool's ends between the law and (a, b)."""
+    ends = np.percentile(pairs.d, (5, 95))
+    return float(np.max(np.abs((a / ends + b) - (law.a / ends + law.b)) / (law.a / ends + law.b)))
+
+
+def test_the_law_walks_to_a_far_fit_no_faster_than_the_slew_allows() -> None:
+    """A law with a slew takes its first live fit whole and then moves at most ``slew_per_s``
+    of inverse depth a second, saying in its report line where it is walking to; with the slew
+    off it takes every fit whole, as the node always did."""
+    now = [0.0]
+    law = AffineLaw(pool_frames=1, slew_per_s=0.01, clock=lambda: now[0])
+    law.fit(_law_pairs(1.75, 0.0))
+    assert (law.a, law.b) == pytest.approx((1.75, 0.0), abs=0.02)  # the first fit, whole
+    assert "slewing" not in law.describe()
+    far = _law_pairs(2.30, -0.15)
+    before, asked = (law.a, law.b), _reach(law, 2.30, -0.15, far)
+    now[0] += 1.0
+    law.fit(far)
+    assert asked > 0.05  # the fit really is far away: worth a speed limit
+    moved = np.max(
+        np.abs(
+            (law.a / np.percentile(far.d, (5, 95)) + law.b)
+            - (before[0] / np.percentile(far.d, (5, 95)) + before[1])
+        )
+        / (before[0] / np.percentile(far.d, (5, 95)) + before[1])
+    )
+    assert moved == pytest.approx(0.01, rel=1e-6)  # one second of the allowance, no more
+    assert "slewing to a 2.30 b -0.150" in law.describe()
+    for _ in range(400):  # given the seconds, it arrives and stops saying so
+        now[0] += 1.0
+        law.fit(far)
+    assert (law.a, law.b) == pytest.approx((2.30, -0.15), abs=0.01)
+    assert "slewing" not in law.describe()
+    quick = AffineLaw(pool_frames=1, clock=lambda: now[0])  # slew off: every fit whole
+    quick.fit(_law_pairs(1.75, 0.0))
+    now[0] += 1.0
+    quick.fit(far)
+    assert (quick.a, quick.b) == pytest.approx((2.30, -0.15), abs=0.01)
