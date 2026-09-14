@@ -159,6 +159,30 @@ def probe_board(host: str, report: HealthReport) -> Probe:
     return Probe("board", True, f"up {v.uptime}, cpu {temp}, {v.mem_free_mb} MB free")
 
 
+def probe_board_budget(host: str) -> Probe:
+    """The board's process census: every process against its budget in config/board_manifest.json.
+
+    Green only when nothing is over budget, missing or unlisted — an unlisted process above
+    1 % CPU is usually a ros2 CLI tool left behind, which is what takes this board to load 12.
+    The whole probe is one ``ps``; ``ros/board.sh census`` prints the same census as a table.
+    """
+    from pepin.census import CENSUS_COMMAND, load_manifest, split_sections, take_census
+
+    r = _ssh(host, CENSUS_COMMAND)
+    if r.returncode != 0:
+        timed_out = r.returncode == SSH_TIMED_OUT
+        return Probe("board budget", False, "ssh timeout" if timed_out else "ps failed")
+    try:
+        sections = split_sections(r.stdout)
+        census = take_census(load_manifest(), sections.get("ps", ""), sections.get("load", ""))
+    except (OSError, ValueError) as exc:  # no manifest on this machine, or a dump without a load
+        return Probe("board budget", False, f"census failed: {exc}")
+    load = f"load {census.load.one:.1f} on {census.manifest.cores} cores"
+    if census.green:
+        return Probe("board budget", True, f"{load}, every budget kept")
+    return Probe("board budget", False, f"{load}; " + "; ".join(census.problems)[:120])
+
+
 def ros_container_status(host: str) -> str | None:
     """``docker ps`` status of the ROS 2 container (``Up 12 minutes``); None when not running."""
     r = _ssh(host, "docker ps --filter name=pepin-ros --format '{{.Status}}' 2>/dev/null")
@@ -386,6 +410,7 @@ def run_health(
     board = probe_board(host, report)
     add(board)
     if board.ok:
+        add(probe_board_budget(host))
         add(probe_bridges(host))
         # Re-check right before each bridge probe: a drive can start between two probes,
         # and the probes themselves also step aside if they get kicked mid-way.
