@@ -55,11 +55,16 @@ REPORT_S = 30.0
 FLAGS = FlagSet(
     Flag(
         "vo_publish",
-        False,
+        True,
         description=f"the gated visual odometry leaves this laptop as {VO_TOPIC}, where the"
         " board's EKF fuses it as a third input beside the wheels and the gyro; off, the node"
         " still measures and reports and the EKF is exactly what it was without it",
-        why="off because the half that matters is unmeasured. AT REST it is measured and it"
+        why="on since 2026-09-14 13:40: at full rate (vo_publish_hz 10) the board's EKF missed its"
+        " 20 Hz period 0 times in 130 s at rest and twice in 3 min of driving, |vy| stayed under"
+        " 0.0003 m/s at rest, the odometry runaway guard counted 0, and the live pose against the"
+        " lidar truth was 0.9 / 2.1 / 4.2 cm — the same as without (tapes 0261/0262 vs 0265/0266)."
+        " Before that it shipped off because the half that matters is unmeasured. AT REST it is"
+        " measured and it"
         " passes: on this laptop's live topics, with the launch's own parameters, this node"
         " gated 9.4-9.7 poses/s and dropped none, and the drift over 60 s with the wheels"
         " reporting a hard zero was 0.2 cm and 0.0 deg (worst stretch 0.4 cm); the same camera"
@@ -231,11 +236,16 @@ FLAGS = FlagSet(
     ),
     Flag(
         "vo_publish_hz",
-        3.0,
+        10.0,
         range=(0.0, 30.0),
         description="how often a gated pose may leave for the board's EKF, in hertz; 0 publishes"
         " every one of them",
-        why="3 Hz because the board could not carry nine. With /vo flowing at ~9 poses/s the"
+        why="10 Hz (no cap in practice, rtabmap answers ~9.5/s) since 2026-09-14 13:40: with vy"
+        " observable in ekf.yaml and origin resets refused, the board's EKF took the full rate"
+        " with 0"
+        " misses at rest and 2 in 3 min of driving. The 3 Hz of the morning was chosen while the"
+        " EKF state was running away: 3 Hz because the board could not carry nine. With /vo"
+        " flowing at ~9 poses/s the"
         " EKF logged 'Failed to meet update rate' continuously — 56-94 ms of every 50 ms period"
         " at its 20 Hz — and Nav2's container sat at 200 % CPU (2026-09-14). The distance is the"
         " same distance: the published pose is absolute (vo_continuous), so the filter"
