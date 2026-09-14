@@ -65,7 +65,7 @@ import os
 import threading
 import time
 import traceback
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +77,7 @@ from sensor_msgs.msg import CameraInfo, Image, LaserScan
 
 from pepin.camera import CameraConfig, mount_transform, optics
 from pepin.depth import (
+    MIN_SAMPLES,
     POOL_MIN_SAMPLES,
     SCALE_CEILING,
     SCAN_WINDOW_S,
@@ -88,6 +89,7 @@ from pepin.depth import (
     load_ray,
     nearest_stamp,
     optical_heading,
+    plane_in_view_from,
     save_law,
     scan_points,
     set_scale_ceiling,
@@ -167,7 +169,12 @@ FLAGS = FlagSet(
         " 0.0-0.1 ms a frame. The one on/off turn on the robot is split: a held law was better"
         " above the band (9.6-19.3 cm against 16-46 cm) and worse at it (12.0 cm against 7-9 cm),"
         " and the band is the row the costmap drives on",
-        on_when="whenever the lidar spins — it is what makes the network's depth metric",
+        on_when="whenever the lidar spins — it is what makes the network's depth metric. It can"
+        " only judge past the range at which its own plane enters the picture"
+        " (pepin.depth.plane_in_view_from: 0.71 m with the head 23.7 deg down, the lens 0.82 m"
+        " above the plane, a 640x360 frame). Parked closer than that — the working case at a"
+        " desk — not one beam lands in the image, the report says so (lidar plane out of the"
+        " picture N frames) instead of asking whether /scan is alive, and the law is held",
         off_when="to rehearse a lidar that dies mid-run (the law freezes, nothing else changes),"
         " or to compare the slices above the band, where the frozen law measured better",
     ),
@@ -413,6 +420,7 @@ class DepthStream(Node):
         cfg = CameraConfig.load(config, board=board)
         x, y, z, _roll, pitch, _yaw = mount_transform(cfg)
         self._camera_config = CameraPose(x, y, z, pitch)  # the fallback while TF has no edge
+        self._last_cam = self._camera_config  # the head's last pose, for the report's geometry
         self._camera_cfg = cfg  # config/camera.json's own optics until a camera_info arrives
         self._intr: Intrinsics | None = None
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
@@ -618,6 +626,13 @@ class DepthStream(Node):
             self._last_verdict_wall = time.time()
         else:
             tally.count("held")
+            # Why this frame got no verdict, so the report does not blame a lidar that is
+            # answering: the beams are cached on the context the pipeline just read, so asking
+            # costs nothing. No scan at all is already counted by the absence of a scan_age.
+            if lidar is not None:
+                beams = ctx.beams
+                blind = beams is None or beams.shape[0] == 0
+                tally.count("beams_out_of_frame" if blind else "beams_too_few")
         if result.withheld:
             tally.count("withheld")
             self.get_logger().info(
@@ -662,11 +677,13 @@ class DepthStream(Node):
         pose = self._poser.camera_in_base(stamp_seconds(stamp))
         if pose is None:
             self._tally.count("camera_from_config")
+            self._last_cam = self._camera_config
             return self._camera_config, None
         _pitch, pan = optical_heading(pose.rotation)
         if abs(pan) > PAN_NOTICE_RAD:
             self._tally.count("camera_panned")
-        return CameraPose.from_optical(pose.rotation, pose.translation), pose
+        self._last_cam = CameraPose.from_optical(pose.rotation, pose.translation)
+        return self._last_cam, pose
 
     def _as_scan(self, depth: Array, image: Image, ctx: FrameContext) -> LaserScan:
         """The depth folded onto the floor plane, in base_link, stamped like the image."""
@@ -754,7 +771,7 @@ class DepthStream(Node):
         if self._switches.on("lidar_anchor") and c["verdicts"] == 0 and c["frames"]:
             self.get_logger().warning(
                 "no lidar beam judged the depth in this window: the law is held"
-                f" ({time.time() - self._last_verdict_wall:.0f} s old); is /scan alive?"
+                f" ({time.time() - self._last_verdict_wall:.0f} s old); {self._blind_because(c)}"
             )
         law = self._law
         self.get_logger().info(
@@ -782,6 +799,37 @@ class DepthStream(Node):
                     throttle_duration_sec=300,
                 )
 
+    def _blind_because(self, counts: Counter[str]) -> str:
+        """Why no beam judged the depth this window, in the words of the counter that won:
+        the lidar silent, its plane under the bottom of the picture (the cart parked closer
+        than :func:`pepin.depth.plane_in_view_from`), or too few beams surviving the edges.
+
+        Worth its own sentence: the old line asked "is /scan alive?" for all three, and a cart
+        parked half a metre from a wall — the working case — sent a morning into the bridge's
+        QoS while the lidar was answering at 9.5 Hz (2026-09-14).
+        """
+        if counts["beams_out_of_frame"] >= max(counts["beams_too_few"], 1):
+            near = self._plane_in_view()
+            where = "" if near is None else f", and it shows only past {near:.2f} m ahead"
+            return (
+                "the scans arrive but the lidar's plane is out of the picture"
+                f"{where}: back the cart off or tilt the head down to refit the law"
+            )
+        if counts["beams_too_few"]:
+            return (
+                f"beams land in the picture but under {MIN_SAMPLES} of them survive the edge"
+                " mask on any frame"
+            )
+        return "no scan came within SCAN_MAX_AGE_S of any frame: is /scan alive?"
+
+    def _plane_in_view(self) -> float | None:
+        """How far ahead the lidar's plane enters the picture at the head's last pose, or
+        ``None`` while the optics or the mount are still unknown."""
+        mount = self._lidar_mount
+        if self._intr is None or mount is None:
+            return None
+        return plane_in_view_from(self._intr, self._last_cam, float(mount.translation[2]))
+
     def _model_note(self) -> str:
         """The CPU model's state for the report line: nothing once it answers, ``not loaded``
         while no frame has asked for it, and why it failed when one did."""
@@ -794,8 +842,9 @@ class DepthStream(Node):
     def _extras(self, w: Window) -> str:
         """The parts of the report line a window may have nothing to say about: how old the
         anchoring scans were, the scans no odometry could carry, the frames whose camera pose
-        came from the config instead of TF, the frames with the head turned, the cart's lean,
-        and the last TF failure of each kind."""
+        came from the config instead of TF, the frames with the head turned, the frames whose
+        beams fell outside the picture or were too few to judge it, the cart's lean, and the
+        last TF failure of each kind."""
         c, extra = w.counts, ""
         ages = w.samples.get("scan_age", [])
         if ages:
@@ -806,6 +855,12 @@ class DepthStream(Node):
             extra += f", camera pose from config {c['camera_from_config']} frames (no TF edge)"
         if c["camera_panned"]:
             extra += f", head panned {c['camera_panned']} frames (projected as if not)"
+        if c["beams_out_of_frame"]:
+            near = self._plane_in_view()
+            where = "" if near is None else f" (it shows past {near:.2f} m ahead)"
+            extra += f", lidar plane out of the picture {c['beams_out_of_frame']} frames{where}"
+        if c["beams_too_few"]:
+            extra += f", beams under {MIN_SAMPLES} clean {c['beams_too_few']} frames"
         extra += f", {self._lean.report()}"
         if w.notes:
             extra += ", tf: " + "; ".join(

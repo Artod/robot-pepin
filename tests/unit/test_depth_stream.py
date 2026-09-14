@@ -53,6 +53,7 @@ from pepin.depth import (  # noqa: E402
     floor_anchor,
     floor_depth,
     optical_heading,
+    plane_in_view_from,
     project,
     quaternion_from_matrix,
     save_law,
@@ -436,6 +437,45 @@ def test_a_scan_the_odometry_cannot_carry_passes_as_it_is_and_is_counted(build: 
     frame(node, net, CONFIG_CAM, 2.0, 0)
     counts = node._tally.take().counts
     assert counts["uncarried"] == 1 and counts["frames"] == 1 and counts["verdicts"] == 1
+
+
+def test_a_cart_parked_under_the_lidar_s_plane_is_told_so_and_not_asked_about_scan(
+    build: Build,
+) -> None:
+    """The cart parked 0.4 m from a wall — closer than the distance at which the lidar's plane
+    enters the picture, so not one beam lands in the image while the lidar answers at full rate.
+    The window must name that, not send the reader to /scan: the counter says how many frames
+    and from how far the plane shows, and the warning says to back off or tilt the head.
+    """
+    node, net = build(law=LAW)
+    near = plane_in_view_from(INTR, CONFIG_CAM, LIDAR_Z_M)
+    assert near is not None and near > 0.5
+    for k, wall_x in enumerate((0.4, 0.45)):
+        frame(node, net, CONFIG_CAM, wall_x, k)
+    counts = node._tally.take().counts
+    assert counts["beams_out_of_frame"] == 2 and counts["verdicts"] == 0
+    assert counts["beams_too_few"] == 0 and counts["held"] == 2
+    for k, wall_x in enumerate((0.4, 0.45)):  # the window the report reads is its own
+        frame(node, net, CONFIG_CAM, wall_x, k)
+    node._report()
+    warning = node.logger.texts("warning")[-1]
+    assert "the lidar's plane is out of the picture" in warning
+    assert f"past {near:.2f} m ahead" in warning and "is /scan alive?" not in warning
+    line = node.logger.texts("info")[-1]
+    assert f"lidar plane out of the picture 2 frames (it shows past {near:.2f} m ahead)" in line
+
+
+def test_without_a_scan_at_all_the_window_still_asks_whether_scan_is_alive(build: Build) -> None:
+    """The other blindness: no scan reaches the node, so no beam is even projected — the
+    question about /scan is the right one and stays."""
+    node, net = build(law=LAW)
+    stamp = _stamp(0)
+    net.frames.append(_network(_scene(CONFIG_CAM, 2.0), seed=0))
+    node._process(_image(stamp))  # no scan delivered
+    node._report()
+    counts = node._tally.take().counts
+    assert counts["beams_out_of_frame"] == 0 and counts["beams_too_few"] == 0
+    assert "is /scan alive?" in node.logger.texts("warning")[-1]
 
 
 def test_the_imu_leans_the_floor_only_while_something_asks_for_the_lean(build: Build) -> None:
