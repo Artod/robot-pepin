@@ -9,7 +9,11 @@ Safety lives here, not on the laptop: a deadman stops the wheels when no
 twist has arrived for half a second (wifi froze, the script crashed, the
 laptop went to sleep); the wheels are armed (torque on) only while someone
 is driving and released ten seconds after the last motion, so the cart can
-always be pushed by hand when idle. Nothing that talks to a laptop runs on
+always be pushed by hand when idle. The encoders have the last word on that
+release: ten seconds in which the wheels did not turn frees them whatever is
+being commanded (``disarm_without_travel`` in config/base.json), because a
+controller left commanding a twist the cart cannot follow kept the servos
+locked all afternoon on 2026-09-14. Nothing that talks to a laptop runs on
 the tick thread: each client has its own reader and writer threads, and a
 laptop that stops reading is dropped, not waited for.
 
@@ -294,19 +298,28 @@ class BaseServerCore:
         servo_names: list[str] | None = None,
         deadman_s: float = DEADMAN_S,
         disarm_after_s: float = 10.0,
+        disarm_without_travel: bool = True,
+        idle_travel_m: float = 0.01,
         latency: LatencyTracker | None = None,
         neck: NeckReader | None = None,
         mover: NeckMover | None = None,
     ) -> None:
         """``servo_names``: the roster :meth:`command` pings; ``latency`` feeds ``bus_p95_ms``;
         ``neck`` answers the ``neck`` command and ``mover`` the two move commands (None for
-        either: that command answers an error)."""
+        either: that command answers an error).
+
+        ``disarm_without_travel`` releases the wheels after ``disarm_after_s`` in which the
+        ENCODERS moved less than ``idle_travel_m``, whatever the commands claim; False is the
+        behaviour before 2026-09-14, which counted from the last non-zero twist alone.
+        """
         self._bus = bus
         self._base = DiffDriveBase(bus, config)
         self._odom = DiffDriveOdometry(config.geometry)
         self._servo_names = servo_names or [LEFT, RIGHT]
         self._deadman_s = deadman_s
         self._disarm_after_s = disarm_after_s
+        self._disarm_without_travel = disarm_without_travel
+        self._idle_travel_m = idle_travel_m
         self._latency = latency
         self._neck = neck
         self._mover = mover
@@ -318,6 +331,12 @@ class BaseServerCore:
         self.bus_ok = True
         self._last_command_at: float | None = None  # any twist: feeds the deadman
         self._last_motion_at: float | None = None  # a non-zero twist: feeds the idle release
+        # ...and the same clock read off the WHEELS: when the encoders last said the cart really
+        # travelled. A controller that keeps commanding a twist the cart cannot follow (a stalled
+        # Nav2 after a cancelled drive, 2026-09-14) refreshes the clock above for ever and left
+        # the servos locked with the cart standing; this one it cannot touch.
+        self._last_travel_at: float | None = None
+        self._still_travel = [0.0, 0.0]  # signed wheel travel since that moment, per wheel
         self._acc = [0.0, 0.0]  # wheel travel since the last snapshot
         self._primed = False
 
@@ -341,7 +360,7 @@ class BaseServerCore:
             if twist.linear or twist.angular:
                 self._last_motion_at = now
                 if not self.armed:
-                    self._arm()
+                    self._arm(now)
             self._apply(twist)
         elif cmd == "stop":
             self._last_command_at = now
@@ -408,6 +427,14 @@ class BaseServerCore:
         self._odom.update(*travel)
         self._acc[0] += travel[0]
         self._acc[1] += travel[1]
+        # Signed, not absolute: encoder noise is zero-mean and would otherwise add up to a
+        # centimetre of "travel" a minute, while a cart genuinely creeping at a millimetre a
+        # second does pass the threshold within the idle time.
+        self._still_travel[0] += travel[0]
+        self._still_travel[1] += travel[1]
+        if max(abs(self._still_travel[0]), abs(self._still_travel[1])) >= self._idle_travel_m:
+            self._still_travel = [0.0, 0.0]
+            self._last_travel_at = now
         last_cmd, last_motion = self._last_command_at, self._last_motion_at
         if self.moving and last_cmd is not None and now - last_cmd > self._deadman_s:
             logger.warning("deadman: no command for %.1f s, stopping", now - last_cmd)
@@ -415,7 +442,14 @@ class BaseServerCore:
             self.deadman = True
         idle = self.armed and not self.moving and last_motion is not None
         if idle and last_motion is not None and now - last_motion > self._disarm_after_s:
-            self._disarm()
+            self._disarm(f"no motion commanded for {now - last_motion:.0f} s")
+        elif (
+            self.armed
+            and self._disarm_without_travel
+            and self._last_travel_at is not None
+            and now - self._last_travel_at > self._disarm_after_s
+        ):
+            self._disarm(f"no travel for {now - self._last_travel_at:.0f} s")
 
     def snapshot(self, now: float) -> dict[str, Any]:
         """The ``state`` message for the clients; resets the accumulated wheel travel."""
@@ -444,7 +478,7 @@ class BaseServerCore:
         """Stop and free the wheels, and the neck with them (shutdown)."""
         with_suppressed_timeout(lambda: self._apply(STOP))
         if self.armed:
-            with_suppressed_timeout(self._disarm)
+            with_suppressed_timeout(lambda: self._disarm("the last client left"))
         if self._mover is not None:
             # A neck left holding would stay energised with nobody left to release it.
             with_suppressed_timeout(self._mover.release)
@@ -480,13 +514,18 @@ class BaseServerCore:
         self._base.set_twist(twist)
         self.twist = twist
 
-    def _arm(self) -> None:
+    def _arm(self, now: float) -> None:
+        """Torque on, and the travel clock starts here: a freshly armed cart is given the whole
+        idle time to move before the encoders are asked whether it did."""
         logger.info("arming: torque on")
         self._base.enable()
         self.armed = True
+        self._last_travel_at = now
+        self._still_travel = [0.0, 0.0]
 
-    def _disarm(self) -> None:
-        logger.info("idle: torque off, the cart can be pushed")
+    def _disarm(self, reason: str) -> None:
+        """Torque off, so the cart can be pushed; ``reason`` is what the log says did it."""
+        logger.info("idle: %s, torque off, the cart can be pushed", reason)
         self._base.disable()
         self.armed = False
         self.twist = STOP
@@ -607,7 +646,15 @@ def main() -> None:
         neck = NeckReader(bus, (PAN, TILT)) if neck_ids else None
         mover = NeckMover(bus, neck, neck_cfg) if neck and neck_cfg else None
         core = BaseServerCore(
-            bus, config, servo_names=list(motors), latency=bus.latency, neck=neck, mover=mover
+            bus,
+            config,
+            servo_names=list(motors),
+            latency=bus.latency,
+            neck=neck,
+            mover=mover,
+            disarm_after_s=config.disarm_after_s,
+            disarm_without_travel=config.disarm_without_travel,
+            idle_travel_m=config.idle_travel_m,
         )
         server = JsonLinesServer(
             args.port, on_last_client_left={"cmd": "release"}, driving_commands=DRIVING_COMMANDS

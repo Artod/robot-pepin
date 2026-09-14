@@ -60,6 +60,12 @@ class BaseConfig:
     right: WheelMotor
     max_speed_m_s: float = 0.3
     max_yaw_rate_rad_s: float = 1.0
+    # When the wheels are released again (the base server's policy, not the driver's): after
+    # this long with no motion COMMANDED and — with ``disarm_without_travel`` — this long with
+    # the encoders showing less than ``idle_travel_m`` of travel, whatever is being commanded.
+    disarm_after_s: float = 10.0
+    disarm_without_travel: bool = True
+    idle_travel_m: float = 0.01  # 10 mm: a hundred encoder ticks, far above the reading noise
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BaseConfig:
@@ -70,6 +76,9 @@ class BaseConfig:
             right=WheelMotor(**data["right"]),
             max_speed_m_s=data.get("max_speed_m_s", cls.max_speed_m_s),
             max_yaw_rate_rad_s=data.get("max_yaw_rate_rad_s", cls.max_yaw_rate_rad_s),
+            disarm_after_s=data.get("disarm_after_s", cls.disarm_after_s),
+            disarm_without_travel=data.get("disarm_without_travel", cls.disarm_without_travel),
+            idle_travel_m=data.get("idle_travel_m", cls.idle_travel_m),
         )
 
     @classmethod
