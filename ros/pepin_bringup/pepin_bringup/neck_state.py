@@ -11,9 +11,15 @@ owner, over the same JSON-lines socket the base bridge uses: ``{"cmd": "neck"}``
 read, this node only asks). The geometry is pepin.neck on config/neck.json: at the reference
 ticks the transform equals the static one, so flipping the switch moves nothing.
 
-Parameters: ``host``/``port`` (the base server, 127.0.0.1:3336), ``poll_hz`` (10), ``config``
-(config/neck.json beside the library, pepin.deployment.config_file); the flag ``neck_tf``
-(:data:`FLAGS`, live, default **on** since 2026-09-11).
+Parameters: ``host``/``port`` (the base server, 127.0.0.1:3336), ``poll_hz`` (2 since
+2026-09-14), ``tf_hz`` (10), ``config`` (config/neck.json beside the library,
+pepin.deployment.config_file); the flags ``neck_tf`` and ``tf_republish`` (:data:`FLAGS`, live).
+
+The bus is polled at ``poll_hz`` and the edge is published at ``tf_hz``: a servo-bus read costs
+13.5 ms of an A53 core, and the head does not move while the cart drives, so the last measured
+edge is republished with a fresh stamp between polls (``tf_republish``). Consumers see the same
+dense TF stream they saw at 10 Hz polling; the bus sees a fifth of the reads. ``poll_hz:=10``
+with ``tf_republish`` off is exactly the old behaviour.
 
 ``neck_tf`` defaults on because the model is checked against the hardware: the reference ticks
 in config/neck.json were read at the measured mount pose and both servo signs were verified by
@@ -26,6 +32,7 @@ neck_state neck_tf false`` hands the edge back to the laptop's static one.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import rclpy
@@ -46,6 +53,8 @@ from pepin_bringup.node_kit import Switches
 _NECK_REQUEST = b'{"cmd":"neck"}\n'
 _REPORT_S = 30.0
 _STALE_S = 1.0  # a cached reading older than this (the servo fell silent) is not a pose
+_TF_HZ = 10.0  # the rate the edge is published at, poll or no poll: TF lookups want it dense
+_TF_HOLD_S = 2.0  # with the bus silent this long the last edge is a guess, not a pose: stop
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration; their state is printed in every report line. neck_tf defaults on since the
@@ -70,6 +79,22 @@ FLAGS = FlagSet(
         " static_camera_tf), or when the neck bus is suspect and a frozen edge is better than a"
         " wrong one",
     ),
+    Flag(
+        "tf_republish",
+        True,
+        description="base_link -> camera_link is republished at tf_hz between polls, carrying the"
+        " last measured angles with a fresh stamp; with it off the edge is published only when a"
+        " reading arrives, i.e. at poll_hz",
+        why="a servo-bus read costs 13.5 ms of a core and the node polled at 10 Hz for 11 % of an"
+        " A53 (top, 2026-09-14) to answer a question that does not change while the cart drives:"
+        " the head is still. Polling at 2 Hz and republishing at 10 Hz keeps the stream RTAB-Map"
+        " and the depth fusion look poses up in (a 2 Hz TF stream fails a lookup at a recent"
+        " stamp) and leaves four fifths of the reads unmade",
+        on_when="whenever the head is still or moves slowly: driving, mapping, everything but"
+        " a commanded sweep",
+        off_when="while the head is being swept and every degree must be measured rather than"
+        " held — then raise poll_hz to 10 in the same breath, which is the pre-2026-09-14 node",
+    ),
 )
 
 
@@ -80,23 +105,31 @@ class NeckState(Node):
         super().__init__("neck_state")
         host = str(self.declare_parameter("host", "127.0.0.1").value)
         port = int(self.declare_parameter("port", 3336).value)
-        self._poll_hz = float(self.declare_parameter("poll_hz", 10.0).value)
+        self._poll_hz = float(self.declare_parameter("poll_hz", 2.0).value)
+        self._tf_hz = float(self.declare_parameter("tf_hz", _TF_HZ).value)
         config = str(self.declare_parameter("config", str(config_file("neck.json"))).value)
         self._switches = Switches(self, FLAGS)
         self._cfg = NeckConfig.from_json(config)
         self._joints_pub = self.create_publisher(JointState, "neck/state", 10)
         self._tf = TransformBroadcaster(self)
-        self._counts = dict.fromkeys(("polls", "replies", "errors", "stale", "out_of_limits"), 0)
+        self._counts = dict.fromkeys(
+            ("polls", "replies", "errors", "stale", "out_of_limits", "held"), 0
+        )
         self._last: tuple[int, int] | None = None
         self._last_error = ""
         self._read_ms = 0.0
+        # The last measured edge and when it was measured (monotonic): what _hold_tf republishes.
+        self._last_edge: tuple[float, float, float, float, float, float] | None = None
+        self._last_edge_at = 0.0
         self._link = JsonLineLink(host, port, self._on_line, name="base server")
         self._link.start()
         self.create_timer(1.0 / self._poll_hz, self._poll)
+        self.create_timer(1.0 / self._tf_hz, self._hold_tf)
         self.create_timer(_REPORT_S, self._report)
         ref = self._cfg.reference
         self.get_logger().info(
-            f"neck state up: base server {host}:{port} at {self._poll_hz:.0f} Hz, reference pan"
+            f"neck state up: base server {host}:{port} at {self._poll_hz:.0f} Hz, TF"
+            f" {self._tf_hz:.0f} Hz, reference pan"
             f" {ref.pan_ticks} tilt {ref.tilt_ticks} ticks -> pitch {ref.pitch_deg:.0f} deg at"
             f" {ref.z_m:.2f} m, signs {'verified' if ref.signs_verified else 'UNVERIFIED'};"
             f" flags: {self._switches.state()}"
@@ -147,9 +180,15 @@ class NeckState(Node):
         joints.name = list(JOINT_NAMES)
         joints.position = [angles.pan_rad, angles.pitch_rad]
         self._joints_pub.publish(joints)
+        edge = camera_pose(self._cfg, angles)
+        self._last_edge, self._last_edge_at = edge, time.monotonic()
         if not self._switches.on("neck_tf"):
             return
-        x, y, z, roll, pitch, yaw = camera_pose(self._cfg, angles)
+        self._send_edge(edge, stamp)
+
+    def _send_edge(self, edge: tuple[float, float, float, float, float, float], stamp: Any) -> None:
+        """Broadcast one base_link -> camera_link transform (metres and radians) at ``stamp``."""
+        x, y, z, roll, pitch, yaw = edge
         t = TransformStamped()
         t.header.stamp = stamp
         t.header.frame_id, t.child_frame_id = "base_link", "camera_link"
@@ -158,6 +197,19 @@ class NeckState(Node):
         t.transform.rotation.x, t.transform.rotation.y = qx, qy
         t.transform.rotation.z, t.transform.rotation.w = qz, qw
         self._tf.sendTransform(t)
+
+    def _hold_tf(self) -> None:
+        """Republish the last measured edge with a fresh stamp, so the TF stream stays dense
+        while the bus is polled slowly; silent for longer than ``_TF_HOLD_S`` of silence."""
+        edge = self._last_edge
+        if edge is None or not self._switches.on("tf_republish"):
+            return
+        if not self._switches.on("neck_tf"):
+            return
+        if time.monotonic() - self._last_edge_at > _TF_HOLD_S:
+            return
+        self._counts["held"] += 1
+        self._send_edge(edge, self.get_clock().now().to_msg())
 
     def _report(self) -> None:
         """One line per half minute: what was asked and answered, where the neck is, the cost."""
@@ -173,8 +225,9 @@ class NeckState(Node):
         model = "" if self._cfg.reference.known else ", reference unread: the pose is the mount"
         self.get_logger().info(
             f"neck: polls {c['polls']}, replies {c['replies']}, errors {c['errors']}, stale"
-            f" {c['stale']}, out of limits {c['out_of_limits']}; {where}; read {self._read_ms:.1f}"
-            f" ms; flags: {self._switches.state()}, poll {self._poll_hz:.0f} Hz"
+            f" {c['stale']}, out of limits {c['out_of_limits']}, TF held {c['held']}; {where};"
+            f" read {self._read_ms:.1f} ms; flags: {self._switches.state()}, poll"
+            f" {self._poll_hz:.0f} Hz, TF {self._tf_hz:.0f} Hz"
             f"{model}{error}"
         )
         for key in c:

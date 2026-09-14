@@ -8,6 +8,13 @@ Topics: the raw lidar scan, wheel odometry, the tracker's pose, Nav2's plan, the
 twist, the three ToF ranges and the local costmap — what `scripts/build_map.py` and the replays
 read, plus the proof of what the robot itself believed: which cells it held for occupied when it
 refused to move (a question a run could not answer before, and the one every stall raises).
+
+Since 2026-09-14 also the fusion's two String topics (``fusion_records``): every pose the laptop
+measured out of a camera scan (``meas``, /localization/measurement) and the tracker's own account
+of each update (``srcs``, /localization/sources). They were ros/tools/session_logger.py's alone,
+and that second recorder cost the board a whole rclpy process — 15 % of a core and ~140 MB —
+deserialising the same lidar stream this node already deserialises. One tape now holds the lot,
+so ros/goto.sh no longer starts the session logger when the numbered tape is being written.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ from __future__ import annotations
 import math
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -26,6 +34,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profi
 from sensor_msgs.msg import Imu, LaserScan, Range
 from std_msgs.msg import String
 
+from pepin.flags import Flag, FlagSet
 from pepin.mounts import Mounts
 from pepin.recording import imu_record, scan_record_from_ros
 from pepin.runlink import (
@@ -37,6 +46,26 @@ from pepin.runlink import (
     parse_command,
 )
 from pepin.tape import RunTape, camera_clip_path, next_run_number
+from pepin_bringup.node_kit import Switches
+
+# The live flags (CLAUDE.md rule 19); their state is printed in the node's ready line.
+FLAGS = FlagSet(
+    Flag(
+        "fusion_records",
+        True,
+        description="the camera's measurements (/localization/measurement) and the tracker's"
+        " account of each update (/localization/sources) go on the numbered tape as the"
+        " 'meas' and 'srcs' records scratch/camera_error.py reads",
+        why="they were recorded only by ros/tools/session_logger.py, a second recorder that"
+        " ros/goto.sh started for every drive: another rclpy process on a 4-core A53, 15 % of a"
+        " core and ~140 MB, deserialising the same 10 Hz lidar stream this node already"
+        " deserialises. Two JSON strings a revolution cost this node almost nothing, and one"
+        " tape then holds a whole drive",
+        on_when="always: without them a camera measurement cannot be compared to the lidar's"
+        " truth after the fact",
+        off_when="when the fusion is off anyway and the tape should stay small",
+    ),
+)
 
 
 def _yaw(orientation: object) -> float:
@@ -61,8 +90,15 @@ class RunRecorder:
     # down to 3 Hz), and a prelude does not need 10 Hz. During a run nothing is thinned.
     IDLE_PERIOD_S: ClassVar[dict[str, float]] = {"pose": 0.2, "loc": 0.2}
 
-    def __init__(self, node: Node, directory: Path, tape: RunTape | None = None) -> None:
+    def __init__(
+        self,
+        node: Node,
+        directory: Path,
+        tape: RunTape | None = None,
+        fusion_records: Callable[[], bool] = lambda: True,
+    ) -> None:
         self._node = node
+        self._fusion_records = fusion_records
         self._last_kept: dict[str, float] = {}
         self._directory = directory
         self._tape = tape or RunTape()
@@ -122,6 +158,7 @@ class RunRecorder:
         """
         want = "listen" if self._tape.recording else "deafen"
         if want == "listen" and not self._during_run:
+            strings = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
             self._during_run = [
                 self._node.create_subscription(
                     LaserScan, "/ldlidar_node/scan", self._on_scan, self._scan_qos
@@ -144,6 +181,17 @@ class RunRecorder:
                         Range, f"/tof/{sensor}", lambda msg, s=sensor: self._on_tof(s, msg), 10
                     )
                     for sensor in ("front", "left", "right")
+                ),
+                # What the camera measured and what the tracker did with it: two String topics
+                # this board already carries, so a subscriber here costs a copy and no new route.
+                *(
+                    self._node.create_subscription(
+                        String, f"/localization/{topic}", handler, strings
+                    )
+                    for topic, handler in (
+                        ("measurement", self._on_measurement),
+                        ("sources", self._on_sources),
+                    )
                 ),
             ]
         elif want == "deafen" and self._during_run:
@@ -271,6 +319,22 @@ class RunRecorder:
             }
         )
 
+    def _on_measurement(self, msg: String) -> None:
+        """One pose the laptop measured out of a camera scan, kept verbatim: nothing here parses
+        it, so a malformed message is on the tape as evidence instead of lost. ``t`` is when it
+        ARRIVED; the moment it speaks for is ``stamp`` inside the JSON."""
+        if not self._fusion_records():
+            return
+        self._tape.add({"t": time.time(), "topic": "meas", "json": msg.data})
+
+    def _on_sources(self, msg: String) -> None:
+        """The tracker's own account of one update (Localizer.sources_report), verbatim: who
+        anchored, what was fused, what was rejected, and every source's fit, delta, sigma and
+        self-check ratio."""
+        if not self._fusion_records():
+            return
+        self._tape.add({"t": time.time(), "topic": "srcs", "json": msg.data})
+
     def _on_cmd(self, msg: Twist) -> None:
         """What the controller asked the wheels for: the only record of the command side."""
         self._tape.add(
@@ -313,7 +377,10 @@ class RunRecorderNode(Node):
     def __init__(self) -> None:
         super().__init__("run_recorder")
         self._record_dir = Path(str(self.declare_parameter("record_dir", "/maps/rec").value))
-        self._recorder = RunRecorder(self, self._record_dir)
+        self._switches = Switches(self, FLAGS)
+        self._recorder = RunRecorder(
+            self, self._record_dir, fusion_records=lambda: self._switches.on("fusion_records")
+        )
         self._camera: subprocess.Popen[bytes] | None = None  # curl copying the stream
         self._camera_clip: Path | None = None
         latched = QoSProfile(
@@ -324,7 +391,9 @@ class RunRecorderNode(Node):
         self._status_pub = self.create_publisher(String, RUN_STATUS_TOPIC, latched)
         self.create_subscription(String, RUN_COMMAND_TOPIC, self._on_command, 10)
         self._say(RunStatus(IDLE))
-        self.get_logger().info(f"run recorder ready: tapes in {self._record_dir}")
+        self.get_logger().info(
+            f"run recorder ready: tapes in {self._record_dir}; flags: {self._switches.state()}"
+        )
 
     def _say(self, status: RunStatus) -> None:
         self._status_pub.publish(String(data=status.to_json()))

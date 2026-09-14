@@ -2,10 +2,10 @@
 
 One component container (high CPU priority) holds the LD19 driver, the hull
 box filter that turns its scan into /scan, the static base_link->laser
-transform, the lifecycle manager that activates the driver, and the Foxglove
-bridge. A separate Python process runs ``base_bridge`` (odometry, TF, /cmd_vel
-to the wheels). Every extra ROS process costs ~140 MB on this 1.5 GB board, so
-composition is not a nicety here.
+transform, the lifecycle manager that activates the driver, and — only when it is
+asked for — the Foxglove bridge. A separate Python process runs ``base_bridge``
+(odometry, TF, /cmd_vel to the wheels). Every extra ROS process costs ~140 MB on
+this 1.5 GB board, so composition is not a nicety here.
 
 The sensor mounts are not arguments: base_link -> laser comes from config/lidar.json (the LD19
 hangs upside down, roll pi, yaw -87.5 deg: the calibration's one home) and base_link -> imu_link
@@ -16,7 +16,11 @@ under /ws/pepin_src/config, which ros/sync.sh keeps beside the library.
 Arguments:
 
 - ``lidar_port`` (default /dev/lidar), ``lidar_debug`` (default false),
-- ``foxglove`` (default true) and ``foxglove_port`` (default 8765),
+- ``foxglove`` (default **false**) and ``foxglove_port`` (default 8765): the board's own
+  Foxglove bridge. Off since 2026-09-14 — the laptop runs one (vslam.launch.py serves
+  ws://localhost:8765) and it sees the board's topics through the zenoh bridge, so a second
+  bridge on a 4-core A53 only serialises every topic a second time and logs "rtabmap_msgs not
+  found" 26 times a minute. ``foxglove:=true`` brings it back for watching the board alone.
 - ``tof`` (default false): the ToF bridge, once Nav2 has a layer that reads it.
 - ``base_bridge_cpp`` (default false): run the C++ base bridge (``pepin_base_cpp``, ~25 MB)
   instead of the Python one. Same node, parameters and wire protocol; the default flips
@@ -201,6 +205,8 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 ],
             )
         )
+    # Opt-in: the laptop's bridge (vslam.launch.py) already serves Foxglove and reaches these
+    # topics through zenoh. Two bridges make this board serialise every topic twice.
     if LaunchConfiguration("foxglove").perform(context).lower() == "true":
         components.append(
             ComposableNode(
@@ -281,7 +287,7 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("lidar_port", default_value="/dev/lidar"),
             DeclareLaunchArgument("lidar_debug", default_value="false"),
-            DeclareLaunchArgument("foxglove", default_value="true"),
+            DeclareLaunchArgument("foxglove", default_value="false"),
             DeclareLaunchArgument("foxglove_port", default_value="8765"),
             DeclareLaunchArgument("tof", default_value="false"),
             DeclareLaunchArgument("base_bridge_cpp", default_value="false"),

@@ -8,13 +8,18 @@
 #   ros/goto.sh cancel           stop the current task (the base's deadman stops the wheels)
 #   ros/goto.sh where            pose and scan-to-map fit right now
 #   ros/goto.sh relocalize       whole-map search now (after a carry or a push)
-# Every run is taped twice. This script's own session log, named by the LAPTOP's local clock:
-# ros/maps/rec/<stamp>_goto.jsonl — scans, odometry, the tracked pose, the commands, the camera's
-# measurements (meas) and the tracker's account of each update (srcs). And the board's numbered
-# tape, 0249_<utc>Z_<place>.jsonl, opened by the run recorder on the goal's word (costmap, EKF
-# and IMU records, the camera clip beside it); goto names it in its log. The two clocks are
-# explained in ros/maps/README.md.
-# PEPIN_REC_CAMERA_SCANS=1 adds /depth_scan and /contact_scan to this script's tape.
+# Every run is taped ONCE, by the board's run recorder: the numbered tape
+# 0249_<utc>Z_<place>.jsonl, opened on the goal's word — scans, odometry, the tracked pose, the
+# commands, the costmap, the EKF and IMU, the ToF, the camera's measurements (meas) and the
+# tracker's account of each update (srcs), with the camera clip beside it; goto names it in its
+# log and fetches it here. Until 2026-09-14 this script also started a second recorder in the
+# container (ros/tools/session_logger.py) which re-deserialised the same 10 Hz lidar stream for
+# 15 % of a core; the numbered tape now carries everything it carried.
+# PEPIN_SESSION_LOGGER=1 starts it anyway, next to the numbered tape (its file is named by the
+# LAPTOP's local clock: ros/maps/rec/<stamp>_goto.jsonl). With PEPIN_GOTO_TAPE=off it is started
+# on its own, so a drive without a numbered tape is still recorded. The two clocks are explained
+# in ros/maps/README.md.
+# PEPIN_REC_CAMERA_SCANS=1 adds /depth_scan and /contact_scan to the session logger's tape.
 # PEPIN_GOTO_TAPE=off drives without asking the recorder for a numbered one.
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
@@ -73,6 +78,11 @@ finish() {  # everything recorded, always: scans, odometry, tracked pose, the go
     if [ -n "$taped" ]; then
         rsync -aq "root@$BOARD:/root/pepin-ros$taped" "$rec/" >> "$trace" 2>&1 || true
         echo "numbered tape: ros/maps/rec/$(basename "$taped")"
+    elif [ -z "${PEPIN_SESSION_LOGGER:-}" ] && [ "${PEPIN_GOTO_TAPE:-on}" != off ]; then
+        # The numbered tape is the only tape now: if the recorder never opened one, say so loudly
+        # instead of leaving a drive with no record at all.
+        echo "!! NO TAPE: the run recorder opened none for this goal (is it up? docker logs pepin-ros)."
+        echo "!! Re-run with PEPIN_SESSION_LOGGER=1 to record the drive from this script instead."
     fi
     echo "recorded: $(ls "$rec" | grep -c "^${STAMP}_goto") files ros/maps/rec/${STAMP}_goto* (jsonl, log, board log, camera; cleanup trace in _goto_finish.log)"
 }
@@ -92,10 +102,15 @@ ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f session_logger.py >/dev/n
 # the laptop (the board carries what is real-time critical and nothing else).
 REC_FLAGS=""
 if [ -n "${PEPIN_REC_CAMERA_SCANS:-}" ]; then REC_FLAGS="--camera-scans"; fi
-ssh "root@$BOARD" "docker exec -d pepin-ros /pepin_entrypoint.sh python3 /tools/session_logger.py $REC $MAX_REC_S $REC_FLAGS"
 # The goal lives on the board (a WiFi hiccup must not become a cancel); this terminal only watches.
 TAPE_FLAG=""
 if [ "${PEPIN_GOTO_TAPE:-on}" = off ]; then TAPE_FLAG="--no-tape"; fi
+# One recorder per drive. The run recorder is already subscribed to every one of these topics
+# (it writes the numbered tape), so the session logger only runs when there is no numbered tape
+# to write — or when it is asked for by name.
+if [ -n "$TAPE_FLAG" ] || [ -n "${PEPIN_SESSION_LOGGER:-}" ]; then
+    ssh "root@$BOARD" "docker exec -d pepin-ros /pepin_entrypoint.sh python3 /tools/session_logger.py $REC $MAX_REC_S $REC_FLAGS"
+fi
 ssh "root@$BOARD" "touch /root/pepin-ros$LOG; docker exec -d -e PYTHONUNBUFFERED=1 pepin-ros /pepin_entrypoint.sh sh -c 'python3 /tools/goto_ros.py --places $PLACES $TAPE_FLAG $* > $LOG 2>&1; echo GOTO_EXIT=\$? >> $LOG'"
 echo "laptop: the goal was sent at $(date +%H:%M:%S.%2N)"
 watch_start

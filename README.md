@@ -59,7 +59,7 @@ Measured on the robot, on the board, during real drives.
         (JSON lines: run number,         │        │              │            global costmap 2 Hz
          events, tape path)              │        │              │ /plan
                                          │        │              ▼
- Foxglove ◄── ws 8765 ── foxglove_bridge │        │        controller_server   RPP 10 Hz
+ Foxglove ◄── ws 8765 ── foxglove_bridge │   (on the laptop; the board's is off)        │        controller_server   RPP 10 Hz
                                          │        │        local costmap 3x3 m @ 5 cm, 5 Hz
  rsync   ◄── camera clip (curl on board) │        │              │ /cmd_vel_nav
  rsync   ◄── run .jsonl, board log ──────┼─ run_recorder         ▼
@@ -415,7 +415,7 @@ ros/mode.sh slam && ros/teleop.sh       # build a map while driving it by hand
 ros/savemap.sh flat3                    # save it on the board and fetch it here
 ```
 
-Watch it in Foxglove (`brew install --cask foxglove-studio`) on `ws://<board>:8765`: a 3D panel
+Watch it in Foxglove (`brew install --cask foxglove-studio`) on `ws://localhost:8765`, the laptop's bridge: a 3D panel
 with `/map`, `/scan`, `/tf`, both costmaps and `/plan`.
 
 ## Repo layout
