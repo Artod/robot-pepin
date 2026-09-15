@@ -392,7 +392,17 @@ FLAGS = FlagSet(
         " of range. Which ranges the pool holds then decides the law — a drive brings 0.5 m and"
         " 4 m pairs, the shift term opens and the same tilt is described as a 2.3 b -0.19, back"
         " at rest as a 1.75 b 0 — so the fused volume is painted under one law and scored under"
-        " another, and depth_fusion refuses those frames at the yaw search's bound",
+        " another, and depth_fusion refuses those frames at the yaw search's bound. What it costs"
+        " is MEMORY, measured 2026-09-15 and left standing: the law is fitted over a pool of the"
+        " last frames, so it describes the last minute's scene, and above the lidar's row the"
+        " door tapes read a per-run offset that flips sign between the approach and the retreat"
+        " (0.984 / 1.060 / 0.987 / 1.009 on 0318/0320/0321/0322, a spread of 0.076). Switched off"
+        " the flip goes away — all four read +2.1 to +4.4 %, a spread of 0.023 — and the residual"
+        " above the row halves on three of the four (12.8 -> 4.7 % in the top third of 0318;"
+        " scratch/wte_03*_norange.txt). It stays ON because the judge that is not circular says"
+        " the opposite: on the COLMAP scene of run 0171, off costs 16.1 -> 19.8 % off the wall"
+        " plane and 9.0 -> 10.9 on it (scratch/wall_vs_colmap.txt), and the held-out lidar row is"
+        " unmoved on three tapes of four. The memory is real and the cure is not this switch",
         on_when="always, until a law that follows the range is measured to be worse than one that"
         " does not",
         off_when="as an A/B against the affine law at rest, and the moment a report line shows a"
