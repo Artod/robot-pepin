@@ -224,6 +224,7 @@ def test_a_new_board_bridge_restarts_the_half_when_the_gentle_repair_is_off(
     repair = FakeRepair()
     node, admin, codes = build(monkeypatch, repair)
     node._switches.set("bridge_restart", False)
+    node._switches.set("half_restart", True)  # the old escalation, asked for explicitly
     drive(node, admin, [0.0], messages=48)
     admin.board_zid = "0000000000000000000000000000ffff"
     with contextlib.suppress(ExitsError):
@@ -360,7 +361,7 @@ def test_the_report_line_is_a_rate_per_topic_and_the_switches(monkeypatch: Any) 
 
 def test_every_switch_is_in_the_table_and_printed() -> None:
     assert {flag.name for flag in FLAGS} == {
-        "flow_watch",
+        "flow_watch", "half_restart",
         "flow_silence_s",
         "dead_routes",
         "bridge_restart",

@@ -73,6 +73,9 @@ from pepin.flags import UNMEASURED, Flag, FlagSet
 from pepin_bringup.node_kit import Switches, Worker, spin_main
 
 BRIDGE_CHANGED_EXIT = 3
+REPAIR_COOLDOWN_S = (
+    120.0  # after a gentle repair that did not help, wait this long before the next one
+)
 POLL_S = 5.0
 ATTACH_S = 1.0
 REPORT_S = 60.0
@@ -166,6 +169,21 @@ FLAGS = FlagSet(
         on_when="always: it is strictly less destructive than the fallback",
         off_when="when the laptop's bridge must not be touched — bisecting it by hand, or"
         " running without the docker socket mounted",
+    ),
+    Flag(
+        "half_restart",
+        False,
+        description="when the gentle repair (the bridge alone) did not bring the routes back,"
+        " end this process so the launch restarts the whole laptop half; off: say so in the"
+        " log, keep everything alive, and retry the gentle repair after a cooldown",
+        why="off since 2026-09-15: after every board restart the escalation killed the whole"
+        " half within minutes (RestartCount 3 -> 6 in 45 min: rgbd_odometry, the fusion model,"
+        " Foxglove's channels and RTAB-Map's writes all died with it) because a restarted bridge"
+        " does not always re-match the nodes' subscriptions (/scan silent). A half that keeps"
+        " running with one silent topic beats one that dies whole; ros/restart.sh laptop is"
+        " the hand repair",
+        on_when="a half whose nodes cannot be kicked one by one and whose routes never come back",
+        off_when="always while the escalation costs more than the fault (today)",
     ),
 )
 
@@ -304,6 +322,7 @@ class BridgeWatch(Node):
         self._reported: dict[str, int] = {}
         self._reported_at = 0.0
         self._attempts = 0
+        self._cooldown_until = 0.0
         self._grace_s = grace_s
         self._started: float | None = None
         self._switches = Switches(self, FLAGS)
@@ -479,7 +498,12 @@ class BridgeWatch(Node):
                 f"bridge watch: {why} while this half is still coming up; waiting"
             )
             return
-        if self._switches.on("bridge_restart") and not self._attempts and self._repair.available():
+        if (
+            self._switches.on("bridge_restart")
+            and not self._attempts
+            and now >= self._cooldown_until
+            and self._repair.available()
+        ):
             self._attempts += 1
             if settle:
                 count = wait_for_routes(self._board, self._expected)
@@ -495,7 +519,16 @@ class BridgeWatch(Node):
             self.get_logger().error(f"bridge watch: {why}; {said}")
             return
         again = "again after a bridge restart" if self._attempts else "and the gentle repair is off"
-        self.restart_half(f"{why} {again}")
+        if self._switches.on("half_restart"):
+            self.restart_half(f"{why} {again}")
+            return
+        self.get_logger().error(
+            f"bridge watch: {why} {again}; half_restart is off — this half stays up; the hand"
+            f" repair is ros/restart.sh laptop; the gentle repair may run again in"
+            f" {REPAIR_COOLDOWN_S:.0f} s"
+        )
+        self._attempts = 0
+        self._cooldown_until = now + REPAIR_COOLDOWN_S
 
     def restart_half(self, why: str) -> None:
         """The old action, kept: wait for the routes to settle, then end the process so the
