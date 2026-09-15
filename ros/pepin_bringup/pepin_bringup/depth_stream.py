@@ -820,37 +820,42 @@ FLAGS = FlagSet(
         PIPELINE_DEFAULTS["field_prior"],
         range=(0.0, 1000.0),
         description="how hard each node of the field is pulled toward the frame's own GLOBAL fit,"
-        " in pair-weight units (a lidar beam is 1). A node that saw no pair comes back as the"
-        " global fit exactly, so the field degrades to the single law wherever the anchors are"
-        " sparse; a node that saw many follows its own",
-        why="1.0 because a node of this camera does not hold hundreds of beams: over the four"
-        " tapes a non-empty node of a 3x3 field holds a median of 3.7-5.1 of pair weight (p10"
-        " 0.2-1.3, p90 10.8-17.3). Swept on the held-out beams"
-        " (scratch/_field_prior_sweep.py, 2026-09-15) the four tapes read 11.3 / 15.9 / 15.3 /"
-        " 3.8 % of median |residual| at a pull of 20 — the field is the single law again, which"
-        " reads 11.4 / 15.6 / 16.3 / 4.5 % — against 8.3 / 15.4 / 14.1 / 4.3 % at 1.0 and"
-        " 7.9 / 15.5 / 14.5 / 5.0 % with no pull at all. The pull enters the fit as two rows at"
-        " the ends of the pairs' own depth range, so it leans on the line harder than its weight"
-        " in pairs suggests",
-        on_when="raise it toward 10 on a cart whose anchors are thin and scattered, where a node"
-        " fitted on two beams is a whole quadrant of the picture fitted on two beams",
-        off_when="0 lets every node follow its own pairs alone (measured better on three tapes of"
-        " four and worse at the 40.9 deg pitch); lower it while reading the node table in the"
-        " report line, never blind",
+        " in PAIRS (a lidar beam is 1): a prior carrying as much information about that node's"
+        " law as that many pairs of weight 1 would at that node. A node that saw no pair comes"
+        " back as the global fit, so the field degrades to the single law wherever the anchors"
+        " are sparse; a node that saw many follows its own",
+        why="0.3 because the number now means pairs and the lidar's own row wants it light."
+        " Swept 0.03 / 0.1 / 0.3 / 1 / 3 against a carry of 0.1 / 1 / 3 (2026-09-15) on the row,"
+        " held out on the CONTIGUOUS split — half a frame's beams fit, the other half judges,"
+        " then the reverse (scratch/field_prior_row_sweep.py): the mean median |residual| over"
+        " the drive and the three neck pitches reads 11.2-11.9 % at 0.03, 11.8-12.3 % at 0.3,"
+        " 13.1-13.4 % at 1 and 13.7-14.1 % at 3, against the single law's 15.8 %. Above the row,"
+        " where no beam judges (scratch/wall_truth_eval.py, tapes 0313 and 0268), the same"
+        " hundred-fold of prior moves the lidar chain by under a point (17.1 / 15.6 % at 0.3"
+        " against 16.7 / 15.0 at 3), because up there the field has almost nothing of its own to"
+        " fit — the parallax anchor lands 0.000-0.004 of pair weight a frame in the top row of"
+        " nodes. So the row decides",
+        on_when="raise it toward 3 on a cart whose anchors are thin and scattered, where a node"
+        " fitted on two beams is a whole quadrant of the picture fitted on two beams — and when"
+        " the rows ABOVE the lidar's matter more than the row itself",
+        off_when="0 lets every node follow its own pairs alone; lower it while reading the node"
+        " table in the report line, never blind — an unpulled node of two weak pairs is what"
+        " puts a law on its bound",
     ),
     Flag(
         "field_carry",
         PIPELINE_DEFAULTS["field_carry"],
         range=(0.0, 1000.0),
         description="how hard each node is pulled toward what it was on the LAST frame, in the"
-        " same pair-weight units, decaying as exp(-dt / field_carry_tau_s)",
-        why="1.0, and it changes almost nothing while the lidar reaches the picture: swept over"
-        " 0, 1, 5 and 20 on the four tapes it moves the residual by under a point, and 20 costs"
-        " the drive 2.3 (8.3 -> 10.6 %) by carrying a node's stale scale into frames that had"
-        " something better to say. What it is there for is the frames with no beams at all —"
-        " with floor pairs as the only ruler it is what holds the scale of the nodes that saw"
-        " nothing this time",
-        on_when="raise it toward 5 on a run whose anchors flicker (a lidar in and out of the"
+        " same pairs, decaying as exp(-dt / field_carry_tau_s)",
+        why="3.0, the one knob of the field that measured better everywhere it was looked at"
+        " (2026-09-15, the same sweep as field_prior). At the lidar's own row, held out on the"
+        " contiguous split, it takes the drive's TOP third of the picture from 28.7 to 23.5 % at"
+        " prior 0.3 and leaves 1 node fit of 846 pinned on a bound against 8 at a carry of 1;"
+        " above the row it is worth 0.2-0.5 points on both wall tapes and both wall-pixel"
+        " selections. What it is there for is the frames with no beams at all — with floor pairs"
+        " as the only ruler it is what holds the scale of the nodes that saw nothing this time",
+        on_when="raise it further on a run whose anchors flicker (a lidar in and out of the"
         " picture, a camera-only stretch), where a node's last value is better than the frame's"
         " global fit",
         off_when="0 makes every frame's field independent of the last, which is what to set when"
