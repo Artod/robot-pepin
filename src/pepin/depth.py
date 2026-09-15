@@ -797,19 +797,35 @@ def fit_frame(
 
 
 # ---- the same fit over one patch of the picture, held by what it knows already -----------------
-def _weighted_line(x: Array, y: Array, weight: Array, shift: bool) -> tuple[float, float]:
+NO_PRIOR = (0.0, 0.0, 0.0, 0.0)  # the Tikhonov rows of :func:`_weighted_line`, carrying nothing
+
+
+def _weighted_line(
+    x: Array,
+    y: Array,
+    weight: Array,
+    shift: bool,
+    prior: tuple[float, float, float, float] = NO_PRIOR,
+) -> tuple[float, float]:
     """(alpha, beta) of ``x = alpha * y + beta`` by weighted least squares in closed form —
     ``beta`` forced to zero (a line through the origin) when ``shift`` is false. NaN in
     ``alpha`` when the rows carry no weight or do not identify a line; two 2x2 sums instead of
-    :func:`numpy.polyfit`, because a scale field fits one of these per node per frame."""
-    syy = float(np.sum(weight * y * y))
-    sxy = float(np.sum(weight * x * y))
+    :func:`numpy.polyfit`, because a scale field fits one of these per node per frame.
+
+    ``prior`` is ``(w_alpha, alpha0, w_beta, beta0)``: two TIKHONOV rows in PARAMETER space,
+    ``sqrt(w_alpha) * (alpha - alpha0) = 0`` and ``sqrt(w_beta) * (beta - beta0) = 0``, added to
+    the normal equations as ``w_alpha`` on the ``alpha`` diagonal and ``w_beta`` on the
+    ``beta`` one. A weight of zero is a prior that says nothing and leaves the sums untouched
+    to the bit, which is what every caller but :func:`fit_node` passes."""
+    w_alpha, alpha0, w_beta, beta0 = prior
+    syy = float(np.sum(weight * y * y)) + w_alpha
+    sxy = float(np.sum(weight * x * y)) + w_alpha * alpha0
     scale_only = (sxy / syy, 0.0) if syy > 0.0 else (math.nan, 0.0)
     if not shift:
         return scale_only
-    s = float(np.sum(weight))
+    s = float(np.sum(weight)) + w_beta
     sy = float(np.sum(weight * y))
-    sx = float(np.sum(weight * x))
+    sx = float(np.sum(weight * x)) + w_beta * beta0
     det = s * syy - sy * sy
     if not math.isfinite(det) or abs(det) <= 1e-12 * max(abs(s * syy), 1.0):
         return scale_only
@@ -846,68 +862,105 @@ def _huber_weights(x: Array, y: Array, weight: Array, shift: bool) -> Array:
     return huber
 
 
+def node_unit(y: Array, weight: Array, fallback: float) -> float:
+    """How much information about the SLOPE one pair of weight 1 carries at this node: the
+    weight-mean of ``y^2`` over the node's own pairs (``y`` their true inverse depth),
+    ``fallback`` when the node has none — the frame's own such mean, handed down by the caller.
+
+    The derivation, in one line. The fit solves ``x = alpha * y + beta`` by weighted least
+    squares, so its information matrix is ``sum_i w_i * [[y_i^2, y_i], [y_i, 1]]``: a pair of
+    weight 1 at inverse depth ``y`` is worth ``y^2`` about ``alpha`` and 1 about ``beta``. The
+    node's mean ``y^2`` is therefore the exchange rate between "one pair" and "one unit of
+    slope information" AT THIS NODE — which is exactly what a prior in pairs has to be
+    multiplied by to mean the same thing near the camera and across the room."""
+    total = float(np.sum(weight))
+    if total <= 0.0 or y.size == 0:
+        return fallback
+    unit = float(np.sum(weight * y * y) / total)
+    return unit if math.isfinite(unit) and unit > 0.0 else fallback
+
+
 def fit_node(
     d: Array,
     z: Array,
     weight: Array,
     priors: Sequence[tuple[float, float, float]] = (),
-    span: tuple[float, float] = (1.0, 2.0),
+    unit: float = 1.0,
     shift: bool = True,
 ) -> tuple[float, float] | None:
     """The law ``1 / z = a / D + b`` of ONE NODE of a scale field: the same regression as
-    :func:`fit_frame` on the pairs that belong to the node, held by pseudo-observations that
-    say what the node should be where its own pairs say little. ``None`` when nothing at all
-    constrains it (no pairs and no priors) and when the fit does not come back finite
-    (:func:`_finite`) — a NaN node poisons every pixel of the picture, not only its own.
+    :func:`fit_frame` on the pairs that belong to the node, held by a prior that says what the
+    node should be where its own pairs say little. ``None`` when nothing at all constrains it
+    (no pairs and no priors) and when the fit does not come back finite (:func:`_finite`) — a
+    NaN node poisons every pixel of the picture, not only its own.
 
     ``priors`` are (a, b, weight) laws to be pulled toward — the frame's own global fit, and
-    the node's previous value decayed by the time since. Each enters the fit as two extra ROWS
-    of the weighted least squares, lying exactly on that law's line at the two true depths of
-    ``span`` (the pairs' own depth range), half the weight each, in the same units as a pair's
-    weight: a node that saw no pair comes back as the prior to the bit, a node that saw
-    hundreds of beams follows them, and in between the two are averaged the way two rulers of
-    different noise always are. A prior is not an outlier either: the robust re-weighting is
-    judged on the pairs' own line and applied to their rows only
-    (:func:`_huber_weights`), so a node whose data disagrees with the global fit moves away
-    from it instead of being cut down as an outlier of it.
+    the node's previous value decayed by the time since. Each enters as two TIKHONOV rows in
+    PARAMETER space, ``sqrt(w_alpha) * (alpha - alpha0) = 0`` and
+    ``sqrt(w_beta) * (beta - beta0) = 0`` about the prior's own
+    ``alpha0 = 1 / a``, ``beta0 = -b / a``, and NOT as pseudo-observations at two depths.
+    Its weight is read in PAIRS: ``weight = N`` means "as much information about that parameter
+    as N pairs of weight 1 would carry AT THIS NODE", which is ``w_alpha = N * unit`` and
+    ``w_beta = N`` — the exchange rate ``unit`` being the node's own mean ``y^2``
+    (:func:`node_unit`), because the fit's information matrix is
+    ``sum_i w_i * [[y_i^2, y_i], [y_i, 1]]``. So a node that saw no pair comes back as the
+    prior, a node that saw hundreds of beams follows them, and in between the two are averaged
+    the way two rulers of different noise always are — at the same exchange rate whether the
+    node looks at the far wall or at the cart's own bumper.
+
+    What it replaces, and why (scratch/_field_refutations.py, 2026-09-15). The pull used to be
+    two pseudo-observation ROWS on the prior's line at the two ends of the pairs' depth range,
+    ``0.5 * weight`` each. Rows at ``+-dy/2`` about the mean carry ``w * dy^2 / 4`` of slope
+    information against the data's ``W * s^2``, so their pull depended on how wide the FRAME's
+    span was and on where in it the node's pairs sat: one probe (ten pairs of weight 1 at one
+    depth, a prior of weight 1) measured an effective pull of 0.4 pairs with the cluster at
+    0.6 m and 36 pairs with it at 6 m, and a flat ~15 pairs once the shift was open. A field
+    whose top nodes hold a handful of weak parallax corners could therefore never leave the
+    global fit, whatever ``field_prior`` was set to. "One beam's worth" now means one beam's
+    worth everywhere.
+
+    A prior is not an outlier: the robust re-weighting is judged on the pairs' own line and
+    applied to their rows only (:func:`_huber_weights`) — the Tikhonov rows are not rows of the
+    design at all and can never be reweighted.
 
     ``shift`` says whether the node may fit a shift at all, and belongs to the FRAME, not to
     the node: a node holds a handful of beams over half a metre of depth, and a two-parameter
     fit on that is noise. The caller passes what its own global fit decided
     (:data:`FRAME_MIN_SPREAD`), so a field never opens a term the frame's gate refused. The
-    result is bounded like every other law (:func:`_bounded`)."""
+    result is bounded like every other law (:func:`_bounded`), on the node's OWN pairs: when a
+    bound binds, the other parameter is refitted as a median residual, and a prior in parameter
+    space has no residual to take a median of. A node with no pairs is clipped instead."""
     d = np.asarray(d, dtype=float)
     z = np.asarray(z, dtype=float)
     w = np.asarray(weight, dtype=float)
-    lo, hi = float(min(span)), float(max(span))
-    if not (math.isfinite(lo) and math.isfinite(hi)) or lo <= 0.0:
-        return None
-    if hi <= lo * (1.0 + 1e-6):  # one depth cannot hold a line: spread the pull about it
-        lo, hi = 0.8 * lo, 1.25 * lo
-    y_pull = np.array([1.0 / lo, 1.0 / hi])
     with np.errstate(divide="ignore", invalid="ignore"):  # a pair at depth 0 drops out below
-        rows_x, rows_y, rows_w = [1.0 / d], [1.0 / z], [w]
-    for a, b, pull in priors:
-        if pull <= 0.0 or not math.isfinite(a) or a == 0.0:
+        x, y = 1.0 / d, 1.0 / z
+    ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(w) & (w > 0.0)
+    x, y, w = x[ok], y[ok], w[ok]
+    rate = node_unit(y, w, float(unit) if math.isfinite(unit) and unit > 0.0 else 1.0)
+    w_alpha, w_beta, num_alpha, num_beta = 0.0, 0.0, 0.0, 0.0
+    for a_prior, b_prior, pull in priors:
+        if pull <= 0.0 or not math.isfinite(a_prior) or a_prior == 0.0:
             continue
-        rows_x.append((y_pull - b) / a)  # the prior's own line at the span's two ends
-        rows_y.append(y_pull)
-        rows_w.append(np.full(2, 0.5 * pull))
-    x = np.concatenate(rows_x)
-    y = np.concatenate(rows_y)
-    base = np.concatenate(rows_w)
-    real = np.zeros(x.size, dtype=bool)
-    real[: d.size] = True
-    ok = np.isfinite(x) & np.isfinite(y) & (base > 0.0)
-    x, y, base, real = x[ok], y[ok], base[ok], real[ok]
-    if x.size == 0 or float(np.sum(base)) <= 0.0:
-        return None
-    base = base.copy()
-    base[real] *= _huber_weights(x[real], y[real], base[real], shift)
-    alpha, beta = _weighted_line(x, y, base, shift and x.size >= 2)
+        if not math.isfinite(b_prior):
+            continue
+        w_alpha += pull * rate
+        num_alpha += pull * rate / a_prior
+        w_beta += pull
+        num_beta += pull * (-b_prior / a_prior)
+    if x.size == 0 and w_alpha <= 0.0:
+        return None  # nothing at all constrains this node
+    if x.size:
+        w = w * _huber_weights(x, y, w, shift)
+    prior = NO_PRIOR
+    if w_alpha > 0.0:
+        prior = (w_alpha, num_alpha / w_alpha, w_beta, num_beta / w_beta)
+    alpha, beta = _weighted_line(x, y, w, shift and (x.size >= 2 or w_beta > 0.0), prior)
     with np.errstate(divide="ignore", invalid="ignore"):
         a, b = float(np.divide(1.0, alpha)), float(np.divide(-beta, alpha))
-    return _finite(*_bounded(a, b, x, y, base))
+    if x.size == 0:  # no pairs to take a residual median over: the prior, held to the bounds
+        return _finite(float(np.clip(a, *a_bounds())), float(np.clip(b, *B_BOUNDS)))
+    return _finite(*_bounded(a, b, x, y, w))
 
 
 # ---- the same pairs read as a curve over the network's range ----------------------------------

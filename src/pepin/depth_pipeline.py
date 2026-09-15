@@ -104,6 +104,7 @@ from pepin.depth import (
     floor_depth,
     in_image,
     inverse_sigma,
+    node_unit,
     pair_weight,
     project,
     project_all,
@@ -192,22 +193,33 @@ LIDAR_SIGMA_M = 0.0  # metres: one beam's range noise, 0 meaning every beam weig
 
 FIELD_GRIDS = ("1x1", "2x2", "3x3", "4x3", "4x4")  # how many nodes a scale field carries, written
 # the way an image size is — COLUMNS x ROWS, so 4x3 is four across and three down.
-FIELD_PRIOR = 1.0  # in pair-weight units (a lidar beam is 1): how hard a node is pulled toward
-# the frame's own global fit. A node that saw nothing comes back as the global fit exactly, which
-# is what makes a field safe — it degrades to today's single law wherever the anchors are sparse.
-# One beam's worth, MEASURED, not assumed: a node of a 3x3 field over this camera holds a median
-# of 3.7-5.1 of pair weight (p10 0.2-1.3, p90 10.8-17.3) over the four tapes of 2026-09-15, not
-# the hundreds a pull of 20 would need to be outvoted — at 20 the field is the single law again.
-# Swept over the four tapes (scratch/_field_prior_sweep.py, held-out beams, median |residual|):
-# at 20 they read 11.3 / 15.9 / 15.3 / 3.8 %, at 1.0 8.3 / 15.4 / 14.1 / 4.3 %, at 0 (no pull at
-# all) 7.9 / 15.5 / 14.5 / 5.0 %, against the single law's own 11.4 / 15.6 / 16.3 / 4.5 %. The
-# pull is two rows at the ends of the pairs' own depth range, so it carries more leverage on the
-# line than its nominal weight in pairs suggests.
-FIELD_CARRY = 1.0  # the same units: how hard a node is pulled toward what it was on the last
-# frame. One beam's worth as well — swept over 0, 1, 5 and 20 on the same four tapes, where every
-# frame does have beams, it moves the residual by under a point and 20 costs the drive 2.3
-# (8.3 -> 10.6 %). What it is there for is the frames that have none: without a lidar it is the
-# only thing carrying a node's scale from the last frame that saw something.
+FIELD_PRIOR = 0.3  # in PAIRS (a lidar beam is 1): how hard a node is pulled toward the frame's
+# own global fit. It means what it says — a Tikhonov prior carrying as much information about
+# the node's law as 0.3 pairs of weight 1 would at that node (:func:`pepin.depth.fit_node`) — and
+# a node that saw nothing still comes back as the global fit, which is what makes a field safe:
+# it degrades to today's single law wherever the anchors are sparse.
+# Swept 0.03 / 0.1 / 0.3 / 1 / 3 against a carry of 0.1 / 1 / 3, 2026-09-15, on two judges at
+# once. (1) The lidar's own row, held out on the CONTIGUOUS split — the first half of a frame's
+# beams fits, the second judges, then the reverse (scratch/field_prior_row_sweep.py; the parity
+# split grades a node on the immediate neighbours of the beams that fitted it and flatters the
+# field). Mean median |residual| over run 0171's drive and the three neck pitches: 11.9 / 11.2 /
+# 11.3 at prior 0.03, 12.0 / 11.5 / 11.4 at 0.1, 12.3 / 12.1 / 11.8 at 0.3, 13.4 / 13.1 / 13.2 at
+# 1, 14.1 / 13.7 / 13.7 at 3 (carry 0.1 / 1 / 3), against the single law's 15.8 and the OLD
+# pseudo-observation prior's 12.1 at its own 1.0. (2) The wall ABOVE that row, where no beam ever
+# judges (scratch/wall_truth_eval.py, tapes 0313 and 0268): the lidar chain reads 17.1 / 15.6 % of
+# median |residual| at prior 0.3 against 16.7 / 15.0 at 3 and 17.3 / 16.1 at 0.03 — a whole
+# hundred-fold of prior moves it by under a point, because above the row the field has almost
+# nothing of its own to fit (the parallax anchor lands 0.000-0.004 of pair weight a frame in the
+# top row of nodes). So the row decides, and the row wants a light prior: 0.3 improves the
+# held-out row by 0.3 points against today's default and costs 0.4 above it.
+FIELD_CARRY = 3.0  # the same units: how hard a node is pulled toward what it was on the last
+# frame, decayed by exp(-dt / FIELD_CARRY_TAU_S). Three beams' worth, and the one knob that is a
+# win everywhere it was measured (2026-09-15, the sweep above): at the lidar's row it takes the
+# drive's TOP third of the picture from 28.7 to 23.5 % at prior 0.3 and leaves 1 node fit of 846
+# pinned at a bound against 8 at carry 1; above the row it is worth 0.2-0.5 points on both tapes
+# and both wall-pixel selections. What it is there for is the frames with no beams at all:
+# without a lidar it is the only thing carrying a node's scale from the last frame that saw
+# something, and FIELD_CARRY_SPENT is what stops it carrying for ever.
 FIELD_CARRY_TAU_S = 2.0  # seconds over which that pull decays: a node starved for a time constant
 # keeps a third of the carry, and one starved for five seconds is the global fit again. The frame
 # law's own hold constant (FRAME_HOLD_TAU_S), by design, unmeasured as a choice of its own.
@@ -218,7 +230,8 @@ FIELD_CARRY_SPENT = 0.01  # what is left of the carry when it is dropped outrigh
 # floor existed (scratch/_field_hazards.py, 2026-09-15): a starved node read its 20-second-old
 # value to four decimals, the decay having done nothing at all. A hundredth is 4.6 time
 # constants, 9.2 s at the default tau — past the point where the pull moves the fit by a per
-# cent, so the default (field_prior 1.0) is unchanged to well under its own noise.
+# cent, so the defaults are unchanged to well under their own noise (at FIELD_PRIOR 0.3 and
+# FIELD_CARRY 3.0 a carry spent to 0.03 is a tenth of the prior beside it).
 
 
 # ---- one table of defaults ----------------------------------------------------------------------
@@ -2380,13 +2393,22 @@ class ScaleField:
     Every node is fitted by the same weighted, robust regression as the whole frame
     (:func:`pepin.depth.fit_node`) on the pairs that belong to it — each pair's own weight
     times its bilinear membership in that node, so a lidar row falling between two node rows
-    feeds both — plus two pseudo-observations: one pulling the node toward the frame's GLOBAL
-    fit with weight ``prior``, and one pulling it toward its own last value with weight
-    ``carry`` decayed by ``exp(-dt / carry_tau_s)``. The first is what makes the field safe: a
-    node that saw nothing is the global fit to the bit, so the field degrades to today's single
-    law wherever the anchors are sparse. The second is what makes it steady: with a lidar row
-    in the picture it barely matters, and on a frame whose only ruler is the floor it is what
-    carries the scale of the nodes that saw no pair this time.
+    feeds both — plus two priors: one pulling the node toward the frame's GLOBAL fit with
+    weight ``prior``, and one pulling it toward its own last value with weight ``carry``
+    decayed by ``exp(-dt / carry_tau_s)``. The first is what makes the field safe: a node that
+    saw nothing is the global fit, so the field degrades to today's single law wherever the
+    anchors are sparse. The second is what makes it steady: with a lidar row in the picture it
+    barely matters, and on a frame whose only ruler is the floor it is what carries the scale
+    of the nodes that saw no pair this time.
+
+    Both are read in PAIRS and mean it: ``prior = N`` carries as much information about a
+    node's law as N pairs of weight 1 would AT THAT NODE (:func:`pepin.depth.fit_node`, the
+    Tikhonov rows and the ``unit`` that scales them). Until 2026-09-15 they were pseudo-
+    observations on the prior's line at the two ends of the frame's depth span, whose pull ran
+    from 0.4 to 36 pairs depending on where in that span the node's own pairs sat — so a top
+    node holding a handful of far, weak corners could not leave the global fit whatever the
+    number said. The frame's own mean inverse depth squared is handed down as that exchange
+    rate for the nodes with no pairs of their own.
 
     A grid of (1, 1) is the old behaviour reachable: one node, no membership to compute and no
     pull to apply — the node IS the frame's global fit, bit for bit what :class:`FrameLaw`
@@ -2493,7 +2515,13 @@ class ScaleField:
             return  # a NaN global fit would fill every node that saw nothing, and the picture
         share = self.membership(rows, cols, shape) * np.asarray(weight, dtype=float)
         self._seen = share.sum(axis=2)
-        span = (float(np.percentile(z, 5)), float(np.percentile(z, 95)))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inverse = 1.0 / np.asarray(z, dtype=float)
+        # What one pair of weight 1 is worth about the SLOPE over the frame as a whole — the
+        # exchange rate a node with no pairs of its own has to read its prior in
+        # (:func:`pepin.depth.node_unit`).
+        finite = np.isfinite(inverse)
+        unit = node_unit(inverse[finite], np.asarray(weight, dtype=float)[finite], 1.0)
         carried = 0.0
         if self._fitted and self.carry > 0.0:
             tau = self.carry_tau_s
@@ -2507,7 +2535,7 @@ class ScaleField:
                 priors = [(a0, b0, self.prior)]
                 if carried > 0.0:
                     priors.append((float(self._a[i, j]), float(self._b[i, j]), carried))
-                fitted = fit_node(d[mine], z[mine], share[i, j][mine], priors, span, shift)
+                fitted = fit_node(d[mine], z[mine], share[i, j][mine], priors, unit, shift)
                 if fitted is not None:
                     a_new[i, j], b_new[i, j] = fitted
                     bound += 1 if at_bound(*fitted) else 0

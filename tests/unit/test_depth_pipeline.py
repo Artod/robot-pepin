@@ -813,6 +813,54 @@ def test_a_node_starved_of_pairs_carries_its_value_and_decays_toward_the_global_
     assert kept[2] < 0.05, "ten time constants later the node is the global fit again"
 
 
+def test_the_field_prior_weighs_the_pairs_it_claims_to_wherever_the_node_sits() -> None:
+    """``field_prior = N`` has to mean N pairs of weight 1 AT THIS NODE — the same N for a node
+    looking at the cart's own bumper and for one looking down the corridor. The pseudo-
+    observation prior it replaces did not: the skeptic's probe (scratch/_field_refutations.py,
+    2026-09-15 — ten pairs of weight 1 saying a = 1.00 against one prior of weight 1 saying
+    a = 2.00) measured an effective pull of 0.4 pairs with the cluster at 0.6 m and 36 pairs
+    with it at 6 m, so "1.0" named nothing physical and the top nodes of a field, holding a few
+    weak corners, could never leave the frame's global fit.
+
+    Read in the fit's own linear parameter, alpha = 1 / a, where a prior IS a weighted average
+    and the pull can be read straight off the answer (scratch/field_prior_units.py)."""
+    n, a_prior = 10, 2.0
+    for pull in (0.3, 1.0, 3.0):
+        read = []
+        for z0 in (0.6, 1.5, 3.0, 6.0):  # one tight cluster, near and far, the prior far away
+            z = np.full(n, z0)
+            got = fit_node(z, z, np.ones(n), [(a_prior, 0.0, pull)], 1.0, shift=False)
+            assert got is not None
+            frac = (1.0 / got[0] - 1.0) / (1.0 / a_prior - 1.0)
+            read.append(n * frac / (1.0 - frac))
+        assert read == pytest.approx([pull] * 4, rel=1e-9), f"{pull} pairs at every depth"
+    # With the shift OPEN the same holds for the scale. A cluster at one depth cannot separate
+    # slope from shift and the prior decides that split — but it decides it the same way at
+    # every depth, where the pseudo rows read a flat ~15 pairs whatever was asked of them. The
+    # SHIFT that comes out is not depth-free and must not be: b is in 1 / m, and the compromise
+    # line between a prior and a cluster tilts about the cluster's own inverse depth.
+    wide = [
+        fit_node(np.full(n, z0), np.full(n, z0), np.ones(n), [(a_prior, 0.0, 1.0)], 1.0, True)
+        for z0 in (3.0, 6.0, 9.0)  # under 3 m this cluster's compromise b lands on B_BOUNDS
+    ]
+    assert all(got is not None for got in wide)
+    scales = [got[0] for got in wide if got is not None]
+    assert scales == pytest.approx([scales[0]] * 3, rel=1e-9), "one scale, wherever it stood"
+
+
+def test_a_node_with_no_pairs_is_its_prior_and_two_priors_are_averaged_in_their_weights() -> None:
+    """A node that saw nothing must come back as what it was told, whatever the frame's own
+    depths were — that is what makes a field safe where the anchors are sparse. And the frame's
+    global fit and the node's own carry are two priors, averaged in the parameter they are held
+    in (alpha = 1 / a), so the exchange rate cannot tilt one against the other."""
+    nothing = (np.array([]), np.array([]), np.array([]))
+    for unit in (0.01, 1.0, 100.0):  # the frame's own mean inverse depth squared, any of them
+        assert fit_node(*nothing, [(1.7, 0.05, 1.0)], unit) == (1.7, 0.05)
+    assert fit_node(*nothing, [], 1.0) is None, "no pairs and no prior constrains nothing"
+    two = fit_node(*nothing, [(2.0, 0.0, 1.0), (1.0, 0.0, 3.0)], 0.25)
+    assert two is not None and two[0] == pytest.approx(1.0 / ((0.5 + 3.0 * 1.0) / 4.0))
+
+
 def test_a_floor_pair_weighs_its_own_sigma_and_a_tilted_plane_is_refused() -> None:
     """A floor pair's ruler is the mount's pitch: its sigma grows as the square of the range
     (z^2 / h * sigma_pitch) and its weight against a lidar beam's 1 says so. And the frame must
@@ -927,8 +975,8 @@ def test_a_law_that_is_not_a_number_never_reaches_the_picture() -> None:
     the callers already hold frames for."""
     blind = np.full(40, np.inf)  # a ruler and a network that both read infinitely far
     assert fit_frame(blind, blind, np.ones(40)) is None
-    assert fit_node(blind, blind, np.ones(40), [(math.nan, math.nan, 1.0)], (1.0, 3.0)) is None
-    assert fit_node(blind, blind, np.ones(40), [(1.5, 0.0, 1.0)], (1.0, 3.0)) == (1.5, 0.0)
+    assert fit_node(blind, blind, np.ones(40), [(math.nan, math.nan, 1.0)], 0.25) is None
+    assert fit_node(blind, blind, np.ones(40), [(1.5, 0.0, 1.0)], 0.25) == (1.5, 0.0)
 
     field = ScaleField((3, 3), prior=1.0, carry=0.0)
     rng = np.random.default_rng(5)
