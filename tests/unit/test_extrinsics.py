@@ -12,9 +12,13 @@ from pepin.extrinsics import (
     bearing_grid,
     corrected_pan_reference,
     estimate_yaw_offset,
+    fit_mount,
     median_fan,
+    mount_yaw_shift,
     range_bias,
     sample_fan,
+    slope_artefact,
+    synthetic_camera_fan,
 )
 
 DEG_PER_TICK = 360.0 / 4096
@@ -241,3 +245,73 @@ def test_the_proposed_reference_makes_the_neck_believe_the_measured_heading() ->
     assert proposed == 2082
     after = math.degrees(joint_angles(config(proposed), 2021, 2311).pan_rad)
     assert after == pytest.approx(5.40, abs=0.05)
+
+
+# ---- the mount behind the shifts: a pan, a roll, or neither -----------------------------------
+MEASURED_2026_09_15 = ((14.1, 3.1), (23.8, 5.4), (33.6, 3.5))  # (head pitch, median yaw shift)
+
+
+def test_a_roll_shows_as_yaw_only_when_the_head_looks_down() -> None:
+    """The geometry the joint fit rests on: a pan is the same degree at every pitch, a roll is
+    ``roll * sin(pitch)`` — invisible at a level head, 0.55 of itself at 33.6 deg down."""
+    for pitch in (0.0, 14.1, 23.8, 33.6):
+        assert mount_yaw_shift(2.0, 0.0, pitch) == pytest.approx(2.0)
+    assert mount_yaw_shift(0.0, 3.0, 0.0) == pytest.approx(0.0)
+    assert mount_yaw_shift(0.0, 3.0, 33.6) == pytest.approx(3.0 * math.sin(math.radians(33.6)))
+
+
+def test_fit_mount_recovers_a_pan_and_a_roll_it_was_given() -> None:
+    """Exact samples of a known mount come back as that mount, with nothing left over."""
+    samples = [(p, mount_yaw_shift(1.7, -2.4, p)) for p in (14.1, 23.8, 33.6)]
+    fit = fit_mount(samples)
+    assert fit.pan_deg == pytest.approx(1.7, abs=1e-6)
+    assert fit.roll_deg == pytest.approx(-2.4, abs=1e-6)
+    assert fit.rms_deg < 1e-9
+    assert fit.explains(0.1)
+
+
+def test_one_pitch_alone_cannot_tell_a_pan_from_a_roll() -> None:
+    """Two samples at the same pitch are one equation: the fit refuses instead of inventing."""
+    with pytest.raises(ValueError):
+        fit_mount([(23.8, 5.4), (23.8, 5.5)])
+    with pytest.raises(ValueError):
+        fit_mount([(23.8, 5.4)])
+
+
+def test_no_rigid_mount_explains_the_three_shifts_of_2026_09_15() -> None:
+    """The measurement's own verdict: +3.1 / +5.4 / +3.5 deg at 14.1 / 23.8 / 33.6 deg down.
+
+    A pan and a roll together can only make a shift MONOTONIC in pitch (``pan + roll *
+    sin pitch``), and these rise then fall. The best joint fit leaves 0.8 deg rms — eight times
+    the 0.1 deg the three windows at the working pitch repeat to — so the shifts are not a
+    mount's, and the pan reference must not be set from them.
+    """
+    fit = fit_mount(list(MEASURED_2026_09_15))
+    assert fit.rms_deg > 0.7
+    assert not fit.explains(0.3)  # the worst within-pitch spread of the three pitches
+    assert abs(fit.residuals_deg[1]) > 1.0  # the working pitch is the one that does not fit
+
+
+def test_the_estimator_returns_a_synthetic_fan_s_own_yaw() -> None:
+    """synthetic_camera_fan is the truth the artefact is measured against: with no range bias
+    the estimator gives back exactly the yaw the fan was built with."""
+    lidar = lidar_fan()
+    for turned in (-3.0, 0.0, 2.5):
+        fan = synthetic_camera_fan(lidar, shift_deg=turned)
+        assert estimate_yaw_offset(lidar, fan).shift_deg == pytest.approx(turned, abs=0.2)
+        assert range_bias(lidar, fan, shift_deg=turned).ratio == pytest.approx(1.0, abs=0.02)
+
+
+def test_the_live_range_slope_invents_more_yaw_than_the_live_shift_measured() -> None:
+    """The artefact reproduced with the estimator itself, at the slopes measured on 2026-09-15.
+
+    A camera not turned by one degree, whose ranges carry the live scale (0.58) and the live
+    slope (-0.0040/deg at the working pitch, -0.0082/deg at 14.1 deg), reads back as several
+    degrees of yaw — the size of the shifts the live probe reported. The artefact grows with the
+    slope, and it is signed, so it cannot be subtracted off a single measurement either.
+    """
+    lidar = lidar_fan()
+    for slope in (-0.0040, -0.0082):
+        faked = slope_artefact(lidar, slope, scale=0.58)
+        assert abs(faked.shift_deg) > 2.0
+    assert abs(slope_artefact(lidar, 0.0, scale=0.58).shift_deg) == pytest.approx(0.0, abs=0.2)
