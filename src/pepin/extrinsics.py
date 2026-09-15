@@ -65,8 +65,9 @@ class Fan:
 class YawOffset:
     """How far the camera's fan must be turned CCW to sit on the lidar's, and how sure that is.
 
-    ``shift_deg`` is the answer (positive: the camera fan must rotate counter-clockwise, so the
-    camera really looks further clockwise than the transform says). ``score_m`` is the median
+    ``shift_deg`` is the answer (positive: the camera fan must rotate counter-clockwise to land
+    on the lidar's, because the camera really looks that much further COUNTER-CLOCKWISE — to the
+    cart's left — than the projection assumed). ``score_m`` is the median
     absolute range difference there, ``depth_m`` how much that median rises one degree away (a
     sharp minimum is a wall seen by both; a flat one means the fans did not constrain the yaw),
     ``bearings`` how many bearings the winning score was taken over, ``scale`` the camera range
@@ -85,7 +86,14 @@ class YawOffset:
     @property
     def sharp(self) -> bool:
         """Whether the minimum stands out enough to act on (:data:`SHARP_DEPTH_M` of climb one
-        degree away, over at least 20 bearings) — a flat score curve fits any yaw equally."""
+        degree away, over at least 20 bearings) — a flat score curve fits any yaw equally.
+
+        Necessary, not sufficient: it catches a room that does not constrain the yaw, NOT a
+        camera whose ranges are wrong by a bearing-dependent factor. A ratio that slides by
+        0.002 per degree across the fan, with no rotation whatever, produced a 6 deg shift with
+        a 1.2 cm/deg minimum — sharp and false (scratch/fan_yaw_confounds.py, 2026-09-15). Read
+        :func:`range_bias`'s ``slope_per_deg`` beside this: under a slope of a few thousandths
+        the shift is the law's, not the neck's."""
         return self.depth_m >= SHARP_DEPTH_M and self.bearings >= 20
 
 
@@ -272,10 +280,11 @@ def corrected_pan_reference(
 ) -> int:
     """The pan reference tick that puts the neck's believed heading on the measured one.
 
-    ``pan_error_deg`` is how far the model's pan sits from the truth, CCW positive. Where the
-    camera fan is placed into base_link THROUGH the neck's transform, that is exactly
-    :attr:`YawOffset.shift_deg`. Where it is not — /depth_scan today is folded onto the floor as
-    if the head looked along the cart's x, whatever the pan (depth_stream ``_as_scan``, counted
+    ``pan_error_deg`` is the truth MINUS what the model believes (CCW positive: positive means
+    the head really points further left than /neck/state says). Where the camera fan is placed
+    into base_link THROUGH the neck's transform, that is exactly :attr:`YawOffset.shift_deg`.
+    Where it is not — /depth_scan today is folded onto the floor as if the head looked along the
+    cart's x, whatever the pan (depth_stream ``_as_scan``, counted
     in its report line as "head panned N frames (projected as if not)") — the shift measures the
     camera's TRUE heading, and the error is ``shift - the pan /neck/state believes``.
 

@@ -20,8 +20,13 @@ from pepin.extrinsics import (
 DEG_PER_TICK = 360.0 / 4096
 
 
+PILLAR = (1.2, 0.5, 0.2)  # a post ahead and to the left: the corner that constrains a yaw
+
+
 def room_range(bearing_rad: float) -> float:
-    """A 3 m by 4 m box seen from its middle: the range to the wall at a bearing, in metres."""
+    """A 3 m by 4 m box with a pillar in it, seen from its middle: the range at a bearing, in
+    metres. The pillar gives the camera's cone one real corner — two flat walls constrain a yaw
+    only through their own corner, which a 80 deg cone may not hold."""
     half_x, half_y = 2.0, 1.5
     c, s = math.cos(bearing_rad), math.sin(bearing_rad)
     hits = []
@@ -29,6 +34,12 @@ def room_range(bearing_rad: float) -> float:
         hits.append(half_x / abs(c))
     if abs(s) > 1e-9:
         hits.append(half_y / abs(s))
+    px, py, radius = PILLAR
+    along = c * px + s * py
+    if along > 0.0:
+        perp2 = px * px + py * py - along * along
+        if perp2 < radius * radius:
+            hits.append(along - math.sqrt(radius * radius - perp2))
     return min(hits)
 
 
@@ -137,7 +148,9 @@ def test_range_bias_with_nothing_in_common_is_nan() -> None:
 
 
 def test_corrected_pan_reference_reproduces_the_move_of_2026_09_13() -> None:
-    """2021 -> 1993: the camera looked 2.5 deg left, so the fan had to turn 2.5 deg clockwise."""
+    """2021 -> 1993: depth_fusion's align turned every frame by a signed median of -2.5 deg, so
+    the camera's projected view sat 2.5 deg LEFT of the truth — the truth minus the belief is
+    -2.5, and the reference had to fall by 28 ticks (journal 2026-09-13 20:30)."""
     assert corrected_pan_reference(2021, -2.5, pan_sign=-1, deg_per_tick=DEG_PER_TICK) == 1993
     assert corrected_pan_reference(1993, 0.0, pan_sign=-1, deg_per_tick=DEG_PER_TICK) == 1993
     assert corrected_pan_reference(1993, 1.0, pan_sign=-1, deg_per_tick=DEG_PER_TICK) == 2004
@@ -167,3 +180,64 @@ def test_a_fan_wants_matching_arrays() -> None:
 def test_bearing_grid_wants_more_than_one_cell() -> None:
     with pytest.raises(ValueError, match="at least two cells"):
         median_fan([], np.zeros(1))
+
+
+def test_a_pure_range_scale_is_not_read_as_a_yaw_while_scale_free_is_on() -> None:
+    """The flag's reason for existing: ranges 1.1x and 0.573x the truth, no rotation at all.
+
+    With it on the scale is divided out and the answer is 0.0; with it off (the old absolute
+    score) the search buys a fake -4.8 / +8.0 deg to pay for the scale
+    (scratch/fan_yaw_confounds.py, 2026-09-15).
+    """
+    lidar, cam = lidar_fan(), camera_fan(0.0)
+    for k in (1.1, 0.573):
+        scaled = Fan(cam.bearings_rad, cam.ranges_m * k)
+        assert estimate_yaw_offset(lidar, scaled).shift_deg == pytest.approx(0.0, abs=0.2)
+        loose = estimate_yaw_offset(lidar, scaled, scale_free=False)
+        assert abs(loose.shift_deg) > 4.0  # the scale is paid for in degrees
+        assert not loose.sharp
+
+
+def test_a_bearing_dependent_range_bias_fakes_a_sharp_yaw_that_is_not_there() -> None:
+    """What `sharp` does NOT catch, and why 2026-09-15's live +5.8 deg is not the neck's.
+
+    A camera/lidar ratio that slides by 0.002 per degree across the fan — half of the -0.004/deg
+    measured live — with the camera NOT turned by one degree, moves the minimum by about 6 deg
+    and the minimum stays sharp. A yaw and a bearing-dependent range bias are not separable by
+    this instrument, whatever the scale flag does about the constant part.
+    """
+    lidar, cam = lidar_fan(), camera_fan(0.0)
+    tilted = Fan(
+        cam.bearings_rad, cam.ranges_m * 0.573 * (1.0 + 0.002 * np.degrees(cam.bearings_rad))
+    )
+    out = estimate_yaw_offset(lidar, tilted)
+    assert abs(out.shift_deg) > 4.0  # degrees of yaw bought by a range slope alone
+    assert out.sharp  # and it looks exactly like a good measurement
+    assert abs(range_bias(lidar, tilted).slope_per_deg) > 1e-3  # the only tell there is
+
+
+def test_the_proposed_reference_makes_the_neck_believe_the_measured_heading() -> None:
+    """The tick chain end to end, through pepin.neck itself rather than its arithmetic.
+
+    Head at 2021 ticks with the reference at 1993 (the live state of 2026-09-15): the model
+    believes -2.46 deg; a measured true heading of +5.40 deg is an error of +7.86, and under the
+    reference that closes it joint_angles must answer the measured heading at those same ticks.
+    """
+    from pepin.neck import NeckConfig, NeckJoint, NeckPivot, NeckReference, joint_angles
+
+    def config(pan_reference: int) -> NeckConfig:
+        return NeckConfig(
+            NeckJoint("neck", 9, 2048, 257, 3812),
+            NeckJoint("head", 10, 2048, 1814, 3090),
+            NeckReference(pan_reference, 2311, 0.0, 0.0, 1.203, 23.8, pan_sign=-1, tilt_sign=1),
+            NeckPivot(),
+        )
+
+    believed = math.degrees(joint_angles(config(1993), 2021, 2311).pan_rad)
+    assert believed == pytest.approx(-2.46, abs=0.01)
+    proposed = corrected_pan_reference(
+        1993, 5.40 - believed, pan_sign=-1, deg_per_tick=DEG_PER_TICK
+    )
+    assert proposed == 2082
+    after = math.degrees(joint_angles(config(proposed), 2021, 2311).pan_rad)
+    assert after == pytest.approx(5.40, abs=0.05)
