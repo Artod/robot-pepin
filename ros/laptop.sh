@@ -198,7 +198,7 @@ case "${1:-start}" in
             -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} \
             "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "slam:=$SLAM" "camera_only:=$CAMERA_ONLY" "resume:=$RESUME" "world_map:=$WORLD_MAP" \
-            "seed_map:=$SEED_MAP" "vo:=$VO" >/dev/null
+            ${SEED_MAP:+"seed_map:=$SEED_MAP"} "vo:=$VO" >/dev/null  # an empty seed_map:= is a malformed launch argument: SLAM mode passes none (2026-09-14)
         [ "$SLAM" = true ] \
             && echo "vslam up in SLAM mode (camera_only $CAMERA_ONLY, resume $RESUME, static camera tf $STATIC_CAMERA_TF): the map grows on /map; board must be on ros/thin.sh slam. Foxglove ws://localhost:8765, save with ros/map.sh save NAME" \
             || echo "vslam up beside the known map (static camera tf $STATIC_CAMERA_TF): Foxglove at ws://localhost:8765, ros/laptop.sh logs vslam"
