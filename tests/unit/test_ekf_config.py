@@ -63,9 +63,18 @@ def test_camera_gives_position_and_yaw_differentially(params: dict[str, Any]) ->
     assert params["odom1_differential"] is True
 
 
-def test_imu_gives_the_yaw_rate_and_the_planar_accelerations(params: dict[str, Any]) -> None:
-    """imu0 is /imu/data_raw: the gyro's yaw rate and the accelerometer's ax/ay, gravity off."""
-    assert fused(params, "imu0_config") == {"vyaw", "ax", "ay"}
+def test_imu_gives_the_yaw_rate_and_nothing_else(params: dict[str, Any]) -> None:
+    """imu0 is /imu/data_raw: the gyro's yaw rate alone.
+
+    ax/ay stay off because what the tapes measure on them is a BIAS (-0.229 to +0.066 m/s^2 with
+    the cart standing still), and a filter with no bias state cannot be told about one with a
+    covariance: fusing them costs up to 4.6 % of the forward speed while the wheels are alive
+    and runs to 0.98 m/s of invented speed in 5 s when they are not (scratch/accel_bias_cost.py).
+    The yaml carries the table; this is the assertion.
+    """
+    assert fused(params, "imu0_config") == {"vyaw"}
+    # Declared and true for the day a bias state or a real orientation makes ax/ay fusable; with
+    # no acceleration index on, robot_localization never prepares an acceleration measurement.
     assert params["imu0_remove_gravitational_acceleration"] is True
 
 
