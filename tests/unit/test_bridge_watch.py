@@ -179,6 +179,7 @@ def test_a_silence_that_survives_the_restart_escalates_to_the_half(monkeypatch: 
 def test_without_the_docker_socket_the_repair_is_the_old_one(monkeypatch: Any) -> None:
     repair = FakeRepair(present=False)
     node, admin, codes = build(monkeypatch, repair)
+    node._switches.set("half_restart", True)  # the old escalation, asked for explicitly
     with contextlib.suppress(ExitsError):
         drive(node, admin, [0.0, 20.0], messages=0)
     assert repair.restarts == 0 and codes == [watch_module.BRIDGE_CHANGED_EXIT]
