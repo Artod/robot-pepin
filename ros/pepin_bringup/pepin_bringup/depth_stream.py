@@ -141,6 +141,7 @@ from pepin.depth_pipeline import (
     PARALLAX_TRACK_WINDOW_S,
     PARALLAX_TRACKING,
     PARALLAX_TRACKINGS,
+    PARALLAX_UNDISTORT,
     PARALLAX_VERIFY_EVERY,
     PARALLAX_WEIGHT,
     PIPELINE_DEFAULTS,
@@ -209,6 +210,7 @@ TRACK_FLAGS = (  # the ones that decide the shape of a parallax measurement: tra
     "parallax_verify_every",
     "parallax_drift_tol_px",
     "parallax_correction_tol_m",
+    "parallax_undistort",
 )
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
@@ -860,6 +862,36 @@ FLAGS = FlagSet(
         range=(0.0, 20.0),
     ),
     Flag(
+        "parallax_undistort",
+        PARALLAX_UNDISTORT,
+        description="the tracked corners are straightened with the lens camera_info publishes"
+        " before the epipolar test, the triangulation and the reprojection measure with them."
+        " The flow, the drift bound and the depth image itself keep the picture's own pixels —"
+        " only the geometry is a pinhole. A no-op on an uncalibrated camera, on a picture"
+        " camera_stream already rectified (its camera_info then carries no distortion), and on"
+        " parallax_tracking window or pair, which measure in the picture's pixels as they"
+        " always did",
+        why="the geometry is a pinhole and the picture is not: this is an 83 degree lens with"
+        " k1 -0.150, k2 -0.129, k3 +0.092 (config/camera.json, 45 views, rms 0.23 px), which is"
+        " 8 px of displacement at the top edge of a 640x360 frame and over 20 in the corners,"
+        " against an epipolar gate 1.5 px wide. Measured on the door tapes 0321/0322 of"
+        " 2026-09-15 (scratch/parallax_rows_probe.txt, 77 judged frames) it is worth much less"
+        " than that sounds, because both views of one corner are bent in nearly the same way"
+        " and the error largely cancels: the epipolar residual's median moves 1.18 -> 1.04 px"
+        " in the middle third of the picture and not at all in the top (1.10 -> 1.11). What it"
+        " does buy is corners through every gate — 333 -> 411 kept in the top third, 2572 ->"
+        " 2730 in the middle, 2812 -> 3019 at the bottom, 8 % overall and 23 % at the top —"
+        " for one cv2.undistortPoints over a few hundred points a frame. Where that lands is"
+        " the top of the picture, which is the part the lidar never sees: the weight the"
+        " parallax corners carry into the frame's fit goes from 0.18 to 0.33 of a lidar beam"
+        " per frame in the top third, while the middle and the bottom give back 3.61 -> 3.41"
+        " and 4.01 -> 3.53 — the same corners with an honest sigma instead of a flattered one",
+        on_when="always while the published picture carries a distortion: the pixels the gates"
+        " measure ought to be the pixels the geometry assumes",
+        off_when="to reproduce a number measured before 2026-09-16, or to A/B what the lens is"
+        " worth on a tape",
+    ),
+    Flag(
         "parallax_correction_tol_m",
         PARALLAX_CORRECTION_TOL_M,
         description="how far the tracker's map -> odom correction may jump between two frames"
@@ -1297,6 +1329,7 @@ class DepthStream(Node):
         self._last_cam = self._camera_config  # the head's last pose, for the report's geometry
         self._camera_cfg = cfg  # config/camera.json's own optics until a camera_info arrives
         self._intr: Intrinsics | None = None
+        self._dist: tuple[float, ...] | None = None  # camera_info's own, once it has arrived
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         newest = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(Image, "/camera/depth", reliable)
@@ -1511,6 +1544,7 @@ class DepthStream(Node):
             stage.verify_every = int(self._switches["parallax_verify_every"])
             stage.drift_tol_px = float(self._switches["parallax_drift_tol_px"])
             stage.correction_tol_m = float(self._switches["parallax_correction_tol_m"])
+            stage.undistort = bool(self._switches["parallax_undistort"])
 
     def _ask_lidar_sigma(self, sigma_m: float) -> None:
         """Tell the lidar anchor what one beam's range is trusted to, in metres: its pairs then
@@ -1579,7 +1613,12 @@ class DepthStream(Node):
         )
 
     def _on_info(self, msg: CameraInfo) -> None:
+        """The camera's optics as they are published — and the distortion the published picture
+        still carries, which is empty once camera_stream's ``undistort`` rectifies it. The
+        pipeline's own projections stay a pinhole; the parallax anchor is the one stage that
+        straightens the pixels it measures with (``parallax_undistort``)."""
         self._intr = Intrinsics.from_camera_info(msg.k, msg.width, msg.height)
+        self._dist = tuple(float(v) for v in msg.d)
 
     def _on_scan(self, msg: LaserScan) -> None:
         """Keep the last SCAN_WINDOW_S of scans: the frame picks the one nearest its exposure.
@@ -1632,6 +1671,7 @@ class DepthStream(Node):
             gray=to_gray(rgb) if self._pipeline.on("parallax_anchor") else None,
             motion=self._poser,
             cam_optical=cam_optical,
+            dist=self._lens_dist(msg),
         )
         with tally.measure("pipeline"):
             result = self._pipeline.run(depth, ctx)
@@ -1770,6 +1810,14 @@ class DepthStream(Node):
             self._expected = floor_depth(ctx.intr, ctx.cam, ctx.up)
             self._expected_key = key
         return self._expected
+
+    def _lens_dist(self, image: Image) -> tuple[float, ...]:
+        """The distortion the published picture carries: camera_info's own once it has arrived,
+        config/camera.json's calibration scaled to this frame's size until then. Empty when the
+        camera is uncalibrated or the picture is already rectified."""
+        if self._dist is not None:
+            return self._dist
+        return tuple(optics(self._camera_cfg, image.width, image.height).dist)
 
     def _intr_or_nominal(self, image: Image) -> Intrinsics:
         """The camera_info's optics, or config/camera.json's own until one arrives — the

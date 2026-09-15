@@ -747,6 +747,9 @@ class Tracks:
     seen: npt.NDArray[np.bool_]
     motions: tuple[Motion, ...]
     found: int = 0
+    at: Pixels | None = None  # where the CURRENT frame's pixels really are in the picture, when
+    # that is not where ``pixels`` puts them: a lens straightened for the geometry is still read
+    # off the distorted image, and a caller indexes the depth with these (``None``: the same)
 
     @property
     def count(self) -> int:
@@ -766,8 +769,15 @@ class Tracks:
 
     @property
     def current(self) -> Pixels:
-        """Where each track sits in the current frame — the pixel its depth belongs to."""
+        """Where each track sits in the current frame in the GEOMETRY's pixels — the ones the
+        epipolar test, the triangulation and the reprojection speak."""
         return np.asarray(self.pixels[:, -1], dtype=np.float32)
+
+    @property
+    def read_at(self) -> Pixels:
+        """Where each track sits in the PICTURE: the pixel a caller indexes the depth image
+        with, which is :attr:`current` unless a lens was straightened out of it."""
+        return self.current if self.at is None else np.asarray(self.at, dtype=np.float32)
 
 
 def _identity() -> Motion:
@@ -1344,6 +1354,7 @@ def gate_tracks(
         return ParallaxTruth.nothing("flow", rejected=rejected)
     seen = tracks.seen.copy()
     current = tracks.current
+    at = tracks.read_at
     for view in range(tracks.views - 1):
         here = seen[:, view]
         if not bool(here.any()):
@@ -1359,8 +1370,8 @@ def gate_tracks(
         seen[:, view] &= ~lost
     tracks = replace(tracks, seen=seen)
     keep = started.copy()
-    column = np.rint(np.asarray(current, dtype=float)[:, 0])
-    row = np.rint(np.asarray(current, dtype=float)[:, 1])
+    column = np.rint(np.asarray(at, dtype=float)[:, 0])
+    row = np.rint(np.asarray(at, dtype=float)[:, 1])
     inside = (column >= 0) & (column < intr.width) & (row >= 0) & (row < intr.height)
     rejected["outside"] = int((keep & ~inside).sum())
     keep &= inside
@@ -1402,7 +1413,7 @@ def gate_tracks(
         return ParallaxTruth.nothing(worst, tracked=tracked, rejected=rejected)
     weight = pair_weight(found.sigma[keep] / found.z[keep] ** 2, cap=max_weight)
     return ParallaxTruth(
-        current[keep],
+        at[keep],
         found.z[keep],
         found.sigma[keep],
         found.residual[keep],
@@ -1490,6 +1501,61 @@ DETECT_GRID = (4, 3)  # columns x rows the detector spreads new corners over, so
 # picture gets corners too — which is exactly where the lidar's one plane never reaches, and the
 # only elevation a law over the ray's angle can be fitted at.
 TRACK_DEATHS = ("lk", "fb", "edge", "drift", "source")
+
+
+class Lens(Protocol):
+    """Who turns the pixels a real lens produced into the pixels an ideal pinhole would have
+    produced — everything downstream of the tracker is a pinhole geometry."""
+
+    def straighten(self, points: Pixels) -> Pixels:
+        """``points`` (n, 2) with the lens's distortion undone, in the same pixel units, so
+        every threshold measured in pixels keeps its meaning."""
+        ...
+
+
+@dataclass(frozen=True)
+class PlumbBob:
+    """OpenCV's radial-tangential model as a :class:`Lens`: the distortion ``config/camera.json``
+    measured and ``camera_info`` publishes, undone with the same K it was measured in.
+
+    Why it matters here and not in the rest of the pipeline. A distorted pixel is not on the ray
+    a pinhole says it is, and the epipolar test asks a pixel to lie within 1.5 px of a line that
+    a pinhole drew: on this 83 degree lens (k1 -0.150, k2 -0.129, k3 +0.092) that is 8 px of
+    displacement at the top edge of a 640x360 picture and over 20 in the corners. Measured on
+    the door tapes of 2026-09-15 (scratch/parallax_rows_probe.txt) it is worth rather less than
+    that sounds — the epipolar residual's median moves 1.18 -> 1.04 px in the middle third and
+    not at all at the top — because the two views of one corner are distorted in nearly the same
+    way and the error largely cancels. What it does buy is corners: 8 % more tracks through
+    every gate, 23 % more in the top third of the picture."""
+
+    intr: Intrinsics
+    dist: tuple[float, ...]
+
+    def straighten(self, points: Pixels) -> Pixels:
+        """:meth:`Lens.straighten` through OpenCV's iterative inverse with P = K.
+
+        Iterated to a thousandth of a pixel rather than left at the five turns
+        ``undistortPoints`` takes by default: at this lens's strength the default stops about
+        0.2 px from the answer at the corners of the picture, which is a seventh of the
+        epipolar gate spent on arithmetic."""
+        import cv2
+
+        flat = np.asarray(points, dtype=np.float64).reshape(-1, 1, 2)
+        if flat.shape[0] == 0 or not self.dist:
+            return np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        k = np.array(
+            [[self.intr.fx, 0.0, self.intr.cx], [0.0, self.intr.fy, self.intr.cy], [0.0, 0.0, 1.0]]
+        )
+        undistort: Any = cv2.undistortPointsIter  # cv2's stubs type neither P= nor the shape
+        out = undistort(
+            flat,
+            k,
+            np.array(self.dist, dtype=float),
+            None,
+            k,
+            (cv2.TERM_CRITERIA_MAX_ITER | cv2.TERM_CRITERIA_EPS, 20, 1e-4),
+        )
+        return np.asarray(out, dtype=np.float32).reshape(-1, 2)
 
 
 class Flow(Protocol):
@@ -1609,8 +1675,9 @@ class Track:
     survived."""
 
     ident: int
-    pixel: Pixels
+    pixel: Pixels  # where it sits in the PICTURE: what the flow tracks and the depth is read at
     born: float
+    straight: Pixels | None = None  # the same place with the lens undone, for the geometry
     observations: list[Observation] = field(default_factory=list)
     used: list[Observation] = field(default_factory=list)
     descriptor: npt.NDArray[np.uint8] | None = None
@@ -1714,6 +1781,7 @@ class TrackStore:
         fb_tol_px: float = FB_TOL_PX,
         ratio: float = ORB_RATIO,
         flow: Flow | None = None,
+        lens: Lens | None = None,
     ) -> None:
         if matcher not in MATCHERS:
             raise ValueError(f"unknown matcher {matcher!r}: one of {', '.join(MATCHERS)}")
@@ -1729,6 +1797,10 @@ class TrackStore:
         self.fb_tol_px = fb_tol_px
         self.ratio = ratio
         self._flow: Flow = flow if flow is not None else LucasKanade()
+        self.lens = lens  # live: parallax_undistort hands one over, or None to keep the raw
+        # pixels. The flow and the drift bound always work in the picture's own pixels; only
+        # what a solve reads is straightened, and a change takes effect from the next frame's
+        # observations on (the ones already stored keep the pixels they were made with).
         self._tracks: list[Track] = []
         self._described: Features | None = None  # the describer's reading of the current frame
         self._taken: npt.NDArray[np.bool_] = np.zeros(0, dtype=bool)  # its keypoints recognised
@@ -1811,11 +1883,13 @@ class TrackStore:
             born = self._detect(gray, view)
             detect_ms = 1000.0 * (time.perf_counter() - started)
             self._since_detect = 0
+        self._straighten()
         if self._is_view(view, born):
             self._keys.append(view)
             self._greys[view.stamp] = gray
             for track in self._tracks:
-                track.observations.append(Observation(track.pixel.copy(), view))
+                seat = track.straight if track.straight is not None else track.pixel
+                track.observations.append(Observation(np.array(seat, dtype=np.float32), view))
         died["source"] = self._select(view)
         self._gray = gray
         self._frames += 1
@@ -1831,6 +1905,18 @@ class TrackStore:
             verify_ms=verify_ms,
             rest_ms=max(whole - hop_ms - detect_ms - verify_ms, 0.0),
         )
+
+    def _straighten(self) -> None:
+        """Every live corner's place in the geometry's pixels, computed once a frame for all of
+        them together: the picture's pixel with the lens undone (:class:`Lens`). Without a lens
+        a corner's two places are the same place, and nothing is computed."""
+        if self.lens is None or not self._tracks:
+            for track in self._tracks:
+                track.straight = None
+            return
+        seats = self.lens.straighten(np.array([t.pixel for t in self._tracks], dtype=np.float32))
+        for track, seat in zip(self._tracks, seats, strict=True):
+            track.straight = np.asarray(seat, dtype=np.float32)
 
     def views(self) -> list[FrameView]:
         """The earlier frames the next solve needs a motion for, oldest first — at most
@@ -1869,11 +1955,18 @@ class TrackStore:
         if found:
             pixels[at_row, at_view] = np.asarray(found, dtype=float)
             seen[at_row, at_view] = True
+        at: Pixels | None = None
         if rows:
-            pixels[:, -1] = np.asarray([t.pixel for t in rows], dtype=float)
+            here = np.asarray([t.pixel for t in rows], dtype=float)
+            straight = np.asarray(
+                [t.straight if t.straight is not None else t.pixel for t in rows], dtype=float
+            )
+            pixels[:, -1] = straight
             seen[:, -1] = True
+            if self.lens is not None:
+                at = here.astype(np.float32)
         ordered = (*(motions[stamp] for stamp in stamps), _identity())
-        return Tracks(pixels, seen, ordered, found=len(self._tracks))
+        return Tracks(pixels, seen, ordered, found=len(self._tracks), at=at)
 
     # ---- one frame, step by step ---------------------------------------------------------
     def _hop(self, gray: npt.NDArray[np.uint8], died: dict[str, int]) -> None:
@@ -2154,6 +2247,7 @@ __all__ = [
     "Features",
     "Flow",
     "FrameView",
+    "Lens",
     "LucasKanade",
     "Matcher",
     "Motion",
@@ -2161,6 +2255,7 @@ __all__ = [
     "ParallaxTruth",
     "Pixels",
     "Placement",
+    "PlumbBob",
     "Track",
     "TrackDepths",
     "TrackReport",

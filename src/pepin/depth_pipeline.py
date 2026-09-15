@@ -112,7 +112,7 @@ from pepin.depth import (
 from pepin.elevation import RAY_AZIMUTH_DEGREE, RAY_DEGREE, RayGain, fit_ray, ray_angles
 
 if TYPE_CHECKING:  # the tracker's own module stays a lazy import inside the parallax stage
-    from pepin.parallax import Features, FrameView, Motion, ParallaxTruth, TrackStore
+    from pepin.parallax import Features, FrameView, Lens, Motion, ParallaxTruth, TrackStore
 
 LEAN_STEP = 0.003  # the floor's expected depth is recomputed when the up vector moves this much
 FLOOR_PAIR_STRIDE = 8  # every 8th row and column of the floor: 3600 candidates of a 640x360 frame
@@ -155,6 +155,8 @@ PARALLAX_CORRECTION_TOL_M = 0.05  # how far the tracker's map -> odom correction
 # pose after it, and that displacement is not one the camera made. Read as the metres it puts on
 # a point PARALLAX_CORRECTION_REACH_M ahead, so a turn of the map counts as well as a shift.
 PARALLAX_CORRECTION_REACH_M = 2.0
+PARALLAX_UNDISTORT = True  # straighten the tracked pixels with camera_info's own distortion
+# before the epipolar test, the triangulation and the reprojection
 PARALLAX_RING_FRAMES = 48  # frames kept to reach back through, the BACKWARD window's and the
 # pair's alone (the forward store keeps the previous grey and one per view, and no ring at all).
 # The ring is pruned by TIME (parallax_track_window_s); this is the memory bound under it, and at
@@ -445,6 +447,10 @@ class FrameContext:
     gray: npt.NDArray[np.uint8] | None = None
     motion: MotionSource | None = None
     cam_optical: Rigid | None = None
+    dist: tuple[float, ...] = ()  # the lens the PICTURE still carries (camera_info's d, empty
+    # once camera_stream publishes a rectified one). Every projection in this module is a
+    # pinhole and stays one; it is the parallax anchor, whose epipolar test is 1.5 px wide,
+    # that asks for the pixels straightened before it measures with them.
 
     @cached_property
     def beams(self) -> Array | None:
@@ -1550,6 +1556,7 @@ class ParallaxAnchor(AnchorStage):
         split_tol_sigma: float = PARALLAX_SPLIT_TOL_SIGMA,
         tracking: str = PARALLAX_TRACKING,
         correction_tol_m: float = PARALLAX_CORRECTION_TOL_M,
+        undistort: bool = PARALLAX_UNDISTORT,
         max_tracks: int = PARALLAX_MAX_TRACKS,
         redetect_every: int = PARALLAX_REDETECT_EVERY,
         verify_every: int = PARALLAX_VERIFY_EVERY,
@@ -1572,6 +1579,7 @@ class ParallaxAnchor(AnchorStage):
         self.split_tol_sigma = split_tol_sigma  # live: parallax_split_tol_sigma; 0 is off
         self.tracking_mode = tracking  # live: parallax_tracking — forward, window or pair
         self.correction_tol_m = correction_tol_m  # live: parallax_correction_tol_m; 0 is off
+        self.undistort = undistort  # live: parallax_undistort
         self.max_tracks = max_tracks  # live: parallax_max_tracks (the forward store's cap)
         self.redetect_every = redetect_every  # live: parallax_redetect_every, in frames
         self.verify_every = verify_every  # live: parallax_verify_every, in frames; 0 is off
@@ -1586,6 +1594,8 @@ class ParallaxAnchor(AnchorStage):
         self._last_stamp: float | None = None  # the newest frame the store has seen
         self._pose: Rigid | None = None  # where the cart stood at this frame, when tf can say
         self._correction: Rigid | None = None  # the newest map <- odom, to notice it jumping
+        self._lens_for: tuple[Intrinsics, tuple[float, ...]] | None = None
+        self._lens_is: Lens | None = None
         self.deaths: dict[str, int] = {}  # forward tracks closed, by cause (lk, fb, edge, drift)
         self._live: list[int] = []  # corners the store was following, per frame
         self._born: list[int] = []
@@ -1776,7 +1786,7 @@ class ParallaxAnchor(AnchorStage):
         out.reverse()
         return out
 
-    def _forward_store(self) -> TrackStore:
+    def _forward_store(self, ctx: FrameContext) -> TrackStore:
         """The forward ruler's store, with every live knob pushed into it. The knobs are pushed
         on EVERY frame and nothing is reset by pushing them, which is what makes a window
         lengthened or shortened live take effect on the next frame with no restart: the store
@@ -1795,7 +1805,22 @@ class ParallaxAnchor(AnchorStage):
         store.redetect_every = self.redetect_every
         store.verify_every = self.verify_every
         store.drift_tol_px = self.drift_tol_px
+        store.lens = self._lens(ctx)
         return store
+
+    def _lens(self, ctx: FrameContext) -> Lens | None:
+        """The lens the tracked pixels are straightened with, or ``None`` when they are not:
+        ``parallax_undistort`` off, or a picture that carries no distortion (camera_stream
+        publishing a rectified one, or an uncalibrated camera). Built once per optics rather
+        than per frame — it is a dataclass over the same two numbers every frame."""
+        from pepin.parallax import PlumbBob
+
+        if not self.undistort or not ctx.dist or not any(ctx.dist):
+            return None
+        key = (ctx.intr, ctx.dist)
+        if self._lens_for != key:
+            self._lens_for, self._lens_is = key, PlumbBob(ctx.intr, tuple(ctx.dist))
+        return self._lens_is
 
     def _source(self, ctx: FrameContext) -> tuple[str, Rigid | None]:
         """Whose word this frame's motion is, asked ONCE a frame, and — where that word is a
@@ -1901,7 +1926,7 @@ class ParallaxAnchor(AnchorStage):
         is no view with a motion behind it yet."""
         from pepin.parallax import gate_tracks
 
-        store = self._forward_store()
+        store = self._forward_store(ctx)
         source, self._pose = self._source(ctx)
         if self._corrected(ctx):
             self._count("correction", store.forget_views())
@@ -2072,6 +2097,7 @@ class ParallaxAnchor(AnchorStage):
             )
             + (
                 f", <= {self.max_tracks} corners, detect every {self.redetect_every}"
+                + (", lens undone" if self.undistort else ", raw pixels")
                 + (
                     f", drift <= {self.drift_tol_px:.1f} px every {self.verify_every}"
                     if self.verify_every > 0 and self.drift_tol_px > 0

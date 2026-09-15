@@ -31,10 +31,12 @@ from pepin.parallax import (
     LucasKanade,
     Motion,
     ParallaxTruth,
+    PlumbBob,
     Tracks,
     TrackStore,
     build_tracks,
     camera_motion,
+    gate_tracks,
     match,
     parallax_truth,
     perpendicular_baseline,
@@ -523,7 +525,8 @@ def test_the_report_line_names_the_matcher_and_its_window() -> None:
     assert windowed.startswith("klt <= 1.50 s window >= 3 obs over <= 8 views, asks 10 cm total")
     forward = ParallaxAnchor().describe()
     assert forward.startswith("klt <= 3.00 s forward >= 3 obs over <= 8 views")
-    assert "<= 200 corners, detect every 5, drift <= 1.0 px every 10" in forward
+    assert "<= 200 corners, detect every 5, lens undone, drift <= 1.0 px every 10" in forward
+    assert "raw pixels" in ParallaxAnchor(undistort=False).describe()
     assert "drift unchecked" in ParallaxAnchor(verify_every=0).describe()
 
 
@@ -1408,6 +1411,71 @@ def test_a_track_s_solve_never_spans_two_motion_sources() -> None:
             assert all(obs.source == source for obs in track.used)
     assert min((v.stamp for v in store.views()), default=turn) >= turn
     assert store.live > 100, "a track outlives the change of source: only its bundle restarts"
+
+
+DOOR_LENS = (-0.150009, -0.129449, -0.002416, -0.001635, 0.091751)  # config/camera.json's own
+
+
+def bend(points: np.ndarray, intr: Intrinsics, dist: tuple[float, ...]) -> np.ndarray:
+    """Where a plumb-bob lens really puts the pixels a pinhole would have placed at ``points``
+    — the forward model, so the test bends a picture the way the camera does and asks the code
+    to unbend it."""
+    k1, k2, p1, p2, k3 = dist
+    x = (points[..., 0] - intr.cx) / intr.fx
+    y = (points[..., 1] - intr.cy) / intr.fy
+    r2 = x * x + y * y
+    radial = 1.0 + k1 * r2 + k2 * r2**2 + k3 * r2**3
+    xd = x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x)
+    yd = y * radial + p1 * (r2 + 2 * y * y) + 2 * p2 * x * y
+    return np.stack([intr.fx * xd + intr.cx, intr.fy * yd + intr.cy], axis=-1)
+
+
+def test_a_bent_pixel_is_straightened_back_to_where_a_pinhole_would_have_put_it() -> None:
+    """The lens this cart carries is 83 degrees wide and calibrated, and the published picture
+    is the raw one: a pixel at the top edge of a 640x360 frame sits several pixels from where a
+    pinhole would have put it, against an epipolar gate 1.5 px wide. Undoing it is a round trip
+    to a hundredth of a pixel."""
+    lens = PlumbBob(INTR, DOOR_LENS)
+    grid = np.array(
+        [[x, y] for x in (0.0, 160.0, 320.0, 480.0, 639.0) for y in (0.0, 90.0, 180.0, 359.0)],
+        dtype=np.float32,
+    )
+    bent = bend(grid, INTR, DOOR_LENS).astype(np.float32)
+    back = lens.straighten(bent)
+    assert np.allclose(back, grid, atol=0.02), "the lens must undo itself"
+    moved = np.linalg.norm(bent - grid, axis=1)
+    assert moved.max() > 20.0, "a wide lens moves a corner pixel by more than the gate"
+    assert float(np.median(moved[grid[:, 1] == 0.0])) > 3.0, "and the top edge by more than it"
+    assert float(np.median(moved[grid[:, 1] == 180.0])) < float(np.median(moved))
+
+
+def test_the_geometry_measures_the_straightened_pixels_and_the_depth_the_picture_s_own() -> None:
+    """A bundle of exact tracks bent by the lens: read as pinhole pixels the depths are wrong
+    and the epipolar gate throws them away, straightened they come back. The pixel the caller
+    indexes the depth image with stays the PICTURE's own, because that is where the corner is."""
+    points, tracks = moving_scene(6, noise_px=0.0)
+    bent = bend(np.asarray(tracks.pixels), INTR, DOOR_LENS)
+    lens = PlumbBob(INTR, DOOR_LENS)
+    straight = lens.straighten(bent.reshape(-1, 2)).reshape(bent.shape)
+    raw = np.asarray(bent[:, -1], dtype=np.float32)
+    as_seen = replace(tracks, pixels=bent)
+    as_meant = replace(tracks, pixels=straight.astype(float), at=raw)
+    wrong = gate_tracks(as_seen, INTR)
+    right = gate_tracks(as_meant, INTR)
+
+    def missed(truth: ParallaxTruth) -> float:
+        """The median relative depth error of a truth against the scene it was built from."""
+        row = np.array([np.argmin(np.abs(points[:, 2] - z)) for z in truth.z])
+        return float(np.median(np.abs(truth.z / points[row, 2] - 1.0)))
+
+    # exact correspondences, so every pixel the epipolar gate drops is the lens's doing
+    assert wrong.rejected["epipolar"] > 10 * right.rejected["epipolar"]
+    assert missed(right) < 0.0005 < missed(wrong), f"{missed(right)} against {missed(wrong)}"
+    assert right.kept > wrong.kept
+    # and every reported pixel is the picture's own, not the straightened one
+    seen_at = {(round(float(c)), round(float(r))) for c, r in right.points}
+    picture = {(round(float(c)), round(float(r))) for c, r in raw}
+    assert seen_at <= picture
 
 
 class TfPoses(Odometry):
