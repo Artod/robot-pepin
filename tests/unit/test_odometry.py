@@ -234,3 +234,34 @@ def test_twist_from_pose_re_primes_after_a_gap() -> None:
     assert estimator.update(Pose2D(1.0, 0.0, 0.0), 3.0) == Twist(0.0, 0.0)
     twist = estimator.update(Pose2D(1.1, 0.0, 0.0), 3.1)
     assert twist.linear == pytest.approx(1.0)
+
+
+def test_twist_from_pose_contract_the_cpp_bridge_mirrors() -> None:
+    """The table the C++ port must reproduce line for line.
+
+    The bridge that actually runs on the board is the C++ one
+    (ros/pepin_base_cpp/include/pepin_base_cpp/twist_from_pose.hpp); that package has no test
+    target, so this is the contract both sides implement: the prime, a forward step, a pivot in
+    place, a signed backward step, a board that restarted its monotonic clock, a silence longer
+    than ``max_gap_s`` and the sample right after it. Change the maths here first.
+    """
+    estimator = TwistFromPose(max_gap_s=1.0)
+    samples = [
+        # (pose, board stamp, expected forward m/s, expected yaw rate rad/s)
+        (Pose2D(0.0, 0.0, 0.0), 100.00, 0.0, 0.0),  # primes: nothing to difference yet
+        (Pose2D(0.01, 0.0, 0.0), 100.05, 0.2, 0.0),  # 1 cm forward in 50 ms
+        (Pose2D(0.01, 0.0, 0.05), 100.10, 0.0, 1.0),  # pivot in place: 0.05 rad in 50 ms
+        (Pose2D(0.0, 0.0, 0.05), 100.15, -0.19975, 0.0),  # pushed back: forward is signed
+        (Pose2D(0.0, 0.0, 0.05), 99.00, 0.0, 0.0),  # the board's clock restarted: no twist
+        (Pose2D(0.0, 0.0, 0.05), 101.00, 0.0, 0.0),  # 2 s > max_gap_s: re-primes instead
+        (Pose2D(0.01, 0.0, 0.05), 101.05, 0.19975, 0.0),  # measuring again on the next line
+    ]
+    for pose, stamp, forward, yaw_rate in samples:
+        twist = estimator.update(pose, stamp)
+        assert twist.linear == pytest.approx(forward, abs=1e-6), f"forward at t={stamp}"
+        assert twist.angular == pytest.approx(yaw_rate, abs=1e-6), f"yaw rate at t={stamp}"
+
+    across_pi = TwistFromPose()
+    assert across_pi.update(Pose2D(0.0, 0.0, math.pi - 0.05), 200.00) == Twist(0.0, 0.0)
+    twist = across_pi.update(Pose2D(0.0, 0.0, -math.pi + 0.05), 200.05)
+    assert twist.angular == pytest.approx(2.0)  # 0.1 rad across +-pi, not a full circle
