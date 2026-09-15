@@ -1,6 +1,6 @@
 """The depth chain as a pipeline: today's stages give the node's numbers bit for bit, the
-floor and the walls contribute pairs of their own, the laws read the elevation, and every
-stage switches by name."""
+floor and the walls contribute pairs of their own, the law of the range and the law of the
+frame stand behind the affine one, and every stage switches by name."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import pytest
 
 from pepin.contact import DEPTH_NOISE
 from pepin.depth import (
-    POOL_MIN_SAMPLES,
     AffineScale,
     CameraPose,
     Intrinsics,
@@ -31,7 +30,6 @@ from pepin.depth_pipeline import (
     AffineLaw,
     DepthPipeline,
     EdgeFilter,
-    ElevationLaw,
     FloorAnchor,
     FloorGeometry,
     FloorPairs,
@@ -41,7 +39,6 @@ from pepin.depth_pipeline import (
     LidarAnchor,
     Pairs,
     RangeLawStage,
-    RowLaw,
     ScaleField,
     WallAnchor,
     floor_sigma,
@@ -146,7 +143,6 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
         "wall_anchor",
         "parallax_anchor",
         "affine_law",
-        "ray_law",
         "range_law",
         "frame_law",
         "wall_correct",
@@ -198,7 +194,6 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
         "wall_anchor": True,
         "parallax_anchor": True,
         "affine_law": True,
-        "ray_law": False,
         "range_law": True,
         "frame_law": True,
         "wall_correct": False,
@@ -520,58 +515,6 @@ def test_the_walk_stops_where_a_table_top_recedes_and_can_correct_without_pairs(
     # the correction lands after the law: the walked pixels are the plane's metric depth
     assert np.allclose(result.depth[r, cols], front[r, cols])
     assert np.allclose(result.after["affine_law"][r, cols], raw[r, cols] / 1.4)
-
-
-def test_the_wall_pairs_teach_the_affine_law_the_room_above_the_lidar_row() -> None:
-    """A network right at the lidar's row and 20 % too far above it (an error the beams cannot
-    see): with the wall pairs in the pool the elevation law finds the term, the row law's
-    upper bands differ from its lower ones, and the plain affine law lands in between."""
-    lift = lift_of(np.arange(360), INTR)[:, None]
-    factor = 1.0 + 0.6 * np.clip(lift - lift[200], 0.0, None)  # grows up the picture
-    views = [(_scene(x, floor=False) / factor, _wall_returns(x)) for x in (1.0, 3.5, 2.0)]
-    truth, raw, lidar = _scene(2.0, floor=False), views[-1][0], views[-1][1]
-    laws = {"affine": AffineLaw(), "elevation": ElevationLaw(), "row": RowLaw(bands=4)}
-    for law in laws.values():
-        pipeline = DepthPipeline([LidarAnchor(), WallAnchor(), law])
-        for view, returns in views:
-            result = pipeline.run(view, _context(returns))
-        assert not result.withheld
-    elevation = laws["elevation"]
-    assert isinstance(elevation, ElevationLaw) and elevation.c != 0.0
-    assert "c " in elevation.describe()
-    row = laws["row"]
-    assert isinstance(row, RowLaw) and row.centres.size == 4
-    assert row.a_of[-1] != row.a_of[0] and "bands a/b" in row.describe()
-    # the corrected depth at the top rows: the elevation and row laws come nearer the truth
-    ctx = _context(lidar)
-    top = slice(20, 60)
-    err = {
-        name: float(np.nanmedian(np.abs(law.apply(raw, ctx)[top] - truth[top])))
-        for name, law in laws.items()
-    }
-    assert err["elevation"] < err["affine"] and err["row"] < err["affine"]
-
-
-def test_the_elevation_and_row_laws_fall_back_to_the_affine_law_on_a_flat_pool() -> None:
-    """Pairs of one row only: no elevation spread, so the elevation term stays 0 and the row
-    law has no bands — both apply the plain affine law, and a seed holds them too."""
-    raw = _network(_scene(2.0), 1.3, 0.03, noise=0.0, seed=0)
-    lidar = _wall_returns(2.0)
-    for law in (ElevationLaw(), RowLaw()):
-        pipeline = DepthPipeline([LidarAnchor(), law])
-        for _ in range(3):
-            result = pipeline.run(raw, _context(lidar))
-        assert not result.withheld and law.fitted
-        assert np.array_equal(law.apply(raw, _context(lidar)), apply_affine(raw, law.a, law.b))
-    elevation = ElevationLaw()
-    elevation.seed(1.3, 0.03)
-    assert elevation.ready and elevation.c == 0.0
-    elevation.fit(Pairs.of([1.0] * 30, [1.0] * 30, [0.0] * 30))
-    assert (elevation.a, elevation.b, elevation.c) == (1.3, 0.03, 0.0)
-    rows = RowLaw()
-    rows.fit(None)
-    assert rows.centres.size == 0 and rows.describe().endswith("(none yet)")
-    assert POOL_MIN_SAMPLES == 200
 
 
 def test_the_floor_geometry_is_recomputed_only_when_the_lean_moves() -> None:

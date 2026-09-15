@@ -19,9 +19,7 @@ columns while the network's depth stays continuous (a wall goes on, a chair back
 top), a third hoop above the lidar's row; and :class:`ParallaxAnchor` — the corners this frame
 shares with the previous one, triangulated against the odometry's transform between the two
 stamps (:mod:`pepin.parallax`), a fourth hoop that needs no second sensor and no assumed plane
-and that measures at every elevation the picture has. Two more laws let the data say whether the
-error above the lidar's row depends on the elevation: :class:`ElevationLaw` adds a term in the
-ray's lift, :class:`RowLaw` fits a law per band of rows.
+and that measures at every elevation the picture has.
 
 Measured on run 0171 (29 frames against the run's lidar cloud and its COLMAP reference,
 scratch/pipeline_vs_truth.py, 2026-09-11), which set the defaults of :func:`standard_pipeline`:
@@ -29,9 +27,8 @@ the network's error is not one law — 1.1x too far on the floor, 1.6x at the li
 from 0.3 m up — so every hoop but the lidar's pulls the law off the row the costmap lives on.
 Floor pairs alone put the lidar's row 2.0x too far (a camera without lidar sees walls where the
 raw network does); wall pairs at 0.2 of a beam put it 10 % too near while fixing the 0.5-0.8 m
-slice (0.86 -> 1.00 of the truth); the elevation term is real (c +0.1) but linear in lift is the
-wrong shape (the error steps within 60 rows of the lidar's row and is flat above), and the row
-law overfits. The lidar-only anchor stays the default; the new anchors ship switched off.
+slice (0.86 -> 1.00 of the truth). The lidar-only anchor stays the default; the new anchors ship
+switched off.
 
 The law that ships live is :class:`RangeLawStage`, not the affine one: fitted on the same pool,
 it bins the pairs by the network's own depth and measures a ratio in each bin, because the
@@ -45,17 +42,10 @@ coarse grid of nodes over the picture (:class:`ScaleField`), each fitted on the 
 near it and held toward the frame's global fit and toward its own last value, because this
 network's error is regime-wise — 1.1x on the floor, 1.6x at the lidar's row, 2.0x above it —
 and one law fitted across all three is wrong in all three. A grid of 1x1 is that single law
-again, bit for bit.
-
-:class:`RayLaw` (:mod:`pepin.elevation`) is the third such law and the one parameterised the
-way the error is: by the ray's angle off the optical axis, so the neck may tilt without
-refitting. Measured held out on the same 29 frames (scratch/ray_law_eval.txt, 2026-09-12) it
-tightens the scatter of the beams' residual on three drive halves of four (q3 0.46 -> 0.13 on
-the widest) and moves the median 5-10 % near, and its scale reproduces between two tapes of the
-same room at the bottom and the middle of the frame (12 % and 8 % apart) but not at the top
-(30 %). It ships switched off, and on the lidar's beams alone it is refused outright: a
-return's elevation is a curve of its range, so there the angle and the depth are one regressor
-(:func:`pepin.elevation.separable`) and the affine law stands instead.
+again, bit for bit. Where in the picture a pixel sits is the field's business alone: laws
+parameterised by the row or by the ray's own angle were fitted and dropped on 2026-09-15 (the
+error follows the world's elevation, not the ray's angle, and no angular law beat plain scale
+out of sample).
 """
 
 from __future__ import annotations
@@ -66,7 +56,6 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
-from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import numpy as np
@@ -74,13 +63,11 @@ import numpy.typing as npt
 
 from pepin.contact import DEPTH_NOISE, DepthNoise
 from pepin.depth import (
-    B_BOUNDS,
     EDGE_REL_STEP,
     FLOOR_HEIGHT_TOLERANCE,
     FRAME_HOLD_TAU_S,
     FRAME_MIN_PAIRS,
     FRAME_MIN_SPREAD,
-    MIN_DEPTH_SPREAD,
     MIN_SAMPLES,
     NEAR_M,
     POOL_FRAMES,
@@ -91,7 +78,6 @@ from pepin.depth import (
     Intrinsics,
     Mask,
     RangeLaw,
-    a_bounds,
     apply_affine,
     at_bound,
     beam_hits,
@@ -109,7 +95,6 @@ from pepin.depth import (
     project,
     project_all,
 )
-from pepin.elevation import RAY_AZIMUTH_DEGREE, RAY_DEGREE, RayGain, fit_ray, ray_angles
 
 if TYPE_CHECKING:  # the tracker's own module stays a lazy import inside the parallax stage
     from pepin.parallax import Features, FrameView, Lens, Motion, ParallaxTruth, TrackStore
@@ -185,8 +170,6 @@ WALL_DRIFT_TOL = 0.0  # how far the network's depth may drift from the plane's O
 WALL_MIN_WALK_M = 0.5  # metres above the lidar's line a column must reach, undisturbed, before
 # any of its pairs count. The ruler exists for the TOP of the picture; a stump that dies 20 cm
 # up adds pairs where the beams already speak and carries the full risk of being a chair back.
-MIN_LIFT_SPREAD = 0.15  # the pool's elevation span (5th-95th of lift) before an elevation term
-ROW_BANDS = 6  # bands of elevation of the row law
 PARALLAX_MIN_GAP_S = 0.08  # a partner frame nearer in time than this has no baseline to speak of
 PARALLAX_MAX_GAP_S = 0.60  # farther back than this the view has changed more than the flow follows
 PARALLAX_ORB_MAX_GAP_S = 1.5  # the describer's window: a keypoint is recognised, not followed
@@ -311,7 +294,6 @@ PIPELINE_DEFAULTS: dict[str, bool | float | str] = {
     # stream held 7-8 fps with them on during the door drives; alone they read a door 2 m away
     # to 5-6 % above the lidar's row on straight legs (scratch/wall_truth_eval.py).
     "parallax_anchor": True,
-    "ray_law": False,
     "range_law": True,
     "frame_law": True,
     "wall_correct": False,
@@ -2516,245 +2498,7 @@ class ParallaxAnchor(AnchorStage):
         )
 
 
-# ---- laws that read the elevation -------------------------------------------------------------
-class ElevationLaw(AffineLaw):
-    """The affine law with a term in the ray's elevation, 1 / z = a / D + b + c * lift, for an
-    error that grows up the picture. Fitted the way the affine law is (the noisy 1 / D
-    regressed on the exact 1 / z and lift, then inverted). Each term has its own gate: ``c``
-    needs the pool to span elevations (MIN_LIFT_SPREAD between its 5th and 95th lift
-    percentiles), ``b`` needs it to span depths (MIN_DEPTH_SPREAD, as the affine law) and is
-    0 otherwise; the fit falls back to the affine law when its (a, b) leave the bounds."""
-
-    name = "elevation_law"
-
-    def __init__(self, pool_frames: int = POOL_FRAMES) -> None:
-        super().__init__(pool_frames)
-        self.c = 0.0
-
-    def fit(self, pairs: Pairs | None) -> None:
-        """The affine fit, then the elevation term when the pool can carry it."""
-        super().fit(pairs)
-        pool = self.pool
-        self.c = 0.0
-        if pool is None or not self.fitted:
-            return
-        lo, hi = np.percentile(pool.lift, (5, 95))
-        z_lo, z_hi = np.percentile(pool.z, (5, 95))
-        if hi - lo < MIN_LIFT_SPREAD:
-            return
-        with_shift = z_hi / z_lo >= MIN_DEPTH_SPREAD
-        x, y = 1.0 / pool.d, 1.0 / pool.z
-        w = np.sqrt(pool.weight)
-        columns = [y, pool.lift] + ([np.ones_like(y)] if with_shift else [])
-        design = np.stack(columns, axis=1) * w[:, None]
-        coef, *_ = np.linalg.lstsq(design, x * w, rcond=None)
-        res = np.abs(x - (coef[0] * y + coef[1] * pool.lift + (coef[2] if with_shift else 0.0)))
-        keep = res <= np.percentile(res, 75)
-        if int(keep.sum()) >= 4:
-            coef, *_ = np.linalg.lstsq(design[keep], (x * w)[keep], rcond=None)
-        alpha, gamma = float(coef[0]), float(coef[1])
-        beta = float(coef[2]) if with_shift else 0.0
-        if alpha == 0.0:
-            return
-        a, b, c = 1.0 / alpha, -beta / alpha, -gamma / alpha
-        a_lo, a_hi = a_bounds()
-        if a_lo <= a <= a_hi and B_BOUNDS[0] <= b <= B_BOUNDS[1]:
-            self.a, self.b, self.c = a, b, c
-
-    def apply(self, depth: Array, ctx: FrameContext) -> Array:
-        """The depth through the law, the elevation of each row from the optics."""
-        d = np.asarray(depth, dtype=float)
-        lift = lift_of(np.arange(d.shape[0]), ctx.intr)[:, None]
-        with np.errstate(divide="ignore", invalid="ignore"):
-            inv = self.a / d + self.b + self.c * lift
-            z = np.where(np.isfinite(inv) & (inv > 1e-6), 1.0 / inv, np.nan)
-        out: Array = z
-        return out
-
-    def describe(self) -> str:
-        return super().describe() + f" c {self.c:+.3f}"
-
-
-class RowLaw(AffineLaw):
-    """A law per band of elevation: the pool's lift range cut into ``bands`` equal bands, an
-    affine law fitted in each band that holds POOL_MIN_SAMPLES pairs (the whole pool's law
-    elsewhere), the bands' (a, b) interpolated along the rows at apply time — the shape a
-    row-dependent error would take, held against the elevation term's straight line."""
-
-    name = "row_law"
-
-    def __init__(self, pool_frames: int = POOL_FRAMES, bands: int = ROW_BANDS) -> None:
-        super().__init__(pool_frames)
-        self.bands = bands
-        self.centres: Array = np.zeros(0)
-        self.a_of: Array = np.zeros(0)
-        self.b_of: Array = np.zeros(0)
-
-    def fit(self, pairs: Pairs | None) -> None:
-        """The affine fit, then one per band of elevation."""
-        super().fit(pairs)
-        pool = self.pool
-        if pool is None or not self.fitted:
-            self.centres = np.zeros(0)
-            return
-        edges = np.linspace(pool.lift.min(), pool.lift.max() + 1e-9, self.bands + 1)
-        centres, a_of, b_of = [], [], []
-        for lo, hi in pairwise(edges):
-            sel = (pool.lift >= lo) & (pool.lift < hi)
-            if int(sel.sum()) >= POOL_MIN_SAMPLES:
-                a, b = fit_affine(pool.d[sel], pool.z[sel], pool.weight[sel])
-            else:
-                a, b = self.a, self.b
-            centres.append(0.5 * (lo + hi))
-            a_of.append(a)
-            b_of.append(b)
-        self.centres, self.a_of, self.b_of = np.array(centres), np.array(a_of), np.array(b_of)
-
-    def apply(self, depth: Array, ctx: FrameContext) -> Array:
-        """The depth through the band laws interpolated along the rows."""
-        d = np.asarray(depth, dtype=float)
-        if self.centres.size == 0:
-            return apply_affine(d, self.a, self.b)
-        lift = lift_of(np.arange(d.shape[0]), ctx.intr)
-        a = np.interp(lift, self.centres, self.a_of)[:, None]
-        b = np.interp(lift, self.centres, self.b_of)[:, None]
-        with np.errstate(divide="ignore", invalid="ignore"):
-            inv = a / d + b
-            z = np.where(np.isfinite(inv) & (inv > 1e-6), 1.0 / inv, np.nan)
-        out: Array = z
-        return out
-
-    def describe(self) -> str:
-        if self.centres.size == 0:
-            return super().describe()
-        bands = " ".join(f"{a:.2f}/{b:+.3f}" for a, b in zip(self.a_of, self.b_of, strict=True))
-        return f"{self.pooled} pairs, bands a/b {bands}"
-
-
-# ---- the law of the ray -----------------------------------------------------------------------
-class RayLaw(AffineLaw):
-    """The affine law with its scale a smooth function of the ray's angle off the optical axis
-    (:mod:`pepin.elevation`): ``1 / z = a(eps, az) / D + b(eps, az)``, fitted on the same pool,
-    with the plain affine law as its fallback whenever the angular fit does not stand.
-
-    The error this corrects belongs to the camera and the network, not to the room: it is
-    parameterised by the ray's own elevation (and azimuth) in radians, so the neck may tilt and
-    pan without moving the law — the head's pose enters where it always did, through TF into
-    :class:`FrameContext`'s :class:`pepin.depth.CameraPose`, which decides which world point a
-    ray meets, not how far the network thinks it is. As a stage the law reads the frame's raw
-    depth and keeps the holes of the depth handed to it, so it can stand either as the chain's
-    only law or behind the affine law as the flag ``ray_law`` switching between the two live
-    (rule 19): with the flag off, the affine law's image goes on unchanged; with it on, the
-    same pixels come from the ray's law. Off it also falls back, without a word, whenever
-    :func:`pepin.elevation.fit_ray` returns nothing — too few pairs, too narrow a cone, a slope
-    that turns non-positive — and the frame is withheld only where the affine law would withhold
-    it (no law at all).
-
-    Cost: the stage refits on every frame as the affine law does, and the angular fit is the
-    wider design — 8.5 ms a frame (10.5 max) against the affine law's 2.9 on a 47 000-pair pool
-    of run 0171's frames, measured on the Mac. The stage is off by default; a pool that large
-    only exists with the wall anchor on."""
-
-    name = "ray_law"
-
-    def __init__(
-        self,
-        pool_frames: int = POOL_FRAMES,
-        *,
-        degree: int = RAY_DEGREE,
-        azimuth_degree: int = RAY_AZIMUTH_DEGREE,
-    ) -> None:
-        super().__init__(pool_frames)
-        self.degree = degree
-        self.azimuth_degree = azimuth_degree
-        self.gain: RayGain | None = None
-        self._seeded_gain: RayGain | None = None
-        self._live_gain = False
-
-    def seed_gain(self, gain: RayGain) -> None:
-        """Start from a saved gain (the map's), applied until the live pool can fit its own."""
-        self._seeded_gain = gain
-        self.gain = gain
-        self._live_gain = False
-
-    @property
-    def ray_ready(self) -> bool:
-        """Whether an angular law exists; false means this stage is the affine law."""
-        return self.gain is not None
-
-    @property
-    def ray_fitted(self) -> bool:
-        """Whether the angular law rests on the live pool rather than on a seed."""
-        return self._live_gain
-
-    def saved_state(self) -> dict[str, Any] | None:
-        """The angular law that stands as plain JSON values for :func:`pepin.depth.save_law`,
-        ``None`` while there is none. A seed the live pool has not replaced is written back
-        rather than dropped: the file holds one record for both laws, so anything left out of a
-        save is erased, and this law belongs to the camera and the network, not to the room the
-        last window happened to show (:mod:`pepin.elevation`) — the whole file is only ever
-        written while the affine law rests on live pairs."""
-        return self.gain.state() if self.gain is not None else None
-
-    @property
-    def clipped(self) -> bool:
-        """Whether the angular law meets a bound inside its own span (a law at its limit)."""
-        return self.gain is not None and self.gain.clipped
-
-    def fit(self, pairs: Pairs | None) -> None:
-        """The affine fit, then the angular one on the whole pool; a pool that cannot carry an
-        angular law leaves the seeded gain, or none, and the affine law stands."""
-        super().fit(pairs)
-        pool = self.pool
-        if pool is None or not self.fitted:
-            return
-        elevation, azimuth = ray_angles(pool.lift, pool.left)
-        gain = fit_ray(
-            pool.d,
-            pool.z,
-            elevation,
-            pool.weight,
-            azimuth=azimuth,
-            degree=self.degree,
-            azimuth_degree=self.azimuth_degree,
-        )
-        if gain is not None:
-            self.gain, self._live_gain = gain, True
-        elif self._seeded_gain is None:
-            self.gain, self._live_gain = None, False
-
-    def apply(self, depth: Array, ctx: FrameContext) -> Array:
-        """The depth through the angular law — one (a, b) per pixel, from that pixel's ray —
-        or through the plain affine law while no angular law stands."""
-        d = np.asarray(depth, dtype=float)
-        if self.gain is None:
-            return apply_affine(d, self.a, self.b)
-        rows = np.arange(d.shape[0])[:, None]
-        columns = np.arange(d.shape[1])[None, :]
-        elevation, azimuth = ray_angles(lift_of(rows, ctx.intr), left_of(columns, ctx.intr))
-        return self.gain.apply(d, elevation, azimuth)
-
-    def run(self, depth: Array, frame: Frame) -> tuple[Array, Verdict]:
-        """Fit on the pool and correct the frame's raw depth, keeping the holes of the depth
-        handed in (the edge filter's, and the affine law's where it ran before this stage);
-        the frame is withheld only while no law of any kind exists."""
-        pool = frame.pool
-        self.fit(pool)
-        n = 0 if pool is None else pool.size
-        if not self.ready:
-            return depth, Verdict(self.name, True, pairs=n, note="no law yet", withhold=True)
-        out = np.where(np.isfinite(depth), self.apply(frame.raw, frame.ctx), np.nan)
-        return out, Verdict(self.name, True, pairs=n, pixels=int(out.size), note=self.describe())
-
-    def describe(self) -> str:
-        """The affine law's words, then the angular law's — marked ``(seed)`` while it is the
-        one the last run saved — or why there is none."""
-        if self.gain is None:
-            return super().describe() + "; affine fallback"
-        source = "" if self._live_gain else " (seed)"
-        return super().describe() + "; " + self.gain.describe() + source
-
-
+# ---- the laws that ship: the range's and the frame's --------------------------------------------
 class RangeLawStage(LawStage):
     """The law whose scale follows the range: the pooled pairs binned by the network's own
     depth and a robust ratio measured in each bin (:class:`pepin.depth.RangeLaw`), applied to
@@ -3288,26 +3032,23 @@ class FrameLaw(LawStage):
 def standard_pipeline(
     law: AffineLaw | None = None,
     *,
-    ray: RayLaw | None = None,
     range_stage: RangeLawStage | None = None,
     frame_stage: FrameLaw | None = None,
     floor_pairs: bool | None = None,
     wall_anchor: bool | None = None,
     parallax_anchor: bool | None = None,
-    ray_law: bool | None = None,
     range_law: bool | None = None,
     frame_law: bool | None = None,
     wall_correct: bool | None = None,
 ) -> DepthPipeline:
     """The node's chain: edges -> lidar -> (floor pairs) -> (wall pairs) -> (parallax) -> law
-    -> (ray law) -> range law -> frame law -> (wall correction) -> floor anchor; the seven
-    switchable stages are in the list and switched by the flags of the same name
-    (``wall_anchor`` is the pairs role, ``wall_correct`` the pixels). The ray law, the range law
-    and the frame law all sit behind the affine one and correct the same raw depth by their own
-    rule instead — by the ray's angle, by the range, by this frame's own beams — and on, each
-    replaces the image of the law before it; off, that law's stands. ``range_law`` and
-    ``range_law`` and ``frame_law`` are the two of the seven on by
-    default: one affine law leaves a residual that tilts 12 % per metre
+    -> range law -> frame law -> (wall correction) -> floor anchor; the six switchable stages
+    are in the list and switched by the flags of the same name (``wall_anchor`` is the pairs
+    role, ``wall_correct`` the pixels). The range law and the frame law both sit behind the
+    affine one and correct the same raw depth by their own rule instead — by the range, by this
+    frame's own beams — and on, each replaces the image of the law before it; off, that law's
+    stands. ``range_law`` and ``frame_law`` ship on:
+    one affine law leaves a residual that tilts 12 % per metre
     (:class:`pepin.depth.RangeLaw`), a law fitted on a minute of pool describes the last
     minute's scene rather than this frame's (:class:`FrameLaw`), and the lidar's one row is not
     the whole picture — the parallax anchor is the second ruler of the scale, weighed against
@@ -3317,14 +3058,11 @@ def standard_pipeline(
     :data:`PIPELINE_DEFAULTS` — the one table the node's FLAGS read theirs from as well, so a
     default is written once. A switch handed in as ``None`` takes the table's value.
 
-    Every law may be handed in so the caller keeps them: the affine and the ray law pool and
-    fit on their own, so a saved law must be seeded into **both** (:meth:`AffineLaw.seed`), or
-    the ray law withholds every frame of the warm-up while the affine law publishes from the
-    seed; the range law falls back to the affine law it is built on and needs no seed of its
-    own to publish."""
+    Every law may be handed in so the caller keeps it: the affine law pools and fits on its own
+    and takes the saved law as its seed (:meth:`AffineLaw.seed`); the range law falls back to
+    the affine law it is built on and needs no seed of its own to publish."""
     defaults = PIPELINE_DEFAULTS
     the_law = law if law is not None else AffineLaw()
-    the_ray = ray if ray is not None else RayLaw()
     the_range = range_stage if range_stage is not None else RangeLawStage(the_law)
     the_frame = (
         frame_stage
@@ -3352,7 +3090,6 @@ def standard_pipeline(
         WallAnchor(sigma_height=float(defaults["wall_sigma_height"])),
         ParallaxAnchor(),
         the_law,
-        the_ray,
         the_range,
         the_frame,
         WallCorrection(),
@@ -3362,7 +3099,6 @@ def standard_pipeline(
         ("floor_pairs", floor_pairs),
         ("wall_anchor", wall_anchor),
         ("parallax_anchor", parallax_anchor),
-        ("ray_law", ray_law),
         ("range_law", range_law),
         ("frame_law", frame_law),
         ("wall_correct", wall_correct),
@@ -3379,7 +3115,6 @@ __all__ = [
     "AnchorStage",
     "DepthPipeline",
     "EdgeFilter",
-    "ElevationLaw",
     "FloorAnchor",
     "FloorGeometry",
     "FloorPairs",
@@ -3395,11 +3130,9 @@ __all__ = [
     "ParallaxAnchor",
     "PreviousFrame",
     "RangeLawStage",
-    "RayLaw",
     "RecentMapMotionSource",
     "Result",
     "Rigid",
-    "RowLaw",
     "ScaleField",
     "Stage",
     "StageStats",

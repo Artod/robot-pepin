@@ -15,9 +15,9 @@ until the law exists: the raw network's depth is 1.5-2x too far and would put th
 obstacles where there are none, so frames are withheld until POOL_MIN_SAMPLES beam pairs are
 pooled — or until the law saved by the last run (``/maps/depth_law.json``, a day old at most)
 is loaded at start. That file carries every law: the affine numbers, seeded into every law of
-the chain so none of them withholds while another publishes, and the ray law's and the range
-law's own records beside them, each written whenever its stage has fitted one on the live pool
-and restored only when it still stands on its own terms. One affine law is not the shape of
+the chain so none of them withholds while another publishes, and the range law's own record
+beside them, written whenever its stage has fitted one on the live pool and restored only when
+it still stands on its own terms. One affine law is not the shape of
 this camera's error — its residual tilts 12 % per metre of range — so the law that ships live
 is the range law, the same pooled pairs read per bin of the network's own depth
 (:class:`pepin.depth.RangeLaw`, the ``range_law`` flag), and behind it the frame law
@@ -62,7 +62,7 @@ the signature of a drifting gyro rather than of a tipping body) is treated as no
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): one per stage of
 the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anchor``,
-``parallax_anchor``, ``affine_law``, ``ray_law``, ``range_law``, ``frame_law``,
+``parallax_anchor``, ``affine_law``, ``range_law``, ``frame_law``,
 ``wall_correct``, ``floor_anchor`` — plus ``depth_backend``, ``scale_ceiling``, the largest
 1 / scale the law may be fitted to, ``law_slew``, how fast that law may move between fits,
 ``imu_lean`` and ``lean_min_quality``; their state is printed in every report line.
@@ -109,10 +109,10 @@ from pepin.depth import (
     floor_depth,
     load_law,
     load_range,
-    load_ray,
     nearest_stamp,
     optical_heading,
     plane_in_view_from,
+    retired_laws,
     save_law,
     scan_points,
     set_scale_ceiling,
@@ -152,7 +152,6 @@ from pepin.depth_pipeline import (
     LidarAnchor,
     ParallaxAnchor,
     RangeLawStage,
-    RayLaw,
     WallAnchor,
     grid_of,
     standard_pipeline,
@@ -165,7 +164,6 @@ from pepin.depth_service import (
     LazyDepth,
     RemoteDepth,
 )
-from pepin.elevation import RayGain
 from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import FramePoser
 from pepin.lean import LEAN_QUALITY_FLOOR
@@ -366,26 +364,6 @@ FLAGS = FlagSet(
         on_when="always, to drive",
         off_when="as an A/B measure of the correction, at rest — never a way to drive: every"
         " published metre is then 1.6-2.0x long",
-    ),
-    Flag(
-        "ray_law",
-        PIPELINE_DEFAULTS["ray_law"],
-        description="the law's scale follows the ray's angle off the optical axis, a / D + b"
-        " fitted per elevation (pepin.elevation) instead of one pair of numbers for the whole"
-        " picture; it needs wall_anchor on, because on the lidar's own beams a return's elevation"
-        " and its 1 / z are the same variable (|corr| 1.000) and the angular fit is refused",
-        why="for good, unless new data arrives: the network's error follows the world's elevation,"
-        " not the ray's angle. Across three neck pitches (tapes 0235/0236/0237 at 11.1, 25.8, 40.9"
-        " deg) the confound gate refuses the fit at two of them, and the one law that could be"
-        " fitted helps in sample and hurts at both other pitches (scratch/ray_law_pitch_eval.txt);"
-        " carried between tapes and geometries no angular law beats plain scale out of sample"
-        " (mean |ln ratio| 13.6 % for scale against 15.1-15.4 % for the ray laws, while the room's"
-        " own elevation reaches 12.9 %: scratch/horizon_law_eval.txt). Fixing the camera's pose"
-        " was worth 9 of those 22 points, the best angular term 0.7 more",
-        on_when="only on data that separates the ray's angle from the world's elevation — a pitch"
-        " sweep with the calibrated lens whose fit the confound gate does not refuse",
-        off_when="it ships off; the scale itself still moves 21-25 % over 30 deg of neck pitch,"
-        " which asks for a refit, not for an angular law",
     ),
     Flag(
         "range_law",
@@ -1446,11 +1424,10 @@ class DepthStream(Node):
             ).value
         )
         self._law = AffineLaw()
-        self._ray = RayLaw()
         self._range = RangeLawStage(self._law)
         self._last_verdict_wall = time.time()  # the law's age is the beams', not the node's
         self._seed_laws(time.time())
-        self._pipeline = standard_pipeline(self._law, ray=self._ray, range_stage=self._range)
+        self._pipeline = standard_pipeline(self._law, range_stage=self._range)
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         for name in self._pipeline.names:  # a launch override reaches the stage it names
             self._pipeline.set(name, self._switches.on(name))
@@ -1517,13 +1494,11 @@ class DepthStream(Node):
 
     def _seed_laws(self, now: float) -> None:
         """Hand every law what the last run saved in the law file, and say so in the log: the
-        affine numbers to the affine law *and* to the ray law (each pools and fits on its own,
-        so a ray law left unseeded would withhold every frame of the warm-up while the affine
-        law publishes), the angular gain to the ray law and the range law's bins to the range
-        law when the file holds them and they still stand
-        (:meth:`pepin.elevation.RayGain.restore`, :meth:`pepin.depth.RangeLaw.restore` judge
-        them). Without a file nothing is published until POOL_MIN_SAMPLES beam pairs are
-        pooled."""
+        affine numbers to the affine law, and the range law's bins to the range law when the
+        file holds them and they still stand (:meth:`pepin.depth.RangeLaw.restore` judges
+        them). A record of a law that no longer exists (:func:`pepin.depth.retired_laws`) is
+        named in the log line and left alone — the next save drops it. Without a file nothing
+        is published until POOL_MIN_SAMPLES beam pairs are pooled."""
         saved = load_law(self._law_file, now)
         if saved is None:
             self.get_logger().info(
@@ -1532,12 +1507,12 @@ class DepthStream(Node):
             )
             return
         self._law.seed(saved[0], saved[1])
-        self._ray.seed(saved[0], saved[1])
-        record = load_ray(self._law_file, now)
-        gain = RayGain.restore(record) if record is not None else None
-        if gain is not None:
-            self._ray.seed_gain(gain)
-        ray_note = f"; ray law {gain.describe()}" if gain is not None else "; no ray law saved"
+        retired = retired_laws(self._law_file)
+        retired_note = (
+            f"; ignoring the retired {', '.join(retired)} law record the file still carries"
+            if retired
+            else ""
+        )
         ranged = load_range(self._law_file, now)
         if ranged is not None:
             self._range.seed(ranged)
@@ -1546,7 +1521,7 @@ class DepthStream(Node):
         )
         self.get_logger().info(
             f"depth law from {self._law_file}: a {saved[0]:.2f} b {saved[1]:+.3f}"
-            f" on {saved[2]} beams; publishing at once{ray_note}{range_note}"
+            f" on {saved[2]} beams; publishing at once{range_note}{retired_note}"
         )
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
@@ -2031,7 +2006,6 @@ class DepthStream(Node):
                     law.b,
                     law.pooled,
                     self._last_verdict_wall,
-                    ray=self._ray.saved_state(),
                     range_law=self._range.saved_state(),
                 )
             except OSError as exc:
