@@ -79,5 +79,11 @@ ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ENV ROS_DOMAIN_ID=7
 COPY entrypoint.sh /pepin_entrypoint.sh
 RUN chmod +x /pepin_entrypoint.sh
+# What `docker stop` sends. SIGINT is the signal ros2 launch answers by shutting its nodes down;
+# the default SIGTERM it answers by cancelling itself, and the nodes are SIGKILLed without ever
+# closing what they were writing (RTAB-Map's database: ros/maps/rtabmap.db, malformed after the
+# kills of 2026-09-13). The docker run lines pass --stop-signal SIGINT too; this makes a
+# container started without that flag gentle anyway.
+STOPSIGNAL SIGINT
 ENTRYPOINT ["/pepin_entrypoint.sh"]
 CMD ["bash"]

@@ -15,6 +15,10 @@ if echo "$OUT" | grep -q "cancel requested"; then
     echo "navigation task cancelled ($(( $(date +%s) - T0 )) s)"
     exit 0
 fi
+# The one deliberate SIGKILL in this repo, and the list says why it is safe: only the processes
+# between a goal and the wheels are in it. The run recorder and everything else that is mid-write
+# are left alone and go down with the `systemctl restart` that follows, which is gentle
+# (board/pepin-ros.service's ExecStop, ros/lib.sh's window).
 echo "cancel not confirmed in 3 s — killing the ROS processes (wheels stop on the base's deadman)..."
 ssh -o ConnectTimeout=3 "root@$BOARD" "docker exec pepin-ros pkill -9 -f 'component_container_isolated|relocalizer|tof_bridge' >/dev/null 2>&1; echo killed at +$(( $(date +%s) - T0 )) s; systemctl restart pepin-ros" 2>&1 | tail -1
 echo "stack restarting, back in ~45 s"
