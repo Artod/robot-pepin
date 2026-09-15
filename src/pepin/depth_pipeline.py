@@ -144,10 +144,17 @@ PARALLAX_MAX_GAP_S = 0.60  # farther back than this the view has changed more th
 PARALLAX_ORB_MAX_GAP_S = 1.5  # the describer's window: a keypoint is recognised, not followed
 PARALLAX_MIN_BASELINE_M = 0.10  # the parallax a partner is chosen to reach: 0.4 s at 0.25 m/s
 PARALLAX_MATCHER = "klt"  # who finds the correspondences: the flow or the describer
-PARALLAX_MOTION = "tracker"  # whose word on the baseline: the lidar tracker's map pose, or odometry
+PARALLAX_MOTION = "tf"  # whose word on the baseline: the map pose TF gives on EVERY frame (the
+# newest map -> odom composed with this moment's odom -> base_link), the tracker's own map pose
+# where it covers the frame's stamp, or the odometry
 PARALLAX_MAP_WAIT = False  # ask the map pose without waiting: a wait costs the whole frame rate
 PARALLAX_MAP_MAX_AGE_S = 0.3  # a map pose older than this is not this frame's: odometry answers
-PARALLAX_MOTIONS = ("tracker", "odom")
+PARALLAX_MOTIONS = ("tf", "tracker", "odom")
+PARALLAX_CORRECTION_TOL_M = 0.05  # how far the tracker's map -> odom correction may jump before
+# the window is dropped: a relocalisation moves every pose stored before it relative to every
+# pose after it, and that displacement is not one the camera made. Read as the metres it puts on
+# a point PARALLAX_CORRECTION_REACH_M ahead, so a turn of the map counts as well as a shift.
+PARALLAX_CORRECTION_REACH_M = 2.0
 PARALLAX_RING_FRAMES = 48  # frames kept to reach back through, the BACKWARD window's and the
 # pair's alone (the forward store keeps the previous grey and one per view, and no ring at all).
 # The ring is pruned by TIME (parallax_track_window_s); this is the memory bound under it, and at
@@ -398,6 +405,26 @@ class RecentMapMotionSource(Protocol):
         """base_link at ``from_stamp`` into base_link at ``to_stamp`` through the map, using only
         poses already held and only when the newest is within ``max_age_s`` of ``to_stamp``;
         ``None`` at once otherwise. Never waits."""
+        ...
+
+
+@runtime_checkable
+class RecentMapPoseSource(Protocol):
+    """A motion source that can hand out the cart's MAP POSE rather than a motion between two
+    stamps, built so that it exists on every frame: the newest ``map <- odom`` composed with
+    ``odom <- base_link`` at the frame's own stamp
+    (:meth:`pepin.frame_pose.FramePoser.map_pose_recent`). A window of such poses is one
+    source by construction — there is no frame on which it falls back to something else and
+    nothing to cut — and the motion between any two of them is arithmetic, with no lookup."""
+
+    def map_pose_recent(self, stamp: float) -> Rigid | None:
+        """``map <- base_link`` at ``stamp`` from the newest correction and this moment's
+        odometry; ``None`` only without a map edge at all. Never waits."""
+        ...
+
+    def map_correction_recent(self) -> Rigid | None:
+        """The newest ``map <- odom``: the correction itself, which a caller watches for the
+        jump a relocalisation puts between the poses it has already stored."""
         ...
 
 
@@ -1376,6 +1403,19 @@ class WallCorrection(WallAnchor):
 
 
 # ---- motion as a hoop, with no lidar at all ---------------------------------------------------
+def _base_motion(before: Rigid, after: Rigid) -> tuple[Array, Array]:
+    """base_link at ``before`` into base_link at ``after``, from two poses in one fixed frame:
+    the rotation and translation :func:`pepin.parallax.camera_motion` asks for, the way
+    :meth:`pepin.frame_pose.FramePoser.motion` composes them from a history. Two poses of the
+    same fixed frame are all a motion needs — no lookup, and no moment at which the answer
+    happens not to exist."""
+    back = np.asarray(after.rotation, dtype=float).T
+    moved: Array = np.asarray(before.translation, dtype=float) - np.asarray(
+        after.translation, dtype=float
+    )
+    return back @ np.asarray(before.rotation, dtype=float), back @ moved
+
+
 @dataclass(eq=False)
 class PreviousFrame:
     """A frame the parallax anchor keeps in its ring: its grey image, its stamp and where the
@@ -1509,6 +1549,7 @@ class ParallaxAnchor(AnchorStage):
         track_max_views: int = PARALLAX_TRACK_MAX_VIEWS,
         split_tol_sigma: float = PARALLAX_SPLIT_TOL_SIGMA,
         tracking: str = PARALLAX_TRACKING,
+        correction_tol_m: float = PARALLAX_CORRECTION_TOL_M,
         max_tracks: int = PARALLAX_MAX_TRACKS,
         redetect_every: int = PARALLAX_REDETECT_EVERY,
         verify_every: int = PARALLAX_VERIFY_EVERY,
@@ -1530,6 +1571,7 @@ class ParallaxAnchor(AnchorStage):
         # the closed form sqrt(sum b^2) the stage shipped with (pepin.parallax.TRACK_SIGMA_MODELS)
         self.split_tol_sigma = split_tol_sigma  # live: parallax_split_tol_sigma; 0 is off
         self.tracking_mode = tracking  # live: parallax_tracking — forward, window or pair
+        self.correction_tol_m = correction_tol_m  # live: parallax_correction_tol_m; 0 is off
         self.max_tracks = max_tracks  # live: parallax_max_tracks (the forward store's cap)
         self.redetect_every = redetect_every  # live: parallax_redetect_every, in frames
         self.verify_every = verify_every  # live: parallax_verify_every, in frames; 0 is off
@@ -1542,6 +1584,8 @@ class ParallaxAnchor(AnchorStage):
         self._ring: deque[PreviousFrame] = deque(maxlen=PARALLAX_RING_FRAMES)
         self._store: TrackStore | None = None  # the forward ruler's live corners
         self._last_stamp: float | None = None  # the newest frame the store has seen
+        self._pose: Rigid | None = None  # where the cart stood at this frame, when tf can say
+        self._correction: Rigid | None = None  # the newest map <- odom, to notice it jumping
         self.deaths: dict[str, int] = {}  # forward tracks closed, by cause (lk, fb, edge, drift)
         self._live: list[int] = []  # corners the store was following, per frame
         self._born: list[int] = []
@@ -1549,6 +1593,7 @@ class ParallaxAnchor(AnchorStage):
         self._hop_ms: list[float] = []
         self._detect_ms: list[float] = []
         self._verify_ms: list[float] = []
+        self._rest_ms: list[float] = []
         self._solve_ms: list[float] = []
         self._baseline: list[float] = []
         self._sigma: list[float] = []
@@ -1660,7 +1705,7 @@ class ParallaxAnchor(AnchorStage):
         best: tuple[PreviousFrame, Motion] | None = None
         spoke = ""
         candidates = 0
-        ask_tracker = self.motion_source == "tracker"
+        ask_tracker = self.motion_source in ("tf", "tracker")
         for previous in reversed(self._ring):
             gap = ctx.stamp - previous.stamp
             if gap < self.min_gap_s:
@@ -1704,7 +1749,7 @@ class ParallaxAnchor(AnchorStage):
         out: list[tuple[PreviousFrame, Motion]] = []
         spoke = ""
         candidates = 0
-        ask_tracker = self.motion_source == "tracker"
+        ask_tracker = self.motion_source in ("tf", "tracker")
         for previous in reversed(self._ring):
             gap = ctx.stamp - previous.stamp
             if gap < self.min_gap_s:
@@ -1752,15 +1797,59 @@ class ParallaxAnchor(AnchorStage):
         store.drift_tol_px = self.drift_tol_px
         return store
 
-    def _source(self, ctx: FrameContext) -> str:
-        """Whose word this frame's motion is, asked ONCE a frame: the tracker's map pose when
-        it can answer without waiting, the odometry when it cannot. Every observation the store
-        keeps of this frame is stamped with it, and a track's bundle never spans two."""
+    def _source(self, ctx: FrameContext) -> tuple[str, Rigid | None]:
+        """Whose word this frame's motion is, asked ONCE a frame, and — where that word is a
+        POSE rather than a motion — the pose itself.
+
+        ``tf`` (the default) asks :class:`RecentMapPoseSource` for the map pose TF can build on
+        every frame: the newest ``map <- odom`` composed with this moment's ``odom <-
+        base_link``. It is the answer to the thing that broke a long window live on 2026-09-15:
+        the tracker's own ``map <- base_link`` covers a frame's stamp only sometimes (821
+        fallbacks over a 30 s drive), a bundle may not span two sources, and so every fallback
+        cut the window — a 5 s window never reached past 2.1 s and the store counted 16718 cut
+        bundles. Split in two, the slow half asked for its newest value and the fast half for
+        this exact moment, there is one source on every frame and nothing to cut.
+
+        ``tracker`` is the older ask (:meth:`_through_map`) and ``odom`` the wheels; both
+        answer with a motion between two stamps, so they keep the cut. A ``tf`` frame the map
+        cannot answer for at all — no ``map -> odom`` in TF, a tape with bare odometry — falls
+        back to the odometry and is counted, and the cut then applies to it as it always did."""
+        if self.motion_source == "tf":
+            source = ctx.motion
+            pose = (
+                source.map_pose_recent(ctx.stamp)
+                if isinstance(source, RecentMapPoseSource)
+                else None
+            )
+            if pose is not None:
+                return "tf", pose
+            self.stale += 1
+            return "odom", None
         if self.motion_source != "tracker":
-            return "odom"
+            return "odom", None
         reference = self._last_stamp if self._last_stamp is not None else ctx.stamp
         moved, spoke = self._moved(ctx, reference, ctx.stamp, True)
-        return spoke if moved is not None else "odom"
+        return (spoke if moved is not None else "odom"), None
+
+    def _corrected(self, ctx: FrameContext) -> bool:
+        """Whether the tracker has just moved the map under the poses already stored: the
+        newest ``map <- odom`` against the one seen last frame, read as the metres it puts on a
+        point :data:`PARALLAX_CORRECTION_REACH_M` ahead so a turn of the map counts as well as
+        a shift. A jump over ``correction_tol_m`` invents a displacement the camera never made,
+        and every pose stored before it is no longer comparable with every pose after it."""
+        source = ctx.motion
+        if not isinstance(source, RecentMapPoseSource):
+            return False
+        now = source.map_correction_recent()
+        if now is None:
+            return False
+        before, self._correction = self._correction, now
+        if before is None or self.correction_tol_m <= 0:
+            return False
+        shift = float(np.linalg.norm(np.asarray(now.translation) - np.asarray(before.translation)))
+        spun = np.asarray(before.rotation, dtype=float).T @ np.asarray(now.rotation, dtype=float)
+        turn = math.acos(float(np.clip(0.5 * (float(np.trace(spun)) - 1.0), -1.0, 1.0)))
+        return shift + PARALLAX_CORRECTION_REACH_M * turn > self.correction_tol_m
 
     def _motions(
         self, ctx: FrameContext, place: Rigid, views: Sequence[FrameView], source: str
@@ -1768,14 +1857,29 @@ class ParallaxAnchor(AnchorStage):
         """The transform from each view's optical frame into this frame's camera, keyed by the
         view's stamp — what :meth:`pepin.parallax.TrackStore.tracks` turns into a bundle.
 
-        Asked newest first, as :meth:`_window`'s walk is, so a silent tracker costs its lookup
-        once a frame and not once a view; the walk stops where the source changes, because the
-        two disagree by about a quarter over a second and a bundle half measured by each is not
-        a geometry. A view the source cannot answer for at all is simply left out of the map
-        and the tracks that wanted it lose that one observation."""
+        With ``tf`` every view carries the pose the cart stood at when it was taken, so this is
+        arithmetic: one transform per view, no lookup, nothing that can fail on some views and
+        not others. The price is written into the pose itself — a view's pose is the tracker's
+        estimate AS OF THAT FRAME, so a correction landing inside the window moves the older
+        views by the correction; :meth:`_corrected` watches for one big enough to matter.
+
+        With ``tracker`` or ``odom`` there is no pose, and each view's motion is asked of the
+        source between the two stamps. Asked newest first, as :meth:`_window`'s walk is, so a
+        silent tracker costs its lookup once a frame and not once a view; the walk stops where
+        the source changes, because the two disagree by about a quarter over a second and a
+        bundle half measured by each is not a geometry. A view the source cannot answer for at
+        all is left out of the map and the tracks that wanted it lose that one observation."""
         from pepin.parallax import camera_motion
 
         out: dict[float, Motion] = {}
+        here = self._pose
+        if source == "tf" and here is not None:
+            for view in views:
+                if view.pose is None:
+                    continue
+                rotation, translation = _base_motion(view.pose, here)
+                out[view.stamp] = camera_motion(rotation, translation, view.place, place)
+            return out
         ask_tracker = source == "tracker"
         for view in reversed(views):
             moved, spoke = self._moved(ctx, view.stamp, ctx.stamp, ask_tracker)
@@ -1798,8 +1902,10 @@ class ParallaxAnchor(AnchorStage):
         from pepin.parallax import gate_tracks
 
         store = self._forward_store()
-        source = self._source(ctx)
-        report = store.follow(gray, ctx.stamp, place, source)
+        source, self._pose = self._source(ctx)
+        if self._corrected(ctx):
+            self._count("correction", store.forget_views())
+        report = store.follow(gray, ctx.stamp, place, source, self._pose)
         self._last_stamp = ctx.stamp
         self._live.append(report.live)
         self._born.append(report.born)
@@ -1811,6 +1917,7 @@ class ParallaxAnchor(AnchorStage):
         self._hop_ms.append(report.hop_ms)
         self._detect_ms.append(report.detect_ms)
         self._verify_ms.append(report.verify_ms)
+        self._rest_ms.append(report.rest_ms)
         views = store.views()
         if not views:
             self._count("gap")
@@ -1936,6 +2043,7 @@ class ParallaxAnchor(AnchorStage):
         del self._live[:-POOL_FRAMES], self._born[:-POOL_FRAMES], self._gone[:-POOL_FRAMES]
         del self._hop_ms[:-POOL_FRAMES], self._detect_ms[:-POOL_FRAMES]
         del self._verify_ms[:-POOL_FRAMES], self._solve_ms[:-POOL_FRAMES]
+        del self._rest_ms[:-POOL_FRAMES]
         return Pairs.of(
             d[ok],
             truth.z[ok],
@@ -1975,9 +2083,21 @@ class ParallaxAnchor(AnchorStage):
             if self.tracking
             else f", asks {self.min_baseline_m * 100:.0f} cm"
         )
+        carried = (
+            f" (correction gate {self.correction_tol_m * 100:.0f} cm)"
+            if self.motion_source == "tf" and self.correction_tol_m > 0
+            else " (correction ungated)"
+            if self.motion_source == "tf"
+            else ""
+        )
+        whose = {
+            "tf": "TF's continuous map pose",
+            "tracker": "the tracker's motion",
+            "odom": "the odometry's motion",
+        }.get(self.motion_source, f"the {self.motion_source}'s motion")
         asked = (
             f"{self.matcher} <= {self.window_s:.2f} s{shape},"
-            f" on the {self.motion_source}'s motion ({spoke or 'none yet'}),"
+            f" on {whose}{carried} ({spoke or 'none yet'}),"
             f" weight {self.weight:g} / sigma^2"
             + (f", map pose stale -> odom {self.stale}" if self.stale else "")
             + (" [map_wait: the frame path WAITS for TF]" if self.map_wait else "")
@@ -2017,10 +2137,14 @@ class ParallaxAnchor(AnchorStage):
             f" +{np.median(self._born):.0f}/-{np.median(self._gone):.0f} a frame"
             + (f" ({killed})" if killed else "")
             + (f", source cut {cut}" if cut else "")
-            + f", hop {np.median(self._hop_ms):.1f}"
-            f" / detect {np.median(self._detect_ms):.1f}"
-            f" / verify {np.median(self._verify_ms):.1f}"
-            f" / solve {np.median(self._solve_ms) if self._solve_ms else 0.0:.1f} ms"
+            # the MEAN, not the median: the detector runs one frame in redetect_every and the
+            # drift bound one cycle in verify_every, and a median of those is 0.0 on a stage
+            # that really costs them (scratch/parallax_store_profile.txt)
+            + f", hop {np.mean(self._hop_ms):.1f}"
+            f" / detect {np.mean(self._detect_ms):.1f}"
+            f" / verify {np.mean(self._verify_ms):.1f}"
+            f" / rest {np.mean(self._rest_ms):.1f}"
+            f" / solve {np.mean(self._solve_ms) if self._solve_ms else 0.0:.1f} ms a frame"
         )
 
 

@@ -133,6 +133,7 @@ import math
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from typing import Any, Literal, Protocol
 
 import numpy as np
@@ -774,14 +775,28 @@ def _identity() -> Motion:
     return Motion(np.eye(3), np.zeros(3))
 
 
+@lru_cache(maxsize=1024)
+def _spread(count: int, most: int) -> tuple[int, ...]:
+    """Which of ``count`` things to keep when at most ``most`` may be: evenly spaced over the
+    whole range, the first and the last always.
+
+    Integers and a cache rather than ``linspace`` because of who asks. The forward store asks
+    it once per live track on every frame, and hundreds of tracks born in the same frames ask
+    the same (count, most): profiled at 400 corners over the four errands of 2026-09-14 the
+    numpy version was 40391 calls to ``linspace`` and ``unique`` and a fifth of the store's
+    whole Python time (scratch/parallax_store_profile.txt)."""
+    if count <= most:
+        return tuple(range(count))
+    if most <= 1:
+        return (count - 1,) if most == 1 else ()
+    return tuple(sorted({round(i * (count - 1) / (most - 1)) for i in range(most)}))
+
+
 def _view_span(views: int, max_views: int) -> list[int]:
     """Which of ``views`` frames a track is allowed to rest on when the window holds more than
     ``max_views``: evenly spaced over the window, always keeping the oldest frame (the widest
     baseline) and the current one (the frame the depth is reported in)."""
-    if views <= max_views:
-        return list(range(views))
-    picked = np.unique(np.rint(np.linspace(0, views - 1, max_views)).astype(int))
-    return [int(i) for i in picked]
+    return list(_spread(views, max_views))
 
 
 def build_tracks(
@@ -1553,12 +1568,18 @@ class LucasKanade:
 @dataclass(frozen=True)
 class FrameView:
     """One frame a track may be triangulated from: when it was taken, the whole ``base_link <-
-    camera_optical`` the lens sat at then (the neck's pan included), and whose word the cart's
-    motion at that moment was — ``tracker`` (the map pose) or ``odom``."""
+    camera_optical`` the lens sat at then (the neck's pan included), whose word the cart's
+    motion at that moment was — ``tf``, ``tracker`` or ``odom`` — and, where that source can
+    say it, where the cart itself stood in a fixed frame at that moment.
+
+    A ``pose`` turns the motion between any two views into arithmetic, with no lookup and no
+    frame on which the answer is missing; without one the caller asks its source for the motion
+    between the two stamps instead."""
 
     stamp: float
     place: Placement
     source: str
+    pose: Placement | None = None
 
 
 @dataclass(frozen=True)
@@ -1609,7 +1630,12 @@ class TrackReport:
     the forward-backward check, ``edge`` it left the picture, ``drift`` it disagreed with its
     own birth patch, ``source`` its older views were cut off by a change of motion source —
     the corner itself lives on, its bundle starts again), the median observations a live track
-    carries, and the milliseconds of the hop, the detection and the drift bound."""
+    carries, and the milliseconds of the hop, the detection, the drift bound and everything
+    else the frame cost — ``rest_ms``, the bookkeeping between the flow calls (forgetting what
+    the window no longer covers, keeping the observation, choosing every track's views). That
+    last one is named because it is not small and it was not counted: at 400 corners it is
+    1.8 ms of a frame's 10.6 (scratch/parallax_store_profile.txt), and a report line that adds
+    up to less than the frame really costs sends the next person looking in the wrong place."""
 
     live: int
     born: int
@@ -1618,6 +1644,7 @@ class TrackReport:
     hop_ms: float
     detect_ms: float
     verify_ms: float
+    rest_ms: float = 0.0
 
 
 class TrackStore:
@@ -1730,14 +1757,38 @@ class TrackStore:
         self._queue.clear()
         self._since_detect = self._since_verify = self._frames = 0
 
+    def forget_views(self) -> int:
+        """Throw away every observation, the views they were made in and the greys kept for
+        them, and keep the corners themselves alive — the corners are still the same corners
+        and still where the hops say they are; it is the POSES behind them that have stopped
+        being comparable. What does that: a relocalisation, which moves every pose stored
+        before it relative to every pose after it. Returns how many tracks lost a bundle."""
+        lost = sum(1 for track in self._tracks if track.observations)
+        for track in self._tracks:
+            track.observations = []
+            track.used = []
+        self._keys.clear()
+        self._greys.clear()
+        self._queue.clear()
+        self._pending.clear()
+        return lost
+
     def follow(
-        self, gray: npt.NDArray[np.uint8], stamp: float, place: Placement, source: str
+        self,
+        gray: npt.NDArray[np.uint8],
+        stamp: float,
+        place: Placement,
+        source: str,
+        pose: Placement | None = None,
     ) -> TrackReport:
         """Take one frame: hop every live corner into it, verify one kept grey against it,
         forget what the window no longer covers, detect new corners when they are due, keep the
         observation when the frame is a view, and choose the views every track's next solve
-        rests on. Returns what it cost and what it did (:class:`TrackReport`)."""
-        view = FrameView(float(stamp), place, str(source))
+        rests on. ``pose`` is where the cart stood in a fixed frame at this moment, when the
+        caller's motion source can say (:class:`FrameView`). Returns what it cost and what it
+        did (:class:`TrackReport`)."""
+        view = FrameView(float(stamp), place, str(source), pose)
+        entered = time.perf_counter()
         died = dict.fromkeys(TRACK_DEATHS, 0)
         hop_ms = detect_ms = verify_ms = 0.0
         if self.matcher == "orb":  # described once a frame, whoever asks for it
@@ -1769,6 +1820,7 @@ class TrackStore:
         self._gray = gray
         self._frames += 1
         counts = [float(len(t.observations)) for t in self._tracks]
+        whole = 1000.0 * (time.perf_counter() - entered)
         return TrackReport(
             live=len(self._tracks),
             born=born,
@@ -1777,6 +1829,7 @@ class TrackStore:
             hop_ms=hop_ms,
             detect_ms=detect_ms,
             verify_ms=verify_ms,
+            rest_ms=max(whole - hop_ms - detect_ms - verify_ms, 0.0),
         )
 
     def views(self) -> list[FrameView]:
@@ -1799,15 +1852,26 @@ class TrackStore:
         views = len(stamps) + 1
         pixels = np.full((len(rows), views, 2), np.nan)
         seen = np.zeros((len(rows), views), dtype=bool)
+        # gathered flat and written once: a matrix filled a cell at a time is one numpy
+        # __setitem__ per observation, which at four hundred corners and seven views is
+        # thousands of them on a frame path (scratch/parallax_store_profile.txt)
+        at_row: list[int] = []
+        at_view: list[int] = []
+        found: list[Pixels] = []
         for r, track in enumerate(rows):
             for obs in track.used:
                 slot = index.get(obs.stamp)
                 if slot is None:
                     continue
-                pixels[r, slot] = obs.pixel
-                seen[r, slot] = True
-            pixels[r, -1] = track.pixel
-            seen[r, -1] = True
+                at_row.append(r)
+                at_view.append(slot)
+                found.append(obs.pixel)
+        if found:
+            pixels[at_row, at_view] = np.asarray(found, dtype=float)
+            seen[at_row, at_view] = True
+        if rows:
+            pixels[:, -1] = np.asarray([t.pixel for t in rows], dtype=float)
+            seen[:, -1] = True
         ordered = (*(motions[stamp] for stamp in stamps), _identity())
         return Tracks(pixels, seen, ordered, found=len(self._tracks))
 
@@ -2004,40 +2068,58 @@ class TrackStore:
         stays the current frame's and stopped at the first observation from the other one; of
         that run at most ``max_views - 1`` are kept, evenly spaced, the oldest always (the
         current frame is the anchor and is always the last view). Returns how many tracks the
-        source cut short."""
+        source cut short.
+
+        This runs once per live track on every frame — four hundred times a frame at the
+        measured budget — so it is written to touch each track a constant number of times. What
+        makes that possible is an invariant: a track's stored observations are always ONE
+        source, because the frame a source changes on is the frame the others are dropped on.
+        The oldest observation therefore answers for all of them, only the newest can be this
+        frame's own, and the run is a slice rather than a walk."""
         now = view.stamp
+        source = view.source
+        most = max(self.max_views - 1, 1)
         cut = 0
         wanted: dict[float, FrameView] = {}
         for track in self._tracks:
-            run: list[Observation] = []
-            broke = False
-            for obs in reversed(track.observations):
-                if obs.source != view.source:
-                    broke = True
-                    break
-                if obs.stamp < now:
-                    run.append(obs)
-            run.reverse()
-            if broke:  # nothing older than the change can ever be used again: drop it once
-                cut += 1
-                oldest = run[0].stamp if run else now
-                track.observations = [o for o in track.observations if o.stamp >= oldest]
-            span = _view_span(len(run), max(self.max_views - 1, 1))
-            track.used = [run[i] for i in span]
+            kept = track.observations
+            if kept and kept[0].view.source != source:
+                cut += 1  # nothing older than the change can be used again: drop it once
+                kept = [obs for obs in kept if obs.view.source == source]
+                track.observations = kept
+            if not kept:
+                track.used = []
+                continue
+            run = kept[:-1] if kept[-1].stamp >= now else kept
+            track.used = [run[i] for i in _spread(len(run), most)]
             for obs in track.used:
-                wanted.setdefault(obs.stamp, obs.view)
+                if obs.stamp not in wanted:
+                    wanted[obs.stamp] = obs.view
         self._pending = [wanted[stamp] for stamp in sorted(wanted)]
         return cut
 
 
 def to_gray(rgb: npt.NDArray[np.uint8]) -> npt.NDArray[np.uint8]:
-    """An RGB image as the single-channel grey the tracker reads (the luma weights, no cv2)."""
+    """An RGB image as the single-channel grey the tracker reads: the luma weights, through
+    OpenCV where it is installed and in numpy where it is not.
+
+    The two agree to a pixel value of 1 and not to the millisecond: at 640x360 the numpy
+    version is 0.52 ms and three float temporaries of 1.4 MB each, ``cvtColor`` 0.03 ms
+    (2026-09-15). It is on the frame path of every frame the parallax anchor sees, and the
+    temporaries are handed to the garbage collector while the network thread wants the
+    interpreter."""
     px = np.asarray(rgb)
     if px.ndim == 2:
         out: npt.NDArray[np.uint8] = px.astype(np.uint8)
         return out
-    grey = 0.299 * px[:, :, 0] + 0.587 * px[:, :, 1] + 0.114 * px[:, :, 2]
-    return np.ascontiguousarray(np.rint(grey).astype(np.uint8))
+    try:
+        import cv2
+    except ImportError:
+        grey = 0.299 * px[:, :, 0] + 0.587 * px[:, :, 1] + 0.114 * px[:, :, 2]
+        return np.ascontiguousarray(np.rint(grey).astype(np.uint8))
+    colour: Any = cv2.cvtColor  # cv2's stubs do not type a uint8 image's return
+    turned: npt.NDArray[np.uint8] = colour(np.ascontiguousarray(px), cv2.COLOR_RGB2GRAY)
+    return turned
 
 
 __all__ = [

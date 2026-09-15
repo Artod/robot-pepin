@@ -201,6 +201,47 @@ class FramePoser:
             return None
         return _compose(after.inverse(), before)
 
+    def map_pose_recent(self, stamp: float) -> RigidPose | None:
+        """``map <- base_link`` at ``stamp``, built the one way that cannot go stale: the newest
+        ``map <- odom`` there is — the tracker's correction, published slowly and, being a
+        correction, changing slowly — composed with ``odom <- base_link`` at the frame's own
+        stamp, which the EKF publishes at 20 Hz. Never waits. ``None`` only when the map edge
+        does not exist at all, or when the odometry does not cover the stamp.
+
+        Why this and not :meth:`map_motion_recent`, which asks the same question through one
+        lookup of ``map <- base_link``: that lookup is answered only while the tracker's own
+        pose covers the frame's stamp, and it usually does not. Live on 2026-09-15 with a 30 s
+        drive the ask fell back to the odometry 821 times, and since a bundle may not span two
+        motion sources, every one of those flips cut the window — a 5 s window never reached
+        past 2.1 s. Split in two, the slow half is asked for its newest value and the fast half
+        for this exact moment, and the answer exists on every frame. The pose it gives is the
+        tracker's estimate AS OF THIS FRAME: a correction that lands later moves the map, so a
+        pose stored for an earlier frame is that frame's estimate and not a retrospective one,
+        which is why a caller holding a window of them watches the correction
+        (:meth:`map_correction_recent`) rather than assuming it away."""
+        history = self._history
+        if not isinstance(history, RecentPoseHistory):
+            return None
+        correction = history.latest_pose(self.odom_frame, self.map_frame)
+        if correction is None:
+            return None
+        on_odom = self._leaned(history.pose_at_nowait(stamp, self.base, self.odom_frame), stamp)
+        if on_odom is None:
+            return None
+        return _compose(correction[0], on_odom)
+
+    def map_correction_recent(self) -> RigidPose | None:
+        """The newest ``map <- odom`` TF holds: the tracker's correction itself, with no cart
+        in it. It is what :meth:`map_pose_recent` is built on, and a caller keeping a window of
+        poses compares it against the one it saw last to notice a relocalisation — a jump here
+        moves every pose stored before it relative to every pose after it, and the displacement
+        it invents is not a displacement the camera made."""
+        history = self._history
+        if not isinstance(history, RecentPoseHistory):
+            return None
+        newest = history.latest_pose(self.odom_frame, self.map_frame)
+        return None if newest is None else newest[0]
+
     def _motion(self, from_stamp: float, to_stamp: float, fixed: str) -> RigidPose | None:
         """base_link at ``from_stamp`` into base_link at ``to_stamp`` through a fixed frame,
         each end leaned when a lean applies; ``None`` when that frame cannot say where the cart

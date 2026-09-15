@@ -537,13 +537,13 @@ def test_the_baseline_is_the_tracker_s_word_and_the_odometry_s_drift_scales_the_
     poses = {1.0: planar_pose(0.0, 0.0, 0.0), 1.2: planar_pose(0.0, -SIDESTEP_M, 0.0)}
     network = np.full((INTR.height, INTR.width), 3.0)
     source = Tracked(poses, drift=1.25)
-    anchor = ParallaxAnchor(track_min_obs=2)
+    anchor = ParallaxAnchor(track_min_obs=2, motion_source="tracker")
     assert anchor.motion_source == "tracker"
     assert anchor.pairs(Frame(network, context(1.0, a, source))) is None
     pairs = anchor.pairs(Frame(network, context(1.2, b, source)))
     assert pairs is not None and pairs.size >= 50
     assert band_error(pairs) < 0.05
-    assert anchor.used == {"tracker": 1, "odom": 0}
+    assert anchor.used["tracker"] == 1 and anchor.used["odom"] == 0
     assert "on the tracker's motion (tracker 1)" in anchor.describe()
     wheels = ParallaxAnchor(motion_source="odom", track_min_obs=2)
     assert wheels.pairs(Frame(network, context(1.0, a, source))) is None
@@ -552,7 +552,7 @@ def test_the_baseline_is_the_tracker_s_word_and_the_odometry_s_drift_scales_the_
     assert float(np.median(np.asarray(stretched.z) / np.asarray(pairs.z))) == pytest.approx(
         1.25, rel=0.02
     )
-    assert wheels.used == {"tracker": 0, "odom": 1} and "(odom 1)" in wheels.describe()
+    assert wheels.used["odom"] == 1 and "(odom 1)" in wheels.describe()
 
 
 def test_a_silent_tracker_falls_back_to_the_odometry_for_that_window() -> None:
@@ -568,13 +568,13 @@ def test_a_silent_tracker_falls_back_to_the_odometry_for_that_window() -> None:
     assert anchor.pairs(Frame(network, context(1.0, a, silent))) is None
     pairs = anchor.pairs(Frame(network, context(1.2, b, silent)))
     assert pairs is not None and pairs.size >= 50
-    assert anchor.used == {"tracker": 0, "odom": 1}
+    assert anchor.used["tracker"] == 0 and anchor.used["odom"] == 1
     assert silent.map_asks == 1  # the second frame's walk; the first has an empty ring
     plain = Odometry(poses)  # no map_motion at all: the protocol simply does not match
     bare = ParallaxAnchor(track_min_obs=2)
     assert bare.pairs(Frame(network, context(1.0, a, plain))) is None
     assert bare.pairs(Frame(network, context(1.2, b, plain))) is not None
-    assert bare.used == {"tracker": 0, "odom": 1}
+    assert bare.used["tracker"] == 0 and bare.used["odom"] == 1
 
 
 def test_the_anchor_hands_its_matcher_to_the_triangulation() -> None:
@@ -1008,7 +1008,9 @@ def test_one_window_rests_on_one_motion_source() -> None:
     network = np.full((INTR.height, INTR.width), 3.0)
     got: dict[str, tuple[ParallaxAnchor, Pairs | None]] = {}
     for ruler in ("window", "forward"):
-        anchor = ParallaxAnchor(tracking=ruler, track_window_s=1.5)
+        # on the tracker's own map pose, which is the source that can fall back mid-drive; the
+        # tf source cannot, which is the point of it (test_a_map_pose_built_from_tf_s_two_halves)
+        anchor = ParallaxAnchor(tracking=ruler, track_window_s=1.5, motion_source="tracker")
         pairs = None
         for i, view in enumerate(frames):
             pairs = anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, source)))
@@ -1406,6 +1408,131 @@ def test_a_track_s_solve_never_spans_two_motion_sources() -> None:
             assert all(obs.source == source for obs in track.used)
     assert min((v.stamp for v in store.views()), default=turn) >= turn
     assert store.live > 100, "a track outlives the change of source: only its bundle restarts"
+
+
+class TfPoses(Odometry):
+    """TF's two halves as a motion source, the way a node's FramePoser reads them: a slow
+    ``map <- odom`` correction that changes only when the tracker relocalises, and a smooth
+    ``odom <- base_link`` at every frame. ``map_motion_recent`` is deliberately blind past
+    ``covers`` — this is the shape that broke the window live: the tracker's own map pose is
+    published behind the frames and covers their stamps only sometimes."""
+
+    def __init__(
+        self,
+        poses: dict[float, RigidPose],
+        *,
+        jump_at: float | None = None,
+        jump_m: float = 0.0,
+        covers: float = float("inf"),
+    ) -> None:
+        super().__init__(poses)
+        self._jump_at = jump_at
+        self._jump_m = jump_m
+        self._covers = covers
+        self.now = min(poses)  # the frame being processed: which correction is the newest one
+
+    def correction(self) -> RigidPose:
+        """``map <- odom`` as it stands at the frame being processed."""
+        moved = 0.0 if self._jump_at is None or self.now < self._jump_at else self._jump_m
+        return planar_pose(moved, 0.0, 0.0)
+
+    def map_correction_recent(self) -> RigidPose:
+        """The newest ``map <- odom`` TF holds."""
+        return self.correction()
+
+    def map_pose_recent(self, stamp: float) -> RigidPose | None:
+        """The newest correction composed with the odometry at ``stamp`` — the pose that exists
+        on every frame."""
+        on_odom = self._poses.get(stamp)
+        if on_odom is None:
+            return None
+        fix = self.correction()
+        return RigidPose(
+            fix.rotation @ on_odom.rotation, fix.rotation @ on_odom.translation + fix.translation
+        )
+
+    def map_motion_recent(
+        self, from_stamp: float, to_stamp: float, max_age_s: float
+    ) -> RigidPose | None:
+        """The tracker's own map pose at both stamps, which it has for only ``covers``
+        seconds of history."""
+        if self.now - from_stamp > self._covers:
+            return None
+        a, b = self.map_pose_recent(from_stamp), self.map_pose_recent(to_stamp)
+        return None if a is None or b is None else base_motion(a, b)
+
+
+def feed(
+    anchor: ParallaxAnchor,
+    frames: list[np.ndarray],
+    poses: dict[float, RigidPose],
+    source: Odometry,
+) -> Pairs | None:
+    """Every frame of the small wall scene through the anchor on a given motion source."""
+    network = np.full((SMALL.height, SMALL.width), 3.0)
+    pairs = None
+    for stamp, view in zip(sorted(poses), frames, strict=True):
+        if isinstance(source, TfPoses):
+            source.now = stamp
+        pairs = anchor.pairs(Frame(network, wall_context(stamp, view, source)))
+    return pairs
+
+
+def test_a_map_pose_built_from_tf_s_two_halves_never_cuts_the_window() -> None:
+    """What broke live on 2026-09-15: the tracker's own map pose covers a frame's stamp only
+    sometimes, a bundle may not span two sources, and so every fallback cut the window — a 5 s
+    window never reached past 2.1 s. Given a tracker that can only answer for the last half
+    second, the tf source still reaches the whole window, because it asks the slow half of TF
+    for its newest value and the fast half for this moment and therefore always has an answer."""
+    frames, poses = wall_frames(30)
+    blinkered = TfPoses(poses, covers=0.5)
+    on_tf = ParallaxAnchor(track_window_s=4.0, motion_source="tf")
+    on_tracker = ParallaxAnchor(track_window_s=4.0, motion_source="tracker")
+    for anchor, source in ((on_tf, blinkered), (on_tracker, TfPoses(poses, covers=0.5))):
+        feed(anchor, frames, poses, source)
+    assert on_tf.gap_s is not None and on_tf.gap_s > 3.0, "tf must reach the whole window"
+    assert on_tf.deaths.get("source", 0) == 0, "one source cannot be cut"
+    # the tracker's own pose cannot reach past what it covers, so its window is cut back to
+    # half a second — which at this window's view spacing is not even three observations, and
+    # the frame yields nothing at all. That is the live failure, reproduced.
+    assert on_tracker.gap_s is None or on_tracker.gap_s < 1.0
+    assert not on_tracker._obs or float(np.median(on_tf._obs)) > float(np.median(on_tracker._obs))
+    assert on_tracker.rejected.get("mixed motion", 0) > 0, "its fallbacks must cut the window"
+    assert on_tf.rejected.get("mixed motion", 0) == 0
+    assert "TF's continuous map pose" in on_tf.describe()
+
+
+def test_a_tracker_correction_inside_the_window_is_caught_by_the_correction_gate() -> None:
+    """The price of a pose that is the tracker's estimate AS OF ITS OWN FRAME: a relocalisation
+    moves every view stored before it relative to every view after it, and the bundle reads a
+    displacement the camera never made. The gate watches the correction itself and drops the
+    window it has just invalidated — the corners live on."""
+    frames, poses = wall_frames(30)
+    jump_at = sorted(poses)[15]
+    gated = ParallaxAnchor(track_window_s=4.0, motion_source="tf")
+    ungated = ParallaxAnchor(track_window_s=4.0, motion_source="tf", correction_tol_m=0.0)
+    for anchor in (gated, ungated):
+        feed(anchor, frames, poses, TfPoses(poses, jump_at=jump_at, jump_m=0.20))
+    assert gated.rejected.get("correction", 0) > 0, "a 20 cm relocalisation must drop the window"
+    assert "correction gate 5 cm" in gated.describe()
+    assert ungated.rejected.get("correction", 0) == 0
+    assert "correction ungated" in ungated.describe()
+    store = gated._store
+    assert store is not None and store.live > 100, "the corners outlive the correction"
+    # the frames after the jump are measured again, and the depths come back to the wall
+    assert gated.sigma_m is not None
+
+
+def test_a_correction_smaller_than_the_gate_rides_along_inside_the_window() -> None:
+    """The gate is a gate and not a reset: a correction of a centimetre is the tracker doing
+    its job, it lands in the observations as the pose change it is, and the window is kept."""
+    frames, poses = wall_frames(30)
+    jump_at = sorted(poses)[15]
+    anchor = ParallaxAnchor(track_window_s=4.0, motion_source="tf")
+    pairs = feed(anchor, frames, poses, TfPoses(poses, jump_at=jump_at, jump_m=0.01))
+    assert anchor.rejected.get("correction", 0) == 0
+    assert anchor.gap_s is not None and anchor.gap_s > 3.0
+    assert pairs is not None and pairs.size >= 20
 
 
 @pytest.mark.slow

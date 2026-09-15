@@ -121,6 +121,8 @@ from pepin.depth import (
 from pepin.depth_pipeline import (
     FIELD_GRIDS,
     LIDAR_SIGMA_M,
+    PARALLAX_CORRECTION_REACH_M,
+    PARALLAX_CORRECTION_TOL_M,
     PARALLAX_DRIFT_TOL_PX,
     PARALLAX_MAP_MAX_AGE_S,
     PARALLAX_MAP_WAIT,
@@ -206,6 +208,7 @@ TRACK_FLAGS = (  # the ones that decide the shape of a parallax measurement: tra
     "parallax_redetect_every",
     "parallax_verify_every",
     "parallax_drift_tol_px",
+    "parallax_correction_tol_m",
 )
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
@@ -857,6 +860,30 @@ FLAGS = FlagSet(
         range=(0.0, 20.0),
     ),
     Flag(
+        "parallax_correction_tol_m",
+        PARALLAX_CORRECTION_TOL_M,
+        description="how far the tracker's map -> odom correction may jump between two frames"
+        " before the forward store's whole window is dropped — the corners live on, their"
+        " observations do not. Read as the metres the jump puts on a point"
+        f" {PARALLAX_CORRECTION_REACH_M:.0f} m ahead, so a turn of the map counts as well as a"
+        " shift. Only read with parallax_motion tf; 0 never drops a window",
+        why="the price of a map pose that answers on every frame. tf stores each view's pose as"
+        " the tracker's estimate AS OF THAT FRAME, so a relocalisation landing inside the"
+        " window moves every view before it relative to every view after it: the bundle then"
+        " reads a displacement the camera never made, in a geometry where every depth is"
+        " proportional to the baseline. 5 cm is a tenth of the shortest baseline the stage will"
+        " keep (parallax_min_total_baseline_m 10 cm) and several times the 1-2 cm the tracker's"
+        " pose is good to over a second (scratch/parallax_pose_sweep.txt) — over it the jump is"
+        " a correction and not noise. What it costs when it fires is one window, which the"
+        " store rebuilds in about a window's worth of frames; the report line counts the"
+        " bundles it drops as correction",
+        on_when="lower on a robot that relocalises smoothly and often, where a small correction"
+        " is common and a large one is really a jump",
+        off_when="0 to see what the corrections are worth, or on a tracker that never"
+        " relocalises at all — the report line's correction count is how often it fires",
+        range=(0.0, 1.0),
+    ),
+    Flag(
         "parallax_verify_every",
         PARALLAX_VERIFY_EVERY,
         description="frames between two rounds of the forward store's long-range drift bound:"
@@ -1113,13 +1140,30 @@ FLAGS = FlagSet(
     Flag(
         "parallax_motion",
         PARALLAX_MOTION,
-        description="whose word the parallax anchor's baseline is: tracker takes the motion"
-        " between the two frames from the lidar tracker's map pose (TF map -> base_link at both"
-        " stamps), odom from the EKF's wheels and gyro (odom -> base_link, what the stage always"
-        " used). A window the tracker cannot answer — no map pose at those stamps, a silent or"
-        " stale tracker — falls back to the odometry on its own, and the report line counts how"
-        " many windows each source actually gave",
-        why="a baseline is a length and every triangulated depth is proportional to it, and over"
+        description="whose word the parallax anchor's baseline is. tf builds the cart's map"
+        " pose out of TF's two halves on every frame — the newest map -> odom (the tracker's"
+        " correction, published slowly and changing slowly) composed with odom -> base_link at"
+        " this frame's own stamp (the EKF at 20 Hz) — and takes the motion between any two"
+        " frames from the two poses, which is arithmetic. tracker asks for the tracker's own"
+        " map pose at BOTH stamps (TF map -> base_link), odom for the EKF's wheels and gyro"
+        " alone. A window the source cannot answer falls back to the odometry, and the report"
+        " line counts how many windows each source actually gave",
+        why="tf because a bundle may not span two motion sources and the tracker's own map pose"
+        " is not there on every frame. Live on 2026-09-15, a 30 s drive with the forward store"
+        " at a 5 s window: 'map pose stale -> odom' fired 821 times, every fallback cut the"
+        " window (16718 cut bundles), and the window never accumulated past a span of 2.10 s"
+        " with 4.0 observations a track and 17.3 cm of baseline. Nothing about the tracker was"
+        " wrong — its pose is published behind the frames and covers their stamps only"
+        " sometimes. Splitting the question in two asks the slow half for its newest value and"
+        " the fast half for this exact moment, so the answer exists on every frame and there is"
+        " nothing to cut. The price is that a view's pose is the tracker's estimate AS OF THAT"
+        " FRAME: a correction landing inside the window moves the older views by the correction"
+        " and invents a displacement the camera never made, which is what"
+        " parallax_correction_tol_m watches for. tracker and odom keep the cut, and for the"
+        " backward window and the pair — which ask for a motion between two stamps rather than"
+        " for a pose — tf asks exactly what tracker asks. On the baseline itself the tracker's"
+        " pose remains the measured one over the wheels, and"
+        " a baseline is a length and every triangulated depth is proportional to it: over"
         " a second the wheels and gyro do not know one: the distance per interval scatters"
         " p10/p90 0.5-2.0 of the tracker's on carpet (scratch/tape_odometry_error.py) while the"
         " tracker's map pose is good to 1-2 cm over a second. The four errands of 2026-09-14"
@@ -1130,10 +1174,11 @@ FLAGS = FlagSet(
         " 1.138 and 0.944 on the tracker's, the describer 1.347 and 1.506 against 0.951 and"
         " 0.968. The 1.25-1.45 over-reading past a second of gap, the one both matchers shared,"
         " was the baseline",
-        on_when="tracker wherever the tracker is alive, which is the default: it is the one pose"
-        " on this cart measured against the map rather than integrated",
-        off_when="odom on a robot with no tracker at all, or to A/B the baseline against the"
-        " numbers above without restarting the node",
+        on_when="tf wherever a window longer than a frame or two matters: it is the only one"
+        " that answers on every frame, and the tracker's correction is still inside it",
+        off_when="tracker to reproduce a number measured before 2026-09-15, or where the"
+        " tracker relocalises so often that every window is cut anyway; odom on a robot with no"
+        " tracker at all, or to A/B the baseline against the numbers above without a restart",
         choices=PARALLAX_MOTIONS,
     ),
     Flag(
@@ -1465,6 +1510,7 @@ class DepthStream(Node):
             stage.redetect_every = int(self._switches["parallax_redetect_every"])
             stage.verify_every = int(self._switches["parallax_verify_every"])
             stage.drift_tol_px = float(self._switches["parallax_drift_tol_px"])
+            stage.correction_tol_m = float(self._switches["parallax_correction_tol_m"])
 
     def _ask_lidar_sigma(self, sigma_m: float) -> None:
         """Tell the lidar anchor what one beam's range is trusted to, in metres: its pairs then
