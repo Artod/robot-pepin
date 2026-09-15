@@ -171,6 +171,7 @@ DEFAULT_MODEL = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
 SCAN_RANGE_M = 6.0
 STAGES = ("network", "pose", "samples", "pipeline", "scan", "publish")
 CARRY_WAIT_S = 0.2  # how long TF is given to cover a frame's stamp (the carry, the camera pose)
+CAMERA_TF_MAX_AGE_S = 1.0  # the neck's newest edge is the head's pose while it is at most this old
 PAN_NOTICE_RAD = math.radians(1.0)  # a head turned more than this is projected as if it were not
 SCAN_BEFORE = "floor_anchor"  # the scan is built from the depth as it stands before this stage
 
@@ -564,6 +565,20 @@ FLAGS = FlagSet(
         choices=MATCHERS,
     ),
     Flag(
+        "camera_tf_latest",
+        True,
+        description="take the newest base_link <- camera_optical edge TF holds (at most"
+        f" {CAMERA_TF_MAX_AGE_S:.0f} s old) when the frame's own stamp is not covered yet, instead"
+        " of waiting CARRY_WAIT_S for it; off: the old wait at the exact stamp",
+        why="on since 2026-09-15 06:00: the neck's edge crosses the bridge late (bursts of +0.75 s)"
+        " and the head stands still while the cart drives; waiting for the exact stamp cost"
+        " 0.2 s on every frame ('Extrapolation ... into the future' x104 a window), the stream"
+        " fell to 3.5 frames/s and rgbd_odometry starved (0 poses/s)",
+        on_when="always while the head does not move during a frame (it does not: neck moves"
+        " are refused while the wheels turn)",
+        off_when="a head that pans while driving, where a 1 s old edge would be a wrong pose",
+    ),
+    Flag(
         "frame_shift_needs_beams",
         True,
         description="the per-frame law fits a shift only when the lidar is one of the rulers of"
@@ -789,12 +804,14 @@ class DepthStream(Node):
         self.create_subscription(Image, "/camera/image", self._on_image, newest)
         self.create_subscription(LaserScan, "/scan", self._on_scan, reliable)
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
+        self._history = TfHistory(self._tf, timeout_s=CARRY_WAIT_S)
         self._poser = FramePoser(
-            TfHistory(self._tf, timeout_s=CARRY_WAIT_S),
+            self._history,
             lean=self._lean,
             apply_lean=self._switches.on("imu_lean"),
             min_lean_quality=float(self._switches["lean_min_quality"]),
         )
+        self._camera_frame, self._base_frame = self._poser.camera, self._poser.base
         self._lidar_mount: RigidPose | None = None
         self._scans: deque[LaserScan] = deque()  # the last SCAN_WINDOW_S of scans, by stamp
         self._scan_lock = threading.Lock()
@@ -1078,7 +1095,19 @@ class DepthStream(Node):
         anchor's baseline turns with the neck's pan). Without such an edge in TF:
         config/camera.json's mount, counted, and no edge. A head turned past PAN_NOTICE_RAD is
         counted too: the projections assume it looks along the cart's x."""
-        pose = self._poser.camera_in_base(stamp_seconds(stamp))
+        at = stamp_seconds(stamp)
+        pose = self._history.pose_at_nowait(at, self._camera_frame, self._base_frame)
+        if pose is None and self._switches.on("camera_tf_latest"):
+            # The neck's edge crosses the bridge late (bursts of +0.75 s, 2026-09-15) and the
+            # head does not move while the cart drives: a lookup at the frame's own stamp
+            # waited CARRY_WAIT_S on every frame ("Extrapolation ... into the future" x104 a
+            # window, 3.5 frames/s, VO starved). The newest edge, if young, is the head's pose.
+            latest = self._history.latest_pose(self._camera_frame, self._base_frame)
+            if latest is not None and at - latest[1] <= CAMERA_TF_MAX_AGE_S:
+                pose = latest[0]
+                self._tally.count("camera_tf_latest")
+        if pose is None:
+            pose = self._poser.camera_in_base(at)  # the old path: wait for the stamp
         if pose is None:
             self._tally.count("camera_from_config")
             self._last_cam = self._camera_config
