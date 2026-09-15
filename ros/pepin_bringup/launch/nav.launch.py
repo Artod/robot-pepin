@@ -30,6 +30,7 @@ from launch.actions import (
     ExecuteProcess,
     OpaqueFunction,
     RegisterEventHandler,
+    SetLaunchConfiguration,
     Shutdown,
 )
 from launch.event_handlers import OnProcessExit
@@ -39,6 +40,7 @@ from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
 from pepin.deployment import (
+    CONTAINER_STOP_TIMEOUT_S,
     SIDES,
     autostart_for,
     bridge_admin_for,
@@ -255,9 +257,24 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     return actions
 
 
+# How long a node of this launch is given to end on SIGINT before the launch escalates to
+# SIGTERM, and then how long before SIGKILL. launch's own defaults are 5 s and 5 s, which is
+# under RTAB-Map's close of a 20-28 GB database and under the board's dozen nodes leaving DDS:
+# every shutdown ended in SIGKILLs mid-write, and eight of them left ros/maps/rtabmap.db
+# malformed (2026-09-13). The window is the container's own stop window
+# (pepin.deployment.CONTAINER_STOP_TIMEOUT_S, ros/lib.sh, board/pepin-ros.service), so on a
+# `docker stop` nothing inside escalates before docker's SIGKILL at its end, and on a shutdown
+# from inside (the bridge watch's exit) the nodes get the same seconds.
+SHUTDOWN = [
+    SetLaunchConfiguration("sigterm_timeout", str(CONTAINER_STOP_TIMEOUT_S)),
+    SetLaunchConfiguration("sigkill_timeout", "5"),
+]
+
+
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
+            *SHUTDOWN,
             DeclareLaunchArgument("map", default_value="/maps/20260903_182653_lap3_loop.yaml"),
             DeclareLaunchArgument("params_file", default_value="/params/nav2_params.yaml"),
             DeclareLaunchArgument("side", default_value="all", choices=list(SIDES)),

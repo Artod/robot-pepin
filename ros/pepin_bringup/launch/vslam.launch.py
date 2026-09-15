@@ -67,6 +67,7 @@ from launch.actions import (
     LogInfo,
     OpaqueFunction,
     RegisterEventHandler,
+    SetLaunchConfiguration,
     Shutdown,
 )
 from launch.conditions import IfCondition
@@ -74,7 +75,20 @@ from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from pepin.deployment import laptop_launch_nodes, map_owner
+from pepin.deployment import CONTAINER_STOP_TIMEOUT_S, laptop_launch_nodes, map_owner
+
+# How long a node of this launch is given to end on SIGINT before the launch escalates to
+# SIGTERM, and then how long before SIGKILL. launch's own defaults are 5 s and 5 s, which is
+# under RTAB-Map's close of a 20-28 GB database and under the board's dozen nodes leaving DDS:
+# every shutdown ended in SIGKILLs mid-write, and eight of them left ros/maps/rtabmap.db
+# malformed (2026-09-13). The window is the container's own stop window
+# (pepin.deployment.CONTAINER_STOP_TIMEOUT_S, ros/lib.sh, board/pepin-ros.service), so on a
+# `docker stop` nothing inside escalates before docker's SIGKILL at its end, and on a shutdown
+# from inside (the bridge watch's exit) the nodes get the same seconds.
+SHUTDOWN = [
+    SetLaunchConfiguration("sigterm_timeout", str(CONTAINER_STOP_TIMEOUT_S)),
+    SetLaunchConfiguration("sigkill_timeout", "5"),
+]
 
 # What RTAB-Map is told in both modes: how a transform between two nodes is found, how the graph
 # is built and closed, and what a place looks like. Only the frames and the grid depend on the
@@ -120,6 +134,25 @@ RTABMAP = {
     # the dictionary. Together: about 20 GB a day becomes about 5.
     "Mem/ImagePostDecimation": "2",
     "Mem/NotLinkedNodesKept": "false",
+    # What happens to the database when the process is killed. RTAB-Map 0.22.1's defaults
+    # (rtabmap/core/Parameters.h:270-274 in the image) are JournalMode 3 = MEMORY and
+    # Synchronous 0 = OFF: sqlite keeps the rollback journal in RAM, so a SIGKILL takes the only
+    # record of the half-written transaction with it and what is left on disk is a torn file.
+    # That is exactly how ros/maps/rtabmap.db became "database disk image is malformed" after
+    # the eight kills of 2026-09-13, and how a reader saw a torn page on 2026-09-15.
+    #   1 = TRUNCATE: the journal is a file beside the database, so an interrupted transaction
+    # is rolled back at the next open and a KILLED process cannot corrupt anything. TRUNCATE and
+    # not 0 = DELETE because it zeroes the journal's header instead of unlinking the file, which
+    # is one directory operation less per commit — the cheapest on-disk mode.
+    #   1 = NORMAL: sqlite fsyncs at the end of each commit instead of never. This is the whole
+    # cost of the change — one flush per node written, at Rtabmap/DetectionRate 1.0 that is one
+    # a second — and it is what carries the guarantee past a process kill to most power losses.
+    # It is not FULL (2): FULL syncs the journal header as well, and a robot that loses power
+    # mid-commit has a bad day either way; the kill is the failure that actually happens here.
+    # A WAL mode is not on offer — this parameter is an int over DELETE/TRUNCATE/PERSIST/MEMORY/
+    # OFF and RTAB-Map never passes anything else to `PRAGMA journal_mode`.
+    "DbSqlite3/JournalMode": "1",
+    "DbSqlite3/Synchronous": "1",
     "Optimizer/GravitySigma": "0",
     # a mono network's depth frays at object edges and far away: lone voxels go
     "Grid/NoiseFilteringRadius": "0.10",
@@ -640,6 +673,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
+            *SHUTDOWN,
             DeclareLaunchArgument("board", default_value="10.0.0.187"),
             DeclareLaunchArgument("slam", default_value="false"),
             DeclareLaunchArgument("camera_only", default_value="false"),  # SLAM mode only
