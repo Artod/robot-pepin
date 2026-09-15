@@ -17,6 +17,10 @@
 // reconnects forever. State lines are published straight from that reader thread (rclcpp
 // publishers are thread-safe): no queue, no drain timer, no CPU spent polling.
 //
+// /odom's TWIST is measured, not commanded: the state line's v and w are the twist the base
+// server was ASKED for, and publishing those puts Nav2's own output where the EKF reads a
+// sensor. See odom_twist() below and `odom_twist_source`.
+//
 // The same process optionally reads an MPU6050 on the board's I2C bus and publishes
 // imu/data_raw (a third thread, same reasoning: a blocking bus must not sit in the
 // executor). Wheel odometry over-reports a turn in place by 10-25% on carpet; the fix is
@@ -47,6 +51,7 @@
 #include "pepin_base_cpp/link.hpp"
 #include "pepin_base_cpp/mpu6050.hpp"
 #include "pepin_base_cpp/protocol.hpp"
+#include "pepin_base_cpp/twist_from_pose.hpp"
 
 namespace pepin
 {
@@ -90,6 +95,18 @@ public:
     const auto up = declare_parameter<std::string>("imu_up_axis", "y");
     imu_up_axis_ = up.empty() ? 'z' : static_cast<char>(std::tolower(up[0]));
     imu_bias_s_ = declare_parameter<double>("imu_bias_s", 2.0);
+    // WHAT /odom's TWIST MEANS. The base server's state line reports v and w as the twist it
+    // was COMMANDED to apply -- snapshot() copies self.twist, which is whatever /cmd_vel last
+    // asked for (src/pepin/base_server.py:466) -- while its x/y/theta are integrated from the
+    // wheel travel and ARE a measurement. Publishing the command as the twist puts a
+    // controller's own output where a filter reads a sensor: robot_localization fuses odom0's
+    // vx today (ros/params/ekf.yaml), so until 2026-09-15 the EKF was told the cart is doing
+    // exactly what it was asked to do. "measured" (the default) differences two consecutive
+    // wheel poses instead (TwistFromPose, the twin of pepin.odometry.TwistFromPose);
+    // "commanded" is the old behaviour, one parameter away and no restart:
+    // ``ros2 param set /base_bridge odom_twist_source commanded``.
+    const auto twist_source = declare_parameter<std::string>("odom_twist_source", "measured");
+    twist_measured_ = twist_source != "commanded";
 
     pose_covariance_ = odometry_pose_covariance();
     twist_covariance_ = odometry_twist_covariance();
@@ -169,8 +186,9 @@ private:
     odom.pose.pose.orientation.z = qz;
     odom.pose.pose.orientation.w = qw;
     odom.pose.covariance = pose_covariance_;
-    odom.twist.twist.linear.x = state.v;  // the body frame: x forward, yaw counter-clockwise
-    odom.twist.twist.angular.z = state.w;
+    const auto twist = odom_twist(state);
+    odom.twist.twist.linear.x = twist.linear;  // the body frame: x forward, yaw CCW
+    odom.twist.twist.angular.z = twist.angular;
     odom.twist.covariance = twist_covariance_;
     odom_publisher_->publish(odom);
     if (!publish_tf_) {
@@ -186,6 +204,33 @@ private:
     transform.transform.rotation.z = qz;
     transform.transform.rotation.w = qw;
     tf_->sendTransform(transform);
+  }
+
+  /// The twist /odom carries: measured off two wheel poses, or the commanded one.
+  ///
+  /// The parameter is read per sample so ``ros2 param set`` switches a live filter's input
+  /// without a restart; the source is named in every link-up line. Called from the reader
+  /// thread only, so the estimator needs no lock; the flag the log line reads is atomic.
+  ///
+  /// COVARIANCE. Unchanged, and on purpose: the encoder is not this measurement's error.
+  /// One tick is pi * 0.125 m / 4096 = 9.6e-5 m of wheel travel (config/base.json), a pose
+  /// difference carries the quantisation of two reads (sigma = 9.6e-5 * sqrt(2/12) = 3.9e-5 m
+  /// per wheel), and over the 0.05 s between state lines (base_server --publish-hz 20) that is
+  /// 5.5e-4 m/s of forward noise and 2.2e-3 rad/s of yaw noise -- variances of 3.1e-7 (m/s)^2
+  /// and 4.8e-6 (rad/s)^2, three to four orders below the 0.001 and 0.01 the message already
+  /// carries (protocol.hpp:203). Those numbers are slip and wheel-diameter error, measured
+  /// against the gyro over 51 tapes (ros/params/ekf.yaml), and they are what the filter needs
+  /// to hear. Quantisation would only matter if the state rate rose far past 20 Hz.
+  BodyTwist odom_twist(const BaseState & state)
+  {
+    const auto source = get_parameter("odom_twist_source").as_string();
+    const bool measured = source != "commanded";
+    twist_measured_ = measured;
+    if (!measured) {
+      twist_from_pose_.reset();
+      return BodyTwist{state.v, state.w};
+    }
+    return twist_from_pose_.update(state.x, state.y, state.theta, state.stamp_s);
   }
 
   /// Forward a twist at once (clamped to the ceiling); remember it until it goes stale.
@@ -238,7 +283,9 @@ private:
       return;
     }
     if (change->first) {
-      RCLCPP_INFO(get_logger(), "%s", change->second.c_str());
+      RCLCPP_INFO(
+        get_logger(), "%s; odom twist: %s", change->second.c_str(),
+        twist_measured_ ? "measured" : "commanded");
     } else {
       RCLCPP_WARN(get_logger(), "%s", change->second.c_str());
     }
@@ -390,6 +437,8 @@ private:
   int imu_address_ = 0x68;
   double imu_rate_hz_ = 50.0;
   double imu_bias_s_ = 2.0;
+  std::atomic<bool> twist_measured_{true};  // read by the status timer, written by the reader
+  TwistFromPose twist_from_pose_;  // touched from the reader thread only
   std::array<double, 36> pose_covariance_{};
   std::array<double, 36> twist_covariance_{};
 
