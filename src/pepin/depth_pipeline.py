@@ -105,6 +105,13 @@ if TYPE_CHECKING:  # the tracker's own module stays a lazy import inside the par
 # frame the pool laws read the beams alone: they are the lidar's lens laws, and the other rulers
 # only stand in for it; the field takes every pair of every ruler.
 POOL_CAP_PER_SOURCE = 100
+# Pairs of one anchor a frame the FRAME law's field fits on, per ruler. The field fits this
+# frame alone, so it reads every ruler and not the beams only — but it still pays for the total:
+# the floor's and the wall's pairs together reach 80 000 on a frame, and the field's fit took
+# 35 ms of it. Thinned to 2000 per block (evenly spaced, the block's weight preserved) that fit
+# is 4.7 ms and its nodes move 0.00 % of their value at the median and 0.22 % at the worst
+# (2026-09-16, scratch/chain_profile.txt). Live knob: the node's field_pairs_cap, 0 uncapped.
+FIELD_PAIRS_CAP = 2000
 LEAN_STEP = 0.003  # the floor's expected depth is recomputed when the up vector moves this much
 FLOOR_PAIR_STRIDE = 8  # every 8th row and column of the floor: 3600 candidates of a 640x360 frame
 FLOOR_SIGMA_PITCH_DEG = 1.5  # how well the camera's pitch is known: config/neck.json's ticks_note
@@ -304,6 +311,7 @@ PIPELINE_DEFAULTS: dict[str, bool | float | str] = {
     "frame_law": True,
     "wall_correct": False,
     "field_grid": "3x3",
+    "field_pairs_cap": FIELD_PAIRS_CAP,
     "field_prior": FIELD_PRIOR,
     "field_carry": FIELD_CARRY,
     "field_carry_tau_s": FIELD_CARRY_TAU_S,
@@ -553,12 +561,26 @@ class Frame:
         """The pool the POOL laws read: the lidar's beams alone when the frame has any (they are
         the lidar's lens laws, fitted over POOL_FRAMES frames, and a fit costs the pool's total —
         the floor's and the wall's 80 000 pairs a frame made two fits 125 ms, 2026-09-16); with
-        no beams in the frame, every other ruler's block thinned to at most ``cap`` pairs (evenly
-        spaced, weights scaled so the block's total weight is unchanged), so a lidar-less chain
-        still gets its law. The frame law reads :attr:`pool` whole — it fits this frame only."""
+        no beams in the frame, every other ruler's block thinned to at most ``cap`` pairs, so a
+        lidar-less chain still gets its law. The FRAME law reads every ruler instead
+        (:meth:`pool_thinned`): it fits this frame alone."""
         beams = [p for n, p in zip(self.sources, self.pairs, strict=False) if n == "lidar_anchor"]
         if beams:
             return Pairs.join(beams)
+        return self.pool_thinned(cap)
+
+    def pool_thinned(self, cap: int = FIELD_PAIRS_CAP) -> Pairs | None:
+        """Every pair contributed so far, each RULER'S BLOCK thinned to at most ``cap`` of them
+        — evenly spaced through the block, their weights scaled so the block carries the total
+        weight it did — or :attr:`pool` whole when ``cap`` is 0.
+
+        Evenly spaced and not sampled at random so that a frame's law is reproducible from its
+        pairs, and per block so that thinning cannot change which ruler writes the law: a fit
+        reads weight, and every block keeps its own. What it buys is the fit's cost, which is
+        linear in the total — the field's fit was 35 ms on the 80 000 pairs a floor and a wall
+        bring, 4.7 ms at 2000 a block, its nodes moving 0.00 % at the median (2026-09-16)."""
+        if cap <= 0:
+            return self.pool
         parts: list[Pairs] = []
         for part in self.pairs:
             if part.size <= cap:
@@ -1763,6 +1785,20 @@ def _between(before: Rigid, after: Rigid) -> tuple[Array, Array]:
     return back @ np.asarray(before.rotation, dtype=float), back @ moved
 
 
+def _windowed[N: (int, float)](series: list[N], value: N, depth: int = POOL_FRAMES) -> None:
+    """One more per-frame number onto ``series``, keeping only the last ``depth`` of them.
+
+    Trimmed HERE, at the append, and not where the pairs are counted: the per-frame series of
+    :class:`ParallaxAnchor` (corners live, born, gone, the milliseconds of each step) grow on
+    every frame, while the trim used to sit on the path a frame takes only when it contributes
+    pairs. A stage that rejects everything — a cart standing still, a tracker gone quiet —
+    therefore grew them without bound, and the report line's medians over 100 000 entries cost
+    23.8 ms a window (2026-09-16, scratch/chain_profile.txt).
+    """
+    series.append(value)
+    del series[:-depth]
+
+
 def _placed(outer: Rigid, inner: Rigid) -> Rigid:
     """``outer`` applied to ``inner``: the pose of ``inner``'s frame in ``outer``'s parent —
     ``map <- base_link`` composed with ``base_link <- camera_optical`` is where the LENS was."""
@@ -1915,8 +1951,10 @@ class ParallaxAnchor(AnchorStage):
         redetect_every: int = PARALLAX_REDETECT_EVERY,
         verify_every: int = PARALLAX_VERIFY_EVERY,
         drift_tol_px: float = PARALLAX_DRIFT_TOL_PX,
+        pool_frames: int = POOL_FRAMES,
     ) -> None:
         self.weight = weight
+        self.pool_frames = pool_frames  # how many frames of per-frame numbers the report reads
         self.min_gap_s = min_gap_s
         self._max_gap_s = max_gap_s  # None: whatever window the matcher in use can carry
         self.min_baseline_m = min_baseline_m
@@ -2290,17 +2328,21 @@ class ParallaxAnchor(AnchorStage):
             self._count("correction", store.forget_views())
         report = store.follow(gray, ctx.stamp, place, source, self._pose)
         self._last_stamp = ctx.stamp
-        self._live.append(report.live)
-        self._born.append(report.born)
+        _windowed(self._live, report.live, self.pool_frames)
+        _windowed(self._born, report.born, self.pool_frames)
         # 'source' is a bundle cut short and not a corner closed: it is counted apart
-        self._gone.append(sum(n for cause, n in report.died.items() if cause != "source"))
+        _windowed(
+            self._gone,
+            sum(n for cause, n in report.died.items() if cause != "source"),
+            self.pool_frames,
+        )
         for cause, count in report.died.items():
             if count:
                 self.deaths[cause] = self.deaths.get(cause, 0) + count
-        self._hop_ms.append(report.hop_ms)
-        self._detect_ms.append(report.detect_ms)
-        self._verify_ms.append(report.verify_ms)
-        self._rest_ms.append(report.rest_ms)
+        _windowed(self._hop_ms, report.hop_ms, self.pool_frames)
+        _windowed(self._detect_ms, report.detect_ms, self.pool_frames)
+        _windowed(self._verify_ms, report.verify_ms, self.pool_frames)
+        _windowed(self._rest_ms, report.rest_ms, self.pool_frames)
         views = store.views()
         if not views:
             self._count("gap")
@@ -2320,7 +2362,7 @@ class ParallaxAnchor(AnchorStage):
             sigma_model=self.sigma_model,
             split_tol_sigma=self.split_tol_sigma,
         )
-        self._solve_ms.append(1000.0 * (time.perf_counter() - started))
+        _windowed(self._solve_ms, 1000.0 * (time.perf_counter() - started), self.pool_frames)
         return truth, ctx.stamp - min(motions)
 
     def _remember(self, ctx: FrameContext, gray: npt.NDArray[np.uint8], place: Rigid) -> None:
@@ -2413,20 +2455,14 @@ class ParallaxAnchor(AnchorStage):
         if not bool(ok.any()):
             return None
         self.contributed += 1
-        self._baseline.append(float(np.median(truth.baseline[ok])))
-        self._sigma.append(float(np.median(truth.sigma[ok])))
-        self._gap.append(span)
-        self._kept.append(int(ok.sum()))
+        _windowed(self._baseline, float(np.median(truth.baseline[ok])), self.pool_frames)
+        _windowed(self._sigma, float(np.median(truth.sigma[ok])), self.pool_frames)
+        _windowed(self._gap, span, self.pool_frames)
+        _windowed(self._kept, int(ok.sum()), self.pool_frames)
         if truth.observations is not None:
-            self._obs.append(float(np.median(truth.observations[ok])))
+            _windowed(self._obs, float(np.median(truth.observations[ok])), self.pool_frames)
         if truth.sigma_two is not None:
-            self._sigma_two.append(float(np.median(truth.sigma_two[ok])))
-        del self._baseline[:-POOL_FRAMES], self._sigma[:-POOL_FRAMES], self._gap[:-POOL_FRAMES]
-        del self._kept[:-POOL_FRAMES], self._obs[:-POOL_FRAMES], self._sigma_two[:-POOL_FRAMES]
-        del self._live[:-POOL_FRAMES], self._born[:-POOL_FRAMES], self._gone[:-POOL_FRAMES]
-        del self._hop_ms[:-POOL_FRAMES], self._detect_ms[:-POOL_FRAMES]
-        del self._verify_ms[:-POOL_FRAMES], self._solve_ms[:-POOL_FRAMES]
-        del self._rest_ms[:-POOL_FRAMES]
+            _windowed(self._sigma_two, float(np.median(truth.sigma_two[ok])), self.pool_frames)
         return Pairs.of(
             d[ok],
             truth.z[ok],
@@ -2909,8 +2945,10 @@ class FrameLaw(LawStage):
         field_prior: float = FIELD_PRIOR,
         field_carry: float = FIELD_CARRY,
         field_carry_tau_s: float = FIELD_CARRY_TAU_S,
+        pairs_cap: int = FIELD_PAIRS_CAP,
     ) -> None:
         self.prior = prior
+        self.pairs_cap = pairs_cap  # live: the node's field_pairs_cap, per ruler; 0 uncapped
         self.a = 1.0
         self.b = 0.0
         self.min_pairs = min_pairs
@@ -3017,8 +3055,12 @@ class FrameLaw(LawStage):
     def run(self, depth: Array, frame: Frame) -> tuple[Array, Verdict]:
         """Fit on this frame's pairs and correct the frame's raw depth, keeping the holes of
         the depth handed in (the edge filter's, and the laws' that ran before); the frame is
-        withheld only while no law of any kind exists."""
-        pool = frame.pool
+        withheld only while no law of any kind exists.
+
+        The pairs are each ruler's block thinned to ``pairs_cap`` (:meth:`Frame.pool_thinned`):
+        the fit's cost is linear in the pool's total, and a floor and a wall bring 80 000 pairs
+        of a frame whose law moves by nothing when 2000 of each are fitted instead."""
+        pool = frame.pool_thinned(self.pairs_cap)
         rulers = frame.rulers
         self.fit(pool, frame.ctx, beams=rulers.get("lidar_anchor", 0.0) > 0.0)
         if rulers and self.pairs:
@@ -3107,6 +3149,7 @@ def standard_pipeline(
             field_prior=float(defaults["field_prior"]),
             field_carry=float(defaults["field_carry"]),
             field_carry_tau_s=float(defaults["field_carry_tau_s"]),
+            pairs_cap=int(defaults["field_pairs_cap"]),
         )
     )
     geometry = FloorGeometry()

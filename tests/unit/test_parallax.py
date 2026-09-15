@@ -516,6 +516,24 @@ def test_the_window_follows_the_matcher_and_a_given_one_pins_it() -> None:
     assert pinned.max_gap_s == 0.25
 
 
+def test_the_per_frame_numbers_are_trimmed_on_every_frame_not_only_on_a_fruitful_one() -> None:
+    """The report line's per-frame series (corners live, born, gone, the milliseconds of each
+    step) are appended on EVERY frame, while the trim used to sit where the pairs are counted:
+    a stage that contributes nothing — a blank wall, a silent odometry — grew them without
+    bound, and the medians over 100 000 entries cost 23.8 ms a window (2026-09-16). Six frames
+    that give nothing, a window of three: three entries."""
+    anchor = ParallaxAnchor(pool_frames=3)
+    blank = np.zeros((INTR.height, INTR.width), dtype=np.uint8)
+    network = np.full((INTR.height, INTR.width), 3.0)
+    blind = Odometry({})  # no pose at any stamp: nothing is ever triangulated
+    for k in range(6):
+        assert anchor.pairs(Frame(network, context(1.0 + 0.1 * k, blank, blind))) is None
+    assert anchor.contributed == 0, "no frame gave a pair"
+    for series in (anchor._live, anchor._born, anchor._gone, anchor._hop_ms, anchor._detect_ms):
+        assert len(series) == 3, "the window is trimmed at the append"
+    assert "live corners" in anchor.describe()
+
+
 def test_the_report_line_names_the_matcher_and_its_window() -> None:
     """The report line says who matched, how far back it looked and whether a corner was a
     track or a pair, so an A/B in the field is readable without asking the node what its

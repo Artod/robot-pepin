@@ -38,11 +38,18 @@ Where the camera sits is asked of TF at every frame's stamp (:class:`pepin.frame
 over the kit's :class:`TfHistory`): the neck moves, and ``base_link -> camera_link`` is published
 live from its encoders by the board's neck node; config/camera.json's mount is the fallback
 while TF has no such edge yet, and the report line counts the frames that used it. The same
-poser carries the scan to the frame's moment through the odometry. A pan of the head is counted
-too, and behind ``scan_honours_pan`` the published fan turns with it — the bearings of
-/depth_scan are the cart's whichever way the neck looks, and the fan's angular window sits off
-base_link's x by the pan. The depth image the pipeline corrects is still projected as if the
-head looked along that x: the anchors read pixels and heights, not bearings.
+poser carries the scan to the frame's moment through the odometry. Neither ask ever waits for
+an edge that has stopped: TF goes through :class:`LiveEdgeHistory`, which refuses any blocking
+lookup of an edge whose newest sample is more than ``tf_dead_s`` behind the frame — the config
+mount and the uncarried scan at once, both counted, instead of CARRY_WAIT_S burnt per frame on
+a route that has died (2026-09-16: the neck's edge 344 s old, 0.9-3 frames/s). What the
+PIPELINE asks about the cart's motion goes to a second poser over the same TF with no wait at
+all, because the parallax anchor asks once per stored view and a wait there is paid per view,
+not per frame; a view TF cannot answer yet is left out of that frame's bundle. A pan of the
+head is counted too, and behind ``scan_honours_pan`` the published fan turns with it — the
+bearings of /depth_scan are the cart's whichever way the neck looks, and the fan's angular
+window sits off base_link's x by the pan. The depth image the pipeline corrects is still
+projected as if the head looked along that x: the anchors read pixels and heights, not bearings.
 
 The network runs where ``depth_backend`` says: ``local`` is the CPU model in this container
 (0.2-0.3 s a frame), ``remote`` the same network on the laptop's GPU behind
@@ -65,7 +72,8 @@ the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anch
 ``parallax_anchor``, ``affine_law``, ``range_law``, ``frame_law``,
 ``wall_correct``, ``floor_anchor`` — plus ``depth_backend``, ``scale_ceiling``, the largest
 1 / scale the law may be fitted to, ``law_slew``, how fast that law may move between fits,
-``imu_lean`` and ``lean_min_quality``; their state is printed in every report line.
+``tf_dead_s``, how stale a TF edge may be before no frame waits for it, ``imu_lean`` and
+``lean_min_quality``; their state is printed in every report line.
 """
 
 from __future__ import annotations
@@ -76,8 +84,9 @@ import threading
 import time
 import traceback
 from collections import Counter, deque
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -194,6 +203,7 @@ SCAN_RANGE_M = 6.0
 STAGES = ("network", "pose", "samples", "pipeline", "scan", "publish")
 CARRY_WAIT_S = 0.2  # how long TF is given to cover a frame's stamp (the carry, the camera pose)
 CAMERA_TF_MAX_AGE_S = 1.0  # the neck's newest edge is the head's pose while it is at most this old
+TF_DEAD_S = 3.0  # an edge whose newest sample is older than this is dead: no frame waits for it
 PAN_NOTICE_RAD = math.radians(1.0)  # a head turned more than this is worth a line in the report
 SCAN_BEFORE = "floor_anchor"  # the scan is built from the depth as it stands before this stage
 TRACK_FLAGS = (  # the ones that decide the shape of a parallax measurement: track or pair
@@ -994,6 +1004,23 @@ FLAGS = FlagSet(
         off_when="a head that pans while driving, where a 1 s old edge would be a wrong pose",
     ),
     Flag(
+        "tf_dead_s",
+        TF_DEAD_S,
+        range=(0.0, 600.0),
+        description="how far behind a frame's stamp TF's newest edge may be before that edge is"
+        " taken for dead and no lookup on the frame's path waits for it: the camera pose falls"
+        " to config/camera.json's mount and the lidar's scan passes uncarried, both at once and"
+        " both counted. 0 turns the guard off — every lookup waits CARRY_WAIT_S again",
+        why="2026-09-16: the board's TF route died, base_link <- camera_optical stopped 344 s"
+        " back, and every frame still spent the whole 0.2 s wait on a lookup no publisher was"
+        " going to answer — pose 212/226 ms in the report line, the stream down to 0.9-3"
+        " frames/s. Three seconds is three missed republishes of the neck at 10 Hz and well over"
+        " any WiFi hiccup, so a route that is merely stuttering still gets its wait",
+        on_when="always: a wait that cannot succeed costs the frame and buys nothing",
+        off_when="0 to reproduce the old behaviour, or raise it on a link whose TF genuinely"
+        " arrives in bursts longer than three seconds",
+    ),
+    Flag(
         "frame_shift_needs_beams",
         True,
         description="the per-frame law fits a shift only when the lidar is one of the rulers of"
@@ -1038,6 +1065,24 @@ FLAGS = FlagSet(
         " of the whole field and the thing to set the moment a node's scale looks wild in the"
         " report line",
         choices=FIELD_GRIDS,
+    ),
+    Flag(
+        "field_pairs_cap",
+        PIPELINE_DEFAULTS["field_pairs_cap"],
+        range=(0, 200_000),
+        description="pairs per RULER the per-frame law's field is fitted on: a block longer than"
+        " this is thinned to that many, evenly spaced, its total weight preserved so the thinning"
+        " cannot change which ruler writes the law. 0 fits every pair, as the stage did",
+        why="the fit costs the pool's total, and the rulers are not the same size: the lidar"
+        " brings tens of beams, the floor and the wall together up to 80 000 pairs of one frame,"
+        " and the field's fit ran 35 ms on them. At 2000 a block the same frames fit in 4.7 ms"
+        " and the nodes move 0.00 % of their value at the median, 0.22 % at the worst"
+        " (2026-09-16, scratch/chain_profile.txt) — a fit reads weight, and 2000 evenly spaced"
+        " pairs of a block carry the same weight in the same places as its 40 000",
+        on_when="lower it on a slower board, where the frame law is the stage in the way; the"
+        " report line's pair count is what was fitted",
+        off_when="0 to fit every pair — the A/B of the cap itself, and the thing to set if a"
+        " node's law is ever suspected of following the thinning rather than the scene",
     ),
     Flag(
         "field_prior",
@@ -1385,6 +1430,86 @@ class MonoDepth:
         return depth
 
 
+class EdgeHistory(Protocol):
+    """What :class:`LiveEdgeHistory` needs of a TF history: the ask that waits, the ask that
+    does not, and the newest edge there is (:class:`pepin_bringup.node_kit.TfHistory`)."""
+
+    def pose_at(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
+        """``fixed <- frame`` at ``stamp`` (seconds), waiting for the buffer to cover it."""
+        ...
+
+    def pose_at_nowait(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
+        """``fixed <- frame`` at ``stamp`` from what the buffer already holds; never waits."""
+        ...
+
+    def latest_pose(self, frame: str, fixed: str) -> tuple[RigidPose, float] | None:
+        """The newest ``fixed <- frame`` there is and the stamp it holds for; never waits."""
+        ...
+
+
+class LiveEdgeHistory:
+    """TF for a frame's path: the history a :class:`pepin.frame_pose.FramePoser` asks, which
+    refuses to WAIT for an edge that is already dead.
+
+    A lookup TF cannot answer costs its whole timeout, and on a frame's path that is paid once
+    per frame. Live on 2026-09-16 the board's TF route died: ``base_link <- camera_optical``
+    stopped 344 s back, and every frame still spent CARRY_WAIT_S waiting for a stamp no
+    publisher was going to fill (pose 212/226 ms, the stream at 0.9-3 frames/s) before falling
+    to the config mount it could have used at once. So: an edge whose newest sample sits more
+    than ``dead_s`` seconds behind the asked-for stamp is dead, :meth:`pose_at` answers
+    ``None`` immediately, ``on_dead(frame, fixed, stale_s)`` counts it, and the caller's own
+    fallback — the config mount, the uncarried scan — runs on this frame instead of the next.
+
+    An edge TF has never carried at all is not dead but unborn: the wait stands there, because
+    the publisher may be one message away (that case is the old ``no TF edge``). The live case
+    the wait exists for — a fresh edge that does not yet cover this frame's stamp — is
+    untouched, and ``dead_s`` 0 turns the guard off altogether. Every non-blocking ask passes
+    through unjudged: they cost nothing whatever the route does.
+    """
+
+    def __init__(
+        self,
+        history: EdgeHistory,
+        *,
+        dead_s: Callable[[], float],
+        on_dead: Callable[[str, str, float], None],
+    ) -> None:
+        self.history = history
+        self._dead_s = dead_s
+        self._on_dead = on_dead
+
+    def pose_at(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
+        """``fixed <- frame`` at ``stamp``, waiting for TF to cover the moment — unless that
+        edge is dead, when the answer is ``None`` at once and the wait is never paid."""
+        stale = self.stale(stamp, frame, fixed)
+        if stale is not None:
+            self._on_dead(frame, fixed, stale)
+            return None
+        return self.history.pose_at(stamp, frame, fixed)
+
+    def pose_at_nowait(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
+        """``fixed <- frame`` at ``stamp`` from what the buffer holds; never waits, so never
+        judged."""
+        return self.history.pose_at_nowait(stamp, frame, fixed)
+
+    def latest_pose(self, frame: str, fixed: str) -> tuple[RigidPose, float] | None:
+        """The newest ``fixed <- frame`` TF holds and the stamp it is for; never waits."""
+        return self.history.latest_pose(frame, fixed)
+
+    def stale(self, stamp: float, frame: str, fixed: str) -> float | None:
+        """How many seconds behind ``stamp`` the newest ``fixed <- frame`` edge sits when that
+        is more than ``dead_s`` — the edge is dead and no wait can cure it — and ``None`` while
+        it is alive, absent from TF altogether, or the guard is off (``dead_s`` 0)."""
+        dead_s = self._dead_s()
+        if dead_s <= 0.0:
+            return None
+        latest = self.latest_pose(frame, fixed)
+        if latest is None:
+            return None
+        stale = stamp - latest[1]
+        return stale if stale > dead_s else None
+
+
 class DepthStream(Node):
     """Publishes a lidar-scaled depth image and its planar scan for every camera frame the
     network can keep up with, once a depth law exists."""
@@ -1456,13 +1581,18 @@ class DepthStream(Node):
         self.create_subscription(Image, "/camera/image", self._on_image, newest)
         self.create_subscription(LaserScan, "/scan", self._on_scan, reliable)
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
-        self._history = TfHistory(self._tf, timeout_s=CARRY_WAIT_S)
-        self._poser = FramePoser(
-            self._history,
-            lean=self._lean,
-            apply_lean=self._switches.on("imu_lean"),
-            min_lean_quality=float(self._switches["lean_min_quality"]),
-        )
+        # Every lookup of a frame's path goes through the guard: one that would wait for an
+        # edge already dead (the board's TF route gone) is refused instead, and the caller's
+        # fallback runs on this frame — the camera pose from the config, the scan uncarried.
+        self._history = self._guarded(CARRY_WAIT_S)
+        self._poser = self._new_poser(self._history)
+        # What the PIPELINE asks about the cart's motion (the parallax anchor, once per stored
+        # view): the same poser over a TF that waits for nothing at all. A wait is paid per
+        # view here, not per frame — two views cost 834 ms of one frame offline
+        # (scratch/chain_profile.txt) — and a view TF cannot answer yet is simply left out of
+        # this frame's bundle, which the stage counts as its own.
+        self._frame_history = self._guarded(0.0)
+        self._frame_poser = self._new_poser(self._frame_history)
         self._camera_frame, self._base_frame = self._poser.camera, self._poser.base
         self._lidar_mount: RigidPose | None = None
         self._scans: deque[LaserScan] = deque()  # the last SCAN_WINDOW_S of scans, by stamp
@@ -1534,11 +1664,11 @@ class DepthStream(Node):
             set_scale_ceiling(float(new))  # the next fit is bounded by it; the law in hand is not
         elif name == "law_slew":
             self._law.slew_per_s = float(new)  # from the next fit on
-        elif name == "imu_lean":
-            self._poser.apply_lean = bool(new)
+        elif name == "imu_lean":  # both posers over the same TF lean the same way
+            self._poser.apply_lean = self._frame_poser.apply_lean = bool(new)
             self._lean.use_gyro = bool(new)
         elif name == "lean_min_quality":
-            self._poser.min_lean_quality = float(new)
+            self._poser.min_lean_quality = self._frame_poser.min_lean_quality = float(new)
         elif name == "parallax_min_baseline_m":
             self._ask_parallax(float(new))
         elif name == "parallax_matcher":
@@ -1632,9 +1762,10 @@ class DepthStream(Node):
             stage.sigma_m = sigma_m
 
     def _ask_field(self) -> None:
-        """Tell the per-frame law what shape it is: how many nodes it carries over the picture
-        and how hard each one is pulled toward the frame's global fit and toward its own last
-        value. A new grid starts every node again from the next frame's fit."""
+        """Tell the per-frame law what shape it is: how many nodes it carries over the picture,
+        how hard each one is pulled toward the frame's global fit and toward its own last value,
+        and how many pairs of one ruler it may fit on. A new grid starts every node again from
+        the next frame's fit."""
         stage = self._pipeline.stage("frame_law")
         if not isinstance(stage, FrameLaw):
             return
@@ -1642,6 +1773,7 @@ class DepthStream(Node):
         field.prior = float(self._switches["field_prior"])
         field.carry = float(self._switches["field_carry"])
         field.carry_tau_s = float(self._switches["field_carry_tau_s"])
+        stage.pairs_cap = int(self._switches["field_pairs_cap"])
         grid = grid_of(str(self._switches["field_grid"]))
         if field.grid != grid:
             field.grid = grid
@@ -1676,9 +1808,43 @@ class DepthStream(Node):
     def _on_work_error(self, text: str) -> None:
         self.get_logger().error(f"depth failed on a frame:\n{text}")
 
+    def _guarded(self, timeout_s: float) -> LiveEdgeHistory:
+        """TF with ``timeout_s`` to spare for a stamp it does not cover yet, behind the guard
+        that refuses to spend it on an edge already dead (:class:`LiveEdgeHistory`)."""
+        return LiveEdgeHistory(
+            TfHistory(self._tf, timeout_s=timeout_s),
+            dead_s=lambda: float(self._switches["tf_dead_s"]),
+            on_dead=self._edge_dead,
+        )
+
+    def _new_poser(self, history: EdgeHistory) -> FramePoser:
+        """A frame poser over ``history``, wearing the node's lean switches: the node keeps two
+        of them over the same TF — one that may wait for a frame's stamp (the camera's pose,
+        the scan's carry) and one that may not (what the pipeline asks per view)."""
+        return FramePoser(
+            history,
+            lean=self._lean,
+            apply_lean=self._switches.on("imu_lean"),
+            min_lean_quality=float(self._switches["lean_min_quality"]),
+        )
+
     def _on_tf_failure(self, kind: str, text: str) -> None:
         self._tally.count("tf_" + kind)
         self._tally.note(kind, text)
+
+    def _edge_dead(self, frame: str, fixed: str, stale_s: float) -> None:
+        """A wait :class:`LiveEdgeHistory` refused, counted under the name the report line
+        calls that edge by — the neck's ``base_link <- camera_optical``, the odometry's
+        ``odom <- base_link``, the tracker's ``map <- base_link``, anything else ``tf`` — with
+        how stale it was, so the window says how long the route has been gone."""
+        poser = self._poser
+        name = {
+            (poser.camera, poser.base): "neck",
+            (poser.base, poser.odom_frame): "odom",
+            (poser.base, poser.map_frame): "map",
+        }.get((frame, fixed), "tf")
+        self._tally.count(f"{name}_edge_dead")
+        self._tally.sample(f"{name}_edge_stale_s", stale_s)
 
     def _leans_anything(self) -> bool:
         """Whether anything in this node wants the lean this second: a floor stage (the plane
@@ -1750,7 +1916,8 @@ class DepthStream(Node):
             lidar = self._lidar_points(msg)
         # The parallax anchor is the one stage that reads the picture itself; the grey copy is
         # made only while it is on, the poser it triangulates against is the same TF the carry
-        # uses, and the camera edge goes in whole so its baseline carries the neck's pan.
+        # asks but with nothing to wait with (a lookup here is paid once per stored view), and
+        # the camera edge goes in whole so its baseline carries the neck's pan.
         ctx = FrameContext(
             self._intr_or_nominal(msg),
             cam,
@@ -1758,7 +1925,7 @@ class DepthStream(Node):
             lidar=lidar,
             stamp=stamp_seconds(msg.header.stamp),
             gray=to_gray(rgb) if self._pipeline.on("parallax_anchor") else None,
-            motion=self._poser,
+            motion=self._frame_poser,
             cam_optical=cam_optical,
             dist=self._lens_dist(msg),
         )
@@ -1820,7 +1987,14 @@ class DepthStream(Node):
         anchor's baseline turns with the neck's pan). Without such an edge in TF:
         config/camera.json's mount, counted, and no edge. A head turned past PAN_NOTICE_RAD is
         counted too: the volume path and the fan (``scan_honours_pan``) turn with it, while the
-        pitch-only pose the rest of the pipeline reads still assumes the cart's x."""
+        pitch-only pose the rest of the pipeline reads still assumes the cart's x.
+
+        Three asks, cheapest first, and only the last of them can wait: the frame's own stamp
+        from what TF already holds, the newest edge while it is younger than
+        CAMERA_TF_MAX_AGE_S (``camera_tf_latest``), and then the blocking lookup — which
+        :class:`LiveEdgeHistory` refuses outright once the neck's edge is more than
+        ``tf_dead_s`` behind this frame, so a dead route costs the config mount and not 0.2 s
+        of every frame."""
         at = stamp_seconds(stamp)
         pose = self._history.pose_at_nowait(at, self._camera_frame, self._base_frame)
         if pose is None and self._switches.on("camera_tf_latest"):
@@ -1930,7 +2104,11 @@ class DepthStream(Node):
         they are, counted): needs the camera's optics, a scan within SCAN_MAX_AGE_S and the
         lidar's mount; ``None`` otherwise, or with the lidar anchor off — and ``None`` as well
         when the carry itself is impossible (``carry_max_speed_mps``), so a runaway odometry
-        frame cannot drag the beams into the picture and refit the law from them."""
+        frame cannot drag the beams into the picture and refit the law from them.
+
+        The carry is asked of TF through :class:`LiveEdgeHistory`, so an odometry edge more
+        than ``tf_dead_s`` behind this frame is not waited for either: the points pass as they
+        are, counted as uncarried, with the dead edge named in the report line."""
         intr = self._intr
         if intr is None or not self._switches.on("lidar_anchor"):
             return None
@@ -2054,22 +2232,37 @@ class DepthStream(Node):
             return f" (CPU model failed: {self._local.failed})"
         return " (CPU model not loaded)"
 
+    def _dead_edge(self, w: Window, name: str, unit: str = "frames") -> str:
+        """``neck edge dead 97 frames (344 s stale)`` when :class:`LiveEdgeHistory` refused to
+        wait for that edge this window, and nothing when it did not — the words that tell a
+        route which has died from an edge TF has simply never carried."""
+        dead = w.counts[f"{name}_edge_dead"]
+        if not dead:
+            return ""
+        stale = w.samples.get(f"{name}_edge_stale_s", [0.0])
+        return f"{name} edge dead {dead} {unit} ({max(stale):.0f} s stale)"
+
     def _extras(self, w: Window) -> str:
         """The parts of the report line a window may have nothing to say about: how old the
-        anchoring scans were, the scans no odometry could carry, the frames whose camera pose
-        came from the config instead of TF, the frames with the head turned, the frames whose
-        beams fell outside the picture or were too few to judge it, the cart's lean, and the
-        last TF failure of each kind."""
+        anchoring scans were, the scans no odometry could carry, the TF edges found dead, the
+        frames whose camera pose came from the config instead of TF, the frames with the head
+        turned, the frames whose beams fell outside the picture or were too few to judge it,
+        the cart's lean, and the last TF failure of each kind."""
         c, extra = w.counts, ""
         ages = w.samples.get("scan_age", [])
         if ages:
             extra += f", scan age median {float(np.median(ages)):.2f} s max {max(ages):.2f} s"
         if c["uncarried"]:
             extra += f", scans uncarried {c['uncarried']}"
+        for edge in ("odom", "map"):  # the edges the carry and the parallax ask about
+            dead = self._dead_edge(w, edge, "asks")
+            if dead:
+                extra += f", {dead}"
         if c["carry_insane"]:
             extra += f", carry insane {c['carry_insane']} frames (the odometry ran away)"
         if c["camera_from_config"]:
-            extra += f", camera pose from config {c['camera_from_config']} frames (no TF edge"
+            neck = self._dead_edge(w, "neck") or "no TF edge"
+            extra += f", camera pose from config {c['camera_from_config']} frames ({neck}"
             extra += "; fan pan from the mount)" if self._switches.on("scan_honours_pan") else ")"
         if c["fan_gated"]:
             extra += f", floor-gated {c['fan_gated']} bearings ({self._switches['fan_floor_gate']})"

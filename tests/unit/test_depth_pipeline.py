@@ -1199,3 +1199,26 @@ def test_the_pool_laws_read_the_beams_alone_or_a_capped_pool_without_them() -> N
     frame.add("lidar_anchor", Pairs.of(np.ones(30), np.ones(30), np.zeros(30), 1.0))
     beams = frame.pool_capped()
     assert beams is not None and beams.size == 30 and frame.pool.size == n + 30
+
+
+def test_the_frame_law_fits_every_ruler_with_each_ruler_s_block_thinned() -> None:
+    """The field fits THIS frame, so it reads every ruler — but it pays for the total, and a
+    floor and a wall bring 80 000 pairs of one frame (the fit was 35 ms of it). Each block is
+    thinned to field_pairs_cap evenly spaced pairs carrying the block's own total weight, so
+    the share of the fit each ruler holds is what it was; 0 fits the lot, as the stage did."""
+    from pepin.depth_pipeline import FIELD_PAIRS_CAP, Frame, FrameLaw, Pairs
+
+    n = 10_000
+    floor = Pairs.of(np.linspace(1.0, 3.0, n), np.linspace(1.0, 3.0, n), np.zeros(n), 0.1)
+    beams = Pairs.of(np.ones(30), np.ones(30), np.zeros(30), 1.0)
+    frame = Frame(raw=np.ones((4, 4)), ctx=None)  # type: ignore[arg-type]
+    frame.add("floor_pairs", floor)
+    frame.add("lidar_anchor", beams)
+    thinned = frame.pool_thinned(2000)
+    assert thinned is not None and frame.pool is not None
+    assert thinned.size == 2030, "every ruler is in it, the long block thinned"
+    assert np.isclose(float(np.sum(thinned.weight)), float(np.sum(frame.pool.weight)))
+    assert float(thinned.d[0]) == 1.0 and np.isclose(float(thinned.d[1999]), 3.0)
+    uncapped = frame.pool_thinned(0)
+    assert uncapped is not None and uncapped.size == n + 30
+    assert FrameLaw(prior=object()).pairs_cap == FIELD_PAIRS_CAP  # type: ignore[arg-type]
