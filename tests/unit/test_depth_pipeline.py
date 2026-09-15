@@ -181,7 +181,7 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
         "lidar_anchor": True,
         "floor_pairs": False,
         "wall_anchor": False,
-        "parallax_anchor": True,
+        "parallax_anchor": False,
         "affine_law": True,
         "ray_law": False,
         "range_law": True,
