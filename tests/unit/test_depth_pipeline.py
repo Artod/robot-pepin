@@ -864,27 +864,74 @@ def test_a_node_with_no_pairs_is_its_prior_and_two_priors_are_averaged_in_their_
 def test_a_floor_pair_weighs_its_own_sigma_and_a_tilted_plane_is_refused() -> None:
     """A floor pair's ruler is the mount's pitch: its sigma grows as the square of the range
     (z^2 / h * sigma_pitch) and its weight against a lidar beam's 1 says so. And the frame must
-    prove its floor is one: the same picture of a plane rolled 3 degrees is taken with the gate
-    at 5 degrees and refused with the gate at 1, counted in the report line."""
+    prove its floor is one, either way the gate can judge it: the degree gate takes the same
+    picture of a plane rolled 3 degrees at 5 degrees and refuses it at 1, and the band gate —
+    the default, which asks in metres whether the plane leaves the band its own pixels were
+    chosen in — takes the 3-degree roll at 0.6 of a band and refuses an 8-degree one. Both
+    count the refusal in the report line."""
     sigma = floor_sigma(np.array([1.0, 2.0, 3.0]), CAM.z, math.radians(1.5), DEPTH_NOISE)
     assert sigma[0] < sigma[1] < sigma[2], "a floor pixel further out is a worse ruler"
     assert sigma[1] / sigma[0] > 2.0, "and worse as the square of the range, not the range"
     rolled = np.array([0.0, math.sin(math.radians(3.0)), math.cos(math.radians(3.0))])
     raw = 1.3 * floor_depth(INTR, CAM, rolled)
     frame = Frame(raw, _context(None))
-    wide = FloorPairs(AffineLaw())
+    wide = FloorPairs(AffineLaw(), plane_band=False)
     pairs = wide.pairs(frame)
     assert pairs is not None and wide.gated == 0 and wide.frames == 1
     assert wide.tilt_deg == pytest.approx(3.0, abs=0.2)
     assert 0.0 < pairs.weight.max() < 0.2, "a floor pair is a fraction of a beam"
     near, far = int(np.argmin(pairs.z)), int(np.argmax(pairs.z))
     assert pairs.weight[near] != pairs.weight[far], "and not the same fraction at every range"
-    tight = FloorPairs(AffineLaw(), normal_tol_deg=1.0)
+    tight = FloorPairs(AffineLaw(), normal_tol_deg=1.0, plane_band=False)
     assert tight.pairs(Frame(raw, _context(None))) is None
     assert tight.gated == 1 and "1/1 frames out" in tight.describe()
-    level = FloorPairs(AffineLaw(), normal_tol_deg=1.0)
+    assert "plane gate 1 deg" in tight.describe()
+    level = FloorPairs(AffineLaw(), normal_tol_deg=1.0, plane_band=False)
     assert level.pairs(Frame(1.3 * floor_depth(INTR, CAM), _context(None))) is not None
     assert level.gated == 0 and level.tilt_deg < 0.1
+    # the band gate reads the same rolls in metres of the pixels' own band
+    band = FloorPairs(AffineLaw())
+    assert band.pairs(Frame(raw, _context(None))) is not None
+    assert band.tilt_deg == pytest.approx(3.0, abs=0.2) and 0.3 < band.plane_off < 0.9
+    assert "plane gate band" in band.describe() and "band <= 20 cm" in band.describe()
+    steep = np.array([0.0, math.sin(math.radians(8.0)), math.cos(math.radians(8.0))])
+    hard = FloorPairs(AffineLaw())
+    assert hard.pairs(Frame(1.3 * floor_depth(INTR, CAM, steep), _context(None))) is None
+    assert hard.gated == 1 and hard.plane_off > 1.0
+
+
+def test_a_door_two_metres_ahead_is_not_the_floor_however_wide_its_band_is() -> None:
+    """The door tapes of 2026-09-15, in the small: a camera 1.2 m up pitched 24 degrees down, a
+    closed door 2 m ahead. The floor is plainly in view — everything out to 2.3 m — but the rows
+    just under the horizon look at the DOOR, and their floor depth runs to hundreds of metres,
+    where the band that decides "is this pixel on the floor?" is metres wide and admits it. Those
+    pixels stand over a metre up at the same 2 m of range, they own the plane fitted to the
+    candidates, and both gates then throw the frame's real floor away — 15.5 degrees of lean and
+    1.6 bands of departure, 25.1 degrees to the old degree gate. Capping the band at what still
+    separates a floor from what stands on it takes the door out and leaves 1501 pairs of honest
+    floor at 2.1 degrees."""
+    intr = Intrinsics(fx=340.0, fy=340.0, cx=320.0, cy=180.0, width=640, height=360)
+    cam = CameraPose(0.0, 0.0, 1.20, math.radians(24.0))  # the horizon at row 29, inside the view
+    ctx = FrameContext(intr, cam)
+    expected = floor_depth(intr, cam)
+    rows = np.mgrid[0:360, 0:640][0]
+    forward = math.cos(cam.pitch) + math.sin(cam.pitch) * lift_of(rows, intr)
+    door = 2.0 / forward  # depth along each ray to a vertical plane 2 m ahead
+    seen = np.fmin(np.where(np.isfinite(expected), expected, np.inf), door)
+    raw = 1.3 * seen
+    assert np.nanmax(np.where(expected <= door, expected, np.nan)) == pytest.approx(2.31, abs=0.05)
+    assert np.nanmax(expected) > 100.0, "and rows whose floor is hundreds of metres out"
+
+    uncapped = FloorPairs(AffineLaw(), band_max_m=0.0)
+    assert uncapped.pairs(Frame(raw, ctx)) is None, "the door passes a band metres wide"
+    assert uncapped.gated == 1 and uncapped.plane_off > 1.5 and uncapped.tilt_deg > 15.0
+    old = FloorPairs(AffineLaw(), band_max_m=0.0, plane_band=False)
+    assert old.pairs(Frame(raw, ctx)) is None and old.tilt_deg > 25.0
+    capped = FloorPairs(AffineLaw())
+    pairs = capped.pairs(Frame(raw, ctx))
+    assert pairs is not None and capped.gated == 0
+    assert capped.tilt_deg < 3.0 and capped.plane_off < 0.5 and pairs.size > 1400
+    assert pairs.z.max() < 3.0, "and what it kept is the floor it can see, not the door"
 
 
 def test_a_frame_without_beams_decays_back_to_the_law_behind_it() -> None:

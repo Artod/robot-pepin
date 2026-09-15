@@ -131,6 +131,26 @@ FLOOR_BOOTSTRAP_STARTS = (50.0, 65.0, 75.0, 85.0, 90.0)  # percentiles of the ca
 FLOOR_NORMAL_TOL_DEG = 5.0  # how far the floor pixels' own fitted plane may lean from the geometric
 # up before the frame's floor pairs are refused outright: a plane fitted to a table top, a ramp or
 # a wrong law is not the floor, and pairs taken off it move every node they touch.
+FLOOR_BAND_MAX_M = 0.20  # metres: the widest the floor's height band may ever grow. The band that
+# decides "is this pixel on the floor?" is 2 * h * (0.03 + 0.01 E) — the network's relative error
+# turned into height — so it grows with the floor's OWN depth and never stops: 12 cm at 2 m, 20 cm
+# at 5 m, 32 cm at 10 m, 2.2 m at 90 m. The rows within half a degree of the horizon all sit at
+# such depths, and there the band has stopped being a test: it admits everything between the floor
+# and the ceiling, which in a room means the WALL standing at that bearing.
+# Measured on tape 0318 (a closed door 2 m ahead, scratch/floor_gate_probe.txt, 2026-09-15): 7 % of
+# the candidates were the door itself at head height — 79 pixels whose floor depth reads 90 m and
+# whose band is 2.24 m wide, standing 1.18 m over the floor at x = 1.94 m. They turned the fitted
+# plane from 12 degrees of lean into 50, with a normal pointing nearly forward; and once the gate
+# let a frame through they took the floor-only law with them — a hundredth of the truth on the next
+# frame, after which the near floor no longer fitted its own band and only the far pixels were left.
+# 20 cm is where the band stops separating the floor from what stands on it (pepin.depth's
+# SCAN_MIN_Z_M, the height the cart's own scan calls an obstacle from, is 15 cm), and it is a cap,
+# not a cut: the far floor keeps its pairs and its lever arm, only the far WALL loses them.
+FLOOR_PLANE_BAND = True  # judge the fitted floor plane in METRES against the very band the pixels
+# were selected inside, instead of in fixed degrees off the up vector (:meth:`FloorPairs._is_floor`)
+PLANE_OFF_PERCENTILE = 95.0  # the band gate reads the plane's departure at this percentile of the
+# pixels rather than at the worst one: a single lattice pixel at the footprint's corner must not
+# throw a frame's whole floor away.
 WALL_ROW_STRIDE = 4  # rows between two wall pairs of one column
 WALL_PAIR_WEIGHT = 0.2
 WALL_MAX_HEIGHT = 2.0  # metres above the floor a wall point may stand: higher is a ceiling
@@ -252,6 +272,8 @@ PIPELINE_DEFAULTS: dict[str, bool | float | str] = {
     "field_carry_tau_s": FIELD_CARRY_TAU_S,
     "floor_sigma_pitch_deg": FLOOR_SIGMA_PITCH_DEG,
     "floor_normal_tol_deg": FLOOR_NORMAL_TOL_DEG,
+    "floor_band_max_m": FLOOR_BAND_MAX_M,
+    "floor_plane_band": FLOOR_PLANE_BAND,
 }
 
 
@@ -1024,7 +1046,11 @@ def _unproject(z: Array, rows: Array, cols: Array, ctx: FrameContext) -> Array:
 
 def fit_plane(points: Array) -> tuple[Array, Array] | None:
     """The plane those (n, 3) points lie on, as (unit normal, a point on it — their centroid),
-    by the smallest eigenvector of their covariance; ``None`` under three points."""
+    by the smallest eigenvector of their covariance; ``None`` under three points.
+
+    Total least squares: the plane that minimises the PERPENDICULAR distances, which is the
+    right estimator for a cloud that is genuinely a surface and the wrong one for a cloud
+    selected inside a height band — see :func:`level_plane`."""
     if points.shape[0] < 3:
         return None
     centre = points.mean(axis=0)
@@ -1032,6 +1058,39 @@ def fit_plane(points: Array) -> tuple[Array, Array] | None:
     _values, vectors = np.linalg.eigh(centred.T @ centred)
     normal: Array = vectors[:, 0]
     return normal, centre
+
+
+def level_plane(points: Array) -> tuple[Array, Array] | None:
+    """The floor those (n, 3) base_link points draw, as (the plane's own HEIGHT at each of them,
+    its unit normal): ``z = a + b x + c y`` by least squares — the one coordinate a downward ray
+    leaves open, regressed on the two the ray fixes. ``None`` under three points or where the
+    ground positions are collinear.
+
+    Why not :func:`fit_plane`'s total least squares, which this replaces in the floor gate: TLS
+    calls "normal" whichever direction the cloud is THINNEST in, and a floor cloud chosen inside
+    a height band is a slab — so as soon as the slab's thickness approaches the footprint's own
+    depth, the thinnest direction stops being the vertical one. On tape 0318 (a closed door 2 m
+    ahead, the floor visible from 1.16 to 2.01 m and the band 12 cm) the TLS plane of pixels that
+    are 90 % within 11 cm of the floor leans 50 degrees with a normal pointing nearly FORWARD;
+    the same pixels regressed this way lean 38, and with the far pixels cut
+    (:data:`FLOOR_BAND_MAX_M`) 12.1 against TLS' 12.4 (scratch/floor_gate_probe.txt,
+    2026-09-15). Regressing the height also gives the gate the number it actually wants — how far
+    the plane sits from the floor, in metres, at each pixel that voted for it.
+
+    The height is base_link's z, which is the cart's up to within its own lean of a few degrees
+    — the same approximation :func:`pepin.depth.floor_anchor` makes when it calls
+    ``camera_height * (1 - d / E)`` a height, and the number this one is held against."""
+    if points.shape[0] < 3:
+        return None
+    x, y, z = points[:, 0], points[:, 1], points[:, 2]
+    ground = np.stack([np.ones(x.shape[0]), x, y], axis=1)
+    coefficients, *_ = np.linalg.lstsq(ground, z, rcond=None)
+    if not np.isfinite(coefficients).all():
+        return None
+    drawn: Array = coefficients[0] + coefficients[1] * x + coefficients[2] * y
+    normal = np.array([-coefficients[1], -coefficients[2], 1.0])
+    unit: Array = normal / float(np.linalg.norm(normal))
+    return drawn, unit
 
 
 class FloorPairs(AnchorStage):
@@ -1061,13 +1120,35 @@ class FloorPairs(AnchorStage):
     at a metre is worth about a hundredth of a beam and one at three metres a fortieth of that
     — which is what a ruler made of geometry and a guessed angle is worth.
 
+    That band is capped at ``band_max_m``, because it grows with the floor's own depth and
+    never stops — 12 cm at 2 m, 2.2 m at 90 m — and the rows within half a degree of the
+    horizon all sit at such depths. There it has stopped being a test of anything: what stands
+    at that bearing in a room is a WALL, and it passes (:data:`FLOOR_BAND_MAX_M`). The cap is a
+    cap and not a cut: the far FLOOR keeps its pairs and the depth span the law's shift is
+    fitted on, and only what stands metres above it loses them.
+
     And the frame must prove its floor is a floor: the candidate pixels are back-projected
-    through the law as it stands and a plane is fitted to them
-    (:func:`fit_plane`). Unless that plane's normal stands within ``normal_tol_deg`` of the
-    cart's up vector, and the camera's distance to it within the network's own band of the
-    camera's height, the frame contributes nothing at all and says so in the report line. A
-    table top, a ramp, or a law that is wrong by a fifth all draw a plane the geometry never
-    meant, and pairs taken off it move every node they touch."""
+    through the law as it stands and a plane is fitted to them. With ``plane_band`` (the
+    default) that plane is :func:`level_plane`'s and the test is in METRES — the plane must
+    stay inside the very height band the pixels were chosen in, at all but the outermost
+    twentieth of the pixels that voted for it (:data:`PLANE_OFF_PERCENTILE`). With
+    ``plane_band`` off the old test stands: :func:`fit_plane`'s normal within
+    ``normal_tol_deg`` of the cart's up vector and the camera's distance to that plane within
+    the network's band of the camera's height. Either way, a frame that fails contributes
+    nothing at all and says so in the report line: a table top, a ramp, or a law that is wrong
+    by a fifth all draw a plane the geometry never meant, and pairs taken off it move every
+    node they touch.
+
+    Why the test moved out of degrees, measured on the door tapes of 2026-09-15
+    (scratch/floor_gate_probe.txt, scratch/floor_gate_eval.txt): a fixed angle asks for
+    something the geometry does not always carry. A door 2 m ahead leaves a floor strip 0.85 m
+    deep in view, and the pixels are chosen inside a band 12 cm wide, so the SELECTION itself
+    admits any lean up to atan(0.24 / 0.85) = 16 degrees — a 5-degree gate is then a test of
+    the law's row bias (the network reads the near floor and the far floor at different scales,
+    so the back-projection ramps) and not of the floor. It refused every frame of all four door
+    tapes, 90 of 95 frames of tape 0313 and 8 of 12 of run 0171. The band test asks instead
+    whether the plane departs from the floor by more than the pixels' own noise allows, so it
+    tightens by itself wherever more floor is in view."""
 
     name = "floor_pairs"
 
@@ -1080,6 +1161,8 @@ class FloorPairs(AnchorStage):
         band: DepthNoise = DEPTH_NOISE,
         sigma_pitch_deg: float = FLOOR_SIGMA_PITCH_DEG,
         normal_tol_deg: float = FLOOR_NORMAL_TOL_DEG,
+        band_max_m: float = FLOOR_BAND_MAX_M,
+        plane_band: bool = FLOOR_PLANE_BAND,
     ) -> None:
         self.law = law
         self.geometry = geometry if geometry is not None else FloorGeometry()
@@ -1087,9 +1170,12 @@ class FloorPairs(AnchorStage):
         self.band = band
         self.sigma_pitch_deg = sigma_pitch_deg
         self.normal_tol_deg = normal_tol_deg
+        self.band_max_m = band_max_m
+        self.plane_band = plane_band
         self.frames = 0  # frames whose floor was looked at
         self.gated = 0  # of those, the frames whose plane was not a floor
         self.tilt_deg = 0.0  # the last plane's lean from the up vector
+        self.plane_off = 0.0  # the last plane's worst departure from the floor, in its own bands
 
     def pairs(self, frame: Frame) -> Pairs | None:
         """(network, floor) pairs of the frame's floor pixels, each weighed by its own sigma —
@@ -1106,6 +1192,8 @@ class FloorPairs(AnchorStage):
         if int(ok.sum()) < MIN_SAMPLES:
             return None
         band = self.band.height_band(expected, ctx.cam.z)
+        if self.band_max_m > 0.0:
+            band = np.minimum(band, self.band_max_m)
         if metric is None:
             with np.errstate(divide="ignore", invalid="ignore"):
                 started = self._bootstrap(raw / expected, ok, band, ctx.cam.z)
@@ -1175,15 +1263,33 @@ class FloorPairs(AnchorStage):
         self, metric: Array, rows: Array, cols: Array, band: Array, ctx: FrameContext
     ) -> bool:
         """Whether the candidate pixels really lie on the floor: their metric 3D points (the
-        law's depth back-projected into base_link) fitted with a plane, that plane's normal
-        within ``normal_tol_deg`` of the cart's up vector and the camera's distance to it
-        within the network's own band of the camera's height."""
-        plane = fit_plane(_unproject(metric, rows, cols, ctx))
+        law's depth back-projected into base_link) fitted with a plane, and that plane held
+        against the floor.
+
+        With ``plane_band`` the plane is :func:`level_plane`'s and the test is the honest one —
+        the plane's own height, read at each pixel that voted for it, must stay inside that
+        pixel's height band, the same band the pixel was called a candidate by. The departure at
+        :data:`PLANE_OFF_PERCENTILE` of the pixels (in bands, so 1.0 is exactly at the edge) is
+        kept as ``plane_off``, and it is what the frame is judged on. With ``plane_band``
+        off the old test runs instead: :func:`fit_plane`'s normal within ``normal_tol_deg`` of
+        up, and the camera's distance to that plane within the band of its height."""
+        up = np.asarray(ctx.up, dtype=float)
+        up = up / float(np.linalg.norm(up))
+        points = _unproject(metric, rows, cols, ctx)
+        if self.plane_band:
+            drawn = level_plane(points)
+            if drawn is None:
+                return False
+            height, normal = drawn
+            self.tilt_deg = math.degrees(math.acos(min(1.0, abs(float(normal @ up)))))
+            with np.errstate(divide="ignore", invalid="ignore"):
+                off = np.abs(height) / np.maximum(band, 1e-6)
+            self.plane_off = float(np.percentile(off[np.isfinite(off)], PLANE_OFF_PERCENTILE))
+            return self.plane_off <= 1.0
+        plane = fit_plane(points)
         if plane is None:
             return False
         normal, centre = plane
-        up = np.asarray(ctx.up, dtype=float)
-        up = up / float(np.linalg.norm(up))
         self.tilt_deg = math.degrees(math.acos(min(1.0, abs(float(normal @ up)))))
         if self.tilt_deg > self.normal_tol_deg:
             return False
@@ -1193,10 +1299,20 @@ class FloorPairs(AnchorStage):
 
     def describe(self) -> str:
         """The stage for the report line: its lattice, what the mount's pitch is trusted to,
-        and how many frames the plane gate refused (with the last plane's own lean)."""
+        how wide its height band may grow, which plane gate is running and how many frames that
+        gate refused (with the last plane's own lean, and its worst departure in bands when the
+        band gate is the one judging)."""
+        widest = (
+            f"band <= {100 * self.band_max_m:.0f} cm" if self.band_max_m > 0.0 else "band uncapped"
+        )
+        gate = (
+            f"plane gate band (last off {self.plane_off:.2f} band)"
+            if self.plane_band
+            else f"plane gate {self.normal_tol_deg:.0f} deg"
+        )
         return (
-            f"stride {self.stride}, pitch +-{self.sigma_pitch_deg:.1f} deg, "
-            f"plane gate {self.normal_tol_deg:.0f} deg: {self.gated}/{self.frames} frames out"
+            f"stride {self.stride}, pitch +-{self.sigma_pitch_deg:.1f} deg, {widest}, "
+            f"{gate}: {self.gated}/{self.frames} frames out"
             f" (last tilt {self.tilt_deg:.1f} deg)"
         )
 
@@ -2854,6 +2970,8 @@ def standard_pipeline(
             geometry,
             sigma_pitch_deg=float(defaults["floor_sigma_pitch_deg"]),
             normal_tol_deg=float(defaults["floor_normal_tol_deg"]),
+            band_max_m=float(defaults["floor_band_max_m"]),
+            plane_band=bool(defaults["floor_plane_band"]),
         ),
         WallAnchor(),
         ParallaxAnchor(),
@@ -2919,6 +3037,7 @@ __all__ = [
     "grid_name",
     "grid_of",
     "left_of",
+    "level_plane",
     "lift_of",
     "standard_pipeline",
 ]
