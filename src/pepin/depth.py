@@ -1130,7 +1130,10 @@ class RangeLaw:
         return cls(centres, ratios, counts) if sane else None
 
 
-LAW_VERSION = 3  # 1: the affine law alone; 2: the ray law's record beside it; 3: the range law's
+LAW_VERSION = 3  # 1: the affine law alone; 2: the ray law's record beside it (retired 2026-09-15,
+# written by nobody since); 3: the range law's
+RETIRED_LAW_KEYS = ("ray",)  # records of laws that no longer exist, which a file written by an
+# older build still carries: read by nobody, and gone from the file at the first save
 
 
 def save_law(
@@ -1139,14 +1142,12 @@ def save_law(
     b: float,
     pooled: int,
     now: float,
-    ray: dict[str, Any] | None = None,
     range_law: dict[str, Any] | None = None,
 ) -> None:
     """Write the law next to the maps, atomically (a temp file, then ``os.replace``): a restart
     begins from it instead of the raw network's depth. ``now`` is the wall clock in seconds.
-    ``ray`` is the angle-dependent law's record beside the affine one
-    (:meth:`pepin.elevation.RayGain.state`) and ``range_law`` the range-dependent one's
-    (:meth:`RangeLaw.state`), in the same file each under its own key so one law is
+    ``range_law`` is the range-dependent law's record beside the affine one
+    (:meth:`RangeLaw.state`), in the same file under its own key so one law is
     never read with another's map: a reader of version 1 sees the affine law it expects and
     ignores the rest."""
     tmp = path.with_name(path.name + ".tmp")
@@ -1157,8 +1158,6 @@ def save_law(
         "pooled": pooled,
         "saved_at": now,
     }
-    if ray is not None:
-        record["ray"] = ray
     if range_law is not None:
         record["range"] = range_law
     tmp.write_text(json.dumps(record))
@@ -1180,21 +1179,17 @@ def load_range(path: Path, now: float, max_age_s: float = LAW_MAX_AGE_S) -> Rang
     return RangeLaw.restore(record)
 
 
-def load_ray(path: Path, now: float, max_age_s: float = LAW_MAX_AGE_S) -> Any | None:
-    """The saved ray law's record (the dict :meth:`pepin.elevation.RayGain.state` wrote) when
-    the file is there, holds one, and is no older than ``max_age_s``; ``None`` otherwise — an
-    older file, or one written before the ray law existed, simply has none. The record is not
-    judged here: :meth:`pepin.elevation.RayGain.restore` does that, so this module keeps no
-    knowledge of the angular law's shape."""
+def retired_laws(path: Path) -> tuple[str, ...]:
+    """The records of retired laws (:data:`RETIRED_LAW_KEYS`) a law file still carries, for a
+    log line: such a record is read by nobody and the next save drops it. Empty when the file
+    is missing, unreadable or carries none."""
     try:
         data = json.loads(path.read_text())
-        saved_at = float(data["saved_at"])
-        ray = data.get("ray")
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    if ray is None or now - saved_at > max_age_s:
-        return None
-    return ray
+    except (OSError, ValueError):
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    return tuple(key for key in RETIRED_LAW_KEYS if data.get(key) is not None)
 
 
 def load_law(
