@@ -1123,7 +1123,46 @@ FLAGS = FlagSet(
         on_when="lower it toward 2 on a floor known to be flat, to refuse everything but the"
         " clean frames",
         off_when="90 accepts every plane, which is the floor anchor as it behaved before the"
-        " gate: the A/B of what the gate is refusing",
+        " gate: the A/B of what the gate is refusing. It is read at all only with"
+        " floor_plane_band off",
+    ),
+    Flag(
+        "floor_band_max_m",
+        PIPELINE_DEFAULTS["floor_band_max_m"],
+        range=(0.0, 2.0),
+        description="the widest, in metres, the floor's height band may ever grow — the band that"
+        " decides whether a pixel is on the floor at all. 0 leaves it uncapped, which is the"
+        " behaviour before this knob",
+        why="the band is 2 * h * (0.03 + 0.01 E), the network's relative error turned into"
+        " height, so it grows with the floor's own depth and never stops: 12 cm at 2 m, 20 cm at"
+        " 5 m, 2.2 m at 90 m. The rows within half a degree of the horizon all sit at such"
+        " depths, and there the band admits everything between the floor and the ceiling — which"
+        " in a room is the WALL standing at that bearing. On tape 0318 (a closed door 2 m ahead)"
+        " 7 % of the candidates were the door at head height: 79 pixels whose floor depth reads"
+        " 90 m, standing 1.18 m over the floor. They turned the fitted plane from 12 degrees of"
+        " lean into 50, and once a frame got through the gate they took the floor-only law with"
+        " them — a hundredth of the truth on the next frame (scratch/floor_gate_probe.txt)."
+        " 20 cm is where the band stops separating the floor from what stands on it (the cart's"
+        " own scan calls something an obstacle from 15 cm up)",
+        on_when="raise it toward 30 cm on a floor the network reads badly, and watch what the"
+        " gate then lets in",
+        off_when="0 is the A/B: the band grows without limit, as it did before",
+    ),
+    Flag(
+        "floor_plane_band",
+        PIPELINE_DEFAULTS["floor_plane_band"],
+        description="judge the plane fitted to a frame's floor pixels in METRES — it must stay"
+        " inside the very height band each pixel was selected by — instead of in fixed degrees"
+        " off the cart's up vector (floor_normal_tol_deg). The plane is also fitted differently:"
+        " the height regressed on the ground position, not total least squares",
+        why="a fixed angle asks for something the geometry does not always carry. A door 2 m"
+        " ahead leaves a floor strip 0.85 m deep in view and the pixels are chosen inside a band"
+        " 12 cm wide, so the selection itself admits any lean up to 16 deg; a 5-degree gate is"
+        " then a test of the law's row bias, not of the floor, and it refused EVERY frame of all"
+        " four door tapes, 90 of 95 of tape 0313 and 8 of 12 of run 0171. The band test tightens"
+        " by itself wherever more floor is in view (scratch/floor_gate_eval.txt)",
+        on_when="on is the measured default",
+        off_when="off restores the degree gate, which is the A/B of what moved",
     ),
     Flag(
         "parallax_weight",
@@ -1569,13 +1608,15 @@ class DepthStream(Node):
             field.grid = grid
 
     def _ask_floor(self) -> None:
-        """Tell the floor anchor what the mount's pitch is trusted to (a floor pair's own sigma)
-        and how far the plane fitted to its pixels may lean before the frame's floor is
-        refused."""
+        """Tell the floor anchor what the mount's pitch is trusted to (a floor pair's own sigma),
+        how wide its height band may grow, which plane gate judges its pixels and — for the
+        degree gate — how far that plane may lean before the frame's floor is refused."""
         stage = self._pipeline.stage("floor_pairs")
         if isinstance(stage, FloorPairs):
             stage.sigma_pitch_deg = float(self._switches["floor_sigma_pitch_deg"])
             stage.normal_tol_deg = float(self._switches["floor_normal_tol_deg"])
+            stage.band_max_m = float(self._switches["floor_band_max_m"])
+            stage.plane_band = bool(self._switches["floor_plane_band"])
 
     def _ask_frame_shift(self, needs_beams: bool) -> None:
         """Tell the per-frame law whether a shift needs the lidar in the pool that fits it; a
