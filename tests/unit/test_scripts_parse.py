@@ -215,7 +215,14 @@ docker() { log "docker $*"; answer "$*"; }
 FAKE_FLAGS = r"""#!/bin/bash
 printf 'flags %s\n' "$*" >> "$FAKE_LOG"
 [ "${FAKE_SOURCES:-lidar}" = none ] && exit 2
-[ "$1" = get ] && printf 'String value is: %s\n' "${FAKE_SOURCES:-lidar}"
+if [ "$1" = get ]; then
+    case "$3" in
+        sources) printf 'String value is: %s\n' "${FAKE_SOURCES:-lidar}" ;;
+        camera_sources) printf 'String value is: %s\n' "${FAKE_CAMERA_SOURCES-depth,contact}" ;;
+        *) [ "${FAKE_PUBLISH:-True}" = none ] && exit 2
+           printf 'Boolean value is: %s\n' "${FAKE_PUBLISH:-True}" ;;
+    esac
+fi
 exit 0
 """
 
@@ -668,6 +675,91 @@ def _restart(tmp_path, *args, **env):  # type: ignore[no-untyped-def]
     )
     sent = [line.strip() for line in log.read_text().splitlines() if line.strip()]
     return run.returncode, run.stdout + run.stderr, sent
+
+
+def test_mute_imu_sets_the_publisher_s_own_flag_and_says_what_a_consumer_will_see(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The publisher end of the switch: one live flag on the node that publishes the sensor, no
+    restart, no other flag touched — and the line the operator needs, which is what the EKF does
+    once the yaw rate stops arriving."""
+    code, out, sent = _sensor(tmp_path, "mute", "imu", FAKE_PUBLISH="True")
+    assert code == 0, out
+    assert "flags set base_bridge imu_publish false" in sent
+    assert not [c for c in sent if "param set" in c or "lifecycle" in c], sent
+    assert "yaw-rate source" in out and "the wheels" in out
+
+
+def test_muting_what_is_already_muted_writes_nothing(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Idempotent like the rest of the script: the live value is read first."""
+    code, out, sent = _sensor(tmp_path, "mute", "odom", FAKE_PUBLISH="False")
+    assert code == 0, out
+    assert not [c for c in sent if c.startswith("flags set")], sent
+    assert "already so" in out
+
+
+def test_unmuting_the_camera_restores_the_two_scans_the_table_ships(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The camera's mute is a list flag, not a bool: empty is silence, and an unmute must put
+    back exactly what laptop_localizer's FLAGS table defaults to — the test below holds the two
+    in step."""
+    code, out, sent = _sensor(tmp_path, "unmute", "camera", FAKE_CAMERA_SOURCES="")
+    assert code == 0, out
+    assert "flags set laptop_localizer camera_sources depth,contact" in sent
+    assert "/localization/measurement" in out
+
+
+def test_the_scripts_camera_scans_are_the_localizer_s_own_default() -> None:
+    """ros/sensor.sh cannot ask Python what an unmuted camera is (it is a shell script on the
+    laptop), so the value is written down — and this test fails the day the table moves."""
+    from pepin.flags import load_table
+
+    flags = load_table(REPO / "ros/pepin_bringup/pepin_bringup/laptop_localizer.py")
+    default = ",".join(flags["camera_sources"])
+    assert [
+        line
+        for line in (REPO / "ros/sensor.sh").read_text().splitlines()
+        if line.startswith(f'CAMERA_SCANS="{default}"')
+    ], f"ros/sensor.sh must restore {default}"
+
+
+def test_muting_the_lidar_is_the_consumer_set_no_node_of_ours_publishes_it(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Our own node in the lidar's chain is laser_filters' scan_filter and it has no flag of
+    ours; a relay on the board that could drop /scan is refused by CLAUDE.md rule 20. So the
+    mute is the documented pair — the tracker's sources without `lidar`, lidar_layer off on both
+    costmaps — and the driver is left running (`lidar off --hard` is the real absence)."""
+    code, out, sent = _sensor(
+        tmp_path, "mute", "lidar", FAKE_SOURCES="lidar,camera", FAKE_LAYERS="true"
+    )
+    assert code == 0, out
+    assert "flags set relocalizer sources camera" in sent
+    assert f"{BOARD} ros2 param set {LOCAL} lidar_layer.enabled false" in sent
+    assert not [c for c in sent if "lifecycle set" in c], "a mute never stops the driver"
+    assert "scan_filter" in out and "--hard" in out
+
+
+def test_a_publisher_that_does_not_answer_is_reported_and_the_run_goes_red(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A node that is down must not read as an unmuted sensor."""
+    code, out, sent = _sensor(tmp_path, "mute", "vo", FAKE_PUBLISH="none")
+    assert code == 1, out
+    assert not [c for c in sent if c.startswith("flags set")], sent
+    assert "did not answer" in out
+
+
+def test_status_lists_every_sensor_s_mute_state(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """One reading of the whole publisher end: each sensor's own live flag, and the lidar
+    pointed at the two consumer settings that are its mute."""
+    code, out, _ = _sensor(
+        tmp_path, "status", FAKE_PUBLISH="False", FAKE_CAMERA_SOURCES="", FAKE_LAYERS="true"
+    )
+    assert code == 0, out
+    for sensor in ("imu", "odom", "vo", "graph", "camera"):
+        assert f"{sensor}: MUTED" in out, out
+    assert "lidar: see the tracker sources" in out
+
+
+def test_an_unmuted_stack_says_so_sensor_by_sensor(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The other half of the reading: the shipping state is named, not left blank."""
+    _, out, _ = _sensor(tmp_path, "status", FAKE_PUBLISH="True", FAKE_LAYERS="true")
+    assert "imu: on (base_bridge imu_publish=True)" in out
+    assert "camera: on (laptop_localizer camera_sources=depth,contact)" in out
 
 
 def test_restart_sh_parses_and_never_drives() -> None:

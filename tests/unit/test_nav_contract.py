@@ -1488,6 +1488,28 @@ def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_p
     assert {"depth_stream", "depth_fusion", "relocalizer", "neck_state"} <= tables.keys()
 
 
+def test_a_sensor_is_muted_where_it_is_published_and_both_bridges_know_the_same_two_names() -> None:
+    """Switching a sensor off used to mean `ros/feature.sh imu off`: a restart of the whole
+    board stack, a minute long, every live flag on it lost. The mute is the same test without
+    the restart — the node that publishes the sensor stops publishing, live, and a consumer sees
+    what a dead sensor looks like. One node name, `base_bridge`, two implementations
+    (robot.launch.py picks one), so the two parameter names have to exist in both or
+    `ros/sensor.sh mute imu` reaches whichever bridge is running and does nothing."""
+    flags = load_table(REPO / NODES / "base_bridge.py")
+    assert flags.names == ("imu_publish", "odom_publish")
+    for name in flags.names:
+        assert flags.flag(name).live and flags[name] is True, f"{name}: on, and live, or no test"
+    cpp = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
+    for name in flags.names:
+        assert f'declare_parameter<bool>("{name}", true)' in cpp, f"{name} missing from the C++"
+        assert f'get_parameter("{name}").as_bool()' in cpp, f"{name} read per message, not once"
+    assert "switch_state()" in cpp, "the report line names the switches (CLAUDE.md rule 19)"
+    # The board's bridge is the one that reads the chip, so `mute imu` has to reach it there.
+    from pepin.deployment import node_host
+
+    assert node_host("base_bridge") == ("board", "pepin-ros")
+
+
 def test_every_flag_says_why_its_default_is_what_it_is_and_when_to_move_it() -> None:
     """A switch nobody can argue with is a switch nobody dares touch: every flag carries the
     measured reason for its default — with the numbers and the file they were measured in — or

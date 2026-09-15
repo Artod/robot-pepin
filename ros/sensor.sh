@@ -15,6 +15,20 @@
 #                                   laptop measures from its scans) and as camera_layer and
 #                                   contact_layer — one camera, two readings of the same frames:
 #                                   the band 8 cm-1.3 m, and where the floor ends
+#
+# MUTING, the other half, added 2026-09-15: `on|off` above is the CONSUMER end — the tracker and
+# the costmaps stop listening while the sensor keeps publishing. `mute` is the PUBLISHER end: the
+# node that owns the sensor stops sending, and every consumer meets what a dead sensor really
+# looks like — silence, a sensor_timeout, a TF that stops moving — without a restart, without
+# losing the other live flags, and with the sensor itself still read.
+#   ros/sensor.sh mute|unmute SENSOR    imu odom vo camera graph lidar
+#   ros/sensor.sh status                ... also prints each sensor's mute state
+# Each sensor is one live flag of the node that publishes it (ros/flags.sh), except the lidar:
+# our own node in its chain is `scan_filter` (laser_filters, external) and it has no flag of
+# ours, so `mute lidar` is the documented consumer set instead — the tracker's `sources` without
+# `lidar` plus lidar_layer off on both costmaps, which is exactly `lidar off` above. A relay node
+# on the board that could drop /scan is not the answer (CLAUDE.md rule 20: the board carries only
+# what is real-time critical); `lidar off --hard` is the real absence when one is wanted.
 # Idempotent: only what differs is set, and only what changed is printed. This script writes no
 # velocity and restarts nothing. The lifecycle half is refused while a navigation goal runs, and
 # refused when that check itself cannot be made: taking /scan away from a moving robot is an
@@ -39,6 +53,9 @@ SOURCE_ORDER="lidar depth contact camera graph"  # pepin.sources' own order, two
 # Only an ORDER: a name outside it is carried through, never dropped (normalize_sources), and
 # tests/unit/test_scripts_parse.py fails when it drifts from src/pepin/sources.py.
 LAYER_ORDER="lidar_layer camera_layer contact_layer"
+MUTE_ORDER="imu odom vo camera graph lidar"  # what `mute` knows, in the order status prints
+CAMERA_SCANS="depth,contact"  # laptop_localizer's camera_sources default: what unmute restores
+# (tests/unit/test_scripts_parse.py fails when it drifts from that node's FLAGS table)
 NAV_ACTIONS="navigate_to_pose navigate_through_poses"
 REPORT_WINDOW_S=90  # the nodes report every 30 s: three windows, so one missed line is not a verdict
 GUARD_TIMEOUT_S=30  # the navigation guard's whole rclpy pass (ros/tools/nav_goal_running.py):
@@ -49,7 +66,8 @@ CHANGED=0  # settings this run actually moved (each one is printed)
 FAILED=0   # something did not answer and was not applied: the exit status
 
 usage() {
-    echo "usage: ros/sensor.sh [status | lidar on|off | lidar off --hard | camera on|off]"
+    echo "usage: ros/sensor.sh [status | lidar on|off | lidar off --hard | camera on|off"
+    echo "                      | mute|unmute imu|odom|vo|camera|graph|lidar]"
     exit 2
 }
 
@@ -348,6 +366,151 @@ switch() {  # SENSOR on|off [--hard]: the flag, the layers and, for the lidar, t
     [ "$CHANGED" -gt 0 ] || echo "  already so"
 }
 
+# ---------------------------------------------------------------------------------------------
+# Muting: the publisher end. One live flag per sensor, set through ros/flags.sh so the value is
+# checked by the flag itself before any host is touched, and nothing is restarted.
+
+sensor_node() {  # SENSOR -> the node that publishes it; exit 1 for a sensor with no flag of ours
+    case "$1" in
+        imu | odom) echo base_bridge ;;
+        vo) echo visual_odometry ;;
+        camera) echo laptop_localizer ;;
+        graph) echo rtabmap_frame ;;
+        *) return 1 ;;
+    esac
+}
+
+sensor_flag() {  # SENSOR -> the flag of that node whose off value is this sensor's silence
+    case "$1" in
+        imu) echo imu_publish ;;
+        odom) echo odom_publish ;;
+        vo) echo vo_publish ;;
+        camera) echo camera_sources ;;
+        graph) echo graph_measurement ;;
+        *) return 1 ;;
+    esac
+}
+
+sensor_value() {  # SENSOR mute|unmute -> the value its flag takes (the camera's is a list)
+    case "$1:$2" in
+        camera:mute) echo "" ;;
+        camera:unmute) echo "$CAMERA_SCANS" ;;
+        *:mute) echo false ;;
+        *) echo true ;;
+    esac
+}
+
+muted_by() {  # SENSOR VALUE -> yes, no or ? : whether that live value is this sensor's silence
+    local value
+    value="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+    if [ "$1" = camera ]; then
+        case "$value" in "" | "(none)") echo yes ;; *) echo no ;; esac
+        return 0
+    fi
+    case "$value" in
+        false) echo yes ;;
+        true) echo no ;;
+        *) echo "?" ;;
+    esac
+}
+
+flag_value() {  # NODE FLAG -> the value the running node holds; exit 1 when it did not answer
+    local reply
+    reply="$(flags get "$1" "$2" 2>/dev/null)" || return 1
+    case "$reply" in
+        *"value is:"*) printf '%s' "$reply" | sed -n 's/^.*value is: *//p' | tr -d " \n" ;;
+        *) return 1 ;;
+    esac
+}
+
+consequence() {  # SENSOR mute|unmute: what a consumer should now see, in one or two lines
+    if [ "$2" = unmute ]; then
+        case "$1" in
+            imu) echo "  /imu/data_raw is back within one IMU period (50 Hz)" ;;
+            odom) echo "  /odom is back on the next state line (20 Hz), and the transform with it" ;;
+            vo) echo "  /vo is back at about 9.4 poses/s and the EKF fuses it again" ;;
+            camera) echo "  the laptop matches both camera scans again and /localization/measurement resumes" ;;
+            graph) echo "  RTAB-Map's graph speaks to the fusion again, every time the graph moves" ;;
+            lidar) echo "  the tracker matches /scan again and lidar_layer feeds both costmaps" ;;
+        esac
+        return 0
+    fi
+    case "$1" in
+        imu) echo "  /imu/data_raw goes silent: the EKF loses its yaw-rate source, and with odom0's"
+             echo "  vyaw on (ros/params/ekf.yaml, since 2026-09-15) the heading follows the wheels —"
+             echo "  which over-report a turn in place by 10-25 % on carpet" ;;
+        odom) echo "  /odom goes silent, and odom -> base_link with it: past the EKF's sensor_timeout"
+              echo "  of 0.5 s the filter has no velocity measurement left (ax/ay are off), so the"
+              echo "  pose stops advancing while the gyro still turns it. The wheels still obey" ;;
+        vo) echo "  /vo stops: the board's EKF is the wheels and the gyro, exactly as it was before"
+            echo "  2026-09-14; the node still measures and still reports" ;;
+        camera) echo "  nothing is matched on the laptop: /localization/measurement stops and the"
+                echo "  tracker localises on the lidar alone. The frames themselves keep flowing —"
+                echo "  depth_stream has no publish switch (2026-09-15)" ;;
+        graph) echo "  the graph's answer stays on the laptop: no 'graph' word reaches the fusion,"
+               echo "  and the tracker keeps whatever its other sources give it" ;;
+    esac
+}
+
+mute_lidar() {  # mute|unmute: the documented consumer set, because the lidar has no flag of ours
+    echo "$1 lidar: our own node in the lidar's chain is scan_filter (laser_filters, external)"
+    echo "and it has no flag of ours; the mute is therefore the consumer set — the tracker's"
+    echo "sources without lidar, and lidar_layer off on both costmaps (ros/sensor.sh lidar off)."
+    echo "For a real absence of /scan: ros/sensor.sh lidar off --hard"
+    switch lidar "$([ "$1" = mute ] && echo off || echo on)"
+}
+
+mute() {  # mute|unmute SENSOR: the publisher's flag, and what a consumer should now see
+    local action="$1" sensor="$2" node flag want have
+    case " $MUTE_ORDER " in *" $sensor "*) ;; *) usage ;; esac
+    if [ "$sensor" = lidar ]; then
+        mute_lidar "$action"
+        consequence lidar "$action"
+        return 0
+    fi
+    node="$(sensor_node "$sensor")"
+    flag="$(sensor_flag "$sensor")"
+    want="$(sensor_value "$sensor" "$action")"
+    echo "$action $sensor: $node $flag"
+    have="$(flag_value "$node" "$flag")" || {
+        echo "  $node did not answer about $flag: it is unchanged"
+        echo "  (is the node up? ros/flags.sh list $node)"
+        FAILED=1
+        return 0
+    }
+    case "$action:$(muted_by "$sensor" "$have")" in
+        mute:yes | unmute:no) echo "  already so (${have:-(none)})"; return 0 ;;
+    esac
+    flags set "$node" "$flag" "$want" >/dev/null
+    echo "  $node $flag ${have:-(none)} -> ${want:-(none)}"
+    CHANGED=$((CHANGED + 1))
+    consequence "$sensor" "$action"
+}
+
+mute_status() {  # every sensor's mute state, read from the live flags one by one
+    local sensor node flag have state
+    echo "muted (the publisher's own flag; a muted sensor is read and not sent):"
+    for sensor in $MUTE_ORDER; do
+        if [ "$sensor" = lidar ]; then
+            echo "  lidar: see the tracker sources and lidar_layer above (no publisher flag of ours)"
+            continue
+        fi
+        node="$(sensor_node "$sensor")"
+        flag="$(sensor_flag "$sensor")"
+        if have="$(flag_value "$node" "$flag")"; then
+            state="$(muted_by "$sensor" "$have")"
+        else
+            have=""
+            state="?"
+        fi
+        case "$state" in
+            yes) echo "  $sensor: MUTED ($node $flag=${have:-(none)})" ;;
+            no) echo "  $sensor: on ($node $flag=${have:-(none)})" ;;
+            *) echo "  $sensor: ? ($node did not answer about $flag; ros/flags.sh list $node)" ;;
+        esac
+    done
+}
+
 status() {  # what the tracker matches on, what the costmaps take, and what each node last said
     local costmap dump layer line value tracker vslam depth contact sensor
     SIDE="$(board_side)"
@@ -385,11 +548,13 @@ status() {  # what the tracker matches on, what the costmaps take, and what each
     for sensor in lidar camera; do
         echo "$sensor owns: sources $(sensor_sources "$sensor" | tr ' ' ','), layers $(sensor_layers "$sensor" | tr ' ' ',')"
     done
+    mute_status
 }
 
 case "${1:-status}" in
     status) [ $# -le 1 ] || usage; status ;;
     lidar | camera) { [ $# -ge 2 ] && [ $# -le 3 ]; } || usage; switch "$1" "$2" "${3:-}" ;;
+    mute | unmute) [ $# -eq 2 ] || usage; mute "$1" "$2" ;;
     *) usage ;;
 esac
 exit "$FAILED"

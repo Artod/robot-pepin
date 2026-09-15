@@ -62,6 +62,24 @@ to turn it off. The *Default* line carries the measurement the default rests on 
 was measured in, or says `default by design, unmeasured` when there is none — a flag never
 argues from taste. Switches live here; the numbers that are not switches (the lidar's mount,
 the camera's intrinsics, the fusion band) live in `config/*.json` and are read at start."""
+MUTING = """\
+**Muting a sensor live.** A sensor is switched off where it is *published*, by a flag of the node
+that publishes it, so the message simply stops and every consumer meets what a dead sensor looks
+like — silence, an EKF's `sensor_timeout`, a transform that stops moving — with nothing
+restarted and no other live flag lost. `ros/sensor.sh mute imu|odom|vo|camera|graph|lidar` and
+`ros/sensor.sh unmute ...` do it in one command and print what to expect; `ros/sensor.sh status`
+lists each sensor's mute state. The flags behind them: `base_bridge` `imu_publish` and
+`odom_publish` (the board's bridge; `odom_publish` takes the `odom -> base_link` transform with
+it, because a transform still broadcast from a silent `/odom` is a state no sensor failure
+produces), `visual_odometry` `vo_publish`, `laptop_localizer` `camera_sources` (emptied: the
+camera's scans stop being matched and `/localization/measurement` stops, though the frames
+themselves keep flowing — `depth_stream` has no publish switch), `rtabmap_frame`
+`graph_measurement`. The lidar has none: our own node in its chain is `scan_filter`
+(laser_filters, external), and a relay on the board that could drop `/scan` is what CLAUDE.md
+rule 20 refuses — so `mute lidar` is the consumer set instead (the tracker's `sources` without
+`lidar`, `lidar_layer` off on both costmaps, which is `ros/sensor.sh lidar off`), and
+`ros/sensor.sh lidar off --hard` is the real absence of a scan. The old way — `ros/feature.sh
+imu off` — restarts the board stack: a minute, and every live flag on it back to its default."""
 
 
 def has_table(path: Path, name: str = "FLAGS") -> bool:
@@ -86,7 +104,7 @@ def section() -> str:
     every node, and under it every flag in full, grouped by the node that owns it."""
     nodes = tables()
     rows = [[f"`{node}`", *row] for node, flags in nodes.items() for row in flags.rows()]
-    parts = [HEADING, INTRO, HOW_TO_READ, markdown_table(("node", *COLUMNS), rows), DETAILS]
+    parts = [HEADING, INTRO, HOW_TO_READ, MUTING, markdown_table(("node", *COLUMNS), rows), DETAILS]
     parts += [f"#### `{node}`\n\n{flags.details()}" for node, flags in nodes.items()]
     return "\n\n".join(parts) + "\n"
 

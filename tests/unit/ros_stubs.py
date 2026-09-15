@@ -112,6 +112,7 @@ CameraInfo = _msg(
     p=lambda: [0.0] * 12,
 )
 Twist = _msg("Twist", linear=Vector3, angular=Vector3)
+TwistStamped = _msg("TwistStamped", header=Header, twist=Twist)
 TwistWithCovariance = _msg("TwistWithCovariance", twist=Twist, covariance=lambda: [0.0] * 36)
 Odometry = _msg(
     "Odometry",
@@ -478,6 +479,11 @@ class Node:
             self.descriptors[name] = descriptor
         return Parameter(name, value=PARAMETERS.get(name, default))
 
+    def get_parameter(self, name: str) -> Parameter:
+        """rclpy's: the value the node holds now — what :func:`parameters` overrode, or what
+        the node declared (a node that reads a parameter per message reads it through this)."""
+        return Parameter(name, value=PARAMETERS.get(name, self.declared[name]))
+
     def add_on_set_parameters_callback(self, callback: Any) -> None:
         self.parameter_callbacks.append(callback)
 
@@ -602,6 +608,7 @@ def install() -> Any:
             Quaternion=Quaternion,
             Vector3=Vector3,
             Twist=Twist,
+            TwistStamped=TwistStamped,
         ),
         "nav_msgs": _module("nav_msgs"),
         "nav_msgs.msg": _module(
