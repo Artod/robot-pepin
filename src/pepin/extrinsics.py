@@ -516,7 +516,8 @@ def associate_bearings(
     within ``max_gap_deg`` of each other — the differences, one per associated edge.
 
     Sign: corner MINUS edge, so a positive difference means the thing really sits further CCW
-    than the picture placed it, which is the camera pointing further clockwise than believed.
+    than the picture placed it, which is the camera pointing further COUNTER-clockwise than
+    believed (the picture was placed with the believed pan, so every edge sits too far clockwise).
     Unassociated edges are dropped, not guessed.
     """
     e = np.asarray(edges_rad, dtype=float)

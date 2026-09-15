@@ -363,7 +363,8 @@ def test_the_report_line_is_a_rate_per_topic_and_the_switches(monkeypatch: Any) 
 
 def test_every_switch_is_in_the_table_and_printed() -> None:
     assert {flag.name for flag in FLAGS} == {
-        "flow_watch", "half_restart",
+        "flow_watch",
+        "half_restart",
         "flow_silence_s",
         "dead_routes",
         "bridge_restart",
