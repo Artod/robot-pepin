@@ -93,6 +93,7 @@ silence as good news. What is checked:
 | 2.6 | the rtabmap process is alive in `pepin-vslam` |
 | 2.7 | `rtabmap_frame` has an anchor (from file or learned) and `over N infos` with N > 0 — 0 means the graph's trust is deaf |
 | 2.8 | no `process has died` in the container since it started |
+| 2.9 | Foxglove: the bridge answers on `ws://localhost:8765` and advertises every topic the layout draws (`ros/foxglove.sh check`; its failing lines are indented under this one) |
 
 | # | flags |
 |---|---|
@@ -1461,13 +1462,32 @@ ssh root@pepin.local '/root/pepin-ros/run.sh ros2 launch pepin_bringup robot.lau
 ssh root@pepin.local '/root/pepin-ros/run.sh ros2 launch pepin_bringup nav.launch.py map:=/maps/lap3.yaml'
 ```
 
-Laptop: install Foxglove Studio (`brew install --cask foxglove-studio`), open a connection
-to `ws://localhost:8765` — the LAPTOP's bridge (`ros/laptop.sh vslam`), which sees the board's
-topics through the zenoh bridge; the board's own bridge is off since 2026-09-14 (it cost a
-second serialisation of every topic on four A53 cores) and comes back with
-`robot.launch.py foxglove:=true`, on `ws://pepin.local:8765`. Add the 3D panel with `/map`, `/scan`, `/tf`, the costmaps and
-`/plan`; send a goal with the "Publish" panel on `/goal_pose` (`geometry_msgs/PoseStamped`,
-frame `map`).
+Laptop: install Foxglove (`brew install --cask foxglove`), and let `ros/foxglove.sh` do the rest.
+
+| command | what it does |
+|---|---|
+| `ros/foxglove.sh check` | one `PASS`/`FAIL` line each: `pepin-vslam` is up, port 8765 accepts connections, the websocket handshake succeeds, `serverInfo` and the channel count arrive, every topic the layout draws is advertised, and how many times the bridge has died since the container started |
+| `ros/foxglove.sh reopen` | tells the running desktop app to reconnect (`foxglove://open?ds=foxglove-websocket&ds.url=…`), waiting for the port first; prints the link instead when the app is not running |
+| `ros/foxglove.sh url` | prints that link |
+
+It is wired in, so nobody has to remember it: `ros/restart.sh laptop|both` runs `check` as check
+2.9 and `reopen` as its last act, and `ros/laptop.sh vslam` reopens the app after the container is
+recreated (`PEPIN_FOXGLOVE_REOPEN=0` leaves the app alone and prints the link).
+
+**Why a reconnect is needed at all.** A Foxglove client is bound to ONE bridge process: channel
+ids are that process's own numbering and start again at 1 when it restarts. Recreating the
+container (`ros/laptop.sh vslam`) or restarting the launch kills the bridge, and the app keeps
+showing the dead socket's panels — empty — until a client re-attaches. The second, milder
+emptiness is a channel *withdrawn* while the socket lives: the bridge advertises a topic while a
+publisher exists and removes the channel when the last one goes, so every repair of the board's
+routes takes `/global_costmap/costmap`, `/amcl_path`, `/tof/*` and friends out of the panel and
+puts them back under a new id a second later. No bridge parameter can hold those open.
+
+The bridge is the LAPTOP's (`ros/laptop.sh vslam`), which sees the board's topics through the
+zenoh bridge; the board's own bridge is off since 2026-09-14 (it cost a second serialisation of
+every topic on four A53 cores) and comes back with `robot.launch.py foxglove:=true`, on
+`ws://pepin.local:8765`. Layouts live in `ros/foxglove/` (`pepin_slam.json` is the driving one);
+send a goal with the "Publish" panel on `/goal_pose` (`geometry_msgs/PoseStamped`, frame `map`).
 
 ## At boot
 
