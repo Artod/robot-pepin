@@ -23,7 +23,10 @@ case "${1:-}" in
     trip) "$0" printer && "$0" home; exit $? ;;
     round)  # a full turn in place (ros/tools/turn_full.py on the board), recorded as NAME
         ssh -o ConnectTimeout=10 "root@$BOARD" 'docker exec -i pepin-ros /pepin_entrypoint.sh python3 - "'"${2:-round}"'"' < "$(cd "$(dirname "$0")" && pwd)/tools/turn_full.py"; exit $? ;;
-    "") echo "usage: ros/go.sh printer | home | X Y [YAW] | mark NAME | where | places | cancel | planner navfn|lattice|theta|smac|hybrid | trip | round"; exit 2 ;;
+    move)  # measured legs without the planner (ros/tools/move.py on the board): f0.40 = 0.40 m straight (negative = back), t90 = 90 deg left; recorded as NAME
+        NAME="${2:-move}"; shift 2 2>/dev/null || shift $#
+        ssh -o ConnectTimeout=10 "root@$BOARD" 'docker exec -i pepin-ros /pepin_entrypoint.sh python3 - '"$NAME $*"'' < "$(cd "$(dirname "$0")" && pwd)/tools/move.py"; exit $? ;;
+    "") echo "usage: ros/go.sh printer | home | X Y [YAW] | mark NAME | where | places | cancel | planner navfn|lattice|theta|smac|hybrid | trip | round | move NAME SEG..."; exit 2 ;;
     mark)   REQUEST="{\"cmd\":\"mark\",\"name\":\"${2:?a name}\"}" ;;
     where)  REQUEST='{"cmd":"where"}' ;;
     places) REQUEST='{"cmd":"places"}' ;;
