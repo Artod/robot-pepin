@@ -111,7 +111,7 @@ from pepin.depth import (
 from pepin.elevation import RAY_AZIMUTH_DEGREE, RAY_DEGREE, RayGain, fit_ray, ray_angles
 
 if TYPE_CHECKING:  # the tracker's own module stays a lazy import inside the parallax stage
-    from pepin.parallax import Features, Motion, ParallaxTruth
+    from pepin.parallax import Features, FrameView, Motion, ParallaxTruth, TrackStore
 
 LEAN_STEP = 0.003  # the floor's expected depth is recomputed when the up vector moves this much
 FLOOR_PAIR_STRIDE = 8  # every 8th row and column of the floor: 3600 candidates of a 640x360 frame
@@ -147,12 +147,24 @@ PARALLAX_MOTION = "tracker"  # whose word on the baseline: the lidar tracker's m
 PARALLAX_MAP_WAIT = False  # ask the map pose without waiting: a wait costs the whole frame rate
 PARALLAX_MAP_MAX_AGE_S = 0.3  # a map pose older than this is not this frame's: odometry answers
 PARALLAX_MOTIONS = ("tracker", "odom")
-PARALLAX_RING_FRAMES = 48  # frames kept to reach back through. The ring is pruned by TIME (the
-# window, at most parallax_track_window_s of 3 s); this is only the memory bound under it, and at
-# 24 a 3 s window on a 16 frames/s camera was silently cut to 1.5 s. 48 greys at 640x360 is 11 MB.
+PARALLAX_RING_FRAMES = 48  # frames kept to reach back through, the BACKWARD window's and the
+# pair's alone (the forward store keeps the previous grey and one per view, and no ring at all).
+# The ring is pruned by TIME (parallax_track_window_s); this is the memory bound under it, and at
+# 24 a 3 s window on a 16 frames/s camera was silently cut to 1.5 s. 48 greys at 640x360 is 11 MB,
+# and it is what caps a backward window at 48 / the frame rate however long the knob is set.
 PARALLAX_WEIGHT = 1.0  # the multiplier on a parallax pair's own 1 / sigma^2 (the A/B's knob)
 PARALLAX_TRACK_MIN_OBS = 3  # frames a corner must be seen in to be a track; 2 is the old pair
-PARALLAX_TRACK_WINDOW_S = 1.5  # how far back a track reaches, seconds: the ring's own span
+PARALLAX_TRACKING = "forward"  # how a corner becomes a track: followed FORWARD one hop a frame
+# (two flow calls a frame whatever the window), the old backward "window" re-tracked from the
+# current frame every frame (two calls per view), or "pair" — this frame against one partner.
+PARALLAX_TRACKINGS = ("forward", "window", "pair")
+PARALLAX_TRACK_WINDOW_S = 3.0  # how far back a track reaches, seconds. 1.5 until 2026-09-15,
+# when the backward build's cost stopped setting it: every error term of a parallax depth
+# divides by the baseline and the tracker's map pose is absolute, so a longer window is free.
+PARALLAX_MAX_TRACKS = 200  # corners the forward store follows at once
+PARALLAX_REDETECT_EVERY = 5  # frames between two hunts for new corners
+PARALLAX_VERIFY_EVERY = 10  # frames between two rounds of the long-range drift bound; 0 is off
+PARALLAX_DRIFT_TOL_PX = 1.0  # how far a hopped corner may sit from where its birth patch lands
 PARALLAX_MIN_TOTAL_BASELINE_M = 0.10  # the effective parallax a track's views must add up to
 PARALLAX_TRACK_MAX_VIEWS = 8  # views one track may rest on (pepin.parallax.TRACK_MAX_VIEWS)
 PARALLAX_SIGMA_MODEL = "covariance"  # a track's sigma: the solve's own covariance. The
@@ -1375,8 +1387,21 @@ class ParallaxAnchor(AnchorStage):
     it is the pool a law over the ray's angle can be fitted on.
 
     A corner is a TRACK, not a pair (``track_min_obs``, the node's ``parallax_track_min_obs``,
-    3 by default; 2 restores the pair the stage measured until 2026-09-15). The corners of this
-    frame are followed back through every ring frame inside ``track_window_s``
+    3 by default; 2 restores the pair the stage measured until 2026-09-15), and since
+    2026-09-15 it is followed FORWARD by default (``tracking``, the node's
+    ``parallax_tracking``): detected once and hopped one frame at a time in a
+    :class:`pepin.parallax.TrackStore`, which costs two flow calls a FRAME instead of two per
+    view, so the window may be as long as the pose deserves. Measured over the four errands of
+    2026-09-14 (scratch/parallax_forward_eval.txt): 5.9 ms a frame at a 1.5 s window and 6.4 at
+    5 s against the backward build's 31.3 at 1.5 s, the corners' own depth 0.94-1.02 of the
+    lidar against the backward build's 0.89 and the pair's 0.79, and a parallax-only law at
+    12.7-13.8 % of residual over the frames it fits against 16.0 % and 30.2 %. What it pays is
+    corners: 6-12 a frame against the backward build's 39.5, because it follows ``max_tracks``
+    of them where the backward build asks the detector for 400 fresh ones every frame, so it
+    fits a law at all on 5-9 frames of 69 against 19. ``window`` keeps the old behaviour.
+
+    In the backward ``window`` mode the corners of this frame are followed back through every
+    ring frame inside ``track_window_s``
     (:func:`pepin.parallax.build_tracks` — hop by hop for the flow, recognised frame by frame
     for the describer) and all of a track's rays are met in ONE least-squares solve with the
     known camera placements, with a robust pass that drops a track's single worst observation
@@ -1470,6 +1495,11 @@ class ParallaxAnchor(AnchorStage):
         sigma_model: str = PARALLAX_SIGMA_MODEL,
         track_max_views: int = PARALLAX_TRACK_MAX_VIEWS,
         split_tol_sigma: float = PARALLAX_SPLIT_TOL_SIGMA,
+        tracking: str = PARALLAX_TRACKING,
+        max_tracks: int = PARALLAX_MAX_TRACKS,
+        redetect_every: int = PARALLAX_REDETECT_EVERY,
+        verify_every: int = PARALLAX_VERIFY_EVERY,
+        drift_tol_px: float = PARALLAX_DRIFT_TOL_PX,
     ) -> None:
         self.weight = weight
         self.min_gap_s = min_gap_s
@@ -1486,12 +1516,27 @@ class ParallaxAnchor(AnchorStage):
         self.sigma_model = sigma_model  # what a track's sigma is: the solve's covariance, or
         # the closed form sqrt(sum b^2) the stage shipped with (pepin.parallax.TRACK_SIGMA_MODELS)
         self.split_tol_sigma = split_tol_sigma  # live: parallax_split_tol_sigma; 0 is off
+        self.tracking_mode = tracking  # live: parallax_tracking — forward, window or pair
+        self.max_tracks = max_tracks  # live: parallax_max_tracks (the forward store's cap)
+        self.redetect_every = redetect_every  # live: parallax_redetect_every, in frames
+        self.verify_every = verify_every  # live: parallax_verify_every, in frames; 0 is off
+        self.drift_tol_px = drift_tol_px  # live: parallax_drift_tol_px
         self.stale = 0  # frames whose map pose was too old (or absent) and fell back to odometry
         self.used: dict[str, int] = dict.fromkeys(PARALLAX_MOTIONS, 0)  # who gave each baseline
         self.frames = 0  # frames that reached the triangulation
         self.contributed = 0  # of those, the ones that gave at least one pair
         self.rejected: dict[str, int] = {}
         self._ring: deque[PreviousFrame] = deque(maxlen=PARALLAX_RING_FRAMES)
+        self._store: TrackStore | None = None  # the forward ruler's live corners
+        self._last_stamp: float | None = None  # the newest frame the store has seen
+        self.deaths: dict[str, int] = {}  # forward tracks closed, by cause (lk, fb, edge, drift)
+        self._live: list[int] = []  # corners the store was following, per frame
+        self._born: list[int] = []
+        self._gone: list[int] = []
+        self._hop_ms: list[float] = []
+        self._detect_ms: list[float] = []
+        self._verify_ms: list[float] = []
+        self._solve_ms: list[float] = []
         self._baseline: list[float] = []
         self._sigma: list[float] = []
         self._sigma_two: list[float] = []  # the same corners read as the widest pair alone
@@ -1500,11 +1545,20 @@ class ParallaxAnchor(AnchorStage):
         self._kept: list[int] = []
 
     @property
+    def mode(self) -> str:
+        """Which ruler measures this frame: ``forward`` (a corner detected once and followed
+        one hop a frame, :class:`pepin.parallax.TrackStore`), ``window`` (the current frame's
+        corners re-tracked backwards through the ring every frame,
+        :func:`pepin.parallax.build_tracks`) or ``pair`` (this frame against one partner, what
+        the stage did until 2026-09-15). ``track_min_obs`` under 3 is the pair whatever the
+        switch says: a corner seen twice IS a pair, arithmetically."""
+        return "pair" if self.track_min_obs < 3 else self.tracking_mode
+
+    @property
     def tracking(self) -> bool:
-        """Whether a corner is a TRACK through the window (``track_min_obs`` of 3 or more) or
-        the PAIR of this frame and one chosen partner (2, what the stage did until
-        2026-09-15)."""
-        return self.track_min_obs > 2
+        """Whether a corner is a TRACK (forward or through the window) or the PAIR of this
+        frame and one chosen partner."""
+        return self.mode != "pair"
 
     @property
     def window_s(self) -> float:
@@ -1664,9 +1718,112 @@ class ParallaxAnchor(AnchorStage):
         out.reverse()
         return out
 
+    def _forward_store(self) -> TrackStore:
+        """The forward ruler's store, with every live knob pushed into it. The knobs are pushed
+        on EVERY frame and nothing is reset by pushing them, which is what makes a window
+        lengthened or shortened live take effect on the next frame with no restart: the store
+        simply uses more or fewer of the observations it already holds. Only a change of
+        matcher builds a new store, the flow and the describer keeping different things about a
+        corner."""
+        from pepin.parallax import TrackStore
+
+        store = self._store
+        if store is None or store.matcher != self.matcher:
+            store = TrackStore(matcher=self.matcher)
+            self._store = store
+        store.window_s = self.track_window_s
+        store.max_views = self.track_max_views
+        store.max_tracks = self.max_tracks
+        store.redetect_every = self.redetect_every
+        store.verify_every = self.verify_every
+        store.drift_tol_px = self.drift_tol_px
+        return store
+
+    def _source(self, ctx: FrameContext) -> str:
+        """Whose word this frame's motion is, asked ONCE a frame: the tracker's map pose when
+        it can answer without waiting, the odometry when it cannot. Every observation the store
+        keeps of this frame is stamped with it, and a track's bundle never spans two."""
+        if self.motion_source != "tracker":
+            return "odom"
+        reference = self._last_stamp if self._last_stamp is not None else ctx.stamp
+        moved, spoke = self._moved(ctx, reference, ctx.stamp, True)
+        return spoke if moved is not None else "odom"
+
+    def _motions(
+        self, ctx: FrameContext, place: Rigid, views: Sequence[FrameView], source: str
+    ) -> dict[float, Motion]:
+        """The transform from each view's optical frame into this frame's camera, keyed by the
+        view's stamp — what :meth:`pepin.parallax.TrackStore.tracks` turns into a bundle.
+
+        Asked newest first, as :meth:`_window`'s walk is, so a silent tracker costs its lookup
+        once a frame and not once a view; the walk stops where the source changes, because the
+        two disagree by about a quarter over a second and a bundle half measured by each is not
+        a geometry. A view the source cannot answer for at all is simply left out of the map
+        and the tracks that wanted it lose that one observation."""
+        from pepin.parallax import camera_motion
+
+        out: dict[float, Motion] = {}
+        ask_tracker = source == "tracker"
+        for view in reversed(views):
+            moved, spoke = self._moved(ctx, view.stamp, ctx.stamp, ask_tracker)
+            ask_tracker &= spoke != "odom"
+            if moved is None:
+                continue
+            if spoke != source:
+                self._count("mixed motion")
+                break
+            out[view.stamp] = camera_motion(moved.rotation, moved.translation, view.place, place)
+        return out
+
+    def _forward_truth(
+        self, ctx: FrameContext, gray: npt.NDArray[np.uint8], place: Rigid
+    ) -> tuple[ParallaxTruth, float] | None:
+        """This frame through the forward ruler: hop every live corner into it, ask the motion
+        of the views the store wants, meet each track's rays and gate the result. Returns the
+        truth and the span in seconds its oldest view reaches back over, or ``None`` when there
+        is no view with a motion behind it yet."""
+        from pepin.parallax import gate_tracks
+
+        store = self._forward_store()
+        source = self._source(ctx)
+        report = store.follow(gray, ctx.stamp, place, source)
+        self._last_stamp = ctx.stamp
+        self._live.append(report.live)
+        self._born.append(report.born)
+        # 'source' is a bundle cut short and not a corner closed: it is counted apart
+        self._gone.append(sum(n for cause, n in report.died.items() if cause != "source"))
+        for cause, count in report.died.items():
+            if count:
+                self.deaths[cause] = self.deaths.get(cause, 0) + count
+        self._hop_ms.append(report.hop_ms)
+        self._detect_ms.append(report.detect_ms)
+        self._verify_ms.append(report.verify_ms)
+        views = store.views()
+        if not views:
+            self._count("gap")
+            return None
+        motions = self._motions(ctx, place, views, source)
+        if not motions:
+            self._count("no odometry")
+            return None
+        self.used[source] = self.used.get(source, 0) + 1
+        started = time.perf_counter()
+        truth = gate_tracks(
+            store.tracks(motions),
+            ctx.intr,
+            matcher=self.matcher,
+            min_obs=self.track_min_obs,
+            min_total_baseline_m=self.min_total_baseline_m,
+            sigma_model=self.sigma_model,
+            split_tol_sigma=self.split_tol_sigma,
+        )
+        self._solve_ms.append(1000.0 * (time.perf_counter() - started))
+        return truth, ctx.stamp - min(motions)
+
     def _remember(self, ctx: FrameContext, gray: npt.NDArray[np.uint8], place: Rigid) -> None:
         """Put this frame in the ring and drop the frames no later frame can reach: the track
-        window while tracking, the matcher's gap window while pairing."""
+        window while tracking, the matcher's gap window while pairing. The forward ruler keeps
+        no ring at all — it needs the previous grey and one grey per view, not the window."""
         while self._ring and ctx.stamp - self._ring[0].stamp > self.window_s:
             self._ring.popleft()
         self._ring.append(PreviousFrame(gray, ctx.stamp, place))
@@ -1720,7 +1877,12 @@ class ParallaxAnchor(AnchorStage):
         place: Rigid = (
             ctx.cam_optical if ctx.cam_optical is not None else CameraPlacement.of(ctx.cam)
         )
-        if self.tracking:
+        if self.mode == "forward":
+            measured = self._forward_truth(ctx, gray, place)
+            if measured is None:
+                return None
+            truth, span = measured
+        elif self.tracking:
             views = self._window(ctx, place)
             self._remember(ctx, gray, place)
             if not views:
@@ -1758,6 +1920,9 @@ class ParallaxAnchor(AnchorStage):
             self._sigma_two.append(float(np.median(truth.sigma_two[ok])))
         del self._baseline[:-POOL_FRAMES], self._sigma[:-POOL_FRAMES], self._gap[:-POOL_FRAMES]
         del self._kept[:-POOL_FRAMES], self._obs[:-POOL_FRAMES], self._sigma_two[:-POOL_FRAMES]
+        del self._live[:-POOL_FRAMES], self._born[:-POOL_FRAMES], self._gone[:-POOL_FRAMES]
+        del self._hop_ms[:-POOL_FRAMES], self._detect_ms[:-POOL_FRAMES]
+        del self._verify_ms[:-POOL_FRAMES], self._solve_ms[:-POOL_FRAMES]
         return Pairs.of(
             d[ok],
             truth.z[ok],
@@ -1776,7 +1941,7 @@ class ParallaxAnchor(AnchorStage):
         been read as the widest single pair, which is the whole point of the change."""
         spoke = ", ".join(f"{k} {v}" for k, v in self.used.items() if v)
         shape = (
-            f" >= {self.track_min_obs} obs over <= {self.track_max_views} views,"
+            f" {self.mode} >= {self.track_min_obs} obs over <= {self.track_max_views} views,"
             f" asks {self.min_total_baseline_m * 100:.0f} cm total"
             f", sigma from the {self.sigma_model}"
             + (
@@ -1784,11 +1949,21 @@ class ParallaxAnchor(AnchorStage):
                 if self.split_tol_sigma > 0
                 else ", halves unchecked"
             )
+            + (
+                f", <= {self.max_tracks} corners, detect every {self.redetect_every}"
+                + (
+                    f", drift <= {self.drift_tol_px:.1f} px every {self.verify_every}"
+                    if self.verify_every > 0 and self.drift_tol_px > 0
+                    else ", drift unchecked"
+                )
+                if self.mode == "forward"
+                else ""
+            )
             if self.tracking
             else f", asks {self.min_baseline_m * 100:.0f} cm"
         )
         asked = (
-            f"{self.matcher} <= {self.window_s:.2f} s{shape}"
+            f"{self.matcher} <= {self.window_s:.2f} s{shape},"
             f" on the {self.motion_source}'s motion ({spoke or 'none yet'}),"
             f" weight {self.weight:g} / sigma^2"
             + (f", map pose stale -> odom {self.stale}" if self.stale else "")
@@ -1796,7 +1971,9 @@ class ParallaxAnchor(AnchorStage):
         )
         dropped = ", ".join(f"{k} {v}" for k, v in self.rejected.items())
         if not self._baseline:
-            return f"{asked}, no pairs yet" + (f" ({dropped})" if dropped else "")
+            return f"{asked}{self._store_line()}, no pairs yet" + (
+                f" ({dropped})" if dropped else ""
+            )
         what = "tracks" if self.tracking else "pairs"
         gained = (
             f" ({np.median(self._obs):.1f} obs a track,"
@@ -1805,12 +1982,32 @@ class ParallaxAnchor(AnchorStage):
             else ""
         )
         return (
-            f"{asked}, {self.contributed}/{self.frames} frames,"
+            f"{asked}{self._store_line()}, {self.contributed}/{self.frames} frames,"
             f" span {np.median(self._gap):.2f} s,"
             f" baseline {np.median(self._baseline) * 100:.1f} cm,"
             f" {np.median(self._kept):.0f} {what} a frame,"
             f" sigma {np.median(self._sigma) * 100:.1f} cm{gained}"
             + (f", rejected: {dropped}" if dropped else "")
+        )
+
+    def _store_line(self) -> str:
+        """The forward ruler's own half of the report line: the corners alive right now, how
+        many are born and closed in a frame and of what, and where the milliseconds went — the
+        hop (one flow call for every corner and one back), the detector, the drift bound and
+        the solve. Empty while the stage is not following corners forward."""
+        if self.mode != "forward" or not self._live:
+            return ""
+        killed = ", ".join(f"{k} {v}" for k, v in self.deaths.items() if v and k != "source")
+        cut = self.deaths.get("source", 0)
+        return (
+            f", {self._live[-1]} live corners,"
+            f" +{np.median(self._born):.0f}/-{np.median(self._gone):.0f} a frame"
+            + (f" ({killed})" if killed else "")
+            + (f", source cut {cut}" if cut else "")
+            + f", hop {np.median(self._hop_ms):.1f}"
+            f" / detect {np.median(self._detect_ms):.1f}"
+            f" / verify {np.median(self._verify_ms):.1f}"
+            f" / solve {np.median(self._solve_ms) if self._solve_ms else 0.0:.1f} ms"
         )
 
 

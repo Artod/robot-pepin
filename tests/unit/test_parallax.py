@@ -8,6 +8,7 @@ import math
 from dataclasses import replace
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 from pepin.depth import CameraPose, Intrinsics, project_all
@@ -27,9 +28,11 @@ from pepin.parallax import (
     ORB_DISPARITY_SIGMA_PX,
     CameraPlacement,
     Features,
+    LucasKanade,
     Motion,
     ParallaxTruth,
     Tracks,
+    TrackStore,
     build_tracks,
     camera_motion,
     match,
@@ -467,10 +470,11 @@ def test_the_anchor_holds_when_the_context_brings_no_picture_or_no_odometry() ->
 
 def test_a_gap_outside_the_window_is_not_triangulated() -> None:
     """Two frames a second and a half apart have moved farther than the flow follows: the pair
-    is skipped, not tracked."""
+    is skipped, not tracked. (The gap window is the PAIR's own: a forward track is bounded by
+    parallax_track_window_s instead, and reaches as far back as the pose deserves.)"""
     a, b, _ = rendered_pair()
     poses = {1.0: planar_pose(0.0, 0.0, 0.0), 3.0: planar_pose(0.0, -SIDESTEP_M, 0.0)}
-    anchor = ParallaxAnchor()
+    anchor = ParallaxAnchor(tracking="pair")
     network = np.full((INTR.height, INTR.width), 3.0)
     odometry = Odometry(poses)
     assert anchor.pairs(Frame(network, context(1.0, a, odometry))) is None
@@ -515,8 +519,12 @@ def test_the_report_line_names_the_matcher_and_its_window() -> None:
     line = ParallaxAnchor(track_min_obs=2).describe()
     assert line.startswith("klt <= 0.60 s")
     assert ParallaxAnchor(matcher="orb", track_min_obs=2).describe().startswith("orb <= 1.50 s")
-    tracking = ParallaxAnchor().describe()
-    assert tracking.startswith("klt <= 1.50 s >= 3 obs over <= 8 views, asks 10 cm total")
+    windowed = ParallaxAnchor(tracking="window", track_window_s=1.5).describe()
+    assert windowed.startswith("klt <= 1.50 s window >= 3 obs over <= 8 views, asks 10 cm total")
+    forward = ParallaxAnchor().describe()
+    assert forward.startswith("klt <= 3.00 s forward >= 3 obs over <= 8 views")
+    assert "<= 200 corners, detect every 5, drift <= 1.0 px every 10" in forward
+    assert "drift unchecked" in ParallaxAnchor(verify_every=0).describe()
 
 
 def test_the_baseline_is_the_tracker_s_word_and_the_odometry_s_drift_scales_the_depth() -> None:
@@ -571,15 +579,18 @@ def test_a_silent_tracker_falls_back_to_the_odometry_for_that_window() -> None:
 
 def test_the_anchor_hands_its_matcher_to_the_triangulation() -> None:
     """The stage's switch reaches pepin.parallax: an anchor set to a matcher nobody implements
-    fails at the match rather than quietly tracking corners."""
+    fails at the match rather than quietly tracking corners. The forward store refuses it on
+    the first frame, before it has followed anything; the pair path at the first match."""
     a, b, _ = rendered_pair()
     poses = {1.0: planar_pose(0.0, 0.0, 0.0), 1.3: planar_pose(0.0, -SIDESTEP_M, 0.0)}
     odometry = Odometry(poses)
-    anchor = ParallaxAnchor(matcher="sift")
     network = np.full((INTR.height, INTR.width), 3.0)
-    assert anchor.pairs(Frame(network, context(1.0, a, odometry))) is None  # the ring's first
+    paired = ParallaxAnchor(matcher="sift", tracking="pair")
+    assert paired.pairs(Frame(network, context(1.0, a, odometry))) is None  # the ring's first
     with pytest.raises(ValueError, match="unknown matcher"):
-        anchor.pairs(Frame(network, context(1.3, b, odometry)))
+        paired.pairs(Frame(network, context(1.3, b, odometry)))
+    with pytest.raises(ValueError, match="unknown matcher"):
+        ParallaxAnchor(matcher="sift").pairs(Frame(network, context(1.0, a, odometry)))
 
 
 def test_a_colour_frame_becomes_the_grey_the_tracker_reads() -> None:
@@ -991,20 +1002,30 @@ def test_one_window_rests_on_one_motion_source() -> None:
             """The same answer, asked the non-blocking way the frame path asks it."""
             return self.map_motion(from_stamp, to_stamp)
 
-    frames, poses = crawling_frames(0.03, 6)
+    frames, poses = crawling_frames(0.03, 10)
     # the wheels over-read the crawl by half; the map pose is the truth, from 0.2 s on
     source = HalfTracked(poses, since=0.2, drift=1.5)
-    anchor = ParallaxAnchor()
     network = np.full((INTR.height, INTR.width), 3.0)
-    pairs = None
-    for i, view in enumerate(frames):
-        pairs = anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, source)))
-    assert anchor.rejected.get("mixed motion", 0) > 0, "a mixed window must be cut and counted"
-    assert "mixed motion" in anchor.describe()
-    # the last frame's window reaches 0.2 s, where the tracker still speaks: had the two oldest
+    got: dict[str, tuple[ParallaxAnchor, Pairs | None]] = {}
+    for ruler in ("window", "forward"):
+        anchor = ParallaxAnchor(tracking=ruler, track_window_s=1.5)
+        pairs = None
+        for i, view in enumerate(frames):
+            pairs = anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, source)))
+        got[ruler] = (anchor, pairs)
+    windowed, backward = got["window"]
+    assert windowed.rejected.get("mixed motion", 0) > 0, "a mixed window must be cut and counted"
+    assert "mixed motion" in windowed.describe()
+    # the forward ruler does not cut a window, it cuts a TRACK's run: the corner lives on and
+    # its bundle starts again at the first frame the tracker answered for
+    onward, forward = got["forward"]
+    assert onward.deaths.get("source", 0) > 0, "the older views must be cut off and counted"
+    assert "source cut" in onward.describe()
+    # the last frame reaches back to 0.2 s, where the tracker still speaks: had the two oldest
     # views come in on the wheels' stretched baseline, the planes would sit half again too far
-    assert pairs is not None and pairs.size >= 20
-    assert band_error(pairs) < 0.05, "a window that mixed the sources would read the wheels'"
+    for pairs in (backward, forward):
+        assert pairs is not None and pairs.size >= 20
+        assert band_error(pairs) < 0.05, "a bundle that mixed the sources would read the wheels'"
 
 
 def test_the_knob_at_two_is_the_pair_the_anchor_always_measured() -> None:
@@ -1187,3 +1208,235 @@ def test_the_split_gate_ships_off_and_is_armed_and_counted_by_its_tolerance() ->
     tight = track_truth(frames, motions, INTR, split_tol_sigma=0.05)
     assert tight.rejected["split"] > 0 and tight.kept < off.kept
     assert tight.split is not None and float(np.max(tight.split)) <= 0.05
+
+
+# ---- the forward ruler: a corner born once and followed one hop a frame -----------------------
+SMALL = Intrinsics(fx=200.0, fy=200.0, cx=160.0, cy=90.0, width=320, height=180)
+WALL_M = 2.0  # the one textured plane the small scene is made of
+SLIDE_M = 0.02  # the camera's sidestep between frames: exactly 2 px on the wall at SMALL's optics
+SLIDE_S = 0.15  # seconds between frames: 40 of them span 5.85 s, which a 5 s window can fill
+SMALL_MARGIN = 96  # spare columns either side, so 40 frames of 2 px may shift into them
+
+
+def wall_frames(
+    count: int, step_m: float = SLIDE_M, dt: float = SLIDE_S
+) -> tuple[list[np.ndarray], dict[float, RigidPose]]:
+    """A camera sidestepping past one fronto-parallel textured wall ``WALL_M`` away: the view
+    at each frame (a whole-pixel shift, so there is nothing for the tracker to round) and the
+    cart pose at each stamp. Small on purpose — a unit test pays for every flow call."""
+    rng = np.random.default_rng(11)
+    fine = rng.integers(0, 255, size=(SMALL.height, SMALL.width + 2 * SMALL_MARGIN))
+    blurred = fine.astype(float)
+    for axis in (0, 1):
+        blurred = np.mean([np.roll(blurred, s, axis=axis) for s in range(-3, 4)], axis=0)
+    wide = np.rint(blurred).astype(np.uint8)
+    frames, poses = [], {}
+    for i in range(count):
+        shift = SMALL_MARGIN + round(SMALL.fx * step_m * i / WALL_M)
+        frames.append(np.ascontiguousarray(wide[:, shift : shift + SMALL.width]))
+        poses[round(dt * i, 3)] = planar_pose(0.0, -step_m * i, 0.0)
+    return frames, poses
+
+
+def wall_context(stamp: float, gray: np.ndarray, odometry: Odometry) -> FrameContext:
+    """The small scene's frame context: the same fake motion source, SMALL's optics."""
+    mount = CameraPose(0.0, 0.0, 1.23, 0.0)
+    return FrameContext(
+        SMALL,
+        mount,
+        stamp=stamp,
+        gray=gray,
+        motion=odometry,
+        cam_optical=CameraPlacement.of(mount),
+    )
+
+
+def drive(
+    anchor: ParallaxAnchor, frames: list[np.ndarray], poses: dict[float, RigidPose]
+) -> Pairs | None:
+    """Every frame of the small scene through the anchor, in order; the last frame's pairs."""
+    network = np.full((SMALL.height, SMALL.width), 3.0)
+    odometry = Odometry(poses)
+    pairs = None
+    for stamp, view in zip(sorted(poses), frames, strict=True):
+        pairs = anchor.pairs(Frame(network, wall_context(stamp, view, odometry)))
+    return pairs
+
+
+def test_a_corner_is_born_once_and_is_still_followed_forty_frames_later() -> None:
+    """The whole point of following corners FORWARD: the cost is two flow calls a frame
+    whatever the window, so a corner detected in the first frame is still the same corner six
+    seconds later, resting on observations spread over the whole window. The depths it gives
+    are the wall's, and the report line says how many corners the store is holding."""
+    frames, poses = wall_frames(40)
+    anchor = ParallaxAnchor(track_window_s=5.0)
+    pairs = drive(anchor, frames, poses)
+    store = anchor._store
+    assert store is not None and store.live > 100
+    assert max(track.hops for track in store._tracks) >= 30, "a corner must survive the window"
+    assert float(np.median(anchor._obs)) >= 5, "a track must rest on more than a pair's two views"
+    assert pairs is not None and pairs.size >= 20
+    assert abs(float(np.median(pairs.z)) / WALL_M - 1.0) < 0.05
+    assert "live corners" in anchor.describe() and "hop" in anchor.describe()
+
+
+@pytest.mark.slow
+def test_a_longer_window_is_a_wider_baseline_and_a_smaller_sigma() -> None:
+    """The reason the window may be long at all: every error term of a parallax depth divides
+    by the baseline, and following forward means a longer window costs no more flow. The same
+    forty pictures read at 1, 3 and 5 seconds must widen the baseline and shrink the sigma."""
+    frames, poses = wall_frames(40)
+    sigma: list[float] = []
+    baseline: list[float] = []
+    for window_s in (1.0, 3.0, 5.0):
+        anchor = ParallaxAnchor(track_window_s=window_s)
+        drive(anchor, frames, poses)
+        assert anchor.sigma_m is not None, f"{window_s} s triangulated nothing"
+        sigma.append(anchor.sigma_m)
+        baseline.append(float(np.median(anchor._baseline)))
+    assert baseline[0] < baseline[1] < baseline[2], f"the baselines did not grow: {baseline}"
+    assert sigma[0] > sigma[1] > sigma[2], f"the sigma did not fall: {sigma}"
+
+
+def test_a_window_shortened_live_uses_fewer_of_the_observations_it_already_holds() -> None:
+    """A knob turned in the field takes effect on the next frame and resets nothing: the store
+    keeps its corners, their hops and their observations, and simply stops reaching for the
+    ones the new window no longer covers."""
+    frames, poses = wall_frames(45)
+    stamps = sorted(poses)
+    network = np.full((SMALL.height, SMALL.width), 3.0)
+    odometry = Odometry(poses)
+    anchor = ParallaxAnchor(track_window_s=5.0)
+    for stamp, view in zip(stamps[:40], frames[:40], strict=True):
+        anchor.pairs(Frame(network, wall_context(stamp, view, odometry)))
+    store = anchor._store
+    assert store is not None
+    wide_obs, wide_baseline = anchor._obs[-1], anchor._baseline[-1]
+    corners, hops = store.live, max(track.hops for track in store._tracks)
+    oldest = min(o.stamp for t in store._tracks for o in t.observations)
+    assert stamps[39] - oldest > 4.0, "a 5 s window must be reaching back 5 s"
+    anchor.track_window_s = 1.0
+    anchor.pairs(Frame(network, wall_context(stamps[40], frames[40], odometry)))
+    oldest = min(o.stamp for t in store._tracks for o in t.observations)
+    assert stamps[40] - oldest <= 1.0, "the old observations must go on the very next frame"
+    assert max(stamps[40] - v.stamp for v in store.views()) <= 1.0
+    # the only corners lost are the ones that frame's own flow lost; nothing is reset
+    assert store.live >= corners - 5, "shortening the window must not throw the corners away"
+    assert max(track.hops for track in store._tracks) == hops + 1
+    for stamp, view in zip(stamps[41:], frames[41:], strict=True):
+        anchor.pairs(Frame(network, wall_context(stamp, view, odometry)))
+    assert anchor._obs[-1] < wide_obs, "a shorter window is fewer observations"
+    assert anchor._baseline[-1] < wide_baseline
+
+
+class SlidingFlow:
+    """A flow whose HOP slides ``per_hop`` pixels sideways every frame while a direct re-track
+    from an older picture still lands where the corner really is — the drift Lucas-Kanade does
+    along an edge, invisible to a per-hop forward-backward check because every single hop is
+    self-consistent."""
+
+    def __init__(self, per_hop: float) -> None:
+        self.per_hop = per_hop
+        self._real = LucasKanade()
+
+    def track(
+        self,
+        a: npt.NDArray[np.uint8],
+        b: npt.NDArray[np.uint8],
+        points: np.ndarray,
+        *,
+        backward: bool = True,
+        guess: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, npt.NDArray[np.bool_], np.ndarray]:
+        """The real flow, nudged sideways on a hop (no guess) and honest on a verification."""
+        landed, kept, drift = self._real.track(a, b, points, backward=backward, guess=guess)
+        if guess is None:
+            landed = landed + np.array([self.per_hop, 0.0], dtype=np.float32)
+        return landed, kept, drift
+
+
+def test_the_drift_bound_closes_a_corner_that_slid_off_its_own_birth_patch() -> None:
+    """Thirty hops of two pixels are sixty pixels and a depth that is wrong and consistent, and
+    no per-hop check can see it. Re-tracking each corner directly from the picture its oldest
+    kept view was taken in does see it: with the bound armed the sliding corners are closed and
+    counted, and with it off they live on."""
+    frames, poses = wall_frames(30)
+    place = CameraPlacement.of(CameraPose(0.0, 0.0, 1.23, 0.0))
+    store = TrackStore(window_s=5.0, verify_every=5, drift_tol_px=1.0, flow=SlidingFlow(2.0))
+    loose = TrackStore(window_s=5.0, verify_every=0, drift_tol_px=1.0, flow=SlidingFlow(2.0))
+    caught = 0
+    for stamp, view in zip(sorted(poses), frames, strict=True):
+        caught += store.follow(view, stamp, place, "odom").died["drift"]
+        loose.follow(view, stamp, place, "odom")
+    assert caught > 20, f"the bound closed only {caught} sliding corners"
+    assert loose.live > store.live, "with the bound off the sliding corners must survive"
+
+
+def test_the_drift_bound_leaves_a_corner_that_did_not_slide_alone() -> None:
+    """The other half of the bound: an honest flow over the same thirty frames loses nobody to
+    drift, so the gate is not simply closing whatever it re-tracks."""
+    frames, poses = wall_frames(30)
+    place = CameraPlacement.of(CameraPose(0.0, 0.0, 1.23, 0.0))
+    store = TrackStore(window_s=5.0, verify_every=5, drift_tol_px=1.0)
+    killed = 0
+    for stamp, view in zip(sorted(poses), frames, strict=True):
+        killed += store.follow(view, stamp, place, "odom").died["drift"]
+    # not zero as a matter of principle: a direct re-track five seconds back lands a pixel off
+    # now and then on noise alone. Three of two hundred is the false-positive rate, against the
+    # sliding flow's twenty-odd in the test above.
+    assert killed <= 3, f"an honest flow lost {killed} corners to the drift bound"
+    assert store.live > 100
+
+
+def test_a_track_s_solve_never_spans_two_motion_sources() -> None:
+    """The rule with no exception: the wheels and the tracker's map pose disagree by about a
+    quarter over a second, so a bundle half measured by each is not a geometry at all. The
+    source changes in the middle of the drive; from that frame on, not one observation from
+    before it is offered to a solve, and every track's own views agree with one another."""
+    frames, poses = wall_frames(20)
+    place = CameraPlacement.of(CameraPose(0.0, 0.0, 1.23, 0.0))
+    store = TrackStore(window_s=5.0)
+    stamps = sorted(poses)
+    turn = stamps[10]
+    for stamp, view in zip(stamps, frames, strict=True):
+        source = "odom" if stamp < turn else "tracker"
+        store.follow(view, stamp, place, source)
+        assert all(v.source == source for v in store.views()), "a view of the other source"
+        for track in store._tracks:
+            assert all(obs.source == source for obs in track.used)
+    assert min((v.stamp for v in store.views()), default=turn) >= turn
+    assert store.live > 100, "a track outlives the change of source: only its bundle restarts"
+
+
+@pytest.mark.slow
+def test_the_describer_follows_corners_forward_too() -> None:
+    """The forward store with ``orb``: the frame is described once, its keypoints matched
+    against the descriptors the live corners carried out of the previous frame, and whatever
+    nobody recognised becomes a new corner. The drift bound does not apply — a match is a
+    recognition, not a hop — and the depths are still the wall's."""
+    frames, poses = wall_frames(16)
+    anchor = ParallaxAnchor(matcher="orb", track_window_s=2.0)
+    pairs = drive(anchor, frames, poses)
+    store = anchor._store
+    assert store is not None and store.live > 50
+    assert max(track.hops for track in store._tracks) >= 8, "a keypoint must be re-recognised"
+    assert anchor.deaths.get("drift", 0) == 0, "the drift bound is a flow's, not a describer's"
+    assert pairs is not None and pairs.size >= 10
+    assert abs(float(np.median(pairs.z)) / WALL_M - 1.0) < 0.10
+
+
+def test_the_forward_ruler_emits_the_pairs_the_window_ruler_does() -> None:
+    """The interface downstream is untouched: whoever followed the corners, a frame comes out
+    as the same (network depth, triangulated depth, lift, weight, left) pool, with the track's
+    own observation count and two-view sigma filled in beside it."""
+    frames, poses = wall_frames(12)
+    forward = ParallaxAnchor(track_window_s=1.5)
+    windowed = ParallaxAnchor(tracking="window", track_window_s=1.5)
+    for anchor in (forward, windowed):
+        pairs = drive(anchor, frames, poses)
+        assert pairs is not None and pairs.size >= 20
+        assert pairs.d.shape == pairs.z.shape == pairs.lift.shape == pairs.weight.shape
+        assert pairs.left.shape == pairs.d.shape
+        assert np.all(np.isfinite(pairs.z)) and np.all(pairs.weight > 0)
+        assert abs(float(np.median(pairs.z)) / WALL_M - 1.0) < 0.05
+        assert anchor._obs and anchor._sigma_two

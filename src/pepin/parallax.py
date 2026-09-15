@@ -86,6 +86,23 @@ is the pair's own formula with the bundle's parallax in it: ``sigma_z = z^2 * si
 (f * B_effective)`` with ``B_effective = sqrt(sum_v b_v^2)`` over the views, so four views 5 cm
 out are worth one pair at 10 cm, and a two-view track is arithmetically today's pair.
 
+Following a corner BACKWARDS is the wrong way round, and the cost says so: the whole window is
+re-tracked on every frame, two flow calls per view, 27 ms a frame at 8 views and 52 at 16
+(scratch/parallax_tracks_audit.txt), so a window long enough to matter cannot be afforded. And
+the window is what matters. Every error term of a triangulated depth divides by the baseline —
+pixel noise as ``z^2 sigma_px / (f B)``, the pose's own centimetre or two as ``1 / B``, its
+0.3 degrees of heading as 1.9 px against a disparity of 25 px at 2 m — while the tracker's map
+pose is ABSOLUTE, so reaching further back costs the pose nothing at all. Over 1.5 s this cart's
+effective baseline is about 14 cm and a parallax-only law leaves 19 % of residual against the
+lidar; 28 cm should halve that. :class:`TrackStore` turns the tracking round: a corner is
+detected once and followed FORWARD one hop a frame, two flow calls per FRAME whatever the
+window, each hop appending an observation to the corner it already has. What a forward track
+needs and a backward one never did is a bound on the drift a per-hop check cannot see — the flow
+slides along an edge and along the epipolar line by a fraction of a pixel a hop, each hop
+passing its own forward-backward test — so every ``verify_every`` frames each corner is
+re-tracked DIRECTLY from the grey of its oldest kept view and closed when the two disagree by
+more than ``drift_tol_px``.
+
 A track can be asked to agree with itself as well: :func:`_split_gap` solves the older half of a
 track's views and the newer half separately and drops the track when the two depths disagree
 (``split_tol_sigma``, off by default). It is the only test left that reads a depth changing with
@@ -113,7 +130,8 @@ weighed and not a truth to be trusted.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol
 
@@ -1266,16 +1284,13 @@ def triangulate_tracks(
     )
 
 
-def track_truth(
-    grays: Sequence[npt.NDArray[np.uint8]],
-    motions: Sequence[Motion],
+def gate_tracks(
+    tracks: Tracks,
     intr: Intrinsics,
     *,
     matcher: str = "klt",
-    features: list[Features | None] | None = None,
     min_obs: int = TRACK_MIN_OBS,
     min_total_baseline_m: float = TRACK_MIN_TOTAL_BASELINE_M,
-    max_views: int = TRACK_MAX_VIEWS,
     min_baseline_m: float = MIN_BASELINE_M,
     min_parallax_ratio: float = MIN_PARALLAX_RATIO,
     epipole_min_deg: float = EPIPOLE_MIN_DEG,
@@ -1286,38 +1301,26 @@ def track_truth(
     sigma_model: str = TRACK_SIGMA_MODEL,
     split_tol_sigma: float = TRACK_SPLIT_TOL_SIGMA,
 ) -> ParallaxTruth:
-    """:func:`parallax_truth` over a window of frames instead of a pair: track, gate,
-    triangulate from every view at once, weigh. The result is the same
-    :class:`ParallaxTruth` — the pixels of the CURRENT frame, their depth, their sigma, their
-    weight against a lidar beam — with ``observations`` and ``sigma_two`` filled in, so an
-    anchor emits the same pairs whichever ruler it used.
+    """A bundle of tracks gated, triangulated and weighed, whoever followed the corners: the
+    half of :func:`track_truth` that does not care how the pixels were found, so the backward
+    window (:func:`build_tracks`) and the forward store (:class:`TrackStore`) come out as the
+    same :class:`ParallaxTruth` with the same gates in the same order.
 
-    ``grays`` is oldest first with the current frame last and ``motions`` is one per earlier
-    view into the current camera (:func:`build_tracks`). The gates a track meets: the motion
-    itself (no view moved ``min_baseline_m`` and there is nothing to triangulate — ``still``
-    when the camera did not turn either, ``rotation-only`` when it only turned); the matcher's
-    own check (forward-backward per hop for the flow, the ratio and cross-check for the
-    describer); the epipolar distance of each OBSERVATION to the known motion of its view,
-    which drops that observation and not the whole track; landing inside the current picture;
-    ``min_obs`` observations left; a depth in front of every lens that saw it; the parallax
-    those observations add up to (``min_total_baseline_m`` of effective baseline, and
-    ``min_parallax_ratio`` of the depth, and ``epipole_min_deg`` off the direction of travel);
-    the bundle's own reprojection error (``max_reproj_px``); and, only when
-    ``split_tol_sigma`` is above 0, the two halves of the window agreeing about the depth to
-    within that many combined sigmas (:func:`_split_gap` — which also says what it cannot see,
-    and what the measurement says it is worth). Set it huge to compute the split and gate on
-    nothing, which is how its distribution was measured."""
-    if not motions or max(m.baseline for m in motions) < min_baseline_m:
-        turned = bool(motions) and max(m.angle for m in motions) > MIN_ROTATION_RAD
+    ``tracks`` must carry the current frame as its last view (its motion the identity), which
+    is where every depth is reported. The gates a track meets, in order: the motion itself
+    (nothing moved ``min_baseline_m`` and there is nothing to triangulate — ``still`` when the
+    camera did not turn either, ``rotation-only`` when it only turned); the epipolar distance
+    of each OBSERVATION to the known motion of its view, which drops that observation and not
+    the whole track; landing inside the current picture; ``min_obs`` observations left; a depth
+    in front of every lens that saw it; the parallax those observations add up to
+    (``min_total_baseline_m`` of effective baseline, ``min_parallax_ratio`` of the depth, and
+    ``epipole_min_deg`` off the direction of travel); the bundle's own reprojection error
+    (``max_reproj_px``); and, only when ``split_tol_sigma`` is above 0, the two halves of the
+    window agreeing about the depth (:func:`_split_gap`)."""
+    earlier = tracks.motions[:-1]
+    if not earlier or max(m.baseline for m in earlier) < min_baseline_m:
+        turned = bool(earlier) and max(m.angle for m in earlier) > MIN_ROTATION_RAD
         return ParallaxTruth.nothing("rotation-only" if turned else "still")
-    span = _view_span(len(grays), max_views)
-    windows = [grays[i] for i in span]
-    moved = [motions[i] for i in span if i < len(motions)]
-    kept_features = None if features is None else [features[i] for i in span]
-    tracks = build_tracks(windows, moved, matcher=matcher, features=kept_features)
-    if features is not None and kept_features is not None:
-        for slot, i in enumerate(span):
-            features[i] = kept_features[slot]
     rejected = dict.fromkeys((*REASONS, *TRACK_REASONS), 0)
     started = tracks.observations >= 2
     tracked = int(started.sum())
@@ -1399,6 +1402,634 @@ def track_truth(
     )
 
 
+def track_truth(
+    grays: Sequence[npt.NDArray[np.uint8]],
+    motions: Sequence[Motion],
+    intr: Intrinsics,
+    *,
+    matcher: str = "klt",
+    features: list[Features | None] | None = None,
+    min_obs: int = TRACK_MIN_OBS,
+    min_total_baseline_m: float = TRACK_MIN_TOTAL_BASELINE_M,
+    max_views: int = TRACK_MAX_VIEWS,
+    min_baseline_m: float = MIN_BASELINE_M,
+    min_parallax_ratio: float = MIN_PARALLAX_RATIO,
+    epipole_min_deg: float = EPIPOLE_MIN_DEG,
+    max_sampson_px: float = MAX_SAMPSON_PX,
+    max_reproj_px: float = MAX_REPROJ_PX,
+    max_weight: float = MAX_WEIGHT,
+    outlier_px: float = TRACK_OUTLIER_PX,
+    sigma_model: str = TRACK_SIGMA_MODEL,
+    split_tol_sigma: float = TRACK_SPLIT_TOL_SIGMA,
+) -> ParallaxTruth:
+    """:func:`parallax_truth` over a window of frames instead of a pair: track, gate,
+    triangulate from every view at once, weigh. The result is the same
+    :class:`ParallaxTruth` — the pixels of the CURRENT frame, their depth, their sigma, their
+    weight against a lidar beam — with ``observations`` and ``sigma_two`` filled in, so an
+    anchor emits the same pairs whichever ruler it used.
+
+    ``grays`` is oldest first with the current frame last and ``motions`` is one per earlier
+    view into the current camera (:func:`build_tracks`). The matcher's own check comes first
+    (forward-backward per hop for the flow, the ratio and cross-check for the describer) and
+    every gate after it is :func:`gate_tracks`', in its order and under its names — including
+    ``split_tol_sigma``, which set huge computes the split and gates on nothing, the way its
+    distribution was measured."""
+    if not motions or max(m.baseline for m in motions) < min_baseline_m:
+        turned = bool(motions) and max(m.angle for m in motions) > MIN_ROTATION_RAD
+        return ParallaxTruth.nothing("rotation-only" if turned else "still")
+    span = _view_span(len(grays), max_views)
+    windows = [grays[i] for i in span]
+    moved = [motions[i] for i in span if i < len(motions)]
+    kept_features = None if features is None else [features[i] for i in span]
+    tracks = build_tracks(windows, moved, matcher=matcher, features=kept_features)
+    if features is not None and kept_features is not None:
+        for slot, i in enumerate(span):
+            features[i] = kept_features[slot]
+    return gate_tracks(
+        tracks,
+        intr,
+        matcher=matcher,
+        min_obs=min_obs,
+        min_total_baseline_m=min_total_baseline_m,
+        min_baseline_m=min_baseline_m,
+        min_parallax_ratio=min_parallax_ratio,
+        epipole_min_deg=epipole_min_deg,
+        max_sampson_px=max_sampson_px,
+        max_reproj_px=max_reproj_px,
+        max_weight=max_weight,
+        outlier_px=outlier_px,
+        sigma_model=sigma_model,
+        split_tol_sigma=split_tol_sigma,
+    )
+
+
+# ---- the forward ruler: a corner born once and followed one hop a frame -----------------------
+TRACKINGS = ("forward", "window", "pair")
+Tracking = Literal["forward", "window", "pair"]
+TRACK_MAX_TRACKS = 200  # corners the store follows at once: the cost of one LK call, not of many
+TRACK_REDETECT_EVERY = 5  # frames between two hunts for new corners
+TRACK_DETECT_FLOOR = 0.6  # live corners under this share of the cap start a hunt early
+TRACK_VERIFY_EVERY = 10  # frames between two rounds of the long-range drift bound; 0 is off
+TRACK_DRIFT_TOL_PX = 1.0  # how far the hopped corner may sit from where its birth patch lands
+DETECT_GRID = (4, 3)  # columns x rows the detector spreads new corners over, so the TOP of the
+# picture gets corners too — which is exactly where the lidar's one plane never reaches, and the
+# only elevation a law over the ray's angle can be fitted at.
+TRACK_DEATHS = ("lk", "fb", "edge", "drift", "source")
+
+
+class Flow(Protocol):
+    """Who moves a set of points from one picture to the next — the one thing the forward store
+    needs of a tracker, so a test may hand it a fake that drifts on purpose."""
+
+    def track(
+        self,
+        a: npt.NDArray[np.uint8],
+        b: npt.NDArray[np.uint8],
+        points: Pixels,
+        *,
+        backward: bool = True,
+        guess: Pixels | None = None,
+    ) -> tuple[Pixels, npt.NDArray[np.bool_], Array]:
+        """Where each of ``points`` landed in ``b``, whether the tracker kept it at all, and how
+        far it came back from where it started when followed back into ``a`` (``inf`` per point
+        when ``backward`` is off). ``guess`` starts the search at a known position instead of at
+        the point itself, which is what makes a jump across a whole window converge."""
+        ...
+
+
+@dataclass(frozen=True)
+class LucasKanade:
+    """Pyramidal Lucas-Kanade as the store's :class:`Flow`: one call forward, one back for the
+    check, the same window and pyramid the pair path uses."""
+
+    window: int = LK_WINDOW
+    levels: int = LK_LEVELS
+
+    def track(
+        self,
+        a: npt.NDArray[np.uint8],
+        b: npt.NDArray[np.uint8],
+        points: Pixels,
+        *,
+        backward: bool = True,
+        guess: Pixels | None = None,
+    ) -> tuple[Pixels, npt.NDArray[np.bool_], Array]:
+        """:meth:`Flow.track` by optical flow: (landed pixels, kept, the forward-backward
+        distance in pixels)."""
+        import cv2
+
+        empty: Pixels = np.zeros((0, 2), dtype=np.float32)
+        start = np.asarray(points, dtype=np.float32).reshape(-1, 1, 2)
+        if start.shape[0] == 0:
+            return empty, np.zeros(0, dtype=bool), np.zeros(0)
+        first = np.ascontiguousarray(a)
+        second = np.ascontiguousarray(b)
+        size = (self.window, self.window)
+        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+        flow: Any = cv2.calcOpticalFlowPyrLK  # cv2's stubs admit neither uint8 nor a None output
+        seed = None if guess is None else np.asarray(guess, dtype=np.float32).reshape(-1, 1, 2)
+        forward, ok, _ = flow(
+            first,
+            second,
+            start,
+            None if seed is None else seed.copy(),
+            winSize=size,
+            maxLevel=self.levels,
+            criteria=criteria,
+            **({} if seed is None else {"flags": cv2.OPTFLOW_USE_INITIAL_FLOW}),
+        )
+        kept: npt.NDArray[np.bool_] = ok.ravel() == 1
+        drift = np.full(start.shape[0], np.inf)
+        if backward and bool(kept.any()):
+            back, ok_back, _ = flow(
+                second, first, forward, None, winSize=size, maxLevel=self.levels, criteria=criteria
+            )
+            kept &= ok_back.ravel() == 1
+            drift = np.linalg.norm((back - start).reshape(-1, 2), axis=1)
+        landed: Pixels = forward.reshape(-1, 2).astype(np.float32)
+        return landed, kept, drift
+
+
+@dataclass(frozen=True)
+class FrameView:
+    """One frame a track may be triangulated from: when it was taken, the whole ``base_link <-
+    camera_optical`` the lens sat at then (the neck's pan included), and whose word the cart's
+    motion at that moment was — ``tracker`` (the map pose) or ``odom``."""
+
+    stamp: float
+    place: Placement
+    source: str
+
+
+@dataclass(frozen=True)
+class Observation:
+    """Where one track was seen in one frame: its sub-pixel (column, row) and the frame."""
+
+    pixel: Pixels
+    view: FrameView
+
+    @property
+    def stamp(self) -> float:
+        """When the observation was made, in seconds."""
+        return self.view.stamp
+
+    @property
+    def source(self) -> str:
+        """Whose word the motion at that frame was."""
+        return self.view.source
+
+
+@dataclass(eq=False)
+class Track:
+    """One corner, born where a detector found it and followed forward one hop a frame: where
+    it sits in the CURRENT picture, when it was born, the observations kept for its solve
+    (oldest first, all inside the window), the observations this frame actually uses, the ORB
+    descriptor its last sighting carried (``None`` for the flow) and how many hops it has
+    survived."""
+
+    ident: int
+    pixel: Pixels
+    born: float
+    observations: list[Observation] = field(default_factory=list)
+    used: list[Observation] = field(default_factory=list)
+    descriptor: npt.NDArray[np.uint8] | None = None
+    hops: int = 0
+
+    @property
+    def anchor(self) -> float | None:
+        """The stamp of the oldest observation still inside the window — the frame the drift
+        bound re-tracks this corner from; ``None`` for a track with no observation yet."""
+        return self.observations[0].stamp if self.observations else None
+
+
+@dataclass(frozen=True)
+class TrackReport:
+    """What one frame cost the store and what it did to the corners: how many are alive, how
+    many were born, how many died of each cause (``lk`` the tracker lost it, ``fb`` it failed
+    the forward-backward check, ``edge`` it left the picture, ``drift`` it disagreed with its
+    own birth patch, ``source`` its older views were cut off by a change of motion source —
+    the corner itself lives on, its bundle starts again), the median observations a live track
+    carries, and the milliseconds of the hop, the detection and the drift bound."""
+
+    live: int
+    born: int
+    died: dict[str, int]
+    observations: float
+    hop_ms: float
+    detect_ms: float
+    verify_ms: float
+
+
+class TrackStore:
+    """Corners followed FORWARD, one hop a frame, for as long as each of them survives.
+
+    The backward build (:func:`build_tracks`) re-tracks the current frame's corners through
+    every frame of the window on every frame, so its cost is two flow calls per view and a
+    long window is unaffordable: 27 ms a frame at 8 views, 52 at 16
+    (scratch/parallax_tracks_audit.txt). This one pays two flow calls per FRAME whatever the
+    window: a corner is detected once, followed from the previous grey to the current one with
+    the forward-backward check, and each frame appends an observation to the corner it already
+    has. The window is then free to be as long as the pose is good, which is the whole point —
+    every error term in a triangulated depth divides by the baseline (pixel noise as
+    ``z^2 sigma_px / (f B)``, the pose's own 1-2 cm as ``1 / B``), the effective baseline over
+    1.5 s of this cart's errand is about 14 cm, and the tracker's map pose is absolute, so 3 s
+    costs the pose nothing and doubles the divisor.
+
+    What the store is careful about, in the order a frame meets it:
+
+    * **the hop** — one flow call for every live corner, one back for the check. A corner the
+      tracker loses, that comes back more than ``fb_tol_px`` from where it started, or that
+      leaves the picture, is closed.
+    * **the drift bound** — a per-hop check cannot see the drift that matters. Lucas-Kanade
+      slides along an edge and along the epipolar line by a fraction of a pixel a hop, each hop
+      passing its own forward-backward test, and fifty hops later the corner is somewhere else
+      at a depth that is wrong and consistent. So every ``verify_every`` frames each corner is
+      re-tracked DIRECTLY from the grey of the frame its oldest kept observation was made in,
+      started at where the hops say it is, and closed when the two disagree by more than
+      ``drift_tol_px``. One flow call per kept grey, one grey a frame, so no frame pays more
+      than one.
+    * **the window** — observations older than ``window_s`` are dropped and the track lives on.
+      A window shortened live is therefore a shorter bundle on the very next frame, with no
+      restart and nothing reset.
+    * **the views** — a solve rests on at most ``max_views`` observations, evenly spaced, the
+      oldest kept and the current frame always. Observations are only STORED every
+      ``window_s / max_views`` seconds (and on every frame while the window holds fewer than
+      ``max_views`` of them), which is what keeps the number of poses a frame must ask for
+      bounded by ``max_views`` however long the window is.
+    * **the detector** — new corners every ``redetect_every`` frames, or as soon as the live
+      count falls under ``TRACK_DETECT_FLOOR`` of ``max_tracks``, masked away from the corners
+      already alive and balanced over a :data:`DETECT_GRID` so the top of the picture is filled
+      too. The lidar's plane never reaches there, and a law over the ray's elevation needs it.
+    * **the motion source** — every observation carries whose word the motion at its frame was.
+      A solve walks back from the current frame while the source stays the same and stops at
+      the first observation from the other one: the two disagree by about a quarter over a
+      second (scratch/parallax_pose_sweep.txt) and a bundle half measured by each is not a
+      geometry at all. A track whose source changed keeps living and starts its bundle again;
+      after ``window_s`` the other source's observations have left the window by themselves.
+
+    With ``matcher`` ``orb`` the hop is a descriptor match instead — the current frame is
+    described once and matched against the descriptors the live corners carried out of the
+    previous frame — and the drift bound does not apply, a match being a recognition rather
+    than a hop."""
+
+    def __init__(
+        self,
+        *,
+        window_s: float = TRACK_WINDOW_S,
+        max_views: int = TRACK_MAX_VIEWS,
+        max_tracks: int = TRACK_MAX_TRACKS,
+        redetect_every: int = TRACK_REDETECT_EVERY,
+        verify_every: int = TRACK_VERIFY_EVERY,
+        drift_tol_px: float = TRACK_DRIFT_TOL_PX,
+        matcher: str = "klt",
+        quality: float = CORNER_QUALITY,
+        min_distance: int = CORNER_MIN_DISTANCE,
+        fb_tol_px: float = FB_TOL_PX,
+        ratio: float = ORB_RATIO,
+        flow: Flow | None = None,
+    ) -> None:
+        if matcher not in MATCHERS:
+            raise ValueError(f"unknown matcher {matcher!r}: one of {', '.join(MATCHERS)}")
+        self.window_s = window_s  # live: every knob here is read afresh on each frame
+        self.max_views = max_views
+        self.max_tracks = max_tracks
+        self.redetect_every = redetect_every
+        self.verify_every = verify_every
+        self.drift_tol_px = drift_tol_px
+        self.matcher = matcher
+        self.quality = quality
+        self.min_distance = min_distance
+        self.fb_tol_px = fb_tol_px
+        self.ratio = ratio
+        self._flow: Flow = flow if flow is not None else LucasKanade()
+        self._tracks: list[Track] = []
+        self._described: Features | None = None  # the describer's reading of the current frame
+        self._taken: npt.NDArray[np.bool_] = np.zeros(0, dtype=bool)  # its keypoints recognised
+        self._next = 0
+        self._gray: npt.NDArray[np.uint8] | None = None
+        self._keys: list[FrameView] = []
+        self._greys: dict[float, npt.NDArray[np.uint8]] = {}
+        self._pending: list[FrameView] = []
+        self._queue: list[float] = []
+        self._since_detect = 0
+        self._since_verify = 0
+        self._frames = 0
+
+    @property
+    def live(self) -> int:
+        """How many corners the store is following right now."""
+        return len(self._tracks)
+
+    def reset(self) -> None:
+        """Forget every corner and every kept picture — a new tape, or a jump in time."""
+        self._tracks.clear()
+        self._gray = None
+        self._keys.clear()
+        self._greys.clear()
+        self._pending.clear()
+        self._queue.clear()
+        self._since_detect = self._since_verify = self._frames = 0
+
+    def follow(
+        self, gray: npt.NDArray[np.uint8], stamp: float, place: Placement, source: str
+    ) -> TrackReport:
+        """Take one frame: hop every live corner into it, verify one kept grey against it,
+        forget what the window no longer covers, detect new corners when they are due, keep the
+        observation when the frame is a view, and choose the views every track's next solve
+        rests on. Returns what it cost and what it did (:class:`TrackReport`)."""
+        view = FrameView(float(stamp), place, str(source))
+        died = dict.fromkeys(TRACK_DEATHS, 0)
+        hop_ms = detect_ms = verify_ms = 0.0
+        if self.matcher == "orb":  # described once a frame, whoever asks for it
+            started = time.perf_counter()
+            self._described = describe_frame(gray)
+            self._taken = np.zeros(self._described.count, dtype=bool)
+            hop_ms += 1000.0 * (time.perf_counter() - started)
+        if self._gray is not None and self._tracks:
+            started = time.perf_counter()
+            self._hop(gray, died)
+            hop_ms = 1000.0 * (time.perf_counter() - started)
+        started = time.perf_counter()
+        self._verify(gray, died)
+        verify_ms = 1000.0 * (time.perf_counter() - started)
+        self._forget(view.stamp)
+        born = 0
+        self._since_detect += 1
+        if self._due():
+            started = time.perf_counter()
+            born = self._detect(gray, view)
+            detect_ms = 1000.0 * (time.perf_counter() - started)
+            self._since_detect = 0
+        if self._is_view(view, born):
+            self._keys.append(view)
+            self._greys[view.stamp] = gray
+            for track in self._tracks:
+                track.observations.append(Observation(track.pixel.copy(), view))
+        died["source"] = self._select(view)
+        self._gray = gray
+        self._frames += 1
+        counts = [float(len(t.observations)) for t in self._tracks]
+        return TrackReport(
+            live=len(self._tracks),
+            born=born,
+            died=died,
+            observations=float(np.median(counts)) if counts else 0.0,
+            hop_ms=hop_ms,
+            detect_ms=detect_ms,
+            verify_ms=verify_ms,
+        )
+
+    def views(self) -> list[FrameView]:
+        """The earlier frames the next solve needs a motion for, oldest first — at most
+        ``max_views`` of them however long the window is, because that is how sparsely the
+        store keeps an observation in the first place."""
+        return list(self._pending)
+
+    def tracks(self, motions: Mapping[float, Motion]) -> Tracks:
+        """The live corners as the bundle :func:`gate_tracks` triangulates: one row per track
+        that has at least one usable earlier view, one column per view the caller could answer
+        for, and the current frame as the last column (its motion the identity, its pixel the
+        one every depth is reported at). ``motions`` maps a view's stamp to the transform
+        taking that view's optical frame into the current camera's; a view left out of it is
+        simply not used — which is how a caller drops the views its motion source would not
+        answer for without mixing two sources into one geometry."""
+        stamps = [v.stamp for v in self._pending if v.stamp in motions]
+        index = {stamp: i for i, stamp in enumerate(stamps)}
+        rows = [t for t in self._tracks if any(o.stamp in index for o in t.used)]
+        views = len(stamps) + 1
+        pixels = np.full((len(rows), views, 2), np.nan)
+        seen = np.zeros((len(rows), views), dtype=bool)
+        for r, track in enumerate(rows):
+            for obs in track.used:
+                slot = index.get(obs.stamp)
+                if slot is None:
+                    continue
+                pixels[r, slot] = obs.pixel
+                seen[r, slot] = True
+            pixels[r, -1] = track.pixel
+            seen[r, -1] = True
+        ordered = (*(motions[stamp] for stamp in stamps), _identity())
+        return Tracks(pixels, seen, ordered, found=len(self._tracks))
+
+    # ---- one frame, step by step ---------------------------------------------------------
+    def _hop(self, gray: npt.NDArray[np.uint8], died: dict[str, int]) -> None:
+        """Every live corner moved into this frame, and the ones that did not make it closed."""
+        if self.matcher == "orb":
+            self._recognise(died)
+            return
+        previous = self._gray
+        if previous is None:
+            return
+        points = np.array([t.pixel for t in self._tracks], dtype=np.float32)
+        landed, kept, drift = self._flow.track(previous, gray, points, backward=True)
+        height, width = gray.shape[:2]
+        steady = kept & (drift <= self.fb_tol_px)
+        inside = (
+            (landed[:, 0] >= 0)
+            & (landed[:, 0] < width)
+            & (landed[:, 1] >= 0)
+            & (landed[:, 1] < height)
+        )
+        died["lk"] += int((~kept).sum())
+        died["fb"] += int((kept & ~steady).sum())
+        died["edge"] += int((steady & ~inside).sum())
+        good = steady & inside
+        alive: list[Track] = []
+        for track, ok, where in zip(self._tracks, good, landed, strict=True):
+            if not bool(ok):
+                continue
+            track.pixel = np.asarray(where, dtype=np.float32)
+            track.hops += 1
+            alive.append(track)
+        self._tracks = alive
+
+    def _recognise(self, died: dict[str, int]) -> None:
+        """The describer's hop: this frame described once, its keypoints matched against the
+        descriptors the live corners carried out of the previous frame, and the corners nobody
+        recognised closed. What the match does not find is left for :meth:`_detect`."""
+        frame = self._described
+        if frame is None:
+            return
+        held = [t for t in self._tracks if t.descriptor is not None]
+        if not held or frame.count == 0:
+            died["lk"] += len(self._tracks)
+            self._tracks = []
+            return
+        mine = Features(
+            np.array([t.pixel for t in held], dtype=np.float32),
+            np.array([t.descriptor for t in held], dtype=np.uint8),
+        )
+        rows, theirs = _match_features(mine, frame, self.ratio)
+        taken = np.zeros(frame.count, dtype=bool)
+        alive: list[Track] = []
+        for row, column in zip(rows, theirs, strict=True):
+            track = held[int(row)]
+            track.pixel = np.asarray(frame.points[int(column)], dtype=np.float32)
+            assert frame.descriptors is not None
+            track.descriptor = frame.descriptors[int(column)]
+            track.hops += 1
+            taken[int(column)] = True
+            alive.append(track)
+        died["lk"] += len(self._tracks) - len(alive)
+        self._tracks = alive
+        self._taken = taken
+
+    def _verify(self, gray: npt.NDArray[np.uint8], died: dict[str, int]) -> None:
+        """The long-range drift bound: one kept grey a frame, its corners re-tracked directly
+        into this picture from where the hops say they are, and every corner whose birth patch
+        lands more than ``drift_tol_px`` away closed. A cycle over every kept grey starts every
+        ``verify_every`` frames, one grey per frame, so no frame pays for more than one call."""
+        if self.matcher != "klt" or self.verify_every <= 0 or self.drift_tol_px <= 0:
+            return
+        self._since_verify += 1
+        if not self._queue and self._since_verify >= self.verify_every:
+            self._queue = [key.stamp for key in self._keys if key.stamp in self._greys]
+            self._since_verify = 0
+        while self._queue:
+            stamp = self._queue.pop(0)
+            older = self._greys.get(stamp)
+            group = [t for t in self._tracks if t.anchor == stamp]
+            if older is None or not group:
+                continue  # that grey has left the window, or holds nobody's oldest view
+            birth = np.array([t.observations[0].pixel for t in group], dtype=np.float32)
+            hopped = np.array([t.pixel for t in group], dtype=np.float32)
+            landed, kept, _ = self._flow.track(older, gray, birth, backward=False, guess=hopped)
+            slid = np.linalg.norm(landed - hopped, axis=1)
+            drifted = kept & (slid > self.drift_tol_px)
+            if bool(drifted.any()):
+                died["drift"] += int(drifted.sum())
+                gone = {id(t) for t, bad in zip(group, drifted, strict=True) if bool(bad)}
+                self._tracks = [t for t in self._tracks if id(t) not in gone]
+            return
+
+    def _forget(self, now: float) -> None:
+        """Drop what the window no longer covers: every observation older than ``window_s``,
+        the views they were made in and the greys kept for them. The tracks themselves live."""
+        cutoff = now - self.window_s
+        for track in self._tracks:
+            if track.observations and track.observations[0].stamp < cutoff:
+                track.observations = [o for o in track.observations if o.stamp >= cutoff]
+        self._keys = [key for key in self._keys if key.stamp >= cutoff]
+        alive = {key.stamp for key in self._keys}
+        self._greys = {stamp: grey for stamp, grey in self._greys.items() if stamp in alive}
+        self._queue = [stamp for stamp in self._queue if stamp in alive]
+
+    def _due(self) -> bool:
+        """Whether to hunt for new corners: every ``redetect_every`` frames, or as soon as the
+        live count falls under :data:`TRACK_DETECT_FLOOR` of the cap (a turn or a doorway can
+        take three corners in four in one frame, and waiting for the cadence wastes the window)."""
+        if not self._tracks:
+            return True
+        if self._since_detect >= max(self.redetect_every, 1):
+            return True
+        return len(self._tracks) < TRACK_DETECT_FLOOR * self.max_tracks
+
+    def _detect(self, gray: npt.NDArray[np.uint8], view: FrameView) -> int:
+        """New corners where there are none: masked away from the corners already alive and
+        asked for cell by cell over :data:`DETECT_GRID`, so the top of the picture is filled
+        even though its corners are weaker than the floor's. Returns how many were born."""
+        room = self.max_tracks - len(self._tracks)
+        if room <= 0:
+            return 0
+        if self.matcher == "orb":
+            return self._adopt(room, view)
+        import cv2
+
+        height, width = gray.shape[:2]
+        mask = np.full((height, width), 255, dtype=np.uint8)
+        for track in self._tracks:
+            centre = (round(float(track.pixel[0])), round(float(track.pixel[1])))
+            cv2.circle(mask, centre, int(self.min_distance), 0, -1)
+        columns, rows = DETECT_GRID
+        share = max(1, -(-room // (columns * rows)))
+        picture = np.ascontiguousarray(gray)
+        born = 0
+        for cx in range(columns):
+            for cy in range(rows):
+                x0, x1 = width * cx // columns, width * (cx + 1) // columns
+                y0, y1 = height * cy // rows, height * (cy + 1) // rows
+                found = cv2.goodFeaturesToTrack(
+                    picture[y0:y1, x0:x1],
+                    maxCorners=min(share, room - born),
+                    qualityLevel=self.quality,
+                    minDistance=self.min_distance,
+                    mask=mask[y0:y1, x0:x1],
+                )
+                if found is None:
+                    continue
+                for point in found.reshape(-1, 2):
+                    self._born(np.array([point[0] + x0, point[1] + y0], dtype=np.float32), view)
+                    born += 1
+                    if born >= room:
+                        return born
+        return born
+
+    def _adopt(self, room: int, view: FrameView) -> int:
+        """The describer's detection: the keypoints of this frame nobody recognised become new
+        corners, strongest first (ORB returns them in that order)."""
+        frame = self._described
+        if frame is None or frame.descriptors is None:
+            return 0
+        free = np.flatnonzero(~self._taken)
+        born = 0
+        for column in free[:room]:
+            track = self._born(np.asarray(frame.points[column], dtype=np.float32), view)
+            track.descriptor = frame.descriptors[column]
+            born += 1
+        return born
+
+    def _born(self, pixel: Pixels, view: FrameView) -> Track:
+        """One new corner, alive from this frame on."""
+        track = Track(self._next, np.asarray(pixel, dtype=np.float32), view.stamp)
+        self._next += 1
+        self._tracks.append(track)
+        return track
+
+    def _is_view(self, view: FrameView, born: int) -> bool:
+        """Whether this frame is kept as a view a solve may rest on: always while the window
+        holds fewer than ``max_views`` of them or corners were just born in it (a newborn with
+        no observation at its own frame would start its bundle a cadence late), and every
+        ``window_s / max_views`` seconds after that — which is what bounds the poses a frame
+        must ask for, and the greys the drift bound keeps, however long the window is."""
+        if not self._keys or born:
+            return True
+        if len(self._keys) < max(self.max_views, 2):
+            return True
+        spacing = self.window_s / max(self.max_views, 1)
+        return view.stamp - self._keys[-1].stamp >= spacing
+
+    def _select(self, view: FrameView) -> int:
+        """Choose the views every track's next solve rests on and list the frames a motion is
+        needed for. A track's run is walked back from the current frame while the motion source
+        stays the current frame's and stopped at the first observation from the other one; of
+        that run at most ``max_views - 1`` are kept, evenly spaced, the oldest always (the
+        current frame is the anchor and is always the last view). Returns how many tracks the
+        source cut short."""
+        now = view.stamp
+        cut = 0
+        wanted: dict[float, FrameView] = {}
+        for track in self._tracks:
+            run: list[Observation] = []
+            broke = False
+            for obs in reversed(track.observations):
+                if obs.source != view.source:
+                    broke = True
+                    break
+                if obs.stamp < now:
+                    run.append(obs)
+            run.reverse()
+            if broke:  # nothing older than the change can ever be used again: drop it once
+                cut += 1
+                oldest = run[0].stamp if run else now
+                track.observations = [o for o in track.observations if o.stamp >= oldest]
+            span = _view_span(len(run), max(self.max_views - 1, 1))
+            track.used = [run[i] for i in span]
+            for obs in track.used:
+                wanted.setdefault(obs.stamp, obs.view)
+        self._pending = [wanted[stamp] for stamp in sorted(wanted)]
+        return cut
+
+
 def to_gray(rgb: npt.NDArray[np.uint8]) -> npt.NDArray[np.uint8]:
     """An RGB image as the single-channel grey the tracker reads (the luma weights, no cv2)."""
     px = np.asarray(rgb)
@@ -1422,28 +2053,43 @@ __all__ = [
     "ORB_DISPARITY_SIGMA_PX",
     "ORB_FEATURES",
     "ORB_RATIO",
+    "TRACKINGS",
+    "TRACK_DEATHS",
+    "TRACK_DRIFT_TOL_PX",
+    "TRACK_MAX_TRACKS",
     "TRACK_MAX_VIEWS",
     "TRACK_MIN_OBS",
     "TRACK_MIN_TOTAL_BASELINE_M",
     "TRACK_OUTLIER_PX",
     "TRACK_REASONS",
+    "TRACK_REDETECT_EVERY",
     "TRACK_SIGMA_MODEL",
     "TRACK_SIGMA_MODELS",
     "TRACK_SPLIT_TOL_SIGMA",
+    "TRACK_VERIFY_EVERY",
     "TRACK_WINDOW_S",
     "CameraPlacement",
     "Features",
+    "Flow",
+    "FrameView",
+    "LucasKanade",
     "Matcher",
     "Motion",
+    "Observation",
     "ParallaxTruth",
     "Pixels",
     "Placement",
+    "Track",
     "TrackDepths",
+    "TrackReport",
+    "TrackStore",
+    "Tracking",
     "Tracks",
     "build_tracks",
     "camera_motion",
     "describe_frame",
     "fundamental",
+    "gate_tracks",
     "match",
     "optical_from_base",
     "parallax_truth",

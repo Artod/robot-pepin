@@ -121,19 +121,25 @@ from pepin.depth import (
 from pepin.depth_pipeline import (
     FIELD_GRIDS,
     LIDAR_SIGMA_M,
+    PARALLAX_DRIFT_TOL_PX,
     PARALLAX_MAP_MAX_AGE_S,
     PARALLAX_MAP_WAIT,
     PARALLAX_MATCHER,
+    PARALLAX_MAX_TRACKS,
     PARALLAX_MIN_BASELINE_M,
     PARALLAX_MIN_GAP_S,
     PARALLAX_MIN_TOTAL_BASELINE_M,
     PARALLAX_MOTION,
     PARALLAX_MOTIONS,
+    PARALLAX_REDETECT_EVERY,
     PARALLAX_SIGMA_MODEL,
     PARALLAX_SPLIT_TOL_SIGMA,
     PARALLAX_TRACK_MAX_VIEWS,
     PARALLAX_TRACK_MIN_OBS,
     PARALLAX_TRACK_WINDOW_S,
+    PARALLAX_TRACKING,
+    PARALLAX_TRACKINGS,
+    PARALLAX_VERIFY_EVERY,
     PARALLAX_WEIGHT,
     PIPELINE_DEFAULTS,
     AffineLaw,
@@ -189,12 +195,17 @@ CAMERA_TF_MAX_AGE_S = 1.0  # the neck's newest edge is the head's pose while it 
 PAN_NOTICE_RAD = math.radians(1.0)  # a head turned more than this is worth a line in the report
 SCAN_BEFORE = "floor_anchor"  # the scan is built from the depth as it stands before this stage
 TRACK_FLAGS = (  # the ones that decide the shape of a parallax measurement: track or pair
+    "parallax_tracking",
     "parallax_track_min_obs",
     "parallax_track_window_s",
     "parallax_min_total_baseline_m",
     "parallax_track_max_views",
     "parallax_sigma_model",
     "parallax_split_tol_sigma",
+    "parallax_max_tracks",
+    "parallax_redetect_every",
+    "parallax_verify_every",
+    "parallax_drift_tol_px",
 )
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
@@ -596,6 +607,79 @@ FLAGS = FlagSet(
         choices=MATCHERS,
     ),
     Flag(
+        "parallax_tracking",
+        PARALLAX_TRACKING,
+        description="which ruler follows the corners. forward detects a corner once and follows"
+        " it FORWARD one hop a frame, keeping it alive for as long as it survives — two flow"
+        " calls a frame whatever the window. window is the backward build: the CURRENT frame's"
+        " corners re-tracked through every view of the window on every frame, two flow calls"
+        " per view. pair is this frame against one partner chosen out of the ring, what the"
+        " stage did until 2026-09-15. parallax_track_min_obs under 3 is the pair whatever this"
+        " says",
+        why="the window's cost IS its window, and the window is what the measurement wants:"
+        " every error term of a parallax depth divides by the baseline, and the tracker's map"
+        " pose is absolute, so reaching further back costs the pose nothing. Measured over the"
+        " four errands of 2026-09-14, 69 judged frames, every clip frame fed to the forward"
+        " store (scratch/parallax_forward_eval.txt, 2026-09-15). COST: forward is 5.9 ms a"
+        " frame at a 1.5 s window and 6.4 at 5 s (hop 2.5, detect 0.0, drift bound 0.5, solve"
+        " 3.2) against the backward window's 31.3 at 1.5 s, which grows with every view added."
+        " DEPTH: the corners' own depth against the lidar's ranges reads 0.94 / 0.98 / 1.02 of"
+        " it at 1.5 / 3 / 5 s, against the backward window's 0.887 and the pair's 0.788 — the"
+        " long window is what pulls the ratio onto 1.00. RESIDUAL of a parallax-only law at the"
+        " beams: 12.7 % at 3 s and 13.8 % at 5 s over the frames each could fit, against the"
+        " window's 16.0 % and the pair's 30.2 %; but on the 264 beams of the frames EVERY way"
+        " fitted, the backward window still reads 13.4 % against forward's 17.5-18.1 %."
+        " CORNERS are where forward pays: 6-12 a frame against the window's 39.5, because it"
+        " follows parallax_max_tracks corners where the window asks the detector for 400 fresh"
+        " ones on every frame, and because 3800 of its corners per 1200 frames are closed by"
+        " the drift bound. It therefore fits a law on 5-9 of 69 frames where the window fits on"
+        " 19. Raising parallax_max_tracks to 400 is the measured fix (12.5 corners a frame,"
+        " 9 frames, 9.4 ms — still a third of the backward build)",
+        on_when="forward wherever the window is worth more than half a second: it is the only"
+        " one that can afford a long one, and the depths it gives sit on the lidar's ranges",
+        off_when="window to reproduce a number measured between 2026-09-15 and this change, or"
+        " where 39 corners a frame matter more than 25 ms; pair for the A/B against everything"
+        " measured before 2026-09-15",
+        choices=PARALLAX_TRACKINGS,
+    ),
+    Flag(
+        "parallax_max_tracks",
+        PARALLAX_MAX_TRACKS,
+        description="how many corners the forward store follows at once. New ones are detected"
+        " into the gaps between the live ones, balanced over a grid so the top of the picture"
+        " is filled as well as the floor; the cap is the width of one flow call, not the number"
+        " of calls, so it is close to free",
+        why="200 is the brief's number and 400 is the one the measurement likes: over the four"
+        " errands of 2026-09-14 (scratch/parallax_forward_eval.txt) a 3 s window keeps 7.0"
+        " corners a frame at 200 and 12.5 at 400, fits a law on 5 frames of 69 against 9, and"
+        " costs 6.0 ms a frame against 9.4 — where the backward window, which asks the detector"
+        " for 400 fresh corners on EVERY frame, keeps 39.5 at 31.3 ms. The residual barely"
+        " moves (12.7 % against 13.1 % over each one's own frames, 18.1 % against 17.8 % on the"
+        " frames every way fitted): the corner count buys FRAMES that can be fitted at all, not"
+        " a better fit",
+        on_when="400 on this laptop, which is the corner budget the backward build always had",
+        off_when="lower wherever the flow's milliseconds matter: the cost is linear in the"
+        " corners and the report line prints it as the hop",
+        range=(20, 2000),
+    ),
+    Flag(
+        "parallax_redetect_every",
+        PARALLAX_REDETECT_EVERY,
+        description="frames between two hunts for new corners in the forward store. A hunt also"
+        " starts early whenever the live corners fall under 60 % of parallax_max_tracks — a"
+        " turn or a doorway can take three corners in four in one frame, and waiting for the"
+        " cadence would waste the window",
+        why="the detector is 0.0-0.1 ms a frame at this cadence over the four errands of"
+        " 2026-09-14 (scratch/parallax_forward_eval.txt) because the early floor does most of"
+        " the work: the store loses about 6 corners a frame to the flow, the"
+        " forward-backward check and the drift bound together, so the floor fires long before"
+        " the fifth frame. 5 is therefore a cheap upper bound rather than the real cadence",
+        on_when="lower on a camera whose view changes fast (a turn in place), where a corner"
+        " born late still has the whole window ahead of it",
+        off_when="higher wherever the detector shows in the report line's detect ms",
+        range=(1, 120),
+    ),
+    Flag(
         "parallax_track_min_obs",
         PARALLAX_TRACK_MIN_OBS,
         description="how many frames a corner must be seen in before its depth is a"
@@ -627,10 +711,25 @@ FLAGS = FlagSet(
     Flag(
         "parallax_track_window_s",
         PARALLAX_TRACK_WINDOW_S,
-        description="how far back in time a track may reach, in seconds: every ring frame"
-        f" between {PARALLAX_MIN_GAP_S:.2f} s and this is a view a corner may be seen in, capped"
-        " at 16 views. It also sets how long the ring holds a frame",
-        why="swept over the same 48 frames (scratch/parallax_tracks_eval.txt, 2026-09-15): at"
+        description="how far back in time a track may reach, in seconds. Following corners"
+        " forward (parallax_tracking) it is the age at which an observation is dropped and"
+        " nothing more — the corner lives on, the cost does not move, and a window changed"
+        " live takes effect on the very next frame with nothing reset. On the backward window"
+        f" it is also the cost: every ring frame between {PARALLAX_MIN_GAP_S:.2f} s and this is"
+        " a view to re-track through, and it sets how long the ring holds a frame",
+        why="3.0 since 2026-09-15, when the forward store stopped charging for the window."
+        " Every error term of a parallax depth divides by the baseline (pixel noise as"
+        " z^2 sigma_px / (f B), the pose's own centimetre as 1 / B) and the tracker's map pose"
+        " is ABSOLUTE, so reaching further back costs the pose nothing. Measured forward over"
+        " the four errands of 2026-09-14 (scratch/parallax_forward_eval.txt, 69 judged frames):"
+        " the corners' own depth reads 0.938 of the lidar at 1.5 s, 0.976 at 3 and 1.020 at 5,"
+        " and a parallax-only law leaves 21.3 %, 12.7 % and 13.8 % of residual at the beams"
+        " over the frames each could fit. What does NOT arrive is the baseline the premise"
+        " promised: 13.4, 14.7 and 15.2 cm of effective parallax, because these errands turn"
+        " and pause rather than drive straight, and only 43 of 69 frames reached 3 s of window"
+        " and 29 of 69 reached 5. The cost is flat — 5.9 ms a frame at 1.5 s, 6.4 at 5 —"
+        " against the backward window's 31.3 at 1.5 s alone. Swept BACKWARD over 48 frames"
+        " before that (scratch/parallax_tracks_eval.txt, 2026-09-15): at"
         " 0.5 s a track has 5 observations, 11.2 cm of effective baseline, a 7.8 cm sigma, a law"
         " on 15 of 48 frames and 21.6 % of residual; at 1.0 s, 6 observations, 12.9 cm, 6.3 cm,"
         " 26 frames, 17.8 %; at 1.5 s, 6 observations, 14.0 cm, 6.0 cm, 31 frames, 15.3 %."
@@ -641,10 +740,12 @@ FLAGS = FlagSet(
         " pair's 0.782. The cost is roughly linear in the window: 19.3 ms a frame at 0.5 s, 39.4"
         " at 1.0, 47.7 at 1.5",
         on_when="longer on a robot whose pose over that window is better than this cart's"
-        " tracker — the baseline is a length and every depth is proportional to it",
+        " tracker — the baseline is a length and every depth is proportional to it — and on one"
+        " that drives straight for that long, which this cart's errands do not",
         off_when="shorter wherever the flow loses the corners before the window ends, or where"
-        " the milliseconds in the report line matter more than the sigma",
-        range=(0.2, 3.0),
+        " the milliseconds in the report line matter more than the sigma; and back to 1.5 with"
+        " parallax_tracking window, whose cost really is its window",
+        range=(0.2, 10.0),
     ),
     Flag(
         "parallax_min_total_baseline_m",
@@ -754,6 +855,57 @@ FLAGS = FlagSet(
         " sigma on pixel noise and 4.2 % of real tracks sit above 2",
         off_when="0 is the shipped default and costs nothing at all: the halves are not solved",
         range=(0.0, 20.0),
+    ),
+    Flag(
+        "parallax_verify_every",
+        PARALLAX_VERIFY_EVERY,
+        description="frames between two rounds of the forward store's long-range drift bound:"
+        " every corner re-tracked DIRECTLY from the picture its oldest kept view was taken in,"
+        " started at where the hops say it is, and closed when the two disagree by more than"
+        " parallax_drift_tol_px. A round is spread one kept picture per frame, so no frame pays"
+        " for more than one extra flow call. 0 turns the bound off",
+        why="a per-hop forward-backward check cannot see the drift that matters. Lucas-Kanade"
+        " slides along an edge and along the epipolar line by a fraction of a pixel a hop, each"
+        " hop passing its own check, and at this camera's 14 frames a second a 3 s window is"
+        " forty hops — which is a corner somewhere else at a depth that is wrong and"
+        " consistent. Nothing about a forward track catches that, because there is no fresh"
+        " re-track in it: the backward window got one for free every frame. Synthetically a"
+        " flow nudged 2 px a hop is caught 20-odd times over 30 frames while an honest one"
+        " loses at most 3 corners of 200 (tests/unit/test_parallax.py). On the four errands of"
+        " 2026-09-14 the bound costs 0.4-0.6 ms a frame and closes about 3800 corners per 1200"
+        " frames, a third of all the corners the store loses"
+        " (scratch/parallax_forward_eval.txt) — so it is also the biggest single reason the"
+        " forward ruler keeps fewer corners a frame than the backward window. What it buys on"
+        " real pictures is not separated from what it costs: measured on one errand it left"
+        " more corners standing after the epipolar gate than turning it off did"
+        " (scratch/_forward_probe.py), which is the opposite sign to the corner count",
+        on_when="every 10 frames is the default, which at this camera is about a fifth of a 3 s"
+        " window; lower it on a longer window, where a corner has more hops to slide over",
+        off_when="0 wherever the corner count matters more than the corner's truthfulness, or"
+        " to A/B what the bound is really worth — the report line counts what it closes as"
+        " drift",
+        range=(0, 240),
+    ),
+    Flag(
+        "parallax_drift_tol_px",
+        PARALLAX_DRIFT_TOL_PX,
+        description="how far a corner's hopped position may sit from where its own birth patch"
+        " lands when it is re-tracked directly into this frame, before the corner is closed."
+        " Only read when parallax_verify_every is above 0",
+        why="a pixel is twice what the flow is trusted to place a corner to"
+        " (DISPARITY_SIGMA_PX 0.5), so a corner over it has moved by more than its own noise"
+        " and the two pictures no longer agree about what it is. It is not a free gate: on the"
+        " four errands of 2026-09-14 the bound at 1 px closes about 3800 corners per 1200"
+        " frames and roughly halves the corners a frame against turning it off, while 2 px sits"
+        " between the two (scratch/_forward_probe.py, scratch/parallax_forward_eval.txt). A"
+        " direct re-track over a whole window can also disagree for reasons that are not drift"
+        " — the patch has turned and been lit differently — which is why the number is a"
+        " tolerance and not a half-pixel",
+        on_when="tighter on a robot whose window is long and whose flow is the suspect: a"
+        " sliding corner is a depth that is wrong and consistent, and no other gate sees it",
+        off_when="looser (2 px) wherever the corner count is the binding constraint, which on"
+        " these errands it is",
+        range=(0.1, 20.0),
     ),
     Flag(
         "camera_tf_latest",
@@ -1287,20 +1439,27 @@ class DepthStream(Node):
 
     def _ask_track(self) -> None:
         """Hand the parallax anchor the whole shape of a measurement, read from the switch
-        table: whether a corner is a track through the window or a pair with one partner, how
-        far back the window reaches and over how many views, how much parallax those views must
-        add up to, what the sigma is taken from, and how far the two halves of a track may
-        disagree before it is dropped. They move together, so they are set together — at
-        ``parallax_track_min_obs`` 2 the rest are unused and the anchor pairs exactly as it did
-        before 2026-09-15."""
+        table: which ruler follows the corners (forward, the old backward window, or one
+        partner), how far back it reaches and over how many views, how much parallax those
+        views must add up to, what the sigma is taken from, how far the two halves of a track
+        may disagree — and the forward store's own corners, detection cadence and drift bound.
+        They move together, so they are set together, and every one of them is pushed into the
+        store on the next frame with nothing reset: a window changed live simply uses more or
+        fewer of the observations already held. At ``parallax_track_min_obs`` 2 the rest are
+        unused and the anchor pairs exactly as it did before 2026-09-15."""
         stage = self._pipeline.stage("parallax_anchor")
         if isinstance(stage, ParallaxAnchor):
+            stage.tracking_mode = str(self._switches["parallax_tracking"])
             stage.track_min_obs = int(self._switches["parallax_track_min_obs"])
             stage.track_window_s = float(self._switches["parallax_track_window_s"])
             stage.min_total_baseline_m = float(self._switches["parallax_min_total_baseline_m"])
             stage.track_max_views = int(self._switches["parallax_track_max_views"])
             stage.sigma_model = str(self._switches["parallax_sigma_model"])
             stage.split_tol_sigma = float(self._switches["parallax_split_tol_sigma"])
+            stage.max_tracks = int(self._switches["parallax_max_tracks"])
+            stage.redetect_every = int(self._switches["parallax_redetect_every"])
+            stage.verify_every = int(self._switches["parallax_verify_every"])
+            stage.drift_tol_px = float(self._switches["parallax_drift_tol_px"])
 
     def _ask_lidar_sigma(self, sigma_m: float) -> None:
         """Tell the lidar anchor what one beam's range is trusted to, in metres: its pairs then
