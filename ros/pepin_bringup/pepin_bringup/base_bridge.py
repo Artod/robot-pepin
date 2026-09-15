@@ -29,9 +29,11 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from tf2_ros import TransformBroadcaster
 
+from pepin.flags import Flag, FlagSet
 from pepin.kinematics import Twist as KinematicTwist
 from pepin.odometry import Pose2D, TwistFromPose
 from pepin_bringup.link import JsonLineLink
+from pepin_bringup.node_kit import Switches
 from pepin_bringup.protocol import (
     BaseState,
     encode_stop,
@@ -42,6 +44,47 @@ from pepin_bringup.protocol import (
 )
 
 _STATUS_HZ = 2.0  # how often link up/down transitions are logged
+
+# The live switches (CLAUDE.md rule 19), printed in the link-up line. They mute a sensor where
+# it is published, so a consumer sees what a dead sensor looks like — silence — without a
+# restart and without losing any other live flag (ros/sensor.sh mute imu | mute odom).
+# The same two names are declared by the C++ bridge (ros/pepin_base_cpp/src/base_bridge.cpp),
+# which is the node that actually runs on the board: one node name, one pair of flags, whichever
+# implementation robot.launch.py picked.
+FLAGS = FlagSet(
+    Flag(
+        "imu_publish",
+        True,
+        description="the MPU6050's readings leave the bridge as /imu/data_raw, where the EKF"
+        " fuses index 11 (the yaw rate) and nothing else; off, the chip is still read and its"
+        " bias still estimated, but no message is published. THE PYTHON BRIDGE PUBLISHES NO IMU"
+        " AT ALL — here the flag only exists so the node's table is the same table whichever"
+        " bridge robot.launch.py started; the C++ bridge is the one that reads the chip",
+        why="on, because the gyro is the heading: the wheels over-report a turn in place by"
+        " 10-25 % on carpet, and odom0's vyaw — the only other yaw-rate source, live since"
+        " 2026-09-15 — carries about 4 % of the weight beside it (ros/params/ekf.yaml)",
+        on_when="always, unless the point of the run is what the stack does without a gyro",
+        off_when="for one test of the heading on the wheels alone, or to see an EKF meet its"
+        " sensor_timeout on a source that is simply gone; unmute and the rate is back within"
+        " one IMU period (50 Hz)",
+    ),
+    Flag(
+        "odom_publish",
+        True,
+        description="the base server's state line leaves the bridge as /odom and, while"
+        " publish_tf is on, as the odom -> base_link transform; off, the wheels are still read"
+        " and still commanded, and both go silent together — a transform still broadcast from a"
+        " silent /odom is a state no sensor failure produces",
+        why="on, because /odom is the only source of speed this filter has: odom0 fuses vx and"
+        " vy at 0.001 (m/s)^2 and, since 2026-09-15, vyaw; ax and ay are off (a mount bias of"
+        " -0.229 to +0.066 m/s^2 that no covariance can answer), so with /odom silent past the"
+        " EKF's sensor_timeout of 0.5 s the filter has no velocity measurement left at all",
+        on_when="always, unless the run is about what the stack does with dead wheel odometry",
+        off_when="to watch a consumer meet a silent odometry — the EKF's sensor_timeout, Nav2's"
+        " TF lookups, the tracker's dead reckoning — without stopping the base server; unmute"
+        " and /odom is back on the next state line (20 Hz)",
+    ),
+)
 
 
 class BaseBridge(Node):
@@ -73,6 +116,7 @@ class BaseBridge(Node):
         # (``ros2 param set /base_bridge odom_twist_source commanded``).
         self._odom_twist_source = str(self.declare_parameter("odom_twist_source", "measured").value)
         self._twist_from_pose = TwistFromPose()
+        self._switches = Switches(self, FLAGS)  # after the last declare_parameter, by contract
 
         self._pose_covariance = odometry_pose_covariance()
         self._twist_covariance = odometry_twist_covariance()
@@ -103,7 +147,11 @@ class BaseBridge(Node):
             self._publish_state(state)
 
     def _publish_state(self, state: BaseState) -> None:
-        """One state line as a nav_msgs/Odometry on /odom and an odom->base_link transform."""
+        """One state line as a nav_msgs/Odometry on /odom and an odom->base_link transform —
+        nothing at all while ``odom_publish`` is off (the state line is still read)."""
+        if not self._switches.on("odom_publish"):
+            self._twist_from_pose.reset()  # the gap this mute makes is not a measurement
+            return
         stamp = self.get_clock().now().to_msg()
         qz, qw = math.sin(state.theta / 2.0), math.cos(state.theta / 2.0)
 
@@ -187,7 +235,9 @@ class BaseBridge(Node):
             return
         connected, detail = change
         if connected:
-            self.get_logger().info(f"{detail}; odom twist: {self._odom_twist_source}")
+            self.get_logger().info(
+                f"{detail}; odom twist: {self._odom_twist_source}, {self._switches.state()}"
+            )
         else:
             self.get_logger().warning(detail)
 

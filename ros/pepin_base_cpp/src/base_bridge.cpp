@@ -85,6 +85,16 @@ public:
     // The IMU shares /dev/i2c-2 with the ToF sensors; 0x68 is the MPU6050's own address.
     // False when an EKF (robot_localization) owns odom -> base_link; /odom is still published.
     publish_tf_ = declare_parameter<bool>("publish_tf", true);
+    // MUTING A SENSOR LIVE. Both default true and both are read per message, so `ros2 param
+    // set` (ros/sensor.sh mute imu | mute odom) silences a sensor without restarting anything:
+    // the chip is still read, the base server is still asked, only the message stops. What a
+    // consumer sees is what a dead sensor looks like — silence — which is the point: the EKF's
+    // sensor_timeout, Nav2's TF lookups and the tracker's fallbacks are exercised in place
+    // (ros/README.md, "Muting a sensor live"). `odom_publish` takes the odom -> base_link
+    // transform with it when `publish_tf` is on: wheel odometry that keeps broadcasting a
+    // transform while /odom is silent is a state no sensor failure produces.
+    declare_parameter<bool>("imu_publish", true);
+    declare_parameter<bool>("odom_publish", true);
     const bool imu_enable = declare_parameter<bool>("imu_enable", false);
     imu_device_ = declare_parameter<std::string>("imu_device", "/dev/i2c-2");
     imu_address_ = static_cast<int>(declare_parameter<int>("imu_address", 0x68));
@@ -136,6 +146,9 @@ public:
     if (imu_enable) {
       start_imu();
     }
+    RCLCPP_INFO(
+      get_logger(), "base_bridge: odom twist %s, publish_tf=%s, %s", twist_source.c_str(),
+      publish_tf_ ? "on" : "off", switch_state().c_str());
   }
 
   /// Stop the wheels and join the threads before anything they publish through goes away.
@@ -173,6 +186,12 @@ private:
   /// One state line as a nav_msgs/Odometry on /odom and an odom->base_link transform.
   void publish_state(const BaseState & state)
   {
+    const bool publish = get_parameter("odom_publish").as_bool();
+    odom_publish_ = publish;
+    if (!publish) {
+      twist_from_pose_.reset();  // the gap this mute makes is not a measurement
+      return;
+    }
     const auto stamp = now();
     const double qz = std::sin(state.theta / 2.0);
     const double qw = std::cos(state.theta / 2.0);
@@ -275,7 +294,15 @@ private:
     }
   }
 
-  /// Say it once whenever the link comes up or goes down.
+  /// The live switches as a report line prints them: ``imu_publish=on odom_publish=off``.
+  std::string switch_state() const
+  {
+    return std::string("imu_publish=") + (imu_publish_ ? "on" : "off") + " odom_publish=" +
+           (odom_publish_ ? "on" : "off");
+  }
+
+  /// Say it once whenever the link comes up or goes down, with the switches that decide
+  /// whether anything is published at all (CLAUDE.md rule 19).
   void log_link_status()
   {
     const auto change = link_->take_status_change();
@@ -284,8 +311,8 @@ private:
     }
     if (change->first) {
       RCLCPP_INFO(
-        get_logger(), "%s; odom twist: %s", change->second.c_str(),
-        twist_measured_ ? "measured" : "commanded");
+        get_logger(), "%s; odom twist: %s, %s", change->second.c_str(),
+        twist_measured_ ? "measured" : "commanded", switch_state().c_str());
     } else {
       RCLCPP_WARN(get_logger(), "%s", change->second.c_str());
     }
@@ -399,8 +426,14 @@ private:
     }
   }
 
+  /// One sample as sensor_msgs/Imu, unless ``imu_publish`` is off — then nothing goes out.
   void publish_imu(const ImuSample & sample, double bias_x, double bias_y, double bias_z)
   {
+    const bool publish = get_parameter("imu_publish").as_bool();
+    imu_publish_ = publish;
+    if (!publish) {
+      return;
+    }
     sensor_msgs::msg::Imu message;
     message.header.stamp = now();
     message.header.frame_id = imu_frame_;
@@ -438,6 +471,8 @@ private:
   double imu_rate_hz_ = 50.0;
   double imu_bias_s_ = 2.0;
   std::atomic<bool> twist_measured_{true};  // read by the status timer, written by the reader
+  std::atomic<bool> imu_publish_{true};   // what the report line says; written by the IMU thread
+  std::atomic<bool> odom_publish_{true};  // ... and this one by the reader thread
   TwistFromPose twist_from_pose_;  // touched from the reader thread only
   std::array<double, 36> pose_covariance_{};
   std::array<double, 36> twist_covariance_{};
