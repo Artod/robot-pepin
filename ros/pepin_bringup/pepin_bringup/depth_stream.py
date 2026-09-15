@@ -153,6 +153,7 @@ from pepin.depth_pipeline import (
     ParallaxAnchor,
     RangeLawStage,
     RayLaw,
+    WallAnchor,
     grid_of,
     standard_pipeline,
 )
@@ -288,19 +289,35 @@ FLAGS = FlagSet(
         "wall_anchor",
         PIPELINE_DEFAULTS["wall_anchor"],
         description="the lidar's returns extruded up the image, where the network's depth stays"
-        " continuous, pair the rows above the lidar's with the wall's depth — a third hoop",
-        why="redundant with the lidar and worse where the cart drives. The wall extrusion agrees"
-        " with the beams to 3 % once the mount height is right (lidar/wall 0.966 at the tape's"
-        " 0.383 m against 0.816 at the assumed 0.200, scratch/lidar_height_check.txt), and"
-        " switching it on pulls the lidar's own row 10 % near (1.010 -> 0.896) and stretches the"
-        " band's tail 2.6x (p90 20.6 -> 53.6 cm) on run 0171 (scratch/pipeline_vs_truth.txt,"
-        " scratch/lidar_height_check.txt). What it buys is the rows above: the 3D error at z"
-        " 0.80-1.20 m 47.4 -> 31.5 cm",
-        on_when="on a robot with no lidar, where the extrusion is the only wall cue; or when what"
-        " reads the depth is above 0.5 m (a manipulator's reach) and no costmap is reading the"
-        " band",
-        off_when="whenever the cart drives on the band: that is the row the costmap reads, and"
-        " wall pairs move it 10 %",
+        " continuous, pair the rows above the lidar's with the wall's depth — a third hoop. Each"
+        " pair carries its own sigma: the beam's 1.5 cm through the plane's geometry, plus"
+        " wall_sigma_height per metre of height above the line (the price of the world"
+        " assumption), and the pairs of one column SHARE that beam's weight instead of each"
+        " carrying it. A column must climb 0.5 m undisturbed to count at all",
+        why="ON since 2026-09-15, on two judges, after shipping off since 2026-09-14. What"
+        " changed is the weighing and the field. Under one global law a wall pixel carried a flat"
+        " fifth of a beam whatever its height, fifty of them stood on one beam, and the ruler"
+        " pulled the lidar's own row 10 % near (1.010 -> 0.896, scratch/pipeline_vs_truth.txt)."
+        " Now: (1) the non-circular judge, COLMAP's reconstruction of the furnished home scene"
+        " 0171 split into points ON the lidar's vertical extrusion and points OFF it (furniture,"
+        " clutter, the far room — the pixels this ruler can only damage), 5159 off-plane"
+        " observations: median |corrected/true - 1| falls in EVERY height band, 20.5 -> 17.9 %"
+        " below the line, 16.7 -> 13.7 % up to 0.3 m, 45.9 -> 30.2 % at 0.3-0.6 m, 99.8 -> 76.7 %"
+        " at 0.6-1.0 m, 19.1 -> 16.1 % overall, and the 210 on-plane points 9.6 -> 9.0"
+        " (scratch/wall_vs_colmap.txt). (2) The lidar's own row on a CONTIGUOUS held-out split"
+        " (the first half of the scan fits and walks, the second half judges): 12.9 -> 11.5 % on"
+        " run 0171, 17.5 -> 16.1 on tape 0235, 32.7 -> 25.0 on 0236, and on 0237 (neck 40.9 deg"
+        " down) the climb gate refuses every column, so the ruler is a no-op"
+        " (scratch/wall_field_row_eval.txt). The wall brings 4-9 % of a frame's fit weight there"
+        " against 67-85 % when every pair votes for itself. What it cannot do is tell a leaning"
+        " surface from its own error: a sofa back leaning 0.3 m per metre of height reads like a"
+        " wall to every shape gate, and only 3-6 % of the COLMAP points the camera sees actually"
+        " stand on the lidar's extrusion — the gates cut what is walked to 2-11 % of it, and"
+        " wall_sigma_height prices the rest",
+        on_when="it ships on; it is also the only wall cue on a robot with no lidar",
+        off_when="if a costmap regression ever traces to the rows above the beams, or on a scene"
+        " of low furniture where the extrusion has nothing to extrude — it is a no-op there"
+        " rather than a cost, but off is the way to prove that",
     ),
     Flag(
         "parallax_anchor",
@@ -386,7 +403,17 @@ FLAGS = FlagSet(
         " of range. Which ranges the pool holds then decides the law — a drive brings 0.5 m and"
         " 4 m pairs, the shift term opens and the same tilt is described as a 2.3 b -0.19, back"
         " at rest as a 1.75 b 0 — so the fused volume is painted under one law and scored under"
-        " another, and depth_fusion refuses those frames at the yaw search's bound",
+        " another, and depth_fusion refuses those frames at the yaw search's bound. What it costs"
+        " is MEMORY, measured 2026-09-15 and left standing: the law is fitted over a pool of the"
+        " last frames, so it describes the last minute's scene, and above the lidar's row the"
+        " door tapes read a per-run offset that flips sign between the approach and the retreat"
+        " (0.984 / 1.060 / 0.987 / 1.009 on 0318/0320/0321/0322, a spread of 0.076). Switched off"
+        " the flip goes away — all four read +2.1 to +4.4 %, a spread of 0.023 — and the residual"
+        " above the row halves on three of the four (12.8 -> 4.7 % in the top third of 0318;"
+        " scratch/wte_03*_norange.txt). It stays ON because the judge that is not circular says"
+        " the opposite: on the COLMAP scene of run 0171, off costs 16.1 -> 19.8 % off the wall"
+        " plane and 9.0 -> 10.9 on it (scratch/wall_vs_colmap.txt), and the held-out lidar row is"
+        " unmoved on three tapes of four. The memory is real and the cure is not this switch",
         on_when="always, until a law that follows the range is measured to be worse than one that"
         " does not",
         off_when="as an A/B against the affine law at rest, and the moment a report line shows a"
@@ -425,12 +452,14 @@ FLAGS = FlagSet(
         PIPELINE_DEFAULTS["wall_correct"],
         description="after the law, the pixels the wall walk covered are set to the extruded"
         " plane's depth outright (the same walk as wall_anchor, applied instead of fitted)",
-        why="default by design, unmeasured as a win — standalone it is a wash — run 0171 keeps the"
-        " same law and the same lidar row (1.010, |·-1| q3 0.320) and the band reads 12.8/39.3 cm"
-        " against today's 12.9/38.2, or 3.6/20.2 against 3.8/20.6 at the corrected mount, with the"
-        " 3D error slightly better at every slice (scratch/pipeline_vs_truth.txt,"
-        " scratch/lidar_height_check.txt). It is off because it is the wall walk and the wall walk"
-        " is off; no number says it hurts",
+        why="a wash, measured twice, and a wash is not a reason to overwrite a measurement with"
+        " an assumption. Beside wall_anchor on the COLMAP scene of run 0171 it moves nothing that"
+        " can be read: 16.1 % of median |corrected/true - 1| off the wall plane against"
+        " wall_anchor's own 16.1, and the same 9.0 % on it, band for band"
+        " (scratch/wall_vs_colmap.txt, 2026-09-15). Standalone it was a wash before that too —"
+        " the same law and the same lidar row on run 0171, the band 12.8/39.3 cm against"
+        " 12.9/38.2 (scratch/pipeline_vs_truth.txt). So the pairs role carries the ruler and the"
+        " pixels stay the network's own",
         on_when="with wall_anchor on, when what reads the depth is the wall above the beams and a"
         " plane is a better answer there than a fitted one",
         off_when="wherever the published depth must stay the network's own measurement rather than"
@@ -1112,6 +1141,32 @@ FLAGS = FlagSet(
         " against a plumb line, not a fit through the same depths it would then weigh",
     ),
     Flag(
+        "wall_sigma_height",
+        PIPELINE_DEFAULTS["wall_sigma_height"],
+        range=(0.0, 2.0),
+        description="metres of doubt a wall pair carries per metre of HEIGHT above the lidar's"
+        " line — the price of the world assumption. A pair's sigma is sqrt(sigma_lidar^2 +"
+        " (wall_sigma_height * h)^2), so the ruler fades as it leaves the beams that vouch for"
+        " it instead of switching off at a threshold: at 0.05 a pixel a metre up is trusted to"
+        " 5 cm, about a fortieth of a beam's weight at 2 m",
+        why="'the surface goes on upwards' is true of a door and a wall and false of a sofa, a"
+        " shelf, a table and a chair, and NOTHING in the picture settles it: a surface leaning"
+        " back 0.3 m per metre of height departs from the plane by 0.08 % a row while this"
+        " network's own scale climbs about 0.4 % a row (1.6x at the lidar's row, 2.0x by 0.3 m"
+        " above it, scratch/pipeline_vs_truth.txt), so a gate tight enough to refuse the lean"
+        " refuses every real wall — which is why there is a growing error bar here and not a"
+        " sharper gate (a unit test holds that boundary: the step of a shelf yields zero pairs,"
+        " the 0.3 m/m lean yields the same pairs as a flat wall). 0.05 is a CHOSEN error bar,"
+        " not a measured one: on the COLMAP scene only 3-6 % of the points the camera sees stand"
+        " on the lidar's extrusion at all, and the gated walk covers too few of them (29) to"
+        " measure its own error against (scratch/wall_vs_colmap.txt). What is measured is the"
+        " end-to-end effect at this value",
+        on_when="raise it toward 0.3 in a room of low furniture, sofas and shelves, where the"
+        " extrusion is most often a lie: the pairs then fade within half a metre of the beams",
+        off_when="lower it toward 0.01 in a corridor of flat walls and doors, where the"
+        " assumption holds to the top of the picture",
+    ),
+    Flag(
         "floor_normal_tol_deg",
         PIPELINE_DEFAULTS["floor_normal_tol_deg"],
         range=(0.0, 90.0),
@@ -1411,6 +1466,7 @@ class DepthStream(Node):
         self._ask_frame_shift(bool(self._switches["frame_shift_needs_beams"]))  # and the gate
         self._ask_field()  # and the shape of the per-frame law: its grid and its two pulls
         self._ask_floor()  # and what a floor pair is worth and when a floor is not a floor
+        self._ask_wall()  # and what the world assumption above the beams is worth
         self._tally = Tally(STAGES)
         self._lean = LeanFeed(
             self,
@@ -1528,6 +1584,8 @@ class DepthStream(Node):
             self._ask_field()
         elif name.startswith("floor_") and name not in self._pipeline.switches:
             self._ask_floor()
+        elif name == "wall_sigma_height":
+            self._ask_wall()
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
 
@@ -1623,6 +1681,15 @@ class DepthStream(Node):
             stage.normal_tol_deg = float(self._switches["floor_normal_tol_deg"])
             stage.band_max_m = float(self._switches["floor_band_max_m"])
             stage.plane_band = bool(self._switches["floor_plane_band"])
+
+    def _ask_wall(self) -> None:
+        """Tell both wall stages what a metre of height above the lidar's line costs a pair in
+        certainty — the price of "the surface goes on upwards" (:func:`pepin.depth_pipeline.
+        wall_sigma`)."""
+        for name in ("wall_anchor", "wall_correct"):
+            stage = self._pipeline.stage(name)
+            if isinstance(stage, WallAnchor):
+                stage.sigma_height = float(self._switches["wall_sigma_height"])
 
     def _ask_frame_shift(self, needs_beams: bool) -> None:
         """Tell the per-frame law whether a shift needs the lidar in the pool that fits it; a
