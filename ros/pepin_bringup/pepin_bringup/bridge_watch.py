@@ -57,6 +57,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from pepin.deployment import (
+    CONTAINER_STOP_TIMEOUT_S,
     BridgeIdentity,
     FlowWatch,
     TopicFlow,
@@ -86,6 +87,12 @@ STARTUP_GRACE_S = 60.0
 WATCH_NODE = "bridge_watch"
 LAPTOP_BRIDGE_CONTAINER = "pepin-zenoh"
 DOCKER_SOCKET = "/var/run/docker.sock"
+# This watch's repair is a stop like any other here: the daemon is told the same window
+# ros/lib.sh and board/pepin-ros.service use, so a container it restarts gets its stop signal
+# and the seconds to answer it instead of a five-second kill. The bridge itself is out in one,
+# and `docker stop` returns as soon as the container is down — the window is a ceiling, not a
+# wait — so the number costs nothing here and keeps one way to stop a container in the repo.
+HTTP_SLACK_S = 15.0  # the socket must outlive the restart the daemon is doing on it
 
 FLAGS = FlagSet(
     Flag(
@@ -178,19 +185,22 @@ class DockerRestart:
 
     The bridge is a container beside this one, not a process in it, so the only handle on it is
     the daemon: ``POST /containers/<name>/restart``. Plain HTTP over a UNIX socket — no docker
-    CLI in the image, no shell. ``connect`` is injectable so a test drives it with a fake.
+    CLI in the image, no shell. ``t=`` is the same stop window every other stop here uses
+    (:data:`pepin.deployment.CONTAINER_STOP_TIMEOUT_S`), so this repair is not a shortcut past
+    it. ``connect`` is injectable so a test drives it with a fake.
     """
 
     def __init__(
         self,
         container: str = LAPTOP_BRIDGE_CONTAINER,
         socket_path: str = DOCKER_SOCKET,
-        timeout_s: float = 30.0,
+        stop_timeout_s: float = CONTAINER_STOP_TIMEOUT_S,
         connect: Any = None,
     ) -> None:
         self._container = container
         self._socket_path = socket_path
-        self._timeout_s = timeout_s
+        self._stop_timeout_s = stop_timeout_s
+        self._timeout_s = stop_timeout_s + HTTP_SLACK_S
         self._connect = connect
 
     def available(self) -> bool:
@@ -205,7 +215,9 @@ class DockerRestart:
             else _UnixSocketConnection(self._socket_path, self._timeout_s)
         )
         try:
-            connection.request("POST", f"/containers/{self._container}/restart?t=5")
+            connection.request(
+                "POST", f"/containers/{self._container}/restart?t={self._stop_timeout_s:g}"
+            )
             reply = connection.getresponse()
             body = reply.read().decode("utf-8", "replace").strip()
             return f"restarted {self._container}: HTTP {reply.status} {body or 'ok'}"

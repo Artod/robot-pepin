@@ -21,6 +21,8 @@ from pepin_bringup import bridge_watch as watch_module  # noqa: E402
 from pepin_bringup.bridge_watch import FLAGS, BridgeWatch, DockerRestart  # noqa: E402
 from ros_stubs import Imu  # noqa: E402
 
+from pepin.deployment import CONTAINER_STOP_TIMEOUT_S  # noqa: E402
+
 BOARD = "10.0.0.187"
 ADMIN = "http://pepin-zenoh:8000"
 BOARD_ZID = "abee59d7f052e5eeffe2098f0b8ef347"
@@ -296,7 +298,10 @@ def test_the_docker_repair_asks_the_daemon_to_restart_the_bridge_container() -> 
     repair = DockerRestart("pepin-zenoh", connect=Connection)
     assert repair.available()
     assert "restarted pepin-zenoh: HTTP 204" in repair.restart()
-    assert asked[0] == ("POST", "/containers/pepin-zenoh/restart?t=5")
+    assert asked[0] == (
+        "POST",
+        f"/containers/pepin-zenoh/restart?t={CONTAINER_STOP_TIMEOUT_S:g}",
+    ), "a repair is a stop like any other: the daemon gets the repo's one stop window"
     assert asked[-1][0] == "close", "the socket is closed even when the daemon refuses"
     assert not DockerRestart("pepin-zenoh", socket_path="/no/such/socket").available()
 
