@@ -79,7 +79,7 @@ ekf_filter_node:
     odom0_config: [false, false, false,
                    false, false, false,
                    true, true, false,
-                   false, false, false,
+                   false, false, true,   # vyaw since 2026-09-15: the twist is MEASURED now (13d14da); on tapes 0301/0303/0304 the wheels' rate is 1.00-1.09 of the gyro's on pivots, residual std 0.04-0.10 rad/s (variance 0.002-0.01), weight ~4 % beside the gyro — a heading that survives a dead gyro
                    false, false, false]
     odom0_differential: false
     odom0_relative: false
