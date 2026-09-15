@@ -40,6 +40,13 @@ affine law's residual tilts 12 % per metre of range (:class:`pepin.depth.RangeLa
 what the law file carries, what seeds every law at start, and the fallback the range law
 publishes through until two of its bins fill.
 
+The law of the frame in hand (:class:`FrameLaw`) is not one pair of numbers either: it is a
+coarse grid of nodes over the picture (:class:`ScaleField`), each fitted on the pairs that land
+near it and held toward the frame's global fit and toward its own last value, because this
+network's error is regime-wise — 1.1x on the floor, 1.6x at the lidar's row, 2.0x above it —
+and one law fitted across all three is wrong in all three. A grid of 1x1 is that single law
+again, bit for bit.
+
 :class:`RayLaw` (:mod:`pepin.elevation`) is the third such law and the one parameterised the
 way the error is: by the ray's angle off the optical axis, so the neck may tilt without
 refitting. Measured held out on the same 29 frames (scratch/ray_law_eval.txt, 2026-09-12) it
@@ -92,6 +99,7 @@ from pepin.depth import (
     edge_mask,
     fit_affine,
     fit_frame,
+    fit_node,
     floor_anchor,
     floor_depth,
     in_image,
@@ -107,7 +115,13 @@ if TYPE_CHECKING:  # the tracker's own module stays a lazy import inside the par
 
 LEAN_STEP = 0.003  # the floor's expected depth is recomputed when the up vector moves this much
 FLOOR_PAIR_STRIDE = 8  # every 8th row and column of the floor: 3600 candidates of a 640x360 frame
-FLOOR_PAIR_WEIGHT = 0.1  # a floor pixel's share against a lidar beam's 1: the lidar keeps its row
+FLOOR_SIGMA_PITCH_DEG = 1.5  # how well the camera's pitch is known: config/neck.json's ticks_note
+# reads "head level by eye the tilt servo reads 2068 ticks and the picture is 1.0 deg down
+# (+-1.5)". It is what a floor pair's own noise is made of: the plane's depth under a ray is
+# h / sin(angle below the horizon), so a pitch error tilts the whole ruler (:func:`floor_sigma`).
+FLOOR_NORMAL_TOL_DEG = 5.0  # how far the floor pixels' own fitted plane may lean from the geometric
+# up before the frame's floor pairs are refused outright: a plane fitted to a table top, a ramp or
+# a wrong law is not the floor, and pairs taken off it move every node they touch.
 WALL_ROW_STRIDE = 4  # rows between two wall pairs of one column
 WALL_PAIR_WEIGHT = 0.2
 WALL_MAX_HEIGHT = 2.0  # metres above the floor a wall point may stand: higher is a ceiling
@@ -140,6 +154,70 @@ LIDAR_SIGMA_M = 0.0  # metres: one beam's range noise, 0 meaning every beam weig
 # a few per cent of range) dwarfs a beam's (0.0002-0.023) everywhere — so a beam's sigma is not
 # the residual's sigma, and 1 / sigma_beam^2 is not that pair's weight in this fit.
 # Live knob: the node's lidar_sigma_m, > 0 to weigh the beams by range again.
+
+FIELD_GRIDS = ("1x1", "2x2", "3x3", "4x3", "4x4")  # how many nodes a scale field carries, written
+# the way an image size is — COLUMNS x ROWS, so 4x3 is four across and three down.
+FIELD_PRIOR = 1.0  # in pair-weight units (a lidar beam is 1): how hard a node is pulled toward
+# the frame's own global fit. A node that saw nothing comes back as the global fit exactly, which
+# is what makes a field safe — it degrades to today's single law wherever the anchors are sparse.
+# One beam's worth, MEASURED, not assumed: a node of a 3x3 field over this camera holds a median
+# of 3.7-5.1 of pair weight (p10 0.2-1.3, p90 10.8-17.3) over the four tapes of 2026-09-15, not
+# the hundreds a pull of 20 would need to be outvoted — at 20 the field is the single law again.
+# Swept over the four tapes (scratch/_field_prior_sweep.py, held-out beams, median |residual|):
+# at 20 they read 11.3 / 15.9 / 15.3 / 3.8 %, at 1.0 8.3 / 15.4 / 14.1 / 4.3 %, at 0 (no pull at
+# all) 7.9 / 15.5 / 14.5 / 5.0 %, against the single law's own 11.4 / 15.6 / 16.3 / 4.5 %. The
+# pull is two rows at the ends of the pairs' own depth range, so it carries more leverage on the
+# line than its nominal weight in pairs suggests.
+FIELD_CARRY = 1.0  # the same units: how hard a node is pulled toward what it was on the last
+# frame. One beam's worth as well — swept over 0, 1, 5 and 20 on the same four tapes, where every
+# frame does have beams, it moves the residual by under a point and 20 costs the drive 2.3
+# (8.3 -> 10.6 %). What it is there for is the frames that have none: without a lidar it is the
+# only thing carrying a node's scale from the last frame that saw something.
+FIELD_CARRY_TAU_S = 2.0  # seconds over which that pull decays: a node starved for a time constant
+# keeps a third of the carry, and one starved for five seconds is the global fit again. The frame
+# law's own hold constant (FRAME_HOLD_TAU_S), by design, unmeasured as a choice of its own.
+
+
+# ---- one table of defaults ----------------------------------------------------------------------
+# Every switch of the chain, its default once. The node's FLAGS table reads its defaults from here
+# (pepin_bringup.depth_stream) and so does :func:`standard_pipeline`, so a default lives in one
+# place instead of three (a unit test holds the two tables against each other).
+PIPELINE_DEFAULTS: dict[str, bool | float | str] = {
+    "floor_pairs": False,
+    "wall_anchor": False,
+    "parallax_anchor": False,
+    "ray_law": False,
+    "range_law": True,
+    "frame_law": True,
+    "wall_correct": False,
+    "field_grid": "3x3",
+    "field_prior": FIELD_PRIOR,
+    "field_carry": FIELD_CARRY,
+    "field_carry_tau_s": FIELD_CARRY_TAU_S,
+    "floor_sigma_pitch_deg": FLOOR_SIGMA_PITCH_DEG,
+    "floor_normal_tol_deg": FLOOR_NORMAL_TOL_DEG,
+}
+
+
+def default_switch(name: str, given: bool | None) -> bool:
+    """``given`` when a caller said so, else :data:`PIPELINE_DEFAULTS`' own value for the
+    switch called ``name``."""
+    return bool(PIPELINE_DEFAULTS[name]) if given is None else bool(given)
+
+
+def grid_of(choice: str) -> tuple[int, int]:
+    """The (rows, columns) of nodes named by a ``field_grid`` choice — ``"4x3"`` is four
+    columns and three rows, the way an image size is written. ``ValueError`` for anything
+    else."""
+    if choice not in FIELD_GRIDS:
+        raise ValueError(f"{choice!r} is not one of {', '.join(FIELD_GRIDS)}")
+    cols, rows = (int(part) for part in choice.split("x"))
+    return rows, cols
+
+
+def grid_name(grid: tuple[int, int]) -> str:
+    """A (rows, columns) grid written the way :func:`grid_of` reads it."""
+    return f"{grid[1]}x{grid[0]}"
 
 
 # ---- what flows through the pipeline ----------------------------------------------------------
@@ -856,6 +934,50 @@ class FloorAnchor(AnchorStage):
 
 
 # ---- the floor as a second hoop ---------------------------------------------------------------
+def floor_sigma(z: Array, camera_height: float, sigma_pitch: float, band: DepthNoise) -> Array:
+    """How well a floor pixel's depth is known, in metres, at true depth ``z``.
+
+    The geometry is the ruler's: a ray leaving a lens ``camera_height`` above the plane at an
+    angle ``t`` below the horizon ends at ``z = h / sin(t)``, so an error in the angle — which
+    is what the mount's pitch is uncertain by — moves that depth by ``dz = z^2 / h * dt`` for a
+    small ``dt`` (differentiate, and ``cos t -> 1`` at the shallow angles a floor is seen at).
+    A ruler whose noise grows as the SQUARE of the range is a different animal from a lidar
+    beam's constant centimetres: the floor is a good ruler at a metre and a poor one at three,
+    and the weight must say so instead of the flat share every floor pixel used to carry.
+    ``sigma_pitch`` is in radians (config/neck.json's ticks_note measures the mount's pitch to
+    +-1.5 deg). The network's own band at that depth (:class:`pepin.contact.DepthNoise`) is
+    added in quadrature: a floor pixel is called floor because the network's depth put it near
+    the plane, so its pair is only as good as that judgement."""
+    depth = np.asarray(z, dtype=float)
+    tilt = depth**2 / max(camera_height, 1e-6) * sigma_pitch
+    network = depth * (band.rel_at_zero + band.rel_per_m * depth)
+    out: Array = np.hypot(tilt, network)
+    return out
+
+
+def _unproject(z: Array, rows: Array, cols: Array, ctx: FrameContext) -> Array:
+    """The (n, 3) base_link points sitting ``z`` metres along the optical axis on the rays
+    through pixels (``rows``, ``cols``): the mount's pitch applied, the lens' place added."""
+    lift, left = lift_of(rows, ctx.intr), left_of(cols, ctx.intr)
+    c, s = math.cos(ctx.cam.pitch), math.sin(ctx.cam.pitch)
+    return np.stack(
+        [ctx.cam.x + z * (c + s * lift), ctx.cam.y + z * left, ctx.cam.z + z * (-s + c * lift)],
+        axis=1,
+    )
+
+
+def fit_plane(points: Array) -> tuple[Array, Array] | None:
+    """The plane those (n, 3) points lie on, as (unit normal, a point on it — their centroid),
+    by the smallest eigenvector of their covariance; ``None`` under three points."""
+    if points.shape[0] < 3:
+        return None
+    centre = points.mean(axis=0)
+    centred = points - centre
+    _values, vectors = np.linalg.eigh(centred.T @ centred)
+    normal: Array = vectors[:, 0]
+    return normal, centre
+
+
 class FloorPairs(AnchorStage):
     """The floor pairs the network's depth with the plane's geometric depth: every
     ``stride``-th pixel whose ray meets the floor and that stands within the network's height
@@ -863,7 +985,23 @@ class FloorPairs(AnchorStage):
     pairs feed a robust fit, not a correction). Which pixels are floor is judged with the law
     as it stands; before any law exists, with a scale bootstrapped from the pixels themselves —
     the median ratio of network to plane depth, re-taken over the pixels that ratio calls
-    floor, three times. So the law can be fitted from the floor alone, with no lidar."""
+    floor, three times. So the law can be fitted from the floor alone, with no lidar.
+
+    Each pair carries its OWN weight, not a flat share: the plane's depth under a ray is
+    ``h / sin(angle below the horizon)``, so the mount's pitch uncertainty
+    (``sigma_pitch_deg``) makes a floor pair's sigma grow as the square of its range
+    (:func:`floor_sigma`), and the weight is that sigma against a lidar beam's in inverse depth
+    (:func:`pepin.depth.pair_weight`, the unit every other ruler is weighed in). A floor pixel
+    at a metre is worth about a hundredth of a beam and one at three metres a fortieth of that
+    — which is what a ruler made of geometry and a guessed angle is worth.
+
+    And the frame must prove its floor is a floor: the candidate pixels are back-projected
+    through the law as it stands and a plane is fitted to them
+    (:func:`fit_plane`). Unless that plane's normal stands within ``normal_tol_deg`` of the
+    cart's up vector, and the camera's distance to it within the network's own band of the
+    camera's height, the frame contributes nothing at all and says so in the report line. A
+    table top, a ramp, or a law that is wrong by a fifth all draw a plane the geometry never
+    meant, and pairs taken off it move every node they touch."""
 
     name = "floor_pairs"
 
@@ -874,16 +1012,22 @@ class FloorPairs(AnchorStage):
         *,
         stride: int = FLOOR_PAIR_STRIDE,
         band: DepthNoise = DEPTH_NOISE,
-        weight: float = FLOOR_PAIR_WEIGHT,
+        sigma_pitch_deg: float = FLOOR_SIGMA_PITCH_DEG,
+        normal_tol_deg: float = FLOOR_NORMAL_TOL_DEG,
     ) -> None:
         self.law = law
         self.geometry = geometry if geometry is not None else FloorGeometry()
         self.stride = stride
         self.band = band
-        self.weight = weight
+        self.sigma_pitch_deg = sigma_pitch_deg
+        self.normal_tol_deg = normal_tol_deg
+        self.frames = 0  # frames whose floor was looked at
+        self.gated = 0  # of those, the frames whose plane was not a floor
+        self.tilt_deg = 0.0  # the last plane's lean from the up vector
 
     def pairs(self, frame: Frame) -> Pairs | None:
-        """(network, floor) pairs of the frame's floor pixels, or ``None`` under MIN_SAMPLES."""
+        """(network, floor) pairs of the frame's floor pixels, each weighed by its own sigma —
+        or ``None`` under MIN_SAMPLES of them, and ``None`` when the plane gate refuses."""
         ctx = frame.ctx
         s = self.stride
         expected = self.geometry.expected(ctx)
@@ -905,22 +1049,55 @@ class FloorPairs(AnchorStage):
                 if int(floor.sum()) < MIN_SAMPLES:
                     return None
                 scale = float(np.median(raw[floor] / expected[floor]))
+            metric = raw / scale
         else:
             with np.errstate(invalid="ignore"):
                 height = ctx.cam.z * (1.0 - metric / expected)
             floor = ok & np.isfinite(height) & (np.abs(height) < band)
         if int(floor.sum()) < MIN_SAMPLES:
             return None
+        self.frames += 1
+        if not self._is_floor(metric[floor], rows[floor], cols[floor], band[floor], ctx):
+            self.gated += 1
+            return None
+        z = expected[floor]
+        sigma = floor_sigma(z, ctx.cam.z, math.radians(self.sigma_pitch_deg), self.band)
         return Pairs.of(
             raw[floor],
-            expected[floor],
+            z,
             lift_of(rows[floor], ctx.intr),
-            self.weight,
+            pair_weight(inverse_sigma(sigma, z)),
             left_of(cols[floor], ctx.intr),
         )
 
+    def _is_floor(
+        self, metric: Array, rows: Array, cols: Array, band: Array, ctx: FrameContext
+    ) -> bool:
+        """Whether the candidate pixels really lie on the floor: their metric 3D points (the
+        law's depth back-projected into base_link) fitted with a plane, that plane's normal
+        within ``normal_tol_deg`` of the cart's up vector and the camera's distance to it
+        within the network's own band of the camera's height."""
+        plane = fit_plane(_unproject(metric, rows, cols, ctx))
+        if plane is None:
+            return False
+        normal, centre = plane
+        up = np.asarray(ctx.up, dtype=float)
+        up = up / float(np.linalg.norm(up))
+        self.tilt_deg = math.degrees(math.acos(min(1.0, abs(float(normal @ up)))))
+        if self.tilt_deg > self.normal_tol_deg:
+            return False
+        lens = np.array([ctx.cam.x, ctx.cam.y, ctx.cam.z])
+        stands = abs(float(normal @ (lens - centre)))  # the camera's own height over that plane
+        return abs(stands - float(up @ lens)) <= float(np.median(band))
+
     def describe(self) -> str:
-        return f"stride {self.stride}, weight {self.weight:g}"
+        """The stage for the report line: its lattice, what the mount's pitch is trusted to,
+        and how many frames the plane gate refused (with the last plane's own lean)."""
+        return (
+            f"stride {self.stride}, pitch +-{self.sigma_pitch_deg:.1f} deg, "
+            f"plane gate {self.normal_tol_deg:.0f} deg: {self.gated}/{self.frames} frames out"
+            f" (last tilt {self.tilt_deg:.1f} deg)"
+        )
 
 
 # ---- the walls as a third hoop ----------------------------------------------------------------
@@ -1722,6 +1899,200 @@ class RangeLawStage(LawStage):
         return f"{self.law.describe()} on {self.pooled} pairs{source}"
 
 
+def _axis_weights(coord: npt.ArrayLike, size: int, nodes: int) -> Array:
+    """Each coordinate's bilinear membership in ``nodes`` node positions spread evenly over
+    ``0 .. size - 1``: a (len(coord), nodes) matrix whose rows sum to 1 and hold at most two
+    non-zeros — the two nodes a coordinate falls between, by how near it is to each. One node
+    means one column of ones: the whole axis belongs to it."""
+    out = np.zeros((np.size(coord), nodes))
+    if nodes <= 1:
+        out[:, 0] = 1.0
+        return out
+    place = np.clip(np.asarray(coord, dtype=float) / max(size - 1, 1) * (nodes - 1), 0.0, nodes - 1)
+    low = np.clip(np.floor(place).astype(int), 0, nodes - 2)
+    part = place - low
+    who = np.arange(np.size(coord))
+    out[who, low] = 1.0 - part
+    out[who, low + 1] += part
+    return out
+
+
+class ScaleField:
+    """The frame's law as a coarse grid of nodes over the picture instead of one pair of
+    numbers for all of it: each node holds its own (a, b) — scale and shift in inverse depth,
+    exactly what :func:`pepin.depth.fit_frame` fits — and a pixel's law is the bilinear blend
+    of the nodes around it, so there are no seams and no bands.
+
+    Why a field at all: this network's error is regime-wise, not global. Measured against
+    COLMAP on run 0171 (scratch/pipeline_vs_truth.txt, 2026-09-11) the raw network reads about
+    1.1x on the floor, 1.6x at the lidar's row and 2.0x from 0.3 m up — so any single law
+    fitted on a pool holding both the floor and the beams sits between the two and is wrong in
+    both places, which is why the floor pairs pulled the lidar's row 5-8 % near and had to be
+    switched off. A field lets the floor's pairs move the bottom nodes and leave the row the
+    costmap drives on to the beams.
+
+    Every node is fitted by the same weighted, robust regression as the whole frame
+    (:func:`pepin.depth.fit_node`) on the pairs that belong to it — each pair's own weight
+    times its bilinear membership in that node, so a lidar row falling between two node rows
+    feeds both — plus two pseudo-observations: one pulling the node toward the frame's GLOBAL
+    fit with weight ``prior``, and one pulling it toward its own last value with weight
+    ``carry`` decayed by ``exp(-dt / carry_tau_s)``. The first is what makes the field safe: a
+    node that saw nothing is the global fit to the bit, so the field degrades to today's single
+    law wherever the anchors are sparse. The second is what makes it steady: with a lidar row
+    in the picture it barely matters, and on a frame whose only ruler is the floor it is what
+    carries the scale of the nodes that saw no pair this time.
+
+    A grid of (1, 1) is the old behaviour reachable: one node, no membership to compute and no
+    pull to apply — the node IS the frame's global fit, bit for bit what :class:`FrameLaw`
+    published before the field existed.
+
+    Measured held out on the four tapes (scratch/scale_field_eval.py, 2026-09-15: every frame's
+    lidar pairs split odd / even, the odd fitting and the even judging, over the raw network so
+    the numbers are the whole correction). Median |corrected / true - 1| falls from the single
+    law's 11.4 / 15.6 / 16.3 / 4.5 % to 8.3 / 15.4 / 14.1 / 4.3 % at 3x3 on run 0171's drive and
+    the three neck pitches, and on the drive the residual across the top, middle and bottom third
+    of the picture goes 25.8 / 13.6 / 9.2 % -> 11.8 / 9.9 / 6.8 %. 4x3 is a wash against 3x3.
+    Where it matters most is the floor's pairs: the arrangement that pulled the lidar's row 5-8 %
+    near under one law (11.4 -> 17.6 % on the drive, 4.5 -> 16.3 % at the 40.9 deg pitch) costs
+    8.3 -> 10.6 % and 4.3 -> 5.0 % under the field, and IMPROVES the 25.8 deg pitch,
+    14.1 -> 13.6 %. The field costs 0.94 ms a frame on a 640x360 image against the single law's
+    0.46 (2x2 0.81, 4x3 1.14, 4x4 1.19)."""
+
+    def __init__(
+        self,
+        grid: tuple[int, int] = (3, 3),
+        prior: float = FIELD_PRIOR,
+        carry: float = FIELD_CARRY,
+        carry_tau_s: float = FIELD_CARRY_TAU_S,
+    ) -> None:
+        self.prior = prior
+        self.carry = carry
+        self.carry_tau_s = carry_tau_s
+        self._grid = (1, 1)
+        self.grid = grid
+
+    @property
+    def grid(self) -> tuple[int, int]:
+        """How many nodes the field carries, as (rows, columns)."""
+        return self._grid
+
+    @grid.setter
+    def grid(self, grid: tuple[int, int]) -> None:
+        """Re-cut the grid (a live flag): every node starts again from the next frame's fit."""
+        rows, cols = int(grid[0]), int(grid[1])
+        if rows < 1 or cols < 1:
+            raise ValueError(f"a scale field needs at least one node, not {rows}x{cols}")
+        self._grid = (rows, cols)
+        self._a = np.ones((rows, cols))
+        self._b = np.zeros((rows, cols))
+        self._seen = np.zeros((rows, cols))
+        self._fitted = False
+        self._axes: tuple[tuple[int, int], Array, Array] | None = None
+
+    @property
+    def fitted(self) -> bool:
+        """Whether any frame has fitted the field yet."""
+        return self._fitted
+
+    @property
+    def nodes(self) -> tuple[Array, Array]:
+        """Every node's (scale, shift), as two (rows, columns) images of the grid."""
+        return self._a.copy(), self._b.copy()
+
+    @property
+    def seen(self) -> Array:
+        """How much pair weight each node saw on the last frame fitted (a lidar beam is 1) —
+        the only honest measure of which part of the picture spoke for itself."""
+        return self._seen.copy()
+
+    def membership(self, rows: Array, cols: Array, shape: tuple[int, int]) -> Array:
+        """Each pair's share of each node, as a (grid rows, grid columns, pairs) array: the
+        bilinear weights of the (row, column) it sits at, the nodes being the vertices of a
+        regular grid spanning the image of ``shape``."""
+        down = _axis_weights(rows, shape[0], self._grid[0])
+        across = _axis_weights(cols, shape[1], self._grid[1])
+        share: Array = np.einsum("ni,nj->ijn", down, across)
+        return share
+
+    def fit(
+        self,
+        d: Array,
+        z: Array,
+        weight: Array,
+        rows: Array,
+        cols: Array,
+        shape: tuple[int, int],
+        law: tuple[float, float],
+        dt: float = 0.0,
+        shift: bool = True,
+    ) -> None:
+        """Fit every node on this frame's pairs — ``d`` the depth to correct FROM (whatever the
+        prior law published), ``z`` the true depth, ``weight`` each pair's own, ``rows`` and
+        ``cols`` where it sits in an image of ``shape`` — around the frame's global fit
+        ``law``, with the carry decayed over ``dt`` seconds since the last fit and ``shift``
+        saying whether a node may fit a shift at all (the frame's gate, not the node's)."""
+        a0, b0 = law
+        grid_rows, grid_cols = self._grid
+        if self._grid == (1, 1):  # one node: the field IS the frame's law, to the bit
+            self._a[:] = a0
+            self._b[:] = b0
+            self._seen[:] = float(np.sum(weight))
+            self._fitted = True
+            return
+        share = self.membership(rows, cols, shape) * np.asarray(weight, dtype=float)
+        self._seen = share.sum(axis=2)
+        span = (float(np.percentile(z, 5)), float(np.percentile(z, 95)))
+        carried = 0.0
+        if self._fitted and self.carry > 0.0:
+            tau = self.carry_tau_s
+            carried = self.carry * (math.exp(-max(0.0, dt) / tau) if tau > 0.0 else 0.0)
+        a_new, b_new = np.full_like(self._a, a0), np.full_like(self._b, b0)
+        for i in range(grid_rows):
+            for j in range(grid_cols):
+                mine = share[i, j] > 0.0
+                priors = [(a0, b0, self.prior)]
+                if carried > 0.0:
+                    priors.append((float(self._a[i, j]), float(self._b[i, j]), carried))
+                fitted = fit_node(d[mine], z[mine], share[i, j][mine], priors, span, shift)
+                if fitted is not None:
+                    a_new[i, j], b_new[i, j] = fitted
+        self._a, self._b = a_new, b_new
+        self._fitted = True
+
+    def law_image(self, shape: tuple[int, int]) -> tuple[float | Array, float | Array]:
+        """The (a, b) of every pixel of an image of ``shape``: the nodes blended bilinearly —
+        two small matrix products, not a loop over the picture — or the node's two numbers
+        themselves on a one-node grid."""
+        if self._grid == (1, 1):
+            return float(self._a[0, 0]), float(self._b[0, 0])
+        if self._axes is None or self._axes[0] != shape:
+            down = _axis_weights(np.arange(shape[0]), shape[0], self._grid[0])
+            across = _axis_weights(np.arange(shape[1]), shape[1], self._grid[1])
+            self._axes = (shape, down, across)
+        _key, down, across = self._axes
+        # errstate because this laptop's BLAS raises "divide by zero encountered in matmul" on
+        # any float matmul, finite operands and all (scratch/_matmul_warn.py): a spurious flag,
+        # and a report line is not the place to print it every frame.
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            return down @ self._a @ across.T, down @ self._b @ across.T
+
+    def apply(self, depth: Array) -> Array:
+        """``depth`` through the field: per pixel 1 / z = a / D + b, the two interpolated."""
+        rows, cols = depth.shape
+        a, b = self.law_image((int(rows), int(cols)))
+        return apply_affine(depth, a, b)
+
+    def describe(self) -> str:
+        """The field for the report line: its grid and, node by node, the pair weight each one
+        saw on the last frame fitted — ``3x3 [120 0 0 | 85 0 0 | 0 0 0]`` reads as a lidar row
+        down the left of the picture and nothing anywhere else, which is the whole question a
+        field asks."""
+        rows = " | ".join(
+            " ".join(f"{value:.0f}" for value in row) for row in np.atleast_2d(self._seen)
+        )
+        return f"{grid_name(self._grid)} [{rows}]"
+
+
 class FrameLaw(LawStage):
     """The law of THIS frame: scale and shift fitted on the beams of the frame in hand
     (:func:`pepin.depth.fit_frame`), not on the pool — the alignment the field performs.
@@ -1750,7 +2121,14 @@ class FrameLaw(LawStage):
     a cart that turns away from every surface the lidar and the camera share returns to the
     pool's law in a few seconds instead of carrying one frame's numbers forever. With no law of
     its own yet the prior's image goes out untouched, so switching this stage on never withholds
-    a frame the chain would otherwise have published."""
+    a frame the chain would otherwise have published.
+
+    The law is a FIELD, not a pair of numbers: the frame's fit above is the global one, and a
+    grid of nodes over the picture (:class:`ScaleField`, ``grid``, where the numbers are) is
+    fitted around it, each node on the pairs that land near it and pulled toward the global fit
+    and toward its own last value. ``grid`` (1, 1) is the old behaviour, bit for bit. The reason
+    is that this network's error is a property of where in the picture a pixel is — 1.1x on the
+    floor, 1.6x at the lidar's row, 2.0x above it — which one law cannot hold and a field can."""
 
     name = "frame_law"
 
@@ -1761,6 +2139,10 @@ class FrameLaw(LawStage):
         tau_s: float = FRAME_HOLD_TAU_S,
         clock: Callable[[], float] = time.monotonic,
         shift_needs_beams: bool = True,
+        grid: tuple[int, int] = (3, 3),
+        field_prior: float = FIELD_PRIOR,
+        field_carry: float = FIELD_CARRY,
+        field_carry_tau_s: float = FIELD_CARRY_TAU_S,
     ) -> None:
         self.prior = prior
         self.a = 1.0
@@ -1768,6 +2150,7 @@ class FrameLaw(LawStage):
         self.min_pairs = min_pairs
         self.tau_s = tau_s
         self.shift_needs_beams = shift_needs_beams
+        self.field = ScaleField(grid, field_prior, field_carry, field_carry_tau_s)
         self.frames = 0
         self.fits = 0
         self.held = 0
@@ -1808,23 +2191,40 @@ class FrameLaw(LawStage):
         with the shift the parallax-only law reads 44.5 % median |residual| and its scale jumps
         1.69 between consecutive frames, with the scale alone 30.9 % and 1.15."""
         self.frames += 1
-        law = None
+        law, corrected = None, None
         if pairs is not None and pairs.size and ctx is not None:
+            corrected = self.prior.apply(pairs.d, ctx)
             spread = math.inf if self.shift_needs_beams and not beams else FRAME_MIN_SPREAD
             law = fit_frame(
-                self.prior.apply(pairs.d, ctx),
+                corrected,
                 pairs.z,
                 pairs.weight,
                 self.min_pairs,
                 min_spread=spread,
             )
-        if law is None or pairs is None:
+        if law is None or pairs is None or ctx is None or corrected is None:
             self.held += 1
             return
         self.a, self.b = law
+        now = self._clock()
+        since = 0.0 if self._last_fit is None else max(0.0, now - self._last_fit)
+        intr = ctx.intr
+        # Where each pair sits in the picture: the anchors carry the ray's angles, and the
+        # column and row are those angles back through the optics, whoever measured the pair.
+        self.field.fit(
+            corrected,
+            pairs.z,
+            pairs.weight,
+            intr.cy - pairs.lift * intr.fy,
+            intr.cx - pairs.left * intr.fx,
+            (intr.height, intr.width),
+            law,
+            since,
+            shift=law[1] != 0.0,  # the frame's own gate: a node never opens a term it refused
+        )
         self.pairs, self._fitted = pairs.size, True
         self.fits += 1
-        self._last_fit = self._clock()
+        self._last_fit = now
 
     def apply(self, depth: Array, ctx: FrameContext) -> Array:
         """The prior's depth through this frame's own law, the prior's alone where this one has
@@ -1833,7 +2233,7 @@ class FrameLaw(LawStage):
         w = self.weight
         if w <= 0.0:
             return prior
-        own = apply_affine(prior, self.a, self.b)
+        own = self.field.apply(prior)
         if w >= 1.0:
             return own
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -1872,10 +2272,10 @@ class FrameLaw(LawStage):
         return f"rulers: {shares}, {self.pairs} pts"
 
     def describe(self) -> str:
-        """The law for the report line: this frame's two numbers over the prior's depth, the
-        pairs behind them, which rulers' weight fitted them, how many frames have been held
-        against how many seen, and how much of the frame's own law still stands against the
-        prior's."""
+        """The law for the report line: this frame's GLOBAL two numbers over the prior's depth,
+        the pairs behind them, the field's grid with the pair weight every node saw, which
+        rulers' weight fitted them, how many frames have been held against how many seen, and
+        how much of the frame's own law still stands against the prior's."""
         if not self._fitted:
             return f"prior stands, {self.held}/{self.frames} frames held"
         clipped = at_bound(self.a, self.b)
@@ -1883,6 +2283,7 @@ class FrameLaw(LawStage):
         rulers = self.rulers
         return (
             f"a {self.a:.2f} b {self.b:+.3f} on {self.pairs} pairs{edge}, "
+            + f"field {self.field.describe()}, "
             + (f"{rulers}, " if rulers else "")
             + f"{self.held}/{self.frames} frames held (own {self.weight:.2f})"
         )
@@ -1895,13 +2296,13 @@ def standard_pipeline(
     ray: RayLaw | None = None,
     range_stage: RangeLawStage | None = None,
     frame_stage: FrameLaw | None = None,
-    floor_pairs: bool = False,
-    wall_anchor: bool = False,
-    parallax_anchor: bool = False,
-    ray_law: bool = False,
-    range_law: bool = True,
-    frame_law: bool = True,
-    wall_correct: bool = False,
+    floor_pairs: bool | None = None,
+    wall_anchor: bool | None = None,
+    parallax_anchor: bool | None = None,
+    ray_law: bool | None = None,
+    range_law: bool | None = None,
+    frame_law: bool | None = None,
+    wall_correct: bool | None = None,
 ) -> DepthPipeline:
     """The node's chain: edges -> lidar -> (floor pairs) -> (wall pairs) -> (parallax) -> law
     -> (ray law) -> range law -> frame law -> (wall correction) -> floor anchor; the seven
@@ -1917,20 +2318,40 @@ def standard_pipeline(
     the whole picture — the parallax anchor is the second ruler of the scale, weighed against
     the beams by its own noise and measuring where they cannot reach (:class:`ParallaxAnchor`).
 
+    Every switch's default, and every knob of the field and of the floor's sigma, is
+    :data:`PIPELINE_DEFAULTS` — the one table the node's FLAGS read theirs from as well, so a
+    default is written once. A switch handed in as ``None`` takes the table's value.
+
     Every law may be handed in so the caller keeps them: the affine and the ray law pool and
     fit on their own, so a saved law must be seeded into **both** (:meth:`AffineLaw.seed`), or
     the ray law withholds every frame of the warm-up while the affine law publishes from the
     seed; the range law falls back to the affine law it is built on and needs no seed of its
     own to publish."""
+    defaults = PIPELINE_DEFAULTS
     the_law = law if law is not None else AffineLaw()
     the_ray = ray if ray is not None else RayLaw()
     the_range = range_stage if range_stage is not None else RangeLawStage(the_law)
-    the_frame = frame_stage if frame_stage is not None else FrameLaw(the_range)
+    the_frame = (
+        frame_stage
+        if frame_stage is not None
+        else FrameLaw(
+            the_range,
+            grid=grid_of(str(defaults["field_grid"])),
+            field_prior=float(defaults["field_prior"]),
+            field_carry=float(defaults["field_carry"]),
+            field_carry_tau_s=float(defaults["field_carry_tau_s"]),
+        )
+    )
     geometry = FloorGeometry()
     stages: list[Stage] = [
         EdgeFilter(),
         LidarAnchor(),
-        FloorPairs(the_law, geometry),
+        FloorPairs(
+            the_law,
+            geometry,
+            sigma_pitch_deg=float(defaults["floor_sigma_pitch_deg"]),
+            normal_tol_deg=float(defaults["floor_normal_tol_deg"]),
+        ),
         WallAnchor(),
         ParallaxAnchor(),
         the_law,
@@ -1940,7 +2361,7 @@ def standard_pipeline(
         WallCorrection(),
         FloorAnchor(geometry),
     ]
-    flags = (
+    given = (
         ("floor_pairs", floor_pairs),
         ("wall_anchor", wall_anchor),
         ("parallax_anchor", parallax_anchor),
@@ -1949,10 +2370,13 @@ def standard_pipeline(
         ("frame_law", frame_law),
         ("wall_correct", wall_correct),
     )
+    flags = [(name, default_switch(name, value)) for name, value in given]
     return DepthPipeline(stages, off=[name for name, on in flags if not on])
 
 
 __all__ = [
+    "FIELD_GRIDS",
+    "PIPELINE_DEFAULTS",
     "AffineLaw",
     "Anchor",
     "AnchorStage",
@@ -1979,12 +2403,18 @@ __all__ = [
     "Result",
     "Rigid",
     "RowLaw",
+    "ScaleField",
     "Stage",
     "StageStats",
     "Verdict",
     "WallAnchor",
     "WallCorrection",
     "WallWalk",
+    "default_switch",
+    "fit_plane",
+    "floor_sigma",
+    "grid_name",
+    "grid_of",
     "left_of",
     "lift_of",
     "standard_pipeline",

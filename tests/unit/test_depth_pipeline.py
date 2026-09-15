@@ -10,6 +10,7 @@ import time
 import numpy as np
 import pytest
 
+from pepin.contact import DEPTH_NOISE
 from pepin.depth import (
     POOL_MIN_SAMPLES,
     AffineScale,
@@ -19,6 +20,7 @@ from pepin.depth import (
     beam_pairs,
     drop_edges,
     edge_mask,
+    fit_frame,
     floor_anchor,
     floor_depth,
     project,
@@ -38,7 +40,10 @@ from pepin.depth_pipeline import (
     Pairs,
     RangeLawStage,
     RowLaw,
+    ScaleField,
     WallAnchor,
+    floor_sigma,
+    left_of,
     lift_of,
     standard_pipeline,
 )
@@ -288,7 +293,7 @@ def test_the_floor_alone_fits_the_law_with_no_lidar_and_a_box_stays_out() -> Non
         pools[with_box], raws[with_box] = result.frame.pool, result.frame.raw
     assert "stride 8" in pipeline.report() and s == 8
     pool, raw = pools[True], raws[True]
-    assert pool.weight[0] == 0.1
+    assert 0.0 < pool.weight.max() < 0.1, "a floor pair weighs its own sigma, not a flat share"
     # every pair is the network's depth and the plane's depth at one and the same lattice pixel
     lattice_raw, lattice_z = raw[::s, ::s].ravel(), expected[::s, ::s].ravel()
     order = np.argsort(lattice_raw)
@@ -701,6 +706,135 @@ def test_the_pool_of_two_rulers_is_read_by_weight_and_the_report_says_whose_it_w
     truth = 1.3  # the network's own scale on this frame: what the beams measure
     assert only.a == pytest.approx(truth / 1.3, abs=0.02), "the corners alone fit their own claim"
     assert abs(both - truth) < abs(only.a - truth) / 3.0, "the beams write the law where they are"
+
+
+# ---- the frame's law as a field over the picture -----------------------------------------------
+def _at_node(
+    field: ScaleField, node: tuple[int, int], scale: float, count: int = 24, seed: int = 0
+) -> Pairs:
+    """``count`` pairs sitting exactly on one node of ``field`` over a 360x640 picture, whose
+    network depth is ``scale`` times their true depth (1.8-2.2 m apart, under the shift gate)."""
+    rows, cols = field.grid
+    row = node[0] / max(rows - 1, 1) * 359.0
+    col = node[1] / max(cols - 1, 1) * 639.0
+    z = np.linspace(1.8, 2.2, count) + 0.01 * np.random.default_rng(seed).standard_normal(count)
+    return Pairs.of(
+        scale * z,
+        z,
+        lift_of(np.full(count, row), INTR),
+        1.0,
+        left_of(np.full(count, col), INTR),
+    )
+
+
+def test_a_one_node_field_is_the_frame_law_as_it_was_to_the_bit() -> None:
+    """The old behaviour reachable: a 1x1 grid is one node, it IS the frame's global fit, and
+    the image it publishes is what apply_affine makes of the prior's depth — bit for bit."""
+    law = AffineLaw()
+    law.seed(1.0, 0.0)
+    raw = _network(_scene(2.0), 1.6, 0.0, noise=0.01, seed=3)
+    frame = Frame(raw, _context(_wall_returns(2.0)))
+    beams = LidarAnchor().pairs(frame)
+    assert beams is not None
+    frame.add("lidar_anchor", beams)
+    stage = FrameLaw(law, grid=(1, 1), clock=lambda: 0.0)  # frozen: no decay to blend in
+    out, _verdict = stage.run(raw, frame)
+    own = fit_frame(law.apply(beams.d, frame.ctx), beams.z, beams.weight)
+    assert own is not None and (stage.a, stage.b) == own
+    expected = apply_affine(law.apply(raw, frame.ctx), *own)
+    assert np.array_equal(out, np.where(np.isfinite(raw), expected, np.nan), equal_nan=True)
+    assert stage.field.grid == (1, 1) and "field 1x1 [" in stage.describe()
+
+
+def test_the_field_is_its_own_scale_where_it_has_pairs_and_the_global_fit_where_it_has_none() -> (
+    None
+):
+    """A network whose error depends on where in the picture a pixel is — 1.1x at the bottom
+    left, 1.6x in the middle, 2.0x at the top — with pairs in two of the nine nodes only. Those
+    two come back as their own scale; the nodes nobody measured are the frame's global fit to
+    the bit, which is what makes a field safe where the anchors are sparse."""
+    stage = FrameLaw(AffineLaw(), grid=(3, 3))
+    stage.prior.seed(1.0, 0.0)  # type: ignore[attr-defined]  the identity, so the field is the law
+    field = stage.field
+    two_nodes = Pairs.join(
+        [_at_node(field, (2, 0), 1.1, seed=1), _at_node(field, (1, 1), 1.6, seed=2)]
+    )
+    assert two_nodes is not None
+    stage.fit(two_nodes, _context(None), beams=True)
+    a, b = field.nodes
+    assert a[2, 0] == pytest.approx(1.1, rel=0.03), "the node that saw the floor's regime"
+    assert a[1, 1] == pytest.approx(1.6, rel=0.03), "the node that saw the lidar's row"
+    assert a[0, 2] == pytest.approx(stage.a, rel=1e-9), "a node with no pairs IS the global fit"
+    assert np.all(b == 0.0), "one depth band: the frame's gate kept the shift shut"
+    assert 1.1 < stage.a < 1.6, "the global fit sits between the two regimes, as one law must"
+    seen = field.seen
+    assert seen[2, 0] == pytest.approx(24.0) and seen[0, 2] == 0.0
+    assert field.describe().startswith("3x3 [") and " | " in field.describe()
+    # and the picture it publishes: the true depth back at both regimes, which one law cannot do
+    z = np.full((360, 640), 2.0)
+    published = field.apply(np.where(np.arange(360)[:, None] > 180, 1.1 * z, 1.6 * z))
+    assert published[359, 0] == pytest.approx(2.0, rel=0.03)
+    assert published[180, 320] == pytest.approx(2.0, rel=0.03)
+
+
+def test_a_node_starved_of_pairs_carries_its_value_and_decays_toward_the_global_fit() -> None:
+    """The carry: a node fed on one frame and starved on the next keeps what it measured,
+    decaying toward the frame's global fit over field_carry_tau_s — the only thing holding a
+    node's scale on a frame whose anchors landed somewhere else."""
+    now = [0.0]
+    kept = []
+    for gap in (0.0, 2.0, 20.0):
+        stage = FrameLaw(
+            AffineLaw(), grid=(3, 3), field_prior=1.0, field_carry=10.0, clock=lambda: now[0]
+        )
+        stage.prior.seed(1.0, 0.0)  # type: ignore[attr-defined]
+        field = stage.field
+        now[0] = 0.0
+        fed = Pairs.join(
+            [_at_node(field, (2, 0), 1.1, seed=1), _at_node(field, (1, 1), 1.6, seed=2)]
+        )
+        assert fed is not None
+        stage.fit(fed, _context(None), beams=True)
+        measured = float(field.nodes[0][2, 0])
+        now[0] = gap  # the next frame, that long later, with nothing at the starved node
+        starved = Pairs.join(
+            [_at_node(field, (1, 1), 1.6, seed=4), _at_node(field, (0, 2), 1.6, seed=5)]
+        )
+        assert starved is not None
+        stage.fit(starved, _context(None), beams=True)
+        kept.append(abs(float(field.nodes[0][2, 0]) - stage.a) / abs(measured - stage.a))
+    # with no pairs of its own a node is the carry and the prior averaged: carry / (carry + 1)
+    # of the way from the global fit to what it last measured, the carry decaying as exp(-dt/tau)
+    share = [10.0 * math.exp(-gap / 2.0) for gap in (0.0, 2.0, 20.0)]
+    assert kept[0] == pytest.approx(share[0] / (1 + share[0]), rel=0.1), "no time: it keeps it"
+    assert kept[1] == pytest.approx(share[1] / (1 + share[1]), rel=0.1), "one tau: a third gone"
+    assert kept[2] < 0.05, "ten time constants later the node is the global fit again"
+
+
+def test_a_floor_pair_weighs_its_own_sigma_and_a_tilted_plane_is_refused() -> None:
+    """A floor pair's ruler is the mount's pitch: its sigma grows as the square of the range
+    (z^2 / h * sigma_pitch) and its weight against a lidar beam's 1 says so. And the frame must
+    prove its floor is one: the same picture of a plane rolled 3 degrees is taken with the gate
+    at 5 degrees and refused with the gate at 1, counted in the report line."""
+    sigma = floor_sigma(np.array([1.0, 2.0, 3.0]), CAM.z, math.radians(1.5), DEPTH_NOISE)
+    assert sigma[0] < sigma[1] < sigma[2], "a floor pixel further out is a worse ruler"
+    assert sigma[1] / sigma[0] > 2.0, "and worse as the square of the range, not the range"
+    rolled = np.array([0.0, math.sin(math.radians(3.0)), math.cos(math.radians(3.0))])
+    raw = 1.3 * floor_depth(INTR, CAM, rolled)
+    frame = Frame(raw, _context(None))
+    wide = FloorPairs(AffineLaw())
+    pairs = wide.pairs(frame)
+    assert pairs is not None and wide.gated == 0 and wide.frames == 1
+    assert wide.tilt_deg == pytest.approx(3.0, abs=0.2)
+    assert 0.0 < pairs.weight.max() < 0.2, "a floor pair is a fraction of a beam"
+    near, far = int(np.argmin(pairs.z)), int(np.argmax(pairs.z))
+    assert pairs.weight[near] != pairs.weight[far], "and not the same fraction at every range"
+    tight = FloorPairs(AffineLaw(), normal_tol_deg=1.0)
+    assert tight.pairs(Frame(raw, _context(None))) is None
+    assert tight.gated == 1 and "1/1 frames out" in tight.describe()
+    level = FloorPairs(AffineLaw(), normal_tol_deg=1.0)
+    assert level.pairs(Frame(1.3 * floor_depth(INTR, CAM), _context(None))) is not None
+    assert level.gated == 0 and level.tilt_deg < 0.1
 
 
 def test_a_frame_without_beams_decays_back_to_the_law_behind_it() -> None:
