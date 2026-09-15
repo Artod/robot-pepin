@@ -774,9 +774,9 @@ def test_one_corrupted_observation_is_dropped_and_the_track_survives() -> None:
     error = np.abs(repaired.z - points[:, 2])[good]
     assert float(np.median(error)) < 3.0 * float(np.median(np.abs(clean.z - points[:, 2])[good]))
     naive = triangulate_tracks(broken, INTR, outlier_px=1e9)  # the same track, nothing dropped
-    assert float(np.median(np.abs(naive.z - points[:, 2])[good])) > 2.0 * float(
-        np.median(error)
-    ), "the repair must actually be worth something"
+    assert float(np.median(np.abs(naive.z - points[:, 2])[good])) > 2.0 * float(np.median(error)), (
+        "the repair must actually be worth something"
+    )
 
 
 def track_window(
