@@ -268,9 +268,17 @@ FIELD_CARRY_SPENT = 0.01  # what is left of the carry when it is dropped outrigh
 # (pepin_bringup.depth_stream) and so does :func:`standard_pipeline`, so a default lives in one
 # place instead of three (a unit test holds the two tables against each other).
 PIPELINE_DEFAULTS: dict[str, bool | float | str] = {
-    "floor_pairs": False,
+    # floor_pairs ON since 2026-09-16: with the band capped and the plane judged in metres the
+    # floor pairs feed 55-125 of every 79-125 door frames at 10 % of the fit weight and cost the
+    # lidar chain nothing (scratch/wall_truth_eval.py), lift the lidar row on the 0171 drive
+    # 17.0 -> 11.3 % (block split, scratch/scale_field_eval.py) and alone read a door 2 m away
+    # to 4-9 % with no lidar in the chain — the field keeps them off the lidar's own nodes.
+    "floor_pairs": True,
     "wall_anchor": False,
-    "parallax_anchor": False,
+    # parallax_anchor ON since 2026-09-16: forward tracks cost 6 ms a frame and the depth
+    # stream held 7-8 fps with them on during the door drives; alone they read a door 2 m away
+    # to 5-6 % above the lidar's row on straight legs (scratch/wall_truth_eval.py).
+    "parallax_anchor": True,
     "ray_law": False,
     "range_law": True,
     "frame_law": True,
