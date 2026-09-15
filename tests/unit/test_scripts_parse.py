@@ -626,6 +626,9 @@ case "$(basename "$0")$*" in
     goto.shwhere) printf '%s\\n' "${FAKE_WHERE-at (-11.32, 0.71) facing 132 deg, fit 0.66}"
                   [ -z "${FAKE_WHERE_DOWN-}" ] || exit 1 ;;
     flags.shdrift*) printf '%s' "${FAKE_DRIFT-}" ;;
+    foxglove.shcheck) printf '%s\n' "${FAKE_FOXGLOVE-foxglove: 17 checks, none failed}"
+                      [ -z "${FAKE_FOXGLOVE_RED-}" ] || exit 1 ;;
+    foxglove.shreopen) printf 'foxglove: the app was told to reconnect\n' ;;
 esac
 exit 0
 """
@@ -638,7 +641,7 @@ def _restart(tmp_path, *args, **env):  # type: ignore[no-untyped-def]
     here = tmp_path / "ros"
     here.mkdir(exist_ok=True)
     (here / "lib.sh").write_text(FAKE_RESTART_LIB)
-    for name in ("sync.sh", "board.sh", "goto.sh", "laptop.sh", "flags.sh"):
+    for name in ("sync.sh", "board.sh", "goto.sh", "laptop.sh", "flags.sh", "foxglove.sh"):
         (here / name).write_text(FAKE_SUB)
         (here / name).chmod(0o755)
     (here / "restart.sh").write_text((REPO / "ros/restart.sh").read_text())
@@ -744,9 +747,51 @@ def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_
     assert sent[order[1]] == "laptop.sh start"
     first_rate = next(i for i, c in enumerate(sent) if "topic_rate.py" in c)
     assert first_rate > order[-1], "the board is asked about the laptop's topics after it is up"
-    for number in ("1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "2.1", "2.8", "3.1"):
+    for number in (
+        "1.1",
+        "1.2",
+        "1.3",
+        "1.4",
+        "1.5",
+        "1.6",
+        "1.7",
+        "1.8",
+        "2.1",
+        "2.8",
+        "2.9",
+        "3.1",
+    ):
         assert f"PASS {number}" in out, out
     assert "green: " in out and "none failed" in out
+
+
+def test_the_operators_window_is_checked_and_the_app_is_reconnected_last(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A restart kills the bridge and with it the desktop app's socket: the panels stay on screen,
+    empty, until a client re-attaches. So `ros/foxglove.sh check` is check 2.9 and `reopen` is the
+    last thing the restart does — and a bridge that does not answer turns the run red like any
+    other check."""
+    code, out, sent = _restart(tmp_path, "both")
+    assert code == 0, out
+    assert "PASS 2.9" in out and "none failed" in out
+    calls = [c for c in sent if c.startswith("foxglove.sh")]
+    assert calls == ["foxglove.sh check", "foxglove.sh reopen"]
+    assert out.index("== foxglove ==") < out.index("== verdict ==")
+
+    code, out, sent = _restart(
+        tmp_path,
+        "both",
+        FAKE_FOXGLOVE_RED="1",
+        FAKE_FOXGLOVE="FAIL fg.3   channels: 0 advertised\nfoxglove: 1 of 17 checks failed",
+    )
+    assert code == 1, out
+    assert "FAIL 2.9" in out and "1 of 17 checks failed" in out
+    assert "FAIL fg.3" in out, "the failing lines of the check are shown under it"
+    assert "PASS 3.1" in out, "the checks after it still ran"
+
+    # The board alone never touches the laptop's app.
+    code, out, sent = _restart(tmp_path, "board")
+    assert code == 0, out
+    assert not [c for c in sent if c.startswith("foxglove.sh")]
 
 
 def test_every_check_runs_even_when_the_first_ones_fail_and_the_run_goes_red(tmp_path) -> None:  # type: ignore[no-untyped-def]

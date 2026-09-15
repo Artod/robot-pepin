@@ -487,12 +487,32 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     )
     # The operator's Foxglove connects here for the 3D view: the cloud stays on the laptop and
     # the board's topics arrive over the bridge, so nothing crosses the WiFi twice.
+    #
+    # What the parameters are for (foxglove_bridge 3.4.1, its own launch file lists every one):
+    # ``topic_whitelist`` is written out as the default ``['.*']`` on purpose — the bridge
+    # advertises a topic when a PUBLISHER for it appears and withdraws the channel when the last
+    # one goes, so a topic that only shows up after the board's routes are repaired IS advertised
+    # then, and no whitelist entry can hold a channel open for a topic nobody publishes. What
+    # a client sees as "the panel went empty" is that withdrawal, or this process restarting:
+    # channel ids are per bridge process and start again at 1, which is why every restart of this
+    # half ends with ros/foxglove.sh reopen. ``max_qos_depth`` 25 is what the bridge silently
+    # clamps to anyway (it warns about /tf, /tf_static and /rosout at every start); saying it
+    # keeps the warnings out of the log. ``send_buffer_limit`` 100 MB is ten times the default
+    # because the surface cloud is megabytes a frame and the default drops the client instead.
     foxglove = Node(
         package="foxglove_bridge",
         executable="foxglove_bridge",
         name="foxglove_bridge",
         output="screen",
-        parameters=[{"port": 8765, "address": "0.0.0.0", "send_buffer_limit": 100_000_000}],
+        parameters=[
+            {
+                "port": 8765,
+                "address": "0.0.0.0",
+                "send_buffer_limit": 100_000_000,
+                "topic_whitelist": [".*"],
+                "max_qos_depth": 25,
+            }
+        ],
         prefix=_after_ghost("/foxglove_bridge"),
         **RESPAWN,
     )

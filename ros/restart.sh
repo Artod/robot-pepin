@@ -20,6 +20,9 @@
 #                  the laptop feeds the board are asked for when there is a laptop to feed them
 #   --no-check     restart only
 #
+# After a laptop restart the desktop Foxglove is told to reconnect (ros/foxglove.sh reopen): its
+# old websocket died with the container and its panels stay empty until a client re-attaches.
+#
 # The checks (one PASS/FAIL line each, numbered; WARN never fails the run) are listed under
 # "Restarting" in ros/README.md. Exit status: 1 if any check failed, 0 otherwise. Everything
 # waits with an explicit timeout, and a check that blows up never stops the ones after it —
@@ -330,11 +333,28 @@ check_laptop() {
         pass 2.7 "rtabmap frame: anchor from $value, graph trust over $n infos"
     fi
 
+    check_foxglove
+
     n="$(grep -ac 'process has died' <<<"$LOG" || true)"
     if [ "${n:-0}" -eq 0 ] 2>/dev/null; then
         pass 2.8 "no node died since the container started"
     else
         fail 2.8 "$n node(s) died since the container started: $(grep -a 'process has died' <<<"$LOG" | tail -1 | cut -c1-140)"
+    fi
+}
+
+check_foxglove() {  # 2.9: the operator's window — the bridge answers, and it advertises what
+    # the layout draws. One line here, the failing details indented under it; the whole list is
+    # ros/foxglove.sh check.
+    local out line status=0
+    out="$(PEPIN_FOXGLOVE_PREFIX=2.9 "$HERE/foxglove.sh" check 2>&1)" || status=$?
+    if [ "$status" -eq 0 ]; then
+        pass 2.9 "$(tail -1 <<<"$out")"
+    else
+        fail 2.9 "$(tail -1 <<<"$out")"
+        while IFS= read -r line; do
+            [ -z "$line" ] || printf '          %s\n' "$line"
+        done < <(grep '^FAIL' <<<"$out")
     fi
 }
 
@@ -372,6 +392,13 @@ fi
 [ "$HALF" = laptop ] || check_board
 [ "$HALF" = board ] || check_laptop
 check_flags   # last: one `ros2 param dump` per node, the slowest thing here
+# The restart took the bridge with it, and a Foxglove client bound to the dead socket shows empty
+# panels until it reconnects. So the app is told to, as the last act of the restart (it is only
+# told when it is running; PEPIN_FOXGLOVE_REOPEN=0 leaves it alone).
+if [ "$HALF" != board ] && [ "${PEPIN_FOXGLOVE_REOPEN:-1}" = 1 ]; then
+    step "foxglove"
+    "$HERE/foxglove.sh" reopen || true
+fi
 step "verdict"
 if [ "$FAILED" -eq 0 ]; then
     echo "green: $TOTAL checks, none failed"
