@@ -2340,9 +2340,13 @@ def test_the_visual_odometry_reaches_the_ekf_without_being_able_to_move_the_odom
     """The camera's own odometry is a third input to the EKF, and the shape of that input is
     the whole safety argument: rtabmap_odom's rgbd_odometry on the laptop, gated by
     pepin_bringup.visual_odometry, fused DIFFERENTIALLY (two poses differenced into a velocity,
-    so this source's origin — and its restarts — can never move odom -> base_link) in x and y
-    only, with no yaw at all because the gyro owns heading (measured 2026-09-13: with the gyro
-    the EKF's turn error is ~5 %, the wheels alone over-report a turn by 40-70 %)."""
+    so this source's origin — and its restarts — can never move odom -> base_link) in x, y and —
+    since 2026-09-15 — yaw, which is the same differential path and therefore the same safety
+    argument. The gyro still owns heading: at vo_yaw_sigma_deg's 5 degrees the camera carries a
+    quarter of the gyro's weight per sample and ~5 % of its information per second, which is a
+    second opinion that keeps a heading alive if the MPU6050 dies, not a rival (measured
+    2026-09-13: with the gyro the EKF's turn error is ~5 %, the wheels alone over-report a turn
+    by 40-70 %)."""
     ekf = yaml.safe_load((REPO / "ros/params/ekf.yaml").read_text())["ekf_filter_node"][
         "ros__parameters"
     ]
@@ -2352,8 +2356,11 @@ def test_the_visual_odometry_reaches_the_ekf_without_being_able_to_move_the_odom
     assert ekf["odom1"] == "vo"
     pose_x, pose_y, *_rest = ekf["odom1_config"]
     assert pose_x is True and pose_y is True
-    assert ekf["odom1_config"][5] is False, "no yaw from the camera: the gyro owns heading"
-    assert ekf["odom1_config"][11] is False, "nor yaw rate"
+    assert ekf["odom1_config"][5] is True, "the camera's yaw, differenced into a yaw rate"
+    assert ekf["odom1_config"][11] is False, (
+        "index 11 would read rtabmap's own twist, which the gate never rewrites; the fused"
+        " heading must come through the differential path that the gate's covariance sizes"
+    )
     assert not any(ekf["odom1_config"][2:5]), "z, roll and pitch are not the camera's either"
     assert ekf["odom1_differential"] is True, "a VO restart must never jump the odom frame"
     assert ekf["odom1_pose_rejection_threshold"] > 0, "an outlier may not yank odom"

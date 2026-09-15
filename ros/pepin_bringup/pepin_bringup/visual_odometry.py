@@ -136,16 +136,20 @@ FLAGS = FlagSet(
         "vo_yaw_sigma_deg",
         5.0,
         range=(0.1, 180.0),
-        description="the constant yaw sigma of one visual-odometry pose, in degrees; the board's"
-        " EKF does not fuse yaw from this source at all, so it is carried for whoever reads the"
-        " message rather than for the filter",
-        why="unmeasured on purpose, because nothing fuses it: the gyro owns heading — with it"
-        " the EKF's turn error is ~5 % against the wheels' 40-70 % (2026-09-13) — and"
-        " ros/params/ekf.yaml fuses no"
-        " yaw from this topic. 5 degrees is a deliberately weak claim so that a future consumer"
-        " of /vo cannot mistake this for a heading source",
-        on_when="not a switch",
-        off_when="not a switch",
+        description="the constant yaw sigma of one visual-odometry pose, in degrees; since"
+        " 2026-09-15 the board's EKF fuses this yaw differentially (ekf.yaml odom1_config index"
+        " 5), so this number is what sizes a second heading source against the gyro",
+        why="5 degrees is a deliberately weak claim, and it is the claim that keeps this source"
+        " a second opinion instead of a rival: through robot_localization's differential"
+        " arithmetic (2 * sigma^2 * dt) it is a yaw-rate variance of 1.6e-3 (rad/s)^2 at 9.4"
+        " poses/s against the gyro's 4.0e-4, a quarter of the gyro's weight per sample and ~5 %"
+        " of its information per second. rtabmap's own per-frame yaw std is 0.02-0.04 rad"
+        " (1.1-2.3 deg): tightening this toward that makes the camera a rival to the gyro, which"
+        " is a decision to take with a drive, not a default. The gyro still owns heading — with"
+        " it the EKF's turn error is ~5 % against the wheels' 40-70 % (2026-09-13)",
+        on_when="widen it toward 180 to make the camera's heading count for nothing while"
+        " leaving its x/y fused",
+        off_when="the whole source goes with vo_publish; there is no separate yaw switch",
     ),
     Flag(
         "vo_max_speed",

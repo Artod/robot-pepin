@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from pepin.geometry import BaseGeometry
+from pepin.kinematics import Twist
 
 _log = logging.getLogger(__name__)
 
@@ -223,3 +224,44 @@ class RunawayWatch:
         self._pose, self._stamp = pose, stamp
         self.streak = 0
         self.reason = ""
+
+
+class TwistFromPose:
+    """Turns consecutive wheel poses into the body twist the wheels actually measured.
+
+    The base server reports ``v`` and ``w`` as the twist it was COMMANDED to apply, not one it
+    measured: ``base_server.snapshot`` copies ``self.twist``, which is whatever /cmd_vel last
+    asked for (src/pepin/base_server.py:466). Its x/y/theta, on the other hand, are integrated
+    from the wheel travel and are a measurement. So the honest wheel velocity is the difference
+    of two consecutive poses over their gap, which is what this returns -- and what a filter may
+    fuse without closing a loop from its own command back into its own state estimate.
+
+    Feed every pose as it arrives; the first one primes and returns a zero twist.
+    """
+
+    def __init__(self, max_gap_s: float = 1.0) -> None:
+        """``max_gap_s``: a longer silence re-primes instead of dividing by a stale gap."""
+        self._max_gap_s = max_gap_s
+        self._pose: Pose2D | None = None
+        self._stamp = 0.0
+
+    def reset(self) -> None:
+        """Forget the last pose; the next sample primes again and returns a zero twist."""
+        self._pose = None
+
+    def update(self, pose: Pose2D, stamp: float) -> Twist:
+        """The body twist between the previous pose and this one, in m/s and rad/s.
+
+        Forward speed is the straight-line step signed by the direction the robot was facing
+        (a differential cart cannot move sideways, so the step is forward or backward); the yaw
+        rate is the wrapped heading step over the gap. Returns a zero twist on the first sample
+        and after a gap longer than ``max_gap_s``.
+        """
+        previous, last_stamp = self._pose, self._stamp
+        self._pose, self._stamp = pose, stamp
+        dt = stamp - last_stamp
+        if previous is None or dt <= 0.0 or dt > self._max_gap_s:
+            return Twist(0.0, 0.0)
+        dx, dy = pose.x - previous.x, pose.y - previous.y
+        forward = dx * math.cos(previous.theta) + dy * math.sin(previous.theta)
+        return Twist(forward / dt, wrap_angle(pose.theta - previous.theta) / dt)

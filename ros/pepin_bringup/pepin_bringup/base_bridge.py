@@ -29,6 +29,8 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from tf2_ros import TransformBroadcaster
 
+from pepin.kinematics import Twist as KinematicTwist
+from pepin.odometry import Pose2D, TwistFromPose
 from pepin_bringup.link import JsonLineLink
 from pepin_bringup.protocol import (
     BaseState,
@@ -60,6 +62,17 @@ class BaseBridge(Node):
         self._max_angular = float(self.declare_parameter("max_angular_rad_s", 0.6).value)
         # False when an EKF (robot_localization) owns odom -> base_link; /odom is still published.
         self._publish_tf = bool(self.declare_parameter("publish_tf", True).value)
+        # WHAT /odom's TWIST MEANS. The base server's state line reports v and w as the twist it
+        # was COMMANDED to apply -- snapshot() copies self.twist, which is whatever /cmd_vel last
+        # asked for (src/pepin/base_server.py:466) -- while its x/y/theta are integrated from the
+        # wheel travel and ARE a measurement. Publishing the command as the twist puts a
+        # controller's own output where a filter reads a sensor: robot_localization fuses
+        # odom0's vx today, so the EKF has been told the cart is doing exactly what it was
+        # asked to do. "measured" (the default) differences two consecutive wheel poses instead
+        # (pepin.odometry.TwistFromPose); "commanded" is the old behaviour, one parameter away
+        # (``ros2 param set /base_bridge odom_twist_source commanded``).
+        self._odom_twist_source = str(self.declare_parameter("odom_twist_source", "measured").value)
+        self._twist_from_pose = TwistFromPose()
 
         self._pose_covariance = odometry_pose_covariance()
         self._twist_covariance = odometry_twist_covariance()
@@ -103,8 +116,9 @@ class BaseBridge(Node):
         odom.pose.pose.orientation.z = qz
         odom.pose.pose.orientation.w = qw
         odom.pose.covariance = self._pose_covariance
-        odom.twist.twist.linear.x = state.v  # the body frame: x forward, yaw counter-clockwise
-        odom.twist.twist.angular.z = state.w
+        twist = self._odom_twist(state)
+        odom.twist.twist.linear.x = twist.linear  # body frame: x forward, yaw counter-clockwise
+        odom.twist.twist.angular.z = twist.angular
         odom.twist.covariance = self._twist_covariance
         self._odom_pub.publish(odom)
 
@@ -118,6 +132,19 @@ class BaseBridge(Node):
         transform.transform.rotation.w = qw
         if self._publish_tf:
             self._tf.sendTransform(transform)
+
+    def _odom_twist(self, state: BaseState) -> KinematicTwist:
+        """The twist /odom carries: measured off two wheel poses, or the commanded one.
+
+        The parameter is read per sample so ``ros2 param set`` switches a live filter's input
+        without a restart; the source is named in every link-up line.
+        """
+        source = str(self.get_parameter("odom_twist_source").value)
+        self._odom_twist_source = source
+        if source == "commanded":
+            self._twist_from_pose.reset()
+            return KinematicTwist(state.v, state.w)
+        return self._twist_from_pose.update(Pose2D(state.x, state.y, state.theta), state.stamp_s)
 
     def _on_twist(self, message: Twist) -> None:
         """A /cmd_vel message: down to the board now, and kept as what the resend repeats."""
@@ -160,7 +187,7 @@ class BaseBridge(Node):
             return
         connected, detail = change
         if connected:
-            self.get_logger().info(detail)
+            self.get_logger().info(f"{detail}; odom twist: {self._odom_twist_source}")
         else:
             self.get_logger().warning(detail)
 

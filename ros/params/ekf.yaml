@@ -1,6 +1,10 @@
 # robot_localization EKF: wheel odometry fused with the gyro — and, when the laptop publishes it,
 # with the camera's own visual odometry — in the plane.
 #
+# Every number in this file that says "measured" was measured from the numbered tapes by
+# scratch/heading_sources.py (2026-09-15); each fused index carries the measurement that sizes
+# it and the one word that turns it off again.
+#
 # Why: on carpet the wheels over-report rotation by 10-25% whenever the cart turns in place
 # (measured 2026-09-06 across three drives; it varies by direction and run, so no track-width
 # constant fixes it). Distance from the wheels is honest to 3%. So the wheels give x, y and
@@ -25,6 +29,46 @@ ekf_filter_node:
     # vx from the wheels, and vy too: a differential-drive cart cannot move sideways, so the
     # wheels' vy = 0 is a real measurement. Without it vy was unobservable — nothing pulled it
     # back — and one bad VO sample on 2026-09-14 flew odom -> base_link 43 km at 60 m/s.
+    #
+    # THE WHEELS' YAW RATE (index 11) IS OFF, AND NOT BECAUSE IT IS WORTHLESS. Measured over 51
+    # tapes of 2026-09-13/14 (scratch/heading_sources.py): differenced off /odom's own theta the
+    # wheels' yaw rate sits within 4 % of the gyro's in a pivot (median of the per-tape medians;
+    # 0.95 to 1.28 across tapes) and its per-interval residual against the gyro is 0.098 rad/s
+    # RMS (median; 0.031 to 0.283) -- a variance of 0.0096 (rad/s)^2, which is the 0.01 the base
+    # bridge already puts in twist.covariance[35] (pepin_base_cpp/include/.../protocol.hpp:203).
+    # The message's number is right; the message's VALUE is not. The base server reports v and w
+    # as the twist it was COMMANDED to apply (base_server.py:466 copies self.twist, whatever
+    # /cmd_vel last asked for), while x/y/theta ARE integrated wheel travel. Fusing index 11
+    # today would feed the controller's own output back into the filter as a heading sensor.
+    # The same sentence applies to index 6, which IS fused: the EKF's forward speed is the
+    # commanded one, not a measured one (found 2026-09-15).
+    # TO TURN IT ON, in this order: (1) make the bridge that actually runs on the board publish a
+    # measured twist -- pepin.odometry.TwistFromPose differences two consecutive wheel poses and
+    # the Python bridge already uses it behind ``odom_twist_source`` (default "measured"), the
+    # C++ bridge (pepin_base_cpp/src/base_bridge.cpp:173) still publishes state.v/state.w;
+    # (2) flip the index-11 false below to true. Nothing else changes: the covariance is already
+    # the measured one, and at 0.01 against the gyro's 0.0004 the wheels carry 4 % of the gyro's
+    # weight per sample (1.7 % per second: 20 Hz against the gyro's 47) -- a heading that
+    # survives the gyro dying, and changes nothing while it lives.
+    # TWO WARNINGS ON THAT 0.01, BOTH FOUND BY RE-RUNNING THE SCRIPT ON 2026-09-15.
+    # (a) It is the spread's p90, not its middle: per-tape the residual RMS runs 0.016 to 0.107
+    # rad/s (variance 0.0003 to 0.0114) across the 2026-09-14 tapes. 0.01 is the pessimistic end,
+    # which is the right end to sit on for a source whose error is partly systematic.
+    # (b) IT IS A NOISE NUMBER, AND THE ERROR THIS FILE WAS WRITTEN FOR IS A BIAS. A variance
+    # cannot answer a scale error: at a 50 % over-report and a 0.6 rad/s pivot the wheels would
+    # be a steady +0.3 rad/s off, and fusing that at 1.7 % of the gyro's information adds
+    # 0.005 rad/s of one-directional heading error for as long as the turn lasts. Which is only
+    # 0.8 % of the turn -- small, but it can only make the heading worse, never better, because
+    # the gyro is the better source. The fallback is the whole reason, not the accuracy.
+    # AND THE 40-70 % ITSELF IS NOW IN DOUBT. This file says 10-25 % at the top and 40-70 % in
+    # the /vo block, both from lidar-truth drives; differenced straight off /odom's own theta
+    # against the gyro over the same interval the tapes say 0.97 to 1.09 (per-tape medians of
+    # 48 to 320 pivot intervals, |gyro| > 0.15 rad/s). The wheels' INSTANTANEOUS yaw rate tracks
+    # the gyro to a few per cent. Either the over-report is slip the gyro shares (both under-
+    # reading against the lidar: the same script's replay has the lidar at 1.36-1.66x the gyro's
+    # total turn on a fit of 0.48-0.77, so its own truth is not trustworthy either), or it lives
+    # in a regime these tapes do not contain. Nobody may turn index 11 on citing "the covariance
+    # is measured" until a lidar-mode drive says which of the three numbers is real.
     odom0_config: [false, false, false,
                    false, false, false,
                    true, true, false,
@@ -38,12 +82,13 @@ ekf_filter_node:
     # no cart of this speed could have made never arrive here). The one input that cannot be
     # fooled by a wheel turning on carpet without the cart moving.
     #
-    # x and y only, and DIFFERENTIALLY: robot_localization then differences two consecutive
+    # x, y and yaw, and DIFFERENTIALLY: robot_localization then differences two consecutive
     # visual poses, divides by the gap and fuses the result as a velocity, so this source's own
     # origin — wherever rgbd_odometry happened to start, and wherever it restarts after losing
-    # its tracking — can never move odom -> base_link. NO YAW: the gyro owns heading (with it the
-    # EKF's turn error is ~5 %; the wheels alone over-report a turn by 40-70 %, 2026-09-13), and
-    # a camera that sees a blank wall would only spoil it.
+    # its tracking — can never move odom -> base_link. The gyro still owns heading (with it the
+    # EKF's turn error is ~5 %; the wheels alone over-report a turn by 40-70 %, 2026-09-13); the
+    # yaw fused here is a weak second opinion, sized below so a camera facing a blank wall cannot
+    # spoil it.
     #
     # WHAT THE FILTER ACTUALLY WEIGHS. The differential path does not divide the pose covariance
     # by the square of the gap; it adds this pose's to the previous one's and MULTIPLIES by the
@@ -60,13 +105,47 @@ ekf_filter_node:
     #
     # Measured at rest on the laptop 2026-09-14 (scratch/vo_probe.py, 85 s on the charger): 9.1
     # poses/s, one lost frame (the first), 0.48 cm and 0.075 deg of drift while the wheels
-    # reported a hard zero. In MOTION it is unmeasured, which is why the laptop withholds the
-    # topic until pepin_bringup.visual_odometry's vo_publish flag is turned on: with nothing
-    # published, this block subscribes to a silent topic and the filter is the wheels and the
-    # gyro exactly as it was before.
+    # reported a hard zero. In MOTION it was unmeasured until 2026-09-14 13:40, when
+    # vo_publish was turned ON after a drive that measured it (tapes 0261/0262 against 0265/0266:
+    # two missed EKF periods in three minutes, |vy| under 0.0003 m/s at rest, the live pose
+    # against the lidar unchanged at 0.9/2.1/4.2 cm). So this block fuses a live topic, not a
+    # silent one; the wheels and the gyro exactly as they were before is
+    # ``ros/flags.sh set visual_odometry vo_publish false``.
     odom1: vo
+    #
+    # YAW (index 5) IS FUSED TOO, AND DIFFERENTIALLY LIKE X AND Y (2026-09-15). Not index 11:
+    # `differential` converts a POSE into a velocity, so a yaw fused as a pose is what becomes a
+    # yaw RATE in the filter -- index 11 would read this message's twist, which rtabmap fills on
+    # its own terms and the gate does not rewrite. Differenced, this source's origin still cannot
+    # move the odom frame, and a tracking restart is a step the gate has already refused.
+    # WHAT IT WEIGHS: the node stamps the pose with vo_yaw_sigma_deg (5 deg = 0.0873 rad by
+    # default, a deliberately weak claim -- rtabmap's own per-frame yaw std is 0.02-0.04 rad).
+    # Through the same differential arithmetic as x/y (2 * sigma^2 * dt), at 9.4 poses/s that is
+    # a yaw-rate variance of 1.6e-3 (rad/s)^2 against the gyro's 4.0e-4: a quarter of the gyro's
+    # weight per sample, and at 9.4 Hz against 47 Hz about 5 % of its information per second.
+    # The gyro still owns heading; this is the second pair of eyes that keeps a heading alive if
+    # the MPU6050 dies mid-drive. OFF is one word: index 5 back to false, or
+    # ``ros/flags.sh set visual_odometry vo_publish false`` for the whole source.
+    #
+    # WHAT ADDING YAW HERE COSTS, and it is not nothing: odom1_pose_rejection_threshold is
+    # Mahalanobis over the WHOLE converted measurement at once, not per axis -- the innovation is
+    # dotted with the inverse covariance and the scalar compared to 3^2. With yaw in the subset,
+    # a yaw the camera gets wrong now rejects this sample's x and y with it; before 2026-09-15 a
+    # spinning visual estimate cost the filter nothing, and now it costs the camera's position
+    # too. That is the trade: a heading fallback, paid for with the position source's
+    # availability exactly when the camera is confused. If a drive shows /vo going quiet through
+    # the turns, index 5 is the first thing to put back to false.
+    #
+    # CAN A TRACKING RESET STILL INJECT A SPIN THROUGH THIS? Checked on 2026-09-15: no, by two
+    # independent gates. pepin.visual_odometry.VoTrack publishes THE SUM OF THE ADMITTED STEPS,
+    # so a refused jump never reaches this topic at all -- what the filter differences is already
+    # continuous. And what the gate does admit is bounded by vo_max_turn (180 deg/s), which at
+    # the source's 9.4 poses/s is 19 degrees in one sample; differenced here that is 3.1 rad/s
+    # against a 3-sigma window of about 0.12 rad/s, so the filter throws it out as well. The two
+    # gates both pass only a step under roughly 0.37 * dt^1.5 radians, which at 9.4 Hz is 0.7
+    # degrees. A reset landing within 0.7 degrees of the heading it left is not a spin.
     odom1_config: [true,  true,  false,
-                   false, false, false,
+                   false, false, true,
                    false, false, false,
                    false, false, false,
                    false, false, false]
@@ -74,8 +153,45 @@ ekf_filter_node:
     odom1_relative: false
     odom1_queue_size: 10
     odom1_pose_rejection_threshold: 3.0
-    # /imu/data_raw from the MPU6050: yaw rate. No orientation (the chip gives none), no
-    # accelerations (double-integrated they drift metres in seconds at our speeds).
+    # /imu/data_raw from the MPU6050: THE YAW RATE (index 11) AND NOTHING ELSE. No orientation --
+    # the chip gives none and the driver says so (orientation_covariance[0] = -1,
+    # base_bridge.cpp:361), so roll and pitch cannot be fused from it either; two_d_mode holds
+    # them at zero anyway, which is why "tilt from the accelerometer" is not a line in this file
+    # but a two_d_mode decision.
+    #
+    # AX AND AY (indices 12, 13) WERE TURNED ON ON 2026-09-15 AND TURNED BACK OFF THE SAME DAY.
+    # What the tapes say (scratch/heading_sources.py, the rest windows of the 2026-09-13/14
+    # tapes: nothing commanded AND the wheels reporting no step): ax reads -0.229 to +0.066 m/s^2
+    # with the cart standing still (median -0.038), ay -0.234 to -0.052 (median -0.069), az 9.940
+    # to 9.952 against g = 9.807. Those are not noise -- the std inside a window is 0.010 to
+    # 0.069 -- they are a BIAS: the mount's tilt and the chip's own offset, constant for as long
+    # as the cart stands where it stands, and different where it stands next.
+    # A COVARIANCE CANNOT ANSWER A BIAS. The filter has no accelerometer-bias state, so an honest
+    # 0.25 (m/s^2)^2 does not make the bias harmless; it only makes it slow. Measured by running
+    # this filter's own vx/ax sub-block (scratch/accel_bias_cost.py: the same transfer, the same
+    # Q from below, R = 0.001 from the wheels at 20 Hz and 0.25 from the IMU at 47 Hz):
+    #   ax bias   vx error, wheels alive   over a 10 m drive at 0.15 m/s
+    #   (none)             -0.5 %                    -0.03 m
+    #   -0.089 (0299)      -1.5 %                    -0.15 m
+    #   -0.195 (0299 ay)   -3.8 %                    -0.38 m
+    #   -0.229 (worst)     -4.6 %                    -0.46 m
+    # The wheels are honest about distance to 3 % (2026-09-06). Fusing ax spends that whole
+    # budget on a systematic error and buys nothing in exchange: while the wheels are alive they
+    # already measure vx at 0.001 (m/s)^2, thirty times tighter. And when they are NOT alive --
+    # /odom silent past sensor_timeout 0.5 s -- the same sub-block runs the bias open loop and
+    # reaches 0.98 m/s of invented speed in 5 s, three times this cart's top speed and the shape
+    # of the 2026-09-14 runaway (pepin.odometry.RunawayWatch's docstring). A source that adds
+    # nothing while the stack is healthy and runs away when it is not does not get fused.
+    # TO TURN THEM ON AGAIN, both words on one line below (12 and 13 to true) -- and only behind
+    # one of: a bias state in the filter, or an orientation this chip does not publish, or a
+    # measured drive that beats the wheels' 3 %.
+    # imu0_remove_gravitational_acceleration stays declared and true for that day. What it does
+    # here is NOT what the ROS wiki suggests: with orientation_covariance[0] = -1 robot_
+    # localization does not read this message's quaternion at all -- it takes the roll/pitch/yaw
+    # out of its OWN STATE (ros_filter.cpp 2765-2776, jazzy-devel), which two_d_mode holds at
+    # roll = pitch = 0, so the vector it subtracts is (0, 0, 9.81) rotated by yaw alone: az only,
+    # ax and ay untouched. Which is precisely why the mount's tilt survives as the bias above --
+    # the one thing gravity removal would have to fix is the one thing it cannot see.
     imu0: imu/data_raw
     imu0_config: [false, false, false,
                   false, false, false,
@@ -84,6 +200,7 @@ ekf_filter_node:
                   false, false, false]
     imu0_differential: false
     imu0_relative: false
+    imu0_remove_gravitational_acceleration: true
     imu0_queue_size: 20
     # Process noise: trust the gyro's yaw more than the wheels' (vyaw small), let x/y follow the wheels.
     process_noise_covariance: [0.02, 0.0,  0.0, 0.0, 0.0, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
