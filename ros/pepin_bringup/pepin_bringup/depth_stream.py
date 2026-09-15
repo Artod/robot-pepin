@@ -241,12 +241,17 @@ FLAGS = FlagSet(
     ),
     Flag(
         "parallax_anchor",
-        True,
+        False,
         description="the corners this frame shares with the previous one, triangulated against the"
         " odometry's transform between the two stamps (pepin.parallax), pair the network's depth"
         " with a depth in metres the cart measured by moving — a hoop that needs no lidar and no"
         " assumed plane and that lands at every elevation the picture has",
-        why="it is the second ruler of the scale, and it is now weighed like one. Every pair"
+        why="OFF again since 2026-09-15 04:20: on the live stack the anchor's ask for the tracker's"
+        " motion (parallax_motion=tracker) waited its 0.2 s carry timeout on EVERY frame (report:"
+        " pose 211/222 ms, 'no odometry 41, gap 41'), the stream fell from 8.7 to 1.5 frames/s and"
+        " rgbd_odometry starved (0 poses/s); off, 6.1 frames/s and VO back within 40 s. Until the"
+        " ask is non-blocking the anchor stays off. Before that: it is the second ruler of the"
+        " scale, and it is now weighed like one. Every pair"
         " carries 1 / sigma^2 from its own triangulation against a beam's 1 / sigma^2 at"
         " lidar_sigma_m (pepin.depth.pair_weight), so a corner at 7-10 cm of noise counts about"
         " 0.03 of a beam and 200 of them do not outvote 30 beams: measured on the errands of"

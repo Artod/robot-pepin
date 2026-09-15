@@ -1857,7 +1857,7 @@ def standard_pipeline(
     frame_stage: FrameLaw | None = None,
     floor_pairs: bool = False,
     wall_anchor: bool = False,
-    parallax_anchor: bool = True,
+    parallax_anchor: bool = False,
     ray_law: bool = False,
     range_law: bool = True,
     frame_law: bool = True,
@@ -1870,7 +1870,7 @@ def standard_pipeline(
     and the frame law all sit behind the affine one and correct the same raw depth by their own
     rule instead — by the ray's angle, by the range, by this frame's own beams — and on, each
     replaces the image of the law before it; off, that law's stands. ``range_law`` and
-    ``parallax_anchor``, ``range_law`` and ``frame_law`` are the three of the seven on by
+    ``range_law`` and ``frame_law`` are the two of the seven on by
     default: one affine law leaves a residual that tilts 12 % per metre
     (:class:`pepin.depth.RangeLaw`), a law fitted on a minute of pool describes the last
     minute's scene rather than this frame's (:class:`FrameLaw`), and the lidar's one row is not
