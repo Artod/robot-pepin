@@ -21,11 +21,13 @@ from pepin.depth import (
     drop_edges,
     edge_mask,
     fit_frame,
+    fit_node,
     floor_anchor,
     floor_depth,
     project,
 )
 from pepin.depth_pipeline import (
+    FLOOR_PAIR_STRIDE,
     AffineLaw,
     DepthPipeline,
     EdgeFilter,
@@ -914,3 +916,134 @@ def test_the_parallax_anchor_does_not_wait_for_a_map_pose_it_cannot_get() -> Non
     anchor._moved(ctx, 9.5, 10.0, ask_tracker=True)
     assert time.perf_counter() - started >= 0.15
     assert source.waited == 1
+
+
+# ---- what the field must never publish ----------------------------------------------------------
+def test_a_law_that_is_not_a_number_never_reaches_the_picture() -> None:
+    """A NaN law is not a bad law, it is a blind robot: the field blends its nodes with two
+    matrix products, and a matmul does not skip a zero membership — 0 * NaN is NaN, so ONE bad
+    node of nine takes every pixel of the image with it, not its own corner. So neither fit
+    hands one back: a frame fit and a node fit that do not come back finite are "no law", which
+    the callers already hold frames for."""
+    blind = np.full(40, np.inf)  # a ruler and a network that both read infinitely far
+    assert fit_frame(blind, blind, np.ones(40)) is None
+    assert fit_node(blind, blind, np.ones(40), [(math.nan, math.nan, 1.0)], (1.0, 3.0)) is None
+    assert fit_node(blind, blind, np.ones(40), [(1.5, 0.0, 1.0)], (1.0, 3.0)) == (1.5, 0.0)
+
+    field = ScaleField((3, 3), prior=1.0, carry=0.0)
+    rng = np.random.default_rng(5)
+    z = rng.uniform(1.0, 3.0, 300)
+    where = (rng.uniform(0, 359, 300), rng.uniform(0, 639, 300))
+    field.fit(1.5 * z, z, np.ones(300), *where, (360, 640), (1.5, 0.0), 0.0, shift=False)
+    assert np.isfinite(field.apply(np.full((360, 640), 2.0))).all()
+    kept = field.nodes
+    field.fit(1.5 * z, z, np.ones(300), *where, (360, 640), (math.nan, 0.0), 0.0, shift=False)
+    assert np.array_equal(field.nodes[0], kept[0]), "a NaN global fit leaves the field alone"
+    assert np.isfinite(field.apply(np.full((360, 640), 2.0))).all()
+
+
+def test_the_carry_runs_out_even_with_nothing_to_decay_against() -> None:
+    """The carry decays against the pull toward the global fit. At field_prior 0 there is no
+    such pull, and a weight of 1e-13 holds an unconstrained node just as completely as a weight
+    of 1: without a floor under the decay a starved node reads its own last value for ever.
+    Past FIELD_CARRY_SPENT of itself the carry is dropped outright and the node is the global
+    fit again, at either setting of the prior."""
+    rng = np.random.default_rng(3)
+    where = (rng.uniform(0, 359, 500), rng.uniform(0, 639, 500))
+    z = rng.uniform(1.0, 3.0, 500)
+    starved = (np.full(40, 10.0), np.full(40, 10.0))  # every pair in the top-left node
+    held = {}
+    for prior in (1.0, 0.0):
+        field = ScaleField((3, 3), prior=prior, carry=1.0, carry_tau_s=2.0)
+        field.fit(1.5 * z, z, np.ones(500), *where, (360, 640), (1.5, 0.0), 0.0, shift=False)
+        field.fit(3.0 * z[:40], z[:40], np.ones(40), *starved, (360, 640), (3.0, 0.0), 1.0, False)
+        held[prior] = float(field.nodes[0][2, 2])
+        field.fit(3.0 * z[:40], z[:40], np.ones(40), *starved, (360, 640), (3.0, 0.0), 30.0, False)
+        assert field.nodes[0][2, 2] == pytest.approx(3.0), "thirty seconds later it is the fit"
+    assert 1.5 < held[1.0] < 3.0, "against a prior of 1 the carry is one of two pulls and decays"
+    assert held[0.0] == pytest.approx(1.5), (
+        "against no prior it is the only pull, whatever it weighs"
+    )
+
+
+def test_recutting_the_grid_live_keeps_the_frame_s_own_law() -> None:
+    """field_grid is a live flag and a new grid starts every node again from the next frame's
+    fit — but between the flag and that fit the field is a grid of ones, the identity, while the
+    stage still says a law of its own stands. The stage's own global two numbers hold that gap,
+    so flipping the flag changes the law's SHAPE and never whether the picture is corrected at
+    all; on a cart whose beams have gone quiet the gap is however long the frames are held."""
+    law = AffineLaw()
+    law.seed(1.0, 0.0)
+    stage = FrameLaw(law, grid=(3, 3))
+    raw = _network(_scene(2.0), 1.6, 0.0, noise=0.0, seed=0)
+    seen = Frame(raw, _context(_wall_returns(2.0)))
+    seen.pairs.append(LidarAnchor().pairs(seen) or Pairs.of(np.empty(0), np.empty(0), np.empty(0)))
+    before, _verdict = stage.run(raw, seen)
+    assert stage.fits == 1 and stage.field.fitted
+    stage.field.grid = (2, 2)  # the flag, between two frames
+    assert not stage.field.fitted
+    after = stage.apply(raw, seen.ctx)
+    assert not np.allclose(
+        after[np.isfinite(after)], law.apply(raw, seen.ctx)[np.isfinite(after)]
+    ), "the prior's own depth must not go out as if no frame had ever spoken"
+    assert np.allclose(after[np.isfinite(after)], before[np.isfinite(after)], rtol=0.05)
+
+
+def test_the_report_line_says_which_nodes_are_empty_and_which_are_at_a_bound() -> None:
+    """A field of nine laws had no way of saying what the single law has always said: this one
+    is the bound, not a measurement. The report line counts both — the nodes that saw no pair
+    (those are the frame's global fit) and the nodes that came back pinned."""
+    field = ScaleField((3, 3), prior=1.0, carry=0.0)
+    fed = _at_node(field, (1, 1), 1.6, seed=1)
+    rows = INTR.cy - fed.lift * INTR.fy
+    cols = INTR.cx - fed.left * INTR.fx
+    field.fit(fed.d, fed.z, fed.weight, rows, cols, (360, 640), (1.6, 0.0), 0.0, shift=False)
+    assert "empty" in field.describe() and "AT BOUND" not in field.describe()
+    assert field.describe().endswith("8 empty"), field.describe()
+    # A node whose pairs ask for a shift past what a lens can do: the bound does the fitting.
+    z = np.linspace(1.2, 4.0, 60)
+    beyond = 1.6 / (1.0 / z - 0.35)  # the law 1 / z = 1.6 / D + 0.35, past B_BOUNDS
+    field.fit(
+        beyond,
+        z,
+        np.ones(60),
+        np.full(60, 180.0),
+        np.full(60, 320.0),
+        (360, 640),
+        (1.6, 0.0),
+        0.0,
+        shift=True,
+    )
+    assert "AT BOUND" in field.describe(), field.describe()
+
+
+def test_the_floor_bootstraps_from_the_floor_and_not_from_the_median_of_the_clutter() -> None:
+    """Which pixels are floor is judged with the law as it stands, and before any law exists
+    with a scale bootstrapped from the pixels themselves. That bootstrap cannot be started at
+    the MEDIAN of every candidate below the horizon: everything down there that is not floor
+    stands ON the floor and is therefore NEARER than it, so the clutter's network-over-plane
+    ratio is always LOWER and the median of the mixture is biased low by construction — and the
+    turns that follow cannot climb back out, the height band being about a tenth of the depth
+    wide and admitting whatever scale it is handed.
+
+    Here two thirds of the picture below the horizon is furniture — six things of six heights,
+    none of them as large as the floor — which drags the median of the candidates well under the
+    floor's own 1.60 while leaving the floor the biggest single population in the picture. The
+    starts run from the floor's side as well, and the one that ends up holding the most pixels
+    wins."""
+    truth = _scene(None)
+    scene = truth.copy()
+    for k, factor in enumerate((0.30, 0.42, 0.54, 0.66, 0.78, 0.90)):
+        scene[120:360, k * 106 : (k + 1) * 106] = truth[120:360, k * 106 : (k + 1) * 106] * factor
+    raw = _network(scene, 1.6, 0.0, noise=0.01, seed=11)
+    expected = floor_depth(INTR, CAM)
+    s = FLOOR_PAIR_STRIDE
+    seen = np.isfinite(expected[::s, ::s]) & np.isfinite(raw[::s, ::s])
+    ratios = (raw[::s, ::s] / expected[::s, ::s])[seen]
+    assert float(np.median(ratios)) < 1.3, "the median of the candidates is not the floor's 1.60"
+
+    stage = FloorPairs(AffineLaw())  # no law anywhere: the bootstrap is all there is
+    pairs = stage.pairs(Frame(raw, _context(None)))
+    assert pairs is not None and stage.gated == 0
+    assert float(np.median(pairs.d / pairs.z)) == pytest.approx(1.6, rel=0.03)
+    assert pairs.size > 800, "and it is the floor it held, not a corner of it"

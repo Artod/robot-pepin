@@ -119,6 +119,14 @@ FLOOR_SIGMA_PITCH_DEG = 1.5  # how well the camera's pitch is known: config/neck
 # reads "head level by eye the tilt servo reads 2068 ticks and the picture is 1.0 deg down
 # (+-1.5)". It is what a floor pair's own noise is made of: the plane's depth under a ray is
 # h / sin(angle below the horizon), so a pitch error tilts the whole ruler (:func:`floor_sigma`).
+FLOOR_BOOTSTRAP_STARTS = (50.0, 65.0, 75.0, 85.0, 90.0)  # percentiles of the candidates' own
+# network-over-plane ratio the floor's first scale is tried from, before any law exists; the one
+# whose three turns end up admitting the most pixels wins (:meth:`FloorPairs._bootstrap`). The
+# median alone — where this started — is biased low, because everything below the horizon that is
+# not floor is NEARER than the floor and reads a lower ratio. Measured over the four tapes of
+# 2026-09-15 (scratch/_floor_bootstrap_start.py): the median start settles at 0.85 / 0.83 / 1.13 /
+# 1.76 against lidar ratios of 2.21 / 1.38 / 1.91 / 2.10, and "the start that admits the most"
+# settles at 1.41 / 0.94 / 1.63 / 1.76 — the right basin on the two tapes that have one.
 FLOOR_NORMAL_TOL_DEG = 5.0  # how far the floor pixels' own fitted plane may lean from the geometric
 # up before the frame's floor pairs are refused outright: a plane fitted to a table top, a ramp or
 # a wrong law is not the floor, and pairs taken off it move every node they touch.
@@ -181,6 +189,14 @@ FIELD_CARRY = 1.0  # the same units: how hard a node is pulled toward what it wa
 FIELD_CARRY_TAU_S = 2.0  # seconds over which that pull decays: a node starved for a time constant
 # keeps a third of the carry, and one starved for five seconds is the global fit again. The frame
 # law's own hold constant (FRAME_HOLD_TAU_S), by design, unmeasured as a choice of its own.
+FIELD_CARRY_SPENT = 0.01  # what is left of the carry when it is dropped outright rather than
+# decayed further. A decay is a RELATIVE statement, and at field_prior 0 there is nothing for it
+# to be relative to: a node with no pairs and a carry of 1e-13 is still held by that carry alone
+# and comes back as its own last value exactly, forever. Measured at field_prior 0 before this
+# floor existed (scratch/_field_hazards.py, 2026-09-15): a starved node read its 20-second-old
+# value to four decimals, the decay having done nothing at all. A hundredth is 4.6 time
+# constants, 9.2 s at the default tau — past the point where the pull moves the fit by a per
+# cent, so the default (field_prior 1.0) is unchanged to well under its own noise.
 
 
 # ---- one table of defaults ----------------------------------------------------------------------
@@ -988,9 +1004,19 @@ class FloorPairs(AnchorStage):
     ``stride``-th pixel whose ray meets the floor and that stands within the network's height
     band of the plane (:class:`pepin.contact.DepthNoise`, wider than the anchor's snap: these
     pairs feed a robust fit, not a correction). Which pixels are floor is judged with the law
-    as it stands; before any law exists, with a scale bootstrapped from the pixels themselves —
-    the median ratio of network to plane depth, re-taken over the pixels that ratio calls
-    floor, three times. So the law can be fitted from the floor alone, with no lidar.
+    as it stands; before any law exists, with a scale bootstrapped from the pixels themselves
+    (:meth:`_bootstrap`). So the law can be fitted from the floor alone, with no lidar.
+
+    What that costs, said plainly, because it decides what a lidar-less cart can expect: the
+    band is about a tenth of the depth wide, so the pixels a law calls floor are the pixels that
+    AGREE with it, and the scale re-taken over them comes back as the scale it was handed — over
+    run 0171 the map from assumed scale to fitted scale returns its own input to within 0.01
+    everywhere between 0.6 and 2.4 (scratch/_floor_fixed_point.py, 2026-09-15). The floor's
+    pixels therefore identify the scale only where they DOMINATE the picture below the horizon
+    (a neck pitched down: tape 0237 reads the same 1.76 from every start), and where they do not,
+    the answer is the one the bootstrap started in. That is why the bootstrap's start is chosen
+    by how many pixels it ends up holding and not by the median, and why a law once fitted is
+    never re-bootstrapped from a floor it may have locked onto.
 
     Each pair carries its OWN weight, not a flat share: the plane's depth under a ray is
     ``h / sin(angle below the horizon)``, so the mount's pitch uncertainty
@@ -1046,14 +1072,11 @@ class FloorPairs(AnchorStage):
             return None
         band = self.band.height_band(expected, ctx.cam.z)
         if metric is None:
-            scale = float(np.median(raw[ok] / expected[ok]))
-            floor = ok
-            for _ in range(3):
-                height = ctx.cam.z * (1.0 - raw / (scale * expected))
-                floor = ok & (np.abs(height) < band)
-                if int(floor.sum()) < MIN_SAMPLES:
-                    return None
-                scale = float(np.median(raw[floor] / expected[floor]))
+            with np.errstate(divide="ignore", invalid="ignore"):
+                started = self._bootstrap(raw / expected, ok, band, ctx.cam.z)
+            if started is None:
+                return None
+            scale, floor = started
             metric = raw / scale
         else:
             with np.errstate(invalid="ignore"):
@@ -1074,6 +1097,44 @@ class FloorPairs(AnchorStage):
             pair_weight(inverse_sigma(sigma, z)),
             left_of(cols[floor], ctx.intr),
         )
+
+    def _bootstrap(
+        self, ratio: Array, ok: Mask, band: Array, height: float
+    ) -> tuple[float, Mask] | None:
+        """The floor's own scale before any law exists, and the pixels it calls floor: the same
+        three turns of "call floor what this scale puts on the plane, re-take the scale over
+        them" the stage has always run, started from each of :data:`FLOOR_BOOTSTRAP_STARTS` and
+        kept by whichever start ends up admitting the most pixels. ``None`` when no start keeps
+        MIN_SAMPLES of them.
+
+        Why not the median of every candidate, which is where this started: a pixel that sits on
+        an OBJECT is nearer than the floor would be on the same ray, so its network-over-plane
+        ratio is LOWER than the floor's. The candidates below the horizon are therefore a mixture
+        whose clutter lives entirely on the low side, and the median of the mixture is biased low
+        by construction — while the turns that follow it cannot recover, because the height band
+        is only about a tenth of the depth wide and admits whatever scale it is handed (measured
+        on the tapes of 2026-09-15, scratch/_floor_fixed_point.py: over run 0171 the map from
+        assumed scale to fitted scale returns its own input to within 0.01 everywhere from 0.6 to
+        2.4). The floor is the upper population and the biggest one, which is what these starts
+        and this choice between them say: on tape 0236 the median start settles at 1.13 where the
+        floor's own basin is at 1.63 and the lidar reads 1.91
+        (scratch/_floor_bootstrap_start.py)."""
+        with np.errstate(invalid="ignore"):
+            starts = np.percentile(ratio[ok], FLOOR_BOOTSTRAP_STARTS)
+        best: tuple[float, Mask] | None = None
+        for start in starts:
+            scale, found = float(start), None
+            for _ in range(3):
+                with np.errstate(invalid="ignore"):
+                    sel = ok & (np.abs(height * (1.0 - ratio / scale)) < band)
+                if int(sel.sum()) < MIN_SAMPLES:
+                    found = None
+                    break
+                scale = float(np.median(ratio[sel]))
+                found = (scale, sel)
+            if found is not None and (best is None or int(found[1].sum()) > int(best[1].sum())):
+                best = found
+        return best
 
     def _is_floor(
         self, metric: Array, rows: Array, cols: Array, band: Array, ctx: FrameContext
@@ -2128,8 +2189,12 @@ class ScaleField:
         self._a = np.ones((rows, cols))
         self._b = np.zeros((rows, cols))
         self._seen = np.zeros((rows, cols))
+        self._bound = 0
         self._fitted = False
-        self._axes: tuple[tuple[int, int], Array, Array] | None = None
+        # Keyed on the GRID as well as the image: the grid is re-cut from the node's parameter
+        # thread while a frame is being corrected on the worker's, and axes left over from the
+        # grid before would meet the new nodes in a matrix product of the wrong shape.
+        self._axes: tuple[tuple[int, int], tuple[int, int], Array, Array] | None = None
 
     @property
     def fitted(self) -> bool:
@@ -2181,14 +2246,18 @@ class ScaleField:
             self._seen[:] = float(np.sum(weight))
             self._fitted = True
             return
+        if not (math.isfinite(a0) and math.isfinite(b0)):
+            return  # a NaN global fit would fill every node that saw nothing, and the picture
         share = self.membership(rows, cols, shape) * np.asarray(weight, dtype=float)
         self._seen = share.sum(axis=2)
         span = (float(np.percentile(z, 5)), float(np.percentile(z, 95)))
         carried = 0.0
         if self._fitted and self.carry > 0.0:
             tau = self.carry_tau_s
-            carried = self.carry * (math.exp(-max(0.0, dt) / tau) if tau > 0.0 else 0.0)
+            decay = math.exp(-max(0.0, dt) / tau) if tau > 0.0 else 0.0
+            carried = self.carry * (decay if decay >= FIELD_CARRY_SPENT else 0.0)
         a_new, b_new = np.full_like(self._a, a0), np.full_like(self._b, b0)
+        bound = 0
         for i in range(grid_rows):
             for j in range(grid_cols):
                 mine = share[i, j] > 0.0
@@ -2198,25 +2267,30 @@ class ScaleField:
                 fitted = fit_node(d[mine], z[mine], share[i, j][mine], priors, span, shift)
                 if fitted is not None:
                     a_new[i, j], b_new[i, j] = fitted
+                    bound += 1 if at_bound(*fitted) else 0
         self._a, self._b = a_new, b_new
+        self._bound = bound
         self._fitted = True
 
     def law_image(self, shape: tuple[int, int]) -> tuple[float | Array, float | Array]:
         """The (a, b) of every pixel of an image of ``shape``: the nodes blended bilinearly —
         two small matrix products, not a loop over the picture — or the node's two numbers
         themselves on a one-node grid."""
-        if self._grid == (1, 1):
-            return float(self._a[0, 0]), float(self._b[0, 0])
-        if self._axes is None or self._axes[0] != shape:
-            down = _axis_weights(np.arange(shape[0]), shape[0], self._grid[0])
-            across = _axis_weights(np.arange(shape[1]), shape[1], self._grid[1])
-            self._axes = (shape, down, across)
-        _key, down, across = self._axes
+        grid, a_now, b_now = self._grid, self._a, self._b  # one read each: see the grid setter
+        if grid == (1, 1):
+            return float(a_now[0, 0]), float(b_now[0, 0])
+        axes = self._axes
+        if axes is None or axes[0] != shape or axes[1] != grid:
+            down = _axis_weights(np.arange(shape[0]), shape[0], grid[0])
+            across = _axis_weights(np.arange(shape[1]), shape[1], grid[1])
+            axes = (shape, grid, down, across)
+            self._axes = axes
+        _shape, _grid, down, across = axes
         # errstate because this laptop's BLAS raises "divide by zero encountered in matmul" on
         # any float matmul, finite operands and all (scratch/_matmul_warn.py): a spurious flag,
         # and a report line is not the place to print it every frame.
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            return down @ self._a @ across.T, down @ self._b @ across.T
+            return down @ a_now @ across.T, down @ b_now @ across.T
 
     def apply(self, depth: Array) -> Array:
         """``depth`` through the field: per pixel 1 / z = a / D + b, the two interpolated."""
@@ -2228,11 +2302,20 @@ class ScaleField:
         """The field for the report line: its grid and, node by node, the pair weight each one
         saw on the last frame fitted — ``3x3 [120 0 0 | 85 0 0 | 0 0 0]`` reads as a lidar row
         down the left of the picture and nothing anywhere else, which is the whole question a
-        field asks."""
+        field asks — then how many nodes saw NOTHING (those are the frame's global fit, not a
+        fit of their own) and how many came back pinned at the law's bounds.
+
+        The last is not decoration: over run 0171's drive 17 of 72 fitted nodes land on the
+        shift's bound at a 3x3 grid (scratch/_field_hazards.py, 2026-09-15), where the bound is
+        doing the fitting and the node is not a measurement. The global law has said
+        ``AT BOUND`` since it existed; a field of nine laws had no way of saying it."""
         rows = " | ".join(
             " ".join(f"{value:.0f}" for value in row) for row in np.atleast_2d(self._seen)
         )
-        return f"{grid_name(self._grid)} [{rows}]"
+        empty = int(np.sum(self._seen <= 0.0)) if self._fitted else self._a.size
+        tail = f", {empty} empty" if empty else ""
+        tail += f", {self._bound} AT BOUND" if self._bound else ""
+        return f"{grid_name(self._grid)} [{rows}]{tail}"
 
 
 class FrameLaw(LawStage):
@@ -2370,12 +2453,19 @@ class FrameLaw(LawStage):
 
     def apply(self, depth: Array, ctx: FrameContext) -> Array:
         """The prior's depth through this frame's own law, the prior's alone where this one has
-        decayed (the blend is of the published inverse depths) or while no frame has spoken."""
+        decayed (the blend is of the published inverse depths) or while no frame has spoken.
+
+        The field is asked for the law only while it HAS one: re-cutting the grid live
+        (``field_grid``) starts every node again from the next frame's fit, and between the flag
+        and that fit the field is a grid of ones — the identity. This stage's own global two
+        numbers stand in over that gap, so a flag flip changes the law's shape and not whether
+        there is a law at all; on a cart whose lidar has gone quiet that gap is however many
+        seconds the frames are held for, not one frame."""
         prior = self.prior.apply(depth, ctx)
         w = self.weight
         if w <= 0.0:
             return prior
-        own = self.field.apply(prior)
+        own = self.field.apply(prior) if self.field.fitted else apply_affine(prior, self.a, self.b)
         if w >= 1.0:
             return own
         with np.errstate(divide="ignore", invalid="ignore"):
