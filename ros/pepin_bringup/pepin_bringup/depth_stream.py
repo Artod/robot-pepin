@@ -83,10 +83,19 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image, LaserScan
 
 from pepin.camera import CameraConfig, mount_transform, optics
+from pepin.contact import (
+    FAN_FLOOR_GATE,
+    FAN_FLOOR_GATES,
+    FloorPlane,
+    contact_scan,
+    fan_min_z,
+    gate_by_contact,
+)
 from pepin.depth import (
     MIN_SAMPLES,
     POOL_MIN_SAMPLES,
     SCALE_CEILING,
+    SCAN_MIN_Z_M,
     SCAN_WINDOW_S,
     Array,
     CameraPose,
@@ -94,6 +103,7 @@ from pepin.depth import (
     carry,
     carry_speed,
     depth_to_scan,
+    floor_depth,
     load_law,
     load_range,
     load_ray,
@@ -107,6 +117,8 @@ from pepin.depth import (
 )
 from pepin.depth_pipeline import (
     LIDAR_SIGMA_M,
+    PARALLAX_MAP_MAX_AGE_S,
+    PARALLAX_MAP_WAIT,
     PARALLAX_MATCHER,
     PARALLAX_MIN_BASELINE_M,
     PARALLAX_MOTION,
@@ -640,6 +652,47 @@ FLAGS = FlagSet(
         " numbers above without restarting the node",
         choices=PARALLAX_MOTIONS,
     ),
+    Flag(
+        "parallax_map_wait",
+        PARALLAX_MAP_WAIT,
+        description="how the parallax anchor asks the tracker for a baseline: off (the default)"
+        " uses the newest map pose TF already holds when it is within"
+        f" {PARALLAX_MAP_MAX_AGE_S:.1f} s of the frame and falls straight back to the odometry"
+        " when it is not; on restores the old ask, which WAITS up to the node's TF timeout for a"
+        " map pose at the frame's own stamp. The report line counts the frames that fell back",
+        why="the old ask cost the whole 0.2 s timeout on every frame, because map -> base_link is"
+        " published behind a frame's stamp and the lookup could never be satisfied in time: live"
+        " on 2026-09-15 with parallax_anchor on and parallax_motion tracker the stream fell from"
+        " 8.7 to 1.5 frames/s (301 frames dropped in a window) and rgbd_odometry starved to 0"
+        " poses/s. A map pose 0.1-0.3 s behind the frame shortens the baseline by that much; a"
+        " frame not processed at all is worth nothing",
+        on_when="never in the frame path — only to reproduce the 2026-09-15 stall on purpose",
+        off_when="always, which is the default",
+    ),
+    Flag(
+        "fan_floor_gate",
+        FAN_FLOOR_GATE,
+        description="what keeps the floor out of /depth_scan: band (the default) raises the"
+        " band's lower edge with the floor's own noise, 3 sigma of it"
+        " (pepin.contact.fan_min_z), contact drops every mark nearer than that bearing's"
+        " floor-contact range (pepin.contact.gate_by_contact, a range no depth law enters), off"
+        " is the flat 0.15 m edge the fan always had. The report line counts the bearings gated",
+        why="a floor pixel stands camera_height * (relative depth error) above the floor at every"
+        " range, so 12.5 % short is exactly the 0.15 m edge on this mount while the per-frame"
+        " law's own median residual is 10.2 % — the floor marks itself as an obstacle, and it is"
+        " why the fan read 0.58 of the lidar at the working pitch on 2026-09-15"
+        " (scratch/fan_floor_leak.py). Measured on the three pitch tapes of 2026-09-12"
+        " (scratch/fan_gate_offline.py, the per-frame law, 9 frames each): band moves k ="
+        " fan / lidar 0.499 -> 0.595 at 25.8 deg without removing a single bearing (the mark"
+        " simply lands on the real obstacle instead of the floor in front of it), and does"
+        " nothing at 11.1 (0.851 -> 0.853) or 40.9 (0.232). contact is the aggressive one and"
+        " overshoots: it removes 455 of 1399 marks at 11.1 deg and takes k past 1 to 1.215, and"
+        " at 25.8 and 40.9 it removes every mark there is",
+        on_when="band as shipped; contact only against a scene where the floor plane is trusted"
+        " and the fan is known to be floor — and never without reading the bearings gated",
+        off_when="off to reproduce a costmap from before this gate",
+        choices=FAN_FLOOR_GATES,
+    ),
 )
 FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
 
@@ -696,6 +749,8 @@ class DepthStream(Node):
         self._pub = self.create_publisher(Image, "/camera/depth", reliable)
         self._scan_pub = self.create_publisher(LaserScan, "/depth_scan", reliable)
         self._scan_max_range = float(self.declare_parameter("scan_max_range", 3.0).value)
+        self._expected_key: object = None  # the optics and head pose the floor ruler was cut for
+        self._expected: Array = np.zeros((0, 0))
         self._law_file = Path(str(self.declare_parameter("law_file", LAW_FILE).value))
         # The depth service as this container sees it (host.docker.internal is the laptop);
         # read at start: the client reconnects by itself, the address does not move.
@@ -718,6 +773,7 @@ class DepthStream(Node):
         self._ask_parallax(float(self._switches["parallax_min_baseline_m"]))  # and the ring's ask
         self._ask_matcher(str(self._switches["parallax_matcher"]))  # and who matches its corners
         self._ask_motion(str(self._switches["parallax_motion"]))  # and whose motion it triangulates
+        self._ask_map_wait(bool(self._switches["parallax_map_wait"]))  # asked without waiting
         self._ask_parallax_weight(float(self._switches["parallax_weight"]))  # and its vote
         self._ask_lidar_sigma(float(self._switches["lidar_sigma_m"]))  # and what a beam is worth
         self._ask_frame_shift(bool(self._switches["frame_shift_needs_beams"]))  # and the gate
@@ -822,6 +878,8 @@ class DepthStream(Node):
             self._ask_matcher(str(new))
         elif name == "parallax_motion":
             self._ask_motion(str(new))
+        elif name == "parallax_map_wait":
+            self._ask_map_wait(bool(new))
         elif name == "parallax_weight":
             self._ask_parallax_weight(float(new))
         elif name == "lidar_sigma_m":
@@ -830,6 +888,13 @@ class DepthStream(Node):
             self._ask_frame_shift(bool(new))
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
+
+    def _ask_map_wait(self, wait: bool) -> None:
+        """Tell the parallax anchor whether it may WAIT for a map pose at the frame's stamp (it
+        may not, by default: the wait cost the stream 7 frames a second on 2026-09-15)."""
+        stage = self._pipeline.stage("parallax_anchor")
+        if isinstance(stage, ParallaxAnchor):
+            stage.map_wait = wait
 
     def _ask_parallax(self, baseline_m: float) -> None:
         """Tell the parallax anchor how much baseline to pick its partner frame to reach."""
@@ -1025,10 +1090,21 @@ class DepthStream(Node):
         return self._last_cam, pose
 
     def _as_scan(self, depth: Array, image: Image, ctx: FrameContext) -> LaserScan:
-        """The depth folded onto the floor plane, in base_link, stamped like the image."""
+        """The depth folded onto the floor plane, in base_link, stamped like the image — with
+        the floor gated out of it the way ``fan_floor_gate`` says (:data:`FAN_FLOOR_GATES`)."""
+        gate = str(self._switches["fan_floor_gate"])
+        floor_of: float | Array = SCAN_MIN_Z_M
+        if gate == "band":
+            floor_of = fan_min_z(self._floor_expected(ctx), ctx.cam.z)
         angle_min, step, ranges = depth_to_scan(
-            depth, ctx.intr, ctx.cam, max_range=self._scan_max_range
+            depth, ctx.intr, ctx.cam, min_z=floor_of, max_range=self._scan_max_range
         )
+        before = int(np.count_nonzero(np.isfinite(ranges)))
+        if gate == "contact":
+            plane = FloorPlane.of(ctx.intr, ctx.cam, ctx.up)
+            _min, _step, contact, _verdict = contact_scan(depth, plane)
+            ranges, _removed = gate_by_contact(ranges, contact)
+        self._tally.count("fan_gated", before - int(np.count_nonzero(np.isfinite(ranges))))
         return scan_from_ranges(
             ranges,
             float(angle_min),
@@ -1038,6 +1114,16 @@ class DepthStream(Node):
             0.1,
             float(self._scan_max_range),
         )
+
+    def _floor_expected(self, ctx: FrameContext) -> Array:
+        """The depth every pixel would have if its ray ended on the floor, cached per optics and
+        head pose: the band gate's ruler (:func:`pepin.contact.fan_min_z`), one mgrid over the
+        picture that must not be paid for on every frame while the head stands still."""
+        key = (ctx.intr, ctx.cam, float(ctx.up[0]), float(ctx.up[1]), float(ctx.up[2]))
+        if self._expected_key != key:
+            self._expected = floor_depth(ctx.intr, ctx.cam, ctx.up)
+            self._expected_key = key
+        return self._expected
 
     def _intr_or_nominal(self, image: Image) -> Intrinsics:
         """The camera_info's optics, or config/camera.json's own until one arrives — the
@@ -1202,6 +1288,8 @@ class DepthStream(Node):
             extra += f", carry insane {c['carry_insane']} frames (the odometry ran away)"
         if c["camera_from_config"]:
             extra += f", camera pose from config {c['camera_from_config']} frames (no TF edge)"
+        if c["fan_gated"]:
+            extra += f", floor-gated {c['fan_gated']} bearings ({self._switches['fan_floor_gate']})"
         if c["camera_panned"]:
             extra += f", head panned {c['camera_panned']} frames (projected as if not)"
         if c["beams_out_of_frame"]:

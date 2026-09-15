@@ -417,3 +417,141 @@ def corrected_pan_reference(
     if deg_per_tick <= 0.0:
         raise ValueError("deg_per_tick must be positive")
     return reference_ticks - round(pan_error_deg / (pan_sign * deg_per_tick))
+
+
+# ---- the pan from bearings alone, with no depth in it ------------------------------------------
+EDGE_MIN_RELATIVE = 3.0  # a column is an edge at this many times the picture's median energy
+EDGE_MIN_SEPARATION_PX = 12  # two peaks nearer than this are one edge seen twice
+CORNER_MIN_JUMP_M = 0.15  # a step between neighbouring beams this big is an edge of something
+ASSOCIATION_MAX_GAP_DEG = 6.0  # an edge and a corner further apart than this are not the same thing
+
+
+@dataclass(frozen=True, eq=False)
+class PanByBearings:
+    """The camera's pan error measured from bearings only: no range, no depth law, no scale.
+
+    ``pan_error_deg`` is the truth MINUS what the model believes (CCW positive), ready for
+    :func:`corrected_pan_reference`. ``spread_deg`` is the median absolute deviation of the
+    pairs about it — the instrument's own repeatability, not a fitted uncertainty. ``pairs`` is
+    how many edge/corner associations it was taken over and ``frames`` how many pictures they
+    came from.
+    """
+
+    pan_error_deg: float
+    spread_deg: float
+    pairs: int
+    frames: int
+
+
+def column_bearing(columns: Array, fx: float, cx: float, pan_rad: float = 0.0) -> Array:
+    """The bearing in base_link of image columns: ``atan((cx - u) / fx) + pan``, radians CCW.
+
+    Left of the principal point is a positive bearing, the convention
+    :func:`pepin.depth.depth_to_scan` folds its fan in. ``pan_rad`` is where the neck believes
+    the head points (``/neck/state``, or TF's ``base_link <- camera_link``), so the answer is in
+    the cart's frame and not the camera's. Only the calibrated intrinsics enter: a bearing is a
+    direction, and no depth, scale or law can move it.
+    """
+    return np.arctan((cx - np.asarray(columns, dtype=float)) / fx) + pan_rad
+
+
+def edge_columns(
+    energy: Array,
+    *,
+    min_relative: float = EDGE_MIN_RELATIVE,
+    min_separation_px: int = EDGE_MIN_SEPARATION_PX,
+) -> Array:
+    """The columns of a picture that hold a vertical edge, from one column-energy profile (the
+    absolute horizontal gradient summed down the image, or a Hough vertical-line count).
+
+    A column is an edge when it stands ``min_relative`` times the profile's median and is the
+    strongest within ``min_separation_px`` of itself — a door frame is two edges, not forty.
+    Returns the columns, ascending. The profile, not the image, is the argument: the picture's
+    filtering belongs to whoever has OpenCV, and this stays portable and testable.
+    """
+    e = np.asarray(energy, dtype=float)
+    median = float(np.median(e[np.isfinite(e)])) if np.any(np.isfinite(e)) else 0.0
+    if not (median > 0.0):
+        return np.zeros(0, dtype=np.int64)
+    strong = np.flatnonzero(np.isfinite(e) & (e >= min_relative * median))
+    kept: list[int] = []
+    for column in strong[np.argsort(-e[strong])]:
+        if all(abs(int(column) - k) >= min_separation_px for k in kept):
+            kept.append(int(column))
+    return np.asarray(sorted(kept), dtype=np.int64)
+
+
+def scan_corners(
+    bearings_rad: Array,
+    ranges_m: Array,
+    *,
+    min_jump_m: float = CORNER_MIN_JUMP_M,
+    max_range_m: float = DEFAULT_MAX_RANGE_M,
+) -> Array:
+    """The bearings at which the lidar's range steps: a door jamb, a cupboard's corner, the edge
+    of anything that occludes what is behind it.
+
+    A step of at least ``min_jump_m`` between neighbouring beams is an edge, and the bearing
+    returned is the NEARER of the two beams — the occluding side, which is the side the picture
+    also draws a line at. Beams beyond ``max_range_m`` or missing do not make edges.
+    """
+    b = np.asarray(bearings_rad, dtype=float)
+    r = np.asarray(ranges_m, dtype=float)
+    ok = np.isfinite(b) & np.isfinite(r) & (r > 0.05) & (r < max_range_m)
+    b, r = b[ok], r[ok]
+    if len(b) < 2:
+        return np.zeros(0, dtype=np.float64)
+    order = np.argsort(b)
+    b, r = b[order], r[order]
+    step = np.abs(np.diff(r))
+    at = np.flatnonzero(step >= min_jump_m)
+    nearer = np.where(r[at] <= r[at + 1], b[at], b[at + 1])
+    return np.asarray(nearer, dtype=np.float64)
+
+
+def associate_bearings(
+    edges_rad: Array, corners_rad: Array, *, max_gap_deg: float = ASSOCIATION_MAX_GAP_DEG
+) -> Array:
+    """Each camera edge minus the lidar corner nearest it, in radians, for the pairs that fall
+    within ``max_gap_deg`` of each other — the differences, one per associated edge.
+
+    Sign: corner MINUS edge, so a positive difference means the thing really sits further CCW
+    than the picture placed it, which is the camera pointing further clockwise than believed.
+    Unassociated edges are dropped, not guessed.
+    """
+    e = np.asarray(edges_rad, dtype=float)
+    c = np.asarray(corners_rad, dtype=float)
+    if not len(e) or not len(c):
+        return np.zeros(0, dtype=np.float64)
+    gaps = c[None, :] - e[:, None]
+    nearest = np.argmin(np.abs(gaps), axis=1)
+    picked = gaps[np.arange(len(e)), nearest]
+    return np.asarray(picked[np.abs(picked) <= math.radians(max_gap_deg)], dtype=np.float64)
+
+
+def pan_from_bearings(
+    per_frame: Sequence[tuple[Array, Array]], *, max_gap_deg: float = ASSOCIATION_MAX_GAP_DEG
+) -> PanByBearings:
+    """The camera's pan error from a run of frames, each a pair of (edge bearings from the
+    picture, corner bearings from the lidar) in base_link radians.
+
+    Every edge is associated with the nearest corner within ``max_gap_deg``, and the MEDIAN of
+    all the differences over all the frames is the answer, its median absolute deviation the
+    spread (:class:`PanByBearings`). Nothing here has ever seen a range: this is the measurement
+    a depth law cannot bias, and the one that settles a pan reference.
+
+    Raises ValueError when no frame produced a single association.
+    """
+    picked = [associate_bearings(e, c, max_gap_deg=max_gap_deg) for e, c in per_frame]
+    used = [p for p in picked if len(p)]
+    if not used:
+        return PanByBearings(math.nan, math.nan, 0, len(per_frame))
+    all_diffs = np.concatenate(used)
+    median = float(np.median(all_diffs))
+    mad = float(np.median(np.abs(all_diffs - median)))
+    return PanByBearings(
+        pan_error_deg=math.degrees(median),
+        spread_deg=math.degrees(mad),
+        pairs=len(all_diffs),
+        frames=len(used),
+    )

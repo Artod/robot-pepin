@@ -117,6 +117,14 @@ class Tracked(Odometry):
             return None
         return base_motion(self._map[from_stamp], self._map[to_stamp])
 
+    def map_motion_recent(
+        self, from_stamp: float, to_stamp: float, max_age_s: float
+    ) -> RigidPose | None:
+        """The same answer asked the way the frame path asks it (never waiting): this tape's
+        poses are all already held, so the two agree — what the anchor must NOT do is call the
+        blocking one, and that is what map_asks counts."""
+        return self.map_motion(from_stamp, to_stamp)
+
 
 def _stretched(pose: RigidPose, drift: float) -> RigidPose:
     """The same pose with its position scaled: a metre of travel the wheels call ``drift``

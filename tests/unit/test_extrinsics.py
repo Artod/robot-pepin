@@ -9,14 +9,19 @@ import pytest
 
 from pepin.extrinsics import (
     Fan,
+    associate_bearings,
     bearing_grid,
+    column_bearing,
     corrected_pan_reference,
+    edge_columns,
     estimate_yaw_offset,
     fit_mount,
     median_fan,
     mount_yaw_shift,
+    pan_from_bearings,
     range_bias,
     sample_fan,
+    scan_corners,
     slope_artefact,
     synthetic_camera_fan,
 )
@@ -315,3 +320,59 @@ def test_the_live_range_slope_invents_more_yaw_than_the_live_shift_measured() ->
         faked = slope_artefact(lidar, slope, scale=0.58)
         assert abs(faked.shift_deg) > 2.0
     assert abs(slope_artefact(lidar, 0.0, scale=0.58).shift_deg) == pytest.approx(0.0, abs=0.2)
+
+
+# ---- the pan from bearings alone ---------------------------------------------------------------
+FX, CX = 362.06, 326.02  # config/camera.json's calibration at the 640x360 the node runs
+
+
+def test_a_column_is_a_bearing_left_of_centre_positive() -> None:
+    """The convention depth_to_scan folds its fan in, and the neck's pan carried into it."""
+    assert column_bearing(np.array([CX]), FX, CX)[0] == pytest.approx(0.0)
+    left = column_bearing(np.array([CX - FX]), FX, CX)[0]  # one focal length left of centre
+    assert math.degrees(left) == pytest.approx(45.0)
+    panned = column_bearing(np.array([CX]), FX, CX, pan_rad=math.radians(-2.46))
+    assert math.degrees(panned[0]) == pytest.approx(-2.46)
+
+
+def test_edge_columns_finds_the_jambs_and_not_the_texture() -> None:
+    """Two strong columns 200 px apart on a noisy profile come back as two edges."""
+    energy = np.full(640, 10.0)
+    energy[100] = energy[101] = 300.0
+    energy[300] = 250.0
+    found = edge_columns(energy)
+    assert list(found) == [100, 300]  # the neighbour at 101 is the same edge, suppressed
+
+
+def test_scan_corners_takes_the_nearer_side_of_a_range_step() -> None:
+    """A jamb is where the range jumps; the bearing kept is the occluding one."""
+    bearings = np.radians(np.arange(-10.0, 10.0, 1.0))
+    ranges = np.where(bearings < math.radians(0.5), 1.0, 2.5)
+    corners = scan_corners(bearings, ranges)
+    assert len(corners) == 1
+    assert math.degrees(corners[0]) == pytest.approx(0.0, abs=0.01)  # the near beam, not the far
+
+
+def test_a_known_pan_comes_back_out_of_bearings_alone() -> None:
+    """The measurement the depth law cannot bias: corners at known bearings, the picture drawn
+    by a camera really turned -1.8 deg, and no range anywhere in the arithmetic."""
+    truth_deg = np.array([-22.0, -9.5, 3.0, 14.0, 27.5])
+    for pan_error in (-1.8, 0.0, 2.4):
+        # the camera believes it looks straight; it really looks pan_error further CCW, so a
+        # thing at bearing b is drawn at b - pan_error
+        drawn = np.radians(truth_deg - pan_error)
+        columns = CX - FX * np.tan(drawn)
+        frames = [(column_bearing(columns, FX, CX), np.radians(truth_deg))] * 3
+        out = pan_from_bearings(frames)
+        assert out.pan_error_deg == pytest.approx(pan_error, abs=0.3)
+        assert out.pairs == 15 and out.frames == 3
+        assert out.spread_deg < 0.3
+
+
+def test_an_edge_with_no_corner_near_it_is_dropped_not_guessed() -> None:
+    """An edge 20 deg from the nearest corner is furniture only the camera sees."""
+    corners = np.radians(np.array([0.0, 10.0]))
+    edges = np.radians(np.array([0.2, 40.0]))
+    picked = associate_bearings(edges, corners)
+    assert len(picked) == 1 and math.degrees(picked[0]) == pytest.approx(-0.2, abs=1e-6)
+    assert pan_from_bearings([(np.radians(np.array([90.0])), corners)]).pairs == 0

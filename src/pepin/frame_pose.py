@@ -26,7 +26,7 @@ gyro's own signature — is not a lean but an unknown, and is placed level like 
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 
@@ -47,6 +47,22 @@ class PoseHistory(Protocol):
     def pose_at(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
         """``fixed <- frame`` at ``stamp`` (seconds), or ``None`` when the history does not
         cover that moment."""
+        ...
+
+
+@runtime_checkable
+class RecentPoseHistory(Protocol):
+    """A history that can also answer WITHOUT waiting: what it already holds, and how old the
+    newest of it is. TF's buffer can do both; a tape trivially can; a fake in a test says so by
+    implementing them."""
+
+    def pose_at_nowait(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
+        """``fixed <- frame`` at ``stamp``, from what is already buffered; never waits."""
+        ...
+
+    def latest_pose(self, frame: str, fixed: str) -> tuple[RigidPose, float] | None:
+        """The newest ``fixed <- frame`` there is and the stamp it holds for (seconds), or
+        ``None`` when that edge is not in the history at all. Never waits."""
         ...
 
 
@@ -152,6 +168,38 @@ class FramePoser:
         Not for carrying a scan (:meth:`carry`): a correction between the two stamps is a jump,
         and a jump inside one revolution of the lidar is a tear."""
         return self._motion(from_stamp, to_stamp, self.map_frame)
+
+    def map_motion_recent(
+        self, from_stamp: float, to_stamp: float, max_age_s: float = 0.3
+    ) -> RigidPose | None:
+        """:meth:`map_motion` asked so that it cannot cost the caller a wait: the older end from
+        what the history already holds, the newer end from the NEWEST map pose there is, and
+        only while that pose is within ``max_age_s`` of ``to_stamp``. ``None`` at once otherwise.
+
+        The frame path may not wait. Live on 2026-09-15 the blocking ask spent the whole 0.2 s
+        TF timeout on every frame — map -> base_link is published behind a frame's own stamp, so
+        the lookup could never be satisfied in time — and the depth stream fell from 8.7 to 1.5
+        frames a second with rgbd_odometry starved to zero poses. A pose 0.1-0.3 s behind the
+        frame is a baseline measured over 0.1-0.3 s less than asked for, which shortens the
+        baseline slightly; a frame lost is worth nothing at all."""
+        history = self._history
+        if not isinstance(history, RecentPoseHistory):
+            return None
+        before = self._leaned(
+            history.pose_at_nowait(from_stamp, self.base, self.map_frame), from_stamp
+        )
+        if before is None:
+            return None
+        newest = history.latest_pose(self.base, self.map_frame)
+        if newest is None:
+            return None
+        pose, stamp = newest
+        if abs(stamp - to_stamp) > max_age_s:
+            return None
+        after = self._leaned(pose, stamp)
+        if after is None:
+            return None
+        return _compose(after.inverse(), before)
 
     def _motion(self, from_stamp: float, to_stamp: float, fixed: str) -> RigidPose | None:
         """base_link at ``from_stamp`` into base_link at ``to_stamp`` through a fixed frame,

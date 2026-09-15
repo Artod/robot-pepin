@@ -273,7 +273,7 @@ def depth_to_scan(
     cam: CameraPose,
     *,
     stride: int = 4,
-    min_z: float = SCAN_MIN_Z_M,
+    min_z: float | Array = SCAN_MIN_Z_M,
     max_z: float = 1.30,
     max_range: float = 3.0,
 ) -> tuple[float, float, Array]:
@@ -285,7 +285,12 @@ def depth_to_scan(
     ``inf_is_valid`` an ``inf`` clears every cell out to the raytrace range, so a NaN-heavy frame
     (a region the law cannot place, a dark image) must not wipe a table top off the costmap.
     Returns (angle_min, angle_increment, ranges), ready for a LaserScan. Every ``stride``-th
-    pixel is used; the k-th nearest point per bearing marks, a flying pixel does not."""
+    pixel is used; the k-th nearest point per bearing marks, a flying pixel does not.
+
+    ``min_z`` may be one height for the whole picture or an image of heights, one per pixel: a
+    floor pixel stands ``camera height * (relative depth error)`` above the plane whatever its
+    range, so where the network is noisier the band's floor must rise with it or the floor marks
+    itself as an obstacle (:func:`pepin.contact.fan_min_z`, the ``band`` gate)."""
     d = np.asarray(depth, dtype=float)[::stride, ::stride]
     rows, cols = np.mgrid[0 : d.shape[0], 0 : d.shape[1]]
     u = cols * stride + 0.5
@@ -305,7 +310,10 @@ def depth_to_scan(
     seen = (px > 0.0) & (np.abs(bearing) <= SCAN_HALF_FOV)
     bins = np.rint((bearing + SCAN_HALF_FOV) / SCAN_STEP).astype(int)
     ranges[np.unique(bins[seen])] = np.inf  # something was seen along the bearing: clear
-    marks = seen & (pz > min_z) & (pz < max_z) & (rng <= max_range)
+    floor_of = np.asarray(min_z, dtype=float)
+    if floor_of.ndim:  # an image of heights: the same pixels the depths were taken from
+        floor_of = floor_of[::stride, ::stride][ok]
+    marks = seen & (pz > floor_of) & (pz < max_z) & (rng <= max_range)
     order = np.lexsort((rng[marks], bins[marks]))
     bins_sorted, rng_sorted = bins[marks][order], rng[marks][order]
     starts = np.flatnonzero(np.r_[True, bins_sorted[1:] != bins_sorted[:-1]])

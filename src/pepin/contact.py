@@ -51,6 +51,7 @@ from pepin.depth import (
     FLOOR_HEIGHT_TOLERANCE,
     NEAR_M,
     SCAN_HALF_FOV,
+    SCAN_MIN_Z_M,
     SCAN_STEP,
     UP_LEVEL,
     Array,
@@ -480,3 +481,54 @@ def contact_scan(
         unseen=int(np.isnan(ranges).sum()),
     )
     return -SCAN_HALF_FOV, SCAN_STEP, ranges, verdict
+
+
+# ---- the floor kept out of the obstacle fan ------------------------------------------------------
+FAN_FLOOR_GATE = "band"  # what keeps the floor out of the obstacle fan, by default
+FAN_FLOOR_GATES = ("band", "contact", "off")
+FAN_GATE_MARGIN_M = 0.10  # a mark this much nearer than the floor's end is not the wall's face
+FAN_GATE_N_SIGMA = 3.0  # how much floor noise the fan's band floor must clear
+
+
+def fan_min_z(
+    expected: Array,
+    camera_height: float,
+    *,
+    noise: DepthNoise = DEPTH_NOISE,
+    n_sigma: float = FAN_GATE_N_SIGMA,
+    floor_m: float = SCAN_MIN_Z_M,
+) -> Array:
+    """The height :func:`pepin.depth.depth_to_scan` must mark from, per pixel, so that the floor's
+    own noise does not mark itself: ``max(floor_m, n_sigma * camera_height * sigma_rel(E))``.
+
+    The band's lower edge is a constant 0.15 m today while a floor pixel's height error is
+    ``camera_height * (relative depth error)`` at EVERY range — 12.5 % short is exactly 0.15 m on
+    this mount, and the per-frame law's own median residual is 10.2 % (2026-09-14). This raises
+    the edge where the floor is far and the network loose, and leaves it alone up close, where a
+    shoe or a cable must still mark. ``expected`` is the floor's depth per pixel
+    (:func:`pepin.depth.floor_depth`); NaN above the horizon stays NaN and marks nothing.
+    """
+    sigma = noise.rel_at_zero + noise.rel_per_m * np.asarray(expected, dtype=float)
+    band: Array = np.maximum(floor_m, n_sigma * camera_height * sigma)
+    return band
+
+
+def gate_by_contact(
+    ranges: Array, contact: Array, margin_m: float = FAN_GATE_MARGIN_M
+) -> tuple[Array, int]:
+    """The obstacle fan with the marks the floor's own contact line forbids taken out, and how
+    many were taken: a mark nearer than that bearing's floor-contact range, by more than
+    ``margin_m``, stands on floor the camera watched continue past it.
+
+    Both scans are on the same half-degree grid (:func:`pepin.depth.depth_to_scan` and
+    :func:`contact_scan`), and the contact range does not depend on the depth law's scale at all
+    — it is the mount, the optics and the lean. A gated bearing becomes ``inf``: seen, and clear
+    that far, which is what the camera actually saw. Bearings the contact scan could not judge
+    (NaN) are left exactly as they were: this removes marks, it never invents them.
+    """
+    out = np.asarray(ranges, dtype=float).copy()
+    against = np.asarray(contact, dtype=float)
+    with np.errstate(invalid="ignore"):
+        forbidden: Mask = np.isfinite(out) & ~np.isnan(against) & (out < against - margin_m)
+    out[forbidden] = np.inf
+    return out, int(np.count_nonzero(forbidden))
