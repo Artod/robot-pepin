@@ -285,8 +285,9 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     is the pose, as it was): after every frame the node's law is the reference's law to the
     last bit, it withholds exactly the frames the reference withheld, and every published
     image and scan is byte for byte the reference's."""
-    node, net = build(range_law=False, frame_law=False, lidar_sigma_m=0.0)  # the affine law
-    # alone and every beam weighing the same: this reference is the chain of before 2026-09-15
+    node, net = build(range_law=False, frame_law=False, lidar_sigma_m=0.0, fan_floor_gate="off")
+    # the affine law alone, every beam weighing the same, and the fan's floor gate off: this
+    # reference is the chain of before 2026-09-15, and every switch that moved it is named here
     assert node._pipeline.switches == {name: FLAGS[name] for name in node._pipeline.names} | {
         "range_law": False,
         "frame_law": False,
@@ -347,7 +348,9 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
     reference's with that pose, and not the reference's with the config's — and the report
     line no longer counts a config fallback. A head panned 20 deg is counted as such."""
     edge = _optical_edge(31.5)
-    node, net = build(camera_edge=edge, law=LAW, range_law=False, frame_law=False)
+    node, net = build(
+        camera_edge=edge, law=LAW, range_law=False, frame_law=False, fan_floor_gate="off"
+    )  # the gate off: this test is about WHICH pose the chain uses, not about the fan's floor
     on_neck = pose_from_transform(edge)
     tf_cam = CameraPose.from_optical(on_neck.rotation, on_neck.translation)
     assert tf_cam.pitch == pytest.approx(math.radians(31.5)) and tf_cam.z == 1.2
@@ -713,3 +716,24 @@ def test_the_range_law_ships_live_and_goes_through_the_file(build: Build, tmp_pa
     assert second._range.law is not None and second._range.law.state() == stage.law.state()
     assert second._range.ready and not second._range.fitted, "a seed until the live pool answers"
     assert "range law D" in second.logger.texts("info")[0]
+
+
+def test_the_shipped_floor_gate_raises_the_fan_s_band_and_says_so(build: Build) -> None:
+    """The default is no longer the flat 0.15 m edge: with ``fan_floor_gate`` band the fan marks
+    from the floor's own noise upward (pepin.contact.fan_min_z), so a bearing the flat edge
+    marked on a noisy floor can come back clear, and ``off`` still reproduces the old fan
+    exactly. The chain is otherwise the reference's."""
+    gated, net_gated = build(range_law=False, frame_law=False, lidar_sigma_m=0.0)
+    assert str(gated._switches["fan_floor_gate"]) == "band", "the shipped gate"
+    plain, net_plain = build(
+        range_law=False, frame_law=False, lidar_sigma_m=0.0, fan_floor_gate="off"
+    )
+    for k, wall_x in enumerate(WALLS):
+        frame(gated, net_gated, CONFIG_CAM, wall_x, k)
+        frame(plain, net_plain, CONFIG_CAM, wall_x, k)
+    _d, gated_scans = published(gated)
+    _p, plain_scans = published(plain)
+    assert len(gated_scans) == len(plain_scans) and gated_scans
+    marked_gated = sum(np.count_nonzero(np.isfinite(np.asarray(s.ranges))) for s in gated_scans)
+    marked_plain = sum(np.count_nonzero(np.isfinite(np.asarray(s.ranges))) for s in plain_scans)
+    assert marked_gated <= marked_plain  # a gate removes marks, it never invents them

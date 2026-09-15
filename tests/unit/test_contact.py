@@ -247,3 +247,50 @@ def test_the_verdict_counts_the_columns_and_the_bearings_for_the_report_line() -
     assert verdict.median_range_m == pytest.approx(1.7, abs=0.05)
     assert "contact (median" in str(verdict) and "unseen" in str(verdict)
     assert ColumnState.CONTACT > ColumnState.CLEAR  # the states rank by how much the column knows
+
+
+# ---- the floor kept out of the obstacle fan ------------------------------------------------------
+def test_the_band_floor_rises_with_the_floor_s_own_noise() -> None:
+    """The gate's ruler: 0.15 m up close, higher where the network is loose (3 sigma of
+    0.03 + 0.01 E, at the 1.203 m camera), and NaN above the horizon stays NaN."""
+    from pepin.contact import fan_min_z
+
+    expected = np.array([1.0, 3.0, 6.0, np.nan])
+    band = fan_min_z(expected, 1.203)
+    assert band[0] == pytest.approx(0.15)  # 3 * 1.203 * 0.04 = 0.144, under the floor: 0.15
+    assert band[1] == pytest.approx(3 * 1.203 * 0.06, abs=1e-6)  # 0.217 m at three metres
+    assert band[2] > band[1]
+    assert math.isnan(band[3])
+
+
+def test_a_mark_the_floor_was_watched_past_is_gated_and_a_real_one_is_not() -> None:
+    """The contact gate: the floor verified out to 2.0 m forbids a mark at 1.0 m, leaves the
+    wall's own mark at 1.95 m alone (the margin), and never touches a bearing it cannot judge."""
+    from pepin.contact import gate_by_contact
+
+    ranges = np.array([1.0, 1.95, 0.8, np.inf])
+    contact = np.array([2.0, 2.0, np.nan, 2.0])
+    out, gated = gate_by_contact(ranges, contact)
+    assert gated == 1
+    assert out[0] == math.inf  # seen, and clear that far: what the camera actually saw
+    assert out[1] == pytest.approx(1.95)  # within the margin of the floor's end: the wall
+    assert out[2] == pytest.approx(0.8)  # no verdict at that bearing: left exactly as it was
+    assert out[3] == math.inf
+
+
+def test_an_array_band_floor_reaches_depth_to_scan_pixel_by_pixel() -> None:
+    """A per-pixel band floor is what depth_to_scan marks against: a floor 0.2 m "above" the
+    plane marks with the flat 0.15 m edge and does not with the noise band's."""
+    from pepin.contact import fan_min_z
+    from pepin.depth import CameraPose, Intrinsics, depth_to_scan, floor_depth
+
+    intr = Intrinsics(362.06, 363.41, 326.02, 186.99, 640, 360)
+    cam = CameraPose(0.0, 0.0, 1.203, math.radians(23.8))
+    expected = floor_depth(intr, cam)
+    # the floor read 15 % short past two metres only (0.18 m of false height, where the
+    # network is loosest) and exact up close: the flat edge marks it, the noise band does not
+    leaking = np.where(expected > 2.0, expected * 0.85, expected)
+    flat = depth_to_scan(leaking, intr, cam)[2]
+    banded = depth_to_scan(leaking, intr, cam, min_z=fan_min_z(expected, cam.z))[2]
+    assert np.count_nonzero(np.isfinite(flat)) > 20  # the far floor marks itself as obstacles
+    assert np.count_nonzero(np.isfinite(banded)) == 0  # 0.18 m is inside the band past 2 m
