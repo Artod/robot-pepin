@@ -522,36 +522,6 @@ def test_the_walk_stops_where_a_table_top_recedes_and_can_correct_without_pairs(
     assert np.allclose(result.after["affine_law"][r, cols], raw[r, cols] / 1.4)
 
 
-def test_the_wall_pairs_teach_the_affine_law_the_room_above_the_lidar_row() -> None:
-    """A network right at the lidar's row and 20 % too far above it (an error the beams cannot
-    see): with the wall pairs in the pool the elevation law finds the term, the row law's
-    upper bands differ from its lower ones, and the plain affine law lands in between."""
-    lift = lift_of(np.arange(360), INTR)[:, None]
-    factor = 1.0 + 0.6 * np.clip(lift - lift[200], 0.0, None)  # grows up the picture
-    views = [(_scene(x, floor=False) / factor, _wall_returns(x)) for x in (1.0, 3.5, 2.0)]
-    truth, raw, lidar = _scene(2.0, floor=False), views[-1][0], views[-1][1]
-    laws = {"affine": AffineLaw(), "elevation": ElevationLaw(), "row": RowLaw(bands=4)}
-    for law in laws.values():
-        pipeline = DepthPipeline([LidarAnchor(), WallAnchor(), law])
-        for view, returns in views:
-            result = pipeline.run(view, _context(returns))
-        assert not result.withheld
-    elevation = laws["elevation"]
-    assert isinstance(elevation, ElevationLaw) and elevation.c != 0.0
-    assert "c " in elevation.describe()
-    row = laws["row"]
-    assert isinstance(row, RowLaw) and row.centres.size == 4
-    assert row.a_of[-1] != row.a_of[0] and "bands a/b" in row.describe()
-    # the corrected depth at the top rows: the elevation and row laws come nearer the truth
-    ctx = _context(lidar)
-    top = slice(20, 60)
-    err = {
-        name: float(np.nanmedian(np.abs(law.apply(raw, ctx)[top] - truth[top])))
-        for name, law in laws.items()
-    }
-    assert err["elevation"] < err["affine"] and err["row"] < err["affine"]
-
-
 def test_the_elevation_and_row_laws_fall_back_to_the_affine_law_on_a_flat_pool() -> None:
     """Pairs of one row only: no elevation spread, so the elevation term stays 0 and the row
     law has no bands — both apply the plain affine law, and a seed holds them too."""
@@ -1236,3 +1206,23 @@ def test_the_floor_bootstraps_from_the_floor_and_not_from_the_median_of_the_clut
     assert pairs is not None and stage.gated == 0
     assert float(np.median(pairs.d / pairs.z)) == pytest.approx(1.6, rel=0.03)
     assert pairs.size > 800, "and it is the floor it held, not a corner of it"
+
+
+def test_the_pool_laws_read_the_beams_alone_or_a_capped_pool_without_them() -> None:
+    """With beams in the frame the pool laws get the beams and nothing else; without them, every
+    other ruler's block thinned to POOL_CAP_PER_SOURCE evenly spaced pairs with its total weight
+    unchanged. The frame law's own pool is the lot either way."""
+    from pepin.depth_pipeline import POOL_CAP_PER_SOURCE, Frame, Pairs
+
+    n = 10_000
+    floor = Pairs.of(np.linspace(1, 3, n), np.linspace(1, 3, n), np.zeros(n), 0.1)
+    frame = Frame(raw=np.ones((4, 4)), ctx=None)  # type: ignore[arg-type]
+    frame.add("floor_pairs", floor)
+    capped = frame.pool_capped()
+    assert capped is not None and frame.pool is not None
+    assert capped.size == POOL_CAP_PER_SOURCE and frame.pool.size == n
+    assert np.isclose(float(np.sum(capped.weight)), float(np.sum(frame.pool.weight)))
+    assert float(capped.d[0]) == 1.0 and np.isclose(float(capped.d[-1]), 3.0)
+    frame.add("lidar_anchor", Pairs.of(np.ones(30), np.ones(30), np.zeros(30), 1.0))
+    beams = frame.pool_capped()
+    assert beams is not None and beams.size == 30 and frame.pool.size == n + 30

@@ -114,6 +114,12 @@ from pepin.elevation import RAY_AZIMUTH_DEGREE, RAY_DEGREE, RayGain, fit_ray, ra
 if TYPE_CHECKING:  # the tracker's own module stays a lazy import inside the parallax stage
     from pepin.parallax import Features, FrameView, Lens, Motion, ParallaxTruth, TrackStore
 
+# Pairs of one anchor a frame the POOL laws keep when the frame has no beams: about the lidar's
+# own count, because their pool is POOL_FRAMES (600) frames deep and a fit costs the total (the
+# floor's and the wall's 80 000 a frame made the two fits 125 ms, 2026-09-16). With beams in the
+# frame the pool laws read the beams alone: they are the lidar's lens laws, and the other rulers
+# only stand in for it; the field takes every pair of every ruler.
+POOL_CAP_PER_SOURCE = 100
 LEAN_STEP = 0.003  # the floor's expected depth is recomputed when the up vector moves this much
 FLOOR_PAIR_STRIDE = 8  # every 8th row and column of the floor: 3600 candidates of a 640x360 frame
 FLOOR_SIGMA_PITCH_DEG = 1.5  # how well the camera's pitch is known: config/neck.json's ticks_note
@@ -561,6 +567,34 @@ class Frame:
         """Every pair contributed so far, as one."""
         return Pairs.join(self.pairs)
 
+    def pool_capped(self, cap: int = POOL_CAP_PER_SOURCE) -> Pairs | None:
+        """The pool the POOL laws read: the lidar's beams alone when the frame has any (they are
+        the lidar's lens laws, fitted over POOL_FRAMES frames, and a fit costs the pool's total —
+        the floor's and the wall's 80 000 pairs a frame made two fits 125 ms, 2026-09-16); with
+        no beams in the frame, every other ruler's block thinned to at most ``cap`` pairs (evenly
+        spaced, weights scaled so the block's total weight is unchanged), so a lidar-less chain
+        still gets its law. The frame law reads :attr:`pool` whole — it fits this frame only."""
+        beams = [p for n, p in zip(self.sources, self.pairs, strict=False) if n == "lidar_anchor"]
+        if beams:
+            return Pairs.join(beams)
+        parts: list[Pairs] = []
+        for part in self.pairs:
+            if part.size <= cap:
+                parts.append(part)
+                continue
+            keep = np.linspace(0, part.size - 1, cap).round().astype(int)
+            scale = float(np.sum(part.weight)) / max(float(np.sum(part.weight[keep])), 1e-12)
+            parts.append(
+                Pairs(
+                    part.d[keep],
+                    part.z[keep],
+                    part.weight[keep] * scale,
+                    part.lift[keep],
+                    part.left[keep],
+                )
+            )
+        return Pairs.join(parts)
+
 
 @dataclass(frozen=True)
 class Verdict:
@@ -685,7 +719,7 @@ class LawStage:
 
     def run(self, depth: Array, frame: Frame) -> tuple[Array, Verdict]:
         """Fit on the pool, apply — or withhold the frame while there is no law."""
-        pool = frame.pool
+        pool = frame.pool_capped()
         self.fit(pool)
         n = 0 if pool is None else pool.size
         if not self.ready:
@@ -2738,7 +2772,7 @@ class RayLaw(AffineLaw):
         """Fit on the pool and correct the frame's raw depth, keeping the holes of the depth
         handed in (the edge filter's, and the affine law's where it ran before this stage);
         the frame is withheld only while no law of any kind exists."""
-        pool = frame.pool
+        pool = frame.pool_capped()
         self.fit(pool)
         n = 0 if pool is None else pool.size
         if not self.ready:
@@ -2833,7 +2867,7 @@ class RangeLawStage(LawStage):
         """Fit on the pool and correct the frame's raw depth, keeping the holes of the depth
         handed in (the edge filter's, and the affine law's where it ran before this stage);
         the frame is withheld only while no law of any kind exists."""
-        pool = frame.pool
+        pool = frame.pool_capped()
         self.fit(pool)
         n = 0 if pool is None else pool.size
         if not self.ready:
