@@ -124,8 +124,11 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
     law is the node's law to the last bit, its output the node's output, and it withholds
     exactly the frames the node withheld."""
     node_law = AffineScale()
-    pipeline = standard_pipeline(range_law=False, frame_law=False)  # the affine law alone,
-    # as the node ran then
+    # the affine law on the lidar's beams alone, as the node ran then: the floor and the
+    # parallax corners ship on since 2026-09-15 and would be fitting this law too
+    pipeline = standard_pipeline(
+        range_law=False, frame_law=False, floor_pairs=False, parallax_anchor=False
+    )
     beams = pipeline.stage("lidar_anchor")
     assert isinstance(beams, LidarAnchor)
     assert beams.sigma_m == 0.0, "and every beam weighing the same, as the node's law was fitted"
@@ -145,7 +148,7 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
         "floor_anchor",
     ]
     assert not pipeline.on("floor_pairs") and not pipeline.on("wall_anchor")
-    assert not pipeline.on("wall_correct")
+    assert not pipeline.on("wall_correct") and not pipeline.on("parallax_anchor")
     withheld = 0
     for k, wall_x in enumerate((1.0, 1.5, 2.5, 3.5, 2.0)):
         raw = _network(_scene(wall_x), 1.3, 0.03, noise=0.03, seed=k)
@@ -187,9 +190,9 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
     assert pipeline.switches == {
         "edge_filter": True,
         "lidar_anchor": True,
-        "floor_pairs": False,
+        "floor_pairs": True,
         "wall_anchor": False,
-        "parallax_anchor": False,
+        "parallax_anchor": True,
         "affine_law": True,
         "ray_law": False,
         "range_law": True,
@@ -199,6 +202,7 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
     }
     pipeline.set("floor_anchor", False)
     assert not pipeline.on("floor_anchor")
+    pipeline.set("floor_pairs", False)  # so the frame below really has no pairs at all
     with pytest.raises(KeyError):
         pipeline.set("no_such_stage", True)
     with pytest.raises(KeyError):
@@ -242,7 +246,8 @@ def test_the_depth_before_a_stage_is_the_last_output_before_it_or_the_raw() -> N
     bare = DepthPipeline([EdgeFilter(), FloorAnchor()], off=["edge_filter"])
     result = bare.run(raw, _context(None))
     assert result.before("floor_anchor") is result.frame.raw
-    stopped = standard_pipeline().run(raw, _context(None))  # withheld at the law
+    # withheld at the law: no lidar in the context and no floor either, so nothing pairs
+    stopped = standard_pipeline(floor_pairs=False).run(raw, _context(None))
     assert stopped.withheld
     with pytest.raises(KeyError):
         stopped.before("floor_anchor")
@@ -423,7 +428,8 @@ def test_the_walk_stops_where_a_table_top_recedes_and_can_correct_without_pairs(
     assert "correcting" in quiet.describe() and "pairs" not in quiet.describe()
     law = AffineLaw()
     law.seed(1.4, 0.0)
-    pipeline = standard_pipeline(law, wall_correct=True)
+    # the floor's own pairs would fit this law too, and the question here is the wall's walk
+    pipeline = standard_pipeline(law, wall_correct=True, floor_pairs=False)
     result = pipeline.run(raw, _context(returns))
     assert not result.verdict("wall_anchor").on and result.verdict("wall_correct").pixels > 0
     assert result.verdict("wall_correct").pairs == 0
@@ -578,7 +584,8 @@ def test_the_range_law_publishes_through_the_affine_law_until_two_bins_fill() ->
     law = AffineLaw()
     law.seed(1.3, 0.0)
     stage = RangeLawStage(law)
-    pipeline = standard_pipeline(law, range_stage=stage)
+    # one wall at one range and nothing else: the floor's own pairs would fill a second bin
+    pipeline = standard_pipeline(law, range_stage=stage, floor_pairs=False)
     raw = _network(_scene(2.0), 1.3, 0.0, noise=0.0, seed=0)
     result = pipeline.run(raw, _context(_wall_returns(2.0)))
     assert not result.withheld and stage.law is None and not stage.fitted

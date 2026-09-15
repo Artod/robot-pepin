@@ -1636,11 +1636,16 @@ class FrameView:
     """One frame a track may be triangulated from: when it was taken, the whole ``base_link <-
     camera_optical`` the lens sat at then (the neck's pan included), whose word the cart's
     motion at that moment was — ``tf``, ``tracker`` or ``odom`` — and, where that source can
-    say it, where the cart itself stood in a fixed frame at that moment.
+    say it, where the LENS itself was in a fixed frame at that moment.
 
-    A ``pose`` turns the motion between any two views into arithmetic, with no lookup and no
-    frame on which the answer is missing; without one the caller asks its source for the motion
-    between the two stamps instead."""
+    The pose is the camera's and not the cart's, because the head moves: a neck that pans while
+    the cart stands still moves the camera and not the base, and a window built on base poses
+    would call that no motion at all. ``map <- camera_optical`` is
+    ``(map <- base_link) . (base_link <- camera_optical)``, composed once when the frame is
+    taken, and the motion between any two views is then one subtraction — no lookup, and no
+    frame on which the answer is missing. Without a pose the caller asks its source for the
+    motion between the two stamps and composes the two placements itself
+    (:func:`camera_motion`), which is the same transform."""
 
     stamp: float
     place: Placement

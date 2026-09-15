@@ -229,7 +229,9 @@ def test_a_pool_whose_angle_is_the_depth_in_disguise_fits_no_ray_law() -> None:
     elevation, _azimuth = ray_angles(lift)
     y = 1.0 / beams[hits, 2]
     assert separable(elevation / RAY_SCALE, y) > 0.99
-    pipeline = standard_pipeline(ray_law=True)  # the lidar alone
+    # the lidar alone: the floor's pairs are many elevations at one depth and would break the
+    # degeneracy exactly as the wall's do below, which is the other half of this test
+    pipeline = standard_pipeline(ray_law=True, floor_pairs=False)
     for _ in range(3):
         pipeline.run(raw, ctx)
     law = pipeline.stage("ray_law")
@@ -342,8 +344,8 @@ def test_the_stage_withholds_only_while_no_law_of_any_kind_exists() -> None:
     """With nothing pooled the ray law withholds the frame like the affine law does; once the
     affine law stands it never withholds again, angular fit or not."""
     raw, ctx = _frames()
-    pipeline = standard_pipeline(ray_law=True, wall_anchor=True)
-    blind = FrameContext(INTR, CAM, stamp=1.0)
+    pipeline = standard_pipeline(ray_law=True, wall_anchor=True, floor_pairs=False)
+    blind = FrameContext(INTR, CAM, stamp=1.0)  # no lidar, and no floor either: nothing pools
     assert pipeline.run(raw, blind).withheld
     for _ in range(3):
         result = pipeline.run(raw, ctx)
