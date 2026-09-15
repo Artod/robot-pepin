@@ -503,7 +503,15 @@ def pair_weight(sigma_inv: Array, cap: float | None = None) -> Array:
     The fit lives in inverse depth, so this is where a ruler's noise belongs: a ruler with a
     constant noise in METRES is not equally good at every range there — a beam of 1.5 cm at
     1 m is 0.015 in inverse depth and the same beam at 3 m is 0.0017, eight times better.
-    Weighing by the metre would let the near field decide a law the far field measures better."""
+
+    What this is NOT is the variance of the residual being minimised. The fit regresses the
+    network's noisy 1 / D on the ruler's 1 / z and takes the ruler as exact
+    (:func:`fit_affine`), so the residual's own noise is the NETWORK's — 0.02-0.10 of inverse
+    depth at a few per cent of range, above a beam's 0.0002-0.023 everywhere. The weight is
+    therefore a RELATIVE TRUST between rulers, sound for ranking a 7-10 cm corner against a
+    1.5 cm beam and unsound for ranking beam against beam by range: applied inside one ruler it
+    tilts the law as z^4 and measured worse on the lidar alone
+    (:data:`pepin.depth_pipeline.LIDAR_SIGMA_M`, 2026-09-15)."""
     sigma = np.asarray(sigma_inv, dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
         w = np.where(np.isfinite(sigma) & (sigma > 0.0), (REF_SIGMA_INV / sigma) ** 2, 0.0)
@@ -713,10 +721,10 @@ def fit_frame(
     (:func:`fit_affine`) — because a frame's pairs span little range and regressing the other
     way collapses the slope towards zero exactly when the fit is weakest. The robustness is
     heavier instead (:func:`_irls`), a frame having no other frames to outvote a bad beam. A
-    shift is fitted only when the frame's own depths span ``min_spread`` (1.5, not the pool's
-    2.5: one picture of one wall spans little, and a shift fitted on it is noise), otherwise the
-    scale alone, the weighted median ratio. The result is bounded like every other law
-    (:func:`_bounded`).
+    shift is fitted only when the frame's own depths span ``min_spread`` — the pool's own 2.5,
+    not a looser gate: one picture of one wall spans little, and a shift fitted on it is noise
+    (:data:`FRAME_MIN_SPREAD`) — otherwise the scale alone, the weighted median ratio. The
+    result is bounded like every other law (:func:`_bounded`).
 
     ``weight`` is each pair's 1 / sigma^2 (:func:`pair_weight`) and is what lets two rulers
     share one fit: the lidar's beams and the parallax anchor's corners land in the same pool and

@@ -250,8 +250,10 @@ FLAGS = FlagSet(
         " carries 1 / sigma^2 from its own triangulation against a beam's 1 / sigma^2 at"
         " lidar_sigma_m (pepin.depth.pair_weight), so a corner at 7-10 cm of noise counts about"
         " 0.03 of a beam and 200 of them do not outvote 30 beams: measured on the errands of"
-        " 2026-09-14, the lidar keeps 90-97 % of a frame's fit weight wherever it reaches"
-        " (scratch/parallax_ruler_eval.txt). What the anchor buys is where the lidar does not"
+        " 2026-09-14, the lidar keeps 99-100 % of a frame's fit weight wherever it reaches"
+        " (scratch/parallax_ruler_eval.txt: parallax 0 % of the weight at the median, 0-1 %"
+        " p10-p90 over the 40 frames carrying both). What the anchor buys is where the lidar"
+        " does not"
         " reach — above the plane, nearer than the 0.71 m at which the plane enters the picture,"
         " and every frame with no beams at all, where it is the only metric ruler left and the"
         " frame law fits on it instead of decaying to the pool. Its own depth reads 0.93-1.01 of"
@@ -585,22 +587,26 @@ FLAGS = FlagSet(
     Flag(
         "lidar_sigma_m",
         LIDAR_SIGMA_M,
-        description="what one lidar beam's range is trusted to, in metres: its pair's weight in"
-        " every fit is 1 / sigma^2 in inverse depth, sigma_m / z^2. 0 restores the flat weight of"
-        " 1 that every beam carried before 2026-09-15, whatever its range",
-        why="two rulers can only share one fit if both are weighed in the same unit, and a"
-        " constant noise in METRES is not a constant weight in inverse depth, the space the law"
-        " is fitted in: the same 1.5 cm is 0.015 of inverse depth at 1 m and 0.0017 at 3 m. A"
-        " flat weight therefore lets the near beams — the ones whose pixel association is worst"
-        " and whose ratio the range law already shows drifting +8.7 % — write the scale the far"
-        " field measures eight times better. 1.5 cm is the number the pipeline had assumed all"
-        " along in another dress (the parallax anchor weighed its corners against 2 cm at 2 m)"
-        " and it covers the beam's own noise plus the association error, not the datasheet's"
-        " accuracy alone",
-        on_when="raise it towards 0.03 on a lidar whose returns are noisier than the association"
-        " (a dusty room, a reflective floor): it flattens the range dependence of the weights",
-        off_when="0 for the old flat weight — the A/B of this whole change on a lidar-only frame,"
-        " and the setting to compare a law fitted before 2026-09-15 against",
+        description="what one lidar beam's range is trusted to, in metres. 0 (the default) gives"
+        " every beam the flat weight of 1 — the reference pair the parallax corners are weighed"
+        " against, so both rulers still share one unit. Above 0, a beam's weight is 1 / sigma^2"
+        " in inverse depth, sigma_m / z^2, which reads as a weight proportional to z^4",
+        why="0 because weighing the beams by range was measured and it is worse. On the four"
+        " errands of 2026-09-14 (scratch/parallax_ruler_recheck.txt, 112 frames, the odd beams"
+        " fitting and the even ones judging) sigma_m 1.5 cm took the LIDAR-ONLY frame law from"
+        " 7.4 % to 11.4 % of median |residual| overall and from 6.4 % to 18.3 % over 1.0-1.5 m,"
+        " while 3-12 m improved 10.5 % -> 4.4 %: at z^4 a beam at 8 m counts 256 beams at 2 m,"
+        " so the far beams fit themselves and the near field — everything the cart parks against"
+        " — pays for it. The maths behind that: the fit minimises the residual of the NETWORK's"
+        " 1 / D, whose own noise (0.02-0.10 of inverse depth) is far above a beam's"
+        " (0.0002-0.023) at every range, so a beam's sigma is not the residual's sigma and"
+        " 1 / sigma_beam^2 is not that pair's share of this fit. The ratio between two DIFFERENT"
+        " rulers (a 7-10 cm corner against a beam) is a different question and is what"
+        " pepin.depth.pair_weight is still used for",
+        on_when="only with a measurement that beats the flat weight on the near bands — e.g."
+        " after the network's own per-pair noise enters the weight (1 / (sigma_net^2 +"
+        " a^2 sigma_ruler^2)), which is the fit this knob is a crude stand-in for",
+        off_when="0 is the shipped default; leave it there",
         range=(0.0, 0.2),
     ),
     Flag(

@@ -125,13 +125,19 @@ PARALLAX_MOTION = "tracker"  # whose word on the baseline: the lidar tracker's m
 PARALLAX_MOTIONS = ("tracker", "odom")
 PARALLAX_RING_FRAMES = 24  # frames kept to choose a partner from: 1.5 s at any rate the node runs
 PARALLAX_WEIGHT = 1.0  # the multiplier on a parallax pair's own 1 / sigma^2 (the A/B's knob)
-LIDAR_SIGMA_M = 0.015  # metres: one beam's range noise, the number its weight is 1 / sigma^2 of.
-# Not in config/lidar.json (that file carries the mount, not the noise) and not a datasheet
-# copy: the LD19's stated accuracy is a per-cent of range, and what the pairs actually see is
-# the beam's own noise plus the association error (the beam and the pixel look at the same
-# thing to within a pixel and a scan period). 1.5 cm is what the pipeline had assumed all along
-# in another dress — pepin.parallax weighed its corners against "2 cm at 2 m" — and the live
-# knob is the node's lidar_sigma_m; 0 restores the flat weight of 1 every beam used to carry.
+LIDAR_SIGMA_M = 0.0  # metres: one beam's range noise, 0 meaning every beam weighs a flat 1 —
+# the reference pair itself (REF_SIGMA_INV, "a beam at 2 m"), which is what the parallax anchor
+# has always weighed its corners against, so the two rulers still share one unit.
+# Measured 2026-09-15 (scratch/parallax_ruler_recheck.txt, the four errands of 2026-09-14,
+# 112 frames, odd beams fitting and even beams judging): weighing each beam 1 / sigma^2 at
+# sigma_m = 1.5 cm makes the LIDAR-ONLY law worse, 7.4 % -> 11.4 % of median |residual| overall
+# and 6.4 % -> 18.3 % over 1.0-1.5 m, because sigma_m / z^2 puts the weight as z^4 (a beam at
+# 8 m counts 256 beams at 2 m) and the far beams then fit themselves: 3-12 m improves
+# 10.5 % -> 4.4 % and everything the cart parks against loses. The reason is that the fit
+# minimises the residual of the NETWORK's 1 / D, whose own noise (0.02-0.10 of inverse depth at
+# a few per cent of range) dwarfs a beam's (0.0002-0.023) everywhere — so a beam's sigma is not
+# the residual's sigma, and 1 / sigma_beam^2 is not that pair's weight in this fit.
+# Live knob: the node's lidar_sigma_m, > 0 to weigh the beams by range again.
 
 
 # ---- what flows through the pipeline ----------------------------------------------------------
@@ -605,11 +611,12 @@ class LidarAnchor(AnchorStage):
     get no pairs from the lidar and hold — the failure mode of a lidar that stops, and the
     measure of what the lidar buys.
 
-    Each beam carries its own weight, ``1 / sigma^2`` in inverse depth from ``sigma_m`` metres
-    of range noise (:func:`pepin.depth.pair_weight`), because it shares the pool with a second
-    ruler now (:class:`ParallaxAnchor`) and two rulers can only be mixed in one fit if both are
-    weighed in the same unit. ``sigma_m`` at or below 0 restores the flat weight of 1 every beam
-    carried before, which is what the laws were fitted on until 2026-09-15."""
+    A beam weighs a flat 1 by default — the reference pair every other ruler is weighed against
+    (:data:`pepin.depth.REF_SIGMA_INV`), so the parallax anchor's corners can share the pool
+    with the beams in one unit. ``sigma_m`` above 0 weighs each beam ``1 / sigma^2`` in inverse
+    depth instead (``sigma_m / z^2``, :func:`pepin.depth.pair_weight`), which reads as a weight
+    proportional to ``z^4`` and measured WORSE on the beams alone (:data:`LIDAR_SIGMA_M`); it is
+    kept as the live ``lidar_sigma_m`` knob, not as the default."""
 
     name = "lidar_anchor"
 

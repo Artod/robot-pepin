@@ -120,7 +120,7 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
     # as the node ran then
     beams = pipeline.stage("lidar_anchor")
     assert isinstance(beams, LidarAnchor)
-    beams.sigma_m = 0.0  # and every beam weighing the same, as it did before 2026-09-15
+    assert beams.sigma_m == 0.0, "and every beam weighing the same, as the node's law was fitted"
     law = pipeline.stage("affine_law")
     assert isinstance(law, AffineLaw)
     assert pipeline.names == [
@@ -630,26 +630,20 @@ def test_the_frame_law_corrects_what_the_pool_law_left_on_this_frame() -> None:
 
 
 # ---- two rulers in one fit -------------------------------------------------------------------
-def test_a_beam_weighs_its_own_inverse_depth_noise_and_zero_sigma_restores_the_flat_weight() -> (
-    None
-):
-    """Every beam used to count once whatever its range. It now counts 1 / sigma^2 in inverse
-    depth, so a far beam — eight times better placed in the space the law is fitted in —
-    outweighs a near one, and sigma_m 0 brings the flat weight back."""
+def test_a_beam_ships_weighing_a_flat_one_and_sigma_m_weighs_it_by_range_instead() -> None:
+    """A beam ships weighing 1 whatever its range — the reference pair the corners are weighed
+    against — and ``sigma_m`` above 0 is the live knob that weighs it 1 / sigma^2 in inverse
+    depth instead, which puts the weight as z^4 and measured worse (LIDAR_SIGMA_M)."""
     frame = Frame(_network(_scene(2.0), 1.3, 0.0, noise=0.0, seed=0), _context(_wall_returns(2.0)))
     weighed = LidarAnchor(sigma_m=0.015).pairs(frame)
-    flat = LidarAnchor(sigma_m=0.0).pairs(frame)
+    flat = LidarAnchor().pairs(frame)
     assert weighed is not None and flat is not None
     assert np.array_equal(weighed.z, flat.z) and np.all(flat.weight == 1.0)
     near, far = np.argmin(weighed.z), np.argmax(weighed.z)
     ratio = (weighed.z[far] / weighed.z[near]) ** 4  # 1 / (sigma_m / z^2)^2
     assert weighed.weight[far] / weighed.weight[near] == pytest.approx(ratio, rel=1e-9)
-    assert "sigma 1.5 cm" in LidarAnchor().describe() and "flat" in flat_describe()
-
-
-def flat_describe() -> str:
-    """The lidar anchor's report words with the weights switched back to flat."""
-    return LidarAnchor(sigma_m=0.0).describe()
+    assert "sigma 1.5 cm" in LidarAnchor(sigma_m=0.015).describe()
+    assert "flat" in LidarAnchor().describe()
 
 
 def test_the_pool_of_two_rulers_is_read_by_weight_and_the_report_says_whose_it_was() -> None:

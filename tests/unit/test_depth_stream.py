@@ -421,11 +421,12 @@ def test_the_two_rulers_weights_are_live_flags_and_the_report_prints_them(build:
     node, net = build()
     beams, corners = node._pipeline.stage("lidar_anchor"), node._pipeline.stage("parallax_anchor")
     assert isinstance(beams, LidarAnchor) and isinstance(corners, ParallaxAnchor)
-    assert beams.sigma_m == LIDAR_SIGMA_M and corners.weight == PARALLAX_WEIGHT
-    assert node.set_parameters([Param("lidar_sigma_m", 0.0), Param("parallax_weight", 0.0)])[
+    assert beams.sigma_m == LIDAR_SIGMA_M == 0.0, "a beam ships weighing a flat 1"
+    assert corners.weight == PARALLAX_WEIGHT
+    assert node.set_parameters([Param("lidar_sigma_m", 0.015), Param("parallax_weight", 0.0)])[
         0
     ].successful
-    assert beams.sigma_m == 0.0 and corners.weight == 0.0
+    assert beams.sigma_m == 0.015 and corners.weight == 0.0
     assert node.set_parameters([Param("lidar_sigma_m", 0.03), Param("parallax_weight", 2.0)])[
         0
     ].successful
