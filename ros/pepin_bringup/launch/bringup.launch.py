@@ -51,6 +51,7 @@ def generate_launch_description() -> LaunchDescription:
         launch_arguments={
             "base_bridge_cpp": LaunchConfiguration("base_bridge_cpp"),
             "imu": LaunchConfiguration("imu"),
+            "ekf": LaunchConfiguration("ekf"),
             "tof": LaunchConfiguration("tof"),
             "neck": LaunchConfiguration("neck"),
         }.items(),
@@ -87,6 +88,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("slam_toolbox", default_value="false"),  # never with nav/slam
             DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
             DeclareLaunchArgument("imu", default_value="false"),
+            DeclareLaunchArgument("ekf", default_value="true"),
             DeclareLaunchArgument("tof", default_value="false"),
             DeclareLaunchArgument("neck", default_value="false"),
             robot,

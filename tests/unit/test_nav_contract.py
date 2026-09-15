@@ -1247,7 +1247,7 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     feature = (REPO / "ros/feature.sh").read_text()
     assert "neck) VAR=PEPIN_NECK ;;" in feature
     assert (
-        "PEPIN_(CPP_BRIDGE|IMU|TOF|NECK|SIDE|BRIDGE|BRIDGE_CONFIG)"
+        "PEPIN_(CPP_BRIDGE|IMU|EKF|TOF|NECK|SIDE|BRIDGE|BRIDGE_CONFIG)"
         in (REPO / "ros/mode.sh").read_text()
     ), "a mode change must not wipe the bridge the board was told to run"
     laptop = (REPO / "ros/laptop.sh").read_text()
@@ -2337,6 +2337,45 @@ def test_no_node_publishes_on_a_topic_it_listens_to() -> None:
         listened = set(re.findall(r"create_subscription" + literal, source))
         offenders += [f"{p.name}: {topic}" for topic in sorted(published & listened)]
     assert not offenders, f"a node would hear itself on: {offenders}"
+
+
+def test_the_filter_survives_a_dead_gyro_because_the_launch_never_gated_it_on_one() -> None:
+    """No single point of failure in the odometry: the EKF is the stack's one publisher of
+    odom -> base_link and of /odometry/filtered — the topic the relocalizer and the run recorder
+    read — so it must run on whichever sources are alive. It was conditioned on ``imu:=true``
+    until 2026-09-15, and ``ros/feature.sh imu off`` therefore took the filter down with the
+    gyro: zero messages on /odometry/filtered, the relocalizer carrying scans on an odometry
+    that never arrived, goto refusing with "not localized". Its one precondition is the C++
+    bridge, which is what hands over the transform; the way back to no filter is its own switch.
+    """
+    robot = sf.tree(ROBOT_LAUNCH)
+    condition = ast.unparse(sf.keywords(_node_named(robot, "ekf_filter_node"))["condition"])
+    assert "'ekf'" in condition and "use_cpp" in condition
+    assert "'imu'" not in condition, "the gyro is a source of this filter, never its switch"
+    # The bridge hands over odom -> base_link to whoever publishes it: keyed on the filter, so
+    # `imu off` can never leave the edge unpublished nor let both publish it.
+    assert "ekf_on = LaunchConfiguration('ekf').perform(context).lower() == 'true'" in sf.unparsed(
+        robot, ast.Assign
+    )
+    assert sf.dict_items(robot)["publish_tf"] == {"not ekf_on", "True"}, (
+        "the C++ bridge follows the filter; the Python bridge, which has no filter, keeps it"
+    )
+    assert sf.dict_items(robot)["imu_enable"] == {"imu_on"}, "the gyro keeps its own switch"
+    # On by default, and reachable end to end: one operator gesture, one env var, one argument.
+    ekf_arg = next(
+        c for c in sf.calls_to(robot, "DeclareLaunchArgument") if ast.unparse(c.args[0]) == "'ekf'"
+    )
+    assert ast.unparse(sf.keywords(ekf_arg)["default_value"]) == "'true'"
+    bringup = sf.tree("ros/pepin_bringup/launch/bringup.launch.py")
+    assert "LaunchConfiguration('ekf')" in sf.unparsed(bringup, ast.Call)
+    unit = (REPO / "board/pepin-ros.service").read_text()
+    assert "Environment=PEPIN_EKF=true" in unit and "ekf:=${PEPIN_EKF}" in unit
+    assert "ekf) VAR=PEPIN_EKF ;;" in (REPO / "ros/feature.sh").read_text()
+    # And without the gyro the heading has to come from somewhere: the wheels' own yaw rate.
+    ekf_yaml = yaml.safe_load((REPO / "ros/params/ekf.yaml").read_text())["ekf_filter_node"][
+        "ros__parameters"
+    ]
+    assert ekf_yaml["odom0_config"][11] is True, "the wheels carry the heading when the gyro dies"
 
 
 def test_the_visual_odometry_reaches_the_ekf_without_being_able_to_move_the_odom_frame() -> None:

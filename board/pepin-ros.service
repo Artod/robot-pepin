@@ -20,6 +20,10 @@ Environment=PEPIN_SLAM_TOOLBOX=false
 Environment=PEPIN_MAP=/maps/20260903_182653_lap3_loop.yaml
 Environment=PEPIN_CPP_BRIDGE=false
 Environment=PEPIN_IMU=false
+# The EKF (ros/params/ekf.yaml) fuses whatever odometry sources are alive and owns
+# odom -> base_link; it does NOT need the IMU, only the C++ bridge. Off, the bridge publishes
+# that transform from the wheels alone and there is no /odometry/filtered for the relocalizer.
+Environment=PEPIN_EKF=true
 Environment=PEPIN_TOF=false
 # The neck's encoders and the live camera transform (ros/feature.sh neck on|off); the laptop's
 # SLAM must then start with ros/laptop.sh vslam --neck, or two nodes publish base_link -> camera_link.
@@ -35,7 +39,7 @@ ExecStartPre=-/bin/sh -c 'for i in $$(seq 1 90); do [ "$$(timedatectl show -p NT
 ExecStartPre=-/bin/sh -c 'mkdir -p /root/pepin-ros/logs && /usr/bin/docker logs pepin-ros > /root/pepin-ros/logs/$$(date +%%Y%%m%%d_%%H%%M%%S).log 2>&1'
 ExecStartPre=-/usr/bin/docker rm -f pepin-ros
 # run.sh mounts the code from /root/pepin-ros (see it): edits reach the robot via ros/sync.sh, no rebuild.
-ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} slam_toolbox:=${PEPIN_SLAM_TOOLBOX} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK} side:=${PEPIN_SIDE}
+ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} slam_toolbox:=${PEPIN_SLAM_TOOLBOX} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} ekf:=${PEPIN_EKF} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK} side:=${PEPIN_SIDE}
 # ros2 launch needs more than 5 s to bring a dozen nodes down on this board; a SIGKILL (137)
 # after the grace period is still a normal stop, not a failure.
 # The container's stop signal is SIGINT (ros/run.sh, ros/Dockerfile), which the launch answers by

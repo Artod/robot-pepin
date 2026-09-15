@@ -26,7 +26,12 @@ Arguments:
   instead of the Python one. Same node, parameters and wire protocol; the default flips
   once it has driven the cart.
 - ``imu`` (default false): read the MPU6050 on /dev/i2c-2 inside the C++ bridge and publish
-  /imu/data_raw. Needs ``base_bridge_cpp:=true``; the Python bridge has no IMU.
+  /imu/data_raw. Needs ``base_bridge_cpp:=true``; the Python bridge has no IMU. The IMU is a
+  sensor of the filter below, never its precondition: with ``imu:=false`` the EKF still runs.
+- ``ekf`` (default true): fuse whatever odometry sources are alive (ros/params/ekf.yaml) and
+  own odom -> base_link. Only with ``base_bridge_cpp:=true`` — the Python bridge publishes that
+  transform itself and two publishers of one edge fight. ``ekf:=false`` is the way back to the
+  bridge's own transform with no filter in the chain.
 - ``neck`` (default false): the neck's encoders as /neck/state and, behind the node's live
   ``neck_tf`` switch, base_link -> camera_link from them (pepin_bringup.neck_state, a Python
   process, ~150 MB). The laptop's camera node must then keep its static edge off
@@ -188,17 +193,21 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
         )
     if LaunchConfiguration("base_bridge_cpp").perform(context).lower() == "true":
         imu_on = LaunchConfiguration("imu").perform(context).lower() == "true"
+        ekf_on = LaunchConfiguration("ekf").perform(context).lower() == "true"
         components.append(
             ComposableNode(
                 package="pepin_base_cpp",
                 plugin="pepin::BaseBridge",
                 name="base_bridge",
-                # With the IMU the EKF owns odom -> base_link; the bridge then publishes /odom only.
+                # The transform follows the FILTER, not the IMU (2026-09-15): with the EKF up it
+                # owns odom -> base_link and the bridge publishes /odom only, whether or not the
+                # gyro is there to be fused. Keyed on the IMU, `imu off` left the stack with no
+                # /odometry/filtered at all — the relocalizer reads that topic and never localised.
                 # The speed caps are the base's own, not the bridge's defaults (0.25 m/s).
                 parameters=[
                     {
                         "imu_enable": imu_on,
-                        "publish_tf": not imu_on,
+                        "publish_tf": not ekf_on,
                         "max_linear_m_s": BASE_MAX_LINEAR_M_S,
                         "max_angular_rad_s": BASE_MAX_ANGULAR_RAD_S,
                     }
@@ -248,12 +257,19 @@ def generate_launch_description() -> LaunchDescription:
     use_cpp = LaunchConfiguration("base_bridge_cpp")
     # The Python bridge keeps the transform: without the C++ bridge there is no EKF to own it.
     base = base_bridge("pepin_bringup", UnlessCondition(use_cpp), [{"publish_tf": True}])
-    # Only the C++ bridge reads the IMU: the Python one has no such parameter.
-    imu = LaunchConfiguration("imu")
-    # Wheels + gyro fused in the plane (ros/params/ekf.yaml): the wheels over-report rotation
-    # on carpet, the gyro does not; the filter publishes odom -> base_link instead of the bridge.
-    # The EKF owns odom -> base_link only when the C++ bridge is what feeds it: with the Python
-    # bridge there is no /imu/data_raw to fuse and both would broadcast the same transform.
+    # Wheels, gyro and the camera's odometry fused in the plane (ros/params/ekf.yaml): the wheels
+    # over-report rotation on carpet, the gyro does not; the filter publishes odom -> base_link
+    # instead of the bridge, and /odometry/filtered, which is the odometry the relocalizer and the
+    # recorder read.
+    #
+    # THE ONLY PRECONDITION IS THE C++ BRIDGE, NOT THE IMU (2026-09-15). The Python bridge has no
+    # ``publish_tf`` to hand over, so there both would broadcast the same edge. The IMU is one of
+    # three sources and robot_localization needs none of them in particular: it initialises on the
+    # first measurement of ANY configured source and then publishes at ``frequency`` forever, a
+    # silent imu0 costing nothing but its own weight. Gated on ``imu`` instead, `ros/feature.sh imu
+    # off` took the whole filter down with the gyro: /odometry/filtered went to zero messages, the
+    # relocalizer carried its scans on an odometry that never arrived and goto refused with "not
+    # localized". Without the gyro the heading comes off the wheels (ekf.yaml's odom0 index 11).
     ekf = Node(
         package="robot_localization",
         executable="ekf_node",
@@ -262,7 +278,9 @@ def generate_launch_description() -> LaunchDescription:
         prefix="nice -n -5",
         parameters=["/params/ekf.yaml"],
         condition=IfCondition(
-            PythonExpression(["'", imu, "' == 'true' and '", use_cpp, "' == 'true'"])
+            PythonExpression(
+                ["'", LaunchConfiguration("ekf"), "' == 'true' and '", use_cpp, "' == 'true'"]
+            )
         ),
     )
     # Off by default for now: a rclpy process costs ~140 MB and Nav2 does not read Range yet.
@@ -292,6 +310,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("tof", default_value="false"),
             DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
             DeclareLaunchArgument("imu", default_value="false"),
+            DeclareLaunchArgument("ekf", default_value="true"),
             DeclareLaunchArgument("neck", default_value="false"),
             OpaqueFunction(function=sensors_container),
             base,
