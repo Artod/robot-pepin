@@ -263,23 +263,26 @@ FLAGS = FlagSet(
         " uncertainty makes it grow as the square of the range (floor_sigma_pitch_deg) — and the"
         " frame's whole floor is refused unless the plane fitted to those pixels stands up"
         " (floor_normal_tol_deg); the report line counts the frames refused",
-        why="it stays off, but it is no longer the same knob. Under ONE law it moved the lidar's"
-        " own row by 5-8 % and the band 12.9/38.2 cm -> 24.1/48.7 on run 0171"
-        " (scratch/pipeline_vs_truth.txt, 2026-09-11), because the network's error is regime-wise"
-        " (floor 1.1x, the lidar's row 1.6x, above it 2.0x) and one law fitted across the two"
-        " lands between them. Under the 3x3 scale field the same pairs cost far less and"
-        " sometimes pay: on the held-out beams of the four tapes of 2026-09-15"
-        " (scratch/scale_field_eval.txt) the floor takes the single law from 11.4 % to 17.6 % of"
-        " median |residual| on run 0171 and from 4.5 % to 16.3 % on tape 0237, where under the"
-        " field it takes 8.3 % to 10.6 % and 4.3 % to 5.0 %, and on tape 0236 it IMPROVES the"
-        " field, 14.1 % -> 13.6 %. What it still does not do is give a metric scale on its own:"
-        " with every beam withheld the floor-only field reads 19.8 % at the 40.9 deg pitch, 78.6 %"
-        " at 25.8 and 93.2 % on the drive, where the floor is barely in the picture",
-        on_when="with the field on and a head pitched down far enough that the floor fills a"
-        " third of the picture, when what reads the depth is above the lidar's row; and on a cart"
-        " with no lidar at all, where it is the only ruler there is",
-        off_when="in every run that drives on the lidar's row: it still costs 2.3 points of"
-        " residual there on the drive, and nothing yet says the rows above are worth that",
+        why="since 2026-09-16, when the height band was capped and the plane judged in metres"
+        " (floor_band_max_m, floor_plane_band): the floor pairs feed 55-125 of every 79-125 door"
+        " frames at 10 % of the fit weight — the beams keep the rest — and cost the lidar chain"
+        " nothing, lifting the lidar row on run 0171 from 17.0 to 11.3 % of median |residual| on"
+        " the block split (scratch/scale_field_eval.py), and alone, with no lidar in the chain at"
+        " all, they read a door 2 m away to 4-9 % (scratch/wall_truth_eval.py): the scale field"
+        " keeps them off the lidar's own nodes. Before the cap they were the same knob that moved"
+        " the band 12.9/38.2 cm -> 24.1/48.7 on run 0171 (scratch/pipeline_vs_truth.txt,"
+        " 2026-09-11) under ONE law, because the network's error is regime-wise (floor 1.1x, the"
+        " lidar's row 1.6x, above it 2.0x) and one law fitted across the two lands between them;"
+        " under the 3x3 scale field the regimes are separate nodes and an uncapped band still"
+        " took run 0171 from 11.4 to 17.6 % of median |residual| (scratch/scale_field_eval.txt,"
+        " 2026-09-15). The cap is what made the pairs safe, not the field alone",
+        on_when="always, as shipped: on a frame the lidar covers the field keeps the floor off"
+        " the beams' own nodes, and on a frame with no beams at all — nearer than the 0.71 m at"
+        " which the lidar's plane enters the picture, or on a cart with no lidar — it is a metric"
+        " ruler that needs nothing but the mount's height",
+        off_when="to reproduce a chain from before 2026-09-16, or on a floor the plane cannot be"
+        " fitted to (glass, deep pile, a slope the mount does not know) when the report line's"
+        " count of refused frames is already most of them",
     ),
     Flag(
         "wall_anchor",
@@ -306,12 +309,15 @@ FLAGS = FlagSet(
         " odometry's transform between the two stamps (pepin.parallax), pair the network's depth"
         " with a depth in metres the cart measured by moving — a hoop that needs no lidar and no"
         " assumed plane and that lands at every elevation the picture has",
-        why="OFF again since 2026-09-15 04:20: on the live stack the anchor's ask for the tracker's"
-        " motion (parallax_motion=tracker) waited its 0.2 s carry timeout on EVERY frame (report:"
-        " pose 211/222 ms, 'no odometry 41, gap 41'), the stream fell from 8.7 to 1.5 frames/s and"
-        " rgbd_odometry starved (0 poses/s); off, 6.1 frames/s and VO back within 40 s. Until the"
-        " ask is non-blocking the anchor stays off. Before that: it is the second ruler of the"
-        " scale, and it is now weighed like one. Every pair"
+        why="since 2026-09-16, once the ask stopped blocking (parallax_map_wait off) and the"
+        " corners were followed forward (parallax_tracking forward): the forward tracks cost 6 ms"
+        " a frame and the depth stream held 7-8 frames/s live through the door drives, and alone"
+        " — with no lidar in the chain — they read a door 2 m away to 5-6 % of median |residual|"
+        " above the lidar's row on the straight legs (scratch/wall_truth_eval.py). It had been"
+        " OFF from 2026-09-15 04:20, when the ask for the tracker's motion waited its 0.2 s carry"
+        " timeout on EVERY frame and the stream fell from 8.7 to 1.5 frames/s (parallax_map_wait"
+        " carries that measurement). It is the second ruler of the scale, and it is weighed like"
+        " one. Every pair"
         " carries 1 / sigma^2 from its own triangulation against a beam's 1 / sigma^2 at"
         " lidar_sigma_m (pepin.depth.pair_weight), so a corner at 7-10 cm of noise counts about"
         " 0.03 of a beam and 200 of them do not outvote 30 beams: measured on the errands of"

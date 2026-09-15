@@ -300,13 +300,23 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     is the pose, as it was): after every frame the node's law is the reference's law to the
     last bit, it withholds exactly the frames the reference withheld, and every published
     image and scan is byte for byte the reference's."""
-    node, net = build(range_law=False, frame_law=False, lidar_sigma_m=0.0, fan_floor_gate="off")
-    # the affine law alone, every beam weighing the same, and the fan's floor gate off: this
-    # reference is the chain of before 2026-09-15, and every switch that moved it is named here
+    node, net = build(
+        range_law=False,
+        frame_law=False,
+        floor_pairs=False,
+        parallax_anchor=False,
+        lidar_sigma_m=0.0,
+        fan_floor_gate="off",
+    )
+    # the affine law alone on the beams alone, every beam weighing the same, and the fan's floor
+    # gate off: this reference is the chain of before 2026-09-15, and every switch that moved it
+    # since is named here — the floor's and the parallax's pairs ship on since 2026-09-16
     assert node._pipeline.switches == {name: FLAGS[name] for name in node._pipeline.names} | {
         "range_law": False,
         "frame_law": False,
-    }, "the flags' defaults are the chain's, bar the two switched here"
+        "floor_pairs": False,
+        "parallax_anchor": False,
+    }, "the flags' defaults are the chain's, bar the four switched here"
 
     reference = AffineScale()
     withheld = 0
@@ -395,8 +405,16 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
     line no longer counts a config fallback. A head panned 20 deg is counted as such."""
     edge = _optical_edge(31.5)
     node, net = build(
-        camera_edge=edge, law=LAW, range_law=False, frame_law=False, fan_floor_gate="off"
-    )  # the gate off: this test is about WHICH pose the chain uses, not about the fan's floor
+        camera_edge=edge,
+        law=LAW,
+        range_law=False,
+        frame_law=False,
+        floor_pairs=False,
+        parallax_anchor=False,
+        fan_floor_gate="off",
+    )  # the gate off, and the floor's and the parallax's pairs off (on by default since
+    # 2026-09-16, and they would move the seeded law off the reference's): this test is about
+    # WHICH pose the chain uses, not about the fan's floor nor about the rulers of the law
     on_neck = pose_from_transform(edge)
     tf_cam = CameraPose.from_optical(on_neck.rotation, on_neck.translation)
     assert tf_cam.pitch == pytest.approx(math.radians(31.5)) and tf_cam.z == 1.2
@@ -625,7 +643,8 @@ def test_the_imu_leans_the_floor_only_while_something_asks_for_the_lean(build: B
     node.subs["/imu/data_raw"][1](reading)
     assert node._lean.estimator is not None and node._lean.up == pytest.approx([0.0, 0.0, 1.0])
     assert "lean +0.0/+0.0 deg" in node._lean.report()
-    off, _ = build(floor_anchor=False, imu_lean=False)
+    # both floor stages off: floor_pairs reads the up vector too and ships on since 2026-09-16
+    off, _ = build(floor_anchor=False, floor_pairs=False, imu_lean=False)
     off.subs["/imu/data_raw"][1](reading)
     assert off._lean.estimator is None and "lean none" in off._lean.report()
     alien, _ = build(floor_pairs=True)
@@ -693,13 +712,17 @@ def test_both_laws_go_through_the_file_from_one_run_to_the_next(
     """A run that fits an angular law writes it beside the affine one, and the next start
     restores it and applies it before any live pool."""
     path = tmp_path / "shared_law.json"
-    first, net = build(law_file=path, ray_law=True, wall_anchor=True)
+    # the wall's pairs are the angular law's own ruler here; the floor's and the parallax's (on
+    # by default since 2026-09-16) carry angles of their own and would refit the restored law,
+    # and this test is about what the file carries from one run to the next
+    chain = {"ray_law": True, "wall_anchor": True, "floor_pairs": False, "parallax_anchor": False}
+    first, net = build(law_file=path, **chain)
     _tilted_run(first, net)
     assert first._ray.ray_fitted and first._ray.gain is not None
     first._report()
     saved = json.loads(path.read_text())
     assert saved["version"] == LAW_VERSION and saved["ray"] == first._ray.gain.state()
-    second, _net = build(law_file=path, ray_law=True, wall_anchor=True)
+    second, _net = build(law_file=path, **chain)
     assert second._ray.ray_ready and not second._ray.ray_fitted, "restored, not refitted"
     assert second._ray.gain is not None and second._ray.gain.state() == saved["ray"]
     assert "ray law ray deg" in second.logger.texts("info")[0]

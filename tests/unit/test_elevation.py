@@ -229,12 +229,16 @@ def test_a_pool_whose_angle_is_the_depth_in_disguise_fits_no_ray_law() -> None:
     elevation, _azimuth = ray_angles(lift)
     y = 1.0 / beams[hits, 2]
     assert separable(elevation / RAY_SCALE, y) > 0.99
-    pipeline = standard_pipeline(ray_law=True)  # the lidar alone
+    # the lidar alone: the floor's and the parallax's pairs are on by default since 2026-09-16
+    # and carry elevations of their own, which is exactly what this test withholds
+    pipeline = standard_pipeline(ray_law=True, floor_pairs=False, parallax_anchor=False)
     for _ in range(3):
         pipeline.run(raw, ctx)
     law = pipeline.stage("ray_law")
     assert isinstance(law, RayLaw) and law.fitted and not law.ray_ready
-    walled = standard_pipeline(ray_law=True, wall_anchor=True)
+    walled = standard_pipeline(
+        ray_law=True, wall_anchor=True, floor_pairs=False, parallax_anchor=False
+    )
     for _ in range(3):
         walled.run(raw, ctx)
     with_walls = walled.stage("ray_law")
@@ -342,7 +346,11 @@ def test_the_stage_withholds_only_while_no_law_of_any_kind_exists() -> None:
     """With nothing pooled the ray law withholds the frame like the affine law does; once the
     affine law stands it never withholds again, angular fit or not."""
     raw, ctx = _frames()
-    pipeline = standard_pipeline(ray_law=True, wall_anchor=True)
+    # nothing pooled means nothing pairs: the floor's and the parallax's pairs (on by default
+    # since 2026-09-16) would fit a law on the blind frame, which has no lidar
+    pipeline = standard_pipeline(
+        ray_law=True, wall_anchor=True, floor_pairs=False, parallax_anchor=False
+    )
     blind = FrameContext(INTR, CAM, stamp=1.0)
     assert pipeline.run(raw, blind).withheld
     for _ in range(3):
