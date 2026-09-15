@@ -53,7 +53,8 @@ def test_wheels_give_speed_and_not_the_commanded_yaw_rate(params: dict[str, Any]
     measured one (base_server.py:466) -- fusing it would feed the controller's output back in
     as a heading sensor. The yaml says so in full; this is the assertion.
     """
-    assert fused(params, "odom0_config") == {"vx", "vy", "vyaw"}  # vyaw since 2026-09-15: measured twist, ~4 % of the gyro's weight
+    # vyaw since 2026-09-15: the twist is measured, ~4 % of the gyro's weight
+    assert fused(params, "odom0_config") == {"vx", "vy", "vyaw"}
     assert params["odom0_differential"] is False
 
 

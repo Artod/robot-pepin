@@ -478,7 +478,8 @@ def test_the_flag_ships_off_and_switching_it_on_puts_the_stage_in() -> None:
     pipeline = standard_pipeline()
     assert pipeline.names.index("parallax_anchor") == pipeline.names.index("wall_anchor") + 1
     assert pipeline.names.index("parallax_anchor") < pipeline.names.index("affine_law")
-    assert pipeline.switches["parallax_anchor"] is False  # off since 2026-09-15: the blocking motion ask starved the stream
+    # off since 2026-09-15: the blocking motion ask starved the stream
+    assert pipeline.switches["parallax_anchor"] is False
     a, _b, _ = rendered_pair()
     poses = {1.0: planar_pose(0.0, 0.0, 0.0)}
     ctx = context(1.0, a, Odometry(poses))
