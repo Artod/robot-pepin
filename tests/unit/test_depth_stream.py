@@ -327,7 +327,7 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     assert "backend fake (CPU model not loaded)" in line
     assert (
         "flags: edge_filter=on lidar_anchor=on floor_pairs=off wall_anchor=off"
-        " parallax_anchor=on affine_law=on ray_law=off range_law=off frame_law=off"
+        " parallax_anchor=off affine_law=on ray_law=off range_law=off frame_law=off"
         " wall_correct=off"
         " floor_anchor=on"
         " depth_backend=local" in line
