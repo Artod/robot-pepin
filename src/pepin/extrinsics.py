@@ -275,6 +275,125 @@ def range_bias(
     return RangeBias(float(np.median(ratio)), float(slope), int(np.count_nonzero(both)))
 
 
+@dataclass(frozen=True, eq=False)
+class MountFit:
+    """A pan and a roll of the camera mount fitted to yaw shifts measured at several head
+    pitches, and what the two of them fail to explain.
+
+    ``pan_deg`` turns the camera about the cart's vertical (the neck's own axis) and moves every
+    fan by the same angle whatever the head's pitch. ``roll_deg`` turns it about the optical
+    axis, which is tilted ``pitch`` below the horizon, so its vertical component — the only one
+    that shows as a yaw — is ``roll * sin(pitch)``: a roll hides at a level head and grows as
+    the head looks down. ``residuals_deg`` is measured minus fitted, one per sample, and
+    ``rms_deg`` their spread: bigger than the measurement's own repeatability means no rigid
+    mount produced these numbers and something bearing-dependent did.
+    """
+
+    pan_deg: float
+    roll_deg: float
+    pitches_deg: Array
+    residuals_deg: Array
+    rms_deg: float
+
+    def explains(self, spread_deg: float) -> bool:
+        """Whether a rigid mount accounts for the shifts within the measurement's own spread."""
+        return self.rms_deg <= spread_deg
+
+
+def mount_yaw_shift(pan_deg: float, roll_deg: float, pitch_deg: float) -> float:
+    """The yaw a camera fan lands at when the mount is turned ``pan_deg`` CCW about the cart's
+    vertical and rolled ``roll_deg`` about its own optical axis, the head looking ``pitch_deg``
+    down: ``pan + roll * sin(pitch)`` degrees.
+
+    The roll term is the projection of a rotation about the optical axis onto base_link's z: the
+    optical axis points ``(cos pitch, 0, -sin pitch)``, so a roll of rho about it carries
+    ``rho * sin(pitch)`` of yaw (and ``rho * cos(pitch)`` of image rotation, which no fan sees).
+    First order in the angles, which is all a few degrees need. The consequence worth keeping:
+    the shift a rigid mount produces is MONOTONIC in pitch — a set of shifts that rises and
+    falls again cannot be one, whatever pan and roll are chosen (:class:`MountFit`).
+    """
+    return pan_deg + roll_deg * math.sin(math.radians(pitch_deg))
+
+
+def fit_mount(samples: Sequence[tuple[float, float]]) -> MountFit:
+    """Pan and roll fitted jointly to (head pitch in degrees, measured yaw shift in degrees)
+    samples by least squares on ``pan + roll * sin(pitch)``.
+
+    Needs at least two pitches, and two that differ: a single pitch cannot tell a pan from a
+    roll, they are the same degree there. Returns the two angles with the residual each sample
+    is left with (:class:`MountFit`).
+    """
+    pitches = np.asarray([p for p, _ in samples], dtype=np.float64)
+    shifts = np.asarray([s for _, s in samples], dtype=np.float64)
+    if len(pitches) < 2:
+        raise ValueError("a pan and a roll need at least two head pitches")
+    basis = np.stack([np.ones_like(pitches), np.sin(np.radians(pitches))], axis=1)
+    if np.ptp(basis[:, 1]) < 1e-9:
+        raise ValueError("every sample is at the same pitch: a pan and a roll are one number there")
+    (pan, roll), *_ = np.linalg.lstsq(basis, shifts, rcond=None)
+    residuals = shifts - basis @ np.array([pan, roll])
+    return MountFit(
+        pan_deg=float(pan),
+        roll_deg=float(roll),
+        pitches_deg=pitches,
+        residuals_deg=residuals,
+        rms_deg=float(np.sqrt(np.mean(residuals**2))),
+    )
+
+
+def synthetic_camera_fan(
+    lidar: Fan,
+    *,
+    shift_deg: float = 0.0,
+    scale: float = 1.0,
+    slope_per_deg: float = 0.0,
+    half_fov_deg: float = 40.0,
+    step_deg: float = 0.5,
+) -> Fan:
+    """A camera fan built from a lidar fan with a KNOWN yaw and a known range bias: the truth
+    the estimator can be held against.
+
+    The camera's beam drawn at bearing ``b`` really looks at ``b + shift_deg`` (the same
+    convention :class:`YawOffset` answers in), and the range it reports there is the lidar's
+    times ``scale + slope_per_deg * b`` — a scale error of the depth law, and a scale that
+    slides across the picture, which is what the live probe measures as
+    :attr:`RangeBias.slope_per_deg`. The fan spans ``+-half_fov_deg`` like
+    :func:`pepin.depth.depth_to_scan`'s.
+
+    It exists because the estimator's answer cannot be read without it: with the camera not
+    turned by a single degree, a slope of a few thousandths per degree moves the minimum by
+    several degrees and passes the sharpness test (:func:`slope_artefact`).
+    """
+    bearings = np.radians(np.arange(-half_fov_deg, half_fov_deg + 0.5 * step_deg, step_deg))
+    looked_at = bearings + math.radians(shift_deg)
+    ranges = sample_fan(lidar, looked_at) * (scale + slope_per_deg * np.degrees(bearings))
+    return Fan(np.asarray(bearings, dtype=np.float64), np.asarray(ranges, dtype=np.float64))
+
+
+def slope_artefact(
+    lidar: Fan,
+    slope_per_deg: float,
+    *,
+    scale: float = 1.0,
+    shift_deg: float = 0.0,
+    search_deg: float = DEFAULT_SEARCH_DEG,
+    scale_free: bool = True,
+) -> YawOffset:
+    """What this estimator reads on a camera turned by ``shift_deg`` (0 by default: not turned
+    at all) whose ranges carry ``slope_per_deg`` of bearing-dependent scale, in THIS room.
+
+    The difference between its ``shift_deg`` and the ``shift_deg`` asked for is the artefact —
+    degrees of yaw the range bias alone invents — and it depends on the room, because it is the
+    room's ranges that the sliding scale distorts. Read it beside any measured shift: a shift
+    smaller than the artefact its own :func:`range_bias` slope implies carries no information
+    about the mount.
+    """
+    fake = synthetic_camera_fan(
+        lidar, shift_deg=shift_deg, scale=scale, slope_per_deg=slope_per_deg
+    )
+    return estimate_yaw_offset(lidar, fake, search_deg=search_deg, scale_free=scale_free)
+
+
 def corrected_pan_reference(
     reference_ticks: int, pan_error_deg: float, pan_sign: int, deg_per_tick: float
 ) -> int:
