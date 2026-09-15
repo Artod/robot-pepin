@@ -19,6 +19,8 @@ from pepin.depth_pipeline import (
     FrameContext,
     Pairs,
     ParallaxAnchor,
+    _between,
+    _placed,
     standard_pipeline,
 )
 from pepin.parallax import (
@@ -491,18 +493,14 @@ def test_the_flag_ships_on_and_switching_it_off_takes_the_stage_out() -> None:
     pipeline = standard_pipeline()
     assert pipeline.names.index("parallax_anchor") == pipeline.names.index("wall_anchor") + 1
     assert pipeline.names.index("parallax_anchor") < pipeline.names.index("affine_law")
-    # on since 2026-09-16: forward tracks cost 6 ms a frame and the stream held 7-8 fps live
     assert pipeline.switches["parallax_anchor"] is True
     a, _b, _ = rendered_pair()
     poses = {1.0: planar_pose(0.0, 0.0, 0.0)}
     ctx = context(1.0, a, Odometry(poses))
     result = pipeline.run(np.full((INTR.height, INTR.width), 3.0), ctx)
+    # the first frame of a drive has nothing behind it either way
     assert result.verdict("parallax_anchor").on is True
-    assert result.verdict("parallax_anchor").pairs == 0, "one frame is no baseline"
-    off = standard_pipeline(parallax_anchor=False)
-    assert off.switches["parallax_anchor"] is False
-    quiet = off.run(np.full((INTR.height, INTR.width), 3.0), ctx)
-    assert quiet.verdict("parallax_anchor").on is False
+    assert standard_pipeline(parallax_anchor=False).switches["parallax_anchor"] is False
 
 
 def test_the_window_follows_the_matcher_and_a_given_one_pins_it() -> None:
@@ -1417,6 +1415,86 @@ def test_a_track_s_solve_never_spans_two_motion_sources() -> None:
     assert store.live > 100, "a track outlives the change of source: only its bundle restarts"
 
 
+def necked(pan: float, lens: tuple[float, float, float] = (0.0, 0.0, 1.23)) -> CameraPlacement:
+    """``base_link <- camera_optical`` for a head panned ``pan`` radians with the lens at
+    ``lens`` on the cart — the TF edge a moving neck publishes on every frame."""
+    turn = np.array(
+        [[math.cos(pan), -math.sin(pan), 0.0], [math.sin(pan), math.cos(pan), 0.0], [0, 0, 1.0]]
+    )
+    mount = CameraPlacement.of(CameraPose(lens[0], lens[1], lens[2], 0.0))
+    return CameraPlacement(turn @ np.asarray(mount.rotation), np.array(lens))
+
+
+def wall_frame_context(
+    stamp: float, gray: np.ndarray, odometry: Odometry, place: CameraPlacement
+) -> FrameContext:
+    """The small wall scene's context with a neck edge of the test's own choosing."""
+    return replace(wall_context(stamp, gray, odometry), cam_optical=place)
+
+
+def test_a_camera_pose_and_a_cart_pose_with_its_neck_are_the_same_motion() -> None:
+    """The refactor's own invariant, stated so it cannot rot: composing the neck's edge into
+    the stored pose (``map <- camera_optical``, one composition when the frame is taken) and
+    composing it at solve time (``map <- base_link`` through
+    :func:`pepin.parallax.camera_motion`, two) are the same transform to floating point. So
+    this is not a repair of a wrong number — the neck was always carried — it is one
+    composition instead of two, and a stored pose that means something on its own."""
+    rng = np.random.default_rng(5)
+    for _ in range(8):
+        stood = [planar_pose(*rng.uniform(-2.0, 2.0, 3)) for _ in range(2)]
+        necks = [necked(rng.uniform(-0.6, 0.6), tuple(rng.uniform(-0.3, 1.4, 3))) for _ in range(2)]
+        through_base = camera_motion(*_between(stood[0], stood[1]), necks[0], necks[1])
+        lenses = [_placed(pose, neck) for pose, neck in zip(stood, necks, strict=True)]
+        through_lens = Motion(*_between(lenses[0], lenses[1]))
+        assert np.allclose(through_base.rotation, through_lens.rotation, atol=1e-12)
+        assert np.allclose(through_base.translation, through_lens.translation, atol=1e-12)
+
+
+def test_a_head_that_turns_over_a_standing_cart_is_a_rotation_and_not_a_baseline() -> None:
+    """The head will pan and tilt while the cart drives, and a window whose motions were the
+    BASE's would read them as if the camera had stood still. Here the cart never moves and the
+    neck pans 10 degrees across the window about the lens itself: the camera's own motion is a
+    pure rotation, there is no baseline anywhere in it, and the stage says ``rotation-only``
+    instead of triangulating rays that never crossed."""
+    frames, poses = wall_frames(12)
+    stamps = sorted(poses)
+    still = {t: planar_pose(0.0, 0.0, 0.0) for t in stamps}  # the cart does not move at all
+    anchor = ParallaxAnchor(track_window_s=3.0)
+    network = np.full((SMALL.height, SMALL.width), 3.0)
+    odometry = TfPoses(still)
+    for i, (stamp, view) in enumerate(zip(stamps, frames, strict=True)):
+        odometry.now = stamp
+        place = necked(math.radians(10.0) * i / (len(frames) - 1))
+        assert (
+            anchor.pairs(Frame(network, wall_frame_context(stamp, view, odometry, place))) is None
+        )
+    # 'rotation-only' on every frame whose window spans more than the gyro's own degree, and
+    # 'still' on the one frame whose two views are 0.9 degrees apart: both are refusals
+    assert anchor.rejected.get("rotation-only", 0) >= 10, "a pure pan must say so"
+    assert not anchor._baseline, "a turning head must not invent a baseline"
+
+
+def test_the_baseline_is_the_lens_s_own_path_and_not_the_cart_s() -> None:
+    """The other way round: the cart stands still and the NECK carries the lens sideways, which
+    is exactly the motion the pictures were rendered from. A window built on the base's poses
+    would find no baseline at all and give nothing; built on the lens's it reads the wall."""
+    frames, poses = wall_frames(16)
+    stamps = sorted(poses)
+    still = {t: planar_pose(0.0, 0.0, 0.0) for t in stamps}
+    anchor = ParallaxAnchor(track_window_s=3.0)
+    network = np.full((SMALL.height, SMALL.width), 3.0)
+    odometry = TfPoses(still)
+    pairs = None
+    for i, (stamp, view) in enumerate(zip(stamps, frames, strict=True)):
+        odometry.now = stamp
+        place = necked(0.0, (0.0, -SLIDE_M * i, 1.23))  # the neck sidesteps the lens itself
+        pairs = anchor.pairs(Frame(network, wall_frame_context(stamp, view, odometry, place)))
+    assert pairs is not None and pairs.size >= 20, "the lens moved, so the corners triangulate"
+    assert abs(float(np.median(pairs.z)) / WALL_M - 1.0) < 0.05
+    travelled = float(np.median(anchor._baseline))
+    assert travelled > 0.1, f"the baseline must be the lens's path, not the cart's: {travelled}"
+
+
 DOOR_LENS = (-0.150009, -0.129449, -0.002416, -0.001635, 0.091751)  # config/camera.json's own
 
 
@@ -1451,6 +1529,39 @@ def test_a_bent_pixel_is_straightened_back_to_where_a_pinhole_would_have_put_it(
     assert moved.max() > 20.0, "a wide lens moves a corner pixel by more than the gate"
     assert float(np.median(moved[grid[:, 1] == 0.0])) > 3.0, "and the top edge by more than it"
     assert float(np.median(moved[grid[:, 1] == 180.0])) < float(np.median(moved))
+
+
+def test_every_view_is_straightened_with_the_lens_its_own_frame_published() -> None:
+    """A corner is straightened when its frame is taken, not when a solve reads it, so an
+    observation carries the lens camera_info published for THAT frame. A camera that is
+    re-calibrated mid-drive, or whose picture camera_stream starts rectifying, therefore leaves
+    the observations already stored exactly as they were measured."""
+    frames, poses = wall_frames(8)
+    stamps = sorted(poses)
+    anchor = ParallaxAnchor(track_window_s=3.0)
+    network = np.full((SMALL.height, SMALL.width), 3.0)
+    odometry = Odometry(poses)
+    seen: list[tuple[float, ...]] = []
+    marked: dict[int, np.ndarray] = {}
+    for i, (stamp, view) in enumerate(zip(stamps, frames, strict=True)):
+        lens = DOOR_LENS if i < 4 else ()  # the picture becomes a rectified one halfway through
+        ctx = replace(wall_context(stamp, view, odometry), dist=lens)
+        anchor.pairs(Frame(network, ctx))
+        store = anchor._store
+        assert store is not None
+        seen.append(() if store.lens is None else store.lens.dist)
+        if i == 3:  # the observations made while the lens was still in the picture
+            marked = {
+                t.ident: t.observations[0].pixel.copy() for t in store._tracks if t.observations
+            }
+    assert seen[0] == DOOR_LENS and seen[-1] == (), "the lens follows the frame's own camera_info"
+    store = anchor._store
+    assert store is not None
+    after = {t.ident: t.observations[0].pixel for t in store._tracks if t.observations}
+    shared = set(marked) & set(after)
+    assert len(shared) > 50, "corners must live across the change for the question to mean anything"
+    for ident in shared:
+        assert np.array_equal(marked[ident], after[ident]), "a stored view was measured again"
 
 
 def test_the_geometry_measures_the_straightened_pixels_and_the_depth_the_picture_s_own() -> None:

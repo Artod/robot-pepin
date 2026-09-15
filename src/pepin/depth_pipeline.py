@@ -1734,17 +1734,30 @@ class WallCorrection(WallAnchor):
 
 
 # ---- motion as a hoop, with no lidar at all ---------------------------------------------------
-def _base_motion(before: Rigid, after: Rigid) -> tuple[Array, Array]:
-    """base_link at ``before`` into base_link at ``after``, from two poses in one fixed frame:
-    the rotation and translation :func:`pepin.parallax.camera_motion` asks for, the way
-    :meth:`pepin.frame_pose.FramePoser.motion` composes them from a history. Two poses of the
-    same fixed frame are all a motion needs — no lookup, and no moment at which the answer
-    happens not to exist."""
+def _between(before: Rigid, after: Rigid) -> tuple[Array, Array]:
+    """The transform taking a point of ``before``'s frame into ``after``'s, from two poses in
+    one fixed frame: ``after^-1 . before`` as a rotation and a translation. Two poses of one
+    fixed frame are all a motion needs — no lookup, and no moment at which the answer happens
+    not to exist. Whose motion it is, is whose poses they are: hand it two camera poses and it
+    is the camera's, which is the only one a triangulation may use."""
     back = np.asarray(after.rotation, dtype=float).T
     moved: Array = np.asarray(before.translation, dtype=float) - np.asarray(
         after.translation, dtype=float
     )
     return back @ np.asarray(before.rotation, dtype=float), back @ moved
+
+
+def _placed(outer: Rigid, inner: Rigid) -> Rigid:
+    """``outer`` applied to ``inner``: the pose of ``inner``'s frame in ``outer``'s parent —
+    ``map <- base_link`` composed with ``base_link <- camera_optical`` is where the LENS was."""
+    from pepin.parallax import CameraPlacement
+
+    rotation = np.asarray(outer.rotation, dtype=float)
+    return CameraPlacement(
+        rotation @ np.asarray(inner.rotation, dtype=float),
+        rotation @ np.asarray(inner.translation, dtype=float)
+        + np.asarray(outer.translation, dtype=float),
+    )
 
 
 @dataclass(eq=False)
@@ -2219,6 +2232,7 @@ class ParallaxAnchor(AnchorStage):
         the source changes, because the two disagree by about a quarter over a second and a
         bundle half measured by each is not a geometry. A view the source cannot answer for at
         all is left out of the map and the tracks that wanted it lose that one observation."""
+        from pepin.parallax import Motion as OpticalMotion
         from pepin.parallax import camera_motion
 
         out: dict[float, Motion] = {}
@@ -2227,8 +2241,7 @@ class ParallaxAnchor(AnchorStage):
             for view in views:
                 if view.pose is None:
                     continue
-                rotation, translation = _base_motion(view.pose, here)
-                out[view.stamp] = camera_motion(rotation, translation, view.place, place)
+                out[view.stamp] = OpticalMotion(*_between(view.pose, here))
             return out
         ask_tracker = source == "tracker"
         for view in reversed(views):
@@ -2252,7 +2265,11 @@ class ParallaxAnchor(AnchorStage):
         from pepin.parallax import gate_tracks
 
         store = self._forward_store(ctx)
-        source, self._pose = self._source(ctx)
+        source, stood = self._source(ctx)
+        # the view's pose is the LENS's, not the cart's: the neck pans and tilts while the cart
+        # drives, and a window whose motions were the base's would read a baseline the camera
+        # never travelled (and none at all for a head that turned over a standing cart)
+        self._pose = None if stood is None else _placed(stood, place)
         if self._corrected(ctx):
             self._count("correction", store.forget_views())
         report = store.follow(gray, ctx.stamp, place, source, self._pose)
