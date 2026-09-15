@@ -5,6 +5,7 @@ stage switches by name."""
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
 import pytest
@@ -728,3 +729,54 @@ def test_a_frame_without_beams_decays_back_to_the_law_behind_it() -> None:
     bare = FrameLaw(AffineLaw())  # nothing of its own, nothing behind it
     _depth, verdict = bare.run(raw, Frame(raw, _context(None)))
     assert verdict.withhold and verdict.note == "no law yet"
+
+
+# ---- the parallax anchor may not wait inside the frame path -------------------------------------
+from pepin.tsdf import RigidPose  # noqa: E402  the rigid transform a motion source hands back
+
+
+class BlockingPoser:
+    """A motion source whose map lookup blocks, the way TF does when it cannot cover a frame's
+    stamp: the odometry answers at once, the map costs a whole timeout."""
+
+    def __init__(self, timeout_s: float = 0.2) -> None:
+        self.timeout_s = timeout_s
+        self.waited = 0
+        self.asked_recent = 0
+
+    def motion(self, from_stamp: float, to_stamp: float) -> RigidPose:
+        return RigidPose(np.eye(3), np.array([0.2 * (to_stamp - from_stamp), 0.0, 0.0]))
+
+    def map_motion(self, from_stamp: float, to_stamp: float) -> None:
+        self.waited += 1
+        time.sleep(self.timeout_s)
+        return None
+
+    def map_motion_recent(self, from_stamp: float, to_stamp: float, max_age_s: float) -> None:
+        self.asked_recent += 1
+        return None  # the newest map pose is older than max_age_s: the odometry answers
+
+
+def test_the_parallax_anchor_does_not_wait_for_a_map_pose_it_cannot_get() -> None:
+    """The live stall of 2026-09-15, as a test: the blocking ask cost 0.2 s a window and took
+    the stream from 8.7 to 1.5 frames/s. The default ask must return in under a millisecond and
+    still produce a motion — the odometry's — and count the fallback."""
+    from pepin.depth_pipeline import ParallaxAnchor
+
+    anchor = ParallaxAnchor()
+    assert anchor.map_wait is False
+    source = BlockingPoser()
+    ctx = FrameContext(INTR, CAM, motion=source, stamp=10.0)
+    started = time.perf_counter()
+    moved, whose = anchor._moved(ctx, 9.5, 10.0, ask_tracker=True)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.001  # the frame path waited for nothing at all
+    assert whose == "odom" and moved is not None
+    assert source.waited == 0 and source.asked_recent == 1
+    assert anchor.stale == 1  # the report line's "map pose stale -> odom"
+
+    anchor.map_wait = True  # the old behaviour, still reachable for an A/B
+    started = time.perf_counter()
+    anchor._moved(ctx, 9.5, 10.0, ask_tracker=True)
+    assert time.perf_counter() - started >= 0.15
+    assert source.waited == 1

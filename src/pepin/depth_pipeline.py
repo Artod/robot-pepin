@@ -122,6 +122,8 @@ PARALLAX_ORB_MAX_GAP_S = 1.5  # the describer's window: a keypoint is recognised
 PARALLAX_MIN_BASELINE_M = 0.10  # the parallax a partner is chosen to reach: 0.4 s at 0.25 m/s
 PARALLAX_MATCHER = "klt"  # who finds the correspondences: the flow or the describer
 PARALLAX_MOTION = "tracker"  # whose word on the baseline: the lidar tracker's map pose, or odometry
+PARALLAX_MAP_WAIT = False  # ask the map pose without waiting: a wait costs the whole frame rate
+PARALLAX_MAP_MAX_AGE_S = 0.3  # a map pose older than this is not this frame's: odometry answers
 PARALLAX_MOTIONS = ("tracker", "odom")
 PARALLAX_RING_FRAMES = 24  # frames kept to choose a partner from: 1.5 s at any rate the node runs
 PARALLAX_WEIGHT = 1.0  # the multiplier on a parallax pair's own 1 / sigma^2 (the A/B's knob)
@@ -243,6 +245,25 @@ class MapMotionSource(Protocol):
     def map_motion(self, from_stamp: float, to_stamp: float) -> Rigid | None:
         """base_link at ``from_stamp`` into base_link at ``to_stamp`` through the map, or
         ``None`` when the map pose does not cover both moments (no tracker, or a stale one)."""
+        ...
+
+
+@runtime_checkable
+class RecentMapMotionSource(Protocol):
+    """A map motion source that can answer WITHOUT waiting — the only kind the frame path may
+    ask, because a TF lookup that cannot be answered costs its whole timeout inside the frame.
+
+    Live on 2026-09-15: the blocking ask waited the node's 0.2 s on every frame (map -> base_link
+    is not in TF at a frame's stamp yet), the stream fell from 8.7 to 1.5 frames/s and
+    rgbd_odometry starved to 0 poses/s. The recent ask uses the newest map pose already held,
+    when it is fresh enough to be this frame's, and says no at once when it is not."""
+
+    def map_motion_recent(
+        self, from_stamp: float, to_stamp: float, max_age_s: float
+    ) -> Rigid | None:
+        """base_link at ``from_stamp`` into base_link at ``to_stamp`` through the map, using only
+        poses already held and only when the newest is within ``max_age_s`` of ``to_stamp``;
+        ``None`` at once otherwise. Never waits."""
         ...
 
 
@@ -1162,6 +1183,8 @@ class ParallaxAnchor(AnchorStage):
         min_baseline_m: float = PARALLAX_MIN_BASELINE_M,
         matcher: str = PARALLAX_MATCHER,
         motion_source: str = PARALLAX_MOTION,
+        map_wait: bool = PARALLAX_MAP_WAIT,
+        map_max_age_s: float = PARALLAX_MAP_MAX_AGE_S,
     ) -> None:
         self.weight = weight
         self.min_gap_s = min_gap_s
@@ -1169,6 +1192,9 @@ class ParallaxAnchor(AnchorStage):
         self.min_baseline_m = min_baseline_m
         self.matcher = matcher
         self.motion_source = motion_source  # live: the node's parallax_motion flag writes it
+        self.map_wait = map_wait  # live: parallax_map_wait — the old blocking ask, for an A/B
+        self.map_max_age_s = map_max_age_s
+        self.stale = 0  # frames whose map pose was too old (or absent) and fell back to odometry
         self.used: dict[str, int] = dict.fromkeys(PARALLAX_MOTIONS, 0)  # who gave each baseline
         self.frames = 0  # pairs of frames that reached the triangulation
         self.contributed = 0  # of those, the ones that gave at least one pair
@@ -1227,11 +1253,23 @@ class ParallaxAnchor(AnchorStage):
         source = ctx.motion
         if source is None:
             return None, ""
-        if ask_tracker and isinstance(source, MapMotionSource):
-            through_map = source.map_motion(then, now)
+        if ask_tracker:
+            through_map = self._through_map(source, then, now)
             if through_map is not None:
                 return through_map, "tracker"
+            self.stale += 1
         return source.motion(then, now), "odom"
+
+    def _through_map(self, source: MotionSource, then: float, now: float) -> Rigid | None:
+        """The tracker's word on the motion, asked the way ``map_wait`` says: the non-blocking
+        ask of the newest map pose within ``map_max_age_s`` of the frame (the default), or the
+        old ask that waits for TF to cover the frame's stamp. ``None`` when the source cannot
+        answer at all — a tape's bare odometry, a silent tracker, a map pose too old."""
+        if not self.map_wait and isinstance(source, RecentMapMotionSource):
+            return source.map_motion_recent(then, now, self.map_max_age_s)
+        if self.map_wait and isinstance(source, MapMotionSource):
+            return source.map_motion(then, now)
+        return None
 
     def _partner(self, ctx: FrameContext, place: Rigid) -> tuple[PreviousFrame, Motion] | None:
         """The frame of the ring this one is paired with and the camera motion between them:
@@ -1334,6 +1372,8 @@ class ParallaxAnchor(AnchorStage):
             f"{self.matcher} <= {self.max_gap_s:.2f} s on the {self.motion_source}'s motion"
             f" ({spoke or 'none yet'}), weight {self.weight:g} / sigma^2,"
             f" asks {self.min_baseline_m * 100:.0f} cm"
+            + (f", map pose stale -> odom {self.stale}" if self.stale else "")
+            + (" [map_wait: the frame path WAITS for TF]" if self.map_wait else "")
         )
         dropped = ", ".join(f"{k} {v}" for k, v in self.rejected.items())
         if not self._baseline:
@@ -1935,6 +1975,7 @@ __all__ = [
     "PreviousFrame",
     "RangeLawStage",
     "RayLaw",
+    "RecentMapMotionSource",
     "Result",
     "Rigid",
     "RowLaw",

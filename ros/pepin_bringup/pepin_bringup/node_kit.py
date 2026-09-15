@@ -476,6 +476,21 @@ class TfHistory:
         """``fixed <- frame`` at ``stamp`` (seconds), or ``None`` when TF does not have it."""
         return self._lookup.pose(fixed, frame, stamp_from_seconds(stamp), timeout_s=self.timeout_s)
 
+    def pose_at_nowait(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
+        """``fixed <- frame`` at ``stamp`` from what the buffer already holds, waiting for
+        nothing (:class:`pepin.frame_pose.RecentPoseHistory`) — for the frame path, where a
+        lookup that cannot be answered costs its whole timeout and the frame with it."""
+        return self._lookup.pose(fixed, frame, stamp_from_seconds(stamp), timeout_s=0.0)
+
+    def latest_pose(self, frame: str, fixed: str) -> tuple[RigidPose, float] | None:
+        """The newest ``fixed <- frame`` TF holds and the stamp it is for, or ``None``: TF's own
+        "latest" lookup, which never waits because it asks for whatever is there."""
+        transform = self._lookup.transform(fixed, frame, None, 0.0)
+        if transform is None:
+            return None
+        stamp = transform.header.stamp
+        return pose_from_transform(transform), float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
 
 def bridged_qos_profile(topic: str) -> Any:
     """The QoS every endpoint of ``topic`` must use when the topic crosses the bridge
