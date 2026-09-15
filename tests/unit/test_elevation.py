@@ -229,7 +229,7 @@ def test_a_pool_whose_angle_is_the_depth_in_disguise_fits_no_ray_law() -> None:
     elevation, _azimuth = ray_angles(lift)
     y = 1.0 / beams[hits, 2]
     assert separable(elevation / RAY_SCALE, y) > 0.99
-    pipeline = standard_pipeline(ray_law=True)  # the lidar alone
+    pipeline = standard_pipeline(ray_law=True, wall_anchor=False)  # the lidar alone
     for _ in range(3):
         pipeline.run(raw, ctx)
     law = pipeline.stage("ray_law")

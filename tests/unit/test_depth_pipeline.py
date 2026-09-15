@@ -48,6 +48,7 @@ from pepin.depth_pipeline import (
     left_of,
     lift_of,
     standard_pipeline,
+    wall_sigma,
 )
 
 INTR = Intrinsics(fx=457.0, fy=457.0, cx=320.0, cy=180.0, width=640, height=360)
@@ -124,8 +125,9 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
     law is the node's law to the last bit, its output the node's output, and it withholds
     exactly the frames the node withheld."""
     node_law = AffineScale()
-    pipeline = standard_pipeline(range_law=False, frame_law=False)  # the affine law alone,
-    # as the node ran then
+    # the affine law alone on the beams alone, as the node ran then: the wall pairs ship on
+    # today and are a second ruler, so this bit-for-bit comparison switches them off
+    pipeline = standard_pipeline(range_law=False, frame_law=False, wall_anchor=False)
     beams = pipeline.stage("lidar_anchor")
     assert isinstance(beams, LidarAnchor)
     assert beams.sigma_m == 0.0, "and every beam weighing the same, as the node's law was fitted"
@@ -188,7 +190,7 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
         "edge_filter": True,
         "lidar_anchor": True,
         "floor_pairs": False,
-        "wall_anchor": False,
+        "wall_anchor": True,
         "parallax_anchor": False,
         "affine_law": True,
         "ray_law": False,
@@ -332,11 +334,14 @@ def test_the_floor_pairs_judge_floor_with_the_law_once_it_exists() -> None:
 
 
 # ---- the walls as a third hoop -------------------------------------------------------------------
-def test_the_wall_anchor_extrudes_the_lidar_row_up_a_wall_and_stops_at_a_chair_s_top() -> None:
+def test_the_wall_anchor_extrudes_the_lidar_row_up_a_wall_and_throws_away_a_chair_s_columns() -> (
+    None
+):
     """A wall 2 m ahead seen 1.5x too far: the walked pixels' true depth is the wall's optical
     depth at every row above the return. A chair back 1.2 m ahead in the middle columns: the
-    walk stops where the network's depth jumps to the wall behind, so no pair of those columns
-    lies above the chair's top."""
+    walk stops where the network's depth jumps to the wall behind, 0.4 m above the beams, and
+    the climb gate (0.5 m) then throws those columns away whole — a stump adds pairs where the
+    beams already speak and carries the full risk of being furniture."""
     fwd, _left, up = _rays()
     truth = _scene(2.0, floor=False)
     chair = truth.copy()
@@ -366,15 +371,16 @@ def test_the_wall_anchor_extrudes_the_lidar_row_up_a_wall_and_stops_at_a_chair_s
     cols = walk.cols[k]
     assert np.array_equal(np.sort(rows), np.sort(r))
     wall_cols = (cols < 280) | (cols >= 360)
-    assert np.allclose(walk.depth[r[wall_cols], k[wall_cols]], truth[r[wall_cols], cols[wall_cols]])
-    assert r[wall_cols].min() < 40  # the wall goes on to the top of the picture
-    in_chair = ~wall_cols
-    assert in_chair.any()
-    assert np.allclose(
-        walk.depth[r[in_chair], k[in_chair]], chair_depth[r[in_chair], cols[in_chair]], rtol=1e-6
-    )
-    assert on_chair[r[in_chair], cols[in_chair]].all()  # never above the chair's top
-    assert pairs.weight[0] == 0.2 and np.allclose(np.sort(pairs.d), np.sort(raw[r, cols]))
+    assert wall_cols.all()  # the chair's columns die 0.4 m up and are refused whole
+    assert np.allclose(walk.depth[r, k], truth[r, cols])
+    assert r.min() < 40  # the wall goes on to the top of the picture
+    assert np.allclose(np.sort(pairs.d), np.sort(raw[r, cols]))
+    # each pair weighed by its own sigma: about a beam just above the returns, a fraction of
+    # one at the top of the picture, and the column's pairs sharing that single beam's weight
+    high = rows <= np.percentile(rows, 10)  # the top of the picture
+    low = rows >= np.percentile(rows, 90)  # just above the beams
+    assert pairs.weight[high].max() < 0.2 * pairs.weight[low].max()
+    assert float(np.sum(pairs.weight)) < float(np.unique(cols).size)
     corrected, touched = WallAnchor(correct=True).correct(raw, frame)
     assert touched == walk.count and np.allclose(corrected[r, cols], walk.depth[r, k])
     assert corrected[359, 0] == raw[359, 0]  # untouched below the return
@@ -384,6 +390,76 @@ def test_the_wall_anchor_extrudes_the_lidar_row_up_a_wall_and_stops_at_a_chair_s
     z = SCENE_LIDAR_Z
     lonely = np.array([[2.0, 0.0, z], [2.0, 0.9, z], [2.0, -0.9, z]])  # no neighbours
     assert anchor.walk(Frame(raw, _context(lonely))) is None
+
+
+def test_the_wall_gates_refuse_a_shelf_step_and_cannot_see_a_slow_recline() -> None:
+    """What "the surface goes on upwards" is worth, measured on five surfaces the lidar reads
+    as the same wall at 2 m — the beams touch them all at one height and say nothing about what
+    is above.
+
+    A flat wall is walked to the top of the picture. A SHELF STEP — the surface steps back
+    0.2 m at 0.3 m above the line — is refused whole: the step gate stops the walk at the edge
+    and the climb gate (0.5 m) then throws the stump away, so a shelf contributes no pair at
+    all. A surface RECLINING faster than about 5 m per metre of height (a table top, a seat) is
+    refused by the slope gate the same way.
+
+    And the blind spot, which is the reason this ruler's sigma grows with height instead of
+    trusting the gates: a surface leaning back 0.3 m per metre of HEIGHT — a sofa back, a
+    slanted bookshelf — walks to the top like a wall, because its depth departs from the
+    plane's by 0.18 % a row while this network's own scale climbs about 0.4 % a row over the
+    same picture (1.6x at the lidar's row, 2.0x by 0.3 m above it,
+    scratch/pipeline_vs_truth.txt). No tolerance separates them: one tight enough to refuse the
+    recline refuses every real wall, which is the error the ruler exists to correct
+    (WALL_DRIFT_TOL says the same about the integral). What bounds the damage is
+    :func:`wall_sigma`'s height term, and what measures it is the COLMAP scene."""
+    fwd, _left, up = _rays()
+    wall = _scene(2.0, floor=False)
+    over = CAM.z + wall * up - SCENE_LIDAR_Z  # a wall pixel's height above the lidar's line
+    returns = _wall_returns(2.0)
+
+    def walked(truth: np.ndarray) -> tuple[int, float]:
+        """(pairs, how far above the line the walk climbed) for a network 1.5x too far."""
+        anchor = WallAnchor(row_stride=4)
+        frame = Frame(1.5 * truth, _context(returns))
+        walk, pairs = anchor.walk(frame), anchor.pairs(frame)
+        if walk is None or not walk.walked.any():
+            return 0, 0.0
+        r, k = np.nonzero(walk.walked)
+        climb = float(np.max(CAM.z + walk.depth[r, k] * up[r, walk.cols[k]] - SCENE_LIDAR_Z))
+        return (0 if pairs is None else pairs.size), climb
+
+    def reclined(rate: float) -> np.ndarray:
+        """The wall leaning back ``rate`` metres per metre of height above the lidar's line."""
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = (2.0 + rate * (CAM.z - SCENE_LIDAR_Z)) / (fwd - rate * up)
+        return np.where(over > 0.0, t, wall)
+
+    flat, climb = walked(wall)
+    assert flat > 3000 and climb > 0.8
+    shelf = np.where(over > 0.3, 2.2 / fwd, wall)  # stepping back 0.2 m at 0.3 m above the line
+    assert walked(shelf) == (0, 0.0)
+    assert walked(reclined(5.0)) == (0, 0.0)  # a table top: the slope gate stops it dead
+    assert walked(reclined(0.3))[0] == flat  # the blind spot, priced by the sigma instead
+
+
+def test_a_wall_pair_s_sigma_grows_with_the_height_the_arm_and_the_grazing() -> None:
+    """:func:`wall_sigma`, term by term. At the beam's own height, square on, with the ray
+    meeting the plane head on, a pair is worth the beam's own 1.5 cm. It is worth less when the
+    pixel stands a metre above the line (the world assumption, 5 cm a metre), when the point it
+    pairs stands a lever arm away from the return (the fitted direction turning on its chord),
+    and when the ray grazes the plane (n . d small) — and a beam whose range error runs ALONG
+    the wall (n . b small) barely moves it at all."""
+    one = np.array([1.0])
+    at_the_beam = wall_sigma(one, one, np.zeros(1), np.array([0.05]), np.zeros(1))
+    assert float(at_the_beam[0]) == pytest.approx(0.015)
+    a_metre_up = wall_sigma(one, one, np.zeros(1), np.array([0.05]), one)
+    assert float(a_metre_up[0]) == pytest.approx(math.hypot(0.015, 0.05))
+    with_arm = wall_sigma(one, one, np.array([0.1]), np.array([0.05]), np.zeros(1))
+    assert float(with_arm[0]) == pytest.approx(0.045)  # 0.1 m of arm on a 5 cm chord: 3x
+    grazing = wall_sigma(np.array([0.2]), one, np.zeros(1), np.array([0.05]), np.zeros(1))
+    assert float(grazing[0]) == pytest.approx(0.075)  # 1 / (n . d)
+    edge_on = wall_sigma(one, np.array([0.1]), np.zeros(1), np.array([0.05]), np.zeros(1))
+    assert float(edge_on[0]) == pytest.approx(0.0015)
 
 
 def test_the_walk_stops_where_a_table_top_recedes_and_can_correct_without_pairs() -> None:
@@ -423,7 +499,7 @@ def test_the_walk_stops_where_a_table_top_recedes_and_can_correct_without_pairs(
     assert "correcting" in quiet.describe() and "pairs" not in quiet.describe()
     law = AffineLaw()
     law.seed(1.4, 0.0)
-    pipeline = standard_pipeline(law, wall_correct=True)
+    pipeline = standard_pipeline(law, wall_anchor=False, wall_correct=True)
     result = pipeline.run(raw, _context(returns))
     assert not result.verdict("wall_anchor").on and result.verdict("wall_correct").pixels > 0
     assert result.verdict("wall_correct").pairs == 0
@@ -578,7 +654,7 @@ def test_the_range_law_publishes_through_the_affine_law_until_two_bins_fill() ->
     law = AffineLaw()
     law.seed(1.3, 0.0)
     stage = RangeLawStage(law)
-    pipeline = standard_pipeline(law, range_stage=stage)
+    pipeline = standard_pipeline(law, range_stage=stage, wall_anchor=False)  # the beams alone
     raw = _network(_scene(2.0), 1.3, 0.0, noise=0.0, seed=0)
     result = pipeline.run(raw, _context(_wall_returns(2.0)))
     assert not result.withheld and stage.law is None and not stage.fitted
