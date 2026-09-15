@@ -70,6 +70,7 @@ from pepin.depth_pipeline import (  # noqa: E402
     FrameLaw,
     LidarAnchor,
     ParallaxAnchor,
+    WallAnchor,
     grid_of,
     standard_pipeline,
 )
@@ -300,13 +301,21 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     is the pose, as it was): after every frame the node's law is the reference's law to the
     last bit, it withholds exactly the frames the reference withheld, and every published
     image and scan is byte for byte the reference's."""
-    node, net = build(range_law=False, frame_law=False, lidar_sigma_m=0.0, fan_floor_gate="off")
-    # the affine law alone, every beam weighing the same, and the fan's floor gate off: this
-    # reference is the chain of before 2026-09-15, and every switch that moved it is named here
+    node, net = build(
+        range_law=False,
+        frame_law=False,
+        wall_anchor=False,
+        lidar_sigma_m=0.0,
+        fan_floor_gate="off",
+    )
+    # the affine law alone on the beams alone, every beam weighing the same, and the fan's floor
+    # gate off: this reference is the chain of before 2026-09-15, and every switch that has moved
+    # it since is named here
     assert node._pipeline.switches == {name: FLAGS[name] for name in node._pipeline.names} | {
         "range_law": False,
         "frame_law": False,
-    }, "the flags' defaults are the chain's, bar the two switched here"
+        "wall_anchor": False,
+    }, "the flags' defaults are the chain's, bar the three switched here"
 
     reference = AffineScale()
     withheld = 0
@@ -561,6 +570,11 @@ def test_the_scan_is_built_from_the_depth_before_the_floor_anchor(
     frame(node, net, CONFIG_CAM, 2.0, 0)
     assert seen["scan_depth"] is seen["result"].after["frame_law"]
     node.set_parameters([Param("wall_correct", True)])
+    wall = node._pipeline.stage("wall_correct")
+    assert isinstance(wall, WallAnchor)
+    wall.min_walk_m = 0.0  # this room's 3 % of network noise trips the slope gate within 10 cm
+    # of the beams and the climb gate would then refuse every column; what is under test here is
+    # WHERE the published scan is taken from, not how far a wall is walked
     frame(node, net, CONFIG_CAM, 2.0, 1)
     assert seen["scan_depth"] is seen["result"].after["wall_correct"]
     assert seen["result"].verdict("wall_correct").pixels > 0

@@ -132,11 +132,39 @@ FLOOR_NORMAL_TOL_DEG = 5.0  # how far the floor pixels' own fitted plane may lea
 # up before the frame's floor pairs are refused outright: a plane fitted to a table top, a ramp or
 # a wrong law is not the floor, and pairs taken off it move every node they touch.
 WALL_ROW_STRIDE = 4  # rows between two wall pairs of one column
-WALL_PAIR_WEIGHT = 0.2
+WALL_SIGMA_RANGE_M = 0.015  # metres: one LD19 beam's range noise, the measurement the plane is
+# built out of (:func:`wall_sigma` turns it into the pair's own sigma; it was a flat weight of
+# 0.2 until 2026-09-15, which said a wall pixel a beam away and one at the top of the picture
+# were worth the same fifth of a beam).
+WALL_SIGMA_HEIGHT = 0.05  # metres of doubt per metre of HEIGHT above the lidar's line: the
+# world assumption's own error bar. "The surface goes on upwards" is true of a door and a wall
+# and false of a sofa back, a shelf or a table, and nothing in the picture measures it — so the
+# ruler FADES with the distance from its evidence instead of switching off at a threshold: a
+# wall pixel a metre above the beam is trusted to 5 cm whatever the geometry says.
+WALL_WEIGHT_CAP = 1.0  # a wall pair is one beam's range carried up a column, so it may never
+# outweigh the beam it came from — the parallax anchor's cap, for the same reason.
+WALL_COLUMN_SHARE = True  # one beam, one vote: the pairs of a column all rest on that column's
+# single return, so they SHARE its weight instead of each carrying it (50 rows of one beam
+# counted 50 times took 67-85 % of a frame's whole fit weight, scratch/wall_field_row_eval.txt).
 WALL_MAX_HEIGHT = 2.0  # metres above the floor a wall point may stand: higher is a ceiling
 WALL_NEIGHBOUR_GAP = 0.30  # metres between a return and its scan neighbours for a wall direction
 WALL_SLOPE_TOL = 0.004  # per row: how much faster than the plane the network's depth may climb
 WALL_SLOPE_WINDOW = 6  # rows either side over which that climb is measured (the noise averaged)
+WALL_DRIFT_TOL = 0.0  # how far the network's depth may drift from the plane's OVER THE WALK,
+# relative; 0 is off, and off is the reasoned default. The gate exists because the per-row
+# slope test is blind to a SLOW recession: a surface leaning back 0.3 m per metre of height
+# moves 0.08 % a row against a tolerance of 0.4 % and reaches the top of the picture as if it
+# were a wall. The integral would catch it — and would catch the ruler's whole reason for
+# existing with it. The network's depth over this camera climbs 1.6x at the lidar's row and
+# 2.0x by 0.3 m above it (scratch/pipeline_vs_truth.txt, 2026-09-11): 50-80 % of scale drift
+# per metre of height, where the recession to be caught is 15 %. A gate tight enough to refuse
+# the recession refuses every real wall, and one loose enough to pass a real wall never fires.
+# The network cannot tell "the surface is leaning back" from "I am wrong above the row", which
+# is what this ruler is for; what bounds the damage instead is WALL_SIGMA_HEIGHT, the error bar
+# that grows with the height, and the gates below that need no network at all.
+WALL_MIN_WALK_M = 0.5  # metres above the lidar's line a column must reach, undisturbed, before
+# any of its pairs count. The ruler exists for the TOP of the picture; a stump that dies 20 cm
+# up adds pairs where the beams already speak and carries the full risk of being a chair back.
 MIN_LIFT_SPREAD = 0.15  # the pool's elevation span (5th-95th of lift) before an elevation term
 ROW_BANDS = 6  # bands of elevation of the row law
 PARALLAX_MIN_GAP_S = 0.08  # a partner frame nearer in time than this has no baseline to speak of
@@ -240,7 +268,7 @@ FIELD_CARRY_SPENT = 0.01  # what is left of the carry when it is dropped outrigh
 # place instead of three (a unit test holds the two tables against each other).
 PIPELINE_DEFAULTS: dict[str, bool | float | str] = {
     "floor_pairs": False,
-    "wall_anchor": False,
+    "wall_anchor": True,
     "parallax_anchor": False,
     "ray_law": False,
     "range_law": True,
@@ -252,6 +280,7 @@ PIPELINE_DEFAULTS: dict[str, bool | float | str] = {
     "field_carry_tau_s": FIELD_CARRY_TAU_S,
     "floor_sigma_pitch_deg": FLOOR_SIGMA_PITCH_DEG,
     "floor_normal_tol_deg": FLOOR_NORMAL_TOL_DEG,
+    "wall_sigma_height": WALL_SIGMA_HEIGHT,
 }
 
 
@@ -1202,15 +1231,99 @@ class FloorPairs(AnchorStage):
 
 
 # ---- the walls as a third hoop ----------------------------------------------------------------
+def _column_mean(values: Array, window: int) -> Array:
+    """Each row's mean of ``values`` over ``window`` rows either side, down every column,
+    ignoring the NaNs (a row with no finite neighbour comes back NaN). Cumulative sums, so the
+    cost does not grow with the window."""
+    finite = np.isfinite(values)
+    filled = np.where(finite, values, 0.0)
+    zero = np.zeros((1, values.shape[1]))
+    total = np.cumsum(np.vstack([zero, filled]), axis=0)
+    count = np.cumsum(np.vstack([zero, finite.astype(float)]), axis=0)
+    rows = np.arange(values.shape[0])
+    lo = np.clip(rows - window, 0, values.shape[0])
+    hi = np.clip(rows + window + 1, 0, values.shape[0])
+    n = count[hi] - count[lo]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out: Array = np.where(n > 0, (total[hi] - total[lo]) / n, np.nan)
+    return out
+
+
+def wall_sigma(
+    n_dot_d: Array,
+    n_dot_b: Array,
+    arm: Array,
+    chord: Array,
+    height: Array,
+    sigma_range: float = WALL_SIGMA_RANGE_M,
+    sigma_height: float = WALL_SIGMA_HEIGHT,
+) -> Array:
+    """How well a walked wall pixel's depth is known, in metres:
+
+        sigma = sqrt( sigma_lidar^2 + (sigma_height * h)^2 )
+
+    where ``h`` is the pixel's height above the lidar's line, ``sigma_lidar`` is what the beams
+    themselves are worth at that pixel (below) and ``sigma_height`` is the price of the WORLD
+    ASSUMPTION — that the surface the beams hit goes on upwards. That assumption is true of a
+    door and a wall and false of a sofa back, a bookshelf, a table and a chair, and no
+    measurement in the picture settles it, so the ruler fades with the distance from its
+    evidence rather than switching off at a threshold: at the default 0.05 a wall pixel a metre
+    above the beam is trusted to 5 cm, which is about a fortieth of a beam's weight at 2 m.
+    (The gates still refuse a surface the network says is receding — :meth:`WallAnchor.walk` —
+    but they cannot see what the network does not show.)
+
+    The lidar's own half, in one line. The plane stands on a return ``p`` with the unit
+    horizontal normal ``n`` fitted from that return's scan neighbours, and the pixel's ray
+    leaves the lens along ``d``, so the depth the pixel is paired with is
+    ``t = n . (p - lens) / (n . d)``. Two things move it, both of them the same range noise
+    ``sigma_range`` (1.5 cm for an LD19):
+
+    * the return SLIDES along its own beam ``b``, which moves the plane by
+      ``sigma_range * |n . b|`` — the whole error for a wall met head on, and next to nothing
+      for one seen edge-on, where a beam's range error runs along the wall instead of into it;
+    * the plane TURNS about that return, because the normal is fitted to a chord of length
+      ``chord`` between neighbouring returns whose own ranges are noisy:
+      ``sigma_phi = sqrt(2) * sigma_range * |n . b| / chord`` radians. A turn of ``sigma_phi``
+      moves the plane by ``|arm| * sigma_phi`` at the pixel, where ``arm`` is the along-wall
+      distance between the return and the point the ray meets the plane — zero at the beam's
+      own point and growing up the column, which is what makes a wall a WORSE ruler the
+      further the pixel stands from the beam that vouches for it.
+
+    Both are displacements of the plane along its normal; the ray converts one into depth by
+    dividing by ``n . d`` — the column's bearing, 1 for a ray hitting the wall square and small
+    where it grazes it, which is the third thing the sigma must say. So
+
+        sigma_lidar = sigma_range * |n . b| * sqrt(1 + 2 * (arm / chord)^2) / |n . d| .
+
+    ``n_dot_d``, ``arm`` and ``height`` are per (row, return), ``n_dot_b`` and ``chord`` per
+    return; the result has the shape they broadcast to. The network's own band does NOT enter,
+    unlike the floor's (:func:`floor_sigma`): a floor pixel is called floor because the
+    network's depth put it near the plane, so its pair is only as good as that judgement, while
+    a wall pixel is called wall by CONTINUITY up the column and its truth is the plane's,
+    whatever the network says there.
+
+    What it does not say: the pairs of one column all rest on one beam, so they are correlated
+    and the fit would count them as independent (:data:`WALL_COLUMN_SHARE` is the answer to
+    that, and :data:`WALL_WEIGHT_CAP` stops any one of them outweighing the beam it came
+    from)."""
+    turn = np.sqrt(1.0 + 2.0 * (np.asarray(arm, dtype=float) / np.asarray(chord)) ** 2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        beams = sigma_range * np.abs(n_dot_b) * turn / np.abs(n_dot_d)
+    out: Array = np.hypot(beams, sigma_height * np.abs(np.asarray(height, dtype=float)))
+    return out
+
+
 @dataclass(frozen=True, eq=False)
 class WallWalk:
     """Where the lidar's returns were extruded up the picture: the column of every usable
-    return, the (rows, returns) mask of the rows walked above it, and the geometric depth of
-    the vertical surface at every such row."""
+    return, the (rows, returns) mask of the rows walked above it, the geometric depth of the
+    vertical surface at every such row and how well that depth is known
+    (:func:`wall_sigma`, metres)."""
 
     cols: npt.NDArray[np.intp]
     walked: Mask
     depth: Array
+    sigma: Array
 
     @property
     def count(self) -> int:
@@ -1229,7 +1342,34 @@ class WallAnchor(AnchorStage):
     ``slope_window`` rows may differ by ``slope_tol`` a row) — the pixel's ray meets that
     plane at a depth the geometry knows. With ``pairs`` those (network, wall) pairs are a
     third hoop above the lidar's row; with ``correct`` the walked pixels are set to the
-    wall's depth outright."""
+    wall's depth outright.
+
+    "The surface goes on upwards" is a statement about the WORLD, true of a door and a wall
+    and false of a sofa, a shelf, a table and a chair, so two more gates stand between a
+    return and a pair, and the sigma carries what neither of them can see:
+
+    * the DRIFT gate, ``drift_tol``, which ships OFF (0) and says something worth knowing: the
+      integral of that disagreement WOULD catch a slow recession the per-row test cannot, and
+      cannot be set to catch it without refusing every real wall, because this network's own
+      scale climbs faster up the picture than the recession does
+      (:data:`WALL_DRIFT_TOL`). Nothing in the picture separates "the surface leans back" from
+      "the network is wrong above the row", which is the error this ruler exists to correct;
+    * the CLIMB gate, ``min_walk_m``: a column counts only if it reaches that far above the
+      lidar's line undisturbed. The ruler exists for the top of the picture, and a stump that
+      dies 20 cm up adds pairs where the beams already speak while carrying the full risk of
+      being a chair back;
+    * and above all of it :func:`wall_sigma`'s ``sigma_height``, the price of the assumption
+      itself: the pair's error bar grows with its height above the line whether or not the
+      network shows anything wrong, so the ruler FADES as it leaves its evidence.
+
+    Each pair carries its OWN weight, not a flat share: :func:`wall_sigma` is the beam's
+    1.5 cm pushing the plane sideways, the fitted direction turning about the return on a
+    chord of two neighbours, the ray's own bearing onto the plane, and that height term. A
+    pair just above the beam is worth about a beam (``weight_cap``: it IS that beam, and may
+    not outweigh it), one a metre up a fortieth of it, and one on a wall seen edge-on almost
+    nothing — and with ``column_share`` the pairs of one column SHARE that single beam's
+    weight rather than each carrying it, because that is how many measurements they are. It
+    was a flat 0.2 apiece until 2026-09-15."""
 
     name = "wall_anchor"
 
@@ -1238,21 +1378,31 @@ class WallAnchor(AnchorStage):
         *,
         rel_step: float = EDGE_REL_STEP,
         row_stride: int = WALL_ROW_STRIDE,
-        weight: float = WALL_PAIR_WEIGHT,
+        sigma_range_m: float = WALL_SIGMA_RANGE_M,
+        sigma_height: float = WALL_SIGMA_HEIGHT,
+        weight_cap: float = WALL_WEIGHT_CAP,
+        column_share: bool = WALL_COLUMN_SHARE,
         max_height: float = WALL_MAX_HEIGHT,
         neighbour_gap: float = WALL_NEIGHBOUR_GAP,
         slope_tol: float = WALL_SLOPE_TOL,
         slope_window: int = WALL_SLOPE_WINDOW,
+        drift_tol: float = WALL_DRIFT_TOL,
+        min_walk_m: float = WALL_MIN_WALK_M,
         pairs: bool = True,
         correct: bool = False,
     ) -> None:
         self.rel_step = rel_step
         self.row_stride = row_stride
-        self.weight = weight
+        self.sigma_range_m = sigma_range_m
+        self.sigma_height = sigma_height
+        self.weight_cap = weight_cap
+        self.column_share = column_share
         self.max_height = max_height
         self.neighbour_gap = neighbour_gap
         self.slope_tol = slope_tol
         self.slope_window = slope_window
+        self.drift_tol = drift_tol
+        self.min_walk_m = min_walk_m
         self.contribute = pairs
         self.correct_pixels = correct
 
@@ -1281,8 +1431,13 @@ class WallAnchor(AnchorStage):
         if int(usable.sum()) == 0:
             return None
         idx = np.flatnonzero(usable)
-        tangent = chord[idx] / np.linalg.norm(chord[idx], axis=1)[:, None]
+        span = np.linalg.norm(chord[idx], axis=1)  # the chord the direction is fitted on
+        tangent = chord[idx] / span[:, None]
         normal = np.stack([-tangent[:, 1], tangent[:, 0]], axis=1)  # horizontal, unit
+        # the beam the return came in on (the lidar stands within a centimetre of base_link's
+        # origin, config/lidar.json): how much of its range noise pushes the plane sideways
+        bearing = xy[idx] / np.maximum(np.linalg.norm(xy[idx], axis=1), 1e-9)[:, None]
+        n_dot_b = normal[:, 0] * bearing[:, 0] + normal[:, 1] * bearing[:, 1]
         cols = u[idx].astype(int)
         rows0 = v[idx].astype(int)
         h = frame.raw.shape[0]
@@ -1296,9 +1451,23 @@ class WallAnchor(AnchorStage):
         dy = np.broadcast_to(left, shape)
         n_dot_d = normal[None, :, 0] * dx + normal[None, :, 1] * dy
         offset = normal[:, 0] * (xy[idx, 0] - cam.x) + normal[:, 1] * (xy[idx, 1] - cam.y)
+        # along the wall: where the return stands, and where the ray meets the plane — their
+        # difference is the lever arm a turn of the fitted direction acts on (:func:`wall_sigma`)
+        along = tangent[:, 0] * (xy[idx, 0] - cam.x) + tangent[:, 1] * (xy[idx, 1] - cam.y)
+        tan_dot_d = tangent[None, :, 0] * dx + tangent[None, :, 1] * dy
         with np.errstate(divide="ignore", invalid="ignore"):
             t = offset[None, :] / n_dot_d
             z_up = cam.z + t * dz
+            climbed = z_up - points[idx, 2][None, :]  # height above the lidar's own line
+            sigma = wall_sigma(
+                n_dot_d,
+                n_dot_b,
+                along[None, :] - t * tan_dot_d,
+                span,
+                np.maximum(climbed, 0.0),
+                self.sigma_range_m,
+                self.sigma_height,
+            )
             step = np.abs(raw[:-1] - raw[1:]) / raw[1:]
         bad = ~np.isfinite(raw) | ~np.isfinite(t) | (t <= NEAR_M) | (z_up > self.max_height)
         bad[:-1] |= ~np.isfinite(step) | (step > self.rel_step)
@@ -1310,17 +1479,38 @@ class WallAnchor(AnchorStage):
                 climb_t = (ln_t[: -2 * w] - ln_t[2 * w :]) / (2 * w)
                 apart = np.abs(climb_d - climb_t)
             bad[w:-w] |= ~np.isfinite(apart) | (apart > self.slope_tol)
+        if self.drift_tol > 0.0:
+            bad |= self._drifted(raw, t, rows0, w)
         # rows above the return with no bad row between: the count of bad rows at or above a
         # row, less the count at or above the return, must be zero
         above = np.vstack([np.cumsum(bad[::-1], axis=0)[::-1], np.zeros((1, bad.shape[1]))])
         at_return = above[rows0, np.arange(rows0.size)]
         row = np.arange(h)[:, None]
         walked: Mask = (row < rows0[None, :]) & (above[:h] - at_return[None, :] == 0)
-        return WallWalk(cols, walked, t)
+        # and the column must have carried the ruler min_walk_m above the line to count at all
+        reached = np.where(walked.any(axis=0), np.argmax(walked, axis=0), rows0)
+        with np.errstate(invalid="ignore"):
+            far_enough = climbed[reached, np.arange(reached.size)] >= self.min_walk_m
+        walked &= walked.any(axis=0) & far_enough
+        return WallWalk(cols, walked, t, sigma)
+
+    def _drifted(self, raw: Array, t: Array, rows0: Array, window: int) -> Mask:
+        """Where the network's depth has wandered from the plane's by more than ``drift_tol``
+        since the return's own row — the integral the per-row slope test is blind to. The log
+        ratio is averaged over ``window`` rows either side first, so the network's pixel noise
+        does not trip it."""
+        with np.errstate(divide="ignore", invalid="ignore"):
+            smooth = _column_mean(np.log(raw) - np.log(t), window)
+        reference = smooth[rows0, np.arange(rows0.size)]
+        drift = np.abs(smooth - reference[None, :])
+        out: Mask = ~np.isfinite(drift) | (drift > self.drift_tol)
+        return out
 
     def pairs(self, frame: Frame) -> Pairs | None:
-        """(network, wall) pairs every ``row_stride`` rows of the walk, or ``None`` under
-        MIN_SAMPLES or with ``pairs`` off."""
+        """(network, wall) pairs every ``row_stride`` rows of the walk, each weighed by its own
+        sigma against a beam's (:func:`wall_sigma`, :func:`pepin.depth.pair_weight`), capped at
+        ``weight_cap`` and, with ``column_share``, divided among the pairs of its column — they
+        are one beam, not fifty. ``None`` under MIN_SAMPLES or with ``pairs`` off."""
         if not self.contribute:
             return None
         walk = self.walk(frame)
@@ -1333,11 +1523,15 @@ class WallAnchor(AnchorStage):
         if r.size < MIN_SAMPLES:
             return None
         intr = frame.ctx.intr
+        z = walk.depth[r, k]
+        weight = pair_weight(inverse_sigma(walk.sigma[r, k], z), cap=self.weight_cap)
+        if self.column_share:
+            weight = weight / np.bincount(k, minlength=walk.cols.size)[k]
         return Pairs.of(
             frame.raw[r, walk.cols[k]],
-            walk.depth[r, k],
+            z,
             lift_of(r, intr),
-            self.weight,
+            weight,
             left_of(walk.cols[k], intr),
         )
 
@@ -1358,7 +1552,10 @@ class WallAnchor(AnchorStage):
             "correcting" if self.correct_pixels else ""
         )
         return (
-            f"step {self.rel_step:.0%}, slope {self.slope_tol:.1%}/row, weight {self.weight:g},"
+            f"step {self.rel_step:.0%}, slope {self.slope_tol:.1%}/row, drift"
+            f" {self.drift_tol:.0%}, climb {self.min_walk_m:.2f} m, sigma"
+            f" {self.sigma_range_m * 100:.1f} cm + {self.sigma_height * 100:.0f} cm/m up"
+            f"{', one vote a column' if self.column_share else ''},"
             f" {roles.strip() or 'idle'}"
         )
 
@@ -2855,7 +3052,7 @@ def standard_pipeline(
             sigma_pitch_deg=float(defaults["floor_sigma_pitch_deg"]),
             normal_tol_deg=float(defaults["floor_normal_tol_deg"]),
         ),
-        WallAnchor(),
+        WallAnchor(sigma_height=float(defaults["wall_sigma_height"])),
         ParallaxAnchor(),
         the_law,
         the_ray,
@@ -2921,4 +3118,5 @@ __all__ = [
     "left_of",
     "lift_of",
     "standard_pipeline",
+    "wall_sigma",
 ]
