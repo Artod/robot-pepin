@@ -444,30 +444,46 @@ def test_the_two_rulers_weights_are_live_flags_and_the_report_prints_them(build:
     assert "rulers: lidar " in line, "the frame law says whose weight fitted it"
 
 
-def test_a_parallax_corner_is_a_track_and_the_three_knobs_reach_the_stage(build: Build) -> None:
-    """The shape of a parallax measurement is three live parameters: how many frames a corner
-    must be seen in, how far back the window reaches and how much parallax its views must add
-    up to. They reach the anchor, the report line says which shape is running, and
+def test_a_parallax_corner_is_a_track_and_the_knobs_reach_the_stage(build: Build) -> None:
+    """The shape of a parallax measurement is live: how many frames a corner must be seen in,
+    how far back the window reaches and over how many views, how much parallax those views must
+    add up to, what the sigma is taken from and how far a track's two halves may disagree. All
+    six reach the anchor, the report line says which shape is running, and
     parallax_track_min_obs 2 puts the old pair back without a restart."""
     node, _net = build()
     corners = node._pipeline.stage("parallax_anchor")
     assert isinstance(corners, ParallaxAnchor)
     assert corners.track_min_obs == 3 and corners.tracking, "a corner ships as a track"
-    assert ">= 3 obs over <= 8 views, asks 10 cm total" in corners.describe()
+    assert corners.track_max_views == 8 and corners.sigma_model == "covariance"
+    assert corners.split_tol_sigma == 0.0, "the split gate ships off: measured, it buys nothing"
+    line = corners.describe()
+    assert ">= 3 obs over <= 8 views, asks 10 cm total" in line
+    assert "sigma from the covariance, halves unchecked" in line
     assert node.set_parameters(
         [
             Param("parallax_track_min_obs", 5),
             Param("parallax_track_window_s", 0.8),
             Param("parallax_min_total_baseline_m", 0.2),
+            Param("parallax_track_max_views", 4),
+            Param("parallax_sigma_model", "baseline"),
+            Param("parallax_split_tol_sigma", 3.0),
         ]
     )[0].successful
     assert corners.track_min_obs == 5 and corners.track_window_s == 0.8
     assert corners.min_total_baseline_m == 0.2 and corners.window_s == 0.8
+    assert corners.track_max_views == 4 and corners.sigma_model == "baseline"
+    assert corners.split_tol_sigma == 3.0
+    assert "over <= 4 views" in corners.describe()
+    assert "halves within 3 sigma" in corners.describe()
+    refused = node.set_parameters([Param("parallax_sigma_model", "guess")])[0]
+    assert not refused.successful, "a sigma model nobody implements is not a silent default"
     assert node.set_parameters([Param("parallax_track_min_obs", 2)])[0].successful
     assert corners.tracking is False and corners.window_s == corners.max_gap_s
     node._report()
     line = node.logger.texts("info")[-1]
     assert "parallax_track_min_obs=2 " in line and "parallax_track_window_s=0.8 " in line
+    assert "parallax_track_max_views=4 " in line and "parallax_sigma_model=baseline " in line
+    assert "parallax_split_tol_sigma=3.0 " in line
 
 
 def test_the_scan_is_built_from_the_depth_before_the_floor_anchor(
