@@ -203,6 +203,16 @@ case "${1:-start}" in
         [ "$SLAM" = true ] \
             && echo "vslam up in SLAM mode (camera_only $CAMERA_ONLY, resume $RESUME, static camera tf $STATIC_CAMERA_TF): the map grows on /map; board must be on ros/thin.sh slam. Foxglove ws://localhost:8765, save with ros/map.sh save NAME" \
             || echo "vslam up beside the known map (static camera tf $STATIC_CAMERA_TF): Foxglove at ws://localhost:8765, ros/laptop.sh logs vslam"
+        # The desktop app's socket died with the old container, and a Foxglove client never
+        # re-attaches by itself: its panels stay on screen, empty, bound to channel ids this new
+        # bridge does not have. So the app is told to reconnect (ros/foxglove.sh reopen waits for
+        # the port first, and does nothing but print the link when the app is not running).
+        # PEPIN_FOXGLOVE_REOPEN=0 leaves the app alone and prints the link instead.
+        if [ "${PEPIN_FOXGLOVE_REOPEN:-1}" = 1 ]; then
+            "$HERE/foxglove.sh" reopen || true
+        else
+            echo "foxglove: reopen off (PEPIN_FOXGLOVE_REOPEN=0); reconnect with: open '$("$HERE/foxglove.sh" url)'"
+        fi
         exit 0 ;;
     start) ;;
     *) echo "usage: ros/laptop.sh [start | stop | logs [vslam] | vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck] [--no-vo] | kick NODE]"; exit 2 ;;
