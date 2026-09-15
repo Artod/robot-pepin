@@ -64,8 +64,13 @@ from pepin.depth import (  # noqa: E402
 from pepin.depth_pipeline import (  # noqa: E402
     LIDAR_SIGMA_M,
     PARALLAX_WEIGHT,
+    PIPELINE_DEFAULTS,
+    FloorPairs,
+    FrameLaw,
     LidarAnchor,
     ParallaxAnchor,
+    grid_of,
+    standard_pipeline,
 )
 from pepin.mounts import load_lidar_mount, rotation_from_rpy  # noqa: E402
 from pepin.tsdf import RigidPose  # noqa: E402
@@ -337,6 +342,35 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     saved = json.loads(node._law_file.read_text())
     assert saved["pooled"] == node._law.pooled and saved["a"] == node._law.a
     assert node._pipeline.stats["affine_law"].frames == 0, "the stage totals are the window's"
+
+
+def test_one_table_of_defaults_reaches_both_the_node_s_flags_and_the_stages(build: Build) -> None:
+    """A default is written once. Every switch and knob of pepin.depth_pipeline's
+    PIPELINE_DEFAULTS is the node's flag default and the chain standard_pipeline builds, the
+    node hands the knobs to the stages that own them at start, and a live change reaches
+    them."""
+    for name, value in PIPELINE_DEFAULTS.items():
+        assert name in FLAGS, f"{name}: the pipeline's default has no flag of that name"
+        assert FLAGS.flag(name).default == value, f"{name}: the flag's default is not the table's"
+    chain = standard_pipeline()
+    for name, on in chain.switches.items():
+        if name in PIPELINE_DEFAULTS:
+            assert on is PIPELINE_DEFAULTS[name], f"{name}: the chain is not the table"
+    node, _net = build()
+    field = node._pipeline.stage("frame_law")
+    floor = node._pipeline.stage("floor_pairs")
+    assert isinstance(field, FrameLaw) and isinstance(floor, FloorPairs)
+    assert field.field.grid == grid_of(str(PIPELINE_DEFAULTS["field_grid"]))
+    assert field.field.prior == PIPELINE_DEFAULTS["field_prior"]
+    assert field.field.carry == PIPELINE_DEFAULTS["field_carry"]
+    assert field.field.carry_tau_s == PIPELINE_DEFAULTS["field_carry_tau_s"]
+    assert floor.sigma_pitch_deg == PIPELINE_DEFAULTS["floor_sigma_pitch_deg"]
+    assert floor.normal_tol_deg == PIPELINE_DEFAULTS["floor_normal_tol_deg"]
+    node._switches.set("field_grid", "1x1")  # the old single law, live
+    node._switches.set("field_prior", 7.5)
+    node._switches.set("floor_normal_tol_deg", 2.0)
+    assert field.field.grid == (1, 1) and field.field.prior == 7.5
+    assert floor.normal_tol_deg == 2.0
 
 
 # ---- the camera pose from TF ---------------------------------------------------------------

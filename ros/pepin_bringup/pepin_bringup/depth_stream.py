@@ -116,6 +116,7 @@ from pepin.depth import (
     to_base,
 )
 from pepin.depth_pipeline import (
+    FIELD_GRIDS,
     LIDAR_SIGMA_M,
     PARALLAX_MAP_MAX_AGE_S,
     PARALLAX_MAP_WAIT,
@@ -124,13 +125,16 @@ from pepin.depth_pipeline import (
     PARALLAX_MOTION,
     PARALLAX_MOTIONS,
     PARALLAX_WEIGHT,
+    PIPELINE_DEFAULTS,
     AffineLaw,
+    FloorPairs,
     FrameContext,
     FrameLaw,
     LidarAnchor,
     ParallaxAnchor,
     RangeLawStage,
     RayLaw,
+    grid_of,
     standard_pipeline,
 )
 from pepin.depth_service import (
@@ -218,25 +222,34 @@ FLAGS = FlagSet(
     ),
     Flag(
         "floor_pairs",
-        False,
+        PIPELINE_DEFAULTS["floor_pairs"],
         description="the floor's pixels pair the network's depth with the plane's geometric depth,"
-        " a second hoop for the law that needs no lidar",
-        why="useless as measured — it takes the floor pixels the network itself drew and checks"
-        " the network against them, and the median D/E over the pixels it selects is the median"
-        " over every ray that meets the plane (0.86 against 0.89, 1.12 against 1.22, 1.76 against"
-        " 1.69: scratch/horizon_law_eval.txt). What it does change is the law: the lidar's own row"
-        " goes 1.010 -> 1.391 and the band 12.9/38.2 cm -> 24.1/48.7 on run 0171"
-        " (scratch/pipeline_vs_truth.txt), 3.8/20.6 -> 4.8/26.7 cm at the corrected mount"
-        " (scratch/lidar_height_check.txt). A floor anchor needs a floor cue the network did not"
-        " draw itself",
-        on_when="when the floor's depth comes from something independent of the network — a"
-        " measured plane, a second sensor; nothing measured so far supports turning it on",
-        off_when="in every run that drives: it buys nothing above 0.8 m either (65.2 cm against"
-        " 48.2) and moves the row the costmap reads by 38 %",
+        " a second hoop for the law that needs no lidar. Each pair weighs its own sigma — the"
+        " plane's depth under a ray is h / sin(angle below the horizon), so the mount's pitch"
+        " uncertainty makes it grow as the square of the range (floor_sigma_pitch_deg) — and the"
+        " frame's whole floor is refused unless the plane fitted to those pixels stands up"
+        " (floor_normal_tol_deg); the report line counts the frames refused",
+        why="it stays off, but it is no longer the same knob. Under ONE law it moved the lidar's"
+        " own row by 5-8 % and the band 12.9/38.2 cm -> 24.1/48.7 on run 0171"
+        " (scratch/pipeline_vs_truth.txt, 2026-09-11), because the network's error is regime-wise"
+        " (floor 1.1x, the lidar's row 1.6x, above it 2.0x) and one law fitted across the two"
+        " lands between them. Under the 3x3 scale field the same pairs cost far less and"
+        " sometimes pay: on the held-out beams of the four tapes of 2026-09-15"
+        " (scratch/scale_field_eval.txt) the floor takes the single law from 11.4 % to 17.6 % of"
+        " median |residual| on run 0171 and from 4.5 % to 16.3 % on tape 0237, where under the"
+        " field it takes 8.3 % to 10.6 % and 4.3 % to 5.0 %, and on tape 0236 it IMPROVES the"
+        " field, 14.1 % -> 13.6 %. What it still does not do is give a metric scale on its own:"
+        " with every beam withheld the floor-only field reads 19.8 % at the 40.9 deg pitch, 78.6 %"
+        " at 25.8 and 93.2 % on the drive, where the floor is barely in the picture",
+        on_when="with the field on and a head pitched down far enough that the floor fills a"
+        " third of the picture, when what reads the depth is above the lidar's row; and on a cart"
+        " with no lidar at all, where it is the only ruler there is",
+        off_when="in every run that drives on the lidar's row: it still costs 2.3 points of"
+        " residual there on the drive, and nothing yet says the rows above are worth that",
     ),
     Flag(
         "wall_anchor",
-        False,
+        PIPELINE_DEFAULTS["wall_anchor"],
         description="the lidar's returns extruded up the image, where the network's depth stays"
         " continuous, pair the rows above the lidar's with the wall's depth — a third hoop",
         why="redundant with the lidar and worse where the cart drives. The wall extrusion agrees"
@@ -254,7 +267,7 @@ FLAGS = FlagSet(
     ),
     Flag(
         "parallax_anchor",
-        False,
+        PIPELINE_DEFAULTS["parallax_anchor"],
         description="the corners this frame shares with the previous one, triangulated against the"
         " odometry's transform between the two stamps (pepin.parallax), pair the network's depth"
         " with a depth in metres the cart measured by moving — a hoop that needs no lidar and no"
@@ -299,7 +312,7 @@ FLAGS = FlagSet(
     ),
     Flag(
         "ray_law",
-        False,
+        PIPELINE_DEFAULTS["ray_law"],
         description="the law's scale follows the ray's angle off the optical axis, a / D + b"
         " fitted per elevation (pepin.elevation) instead of one pair of numbers for the whole"
         " picture; it needs wall_anchor on, because on the lidar's own beams a return's elevation"
@@ -319,7 +332,7 @@ FLAGS = FlagSet(
     ),
     Flag(
         "range_law",
-        True,
+        PIPELINE_DEFAULTS["range_law"],
         description="the law's scale follows the range: the same pooled pairs binned by the"
         " network's own depth (17 log bins, 0.3-12 m, 50 pairs a bin) with a robust ratio"
         " true / network measured in each, interpolated between the filled bins"
@@ -341,7 +354,7 @@ FLAGS = FlagSet(
     ),
     Flag(
         "frame_law",
-        True,
+        PIPELINE_DEFAULTS["frame_law"],
         description="after the range law, THIS frame's own beams fit a scale (and, where the"
         " frame's depths span 2.5x, a shift) over what the range law published, and that"
         " correction is applied to the whole image (pepin.depth.fit_frame, Huber IRLS on 30"
@@ -369,7 +382,7 @@ FLAGS = FlagSet(
     ),
     Flag(
         "wall_correct",
-        False,
+        PIPELINE_DEFAULTS["wall_correct"],
         description="after the law, the pixels the wall walk covered are set to the extruded"
         " plane's depth outright (the same walk as wall_anchor, applied instead of fitted)",
         why="default by design, unmeasured as a win — standalone it is a wash — run 0171 keeps the"
@@ -598,6 +611,127 @@ FLAGS = FlagSet(
         " length and a per-pair sigma under a couple of centimetres",
     ),
     Flag(
+        "field_grid",
+        PIPELINE_DEFAULTS["field_grid"],
+        description="how many nodes the per-frame law carries over the picture, written the way"
+        " an image size is (columns x rows): each node holds its own scale and shift in inverse"
+        " depth, fitted on the anchors that land near it, and a pixel's law is the bilinear blend"
+        " of the nodes around it. 1x1 is one law for the whole picture — the frame law exactly as"
+        " it was. The report line prints the grid and the pair weight every node saw",
+        why="this network's error is a property of WHERE in the picture a pixel is: against COLMAP"
+        " on run 0171 it reads 1.1x on the floor, 1.6x at the lidar's row and 2.0x from 0.3 m up"
+        " (scratch/pipeline_vs_truth.txt), and one law fitted across all three is wrong in all"
+        " three. Measured on the held-out beams of the four tapes (scratch/scale_field_eval.txt,"
+        " 2026-09-15: every frame's pairs split odd / even, the odd fitting and the even judging,"
+        " over the RAW network so the numbers are the law's whole correction) the median"
+        " |residual| goes 11.4 -> 8.3 % on run 0171's drive, 15.6 -> 15.4 % at the 11.1 deg pitch,"
+        " 16.3 -> 14.1 % at 25.8 and 4.5 -> 4.3 % at 40.9, and on the drive the residual's spread"
+        " across the top, middle and bottom third of the picture falls from 25.8/13.6/9.2 % to"
+        " 11.8/9.9/6.8 %. 4x3 is a wash against 3x3 (8.5 / 15.2 / 12.8 / 4.6 %) and costs 0.2 ms"
+        " more. The whole field costs 0.94 ms a frame against the single law's 0.46 on a 640x360"
+        " frame, 2x2 0.81, 4x3 1.14, 4x4 1.19",
+        on_when="3x3 as shipped; 4x3 where the error is suspected to run across the picture"
+        " rather than up it (a lens the calibration does not describe at the edges)",
+        off_when="1x1 reproduces the single per-frame law exactly, bit for bit, which is the A/B"
+        " of the whole field and the thing to set the moment a node's scale looks wild in the"
+        " report line",
+        choices=FIELD_GRIDS,
+    ),
+    Flag(
+        "field_prior",
+        PIPELINE_DEFAULTS["field_prior"],
+        range=(0.0, 1000.0),
+        description="how hard each node of the field is pulled toward the frame's own GLOBAL fit,"
+        " in pair-weight units (a lidar beam is 1). A node that saw no pair comes back as the"
+        " global fit exactly, so the field degrades to the single law wherever the anchors are"
+        " sparse; a node that saw many follows its own",
+        why="1.0 because a node of this camera does not hold hundreds of beams: over the four"
+        " tapes a non-empty node of a 3x3 field holds a median of 3.7-5.1 of pair weight (p10"
+        " 0.2-1.3, p90 10.8-17.3). Swept on the held-out beams"
+        " (scratch/_field_prior_sweep.py, 2026-09-15) the four tapes read 11.3 / 15.9 / 15.3 /"
+        " 3.8 % of median |residual| at a pull of 20 — the field is the single law again, which"
+        " reads 11.4 / 15.6 / 16.3 / 4.5 % — against 8.3 / 15.4 / 14.1 / 4.3 % at 1.0 and"
+        " 7.9 / 15.5 / 14.5 / 5.0 % with no pull at all. The pull enters the fit as two rows at"
+        " the ends of the pairs' own depth range, so it leans on the line harder than its weight"
+        " in pairs suggests",
+        on_when="raise it toward 10 on a cart whose anchors are thin and scattered, where a node"
+        " fitted on two beams is a whole quadrant of the picture fitted on two beams",
+        off_when="0 lets every node follow its own pairs alone (measured better on three tapes of"
+        " four and worse at the 40.9 deg pitch); lower it while reading the node table in the"
+        " report line, never blind",
+    ),
+    Flag(
+        "field_carry",
+        PIPELINE_DEFAULTS["field_carry"],
+        range=(0.0, 1000.0),
+        description="how hard each node is pulled toward what it was on the LAST frame, in the"
+        " same pair-weight units, decaying as exp(-dt / field_carry_tau_s)",
+        why="1.0, and it changes almost nothing while the lidar reaches the picture: swept over"
+        " 0, 1, 5 and 20 on the four tapes it moves the residual by under a point, and 20 costs"
+        " the drive 2.3 (8.3 -> 10.6 %) by carrying a node's stale scale into frames that had"
+        " something better to say. What it is there for is the frames with no beams at all —"
+        " with floor pairs as the only ruler it is what holds the scale of the nodes that saw"
+        " nothing this time",
+        on_when="raise it toward 5 on a run whose anchors flicker (a lidar in and out of the"
+        " picture, a camera-only stretch), where a node's last value is better than the frame's"
+        " global fit",
+        off_when="0 makes every frame's field independent of the last, which is what to set when"
+        " a node's scale is suspected of lagging the scene",
+    ),
+    Flag(
+        "field_carry_tau_s",
+        PIPELINE_DEFAULTS["field_carry_tau_s"],
+        range=(0.0, 60.0),
+        description="the seconds over which a node's pull toward its own last value decays: a"
+        " node starved for one time constant keeps a third of the carry, one starved for five"
+        " seconds is the frame's global fit again",
+        why="default by design: the frame law's own hold constant"
+        " (pepin.depth.FRAME_HOLD_TAU_S, 2 s), so a node's memory and the stage's decay back to"
+        " the pool's law run at the same rate. Not measured as a choice of its own — the tapes"
+        " that exist all carry beams on every frame, where the carry barely matters",
+        on_when="raise it on a cart that drives slowly enough for a node's scene to survive"
+        " several seconds",
+        off_when="0 drops the carry the moment a node is starved, which is the A/B of the memory",
+    ),
+    Flag(
+        "floor_sigma_pitch_deg",
+        PIPELINE_DEFAULTS["floor_sigma_pitch_deg"],
+        range=(0.0, 20.0),
+        description="what the camera's pitch is trusted to, in degrees, which is what a floor"
+        " pair's own noise is made of: the plane's depth under a ray is h / sin(angle below the"
+        " horizon), so a pitch error of this size is a depth error of z^2 / h times it, and the"
+        " pair's weight is that sigma against a lidar beam's in inverse depth",
+        why="1.5 deg is the measurement, not a guess: config/neck.json's ticks_note reads 'head"
+        " level by eye the tilt servo reads 2068 ticks and the picture is 1.0 deg down (+-1.5)'."
+        " On this mount that makes a floor pixel at 1 m worth about a hundredth of a beam and one"
+        " at 3 m a fortieth, where every floor pixel used to carry a flat tenth whatever its"
+        " range — 1000 of them outvoting 30 beams by three to one",
+        on_when="raise it after a neck re-assembly, or on any run where the head's pitch comes"
+        " from an encoder nobody has checked against a level",
+        off_when="lower it only after the pitch is measured better than 1.5 deg — a checkerboard"
+        " against a plumb line, not a fit through the same depths it would then weigh",
+    ),
+    Flag(
+        "floor_normal_tol_deg",
+        PIPELINE_DEFAULTS["floor_normal_tol_deg"],
+        range=(0.0, 90.0),
+        description="how far the plane fitted to a frame's floor pixels may lean from the cart's"
+        " up vector before that frame's floor pairs are thrown away whole; the camera's distance"
+        " to that plane must also land within the network's own band of the camera's height. The"
+        " report line counts the frames refused and prints the last plane's lean",
+        why="a table top, a ramp and a law that is wrong by a fifth all draw a plane the geometry"
+        " never meant, and pairs taken off it move every node they touch. 5 deg because the floor"
+        " pixels are selected by a height band that is already 12 cm wide at 2 m, which a lean of"
+        " 3-4 deg fits inside. It bites: on the tapes of 2026-09-15 it refused 8 of 12 frames on"
+        " run 0171's drive, 9 of 9 at the 11.1 deg pitch (where the floor is a shallow sliver at"
+        " the bottom of the picture and the plane through it is not identified), 7 of 14 at 25.8"
+        " and 1 of 10 at 40.9 deg, where the floor fills the frame (scratch/scale_field_eval.txt)",
+        on_when="lower it toward 2 on a floor known to be flat, to refuse everything but the"
+        " clean frames",
+        off_when="90 accepts every plane, which is the floor anchor as it behaved before the"
+        " gate: the A/B of what the gate is refusing",
+    ),
+    Flag(
         "parallax_weight",
         PARALLAX_WEIGHT,
         description="the multiplier on every parallax pair's own 1 / sigma^2 before it joins the"
@@ -792,6 +926,8 @@ class DepthStream(Node):
         self._ask_parallax_weight(float(self._switches["parallax_weight"]))  # and its vote
         self._ask_lidar_sigma(float(self._switches["lidar_sigma_m"]))  # and what a beam is worth
         self._ask_frame_shift(bool(self._switches["frame_shift_needs_beams"]))  # and the gate
+        self._ask_field()  # and the shape of the per-frame law: its grid and its two pulls
+        self._ask_floor()  # and what a floor pair is worth and when a floor is not a floor
         self._tally = Tally(STAGES)
         self._lean = LeanFeed(
             self,
@@ -903,6 +1039,10 @@ class DepthStream(Node):
             self._ask_lidar_sigma(float(new))
         elif name == "frame_shift_needs_beams":
             self._ask_frame_shift(bool(new))
+        elif name.startswith("field_"):
+            self._ask_field()
+        elif name.startswith("floor_") and name not in self._pipeline.switches:
+            self._ask_floor()
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
 
@@ -946,6 +1086,30 @@ class DepthStream(Node):
         stage = self._pipeline.stage("lidar_anchor")
         if isinstance(stage, LidarAnchor):
             stage.sigma_m = sigma_m
+
+    def _ask_field(self) -> None:
+        """Tell the per-frame law what shape it is: how many nodes it carries over the picture
+        and how hard each one is pulled toward the frame's global fit and toward its own last
+        value. A new grid starts every node again from the next frame's fit."""
+        stage = self._pipeline.stage("frame_law")
+        if not isinstance(stage, FrameLaw):
+            return
+        field = stage.field
+        field.prior = float(self._switches["field_prior"])
+        field.carry = float(self._switches["field_carry"])
+        field.carry_tau_s = float(self._switches["field_carry_tau_s"])
+        grid = grid_of(str(self._switches["field_grid"]))
+        if field.grid != grid:
+            field.grid = grid
+
+    def _ask_floor(self) -> None:
+        """Tell the floor anchor what the mount's pitch is trusted to (a floor pair's own sigma)
+        and how far the plane fitted to its pixels may lean before the frame's floor is
+        refused."""
+        stage = self._pipeline.stage("floor_pairs")
+        if isinstance(stage, FloorPairs):
+            stage.sigma_pitch_deg = float(self._switches["floor_sigma_pitch_deg"])
+            stage.normal_tol_deg = float(self._switches["floor_normal_tol_deg"])
 
     def _ask_frame_shift(self, needs_beams: bool) -> None:
         """Tell the per-frame law whether a shift needs the lidar in the pool that fits it; a
