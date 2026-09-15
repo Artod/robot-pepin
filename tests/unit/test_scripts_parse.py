@@ -4,6 +4,7 @@ The servo bench tools (jog, calibrate_neck, scan_bus, setup_motor_id) import
 lerobot, which pulls torch; they are left out to keep the unit tier fast.
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+PAN_REFERENCE = json.loads((REPO / "config/neck.json").read_text())["reference"]["pan_ticks"]
 BENCH = {"jog.py", "calibrate_neck.py", "scan_bus.py", "setup_motor_id.py"}
 SCRIPTS = sorted(p.name for p in (REPO / "scripts").glob("*.py") if p.name not in BENCH)
 
@@ -145,14 +147,14 @@ def test_neck_sh_asks_the_base_server_and_prints_ticks_and_degrees() -> None:
         )
 
     port, asked, thread = board(
-        [{"type": "neck", "pan_ticks": 1993, "tilt_ticks": 2311, "age_s": 0.01}]
+        [{"type": "neck", "pan_ticks": PAN_REFERENCE, "tilt_ticks": 2311, "age_s": 0.01}]
     )
     read = run_script(port, "read")
     thread.join(timeout=5)
     assert read.returncode == 0, read.stderr[-400:]
     assert asked == [{"cmd": "neck"}]
-    # the reference ticks of config/neck.json read as straight ahead (1993 since 2026-09-13)
-    assert "pan 1993 ticks (+0.0 deg left)" in read.stdout, read.stdout
+    # the reference ticks of config/neck.json read as straight ahead, whatever they are today
+    assert f"pan {PAN_REFERENCE} ticks (+0.0 deg left)" in read.stdout, read.stdout
     assert "tilt 2311 ticks (+23.8 deg down)" in read.stdout, read.stdout
 
     port, asked, thread = board(
