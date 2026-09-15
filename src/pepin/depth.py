@@ -576,13 +576,15 @@ def _bounded(
     a_lo, a_hi = a_bounds()
     b_lo, b_hi = B_BOUNDS
     if not (math.isfinite(a) and math.isfinite(b)):
-        return float(np.clip(weighted_median(y / x, weight), a_lo, a_hi)), 0.0  # a scale only
+        with np.errstate(divide="ignore", invalid="ignore"):  # a pair at depth 0 on both rulers
+            return float(np.clip(weighted_median(y / x, weight), a_lo, a_hi)), 0.0  # a scale only
     if a < a_lo or a > a_hi:
         a = a_lo if a < a_lo else a_hi
         b = float(np.clip(weighted_median(y - a * x, weight), b_lo, b_hi))
     elif b < b_lo or b > b_hi:
         b = b_lo if b < b_lo else b_hi
-        a = float(np.clip(weighted_median((y - b) / x, weight), a_lo, a_hi))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            a = float(np.clip(weighted_median((y - b) / x, weight), a_lo, a_hi))
     return a, b
 
 
@@ -709,6 +711,17 @@ def _irls(x: Array, y: Array, weight: Array | None = None) -> tuple[float, float
     return float(alpha), float(beta)
 
 
+def _finite(a: float, b: float) -> tuple[float, float] | None:
+    """``(a, b)`` when both are real numbers, ``None`` when either is not — "no law", which
+    every caller of a frame fit already handles (the frame is held, the field keeps the fit it
+    has). A law is NOT allowed to come back NaN: :func:`_bounded`'s last resort is a weighted
+    median of ``1 / z`` over ``1 / D``, which is NaN when more than half the pairs read a
+    non-positive corrected depth (the prior law turns those into NaN), and a NaN law reaches the
+    picture through a matrix product that does not skip a zero membership — one NaN node of nine
+    takes 100 % of the published pixels with it (scratch/_field_hazards.py, 2026-09-15)."""
+    return (a, b) if math.isfinite(a) and math.isfinite(b) else None
+
+
 def fit_frame(
     d: Array,
     z: Array,
@@ -716,7 +729,8 @@ def fit_frame(
     min_pairs: int = FRAME_MIN_PAIRS,
     min_spread: float = FRAME_MIN_SPREAD,
 ) -> tuple[float, float] | None:
-    """The law 1 / z = a / D + b of ONE frame's pairs, or ``None`` under ``min_pairs`` of them.
+    """The law 1 / z = a / D + b of ONE frame's pairs, or ``None`` under ``min_pairs`` of them
+    and ``None`` when the fit does not come back finite (:func:`_finite`).
     ``d`` is whatever depth the frame is to be corrected from — the raw network's, or a pool
     law's output, in which case the numbers that come back are that law's residual.
 
@@ -757,11 +771,11 @@ def fit_frame(
     x, y = 1.0 / d, 1.0 / z
     lo, hi = np.percentile(z, (5, 95))
     if not math.isfinite(hi / lo) or float(hi / lo) < min_spread:
-        return float(np.clip(weighted_median(y / x, weight), *a_bounds())), 0.0
+        return _finite(float(np.clip(weighted_median(y / x, weight), *a_bounds())), 0.0)
     alpha, beta = _irls(x, y, weight)
     with np.errstate(divide="ignore", invalid="ignore"):
         a, b = float(np.divide(1.0, alpha)), float(np.divide(-beta, alpha))
-    return _bounded(a, b, x, y, weight)
+    return _finite(*_bounded(a, b, x, y, weight))
 
 
 # ---- the same fit over one patch of the picture, held by what it knows already -----------------
@@ -825,7 +839,8 @@ def fit_node(
     """The law ``1 / z = a / D + b`` of ONE NODE of a scale field: the same regression as
     :func:`fit_frame` on the pairs that belong to the node, held by pseudo-observations that
     say what the node should be where its own pairs say little. ``None`` when nothing at all
-    constrains it (no pairs and no priors).
+    constrains it (no pairs and no priors) and when the fit does not come back finite
+    (:func:`_finite`) — a NaN node poisons every pixel of the picture, not only its own.
 
     ``priors`` are (a, b, weight) laws to be pulled toward — the frame's own global fit, and
     the node's previous value decayed by the time since. Each enters the fit as two extra ROWS
@@ -874,7 +889,7 @@ def fit_node(
     alpha, beta = _weighted_line(x, y, base, shift and x.size >= 2)
     with np.errstate(divide="ignore", invalid="ignore"):
         a, b = float(np.divide(1.0, alpha)), float(np.divide(-beta, alpha))
-    return _bounded(a, b, x, y, base)
+    return _finite(*_bounded(a, b, x, y, base))
 
 
 # ---- the same pairs read as a curve over the network's range ----------------------------------
