@@ -39,17 +39,24 @@ ekf_filter_node:
     # The message's number is right; the message's VALUE is not. The base server reports v and w
     # as the twist it was COMMANDED to apply (base_server.py:466 copies self.twist, whatever
     # /cmd_vel last asked for), while x/y/theta ARE integrated wheel travel. Fusing index 11
-    # today would feed the controller's own output back into the filter as a heading sensor.
-    # The same sentence applies to index 6, which IS fused: the EKF's forward speed is the
-    # commanded one, not a measured one (found 2026-09-15).
-    # TO TURN IT ON, in this order: (1) make the bridge that actually runs on the board publish a
-    # measured twist -- pepin.odometry.TwistFromPose differences two consecutive wheel poses and
-    # the Python bridge already uses it behind ``odom_twist_source`` (default "measured"), the
-    # C++ bridge (pepin_base_cpp/src/base_bridge.cpp:173) still publishes state.v/state.w;
-    # (2) flip the index-11 false below to true. Nothing else changes: the covariance is already
-    # the measured one, and at 0.01 against the gyro's 0.0004 the wheels carry 4 % of the gyro's
-    # weight per sample (1.7 % per second: 20 Hz against the gyro's 47) -- a heading that
-    # survives the gyro dying, and changes nothing while it lives.
+    # would feed the controller's own output back into the filter as a heading sensor. The same
+    # sentence applied to index 6, which IS fused: the EKF's forward speed was the commanded one,
+    # not a measured one (found 2026-09-15).
+    # FIXED IN THE CODE ON 2026-09-15, NOT YET PROVEN ON THE ROBOT. Both bridges now difference
+    # two consecutive wheel poses into the twist they publish -- pepin.odometry.TwistFromPose and
+    # its C++ twin pepin_base_cpp/include/pepin_base_cpp/twist_from_pose.hpp -- behind
+    # ``odom_twist_source`` (default "measured"; "commanded" is the old behaviour, one
+    # ``ros2 param set /base_bridge odom_twist_source commanded`` away, no restart). A board
+    # still running a binary built before that date publishes the command.
+    # TO TURN IT ON (index 11), in this order: (1) deploy that bridge and read its link-up line,
+    # which ends in "odom twist: measured"; (2) drive one tape and compare /odom's twist.angular.z
+    # with /imu/data_raw's yaw rate over the same intervals -- it must track the gyro the way /odom's
+    # differenced theta already does (within a few per cent, residual RMS ~0.1 rad/s), and it must
+    # be non-zero while the cart is pushed by hand with /cmd_vel at zero, which is the whole point
+    # of the change; (3) only then flip the index-11 false below to true. Nothing else changes:
+    # the covariance is already the measured one, and at 0.01 against the gyro's 0.0004 the wheels
+    # carry 4 % of the gyro's weight per sample (1.7 % per second: 20 Hz against the gyro's 47) --
+    # a heading that survives the gyro dying, and changes nothing while it lives.
     # TWO WARNINGS ON THAT 0.01, BOTH FOUND BY RE-RUNNING THE SCRIPT ON 2026-09-15.
     # (a) It is the spread's p90, not its middle: per-tape the residual RMS runs 0.016 to 0.107
     # rad/s (variance 0.0003 to 0.0114) across the 2026-09-14 tapes. 0.01 is the pessimistic end,
