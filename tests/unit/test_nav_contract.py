@@ -504,6 +504,27 @@ def test_both_doors_to_a_goal_open_the_numbered_tape() -> None:
     assert "--no-tape" in script and "PEPIN_GOTO_TAPE" in script
 
 
+def test_goto_judges_online_slam_on_the_map_frame_not_on_a_fit() -> None:
+    """goto's localisation gate asked two services the board does not run in online SLAM
+    (/where_am_i, /relocalize — pepin.deployment.runs_here keeps the relocalizer off where there
+    is no saved map to match against), so it refused both goals of the 2026-09-14 20:00 session
+    after ten seconds of waiting for absent services, whatever the map was doing. In that mode
+    the evidence is the map frame itself: pepin_bringup.slam_frame broadcasts map -> odom at
+    10 Hz on the board, and a frame younger than a second is what a goal is judged on."""
+    goto = sf.tree("ros/tools/goto_ros.py")
+    defined = {f.name for f in ast.walk(goto) if isinstance(f, ast.FunctionDef)}
+    assert {"tracker_here", "map_frame_age_s"} <= defined, (
+        "the two halves of the gate: is there a tracker, and is the map frame fresh"
+    )
+    gate = next(
+        f for f in ast.walk(goto) if isinstance(f, ast.FunctionDef) and f.name == "ensure_localized"
+    )
+    body = ast.unparse(gate)
+    assert "tracker_here(nav)" in body, "ask whether a tracker exists BEFORE asking it anything"
+    assert "map_frame_age_s(nav)" in body and "MAP_FRAME_FRESH_S" in body
+    assert "map -> base_link" in " ".join(sf.strings(goto)), "the log must name what was judged"
+
+
 def test_one_recorder_writes_a_drive_not_two() -> None:
     """ros/goto.sh started ros/tools/session_logger.py for every drive while the board's run
     recorder was already subscribed to the same topics: two rclpy processes turning the same
@@ -2131,6 +2152,13 @@ def test_online_slam_has_one_map_and_one_owner_of_map_to_odom() -> None:
     assert camera_only["Grid/RayTracing"] == "true", "or free space stays unknown"
     assert float(str(camera_only["Grid/RangeMax"])) <= 3.5
     assert camera_only["RGBD/NeighborLinkRefining"] == "false"
+    # ...and with no scan in a node there is nothing for ICP to register: the common table's
+    # Reg/Strategy 1 would fail every loop closure and every proximity link before it was
+    # scored, leaving dead reckoning with a database. rtabmap_ros does not catch this — its one
+    # scan-aware ICP rule fires when a scan IS subscribed.
+    assert _rtabmap("RTABMAP")["Reg/Strategy"] == "1", "ICP wherever the lidar is in the node"
+    assert camera_only["Reg/Strategy"] == "0", "Vis: the depth gives the words their 3D positions"
+    assert "Reg/Strategy" not in lidar, "the lidar mode keeps the common table's ICP"
     for table in (lidar, camera_only):
         assert table["Grid/3D"] == "false", "Nav2's static layer reads a 2D grid"
     common = _rtabmap("RTABMAP")

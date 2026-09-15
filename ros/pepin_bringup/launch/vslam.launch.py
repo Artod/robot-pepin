@@ -221,8 +221,19 @@ SLAM_LIDAR = {
 # becomes free space instead of unknown, and capped at 3 m because that is where this network's
 # scale stops being a measurement. Neighbour links are NOT refined here — ICP on a cloud whose
 # scale drifts would push the odometry it is meant to correct.
+#   THE REGISTRATION HAS TO BE VISUAL HERE. The common table asks for ICP (Reg/Strategy 1)
+# because everywhere else a 2D scan is what makes two nodes metric. Without the lidar there is no
+# scan in a node at all, and rtabmap_ros does not notice: its only scan-aware rule about ICP sets
+# RGBD/ProximityPathMaxNeighbors, and it fires when a scan IS subscribed (rtabmap_slam's
+# CoreWrapper). So ICP would be asked to register two point clouds that do not exist — every loop
+# closure and every proximity link fails before it is scored, the graph can never be corrected,
+# and the session is dead reckoning with a database. Reg/Strategy 0 is RTAB-Map's own RGB-D
+# default: the words are matched and their 3D positions come from the depth image, which is the
+# one thing this mode does have. It is also why KNOWN_MAP's note about visual registration
+# failing ("old=0 features") does not apply — that is ICP-only memory keeping no 3D words.
 SLAM_CAMERA_ONLY = {
     "subscribe_scan": False,
+    "Reg/Strategy": "0",  # Vis: there is no scan to run ICP on
     "Grid/Sensor": "1",
     "Grid/3D": "false",
     "Grid/RangeMax": "3.0",

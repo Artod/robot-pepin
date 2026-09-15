@@ -42,6 +42,15 @@ from pepin.runlink import (
     stop_command,
 )
 
+# How long the tracker's service is given to appear before this client decides the board is in
+# online SLAM and runs no tracker at all (pepin.deployment.runs_here). The same 5 s every other
+# service wait here uses: over the bridge a client that gives up sooner gives up on a live board.
+TRACKER_PATIENCE_S = 5.0
+# ...and how old the map frame may be there. pepin_bringup.slam_frame re-stamps the correction at
+# 10 Hz, so anything past a tenth of a second means that node is not running; 1 s is Nav2's own
+# order of patience for the frame it plans in.
+MAP_FRAME_FRESH_S = 1.0
+
 LOST_FIT, LOST_FOR_S = 0.30, 15.0  # fit below this for this long...
 LOST_TRAVEL_M = 1.0  # ...while the wheels carried it this far: that is driving blind. Spinning on a
 # stuck wheel with a lost fit is not — the recoveries (odom frame) can still work it free.
@@ -192,9 +201,74 @@ def mark_place(nav: BasicNavigator, path: Path, name: str) -> str:
     )
 
 
+def tracker_here(nav: BasicNavigator, timeout_s: float = TRACKER_PATIENCE_S) -> bool:
+    """Whether the board runs the scan-matching tracker (``/where_am_i`` answers within
+    ``timeout_s``). False in online SLAM: there is no saved map to match a scan against, so
+    pepin.deployment.runs_here keeps the relocalizer off and neither of its services exists."""
+    return bool(nav.create_client(Trigger, "/where_am_i").wait_for_service(timeout_sec=timeout_s))
+
+
+def map_frame_age_s(nav: BasicNavigator, wait_s: float = 5.0) -> float | None:
+    """Age in seconds of the newest ``map -> base_link`` transform, None while there is none.
+
+    This is the whole localisation evidence online SLAM has: no tracker runs, so no fit is
+    published, and what says the cart has a place in the map is that the frame exists at all —
+    pepin_bringup.slam_frame broadcasts it on the board at 10 Hz from the laptop's correction
+    (identity until RTAB-Map's first graph, which is the truth at the start of a session).
+    """
+    from rclpy.time import Time
+    from tf2_ros import Buffer, TransformException, TransformListener
+
+    buffer = Buffer()
+    listener = TransformListener(buffer, nav)  # named: the subscription dies with the reference
+    deadline = time.monotonic() + wait_s
+    age: float | None = None
+    while time.monotonic() < deadline:
+        rclpy.spin_once(nav, timeout_sec=0.1)
+        try:
+            heard = buffer.lookup_transform("map", "base_link", Time())
+        except TransformException:
+            continue
+        stamp = Time.from_msg(heard.header.stamp)
+        age = float((nav.get_clock().now() - stamp).nanoseconds) * 1e-9
+        break
+    del listener
+    return age
+
+
 def ensure_localized(nav: BasicNavigator) -> bool:
     """A weak fit before driving (the robot was carried, or just switched on) gets one whole-map
-    search first; drive only when the scan fits the map."""
+    search first; drive only when the scan fits the map.
+
+    In online SLAM there is neither: the map is being built on the laptop and the board runs no
+    tracker, so ``/where_am_i`` and ``/relocalize`` do not exist and this check used to refuse
+    every goal of the mode after ten seconds of waiting for two absent services ("fit nan:
+    searching the whole map first..." then "not localized", 2026-09-14 20:03 and 20:04). What is
+    judged there instead is the map frame's own freshness — see :func:`map_frame_age_s`; a drive
+    whose correction then goes stale is cut by the goal server's own watch (pepin.watch).
+    """
+    if not tracker_here(nav):
+        age = map_frame_age_s(nav)
+        if age is None:
+            print(
+                "no /where_am_i and no map -> base_link: neither the tracker (a known map) nor"
+                " the SLAM frame (ros/thin.sh slam) is up on the board",
+                flush=True,
+            )
+            return False
+        if age > MAP_FRAME_FRESH_S:
+            print(
+                f"online SLAM: map -> base_link is {age:.1f} s old (over {MAP_FRAME_FRESH_S:.1f}"
+                " s): the board's slam_frame is not broadcasting",
+                flush=True,
+            )
+            return False
+        print(
+            f"localized: online SLAM, map -> base_link {age * 1e3:.0f} ms old"
+            " (no fit here — no tracker matches a scan against a map still being built)",
+            flush=True,
+        )
+        return True
     pose = where_am_i(nav)
     if pose is not None and pose[3] >= 0.45:
         print(f"localized: fit {pose[3]:.2f}", flush=True)
@@ -238,7 +312,13 @@ def describe(x: float, y: float, yaw_deg: float, home: dict[str, float] | None =
 
 
 def arrival(nav: BasicNavigator, x: float, y: float, yaw_deg: float) -> str:
-    """Where the tracker says the robot ended, against the goal."""
+    """Where the tracker says the robot ended, against the goal; in online SLAM, where no tracker
+    runs, the map frame's own word (map -> base_link) with no fit beside it."""
+    if not tracker_here(nav, timeout_s=1.0):
+        age = map_frame_age_s(nav, wait_s=2.0)
+        return "arrival: online SLAM, no tracker to ask" + (
+            f"; map -> base_link {age * 1e3:.0f} ms old" if age is not None else "; no map frame"
+        )
     pose = where_am_i(nav)
     if pose is None:
         return "arrival: the relocalizer is not answering"
