@@ -167,6 +167,7 @@ def test_a_route_that_carries_nothing_restarts_the_bridge_alone(monkeypatch: Any
 def test_a_silence_that_survives_the_restart_escalates_to_the_half(monkeypatch: Any) -> None:
     repair = FakeRepair()
     node, admin, codes = build(monkeypatch, repair)
+    node._switches.set("half_restart", True)  # the old escalation, asked for explicitly
     drive(node, admin, [0.0, 20.0], messages=0)
     assert repair.restarts == 1
     drive(node, admin, [30.0, 60.0, 100.0], messages=0)  # inside the cooldown: nothing happens
