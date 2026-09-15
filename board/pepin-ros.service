@@ -38,7 +38,18 @@ ExecStartPre=-/usr/bin/docker rm -f pepin-ros
 ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} slam_toolbox:=${PEPIN_SLAM_TOOLBOX} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK} side:=${PEPIN_SIDE}
 # ros2 launch needs more than 5 s to bring a dozen nodes down on this board; a SIGKILL (137)
 # after the grace period is still a normal stop, not a failure.
-ExecStop=/usr/bin/docker stop -t 15 pepin-ros
+# The container's stop signal is SIGINT (ros/run.sh, ros/Dockerfile), which the launch answers by
+# shutting its nodes down — the 30 s here is the launch's own sigterm_timeout, so on a
+# `systemctl restart pepin-ros` every node gets the whole window to finish its write (the run
+# recorder's tape, /maps/last_pose.json) instead of the SIGKILL that used to end it.
+# TimeoutStopSec must stay ABOVE that window: when it expires systemd stops waiting for ExecStop
+# and starts killing the unit's own cgroup, which cuts the `docker run` client off mid-stop.
+ExecStop=/usr/bin/docker stop -t 30 pepin-ros
+TimeoutStopSec=45
+# The nodes are docker's children, not this cgroup's: the only process systemd owns here is the
+# `docker run` client, and it must not be signalled while ExecStop is still stopping the
+# container. mixed = SIGTERM to that client alone, SIGKILL to the rest only after the timeout.
+KillMode=mixed
 SuccessExitStatus=137
 Restart=on-failure
 RestartSec=5

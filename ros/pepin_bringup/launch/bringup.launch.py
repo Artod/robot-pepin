@@ -19,10 +19,29 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    SetLaunchConfiguration,
+)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
+
+from pepin.deployment import CONTAINER_STOP_TIMEOUT_S
+
+# How long a node of this launch is given to end on SIGINT before the launch escalates to
+# SIGTERM, and then how long before SIGKILL. launch's own defaults are 5 s and 5 s, which is
+# under RTAB-Map's close of a 20-28 GB database and under the board's dozen nodes leaving DDS:
+# every shutdown ended in SIGKILLs mid-write, and eight of them left ros/maps/rtabmap.db
+# malformed (2026-09-13). The window is the container's own stop window
+# (pepin.deployment.CONTAINER_STOP_TIMEOUT_S, ros/lib.sh, board/pepin-ros.service), so on a
+# `docker stop` nothing inside escalates before docker's SIGKILL at its end, and on a shutdown
+# from inside (the bridge watch's exit) the nodes get the same seconds.
+SHUTDOWN = [
+    SetLaunchConfiguration("sigterm_timeout", str(CONTAINER_STOP_TIMEOUT_S)),
+    SetLaunchConfiguration("sigkill_timeout", "5"),
+]
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -61,6 +80,7 @@ def generate_launch_description() -> LaunchDescription:
     )
     return LaunchDescription(
         [
+            *SHUTDOWN,  # before the includes: a scoped include inherits what is set above it
             DeclareLaunchArgument("nav", default_value="false"),
             DeclareLaunchArgument("side", default_value="all"),  # all | board | laptop
             DeclareLaunchArgument("slam", default_value="false"),  # online SLAM: implies nav

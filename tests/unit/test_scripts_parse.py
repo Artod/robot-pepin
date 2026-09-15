@@ -813,3 +813,66 @@ def test_a_flag_off_its_default_is_seen_but_never_fails_the_run(tmp_path) -> Non
     assert "WARN 3.1" in out and "relocalizer/sources lidar,camera (default lidar)" in out
     assert "flags.sh drift laptop" in sent
     assert "green: " in out
+
+
+def _uncommented(rel: str) -> str:
+    """A script's lines with the whole-line comments dropped: what it DOES, not what it says."""
+    return "\n".join(
+        line for line in (REPO / rel).read_text().splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def test_there_is_one_way_to_stop_a_container_and_it_is_gentle() -> None:
+    """Every stop of a container on this laptop goes through ros/lib.sh's helper, which sends the
+    container's stop signal (SIGINT, what ros2 launch answers by shutting its nodes down) and
+    waits the repo's one window. A bare `docker stop`, `docker kill` or `docker rm -f` next to it
+    would be the SIGKILL mid-write that made ros/maps/rtabmap.db malformed on 2026-09-13."""
+    from pepin.deployment import CONTAINER_STOP_TIMEOUT_S
+
+    lib = _uncommented("ros/lib.sh")
+    assert 'docker stop -t "$PEPIN_STOP_TIMEOUT_S"' in lib
+    assert f'PEPIN_STOP_TIMEOUT_S="${{PEPIN_STOP_TIMEOUT_S:-{CONTAINER_STOP_TIMEOUT_S}}}"' in lib, (
+        "ros/lib.sh and pepin.deployment.CONTAINER_STOP_TIMEOUT_S must be the same number"
+    )
+    # pepin_remove_container stops before it removes, so the rm is never what ends the process.
+    remove = lib[lib.index("pepin_remove_container()") :]
+    assert remove.index("pepin_stop_container") < remove.index("docker rm -f")
+
+    for script in sorted(p.name for p in (REPO / "ros").glob("*.sh")):
+        code = _uncommented(f"ros/{script}")
+        for verb in ("docker stop", "docker kill", "docker rm -f"):
+            if verb not in code:
+                continue
+            assert script in {"lib.sh", "thin.sh"}, (
+                f"ros/{script} runs `{verb}` itself; use pepin_stop_container /"
+                " pepin_remove_container from ros/lib.sh"
+            )
+    # thin.sh's one `docker rm -f` is on the BOARD over ssh, after its unit's own gentle ExecStop,
+    # and the container it names is the bridge sidecar — nothing of ours writes a file in it.
+    thin = _uncommented("ros/thin.sh")
+    assert "systemctl disable --now pepin-bridge" in thin and "docker rm -f zenoh-bridge" in thin
+
+
+def test_the_board_s_containers_answer_sigint_and_the_unit_waits_for_them() -> None:
+    """`systemctl restart pepin-ros` must not be a SIGKILL. The container carries SIGINT as its
+    stop signal (the image's STOPSIGNAL and the run line's flag), the unit's ExecStop gives it the
+    repo's window, and TimeoutStopSec stays above that window — when it expires systemd stops
+    waiting for ExecStop and kills the cgroup the `docker run` client sits in."""
+    import re
+
+    from pepin.deployment import CONTAINER_STOP_TIMEOUT_S
+
+    assert "STOPSIGNAL SIGINT" in (REPO / "ros/Dockerfile").read_text()
+    run = _uncommented("ros/run.sh")
+    assert "--stop-signal SIGINT" in run
+
+    unit = (REPO / "board/pepin-ros.service").read_text()
+    stop = re.search(r"^ExecStop=.*docker stop -t (\d+) pepin-ros", unit, re.M)
+    assert stop is not None and int(stop.group(1)) == CONTAINER_STOP_TIMEOUT_S
+    timeout = re.search(r"^TimeoutStopSec=(\d+)", unit, re.M)
+    assert timeout is not None and int(timeout.group(1)) > int(stop.group(1)), (
+        "systemd must outwait the docker stop it runs, or it kills the client mid-stop"
+    )
+    assert re.search(r"^KillMode=mixed", unit, re.M), (
+        "the nodes are docker's children, not this cgroup's"
+    )

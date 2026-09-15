@@ -9,6 +9,26 @@ ssh() { command ssh $PEPIN_SSH_OPTS "$@"; }
 scp() { command scp $PEPIN_SSH_OPTS "$@"; }
 export RSYNC_RSH="ssh $PEPIN_SSH_OPTS"
 
+# The one way to stop a container here; no ros/*.sh calls `docker stop`, `docker kill` or
+# `docker rm -f` on its own. `docker stop` sends the container's STOPSIGNAL, which is SIGINT for
+# everything built from ros/Dockerfile (and passed again as --stop-signal by the docker run
+# lines, so a container started from another image is gentle too): SIGINT is the signal ros2
+# launch answers by shutting its nodes down, while SIGTERM it answers by cancelling itself and
+# the nodes are SIGKILLed mid-write. That difference is how ros/maps/rtabmap.db was made
+# malformed (2026-09-13, eight kills of a crash loop; a torn page read on 2026-09-15).
+# The window is pepin.deployment.CONTAINER_STOP_TIMEOUT_S seconds — RTAB-Map closing 20-28 GB of
+# visual memory is the slowest thing in it — and docker SIGKILLs at its end, which is why the
+# database is also configured to survive a kill (DbSqlite3/JournalMode in vslam.launch.py).
+PEPIN_STOP_TIMEOUT_S="${PEPIN_STOP_TIMEOUT_S:-30}"  # = pepin.deployment.CONTAINER_STOP_TIMEOUT_S
+pepin_stop_container() {  # NAME...: stop gently, leave the stopped container (a unit keeps its log)
+    [ "$#" -gt 0 ] || return 0
+    docker stop -t "$PEPIN_STOP_TIMEOUT_S" "$@" >/dev/null 2>&1 || true
+}
+pepin_remove_container() {  # NAME...: stop gently, then remove — a container about to be replaced
+    pepin_stop_container "$@"
+    docker rm -f "$@" >/dev/null 2>&1 || true
+}
+
 # What the robot is thinking, printed inline while a script drives it: goals, planner and
 # controller verdicts, recoveries (spin/backup/wait), AMCL and relocalizer lines, local time.
 # watch_start once before driving, watch_stop at the end (ros/watch.sh is the same view alone).

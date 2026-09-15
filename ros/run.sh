@@ -18,8 +18,13 @@ I2C=""
 [ -e /dev/i2c-2 ] && I2C="--device /dev/i2c-2"
 # shellcheck disable=SC2086
 # Not auto-removed: a stopped container keeps its log until the unit's ExecStartPre has saved it.
+# --stop-signal SIGINT beside the image's own STOPSIGNAL (ros/Dockerfile): SIGINT is what ros2
+# launch answers by shutting its nodes down, SIGTERM it answers by cancelling itself and the
+# nodes are SIGKILLed mid-write — every stop of this container used to end in the 137 the unit
+# still tolerates. The window is board/pepin-ros.service's ExecStop, ros/lib.sh's number.
 exec docker run $TTY \
     --network host --ipc host --cap-add SYS_NICE \
+    --stop-signal SIGINT \
     --device "$LIDAR:/dev/lidar" $I2C \
     -v "$HERE/pepin_bringup/pepin_bringup:$SITE:ro" \
     -v "$HERE/pepin_bringup/launch:/ws/install/pepin_bringup/share/pepin_bringup/launch:ro" \

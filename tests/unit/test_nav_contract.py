@@ -767,8 +767,11 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
     container = sf.keywords(sf.calls_to(nav, "ComposableNodeContainer")[0])
     assert ast.unparse(container["name"]).startswith("f'nav2_container_{side}' if side != 'all'")
     laptop = (REPO / "ros/laptop.sh").read_text()
-    assert "docker stop -t 15" in laptop and "docker rm -f pepin-vslam" not in laptop
-    assert "docker rm -f pepin-laptop" not in laptop
+    # The stop itself is ros/lib.sh's now (one way to stop a container, one window); what this
+    # contract still owns is that nothing here removes a container without stopping it first.
+    assert "pepin_remove_container pepin-vslam" in laptop
+    acted = "\n".join(ln for ln in laptop.splitlines() if not ln.lstrip().startswith("#"))
+    assert "docker rm -f" not in acted and "docker stop" not in acted
     # `docker stop` sends the container's stop signal: SIGINT is the one the launch answers by
     # shutting its nodes down (SIGTERM it answers by cancelling itself and the nodes are
     # SIGKILLed without a dispose — the ghost on every container stop). A run wrapped over
@@ -2451,3 +2454,36 @@ def test_the_camera_odometry_crosses_to_the_board_and_never_back() -> None:
             assert not re.compile(block[0]).search("/vo/raw"), (
                 f"{mode}: rgbd_odometry's raw output stays on the laptop"
             )
+
+
+def test_the_visual_memory_survives_a_kill_and_the_launches_wait_for_it_to_close() -> None:
+    """RTAB-Map's database is the map beside a known map, and 0.22.1's own defaults lose it to a
+    SIGKILL: the rollback journal lives in RAM (JournalMode 3 = MEMORY) and nothing is ever
+    flushed (Synchronous 0 = OFF), so a killed process leaves a torn file — which is what
+    ros/maps/rtabmap.db became on 2026-09-13. Two halves of the fix, and a contract on each:
+    an on-disk journal so a kill is survivable, and a shutdown long enough that a stop is not a
+    kill in the first place (launch escalates to SIGTERM after 5 s by default, and a 20-28 GB
+    database does not close in five seconds)."""
+    from pepin.deployment import CONTAINER_STOP_TIMEOUT_S
+
+    table = _rtabmap("RTABMAP")
+    assert table["DbSqlite3/JournalMode"] in {"0", "1"}, (
+        "MEMORY (3, the default), PERSIST and OFF all lose the journal a rollback needs"
+    )
+    assert table["DbSqlite3/Synchronous"] in {"1", "2"}, "0 = OFF never reaches the disk"
+
+    for path in (VSLAM_LAUNCH, NAV_LAUNCH, "ros/pepin_bringup/launch/bringup.launch.py"):
+        launch = sf.tree(path)
+        budget = {
+            ast.literal_eval(call.args[0]): ast.unparse(call.args[1])
+            for call in sf.calls_to(launch, "SetLaunchConfiguration")
+            if len(call.args) == 2 and isinstance(call.args[0], ast.Constant)
+        }
+        assert budget.keys() >= {"sigterm_timeout", "sigkill_timeout"}, path
+        # The constant itself, not a copy of today's value: one number for the whole stop path.
+        assert budget["sigterm_timeout"] == "str(CONTAINER_STOP_TIMEOUT_S)", path
+        assert 0 < float(ast.literal_eval(budget["sigkill_timeout"])) <= CONTAINER_STOP_TIMEOUT_S, (
+            path
+        )
+        first = ast.unparse(sf.calls_to(launch, "LaunchDescription")[0].args[0].elts[0])
+        assert first == "*SHUTDOWN", f"{path}: the budget must be set before anything it covers"

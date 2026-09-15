@@ -54,8 +54,9 @@ settle_bridge() {
 # containers run with --stop-signal SIGINT, the signal the launch answers by shutting its nodes
 # down (SIGTERM it answers by cancelling itself, and the nodes were SIGKILLed without a dispose:
 # their names lingered in the bridge for the DDS lease on every stop). The launch's ghost wait
-# (pepin_bringup.ghost_wait) still covers whatever a crash left behind.
-stop_gently() { docker stop -t 15 "$@" >/dev/null 2>&1 || true; docker rm -f "$@" >/dev/null 2>&1 || true; }
+# (pepin_bringup.ghost_wait) still covers whatever a crash left behind. The window and the
+# signal are ros/lib.sh's, the same ones board/pepin-ros.service and the launches use; the 15 s
+# this used to spend was under RTAB-Map's own close of a 20 GB database.
 # The laptop image (ros/laptop-build.sh) carries RTAB-Map on top of the board's image.
 image() { docker image inspect pepin-laptop:latest >/dev/null 2>&1 && echo pepin-laptop || echo pepin-ros; }
 # The nodes a kick can reach here, the container each lives in and the line it prints once up
@@ -97,7 +98,7 @@ MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/pyth
         -v /var/run/docker.sock:/var/run/docker.sock)
 case "${1:-start}" in
     stop)
-        stop_gently pepin-laptop pepin-vslam; docker rm -f pepin-zenoh >/dev/null 2>&1 || true
+        pepin_remove_container pepin-laptop pepin-vslam pepin-zenoh
         [ "${PEPIN_DEPTH_HOST:-}" = 0 ] || "$HERE/depth_host.sh" stop
         echo "laptop side stopped"; exit 0 ;;
     logs)
@@ -180,7 +181,7 @@ case "${1:-start}" in
             rm -f "$HERE"/maps/rtabmap.db "$HERE"/maps/rtabmap.db-*
             echo "vslam: ros/maps/rtabmap.db deleted; RTAB-Map starts an empty map"
         fi
-        stop_gently pepin-vslam
+        pepin_remove_container pepin-vslam
         # The depth network on the laptop's GPU (ros/depth_host.sh): 20 ms a frame on Metal
         # against 170 ms on the CPU in the container (2026-09-11), so it is on wherever it can
         # run (depth_host_wanted). The node reads PEPIN_DEPTH_BACKEND (auto: the service, the
@@ -233,7 +234,7 @@ fi
 # The mode the board is in, recorded for `ros/laptop.sh vslam`, which never asks the board itself.
 printf '%s\n' "$MODE" > "$HERE/.mode"
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
-stop_gently pepin-laptop; docker rm -f pepin-zenoh >/dev/null 2>&1 || true
+pepin_remove_container pepin-laptop pepin-zenoh
 # The board's bridge must be alive before this side connects: its REST admin answers when its
 # zenoh runtime does (a wedged bridge stays "Up" and answers nothing — 2026-09-09).
 for _ in $(seq 1 30); do

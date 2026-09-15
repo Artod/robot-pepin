@@ -24,6 +24,15 @@ MAP_NODES = ("map_server",)  # the map is served from the board: the tracker nee
 HEARTBEAT_TOPIC = "laptop/heartbeat"
 HEARTBEAT_HZ = 2.0
 
+# How long a container of this robot is given to stop before it is killed, everywhere: ros/lib.sh
+# (pepin_stop_container, which every ros/*.sh goes through), board/pepin-ros.service's ExecStop,
+# the launches' sigterm_timeout (ros/pepin_bringup/launch/*.launch.py) and the bridge watch's
+# own repair (pepin_bringup.bridge_watch). The slowest thing inside that window is RTAB-Map
+# closing its database: 20-28 GB of visual memory, and the 5 s a launch escalates in by default
+# is not enough for it. Eight SIGKILLs of a crash loop on 2026-09-13 left ros/maps/rtabmap.db
+# "database disk image is malformed" — the window is what keeps a stop from being the ninth.
+CONTAINER_STOP_TIMEOUT_S = 30
+
 # The camera's own odometry (rtabmap_odom's rgbd_odometry, gated by pepin_bringup.visual_odometry
 # on the laptop) on its way to the board's EKF, which fuses it as odom1 (ros/params/ekf.yaml).
 # The laptop's, by CLAUDE.md rule 20: it consumes the camera, it costs a quarter of a core at
