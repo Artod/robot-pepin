@@ -583,8 +583,28 @@ was measured in, or says `default by design, unmeasured` when there is none — 
 argues from taste. Switches live here; the numbers that are not switches (the lidar's mount,
 the camera's intrinsics, the fusion band) live in `config/*.json` and are read at start.
 
+**Muting a sensor live.** A sensor is switched off where it is *published*, by a flag of the node
+that publishes it, so the message simply stops and every consumer meets what a dead sensor looks
+like — silence, an EKF's `sensor_timeout`, a transform that stops moving — with nothing
+restarted and no other live flag lost. `ros/sensor.sh mute imu|odom|vo|camera|graph|lidar` and
+`ros/sensor.sh unmute ...` do it in one command and print what to expect; `ros/sensor.sh status`
+lists each sensor's mute state. The flags behind them: `base_bridge` `imu_publish` and
+`odom_publish` (the board's bridge; `odom_publish` takes the `odom -> base_link` transform with
+it, because a transform still broadcast from a silent `/odom` is a state no sensor failure
+produces), `visual_odometry` `vo_publish`, `laptop_localizer` `camera_sources` (emptied: the
+camera's scans stop being matched and `/localization/measurement` stops, though the frames
+themselves keep flowing — `depth_stream` has no publish switch), `rtabmap_frame`
+`graph_measurement`. The lidar has none: our own node in its chain is `scan_filter`
+(laser_filters, external), and a relay on the board that could drop `/scan` is what CLAUDE.md
+rule 20 refuses — so `mute lidar` is the consumer set instead (the tracker's `sources` without
+`lidar`, `lidar_layer` off on both costmaps, which is `ros/sensor.sh lidar off`), and
+`ros/sensor.sh lidar off --hard` is the real absence of a scan. The old way — `ros/feature.sh
+imu off` — restarts the board stack: a minute, and every live flag on it back to its default.
+
 | node | flag | kind | default | live | description |
 | --- | --- | --- | --- | --- | --- |
+| `base_bridge` | `imu_publish` | bool | on | yes | the MPU6050's readings leave the bridge as /imu/data_raw, where the EKF fuses index 11 (the yaw rate) and nothing else; off, the chip is still read and its bias still estimated, but no message is published. THE PYTHON BRIDGE PUBLISHES NO IMU AT ALL — here the flag only exists so the node's table is the same table whichever bridge robot.launch.py started; the C++ bridge is the one that reads the chip |
+| `base_bridge` | `odom_publish` | bool | on | yes | the base server's state line leaves the bridge as /odom and, while publish_tf is on, as the odom -> base_link transform; off, the wheels are still read and still commanded, and both go silent together — a transform still broadcast from a silent /odom is a state no sensor failure produces |
 | `bridge_watch` | `flow_watch` | bool | on | yes | count the messages of every topic that should arrive on this side and repair a topic that carries nothing; off, this watch sees only the board bridge's identity and its route count, as before |
 | `bridge_watch` | `flow_silence_s` | number 5..300 | 20.0 | yes | seconds a topic both bridges say should flow may carry nothing before it counts as a dead route |
 | `bridge_watch` | `dead_routes` | bool | on | yes | a route wired at both ends and missing its own DDS endpoint — a pub route with local publishers and a remote route but no dds_reader, a sub route with local subscribers and a remote route but no dds_writer — is repaired without waiting for the silence to be counted; off, only the message counters of flow_watch can find it |
@@ -714,6 +734,19 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 | `visual_odometry` | `vo_publish_hz` | number 0..30 | 10.0 | yes | how often a gated pose may leave for the board's EKF, in hertz; 0 publishes every one of them |
 
 ### The flags one by one
+
+#### `base_bridge`
+
+- **`imu_publish`** — bool, default on
+  - *What:* the MPU6050's readings leave the bridge as /imu/data_raw, where the EKF fuses index 11 (the yaw rate) and nothing else; off, the chip is still read and its bias still estimated, but no message is published. THE PYTHON BRIDGE PUBLISHES NO IMU AT ALL — here the flag only exists so the node's table is the same table whichever bridge robot.launch.py started; the C++ bridge is the one that reads the chip
+  - *Default:* on — on, because the gyro is the heading: the wheels over-report a turn in place by 10-25 % on carpet, and odom0's vyaw — the only other yaw-rate source, live since 2026-09-15 — carries about 4 % of the weight beside it (ros/params/ekf.yaml)
+  - *On when:* always, unless the point of the run is what the stack does without a gyro
+  - *Off when:* for one test of the heading on the wheels alone, or to see an EKF meet its sensor_timeout on a source that is simply gone; unmute and the rate is back within one IMU period (50 Hz)
+- **`odom_publish`** — bool, default on
+  - *What:* the base server's state line leaves the bridge as /odom and, while publish_tf is on, as the odom -> base_link transform; off, the wheels are still read and still commanded, and both go silent together — a transform still broadcast from a silent /odom is a state no sensor failure produces
+  - *Default:* on — on, because /odom is the only source of speed this filter has: odom0 fuses vx and vy at 0.001 (m/s)^2 and, since 2026-09-15, vyaw; ax and ay are off (a mount bias of -0.229 to +0.066 m/s^2 that no covariance can answer), so with /odom silent past the EKF's sensor_timeout of 0.5 s the filter has no velocity measurement left at all
+  - *On when:* always, unless the run is about what the stack does with dead wheel odometry
+  - *Off when:* to watch a consumer meet a silent odometry — the EKF's sensor_timeout, Nav2's TF lookups, the tracker's dead reckoning — without stopping the base server; unmute and /odom is back on the next state line (20 Hz)
 
 #### `bridge_watch`
 
