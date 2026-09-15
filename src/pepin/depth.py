@@ -84,7 +84,7 @@ class CameraPose:
         moves): the translation as is (the optical frame shares the link's origin) and the
         pitch of the optical axis. A pan of the head is not carried — the projections here
         assume the camera looks along base_link's x (:func:`optical_heading` says how far it
-        does not)."""
+        does not, and :func:`depth_to_scan` takes that pan beside this pose)."""
         t = np.asarray(translation, dtype=float)
         pitch, _pan = optical_heading(rotation)
         return cls(float(t[0]), float(t[1]), float(t[2]), pitch)
@@ -273,6 +273,7 @@ def depth_to_scan(
     cam: CameraPose,
     *,
     stride: int = 4,
+    pan: float = 0.0,
     min_z: float | Array = SCAN_MIN_Z_M,
     max_z: float = 1.30,
     max_range: float = 3.0,
@@ -287,6 +288,14 @@ def depth_to_scan(
     Returns (angle_min, angle_increment, ranges), ready for a LaserScan. Every ``stride``-th
     pixel is used; the k-th nearest point per bearing marks, a flying pixel does not.
 
+    ``pan`` is where the head looks, radians CCW from the cart's x (the yaw of ``base_link <-
+    camera_optical``, :func:`optical_heading`): the rays turn with it about base_link's z before
+    the mount's translation is added, and the fan's window turns with them, so ``angle_min``
+    comes back at ``pan - SCAN_HALF_FOV``. The output stays a base_link scan either way — every
+    bin's angle is the true bearing of what it holds, and a panned head shows as the fan sitting
+    off-centre in the same frame. 0 (the default) is the old projection, which reads the picture
+    as if the head looked along the cart's x.
+
     ``min_z`` may be one height for the whole picture or an image of heights, one per pixel: a
     floor pixel stands ``camera height * (relative depth error)`` above the plane whatever its
     range, so where the network is noisier the band's floor must rise with it or the floor marks
@@ -300,14 +309,23 @@ def depth_to_scan(
     left = -(u[ok] - intr.cx) / intr.fx * z_opt
     up = -(v[ok] - intr.cy) / intr.fy * z_opt
     c, s = math.cos(cam.pitch), math.sin(cam.pitch)
-    px = c * z_opt + s * up + cam.x
-    py = left + cam.y
+    cp, sp = math.cos(pan), math.sin(pan)
+    fwd = c * z_opt + s * up  # the ray in base_link's plane once the neck's pitch is undone
+    # ...then turned by the neck's pan about base_link's z. The translation is NOT turned: it
+    # comes from the same TF edge as the pan and already holds where the panned head sits.
+    px = cp * fwd - sp * left + cam.x
+    py = sp * fwd + cp * left + cam.y
     pz = -s * z_opt + c * up + cam.z
     rng = np.hypot(px, py)
-    bearing = np.arctan2(py, px)
+    # The bearing measured from the head's own heading, so the fan's bins keep meaning "the i-th
+    # half-degree across the picture" whatever the pan (pepin.contact's fan is on that grid too)
+    # and no wrap is needed at a pan near half a turn. The bin's angle, angle_min + i * step,
+    # is then the point's true bearing in base_link.
+    along, across = cp * px + sp * py, -sp * px + cp * py
+    bearing = np.arctan2(across, along)
     n_bins = round(2 * SCAN_HALF_FOV / SCAN_STEP) + 1
     ranges = np.full(n_bins, np.nan)
-    seen = (px > 0.0) & (np.abs(bearing) <= SCAN_HALF_FOV)
+    seen = (along > 0.0) & (np.abs(bearing) <= SCAN_HALF_FOV)
     bins = np.rint((bearing + SCAN_HALF_FOV) / SCAN_STEP).astype(int)
     ranges[np.unique(bins[seen])] = np.inf  # something was seen along the bearing: clear
     floor_of = np.asarray(min_z, dtype=float)
@@ -320,7 +338,7 @@ def depth_to_scan(
     counts = np.diff(np.r_[starts, bins_sorted.size])
     enough = counts >= SCAN_KTH
     ranges[bins_sorted[starts[enough]]] = rng_sorted[starts[enough] + SCAN_KTH - 1]
-    return -SCAN_HALF_FOV, SCAN_STEP, ranges
+    return pan - SCAN_HALF_FOV, SCAN_STEP, ranges
 
 
 # ---- the floor as a second anchor -------------------------------------------------------------

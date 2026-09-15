@@ -402,10 +402,12 @@ def corrected_pan_reference(
     ``pan_error_deg`` is the truth MINUS what the model believes (CCW positive: positive means
     the head really points further left than /neck/state says). Where the camera fan is placed
     into base_link THROUGH the neck's transform, that is exactly :attr:`YawOffset.shift_deg`.
-    Where it is not — /depth_scan today is folded onto the floor as if the head looked along the
-    cart's x, whatever the pan (depth_stream ``_as_scan``, counted
-    in its report line as "head panned N frames (projected as if not)") — the shift measures the
-    camera's TRUE heading, and the error is ``shift - the pan /neck/state believes``.
+    Since 2026-09-15 /depth_scan is one of those: depth_stream's ``_as_scan`` folds the fan
+    through the neck's pan (flag ``scan_honours_pan``, its report line reading "head panned N
+    frames (projected with the pan)"). Where it is NOT — that flag off, or any fan built as if
+    the head looked along the cart's x whatever the pan, which every yaw measurement taken
+    before that day used — the shift measures the camera's TRUE heading instead, and the error
+    is ``shift - the pan /neck/state believes``.
 
     The neck reads ``pan = pan_sign * (ticks - reference) * deg_per_tick``, so moving the
     reference moves the believed heading by the opposite of ``pan_sign``: closing an error of

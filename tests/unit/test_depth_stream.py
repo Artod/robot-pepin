@@ -66,6 +66,7 @@ from pepin.depth_pipeline import (  # noqa: E402
     PARALLAX_WEIGHT,
     PIPELINE_DEFAULTS,
     FloorPairs,
+    FrameContext,
     FrameLaw,
     LidarAnchor,
     ParallaxAnchor,
@@ -198,13 +199,22 @@ def _optical_edge(pitch_deg: float, pan_deg: float = 0.0, z: float = 1.2) -> Any
 
 # ---- the reference: the node's chain as it stood ------------------------------------------
 def legacy_process(
-    depth32: np.ndarray, scan: Any, cam: CameraPose, law: AffineScale, stamp: Any
+    depth32: np.ndarray,
+    scan: Any,
+    cam: CameraPose,
+    law: AffineScale,
+    stamp: Any,
+    pan: float = 0.0,
 ) -> tuple[bytes, list[float]] | None:
     """``DepthStream._process`` before the pipeline, line for line: the edge mask on the raw
     depth, the beams of the scan projected through the static mounts (the cart stood still:
     the carry is the identity), the beam pairs into the law, the law applied, the edges
     dropped, the scan before the floor anchor, the floor anchored, both published; ``None``
-    when the law did not exist yet. Returns the published image's bytes and scan's ranges."""
+    when the law did not exist yet. Returns the published image's bytes and scan's ranges.
+
+    ``pan`` is the head's heading the fan is folded through (``scan_honours_pan``): 0 is the
+    chain of before 2026-09-15, and a reference built against a TF edge passes that edge's own
+    yaw, which a quaternion round trip leaves non-zero even for a head pointing straight."""
     edge = edge_mask(depth32)
     xy = scan_points(np.asarray(scan.ranges), scan.angle_min, scan.angle_increment, SCAN_RANGE_M)
     samples = project(to_base(xy, LIDAR_MOUNT.rotation, LIDAR_MOUNT.translation), cam, INTR)
@@ -213,7 +223,7 @@ def legacy_process(
         return None
     metric = apply_affine(depth32, a, b)
     metric, _dropped = drop_edges(metric, edge)
-    angle_min, step, ranges = depth_to_scan(metric, INTR, cam, max_range=SCAN_MAX_RANGE)
+    angle_min, step, ranges = depth_to_scan(metric, INTR, cam, pan=pan, max_range=SCAN_MAX_RANGE)
     published_scan = scan_from_ranges(
         ranges, float(angle_min), float(step), stamp, "base_link", 0.1, SCAN_MAX_RANGE
     )
@@ -329,7 +339,9 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     assert line.startswith("depth: ") and f"{withheld} withheld" in line
     assert "edge_filter on [step 8%]" in line and "affine_law on [a 1." in line
     assert "floor_pairs off" in line and "wall_anchor off" in line and "wall_correct off" in line
-    assert f"camera pose from config {len(WALLS)} frames (no TF edge)" in line
+    assert (
+        f"camera pose from config {len(WALLS)} frames (no TF edge; fan pan from the mount)" in line
+    )  # no edge to read a pan off: the fan is folded straight ahead, as the mount looks
     assert "backend fake (CPU model not loaded)" in line
     assert (
         "flags: edge_filter=on lidar_anchor=on floor_pairs=off wall_anchor=off"
@@ -395,7 +407,8 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
     depth32 = _network(_scene(tf_cam, 2.0), seed=0)
     seeded = AffineScale()
     seeded.seed(*LAW)
-    with_tf = legacy_process(depth32, _scan(2.0, stamp), tf_cam, seeded, stamp)
+    tf_pan = optical_heading(on_neck.rotation)[1]  # a head pointing straight, to the last bit
+    with_tf = legacy_process(depth32, _scan(2.0, stamp), tf_cam, seeded, stamp, pan=tf_pan)
     assert with_tf is not None
     assert bytes(depths[0].data) == with_tf[0]
     assert np.array_equal(np.asarray(scans[0].ranges), np.asarray(with_tf[1]), equal_nan=True)
@@ -417,7 +430,11 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
     assert optical_heading(edge.rotation)[1] == pytest.approx(math.radians(20.0))
     frame(node, net, turned, 2.0, 1)  # the second count: the frame's own lookup
     node._report()
-    assert "head panned 2 frames (projected as if not)" in node.logger.texts("info")[-1]
+    assert "head panned 2 frames (projected with the pan)" in node.logger.texts("info")[-1]
+    node._switches.set("scan_honours_pan", False)  # the old fan, and the report line says so
+    frame(node, net, turned, 2.0, 2)
+    node._report()
+    assert "head panned 1 frames (projected as if not)" in node.logger.texts("info")[-1]
 
 
 def test_without_a_camera_edge_the_config_pose_stands_in_and_is_counted(build: Build) -> None:
@@ -797,3 +814,64 @@ def test_the_shipped_floor_gate_raises_the_fan_s_band_and_says_so(build: Build) 
     marked_gated = sum(np.count_nonzero(np.isfinite(np.asarray(s.ranges))) for s in gated_scans)
     marked_plain = sum(np.count_nonzero(np.isfinite(np.asarray(s.ranges))) for s in plain_scans)
     assert marked_gated <= marked_plain  # a gate removes marks, it never invents them
+
+
+# ---- the fan and the neck's pan ---------------------------------------------------------------
+def _post(range_m: float = 2.0) -> np.ndarray:
+    """A depth image of one narrow post straight ahead of the LENS at ``range_m`` and nothing
+    else (NaN): whatever the neck does, this post sits on the camera's optical axis, so where
+    the published fan marks it is the whole answer about the pan. Its rows sit below the
+    principal point, which puts the post 0.9-1.2 m above the floor — inside the fan's band."""
+    depth = np.full((HEIGHT, WIDTH), np.nan, dtype=np.float32)
+    u, v = int(INTR.cx), int(INTR.cy)
+    depth[v + 4 : v + 52, u - 2 : u + 3] = range_m
+    return depth
+
+
+def _marked_deg(scan: Any) -> np.ndarray:
+    """The bearings, in degrees, a LaserScan actually marks: the bins holding a finite range."""
+    r = np.asarray(scan.ranges, dtype=float)
+    angles = scan.angle_min + scan.angle_increment * np.arange(r.size)
+    return np.degrees(angles[np.isfinite(r)])
+
+
+def _fan_of(node: DepthStream, pan_deg: float) -> Any:
+    """The published fan of :func:`_post` with the neck's edge at ``pan_deg``, through the
+    node's own ``_camera_at`` — so the pan reaches the fan the way a live frame's does."""
+    node._tf.buffer.transforms[("base_link", "camera_optical")] = _optical_edge(0.0, pan_deg)
+    cam, cam_optical = node._camera_at(_stamp(0))
+    ctx = FrameContext(INTR, cam, cam_optical=cam_optical)
+    return node._as_scan(_post(), _image(_stamp(0)), ctx)
+
+
+def test_the_fan_s_bearings_turn_with_the_neck_s_pan(build: Build) -> None:
+    """A post on the optical axis marks bearing 0 with the head straight, +10 deg with the head
+    turned 10 deg left and -25 with it turned right: the fan's bearings are the cart's, not the
+    camera's. The window turns with them — angle_min is pan - 40 deg — and the frame stays
+    base_link, which is what Nav2's obstacle layer is handed."""
+    node, _net = build(fan_floor_gate="off")  # this test is about bearings, not the floor
+    for pan_deg in (0.0, 10.0, -25.0):
+        scan = _fan_of(node, pan_deg)
+        marked = _marked_deg(scan)
+        assert marked.size, f"the post marks the fan at pan {pan_deg}"
+        # the post is 5 px wide, so it fills a bin or two; the 5 cm the lens sits ahead of
+        # base_link's origin shifts its bearing by under a quarter of a degree at 2 m
+        assert float(np.mean(marked)) == pytest.approx(pan_deg, abs=0.6)
+        assert math.degrees(scan.angle_min) == pytest.approx(pan_deg - 40.0, abs=1e-6)
+        assert math.degrees(scan.angle_max) == pytest.approx(pan_deg + 40.0, abs=1e-6)
+        assert scan.header.frame_id == "base_link"
+
+
+def test_scan_honours_pan_off_folds_the_fan_as_if_the_head_looked_ahead(build: Build) -> None:
+    """The old projection is one live parameter away: with ``scan_honours_pan`` off the same
+    post marks bearing 0 whatever the neck does, and the fan's window sits on base_link's x —
+    which is the costmap of before 2026-09-15, wrong by the whole pan."""
+    node, _net = build(fan_floor_gate="off")
+    assert node.set_parameters([Param("scan_honours_pan", False)])[0].successful
+    assert not node._switches.on("scan_honours_pan"), "the flag reaches the node live"
+    for pan_deg in (0.0, 10.0, -25.0):
+        scan = _fan_of(node, pan_deg)
+        assert float(np.mean(_marked_deg(scan))) == pytest.approx(0.0, abs=0.6)
+        assert math.degrees(scan.angle_min) == pytest.approx(-40.0, abs=1e-6)
+    node.set_parameters([Param("scan_honours_pan", True)])  # and back, without a restart
+    assert float(np.mean(_marked_deg(_fan_of(node, 10.0)))) == pytest.approx(10.0, abs=0.6)

@@ -39,7 +39,10 @@ over the kit's :class:`TfHistory`): the neck moves, and ``base_link -> camera_li
 live from its encoders by the board's neck node; config/camera.json's mount is the fallback
 while TF has no such edge yet, and the report line counts the frames that used it. The same
 poser carries the scan to the frame's moment through the odometry. A pan of the head is counted
-too: the projections assume the camera looks along the cart's x.
+too, and behind ``scan_honours_pan`` the published fan turns with it — the bearings of
+/depth_scan are the cart's whichever way the neck looks, and the fan's angular window sits off
+base_link's x by the pan. The depth image the pipeline corrects is still projected as if the
+head looked along that x: the anchors read pixels and heights, not bearings.
 
 The network runs where ``depth_backend`` says: ``local`` is the CPU model in this container
 (0.2-0.3 s a frame), ``remote`` the same network on the laptop's GPU behind
@@ -180,7 +183,7 @@ SCAN_RANGE_M = 6.0
 STAGES = ("network", "pose", "samples", "pipeline", "scan", "publish")
 CARRY_WAIT_S = 0.2  # how long TF is given to cover a frame's stamp (the carry, the camera pose)
 CAMERA_TF_MAX_AGE_S = 1.0  # the neck's newest edge is the head's pose while it is at most this old
-PAN_NOTICE_RAD = math.radians(1.0)  # a head turned more than this is projected as if it were not
+PAN_NOTICE_RAD = math.radians(1.0)  # a head turned more than this is worth a line in the report
 SCAN_BEFORE = "floor_anchor"  # the scan is built from the depth as it stands before this stage
 TRACK_FLAGS = (  # the three that decide whether a parallax corner is a track or a pair
     "parallax_track_min_obs",
@@ -925,6 +928,30 @@ FLAGS = FlagSet(
         off_when="off to reproduce a costmap from before this gate",
         choices=FAN_FLOOR_GATES,
     ),
+    Flag(
+        "scan_honours_pan",
+        True,
+        description="fold /depth_scan onto the floor through the neck's pan: the fan's bearings"
+        " turn with the head and its angular window turns with them, so angle_min comes out at"
+        " pan - 40 deg instead of -40. The pan is the yaw of the same base_link <-"
+        " camera_optical edge the volume path reads (camera_tf_latest); with no such edge the"
+        " config mount's straight-ahead yaw stands in, and the report line's config counter says"
+        " for how many frames. Off: the fan is projected as if the head looked along the cart's"
+        " x, whatever the encoders say",
+        why="the fan carried no pan at all until 2026-09-15, and the report line said so ('head"
+        " panned N frames (projected as if not)'). At rest that is not nothing: the pan"
+        " reference measured that day (config/neck.json pan_note,"
+        " pepin.extrinsics.pan_from_bearings, six windows in four scenes) puts the resting head"
+        " +0.79 deg left of the cart's x, which is 4 cm of bearing error at 3 m — under"
+        " PAN_NOTICE_RAD, so the old fan did not even count it. A head panned on purpose puts"
+        " the whole fan in the wrong place: 20 deg of neck is 20 deg of costmap, one metre"
+        " sideways at 3 m",
+        on_when="always once the neck's edge is in TF — a scan whose bearings are the cart's is"
+        " what Nav2's obstacle layer assumes it is being handed",
+        off_when="to reproduce a costmap from before 2026-09-15, or to read a fan against a"
+        " measurement taken while the projection ignored the pan (the yaw-offset probes of"
+        " config/neck.json's pan_note were)",
+    ),
 )
 FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
 
@@ -1363,7 +1390,8 @@ class DepthStream(Node):
         and as the edge itself for the stage that needs the whole rotation (the parallax
         anchor's baseline turns with the neck's pan). Without such an edge in TF:
         config/camera.json's mount, counted, and no edge. A head turned past PAN_NOTICE_RAD is
-        counted too: the projections assume it looks along the cart's x."""
+        counted too: the volume path and the fan (``scan_honours_pan``) turn with it, while the
+        pitch-only pose the rest of the pipeline reads still assumes the cart's x."""
         at = stamp_seconds(stamp)
         pose = self._history.pose_at_nowait(at, self._camera_frame, self._base_frame)
         if pose is None and self._switches.on("camera_tf_latest"):
@@ -1387,18 +1415,38 @@ class DepthStream(Node):
         self._last_cam = CameraPose.from_optical(pose.rotation, pose.translation)
         return self._last_cam, pose
 
+    def _fan_pan(self, ctx: FrameContext) -> float:
+        """How far left the head looks while the fan is folded, radians CCW from the cart's x:
+        the yaw of the very ``base_link <- camera_optical`` edge the volume path took for this
+        frame (:meth:`_camera_at`, flag ``camera_tf_latest``). With no such edge the frame's
+        pose is config/camera.json's mount, whose yaw is zero — straight ahead — and the report
+        line's ``camera pose from config`` counter is the count of those frames. Returns 0.0
+        while ``scan_honours_pan`` is off: the fan of before 2026-09-15, folded as if the head
+        looked along the cart's x."""
+        if not self._switches.on("scan_honours_pan") or ctx.cam_optical is None:
+            return 0.0
+        return optical_heading(ctx.cam_optical.rotation)[1]
+
     def _as_scan(self, depth: Array, image: Image, ctx: FrameContext) -> LaserScan:
         """The depth folded onto the floor plane, in base_link, stamped like the image — with
-        the floor gated out of it the way ``fan_floor_gate`` says (:data:`FAN_FLOOR_GATES`)."""
+        the floor gated out of it the way ``fan_floor_gate`` says (:data:`FAN_FLOOR_GATES`) and
+        its bearings turned by the neck's pan the way ``scan_honours_pan`` says."""
         gate = str(self._switches["fan_floor_gate"])
         floor_of: float | Array = SCAN_MIN_Z_M
         if gate == "band":
             floor_of = fan_min_z(self._floor_expected(ctx), ctx.cam.z)
         angle_min, step, ranges = depth_to_scan(
-            depth, ctx.intr, ctx.cam, min_z=floor_of, max_range=self._scan_max_range
+            depth,
+            ctx.intr,
+            ctx.cam,
+            pan=self._fan_pan(ctx),
+            min_z=floor_of,
+            max_range=self._scan_max_range,
         )
         before = int(np.count_nonzero(np.isfinite(ranges)))
         if gate == "contact":
+            # Both fans are indexed by the bearing across the PICTURE, so the contact scan's
+            # bins line up with the panned fan's bin for bin without a pan of its own.
             plane = FloorPlane.of(ctx.intr, ctx.cam, ctx.up)
             _min, _step, contact, _verdict = contact_scan(depth, plane)
             ranges, _removed = gate_by_contact(ranges, contact)
@@ -1585,11 +1633,13 @@ class DepthStream(Node):
         if c["carry_insane"]:
             extra += f", carry insane {c['carry_insane']} frames (the odometry ran away)"
         if c["camera_from_config"]:
-            extra += f", camera pose from config {c['camera_from_config']} frames (no TF edge)"
+            extra += f", camera pose from config {c['camera_from_config']} frames (no TF edge"
+            extra += "; fan pan from the mount)" if self._switches.on("scan_honours_pan") else ")"
         if c["fan_gated"]:
             extra += f", floor-gated {c['fan_gated']} bearings ({self._switches['fan_floor_gate']})"
         if c["camera_panned"]:
-            extra += f", head panned {c['camera_panned']} frames (projected as if not)"
+            how = "with the pan" if self._switches.on("scan_honours_pan") else "as if not"
+            extra += f", head panned {c['camera_panned']} frames (projected {how})"
         if c["beams_out_of_frame"]:
             near = self._plane_in_view()
             where = "" if near is None else f" (it shows past {near:.2f} m ahead)"
