@@ -5,6 +5,7 @@ motions say so instead of inventing numbers, and the anchor is off until its fla
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -24,15 +25,20 @@ from pepin.parallax import (
     MAX_SAMPSON_PX,
     ORB_DISPARITY_SIGMA_PX,
     CameraPlacement,
+    Features,
     Motion,
     ParallaxTruth,
+    Tracks,
+    build_tracks,
     camera_motion,
     match,
     parallax_truth,
     perpendicular_baseline,
     sampson,
     to_gray,
+    track_truth,
     triangulate,
+    triangulate_tracks,
 )
 from pepin.tsdf import RigidPose
 
@@ -409,7 +415,7 @@ def test_the_anchor_pairs_the_network_s_depth_with_the_triangulated_one() -> Non
     a, b, _ = rendered_pair()
     poses = {1.0: planar_pose(0.0, 0.0, 0.0), 1.2: planar_pose(0.0, -SIDESTEP_M, 0.0)}
     odometry = Odometry(poses)
-    anchor = ParallaxAnchor()
+    anchor = ParallaxAnchor(track_min_obs=2)
     network = np.full((INTR.height, INTR.width), 3.0)
     assert anchor.pairs(Frame(network, context(1.0, a, odometry))) is None
     pairs = anchor.pairs(Frame(network, context(1.2, b, odometry)))
@@ -433,12 +439,12 @@ def test_the_anchor_triangulates_through_a_panned_neck() -> None:
     poses = {1.0: planar_pose(0.0, 0.0, 0.0), 1.2: planar_pose(float(step[0]), float(step[1]), 0.0)}
     odometry = Odometry(poses)
     network = np.full((INTR.height, INTR.width), 3.0)
-    anchor = ParallaxAnchor()
+    anchor = ParallaxAnchor(track_min_obs=2)
     assert anchor.pairs(Frame(network, context(1.0, a, odometry, place))) is None
     pairs = anchor.pairs(Frame(network, context(1.2, b, odometry, place)))
     assert pairs is not None and pairs.size >= 50
     assert band_error(pairs) < 0.05
-    blind = ParallaxAnchor()
+    blind = ParallaxAnchor(track_min_obs=2)
     assert blind.pairs(Frame(network, context(1.0, a, odometry))) is None
     lost = blind.pairs(Frame(network, context(1.2, b, odometry)))
     assert lost is None or band_error(lost) > 0.1
@@ -502,11 +508,14 @@ def test_the_window_follows_the_matcher_and_a_given_one_pins_it() -> None:
 
 
 def test_the_report_line_names_the_matcher_and_its_window() -> None:
-    """The report line says who matched and how far back it looked, so an A/B in the field is
-    readable without asking the node what its parameters are."""
-    line = ParallaxAnchor().describe()
+    """The report line says who matched, how far back it looked and whether a corner was a
+    track or a pair, so an A/B in the field is readable without asking the node what its
+    parameters are."""
+    line = ParallaxAnchor(track_min_obs=2).describe()
     assert line.startswith("klt <= 0.60 s")
-    assert ParallaxAnchor(matcher="orb").describe().startswith("orb <= 1.50 s")
+    assert ParallaxAnchor(matcher="orb", track_min_obs=2).describe().startswith("orb <= 1.50 s")
+    tracking = ParallaxAnchor().describe()
+    assert tracking.startswith("klt <= 1.50 s >= 3 obs, asks 10 cm total")
 
 
 def test_the_baseline_is_the_tracker_s_word_and_the_odometry_s_drift_scales_the_depth() -> None:
@@ -519,7 +528,7 @@ def test_the_baseline_is_the_tracker_s_word_and_the_odometry_s_drift_scales_the_
     poses = {1.0: planar_pose(0.0, 0.0, 0.0), 1.2: planar_pose(0.0, -SIDESTEP_M, 0.0)}
     network = np.full((INTR.height, INTR.width), 3.0)
     source = Tracked(poses, drift=1.25)
-    anchor = ParallaxAnchor()
+    anchor = ParallaxAnchor(track_min_obs=2)
     assert anchor.motion_source == "tracker"
     assert anchor.pairs(Frame(network, context(1.0, a, source))) is None
     pairs = anchor.pairs(Frame(network, context(1.2, b, source)))
@@ -527,7 +536,7 @@ def test_the_baseline_is_the_tracker_s_word_and_the_odometry_s_drift_scales_the_
     assert band_error(pairs) < 0.05
     assert anchor.used == {"tracker": 1, "odom": 0}
     assert "on the tracker's motion (tracker 1)" in anchor.describe()
-    wheels = ParallaxAnchor(motion_source="odom")
+    wheels = ParallaxAnchor(motion_source="odom", track_min_obs=2)
     assert wheels.pairs(Frame(network, context(1.0, a, source))) is None
     stretched = wheels.pairs(Frame(network, context(1.2, b, source)))
     assert stretched is not None and stretched.size >= 50
@@ -546,14 +555,14 @@ def test_a_silent_tracker_falls_back_to_the_odometry_for_that_window() -> None:
     poses = {1.0: planar_pose(0.0, 0.0, 0.0), 1.2: planar_pose(0.0, -SIDESTEP_M, 0.0)}
     network = np.full((INTR.height, INTR.width), 3.0)
     silent = Tracked(poses, blind=True)
-    anchor = ParallaxAnchor()
+    anchor = ParallaxAnchor(track_min_obs=2)
     assert anchor.pairs(Frame(network, context(1.0, a, silent))) is None
     pairs = anchor.pairs(Frame(network, context(1.2, b, silent)))
     assert pairs is not None and pairs.size >= 50
     assert anchor.used == {"tracker": 0, "odom": 1}
     assert silent.map_asks == 1  # the second frame's walk; the first has an empty ring
     plain = Odometry(poses)  # no map_motion at all: the protocol simply does not match
-    bare = ParallaxAnchor()
+    bare = ParallaxAnchor(track_min_obs=2)
     assert bare.pairs(Frame(network, context(1.0, a, plain))) is None
     assert bare.pairs(Frame(network, context(1.2, b, plain))) is not None
     assert bare.used == {"tracker": 0, "odom": 1}
@@ -622,7 +631,7 @@ def test_the_partner_frame_is_chosen_for_its_baseline_not_for_being_the_last_one
     half a second. The depths it triangulates across that baseline are the rendered planes'."""
     frames, poses = crawling_frames(0.02, 6)
     odometry = Odometry(poses)
-    anchor = ParallaxAnchor()
+    anchor = ParallaxAnchor(track_min_obs=2)
     network = np.full((INTR.height, INTR.width), 3.0)
     pairs = None
     for i, view in enumerate(frames):
@@ -637,7 +646,7 @@ def test_a_zero_ask_pairs_with_the_frame_before_as_the_anchor_always_did() -> No
     """The flag's off position: asked for no baseline at all, the walk stops at the newest
     partner in the window — the frame before this one, 0.1 s and 2 cm back."""
     frames, poses = crawling_frames(0.02, 6)
-    anchor = ParallaxAnchor(min_baseline_m=0.0)
+    anchor = ParallaxAnchor(min_baseline_m=0.0, track_min_obs=2)
     network = np.full((INTR.height, INTR.width), 3.0)
     for i, view in enumerate(frames):
         anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, Odometry(poses))))
@@ -667,10 +676,230 @@ def test_the_ring_forgets_frames_older_than_the_window() -> None:
     frames, poses = crawling_frames(0.02, 2)
     late = round(0.1 * 1 + 1.5, 3)
     poses[late] = planar_pose(0.0, -0.40, 0.0)
-    anchor = ParallaxAnchor()
+    anchor = ParallaxAnchor(track_min_obs=2)
     network = np.full((INTR.height, INTR.width), 3.0)
     odometry = Odometry(poses)
     assert anchor.pairs(Frame(network, context(0.0, frames[0], odometry))) is None
     assert anchor.pairs(Frame(network, context(0.1, frames[1], odometry))) is not None
     assert anchor.pairs(Frame(network, context(late, frames[0], odometry))) is None
     assert anchor.rejected["gap"] == 1
+
+
+# ---- a corner as a track through many frames ------------------------------------------------
+def moving_scene(
+    views: int, step_m: float = 0.05, noise_px: float = 0.5, seed: int = 1, count: int = 200
+) -> tuple[np.ndarray, Tracks]:
+    """A cloud of 3D points in front of the CURRENT camera, seen by a camera that sidestepped
+    ``step_m`` between consecutive views, every pixel disturbed by ``noise_px`` of Gaussian
+    noise. Returns the points (in the current camera's frame) and the tracks that see them —
+    the geometry with no matcher in the way, so a failure here is the triangulation's."""
+    rng = np.random.default_rng(seed)
+    points = np.stack(
+        [
+            rng.uniform(-1.5, 1.5, count),
+            rng.uniform(-1.0, 1.0, count),
+            rng.uniform(1.0, 4.0, count),
+        ],
+        axis=1,
+    )
+    motions = [
+        Motion(np.eye(3), np.array([-(views - 1 - v) * step_m, 0.0, 0.0])) for v in range(views)
+    ]
+    pixels = np.full((count, views, 2), np.nan)
+    for v, motion in enumerate(motions):
+        local = (points - motion.translation) @ np.asarray(motion.rotation)
+        pixels[:, v, 0] = INTR.fx * local[:, 0] / local[:, 2] + INTR.cx
+        pixels[:, v, 1] = INTR.fy * local[:, 1] / local[:, 2] + INTR.cy
+        pixels[:, v] += rng.normal(0.0, noise_px, (count, 2))
+    seen = np.ones((count, views), dtype=bool)
+    return points, Tracks(pixels, seen, tuple(motions), found=count)
+
+
+def test_more_observations_shrink_the_sigma_and_the_error_stays_inside_it() -> None:
+    """The claim the whole change rests on: a corner triangulated from 5 and 10 views is known
+    better than the same corner from 2, the reported sigma says by how much, and the sigma is
+    honest — the depth error stays inside about two of them. The baselines add in quadrature,
+    so 10 views 5 cm apart are worth one pair at 45 cm and the sigma falls by that factor."""
+    told: list[float] = []
+    for views in (2, 5, 10):
+        points, tracks = moving_scene(views)
+        found = triangulate_tracks(tracks, INTR)
+        good = np.isfinite(found.z)
+        assert good.sum() > 150
+        error = np.abs(found.z - points[:, 2])[good]
+        sigma = found.sigma[good]
+        told.append(float(np.median(sigma)))
+        assert np.all(found.observations == views)
+        # 2.2 and not 2: the pair's own formula credits ONE pixel of noise where a disparity
+        # carries two views' worth, so the sigma runs a little optimistic at every view count.
+        assert float(np.percentile(error / sigma, 90)) < 2.2, f"{views} views: sigma is too small"
+        assert float(np.median(error / sigma)) > 0.2, f"{views} views: sigma is pessimistic"
+    assert told[1] < 0.5 * told[0], "5 views must beat 2 by more than a factor of two"
+    assert told[2] < 0.5 * told[1], "10 views must beat 5 by more than a factor of two"
+
+
+def test_two_observations_are_arithmetically_today_s_pair() -> None:
+    """The off position of the knob is not a second code path: a track seen in exactly two
+    views carries the depth the pair's own triangulation returns, to the float32 pixels' own
+    rounding, and its sigma to a few parts in a thousand — the whole difference being that the
+    bundle widens ``sigma_px`` by the residual averaged over BOTH views where the pair reads it
+    in the second one only. Which is why 2 is what ``parallax_track_min_obs`` means."""
+    for noise, tolerance in ((0.0, 1e-4), (0.5, 5e-3)):
+        _points, tracks = moving_scene(2, noise_px=noise)
+        found = triangulate_tracks(tracks, INTR)
+        pair_a = np.asarray(tracks.pixels[:, 0], dtype=np.float32)
+        pair_b = np.asarray(tracks.pixels[:, 1], dtype=np.float32)
+        z, sigma = triangulate(pair_a, pair_b, INTR, tracks.motions[0])
+        good = np.isfinite(found.z) & np.isfinite(z)
+        assert good.sum() > 150
+        assert np.allclose(found.z[good], z[good], rtol=1e-4)
+        assert np.allclose(found.sigma[good], sigma[good], rtol=tolerance)
+        assert np.allclose(found.sigma_two[good], found.sigma[good], rtol=tolerance)
+
+
+def test_one_corrupted_observation_is_dropped_and_the_track_survives() -> None:
+    """A mistracked hop must not cost the whole track: the observation that misses the solved
+    point is dropped and the remaining views are solved again, so the depth comes back about as
+    good as a clean track's — and measurably better than the same track with nothing dropped."""
+    points, tracks = moving_scene(5, noise_px=0.2)
+    clean = triangulate_tracks(tracks, INTR)
+    spoilt = np.asarray(tracks.pixels).copy()
+    spoilt[:, 2, 0] += 25.0  # the middle view's corner slid 25 px: a hop onto the wrong texture
+    broken = replace(tracks, pixels=spoilt)
+    repaired = triangulate_tracks(broken, INTR)
+    good = np.isfinite(repaired.z) & np.isfinite(clean.z)
+    assert good.sum() > 150
+    assert repaired.repaired == tracks.count, "every track should have lost its bad observation"
+    assert np.all(repaired.observations[good] == 4)
+    error = np.abs(repaired.z - points[:, 2])[good]
+    assert float(np.median(error)) < 3.0 * float(np.median(np.abs(clean.z - points[:, 2])[good]))
+    naive = triangulate_tracks(broken, INTR, outlier_px=1e9)  # the same track, nothing dropped
+    assert float(np.median(np.abs(naive.z - points[:, 2])[good])) > 2.0 * float(
+        np.median(error)
+    ), "the repair must actually be worth something"
+
+
+def track_window(
+    frames: list[np.ndarray], poses: dict[float, RigidPose], place: CameraPlacement
+) -> list[Motion]:
+    """The camera motion from each of ``frames`` but the last into the last one's optical
+    frame — what :func:`build_tracks` and :func:`track_truth` want beside the pictures."""
+    stamps = sorted(poses)[: len(frames)]
+    now = stamps[-1]
+    moved = [base_motion(poses[then], poses[now]) for then in stamps[:-1]]
+    return [camera_motion(m.rotation, m.translation, place, place) for m in moved]
+
+
+@pytest.mark.parametrize("matcher", ["klt", "orb"])
+def test_both_matchers_build_tracks_across_a_sequence(matcher: str) -> None:
+    """The flow follows a corner hop by hop and the describer recognises it frame by frame:
+    either way a corner of the last picture is found in the earlier ones, and the depths the
+    whole window triangulates are the rendered planes'."""
+    frames, poses = crawling_frames(0.03, 6)
+    place = CameraPlacement.of(CameraPose(0.0, 0.0, 1.23, math.radians(26.0)))
+    motions = track_window(frames, poses, place)
+    tracks = build_tracks(frames, motions, matcher=matcher)
+    assert tracks.count >= 50 and tracks.views == 6
+    assert float(np.median(tracks.observations)) >= 3
+    truth = track_truth(frames, motions, INTR, matcher=matcher)
+    assert truth.kept >= 20
+    assert truth.observations is not None and float(np.median(truth.observations)) >= 3
+    rows = truth.points[:, 1]
+    for top, bottom, z in BANDS:
+        inside = (rows >= top + 16) & (rows < bottom - 16)
+        if int(inside.sum()) < 5:
+            continue
+        ratio = float(np.median(truth.z[inside] / z))
+        assert abs(ratio - 1.0) < 0.05, f"band {z} m came back at {ratio:.3f} of its depth"
+
+
+def test_the_describer_keeps_what_it_read_of_a_frame() -> None:
+    """A frame a dozen tracks reach back through is described once: the cache the caller hands
+    in comes back filled, and a second call with it in hand returns the same tracks."""
+    frames, poses = crawling_frames(0.03, 4)
+    place = CameraPlacement.of(CameraPose(0.0, 0.0, 1.23, math.radians(26.0)))
+    motions = track_window(frames, poses, place)
+    cache: list[Features | None] = [None] * len(frames)
+    first = build_tracks(frames, motions, matcher="orb", features=cache)
+    assert all(isinstance(f, Features) for f in cache)
+    again = build_tracks(frames, motions, matcher="orb", features=cache)
+    assert again.count == first.count
+    assert np.array_equal(again.seen, first.seen)
+
+
+def test_a_window_without_a_motion_for_every_frame_is_refused() -> None:
+    """A caller that hands in one motion too few has mislabelled which frame is which, and a
+    silent off-by-one there is a depth wrong by a whole frame's step."""
+    frames, poses = crawling_frames(0.03, 4)
+    place = CameraPlacement.of(CameraPose(0.0, 0.0, 1.23, math.radians(26.0)))
+    motions = track_window(frames, poses, place)
+    with pytest.raises(ValueError, match="motions"):
+        build_tracks(frames, motions[:-1], matcher="klt")
+
+
+def test_a_standing_cart_tracks_nothing_and_says_which_word() -> None:
+    """No view moved: there is no baseline to meet rays across, and the window says ``still``
+    rather than triangulating rays that are all the same ray."""
+    frames, poses = crawling_frames(0.0, 4)
+    place = CameraPlacement.of(CameraPose(0.0, 0.0, 1.23, math.radians(26.0)))
+    motions = track_window(frames, poses, place)
+    truth = track_truth(frames, motions, INTR)
+    assert truth.kept == 0 and truth.verdict == "still"
+
+
+def test_a_track_too_short_or_too_thin_is_not_a_measurement() -> None:
+    """The two gates the knobs name: a corner seen in fewer than ``min_obs`` views is not a
+    track, and a window whose views add up to less than ``min_total_baseline_m`` of parallax
+    has not measured anything, however many views it has."""
+    frames, poses = crawling_frames(0.03, 6)
+    place = CameraPlacement.of(CameraPose(0.0, 0.0, 1.23, math.radians(26.0)))
+    motions = track_window(frames, poses, place)
+    strict = track_truth(frames, motions, INTR, min_obs=6)
+    assert strict.rejected["short track"] > 0
+    greedy = track_truth(frames, motions, INTR, min_total_baseline_m=5.0)
+    assert greedy.kept == 0 and greedy.rejected["total baseline"] > 0
+
+
+def test_the_anchor_triangulates_its_corners_from_the_whole_window() -> None:
+    """The stage's own path: a crawling cart, and the corners of the newest frame are followed
+    back through the ring and met from every view at once. The depths are the rendered planes',
+    every pair rests on more than two observations, and the sigma the bundle reports is smaller
+    than the widest single pair of the same corners would have claimed — which is what the
+    report line prints side by side."""
+    frames, poses = crawling_frames(0.03, 6)
+    odometry = Odometry(poses)
+    anchor = ParallaxAnchor()
+    network = np.full((INTR.height, INTR.width), 3.0)
+    pairs = None
+    for i, view in enumerate(frames):
+        pairs = anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, odometry)))
+    assert pairs is not None and pairs.size >= 20
+    assert band_error(pairs) < 0.05
+    line = anchor.describe()
+    assert "obs a track" in line and "2-view sigma" in line and "tracks a frame" in line
+    assert anchor.sigma_m is not None
+    two_view = float(np.median(anchor._sigma_two))
+    assert anchor.sigma_m < two_view, f"{anchor.sigma_m:.3f} m is not better than {two_view:.3f}"
+
+
+def test_the_knob_at_two_is_the_pair_the_anchor_always_measured() -> None:
+    """The same six frames read both ways: at ``track_min_obs`` 2 the anchor pairs with one
+    partner as it always did, at 3 it tracks through the window. Both put the rendered planes
+    where they are; the tracks put them there more precisely."""
+    frames, poses = crawling_frames(0.03, 6)
+    network = np.full((INTR.height, INTR.width), 3.0)
+    got: dict[int, tuple[ParallaxAnchor, Pairs]] = {}
+    for min_obs in (2, 3):
+        anchor = ParallaxAnchor(track_min_obs=min_obs)
+        pairs = None
+        for i, view in enumerate(frames):
+            pairs = anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, Odometry(poses))))
+        assert pairs is not None
+        got[min_obs] = (anchor, pairs)
+    paired, tracked = got[2][0], got[3][0]
+    assert paired.tracking is False and tracked.tracking is True
+    assert not paired._obs, "the pair path has no observations to report"
+    assert float(np.median(tracked._obs)) >= 3
+    assert band_error(got[2][1]) < 0.05 and band_error(got[3][1]) < 0.05
+    assert tracked.sigma_m is not None and paired.sigma_m is not None
+    assert tracked.sigma_m < paired.sigma_m
