@@ -453,7 +453,7 @@ def test_a_parallax_corner_is_a_track_and_the_three_knobs_reach_the_stage(build:
     corners = node._pipeline.stage("parallax_anchor")
     assert isinstance(corners, ParallaxAnchor)
     assert corners.track_min_obs == 3 and corners.tracking, "a corner ships as a track"
-    assert ">= 3 obs, asks 10 cm total" in corners.describe()
+    assert ">= 3 obs over <= 8 views, asks 10 cm total" in corners.describe()
     assert node.set_parameters(
         [
             Param("parallax_track_min_obs", 5),

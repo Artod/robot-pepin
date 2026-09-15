@@ -515,7 +515,7 @@ def test_the_report_line_names_the_matcher_and_its_window() -> None:
     assert line.startswith("klt <= 0.60 s")
     assert ParallaxAnchor(matcher="orb", track_min_obs=2).describe().startswith("orb <= 1.50 s")
     tracking = ParallaxAnchor().describe()
-    assert tracking.startswith("klt <= 1.50 s >= 3 obs, asks 10 cm total")
+    assert tracking.startswith("klt <= 1.50 s >= 3 obs over <= 8 views, asks 10 cm total")
 
 
 def test_the_baseline_is_the_tracker_s_word_and_the_odometry_s_drift_scales_the_depth() -> None:
@@ -743,10 +743,15 @@ def test_two_observations_are_arithmetically_today_s_pair() -> None:
     views carries the depth the pair's own triangulation returns, to the float32 pixels' own
     rounding, and its sigma to a few parts in a thousand — the whole difference being that the
     bundle widens ``sigma_px`` by the residual averaged over BOTH views where the pair reads it
-    in the second one only. Which is why 2 is what ``parallax_track_min_obs`` means."""
+    in the second one only. Which is why 2 is what ``parallax_track_min_obs`` means.
+
+    The depth is the pair's whatever sigma is asked for; the closed-form sigma is the pair's to
+    a few parts in a thousand, and the solve's own covariance — what the stage reports by
+    default since 2026-09-15 — reads within a tenth of it at two views and never below it, the
+    departure being the points near the epipole the closed form flatters."""
     for noise, tolerance in ((0.0, 1e-4), (0.5, 5e-3)):
         _points, tracks = moving_scene(2, noise_px=noise)
-        found = triangulate_tracks(tracks, INTR)
+        found = triangulate_tracks(tracks, INTR, sigma_model="baseline")
         pair_a = np.asarray(tracks.pixels[:, 0], dtype=np.float32)
         pair_b = np.asarray(tracks.pixels[:, 1], dtype=np.float32)
         z, sigma = triangulate(pair_a, pair_b, INTR, tracks.motions[0])
@@ -755,6 +760,65 @@ def test_two_observations_are_arithmetically_today_s_pair() -> None:
         assert np.allclose(found.z[good], z[good], rtol=1e-4)
         assert np.allclose(found.sigma[good], sigma[good], rtol=tolerance)
         assert np.allclose(found.sigma_two[good], found.sigma[good], rtol=tolerance)
+        shipped = triangulate_tracks(tracks, INTR)
+        assert np.allclose(shipped.z[good], z[good], rtol=1e-4)
+        ratio = shipped.sigma[good] / sigma[good]
+        assert 1.0 <= float(np.median(ratio)) < 1.2
+        assert float(np.percentile(ratio, 5)) > 0.9
+
+
+def driving_scene(
+    views: int, step_m: float = 0.0375, noise_px: float = 0.5, seed: int = 3, count: int = 300
+) -> tuple[np.ndarray, Tracks]:
+    """The same cloud seen by a camera driving FORWARD instead of sidestepping — this cart's
+    actual errand, 0.25 m/s at 6-7 frames a second. The views then spread ALONG the rays as well
+    as across them, which is the geometry the closed-form sigma gets wrong."""
+    rng = np.random.default_rng(seed)
+    points = np.stack(
+        [
+            rng.uniform(-1.5, 1.5, count),
+            rng.uniform(-1.0, 1.0, count),
+            rng.uniform(1.5, 4.0, count),
+        ],
+        axis=1,
+    )
+    motions = [
+        Motion(np.eye(3), np.array([0.0, 0.0, -(views - 1 - v) * step_m])) for v in range(views)
+    ]
+    pixels = np.full((count, views, 2), np.nan)
+    for v, motion in enumerate(motions):
+        local = (points - motion.translation) @ np.asarray(motion.rotation)
+        pixels[:, v, 0] = INTR.fx * local[:, 0] / local[:, 2] + INTR.cx
+        pixels[:, v, 1] = INTR.fy * local[:, 1] / local[:, 2] + INTR.cy
+        pixels[:, v] += rng.normal(0.0, noise_px, (count, 2))
+    return points, Tracks(pixels, np.ones((count, views), dtype=bool), tuple(motions), found=count)
+
+
+def test_the_sigma_is_honest_for_a_cart_driving_forward_and_the_closed_form_is_not() -> None:
+    """The defect the covariance model was added for (scratch/parallax_sigma_mc.txt,
+    2026-09-15). Every earlier test sidesteps, where ``sqrt(sum b_v^2)`` is exactly right. Drive
+    FORWARD instead and the views spread along the ray as well as across it: a view that sees
+    the point from further away reads its pixel into a bigger depth error, which the closed form
+    does not know. It then calls a sixteen-view bundle better than it is — and a pair's vote in
+    the frame's fit is 1 / sigma^2, so an optimistic sigma is a loud vote."""
+    for views in (10, 16):
+        points, tracks = driving_scene(views)
+        error = {}
+        for model in ("baseline", "covariance"):
+            found = triangulate_tracks(tracks, INTR, sigma_model=model)
+            # the corners the field would keep: TRACK_MIN_TOTAL_BASELINE_M of parallax
+            good = np.isfinite(found.z) & np.isfinite(found.sigma) & (found.baseline >= 0.10)
+            assert good.sum() > 200
+            # an honest sigma covers about two thirds of its own scatter, so this is about 1
+            error[model] = float(
+                np.percentile(np.abs(found.z - points[:, 2])[good] / found.sigma[good], 68)
+            )
+        assert error["baseline"] > 1.3, (
+            f"{views} views: the closed form under-reads the scatter here, it still should"
+        )
+        assert error["covariance"] < 1.15, (
+            f"{views} views: the solve's own covariance must cover its own scatter"
+        )
 
 
 def test_one_corrupted_observation_is_dropped_and_the_track_survives() -> None:
@@ -880,6 +944,66 @@ def test_the_anchor_triangulates_its_corners_from_the_whole_window() -> None:
     assert anchor.sigma_m is not None
     two_view = float(np.median(anchor._sigma_two))
     assert anchor.sigma_m < two_view, f"{anchor.sigma_m:.3f} m is not better than {two_view:.3f}"
+
+
+def test_the_view_cap_reaches_the_matcher_and_is_what_the_frame_costs() -> None:
+    """85 % of a track's cost is the flow's hops and there is one hop per view, so the cap on
+    the views IS the cost per frame (52.5 ms at 16 views against 27.0 at 8 over the four errands
+    of 2026-09-14, scratch/parallax_tracks_audit.txt). The knob must therefore really reach the
+    matcher: a cap of 3 leaves no track resting on more."""
+    frames, poses = crawling_frames(0.03, 8)
+    network = np.full((INTR.height, INTR.width), 3.0)
+    seen: dict[int, float] = {}
+    for cap in (3, 8):
+        anchor = ParallaxAnchor(track_max_views=cap)
+        for i, view in enumerate(frames):
+            anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, Odometry(poses))))
+        assert anchor._obs, f"cap {cap} triangulated nothing"
+        seen[cap] = max(anchor._obs)
+        assert seen[cap] <= cap, f"cap {cap} rested a track on {seen[cap]} views"
+    assert seen[8] > seen[3], "a looser cap must actually buy observations"
+
+
+def test_one_window_rests_on_one_motion_source() -> None:
+    """A tracker whose map pose covers the newest frames but not the oldest: a PAIR could not
+    mix sources because it chose a single partner, but a window meets a dozen rays in one solve
+    and the two sources disagree by about a quarter over a second (the wheels over-read). So the
+    window ends where the source changes rather than bundling half of each, and the report line
+    counts the windows it cut."""
+
+    class HalfTracked(Odometry):
+        """A tracker that can answer through the map only for stamps at or after ``since``."""
+
+        def __init__(self, poses: dict[float, RigidPose], since: float, drift: float) -> None:
+            super().__init__({t: _stretched(p, drift) for t, p in poses.items()})
+            self._map = {t: p for t, p in poses.items() if t >= since}
+
+        def map_motion(self, from_stamp: float, to_stamp: float) -> RigidPose | None:
+            """The tracker's word, or ``None`` for a frame its map pose no longer covers."""
+            if from_stamp not in self._map or to_stamp not in self._map:
+                return None
+            return base_motion(self._map[from_stamp], self._map[to_stamp])
+
+        def map_motion_recent(
+            self, from_stamp: float, to_stamp: float, max_age_s: float
+        ) -> RigidPose | None:
+            """The same answer, asked the non-blocking way the frame path asks it."""
+            return self.map_motion(from_stamp, to_stamp)
+
+    frames, poses = crawling_frames(0.03, 6)
+    # the wheels over-read the crawl by half; the map pose is the truth, from 0.2 s on
+    source = HalfTracked(poses, since=0.2, drift=1.5)
+    anchor = ParallaxAnchor()
+    network = np.full((INTR.height, INTR.width), 3.0)
+    pairs = None
+    for i, view in enumerate(frames):
+        pairs = anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, source)))
+    assert anchor.rejected.get("mixed motion", 0) > 0, "a mixed window must be cut and counted"
+    assert "mixed motion" in anchor.describe()
+    # the last frame's window reaches 0.2 s, where the tracker still speaks: had the two oldest
+    # views come in on the wheels' stretched baseline, the planes would sit half again too far
+    assert pairs is not None and pairs.size >= 20
+    assert band_error(pairs) < 0.05, "a window that mixed the sources would read the wheels'"
 
 
 def test_the_knob_at_two_is_the_pair_the_anchor_always_measured() -> None:
