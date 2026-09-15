@@ -662,9 +662,11 @@ class AffineScale:
         return int(sum(p[0].size for p in self._pool))
 
 
-def apply_affine(depth: Array, a: float, b: float) -> Array:
+def apply_affine(depth: Array, a: float | Array, b: float | Array) -> Array:
     """The network's depth corrected by 1 / z = a / D + b; pixels the law cannot place (a
-    non-positive inverse depth) become NaN."""
+    non-positive inverse depth) become NaN. ``a`` and ``b`` are one pair of numbers for the
+    whole image, or an image each — one law per pixel, which is what a scale field applies
+    (:class:`pepin.depth_pipeline.ScaleField`)."""
     d = np.asarray(depth, dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
         inv = a / d + b
@@ -760,6 +762,119 @@ def fit_frame(
     with np.errstate(divide="ignore", invalid="ignore"):
         a, b = float(np.divide(1.0, alpha)), float(np.divide(-beta, alpha))
     return _bounded(a, b, x, y, weight)
+
+
+# ---- the same fit over one patch of the picture, held by what it knows already -----------------
+def _weighted_line(x: Array, y: Array, weight: Array, shift: bool) -> tuple[float, float]:
+    """(alpha, beta) of ``x = alpha * y + beta`` by weighted least squares in closed form —
+    ``beta`` forced to zero (a line through the origin) when ``shift`` is false. NaN in
+    ``alpha`` when the rows carry no weight or do not identify a line; two 2x2 sums instead of
+    :func:`numpy.polyfit`, because a scale field fits one of these per node per frame."""
+    syy = float(np.sum(weight * y * y))
+    sxy = float(np.sum(weight * x * y))
+    scale_only = (sxy / syy, 0.0) if syy > 0.0 else (math.nan, 0.0)
+    if not shift:
+        return scale_only
+    s = float(np.sum(weight))
+    sy = float(np.sum(weight * y))
+    sx = float(np.sum(weight * x))
+    det = s * syy - sy * sy
+    if not math.isfinite(det) or abs(det) <= 1e-12 * max(abs(s * syy), 1.0):
+        return scale_only
+    alpha = (s * sxy - sy * sx) / det
+    return alpha, (sx - alpha * sy) / s
+
+
+def _huber_weights(x: Array, y: Array, weight: Array, shift: bool) -> Array:
+    """Each row's Huber multiplier, judged on a fit of THESE rows alone: the line is refitted
+    :data:`IRLS_ROUNDS` times and a row counts the less the further its residual sits past
+    :data:`IRLS_HUBER` robust sigmas (the MAD's), exactly as :func:`_irls` re-weights.
+
+    Their own line, not the line a prior pulls, because a pseudo-observation is not an outlier
+    and must not be allowed to make the data look like one: a node's pairs sitting perfectly on
+    a line a prior disagrees with would otherwise all be cut down as "outliers" and the prior
+    would win a fit it holds a twentieth of the weight in (scratch/_fit_node_probe.py,
+    2026-09-15: it read a scale of 1.16 where its 24 pairs said 1.10)."""
+    ones: Array = np.ones_like(x)
+    if x.size < 3:
+        return ones
+    alpha, beta = _weighted_line(x, y, weight, shift and x.size >= 2)
+    huber = ones
+    # A scatter under a billionth of the inverse depth itself is not scatter, it is the last
+    # bits of the arithmetic: rows lying exactly on their own line would otherwise be graded
+    # against each other's rounding and come back weighing 1e-5 (scratch/_fit_node_probe.py).
+    floor = 1e-9 * float(np.median(np.abs(x)))
+    for _ in range(IRLS_ROUNDS):
+        res = x - (alpha * y + beta)
+        sigma = 1.4826 * float(np.median(np.abs(res - np.median(res))))
+        if not math.isfinite(sigma) or sigma <= floor:
+            break
+        huber = np.minimum(1.0, IRLS_HUBER * sigma / np.maximum(np.abs(res), 1e-12))
+        alpha, beta = _weighted_line(x, y, weight * huber, shift and x.size >= 2)
+    return huber
+
+
+def fit_node(
+    d: Array,
+    z: Array,
+    weight: Array,
+    priors: Sequence[tuple[float, float, float]] = (),
+    span: tuple[float, float] = (1.0, 2.0),
+    shift: bool = True,
+) -> tuple[float, float] | None:
+    """The law ``1 / z = a / D + b`` of ONE NODE of a scale field: the same regression as
+    :func:`fit_frame` on the pairs that belong to the node, held by pseudo-observations that
+    say what the node should be where its own pairs say little. ``None`` when nothing at all
+    constrains it (no pairs and no priors).
+
+    ``priors`` are (a, b, weight) laws to be pulled toward — the frame's own global fit, and
+    the node's previous value decayed by the time since. Each enters the fit as two extra ROWS
+    of the weighted least squares, lying exactly on that law's line at the two true depths of
+    ``span`` (the pairs' own depth range), half the weight each, in the same units as a pair's
+    weight: a node that saw no pair comes back as the prior to the bit, a node that saw
+    hundreds of beams follows them, and in between the two are averaged the way two rulers of
+    different noise always are. A prior is not an outlier either: the robust re-weighting is
+    judged on the pairs' own line and applied to their rows only
+    (:func:`_huber_weights`), so a node whose data disagrees with the global fit moves away
+    from it instead of being cut down as an outlier of it.
+
+    ``shift`` says whether the node may fit a shift at all, and belongs to the FRAME, not to
+    the node: a node holds a handful of beams over half a metre of depth, and a two-parameter
+    fit on that is noise. The caller passes what its own global fit decided
+    (:data:`FRAME_MIN_SPREAD`), so a field never opens a term the frame's gate refused. The
+    result is bounded like every other law (:func:`_bounded`)."""
+    d = np.asarray(d, dtype=float)
+    z = np.asarray(z, dtype=float)
+    w = np.asarray(weight, dtype=float)
+    lo, hi = float(min(span)), float(max(span))
+    if not (math.isfinite(lo) and math.isfinite(hi)) or lo <= 0.0:
+        return None
+    if hi <= lo * (1.0 + 1e-6):  # one depth cannot hold a line: spread the pull about it
+        lo, hi = 0.8 * lo, 1.25 * lo
+    y_pull = np.array([1.0 / lo, 1.0 / hi])
+    with np.errstate(divide="ignore", invalid="ignore"):  # a pair at depth 0 drops out below
+        rows_x, rows_y, rows_w = [1.0 / d], [1.0 / z], [w]
+    for a, b, pull in priors:
+        if pull <= 0.0 or not math.isfinite(a) or a == 0.0:
+            continue
+        rows_x.append((y_pull - b) / a)  # the prior's own line at the span's two ends
+        rows_y.append(y_pull)
+        rows_w.append(np.full(2, 0.5 * pull))
+    x = np.concatenate(rows_x)
+    y = np.concatenate(rows_y)
+    base = np.concatenate(rows_w)
+    real = np.zeros(x.size, dtype=bool)
+    real[: d.size] = True
+    ok = np.isfinite(x) & np.isfinite(y) & (base > 0.0)
+    x, y, base, real = x[ok], y[ok], base[ok], real[ok]
+    if x.size == 0 or float(np.sum(base)) <= 0.0:
+        return None
+    base = base.copy()
+    base[real] *= _huber_weights(x[real], y[real], base[real], shift)
+    alpha, beta = _weighted_line(x, y, base, shift and x.size >= 2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        a, b = float(np.divide(1.0, alpha)), float(np.divide(-beta, alpha))
+    return _bounded(a, b, x, y, base)
 
 
 # ---- the same pairs read as a curve over the network's range ----------------------------------
