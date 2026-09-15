@@ -3,7 +3,14 @@ import math
 import pytest
 
 from pepin.geometry import BaseGeometry
-from pepin.odometry import DiffDriveOdometry, EncoderUnwrapper, Pose2D, wrap_angle
+from pepin.kinematics import Twist
+from pepin.odometry import (
+    DiffDriveOdometry,
+    EncoderUnwrapper,
+    Pose2D,
+    TwistFromPose,
+    wrap_angle,
+)
 
 GEOM = BaseGeometry(wheel_diameter_m=0.125, track_width_m=0.5, ticks_per_rev=4096)
 
@@ -192,3 +199,38 @@ def test_the_wrap_at_pi_is_not_a_jump() -> None:
     watch = RunawayWatch()
     watch.adopt(Pose2D(0.0, 0.0, math.radians(179.99)), 0.0)
     assert not watch.judge(Pose2D(0.0, 0.0, math.radians(-179.99)), 0.05, 0.0, 0.0)
+
+
+def test_twist_from_pose_primes_then_measures() -> None:
+    """The first sample has nothing to difference; the second is the measured body twist."""
+    estimator = TwistFromPose()
+    assert estimator.update(Pose2D(0.0, 0.0, 0.0), 10.0) == Twist(0.0, 0.0)
+    twist = estimator.update(Pose2D(0.1, 0.0, 0.2), 10.5)
+    assert twist.linear == pytest.approx(0.2)
+    assert twist.angular == pytest.approx(0.4)
+
+
+def test_twist_from_pose_signs_a_reverse_step() -> None:
+    """Driving backwards is a negative forward speed, not a positive distance."""
+    estimator = TwistFromPose()
+    estimator.update(Pose2D(0.0, 0.0, math.pi / 2.0), 0.0)
+    twist = estimator.update(Pose2D(0.0, -0.05, math.pi / 2.0), 0.5)
+    assert twist.linear == pytest.approx(-0.1)
+    assert twist.angular == pytest.approx(0.0)
+
+
+def test_twist_from_pose_wraps_the_heading_step() -> None:
+    """A pivot across +-pi is a small turn, not a full circle at 12 rad/s."""
+    estimator = TwistFromPose()
+    estimator.update(Pose2D(0.0, 0.0, math.pi - 0.05), 0.0)
+    twist = estimator.update(Pose2D(0.0, 0.0, -math.pi + 0.05), 0.1)
+    assert twist.angular == pytest.approx(1.0)
+
+
+def test_twist_from_pose_re_primes_after_a_gap() -> None:
+    """A link that went quiet for seconds must not be divided by its own silence."""
+    estimator = TwistFromPose(max_gap_s=0.5)
+    estimator.update(Pose2D(0.0, 0.0, 0.0), 0.0)
+    assert estimator.update(Pose2D(1.0, 0.0, 0.0), 3.0) == Twist(0.0, 0.0)
+    twist = estimator.update(Pose2D(1.1, 0.0, 0.0), 3.1)
+    assert twist.linear == pytest.approx(1.0)
