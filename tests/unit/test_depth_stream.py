@@ -2,8 +2,9 @@
 
 rclpy is faked (``ros_stubs``), the network is a test's scripted frames, TF is the stub's
 buffer; the node is built and its frames processed here as on the laptop. The proof that
-matters: with the default flags the published depth and scan are, to the bit, what the node's
-own chain (edges -> beam pairs -> law -> drop edges -> scan -> floor anchor, as ``_process``
+matters: with the flags' defaults, bar the switches that have moved since and are named one by
+one at the build, the published depth and scan are, to the bit, what the node's own chain
+(edges -> beam pairs -> law -> drop edges -> scan -> floor anchor, as ``_process``
 stood before the pipeline) published — held here as the reference. Then the camera pose from
 TF at the frame's stamp, the config as the fallback while TF has no edge, the flags reaching
 the stages, and the scan's source when the wall correction is on.
