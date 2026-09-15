@@ -463,20 +463,21 @@ def test_a_gap_outside_the_window_is_not_triangulated() -> None:
     assert anchor.rejected["gap"] == 1 and anchor.frames == 0
 
 
-def test_the_flag_is_off_by_default_and_the_stage_contributes_nothing() -> None:
-    """The chain ships with the parallax anchor switched off, in its place among the anchors,
-    and switching it on is one call."""
+def test_the_flag_ships_on_and_switching_it_off_takes_the_stage_out() -> None:
+    """The chain ships with the parallax anchor switched ON — the second ruler of the scale —
+    in its place among the anchors, and switching it off is one call. A frame the cart did not
+    move between contributes nothing either way."""
     pipeline = standard_pipeline()
     assert pipeline.names.index("parallax_anchor") == pipeline.names.index("wall_anchor") + 1
     assert pipeline.names.index("parallax_anchor") < pipeline.names.index("affine_law")
-    assert pipeline.switches["parallax_anchor"] is False
+    assert pipeline.switches["parallax_anchor"] is True
     a, _b, _ = rendered_pair()
     poses = {1.0: planar_pose(0.0, 0.0, 0.0)}
     ctx = context(1.0, a, Odometry(poses))
     result = pipeline.run(np.full((INTR.height, INTR.width), 3.0), ctx)
-    assert result.verdict("parallax_anchor").on is False
-    assert result.verdict("parallax_anchor").pairs == 0
-    assert standard_pipeline(parallax_anchor=True).switches["parallax_anchor"] is True
+    assert result.verdict("parallax_anchor").on is True
+    assert result.verdict("parallax_anchor").pairs == 0  # one frame in the ring, nothing to pair
+    assert standard_pipeline(parallax_anchor=False).switches["parallax_anchor"] is False
 
 
 def test_the_window_follows_the_matcher_and_a_given_one_pins_it() -> None:

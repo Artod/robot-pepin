@@ -72,6 +72,7 @@ from pepin.depth import (
     FLOOR_HEIGHT_TOLERANCE,
     FRAME_HOLD_TAU_S,
     FRAME_MIN_PAIRS,
+    FRAME_MIN_SPREAD,
     MIN_DEPTH_SPREAD,
     MIN_SAMPLES,
     NEAR_M,
@@ -94,6 +95,8 @@ from pepin.depth import (
     floor_anchor,
     floor_depth,
     in_image,
+    inverse_sigma,
+    pair_weight,
     project,
     project_all,
 )
@@ -121,7 +124,14 @@ PARALLAX_MATCHER = "klt"  # who finds the correspondences: the flow or the descr
 PARALLAX_MOTION = "tracker"  # whose word on the baseline: the lidar tracker's map pose, or odometry
 PARALLAX_MOTIONS = ("tracker", "odom")
 PARALLAX_RING_FRAMES = 24  # frames kept to choose a partner from: 1.5 s at any rate the node runs
-PARALLAX_WEIGHT = 1.0  # the share of a parallax pair's own inverse-depth precision that counts
+PARALLAX_WEIGHT = 1.0  # the multiplier on a parallax pair's own 1 / sigma^2 (the A/B's knob)
+LIDAR_SIGMA_M = 0.015  # metres: one beam's range noise, the number its weight is 1 / sigma^2 of.
+# Not in config/lidar.json (that file carries the mount, not the noise) and not a datasheet
+# copy: the LD19's stated accuracy is a per-cent of range, and what the pairs actually see is
+# the beam's own noise plus the association error (the beam and the pixel look at the same
+# thing to within a pixel and a scan period). 1.5 cm is what the pipeline had assumed all along
+# in another dress — pepin.parallax weighed its corners against "2 cm at 2 m" — and the live
+# knob is the node's lidar_sigma_m; 0 restores the flat weight of 1 every beam used to carry.
 
 
 # ---- what flows through the pipeline ----------------------------------------------------------
@@ -266,6 +276,23 @@ class Frame:
     raw: Array
     ctx: FrameContext
     pairs: list[Pairs] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)  # which anchor each block of pairs is from
+
+    def add(self, source: str, found: Pairs) -> None:
+        """Take one anchor's pairs into the pool, remembering whose they are (the report line
+        says how much of the frame's weight each ruler brought)."""
+        self.pairs.append(found)
+        self.sources.append(source)
+
+    @property
+    def rulers(self) -> dict[str, float]:
+        """How much fit weight each anchor contributed to this frame, by the anchor's name —
+        the sum of its pairs' weights, which is the only honest measure of who is fitting the
+        law when one ruler brings 30 pairs at weight 1 and another 200 at weight 0.03."""
+        out: dict[str, float] = {}
+        for name, part in zip(self.sources, self.pairs, strict=False):
+            out[name] = out.get(name, 0.0) + float(np.sum(part.weight))
+        return out
 
     @cached_property
     def edge(self) -> Mask:
@@ -370,7 +397,7 @@ class AnchorStage:
         """Contribute the pairs, apply the correction."""
         found = self.pairs(frame)
         if found is not None and found.size:
-            frame.pairs.append(found)
+            frame.add(self.name, found)
         out, touched = self.correct(depth, frame)
         return out, Verdict(
             self.name, True, pairs=0 if found is None else found.size, pixels=touched
@@ -576,12 +603,19 @@ class LidarAnchor(AnchorStage):
     """The lidar's beams: where a beam lands in the image, the network's raw depth pairs with
     the beam's true depth (:func:`pepin.depth.beam_hits`; edge pixels left out). Off, the laws
     get no pairs from the lidar and hold — the failure mode of a lidar that stops, and the
-    measure of what the lidar buys."""
+    measure of what the lidar buys.
+
+    Each beam carries its own weight, ``1 / sigma^2`` in inverse depth from ``sigma_m`` metres
+    of range noise (:func:`pepin.depth.pair_weight`), because it shares the pool with a second
+    ruler now (:class:`ParallaxAnchor`) and two rulers can only be mixed in one fit if both are
+    weighed in the same unit. ``sigma_m`` at or below 0 restores the flat weight of 1 every beam
+    carried before, which is what the laws were fitted on until 2026-09-15."""
 
     name = "lidar_anchor"
 
-    def __init__(self, weight: float = 1.0) -> None:
+    def __init__(self, weight: float = 1.0, sigma_m: float = LIDAR_SIGMA_M) -> None:
         self.weight = weight
+        self.sigma_m = sigma_m
 
     def pairs(self, frame: Frame) -> Pairs | None:
         """The beams' pairs, or ``None`` without a scan or under MIN_SAMPLES clean hits."""
@@ -594,16 +628,24 @@ class LidarAnchor(AnchorStage):
         cols = beams[hits, 0].astype(int)
         rows = beams[hits, 1].astype(int)
         intr = frame.ctx.intr
+        z = beams[hits, 2]
+        weight: float | Array = self.weight
+        if self.sigma_m > 0.0:
+            weight = self.weight * pair_weight(inverse_sigma(self.sigma_m, z))
         return Pairs.of(
             frame.raw[rows, cols],
-            beams[hits, 2],
+            z,
             lift_of(rows, intr),
-            self.weight,
+            weight,
             left_of(cols, intr),
         )
 
     def describe(self) -> str:
-        return f"weight {self.weight:g}"
+        """The weight a beam carries: its own 1 / sigma^2 at ``sigma_m`` of range noise, or the
+        flat number every beam shared before."""
+        if self.sigma_m <= 0.0:
+            return f"weight {self.weight:g} flat"
+        return f"weight {self.weight:g} / sigma^2, sigma {self.sigma_m * 100:.1f} cm"
 
 
 class AffineLaw(LawStage):
@@ -1146,6 +1188,14 @@ class ParallaxAnchor(AnchorStage):
         self._max_gap_s = seconds
 
     @property
+    def sigma_m(self) -> float | None:
+        """The per-pair triangulation noise of the last frames, metres (their median), or
+        ``None`` before the first pair — the number every pair's weight is 1 / sigma^2 of, in
+        inverse depth (:func:`pepin.depth.pair_weight`), and the one to read against the
+        lidar's ``lidar_sigma_m`` when the two rulers disagree."""
+        return float(np.median(self._sigma)) if self._sigma else None
+
+    @property
     def gap_s(self) -> float | None:
         """How far back in time the partner of the last triangulated frame sat, in seconds, or
         ``None`` before the first one — the number the report's median is taken over."""
@@ -1275,7 +1325,7 @@ class ParallaxAnchor(AnchorStage):
         spoke = ", ".join(f"{k} {v}" for k, v in self.used.items() if v)
         asked = (
             f"{self.matcher} <= {self.max_gap_s:.2f} s on the {self.motion_source}'s motion"
-            f" ({spoke or 'none yet'}), weight {self.weight:g},"
+            f" ({spoke or 'none yet'}), weight {self.weight:g} / sigma^2,"
             f" asks {self.min_baseline_m * 100:.0f} cm"
         )
         dropped = ", ".join(f"{k} {v}" for k, v in self.rejected.items())
@@ -1663,12 +1713,14 @@ class FrameLaw(LawStage):
         min_pairs: int = FRAME_MIN_PAIRS,
         tau_s: float = FRAME_HOLD_TAU_S,
         clock: Callable[[], float] = time.monotonic,
+        shift_needs_beams: bool = True,
     ) -> None:
         self.prior = prior
         self.a = 1.0
         self.b = 0.0
         self.min_pairs = min_pairs
         self.tau_s = tau_s
+        self.shift_needs_beams = shift_needs_beams
         self.frames = 0
         self.fits = 0
         self.held = 0
@@ -1676,6 +1728,7 @@ class FrameLaw(LawStage):
         self._fitted = False
         self._clock = clock
         self._last_fit: float | None = None  # when a frame last spoke for itself
+        self._rulers: dict[str, float] = {}  # weight per anchor behind the law in hand
 
     @property
     def ready(self) -> bool:
@@ -1693,15 +1746,31 @@ class FrameLaw(LawStage):
             return 1.0 if self.held == 0 else 0.0
         return float(math.exp(-max(0.0, self._clock() - self._last_fit) / self.tau_s))
 
-    def fit(self, pairs: Pairs | None, ctx: FrameContext | None = None) -> None:
+    def fit(self, pairs: Pairs | None, ctx: FrameContext | None = None, beams: bool = True) -> None:
         """Feed this frame's pairs and its context (the prior is asked what it makes of those
         pairs' depths, and the fit is that law's residual): they fit this frame's law outright,
         or the last law is held and starts decaying toward the prior's. Without a context there
-        is no prior to correct and the frame is held."""
+        is no prior to correct and the frame is held.
+
+        ``beams`` says whether the lidar is one of the rulers in this pool. On a pool with no
+        beams at all — parallax corners alone, the lidar-off case — the shift is shut off and
+        the frame gets a scale only while ``shift_needs_beams`` stands: the corners span the
+        whole picture's depths, so the spread gate opens, and a two-parameter fit on a ruler of
+        7-10 cm per pair runs to the law's bounds. Measured over the four errands of 2026-09-14
+        (scratch/parallax_ruler_eval.txt, 101 frames, the corners fitting and the beams judging):
+        with the shift the parallax-only law reads 44.5 % median |residual| and its scale jumps
+        1.69 between consecutive frames, with the scale alone 30.9 % and 1.15."""
         self.frames += 1
         law = None
         if pairs is not None and pairs.size and ctx is not None:
-            law = fit_frame(self.prior.apply(pairs.d, ctx), pairs.z, pairs.weight, self.min_pairs)
+            spread = math.inf if self.shift_needs_beams and not beams else FRAME_MIN_SPREAD
+            law = fit_frame(
+                self.prior.apply(pairs.d, ctx),
+                pairs.z,
+                pairs.weight,
+                self.min_pairs,
+                min_spread=spread,
+            )
         if law is None or pairs is None:
             self.held += 1
             return
@@ -1730,24 +1799,45 @@ class FrameLaw(LawStage):
         the depth handed in (the edge filter's, and the laws' that ran before); the frame is
         withheld only while no law of any kind exists."""
         pool = frame.pool
-        self.fit(pool, frame.ctx)
+        rulers = frame.rulers
+        self.fit(pool, frame.ctx, beams=rulers.get("lidar_anchor", 0.0) > 0.0)
+        if rulers and self.pairs:
+            self._rulers = rulers
         n = 0 if pool is None else pool.size
         if not self.ready:
             return depth, Verdict(self.name, True, pairs=n, note="no law yet", withhold=True)
         out = np.where(np.isfinite(depth), self.apply(frame.raw, frame.ctx), np.nan)
         return out, Verdict(self.name, True, pairs=n, pixels=int(out.size), note=self.describe())
 
+    @property
+    def rulers(self) -> str:
+        """Which ruler fitted the law in hand, by share of the fit's total weight — e.g.
+        ``rulers: lidar 98%, parallax 2%, 312 pts``. Pairs are not the measure: a frame can
+        carry 200 parallax corners at 0.03 of a beam's weight each and 30 beams, and the beams
+        still write the law. Empty before the first fit."""
+        total = sum(self._rulers.values())
+        if not self._rulers or total <= 0.0:
+            return ""
+        shares = ", ".join(
+            f"{name.removesuffix('_anchor').removesuffix('_pairs')} {w / total:.0%}"
+            for name, w in sorted(self._rulers.items(), key=lambda kv: -kv[1])
+        )
+        return f"rulers: {shares}, {self.pairs} pts"
+
     def describe(self) -> str:
         """The law for the report line: this frame's two numbers over the prior's depth, the
-        pairs behind them, how many frames have been held against how many seen, and how much
-        of the frame's own law still stands against the prior's."""
+        pairs behind them, which rulers' weight fitted them, how many frames have been held
+        against how many seen, and how much of the frame's own law still stands against the
+        prior's."""
         if not self._fitted:
             return f"prior stands, {self.held}/{self.frames} frames held"
         clipped = at_bound(self.a, self.b)
         edge = f" [{clipped} AT BOUND]" if clipped else ""
+        rulers = self.rulers
         return (
             f"a {self.a:.2f} b {self.b:+.3f} on {self.pairs} pairs{edge}, "
-            f"{self.held}/{self.frames} frames held (own {self.weight:.2f})"
+            + (f"{rulers}, " if rulers else "")
+            + f"{self.held}/{self.frames} frames held (own {self.weight:.2f})"
         )
 
 
@@ -1760,7 +1850,7 @@ def standard_pipeline(
     frame_stage: FrameLaw | None = None,
     floor_pairs: bool = False,
     wall_anchor: bool = False,
-    parallax_anchor: bool = False,
+    parallax_anchor: bool = True,
     ray_law: bool = False,
     range_law: bool = True,
     frame_law: bool = True,
@@ -1773,9 +1863,12 @@ def standard_pipeline(
     and the frame law all sit behind the affine one and correct the same raw depth by their own
     rule instead — by the ray's angle, by the range, by this frame's own beams — and on, each
     replaces the image of the law before it; off, that law's stands. ``range_law`` and
-    ``frame_law`` are the two of the seven on by default: one affine law leaves a residual that
-    tilts 12 % per metre (:class:`pepin.depth.RangeLaw`), and a law fitted on a minute of pool
-    describes the last minute's scene rather than this frame's (:class:`FrameLaw`).
+    ``parallax_anchor``, ``range_law`` and ``frame_law`` are the three of the seven on by
+    default: one affine law leaves a residual that tilts 12 % per metre
+    (:class:`pepin.depth.RangeLaw`), a law fitted on a minute of pool describes the last
+    minute's scene rather than this frame's (:class:`FrameLaw`), and the lidar's one row is not
+    the whole picture — the parallax anchor is the second ruler of the scale, weighed against
+    the beams by its own noise and measuring where they cannot reach (:class:`ParallaxAnchor`).
 
     Every law may be handed in so the caller keeps them: the affine and the ray law pool and
     fit on their own, so a saved law must be seeded into **both** (:meth:`AffineLaw.seed`), or

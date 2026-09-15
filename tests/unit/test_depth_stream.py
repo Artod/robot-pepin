@@ -61,6 +61,12 @@ from pepin.depth import (  # noqa: E402
     scan_points,
     to_base,
 )
+from pepin.depth_pipeline import (  # noqa: E402
+    LIDAR_SIGMA_M,
+    PARALLAX_WEIGHT,
+    LidarAnchor,
+    ParallaxAnchor,
+)
 from pepin.mounts import load_lidar_mount, rotation_from_rpy  # noqa: E402
 from pepin.tsdf import RigidPose  # noqa: E402
 
@@ -279,7 +285,8 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     is the pose, as it was): after every frame the node's law is the reference's law to the
     last bit, it withholds exactly the frames the reference withheld, and every published
     image and scan is byte for byte the reference's."""
-    node, net = build(range_law=False, frame_law=False)  # the affine law alone: this reference
+    node, net = build(range_law=False, frame_law=False, lidar_sigma_m=0.0)  # the affine law
+    # alone and every beam weighing the same: this reference is the chain of before 2026-09-15
     assert node._pipeline.switches == {name: FLAGS[name] for name in node._pipeline.names} | {
         "range_law": False,
         "frame_law": False,
@@ -320,7 +327,7 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     assert "backend fake (CPU model not loaded)" in line
     assert (
         "flags: edge_filter=on lidar_anchor=on floor_pairs=off wall_anchor=off"
-        " parallax_anchor=off affine_law=on ray_law=off range_law=off frame_law=off"
+        " parallax_anchor=on affine_law=on ray_law=off range_law=off frame_law=off"
         " wall_correct=off"
         " floor_anchor=on"
         " depth_backend=local" in line
@@ -405,6 +412,32 @@ def test_a_flag_switches_its_stage_and_a_launch_override_reaches_it(build: Build
     line = node.logger.texts("info")[-1]
     assert "floor_anchor off [tolerance 4 cm]" in line and "wall_correct on [" in line
     assert "flags: edge_filter=off lidar_anchor=on floor_pairs=on" in line
+
+
+def test_the_two_rulers_weights_are_live_flags_and_the_report_prints_them(build: Build) -> None:
+    """What a beam is trusted to (lidar_sigma_m) and how loudly the corners vote
+    (parallax_weight) are live parameters that reach their stages, and both stages print what
+    they are set to in the report line."""
+    node, net = build()
+    beams, corners = node._pipeline.stage("lidar_anchor"), node._pipeline.stage("parallax_anchor")
+    assert isinstance(beams, LidarAnchor) and isinstance(corners, ParallaxAnchor)
+    assert beams.sigma_m == LIDAR_SIGMA_M and corners.weight == PARALLAX_WEIGHT
+    assert node.set_parameters([Param("lidar_sigma_m", 0.0), Param("parallax_weight", 0.0)])[
+        0
+    ].successful
+    assert beams.sigma_m == 0.0 and corners.weight == 0.0
+    assert node.set_parameters([Param("lidar_sigma_m", 0.03), Param("parallax_weight", 2.0)])[
+        0
+    ].successful
+    assert beams.sigma_m == 0.03 and corners.weight == 2.0
+    for k, wall_x in enumerate(WALLS):
+        frame(node, net, CONFIG_CAM, wall_x, k)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "lidar_anchor on [weight 1 / sigma^2, sigma 3.0 cm]" in line
+    assert "weight 2 / sigma^2" in line, "the parallax anchor says what its pairs vote with"
+    assert "lidar_sigma_m=0.03 " in line and "parallax_weight=2.0 " in line
+    assert "rulers: lidar " in line, "the frame law says whose weight fitted it"
 
 
 def test_the_scan_is_built_from_the_depth_before_the_floor_anchor(

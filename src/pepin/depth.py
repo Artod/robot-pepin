@@ -488,6 +488,38 @@ def beam_pairs(
     return np.asarray(depth, dtype=float)[rows, cols], samples[hits, 2]
 
 
+REF_SIGMA_INV = 0.005  # 1/m: the inverse-depth noise a weight of 1 stands for. It is a lidar
+# beam of 2 cm at 2 m, the unit the parallax pairs were already weighed in
+# (pepin.parallax.LIDAR_SIGMA_INV). Nothing depends on the value itself — a weighted fit is
+# invariant to a common factor — only on every ruler being weighed against the SAME one.
+
+
+def pair_weight(sigma_inv: Array, cap: float | None = None) -> Array:
+    """The weight a pair deserves in a fit from its own inverse-depth noise: ``1 / sigma^2``
+    expressed against :data:`REF_SIGMA_INV`, so a pair as precise as a lidar beam at 2 m weighs
+    1 and one twice as noisy weighs a quarter. ``cap`` bounds it from above (the parallax
+    anchor caps at 1: no triangulated corner outweighs a beam).
+
+    The fit lives in inverse depth, so this is where a ruler's noise belongs: a ruler with a
+    constant noise in METRES is not equally good at every range there — a beam of 1.5 cm at
+    1 m is 0.015 in inverse depth and the same beam at 3 m is 0.0017, eight times better.
+    Weighing by the metre would let the near field decide a law the far field measures better."""
+    sigma = np.asarray(sigma_inv, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = np.where(np.isfinite(sigma) & (sigma > 0.0), (REF_SIGMA_INV / sigma) ** 2, 0.0)
+    out: Array = w if cap is None else np.minimum(cap, w)
+    return out
+
+
+def inverse_sigma(sigma_m: float | Array, z: Array) -> Array:
+    """The inverse-depth noise of a ruler whose noise is ``sigma_m`` metres at depth ``z``:
+    ``sigma_m / z^2``, the first-order image of a metre error in 1 / z."""
+    depth = np.asarray(z, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out: Array = np.asarray(sigma_m, dtype=float) / depth**2
+    return out
+
+
 def weighted_median(values: Array, weight: Array | None) -> float:
     """The median of ``values``, each counting ``weight`` times (the plain median when
     ``weight`` is ``None``): the value at which half the total weight lies below — the mean of
@@ -684,7 +716,22 @@ def fit_frame(
     shift is fitted only when the frame's own depths span ``min_spread`` (1.5, not the pool's
     2.5: one picture of one wall spans little, and a shift fitted on it is noise), otherwise the
     scale alone, the weighted median ratio. The result is bounded like every other law
-    (:func:`_bounded`)."""
+    (:func:`_bounded`).
+
+    ``weight`` is each pair's 1 / sigma^2 (:func:`pair_weight`) and is what lets two rulers
+    share one fit: the lidar's beams and the parallax anchor's corners land in the same pool and
+    the fit reads each by its own noise, so the beams write the law where they reach and the
+    corners carry it where they do not. The weights reach the robust fit as a multiplier on
+    Huber's own weight (:func:`_irls`), never as a replacement: a heavy pair that is wrong is
+    still cut down.
+
+    What the weights do NOT reach is the spread gate above: it reads the 5th and 95th
+    percentile of ``z`` by count, whoever measured them. A lidar-only pool is one row of one
+    room and usually stays under the gate, so the frame gets a scale and no shift; a pool with
+    parallax in it spans the corners of the whole picture and opens the shift far more often —
+    on a parallax-only frame, essentially always. That is the intended behaviour (the spread is
+    real, and a shift is what a spread identifies) but it means switching the anchor on changes
+    which TERM the frame law fits, not only its numbers."""
     d = np.asarray(d, dtype=float)
     z = np.asarray(z, dtype=float)
     if d.size < min_pairs:

@@ -96,7 +96,7 @@ from typing import Any, Literal, Protocol
 import numpy as np
 import numpy.typing as npt
 
-from pepin.depth import NEAR_M, Array, CameraPose, Intrinsics
+from pepin.depth import NEAR_M, REF_SIGMA_INV, Array, CameraPose, Intrinsics, pair_weight
 
 Pixels = npt.NDArray[np.float32]  # (n, 2) columns and rows, sub-pixel
 
@@ -129,8 +129,8 @@ MAX_REPROJ_PX = 1.5  # the triangulated point's own reprojection error in B
 
 # ---- the noise ----------------------------------------------------------------------------
 DISPARITY_SIGMA_PX = 0.5  # what the flow knows a corner's place to
-LIDAR_SIGMA_INV = 0.005  # 1/m: a lidar beam's inverse-depth noise (2 cm at 2 m), the weight's 1
-MAX_WEIGHT = 1.0  # no parallax pair outweighs a lidar beam
+LIDAR_SIGMA_INV = REF_SIGMA_INV  # 1/m: the noise a weight of 1 stands for (pepin.depth)
+MAX_WEIGHT = 1.0  # no parallax pair outweighs a lidar beam at the reference range
 
 REASONS = (
     "still",
@@ -600,7 +600,7 @@ def parallax_truth(
         worst = max(rejected, key=lambda name: rejected[name])
         return ParallaxTruth.nothing(worst, tracked=tracked, rejected=rejected)
     sigma_inv = sigma[keep] / z[keep] ** 2
-    weight = np.minimum(max_weight, (LIDAR_SIGMA_INV / sigma_inv) ** 2)
+    weight = pair_weight(sigma_inv, cap=max_weight)
     return ParallaxTruth(
         np.asarray(pts_b, dtype=np.float32)[keep],
         z[keep],

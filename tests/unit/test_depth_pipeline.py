@@ -118,6 +118,9 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
     node_law = AffineScale()
     pipeline = standard_pipeline(range_law=False, frame_law=False)  # the affine law alone,
     # as the node ran then
+    beams = pipeline.stage("lidar_anchor")
+    assert isinstance(beams, LidarAnchor)
+    beams.sigma_m = 0.0  # and every beam weighing the same, as it did before 2026-09-15
     law = pipeline.stage("affine_law")
     assert isinstance(law, AffineLaw)
     assert pipeline.names == [
@@ -178,7 +181,7 @@ def test_stages_switch_by_name_and_the_report_counts_them() -> None:
         "lidar_anchor": True,
         "floor_pairs": False,
         "wall_anchor": False,
-        "parallax_anchor": False,
+        "parallax_anchor": True,
         "affine_law": True,
         "ray_law": False,
         "range_law": True,
@@ -624,6 +627,85 @@ def test_the_frame_law_corrects_what_the_pool_law_left_on_this_frame() -> None:
     live.set("frame_law", False)
     back = live.run(moved, _context(_wall_returns(2.0)))
     assert back.before("floor_anchor") is back.after["range_law"]
+
+
+# ---- two rulers in one fit -------------------------------------------------------------------
+def test_a_beam_weighs_its_own_inverse_depth_noise_and_zero_sigma_restores_the_flat_weight() -> (
+    None
+):
+    """Every beam used to count once whatever its range. It now counts 1 / sigma^2 in inverse
+    depth, so a far beam — eight times better placed in the space the law is fitted in —
+    outweighs a near one, and sigma_m 0 brings the flat weight back."""
+    frame = Frame(_network(_scene(2.0), 1.3, 0.0, noise=0.0, seed=0), _context(_wall_returns(2.0)))
+    weighed = LidarAnchor(sigma_m=0.015).pairs(frame)
+    flat = LidarAnchor(sigma_m=0.0).pairs(frame)
+    assert weighed is not None and flat is not None
+    assert np.array_equal(weighed.z, flat.z) and np.all(flat.weight == 1.0)
+    near, far = np.argmin(weighed.z), np.argmax(weighed.z)
+    ratio = (weighed.z[far] / weighed.z[near]) ** 4  # 1 / (sigma_m / z^2)^2
+    assert weighed.weight[far] / weighed.weight[near] == pytest.approx(ratio, rel=1e-9)
+    assert "sigma 1.5 cm" in LidarAnchor().describe() and "flat" in flat_describe()
+
+
+def flat_describe() -> str:
+    """The lidar anchor's report words with the weights switched back to flat."""
+    return LidarAnchor(sigma_m=0.0).describe()
+
+
+def test_the_pool_of_two_rulers_is_read_by_weight_and_the_report_says_whose_it_was() -> None:
+    """A frame carrying both rulers: 30 beams at weight 1 and 300 corners at 0.03 that claim a
+    different scale. The fit follows the beams, the report line names the shares by weight (not
+    by pairs), and the same frame with the corners alone fits on them instead."""
+    raw = _network(_scene(2.0), 1.3, 0.0, noise=0.0, seed=0)
+    frame = Frame(raw, _context(_wall_returns(2.0)))
+    beams = LidarAnchor(sigma_m=0.0).pairs(frame)
+    assert beams is not None
+    keep = np.arange(beams.size) % (beams.size // 30) == 0
+    beams = Pairs(
+        beams.d[keep], beams.z[keep], beams.weight[keep], beams.lift[keep], beams.left[keep]
+    )
+    wrong = Pairs.of(  # 300 corners saying every depth is 30 % further than it is
+        np.repeat(beams.d, 300 // beams.size + 1)[:300],
+        np.repeat(beams.z, 300 // beams.size + 1)[:300] * 1.3,
+        np.zeros(300),
+        weight=0.03,
+    )
+    frame.add("lidar_anchor", beams)
+    frame.add("parallax_anchor", wrong)
+    shares = frame.rulers
+    assert shares["lidar_anchor"] == pytest.approx(float(beams.weight.sum()))
+    assert shares["parallax_anchor"] == pytest.approx(9.0)
+    law = AffineLaw()
+    law.seed(1.0, 0.0)
+    stage = FrameLaw(law)
+    stage.run(raw, frame)
+    assert stage.pairs == beams.size + 300
+    both = stage.a
+    share = 9.0 / (9.0 + float(beams.weight.sum()))
+    assert stage.rulers.startswith("rulers: lidar ") and f"parallax {share:.0%}" in stage.rulers
+    assert f"{beams.size + 300} pts" in stage.rulers and stage.rulers in stage.describe()
+    alone = Frame(raw, _context(None))
+    alone.add("parallax_anchor", wrong)
+    only = FrameLaw(law)
+    only.run(raw, alone)
+    assert only.fits == 1, "a frame with no beams at all still fits on the corners"
+    assert only.rulers == f"rulers: parallax 100%, {wrong.size} pts"
+    assert only.b == 0.0, "a pool with no beams in it fits a scale, never a shift"
+    far = np.linspace(0.8, 4.0, 200)  # corners at every range of the room, as the anchor gives
+    span = Pairs.of(1.3 * far + 0.05, far, np.zeros(far.size), weight=0.03)
+    for gate, shift in ((True, 0.0), (False, None)):
+        pool_frame = Frame(raw, _context(None))
+        pool_frame.add("parallax_anchor", span)
+        stage_gate = FrameLaw(law, shift_needs_beams=gate)
+        stage_gate.run(raw, pool_frame)
+        assert stage_gate.fits == 1
+        if shift is None:
+            assert stage_gate.b != 0.0, "the gate off, the spread alone opens the shift"
+        else:
+            assert stage_gate.b == shift, "the gate on, a beamless pool gets a scale only"
+    truth = 1.3  # the network's own scale on this frame: what the beams measure
+    assert only.a == pytest.approx(truth / 1.3, abs=0.02), "the corners alone fit their own claim"
+    assert abs(both - truth) < abs(only.a - truth) / 3.0, "the beams write the law where they are"
 
 
 def test_a_frame_without_beams_decays_back_to_the_law_behind_it() -> None:

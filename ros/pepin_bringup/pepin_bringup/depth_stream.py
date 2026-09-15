@@ -106,12 +106,16 @@ from pepin.depth import (
     to_base,
 )
 from pepin.depth_pipeline import (
+    LIDAR_SIGMA_M,
     PARALLAX_MATCHER,
     PARALLAX_MIN_BASELINE_M,
     PARALLAX_MOTION,
     PARALLAX_MOTIONS,
+    PARALLAX_WEIGHT,
     AffineLaw,
     FrameContext,
+    FrameLaw,
+    LidarAnchor,
     ParallaxAnchor,
     RangeLawStage,
     RayLaw,
@@ -237,23 +241,29 @@ FLAGS = FlagSet(
     ),
     Flag(
         "parallax_anchor",
-        False,
+        True,
         description="the corners this frame shares with the previous one, triangulated against the"
         " odometry's transform between the two stamps (pepin.parallax), pair the network's depth"
         " with a depth in metres the cart measured by moving — a hoop that needs no lidar and no"
         " assumed plane and that lands at every elevation the picture has",
-        why="not measured live yet: on runs 0171 and 0165 it costs 3.5-3.8 ms a frame and yields"
-        " 30-190 pairs on only 31-36 % of frames (nothing at all while the cart stands still or"
-        " turns on the spot), and at those runs' 2.9 cm median baseline the triangulated depth is"
-        " +25-37 % too far under 1.5 m (19-30 samples a run) while it sits within 3 % of the lidar"
-        " from 1.5 to 3 m (scratch/parallax_vs_lidar.txt). The odometry's own +-25 % scale band"
-        " multiplies near and far alike and cannot make a range-dependent bias; the cause is not"
-        " known",
-        on_when="after a run at driving speed (0.3 s of gap = 10-15 cm of baseline instead of 3"
-        " cm) with the calibrated focal length (fx 724.1, HFOV 82.9 deg) either explains the"
-        " near-field bias or clears it",
-        off_when="wherever the cart stands, turns on the spot or faces blank walls: it yields"
-        " nothing there and costs its 3.5 ms anyway",
+        why="it is the second ruler of the scale, and it is now weighed like one. Every pair"
+        " carries 1 / sigma^2 from its own triangulation against a beam's 1 / sigma^2 at"
+        " lidar_sigma_m (pepin.depth.pair_weight), so a corner at 7-10 cm of noise counts about"
+        " 0.03 of a beam and 200 of them do not outvote 30 beams: measured on the errands of"
+        " 2026-09-14, the lidar keeps 90-97 % of a frame's fit weight wherever it reaches"
+        " (scratch/parallax_ruler_eval.txt). What the anchor buys is where the lidar does not"
+        " reach — above the plane, nearer than the 0.71 m at which the plane enters the picture,"
+        " and every frame with no beams at all, where it is the only metric ruler left and the"
+        " frame law fits on it instead of decaying to the pool. Its own depth reads 0.93-1.01 of"
+        " the lidar at 1.5-2 m on the tracker's motion at the 1.0-1.5 s gaps measured"
+        " (scratch/parallax_pose_sweep.txt), at 3.5-3.9 ms a frame",
+        on_when="always, now that the weights are its noise: on a frame the lidar covers it"
+        " changes the law by a few per cent, and on a frame the lidar does not cover it is the"
+        " law",
+        off_when="to A/B what it buys (or set parallax_weight 0, which keeps the pairs and their"
+        " report line and takes their vote away), and on a cart whose tracker is dead AND whose"
+        " odometry is untrusted: the baseline is then a guess and every depth is proportional to"
+        " it",
     ),
     Flag(
         "affine_law",
@@ -535,6 +545,65 @@ FLAGS = FlagSet(
         choices=MATCHERS,
     ),
     Flag(
+        "frame_shift_needs_beams",
+        True,
+        description="the per-frame law fits a shift only when the lidar is one of the rulers of"
+        " that frame's pool; a pool of parallax corners alone gets a scale and no shift. Off,"
+        " the shift is decided by the pool's depth spread alone, whoever measured it",
+        why="the spread gate cannot see WHO spans the room. The lidar's row spans little and"
+        " usually keeps the shift shut; the corners land at every elevation and range in the"
+        " picture and open it every time, and a two-parameter fit on a ruler of 7-10 cm a pair"
+        " runs to the law's bounds. Measured over the four errands of 2026-09-14"
+        " (scratch/parallax_ruler_eval.txt, 101 frames, the corners fitting and the beams"
+        " judging): with the shift a parallax-only law reads 44.5 % median |residual| and its"
+        " scale jumps 1.69 between consecutive frames, with the scale alone 30.9 % and 1.15."
+        " Neither is a law to drive on — this is the gate that makes the lidar-off case merely"
+        " bad instead of unbounded",
+        on_when="always while the parallax anchor's own sigma stays where it is measured",
+        off_when="when a parallax pool is trusted to identify a shift — a calibrated focal"
+        " length and a per-pair sigma under a couple of centimetres",
+    ),
+    Flag(
+        "parallax_weight",
+        PARALLAX_WEIGHT,
+        description="the multiplier on every parallax pair's own 1 / sigma^2 before it joins the"
+        " frame's fit. 1.0 takes the triangulation's noise at face value against a beam's;"
+        " 0 keeps the anchor running and its report line honest while its pairs get no vote;"
+        " above 1 the corners speak louder than their noise says they should",
+        why="the A/B of the second ruler without restarting the node. The weight a pair already"
+        " carries is physics: sigma_(1/z) = sigma_px / (f * b_perp) against the beam's"
+        " lidar_sigma_m / z^2, capped at a beam's 1 (pepin.parallax). At the measured 7-10 cm of"
+        " per-pair sigma at 1.5-2 m that is about 0.03 of a beam, so where the lidar reaches the"
+        " corners move the law by a few per cent — which is the point: they are there to hold the"
+        " scale where the beams stop, not to argue with them",
+        on_when="raise it only with a measurement that says the triangulation is better than its"
+        " own sigma claims — a calibrated focal length and a pose better than the tracker's",
+        off_when="0 to measure what the corners are doing to the law without losing the frames"
+        " they are measured on: the report line still prints their share and their sigma",
+        range=(0.0, 10.0),
+    ),
+    Flag(
+        "lidar_sigma_m",
+        LIDAR_SIGMA_M,
+        description="what one lidar beam's range is trusted to, in metres: its pair's weight in"
+        " every fit is 1 / sigma^2 in inverse depth, sigma_m / z^2. 0 restores the flat weight of"
+        " 1 that every beam carried before 2026-09-15, whatever its range",
+        why="two rulers can only share one fit if both are weighed in the same unit, and a"
+        " constant noise in METRES is not a constant weight in inverse depth, the space the law"
+        " is fitted in: the same 1.5 cm is 0.015 of inverse depth at 1 m and 0.0017 at 3 m. A"
+        " flat weight therefore lets the near beams — the ones whose pixel association is worst"
+        " and whose ratio the range law already shows drifting +8.7 % — write the scale the far"
+        " field measures eight times better. 1.5 cm is the number the pipeline had assumed all"
+        " along in another dress (the parallax anchor weighed its corners against 2 cm at 2 m)"
+        " and it covers the beam's own noise plus the association error, not the datasheet's"
+        " accuracy alone",
+        on_when="raise it towards 0.03 on a lidar whose returns are noisier than the association"
+        " (a dusty room, a reflective floor): it flattens the range dependence of the weights",
+        off_when="0 for the old flat weight — the A/B of this whole change on a lidar-only frame,"
+        " and the setting to compare a law fitted before 2026-09-15 against",
+        range=(0.0, 0.2),
+    ),
+    Flag(
         "parallax_motion",
         PARALLAX_MOTION,
         description="whose word the parallax anchor's baseline is: tracker takes the motion"
@@ -638,6 +707,9 @@ class DepthStream(Node):
         self._ask_parallax(float(self._switches["parallax_min_baseline_m"]))  # and the ring's ask
         self._ask_matcher(str(self._switches["parallax_matcher"]))  # and who matches its corners
         self._ask_motion(str(self._switches["parallax_motion"]))  # and whose motion it triangulates
+        self._ask_parallax_weight(float(self._switches["parallax_weight"]))  # and its vote
+        self._ask_lidar_sigma(float(self._switches["lidar_sigma_m"]))  # and what a beam is worth
+        self._ask_frame_shift(bool(self._switches["frame_shift_needs_beams"]))  # and the gate
         self._tally = Tally(STAGES)
         self._lean = LeanFeed(
             self,
@@ -739,6 +811,12 @@ class DepthStream(Node):
             self._ask_matcher(str(new))
         elif name == "parallax_motion":
             self._ask_motion(str(new))
+        elif name == "parallax_weight":
+            self._ask_parallax_weight(float(new))
+        elif name == "lidar_sigma_m":
+            self._ask_lidar_sigma(float(new))
+        elif name == "frame_shift_needs_beams":
+            self._ask_frame_shift(bool(new))
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
 
@@ -761,6 +839,27 @@ class DepthStream(Node):
         stage = self._pipeline.stage("parallax_anchor")
         if isinstance(stage, ParallaxAnchor):
             stage.motion_source = source
+
+    def _ask_parallax_weight(self, weight: float) -> None:
+        """Tell the parallax anchor how much of its own 1 / sigma^2 its pairs vote with; 0 keeps
+        the pairs and their report line and takes their vote out of every fit."""
+        stage = self._pipeline.stage("parallax_anchor")
+        if isinstance(stage, ParallaxAnchor):
+            stage.weight = weight
+
+    def _ask_lidar_sigma(self, sigma_m: float) -> None:
+        """Tell the lidar anchor what one beam's range is trusted to, in metres: its pairs then
+        weigh 1 / sigma^2 in inverse depth. 0 restores the flat weight of 1 a beam used to have."""
+        stage = self._pipeline.stage("lidar_anchor")
+        if isinstance(stage, LidarAnchor):
+            stage.sigma_m = sigma_m
+
+    def _ask_frame_shift(self, needs_beams: bool) -> None:
+        """Tell the per-frame law whether a shift needs the lidar in the pool that fits it; a
+        parallax-only pool then gets a scale alone."""
+        stage = self._pipeline.stage("frame_law")
+        if isinstance(stage, FrameLaw):
+            stage.shift_needs_beams = needs_beams
 
     def _on_work_error(self, text: str) -> None:
         self.get_logger().error(f"depth failed on a frame:\n{text}")
