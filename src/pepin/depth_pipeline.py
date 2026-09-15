@@ -136,8 +136,12 @@ PARALLAX_TRACK_MAX_VIEWS = 8  # views one track may rest on (pepin.parallax.TRAC
 PARALLAX_SIGMA_MODEL = "covariance"  # a track's sigma: the solve's own covariance. The
 # closed form the stage shipped with is "baseline" (pepin.parallax.TRACK_SIGMA_MODELS); the
 # string is spelled out here because this module imports pepin.parallax lazily, for cv2's sake.
-# The three above are pepin.parallax's TRACK_* defaults, restated here so the pipeline's
-# constants read in one place (the tracker's own module stays a lazy import in the stage).
+PARALLAX_SPLIT_TOL_SIGMA = 0.0  # how far a track's two halves may disagree, in sigmas; 0 is off
+# and off is the measured default: at 3 the gate removes 1.1 % of the real errands' tracks, leaves
+# the parallax-only law exactly where it was and costs 3.9 ms a frame of the stage's 27.0.
+# Every PARALLAX_TRACK_* / _SIGMA_ / _SPLIT_ value above is pepin.parallax's own TRACK_* default,
+# restated here so the pipeline's constants read in one place (the tracker's own module stays a
+# lazy import in the stage).
 LIDAR_SIGMA_M = 0.0  # metres: one beam's range noise, 0 meaning every beam weighs a flat 1 —
 # the reference pair itself (REF_SIGMA_INV, "a beam at 2 m"), which is what the parallax anchor
 # has always weighed its corners against, so the two rulers still share one unit.
@@ -1145,6 +1149,14 @@ class ParallaxAnchor(AnchorStage):
     observations reproduce the pair's own numbers arithmetically, which is what makes 2 the off
     position of the knob rather than a different code path.
 
+    A track can be asked to agree with itself: its older half and its newer half are solved
+    separately and it is dropped when they disagree by more than ``split_tol_sigma`` combined
+    sigmas (:func:`pepin.parallax._split_gap`, counted as ``split`` in the report line). It
+    ships OFF, because it was measured: at the 3 sigma a clean corner never reaches it removes
+    1.1 % of the real errands' tracks, leaves the parallax-only law's residual exactly where it
+    was, and costs 3.9 ms a frame of the stage's 27.0. It cannot see a point moving along the
+    camera's own motion either, which is a degeneracy of monocular geometry and not of the gate.
+
     The anchor keeps the last second and a half of frames in a ring (grey image, stamp, the
     lens's whole placement on the cart, and the describer's reading of it once asked for) and
     asks :class:`FrameContext`'s motion source for the transform between two stamps. While
@@ -1219,6 +1231,7 @@ class ParallaxAnchor(AnchorStage):
         min_total_baseline_m: float = PARALLAX_MIN_TOTAL_BASELINE_M,
         sigma_model: str = PARALLAX_SIGMA_MODEL,
         track_max_views: int = PARALLAX_TRACK_MAX_VIEWS,
+        split_tol_sigma: float = PARALLAX_SPLIT_TOL_SIGMA,
     ) -> None:
         self.weight = weight
         self.min_gap_s = min_gap_s
@@ -1234,6 +1247,7 @@ class ParallaxAnchor(AnchorStage):
         self.track_max_views = track_max_views  # views one track may rest on: the cost per frame
         self.sigma_model = sigma_model  # what a track's sigma is: the solve's covariance, or
         # the closed form sqrt(sum b^2) the stage shipped with (pepin.parallax.TRACK_SIGMA_MODELS)
+        self.split_tol_sigma = split_tol_sigma  # live: parallax_split_tol_sigma; 0 is off
         self.stale = 0  # frames whose map pose was too old (or absent) and fell back to odometry
         self.used: dict[str, int] = dict.fromkeys(PARALLAX_MOTIONS, 0)  # who gave each baseline
         self.frames = 0  # frames that reached the triangulation
@@ -1443,6 +1457,7 @@ class ParallaxAnchor(AnchorStage):
             min_total_baseline_m=self.min_total_baseline_m,
             max_views=self.track_max_views,
             sigma_model=self.sigma_model,
+            split_tol_sigma=self.split_tol_sigma,
         )
         if self.matcher == "orb":
             for (previous, _), found in zip(views, features, strict=False):
@@ -1526,6 +1541,11 @@ class ParallaxAnchor(AnchorStage):
             f" >= {self.track_min_obs} obs over <= {self.track_max_views} views,"
             f" asks {self.min_total_baseline_m * 100:.0f} cm total"
             f", sigma from the {self.sigma_model}"
+            + (
+                f", halves within {self.split_tol_sigma:g} sigma"
+                if self.split_tol_sigma > 0
+                else ", halves unchecked"
+            )
             if self.tracking
             else f", asks {self.min_baseline_m * 100:.0f} cm"
         )

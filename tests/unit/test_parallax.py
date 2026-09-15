@@ -22,6 +22,7 @@ from pepin.depth_pipeline import (
 )
 from pepin.parallax import (
     DISPARITY_SIGMA_PX,
+    MAX_REPROJ_PX,
     MAX_SAMPSON_PX,
     ORB_DISPARITY_SIGMA_PX,
     CameraPlacement,
@@ -1027,3 +1028,162 @@ def test_the_knob_at_two_is_the_pair_the_anchor_always_measured() -> None:
     assert band_error(got[2][1]) < 0.05 and band_error(got[3][1]) < 0.05
     assert tracked.sigma_m is not None and paired.sigma_m is not None
     assert tracked.sigma_m < paired.sigma_m
+
+
+# ---- the split test: does a track agree with itself? ------------------------------------------
+def rolling_track(
+    velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    views: int = 8,
+    dt: float = 0.15,
+    speed: float = 0.25,
+    direction: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    point: tuple[float, float, float] = (0.6, 0.1, 2.0),
+) -> tuple[Tracks, np.ndarray]:
+    """scratch/parallax_gates_probe.py's own construction: a cart moving at ``speed`` along
+    ``direction`` for ``views`` frames ``dt`` apart, and a corner whose 3D point moves at
+    ``velocity`` while it does. Returns the track and the point's true place in the CURRENT
+    camera's frame — everything exact, no pixel noise, so what the gates see is the geometry."""
+    unit = np.asarray(direction, dtype=float)
+    unit /= np.linalg.norm(unit)
+    ages = np.arange(views - 1, -1, -1, dtype=float) * dt
+    origins = -(ages * speed)[:, None] * unit[None, :]
+    truth = np.asarray(point, dtype=float)
+    wandered = truth[None, :] - ages[:, None] * np.asarray(velocity, dtype=float)[None, :]
+    local = wandered - origins
+    pixels = np.stack(
+        [
+            INTR.fx * local[:, 0] / local[:, 2] + INTR.cx,
+            INTR.fy * local[:, 1] / local[:, 2] + INTR.cy,
+        ],
+        axis=1,
+    )
+    motions = tuple(Motion(np.eye(3), o) for o in origins)
+    return Tracks(pixels[None, :, :], np.ones((1, views), dtype=bool), motions, found=1), truth
+
+
+def epipolar_slide(track: Tracks, views: int, per_view: float, grow: bool) -> Tracks:
+    """The same track with its earlier observations slid along their own epipolar lines — the
+    direction the corner would move if its depth changed, which no epipolar gate constrains.
+    ``grow`` makes the slide proportional to the view's age (the probe's drift per hop);
+    otherwise every one of the oldest ``views`` observations slides by the same amount."""
+    pixels = np.asarray(track.pixels, dtype=float).copy()
+    total = track.views
+    for v in range(total - 1):
+        origin = np.asarray(track.motions[v].translation, dtype=float)
+        ray = np.array(
+            [
+                (pixels[0, v, 0] - INTR.cx) / INTR.fx,
+                (pixels[0, v, 1] - INTR.cy) / INTR.fy,
+                1.0,
+            ]
+        )
+        far = origin + 1.05 * (ray * 2.0)  # the same corner two per cent further down its ray
+        towards = np.array(
+            [
+                INTR.fx * far[0] / far[2] + INTR.cx - pixels[0, v, 0],
+                INTR.fy * far[1] / far[2] + INTR.cy - pixels[0, v, 1],
+            ]
+        )
+        length = float(np.linalg.norm(towards))
+        if length < 1e-9:
+            continue
+        how_far = per_view * (total - 1 - v) if grow else per_view * float(v < views)
+        pixels[0, v] += how_far * towards / length
+    return replace(track, pixels=pixels)
+
+
+def test_a_static_corner_s_two_halves_agree_about_its_depth() -> None:
+    """The test the gate is: a point that does not move has ONE depth, and the older half of the
+    views and the newer half must both read it. A clean track's halves sit on top of each other,
+    so the gate costs a good corner nothing."""
+    for direction in ((0.0, 0.0, 1.0), (1.0, 0.0, 0.1)):
+        track, truth = rolling_track(direction=direction)
+        found = triangulate_tracks(track, INTR)
+        assert float(found.z[0]) == pytest.approx(float(truth[2]), rel=1e-6)
+        assert float(found.split[0]) < 0.01, "an exact track's halves must not disagree at all"
+    short = replace(track, seen=np.array([[False] * 6 + [True, True]]))
+    assert float(triangulate_tracks(short, INTR).split[0]) == 0.0, "two views cannot be cut"
+
+
+def test_a_half_of_a_window_sliding_off_the_corner_is_what_the_split_test_sees() -> None:
+    """What the gate is for: the oldest views slide off the corner together — a flow that jumped
+    once and carried the error back through every older hop — and the bundle's own reprojection
+    RMS barely notices, because it is divided by the square root of the view count. The halves
+    then read different depths, which is the signal.
+
+    The signal is weak, and that is measured, not assumed: at 2 px of slide the depth is 21 %
+    wrong and the halves are only 2.0 sigma apart, because cutting the window in two doubles
+    each half's own sigma as well. A clean corner at the flow's 0.4 px also reaches 2.0 sigma on
+    noise alone (scratch/parallax_split_probe.py), so the shipped 3 sigma does NOT separate a
+    slide of this size — it removes only the 1.1 % tail the real errands carry beyond anything
+    pixel noise explains (scratch/parallax_tracks_eval.txt)."""
+    track, truth = rolling_track()
+    gaps = []
+    for slide in (0.5, 1.0, 2.0):
+        slid = epipolar_slide(track, views=4, per_view=slide, grow=False)
+        found = triangulate_tracks(slid, INTR)
+        error = abs(float(found.z[0]) / float(truth[2]) - 1.0)
+        gaps.append(float(found.split[0]))
+        assert float(found.residual[0]) < MAX_REPROJ_PX, "the reprojection gate lets it through"
+        if slide == 2.0:
+            assert error > 0.15, f"a 2 px slide should cost more than 15 %, cost {error:.1%}"
+    assert gaps[0] < gaps[1] < gaps[2], "the halves must disagree more the further they slide"
+    assert gaps[2] < 3.0, "and still not reach the shipped tolerance: this is the measured hole"
+
+
+def test_a_point_moving_along_the_camera_s_own_motion_is_invisible_to_every_gate() -> None:
+    """The hole the split test does NOT close, pinned here so nobody assumes it does. A corner
+    on something receding at 0.1 m/s from a cart driving at 0.25 puts every one of its rays
+    through ONE point — at 3.33 m for a 2.00 m truth, the ratio of the two speeds — so the
+    epipolar distance is zero, the reprojection residual is zero, and both halves of the window
+    agree exactly on the wrong answer. This is the monocular depth-velocity ambiguity, not a
+    missing test: it needs the network's own depth or a second sensor."""
+    track, truth = rolling_track(velocity=(0.0, 0.0, 0.1))
+    found = triangulate_tracks(track, INTR)
+    assert float(found.z[0]) == pytest.approx(0.25 / 0.15 * float(truth[2]), rel=1e-6)
+    assert float(found.residual[0]) < 1e-6 and float(found.split[0]) < 1e-6
+    towards = triangulate_tracks(rolling_track(velocity=(0.0, 0.0, -0.1))[0], INTR)
+    assert float(towards.z[0]) == pytest.approx(0.25 / 0.35 * float(truth[2]), rel=1e-6)
+    assert float(towards.split[0]) < 1e-6
+    # Motion ACROSS the view is a different matter: it leaves the epipolar lines, and the
+    # per-observation epipolar gate of track_truth throws those observations out.
+    across, _ = rolling_track(velocity=(0.1, 0.0, 0.0))
+    pixels = np.asarray(across.pixels, dtype=np.float32)
+    worst = max(
+        float(sampson(pixels[:, v], pixels[:, -1], INTR, across.motions[v])[0])
+        for v in range(across.views - 1)
+    )
+    assert worst > MAX_SAMPSON_PX, "motion across the view does leave the epipolar lines"
+
+
+def test_a_drift_proportional_to_the_baseline_is_invisible_to_the_split_test_too() -> None:
+    """The other hole. A corner sliding along its epipolar line by an amount proportional to how
+    far back the view sits is a disparity offset proportional to the baseline, which is a pure
+    scale error on the depth — every subset of the views reads the same wrong number, so the
+    halves agree. Measured here: a 1 px-per-hop drift moves the depth by more than a fifth and
+    the halves by well under the shipped tolerance."""
+    track, truth = rolling_track(views=10, dt=0.12, direction=(1.0, 0.0, 0.1))
+    drifted = triangulate_tracks(epipolar_slide(track, 10, per_view=1.0, grow=True), INTR)
+    assert abs(float(drifted.z[0]) / float(truth[2]) - 1.0) > 0.2
+    assert float(drifted.residual[0]) < MAX_REPROJ_PX
+    assert float(drifted.split[0]) < 1.0, "the halves cannot see a scale error they both share"
+
+
+def test_the_split_gate_ships_off_and_is_armed_and_counted_by_its_tolerance() -> None:
+    """The gate through the whole measurement. Off by default, and off means the halves are not
+    solved at all — it is two extra solves, 3.9 ms a frame of the stage's 27.0, and a gate that
+    was measured to change no residual should not cost that. Armed at the 3 sigma the real
+    errands were read at it still takes nothing from a clean rendered window; armed tight it
+    removes tracks and says so in the rejection tally under ``split``."""
+    frames, poses = crawling_frames(0.03, 6)
+    place = CameraPlacement.of(CameraPose(0.0, 0.0, 1.23, math.radians(26.0)))
+    motions = track_window(frames, poses, place)
+    off = track_truth(frames, motions, INTR)
+    assert off.kept > 10 and off.rejected["split"] == 0
+    assert off.split is not None and not np.any(off.split), "off does not solve the halves"
+    armed = track_truth(frames, motions, INTR, split_tol_sigma=3.0)
+    assert armed.kept == off.kept and armed.rejected["split"] == 0
+    assert armed.split is not None and 0.0 < float(np.max(armed.split)) < 3.0
+    tight = track_truth(frames, motions, INTR, split_tol_sigma=0.05)
+    assert tight.rejected["split"] > 0 and tight.kept < off.kept
+    assert tight.split is not None and float(np.max(tight.split)) <= 0.05
