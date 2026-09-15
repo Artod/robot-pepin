@@ -122,8 +122,12 @@ from pepin.depth_pipeline import (
     PARALLAX_MAP_WAIT,
     PARALLAX_MATCHER,
     PARALLAX_MIN_BASELINE_M,
+    PARALLAX_MIN_GAP_S,
+    PARALLAX_MIN_TOTAL_BASELINE_M,
     PARALLAX_MOTION,
     PARALLAX_MOTIONS,
+    PARALLAX_TRACK_MIN_OBS,
+    PARALLAX_TRACK_WINDOW_S,
     PARALLAX_WEIGHT,
     PIPELINE_DEFAULTS,
     AffineLaw,
@@ -178,6 +182,11 @@ CARRY_WAIT_S = 0.2  # how long TF is given to cover a frame's stamp (the carry, 
 CAMERA_TF_MAX_AGE_S = 1.0  # the neck's newest edge is the head's pose while it is at most this old
 PAN_NOTICE_RAD = math.radians(1.0)  # a head turned more than this is projected as if it were not
 SCAN_BEFORE = "floor_anchor"  # the scan is built from the depth as it stands before this stage
+TRACK_FLAGS = (  # the three that decide whether a parallax corner is a track or a pair
+    "parallax_track_min_obs",
+    "parallax_track_window_s",
+    "parallax_min_total_baseline_m",
+)
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration, and printed in every report line. One bool per stage of the pipeline, in
@@ -578,6 +587,80 @@ FLAGS = FlagSet(
         choices=MATCHERS,
     ),
     Flag(
+        "parallax_track_min_obs",
+        PARALLAX_TRACK_MIN_OBS,
+        description="how many frames a corner must be seen in before its depth is a"
+        " measurement. 3 or more makes a corner a TRACK: it is followed back through the window"
+        " of ring frames and all of its rays are met in one least-squares solve, with the"
+        " single worst observation dropped and the rest solved again. 2 is the PAIR the anchor"
+        " measured until 2026-09-15 — this frame against one partner chosen for its baseline —"
+        " and is arithmetically the same code at two views",
+        why="a pair rests on one baseline and a track on all of them, and the sigma divides by"
+        " their quadrature sum. The four errands of 2026-09-14 measured both ways on the same"
+        " pictures, poses and judge (scratch/parallax_tracks_eval.txt, 48 frames, klt, the"
+        " tracker's map pose, the corners fitting and the lidar's beams judging): a pair rests"
+        " on 5.2 cm of parallax at a 10.6 cm sigma, a track over the same window on 6"
+        " observations and 14.0 cm at 6.0 cm — and those very corners read as their own widest"
+        " single pair would still claim 7.0 cm, so meeting all the rays at once is worth another"
+        " 15 % on top of the longer reach. The corners a frame keeps go from 35.5 to 48.0 and"
+        " the frames that keep any from 30 to 31 of 48. What it buys downstream is the whole"
+        " lidar-off case: a law fitted on the parallax pool ALONE and read at every beam of the"
+        " same frame falls from 26.6 % to 15.3 % of median |residual| under the shipped"
+        " scale-only gate (frame_shift_needs_beams) and from 31.2 % to 15.2 % with a shift,"
+        " against the lidar's own law at 7.3 % on the same beams. The corners' own depth moves"
+        " towards the lidar with it, 0.782 of it as pairs against 0.861 as tracks. The cost is"
+        " the flow's extra hops, 4.9 ms a frame against 47.7",
+        on_when="raise it towards 4-5 on a robot whose camera runs faster than this one's"
+        " 6-9 frames/s, where the extra views cost little tracking and buy baseline",
+        off_when="2 restores the pair exactly, which is the A/B; and on a board too slow for the"
+        " flow's extra hops, whose cost is in the report line's ms",
+        range=(2.0, 12.0),
+    ),
+    Flag(
+        "parallax_track_window_s",
+        PARALLAX_TRACK_WINDOW_S,
+        description="how far back in time a track may reach, in seconds: every ring frame"
+        f" between {PARALLAX_MIN_GAP_S:.2f} s and this is a view a corner may be seen in, capped"
+        " at 16 views. It also sets how long the ring holds a frame",
+        why="swept over the same 48 frames (scratch/parallax_tracks_eval.txt, 2026-09-15): at"
+        " 0.5 s a track has 5 observations, 11.2 cm of effective baseline, a 7.8 cm sigma, a law"
+        " on 15 of 48 frames and 21.6 % of residual; at 1.0 s, 6 observations, 12.9 cm, 6.3 cm,"
+        " 26 frames, 17.8 %; at 1.5 s, 6 observations, 14.0 cm, 6.0 cm, 31 frames, 15.3 %."
+        " Nothing has turned over yet at 1.5 s, and the reason is the pose: the 1.25-1.45"
+        " over-reading a PAIR shows past a second of gap was the odometry's baseline"
+        " (scratch/parallax_pose_sweep.txt) and the tracker's map pose does not have it — the"
+        " corners' own depth reads 0.861 of the lidar at 1.5 s against 0.852 at 0.5 s and the"
+        " pair's 0.782. The cost is roughly linear in the window: 19.3 ms a frame at 0.5 s, 39.4"
+        " at 1.0, 47.7 at 1.5",
+        on_when="longer on a robot whose pose over that window is better than this cart's"
+        " tracker — the baseline is a length and every depth is proportional to it",
+        off_when="shorter wherever the flow loses the corners before the window ends, or where"
+        " the milliseconds in the report line matter more than the sigma",
+        range=(0.2, 3.0),
+    ),
+    Flag(
+        "parallax_min_total_baseline_m",
+        PARALLAX_MIN_TOTAL_BASELINE_M,
+        description="the effective parallax a track's views must add up to before its depth is"
+        " kept: the quadrature sum of each view's perpendicular baseline, sqrt(sum b^2), which"
+        " is the same number the sigma divides by. It replaces parallax_min_baseline_m for a"
+        " track, where no single view carries the whole baseline",
+        why="the same 10 cm parallax_min_baseline_m asks of one partner, asked of the whole"
+        " bundle instead, because sqrt(sum b^2) is exactly the length the sigma divides by:"
+        " sigma_z = z^2 * sigma_px / (f * B_effective) (pepin.parallax). A track over the"
+        " default window reaches 14.0 cm of it on this cart at 0.2-0.3 m/s where a single 0.5 s"
+        " pair reaches 5.2 (scratch/parallax_tracks_eval.txt, 48 frames of 2026-09-14), so the"
+        " gate costs the default window little while still throwing out the corners on the"
+        " epipole and the stretches where the cart barely moved. It is not the same number as"
+        " parallax_min_baseline_m, which chooses a PARTNER and is unused while a corner is a"
+        " track",
+        on_when="raise it to keep only the corners the window really moved across, at the cost"
+        " of the corners near the epipole and of a slow stretch of the errand",
+        off_when="0 keeps every track the other gates let through, whatever its parallax: the"
+        " sigma already says how little such a corner is worth",
+        range=(0.0, 1.0),
+    ),
+    Flag(
         "camera_tf_latest",
         True,
         description="take the newest base_link <- camera_optical edge TF holds (at most"
@@ -924,6 +1007,11 @@ class DepthStream(Node):
         self._ask_motion(str(self._switches["parallax_motion"]))  # and whose motion it triangulates
         self._ask_map_wait(bool(self._switches["parallax_map_wait"]))  # asked without waiting
         self._ask_parallax_weight(float(self._switches["parallax_weight"]))  # and its vote
+        self._ask_track(  # and whether a corner is a track through the window or a pair
+            int(self._switches["parallax_track_min_obs"]),
+            float(self._switches["parallax_track_window_s"]),
+            float(self._switches["parallax_min_total_baseline_m"]),
+        )
         self._ask_lidar_sigma(float(self._switches["lidar_sigma_m"]))  # and what a beam is worth
         self._ask_frame_shift(bool(self._switches["frame_shift_needs_beams"]))  # and the gate
         self._ask_field()  # and the shape of the per-frame law: its grid and its two pulls
@@ -1035,6 +1123,12 @@ class DepthStream(Node):
             self._ask_map_wait(bool(new))
         elif name == "parallax_weight":
             self._ask_parallax_weight(float(new))
+        elif name in TRACK_FLAGS:  # the table already holds the new value (node_kit.Switches)
+            self._ask_track(
+                int(self._switches["parallax_track_min_obs"]),
+                float(self._switches["parallax_track_window_s"]),
+                float(self._switches["parallax_min_total_baseline_m"]),
+            )
         elif name == "lidar_sigma_m":
             self._ask_lidar_sigma(float(new))
         elif name == "frame_shift_needs_beams":
@@ -1079,6 +1173,17 @@ class DepthStream(Node):
         stage = self._pipeline.stage("parallax_anchor")
         if isinstance(stage, ParallaxAnchor):
             stage.weight = weight
+
+    def _ask_track(self, min_obs: int, window_s: float, total_baseline_m: float) -> None:
+        """Tell the parallax anchor whether a corner is a track through the window or a pair
+        with one partner, how far back the window reaches and how much parallax the views of a
+        track must add up to. The three move together: at ``min_obs`` 2 the other two are unused
+        and the anchor pairs exactly as it did before 2026-09-15."""
+        stage = self._pipeline.stage("parallax_anchor")
+        if isinstance(stage, ParallaxAnchor):
+            stage.track_min_obs = min_obs
+            stage.track_window_s = window_s
+            stage.min_total_baseline_m = total_baseline_m
 
     def _ask_lidar_sigma(self, sigma_m: float) -> None:
         """Tell the lidar anchor what one beam's range is trusted to, in metres: its pairs then

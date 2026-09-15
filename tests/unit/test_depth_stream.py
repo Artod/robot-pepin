@@ -478,6 +478,32 @@ def test_the_two_rulers_weights_are_live_flags_and_the_report_prints_them(build:
     assert "rulers: lidar " in line, "the frame law says whose weight fitted it"
 
 
+def test_a_parallax_corner_is_a_track_and_the_three_knobs_reach_the_stage(build: Build) -> None:
+    """The shape of a parallax measurement is three live parameters: how many frames a corner
+    must be seen in, how far back the window reaches and how much parallax its views must add
+    up to. They reach the anchor, the report line says which shape is running, and
+    parallax_track_min_obs 2 puts the old pair back without a restart."""
+    node, _net = build()
+    corners = node._pipeline.stage("parallax_anchor")
+    assert isinstance(corners, ParallaxAnchor)
+    assert corners.track_min_obs == 3 and corners.tracking, "a corner ships as a track"
+    assert ">= 3 obs, asks 10 cm total" in corners.describe()
+    assert node.set_parameters(
+        [
+            Param("parallax_track_min_obs", 5),
+            Param("parallax_track_window_s", 0.8),
+            Param("parallax_min_total_baseline_m", 0.2),
+        ]
+    )[0].successful
+    assert corners.track_min_obs == 5 and corners.track_window_s == 0.8
+    assert corners.min_total_baseline_m == 0.2 and corners.window_s == 0.8
+    assert node.set_parameters([Param("parallax_track_min_obs", 2)])[0].successful
+    assert corners.tracking is False and corners.window_s == corners.max_gap_s
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "parallax_track_min_obs=2 " in line and "parallax_track_window_s=0.8 " in line
+
+
 def test_the_scan_is_built_from_the_depth_before_the_floor_anchor(
     build: Build, monkeypatch: pytest.MonkeyPatch
 ) -> None:

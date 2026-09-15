@@ -111,7 +111,7 @@ from pepin.depth import (
 from pepin.elevation import RAY_AZIMUTH_DEGREE, RAY_DEGREE, RayGain, fit_ray, ray_angles
 
 if TYPE_CHECKING:  # the tracker's own module stays a lazy import inside the parallax stage
-    from pepin.parallax import Motion
+    from pepin.parallax import Features, Motion, ParallaxTruth
 
 LEAN_STEP = 0.003  # the floor's expected depth is recomputed when the up vector moves this much
 FLOOR_PAIR_STRIDE = 8  # every 8th row and column of the floor: 3600 candidates of a 640x360 frame
@@ -141,6 +141,11 @@ PARALLAX_MAP_MAX_AGE_S = 0.3  # a map pose older than this is not this frame's: 
 PARALLAX_MOTIONS = ("tracker", "odom")
 PARALLAX_RING_FRAMES = 24  # frames kept to choose a partner from: 1.5 s at any rate the node runs
 PARALLAX_WEIGHT = 1.0  # the multiplier on a parallax pair's own 1 / sigma^2 (the A/B's knob)
+PARALLAX_TRACK_MIN_OBS = 3  # frames a corner must be seen in to be a track; 2 is the old pair
+PARALLAX_TRACK_WINDOW_S = 1.5  # how far back a track reaches, seconds: the ring's own span
+PARALLAX_MIN_TOTAL_BASELINE_M = 0.10  # the effective parallax a track's views must add up to
+# The three above are pepin.parallax's TRACK_* defaults, restated here so the pipeline's
+# constants read in one place (the tracker's own module stays a lazy import in the stage).
 LIDAR_SIGMA_M = 0.0  # metres: one beam's range noise, 0 meaning every beam weighs a flat 1 —
 # the reference pair itself (REF_SIGMA_INV, "a beam at 2 m"), which is what the parallax anchor
 # has always weighed its corners against, so the two rulers still share one unit.
@@ -1275,15 +1280,19 @@ class WallCorrection(WallAnchor):
 
 
 # ---- motion as a hoop, with no lidar at all ---------------------------------------------------
-@dataclass(frozen=True, eq=False)
+@dataclass(eq=False)
 class PreviousFrame:
     """A frame the parallax anchor keeps in its ring: its grey image, its stamp and where the
     lens sat on the cart when it was taken — the whole ``base_link <- camera_optical``, pan
-    included, since the neck may have turned since."""
+    included, since the neck may have turned since — plus the describer's reading of the
+    picture once it has been asked for, so a frame a dozen tracks reach back through is
+    described once and not once per later frame (the flow keeps nothing: it re-reads the
+    pixels)."""
 
     gray: npt.NDArray[np.uint8]
     stamp: float
     place: Rigid
+    features: Features | None = None  # filled in by the describer the first time it is asked
 
 
 class ParallaxAnchor(AnchorStage):
@@ -1294,9 +1303,23 @@ class ParallaxAnchor(AnchorStage):
     other sensor is off, and the only one that measures at every elevation the picture has, so
     it is the pool a law over the ray's angle can be fitted on.
 
-    The anchor keeps the last second of frames in a ring (grey image, stamp, the lens's whole
-    placement on the cart) and asks :class:`FrameContext`'s motion source for the transform
-    between two stamps. The partner is not the frame before this one: walking back from the
+    A corner is a TRACK, not a pair (``track_min_obs``, the node's ``parallax_track_min_obs``,
+    3 by default; 2 restores the pair the stage measured until 2026-09-15). The corners of this
+    frame are followed back through every ring frame inside ``track_window_s``
+    (:func:`pepin.parallax.build_tracks` — hop by hop for the flow, recognised frame by frame
+    for the describer) and all of a track's rays are met in ONE least-squares solve with the
+    known camera placements, with a robust pass that drops a track's single worst observation
+    (:func:`pepin.parallax.triangulate_tracks`). The point of it is the sigma: the two-view
+    formula ``z^2 * sigma_px / (f * b)`` keeps its shape with ``b`` the quadrature sum of the
+    views' perpendicular baselines, so four views 5 cm apart are worth one pair at 10 cm, and
+    ``min_total_baseline_m`` is asked of that sum rather than of one partner's step. Two
+    observations reproduce the pair's own numbers arithmetically, which is what makes 2 the off
+    position of the knob rather than a different code path.
+
+    The anchor keeps the last second and a half of frames in a ring (grey image, stamp, the
+    lens's whole placement on the cart, and the describer's reading of it once asked for) and
+    asks :class:`FrameContext`'s motion source for the transform between two stamps. While
+    pairing, the partner is not the frame before this one: walking back from the
     newest, it is the first frame inside the gap window whose baseline reaches
     ``min_baseline_m``, and the widest baseline in the window when none does
     (:meth:`_partner`). Pairing with the frame before meant pairing 0.1 s apart, which at a
@@ -1362,6 +1385,9 @@ class ParallaxAnchor(AnchorStage):
         motion_source: str = PARALLAX_MOTION,
         map_wait: bool = PARALLAX_MAP_WAIT,
         map_max_age_s: float = PARALLAX_MAP_MAX_AGE_S,
+        track_min_obs: int = PARALLAX_TRACK_MIN_OBS,
+        track_window_s: float = PARALLAX_TRACK_WINDOW_S,
+        min_total_baseline_m: float = PARALLAX_MIN_TOTAL_BASELINE_M,
     ) -> None:
         self.weight = weight
         self.min_gap_s = min_gap_s
@@ -1371,16 +1397,34 @@ class ParallaxAnchor(AnchorStage):
         self.motion_source = motion_source  # live: the node's parallax_motion flag writes it
         self.map_wait = map_wait  # live: parallax_map_wait — the old blocking ask, for an A/B
         self.map_max_age_s = map_max_age_s
+        self.track_min_obs = track_min_obs  # live: parallax_track_min_obs; 2 is the old pair
+        self.track_window_s = track_window_s  # live: parallax_track_window_s
+        self.min_total_baseline_m = min_total_baseline_m  # live: parallax_min_total_baseline_m
         self.stale = 0  # frames whose map pose was too old (or absent) and fell back to odometry
         self.used: dict[str, int] = dict.fromkeys(PARALLAX_MOTIONS, 0)  # who gave each baseline
-        self.frames = 0  # pairs of frames that reached the triangulation
+        self.frames = 0  # frames that reached the triangulation
         self.contributed = 0  # of those, the ones that gave at least one pair
         self.rejected: dict[str, int] = {}
         self._ring: deque[PreviousFrame] = deque(maxlen=PARALLAX_RING_FRAMES)
         self._baseline: list[float] = []
         self._sigma: list[float] = []
+        self._sigma_two: list[float] = []  # the same corners read as the widest pair alone
+        self._obs: list[float] = []  # observations a track rests on, median per frame
         self._gap: list[float] = []
         self._kept: list[int] = []
+
+    @property
+    def tracking(self) -> bool:
+        """Whether a corner is a TRACK through the window (``track_min_obs`` of 3 or more) or
+        the PAIR of this frame and one chosen partner (2, what the stage did until
+        2026-09-15)."""
+        return self.track_min_obs > 2
+
+    @property
+    def window_s(self) -> float:
+        """How far back this frame reaches for a partner or for a track's oldest view: the
+        track window while tracking, the matcher's own gap window while pairing."""
+        return self.track_window_s if self.tracking else self.max_gap_s
 
     @property
     def max_gap_s(self) -> float:
@@ -1407,8 +1451,9 @@ class ParallaxAnchor(AnchorStage):
 
     @property
     def gap_s(self) -> float | None:
-        """How far back in time the partner of the last triangulated frame sat, in seconds, or
-        ``None`` before the first one — the number the report's median is taken over."""
+        """How far back in time the last triangulated frame reached, in seconds — its partner
+        while pairing, its oldest track view while tracking — or ``None`` before the first one.
+        The number the report line's span is the median of."""
         return self._gap[-1] if self._gap else None
 
     def _count(self, reason: str, n: int = 1) -> None:
@@ -1486,10 +1531,83 @@ class ParallaxAnchor(AnchorStage):
         self.used[spoke] = self.used.get(spoke, 0) + 1
         return best
 
+    def _window(self, ctx: FrameContext, place: Rigid) -> list[tuple[PreviousFrame, Motion]]:
+        """Every frame of the ring a track may reach back through, OLDEST first, each with the
+        camera motion from its optical frame into this frame's — what
+        :func:`pepin.parallax.build_tracks` wants. The walk is newest-first (so a silent
+        tracker is discovered once a frame, as :meth:`_partner`'s is) and stops at
+        ``track_window_s``; a window a motion source cannot answer simply loses that view, and
+        the frame is triangulated on the ones it can."""
+        from pepin.parallax import camera_motion
+
+        out: list[tuple[PreviousFrame, Motion]] = []
+        spoke = ""
+        candidates = 0
+        ask_tracker = self.motion_source == "tracker"
+        for previous in reversed(self._ring):
+            gap = ctx.stamp - previous.stamp
+            if gap < self.min_gap_s:
+                continue
+            if gap > self.track_window_s:
+                break
+            candidates += 1
+            moved, source = self._moved(ctx, previous.stamp, ctx.stamp, ask_tracker)
+            ask_tracker &= source != "odom"  # a silent tracker is discovered once, not per frame
+            if moved is None:
+                continue
+            out.append(
+                (previous, camera_motion(moved.rotation, moved.translation, previous.place, place))
+            )
+            spoke = spoke or source
+        if not out:
+            if self._ring:
+                self._count("gap" if candidates == 0 else "no odometry")
+            return out
+        self.used[spoke] = self.used.get(spoke, 0) + 1
+        out.reverse()
+        return out
+
+    def _remember(self, ctx: FrameContext, gray: npt.NDArray[np.uint8], place: Rigid) -> None:
+        """Put this frame in the ring and drop the frames no later frame can reach: the track
+        window while tracking, the matcher's gap window while pairing."""
+        while self._ring and ctx.stamp - self._ring[0].stamp > self.window_s:
+            self._ring.popleft()
+        self._ring.append(PreviousFrame(gray, ctx.stamp, place))
+
+    def _track_truth(
+        self,
+        ctx: FrameContext,
+        gray: npt.NDArray[np.uint8],
+        views: list[tuple[PreviousFrame, Motion]],
+    ) -> tuple[ParallaxTruth, float]:
+        """This frame's corners as tracks through ``views``, and the span in seconds the oldest
+        of them reaches back over. The describer's reading of each ring frame is kept on the
+        frame, so a window of a dozen views costs one description each and not one per frame."""
+        from pepin.parallax import track_truth
+
+        grays = [previous.gray for previous, _ in views] + [gray]
+        motions = [motion for _, motion in views]
+        features: list[Features | None] = [previous.features for previous, _ in views] + [None]
+        truth = track_truth(
+            grays,
+            motions,
+            ctx.intr,
+            matcher=self.matcher,
+            features=features if self.matcher == "orb" else None,
+            min_obs=self.track_min_obs,
+            min_total_baseline_m=self.min_total_baseline_m,
+        )
+        if self.matcher == "orb":
+            for (previous, _), found in zip(views, features, strict=False):
+                previous.features = found
+        return truth, ctx.stamp - views[0][0].stamp
+
     def pairs(self, frame: Frame) -> Pairs | None:
-        """(network, triangulated) pairs at the corners this frame shares with the partner
-        frame chosen out of the ring, or ``None`` when there is no usable motion between the
-        two."""
+        """(network, triangulated) pairs at the corners of this frame: each corner followed
+        back through the window of ring frames and triangulated from every view it was seen in
+        (``track_min_obs`` 3 or more), or shared with the one partner frame chosen out of the
+        ring (2, what the stage did until 2026-09-15). ``None`` when there is no usable motion
+        behind this frame, or when nothing survived the gates."""
         from pepin.parallax import CameraPlacement, parallax_truth
 
         ctx = frame.ctx
@@ -1502,14 +1620,20 @@ class ParallaxAnchor(AnchorStage):
         place: Rigid = (
             ctx.cam_optical if ctx.cam_optical is not None else CameraPlacement.of(ctx.cam)
         )
-        chosen = self._partner(ctx, place)
-        while self._ring and ctx.stamp - self._ring[0].stamp > self.max_gap_s:
-            self._ring.popleft()  # older than the window: no later frame can pair with it
-        self._ring.append(PreviousFrame(gray, ctx.stamp, place))
-        if chosen is None:
-            return None
-        previous, motion = chosen
-        truth = parallax_truth(previous.gray, gray, ctx.intr, motion, matcher=self.matcher)
+        if self.tracking:
+            views = self._window(ctx, place)
+            self._remember(ctx, gray, place)
+            if not views:
+                return None
+            truth, span = self._track_truth(ctx, gray, views)
+        else:
+            chosen = self._partner(ctx, place)
+            self._remember(ctx, gray, place)
+            if chosen is None:
+                return None
+            previous, motion = chosen
+            truth = parallax_truth(previous.gray, gray, ctx.intr, motion, matcher=self.matcher)
+            span = ctx.stamp - previous.stamp
         self.frames += 1
         for reason, n in truth.rejected.items():
             self._count(reason, n)
@@ -1526,10 +1650,14 @@ class ParallaxAnchor(AnchorStage):
         self.contributed += 1
         self._baseline.append(float(np.median(truth.baseline[ok])))
         self._sigma.append(float(np.median(truth.sigma[ok])))
-        self._gap.append(ctx.stamp - previous.stamp)
+        self._gap.append(span)
         self._kept.append(int(ok.sum()))
+        if truth.observations is not None:
+            self._obs.append(float(np.median(truth.observations[ok])))
+        if truth.sigma_two is not None:
+            self._sigma_two.append(float(np.median(truth.sigma_two[ok])))
         del self._baseline[:-POOL_FRAMES], self._sigma[:-POOL_FRAMES], self._gap[:-POOL_FRAMES]
-        del self._kept[:-POOL_FRAMES]
+        del self._kept[:-POOL_FRAMES], self._obs[:-POOL_FRAMES], self._sigma_two[:-POOL_FRAMES]
         return Pairs.of(
             d[ok],
             truth.z[ok],
@@ -1540,27 +1668,41 @@ class ParallaxAnchor(AnchorStage):
 
     def describe(self) -> str:
         """The verdict for the report line: who matched the corners and how far back it may
-        look, whose motion the baseline came from and how many windows each source actually
-        answered, the parallax a partner is chosen to reach, the frames that triangulated, the
-        gap and the baseline they were paired across, the pairs a frame yields and their sigma,
-        and what was thrown away and why."""
+        look, whether a corner is a track or a pair and how many views one must be seen in,
+        whose motion the baseline came from and how many windows each source actually answered,
+        the parallax asked for, the frames that triangulated, the span and the effective
+        baseline they rest on, the corners a frame yields and their sigma — and, while
+        tracking, the observations a track carries and what the same corners' sigma would have
+        been read as the widest single pair, which is the whole point of the change."""
         spoke = ", ".join(f"{k} {v}" for k, v in self.used.items() if v)
+        shape = (
+            f" >= {self.track_min_obs} obs, asks {self.min_total_baseline_m * 100:.0f} cm total"
+            if self.tracking
+            else f", asks {self.min_baseline_m * 100:.0f} cm"
+        )
         asked = (
-            f"{self.matcher} <= {self.max_gap_s:.2f} s on the {self.motion_source}'s motion"
-            f" ({spoke or 'none yet'}), weight {self.weight:g} / sigma^2,"
-            f" asks {self.min_baseline_m * 100:.0f} cm"
+            f"{self.matcher} <= {self.window_s:.2f} s{shape}"
+            f" on the {self.motion_source}'s motion ({spoke or 'none yet'}),"
+            f" weight {self.weight:g} / sigma^2"
             + (f", map pose stale -> odom {self.stale}" if self.stale else "")
             + (" [map_wait: the frame path WAITS for TF]" if self.map_wait else "")
         )
         dropped = ", ".join(f"{k} {v}" for k, v in self.rejected.items())
         if not self._baseline:
             return f"{asked}, no pairs yet" + (f" ({dropped})" if dropped else "")
+        what = "tracks" if self.tracking else "pairs"
+        gained = (
+            f" ({np.median(self._obs):.1f} obs a track,"
+            f" 2-view sigma {np.median(self._sigma_two) * 100:.1f} cm)"
+            if self._obs and self._sigma_two
+            else ""
+        )
         return (
             f"{asked}, {self.contributed}/{self.frames} frames,"
-            f" gap {np.median(self._gap):.2f} s,"
+            f" span {np.median(self._gap):.2f} s,"
             f" baseline {np.median(self._baseline) * 100:.1f} cm,"
-            f" {np.median(self._kept):.0f} pairs a frame,"
-            f" sigma {np.median(self._sigma) * 100:.1f} cm"
+            f" {np.median(self._kept):.0f} {what} a frame,"
+            f" sigma {np.median(self._sigma) * 100:.1f} cm{gained}"
             + (f", rejected: {dropped}" if dropped else "")
         )
 

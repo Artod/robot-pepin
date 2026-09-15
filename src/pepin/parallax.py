@@ -75,6 +75,17 @@ second inflates the baseline every depth is proportional to, so the gap is cappe
 not by the matcher. The flow is the default; the describer is the path for a robot whose pose
 over 1.5 s is better than this cart's wheels and gyro.
 
+A corner does not have to be a pair. What mono VO and structure-from-motion do — and what
+Consistent Video Depth does before it fits anything — is follow one corner through MANY frames
+and meet all of its rays at once: :func:`build_tracks` follows the current frame's corners back
+through a window of earlier frames hop by hop (the flow) or recognises them in each (the
+describer), :func:`triangulate_tracks` meets every ray of a track in one linear least-squares
+solve with one robust pass over the worst observation, and :func:`track_truth` gates and weighs
+the result into the same :class:`ParallaxTruth` a pair produces. The win is in the sigma, which
+is the pair's own formula with the bundle's parallax in it: ``sigma_z = z^2 * sigma_px /
+(f * B_effective)`` with ``B_effective = sqrt(sum_v b_v^2)`` over the views, so four views 5 cm
+out are worth one pair at 10 cm, and a two-view track is arithmetically today's pair.
+
 This cart has one, and it is not its wheels (scratch/parallax_pose_sweep.txt, the same four
 errands with the motion taken from the lidar tracker's map pose instead of the EKF's odometry,
 2026-09-14). Over a 1.0 s gap the odometry claims 15.8 cm of travel where the tracker reads
@@ -90,7 +101,8 @@ weighed and not a truth to be trusted.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol
 
 import numpy as np
@@ -132,6 +144,14 @@ DISPARITY_SIGMA_PX = 0.5  # what the flow knows a corner's place to
 LIDAR_SIGMA_INV = REF_SIGMA_INV  # 1/m: the noise a weight of 1 stands for (pepin.depth)
 MAX_WEIGHT = 1.0  # no parallax pair outweighs a lidar beam at the reference range
 
+# ---- a corner as a track ------------------------------------------------------------------
+TRACK_MIN_OBS = 3  # frames a track must be seen in to be a measurement; 2 is today's pair
+TRACK_WINDOW_S = 1.5  # how far back a track may reach, seconds: the ring's own span
+TRACK_MIN_TOTAL_BASELINE_M = 0.10  # the effective parallax a track's views must add up to
+TRACK_MAX_VIEWS = 16  # views one track may rest on: the cap on the matcher's cost per frame
+TRACK_OUTLIER_PX = 2.0  # an observation missing the solved point by more is the one dropped
+TRACK_MIN_CONDITION = 1e-6  # smallest / largest singular value of a track's 3x3 normal matrix
+
 REASONS = (
     "still",
     "rotation-only",
@@ -143,6 +163,7 @@ REASONS = (
     "epipole",
     "reproj",
 )
+TRACK_REASONS = ("short track", "total baseline", "outlier obs")
 
 
 @dataclass(frozen=True)
@@ -281,31 +302,54 @@ def _correspond(
     )
 
 
-def _describe(
-    gray_a: npt.NDArray[np.uint8],
-    gray_b: npt.NDArray[np.uint8],
+@dataclass(frozen=True)
+class Features:
+    """What the describer found in one frame: its keypoints' pixels (n, 2) and their binary
+    descriptors (n, 32 uint8, ``None`` for a frame with no keypoints at all). A caller that
+    keeps these beside a frame it may match against again — a ring of frames a track reaches
+    back through — describes that frame once instead of once per later frame."""
+
+    points: Pixels
+    descriptors: npt.NDArray[np.uint8] | None
+
+    @property
+    def count(self) -> int:
+        """How many keypoints the frame carries."""
+        return int(self.points.shape[0])
+
+
+def describe_frame(
+    gray: npt.NDArray[np.uint8],
     *,
     features: int = ORB_FEATURES,
     fast_threshold: int = ORB_FAST_THRESHOLD,
-    ratio: float = ORB_RATIO,
-) -> tuple[Pixels, Pixels, int]:
-    """Correspondences by recognition rather than by tracking: ORB keypoints and their binary
-    descriptors in both frames, matched on Hamming distance under Lowe's ratio test (a match
-    whose runner-up is within ``ratio`` of it is ambiguous and dropped) and a cross-check (B's
-    own best match for the point must be that point again). Returns (points in A, points in B,
-    keypoints found in A), the last being what the losses are a share of — the describer's
-    equivalent of the flow's corner count."""
+) -> Features:
+    """One frame's ORB keypoints and descriptors — the half of the describer that does not
+    depend on what the frame is matched against, so it may be computed once and kept."""
     import cv2
 
-    empty: Pixels = np.zeros((0, 2), dtype=np.float32)
-    # cv2's stubs type neither the detector's tuple return nor a DMatch's fields
+    # cv2's stubs type neither the detector's tuple return nor a keypoint's fields
     detector: Any = cv2.ORB.create(nfeatures=features, fastThreshold=fast_threshold)
-    kp_a, des_a = detector.detectAndCompute(np.ascontiguousarray(gray_a), None)
-    kp_b, des_b = detector.detectAndCompute(np.ascontiguousarray(gray_b), None)
-    found = len(kp_a)
+    keypoints, descriptors = detector.detectAndCompute(np.ascontiguousarray(gray), None)
+    if not keypoints:
+        return Features(np.zeros((0, 2), dtype=np.float32), None)
+    return Features(np.array([k.pt for k in keypoints], dtype=np.float32), descriptors)
+
+
+def _match_features(
+    a: Features, b: Features, ratio: float = ORB_RATIO
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+    """Which keypoint of ``a`` is which keypoint of ``b``: Hamming distance under Lowe's ratio
+    test (a match whose runner-up is within ``ratio`` of it is ambiguous and dropped) and a
+    cross-check (b's own best match for the point must be that point again). Returns the two
+    index arrays, possibly empty."""
+    import cv2
+
+    empty = np.zeros(0, dtype=np.int64)
+    des_a, des_b = a.descriptors, b.descriptors
     if des_a is None or des_b is None or len(des_a) < 2 or len(des_b) < 2:
-        return empty, empty, found
-    brute: Any = cv2.BFMatcher(cv2.NORM_HAMMING)
+        return empty, empty
+    brute: Any = cv2.BFMatcher(cv2.NORM_HAMMING)  # cv2's stubs type no DMatch field
     mirror = {
         pair[0].queryIdx: pair[0].trainIdx for pair in brute.knnMatch(des_b, des_a, k=2) if pair
     }
@@ -318,11 +362,28 @@ def _describe(
             continue
         rows_a.append(pair[0].queryIdx)
         rows_b.append(pair[0].trainIdx)
-    if not rows_a:
-        return empty, empty, found
-    pts_a: Pixels = np.array([kp_a[i].pt for i in rows_a], dtype=np.float32)
-    pts_b: Pixels = np.array([kp_b[i].pt for i in rows_b], dtype=np.float32)
-    return pts_a, pts_b, found
+    return np.array(rows_a, dtype=np.int64), np.array(rows_b, dtype=np.int64)
+
+
+def _describe(
+    gray_a: npt.NDArray[np.uint8],
+    gray_b: npt.NDArray[np.uint8],
+    *,
+    features: int = ORB_FEATURES,
+    fast_threshold: int = ORB_FAST_THRESHOLD,
+    ratio: float = ORB_RATIO,
+) -> tuple[Pixels, Pixels, int]:
+    """Correspondences by recognition rather than by tracking: both frames described
+    (:func:`describe_frame`) and their descriptors matched (:func:`_match_features`). Returns
+    (points in A, points in B, keypoints found in A), the last being what the losses are a
+    share of — the describer's equivalent of the flow's corner count."""
+    empty: Pixels = np.zeros((0, 2), dtype=np.float32)
+    feat_a = describe_frame(gray_a, features=features, fast_threshold=fast_threshold)
+    feat_b = describe_frame(gray_b, features=features, fast_threshold=fast_threshold)
+    rows_a, rows_b = _match_features(feat_a, feat_b, ratio)
+    if rows_a.size == 0:
+        return empty, empty, feat_a.count
+    return feat_a.points[rows_a], feat_b.points[rows_b], feat_a.count
 
 
 def _track(
@@ -494,6 +555,8 @@ class ParallaxTruth:
     tracked: int = 0
     rejected: dict[str, int] = field(default_factory=dict)
     verdict: str = ""
+    observations: Array | None = None  # a track's views (:func:`track_truth`); None for a pair
+    sigma_two: Array | None = None  # what the widest single pair of a track alone would claim
 
     @classmethod
     def nothing(
@@ -614,6 +677,484 @@ def parallax_truth(
     )
 
 
+# ---- a corner as a track, not a pair ---------------------------------------------------------
+@dataclass(frozen=True)
+class Tracks:
+    """Corners of the current frame followed through the frames before it.
+
+    ``pixels`` is (tracks, views, 2): where each track landed in each view, NaN where it was not
+    seen there, and ``seen`` is the mask that says which. ``motions`` carries one transform per
+    view, taking a point of THAT view's optical frame into the current camera's
+    (``X_current = R X_view + t``); the last view is the current frame itself, so its motion is
+    the identity, ``pixels[:, -1]`` is the pixel every depth is reported at and
+    ``motions[v].translation`` is where view ``v``'s lens sat in the current camera's frame.
+    ``found`` is how many corners the matcher started from, so a caller can say what it lost."""
+
+    pixels: Array
+    seen: npt.NDArray[np.bool_]
+    motions: tuple[Motion, ...]
+    found: int = 0
+
+    @property
+    def count(self) -> int:
+        """How many tracks."""
+        return int(self.pixels.shape[0])
+
+    @property
+    def views(self) -> int:
+        """How many frames the tracks were looked for in, the current one included."""
+        return len(self.motions)
+
+    @property
+    def observations(self) -> npt.NDArray[np.int64]:
+        """How many views each track was actually seen in (2 is today's pair)."""
+        out: npt.NDArray[np.int64] = self.seen.sum(axis=1)
+        return out
+
+    @property
+    def current(self) -> Pixels:
+        """Where each track sits in the current frame — the pixel its depth belongs to."""
+        return np.asarray(self.pixels[:, -1], dtype=np.float32)
+
+
+def _identity() -> Motion:
+    """The motion of the current frame into itself."""
+    return Motion(np.eye(3), np.zeros(3))
+
+
+def _view_span(views: int, max_views: int) -> list[int]:
+    """Which of ``views`` frames a track is allowed to rest on when the window holds more than
+    ``max_views``: evenly spaced over the window, always keeping the oldest frame (the widest
+    baseline) and the current one (the frame the depth is reported in)."""
+    if views <= max_views:
+        return list(range(views))
+    picked = np.unique(np.rint(np.linspace(0, views - 1, max_views)).astype(int))
+    return [int(i) for i in picked]
+
+
+def build_tracks(
+    grays: Sequence[npt.NDArray[np.uint8]],
+    motions: Sequence[Motion],
+    *,
+    matcher: str = "klt",
+    features: list[Features | None] | None = None,
+    max_corners: int = MAX_CORNERS,
+    quality: float = CORNER_QUALITY,
+    min_distance: int = CORNER_MIN_DISTANCE,
+    fb_tol_px: float = FB_TOL_PX,
+    ratio: float = ORB_RATIO,
+) -> Tracks:
+    """The corners of the last frame of ``grays`` as tracks through all of them.
+
+    ``grays`` is oldest first and its LAST entry is the current frame; ``motions`` is one per
+    EARLIER view, taking that view's optical frame into the current camera's, oldest first.
+
+    ``klt`` (the default) detects corners in the current frame and follows them BACK hop by hop
+    — current into the frame before it, that into the one before, and so on — with a
+    forward-backward check at every hop, which is why a track survives a window the flow cannot
+    jump across in one go: five 0.1 s hops each keep about 92 % of their corners where one
+    0.5 s jump keeps 68 %. A track stops where the flow loses it, so its observations are
+    contiguous back from the current frame. ``orb`` describes every frame and matches the
+    current frame's descriptors against each earlier frame's independently, so a track may skip
+    a frame it was occluded in; pass ``features`` — a list as long as ``grays``, entries
+    ``None`` until computed — to keep each frame's description between calls, as a ring does.
+
+    Returns a :class:`Tracks` whose last view is the current frame."""
+    if len(motions) != len(grays) - 1:
+        raise ValueError(
+            f"{len(grays)} frames need {len(grays) - 1} motions into the current camera,"
+            f" got {len(motions)}"
+        )
+    if len(grays) < 2:
+        raise ValueError("a track needs at least two frames")
+    all_motions = (*motions, _identity())
+    if matcher == "orb":
+        pixels, seen, found = _describe_tracks(grays, features, ratio)
+    elif matcher == "klt":
+        pixels, seen, found = _flow_tracks(
+            grays,
+            max_corners=max_corners,
+            quality=quality,
+            min_distance=min_distance,
+            fb_tol_px=fb_tol_px,
+        )
+    else:
+        raise ValueError(f"unknown matcher {matcher!r}: one of {', '.join(MATCHERS)}")
+    return Tracks(pixels, seen, all_motions, found)
+
+
+def _empty_tracks(views: int) -> tuple[Array, npt.NDArray[np.bool_], int]:
+    """No corner found at all, in the shape the builders return."""
+    return np.zeros((0, views, 2)), np.zeros((0, views), dtype=bool), 0
+
+
+def _flow_tracks(
+    grays: Sequence[npt.NDArray[np.uint8]],
+    *,
+    max_corners: int,
+    quality: float,
+    min_distance: int,
+    fb_tol_px: float,
+) -> tuple[Array, npt.NDArray[np.bool_], int]:
+    """The current frame's corners followed back through the earlier frames, one hop at a time,
+    each hop forward-backward checked and required to land inside the earlier picture."""
+    import cv2
+
+    views = len(grays)
+    current = np.ascontiguousarray(grays[-1])
+    height, width = current.shape[:2]
+    corners = cv2.goodFeaturesToTrack(
+        current, maxCorners=max_corners, qualityLevel=quality, minDistance=min_distance
+    )
+    if corners is None or len(corners) == 0:
+        return _empty_tracks(views)
+    found = len(corners)
+    pixels = np.full((found, views, 2), np.nan)
+    seen = np.zeros((found, views), dtype=bool)
+    pixels[:, -1] = corners.reshape(-1, 2)
+    seen[:, -1] = True
+    alive = np.ones(found, dtype=bool)
+    here = corners.reshape(-1, 1, 2).astype(np.float32)
+    window = (LK_WINDOW, LK_WINDOW)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+    flow: Any = cv2.calcOpticalFlowPyrLK  # cv2's stubs admit neither uint8 nor the None output
+    for view in range(views - 2, -1, -1):
+        rows = np.flatnonzero(alive)
+        if rows.size == 0:
+            break
+        earlier = np.ascontiguousarray(grays[view])
+        later = np.ascontiguousarray(grays[view + 1])
+        start = here[rows]
+        back, ok_back, _ = flow(
+            later, earlier, start, None, winSize=window, maxLevel=LK_LEVELS, criteria=criteria
+        )
+        forth, ok_forth, _ = flow(
+            earlier, later, back, None, winSize=window, maxLevel=LK_LEVELS, criteria=criteria
+        )
+        landed = back.reshape(-1, 2)
+        good = (ok_back.ravel() == 1) & (ok_forth.ravel() == 1)
+        good &= np.linalg.norm((forth - start).reshape(-1, 2), axis=1) <= fb_tol_px
+        good &= (landed[:, 0] >= 0) & (landed[:, 0] < width)
+        good &= (landed[:, 1] >= 0) & (landed[:, 1] < height)
+        kept = rows[good]
+        pixels[kept, view] = landed[good]
+        seen[kept, view] = True
+        here = np.full((found, 1, 2), np.nan, dtype=np.float32)
+        here[kept] = landed[good].reshape(-1, 1, 2).astype(np.float32)
+        alive = np.zeros(found, dtype=bool)
+        alive[kept] = True
+    return pixels, seen, found
+
+
+def _describe_tracks(
+    grays: Sequence[npt.NDArray[np.uint8]],
+    features: list[Features | None] | None,
+    ratio: float,
+) -> tuple[Array, npt.NDArray[np.bool_], int]:
+    """The current frame's keypoints recognised in every earlier frame, each frame matched
+    against the current one on its own — a track may therefore skip a frame it was hidden in.
+    ``features`` is filled in where it was ``None``, so a caller's ring keeps each frame's
+    description."""
+    views = len(grays)
+    cache: list[Features | None] = features if features is not None else [None] * views
+    if len(cache) != views:
+        raise ValueError(f"{views} frames need {views} feature slots, got {len(cache)}")
+    for i, gray in enumerate(grays):
+        if cache[i] is None:
+            cache[i] = describe_frame(gray)
+    described = [f for f in cache if f is not None]
+    current = described[-1]
+    found = current.count
+    if found == 0:
+        return _empty_tracks(views)
+    pixels = np.full((found, views, 2), np.nan)
+    seen = np.zeros((found, views), dtype=bool)
+    pixels[:, -1] = current.points
+    seen[:, -1] = True
+    for view in range(views - 1):
+        mine, theirs = _match_features(current, described[view], ratio)
+        if mine.size == 0:
+            continue
+        pixels[mine, view] = described[view].points[theirs]
+        seen[mine, view] = True
+    return pixels, seen, found
+
+
+@dataclass(frozen=True)
+class TrackDepths:
+    """Where every track's point sits in front of the CURRENT camera, and how well it is known.
+
+    ``z`` is the depth along the current optical axis in metres (NaN for a track whose rays do
+    not meet in front of every lens that saw it), ``sigma`` its one-sigma noise, ``residual``
+    the root-mean-square reprojection error over the observations kept (pixels), ``baseline``
+    the effective parallax those observations add up to, ``travel`` how far the camera moved
+    over them, ``observations`` how many were kept, ``sigma_two`` what the single widest pair
+    alone would have claimed — the "before" a report holds against the "after" — and
+    ``repaired`` how many tracks lost their worst observation to the robust pass.
+
+    The sigma is the two-view formula with the whole bundle's parallax in it::
+
+        sigma_z = z^2 * sigma_px / (f * B_effective),  B_effective = sqrt(sum_v b_v^2)
+
+    where ``b_v`` is the part of view ``v``'s baseline perpendicular to the point's ray (the
+    only part a depth rests on) and ``sigma_px`` is the matcher's own noise widened by the
+    solve's residual. Each view carries independent pixel noise, so their inverse-depth
+    informations add and the baselines add in quadrature: two views 5 cm out are worth one at
+    7.1 cm, four at 5 cm one at 10. With one earlier view ``B_effective`` is that view's own
+    ``b`` and the number is exactly what :func:`triangulate` returns for the same pair."""
+
+    z: Array
+    sigma: Array
+    residual: Array
+    baseline: Array
+    travel: Array
+    observations: npt.NDArray[np.int64]
+    sigma_two: Array
+    repaired: int = 0
+
+
+def _view_rays(pixels: Array, intr: Intrinsics, motions: Sequence[Motion]) -> Array:
+    """Every observation's ray as a unit vector in the CURRENT camera's frame: the pixel's ray
+    in its own view, turned by that view's rotation. Shape (tracks, views, 3), NaN where the
+    track was not seen."""
+    tracks, views = int(pixels.shape[0]), int(pixels.shape[1])
+    flat = _rays(np.asarray(pixels, dtype=float).reshape(-1, 2), intr).reshape(tracks, views, 3)
+    rotation = np.array([np.asarray(m.rotation, dtype=float) for m in motions])
+    turned = np.einsum("vij,tvj->tvi", rotation, flat)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out: Array = turned / np.linalg.norm(turned, axis=2, keepdims=True)
+    return out
+
+
+def _origins(motions: Sequence[Motion]) -> Array:
+    """Where each view's lens sat in the current camera's frame (views, 3): the current frame's
+    own origin is the zero at the end."""
+    return np.array([np.asarray(m.translation, dtype=float) for m in motions])
+
+
+def _meet_rays(
+    rays: Array, origins: Array, seen: npt.NDArray[np.bool_]
+) -> tuple[Array, npt.NDArray[np.bool_]]:
+    """Where each track's bundle of rays meets, in least squares: the point minimising the sum
+    of its squared perpendicular distances to every ray, ``sum_v ||(I - e e^T)(X - o_v)||^2``,
+    which is one symmetric 3x3 system per track and, for two rays, exactly the middle of their
+    common perpendicular — today's pair, unchanged. Returns the point per track and whether its
+    system was conditioned at all (rays all but parallel leave the depth along them unknown)."""
+    unit = np.where(seen[:, :, None], np.nan_to_num(rays), 0.0)
+    count = seen.sum(axis=1).astype(float)
+    normal = count[:, None, None] * np.eye(3)[None, :, :] - np.einsum("tvi,tvj->tij", unit, unit)
+    along = np.einsum("tvi,vi->tv", unit, origins)
+    right = np.einsum("tv,vi->ti", seen.astype(float), origins) - np.einsum(
+        "tv,tvi->ti", along, unit
+    )
+    spectrum = np.linalg.svd(normal, compute_uv=False)
+    ok = (count >= 2) & (spectrum[:, 2] > TRACK_MIN_CONDITION * np.maximum(spectrum[:, 0], 1e-12))
+    point = np.full((rays.shape[0], 3), np.nan)
+    if bool(ok.any()):
+        # numpy 2 reads a (t, 3) right-hand side as one matrix, not a stack of vectors
+        point[ok] = np.linalg.solve(normal[ok], right[ok][:, :, None])[:, :, 0]
+    return point, ok
+
+
+def _reproject(
+    point: Array, pixels: Array, intr: Intrinsics, motions: Sequence[Motion]
+) -> tuple[Array, Array]:
+    """Each observation's reprojection residual in pixels and the depth the solved point has in
+    that view: the point carried back into every view (``X_view = R^T (X - t)``) and projected
+    with the same optics the tracker read."""
+    rotation = np.array([np.asarray(m.rotation, dtype=float) for m in motions])
+    origins = _origins(motions)
+    local = np.einsum("vji,tvj->tvi", rotation, point[:, None, :] - origins[None, :, :])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        column = intr.fx * local[:, :, 0] / local[:, :, 2] + intr.cx
+        row = intr.fy * local[:, :, 1] / local[:, :, 2] + intr.cy
+        residual: Array = np.hypot(column - pixels[:, :, 0], row - pixels[:, :, 1])
+    return residual, local[:, :, 2]
+
+
+def triangulate_tracks(
+    tracks: Tracks,
+    intr: Intrinsics,
+    *,
+    disparity_sigma_px: float = DISPARITY_SIGMA_PX,
+    outlier_px: float = TRACK_OUTLIER_PX,
+) -> TrackDepths:
+    """Every track's depth in the current camera, from all of its observations at once.
+
+    The rays of all the views a track was seen in are met in one linear least-squares solve
+    (:func:`_meet_rays`); then one robust pass: a track whose worst observation misses the
+    solved point by more than ``outlier_px`` drops that single observation and is solved again,
+    which repairs a mistracked hop without throwing the other views away (a track left with
+    fewer than two observations is simply not a measurement and comes back NaN). The sigma is
+    ``z^2 * sigma_px / (f * B_effective)`` with ``B_effective`` the quadrature sum of the views'
+    perpendicular baselines — see :class:`TrackDepths`."""
+    pixels = np.asarray(tracks.pixels, dtype=float)
+    rays = _view_rays(pixels, intr, tracks.motions)
+    origins = _origins(tracks.motions)
+    seen = tracks.seen.copy()
+    point, ok = _meet_rays(rays, origins, seen)
+    residual, depth = _reproject(point, pixels, intr, tracks.motions)
+    rows = np.arange(seen.shape[0])
+    missed = np.where(seen, np.nan_to_num(residual, nan=np.inf), -np.inf)
+    worst = np.argmax(missed, axis=1)
+    repaired = ok & (seen.sum(axis=1) > 2) & (missed[rows, worst] > outlier_px)
+    if bool(repaired.any()):
+        seen[rows[repaired], worst[repaired]] = False
+        point, ok = _meet_rays(rays, origins, seen)
+        residual, depth = _reproject(point, pixels, intr, tracks.motions)
+    unit = np.nan_to_num(rays[:, -1, :])  # the current frame's own ray, already a unit vector
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        along = unit @ origins.T
+        perpendicular = np.linalg.norm(
+            origins[None, :, :] - along[:, :, None] * unit[:, None, :], axis=2
+        )
+    perpendicular = np.where(seen, perpendicular, 0.0)
+    baseline = np.sqrt((perpendicular**2).sum(axis=1))
+    stepped = np.where(seen, np.linalg.norm(origins, axis=1)[None, :] ** 2, 0.0)
+    travel = np.sqrt(stepped.sum(axis=1))
+    counted = seen & np.isfinite(residual)
+    rms = np.sqrt(
+        (np.where(counted, residual, 0.0) ** 2).sum(axis=1) / np.maximum(counted.sum(axis=1), 1)
+    )
+    forward = np.all(~seen | (depth > NEAR_M), axis=1)
+    z = point[:, 2]
+    good = ok & forward & np.isfinite(z) & (z > NEAR_M)
+    z = np.where(good, z, np.nan)
+    focal = 0.5 * (intr.fx + intr.fy)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sigma_px = np.hypot(disparity_sigma_px, np.where(np.isfinite(rms), rms, 0.0))
+        sigma = np.where(good & (baseline > 0), z**2 * sigma_px / (focal * baseline), np.inf)
+        widest = np.argmax(np.where(seen, perpendicular, -1.0), axis=1)
+        one = perpendicular[rows, widest]
+        one_px = np.hypot(disparity_sigma_px, np.nan_to_num(residual[rows, widest]))
+        sigma_two = np.where(good & (one > 0), z**2 * one_px / (focal * one), np.inf)
+    return TrackDepths(
+        z,
+        sigma,
+        rms,
+        baseline,
+        travel,
+        seen.sum(axis=1),
+        sigma_two,
+        repaired=int(repaired.sum()),
+    )
+
+
+def track_truth(
+    grays: Sequence[npt.NDArray[np.uint8]],
+    motions: Sequence[Motion],
+    intr: Intrinsics,
+    *,
+    matcher: str = "klt",
+    features: list[Features | None] | None = None,
+    min_obs: int = TRACK_MIN_OBS,
+    min_total_baseline_m: float = TRACK_MIN_TOTAL_BASELINE_M,
+    max_views: int = TRACK_MAX_VIEWS,
+    min_baseline_m: float = MIN_BASELINE_M,
+    min_parallax_ratio: float = MIN_PARALLAX_RATIO,
+    epipole_min_deg: float = EPIPOLE_MIN_DEG,
+    max_sampson_px: float = MAX_SAMPSON_PX,
+    max_reproj_px: float = MAX_REPROJ_PX,
+    max_weight: float = MAX_WEIGHT,
+    outlier_px: float = TRACK_OUTLIER_PX,
+) -> ParallaxTruth:
+    """:func:`parallax_truth` over a window of frames instead of a pair: track, gate,
+    triangulate from every view at once, weigh. The result is the same
+    :class:`ParallaxTruth` — the pixels of the CURRENT frame, their depth, their sigma, their
+    weight against a lidar beam — with ``observations`` and ``sigma_two`` filled in, so an
+    anchor emits the same pairs whichever ruler it used.
+
+    ``grays`` is oldest first with the current frame last and ``motions`` is one per earlier
+    view into the current camera (:func:`build_tracks`). The gates a track meets: the motion
+    itself (no view moved ``min_baseline_m`` and there is nothing to triangulate — ``still``
+    when the camera did not turn either, ``rotation-only`` when it only turned); the matcher's
+    own check (forward-backward per hop for the flow, the ratio and cross-check for the
+    describer); the epipolar distance of each OBSERVATION to the known motion of its view,
+    which drops that observation and not the whole track; landing inside the current picture;
+    ``min_obs`` observations left; a depth in front of every lens that saw it; the parallax
+    those observations add up to (``min_total_baseline_m`` of effective baseline, and
+    ``min_parallax_ratio`` of the depth, and ``epipole_min_deg`` off the direction of travel);
+    and the bundle's own reprojection error (``max_reproj_px``)."""
+    if not motions or max(m.baseline for m in motions) < min_baseline_m:
+        turned = bool(motions) and max(m.angle for m in motions) > MIN_ROTATION_RAD
+        return ParallaxTruth.nothing("rotation-only" if turned else "still")
+    span = _view_span(len(grays), max_views)
+    windows = [grays[i] for i in span]
+    moved = [motions[i] for i in span if i < len(motions)]
+    kept_features = None if features is None else [features[i] for i in span]
+    tracks = build_tracks(windows, moved, matcher=matcher, features=kept_features)
+    if features is not None and kept_features is not None:
+        for slot, i in enumerate(span):
+            features[i] = kept_features[slot]
+    rejected = dict.fromkeys((*REASONS, *TRACK_REASONS), 0)
+    started = tracks.observations >= 2
+    tracked = int(started.sum())
+    rejected["flow"] = tracks.found - tracked
+    if tracked == 0:
+        return ParallaxTruth.nothing("flow", rejected=rejected)
+    seen = tracks.seen.copy()
+    current = tracks.current
+    for view in range(tracks.views - 1):
+        here = seen[:, view]
+        if not bool(here.any()):
+            continue
+        distance = sampson(
+            np.asarray(tracks.pixels[:, view], dtype=np.float32),
+            current,
+            intr,
+            tracks.motions[view],
+        )
+        lost = here & ~(distance <= max_sampson_px)
+        rejected["epipolar"] += int(lost.sum())
+        seen[:, view] &= ~lost
+    tracks = replace(tracks, seen=seen)
+    keep = started.copy()
+    column = np.rint(np.asarray(current, dtype=float)[:, 0])
+    row = np.rint(np.asarray(current, dtype=float)[:, 1])
+    inside = (column >= 0) & (column < intr.width) & (row >= 0) & (row < intr.height)
+    rejected["outside"] = int((keep & ~inside).sum())
+    keep &= inside
+    observations = tracks.observations
+    short = keep & (observations < max(min_obs, 2))
+    rejected["short track"] = int(short.sum())
+    keep &= ~short
+    sigma_px = ORB_DISPARITY_SIGMA_PX if matcher == "orb" else DISPARITY_SIGMA_PX
+    found = triangulate_tracks(tracks, intr, disparity_sigma_px=sigma_px, outlier_px=outlier_px)
+    rejected["outlier obs"] = found.repaired
+    rejected["behind"] = int((keep & ~np.isfinite(found.z)).sum())
+    keep &= np.isfinite(found.z)
+    with np.errstate(invalid="ignore"):
+        thin = keep & (found.baseline < min_total_baseline_m)
+        rejected["total baseline"] = int(thin.sum())
+        keep &= ~thin
+        near = keep & (found.baseline < min_parallax_ratio * found.z)
+        rejected["parallax"] = int(near.sum())
+        keep &= ~near
+        ahead = keep & (found.baseline < found.travel * math.sin(math.radians(epipole_min_deg)))
+        rejected["epipole"] = int(ahead.sum())
+        keep &= ~ahead
+        bad = keep & ~(found.residual <= max_reproj_px)
+        rejected["reproj"] = int(bad.sum())
+        keep &= ~bad
+    if not bool(keep.any()):
+        worst = max(rejected, key=lambda name: rejected[name])
+        return ParallaxTruth.nothing(worst, tracked=tracked, rejected=rejected)
+    weight = pair_weight(found.sigma[keep] / found.z[keep] ** 2, cap=max_weight)
+    return ParallaxTruth(
+        current[keep],
+        found.z[keep],
+        found.sigma[keep],
+        found.residual[keep],
+        found.baseline[keep],
+        weight,
+        tracked=tracked,
+        rejected=rejected,
+        verdict="",
+        observations=found.observations[keep].astype(float),
+        sigma_two=found.sigma_two[keep],
+    )
+
+
 def to_gray(rgb: npt.NDArray[np.uint8]) -> npt.NDArray[np.uint8]:
     """An RGB image as the single-channel grey the tracker reads (the luma weights, no cv2)."""
     px = np.asarray(rgb)
@@ -637,13 +1178,24 @@ __all__ = [
     "ORB_DISPARITY_SIGMA_PX",
     "ORB_FEATURES",
     "ORB_RATIO",
+    "TRACK_MAX_VIEWS",
+    "TRACK_MIN_OBS",
+    "TRACK_MIN_TOTAL_BASELINE_M",
+    "TRACK_OUTLIER_PX",
+    "TRACK_REASONS",
+    "TRACK_WINDOW_S",
     "CameraPlacement",
+    "Features",
     "Matcher",
     "Motion",
     "ParallaxTruth",
     "Pixels",
     "Placement",
+    "TrackDepths",
+    "Tracks",
+    "build_tracks",
     "camera_motion",
+    "describe_frame",
     "fundamental",
     "match",
     "optical_from_base",
@@ -651,5 +1203,7 @@ __all__ = [
     "perpendicular_baseline",
     "sampson",
     "to_gray",
+    "track_truth",
     "triangulate",
+    "triangulate_tracks",
 ]
