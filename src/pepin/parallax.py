@@ -86,6 +86,18 @@ is the pair's own formula with the bundle's parallax in it: ``sigma_z = z^2 * si
 (f * B_effective)`` with ``B_effective = sqrt(sum_v b_v^2)`` over the views, so four views 5 cm
 out are worth one pair at 10 cm, and a two-view track is arithmetically today's pair.
 
+A track can be asked to agree with itself as well: :func:`_split_gap` solves the older half of a
+track's views and the newer half separately and drops the track when the two depths disagree
+(``split_tol_sigma``, off by default). It is the only test left that reads a depth changing with
+the window, and measured it is worth very little. It does not catch — and nothing on one track
+can — a point whose own motion is parallel to the camera's, or a corner sliding along its
+epipolar line by an amount proportional to the baseline: both leave every ray meeting exactly,
+at the wrong depth. Even a whole half of a window sliding 2 px off the corner, 21 % of depth,
+disagrees by only 2.0 sigma, which is what a clean corner reaches on pixel noise alone. On the
+four errands of 2026-09-14 a 3 sigma gate removes 1.1 % of the tracks, leaves the law's residual
+exactly where it was, and costs 3.9 ms a frame of the stage's 27.0
+(scratch/parallax_split_probe.py, scratch/parallax_tracks_eval.txt).
+
 This cart has one, and it is not its wheels (scratch/parallax_pose_sweep.txt, the same four
 errands with the motion taken from the lidar tracker's map pose instead of the EKF's odometry,
 2026-09-14). Over a 1.0 s gap the odometry claims 15.8 cm of travel where the tracker reads
@@ -148,9 +160,25 @@ MAX_WEIGHT = 1.0  # no parallax pair outweighs a lidar beam at the reference ran
 TRACK_MIN_OBS = 3  # frames a track must be seen in to be a measurement; 2 is today's pair
 TRACK_WINDOW_S = 1.5  # how far back a track may reach, seconds: the ring's own span
 TRACK_MIN_TOTAL_BASELINE_M = 0.10  # the effective parallax a track's views must add up to
-TRACK_MAX_VIEWS = 16  # views one track may rest on: the cap on the matcher's cost per frame
+TRACK_MAX_VIEWS = 8  # views one track may rest on: the cap on the matcher's cost per frame.
+# 8 and not 16 since 2026-09-15: 85 % of a track's cost is the flow's hops and the hops are
+# one per view, so the cap is the cost. Over the four errands of 2026-09-14
+# (scratch/parallax_tracks_audit.txt) 16 views cost 52.5 ms a frame and 8 cost 27.0, and on
+# the frames both could fit a law the law was no worse at 8 (14.2 % of median residual at the
+# lidar's beams against 19.0 % at 16, over the same 12 frames). Raise it on a robot whose
+# camera is faster than this one's 6-9 frames/s, where a view is a smaller step.
 TRACK_OUTLIER_PX = 2.0  # an observation missing the solved point by more is the one dropped
 TRACK_MIN_CONDITION = 1e-6  # smallest / largest singular value of a track's 3x3 normal matrix
+TRACK_SIGMA_MODELS = ("covariance", "baseline")
+TRACK_SIGMA_MODEL = "covariance"  # the solve's own covariance; "baseline" is the closed form
+TRACK_SPLIT_TOL_SIGMA = 0.0  # how far a track's older and newer halves may disagree, in sigmas;
+# 0 does not compute the split at all. OFF because it was measured and it buys nothing: at the 3
+# sigma a clean synthetic corner never reaches (max 1.97 over 1200 draws,
+# scratch/parallax_split_probe.py) it removes 1.1 % of the real errands' tracks
+# (scratch/parallax_tracks_eval.txt) and leaves the parallax-only law's residual exactly where it
+# was, 19.0 % at 16 views and 14.2 % at 8 on the frames a pair also fitted, while the two extra
+# half-solves cost 3.9 ms a frame of the stage's 27.0 (scratch/parallax_tracks_audit.txt).
+# Set it above 0 to arm the gate, or to a huge number to measure the distribution without gating.
 
 REASONS = (
     "still",
@@ -163,7 +191,7 @@ REASONS = (
     "epipole",
     "reproj",
 )
-TRACK_REASONS = ("short track", "total baseline", "outlier obs")
+TRACK_REASONS = ("short track", "total baseline", "outlier obs", "split")
 
 
 @dataclass(frozen=True)
@@ -544,7 +572,12 @@ class ParallaxTruth:
     reprojection residual in pixels, the perpendicular baseline its depth rests on, the weight
     it deserves against a lidar beam's 1 — and the bookkeeping: how many correspondences were
     tracked, how many survived, how many fell to each gate, and the one word for a pair of
-    frames that could yield nothing at all (``still`` or ``rotation-only``)."""
+    frames that could yield nothing at all (``still`` or ``rotation-only``).
+
+    A track (:func:`track_truth`) fills in three more per point: ``observations`` how many views
+    its depth rests on, ``sigma_two`` what its widest single pair alone would have claimed, and
+    ``split`` how far its older and newer halves disagree in combined sigmas. A pair leaves all
+    three ``None``."""
 
     points: Pixels
     z: Array
@@ -557,6 +590,7 @@ class ParallaxTruth:
     verdict: str = ""
     observations: Array | None = None  # a track's views (:func:`track_truth`); None for a pair
     sigma_two: Array | None = None  # what the widest single pair of a track alone would claim
+    split: Array | None = None  # how far a track's two halves disagree, in combined sigmas
 
     @classmethod
     def nothing(
@@ -889,19 +923,30 @@ class TrackDepths:
     the root-mean-square reprojection error over the observations kept (pixels), ``baseline``
     the effective parallax those observations add up to, ``travel`` how far the camera moved
     over them, ``observations`` how many were kept, ``sigma_two`` what the single widest pair
-    alone would have claimed — the "before" a report holds against the "after" — and
-    ``repaired`` how many tracks lost their worst observation to the robust pass.
+    alone would have claimed — the "before" a report holds against the "after" —
+    ``repaired`` how many tracks lost their worst observation to the robust pass, and ``split``
+    how far each track's older and newer halves disagree about its depth, in combined sigmas
+    (:func:`_split_gap`; 0 for a track too short to cut in two).
 
-    The sigma is the two-view formula with the whole bundle's parallax in it::
+    The sigma is the solve's own covariance (:func:`_solve_sigma`), a 3x3 inverse per track:
+    the midpoint's normal matrix propagated through each view's range, which is honest whatever
+    the shape of the bundle. The closed form the stage shipped with is still reachable
+    (``sigma_model="baseline"``)::
 
         sigma_z = z^2 * sigma_px / (f * B_effective),  B_effective = sqrt(sum_v b_v^2)
 
     where ``b_v`` is the part of view ``v``'s baseline perpendicular to the point's ray (the
     only part a depth rests on) and ``sigma_px`` is the matcher's own noise widened by the
-    solve's residual. Each view carries independent pixel noise, so their inverse-depth
-    informations add and the baselines add in quadrature: two views 5 cm out are worth one at
-    7.1 cm, four at 5 cm one at 10. With one earlier view ``B_effective`` is that view's own
-    ``b`` and the number is exactly what :func:`triangulate` returns for the same pair."""
+    solve's residual. It is exact for a camera moving ACROSS the ray — a sidestep, which is the
+    geometry it was measured on — and it is optimistic wherever the views also spread along the
+    ray, because a view that sees the point from further away reads its pixel into a bigger
+    depth error while the formula credits it with the same ``z``. Measured on synthetic tracks
+    against the solve's own scatter (scratch/parallax_sigma_mc.txt, 2026-09-15): exact for a
+    sidestep, 1.5-2.0x optimistic for a cart driving forward at 10-16 views — and a pair's vote
+    in the frame's fit is 1 / sigma^2, so that is a vote 2 to 4 times too loud.
+
+    ``baseline`` is still what ``B_effective`` reports and what ``min_total_baseline_m`` gates,
+    since it is a length the report line can read."""
 
     z: Array
     sigma: Array
@@ -911,6 +956,7 @@ class TrackDepths:
     observations: npt.NDArray[np.int64]
     sigma_two: Array
     repaired: int = 0
+    split: Array = field(default_factory=lambda: np.zeros(0))
 
 
 def _view_rays(pixels: Array, intr: Intrinsics, motions: Sequence[Motion]) -> Array:
@@ -972,12 +1018,169 @@ def _reproject(
     return residual, local[:, :, 2]
 
 
+def _solve_sigma(
+    point: Array,
+    rays: Array,
+    origins: Array,
+    seen: npt.NDArray[np.bool_],
+    disparity_sigma_px: float,
+    rms: Array,
+    focal: float,
+) -> Array:
+    """The depth noise the midpoint solve ITSELF carries, per track, in metres.
+
+    :func:`_meet_rays` minimises ``sum_v ||P_v (X - o_v)||^2`` with ``P_v = I - e_v e_v^T``, so
+    its normal matrix is ``N = sum_v P_v`` and one view's residual carries ``r_v`` metres of
+    noise for every radian of ray error (``r_v`` is how far that lens sat from the point).
+    Propagating gives ``C = N^-1 (sum_v r_v^2 P_v) N^-1 * sigma_angle^2`` and the depth's own
+    variance is ``C[2, 2]``; ``sigma_angle`` is the per-observation pixel noise over the focal
+    length. Unlike the baseline formula this knows that a view which sees the point from
+    further away reads its pixel into a bigger depth error, which is exactly what a camera
+    driving FORWARD does (scratch/parallax_sigma_mc.txt: the formula runs up to 2.0x optimistic
+    there, a vote 4 times too loud, and this reads the solve's own scatter to 3 %).
+
+    The bundle's own misfit widens it, but only the part of the misfit that pixel noise does not
+    already explain: a bundle of ``n`` views has ``2n - 3`` degrees of freedom left after the
+    point is fitted, so noise alone puts ``sigma_1 * sqrt((2n - 3) / n)`` into ``rms``, and only
+    the excess over that is evidence the track is worse than a corner should be. (Adding the raw
+    ``rms`` in quadrature, which the baseline model does, charges a perfectly good sixteen-view
+    bundle 25 % of extra sigma for noise it has already counted.)
+
+    ``inf`` where the bundle is too degenerate to invert."""
+    unit = np.where(seen[:, :, None], np.nan_to_num(rays), 0.0)
+    count = seen.sum(axis=1).astype(float)
+    normal = count[:, None, None] * np.eye(3)[None, :, :] - np.einsum("tvi,tvj->tij", unit, unit)
+    reach = np.where(seen, np.linalg.norm(point[:, None, :] - origins[None, :, :], axis=2), 0.0)
+    squared = reach**2
+    middle = squared.sum(axis=1)[:, None, None] * np.eye(3)[None, :, :] - np.einsum(
+        "tv,tvi,tvj->tij", squared, unit, unit
+    )
+    spectrum = np.linalg.svd(normal, compute_uv=False)
+    ok = (count >= 2) & (spectrum[:, 2] > TRACK_MIN_CONDITION * np.maximum(spectrum[:, 0], 1e-12))
+    variance = np.full(point.shape[0], np.inf)
+    if bool(ok.any()):
+        inverse = np.linalg.inv(normal[ok])
+        cov = inverse @ middle[ok] @ inverse
+        variance[ok] = np.maximum(cov[:, 2, 2], 0.0)
+    # disparity_sigma_px is a DISPARITY's noise (two views' pixels); one observation carries
+    # 1 / sqrt(2) of it, which is what keeps a two-view track reading the pair's own number.
+    per_observation = disparity_sigma_px / math.sqrt(2.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        expected = per_observation * np.sqrt(np.maximum(2.0 * count - 3.0, 1.0) / count)
+        excess = np.where(np.isfinite(rms) & (expected > 0), np.maximum(rms / expected, 1.0), 1.0)
+    out: Array = excess * per_observation * np.sqrt(variance) / focal
+    return out
+
+
+def _perpendicular(rays: Array, origins: Array, seen: npt.NDArray[np.bool_]) -> Array:
+    """How much of each view's baseline the point's ray actually sees ACROSS it, per track and
+    view (metres, 0 where the track was not seen): the part of that view's offset from the
+    current camera perpendicular to the current frame's own ray, which is the parallax a depth
+    rests on (:func:`perpendicular_baseline`, one ray against many origins)."""
+    unit = np.nan_to_num(rays[:, -1, :])  # the current frame's own ray, already a unit vector
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        along = unit @ origins.T
+        out = np.linalg.norm(origins[None, :, :] - along[:, :, None] * unit[:, None, :], axis=2)
+    return np.where(seen, out, 0.0)
+
+
+def _rms_residual(residual: Array, seen: npt.NDArray[np.bool_]) -> Array:
+    """The root-mean-square reprojection error over the observations a track actually kept."""
+    counted = seen & np.isfinite(residual)
+    total = (np.where(counted, residual, 0.0) ** 2).sum(axis=1)
+    out: Array = np.sqrt(total / np.maximum(counted.sum(axis=1), 1))
+    return out
+
+
+def _halves(seen: npt.NDArray[np.bool_]) -> tuple[npt.NDArray[np.bool_], npt.NDArray[np.bool_]]:
+    """One track's observations cut in two by age, each half keeping the CURRENT view as its
+    anchor (a half with no anchor would be a depth in a different frame). Of the ``m`` earlier
+    views the older half takes the first ``ceil(m / 2)`` and the newer half the rest, so both
+    halves have at least two observations whenever ``m >= 2``; a track with fewer earlier views
+    cannot be cut at all and comes back with two empty masks."""
+    earlier = seen[:, :-1]
+    count = earlier.sum(axis=1)
+    rank = np.cumsum(earlier, axis=1) - 1
+    cut = (count + 1) // 2
+    splittable = (count >= 2)[:, None]
+    older = earlier & (rank < cut[:, None]) & splittable
+    newer = earlier & (rank >= cut[:, None]) & splittable
+    anchor = seen[:, -1:] & splittable
+    return (
+        np.concatenate([older, anchor], axis=1),
+        np.concatenate([newer, anchor], axis=1),
+    )
+
+
+def _split_gap(
+    rays: Array,
+    origins: Array,
+    pixels: Array,
+    seen: npt.NDArray[np.bool_],
+    intr: Intrinsics,
+    motions: Sequence[Motion],
+    *,
+    disparity_sigma_px: float,
+    sigma_model: str,
+) -> Array:
+    """How far a track's older and newer halves disagree about its depth, in combined sigmas.
+
+    A static point has one depth, and every subset of the views that saw it must read that
+    depth: solving the older half and the newer half separately (each anchored on the current
+    frame, :func:`_halves`) and comparing them is the cheapest test of that there is — three
+    3x3 solves instead of one. What it sees is a depth that CHANGES as the window slides, which
+    is what a mistracked hop halfway through a window does once the reprojection gate has been
+    diluted by the square root of the view count.
+
+    What it does NOT see, and this is a property of monocular geometry rather than of this
+    implementation: a point whose own motion is parallel to the camera's, and a corner drifting
+    along its epipolar line by an amount proportional to the baseline. Both of those make every
+    observation consistent with a STATIC point at a different depth — all the rays meet exactly,
+    at the wrong place — so every subset reads the same wrong number and every half agrees.
+    Measured (scratch/parallax_split_probe.py, 2026-09-15): an object receding at 0.1 m/s from a
+    cart driving at 0.25 reads 3.33 m for a 2.00 m truth with the halves 0.00 sigma apart, and
+    it is still only 1.19 sigma apart with the cart turning at 0.5 rad/s; a 2 px-per-hop drift
+    along the epipolar line reads 2.49 m for 2.00 m with the halves 0.18 sigma apart. Those two
+    holes need a second sensor or the network's own depth, not another geometric test.
+
+    Returns 0 where a track cannot be cut (fewer than two earlier views) or either half fails to
+    triangulate, so the gate never fires on a track it could not judge."""
+    older, newer = _halves(seen)
+    told = []
+    for half in (older, newer):
+        point, ok = _meet_rays(rays, origins, half)
+        residual, depth = _reproject(point, pixels, intr, motions)
+        rms = _rms_residual(residual, half)
+        forward = np.all(~half | (depth > NEAR_M), axis=1)
+        z = point[:, 2]
+        good = ok & forward & np.isfinite(z) & (z > NEAR_M)
+        focal = 0.5 * (intr.fx + intr.fy)
+        baseline = np.sqrt((_perpendicular(rays, origins, half) ** 2).sum(axis=1))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            noise = (
+                _solve_sigma(point, rays, origins, half, disparity_sigma_px, rms, focal)
+                if sigma_model == "covariance"
+                else np.where(good, z, np.nan) ** 2
+                * np.hypot(disparity_sigma_px, np.where(np.isfinite(rms), rms, 0.0))
+                / (focal * baseline)
+            )
+        told.append((np.where(good, z, np.nan), np.where(good & (baseline > 0), noise, np.inf)))
+    (z_old, sigma_old), (z_new, sigma_new) = told
+    combined = np.hypot(sigma_old, sigma_new)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        gap = np.abs(z_old - z_new) / combined
+    out: Array = np.where(np.isfinite(gap), gap, 0.0)
+    return out
+
+
 def triangulate_tracks(
     tracks: Tracks,
     intr: Intrinsics,
     *,
     disparity_sigma_px: float = DISPARITY_SIGMA_PX,
     outlier_px: float = TRACK_OUTLIER_PX,
+    sigma_model: str = TRACK_SIGMA_MODEL,
+    measure_split: bool = True,
 ) -> TrackDepths:
     """Every track's depth in the current camera, from all of its observations at once.
 
@@ -985,9 +1188,17 @@ def triangulate_tracks(
     (:func:`_meet_rays`); then one robust pass: a track whose worst observation misses the
     solved point by more than ``outlier_px`` drops that single observation and is solved again,
     which repairs a mistracked hop without throwing the other views away (a track left with
-    fewer than two observations is simply not a measurement and comes back NaN). The sigma is
-    ``z^2 * sigma_px / (f * B_effective)`` with ``B_effective`` the quadrature sum of the views'
-    perpendicular baselines — see :class:`TrackDepths`."""
+    fewer than two observations is simply not a measurement and comes back NaN).
+
+    ``sigma_model`` decides what the sigma is. ``covariance`` (the default) takes it from the
+    solve's own covariance (:func:`_solve_sigma`), which is right whatever the shape of the
+    bundle; ``baseline`` is the closed form ``z^2 * sigma_px / (f * B_effective)`` the stage
+    shipped with, which is exact for a camera moving ACROSS the ray and up to twice optimistic
+    for one driving along it — see :class:`TrackDepths`.
+
+    ``measure_split`` also solves each track's two halves (:func:`_split_gap`) to fill in
+    ``split``. That is two more solves — 3.9 ms a frame at eight views, a seventh of the whole
+    stage — so a caller that does not gate on the number should not pay for it."""
     pixels = np.asarray(tracks.pixels, dtype=float)
     rays = _view_rays(pixels, intr, tracks.motions)
     origins = _origins(tracks.motions)
@@ -1002,32 +1213,46 @@ def triangulate_tracks(
         seen[rows[repaired], worst[repaired]] = False
         point, ok = _meet_rays(rays, origins, seen)
         residual, depth = _reproject(point, pixels, intr, tracks.motions)
-    unit = np.nan_to_num(rays[:, -1, :])  # the current frame's own ray, already a unit vector
-    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
-        along = unit @ origins.T
-        perpendicular = np.linalg.norm(
-            origins[None, :, :] - along[:, :, None] * unit[:, None, :], axis=2
-        )
-    perpendicular = np.where(seen, perpendicular, 0.0)
+    perpendicular = _perpendicular(rays, origins, seen)
     baseline = np.sqrt((perpendicular**2).sum(axis=1))
     stepped = np.where(seen, np.linalg.norm(origins, axis=1)[None, :] ** 2, 0.0)
     travel = np.sqrt(stepped.sum(axis=1))
-    counted = seen & np.isfinite(residual)
-    rms = np.sqrt(
-        (np.where(counted, residual, 0.0) ** 2).sum(axis=1) / np.maximum(counted.sum(axis=1), 1)
-    )
+    rms = _rms_residual(residual, seen)
     forward = np.all(~seen | (depth > NEAR_M), axis=1)
     z = point[:, 2]
     good = ok & forward & np.isfinite(z) & (z > NEAR_M)
     z = np.where(good, z, np.nan)
     focal = 0.5 * (intr.fx + intr.fy)
+    if sigma_model not in TRACK_SIGMA_MODELS:
+        raise ValueError(
+            f"unknown sigma_model {sigma_model!r}: one of {', '.join(TRACK_SIGMA_MODELS)}"
+        )
     with np.errstate(divide="ignore", invalid="ignore"):
         sigma_px = np.hypot(disparity_sigma_px, np.where(np.isfinite(rms), rms, 0.0))
-        sigma = np.where(good & (baseline > 0), z**2 * sigma_px / (focal * baseline), np.inf)
+        told = (
+            _solve_sigma(point, rays, origins, seen, disparity_sigma_px, rms, focal)
+            if sigma_model == "covariance"
+            else z**2 * sigma_px / (focal * baseline)
+        )
+        sigma = np.where(good & (baseline > 0), told, np.inf)
         widest = np.argmax(np.where(seen, perpendicular, -1.0), axis=1)
         one = perpendicular[rows, widest]
         one_px = np.hypot(disparity_sigma_px, np.nan_to_num(residual[rows, widest]))
         sigma_two = np.where(good & (one > 0), z**2 * one_px / (focal * one), np.inf)
+    split = (
+        _split_gap(
+            rays,
+            origins,
+            pixels,
+            seen,
+            intr,
+            tracks.motions,
+            disparity_sigma_px=disparity_sigma_px,
+            sigma_model=sigma_model,
+        )
+        if measure_split
+        else np.zeros(seen.shape[0])
+    )
     return TrackDepths(
         z,
         sigma,
@@ -1037,6 +1262,7 @@ def triangulate_tracks(
         seen.sum(axis=1),
         sigma_two,
         repaired=int(repaired.sum()),
+        split=split,
     )
 
 
@@ -1057,6 +1283,8 @@ def track_truth(
     max_reproj_px: float = MAX_REPROJ_PX,
     max_weight: float = MAX_WEIGHT,
     outlier_px: float = TRACK_OUTLIER_PX,
+    sigma_model: str = TRACK_SIGMA_MODEL,
+    split_tol_sigma: float = TRACK_SPLIT_TOL_SIGMA,
 ) -> ParallaxTruth:
     """:func:`parallax_truth` over a window of frames instead of a pair: track, gate,
     triangulate from every view at once, weigh. The result is the same
@@ -1074,7 +1302,11 @@ def track_truth(
     ``min_obs`` observations left; a depth in front of every lens that saw it; the parallax
     those observations add up to (``min_total_baseline_m`` of effective baseline, and
     ``min_parallax_ratio`` of the depth, and ``epipole_min_deg`` off the direction of travel);
-    and the bundle's own reprojection error (``max_reproj_px``)."""
+    the bundle's own reprojection error (``max_reproj_px``); and, only when
+    ``split_tol_sigma`` is above 0, the two halves of the window agreeing about the depth to
+    within that many combined sigmas (:func:`_split_gap` — which also says what it cannot see,
+    and what the measurement says it is worth). Set it huge to compute the split and gate on
+    nothing, which is how its distribution was measured."""
     if not motions or max(m.baseline for m in motions) < min_baseline_m:
         turned = bool(motions) and max(m.angle for m in motions) > MIN_ROTATION_RAD
         return ParallaxTruth.nothing("rotation-only" if turned else "still")
@@ -1119,7 +1351,14 @@ def track_truth(
     rejected["short track"] = int(short.sum())
     keep &= ~short
     sigma_px = ORB_DISPARITY_SIGMA_PX if matcher == "orb" else DISPARITY_SIGMA_PX
-    found = triangulate_tracks(tracks, intr, disparity_sigma_px=sigma_px, outlier_px=outlier_px)
+    found = triangulate_tracks(
+        tracks,
+        intr,
+        disparity_sigma_px=sigma_px,
+        outlier_px=outlier_px,
+        sigma_model=sigma_model,
+        measure_split=split_tol_sigma > 0,
+    )
     rejected["outlier obs"] = found.repaired
     rejected["behind"] = int((keep & ~np.isfinite(found.z)).sum())
     keep &= np.isfinite(found.z)
@@ -1136,6 +1375,10 @@ def track_truth(
         bad = keep & ~(found.residual <= max_reproj_px)
         rejected["reproj"] = int(bad.sum())
         keep &= ~bad
+        if split_tol_sigma > 0:
+            disagreed = keep & (found.split > split_tol_sigma)
+            rejected["split"] = int(disagreed.sum())
+            keep &= ~disagreed
     if not bool(keep.any()):
         worst = max(rejected, key=lambda name: rejected[name])
         return ParallaxTruth.nothing(worst, tracked=tracked, rejected=rejected)
@@ -1152,6 +1395,7 @@ def track_truth(
         verdict="",
         observations=found.observations[keep].astype(float),
         sigma_two=found.sigma_two[keep],
+        split=found.split[keep],
     )
 
 
@@ -1183,6 +1427,9 @@ __all__ = [
     "TRACK_MIN_TOTAL_BASELINE_M",
     "TRACK_OUTLIER_PX",
     "TRACK_REASONS",
+    "TRACK_SIGMA_MODEL",
+    "TRACK_SIGMA_MODELS",
+    "TRACK_SPLIT_TOL_SIGMA",
     "TRACK_WINDOW_S",
     "CameraPlacement",
     "Features",

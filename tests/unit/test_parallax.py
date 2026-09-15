@@ -22,6 +22,7 @@ from pepin.depth_pipeline import (
 )
 from pepin.parallax import (
     DISPARITY_SIGMA_PX,
+    MAX_REPROJ_PX,
     MAX_SAMPSON_PX,
     ORB_DISPARITY_SIGMA_PX,
     CameraPlacement,
@@ -515,7 +516,7 @@ def test_the_report_line_names_the_matcher_and_its_window() -> None:
     assert line.startswith("klt <= 0.60 s")
     assert ParallaxAnchor(matcher="orb", track_min_obs=2).describe().startswith("orb <= 1.50 s")
     tracking = ParallaxAnchor().describe()
-    assert tracking.startswith("klt <= 1.50 s >= 3 obs, asks 10 cm total")
+    assert tracking.startswith("klt <= 1.50 s >= 3 obs over <= 8 views, asks 10 cm total")
 
 
 def test_the_baseline_is_the_tracker_s_word_and_the_odometry_s_drift_scales_the_depth() -> None:
@@ -743,10 +744,15 @@ def test_two_observations_are_arithmetically_today_s_pair() -> None:
     views carries the depth the pair's own triangulation returns, to the float32 pixels' own
     rounding, and its sigma to a few parts in a thousand — the whole difference being that the
     bundle widens ``sigma_px`` by the residual averaged over BOTH views where the pair reads it
-    in the second one only. Which is why 2 is what ``parallax_track_min_obs`` means."""
+    in the second one only. Which is why 2 is what ``parallax_track_min_obs`` means.
+
+    The depth is the pair's whatever sigma is asked for; the closed-form sigma is the pair's to
+    a few parts in a thousand, and the solve's own covariance — what the stage reports by
+    default since 2026-09-15 — reads within a tenth of it at two views and never below it, the
+    departure being the points near the epipole the closed form flatters."""
     for noise, tolerance in ((0.0, 1e-4), (0.5, 5e-3)):
         _points, tracks = moving_scene(2, noise_px=noise)
-        found = triangulate_tracks(tracks, INTR)
+        found = triangulate_tracks(tracks, INTR, sigma_model="baseline")
         pair_a = np.asarray(tracks.pixels[:, 0], dtype=np.float32)
         pair_b = np.asarray(tracks.pixels[:, 1], dtype=np.float32)
         z, sigma = triangulate(pair_a, pair_b, INTR, tracks.motions[0])
@@ -755,6 +761,65 @@ def test_two_observations_are_arithmetically_today_s_pair() -> None:
         assert np.allclose(found.z[good], z[good], rtol=1e-4)
         assert np.allclose(found.sigma[good], sigma[good], rtol=tolerance)
         assert np.allclose(found.sigma_two[good], found.sigma[good], rtol=tolerance)
+        shipped = triangulate_tracks(tracks, INTR)
+        assert np.allclose(shipped.z[good], z[good], rtol=1e-4)
+        ratio = shipped.sigma[good] / sigma[good]
+        assert 1.0 <= float(np.median(ratio)) < 1.2
+        assert float(np.percentile(ratio, 5)) > 0.9
+
+
+def driving_scene(
+    views: int, step_m: float = 0.0375, noise_px: float = 0.5, seed: int = 3, count: int = 300
+) -> tuple[np.ndarray, Tracks]:
+    """The same cloud seen by a camera driving FORWARD instead of sidestepping — this cart's
+    actual errand, 0.25 m/s at 6-7 frames a second. The views then spread ALONG the rays as well
+    as across them, which is the geometry the closed-form sigma gets wrong."""
+    rng = np.random.default_rng(seed)
+    points = np.stack(
+        [
+            rng.uniform(-1.5, 1.5, count),
+            rng.uniform(-1.0, 1.0, count),
+            rng.uniform(1.5, 4.0, count),
+        ],
+        axis=1,
+    )
+    motions = [
+        Motion(np.eye(3), np.array([0.0, 0.0, -(views - 1 - v) * step_m])) for v in range(views)
+    ]
+    pixels = np.full((count, views, 2), np.nan)
+    for v, motion in enumerate(motions):
+        local = (points - motion.translation) @ np.asarray(motion.rotation)
+        pixels[:, v, 0] = INTR.fx * local[:, 0] / local[:, 2] + INTR.cx
+        pixels[:, v, 1] = INTR.fy * local[:, 1] / local[:, 2] + INTR.cy
+        pixels[:, v] += rng.normal(0.0, noise_px, (count, 2))
+    return points, Tracks(pixels, np.ones((count, views), dtype=bool), tuple(motions), found=count)
+
+
+def test_the_sigma_is_honest_for_a_cart_driving_forward_and_the_closed_form_is_not() -> None:
+    """The defect the covariance model was added for (scratch/parallax_sigma_mc.txt,
+    2026-09-15). Every earlier test sidesteps, where ``sqrt(sum b_v^2)`` is exactly right. Drive
+    FORWARD instead and the views spread along the ray as well as across it: a view that sees
+    the point from further away reads its pixel into a bigger depth error, which the closed form
+    does not know. It then calls a sixteen-view bundle better than it is — and a pair's vote in
+    the frame's fit is 1 / sigma^2, so an optimistic sigma is a loud vote."""
+    for views in (10, 16):
+        points, tracks = driving_scene(views)
+        error = {}
+        for model in ("baseline", "covariance"):
+            found = triangulate_tracks(tracks, INTR, sigma_model=model)
+            # the corners the field would keep: TRACK_MIN_TOTAL_BASELINE_M of parallax
+            good = np.isfinite(found.z) & np.isfinite(found.sigma) & (found.baseline >= 0.10)
+            assert good.sum() > 200
+            # an honest sigma covers about two thirds of its own scatter, so this is about 1
+            error[model] = float(
+                np.percentile(np.abs(found.z - points[:, 2])[good] / found.sigma[good], 68)
+            )
+        assert error["baseline"] > 1.3, (
+            f"{views} views: the closed form under-reads the scatter here, it still should"
+        )
+        assert error["covariance"] < 1.15, (
+            f"{views} views: the solve's own covariance must cover its own scatter"
+        )
 
 
 def test_one_corrupted_observation_is_dropped_and_the_track_survives() -> None:
@@ -882,6 +947,66 @@ def test_the_anchor_triangulates_its_corners_from_the_whole_window() -> None:
     assert anchor.sigma_m < two_view, f"{anchor.sigma_m:.3f} m is not better than {two_view:.3f}"
 
 
+def test_the_view_cap_reaches_the_matcher_and_is_what_the_frame_costs() -> None:
+    """85 % of a track's cost is the flow's hops and there is one hop per view, so the cap on
+    the views IS the cost per frame (52.5 ms at 16 views against 27.0 at 8 over the four errands
+    of 2026-09-14, scratch/parallax_tracks_audit.txt). The knob must therefore really reach the
+    matcher: a cap of 3 leaves no track resting on more."""
+    frames, poses = crawling_frames(0.03, 8)
+    network = np.full((INTR.height, INTR.width), 3.0)
+    seen: dict[int, float] = {}
+    for cap in (3, 8):
+        anchor = ParallaxAnchor(track_max_views=cap)
+        for i, view in enumerate(frames):
+            anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, Odometry(poses))))
+        assert anchor._obs, f"cap {cap} triangulated nothing"
+        seen[cap] = max(anchor._obs)
+        assert seen[cap] <= cap, f"cap {cap} rested a track on {seen[cap]} views"
+    assert seen[8] > seen[3], "a looser cap must actually buy observations"
+
+
+def test_one_window_rests_on_one_motion_source() -> None:
+    """A tracker whose map pose covers the newest frames but not the oldest: a PAIR could not
+    mix sources because it chose a single partner, but a window meets a dozen rays in one solve
+    and the two sources disagree by about a quarter over a second (the wheels over-read). So the
+    window ends where the source changes rather than bundling half of each, and the report line
+    counts the windows it cut."""
+
+    class HalfTracked(Odometry):
+        """A tracker that can answer through the map only for stamps at or after ``since``."""
+
+        def __init__(self, poses: dict[float, RigidPose], since: float, drift: float) -> None:
+            super().__init__({t: _stretched(p, drift) for t, p in poses.items()})
+            self._map = {t: p for t, p in poses.items() if t >= since}
+
+        def map_motion(self, from_stamp: float, to_stamp: float) -> RigidPose | None:
+            """The tracker's word, or ``None`` for a frame its map pose no longer covers."""
+            if from_stamp not in self._map or to_stamp not in self._map:
+                return None
+            return base_motion(self._map[from_stamp], self._map[to_stamp])
+
+        def map_motion_recent(
+            self, from_stamp: float, to_stamp: float, max_age_s: float
+        ) -> RigidPose | None:
+            """The same answer, asked the non-blocking way the frame path asks it."""
+            return self.map_motion(from_stamp, to_stamp)
+
+    frames, poses = crawling_frames(0.03, 6)
+    # the wheels over-read the crawl by half; the map pose is the truth, from 0.2 s on
+    source = HalfTracked(poses, since=0.2, drift=1.5)
+    anchor = ParallaxAnchor()
+    network = np.full((INTR.height, INTR.width), 3.0)
+    pairs = None
+    for i, view in enumerate(frames):
+        pairs = anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, source)))
+    assert anchor.rejected.get("mixed motion", 0) > 0, "a mixed window must be cut and counted"
+    assert "mixed motion" in anchor.describe()
+    # the last frame's window reaches 0.2 s, where the tracker still speaks: had the two oldest
+    # views come in on the wheels' stretched baseline, the planes would sit half again too far
+    assert pairs is not None and pairs.size >= 20
+    assert band_error(pairs) < 0.05, "a window that mixed the sources would read the wheels'"
+
+
 def test_the_knob_at_two_is_the_pair_the_anchor_always_measured() -> None:
     """The same six frames read both ways: at ``track_min_obs`` 2 the anchor pairs with one
     partner as it always did, at 3 it tracks through the window. Both put the rendered planes
@@ -903,3 +1028,162 @@ def test_the_knob_at_two_is_the_pair_the_anchor_always_measured() -> None:
     assert band_error(got[2][1]) < 0.05 and band_error(got[3][1]) < 0.05
     assert tracked.sigma_m is not None and paired.sigma_m is not None
     assert tracked.sigma_m < paired.sigma_m
+
+
+# ---- the split test: does a track agree with itself? ------------------------------------------
+def rolling_track(
+    velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    views: int = 8,
+    dt: float = 0.15,
+    speed: float = 0.25,
+    direction: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    point: tuple[float, float, float] = (0.6, 0.1, 2.0),
+) -> tuple[Tracks, np.ndarray]:
+    """scratch/parallax_gates_probe.py's own construction: a cart moving at ``speed`` along
+    ``direction`` for ``views`` frames ``dt`` apart, and a corner whose 3D point moves at
+    ``velocity`` while it does. Returns the track and the point's true place in the CURRENT
+    camera's frame — everything exact, no pixel noise, so what the gates see is the geometry."""
+    unit = np.asarray(direction, dtype=float)
+    unit /= np.linalg.norm(unit)
+    ages = np.arange(views - 1, -1, -1, dtype=float) * dt
+    origins = -(ages * speed)[:, None] * unit[None, :]
+    truth = np.asarray(point, dtype=float)
+    wandered = truth[None, :] - ages[:, None] * np.asarray(velocity, dtype=float)[None, :]
+    local = wandered - origins
+    pixels = np.stack(
+        [
+            INTR.fx * local[:, 0] / local[:, 2] + INTR.cx,
+            INTR.fy * local[:, 1] / local[:, 2] + INTR.cy,
+        ],
+        axis=1,
+    )
+    motions = tuple(Motion(np.eye(3), o) for o in origins)
+    return Tracks(pixels[None, :, :], np.ones((1, views), dtype=bool), motions, found=1), truth
+
+
+def epipolar_slide(track: Tracks, views: int, per_view: float, grow: bool) -> Tracks:
+    """The same track with its earlier observations slid along their own epipolar lines — the
+    direction the corner would move if its depth changed, which no epipolar gate constrains.
+    ``grow`` makes the slide proportional to the view's age (the probe's drift per hop);
+    otherwise every one of the oldest ``views`` observations slides by the same amount."""
+    pixels = np.asarray(track.pixels, dtype=float).copy()
+    total = track.views
+    for v in range(total - 1):
+        origin = np.asarray(track.motions[v].translation, dtype=float)
+        ray = np.array(
+            [
+                (pixels[0, v, 0] - INTR.cx) / INTR.fx,
+                (pixels[0, v, 1] - INTR.cy) / INTR.fy,
+                1.0,
+            ]
+        )
+        far = origin + 1.05 * (ray * 2.0)  # the same corner two per cent further down its ray
+        towards = np.array(
+            [
+                INTR.fx * far[0] / far[2] + INTR.cx - pixels[0, v, 0],
+                INTR.fy * far[1] / far[2] + INTR.cy - pixels[0, v, 1],
+            ]
+        )
+        length = float(np.linalg.norm(towards))
+        if length < 1e-9:
+            continue
+        how_far = per_view * (total - 1 - v) if grow else per_view * float(v < views)
+        pixels[0, v] += how_far * towards / length
+    return replace(track, pixels=pixels)
+
+
+def test_a_static_corner_s_two_halves_agree_about_its_depth() -> None:
+    """The test the gate is: a point that does not move has ONE depth, and the older half of the
+    views and the newer half must both read it. A clean track's halves sit on top of each other,
+    so the gate costs a good corner nothing."""
+    for direction in ((0.0, 0.0, 1.0), (1.0, 0.0, 0.1)):
+        track, truth = rolling_track(direction=direction)
+        found = triangulate_tracks(track, INTR)
+        assert float(found.z[0]) == pytest.approx(float(truth[2]), rel=1e-6)
+        assert float(found.split[0]) < 0.01, "an exact track's halves must not disagree at all"
+    short = replace(track, seen=np.array([[False] * 6 + [True, True]]))
+    assert float(triangulate_tracks(short, INTR).split[0]) == 0.0, "two views cannot be cut"
+
+
+def test_a_half_of_a_window_sliding_off_the_corner_is_what_the_split_test_sees() -> None:
+    """What the gate is for: the oldest views slide off the corner together — a flow that jumped
+    once and carried the error back through every older hop — and the bundle's own reprojection
+    RMS barely notices, because it is divided by the square root of the view count. The halves
+    then read different depths, which is the signal.
+
+    The signal is weak, and that is measured, not assumed: at 2 px of slide the depth is 21 %
+    wrong and the halves are only 2.0 sigma apart, because cutting the window in two doubles
+    each half's own sigma as well. A clean corner at the flow's 0.4 px also reaches 2.0 sigma on
+    noise alone (scratch/parallax_split_probe.py), so the shipped 3 sigma does NOT separate a
+    slide of this size — it removes only the 1.1 % tail the real errands carry beyond anything
+    pixel noise explains (scratch/parallax_tracks_eval.txt)."""
+    track, truth = rolling_track()
+    gaps = []
+    for slide in (0.5, 1.0, 2.0):
+        slid = epipolar_slide(track, views=4, per_view=slide, grow=False)
+        found = triangulate_tracks(slid, INTR)
+        error = abs(float(found.z[0]) / float(truth[2]) - 1.0)
+        gaps.append(float(found.split[0]))
+        assert float(found.residual[0]) < MAX_REPROJ_PX, "the reprojection gate lets it through"
+        if slide == 2.0:
+            assert error > 0.15, f"a 2 px slide should cost more than 15 %, cost {error:.1%}"
+    assert gaps[0] < gaps[1] < gaps[2], "the halves must disagree more the further they slide"
+    assert gaps[2] < 3.0, "and still not reach the shipped tolerance: this is the measured hole"
+
+
+def test_a_point_moving_along_the_camera_s_own_motion_is_invisible_to_every_gate() -> None:
+    """The hole the split test does NOT close, pinned here so nobody assumes it does. A corner
+    on something receding at 0.1 m/s from a cart driving at 0.25 puts every one of its rays
+    through ONE point — at 3.33 m for a 2.00 m truth, the ratio of the two speeds — so the
+    epipolar distance is zero, the reprojection residual is zero, and both halves of the window
+    agree exactly on the wrong answer. This is the monocular depth-velocity ambiguity, not a
+    missing test: it needs the network's own depth or a second sensor."""
+    track, truth = rolling_track(velocity=(0.0, 0.0, 0.1))
+    found = triangulate_tracks(track, INTR)
+    assert float(found.z[0]) == pytest.approx(0.25 / 0.15 * float(truth[2]), rel=1e-6)
+    assert float(found.residual[0]) < 1e-6 and float(found.split[0]) < 1e-6
+    towards = triangulate_tracks(rolling_track(velocity=(0.0, 0.0, -0.1))[0], INTR)
+    assert float(towards.z[0]) == pytest.approx(0.25 / 0.35 * float(truth[2]), rel=1e-6)
+    assert float(towards.split[0]) < 1e-6
+    # Motion ACROSS the view is a different matter: it leaves the epipolar lines, and the
+    # per-observation epipolar gate of track_truth throws those observations out.
+    across, _ = rolling_track(velocity=(0.1, 0.0, 0.0))
+    pixels = np.asarray(across.pixels, dtype=np.float32)
+    worst = max(
+        float(sampson(pixels[:, v], pixels[:, -1], INTR, across.motions[v])[0])
+        for v in range(across.views - 1)
+    )
+    assert worst > MAX_SAMPSON_PX, "motion across the view does leave the epipolar lines"
+
+
+def test_a_drift_proportional_to_the_baseline_is_invisible_to_the_split_test_too() -> None:
+    """The other hole. A corner sliding along its epipolar line by an amount proportional to how
+    far back the view sits is a disparity offset proportional to the baseline, which is a pure
+    scale error on the depth — every subset of the views reads the same wrong number, so the
+    halves agree. Measured here: a 1 px-per-hop drift moves the depth by more than a fifth and
+    the halves by well under the shipped tolerance."""
+    track, truth = rolling_track(views=10, dt=0.12, direction=(1.0, 0.0, 0.1))
+    drifted = triangulate_tracks(epipolar_slide(track, 10, per_view=1.0, grow=True), INTR)
+    assert abs(float(drifted.z[0]) / float(truth[2]) - 1.0) > 0.2
+    assert float(drifted.residual[0]) < MAX_REPROJ_PX
+    assert float(drifted.split[0]) < 1.0, "the halves cannot see a scale error they both share"
+
+
+def test_the_split_gate_ships_off_and_is_armed_and_counted_by_its_tolerance() -> None:
+    """The gate through the whole measurement. Off by default, and off means the halves are not
+    solved at all — it is two extra solves, 3.9 ms a frame of the stage's 27.0, and a gate that
+    was measured to change no residual should not cost that. Armed at the 3 sigma the real
+    errands were read at it still takes nothing from a clean rendered window; armed tight it
+    removes tracks and says so in the rejection tally under ``split``."""
+    frames, poses = crawling_frames(0.03, 6)
+    place = CameraPlacement.of(CameraPose(0.0, 0.0, 1.23, math.radians(26.0)))
+    motions = track_window(frames, poses, place)
+    off = track_truth(frames, motions, INTR)
+    assert off.kept > 10 and off.rejected["split"] == 0
+    assert off.split is not None and not np.any(off.split), "off does not solve the halves"
+    armed = track_truth(frames, motions, INTR, split_tol_sigma=3.0)
+    assert armed.kept == off.kept and armed.rejected["split"] == 0
+    assert armed.split is not None and 0.0 < float(np.max(armed.split)) < 3.0
+    tight = track_truth(frames, motions, INTR, split_tol_sigma=0.05)
+    assert tight.rejected["split"] > 0 and tight.kept < off.kept
+    assert tight.split is not None and float(np.max(tight.split)) <= 0.05
