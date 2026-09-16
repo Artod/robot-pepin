@@ -241,7 +241,7 @@ FLAGS = FlagSet(
     ),
     Flag(
         "sources",
-        (LIDAR,),
+        (LIDAR, GRAPH),
         description="what corrects the pose: the lidar's revolution (/scan), matched here, and"
         " the camera (`camera`), whose scans the laptop matches and whose ANSWER arrives on"
         " /localization/measurement. The lidar drives the updates while it is fresh and the"

@@ -1577,7 +1577,9 @@ def test_the_tracker_matches_the_lidar_here_and_takes_the_camera_as_a_measuremen
     assert "loc.update" not in calls and "self._gate.take" not in calls, "one path, not two"
     assert len(sf.calls_to(node, "loc.update_from")) == 2, "the scan's update and the camera's"
     flags = load_table(REPO / NODES / "relocalizer.py")
-    assert flags["sources"] == ("lidar",) and flags["fusion"] is True
+    # since 2026-09-16 the graph is a source by default: without the lidar the pose rides the
+    # graph's words, not dead reckoning (Artem: "по умолчанию должно быть всё сразу")
+    assert flags["sources"] == ("lidar", "graph") and flags["fusion"] is True
     assert flags.flag("sources").choices == ("lidar", "depth", "contact", "camera", "graph")
     assert flags["measurement_max_age_s"] == 0.5
     # The camera's scans still cross for the costmap; the pose it measures crosses beside them.

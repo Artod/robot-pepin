@@ -182,7 +182,7 @@ def test_the_node_takes_the_camera_as_a_measurement_and_never_as_a_scan(
     assert {"/scan", "/odometry/filtered", "/map", "/localization/measurement"} <= set(node.subs)
     assert "/depth_scan" not in node.subs and "/contact_scan" not in node.subs
     assert "/localization/sources" in node.pubs and "/tracker_pose" in node.pubs
-    assert FLAGS["sources"] == (LIDAR,), "the module's default: the lidar alone"
+    assert FLAGS["sources"] == (LIDAR, GRAPH), "the module's default: the lidar and the graph"
     assert node._registry.enabled == (LIDAR, CAMERA), "the launch override reached the roster"
     assert node._localizer is not None and node._localizer.sources is node._registry
     assert node.set_parameters([Parameter("sources", value="lidar")])[0].successful

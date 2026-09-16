@@ -587,7 +587,7 @@ def test_a_silent_tracker_falls_back_to_the_odometry_for_that_window() -> None:
     poses = {1.0: planar_pose(0.0, 0.0, 0.0), 1.2: planar_pose(0.0, -SIDESTEP_M, 0.0)}
     network = np.full((INTR.height, INTR.width), 3.0)
     silent = Tracked(poses, blind=True)
-    anchor = ParallaxAnchor(track_min_obs=2)
+    anchor = ParallaxAnchor(track_min_obs=2, motion_source="tf")  # the fallback under test
     assert anchor.pairs(Frame(network, context(1.0, a, silent))) is None
     pairs = anchor.pairs(Frame(network, context(1.2, b, silent)))
     assert pairs is not None and pairs.size >= 50

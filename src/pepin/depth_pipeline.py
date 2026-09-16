@@ -188,7 +188,7 @@ PARALLAX_MAX_GAP_S = 0.60  # farther back than this the view has changed more th
 PARALLAX_ORB_MAX_GAP_S = 1.5  # the describer's window: a keypoint is recognised, not followed
 PARALLAX_MIN_BASELINE_M = 0.10  # the parallax a partner is chosen to reach: 0.4 s at 0.25 m/s
 PARALLAX_MATCHER = "klt"  # who finds the correspondences: the flow or the describer
-PARALLAX_MOTION = "tf"  # whose word on the baseline: the map pose TF gives on EVERY frame (the
+PARALLAX_MOTION = "odom"  # whose word on the baseline: the map pose TF gives on EVERY frame (the
 # newest map -> odom composed with this moment's odom -> base_link), the tracker's own map pose
 # where it covers the frame's stamp, or the odometry
 PARALLAX_MAP_WAIT = False  # ask the map pose without waiting: a wait costs the whole frame rate
