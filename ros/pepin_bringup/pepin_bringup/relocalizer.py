@@ -82,7 +82,7 @@ from tf2_ros import Buffer, TransformBroadcaster
 
 from pepin.dynamic import STATIC_M, StaticMask, occluded
 from pepin.flags import Flag, FlagSet
-from pepin.fusion import COVARIANCE_CHOICES, PEAK, published_covariance
+from pepin.fusion import COVARIANCE_CHOICES, PEAK, Matrix, published_covariance
 from pepin.localization import SWITCHES as TRACKER_SWITCHES
 from pepin.localization import Localizer
 from pepin.mapping import (
@@ -125,9 +125,14 @@ from pepin.timeline import (
 )
 from pepin.watch import (
     DRIVE_FIT,
+    DRIVE_SIGMA_M,
     LOST_FIT,
+    LOST_SIGMA_M,
+    SIGMA_TOPIC,
     SOURCE_PATIENCE_S,
     LostWatch,
+    PoseSpread,
+    Sigma,
     SourceSilence,
     Verdict,
 )
@@ -891,6 +896,17 @@ class Relocalizer(Node):
         # The fit at the pose actually published (the blend), beside the tracker's own fit at
         # the matched pose: the two part ways while a carry is being absorbed.
         self._published_fit_pub = self.create_publisher(Float32, "localization_fit_published", 5)
+        # The pose's own uncertainty, out of the fusion and grown along the odometry between
+        # corrections: the ONE number a goal gate and a blind-drive watch read (pepin.watch).
+        # The fit beside it stays what it always was — the LIDAR's diagnostic, and the per-source
+        # fits stay on /localization/sources — because a fit is one sensor's metric and a drive
+        # may be held by the camera alone.
+        self._sigma_pub = self.create_publisher(String, SIGMA_TOPIC, 5)
+        self._spread = PoseSpread()
+        # When this node came up: before the first accepted word THAT is how long the pose has
+        # gone uncorrected, and it is what the sigma message reports instead of a 0.0 that would
+        # read as "a word just landed".
+        self._up_since_s = self._now_s()
         # The operator's own word (Foxglove's "set pose", ros/goto.sh seed): the map has twins —
         # 2026-09-13 the whole-map search seeded the cart 6 m from its base at fit 0.77 and the
         # watchdog's true candidate (0.72 vs 0.69) could not beat it by the margin — and nothing
@@ -1277,9 +1293,15 @@ class Relocalizer(Node):
         camera's."""
         self._last_map_odom = map_to_odom(pose, odom)
         self._send_map_odom()
-        self._publish_tracker_pose(
-            pose, loc.confidence, Time(nanoseconds=int(stamp * 1e9)).to_msg()
+        # One covariance, published twice: as the pose's own on /tracker_pose and as the two
+        # sigmas every gate reads. An accepted word of ANY source lands here, so this is where
+        # the uncertainty collapses — the camera's measurement exactly as the lidar's match.
+        covariance = published_covariance(
+            loc.fused, loc.confidence, str(self._switches["covariance"])
         )
+        self._publish_tracker_pose(pose, covariance, Time(nanoseconds=int(stamp * 1e9)).to_msg())
+        self._spread.corrected(covariance, pose, odom, now)
+        self._publish_sigma(now)
         self._published_fit_pub.publish(Float32(data=float(loc.published_fit)))
         report = loc.sources_report(now)
         report["candidates"] = self._candidates.status()  # the laptop's word, beside the scans'
@@ -1471,9 +1493,10 @@ class Relocalizer(Node):
             transform_from_rpy("map", "odom", (x, y, 0.0), (0.0, 0.0, yaw), future.to_msg())
         )
 
-    def _publish_tracker_pose(self, pose: Pose2D, confidence: float, stamp: Any) -> None:
+    def _publish_tracker_pose(self, pose: Pose2D, covariance: Matrix, stamp: Any) -> None:
         """The tracked pose for the operator's view and the trail, with the covariance the
-        ``covariance`` flag asks for.
+        ``covariance`` flag asked for — the same 3x3 :meth:`_publish_sigma` reports, so the pose
+        and the sigma can never tell two stories.
 
         ``peak``: the full 3x3 of the last update's fused match — the spread of the score peak
         the pose was actually corrected by, anisotropic, so a corridor reads as a ridge along
@@ -1483,14 +1506,27 @@ class Relocalizer(Node):
         tracker has no fused measurement to publish (a carried belief, a re-seed), the fit's
         numbers are used either way: there is no peak to report.
         """
-        covariance = published_covariance(
-            None if self._localizer is None else self._localizer.fused,
-            confidence,
-            str(self._switches["covariance"]),
-        )
         msg = pose_with_matrix(pose.x, pose.y, pose.theta, covariance, stamp, "map")
         self._tracker_pub.publish(msg)
         self._append_trail(msg)
+
+    def _publish_sigma(self, now: float) -> None:
+        """Publish how sure the pose is on :data:`SIGMA_TOPIC`, as the JSON
+        :class:`pepin.watch.Sigma` defines: position sigma (m), heading sigma (deg), this
+        clock, and the seconds since the last accepted word.
+
+        Sent from two places and no others: from every update, where the fusion has just
+        corrected the pose, and from the once-a-second check, where nothing has and the spread
+        has grown along the odometry instead. So the topic keeps carrying a number with the
+        lidar dead, the link down and the camera silent — a number that grows until every gate
+        downstream refuses, which is the whole point of measuring uncertainty instead of a fit.
+        """
+        xy, yaw = self._spread.sigma()
+        age = self._spread.age_s(now)
+        word_age = age if age != math.inf else max(0.0, now - self._up_since_s)
+        self._sigma_pub.publish(
+            String(data=Sigma(xy, yaw, 0.0).to_json(stamp=now, word_age_s=word_age))
+        )
 
     def _report_tracking(self) -> None:
         """Every 30 s: where every released scan went (per source, with the rides), what the
@@ -1516,6 +1552,8 @@ class Relocalizer(Node):
             f", {self._silence.phrase(self._source_age_s)}"
             f"{' (published as 0.00)' if self._silence.held_at_zero(self._source_age_s) else ''}"
             f", scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
+            f"{self._spread.text(self._now_s())} "
+            f"(drive under {DRIVE_SIGMA_M:.2f} m, a drive is cut over {LOST_SIGMA_M:.2f} m); "
             f"map {MAP_TOPICS.get(self._choice.source, 'none')} "
             f"(id {self._map_id or 'none'}, {self._choice.take_ignored()} republications "
             f"ignored{fallback}); "
@@ -1612,6 +1650,13 @@ class Relocalizer(Node):
         """
         self._take_fallback_map()  # before every return below: a node with no map takes them all
         now = self._now_s()
+        # The filter's prediction step, and the sigma published whatever else this tick decides:
+        # nothing corrected the pose since the last update, so it grew along the odometry. Before
+        # every early return below, for the same reason as the silence underneath — the pose's
+        # uncertainty is a fact about the ODOMETRY since the last word, not about whether this
+        # node has a map, a scan or a pose yet — and it is what a goal gate will refuse on.
+        self._spread.carried(self._history.newest)
+        self._publish_sigma(now)
         # Measured before anything can return: the silence is a fact about the SENSORS, not
         # about whether this node has a map and a pose yet. Left behind the early return below,
         # the report line said "no source ever" for as long as the map took to arrive, with the
@@ -1825,6 +1870,12 @@ class Relocalizer(Node):
             map_to_odom(pose, newest) if newest is not None else self._last_map_odom
         )
         self._send_map_odom()
+        # A seed is an accepted word like any other — the operator's hand, or two searches that
+        # agreed — so the uncertainty collapses to what that confidence buys and starts growing
+        # again from here. Without this the sigma went on growing from a pose nobody holds any
+        # more, and a hand seed could not clear a refusal.
+        self._spread.corrected(published_covariance(None, confidence), pose, newest, self._now_s())
+        self._publish_sigma(self._now_s())
         self._motion.reset()
         with self._episode:  # the worker may be inside _watch.answer() right now
             self._watch.seeded(time.monotonic())
@@ -1867,7 +1918,8 @@ class Relocalizer(Node):
         res.message = (
             f"x {pose.x:+.2f} m, y {pose.y:+.2f} m, yaw {math.degrees(pose.theta):+.0f} deg;"
             f" scan-to-map fit {self._watch.reported_fit(self.fit):.2f}"
-            f" (good > {DRIVE_FIT}, lost < {self._watch.lost_fit})"
+            f" (good > {DRIVE_FIT}, lost < {self._watch.lost_fit});"
+            f" {self._spread.text(self._now_s())}, the number a drive is judged by"
             + ("" if self._watch.confirmed else "; UNCONFIRMED: waiting for a second search")
         )
         return res

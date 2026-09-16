@@ -2,23 +2,37 @@
 
 import math
 
+import numpy as np
+import pytest
+
 from pepin.odometry import Pose2D
 from pepin.watch import (
     ADMIT_FIT,
     BLIND_FIT,
+    BY_FIT,
+    BY_SIGMA,
+    BY_TF,
     CORRECTION_FRESH_S,
     DRIVE_FIT,
+    DRIVE_SIGMA_M,
+    GRAPH_AGREE_M,
     LOST_FIT,
+    LOST_SIGMA_M,
     PROVISIONAL_FIT_CAP,
     SOURCE_PATIENCE_S,
     TF_FRESH_S,
+    UNKNOWN_SIGMA,
     BlindDriveWatch,
     Correction,
     GoalGate,
     LostWatch,
+    PoseSpread,
+    Preflight,
     Readiness,
+    Sigma,
     SourceSilence,
     Verdict,
+    source_words,
 )
 
 BASE = Pose2D(-9.5, 2.4, 0.9)
@@ -218,7 +232,7 @@ def test_a_goal_starts_on_the_tracker_s_fit_where_a_tracker_speaks() -> None:
     """The known-map stack is unchanged by the gate: at or above the drive rung the goal goes,
     under it the goal buys one whole-map search first (the node's own _find_myself)."""
     gate = GoalGate()
-    assert gate.verdict(DRIVE_FIT, None) == Readiness(True, tracker=True)
+    assert gate.verdict(DRIVE_FIT, None) == Readiness(True, tracker=True, rule=BY_FIT)
     lost = gate.verdict(0.31, None)
     assert (lost.ready, lost.tracker, lost.search) == (False, True, True)
     assert "fit 0.31 under 0.50" in lost.reason
@@ -229,8 +243,10 @@ def test_without_a_tracker_a_fresh_transform_is_what_lets_a_goal_start() -> None
     the gate that waited for one refused every goal on 2026-09-13. The evidence there is the
     pose's own edge — map -> base_link, re-broadcast at 10 Hz from RTAB-Map's correction."""
     gate = GoalGate()
-    assert gate.verdict(None, 0.08) == Readiness(True, tracker=False)
-    assert gate.verdict(None, TF_FRESH_S) == Readiness(True, tracker=False), "the bound is allowed"
+    assert gate.verdict(None, 0.08) == Readiness(True, tracker=False, rule=BY_TF)
+    assert gate.verdict(None, TF_FRESH_S) == Readiness(True, tracker=False, rule=BY_TF), (
+        "the bound is allowed"
+    )
     stale = gate.verdict(None, 4.2)
     assert (stale.ready, stale.tracker, stale.search) == (False, False, False)
     assert "map -> base_link is 4.2 s old" in stale.reason and "fresher than 1.0 s" in stale.reason
@@ -268,8 +284,8 @@ def test_a_correction_nobody_watches_leaves_the_gate_as_it_was() -> None:
     """The default is no correction at all: the known-map stacks, where the fit decides, and
     SLAM with the watch switched off (CLAUDE.md rule 19 — the old behaviour stays reachable)."""
     gate = GoalGate()
-    assert gate.verdict(None, 0.08) == Readiness(True, tracker=False)
-    assert gate.verdict(0.71, None, Correction(None)) == Readiness(True, tracker=True)
+    assert gate.verdict(None, 0.08) == Readiness(True, tracker=False, rule=BY_TF)
+    assert gate.verdict(0.71, None, Correction(None)) == Readiness(True, tracker=True, rule=BY_FIT)
 
 
 def test_a_missing_edge_is_named_before_the_correction_behind_it() -> None:
@@ -317,3 +333,212 @@ def test_the_switch_off_reports_the_silence_and_publishes_the_fit_anyway() -> No
     assert silence.reported(0.70, 141.0) == 0.70
     assert silence.silent(141.0) and not silence.held_at_zero(141.0)
     assert silence.phrase(141.0) == "no source for 141.0 s"
+
+
+# -- the one uncertainty: the fusion's sigma ------------------------------------------------
+
+SURE = np.diag([0.02**2, 0.02**2, math.radians(1.0) ** 2])  # a fused match of the good kind
+
+
+def test_the_sigma_ladder_is_ordered_and_sits_inside_the_cart() -> None:
+    """The two thresholds a drive lives by, read against the cart itself: the footprint is
+    0.55 m wide and Nav2 calls 0.10 m arrived. A goal starts under a fifth of that width and a
+    drive is cut just under half of it — and a pose nothing has measured is over both."""
+    assert 0.10 < DRIVE_SIGMA_M < LOST_SIGMA_M < 0.275
+    assert GRAPH_AGREE_M < DRIVE_SIGMA_M
+    assert UNKNOWN_SIGMA[0] > LOST_SIGMA_M, "before the first word nothing may drive"
+
+
+def test_the_sigma_grows_along_the_odometry_and_collapses_on_a_word() -> None:
+    """The whole decision of the day in one test: a fused word makes the pose sure, and driving
+    away from it with nothing correcting it makes it less sure, metre by metre — the filter's
+    prediction step with this cart's own measured odometry error (pepin.fusion)."""
+    spread = PoseSpread()
+    assert spread.sigma() == UNKNOWN_SIGMA, "no word yet is not a small number"
+    spread.corrected(SURE, Pose2D(1.0, 0.0, 0.0), Pose2D(0.0, 0.0, 0.0), now=100.0)
+    sure_xy, sure_yaw = spread.sigma()
+    assert sure_xy == pytest.approx(0.02, abs=1e-6) and sure_yaw == pytest.approx(1.0, abs=1e-6)
+    assert spread.age_s(100.4) == pytest.approx(0.4)
+    # Metre by metre with nothing correcting: the heading's own sigma is what a carry converts
+    # into position error, so the growth is LINEAR in the distance driven (1 deg of heading is
+    # 1.7 cm per metre) rather than the square root a pile of independent steps would give.
+    over_drive = over_lost = 0
+    for step in range(1, 21):
+        spread.carried(Pose2D(float(step), 0.0, 0.0))
+        over_drive = over_drive or (step if spread.sigma()[0] > DRIVE_SIGMA_M else 0)
+        over_lost = over_lost or (step if spread.sigma()[0] > LOST_SIGMA_M else 0)
+    assert (over_drive, over_lost) == (8, 14), "8 m of dead reckoning refuses a goal, 14 m cuts one"
+    spread.corrected(SURE, Pose2D(21.0, 0.0, 0.0), Pose2D(20.0, 0.0, 0.0), now=120.0)
+    assert spread.sigma()[0] == pytest.approx(sure_xy, abs=1e-6), "one word collapses it again"
+
+
+def test_a_turn_nobody_corrects_is_what_really_costs_this_cart() -> None:
+    """Carpet eats 40-60 % of every in-place turn this differential drive reports (the gyro
+    measured it, 2026-09-11), so the heading is where dead reckoning falls apart first — and
+    the sigma has to say so while the position sigma is still small."""
+    spread = PoseSpread()
+    spread.corrected(SURE, Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 0.0, 0.0), now=0.0)
+    spread.carried(Pose2D(0.0, 0.0, math.radians(90.0)))
+    _, yaw = spread.sigma()
+    assert yaw > 30.0, f"a quarter turn on nobody's word is not 1 deg of certainty: {yaw:.1f}"
+
+
+def test_the_path_costs_and_not_the_displacement() -> None:
+    """A cart that drives out and comes back is not suddenly sure of itself: the prediction step
+    is accumulated step by step, so it is the metres travelled that widen the pose."""
+    there_and_back = PoseSpread()
+    there_and_back.corrected(SURE, Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 0.0, 0.0), now=0.0)
+    for x in (1.0, 2.0, 1.0, 0.0):
+        there_and_back.carried(Pose2D(x, 0.0, 0.0))
+    stayed = PoseSpread()
+    stayed.corrected(SURE, Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 0.0, 0.0), now=0.0)
+    stayed.carried(Pose2D(0.0, 0.0, 0.0))
+    assert there_and_back.sigma()[0] > stayed.sigma()[0]
+
+
+def test_the_position_sigma_is_the_widest_direction_never_the_average() -> None:
+    """A corridor pins the pose across and leaves it loose along: the number a gate reads is the
+    loose direction, or a cart sliding down a corridor would report itself as certain."""
+    spread = PoseSpread()
+    corridor = np.diag([0.30**2, 0.01**2, math.radians(1.0) ** 2])
+    spread.corrected(corridor, Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 0.0, 0.0), now=0.0)
+    assert spread.sigma()[0] == pytest.approx(0.30, abs=1e-6)
+
+
+def test_a_goal_is_judged_by_the_sigma_where_there_is_one_and_the_fit_where_there_is_not() -> None:
+    """The camera-only drive of 2026-09-15: /localization_fit is 0.00 because no lidar scan
+    scored the pose, while the fusion holds it to 6 cm. The sigma outranks the fit, and where no
+    sigma is published (an older build on the board) the fit rules are untouched."""
+    gate = GoalGate()
+    camera_only = gate.verdict(0.0, None, sigma=Sigma(0.06, 1.2, 0.1))
+    assert camera_only.ready and camera_only.rule == BY_SIGMA
+    assert not gate.verdict(0.0, None).ready, "the same drive on an older board: the fit rules"
+    assert gate.verdict(0.0, None).rule == BY_FIT
+    wide = gate.verdict(0.95, None, sigma=Sigma(0.41, 8.0, 0.1))
+    assert (wide.ready, wide.search, wide.rule) == (False, True, BY_SIGMA)
+    assert "0.41 m" in wide.reason and "0.15" in wide.reason
+    bound = gate.verdict(0.0, None, sigma=Sigma(DRIVE_SIGMA_M, 3.0, 0.1))
+    assert bound.ready, "the threshold itself is allowed, like every other bound here"
+
+
+def test_a_sigma_that_stopped_arriving_is_not_a_sigma() -> None:
+    """The tracker publishes one every check period whatever the sensors do, so silence here is
+    the tracker itself — not a quiet room — and no goal starts on the last number it said."""
+    gate = GoalGate()
+    dead = gate.verdict(0.9, None, sigma=Sigma(0.02, 0.5, SOURCE_PATIENCE_S + 1.0))
+    assert not dead.ready and dead.rule == BY_SIGMA
+    assert "stopped 4.0 s ago" in dead.reason
+    assert gate.verdict(0.9, None, sigma=Sigma(0.02, 0.5, SOURCE_PATIENCE_S)).ready, "the bound"
+
+
+def test_the_blind_drive_watch_reads_the_sigma_and_says_which_rule_judged() -> None:
+    """The watch that cut the camera drives: with a sigma it judges the pose, with none the fit,
+    and the phrase it leaves in the log names the reading, so a tape says which rule stopped the
+    cart."""
+    blind = BlindDriveWatch()
+    assert not blind.observe(0.0, 0.0, sigma=Sigma(0.06, 1.2, 0.1)), "a camera drive is not blind"
+    assert blind.rule == BY_SIGMA and "0.06 m" in blind.phrase()
+    lost = False
+    for t in (10.0, 11.0, 12.0, 13.0, 15.0):
+        lost = blind.observe(0.99, t, sigma=Sigma(0.40, 9.0, 0.1))
+    assert lost and "over 0.25 m" in blind.phrase()
+    fit_only = BlindDriveWatch()
+    assert not fit_only.observe(0.9, 0.0) and fit_only.rule == BY_FIT
+    by_fit = False
+    for t in (1.0, 2.0, 3.0, 4.0, 5.0, 6.0):
+        by_fit = fit_only.observe(0.1, t)
+    assert by_fit and "fit 0.10 under 0.30" in fit_only.phrase()
+
+
+def test_a_drive_is_cut_when_the_sigma_stops_arriving_mid_way() -> None:
+    """A tracker that dies mid-drive leaves the cart following a plan on dead reckoning; the
+    last sigma it published stays small for ever, so it is the AGE that has to stop the drive."""
+    blind = BlindDriveWatch()
+    cut = False
+    for age, t in ((0.1, 0.0), (1.0, 1.0), (4.0, 4.0), (9.0, 9.0), (14.0, 14.0)):
+        cut = blind.observe(0.9, t, sigma=Sigma(0.02, 0.5, age))
+    assert cut and "stopped 14.0 s ago" in blind.phrase()
+
+
+# -- the preflight -------------------------------------------------------------------------
+
+
+def report(**sources: object) -> dict[str, object]:
+    """One /localization/sources message, as pepin.localization.Localizer.sources_report writes
+    it: the per-source block is what the preflight reads."""
+    return {"anchor": "lidar", "fused": "lidar", "rejected": [], "fit": 0.8, "sources": sources}
+
+
+LIDAR_FRESH = {"health": "fresh 9.9 Hz", "fit": 0.82, "delta": [1.2, -0.4, 0.3]}
+CAMERA_FRESH = {"health": "fresh 4.8 Hz", "fit": 0.61, "delta": [3.0, 2.0, 1.1]}
+GRAPH_FRESH = {"health": "fresh 1.0 Hz", "fit": 0.55, "delta": [4.0, 3.0, 0.9]}
+GRAPH_FAR = {"health": "fresh 1.0 Hz", "fit": 0.55, "delta": [40.0, 30.0, 2.0]}
+
+
+def test_the_sources_report_is_read_for_who_is_holding_the_pose() -> None:
+    """The delta the tracker publishes is in centimetres and the preflight thinks in metres; a
+    source the flag has off is not evidence, and a half-written entry costs its own fields
+    only."""
+    words = {w.name: w for w in source_words(report(lidar=LIDAR_FRESH, camera={"health": "off"}))}
+    assert words["lidar"].spoke() and words["lidar"].delta_m == pytest.approx(0.0126, abs=1e-4)
+    assert not words["camera"].enabled and not words["camera"].spoke()
+    assert source_words({}) == [] and source_words({"sources": "nonsense"}) == []
+    broken = source_words(report(lidar={"health": "fresh 9.9 Hz", "fit": "x", "delta": ["a", 1]}))
+    assert broken[0].spoke() and broken[0].fit is None and broken[0].delta_m is None
+    stale = source_words(report(lidar={"health": "stale 2.1 s"}, camera={"health": "stale 41.0 s"}))
+    assert stale[0].spoke(SOURCE_PATIENCE_S) and not stale[1].spoke(SOURCE_PATIENCE_S)
+
+
+def test_the_preflight_passes_a_lidar_drive_and_a_camera_drive_that_agrees() -> None:
+    """Both doors of the good case: the lidar holding the pose, and the camera holding it with
+    the graph recognising the room and agreeing with the tracker."""
+    flight = Preflight()
+    lidar = flight.checks(source_words(report(lidar=LIDAR_FRESH)), Sigma(0.03, 0.8, 0.1))
+    assert Preflight.passed(lidar) and "the lidar is holding the pose" in lidar[2].detail
+    camera = flight.checks(
+        source_words(report(camera=CAMERA_FRESH, graph=GRAPH_FRESH)), Sigma(0.08, 2.0, 0.1)
+    )
+    assert Preflight.passed(camera)
+    assert "judged by sigma" in camera[1].detail and "0.05 m from the tracker" in camera[2].detail
+
+
+def test_the_preflight_refuses_each_case_with_the_line_that_says_why() -> None:
+    """One line per check, and the refusal names the reading — never a bare "not localized"."""
+    flight = Preflight()
+    silent = flight.checks([], None, fit=0.9)
+    assert not Preflight.passed(silent) and "no word at all" in silent[0].detail
+    assert "REFUSED" in silent[0].line() and silent[0].line().startswith("preflight sources")
+    asleep = flight.checks(
+        source_words(report(lidar={"health": "stale 41.0 s"}, camera={"health": "absent"})),
+        Sigma(0.03, 0.8, 0.1),
+    )
+    assert not asleep[0].ok and "no source has spoken in 3 s" in asleep[0].detail
+    assert "lidar stale 41.0 s" in asleep[0].detail, "the roster is printed whole"
+    wide = flight.checks(source_words(report(lidar=LIDAR_FRESH)), Sigma(0.44, 9.0, 0.2))
+    assert not wide[1].ok and "0.44 m" in wide[1].detail and "needs 0.15 m" in wide[1].detail
+    old_board = flight.checks(source_words(report(lidar=LIDAR_FRESH)), None, fit=0.31)
+    assert not old_board[1].ok and "no /localization/sigma" in old_board[1].detail
+    assert flight.checks(source_words(report(lidar=LIDAR_FRESH)), None, fit=0.9)[1].ok
+
+
+def test_a_camera_only_drive_needs_the_graph_to_recognise_the_room() -> None:
+    """Without the lidar nothing scores the scan against the map, so the evidence that the room
+    under the cart is the room on the map is RTAB-Map's graph: it has recognised the place (its
+    word carries a trust above zero) and it agrees with the tracker about where in it."""
+    flight = Preflight()
+    no_graph = flight.checks(source_words(report(camera=CAMERA_FRESH)), Sigma(0.08, 2.0, 0.1))
+    assert not no_graph[2].ok and "not among the sources" in no_graph[2].detail
+    blind_graph = flight.checks(
+        source_words(report(camera=CAMERA_FRESH, graph={"health": "fresh 1.0 Hz", "fit": 0.0})),
+        Sigma(0.08, 2.0, 0.1),
+    )
+    assert not blind_graph[2].ok and "recognised nothing" in blind_graph[2].detail
+    far = flight.checks(
+        source_words(report(camera=CAMERA_FRESH, graph=GRAPH_FAR)), Sigma(0.08, 2.0, 0.1)
+    )
+    assert not far[2].ok and "0.50 m from the tracker" in far[2].detail
+    quiet = flight.checks(
+        source_words(report(camera=CAMERA_FRESH, graph={"health": "stale 41.0 s", "fit": 0.6})),
+        Sigma(0.08, 2.0, 0.1),
+    )
+    assert not quiet[2].ok, "a graph that stopped speaking recognises nothing now"

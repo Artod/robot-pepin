@@ -5,9 +5,19 @@
 #   ros/goto.sh mark NAME        stand the robot somewhere: remember that spot as NAME (per map)
 #   ros/goto.sh NAME             drive to a remembered place      ros/goto.sh places   list them
 #   ros/goto.sh seed X Y [YAW]   after placing the robot by hand: tell AMCL where it is
-#   ros/goto.sh cancel           stop the current task (the base's deadman stops the wheels)
-#   ros/goto.sh where            pose and scan-to-map fit right now
+#   ros/goto.sh cancel           cancel every goal on the board's navigators; it prints what came
+#                                of it within 3 s (ros/stop.sh is the hard stop that also brakes)
+#   ros/goto.sh where            pose, scan-to-map fit and the pose's own sigma right now
 #   ros/goto.sh relocalize       whole-map search now (after a carry or a push)
+# Before a goal is sent, goto prints its preflight, one line per check, and any REFUSED stops the
+# drive with the reading behind it:
+#   preflight sources    ok       lidar fresh 9.9 Hz, camera fresh 4.8 Hz, graph fresh 1.0 Hz
+#   preflight certainty  ok       judged by sigma: the pose is known to 0.06 m / 1.2 deg
+#   preflight agreement  ok       the lidar is holding the pose (fresh 9.9 Hz): matched here
+# The certainty is the FUSION's uncertainty (/localization/sigma), not the lidar's fit: on a
+# camera-only drive the fit is 0.00 because no lidar scan scores the pose, and the old rule
+# cancelled healthy drives on it. Without a lidar the third check is the pose graph: it must
+# recognise the room and sit within 0.10 m of the tracker.
 # Every run is taped ONCE, by the board's run recorder: the numbered tape
 # 0249_<utc>Z_<place>.jsonl, opened on the goal's word — scans, odometry, the tracked pose, the
 # commands, the costmap, the EKF and IMU, the ToF, the camera's measurements (meas) and the

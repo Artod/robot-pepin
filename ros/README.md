@@ -744,6 +744,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `depth_stream` | `scan_honours_pan` | bool | on | yes | fold /depth_scan onto the floor through the neck's pan: the fan's bearings turn with the head and its angular window turns with them, so angle_min comes out at pan - 40 deg instead of -40. The pan is the yaw of the same base_link <- camera_optical edge the volume path reads (camera_tf_latest); with no such edge the config mount's straight-ahead yaw stands in, and the report line's config counter says for how many frames. Off: the fan is projected as if the head looked along the cart's x, whatever the encoders say |
 | `goal_server` | `tf_pose` | bool | on | yes | where no tracker answers, the cart's pose is read from TF (map -> base_link) and a goal is judged by how fresh that edge is; off, only the tracker is ever asked |
 | `goal_server` | `correction_watch` | bool | on | yes | where no tracker answers, the SLAM correction (/map_odom) must be arriving for a goal to start, and a drive is cut when it stops; off, the age of map -> base_link is the only evidence read |
+| `goal_server` | `sigma_gate` | bool | on | yes | a goal starts, and a running drive is cut, on the tracker's fused uncertainty (/localization/sigma); off, on its scan-to-map fit as before |
 | `laptop_localizer` | `tf_belief` | bool | on | yes | when /tracker_pose has been silent for a second, the pose a camera scan is matched around is looked up from TF (map -> base_link at that scan's stamp) instead of carried from the last /tracker_pose; off, a silent board means no camera measurements at all |
 | `laptop_localizer` | `global_watch` | bool | on | yes | run the whole-map search once every watch_period_s and publish what it finds on /localization/candidate; off, this half of the node is a subscriber that costs nothing and the board is back to searching for itself only once it is already lost |
 | `laptop_localizer` | `watch_period_s` | number 0.2..60 | 1.0 | yes | seconds between searches |
@@ -1296,6 +1297,11 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* on — map -> base_link is no evidence that the SLAM half is alive: slam_frame re-broadcasts the LAST correction at 10 Hz with a fresh stamp, so with the laptop shut down the edge is still 0.1 s old, the gate passes, and Nav2 — whose costmaps read that same edge against a 0.3 s tolerance — does not abort either. The cart would drive a map that stopped growing, on dead reckoning, with nothing to notice. The correction is a 10 Hz pulse whatever the graph does (pepin_bringup.rtabmap_frame publishes between optimisations too), so 2.0 s of silence is twenty missed messages over the bridge, not a hiccup
   - *On when:* in online SLAM, where the pose is owned by a machine on the other side of the bridge
   - *Off when:* when this node cannot hear /map_odom in a stack that is otherwise healthy — 'ros/go.sh where' prints 'correction_s' where one has ever landed, and prints none at all in that case; the drive then rests on the transform alone, as it did before
+- **`sigma_gate`** — bool, default on
+  - *What:* a goal starts, and a running drive is cut, on the tracker's fused uncertainty (/localization/sigma); off, on its scan-to-map fit as before
+  - *Default:* on — a fit is ONE SENSOR'S metric — the share of one lidar revolution's beams that landed on the map — and it says nothing about a pose the camera is holding. On a camera-only drive it is 0.00 by construction, and every rule built on it read a healthy tracker as lost (2026-09-15). The sigma comes out of the fusion itself, so 0.15 m to start and 0.25 m to cut mean the same thing whichever source spoke — and it goes on growing along the odometry when none does, which a fit never did
+  - *On when:* always on a stack whose tracker publishes the topic; a board that does not is judged by its fit by itself, with no flag to set
+  - *Off when:* to put the fit rules back for a comparison, or if a sigma ever refuses drives the cart is plainly fit for
 
 #### `laptop_localizer`
 
@@ -1838,11 +1844,22 @@ Open `ros/foxglove/pepin_nav.json` in Foxglove Studio:
 - the 3D panel's `/scan` and `/depth_scan` beside `/local_costmap/costmap` and
   `/global_costmap/costmap` — switching a layer changes the grid within a costmap cycle, and the
   marks that remain tell you which sensor drew them;
+- `/localization/sigma` in a Raw Messages panel (JSON: `sigma_xy` metres, `sigma_yaw` degrees,
+  `stamp`, `word_age_s` — the seconds since a source's word last corrected the pose) — **the one
+  number a drive is judged by**, on the board, in `goto` and in `depth_fusion`. It is the
+  covariance that comes out of the tracker's information filter after each update, so it means the
+  same thing whichever source spoke into it, and it grows along the odometry between corrections
+  (`pepin.watch.PoseSpread`: this cart's own 2 % per metre and 0.7 of every reported turn, so
+  eight metres of dead reckoning refuses a goal and fourteen cuts one). A goal starts under 0.15 m
+  and a running drive is cut over 0.25 m (`pepin.watch`: the footprint is 0.55 m wide and Nav2
+  calls 0.10 m arrived). Before the first word it reads 0.35 m — not localised;
 - the `scan-to-map fit` plot (`/localization_fit`, 0..1) — the tracker's own score of the scan it
-  matched. This is where camera-only localisation fails visibly; with no scan of the board's own
-  at all (the camera's measurements driving alone) the plot reads 0.0 by design, because a fit the
-  laptop measured against the camera's own band of the volume is not this board's word about
-  `/map` (`local_fit`) — the camera's fit is in `/localization/sources`, per source;
+  matched, and a DIAGNOSTIC of the lidar, not a verdict on the pose: with no scan of the board's
+  own at all (the camera's measurements driving alone) the plot reads 0.0 by design, because a fit
+  the laptop measured against the camera's own band of the volume is not this board's word about
+  `/map` (`local_fit`) — the camera's fit is in `/localization/sources`, per source. Judging a
+  drive by it cancelled healthy camera-only drives on 2026-09-15, which is what the sigma above
+  replaced;
 - the Log panel (filtered to `relocalizer`, `controller_server`, `planner_server`, ...).
 
 The report lines say the same in words, every 30 s, and `ros/sensor.sh status` prints all three:

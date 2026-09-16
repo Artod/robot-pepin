@@ -205,6 +205,10 @@ BOARD_PUBLISHES = (
     "tof/right",
     "tracker_pose",
     "localization_fit",
+    # How sure the tracker's fusion is, whichever source spoke into it: the one number a goal
+    # gate and a blind-drive watch read (pepin.watch). It crosses for the operator's view — the
+    # judges that matter run on the board, beside the tracker.
+    "localization/sigma",
     "localization/sources",  # every scan source's word on each update, JSON (the tracker)
     "local_costmap/costmap",
     "pepin/run_status",
@@ -303,7 +307,13 @@ VISION_LAPTOP_PUBLISHES = (
 # and the rest are the tracker's, which does not run because nothing matches a scan against a map
 # that does not exist yet. Named, not spelled out below, so a topic added to the vision list
 # reaches SLAM mode by itself unless it is one of these.
-_NOT_IN_SLAM = ("map", "tracker_pose", "localization_fit", "localization/sources")
+_NOT_IN_SLAM = (
+    "map",
+    "tracker_pose",
+    "localization_fit",
+    "localization/sigma",
+    "localization/sources",
+)
 # The board drives exactly as in vision mode, minus those.
 SLAM_BOARD_PUBLISHES = tuple(n for n in VISION_BOARD_PUBLISHES if n not in _NOT_IN_SLAM)
 # RTAB-Map's grid is remapped onto /map in this mode (there is no second map to fight), so
