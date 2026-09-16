@@ -27,7 +27,12 @@ import ros_stubs
 RCLPY = ros_stubs.install()
 
 from camera_configs import CALIBRATION, camera_config  # noqa: E402
-from pepin_bringup.depth_stream import FLAGS, SCAN_RANGE_M, DepthStream  # noqa: E402
+from pepin_bringup.depth_stream import (  # noqa: E402
+    CARRY_WAIT_S,
+    FLAGS,
+    SCAN_RANGE_M,
+    DepthStream,
+)
 from pepin_bringup.msgs import (  # noqa: E402
     image_from_array,
     pose_from_transform,
@@ -181,14 +186,20 @@ def _scan(wall_x: float, stamp: Any) -> Any:
     )
 
 
-def _transform(translation: tuple[float, float, float], rotation: np.ndarray) -> Any:
+def _transform(
+    translation: tuple[float, float, float], rotation: np.ndarray, stamp: Any = None
+) -> Any:
+    """One TF edge, stamped at the first frame's moment unless a test says otherwise: a live
+    route republishes its edges, and the node's guard reads that stamp to tell a route that
+    still runs from one that has died (``tf_dead_s``)."""
     x, y, z = translation
     qx, qy, qz, qw = quaternion_from_matrix(rotation)
     return ros_stubs.TransformStamped(
+        header=ros_stubs.Header(stamp=stamp or _stamp(0)),
         transform=ros_stubs.Transform(
             translation=ros_stubs.Vector3(x=x, y=y, z=z),
             rotation=ros_stubs.Quaternion(x=qx, y=qy, z=qz, w=qw),
-        )
+        ),
     )
 
 
@@ -271,7 +282,7 @@ def build(tmp_path: Path) -> Iterator[Build]:
         edges = node._tf.buffer.transforms
         edges[("base_link", "laser")] = _transform((0.0, 0.0, LIDAR_Z_M), np.eye(3))
         if odom:
-            edges[("odom", "base_link")] = ros_stubs.TransformStamped()
+            edges[("odom", "base_link")] = _transform((0.0, 0.0, 0.0), np.eye(3))
         if camera_edge is not None:
             edges[("base_link", "camera_optical")] = camera_edge
         node.subs["/camera/camera_info"][1](_info(_stamp(0)))
@@ -284,8 +295,11 @@ def build(tmp_path: Path) -> Iterator[Build]:
 
 def frame(node: DepthStream, net: FakeNet, cam: CameraPose, wall_x: float, k: int) -> Any:
     """One frame through the node: the network's answer scripted, the lidar's scan of the same
-    moment delivered, the image processed. Returns the stamp."""
+    moment delivered, TF's edges republished at this moment as a live route does, the image
+    processed. Returns the stamp."""
     stamp = _stamp(k)
+    for edge in node._tf.buffer.transforms.values():
+        edge.header.stamp = stamp
     net.frames.append(_network(_scene(cam, wall_x), seed=k))
     node.subs["/scan"][1](_scan(wall_x, stamp))
     node._process(_image(stamp))
@@ -390,13 +404,15 @@ def test_one_table_of_defaults_reaches_both_the_node_s_flags_and_the_stages(buil
     assert field.field.prior == PIPELINE_DEFAULTS["field_prior"]
     assert field.field.carry == PIPELINE_DEFAULTS["field_carry"]
     assert field.field.carry_tau_s == PIPELINE_DEFAULTS["field_carry_tau_s"]
+    assert field.pairs_cap == PIPELINE_DEFAULTS["field_pairs_cap"]
     assert floor.sigma_pitch_deg == PIPELINE_DEFAULTS["floor_sigma_pitch_deg"]
     assert floor.normal_tol_deg == PIPELINE_DEFAULTS["floor_normal_tol_deg"]
     node._switches.set("field_grid", "1x1")  # the old single law, live
     node._switches.set("field_prior", 7.5)
+    node._switches.set("field_pairs_cap", 0)  # the uncapped fit of before, live
     node._switches.set("floor_normal_tol_deg", 2.0)
     assert field.field.grid == (1, 1) and field.field.prior == 7.5
-    assert floor.normal_tol_deg == 2.0
+    assert field.pairs_cap == 0 and floor.normal_tol_deg == 2.0
 
 
 # ---- the camera pose from TF ---------------------------------------------------------------
@@ -468,6 +484,161 @@ def test_without_a_camera_edge_the_config_pose_stands_in_and_is_counted(build: B
         f"{math.degrees(CONFIG_CAM.pitch):.1f} deg while TF has no edge"
         in (node.logger.texts("info")[-1])
     )
+
+
+# ---- a TF route that has died ---------------------------------------------------------------
+class StoppedTf:
+    """TF whose route died ``age_s`` before the first frame: nothing covers a frame's stamp,
+    the newest edge of every pair is that old, and the blocking ask — the one the guard exists
+    to refuse — sleeps ``wait_s`` and counts itself in ``waits``."""
+
+    def __init__(self, age_s: float, wait_s: float = CARRY_WAIT_S) -> None:
+        self.stamp = stamp_seconds(_stamp(0)) - age_s
+        self.wait_s = wait_s
+        self.waits = 0
+
+    def pose_at(self, stamp: float, frame: str, fixed: str) -> Any:
+        self.waits += 1
+        time.sleep(self.wait_s)
+        return None
+
+    def pose_at_nowait(self, stamp: float, frame: str, fixed: str) -> Any:
+        return None
+
+    def latest_pose(self, frame: str, fixed: str) -> Any:
+        return RigidPose(np.eye(3), np.zeros(3)), self.stamp
+
+
+def stopped_tf(node: DepthStream, age_s: float, wait_s: float = CARRY_WAIT_S) -> StoppedTf:
+    """Put a dead TF route under both of the node's guards — the one that may wait (the camera
+    pose, the scan's carry) and the one the pipeline asks per view — so every lookup of a
+    frame's path meets the stopped route."""
+    fake = StoppedTf(age_s, wait_s)
+    node._history.history = fake
+    node._frame_history.history = fake
+    return fake
+
+
+def test_a_dead_neck_edge_gives_the_config_pose_at_once_instead_of_waiting(build: Build) -> None:
+    """2026-09-16: the board's TF route died, base_link <- camera_optical stopped 344 s back,
+    and every frame still spent CARRY_WAIT_S on a lookup no publisher was going to answer
+    (pose 212/226 ms, 0.9-3 frames/s). An edge older than tf_dead_s is dead: the config mount
+    at once, counted as such, and no wait at all."""
+    node, _net = build()
+    fake = stopped_tf(node, age_s=10.0)
+    started = time.perf_counter()
+    assert node._camera_at(_stamp(0)) == (CONFIG_CAM, None)
+    spent_ms = (time.perf_counter() - started) * 1e3
+    assert fake.waits == 0, "no lookup waited for an edge that has stopped"
+    assert spent_ms < 1.0, f"the dead route cost the frame {spent_ms:.1f} ms"
+    counts = node._tally.take()
+    assert counts.counts["neck_edge_dead"] == 1 and counts.counts["camera_from_config"] == 1
+    assert counts.samples["neck_edge_stale_s"] == pytest.approx([10.0])
+
+
+def test_an_edge_younger_than_tf_dead_s_is_still_waited_for(build: Build) -> None:
+    """The live case the wait exists for: the neck publishes, its newest edge is behind the
+    frame's stamp and does not cover it yet. That wait stays — the guard refuses only the
+    lookups that cannot be answered. Both ways round the newest-edge shortcut: an edge half a
+    second old with ``camera_tf_latest`` off (the old ask at the exact stamp), and one two
+    seconds old, which that shortcut refuses (CAMERA_TF_MAX_AGE_S) and the wait then takes."""
+    old_ask, _net = build(camera_tf_latest=False)
+    fake = stopped_tf(old_ask, age_s=0.5, wait_s=0.0)
+    assert old_ask._camera_at(_stamp(0)) == (CONFIG_CAM, None)
+    assert fake.waits == 1, "a young edge is still waited for at the frame's stamp"
+    assert old_ask._tally.take().counts["neck_edge_dead"] == 0
+    node, _net = build()
+    older = stopped_tf(node, age_s=2.0, wait_s=0.0)
+    assert node._camera_at(_stamp(0)) == (CONFIG_CAM, None)
+    assert older.waits == 1 and node._tally.take().counts["neck_edge_dead"] == 0
+
+
+def test_tf_dead_s_zero_waits_on_a_dead_edge_as_the_node_used_to(build: Build) -> None:
+    """The flag's off position is the behaviour of before: every lookup waits, however old the
+    edge is."""
+    node, _net = build(tf_dead_s=0.0)
+    fake = stopped_tf(node, age_s=10.0, wait_s=0.0)
+    assert node._camera_at(_stamp(0)) == (CONFIG_CAM, None)
+    assert fake.waits == 1 and node._tally.take().counts["neck_edge_dead"] == 0
+
+
+def test_a_dead_odometry_edge_leaves_the_scan_uncarried_instead_of_waiting(build: Build) -> None:
+    """The same rule on the lidar's carry: with no odometry edge within tf_dead_s the scan
+    passes as it is (counted uncarried) rather than costing the frame two more waits."""
+    node, _net = build(law=LAW)
+    stamp = _stamp(0)
+    node.subs["/scan"][1](_scan(2.0, stamp))
+    fake = stopped_tf(node, age_s=10.0)
+    started = time.perf_counter()
+    points = node._lidar_points(_image(stamp))
+    spent_ms = (time.perf_counter() - started) * 1e3
+    assert points is not None and fake.waits == 0
+    assert spent_ms < 1.0, f"the dead odometry cost the frame {spent_ms:.1f} ms"
+    counts = node._tally.take().counts  # two asks: the carry looks the cart up at both stamps
+    assert counts["uncarried"] == 1 and counts["odom_edge_dead"] == 2
+
+
+def test_a_live_odometry_edge_still_carries_the_scan(build: Build) -> None:
+    """The guard judges the edge, not the lookup: with TF republishing, the carry runs as it
+    always did and nothing is counted dead."""
+    node, net = build(law=LAW)
+    frame(node, net, CONFIG_CAM, 2.0, 0)
+    counts = node._tally.take().counts
+    assert counts["uncarried"] == 0 and counts["odom_edge_dead"] == 0
+    assert counts["verdicts"] == 1
+
+
+def test_no_lookup_of_a_frame_s_path_waits_while_tf_is_dead(build: Build) -> None:
+    """The whole frame path, the parallax anchor included: with the route dead, not one of the
+    node's lookups — the camera pose, the carry, the parallax's motion between two views —
+    pays a wait. The frames still publish on the seeded law."""
+    node, net = build(law=LAW, parallax_anchor=True)
+    fake = stopped_tf(node, age_s=10.0)
+    for k in range(3):
+        frame(node, net, CONFIG_CAM, 2.0, k)
+    assert fake.waits == 0, "a dead route was waited for somewhere on the frame's path"
+    assert len(published(node)[0]) == 3
+
+
+def test_the_pipeline_asks_its_motion_of_a_tf_that_cannot_wait(
+    build: Build, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two posers over one TF: the camera pose and the scan's carry may spend CARRY_WAIT_S on a
+    stamp the buffer does not cover yet, the pipeline's may spend nothing. The parallax anchor
+    asks once per stored view, so a wait there is paid per view — 834 ms of one frame offline —
+    and the ask that cannot be answered simply loses that view."""
+    node, net = build(law=LAW)
+    assert node._history.history.timeout_s == CARRY_WAIT_S
+    assert node._frame_history.history.timeout_s == 0.0
+    seen: dict[str, Any] = {}
+    run = node._pipeline.run
+
+    def spy_run(depth: Any, ctx: Any) -> Any:
+        seen["ctx"] = ctx
+        return run(depth, ctx)
+
+    monkeypatch.setattr(node._pipeline, "run", spy_run)
+    frame(node, net, CONFIG_CAM, 2.0, 0)
+    assert seen["ctx"].motion is node._frame_poser
+    assert node._frame_poser is not node._poser
+    node._switches.set("lean_min_quality", 0.75)  # a live flag reaches both posers
+    node._switches.set("imu_lean", False)
+    assert node._poser.min_lean_quality == 0.75 and node._frame_poser.min_lean_quality == 0.75
+    assert not node._poser.apply_lean and not node._frame_poser.apply_lean
+
+
+def test_the_report_line_names_a_dead_neck_edge_and_how_stale_it_is(build: Build) -> None:
+    """A dead route reads differently from an edge TF never had: the report says which, how
+    many frames it cost and how far behind the edge is."""
+    node, net = build(law=LAW)
+    stopped_tf(node, age_s=10.0, wait_s=0.0)
+    frame(node, net, CONFIG_CAM, 2.0, 0)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "camera pose from config 1 frames (neck edge dead 1 frames (10 s stale)" in line
+    assert "no TF edge" not in line
+    assert "scans uncarried 1" in line and "odom edge dead 2 asks (10 s stale)" in line
+    assert "tf_dead_s=3.0" in line
 
 
 # ---- the flags and the stages ----------------------------------------------------------------
