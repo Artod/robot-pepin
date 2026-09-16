@@ -1325,6 +1325,29 @@ def test_the_volume_is_the_map_and_only_one_side_publishes_it() -> None:
     )
 
 
+def test_the_map_is_published_on_change_and_the_first_one_does_not_wait_for_the_timer() -> None:
+    """/map is latched, so a republication buys no subscriber anything and costs every reader a
+    rebuild (the board's tracker its matcher, mask and tracker; both costmaps their static
+    layer). The node therefore hashes the slice and sends only a changed one, ``map_hz`` being
+    the ceiling and not a cadence — and it publishes the first one itself, as soon as the seed
+    is in the volume, instead of leaving a board without a map for 1 / map_hz."""
+    node = sf.tree(f"{NODES}/depth_fusion.py")
+    assert "fields.digest" in sf.calls(node), "the slice's own identity, not a private hash"
+    assert "self._map_digest" in sf.unparsed(node, ast.Attribute), "the last one out is kept"
+    assert "self._publish_map" in sf.calls(node), (
+        "called in __init__ after the seed, not only handed to the timer"
+    )
+    flags = load_table(REPO / NODES / "depth_fusion.py")
+    assert flags.flag("map_hz").default == 0.5 and flags.flag("map_hz").range == (0.1, 5.0)
+    # The measurement that gates the default (scratch/volume_vs_file_seating.py, the four tapes
+    # of 2026-09-13): a SEEDED volume's slice seats a median 0.01 cm from the file's with the
+    # same fit, the LIVE snapshot 1.90 m away with the fit down 0.295. The flag says so.
+    assert flags.flag("map_source").default == "file", (
+        "the volume owns /map only on a passing seating measurement; the live one fails it"
+    )
+    assert "0.01 cm" in flags.flag("map_source").why and "1.90 m" in flags.flag("map_source").why
+
+
 def test_the_graphs_correction_moves_the_volume_only_where_the_graph_owns_it() -> None:
     """The map follows the loop closure: the node carries the volume by the change of
     map -> odom before it paints into it, on both paint paths (a camera frame and a

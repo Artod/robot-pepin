@@ -27,14 +27,26 @@ revolution taken past ``lean_gate_deg`` is dropped rather than believed. A lean 
 not vote for (``lean_min_quality``: a drifting gyro's own signature) is no lean at all, and the
 measurement is placed level instead of by a number nobody measured.
 
-With ``map_source=volume`` that grid goes out as ``/map`` at ``map_hz`` (transient local), so
-the tracker and Nav2 localise and plan on the volume instead of on a frozen file, and a "known
-room" is just a volume that was seeded (``seed_map``) or resumed from a snapshot
-(``resume_volume``) instead of an empty one. Exactly one publisher of /map, and both halves of
-that are launch decisions this node is told: the bridge mode says which side owns the topic
-(:func:`pepin.deployment.map_owner`) and the ``world_map`` parameter says whether the launch
-kept RTAB-Map's grid off it. Without both, the volume is refused on /map however ``map_source``
-is set afterwards. Beside /map goes ``/map_camera``, the band the camera speaks for
+With ``map_source=volume`` that grid IS the map: it goes out as ``/map``, latched (transient
+local), so the tracker and Nav2 localise and plan on the volume rather than on a frozen file,
+and a "known room" is just a volume that was seeded (``seed_map``) or resumed from a snapshot
+(``resume_volume``) instead of an empty one. The saved file is the SEED and nothing else
+afterwards — a picture written into the lidar's layer at start, never matched against, never
+served. The publication is on change, not on a clock: the slice is hashed
+(``OccupancyGridFields.digest``) and an identical grid is never sent again, ``map_hz`` is only
+the ceiling on how often a changed one may go, and the first goes out as soon as the seed is in.
+That is what a republication costs the READERS — a tracker that adopts a map rebuilds its
+matcher, its mask and its tracker on four A53 cores, and both costmaps re-seed their static
+layer. With the wifi down the board keeps the last /map it was handed (a latched subscriber
+holds it, and a grid in memory does not stop working because its publisher went away), so
+nothing on the board waits for this node once it has a map: CLAUDE.md rule 20 is satisfied by
+the subscribers that already exist, and nothing new runs there.
+
+Exactly one publisher of /map, and both halves of that are launch decisions this node is told:
+the bridge mode says which side owns the topic (:func:`pepin.deployment.map_owner`) and the
+``world_map`` parameter says whether the launch kept RTAB-Map's grid off it. Without both, the
+volume is refused on /map however ``map_source`` is set afterwards. Beside /map goes
+``/map_camera``, the band the camera speaks for
 (``camera_band_m``, the band /depth_scan marks in): the slice the camera's own scans are matched
 against on the laptop (:mod:`pepin_bringup.laptop_localizer`), because a tabletop the lidar's
 plane never sees is in that picture and in no other. The volume is snapshotted to ``world_path``
@@ -48,9 +60,9 @@ cell is in the volume from the first frame and simply does not appear in the mat
 until it is heavy — and the report line says what the threshold costs: the share of the band's
 occupied cells it keeps. The lidar's own layer can be matched on too: with ``lidar_map`` the same
 slice that would be ``/map`` also goes out as ``/map_lidar``, a topic of its own the board's
-tracker can be pointed at (its ``map_topic`` flag) while Nav2 and the map_server keep the ``/map``
-they own. A volume the tracker is pointed at must have been seeded from the served map
-(``seed_map``), which also snaps the grid to that map's cell lattice.
+tracker can be pointed at (its ``map_topic`` flag) while Nav2 keeps the ``/map`` it has. A volume
+the tracker is pointed at must have been seeded from the saved file (``seed_map``), which also
+snaps the grid to that file's cell lattice.
 
 THE GRAPH MOVES THE MAP. In online SLAM the graph is the skeleton and ``map -> odom`` is its
 correction: RTAB-Map optimises, pepin_bringup.rtabmap_frame sends the new edge to the board and
@@ -464,30 +476,52 @@ FLAGS = FlagSet(
         "map_source",
         "file",
         description="where /map comes from: the saved file another node serves, or the volume's"
-        " own lidar layer published from here at map_hz. Only where the stack was launched with"
-        " world_map:=true; anywhere else volume is refused, because another node is on /map",
-        why="the other state has been seen to break a run: on 2026-09-10 RTAB-Map's own grid"
-        " landed on /map beside the board's static map and fed the laptop's global costmap a"
-        " second, growing map. Two publishers of one /map is the failure, so the deployment's"
-        " map_owner and the launch's world_map:=true must both agree before volume is allowed."
-        " The volume itself is good enough — its walls sit within one cell of the saved map 79.3"
-        " % of the time",
-        on_when="volume where the laptop owns /map (ros/laptop.sh vslam --world-map) and the room"
-        " is being mapped as it is driven",
+        " own lidar layer, published from here on change and at most every 1 / map_hz. Only"
+        " where the stack was launched with world_map:=true; anywhere else volume is refused,"
+        " because another node is on /map",
+        why="the SEEDED volume is the file exactly and the LIVE one is not the room. Both"
+        " measured the same way, offline, on the four tapes of 2026-09-13 with the node's own"
+        " tracker replayed once per map (scratch/volume_vs_file_seating.py): seeded from"
+        " flat3_straight and sliced, the tracker seats a median 0.01 cm from where the file puts"
+        " it with the same fit to two decimals — the same map, as the cell count already said"
+        " (18274 of 18274 known cells agree). The live snapshot of 2026-09-15 21:22, the same"
+        " file plus a day's painting, seats a median 1.90 m away with the fit down 0.295, and on"
+        " two of the four tapes the tracker re-seated 3.7-3.8 m off; only 52.9 % of the file's"
+        " walls are still within a cell of the volume's, and 2070 cells the file calls wall the"
+        " volume has carved free. So the gate this default waits for (2 cm, 0.05 fit) is failed"
+        " by the map the robot would actually be handed after a drive, and the mechanism is"
+        " known: fit_gate holds the CAMERA path only, while a lidar revolution is integrated at"
+        " whatever pose TF gives, lost tracker or none (_on_scan_work) — which is exactly what"
+        " the laptop's dead routes of 2026-09-15 19:17 would have written. The other state has"
+        " also been seen to break a run outright: on 2026-09-10 RTAB-Map's own grid landed on"
+        " /map beside the board's static map and fed the laptop's global costmap a second,"
+        " growing map. Two publishers of one /map is that failure, so the deployment's map_owner"
+        " and the launch's world_map:=true must both agree before volume is allowed",
+        on_when="volume where the laptop owns /map (ros/laptop.sh vslam --world-map) and the"
+        " volume has been seeded and not driven away from the room — the tracker adopts the"
+        " FIRST map it is handed (its map_refresh_s is 0), and that one is the seed itself",
         off_when="file wherever a map server or RTAB-Map already publishes /map, which is every"
-        " other mode",
+        " other mode — and, until the lidar path is gated on the fit too, wherever a drive's"
+        " painting would reach the costmaps",
         choices=("file", "volume"),
     ),
     Flag(
         "map_hz",
-        1.0,
-        description="how often the volume's layer goes out as /map when map_source is volume",
-        why="default by design, unmeasured: 1 Hz is the cadence RTAB-Map's own map updates at,"
-        " and /map is transient-local, so a subscriber that arrives late is served the last one"
-        " regardless",
-        on_when="raise it when the map is built while driving and the costmap lags visibly behind"
-        " the room",
-        off_when="lower it on a busy laptop: every publication is a whole grid over the bridge",
+        0.5,
+        description="the most often the volume's layer may go out as /map when map_source is"
+        " volume — a ceiling, not a cadence: a slice whose cells have not changed is not"
+        " published at all, and the first one goes out as soon as the volume has its seed",
+        why="what a republication costs is paid by the readers, not by this node: a tracker that"
+        " ADOPTS a map rebuilds its correlative matcher, its static mask and its tracker on four"
+        " A53 cores, and both costmaps re-seed their static layer. /map is transient-local, so"
+        " nobody is waiting for a repeat — a late subscriber is served the last one regardless"
+        " — which leaves no reason to send an unchanged grid and no reason to send a changed one"
+        " oftener than the room changes. Half a hertz is two seconds of painting per map, and"
+        " with the change gate a standing cart publishes nothing after the seed",
+        on_when="raise it when the room is being mapped as it is driven and the costmap lags"
+        " visibly behind it",
+        off_when="lower it on a busy laptop: every publication that does go is a whole grid over"
+        " the bridge",
         range=(0.1, 5.0),
     ),
     Flag(
@@ -724,6 +758,7 @@ class DepthFusion(Node):
         )
         self._laser: tuple[PlanarMount, float, bool] | None = None  # mount, yaw, upside down
         self._map_pub: Any = None  # made on the first publish: only where this side owns /map
+        self._map_digest = ""  # ...and the cells last sent there: an unchanged map is not resent
         self._camera_map_pub: Any = None  # ...and the camera's own band, beside it
         self._lidar_map_pub: Any = None  # ...and the lidar layer on a topic of its own
         self._snapshots = SnapshotClock(float(self._switches["snapshot_s"]))
@@ -743,6 +778,10 @@ class DepthFusion(Node):
             self._period(self._switches["map_hz"]), self._publish_map
         )
         self.create_timer(30.0, self._report)
+        # The seed is in the volume by now, so the map goes out AT ONCE rather than at the map
+        # timer's first tick: a board coming up beside this node must not wait 1 / map_hz for
+        # the only /map there is before its tracker has anything to match a scan against.
+        self._publish_map()
         nx, ny, nz = self._spec.shape
         self.get_logger().info(
             f"fusion up: {nx}x{ny}x{nz} voxels of {self._spec.voxel_m * 100:.0f} cm from"
@@ -1228,9 +1267,21 @@ class DepthFusion(Node):
         )
 
     def _publish_map(self) -> None:
-        """The volume's lidar layer as /map, at ``map_hz``, when the flag says the map comes
-        from the volume and nothing else in this stack is on /map — and, beside it, the band
-        the camera speaks for as /map_camera.
+        """The volume's lidar layer as /map, at most every ``1 / map_hz`` and only when its cells
+        changed, when the flag says the map comes from the volume and nothing else in this stack
+        is on /map — and, beside it, the band the camera speaks for as /map_camera.
+
+        ON CHANGE, NOT ON A CLOCK. /map is latched (transient local), so a subscriber that
+        arrives late is served the last one whether or not it was just republished — and the
+        cost of a republication is paid by the readers: the board's tracker rebuilds its
+        correlative matcher, its static mask and its tracker on every map it ADOPTS (seconds on
+        four A53 cores; its ``map_refresh_s`` gate is what keeps it to the first one), and both
+        costmaps re-seed their static layer. So the slice is hashed
+        (:meth:`pepin.worldmap.OccupancyGridFields.digest`) and a grid identical to the one
+        already out is not sent at all; the timer is only the ceiling
+        on how often a changed one may go. The first message is not waited for either: it is
+        published as soon as the volume has its seed, so a board bringing its tracker up has a
+        map within a second of this node instead of within ``1 / map_hz``.
 
         Two cross-sections of one room: the lidar's plane is what the lidar localises against
         and what Nav2 plans on, and the camera's band (``camera_band_m``, the band /depth_scan
@@ -1241,12 +1292,13 @@ class DepthFusion(Node):
         it goes out beside a known map too, where /map stays the served file. The same is true
         of ``/map_lidar`` (flag ``lidar_map``), which carries the lidar layer — the very cut
         /map would carry — on a topic of its own, so the board's tracker can be pointed at the
-        volume (the relocalizer's ``map_topic``) while Nav2 and the map_server keep the /map
-        they own and the owner rule above is not touched at all. The band is
-        painted by the camera itself at the tracker's pose, and it is the only reference the
-        camera's scans can honestly be matched against — held to the lidar's plane instead,
-        the whole-height fan scored fit 0.34 at the right pose and pulled the fused pose a
-        centimetre off (2026-09-13, runs 190024/190422).
+        volume (the relocalizer's ``map_topic``) while Nav2 keeps the /map it has and the owner
+        rule above is not touched at all. Both of those go out on every tick, unhashed: they are
+        read by matchers that want the freshest cut and by an operator watching the volume grow.
+        The band is painted by the camera itself at the tracker's pose, and it is the only
+        reference the camera's scans can honestly be matched against — held to the lidar's plane
+        instead, the whole-height fan scored fit 0.34 at the right pose and pulled the fused pose
+        a centimetre off (2026-09-13, runs 190024/190422).
         """
         mine = self._switches["map_source"] == "volume" and self._map_mine
         if self._switches["map_source"] == "volume" and not self._map_mine:
@@ -1267,14 +1319,23 @@ class DepthFusion(Node):
             stamp = self._last_stamp
         when = stamp if stamp is not None else self.get_clock().now().to_msg()
         if view is not None:
-            if self._map_pub is None:  # transient local: a late subscriber still gets the map
-                self._map_pub = self.create_publisher(OccupancyGridMsg, "/map", self._latched())
-                self.get_logger().info(
-                    f"/map is the volume's now: {view.shape[1]}x{view.shape[0]} cells of"
-                    f" {view.resolution_m * 100:.0f} cm from {view.origin}, the layer"
-                    f" {view.band_m[0]:.2f}-{view.band_m[1]:.2f} m"
-                )
-            self._map_pub.publish(occupancy_grid(view.message_fields(), when, "map"))
+            fields = view.message_fields()
+            digest = fields.digest()
+            if digest == self._map_digest:  # the same room as the last one out: nobody rebuilds
+                self._tally.count("map_unchanged")
+            else:
+                if self._map_pub is None:  # transient local: a late subscriber still gets it
+                    self._map_pub = self.create_publisher(OccupancyGridMsg, "/map", self._latched())
+                    self.get_logger().info(
+                        f"/map is the volume's now: {view.shape[1]}x{view.shape[0]} cells of"
+                        f" {view.resolution_m * 100:.0f} cm from {view.origin}, the layer"
+                        f" {view.band_m[0]:.2f}-{view.band_m[1]:.2f} m; republished only when"
+                        " these cells change, at most every"
+                        f" {self._period(self._switches['map_hz']):.1f} s"
+                    )
+                self._map_pub.publish(occupancy_grid(fields, when, "map"))
+                self._map_digest = digest
+                self._tally.count("map_changed")
         if camera is not None:
             if self._camera_map_pub is None:
                 self._camera_map_pub = self.create_publisher(
@@ -1334,7 +1395,10 @@ class DepthFusion(Node):
         if source == "volume" and self._map_refusal is not None:
             source = f"volume (refused {c['map_refused']}x: {self._map_refusal})"
         elif source == "volume":
-            source = f"volume ({c['maps']} published, {w.ms_per('map', 'maps'):.0f} ms)"
+            source = (
+                f"volume ({c['map_changed']} published, {c['map_unchanged']} unchanged,"
+                f" {w.ms_per('map', 'maps'):.0f} ms)"
+            )
         age = self._snapshots.age_s(time.monotonic())
         lidar_map = (
             f"{LIDAR_MAP_TOPIC} on" if self._switches.on("lidar_map") else f"{LIDAR_MAP_TOPIC} off"

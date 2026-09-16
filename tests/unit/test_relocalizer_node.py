@@ -959,6 +959,44 @@ def test_a_map_switch_keeps_the_cart_where_it_is(node: Relocalizer) -> None:
     assert node._last_map_odom == frame, "and it broadcasts the very frame it broadcast before"
 
 
+def test_a_second_map_on_the_owners_own_topic_leaves_the_cart_where_it_is(
+    node: Relocalizer,
+) -> None:
+    """The volume takes /map over from the map server (ONE MAP, 2026-09-16): the topic's OWNER
+    changes, its name does not, and the same room now arrives there more than once instead of
+    being latched once and never repeated. Two gates keep the cart where it is — the choice
+    refuses a republication on the topic already in use (``map_refresh_s`` 0 is "the first map
+    and no other"), and where a changed one IS adopted the pose is carried across it, because
+    the same frame and origin is the same room and the cart did not move because the picture of
+    it did.
+    """
+    stand(node, 100.0, 2.0)
+    node.clock.seconds = 103.0
+    here = Pose2D(0.30, -0.20, math.radians(20.0))
+    node.subs["/initialpose"][1](seed_msg(here))
+    echo_initialpose(node)
+    stand(node, 103.1, 1.0)
+    loc = node._localizer
+    assert loc is not None and math.hypot(loc.pose.x, loc.pose.y) > 0.1, "not at the origin"
+    before, frame, served = loc.pose, node._last_map_odom, node._map_id
+
+    node.subs["/map"][1](map_msg())  # the volume's next publication: the very same cells
+    assert node._localizer is loc, "nothing adopted: the same tracker, the same matcher"
+    assert node._map_id == served
+
+    node.clock.seconds = 150.0
+    assert node.set_parameters([Parameter("map_refresh_s", value=30.0)])[0].successful
+    painted = map_msg()  # ...and one the fusion has painted a cell into
+    painted.data[0] = 100 if painted.data[0] != 100 else 0
+    node.subs["/map"][1](painted)
+    after = node._localizer
+    assert after is not None and after is not loc, "a changed map, old enough: adopted"
+    assert node._map_id == served, "same width, height and origin: the same map id"
+    assert (after.pose.x, after.pose.y, after.pose.theta) == (before.x, before.y, before.theta)
+    assert node._tracker_initialised, "no whole-map search, no origin pose"
+    assert node._last_map_odom == frame, "and the frame it broadcasts is the one it broadcast"
+
+
 def test_the_switch_can_be_told_to_find_the_cart_again(node: Relocalizer) -> None:
     """The old behaviour stays reachable: with ``carry_pose_across_maps`` off the tracker looks
     for itself on the new map before it trusts anything (a map of another place on the same

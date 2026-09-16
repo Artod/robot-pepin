@@ -638,21 +638,32 @@ global_costmap:
         # and re-taken whenever a new /map is published. subscribe_to_updates is left at its
         # default False — nobody publishes /map_updates and a partial update is not something
         # this stack has ever needed.
+        # A LATCHED MAP REPUBLISHED ON CHANGE IS FINE HERE, and that is what the volume sends
+        # (depth_fusion hashes the slice and publishes only a changed one, at most every
+        # 1 / map_hz): this layer keeps a live subscription with transient-local durability, so
+        # it takes the first map whenever it appears — before or after this node started — and
+        # re-takes every later one. Nothing here waits for a periodic map.
         # Asked on 2026-09-14 whether it should read /map_lidar instead (the lidar layer of the
         # laptop's fused volume) — no, and not for QoS reasons: that topic is latched too and a
         # transient-local reader on the board does receive it (the tracker's own subscription
         # does). Three reasons, in order:
-        #  1. content: the live volume's layer holds 69.7 % of this file's walls and 67.6 % of
-        #     its own walls are in the file (scratch/map_lidar_vs_pgm.py, 2026-09-14). A planner
-        #     on that map plans through the missing third.
+        #  1. content: a SEEDED volume's layer is this file exactly (18274 of 18274 known cells,
+        #     and the node's own tracker replayed on it seats a median 0.01 cm from where the
+        #     file puts it over the four tapes of 2026-09-13). A DRIVEN one is not: the live
+        #     snapshot of 2026-09-15 keeps 52.9 % of this file's walls, has carved 2070 of them
+        #     free, and the same replay seats a median 1.90 m away with the fit down 0.295
+        #     (scratch/volume_vs_file_seating.py). A planner on that map plans through the
+        #     missing half. The lidar path is the hole: depth_fusion's fit_gate holds the camera
+        #     frames only, and a revolution is integrated at whatever pose TF gives.
         #  2. rule 20: the static layer has no fallback. With the laptop down at startup the
         #     global costmap would hold no static map at all — the board could not plan a metre
         #     on its own. The map_server stays the seed and the fallback.
         #  3. geometry: the volume's grid is 280x250 cells against this map's 239x215, and a
         #     static map of another size makes the layered costmap resize itself, which
         #     matchSize()s every other layer and throws away the marks the lidar, camera,
-        #     contact and ToF layers had gathered. The slice is republished every second, so
-        #     every change of the volume's extent repeats that mid-drive.
+        #     contact and ToF layers had gathered. On change rather than every second, that is
+        #     paid once per change of the volume's extent instead of once per second — but it is
+        #     still paid mid-drive.
         # And it is not the way to plan on the volume in any case: depth_fusion's map_source
         # flag publishes the volume ON /map under the one-owner rule, which is the topic this
         # layer already reads.
