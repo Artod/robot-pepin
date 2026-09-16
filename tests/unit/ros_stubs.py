@@ -237,6 +237,54 @@ class Duration:
         self.nanoseconds = int(seconds * 1e9) + nanoseconds
 
 
+class FilterSubscriber:
+    """message_filters.Subscriber: an ordinary subscription that also feeds a synchronizer.
+
+    It registers on the node like any other, so a test drives it through ``node.subs[topic]``
+    exactly as it drives a plain one, and hands every message to whoever registered a callback.
+    """
+
+    def __init__(self, node: Any, msg_type: Any, topic: str, qos_profile: Any = None) -> None:
+        self.topic = topic
+        self.callbacks: list[Any] = []
+        node.create_subscription(msg_type, topic, self._deliver, qos_profile or 10)
+
+    def registerCallback(self, callback: Any) -> None:  # noqa: N802 (message_filters' own name)
+        self.callbacks.append(callback)
+
+    def _deliver(self, msg: Any) -> None:
+        for callback in self.callbacks:
+            callback(msg)
+
+
+class TimeSynchronizer:
+    """message_filters.TimeSynchronizer: messages of several subscribers paired by exact stamp.
+
+    The real one keeps a queue per input and calls back with one message of each whose header
+    stamps are identical. This keeps the newest of each and fires when every input has spoken
+    for the same stamp — which is the only case the nodes here rely on (the depth copies the
+    image's header, so a pair has one exact stamp)."""
+
+    def __init__(self, subscribers: list[Any], queue_size: int) -> None:
+        self.queue_size = queue_size
+        self.callbacks: list[Any] = []
+        self._held: list[dict[tuple[int, int], Any]] = [{} for _ in subscribers]
+        for slot, subscriber in enumerate(subscribers):
+            subscriber.registerCallback(lambda msg, slot=slot: self._offer(slot, msg))
+
+    def registerCallback(self, callback: Any) -> None:  # noqa: N802 (message_filters' own name)
+        self.callbacks.append(callback)
+
+    def _offer(self, slot: int, msg: Any) -> None:
+        stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
+        self._held[slot][stamp] = msg
+        if not all(stamp in held for held in self._held):
+            return
+        paired = [held.pop(stamp) for held in self._held]
+        for callback in self.callbacks:
+            callback(*paired)
+
+
 class Buffer:
     """tf2_ros.Buffer: a test fills ``transforms`` by (target, source) or sets ``error``."""
 
@@ -634,6 +682,9 @@ def install() -> Any:
             PointCloud2=PointCloud2,
             PointField=PointField,
             Imu=Imu,
+        ),
+        "message_filters": _module(
+            "message_filters", Subscriber=FilterSubscriber, TimeSynchronizer=TimeSynchronizer
         ),
         "tf2_ros": _module(
             "tf2_ros",

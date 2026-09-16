@@ -230,6 +230,22 @@ class FramePoser:
             return None
         return _compose(correction[0], on_odom)
 
+    def map_correction_age_s(self, stamp: float) -> float | None:
+        """How far the newest ``map <- odom`` edge TF holds stands from ``stamp``, in seconds
+        (negative where the edge is newer than the moment asked about), or ``None`` when TF
+        holds no such edge at all. Never waits.
+
+        A pose is only as fresh as the correction it is built on: the tracker re-broadcasts
+        that edge at 20 Hz whatever it is doing, so an edge a second old is not jitter but a
+        tracker — or a link — that has stopped, and a pose built on it is where the cart WAS.
+        What a caller writing into a map frame asks before it writes (pepin.watch.PaintTrust).
+        """
+        history = self._history
+        if not isinstance(history, RecentPoseHistory):
+            return None
+        latest = history.latest_pose(self.odom_frame, self.map_frame)
+        return None if latest is None else stamp - latest[1]
+
     def map_correction_recent(self) -> RigidPose | None:
         """The newest ``map <- odom`` TF holds: the tracker's correction itself, with no cart
         in it. It is what :meth:`map_pose_recent` is built on, and a caller keeping a window of

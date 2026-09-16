@@ -556,10 +556,14 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             "-p",
             f"map_source:={'volume' if volume_owns_map else 'file'}",
             # No tracker runs in SLAM mode, so /localization_fit never comes and a gate waiting
-            # for it fused 0 frames of the first session (2026-09-13 14:05). It stays live: the
-            # operator can put it back on with ros/flags.sh set depth_fusion fit_gate true.
+            # for it fused 0 frames of the first session (2026-09-13 14:05). Both paint paths
+            # ask the same question, so both gates travel together — the lidar's was added on
+            # 2026-09-16 and would empty a SLAM session exactly as the camera's did. They stay
+            # live: ros/flags.sh set depth_fusion fit_gate true, and lidar_fit_gate beside it.
             "-p",
             f"fit_gate:={'false' if slam else 'true'}",
+            "-p",
+            f"lidar_fit_gate:={'false' if slam else 'true'}",
         ]
         # The served map the volume's lidar layer starts as, and whose cell lattice the volume's
         # grid is snapped to. A known room is a seeded volume and nothing else — and a slice

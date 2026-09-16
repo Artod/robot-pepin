@@ -19,6 +19,7 @@ import yaml
 
 from pepin.flags import load_table
 from pepin.tsdf import GridSpec
+from pepin.watch import PAINT_SIGMA_M
 from pepin.worldmap import LidarLaw
 
 REPO = Path(__file__).resolve().parents[2]
@@ -1346,6 +1347,24 @@ def test_the_map_is_published_on_change_and_the_first_one_does_not_wait_for_the_
         "the volume owns /map only on a passing seating measurement; the live one fails it"
     )
     assert "0.01 cm" in flags.flag("map_source").why and "1.90 m" in flags.flag("map_source").why
+
+
+def test_nothing_is_painted_at_a_pose_nobody_trusts() -> None:
+    """Both paint paths ask one predicate (pepin.watch.PaintTrust) before they write, and the
+    launch turns both gates off in SLAM mode, where no tracker publishes a fit at all — with
+    either on there, the session fuses nothing (2026-09-13 14:05, the camera's own case)."""
+    node = sf.tree(f"{NODES}/depth_fusion.py")
+    assert "PaintTrust" in sf.imported(node), "the predicate is the watch's, not a local number"
+    assert "self._paint_refusal" in sf.calls(node), "asked before anything is written"
+    asked = (REPO / NODES / "depth_fusion.py").read_text().count("self._paint_refusal(")
+    assert asked == 2, "both paint paths ask it: the camera's frame and the lidar's revolution"
+    assert "/localization/sigma" in sf.strings(node), "the tracker's own sigma, where it speaks"
+    flags = load_table(REPO / NODES / "depth_fusion.py")
+    assert flags.flag("lidar_fit_gate").default is True, "a revolution is gated like a frame"
+    assert flags.flag("paint_sigma_m").default == PAINT_SIGMA_M
+    assert flags.flag("paint_sigma_m").range == (0.01, 2.0)
+    passed = sf.unparsed(sf.tree(VSLAM_LAUNCH), ast.JoinedStr)
+    assert any("lidar_fit_gate:=" in text for text in passed), "off in SLAM, like fit_gate"
 
 
 def test_the_graphs_correction_moves_the_volume_only_where_the_graph_owns_it() -> None:
