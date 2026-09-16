@@ -205,15 +205,12 @@ BOARD_PUBLISHES = (
     "tof/right",
     "tracker_pose",
     "localization_fit",
-    # How sure the tracker's fusion is, whichever source spoke into it: the one number a goal
-    # gate and a blind-drive watch read (pepin.watch). It crosses for the operator's view — the
-    # judges that matter run on the board, beside the tracker.
+    # How sure the tracker's fusion is, whichever source spoke into it (sigma_xy m, sigma_yaw
+    # deg, JSON): the one number a goal gate and a blind-drive watch read (pepin.watch), and
+    # what the laptop's fusion reads before it paints — a pose whose sigma has grown is not a
+    # pose to write a wall with (pepin.watch.PaintTrust, depth_fusion's paint_sigma_m).
     "localization/sigma",
     "localization/sources",  # every scan source's word on each update, JSON (the tracker)
-    # ...and how sure of itself the tracker is after fusing them (sigma_xy m, sigma_yaw deg,
-    # JSON). The laptop's fusion reads it before it paints: a pose whose sigma has grown is not
-    # a pose to write a wall with (pepin.watch.PaintTrust, depth_fusion's paint_sigma_m).
-    "localization/sigma",
     "local_costmap/costmap",
     "pepin/run_status",
     "neck/state",  # the neck's joint angles (pepin_bringup.neck_state); its transform rides /tf
@@ -250,8 +247,12 @@ _Names = tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]
 
 def _names_regex(names: tuple[str, ...]) -> str:
     """One anchored regex over ROS names (with their leading slash) for the bridge's allow-list.
-    No names at all is a regex no name matches: an empty list could read as "everything"."""
-    return "^/(" + "|".join(sorted(names)) + ")$" if names else "^$"
+    No names at all is a regex no name matches: an empty list could read as "everything".
+
+    Deduplicated: two branches that each added the same topic to a list left it twice in the
+    alternation (``localization/sigma|localization/sigma`` in all four configs, 2026-09-15) —
+    harmless to the regex and a lie to anyone reading the file for what crosses."""
+    return "^/(" + "|".join(sorted(set(names))) + ")$" if names else "^$"
 
 
 # The bridge's two modes. "split" (ros/thin.sh on): the board keeps the reflexes, the laptop
