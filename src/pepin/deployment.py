@@ -206,6 +206,10 @@ BOARD_PUBLISHES = (
     "tracker_pose",
     "localization_fit",
     "localization/sources",  # every scan source's word on each update, JSON (the tracker)
+    # ...and how sure of itself the tracker is after fusing them (sigma_xy m, sigma_yaw deg,
+    # JSON). The laptop's fusion reads it before it paints: a pose whose sigma has grown is not
+    # a pose to write a wall with (pepin.watch.PaintTrust, depth_fusion's paint_sigma_m).
+    "localization/sigma",
     "local_costmap/costmap",
     "pepin/run_status",
     "neck/state",  # the neck's joint angles (pepin_bringup.neck_state); its transform rides /tf
@@ -303,7 +307,13 @@ VISION_LAPTOP_PUBLISHES = (
 # and the rest are the tracker's, which does not run because nothing matches a scan against a map
 # that does not exist yet. Named, not spelled out below, so a topic added to the vision list
 # reaches SLAM mode by itself unless it is one of these.
-_NOT_IN_SLAM = ("map", "tracker_pose", "localization_fit", "localization/sources")
+_NOT_IN_SLAM = (
+    "map",
+    "tracker_pose",
+    "localization_fit",
+    "localization/sources",
+    "localization/sigma",
+)
 # The board drives exactly as in vision mode, minus those.
 SLAM_BOARD_PUBLISHES = tuple(n for n in VISION_BOARD_PUBLISHES if n not in _NOT_IN_SLAM)
 # RTAB-Map's grid is remapped onto /map in this mode (there is no second map to fight), so

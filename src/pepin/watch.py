@@ -401,3 +401,65 @@ class SourceSilence:
         if self.silent(age_s):
             return f"no source for {age_s:.1f} s"
         return f"last source {age_s:.1f} s ago"
+
+
+# How far the tracker's own ``map -> odom`` edge may stand from the moment being painted. The
+# tracker re-broadcasts it at 20 Hz whatever it is doing (pepin_bringup.relocalizer's
+# _send_map_odom, every 0.05 s), so a whole second without one is twenty missed broadcasts:
+# the tracker, or the link that carries it, has stopped. Painting under a frozen edge is
+# painting the room where the cart WAS.
+PAINT_EDGE_FRESH_S = 1.0
+# ...and how sure the tracker must be of itself, in metres, where it publishes a sigma at all
+# (/localization/sigma, its post-fusion covariance). A voxel is 5 cm: at 10 cm of standard
+# deviation a wall is written within two voxels of where it stands, which the surface averages
+# out; at half a metre it is written into the room.
+PAINT_SIGMA_M = 0.10
+
+
+@dataclass(frozen=True)
+class PaintTrust:
+    """Whether the tracker's pose may be painted into the world model right now.
+
+    The volume is painted in the MAP frame: every voxel written while the pose is wrong is
+    written in the wrong place, and a TSDF cannot be un-integrated. Measured on 2026-09-15,
+    when the laptop's routes from the board died mid-session and the fusion went on integrating
+    revolutions at the last pose TF held: the live volume kept 52.9 % of the saved map's walls,
+    carved 2070 of them free, and the tracker replayed on its slice seated a median 1.90 m from
+    where the file put it (scratch/volume_vs_file_seating.py).
+
+    Four questions, in the order they can be answered without the previous one: is the fit good
+    enough to drive on, was it MEASURED recently (a fit that stopped arriving keeps its last
+    good value for ever — the failure above), is the tracker's own sigma small enough where it
+    publishes one, and is the correction TF stands on fresh enough to place this moment.
+    """
+
+    drive_fit: float = DRIVE_FIT
+    patience_s: float = SOURCE_PATIENCE_S
+    max_sigma_xy_m: float = PAINT_SIGMA_M
+    edge_fresh_s: float = PAINT_EDGE_FRESH_S
+
+    def refusal(
+        self,
+        fit: float,
+        fit_age_s: float,
+        sigma_xy_m: float | None = None,
+        edge_age_s: float | None = None,
+    ) -> str | None:
+        """``None`` when the pose may be painted with, else the phrase a report line says.
+
+        ``sigma_xy_m`` and ``edge_age_s`` are ``None`` where nobody said — no sigma on the wire,
+        no ``map -> odom`` edge in TF at all — and an absent sigma is not a refusal (the fit
+        gate is the whole test until that topic exists), while an absent edge is: a pose cannot
+        be placed on a correction that is not there.
+        """
+        if fit_age_s > self.patience_s:
+            return f"the fit stopped {fit_age_s:.1f} s ago"
+        if fit < self.drive_fit:
+            return f"fit {fit:.2f} under {self.drive_fit:.2f}"
+        if sigma_xy_m is not None and sigma_xy_m > self.max_sigma_xy_m:
+            return f"sigma {sigma_xy_m:.2f} m over {self.max_sigma_xy_m:.2f} m"
+        if edge_age_s is None:
+            return "no map -> odom edge"
+        if abs(edge_age_s) > self.edge_fresh_s:
+            return f"the map -> odom edge is {edge_age_s:.1f} s from the scan"
+        return None

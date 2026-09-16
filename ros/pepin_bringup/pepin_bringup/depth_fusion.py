@@ -84,8 +84,23 @@ The grid never moves, nothing is re-seeded and nothing extra is published: the t
 SLAM mode, where the graph owns that edge — on a known map the board's tracker owns it, the
 served map is the reference, and the volume stands still whatever the flag says.
 
+NOTHING IS PAINTED AT A POSE NOBODY TRUSTS. The volume is written in the MAP frame and a TSDF
+cannot be un-integrated, so an observation placed by a wrong pose does not add noise — it
+deletes the room. Both paint paths therefore ask the same question before they write
+(:class:`pepin.watch.PaintTrust`, flags ``fit_gate`` for the camera and ``lidar_fit_gate`` for
+the lidar): the fit is at ``DRIVE_FIT`` or better, it was HEARD within the source patience, the
+tracker's own ``sigma_xy`` is within ``paint_sigma_m`` where it publishes one
+(``/localization/sigma``), and the ``map -> odom`` edge the pose is built on is within a second
+of the observation. Anything else is withheld and counted, with the reason in the report line.
+Until 2026-09-16 only the camera was asked and only about the number: a fit that stops arriving
+keeps its last good value here for ever, and when the laptop's routes from the board died at
+19:17 on 2026-09-15 the fusion went on integrating revolutions at a frozen pose — the snapshot
+that session ended with keeps 52.9 % of the saved map's walls and has carved 2070 of them free
+(scratch/volume_vs_file_seating.py).
+
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
-``fit_gate``, ``imu_lean``, ``lean_gate_deg``, ``lean_min_quality``, ``self_heal``, ``align``,
+``fit_gate``, ``lidar_fit_gate``, ``paint_sigma_m``, ``imu_lean``, ``lean_gate_deg``,
+``lean_min_quality``, ``self_heal``, ``align``,
 ``min_weight``, ``map_min_weight``, ``camera_map_min_weight``, ``lidar_map``, ``surface_hz``,
 ``band_half_z``, ``lidar_layer``, ``no_return_free``, ``map_source``, ``map_hz``, ``snapshot_s``,
 ``resume_volume``, ``follow_correction``, ``follow_correction_min_m``,
@@ -97,6 +112,7 @@ centred on.
 
 from __future__ import annotations
 
+import json
 import math
 import threading
 import time
@@ -110,7 +126,7 @@ from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
 from pepin.deployment import map_owner
@@ -128,7 +144,7 @@ from pepin.tsdf import (
     backproject,
     band_half_z_m,
 )
-from pepin.watch import DRIVE_FIT
+from pepin.watch import DRIVE_FIT, PAINT_SIGMA_M, SOURCE_PATIENCE_S, PaintTrust
 from pepin.worldmap import (
     CorrectionFollower,
     LidarLaw,
@@ -164,6 +180,7 @@ WORLD_PATH = "/maps/world_live.npz"  # the volume's snapshot; ros/maps is mounte
 CAMERA_MAP_TOPIC = "/map_camera"  # the camera's band of the volume, for its own matcher
 LIDAR_MAP_TOPIC = "/map_lidar"  # the volume's own lidar layer, for the board's tracker
 SCAN_TOPIC = "/scan"
+SIGMA_TOPIC = "/localization/sigma"  # the tracker's post-fusion sigma, JSON; may never come
 TF_WAIT_S = 0.3
 BAND_TF_WAIT_S = 5.0  # the static base_link -> laser edge at start: the board publishes it once
 PAIR_QUEUE = 40  # depth arrives a fraction of a second after its image; pair by exact stamp
@@ -188,9 +205,14 @@ FLAGS = FlagSet(
     Flag(
         "fit_gate",
         True,
-        description="frames are fused only while the tracker reports /localization_fit >= 0.50;"
-        " off, every frame is fused",
-        why="where a tracker speaks, and the off state is measured: in the first online-SLAM"
+        description="camera frames are fused only while the tracker's pose is trusted"
+        " (pepin.watch.PaintTrust: /localization_fit >= 0.50, HEARD within the source patience,"
+        " sigma_xy <= paint_sigma_m where a sigma is published, and a map -> odom edge within a"
+        " second of the frame); off, every frame is fused",
+        why="a fit that STOPS arriving leaves its last good value in this node for ever, so the"
+        " gate asks when it was heard as well as what it said: the session whose routes died at"
+        " 19:17 on 2026-09-15 went on fusing at a frozen pose for hours. Otherwise: where a"
+        " tracker speaks, and the off state is measured: in the first online-SLAM"
         " session, where nobody publishes /localization_fit and the gate had to come off, the"
         " fused floor came out rough — offset +4.7 cm, sd 5.5 cm, 34 % within 3 cm at a tilt of"
         " 0.61 deg — against sd 3.3 cm and 71 % within 3 cm in the known-map mode with a"
@@ -202,6 +224,55 @@ FLAGS = FlagSet(
         off_when="in SLAM mode, where RTAB-Map owns the pose and no tracker speaks — with the"
         " gate on nothing is ever fused there. vslam.launch.py passes fit_gate:=false in that"
         " mode, so nobody has to remember it at the start of a session",
+    ),
+    Flag(
+        "lidar_fit_gate",
+        True,
+        description="lidar revolutions are integrated only while the tracker's pose is trusted —"
+        " the very test fit_gate applies to a camera frame (pepin.watch.PaintTrust); off, every"
+        " revolution is integrated at whatever pose TF gives, which is what this node did until"
+        " 2026-09-16. A withheld revolution is counted and never painted",
+        why="measured by its absence, on the volume itself. A revolution places a wall and"
+        " carves free space along its beams, in the MAP frame, and a TSDF cannot be"
+        " un-integrated — so a revolution written at a wrong pose does not add noise, it deletes"
+        " the room. The camera path has been gated since the beginning and the lidar path never"
+        " was; on 2026-09-15 the laptop's routes from the board died at 19:17 and the fusion"
+        " went on integrating at the last pose TF held, and the snapshot at the end of that"
+        " session keeps 52.9 % of the saved map's walls, has carved 2070 of them free, and the"
+        " node's own tracker replayed on its slice seats a median 1.90 m from where the file"
+        " puts it, re-seating 3.7-3.8 m off on two of four tapes"
+        " (scratch/volume_vs_file_seating.py). That measurement is also what keeps map_source at"
+        " file; this gate is the half of the cure that is in this node. What it costs a HEALTHY"
+        " drive was measured too, on the same four tapes with the predicate applied to every"
+        " recorded revolution (scratch/paint_gate_on_a_tape.py): 452 of 10048 withheld, 4.5 %,"
+        " and that is an upper bound — 439 of them are the recorded pose's own gap (the tape"
+        " carries the tracker's pose at about 2 Hz while the node reads a map -> odom edge"
+        " broadcast at 20 Hz), leaving 13 revolutions, 0.13 %, where the tracker really had gone"
+        " quiet past the source patience. Not one revolution of the four drives was refused for"
+        " a LOW fit: a drive the stack was willing to make paints as it always did",
+        on_when="the default, wherever a tracker publishes a fit: the volume then holds only"
+        " what was seen from a pose the stack was willing to drive on",
+        off_when="in SLAM mode, where no tracker speaks and the gate would integrate nothing at"
+        " all (vslam.launch.py passes lidar_fit_gate:=false there, as it does fit_gate) — and to"
+        " reproduce the old behaviour for a comparison, on a volume nobody will navigate on",
+    ),
+    Flag(
+        "paint_sigma_m",
+        PAINT_SIGMA_M,
+        description="how sure of itself the tracker must be, in metres of sigma_xy, before this"
+        " node paints with its pose — read from /localization/sigma, and ignored entirely while"
+        " nothing publishes that topic (the fit gate stands on its own until it exists)",
+        why="default by design, unmeasured, and chosen against the voxel: the grid is 5 cm, so"
+        " 10 cm of standard deviation puts a wall within two voxels of where it stands and the"
+        " surface averages that out, while half a metre writes it into the room. The fit says"
+        " how well the last scan matched, the sigma says how well the tracker knows where it is"
+        " after fusing everything it has — a lidar-starved tracker riding the odometry can hold"
+        " a good fit for a while and a sigma that grows the whole time",
+        on_when="raise it in a room where the tracker is honestly less sure and the volume is"
+        " being built anyway (an unmapped corner, a first pass)",
+        off_when="lower it for a mapping run whose product must be exact: fewer frames, all of"
+        " them from a pose the tracker was certain of",
+        range=(0.01, 2.0),
     ),
     Flag(
         "camera_map",
@@ -711,6 +782,10 @@ class DepthFusion(Node):
         self._pub = self.create_publisher(PointCloud2, "/fusion/surface", reliable)
         self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
         self.create_subscription(Float32, "/localization_fit", self._on_fit, reliable)
+        # How sure the tracker is of itself, beside how well its last scan fitted: JSON on
+        # the tracker's own topic (sigma_xy metres, sigma_yaw degrees). Nobody may publish
+        # it yet, and the gate below works without it — an absent sigma is not a refusal.
+        self.create_subscription(String, SIGMA_TOPIC, self._on_sigma, reliable)
         self.create_service(Trigger, "/fusion/reset", self._on_reset)
         # the depth copies the image's header, so the pair has one exact stamp; the synchronizer
         # keeps PAIR_QUEUE of each and calls back under its own lock, on the executor thread
@@ -738,6 +813,9 @@ class DepthFusion(Node):
         self._gate = LeanGate(float(self._switches["lean_gate_deg"]))
         self._intr: Intrinsics | None = None
         self._fit = 0.0  # no report yet reads as lost: every gate here compares with <
+        self._fit_at = -math.inf  # ...and WHEN it was heard: a fit that stopped is not a fit
+        self._sigma_xy_m: float | None = None  # the tracker's own, while it publishes one
+        self._sigma_at = -math.inf
         self._lock = threading.Lock()  # the model and its last stamp, worker vs publisher
         self._world = WorldMap(self._spec, self._mount)
         self._last_stamp: Any = None  # the last fused frame's header stamp, the board's clock
@@ -982,7 +1060,22 @@ class DepthFusion(Node):
         self._intr = Intrinsics.from_camera_info(msg.k, msg.width, msg.height)
 
     def _on_fit(self, msg: Float32) -> None:
+        """The tracker's scan-to-map fit, and the moment it was heard: a topic that stops
+        arriving leaves the last good number behind, and painting on that is what emptied the
+        volume on 2026-09-15."""
         self._fit = float(msg.data)
+        self._fit_at = time.monotonic()
+
+    def _on_sigma(self, msg: String) -> None:
+        """The tracker's post-fusion sigma as JSON (``sigma_xy`` metres, ``sigma_yaw``
+        degrees). A message this node cannot read is counted and ignored — the fit gate stands
+        on its own, and a malformed sigma may not stop the room being painted."""
+        try:
+            self._sigma_xy_m = float(json.loads(msg.data)["sigma_xy"])
+        except (ValueError, TypeError, KeyError):
+            self._tally.count("bad_sigma")
+            return
+        self._sigma_at = time.monotonic()
 
     def _on_pair(self, depth: Image, image: Image) -> None:
         """A depth frame with its picture, same stamp: the newest pair waits for the worker,
@@ -1028,6 +1121,11 @@ class DepthFusion(Node):
         if not self._gate.admits(self._poser.lean_at(at)):
             self._tally.count("leaned_out")
             return
+        if self._switches.on("lidar_fit_gate"):
+            refusal = self._paint_refusal(at)
+            if refusal is not None:
+                self._withhold("untrusted", refusal)
+                return  # a revolution painted at a pose nobody trusts carves the room away
         angles, ranges = scan_arrays(msg)
         with self._tally.measure("scan"), self._lock:
             self._world.law = self._law()
@@ -1038,6 +1136,31 @@ class DepthFusion(Node):
         self._tally.count("scan_voxels", touched)
         if self._snapshots.due(time.monotonic()) and self._switches["snapshot_s"] > 0.0:
             self._snapshot()
+
+    def _paint_refusal(self, at: float) -> str | None:
+        """Why the tracker's pose may not be painted into the model at ``at``, or ``None`` when
+        it may: :class:`pepin.watch.PaintTrust` over the fit this node last HEARD, the tracker's
+        own sigma where it publishes one, and the age of the ``map -> odom`` edge the pose is
+        built on. Both paint paths ask it — a revolution places a wall exactly as a camera frame
+        does, and until 2026-09-15 only the camera was asked."""
+        now = time.monotonic()
+        # A sigma nobody has refreshed is no sigma: the topic can die while its last small
+        # number sits here, and a frozen number must not hold the gate open. The fit's own
+        # freshness would catch the same silence — both come from the tracker — but a feed is
+        # only evidence while it speaks, so it is dropped here rather than relied on there.
+        fresh_sigma = self._sigma_xy_m if now - self._sigma_at <= SOURCE_PATIENCE_S else None
+        return PaintTrust(max_sigma_xy_m=float(self._switches["paint_sigma_m"])).refusal(
+            fit=self._fit,
+            fit_age_s=now - self._fit_at,
+            sigma_xy_m=fresh_sigma,
+            edge_age_s=self._poser.map_correction_age_s(at),
+        )
+
+    def _withhold(self, kind: str, refusal: str) -> None:
+        """Count one observation the pose was not good enough to paint with, and keep the last
+        reason for the report line."""
+        self._tally.count(kind)
+        self._tally.note(kind, refusal)
 
     def _law(self) -> LidarLaw:
         """How a beam writes into the volume right now: the defaults with the live flags in
@@ -1147,9 +1270,11 @@ class DepthFusion(Node):
         if msg.header.frame_id != self._poser.camera:
             self._tally.count("bad_frame")  # not the camera the poser places
             return
-        if self._switches.on("fit_gate") and self._fit < DRIVE_FIT:
-            self._tally.count("low_fit")
-            return
+        if self._switches.on("fit_gate"):
+            refusal = self._paint_refusal(stamp_seconds(msg.header.stamp))
+            if refusal is not None:
+                self._withhold("low_fit", refusal)
+                return
         stamp = msg.header.stamp
         at = stamp_seconds(stamp)
         camera = self._poser.camera_in_map(at)
@@ -1367,7 +1492,7 @@ class DepthFusion(Node):
         w = self._tally.take()
         c = w.counts
         skipped = (
-            f"low fit {c['low_fit']}, at bound {c['refused_at_bound']},"
+            f"pose not trusted {c['low_fit']}, at bound {c['refused_at_bound']},"
             f" self-heals {c['self_heals']}, unleaned {c['unleaned']},"
             f" leaned out {c['leaned_out']},"
             f" no tf {c['no_tf']}, bad frame {c['bad_frame']}, no intrinsics {c['no_intrinsics']}"
@@ -1405,8 +1530,23 @@ class DepthFusion(Node):
         )
         return (
             f"world: {c['revolutions']} revolutions ({c['scans_dropped']} dropped,"
-            f" {w.ms_per('scan', 'revolutions'):.0f} ms), {text}; /map from {source};"
-            f" {lidar_map}; snapshot {'never' if age == math.inf else f'{age:.0f} s old'}"
+            f" {w.ms_per('scan', 'revolutions'):.0f} ms), {self._withheld_line(w)}, {text};"
+            f" /map from {source}; {lidar_map};"
+            f" snapshot {'never' if age == math.inf else f'{age:.0f} s old'}"
+        )
+
+    def _withheld_line(self, w: Window) -> str:
+        """What the pose gate kept out of the volume this period: how many revolutions were
+        withheld, the last reason, and the sigma the tracker is publishing — or that nobody is."""
+        if not self._switches.on("lidar_fit_gate"):
+            return "lidar revolutions withheld: gate off (every revolution is painted)"
+        reason = w.notes.get("untrusted", "")
+        told = self._sigma_xy_m
+        sigma = f"sigma {told:.2f} m" if told is not None else f"no {SIGMA_TOPIC}"
+        return (
+            f"lidar revolutions withheld: {int(w.counts['untrusted'])}"
+            + (f" (pose not trusted: {reason})" if reason else " (pose not trusted)")
+            + f", {sigma}"
         )
 
     def _follow_line(self, w: Window) -> str:

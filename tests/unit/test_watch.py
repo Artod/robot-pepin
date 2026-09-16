@@ -9,6 +9,8 @@ from pepin.watch import (
     CORRECTION_FRESH_S,
     DRIVE_FIT,
     LOST_FIT,
+    PAINT_EDGE_FRESH_S,
+    PAINT_SIGMA_M,
     PROVISIONAL_FIT_CAP,
     SOURCE_PATIENCE_S,
     TF_FRESH_S,
@@ -16,6 +18,7 @@ from pepin.watch import (
     Correction,
     GoalGate,
     LostWatch,
+    PaintTrust,
     Readiness,
     SourceSilence,
     Verdict,
@@ -317,3 +320,35 @@ def test_the_switch_off_reports_the_silence_and_publishes_the_fit_anyway() -> No
     assert silence.reported(0.70, 141.0) == 0.70
     assert silence.silent(141.0) and not silence.held_at_zero(141.0)
     assert silence.phrase(141.0) == "no source for 141.0 s"
+
+
+def test_a_pose_is_painted_with_only_while_every_half_of_it_holds() -> None:
+    """What may be written into a map frame. The volume is painted in map coordinates and a TSDF
+    cannot be un-integrated, so each half is a veto: the fit, WHEN it was measured, the tracker's
+    own sigma where it publishes one, and the age of the correction the pose stands on."""
+    trust = PaintTrust()
+    assert trust.refusal(fit=0.90, fit_age_s=0.1, edge_age_s=0.05) is None
+
+    assert "fit 0.31" in (trust.refusal(fit=0.31, fit_age_s=0.1, edge_age_s=0.0) or "")
+    # The failure of 2026-09-15: the topic stopped and the last good number stayed behind.
+    stopped = trust.refusal(fit=0.90, fit_age_s=141.0, edge_age_s=0.0) or ""
+    assert stopped == "the fit stopped 141.0 s ago"
+    assert trust.refusal(fit=0.90, fit_age_s=SOURCE_PATIENCE_S + 0.1, edge_age_s=0.0) is not None
+
+    wide = trust.refusal(fit=0.90, fit_age_s=0.1, sigma_xy_m=0.42, edge_age_s=0.0) or ""
+    assert wide == "sigma 0.42 m over 0.10 m"
+    assert trust.refusal(fit=0.90, fit_age_s=0.1, sigma_xy_m=PAINT_SIGMA_M, edge_age_s=0.0) is None
+
+
+def test_an_absent_sigma_is_no_refusal_and_an_absent_correction_is() -> None:
+    """Nothing publishes /localization/sigma yet, and the gate must work without it — while a
+    pose cannot be placed at all on a correction TF does not hold, and one nobody has refreshed
+    for a second places the cart where it WAS."""
+    trust = PaintTrust()
+    assert trust.refusal(fit=0.90, fit_age_s=0.1, sigma_xy_m=None, edge_age_s=0.0) is None
+    assert trust.refusal(fit=0.90, fit_age_s=0.1, edge_age_s=None) == "no map -> odom edge"
+    stale = trust.refusal(fit=0.90, fit_age_s=0.1, edge_age_s=PAINT_EDGE_FRESH_S + 0.5) or ""
+    assert stale == "the map -> odom edge is 1.5 s from the scan"
+    # An edge NEWER than the scan is just as far from it: a pose is placed by a correction that
+    # covers the moment, whichever side of it the correction sits.
+    assert trust.refusal(fit=0.90, fit_age_s=0.1, edge_age_s=-2.0) is not None
