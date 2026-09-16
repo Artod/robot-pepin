@@ -3,7 +3,7 @@
 A differential-drive indoor cart that drives itself to a named place on a saved map —
 localisation, planning, control and recording all on a $35 single-board computer.
 
-![Pepin navigating: lidar scan on the map, ToF marks, local costmap and the tracked pose in Foxglove](docs/figures/nav_live.png)
+![Pepin sees the room: the camera's coloured voxels over the lidar's map, the tracked pose and the sensor frames in Foxglove](docs/figures/voxels_live.png)
 
 *One goal in flight: the static map underneath, the live scan on top of it, the three ToF cones
 marked into the local costmap, and the pose the scan matcher is holding.*

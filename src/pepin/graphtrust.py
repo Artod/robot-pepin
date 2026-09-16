@@ -99,6 +99,11 @@ FILE_ANCHOR_TRUST = 0.3
 # minutes at 0.3 m/s is some 30 m of travel -- six decay lengths of :data:`GRAPH_TRUST_M`, past
 # which the 0.79 m / 31 deg per 25 m the EKF odometry drifts has made the segment its own map.
 RECOGNITION_MAX_S = 120.0
+# The driving clock charges only for real travel. RTAB-Map's distance counter creeps by
+# millimetres while the cart is parked (its own odometry's jitter), and charging on that turned
+# "seconds of driving" into "seconds since start": 3648 s were counted over two minutes of
+# driving on 2026-09-16, which expired a healthy recognition and withheld every word.
+MOVED_EPS_M = 0.01  # a distance step under this is jitter, not a drive
 # The residual at which a word is worth 1/e of itself when its trust is judged by AGREEMENT.
 # 10 cm is the scale a graph word has when it is working: over tapes 0275/0276 the word sat
 # 0.7-0.8 cm from the lidar truth while driving and 0-8 cm at rest, and 2.2-3.2 cm over a
@@ -397,7 +402,7 @@ class Recognition:
             if previous is not None and distance < previous:
                 self._restart()
             else:
-                moved = previous is not None and distance > previous
+                moved = previous is not None and distance > previous + MOVED_EPS_M
             self._travelled = distance
         if moved and self._last_at is not None:
             self._driving_s += max(now - self._last_at, 0.0)
