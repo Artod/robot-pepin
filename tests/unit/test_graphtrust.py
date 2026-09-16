@@ -11,6 +11,7 @@ import pytest
 
 from pepin.graphtrust import (
     ACCEPTED_HYPOTHESIS_ID,
+    AGREEMENT_SCALE_M,
     DISTANCE_TRAVELLED_M,
     FILE_ANCHOR_TRUST,
     GRAPH_TRUST_M,
@@ -18,7 +19,11 @@ from pepin.graphtrust import (
     LOOP_ID,
     PROXIMITY_ICP,
     PROXIMITY_VISUAL,
+    RECOGNITION_MAX_S,
+    Agreement,
     GraphTrust,
+    InfoIds,
+    Recognition,
     stat,
 )
 from pepin.watch import ADMIT_FIT
@@ -168,3 +173,83 @@ def test_statistics_a_message_does_not_carry_leave_the_clock_where_it_was() -> N
     trust.update({PROXIMITY_ICP: 0.0})
     assert trust.since_m == pytest.approx(4.0)
     assert trust.report().hypothesis == pytest.approx(0.5)
+
+
+def test_recognition_is_a_tie_to_the_database_and_not_to_this_start_s_own_nodes() -> None:
+    """The predicate tape 0333 needed. RTAB-Map restarted all day and recognised nothing against
+    the database it loaded, so its new nodes formed an unlinked segment placed by that session's
+    odometry — and closures INSIDE the segment kept the old clock happy while every word was a
+    metre out. A match is only a match when the node matched is older than this start's first."""
+    recognition = Recognition()
+    assert recognition.recognised is False, "nothing is recognised before anything is said"
+
+    assert recognition.update(info(0.0), InfoIds(ref_id=2000), 0.0) is False
+    assert recognition.update(info(0.5), InfoIds(ref_id=2040, loop_closure_id=2011), 1.0) is False
+    assert recognition.recognised is False, "a closure inside the new segment is odometry twice"
+
+    assert recognition.update(info(1.0), InfoIds(ref_id=2050, loop_closure_id=41), 2.0) is True
+    assert recognition.recognised is True and recognition.matches == 1
+    report = recognition.report(withheld=19)
+    assert "recognised on node 41, 0 s of driving ago (1 matches)" in report.text()
+
+    proximity = Recognition()
+    proximity.update(info(0.0), InfoIds(ref_id=2000), 0.0)
+    assert proximity.update(info(0.0), InfoIds(ref_id=2001, proximity_detection_id=77), 1.0)
+    assert proximity.recognised is True, "a proximity link to the database is a place found too"
+
+    localized = Recognition()
+    assert localized.update(info(0.0), InfoIds(ref_id=2000, localized=True), 0.0) is True
+
+
+def test_a_recognition_expires_on_driving_seconds_and_a_restart_forgets_it() -> None:
+    """Standing at the charger does not move the cart away from the place it recognised, so the
+    expiry counts only the messages RTAB-Map's own distance counter grew in. A counter that FALLS
+    is a new session whose nodes are placed by the odometry again: it has recognised nothing."""
+    recognition = Recognition()
+    recognition.update(info(0.0), InfoIds(ref_id=2000, loop_closure_id=41), 0.0)
+    assert recognition.recognised is True
+
+    recognition.update(info(0.0), InfoIds(ref_id=2000), 3600.0)  # an hour, counter still
+    assert recognition.driving_s == 0.0 and recognition.recognised is True
+
+    recognition.update(info(4.0), InfoIds(ref_id=2100), 3600.0 + RECOGNITION_MAX_S - 1.0)
+    assert recognition.recognised is True, "119 s of driving is inside the patience"
+    recognition.update(info(9.0), InfoIds(ref_id=2200), 3600.0 + RECOGNITION_MAX_S + 80.0)
+    assert recognition.recognised is False
+    assert "recognition stale: 200 s of driving since node 41" in recognition.report(3).text()
+
+    recognition.update(info(0.2), InfoIds(ref_id=2300), 4000.0)  # RTAB-Map restarted
+    assert recognition.starts == 1 and recognition.matches == 0
+    assert "unrecognised since start: 3 words withheld" in recognition.report(3).text()
+
+
+def test_the_agreement_trust_follows_the_words_and_forgets_them_after_the_window() -> None:
+    """What a word is worth while it is being said, rather than however many metres ago the last
+    closure was: a word that tracks the tracker's odometry-propagated pose to the centimetre is
+    worth everything, and one a metre out is worth nothing from its first appearance."""
+    agreement = Agreement()
+    assert agreement.rms() is None and agreement.trust() == pytest.approx(1.0)
+
+    for moment in (0.0, 0.5, 1.0):
+        agreement.add(moment, 0.01)
+    assert agreement.rms() == pytest.approx(0.01)
+    assert agreement.trust() == pytest.approx(math.exp(-0.1))
+
+    agreement.add(1.5, 1.0)  # the frame slips a metre under the cart
+    assert agreement.trust() < 0.05, "one word that far out already costs the graph its vote"
+
+    agreement.add(20.0, 0.0)  # ...and ten seconds later nothing older is evidence
+    assert agreement.rms(20.0) == pytest.approx(0.0)
+    assert agreement.trust(20.0) == pytest.approx(1.0)
+    assert agreement.count == 1
+
+
+def test_the_agreement_window_keeps_only_its_last_words() -> None:
+    """The window is the last ten words as well as the last ten seconds: a graph publishing fast
+    must not be vouched for by what it said a hundred words ago."""
+    agreement = Agreement()
+    for step in range(30):
+        agreement.add(0.01 * step, 1.0 if step < 20 else 0.0)
+    assert agreement.count == 10 and agreement.rms() == pytest.approx(0.0)
+    assert agreement.trust() == pytest.approx(1.0)
+    assert Agreement(scale_m=AGREEMENT_SCALE_M).trust() == pytest.approx(1.0)

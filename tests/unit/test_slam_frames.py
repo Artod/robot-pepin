@@ -28,12 +28,23 @@ class _MapGraph:
 
 
 class _Info:
-    """rtabmap_msgs/Info as the laptop's node reads it: RTAB-Map's statistics table, the keys
-    and the values in two parallel arrays."""
+    """rtabmap_msgs/Info as the laptop's node reads it: RTAB-Map's statistics table (the keys
+    and the values in two parallel arrays) and the graph ids of the message — the node it is
+    building now and the node a closure or a proximity link matched, which is what tells a tie
+    to the loaded database from a tie inside this start's own segment."""
 
-    def __init__(self, stats: dict[str, float]) -> None:
+    def __init__(
+        self,
+        stats: dict[str, float],
+        ref_id: int = 0,
+        loop_closure_id: int = 0,
+        proximity_detection_id: int = 0,
+    ) -> None:
         self.stats_keys = list(stats)
         self.stats_values = [float(value) for value in stats.values()]
+        self.ref_id = ref_id
+        self.loop_closure_id = loop_closure_id
+        self.proximity_detection_id = proximity_detection_id
 
 
 sys.modules.setdefault("rtabmap_msgs", types.ModuleType("rtabmap_msgs"))
@@ -90,18 +101,35 @@ def _belief(
     node.subs["/tracker_pose"][1](msg)
 
 
-def _info(node: Any, travelled: float, loop: float = 0.0, hypothesis: float = 0.0) -> None:
+def _info(
+    node: Any,
+    travelled: float,
+    loop: float = 0.0,
+    hypothesis: float = 0.0,
+    ref: int = 0,
+) -> None:
     """One /rtabmap/info into the node: how far RTAB-Map's odometry has travelled, whether this
-    message tied the present to an older node, and how close the last hypothesis came."""
+    message tied the present to an older node and which one, how close the last hypothesis came,
+    and which node RTAB-Map is building now (``ref``: everything below this start's first is a
+    node of the database it loaded)."""
     node.subs[rtabmap_frame.INFO_TOPIC][1](
         _Info(
             {
                 "Memory/Distance_travelled/m": travelled,
                 "Loop/Id/": loop,
                 "Loop/Highest_hypothesis_value/": hypothesis,
-            }
+            },
+            ref_id=ref,
+            loop_closure_id=int(loop),
         )
     )
+
+
+def _recognise(node: Any, travelled: float = 0.0, ref: int = 2000) -> None:
+    """RTAB-Map matching a node of the database it LOADED (id 41, far below the 2000 this start
+    began at): the predicate every word and every anchor re-learn rides on
+    (graph_words_need_recognition)."""
+    _info(node, travelled, loop=41.0, hypothesis=0.8, ref=ref)
 
 
 def _xy(message: Any) -> tuple[float, float]:
@@ -191,6 +219,7 @@ def test_the_graph_s_word_is_where_the_graph_puts_the_cart_on_the_map() -> None:
 
     with ros_stubs.parameters(graph_measurement=True):
         node = rtabmap_frame.RtabmapFrame()
+        _recognise(node)  # RTAB-Map knows where on the database it is: the words may travel
         _odom(node, 0.2, 0.0)
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
         assert not node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent, "no belief to anchor to yet"
@@ -389,6 +418,7 @@ def test_a_stored_anchor_lets_the_graph_speak_before_the_tracker_does(tmp_path: 
         node = rtabmap_frame.RtabmapFrame()
         _map(node)
         assert node._anchor is not None, "adopted the moment the served map is known"
+        _recognise(node)  # ...and the camera has found a place the database knows
         _odom(node, 0.2, 0.0)
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
     (sent,) = node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent
@@ -420,6 +450,7 @@ def test_the_stored_anchor_is_re_learned_only_on_evidence_that_holds(tmp_path: A
     with ros_stubs.parameters(anchor_dir=str(tmp_path)):
         node = rtabmap_frame.RtabmapFrame()
         _map(node)
+        _recognise(node)  # the graph is on the map it loaded: an anchor may be re-learned
         _belief(node, 1.0, 2.0)
         _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
         _odom(node, 0.2, 0.0)
@@ -455,6 +486,7 @@ def test_the_re_learn_can_be_switched_off_in_the_field(tmp_path: Any) -> None:
     with ros_stubs.parameters(anchor_dir=str(tmp_path), anchor_relearn=False):
         node = rtabmap_frame.RtabmapFrame()
         _map(node)
+        _recognise(node)
         _belief(node, 1.0, 2.0)
         _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
         _odom(node, 0.2, 0.0)
@@ -476,6 +508,7 @@ def test_the_word_the_fusion_cannot_use_goes_out_as_a_candidate(tmp_path: Any) -
     with ros_stubs.parameters(anchor_dir=str(tmp_path)):
         node = rtabmap_frame.RtabmapFrame()
         _map(node)
+        _recognise(node)
         _fit(node, 0.9, at=5.0)  # the lidar is driving and the board is talking to us
         _belief(node, 1.0, 2.0)
         _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
@@ -512,6 +545,7 @@ def test_a_word_the_tracker_can_confirm_asks_for_nothing(tmp_path: Any) -> None:
     with ros_stubs.parameters(anchor_dir=str(tmp_path)):
         node = rtabmap_frame.RtabmapFrame()
         _map(node)
+        _recognise(node)
         _belief(node, 1.0, 2.0)
         _fit(node, 0.7, at=0.0)  # the sharp seating the anchor is learned off
         _odom(node, 0.2, 0.0)
@@ -530,6 +564,7 @@ def test_the_candidate_channel_can_be_switched_off(tmp_path: Any) -> None:
     with ros_stubs.parameters(anchor_dir=str(tmp_path), graph_candidates=False):
         node = rtabmap_frame.RtabmapFrame()
         _map(node)
+        _recognise(node)
         _belief(node, 1.0, 2.0)
         _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
         _odom(node, 0.2, 0.0)
@@ -539,12 +574,13 @@ def test_the_candidate_channel_can_be_switched_off(tmp_path: Any) -> None:
     assert node._refused == 1, "refused as before, and now it is the end of the road again"
 
 
-def test_the_word_s_fit_is_what_the_graph_has_recognised() -> None:
+def test_the_word_s_fit_can_be_the_distance_since_the_graph_s_last_tie() -> None:
     """The hole the carry test of 2026-09-14 found: the graph recognised nothing for 64 s, its
     word was the old anchor plus odometry, and it still claimed fit 1.00 — so the board
-    published 1.00 as its own confidence and goto drove on a belief 1.5-2 m wrong. The word now
-    carries what the GRAPH knows: 1.0 at a tie to an older node, decaying with the metres driven
-    since (pepin.graphtrust), and the whole-map candidate floor and the lost ladder act on it."""
+    published 1.00 as its own confidence and goto drove on a belief 1.5-2 m wrong. The answer of
+    that day, still one flag away (graph_trust=distance): 1.0 at a tie to an older node, decaying
+    with the metres driven since (pepin.graphtrust), and the whole-map candidate floor and the
+    lost ladder act on it."""
     import json
 
     from pepin.graphtrust import FILE_ANCHOR_TRUST
@@ -554,7 +590,9 @@ def test_the_word_s_fit_is_what_the_graph_has_recognised() -> None:
         sent = node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent[-1]
         return dict(json.loads(sent.data))
 
-    with ros_stubs.parameters(graph_measurement=True):
+    with ros_stubs.parameters(
+        graph_measurement=True, graph_trust="distance", graph_words_need_recognition=False
+    ):
         node = rtabmap_frame.RtabmapFrame()
         node._map_id = "flat3"
         _belief(node, 1.0, 2.0)
@@ -581,7 +619,7 @@ def test_the_word_s_fit_is_what_the_graph_has_recognised() -> None:
         node.timers[1][1]()
         report = node.logger.texts("info")[-1]
         assert "graph 1.00 trust, 0.0 m since tie 1, hypothesis 0.81 over 4 infos" in report
-        assert "graph_trust=on" in report
+        assert "graph_trust=distance" in report
 
 
 def test_a_wake_up_word_is_a_guess_until_the_graph_recognises_something(tmp_path: Any) -> None:
@@ -595,7 +633,9 @@ def test_a_wake_up_word_is_a_guess_until_the_graph_recognises_something(tmp_path
     from pepin.odometry import Pose2D
 
     save_anchor(tmp_path, Anchor(Pose2D(0.8, 2.0, 0.0), "3x4@1.00,2.00", origin="learned"))
-    with ros_stubs.parameters(anchor_dir=str(tmp_path), graph_measurement=True):
+    with ros_stubs.parameters(
+        anchor_dir=str(tmp_path), graph_measurement=True, graph_words_need_recognition=False
+    ):
         node = rtabmap_frame.RtabmapFrame()
         _map(node)
         _odom(node, 0.2, 0.0)
@@ -610,12 +650,14 @@ def test_a_wake_up_word_is_a_guess_until_the_graph_recognises_something(tmp_path
         assert word["fit"] == 1.0, "the graph recognised the place: the cap is gone"
 
 
-def test_with_graph_trust_off_every_word_claims_what_it_claimed_before() -> None:
-    """The old behaviour, one live flag away: the switch is what a regression is turned off
+def test_with_graph_trust_flat_every_word_claims_what_it_claimed_before() -> None:
+    """The oldest behaviour, one live flag away: the switch is what a regression is turned off
     with in the field, and it is what an A/B on one drive compares."""
     import json
 
-    with ros_stubs.parameters(graph_measurement=True, graph_trust=False):
+    with ros_stubs.parameters(
+        graph_measurement=True, graph_trust="flat", graph_words_need_recognition=False
+    ):
         node = rtabmap_frame.RtabmapFrame()
         node._map_id = "flat3"
         _belief(node, 1.0, 2.0)
@@ -627,3 +669,135 @@ def test_with_graph_trust_off_every_word_claims_what_it_claimed_before() -> None
         node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
     word = json.loads(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent[-1].data)
     assert word["fit"] == 1.0, "30 m past anything recognised, and still claiming everything"
+
+
+def test_a_graph_that_has_not_found_its_database_says_nothing_at_all(tmp_path: Any) -> None:
+    """Tape 0333, 2026-09-15: RTAB-Map had restarted many times and had recognised nothing
+    against the database it loaded since its last start, so the nodes it was building formed an
+    unlinked segment placed by this session's odometry — and a closure INSIDE that segment is not
+    a place found, it is the same odometry twice. The tracker took 19 such words and the pose
+    flew. Nothing rides now until a node of the LOADED database is matched: no measurement, no
+    candidate, and the words are counted so the report line says why the node is quiet."""
+    with ros_stubs.parameters(anchor_dir=str(tmp_path), graph_measurement=True):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _odom(node, 0.2, 0.0)
+        _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
+        _info(node, 0.0, ref=2000)  # the first node of this start
+        _info(node, 0.5, loop=2011.0, ref=2040)  # ...and a closure to another of its own
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert not node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent and node._withheld == 1
+        assert node._anchor is not None, "the FIRST anchor still comes off a sharp lidar seating"
+        assert node._word is not None, "the word is remembered: the report line is the judge"
+
+        # ...and the word a carried cart would be recovered by is withheld too: an unlinked
+        # segment is the one case where the graph's disagreement means nothing
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(2.0, 0.0).transform))
+        assert not node.pubs[rtabmap_frame.CANDIDATE_TOPIC].sent and node._withheld == 2
+        node.timers[1][1]()
+        assert "unrecognised since start: 2 words withheld" in node.logger.texts("info")[-1]
+
+        _recognise(node, travelled=0.5)  # the camera finds a place the database knows
+        assert any("graph recognised" in text for text in node.logger.texts("info"))
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert len(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent) == 1, "and the words travel"
+        assert node._withheld == 2
+
+
+def test_a_recognition_goes_stale_with_the_driving_and_not_with_the_clock(tmp_path: Any) -> None:
+    """A place recognised two minutes of DRIVING ago is a place the odometry has had time to
+    drift away from (0.79 m and 31 deg per 25 m, 2026-09-14); a place recognised before an hour
+    on the charger is still under the cart. So the expiry counts the seconds RTAB-Map's own
+    distance counter moved in, and standing still costs nothing."""
+    with ros_stubs.parameters(anchor_dir=str(tmp_path), graph_measurement=True):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _odom(node, 0.2, 0.0)
+        _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
+        _recognise(node)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert len(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent) == 1
+
+        node.clock.seconds = 300.0  # five minutes parked: the counter does not move
+        _info(node, 0.0, ref=2000)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert len(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent) == 2, "standing still is free"
+
+        node.clock.seconds = 500.0  # ...and then 200 s in which the counter grew
+        _info(node, 12.0, ref=2000)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert len(node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent) == 2 and node._withheld == 1
+        node.timers[1][1]()
+        assert "recognition stale: 200 s of driving since node 41" in node.logger.texts("info")[-1]
+
+
+def test_the_word_s_fit_is_how_well_the_last_words_track_the_odometry() -> None:
+    """The default trust, and what distance-since-the-last-tie could not see: a word riding a
+    frame that no longer holds is a metre out from the moment it is said, whatever the metres
+    since the last closure say. The fit is exp(-rms residual / 10 cm) over the last words against
+    the tracker's pose carried forward by odometry between them — 1.0 while the word follows the
+    cart, under the whole-map candidate floor the moment it stops."""
+    import json
+
+    from pepin.watch import ADMIT_FIT
+
+    def fit(node: Any) -> float:
+        sent = node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent[-1]
+        return float(json.loads(sent.data)["fit"])
+
+    with ros_stubs.parameters(graph_measurement=True):  # graph_trust=agreement, the default
+        node = rtabmap_frame.RtabmapFrame()
+        node._map_id = "flat3"
+        _recognise(node)
+        _odom(node, 0.2, 0.0)
+        _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert fit(node) == 1.0, "the anchor was just learned from this very pair"
+
+        # the cart drives half a metre and the graph's word drives with it
+        _odom(node, 0.7, 0.0)
+        _belief(node, 1.5, 2.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert fit(node) == 1.0, "the word is where the odometry says the cart is"
+
+        # ...and now the graph's frame slips 30 cm under a cart that has not moved
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.3, 0.0).transform))
+        assert fit(node) < ADMIT_FIT, "no candidate is admitted on this any more"
+        node.timers[1][1]()
+        report = node.logger.texts("info")[-1]
+        assert "word fit 0.18 by agreement (residual 17.3 cm over 3 words)" in report
+        assert "recognised on node 41, 0 s of driving ago (1 matches)" in report
+
+
+def test_an_unrecognised_graph_re_learns_no_anchor(tmp_path: Any) -> None:
+    """The anchor is the constant relation between the graph's frame and the map's, and it holds
+    for the nodes it was measured on. Re-learning it off an unlinked segment replaces a good
+    constant with that segment's drift and every word afterwards carries it — which is how tape
+    0333 turned a fine anchor (-10.33, +1.41, +53.3 deg) into a correction of (-0.44, -1.94,
+    -151.8 deg). So the same predicate that gates a word gates the re-learn."""
+    with ros_stubs.parameters(anchor_dir=str(tmp_path)):
+        node = rtabmap_frame.RtabmapFrame()
+        _map(node)
+        _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=0.0)  # the lidar is behind that belief
+        _odom(node, 0.2, 0.0)
+        node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert node._origin == "learned"
+
+        # the tracker relocalises 2 m away on a good lidar fit and stays there: every piece of
+        # evidence anchor_relearn asks for, and the graph still has no place on its database
+        _belief(node, 3.0, 2.0, seconds=7.0)
+        for moment in (10.0, 14.0, 16.0, 22.0):
+            _fit(node, 0.9, at=moment)
+            node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+        assert node._relearns == 0 and node._origin == "learned"
+
+        _recognise(node)  # ...and now it has one
+        for moment in (30.0, 34.0, 40.0):
+            _fit(node, 0.9, at=moment)
+            node.subs["/rtabmap/mapGraph"][1](_MapGraph(_shift(0.0, 0.0).transform))
+    assert node._relearns == 1 and node._origin == "relearned"
+    assert node._anchor is not None and (node._anchor.x, node._anchor.y) == (2.8, 2.0)

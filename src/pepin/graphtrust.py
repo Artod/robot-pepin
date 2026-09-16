@@ -24,18 +24,45 @@ the graph recognises something in this session: the wake-up anchor is a relation
 frames that was true in another session, and nothing has confirmed it yet. It is a guess, and
 a guess with a 1.0 on it is the failure this module exists to stop.
 
+WHAT THE DECAY CLOCK MISSED, tape 0333 of 2026-09-15 (a camera-only drive, the lidar muted):
+RTAB-Map had been restarted many times that day and had recognised NOTHING against the database
+it loaded since its last start, so the nodes it was building formed an unlinked segment placed
+by this session's odometry alone. A word off that segment is odometry wearing a pose's clothes,
+and the decay clock could not see it: the clock resets on any tie, including a tie INSIDE the
+new segment, and the anchor on file (-10.33, +1.41, +53.3 deg) was still perfectly good for the
+LINKED nodes it was measured on. The tracker took 19 such words, each about a metre and 150
+degrees wrong (the last one 103 cm from the tracker, 102 more refused as too far), and the pose
+flew. Two predicates came out of it, both here:
+
+:class:`Recognition` — has RTAB-Map accepted a loop closure, a proximity link or a localisation
+against the DATABASE IT LOADED since its own start, and was it recently enough
+(:data:`RECOGNITION_MAX_S` of driving; standing still does not expire it)? A closure to a node
+this session created is not that: the test is the matched id against the first node id this
+session built. Until that predicate holds, a node has no business publishing a word at all, and
+no business re-learning the anchor from one.
+
+:class:`Agreement` — how well the last words track the tracker's own pose carried forward by
+odometry between them, as an rms residual over a short window, ``exp(-r / scale_m)``. This is
+what tells a word riding a broken frame from a word riding a good one WITHOUT waiting for the
+next closure: a 1 m constant offset reads as 1 m of residual and a trust of 5e-5, while a word
+that follows odometry to the centimetre keeps its 1.0 whatever the metres since the last tie.
+
 Nothing here is ROS: a mapping of RTAB-Map's statistics in (``/rtabmap/info``'s ``stats_keys``
-and ``stats_values``), a number and a report line out.
+and ``stats_values``), the ids of the same message, a number and a report line out.
 """
 
 from __future__ import annotations
 
 import math
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 __all__ = [
     "ACCEPTED_HYPOTHESIS_ID",
+    "AGREEMENT_SCALE_M",
+    "AGREEMENT_WINDOW_S",
+    "AGREEMENT_WORDS",
     "DISTANCE_TRAVELLED_M",
     "FILE_ANCHOR_TRUST",
     "GRAPH_TRUST_M",
@@ -43,8 +70,13 @@ __all__ = [
     "LOOP_ID",
     "PROXIMITY_ICP",
     "PROXIMITY_VISUAL",
+    "RECOGNITION_MAX_S",
+    "Agreement",
     "GraphReport",
     "GraphTrust",
+    "InfoIds",
+    "Recognition",
+    "RecognitionReport",
     "stat",
 ]
 
@@ -61,6 +93,23 @@ GRAPH_TRUST_M = 5.0
 # 0.45) and just above the tracker's own lost_below (0.25): such a word may still be fused as a
 # measurement, but it can neither re-seed the pose nor make a lost tracker look found.
 FILE_ANCHOR_TRUST = 0.3
+# How long a recognition stands: two minutes of DRIVING past the last time RTAB-Map tied its
+# present to the database it loaded. It is driving seconds and not wall seconds because a cart
+# parked at the charger for an hour has not moved away from the place it recognised, while two
+# minutes at 0.3 m/s is some 30 m of travel -- six decay lengths of :data:`GRAPH_TRUST_M`, past
+# which the 0.79 m / 31 deg per 25 m the EKF odometry drifts has made the segment its own map.
+RECOGNITION_MAX_S = 120.0
+# The residual at which a word is worth 1/e of itself when its trust is judged by AGREEMENT.
+# 10 cm is the scale a graph word has when it is working: over tapes 0275/0276 the word sat
+# 0.7-0.8 cm from the lidar truth while driving and 0-8 cm at rest, and 2.2-3.2 cm over a
+# printer errand -- so 10 cm is several times the working spread and a tenth of the metre-scale
+# error of tape 0333, which lands at exp(-10) and stops the word being admitted anywhere.
+AGREEMENT_SCALE_M = 0.10
+# The window the residual is taken over: the last ten seconds, and at most this many words. Long
+# enough that one word arriving mid-closure does not decide the trust, short enough that a frame
+# that has just broken is not vouched for by the minute before it.
+AGREEMENT_WINDOW_S = 10.0
+AGREEMENT_WORDS = 10
 
 # RTAB-Map's statistics, by the names it publishes them under (rtabmap/Statistics.h). The keys
 # carry a trailing unit segment -- "Loop/Id/", "Memory/Distance_travelled/m" -- which :func:`stat`
@@ -203,3 +252,243 @@ class GraphTrust:
             capped=capped,
             heard=self._heard > 0,
         )
+
+
+@dataclass(frozen=True)
+class InfoIds:
+    """The graph ids of one ``/rtabmap/info``, as a node reads them off the message: the node
+    RTAB-Map is building now, the node a loop closure matched, the node a proximity link matched,
+    and whether the message carried a localisation pose against the loaded database. Zero is
+    "not carried" -- RTAB-Map numbers its nodes from 1 -- so a message whose fields are missing
+    reads as one that recognised nothing."""
+
+    ref_id: int = 0
+    loop_closure_id: int = 0
+    proximity_detection_id: int = 0
+    localized: bool = False
+
+
+@dataclass(frozen=True)
+class RecognitionReport:
+    """Whether RTAB-Map's present nodes are tied to the database it loaded, and what stands
+    behind the answer: how many such acceptances this start has seen, which database node the
+    last one matched, how many seconds of DRIVING have passed since it, and how many words the
+    node has withheld meanwhile."""
+
+    recognised: bool
+    matches: int
+    matched_id: int
+    since_s: float
+    withheld: int
+
+    def text(self) -> str:
+        """``recognised on node 2841, 4 s of driving ago (3 matches)`` for a report line, or the
+        refusal that is keeping the node silent."""
+        if self.recognised:
+            return (
+                f"recognised on node {self.matched_id}, {self.since_s:.0f} s of driving ago"
+                f" ({self.matches} matches)"
+            )
+        if self.matches == 0:
+            return f"unrecognised since start: {self.withheld} words withheld"
+        return (
+            f"recognition stale: {self.since_s:.0f} s of driving since node {self.matched_id},"
+            f" {self.withheld} words withheld"
+        )
+
+
+class Recognition:
+    """Has RTAB-Map recognised the database it LOADED since its own start, and recently enough?
+
+    Fed every ``/rtabmap/info`` -- the statistics and the message's graph ids -- it answers the
+    one question the decay clock cannot: whether the nodes the graph is building now are tied to
+    the map on disk at all, or form an unlinked segment placed by this session's odometry. A
+    word off such a segment is odometry dressed as a pose (tape 0333, 2026-09-15: 19 words about
+    a metre and 150 degrees wrong), and the anchor learned from one is worse still, because it
+    is baked into every word that follows.
+
+    What counts as recognition: a loop closure or a proximity link whose matched node is OLDER
+    than the first node this session built (``ref_id`` of the first message: everything below it
+    came off the loaded database), or a localisation pose, which RTAB-Map only publishes when it
+    has placed itself on the database. A closure INSIDE the new segment is not recognition,
+    which is exactly where the decay clock was fooled.
+
+    The clock is driving seconds, differenced off RTAB-Map's own distance counter: a message
+    whose counter grew charges the time since the previous message, and one whose counter stood
+    still charges nothing, so a cart parked for an hour wakes up as recognised as it fell asleep.
+    A counter that goes BACKWARDS is RTAB-Map restarted, and a restart forgets everything here:
+    a new start has recognised nothing until it says so.
+
+    Pure: statistics and ids in, a predicate and a report out; ``max_driving_s`` is a live flag
+    the node writes straight onto the instance.
+    """
+
+    def __init__(self, max_driving_s: float = RECOGNITION_MAX_S) -> None:
+        self.max_driving_s = max_driving_s
+        self._first_ref: int | None = None  # the first node id of this start
+        self._driving_s = 0.0  # seconds of driving heard since this start
+        self._matched_s: float | None = None  # ...at the last acceptance
+        self._matches = 0  # acceptances this start
+        self._matched_id = 0  # ...and the database node the last one matched
+        self._travelled: float | None = None  # the last distance counter read, to difference it
+        self._last_at: float | None = None  # ...and when it was read, by the node's clock
+        self._starts = 0  # RTAB-Map restarts seen (a distance counter that fell)
+
+    @property
+    def matches(self) -> int:
+        """How many times this start the graph has been tied to the loaded database."""
+        return self._matches
+
+    @property
+    def starts(self) -> int:
+        """How many times RTAB-Map has restarted under this node (its counter falling)."""
+        return self._starts
+
+    @property
+    def driving_s(self) -> float:
+        """Seconds of driving heard since this start: the clock the expiry is measured on."""
+        return self._driving_s
+
+    @property
+    def since_s(self) -> float:
+        """Seconds of driving since the last acceptance; ``inf`` when there has been none."""
+        return math.inf if self._matched_s is None else self._driving_s - self._matched_s
+
+    @property
+    def recognised(self) -> bool:
+        """Whether a word may ride right now: an acceptance against the loaded database this
+        start, no older than :attr:`max_driving_s` of driving."""
+        return self.since_s <= self.max_driving_s
+
+    def update(self, stats: Mapping[str, float], ids: InfoIds, now: float) -> bool:
+        """One ``/rtabmap/info`` in, at the node's clock ``now``: the driving clock advanced and
+        the ids read. Returns whether THIS message tied the present to the loaded database --
+        the moment the node starts speaking again."""
+        self._advance(stats, now)
+        if ids.ref_id > 0 and self._first_ref is None:
+            self._first_ref = ids.ref_id
+        matched = self._database_match(stats, ids)
+        if matched is None:
+            return False
+        self._matches += 1
+        self._matched_id = matched
+        self._matched_s = self._driving_s
+        return True
+
+    def report(self, withheld: int = 0) -> RecognitionReport:
+        """The predicate and everything a report line says about it
+        (:class:`RecognitionReport`), with the words the node has withheld meanwhile."""
+        return RecognitionReport(
+            recognised=self.recognised,
+            matches=self._matches,
+            matched_id=self._matched_id,
+            since_s=0.0 if self._matched_s is None else self.since_s,
+            withheld=withheld,
+        )
+
+    def _advance(self, stats: Mapping[str, float], now: float) -> None:
+        """Charge the driving clock for the interval this message covers, and forget everything
+        when RTAB-Map's distance counter falls: that is a restart, not a drive backwards."""
+        travelled = stat(stats, DISTANCE_TRAVELLED_M)
+        moved = False
+        if travelled is not None:
+            distance = max(float(travelled), 0.0)
+            previous = self._travelled
+            if previous is not None and distance < previous:
+                self._restart()
+            else:
+                moved = previous is not None and distance > previous
+            self._travelled = distance
+        if moved and self._last_at is not None:
+            self._driving_s += max(now - self._last_at, 0.0)
+        self._last_at = now
+
+    def _restart(self) -> None:
+        """RTAB-Map opened a new session: its nodes are placed by the odometry again and nothing
+        it recognised before belongs to them."""
+        self._starts += 1
+        self._first_ref = None
+        self._matched_s = None
+        self._matches = 0
+        self._matched_id = 0
+        self._driving_s = 0.0
+
+    def _database_match(self, stats: Mapping[str, float], ids: InfoIds) -> int | None:
+        """The database node this message tied the present to, or ``None``: a closure or a
+        proximity link to a node older than this start's first, or a localisation pose (reported
+        as node 0, since it names no node of ours). With no ``ref_id`` on the message at all --
+        an RTAB-Map that does not carry the ids -- any closure counts, which is what the
+        statistics alone can tell."""
+        loop = ids.loop_closure_id or int(stat(stats, LOOP_ID) or 0.0)
+        for candidate in (loop, ids.proximity_detection_id):
+            if candidate > 0 and (self._first_ref is None or candidate < self._first_ref):
+                return candidate
+        return 0 if ids.localized else None
+
+
+class Agreement:
+    """How well the graph's last words agree with the tracker's own pose carried forward by
+    odometry between them: the rms of the last :data:`AGREEMENT_WORDS` residuals inside
+    :data:`AGREEMENT_WINDOW_S`, as a trust of ``exp(-r / scale_m)``.
+
+    This is the other half of what tape 0333 needed. The decay clock asks how far the cart has
+    driven since the graph last recognised something; this asks whether the words the graph is
+    saying RIGHT NOW land where the cart actually is. A word riding a broken frame is a metre
+    out and reads as a metre of residual (a trust of 5e-5 at 10 cm scale) from the first word,
+    with no closure to wait for; a word riding a good one follows odometry to the centimetre and
+    keeps its 1.0 however many metres ago the last tie was.
+
+    An empty window is not a verdict: with no residual to go on the trust is 1.0, and it is the
+    recognition predicate, not this, that decides whether a word may ride at all. The node feeds
+    a residual only while there is something to measure against -- a belief the tracker has a
+    source behind -- because a residual against a pose nobody is confirming (a carried cart, a
+    lidar matching nothing) measures the tracker's error and not the graph's.
+    """
+
+    def __init__(
+        self,
+        scale_m: float = AGREEMENT_SCALE_M,
+        window_s: float = AGREEMENT_WINDOW_S,
+        words: int = AGREEMENT_WORDS,
+    ) -> None:
+        self.scale_m = scale_m
+        self.window_s = window_s
+        self.words = words
+        self._residuals: deque[tuple[float, float]] = deque()
+
+    @property
+    def count(self) -> int:
+        """How many residuals the window holds right now."""
+        return len(self._residuals)
+
+    def add(self, at: float, residual_m: float) -> None:
+        """One word's distance from the odometry-propagated belief, metres, at the node's
+        clock."""
+        self._residuals.append((at, max(float(residual_m), 0.0)))
+        self._prune(at)
+
+    def rms(self, at: float | None = None) -> float | None:
+        """The rms residual over the window, in metres, pruned to ``at`` first when given;
+        ``None`` while the window holds nothing."""
+        if at is not None:
+            self._prune(at)
+        if not self._residuals:
+            return None
+        return math.sqrt(sum(r * r for _, r in self._residuals) / len(self._residuals))
+
+    def trust(self, at: float | None = None) -> float:
+        """What the word's agreement is worth, in [0, 1]: ``exp(-r / scale_m)``, and 1.0 while
+        there is no residual to judge it on."""
+        residual = self.rms(at)
+        if residual is None:
+            return 1.0
+        if self.scale_m <= 0.0:
+            return 0.0
+        return min(max(math.exp(-residual / self.scale_m), 0.0), 1.0)
+
+    def _prune(self, at: float) -> None:
+        """Drop what is older than the window or past its last :attr:`words` entries."""
+        while self._residuals and at - self._residuals[0][0] > self.window_s:
+            self._residuals.popleft()
+        while len(self._residuals) > self.words:
+            self._residuals.popleft()

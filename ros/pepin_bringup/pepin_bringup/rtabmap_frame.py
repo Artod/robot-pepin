@@ -29,16 +29,27 @@ same door the lidar's own whole-map search uses: three agreeing candidates re-se
 (:class:`pepin.watchdog.CandidateGate`), and the board's rules for a source that is not the
 lidar apply to the graph unchanged.
 
-WHAT THE WORD CLAIMS is the graph's own recognition and nothing else. A graph answers at every
-optimisation whether it has just recognised a place it knows or has been dead-reckoning over
-its own odometry all session, and the two are not worth the same: the word therefore travels
-with a ``fit`` of 1.0 the moment a closure or a proximity link ties the present to an OLDER
-node, decaying with the metres driven since (:mod:`pepin.graphtrust`, fed from
-:data:`INFO_TOPIC`), and capped while the anchor came from a file and nothing has been
-recognised this session. That number is what the board publishes as its own confidence when no
-scan of its own measured one, and the score a candidate is admitted on — so a word built on
-nothing now READS as built on nothing, which is what the carry test of 2026-09-14 could not
-see: fit 1.00 on a belief 1.5-2 m wrong, for 64 s of driving.
+WHETHER THE WORD IS SAID AT ALL is RTAB-Map's own recognition of the database it LOADED. Until
+it has accepted a closure, a proximity link or a localisation against a node older than the
+first node of its own start — and no more than ``recognition_max_s`` of driving ago — the nodes
+it is building are an unlinked segment placed by this session's odometry, and the node stays
+silent, counts the words withheld and re-learns no anchor (``graph_words_need_recognition``,
+:class:`pepin.graphtrust.Recognition`, fed from :data:`INFO_TOPIC`). That is tape 0333 of
+2026-09-15, a camera-only drive after a day of RTAB-Map restarts: the anchor on file was right
+for the linked nodes it was measured on, the words off the new segment were about a metre and
+150 degrees out, and the tracker took 19 of them before the pose flew.
+
+WHAT THE WORD CLAIMS, when it is said, is how well the graph's last words track the tracker's
+own pose carried forward by odometry between them: ``exp(-rms residual / 10 cm)`` over the last
+ten seconds (:class:`pepin.graphtrust.Agreement`), which is what tells a word riding a broken
+frame from one riding a good frame WITHOUT waiting for the next closure. ``graph_trust`` keeps
+the older answer reachable — ``distance``, the decay with the metres driven since the last tie
+to any older node — and ``flat``, the 1.0 every word claimed before 2026-09-14. Either measured
+mode is capped while the anchor came from a file and nothing has been recognised. That number is
+what the board publishes as its own confidence when no scan of its own measured one, and the
+score a candidate is admitted on — so a word built on nothing now READS as built on nothing,
+which is what the carry test of 2026-09-14 could not see: fit 1.00 on a belief 1.5-2 m wrong,
+for 64 s of driving.
 
 With ``graph_odom`` off the old arrangement is back: RTAB-Map's "odometry" IS the tracker's
 pose, ``map -> rtabmap`` is the inverse of the correction (a fixed identity in its place let
@@ -108,8 +119,25 @@ from pepin.anchors import (
     seating_refusal,
 )
 from pepin.flags import Flag, FlagSet
-from pepin.graphtrust import FILE_ANCHOR_TRUST, GRAPH_TRUST_M, GraphTrust
-from pepin.measurements import RemoteMeasurement, compose, graph_anchor, graph_measurement
+from pepin.graphtrust import (
+    AGREEMENT_SCALE_M,
+    AGREEMENT_WINDOW_S,
+    AGREEMENT_WORDS,
+    FILE_ANCHOR_TRUST,
+    GRAPH_TRUST_M,
+    RECOGNITION_MAX_S,
+    Agreement,
+    GraphTrust,
+    InfoIds,
+    Recognition,
+)
+from pepin.measurements import (
+    RemoteMeasurement,
+    compose,
+    graph_anchor,
+    graph_measurement,
+    inverse,
+)
 from pepin.odometry import Pose2D
 from pepin.tsdf import RigidPose
 from pepin.watchdog import GlobalCandidate, same_place
@@ -273,28 +301,78 @@ FLAGS = FlagSet(
     ),
     Flag(
         "graph_trust",
+        "agreement",
+        choices=("agreement", "distance", "flat"),
+        description="what the graph's word carries as its fit. agreement: how well the last"
+        f" {AGREEMENT_WORDS} words inside {AGREEMENT_WINDOW_S:.0f} s track the tracker's pose"
+        " carried forward by odometry between them, exp(-rms residual /"
+        f" {AGREEMENT_SCALE_M:.2f} m), times the recognition predicate"
+        " (graph_words_need_recognition). distance: 1.0 the moment a loop closure or a proximity"
+        " link ties the present to an older node, decaying as exp(-d / graph_trust_m) with the"
+        " metres driven since, as between 2026-09-14 and 2026-09-15. flat: every word claims 1.0,"
+        f" as before 2026-09-14. Never above {FILE_ANCHOR_TRUST:.1f} in either measured mode while"
+        " the anchor came from a file and nothing has been recognised yet (pepin.graphtrust, fed"
+        f" from {INFO_TOPIC})",
+        why="agreement, because distance-since-the-last-tie cannot see a word that is simply in"
+        " the wrong frame: on tape 0333 (2026-09-15, camera only) RTAB-Map had recognised nothing"
+        " against the loaded database since its last start, its new nodes formed an unlinked"
+        " segment, and ties INSIDE that segment kept resetting the decay clock — so words about a"
+        " metre and 150 deg out (the last 103 cm from the tracker, 102 more refused as too far)"
+        " rode with a high fit and the tracker took 19 of them. The residual of those same words"
+        " against the odometry-propagated belief is the metre itself, which is exp(-10) on the"
+        " 10 cm scale: a working word sits 0.7-0.8 cm from the lidar truth while driving, 0-8 cm"
+        " at rest and 2.2-3.2 cm over a printer errand (tapes 0275/0276, 2026-09-14), so the"
+        " scale is several times the working spread and a tenth of the failure. Nothing here"
+        " touches the covariance: the word is still worth the remote floor geometrically, it"
+        " simply stops vouching for itself",
+        on_when="agreement always beside a known map — it is what lets a wrong word be SEEN as"
+        " wrong by the gates that already exist, within one word instead of one closure",
+        off_when="distance for a CARRY test, where the tracker's belief is wrong on purpose: the"
+        " residual then measures the tracker's error and not the graph's, and the word that"
+        " undoes the carry is the one that disagrees most (the node stops feeding the window"
+        " while the tracker has no source behind its pose, which covers the usual case, but a"
+        " carry that keeps a confident wrong pose is exactly the case it cannot cover). flat to"
+        " reproduce a tape recorded before 2026-09-14",
+    ),
+    Flag(
+        "graph_words_need_recognition",
         True,
-        description="the graph's word carries what the GRAPH has recognised as its fit: 1.0 the"
-        " moment a loop closure or a proximity link ties the present to an older node, decaying"
-        " as exp(-d / graph_trust_m) with the metres driven since, and never above"
-        f" {FILE_ANCHOR_TRUST:.1f} while the anchor came from a file and this session has"
-        " recognised nothing (pepin.graphtrust, fed from"
-        f" {INFO_TOPIC}); off, every word claims 1.0 as before 2026-09-14",
-        why="on, because the claim of 1.0 is what made the carry test unfalsifiable. Carried 2 m"
-        " by hand at 21:12 on 2026-09-14 the graph recognised nothing for the whole 64-s drive"
-        " that followed (Loop/Highest_hypothesis_value 0.04, not one closure), so its word was"
-        " the OLD anchor plus odometry — and the tracker published fit 1.00 on it while the"
-        " belief was 1.5-2 m wrong: goto's lost ladder saw a healthy pose and drove, and the"
-        " candidate path's lost clause could not fire because the belief and the word agreed"
-        " (the belief was MADE of the word). The decay length is the drift the EKF odometry the"
-        " graph rides actually has — 0.79 m and 31 deg over 25 m of driving, 22 cm over 12 m,"
-        " measured 2026-09-14 — and nothing here touches the covariance: the word is still worth"
-        " the remote floor geometrically, it simply stops vouching for itself",
-        on_when="always beside a known map, and above all in a carry or a wake-up test: it is"
-        " what lets a wrong word be SEEN as wrong by the gates that already exist",
-        off_when="to reproduce a tape recorded before it, or if a graph that closes loops"
-        " constantly is ever seen starved of its vote by a decay that outruns its closures —"
-        " lengthen graph_trust_m first, and turn this off only to prove that is what it was",
+        description="a graph word — measurement or candidate — is published only while RTAB-Map"
+        " is RECOGNISED: it has accepted a loop closure, a proximity link or a localisation"
+        " against the database it LOADED since its own start (the matched node id is older than"
+        " the first node this start built), and that acceptance is no more than recognition_max_s"
+        " of DRIVING old. Unrecognised, the node stays silent, counts the words it withheld, and"
+        " does not re-learn the anchor either; off, every word is published as before 2026-09-15",
+        why="on, because an unlinked segment is the one failure a graph cannot report itself."
+        " Tape 0333, 2026-09-15: RTAB-Map had restarted many times that day and had recognised"
+        " nothing since its last start, so its current nodes were placed by this session's"
+        " odometry alone — the anchor on file (-10.33, +1.41, +53.3 deg) was still right for the"
+        " LINKED nodes it was measured on, the correction read (-0.44, -1.94, -151.8 deg), and"
+        " the words were odometry dressed as a pose: 19 of them taken, the last 103 cm from the"
+        " tracker with 102 refused as too far, and the pose flew. The predicate is the matched id"
+        " against this start's first node id, which is what tells a tie to the map on disk from a"
+        " tie inside the new segment; the expiry is driving seconds and not wall seconds because"
+        " a cart parked at the charger has not moved away from what it recognised",
+        on_when="always beside a known map, and above all after any RTAB-Map restart: it is what"
+        " keeps a database that has not found itself yet from moving the pose",
+        off_when="to reproduce a tape recorded before 2026-09-15, or in a room where RTAB-Map"
+        " cannot close a loop at all and the word is wanted anyway — then read the trust in the"
+        " report line before believing anything the graph says",
+    ),
+    Flag(
+        "recognition_max_s",
+        RECOGNITION_MAX_S,
+        range=(1.0, 3600.0),
+        description="how many seconds of DRIVING a recognition stands for before the graph goes"
+        " quiet again (graph_words_need_recognition); time at a standstill does not count",
+        why="120 s, because at the cart's 0.3 m/s that is some 30 m of travel — six decay lengths"
+        " of graph_trust_m, past which the 0.79 m and 31 deg per 25 m the EKF odometry drifts"
+        " (2026-09-14) has made the segment a map of its own. Driving seconds rather than wall"
+        " seconds so that an hour on the charger costs nothing",
+        on_when="raise it where the camera sees a known place only once a lap and the word is"
+        " being withheld between laps while the lidar agrees with it",
+        off_when="lower it to make the gate bite sooner in a room where the graph closes loops"
+        " constantly and a stale recognition is never more than seconds old",
     ),
     Flag(
         "graph_trust_m",
@@ -374,6 +452,23 @@ FLAGS = FlagSet(
 )
 
 
+def _info_ids(msg: Info) -> InfoIds:
+    """The graph ids of one ``/rtabmap/info`` (:class:`pepin.graphtrust.InfoIds`): the node
+    RTAB-Map is building now, the nodes a loop closure and a proximity link matched, and whether
+    the message carried a localisation pose — a pose with a covariance on it, which RTAB-Map
+    fills only when it has placed itself on the loaded database. Every field is read through
+    ``getattr``: a build whose Info does not carry one reads as a message that matched nothing,
+    and the statistics still answer for the closures."""
+    localization = getattr(msg, "localization_pose", None)
+    covariance = getattr(getattr(localization, "pose", None), "covariance", ())
+    return InfoIds(
+        ref_id=int(getattr(msg, "ref_id", 0) or 0),
+        loop_closure_id=int(getattr(msg, "loop_closure_id", 0) or 0),
+        proximity_detection_id=int(getattr(msg, "proximity_detection_id", 0) or 0),
+        localized=any(float(value) > 0.0 for value in covariance),
+    )
+
+
 class RtabmapFrame(Node):
     """Broadcasts map -> rtabmap, or sends map -> odom to the board, from RTAB-Map's correction."""
 
@@ -413,6 +508,15 @@ class RtabmapFrame(Node):
         # What the graph has RECOGNISED, which is what its word is worth: the clock the
         # statistics feed, and the trust it answers with (pepin.graphtrust).
         self._trust = GraphTrust(float(self._switches["graph_trust_m"]))
+        # ...and whether it has recognised the database it LOADED at all since its own start,
+        # which is what says its nodes are a map and not an unlinked segment of odometry.
+        self._recognition = Recognition(float(self._switches["recognition_max_s"]))
+        self._withheld = 0  # words not published because it had not
+        # How well the words that DO ride track the tracker's odometry-propagated pose: the
+        # window the fit is made of in the agreement mode.
+        self._agreement = Agreement()
+        self._belief_odom: Pose2D | None = None  # the odometry at the belief's own moment...
+        self._word_odom: Pose2D | None = None  # ...and at the word's, to carry the belief over
         self._infos = 0  # /rtabmap/info messages consumed
         self._lookup = TfLookup(self)  # the EKF's odom -> base_link, at the graph's own stamp
         self._tf = None if self._slam else TransformBroadcaster(self)
@@ -509,13 +613,26 @@ class RtabmapFrame(Node):
             f" correction ({self._correction2d.x:+.2f}, {self._correction2d.y:+.2f},"
             f" {math.degrees(self._correction2d.theta):+.1f} deg), anchor {anchor},"
             f" last word {word}; graph {trust.text()} over {self._infos} infos;"
+            f" {self._recognition.report(self._withheld).text()};"
+            f" word fit {self._trust_now():.2f} by {self._switches['graph_trust']}"
+            f" ({self._agreement_text()});"
             f" flags: {self._switches.state(live_only=False)}"
         )
+
+    def _agreement_text(self) -> str:
+        """How well the words that rode agree with the tracker: the rms residual of the window
+        the last word was judged in and how many words are in it, or why there is none."""
+        residual = self._agreement.rms(self._now())
+        if residual is None:
+            return "no residual: the tracker has no source" if self._lost() else "no residual yet"
+        return f"residual {residual * 100:.1f} cm over {self._agreement.count} words"
 
     def _on_tracker_pose(self, msg: PoseWithCovarianceStamped) -> None:
         """The board's belief: the pose RTAB-Map is fed as its odometry, the one a graph
         correction is applied to — and its error bar, which is what says whether the anchor may
-        be learned from this seating at all."""
+        be learned from this seating at all. The EKF's odometry is read at the same moment, so
+        that a belief can be carried forward to a word's stamp (:meth:`_predicted`)."""
+        self._belief_odom = self._planar(self._lookup.transform(ODOM_FRAME, BASE_FRAME))
         position = msg.pose.pose.position
         self._belief = Pose2D(position.x, position.y, yaw_of(msg.pose.pose.orientation))
         self._belief_stamp = stamp_seconds(msg.header.stamp)
@@ -530,13 +647,24 @@ class RtabmapFrame(Node):
         self._belief_at = self._now()
 
     def _on_info(self, msg: Info) -> None:
-        """RTAB-Map's own statistics: what the graph has RECOGNISED — a closure accepted, a
-        proximity link added, the distance its odometry has travelled and how close the last
-        hypothesis came. The trust the next word travels with is made of these
-        (:class:`pepin.graphtrust.GraphTrust`); a tie is logged, because it is the one event on
-        this robot that undoes accumulated drift."""
+        """RTAB-Map's own statistics and graph ids: what the graph has RECOGNISED — a closure
+        accepted, a proximity link added, the node each of them matched, the distance its
+        odometry has travelled and how close the last hypothesis came. Both predicates the word
+        rides on are made of these: the decay clock (:class:`pepin.graphtrust.GraphTrust`) and
+        the recognition of the LOADED database (:class:`pepin.graphtrust.Recognition`). A tie is
+        logged because it undoes accumulated drift, and a recognition because it is what lets
+        this node speak at all."""
         self._infos += 1
         stats = dict(zip(msg.stats_keys, (float(v) for v in msg.stats_values), strict=False))
+        was = self._recognition.recognised
+        self._recognition.max_driving_s = float(self._switches["recognition_max_s"])
+        if self._recognition.update(stats, _info_ids(msg), self._now()) and not was:
+            report = self._recognition.report(self._withheld)
+            self.get_logger().info(
+                f"graph recognised: RTAB-Map matched database node {report.matched_id} — its"
+                f" nodes are on the map again and words travel ({self._withheld} withheld"
+                f" since its start, {self._recognition.starts} restarts seen)"
+            )
         if not self._trust.update(stats):
             return
         self.get_logger().info(
@@ -544,14 +672,68 @@ class RtabmapFrame(Node):
             f" word is worth 1.00 again (hypothesis {self._trust.report().hypothesis:.2f})"
         )
 
+    def _recognised(self) -> bool:
+        """Whether RTAB-Map's present nodes are tied to the database it LOADED — a closure, a
+        proximity link or a localisation against a node older than this start's first, no more
+        than ``recognition_max_s`` of driving ago. It is what gates every word the node
+        publishes and every re-learn of the anchor; ``graph_words_need_recognition`` off makes
+        it always true, which is the behaviour of before 2026-09-15."""
+        if not self._switches.on("graph_words_need_recognition"):
+            return True
+        self._recognition.max_driving_s = float(self._switches["recognition_max_s"])
+        return self._recognition.recognised
+
     def _trust_now(self) -> float:
-        """What the graph's word may claim as its ``fit`` right now: the decay since the graph's
-        last tie, capped while the anchor is a file's and nothing has been recognised yet; 1.0
-        with ``graph_trust`` off, which is what every word claimed before the flag existed."""
-        if not self._switches.on("graph_trust"):
+        """What the graph's word may claim as its ``fit`` right now, by ``graph_trust``:
+
+        * ``agreement`` — how well the last words track the tracker's odometry-propagated pose
+          (:class:`pepin.graphtrust.Agreement`), times the recognition predicate, so a word from
+          a graph that has found nothing on its map claims nothing;
+        * ``distance`` — the decay since the graph's last tie to an older node, whatever that
+          node was (:class:`pepin.graphtrust.GraphTrust`, the behaviour of 2026-09-14);
+        * ``flat`` — 1.0, which is what every word claimed before either existed.
+
+        Both measured modes are capped at :data:`pepin.graphtrust.FILE_ANCHOR_TRUST` while the
+        anchor came from a file and nothing has been recognised yet: that anchor was measured in
+        another session and nothing has confirmed it.
+        """
+        mode = str(self._switches["graph_trust"])
+        if mode == "flat":
             return 1.0
-        self._trust.trust_m = float(self._switches["graph_trust_m"])
-        return self._trust.trust(self._origin == "file")
+        if mode == "distance":
+            self._trust.trust_m = float(self._switches["graph_trust_m"])
+            return self._trust.trust(self._origin == "file")
+        trust = self._agreement.trust(self._now()) * (1.0 if self._recognised() else 0.0)
+        if self._origin == "file" and self._recognition.matches == 0:
+            trust = min(trust, FILE_ANCHOR_TRUST)
+        return trust
+
+    def _predicted(self) -> Pose2D | None:
+        """Where the tracker's belief says the cart is at the moment of the word being judged:
+        the last belief carried forward by the EKF's odometry between its own stamp and the
+        graph's (the two odometries this node already looks up). ``None`` with no belief at all;
+        the belief itself when one of the two odometries is missing — a graph word and a belief
+        are a tenth of a second apart at 10 Hz, and 3 cm at the cart's speed."""
+        belief = self._belief
+        if belief is None:
+            return None
+        if self._belief_odom is None or self._word_odom is None:
+            return belief
+        return compose(belief, compose(inverse(self._belief_odom), self._word_odom))
+
+    def _agree(self, word: Pose2D) -> None:
+        """Feed one published word's distance from the odometry-propagated belief to the
+        agreement window (:class:`pepin.graphtrust.Agreement`), which is what its ``fit`` is made
+        of in the agreement mode.
+
+        A residual is only taken while the tracker has a source behind its pose (:meth:`_lost`
+        false): a residual against a belief nobody is confirming — a carried cart, a lidar
+        matching nothing — measures the TRACKER's error, and the graph's word is then the only
+        opinion anyone has rather than the suspect one."""
+        predicted = self._predicted()
+        if predicted is None or self._lost():
+            return
+        self._agreement.add(self._now(), math.hypot(word.x - predicted.x, word.y - predicted.y))
 
     def _on_fit(self, msg: Float32) -> None:
         """How well the lidar's last scan matched the map, and when: what says the tracker's
@@ -652,13 +834,21 @@ class RtabmapFrame(Node):
         """Whether the anchor in hand no longer holds: the word it makes of this graph and the
         tracker's belief of the same instant, disagreeing past what a closure accounts for, for
         longer than :data:`pepin.anchors.RELEARN_HOLD_S`, while the LIDAR is what the tracker is
-        believing (a fresh :data:`TRUSTED_FIT`). Every other case feeds the watch a "not
-        trusted", which is also what resets its clock."""
+        believing (a fresh :data:`TRUSTED_FIT`) and while RTAB-Map has RECOGNISED the database it
+        loaded (:meth:`_recognised`). Every other case feeds the watch a "not trusted", which is
+        also what resets its clock.
+
+        The recognition clause is the lesson of tape 0333: an anchor is the constant relation
+        between the graph's frame and the map's, and it holds for the nodes it was measured on.
+        Re-learning it off an unlinked segment — nodes this start placed by its own odometry,
+        tied to nothing on disk — replaces a good constant with that segment's drift, and every
+        word afterwards carries it."""
         now = self._now()
         belief = self._belief
         trusted = (
             self._switches.on("anchor_relearn")
             and belief is not None
+            and self._recognised()
             and self._fit >= TRUSTED_FIT
             and now - self._fit_at <= FIT_FRESH_S
             and abs(stamp - self._belief_stamp) <= ANCHOR_MAX_SKEW_S
@@ -686,15 +876,24 @@ class RtabmapFrame(Node):
         transform = (
             transform if transform is not None else self._lookup.transform(ODOM_FRAME, BASE_FRAME)
         )
+        planar = self._planar(transform)
+        if transform is None or planar is None:
+            return None
+        self._word_odom = planar
+        return compose(self._correction2d, planar), stamp_seconds(transform.header.stamp)
+
+    @staticmethod
+    def _planar(transform: TransformStamped | None) -> Pose2D | None:
+        """A transform read in the plane the cart drives in, or ``None`` when there is none:
+        the EKF's ``odom -> base_link``, both at a belief's moment and at a graph's."""
         if transform is None:
             return None
-        odom = pose_from_transform(transform)
-        planar = Pose2D(
-            float(odom.translation[0]),
-            float(odom.translation[1]),
-            math.atan2(float(odom.rotation[1, 0]), float(odom.rotation[0, 0])),
+        pose = pose_from_transform(transform)
+        return Pose2D(
+            float(pose.translation[0]),
+            float(pose.translation[1]),
+            math.atan2(float(pose.rotation[1, 0]), float(pose.rotation[0, 0])),
         )
-        return compose(self._correction2d, planar), stamp_seconds(transform.header.stamp)
 
     def _unsharp(self) -> str | None:
         """Why the tracker's present seating may not have the graph's whole frame learned from
@@ -773,9 +972,15 @@ class RtabmapFrame(Node):
         one case where the graph is the only thing that knows where the cart is. An anchor
         learned in this session cannot produce that word — it was learned FROM a belief.
 
-        The word's ``fit`` is what the GRAPH knows, not what any scan measured: 1.0 the moment a
-        closure or a proximity link tied the present to an older node, decaying with the metres
-        driven since, capped while the anchor is a file's and nothing has been recognised
+        NOTHING is published at all — neither measurement nor candidate — while RTAB-Map has not
+        RECOGNISED the database it loaded since its own start (:meth:`_recognised`,
+        ``graph_words_need_recognition``): its nodes are then an unlinked segment placed by this
+        session's odometry, and a word off one is odometry dressed as a pose. The word is still
+        remembered and counted, so the report line says how many were withheld and why.
+
+        The word's ``fit`` is what the GRAPH knows, not what any scan measured: how well the
+        last words track the tracker's odometry-propagated pose, or the decay since the last tie
+        to an older node, capped while the anchor is a file's and nothing has been recognised
         (``graph_trust``, :meth:`_trust_now`). Downstream that number is not a discount on the
         covariance — the fusion gates on chi-square and the measurement gate has no fit floor at
         all — but it is what the board publishes as its own confidence with ``local_fit`` off
@@ -783,12 +988,17 @@ class RtabmapFrame(Node):
         admitted on (:meth:`_propose`): below :data:`pepin.watch.ADMIT_FIT` a candidate is
         "unknown map" and re-seeds nothing, which is exactly right — a graph that has recognised
         nothing has no business teleporting the cart."""
-        remote = graph_measurement(place, frame, stamp, self._map_id, fit=self._trust_now())
         belief = self._belief
-        self._word = remote.pose
+        word = compose(frame, place)
+        self._word = word
         self._gap_m = (
-            math.hypot(remote.x - belief.x, remote.y - belief.y) if belief is not None else math.inf
+            math.hypot(word.x - belief.x, word.y - belief.y) if belief is not None else math.inf
         )
+        if not self._recognised():
+            self._withheld += 1
+            return
+        self._agree(word)
+        remote = graph_measurement(place, frame, stamp, self._map_id, fit=self._trust_now())
         self._propose(remote)
         if self._measurement is None or not self._switches.on("graph_measurement"):
             return
