@@ -43,6 +43,7 @@ from pepin.visual_odometry import (
     VoTrack,
     is_lost,
     planar_covariance,
+    scaled_covariance,
 )
 from pepin_bringup.msgs import stamp_seconds, yaw_of
 from pepin_bringup.node_kit import Switches, Tally, bridged_qos_profile, spin_main
@@ -86,10 +87,12 @@ FLAGS = FlagSet(
     ),
     Flag(
         "vo_covariance",
-        "constant",
-        choices=("constant", "rtabmap"),
-        description="whose covariance rides on the published pose: the documented constant"
-        " (vo_sigma_m, vo_yaw_sigma_deg) or the one rtabmap's registration computed",
+        "dynamic",
+        choices=("dynamic", "constant", "rtabmap"),
+        description="whose covariance rides on the published pose: `dynamic`, the registration's"
+        " own sigma and the depth scale's share of the step just taken added in quadrature"
+        " (pepin.visual_odometry.scaled_covariance); the documented constant (vo_sigma_m,"
+        " vo_yaw_sigma_deg); or the one rtabmap's registration computed, untouched",
         why="the constant, because rtabmap's own number answers the wrong question. Measured at"
         " rest on this robot (2026-09-14, scratch/vo_probe.py, 85 s): its registration claimed a"
         " position standard deviation of 3.8 mm at the median and 15.9 mm at p90 — an honest"
@@ -281,6 +284,7 @@ class VisualOdometry(Node):
         self._cap = PublishCap(float(self._switches["vo_publish_hz"]))
         self._rest = RestWatch()
         self._tally = Tally()
+        self._last_xy: tuple[float, float] | None = None  # the frame before this one, for its step
         self._drop: str | None = None  # the last reason, for the report line
         self._hold: str | None = None  # the last reason a pose was not published, for the same
         # Both of these cross the bridge, so their QoS is not this node's to choose: it is
@@ -358,12 +362,29 @@ class VisualOdometry(Node):
             return
         if self._switches.on("vo_continuous"):
             _write_planar_pose(msg, published)
-        if self._switches["vo_covariance"] == "constant":
+        mode = self._switches["vo_covariance"]
+        if mode == "constant":
             msg.pose.covariance = planar_covariance(
                 float(self._switches["vo_sigma_m"]), float(self._switches["vo_yaw_sigma_deg"])
             )
+        elif mode == "dynamic":
+            msg.pose.covariance = scaled_covariance(
+                float(msg.pose.covariance[0]),
+                self._step_since_last(msg),
+                float(self._switches["vo_yaw_sigma_deg"]),
+            )
         self._pub.publish(msg)
         self._tally.count("out")
+
+    def _step_since_last(self, msg: Odometry) -> float:
+        """How far the visual odometry says the cart moved since the frame before this one, in
+        metres — the step whose metres carry the depth scale's error. The first frame is 0.0."""
+        here = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+        there = self._last_xy
+        self._last_xy = here
+        if there is None:
+            return 0.0
+        return float(math.hypot(here[0] - there[0], here[1] - there[1]))
 
     # ---- the report --------------------------------------------------------------------------
     def _report(self) -> None:

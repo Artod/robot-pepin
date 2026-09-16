@@ -33,6 +33,8 @@ __all__ = [
     "LOST_VARIANCE",
     "REST_LINEAR_M_S",
     "REST_YAW_RAD_S",
+    "SCALE_ERROR",
+    "SIGMA_FLOOR_M",
     "PublishCap",
     "RestDrift",
     "RestWatch",
@@ -41,6 +43,7 @@ __all__ = [
     "VoTrack",
     "is_lost",
     "planar_covariance",
+    "scaled_covariance",
 ]
 
 # What rtabmap writes on the diagonal of a pose it did not measure: its odometry nodes publish a
@@ -49,6 +52,16 @@ LOST_VARIANCE = 9999.0
 # Below these the cart stands still: the base's own caps are 0.30 m/s and 1.0 rad/s
 # (pepin.deployment), and the wheels report a hard zero when no wheel turns, so this is a guard
 # against a tick of quantisation rather than a threshold anything is tuned to.
+# What the visual odometry's own error is made of, per frame. The registration's variance --
+# rtabmap's own number, 4.4e-5 m^2 (sigma 6.6 mm) on a healthy frame measured 2026-09-16 -- says
+# how well the two pictures' points fell on each other, and nothing else: the points were built
+# from the NETWORK's depth, whose scale still carries a 5-10 % residual after the frame law
+# (measured against the lidar's beams, 2026-09-15/16). A registration can therefore be perfect
+# while the metres it reports are 10 % short, and that part of the error grows with the step the
+# cart took, not with the picture's quality. SCALE_ERROR is that fraction; SIGMA_FLOOR_M keeps a
+# suspiciously tiny registration variance from claiming millimetre certainty.
+SCALE_ERROR = 0.10
+SIGMA_FLOOR_M = 0.005
 REST_LINEAR_M_S = 0.01
 REST_YAW_RAD_S = 0.02
 # How close to rtabmap's own origin a pose has to land to be its re-initialisation rather than a
@@ -81,6 +94,24 @@ def is_lost(covariance: Sequence[float]) -> bool:
     if len(covariance) < 36:
         return True
     return any(covariance[i * 6 + i] >= LOST_VARIANCE for i in range(6))
+
+
+def scaled_covariance(
+    registration_variance: float,
+    step_m: float,
+    yaw_sigma_deg: float,
+    scale_error: float = SCALE_ERROR,
+    floor_sigma_m: float = SIGMA_FLOOR_M,
+) -> list[float]:
+    """The pose covariance of one visual-odometry frame: the registration's own sigma (from
+    ``registration_variance``, floored at ``floor_sigma_m``) and the depth scale's share of the
+    step just taken, added in quadrature -- ``sqrt(sigma_reg^2 + (scale_error * step_m)^2)`` on x
+    and y, ``yaw_sigma_deg`` on yaw. A frame the cart barely moved in is worth its registration;
+    a long step is worth what the network's scale is worth, which is the part rtabmap cannot see.
+    """
+    reg = math.sqrt(max(float(registration_variance), 0.0))
+    sigma = math.hypot(max(reg, float(floor_sigma_m)), float(scale_error) * max(float(step_m), 0.0))
+    return planar_covariance(sigma, yaw_sigma_deg)
 
 
 def planar_covariance(sigma_m: float, yaw_sigma_deg: float, unfused: float = 1e6) -> list[float]:

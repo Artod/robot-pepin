@@ -261,3 +261,19 @@ def test_the_cap_at_zero_publishes_every_pose_but_still_orders_them() -> None:
     assert cap.refuse(10.0) is None
     assert cap.refuse(10.001) is None
     assert cap.refuse(10.001) is not None
+
+
+def test_the_dynamic_covariance_adds_the_scale_s_share_of_the_step() -> None:
+    """A frame the cart barely moved in is worth the registration's own sigma; a long step is
+    worth what the network's depth scale is worth (SCALE_ERROR of the step), the two added in
+    quadrature; a registration claiming millimetres is floored."""
+    from pepin.visual_odometry import SCALE_ERROR, SIGMA_FLOOR_M, scaled_covariance
+
+    still = scaled_covariance(0.0066**2, 0.0, yaw_sigma_deg=5.0)
+    assert math.isclose(math.sqrt(still[0]), 0.0066, rel_tol=1e-6)
+    stepped = scaled_covariance(0.0066**2, 0.20, yaw_sigma_deg=5.0)
+    assert math.isclose(math.sqrt(stepped[0]), math.hypot(0.0066, SCALE_ERROR * 0.20), rel_tol=1e-6)
+    assert math.sqrt(stepped[0]) > 3 * math.sqrt(still[0]), "the step dominates a long frame"
+    floored = scaled_covariance(1e-12, 0.0, yaw_sigma_deg=5.0)
+    assert math.isclose(math.sqrt(floored[0]), SIGMA_FLOOR_M, rel_tol=1e-6)
+    assert floored[35] > 0.0 and floored[14] > 1e3, "yaw measured, z and roll left to others"
