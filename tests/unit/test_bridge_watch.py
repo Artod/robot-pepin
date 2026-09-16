@@ -406,7 +406,10 @@ def test_the_board_s_own_readerless_route_is_a_fault_this_side_can_see(monkeypat
     drive(node, admin, [0.0, 10.0], messages=48)
     assert repair.restarts == 0, "not yet: a route caught between its creation and its endpoint"
     drive(node, admin, [20.0], messages=48)
-    assert repair.restarts == 1 and codes == [], "the gentle repair first, as for any fault"
+    assert repair.restarts == 0 and len(node.pubs["/bridge/kick"].sent) == 1, (
+        "a readerless route of the BOARD's own is the board's bridge to restart: it must be the"
+        " one that starts last, and a gentle repair here would make this side the newer one"
+    )
 
 
 def test_board_routes_off_leaves_the_far_side_unjudged(monkeypatch: Any) -> None:
@@ -432,11 +435,18 @@ def test_a_fault_that_survives_the_gentle_repair_kicks_the_board(monkeypatch: An
     repair = FakeRepair()
     node, admin, codes = build(monkeypatch, repair, with_readerless_board())
     drive(node, admin, [0.0, 20.0], messages=48)
-    assert repair.restarts == 1 and not node.pubs["/bridge/kick"].sent, "the bridge alone first"
-    drive(node, admin, [25.0, 45.0], messages=48)  # the board's route is still readerless
+    assert not repair.restarts and len(node.pubs["/bridge/kick"].sent) == 1, (
+        "the far side's fault is the far side's bridge: kicked first, this side's repair after"
+    )
+    # the board's route is still readerless, and nothing else happens here for the repair
+    # cooldown after a kick — the gentle repair follows only once that has passed
+    drive(node, admin, [25.0, 45.0, 150.0, 170.0], messages=48)
     sent = node.pubs["/bridge/kick"].sent
     assert len(sent) == 1 and "/scan" in sent[0].data, "one kick, saying what is wrong"
-    assert codes == [] and repair.restarts == 1, "this half and its bridge are left alone"
+    assert codes == [] and repair.restarts == 1, (
+        "the kick did not cure it: this side's bridge is restarted after it, and the half is"
+        " still left alone"
+    )
 
 
 def test_the_board_bridge_that_comes_back_after_a_kick_is_not_a_new_fault(
@@ -451,7 +461,10 @@ def test_the_board_bridge_that_comes_back_after_a_kick_is_not_a_new_fault(
     admin.board_zid = "0000000000000000000000000000ffff"  # the kicked bridge, back
     admin.routes = routes()  # ...with its reader this time
     node.round(70.0)
-    assert repair.restarts == 1 and codes == [], "no repair: this identity change was ours"
+    assert repair.restarts == 0 and codes == [], (
+        "no repair: this identity change was ours, and a readerless BOARD route is kicked"
+        " first — restarting this side would only make this side the newer bridge again"
+    )
     assert any("came back after our kick" in line for line in node.get_logger().texts("info"))
 
 
@@ -460,7 +473,9 @@ def test_the_kick_is_off_when_the_switch_is_off(monkeypatch: Any) -> None:
     node, admin, codes = build(monkeypatch, repair, with_readerless_board())
     node._switches.set("bridge_kick", False)
     drive(node, admin, [0.0, 20.0, 25.0, 45.0, 65.0], messages=48)
-    assert not node.pubs["/bridge/kick"].sent and repair.restarts == 1 and codes == []
+    assert not node.pubs["/bridge/kick"].sent and repair.restarts == 1 and codes == [], (
+        "with the kick off the gentle repair is all that is left, far fault or not"
+    )
 
 
 # ---- the cooldown state machine ------------------------------------------------------------

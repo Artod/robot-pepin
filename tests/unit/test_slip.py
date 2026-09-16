@@ -101,3 +101,19 @@ def test_the_picture_slip_calls_the_wheels_liars_only_on_a_lasting_disagreement(
     watch.feed(4.0, 0.13, 0.0, vo_at=4.0)
     stale = watch.feed(4.0 + PICTURE_SLIP_HOLD_S + 0.1, 0.13, 0.0, vo_at=3.0)
     assert not stale.slipping and "no picture" in stale.reason, "a stale picture cannot testify"
+
+
+def test_a_fresh_slip_mutes_the_wheels_on_their_first_word() -> None:
+    """The hold is the price of the first verdict. Once the wheels have been caught, a silence
+    that gives their voice back must not buy them another hold's worth of lying: while the slip
+    is fresh they are muted again the moment they claim anything."""
+    from pepin.slip import PICTURE_SLIP_HOLD_S, PictureSlip
+
+    watch = PictureSlip()
+    watch.feed(0.0, 0.13, 0.0, vo_at=0.0)
+    assert watch.feed(PICTURE_SLIP_HOLD_S + 0.1, 0.13, 0.0, vo_at=0.4).slipping
+    assert not watch.feed(0.7, 0.0, 0.0, vo_at=0.7).slipping, "a muted wheel's silence"
+    again = watch.feed(0.8, 0.13, 0.0, vo_at=0.8)
+    assert again.slipping, "caught a moment ago: no second hold"
+    watch.feed(1.0, 0.13, 0.13, vo_at=1.0)  # the picture catches up: the slip is over
+    assert not watch.feed(5.0, 0.13, 0.0, vo_at=5.0).slipping, "long past: the hold is charged"

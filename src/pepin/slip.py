@@ -98,6 +98,13 @@ PICTURE_SLIP_RATIO = 0.5
 PICTURE_SLIP_HOLD_S = 0.4
 # Below this the wheels are not claiming to drive anywhere and there is nothing to disbelieve.
 PICTURE_SLIP_MIN_SPEED_M_S = 0.05
+# How long a slip stays fresh in the watch's memory. The hold above is the price of the FIRST
+# verdict — proof that a disagreement is not one late picture. Once the wheels have been caught,
+# paying it again on every re-entry is what leaks: a muted wheel says nothing, the silence gives
+# its voice back, and the wheels then get another hold's worth of lying. Inside this window the
+# wheels are muted on their first word instead (2026-09-16: 54 cm of invented motion became 37
+# with the hold charged every time).
+PICTURE_SLIP_RECENT_S = 2.0
 # A visual odometry older than this cannot testify: it drops frames and a 1.7 s gap was seen
 # live. With no witness the wheels are believed -- the cart must keep moving when the camera
 # half is gone (the board drives alone on a WiFi loss, by design).
@@ -134,11 +141,14 @@ class PictureSlip:
         hold_s: float = PICTURE_SLIP_HOLD_S,
         min_speed: float = PICTURE_SLIP_MIN_SPEED_M_S,
         fresh_s: float = PICTURE_VO_FRESH_S,
+        recent_s: float = PICTURE_SLIP_RECENT_S,
     ) -> None:
         self.ratio = ratio
         self.hold_s = hold_s
         self.min_speed = min_speed
         self.fresh_s = fresh_s
+        self.recent_s = recent_s
+        self._muted_at: float | None = None  # when the wheels were last caught lying
         self._since: float | None = None  # when the present disagreement began
         self._last: float | None = None  # the clock of the last verdict
         self.slips = 0  # disagreements that grew into a verdict, since the start
@@ -212,10 +222,12 @@ class PictureSlip:
         if self._since is None:
             self._since = now
         held = now - self._since
-        if held < self.hold_s:
+        fresh = self._muted_at is not None and now - self._muted_at <= self.recent_s
+        if held < self.hold_s and not fresh:
             return PictureSlipVerdict(False, wheel, seen, held, "disagreeing, not long enough yet")
         if not was:
             self.slips += 1
+        self._muted_at = now
         return PictureSlipVerdict(True, wheel, seen, held, "the wheels turn, the picture stands")
 
 

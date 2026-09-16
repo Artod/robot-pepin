@@ -384,6 +384,7 @@ class BridgeWatch(Node):
         self._reported: dict[str, int] = {}
         self._reported_at = 0.0
         self._attempts = 0
+        self._kicked_first = False
         self._cooldown_until = 0.0
         self._kick_until = 0.0  # no second kick to the board before this
         self._expect_board_bridge = 0.0  # ...and until here a new board bridge is our own doing
@@ -524,7 +525,12 @@ class BridgeWatch(Node):
         if now - self._reported_at >= REPORT_S:
             self.report(flows, starved, dead, far_dead, now)
         if starved or rotten or far_rotten:
-            self.mend(self.fault(starved, rotten, far_rotten), now, grace=True)
+            self.mend(
+                self.fault(starved, rotten, far_rotten),
+                now,
+                grace=True,
+                far=bool(far_rotten) and not bool(rotten),
+            )
         elif self._flow.settled(now):
             self._attempts = 0  # a link healthy well past the last repair earns the gentle one
 
@@ -589,7 +595,14 @@ class BridgeWatch(Node):
             return ()
         return allowed_names(allow if isinstance(allow, str) else str(allow[0]))
 
-    def mend(self, why: str, now: float, grace: bool = False, settle: bool = False) -> None:
+    def mend(
+        self,
+        why: str,
+        now: float,
+        grace: bool = False,
+        settle: bool = False,
+        far: bool = False,
+    ) -> None:
         """Put the routes back, least destructive first: the laptop's bridge container alone,
         then a kick to the board's bridge, and the whole half only after both.
 
@@ -609,6 +622,22 @@ class BridgeWatch(Node):
                 f"bridge watch: {why} while this half is still coming up; waiting"
             )
             return
+        # Whose bridge must restart is not a preference, it is the mechanism: a route's DDS
+        # endpoint is built when the route is created and only if the far bridge is already
+        # announcing, so THE BRIDGE THAT STARTS LAST is the one that ends up with working routes.
+        # When it is the BOARD's own pub routes that carry no reader, restarting this side first
+        # makes this side last and leaves the board's routes exactly as dead as they were — and
+        # the kick that follows makes the board last again, which is the loop seen on 2026-09-16
+        # after every `restart.sh board --deploy`. So the far side's fault is kicked FIRST.
+        if (
+            far
+            and not self._kicked_first
+            and self._switches.on("bridge_kick")
+            and now >= self._kick_until
+        ):
+            self._kicked_first = True
+            self.kick(why, now)
+            return
         if (
             self._switches.on("bridge_restart")
             and not self._attempts
@@ -625,6 +654,7 @@ class BridgeWatch(Node):
                 self.restart_half(f"{why} and the bridge would not restart: {exc}")
                 return
             self._flow.repaired(now)
+            self._kicked_first = False
             self._dead_since.clear()  # fresh routes: every clock starts again
             self._far_since.clear()
             self._local_zid = None  # a new bridge has a new id; its routes are new too

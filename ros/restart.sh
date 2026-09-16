@@ -130,6 +130,17 @@ restart_board() {
         ssh "root@$BOARD" "systemctl restart pepin-ros && sleep 8 && systemctl is-active pepin-ros"
     fi
     wait_for "board" "$WAIT_BOARD_S" pepin-ros "relocalizer\]: tracker:" || true
+    # A route's DDS endpoint is built when the route is created and only if the far bridge is
+    # already announcing, so OF TWO BRIDGES THE ONE THAT STARTS LAST gets working routes. The
+    # board's restart takes its bridge with it, which leaves the laptop's publications (/vo,
+    # /depth_scan, the localisation words) with no reader on the board — measured after every
+    # `restart.sh board --deploy` on 2026-09-16. Restarting the laptop's bridge here makes it
+    # the newer one again. Nothing to do when this half is not up.
+    if [ "$SIDES" != board ] || ! docker ps --format '{{.Names}}' | grep -qx pepin-zenoh; then
+        return 0
+    fi
+    step "the laptop's bridge, after the board's: the newer bridge is the one with live routes"
+    docker restart pepin-zenoh >/dev/null && echo "laptop bridge restarted"
 }
 
 drop_anchor() {  # --fresh-graph: the anchor of the map the board serves, for the new database
