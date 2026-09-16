@@ -859,6 +859,7 @@ class Relocalizer(Node):
         self._picture_slip = PictureSlip()  # the wheels against the camera's own odometry
         self._vo = PictureSpeed()  # the camera's own speed, from its consecutive poses
         self._wheels_muted = False
+        self._wheel_at: float | None = None  # when the wheels last said anything at all
         self._wheel_params = AsyncParameterClient(self, "base_bridge")
         self._history = OdomHistory(horizon_s=5.0)
         # Every source's scans wait at the feed (a gate per source) and one of them drives the
@@ -1003,7 +1004,7 @@ class Relocalizer(Node):
         self._slip_pub = self.create_publisher(Bool, "/slip", 5)  # wheels move, the world does not
         self.create_timer(30.0, self._report_tracking)
         self.create_timer(2.0, self._remember_pose)
-        self.create_timer(1.0, self._wheels_no_word)  # a mute cannot outlive a second of silence
+        self.create_timer(0.2, self._wheels_no_word)  # a mute outlives at most a fifth of a second
         self.create_timer(0.2, self._apply_pending_seed)  # the worker's fix, applied here
         self.create_timer(0.05, self._send_map_odom)  # the frame stays alive, scans or not
         self.create_subscription(
@@ -1235,6 +1236,7 @@ class Relocalizer(Node):
 
     def _on_wheels(self, msg: Odometry) -> None:
         """One word from the wheels, judged against the picture."""
+        self._wheel_at = self.get_clock().now().nanoseconds * 1e-9
         self._wheels_speak(float(msg.twist.twist.linear.x))
 
     def _wheels_no_word(self) -> None:
@@ -1243,8 +1245,17 @@ class Relocalizer(Node):
         and the wheels get their voice back to speak for themselves; a slip that is still going
         mutes them again within the watch's hold. Without this the mute would be permanent: a
         muted wheel publishes nothing, and a watch fed only by wheels would never hear it stop.
+        While the wheels DID speak a moment ago the tick stands aside: their own words answer.
         """
-        self._wheels_speak(0.0)
+        change = self._picture_slip.tick(
+            self.get_clock().now().nanoseconds * 1e-9,
+            self._wheel_at,
+            self._vo.speed,
+            self._vo.at,
+            self._wheels_muted,
+            watching=self._switches.on("slip_watch"),
+        )
+        self._mute_wheels(*change) if change is not None else None
 
     def _wheels_speak(self, speed: float) -> None:
         """The wheels' own speed against the picture's. While the wheels claim to drive and the

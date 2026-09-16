@@ -155,6 +155,26 @@ class PictureSlip:
             return None
         return self._last - self._since
 
+    def tick(
+        self,
+        now: float,
+        wheel_at: float | None,
+        vo_speed: float,
+        vo_at: float | None,
+        muted: bool,
+        silence_s: float = 0.3,
+        watching: bool = True,
+    ) -> tuple[bool, PictureSlipVerdict] | None:
+        """A clock tick rather than a word from the wheels. A muted wheel publishes nothing, so
+        a watch fed only by wheels would never hear its own mute end: this asks the same question
+        of a silence. While the wheels DID speak within ``silence_s`` the tick stands aside and
+        lets their own words answer; otherwise the silence counts as a wheel claiming nothing,
+        which gives the voice back."""
+        spoke = wheel_at is not None and now - wheel_at <= silence_s
+        if spoke:
+            return None
+        return self.change(now, 0.0, vo_speed, vo_at, muted, watching=watching)
+
     def change(
         self,
         now: float,
