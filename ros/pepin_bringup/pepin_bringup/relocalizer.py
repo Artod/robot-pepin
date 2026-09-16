@@ -73,6 +73,8 @@ from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from nav_msgs.msg import Odometry, Path
 from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.parameter import Parameter
+from rclpy.parameter_client import AsyncParameterClient
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
@@ -103,7 +105,7 @@ from pepin.measurements import (
 )
 from pepin.odometry import Pose2D, RunawayWatch, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
-from pepin.slip import SlipWatch
+from pepin.slip import PictureSlip, PictureSlipVerdict, PictureSpeed, SlipWatch
 from pepin.sources import (
     CAMERA,
     CONTACT,
@@ -741,6 +743,25 @@ FLAGS = FlagSet(
         off_when="0 stops the clearing with the flag still on, for a run that wants the jumps"
         " counted without the calls",
     ),
+    Flag(
+        "slip_watch",
+        True,
+        description="while the wheels claim speed and the camera's own odometry shows the"
+        " picture standing still, the wheels are muted at their source (base_bridge's"
+        " odom_publish) so the EKF never fuses the metres they invent; off, the wheels are"
+        " always heard and a slip enters the pose",
+        why="MEASURED 2026-09-16 with the cart held by hand: the wheels reported 36 cm in 2.4 s,"
+        " the EKF followed them to 34 cm, the lidar measured 3 cm. The filter's own Mahalanobis"
+        " gate (odom0_twist_rejection_threshold 5.0) cannot see this — it judges each wheel"
+        " sample against a prediction the wheel samples before it built. The camera can: standing"
+        " still its odometry walks 0.2 cm in 42 s (worst 0.6 cm in 2 s, same day), some 0.3 cm/s"
+        " of noise against the 13 cm/s the wheels were claiming, a ratio of forty"
+        " (pepin.slip.PictureSlip, ratio 0.5 held for 0.4 s)",
+        on_when="always on a cart whose camera half is alive: a slip is the one odometry error"
+        " nothing else on board can see",
+        off_when="while measuring the raw wheels, or when the camera's odometry is itself under"
+        " suspicion — with no picture the watch already stands down by itself",
+    ),
 )
 MASK_FLAGS = ("map_grow",)  # the flags that rebuild the static mask, not the tracker
 
@@ -835,6 +856,10 @@ class Relocalizer(Node):
         # and fell back to "now": 1-2 degrees of false correction per scan in every pivot, with the
         # sign of the turn, and the cart steered by the wobble (runs 0080-0083, 2026-09-09).
         self._odom_topic = str(self.declare_parameter("odom_topic", "/odometry/filtered").value)
+        self._picture_slip = PictureSlip()  # the wheels against the camera's own odometry
+        self._vo = PictureSpeed()  # the camera's own speed, from its consecutive poses
+        self._wheels_muted = False
+        self._wheel_params = AsyncParameterClient(self, "base_bridge")
         self._history = OdomHistory(horizon_s=5.0)
         # Every source's scans wait at the feed (a gate per source) and one of them drives the
         # update: the lidar while it is fresh, else the camera. The roster is shared with the
@@ -915,6 +940,11 @@ class Relocalizer(Node):
             QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
         )
         self.create_subscription(Odometry, self._odom_topic, self._on_odom, 20)
+        # The slip watch's two witnesses: the wheels' own word (base_bridge, not the filter's
+        # output — the filter follows the wheels, so it cannot testify against them) and the
+        # camera's. Both are one subscription each; the board pays ~20 and ~3 messages a second.
+        self.create_subscription(Odometry, "/odom", self._on_wheels, 20)
+        self.create_subscription(Odometry, "/vo", self._on_vo, 10)
         # Depth 1: a candidate is a snapshot of a moment, and the newest one is the only one
         # worth judging; a backlog of them would re-seed from a scan seconds old.
         self.create_subscription(
@@ -1191,6 +1221,42 @@ class Relocalizer(Node):
         )
         self._feed.offer(name, scan)
         self._track_pending()
+
+    def _on_vo(self, msg: Odometry) -> None:
+        """The camera's own speed, from the last pair of visual-odometry poses. The clock is the
+        BOARD's arrival time, not the message's stamp: the two halves keep their own wall clocks
+        and this comparison must not depend on them agreeing."""
+        self._vo.feed(
+            msg.pose.pose.position.x,
+            msg.pose.pose.position.y,
+            self.get_clock().now().nanoseconds * 1e-9,
+        )
+
+    def _on_wheels(self, msg: Odometry) -> None:
+        """The wheels' own speed against the picture's. While the wheels claim to drive and the
+        pictures stand still, the wheels are lying (:class:`pepin.slip.PictureSlip`) and their
+        voice is taken away at the source — base_bridge's ``odom_publish`` — so the EKF never
+        sees the metres they invent. It comes back the moment the two agree again, or the moment
+        the camera stops testifying (a stale picture is no witness)."""
+        change = self._picture_slip.change(
+            self.get_clock().now().nanoseconds * 1e-9,
+            float(msg.twist.twist.linear.x),
+            self._vo.speed,
+            self._vo.at,
+            self._wheels_muted,
+            watching=self._switches.on("slip_watch"),
+        )
+        self._mute_wheels(*change) if change is not None else None
+
+    def _mute_wheels(self, mute: bool, verdict: PictureSlipVerdict) -> None:
+        """Set base_bridge's ``odom_publish`` to the opposite of ``mute`` and say why, once per
+        change. The call is fired and not waited on: nothing on this path may block."""
+        self._wheels_muted = mute
+        self._wheel_params.set_parameters(
+            [Parameter("odom_publish", Parameter.Type.BOOL, not mute)]
+        )
+        heard = "muted" if mute else "heard again"
+        self.get_logger().warn(f"slip: the wheels are {heard} — {verdict.said}")
 
     def _on_odom(self, msg: Odometry) -> None:
         """Every fused odometry sample feeds the history; a scan waiting for it gets matched.

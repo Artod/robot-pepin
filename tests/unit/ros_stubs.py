@@ -575,6 +575,21 @@ class Node:
         self.destroyed = True
 
 
+class AsyncParameterClient:
+    """rclpy.parameter_client.AsyncParameterClient as the nodes here use it: the name of the
+    node whose parameters are being set, and every set that was fired at it (never waited on)."""
+
+    def __init__(self, node: Any, remote: str) -> None:
+        self.node = node
+        self.remote = remote
+        self.sets: list[list[Any]] = []
+
+    def set_parameters(self, parameters: list[Any]) -> Any:
+        """Remember the call and answer with a future nobody waits on."""
+        self.sets.append(list(parameters))
+        return None
+
+
 class Rclpy(types.ModuleType):
     """The ``rclpy`` module a test drives: ``spin`` runs whatever ``on_spin`` is set to."""
 
@@ -627,6 +642,9 @@ def install() -> Any:
             "rclpy.executors", ExternalShutdownException=ExternalShutdownException
         ),
         "rclpy.parameter": _module("rclpy.parameter", Parameter=Parameter),
+        "rclpy.parameter_client": _module(
+            "rclpy.parameter_client", AsyncParameterClient=AsyncParameterClient
+        ),
         "rclpy.action": _module("rclpy.action", ActionClient=ActionClient),
         "rcl_interfaces": _module("rcl_interfaces"),
         "rcl_interfaces.msg": _module(

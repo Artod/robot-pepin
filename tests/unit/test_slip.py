@@ -83,3 +83,21 @@ def test_the_watch_says_nothing_while_the_cart_stands_still() -> None:
     ranges, watch = _scan(), SlipWatch()
     watch.observe(ranges, Pose2D(1.0, 2.0, 0.5))
     assert not watch.observe(ranges.copy(), Pose2D(1.0, 2.0, 0.5)) and watch.streak == 0
+
+
+def test_the_picture_slip_calls_the_wheels_liars_only_on_a_lasting_disagreement() -> None:
+    """The wheels claiming speed while the pictures stand still is a slip once it has lasted;
+    a fresh picture that agrees, quiet wheels, or no picture at all are never a slip."""
+    from pepin.slip import PICTURE_SLIP_HOLD_S, PictureSlip
+
+    watch = PictureSlip()
+    assert not watch.feed(0.0, 0.13, 0.13, vo_at=0.0).slipping, "both agree: driving"
+    assert not watch.feed(1.0, 0.0, 0.0, vo_at=1.0).slipping, "nobody claims anything"
+    first = watch.feed(2.0, 0.13, 0.00, vo_at=2.0)
+    assert not first.slipping and "not long enough" in first.reason
+    late = watch.feed(2.0 + PICTURE_SLIP_HOLD_S + 0.1, 0.13, 0.00, vo_at=2.4)
+    assert late.slipping and watch.slips == 1, "held long enough: the wheels are lying"
+    assert not watch.feed(3.0, 0.13, 0.12, vo_at=3.0).slipping, "the picture caught up"
+    watch.feed(4.0, 0.13, 0.0, vo_at=4.0)
+    stale = watch.feed(4.0 + PICTURE_SLIP_HOLD_S + 0.1, 0.13, 0.0, vo_at=3.0)
+    assert not stale.slipping and "no picture" in stale.reason, "a stale picture cannot testify"
