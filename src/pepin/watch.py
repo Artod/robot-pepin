@@ -14,6 +14,9 @@ drove on dead reckoning alone (2026-09-14).
 
 :class:`Sigma` is the answer the whole file now prefers to a fit: one uncertainty, out of the
 fusion, whatever spoke into it (:data:`DRIVE_SIGMA_M`).
+
+:class:`JumpClear` watches the other side of a correction: when a word moves the pose far
+enough, the obstacle grid built at the old pose has to be thrown away.
 """
 
 from __future__ import annotations
@@ -21,10 +24,10 @@ from __future__ import annotations
 import json
 import math
 import statistics
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -716,6 +719,64 @@ class BlindDriveWatch:
         its own reads it: goto also asks how far the wheels carried the cart since that moment,
         because a cart spinning on a stuck wheel with a poor reading is not driving blind."""
         return self._lost_since
+
+
+@dataclass
+class JumpClear:
+    """When a correction has moved the pose so far that the obstacle grid behind it is a lie,
+    and that grid must be emptied.
+
+    The evidence is the step ``map -> odom`` takes. The cart's own motion lives in
+    ``odom -> base_link``, so this transform moves only when an accepted word corrects the pose
+    and the step IS that correction, whatever drove the update. Three rules on it: the first
+    transform is a baseline and never a jump, a step no longer than ``clear_costmap_jump_m`` is
+    a correction the grid absorbs (0 clears never), and two steps closer together than
+    ``min_gap_s`` buy one clear — emptying a grid costs its owner a rebuild from the live scans,
+    and a clear per update would leave a controller steering on an empty map.
+
+    What emptying means is the caller's business: :meth:`moved` calls ``clear`` with the jump in
+    metres and this class decides nothing else. On the robot that callback asks Nav2 to clear
+    the local costmap, because the camera's marks there were laid at the pose before the jump
+    and nothing else takes them back (2026-09-16: the camera layer clears only inside its own
+    80 degree fan, and camera-only there is no lidar layer to scrub the rest).
+    """
+
+    clear: Callable[[float], None]
+    min_gap_s: float = 1.0
+    clear_costmap_on_jump: bool = True
+    clear_costmap_jump_m: float = 0.10
+    _previous: tuple[float, float, float] | None = field(default=None, init=False)
+    _cleared_s: float = field(default=-math.inf, init=False)
+
+    switches: ClassVar[tuple[str, ...]] = ("clear_costmap_on_jump", "clear_costmap_jump_m")
+
+    def switch(self, name: str, value: Any) -> None:
+        """A live flag by its name (:attr:`switches`); ``ValueError`` for any other name."""
+        if name not in self.switches:
+            raise ValueError(f"{name}: not a switch of the jump watch")
+        setattr(self, name, bool(value) if name == self.switches[0] else float(value))
+
+    def moved(self, map_odom: tuple[float, float, float], now: float) -> float:
+        """Take the ``map -> odom`` a word has just published, clear the grid when it jumped, and
+        return how far the pose moved (0.0 for the first transform, the baseline)."""
+        previous, self._previous = self._previous, map_odom
+        if previous is None:
+            return 0.0
+        jump_m = math.hypot(map_odom[0] - previous[0], map_odom[1] - previous[1])
+        if self.due(jump_m, now):
+            self._cleared_s = now
+            self.clear(jump_m)
+        return jump_m
+
+    def due(self, jump_m: float, now: float) -> bool:
+        """Whether a jump of ``jump_m`` earns a clear now: the switch on, the step past
+        ``clear_costmap_jump_m``, and the previous clear at least ``min_gap_s`` behind."""
+        return (
+            self.clear_costmap_on_jump
+            and self.clear_costmap_jump_m > 0.0
+            and jump_m > self.clear_costmap_jump_m
+            and now - self._cleared_s >= self.min_gap_s
+        )
 
 
 @dataclass(frozen=True)

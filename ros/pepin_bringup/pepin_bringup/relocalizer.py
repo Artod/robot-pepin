@@ -68,6 +68,7 @@ import numpy as np
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from geometry_msgs.msg import PoseArray, PoseStamped, PoseWithCovarianceStamped
 from nav2_msgs.msg import ParticleCloud
+from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from nav_msgs.msg import Odometry, Path
 from rclpy.duration import Duration
@@ -130,6 +131,7 @@ from pepin.watch import (
     LOST_SIGMA_M,
     SIGMA_TOPIC,
     SOURCE_PATIENCE_S,
+    JumpClear,
     LostWatch,
     PoseSpread,
     Sigma,
@@ -174,6 +176,12 @@ GRAPH_MEASUREMENT_TOPIC = "/localization/graph_measurement"
 # the mode's map owner serves, and the lidar layer of the laptop's fused volume
 # (pepin_bringup.depth_fusion, flag lidar_map). Both are subscribed; one is adopted.
 MAP_TOPICS = {"map": "/map", "map_lidar": "/map_lidar"}
+# Nav2's own service for emptying the rolling grid the controller steers by: the marks a
+# correction stranded there are erased in one call and marked again from the next scans. The
+# gap is not a flag: emptying the grid costs Nav2 that rebuild, and a second is the shortest
+# spacing at which the clears stay cheaper than the phantoms they remove.
+CLEAR_LOCAL_COSTMAP = "/local_costmap/clear_entirely_local_costmap"
+CLEAR_MIN_GAP_S = 1.0
 
 
 def map_to_odom(pose: Pose2D, odom: Pose2D) -> tuple[float, float, float]:
@@ -694,6 +702,45 @@ FLAGS = FlagSet(
         " then a graph candidate is a confident wrong room and the drive's own watches are the"
         " better judge",
     ),
+    Flag(
+        "clear_costmap_on_jump",
+        True,
+        description="when an accepted word moves the published pose further than"
+        " clear_costmap_jump_m, Nav2's local costmap is emptied"
+        f' ("{CLEAR_LOCAL_COSTMAP}", asynchronously, and at most once per'
+        f" {CLEAR_MIN_GAP_S:.0f} s), so the obstacles it marked at the old pose do not stand"
+        " beside the ones the live scans mark at the new one",
+        why="the camera-only return of 2026-09-16 13:15: the graph-held pose lagged 1.4 m behind"
+        " the cart and Nav2 spent 29 recoveries fighting marks the camera had placed at the"
+        " poses before each correction. Nothing takes them back — the camera layer clears only"
+        " inside its own 80 deg fan and camera-only there is no lidar layer to scrub the rest —"
+        " so every correction leaves a copy of the room offset by the jump and the controller"
+        " spins between the copies. A cleared local costmap is marked again from the next scans"
+        " within a control cycle. The behaviour tree already forgets that grid, but on a timer"
+        " (RateController 0.2 Hz around ForgetStaleObstacles) and only while a goal runs: up to"
+        " 5 s of driving on a stranded picture, and nothing at all between goals. This ties the"
+        " clear to the correction that stranded it",
+        on_when="whenever a source that corrects in jumps is on the roster — the graph, a"
+        " re-seeding watchdog — and above all camera-only, where no clearing lidar layer scrubs"
+        " the grid outside the fan",
+        off_when="when the marks must survive a correction: a run that reads the local costmap"
+        " as a memory of what the cart drove past, or a debug of the marking itself",
+    ),
+    Flag(
+        "clear_costmap_jump_m",
+        0.10,
+        range=(0.0, 5.0),
+        description="how far one accepted word must move the published pose before the local"
+        " costmap is cleared — the step in map -> odom, which is the correction alone with the"
+        " odometry's own motion taken out; 0 clears never",
+        why="0.10 m is the step the fix of 2026-09-16 was written against, and it sits between"
+        " the two sizes of correction this tracker makes: a scan match moves the pose by a"
+        " centimetre or two, the graph's words by 0.1-0.3 m, and only the second kind strands"
+        " marks worth a clear",
+        on_when="raise it when a clear is paid for a correction the costmap could absorb",
+        off_when="0 stops the clearing with the flag still on, for a run that wants the jumps"
+        " counted without the calls",
+    ),
 )
 MASK_FLAGS = ("map_grow",)  # the flags that rebuild the static mask, not the tracker
 
@@ -767,6 +814,12 @@ class Relocalizer(Node):
         self._last_match_stamp_s: float | None = None  # scan stamp of the previous match: dt_s
         self._last_scan_age_s = 0.0
         self._last_map_odom = (0.0, 0.0, 0.0)  # the belief until the first fix: the base
+        # Nav2's local costmap keeps what the camera marked at the pose before a correction, and
+        # nothing outside the fan erases it. Which step in map -> odom is a jump worth emptying
+        # it for is pepin.watch.JumpClear's decision; this node only makes the call.
+        self._jumps = JumpClear(self._clear_local_costmap, min_gap_s=CLEAR_MIN_GAP_S)
+        self._clear_costmap = self.create_client(ClearEntireCostmap, CLEAR_LOCAL_COSTMAP)
+        self._clears = 0  # costmap clears bought by jumps, since this node came up
         self._slip = SlipWatch()  # wheels claiming a step the picture does not show
         self._runaway = RunawayWatch()  # the mirror: the odometry frame flying, the wheels still
         self._runaways = 0  # odometry samples refused because of it (per report)
@@ -957,7 +1010,7 @@ class Relocalizer(Node):
         # declarations too, and it refuses everything that is not a flag.
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._registry.enable(self._switches["sources"])
-        gates = (self._candidates, self._measurements, self._graph, self._choice)
+        gates = (self._candidates, self._measurements, self._graph, self._choice, self._jumps)
         for gate in gates:  # a launch override too
             for name in gate.switches:
                 gate.switch(name, self._switches[name])
@@ -979,7 +1032,14 @@ class Relocalizer(Node):
         if name in MASK_FLAGS:
             self._rebuild_mask()  # the switches already hold the new value
             return
-        targets = (self._localizer, self._candidates, self._measurements, self._graph, self._choice)
+        targets = (
+            self._localizer,
+            self._candidates,
+            self._measurements,
+            self._graph,
+            self._choice,
+            self._jumps,
+        )
         for target in targets:
             if target is not None and name in target.switches:
                 target.switch(name, new)
@@ -1293,6 +1353,10 @@ class Relocalizer(Node):
         camera's."""
         self._last_map_odom = map_to_odom(pose, odom)
         self._send_map_odom()
+        # The step this transform takes IS what the word moved the pose by — the cart's own
+        # motion sits in odom -> base_link — so the watch reads it and clears Nav2's local
+        # costmap when the marks in it no longer belong to where the cart is.
+        self._jumps.moved(self._last_map_odom, now)
         # One covariance, published twice: as the pose's own on /tracker_pose and as the two
         # sigmas every gate reads. An accepted word of ANY source lands here, so this is where
         # the uncertainty collapses — the camera's measurement exactly as the lidar's match.
@@ -1308,6 +1372,21 @@ class Relocalizer(Node):
         report["measurements"] = self._measurements.status()
         report["graph"] = self._graph.status()
         self._sources_pub.publish(String(data=json.dumps(report)))
+
+    def _clear_local_costmap(self, jump_m: float) -> None:
+        """Ask Nav2 to empty its local costmap, because the pose has just jumped ``jump_m`` and
+        the marks in that grid were laid where the cart used to be (:class:`pepin.watch.JumpClear`
+        decides when).
+
+        The call is asynchronous and its answer is never waited for: this runs on the frame
+        path, between a scan and the transform it earns.
+        """
+        self._clears += 1
+        self._clear_costmap.call_async(ClearEntireCostmap.Request())
+        self.get_logger().info(
+            f"pose jumped {jump_m:.2f} m: local costmap cleared, its marks were laid at the "
+            "old pose"
+        )
 
     def _track_pending(self) -> None:
         """Match the anchor's scan at the feed once the odometry history covers its whole
@@ -1533,7 +1612,8 @@ class Relocalizer(Node):
         tracker did with the matched ones (its switches, the rest lock's cadence and gain,
         carries, lost/weak, the fit at the match and at the published pose, the largest
         map -> odom step), who drives and every source's health, what the laptop's watchdog
-        proposed and what came of it, and the cost."""
+        proposed and what came of it, how many jumps emptied Nav2's local costmap, and the
+        cost."""
         loc = self._localizer
         if loc is None:
             return
@@ -1559,6 +1639,7 @@ class Relocalizer(Node):
             f"ignored{fallback}); "
             f"{self._candidates.report()}; {self._measurements.report()}; "
             f"graph: {self._graph.report()}; "
+            f"costmap cleared {self._clears} times on jumps; "
             f"flags: {self._switches.state()}"
         )
         if feed.expired:

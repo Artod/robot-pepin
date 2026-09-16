@@ -23,7 +23,11 @@ import ros_stubs
 
 RCLPY = ros_stubs.install()
 
-from pepin_bringup.relocalizer import FLAGS, Relocalizer  # noqa: E402
+from pepin_bringup.relocalizer import (  # noqa: E402
+    CLEAR_LOCAL_COSTMAP,
+    FLAGS,
+    Relocalizer,
+)
 from ros_stubs import (  # noqa: E402
     Header,
     LaserScan,
@@ -1269,3 +1273,50 @@ def test_a_seed_collapses_the_sigma_because_a_hand_is_a_word_too(node: Relocaliz
     node.subs["/initialpose"][1](seed)
     assert said(node.pubs[SIGMA_TOPIC]).xy_m < DRIVE_SIGMA_M
     assert json.loads(node.pubs[SIGMA_TOPIC].sent[-1].data)["word_age_s"] == pytest.approx(0.0)
+
+
+def test_a_word_that_jumps_the_pose_clears_nav2_s_local_costmap(node: Relocalizer) -> None:
+    """Camera-only, the graph corrects this tracker in steps of 0.1-0.3 m and Nav2's local
+    costmap keeps what /depth_scan marked at the pose before the step: the fan clears only its
+    own 80 degrees and the lidar layer is off, so the phantoms pile up and the controller spins.
+    A jump past clear_costmap_jump_m empties that grid once, asynchronously, and no faster than
+    CLEAR_MIN_GAP_S; a match's own centimetres are not a jump, and the flag turns it off."""
+    truth, odom = drive(3)
+    on_scan, on_odom = node.subs["/scan"][1], node.subs["/odometry/filtered"][1]
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_scan(lidar_msg(t, ts))
+        on_odom(odom_msg(o, ts))
+        if i == 0:
+            assert until(lambda: node._tracker_initialised)
+    loc = node._localizer
+    assert loc is not None
+    clear = node.service_clients[CLEAR_LOCAL_COSTMAP]
+    assert not clear.calls, "a drive the matcher holds corrects by centimetres and clears nothing"
+    # Every accepted word lands in _publish_update; the jump is its step in map -> odom, so the
+    # poses below are published against one odometry sample and differ by the jump alone.
+    here, base = odom[-1], Pose2D(1.0, 1.0, 0.0)
+    off, on = (
+        Parameter("clear_costmap_on_jump", value=False),
+        Parameter("clear_costmap_on_jump", value=True),
+    )
+    assert node.set_parameters([off])[0].successful
+    node._publish_update(loc, base, here, 100.3, 200.0)  # the baseline the jumps are measured from
+    assert not clear.calls, "off: the old behaviour, phantoms and all"
+    assert node.set_parameters([on])[0].successful
+    node._publish_update(loc, Pose2D(base.x + 0.05, base.y, base.theta), here, 100.4, 200.1)
+    assert not clear.calls, "5 cm is a correction the costmap absorbs"
+    node._publish_update(loc, Pose2D(base.x + 0.35, base.y, base.theta), here, 100.5, 200.2)
+    assert len(clear.calls) == 1, "0.30 m: the marks behind the cart belong to where it was"
+    node._publish_update(loc, Pose2D(base.x + 0.05, base.y, base.theta), here, 100.6, 200.9)
+    assert len(clear.calls) == 1, "a second jump inside CLEAR_MIN_GAP_S is cleared once"
+    node._publish_update(loc, Pose2D(base.x + 0.65, base.y, base.theta), here, 100.7, 202.0)
+    assert len(clear.calls) == 2, "past the rate limit it clears again"
+    assert node.set_parameters([off])[0].successful
+    node._publish_update(loc, Pose2D(base.x + 1.65, base.y, base.theta), here, 100.8, 210.0)
+    assert len(clear.calls) == 2, "off again, with a metre and a half of jump to answer"
+    node._report_tracking()
+    line = next(line for line in node.logger.texts("info") if line.startswith("tracker:"))
+    assert "costmap cleared 2 times on jumps" in line
+    assert "clear_costmap_on_jump=off clear_costmap_jump_m=0.1" in line

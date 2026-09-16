@@ -164,6 +164,13 @@ class GetState:
     Response = _msg("GetState_Response", current_state=State)
 
 
+class ClearEntireCostmap:
+    """nav2_msgs/ClearEntireCostmap: empty a costmap; nothing goes in and nothing comes back."""
+
+    Request = _msg("ClearEntireCostmap_Request")
+    Response = _msg("ClearEntireCostmap_Response")
+
+
 class NavigateToPose:
     """nav2_msgs/NavigateToPose: the drive's goal — where to go, in the map frame."""
 
@@ -665,6 +672,7 @@ def install() -> Any:
         "nav2_msgs": _module("nav2_msgs"),
         "nav2_msgs.msg": _module("nav2_msgs.msg", ParticleCloud=ParticleCloud),
         "nav2_msgs.action": _module("nav2_msgs.action", NavigateToPose=NavigateToPose, Spin=Spin),
+        "nav2_msgs.srv": _module("nav2_msgs.srv", ClearEntireCostmap=ClearEntireCostmap),
         "action_msgs": _module("action_msgs"),
         "action_msgs.msg": _module(
             "action_msgs.msg", GoalStatus=GoalStatus, GoalStatusArray=GoalStatusArray
