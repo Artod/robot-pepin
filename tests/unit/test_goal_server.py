@@ -24,9 +24,25 @@ from pepin_bringup.goal_server import (  # noqa: E402
     TRACKER_WAIT_S,
     GoalServer,
 )
-from ros_stubs import Float32, Header, Quaternion, TransformStamped, Vector3  # noqa: E402
+from ros_stubs import (  # noqa: E402
+    Float32,
+    Header,
+    Quaternion,
+    String,
+    TransformStamped,
+    Vector3,
+)
 
-from pepin.watch import CORRECTION_FRESH_S, TF_FRESH_S  # noqa: E402
+from pepin.watch import (  # noqa: E402
+    BY_FIT,
+    BY_SIGMA,
+    CORRECTION_FRESH_S,
+    SIGMA_TOPIC,
+    SOURCE_PATIENCE_S,
+    TF_FRESH_S,
+    BlindDriveWatch,
+    Sigma,
+)
 
 NOW = 1000.0  # the node's clock, in seconds; a transform's age is NOW minus its stamp
 
@@ -350,3 +366,47 @@ def test_a_tracker_that_comes_up_late_is_still_found(tmp_path) -> None:  # type:
     assert node._tracker_here()
     tracker_says(node, 0.8)
     assert node._pose_now()["fit"] == 0.8, "and its pose is the answer again"
+
+
+def tracker_sigma(node: Any, xy_m: float, yaw_deg: float = 1.2) -> None:
+    """The tracker's fused uncertainty on the wire, as pepin_bringup.relocalizer publishes it:
+    one JSON string, the shape pepin.watch.Sigma defines."""
+    said = Sigma(xy_m, yaw_deg, 0.0).to_json(stamp=node.clock.seconds, word_age_s=0.1)
+    node.subs[SIGMA_TOPIC][1](String(data=said))
+
+
+def test_a_camera_only_drive_is_gated_on_the_sigma_and_not_on_the_lidar_s_fit(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """2026-09-15: with the camera holding the pose /localization_fit is 0.00 — no lidar scan
+    scores it — and this gate refused every goal. The sigma out of the fusion says the same pose
+    is known to 6 cm, and it outranks the fit; the flag off puts the fit rules back (rule 19)."""
+    node = server(tmp_path)
+    tracker_says(node, 0.0)
+    assert not node._ready().ready, "the fit alone: the failure of the day"
+    tracker_sigma(node, 0.06)
+    ready = node._ready()
+    assert ready.ready and ready.rule == BY_SIGMA and ready.tracker
+    node._switches.set("sigma_gate", False)
+    assert not node._ready().ready and node._ready().rule == BY_FIT
+    assert "sigma_gate=off" in node._switches.state()
+    node._switches.set("sigma_gate", True)
+    tracker_sigma(node, 0.44)
+    wide = node._ready()
+    assert not wide.ready and wide.search and "0.44 m" in wide.reason
+
+
+def test_a_sigma_that_stops_arriving_stops_the_drive_under_way(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The blind-drive watch on the new reading: a healthy camera drive runs, and a tracker that
+    goes quiet — its last sigma small for ever — is what cuts it, because the number's AGE is
+    part of the judgment."""
+    node = server(tmp_path)
+    tracker_says(node, 0.0)
+    tracker_sigma(node, 0.06)
+    assert node._sigma() is not None and node._sigma().xy_m == 0.06, "the JSON was read"
+    blind = BlindDriveWatch()
+    assert not blind.observe(node.fit, 0.0, sigma=node._sigma()), "a camera drive is not blind"
+    assert blind.rule == BY_SIGMA
+    node.clock.seconds += SOURCE_PATIENCE_S + 1.0
+    cut = False
+    for tick in range(1, 8):
+        cut = blind.observe(node.fit, float(tick), sigma=node._sigma())
+    assert cut and "stopped" in blind.phrase(), blind.phrase()

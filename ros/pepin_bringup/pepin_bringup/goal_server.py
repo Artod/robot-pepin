@@ -40,6 +40,7 @@ import math
 import socket
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -73,11 +74,15 @@ from pepin.runlink import (
 from pepin.watch import (
     CORRECTION_FRESH_S,
     DRIVE_FIT,
+    DRIVE_SIGMA_M,
+    LOST_SIGMA_M,
+    SIGMA_TOPIC,
     TF_FRESH_S,
     BlindDriveWatch,
     Correction,
     GoalGate,
     Readiness,
+    Sigma,
 )
 from pepin_bringup.msgs import stamp_seconds, yaw_of
 from pepin_bringup.node_kit import Switches, TfLookup
@@ -140,6 +145,22 @@ FLAGS = FlagSet(
         " 'ros/go.sh where' prints 'correction_s' where one has ever landed, and prints none at"
         " all in that case; the drive then rests on the transform alone, as it did before",
     ),
+    Flag(
+        "sigma_gate",
+        True,
+        description="a goal starts, and a running drive is cut, on the tracker's fused"
+        " uncertainty (/localization/sigma); off, on its scan-to-map fit as before",
+        why="a fit is ONE SENSOR'S metric — the share of one lidar revolution's beams that landed"
+        " on the map — and it says nothing about a pose the camera is holding. On a camera-only"
+        " drive it is 0.00 by construction, and every rule built on it read a healthy tracker as"
+        f" lost (2026-09-15). The sigma comes out of the fusion itself, so {DRIVE_SIGMA_M:.2f} m"
+        f" to start and {LOST_SIGMA_M:.2f} m to cut mean the same thing whichever source spoke —"
+        " and it goes on growing along the odometry when none does, which a fit never did",
+        on_when="always on a stack whose tracker publishes the topic; a board that does not is"
+        " judged by its fit by itself, with no flag to set",
+        off_when="to put the fit rules back for a comparison, or if a sigma ever refuses drives"
+        " the cart is plainly fit for",
+    ),
 )
 
 PLANNERS = {
@@ -167,6 +188,13 @@ class GoalServer(Node):
         self._fit_heard = False  # a tracker has spoken here at least once
         self._tracker_probed = False  # ...or its service was waited for, once (_tracker_here)
         self.create_subscription(Float32, "localization_fit", self._on_fit, 10)
+        # ...and the number that outranks it: how sure the tracker's FUSION is, whichever
+        # source spoke into it (pepin_bringup.relocalizer, pepin.watch.Sigma). x is the
+        # position sigma in metres, y the heading sigma in degrees, z the seconds since
+        # the last accepted word.
+        self._heard_sigma: Sigma | None = None
+        self._sigma_at: float | None = None  # when it landed HERE: the age a gate reads
+        self.create_subscription(String, SIGMA_TOPIC, self._on_sigma, 10)
         # The pose's other source: map -> base_link, which the tracker owns on a saved map and
         # pepin_bringup.slam_frame owns in SLAM mode. Read only when no tracker answers, and the
         # listener behind it is not started until then (_tf_pose).
@@ -303,6 +331,24 @@ class GoalServer(Node):
     def _on_fit(self, msg: Float32) -> None:
         self.fit = float(msg.data)
         self._fit_heard = True
+
+    def _on_sigma(self, msg: String) -> None:
+        """The tracker's fused uncertainty landed: the JSON of pepin.watch.Sigma, and when it
+        arrived. A message that does not parse is dropped, not obeyed."""
+        heard = Sigma.from_json(msg.data, 0.0)
+        if heard is None:
+            return
+        self._heard_sigma, self._sigma_at = heard, self._clock_s()
+        self._fit_heard = True  # a sigma is a tracker speaking, exactly as a fit is
+
+    def _sigma(self) -> Sigma | None:
+        """How sure the pose is and how old that word is — ``None`` where the board publishes no
+        sigma at all (a build from before 2026-09-15) or the flag is off, and the fit rules
+        answer instead."""
+        if not self._switches.on("sigma_gate") or self._heard_sigma is None:
+            return None
+        landed = self._clock_s() - (self._sigma_at or 0.0)
+        return replace(self._heard_sigma, age_s=max(0.0, landed))
 
     def _on_correction(self, _msg: TransformStamped) -> None:
         """The SLAM correction landed here; only when it did is kept."""
@@ -528,7 +574,7 @@ class GoalServer(Node):
             edge = self._tf_pose() if pose is None else pose
             watched = self._correction() if self._switches.on("correction_watch") else None
             return self._gate.verdict(None, edge.get("age_s"), watched)
-        return self._gate.verdict(self.fit, None)
+        return self._gate.verdict(self.fit, None, sigma=self._sigma())
 
     def mark(self, name: str) -> dict[str, Any]:
         """Remember where the robot stands as ``name``; refused on the same evidence a goal is
@@ -668,13 +714,23 @@ class GoalServer(Node):
             while rclpy.ok() and not result_future.done():
                 time.sleep(0.05)  # the node's own spin serves the action; this thread only reports
                 now = time.monotonic()
-                if blind is not None and blind.observe(self.fit, now):  # blind: stop, don't finish
+                # blind: stop, don't finish. The sigma where the tracker publishes one — a
+                # camera-only drive has no fit of its own to read — the fit where it does not.
+                if blind is not None and blind.observe(self.fit, now, sigma=self._sigma()):
                     stopped_lost = True
                     self._send(
-                        connection, {"event": "lost", "fit": self.fit, "t": round(now - started, 1)}
+                        connection,
+                        {
+                            "event": "lost",
+                            "rule": blind.rule,
+                            "reading": blind.phrase(),
+                            "fit": self.fit,
+                            "t": round(now - started, 1),
+                        },
                     )
                     self.get_logger().warning(
-                        f"lost mid-drive (fit {self.fit:.2f}): stopping to relocalise"
+                        f"lost mid-drive ({blind.phrase()}, judged by the {blind.rule}):"
+                        " stopping to relocalise"
                     )
                     handle.cancel_goal_async()
                     break

@@ -445,7 +445,7 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
     assert armed and armed[0].endswith("else None"), "no fit to watch without a tracker"
     # The fallback is a flag, so the old behaviour is one `ros/flags.sh set` away (rule 19).
     flags = load_table(REPO / NODES / "goal_server.py")
-    assert flags.names == ("tf_pose", "correction_watch")
+    assert flags.names == ("tf_pose", "correction_watch", "sigma_gate")
     assert all(flags.flag(name).live for name in flags.names)
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"
 
@@ -2592,3 +2592,73 @@ def test_the_visual_memory_survives_a_kill_and_the_launches_wait_for_it_to_close
         )
         first = ast.unparse(sf.calls_to(launch, "LaunchDescription")[0].args[0].elts[0])
         assert first == "*SHUTDOWN", f"{path}: the budget must be set before anything it covers"
+
+
+def test_goto_judges_a_drive_on_the_fusion_s_sigma_and_never_on_one_sensor_s_fit() -> None:
+    """2026-09-15: goto cancelled its own camera-only drives — "localization lost for 19 s while
+    the wheels travelled 1.0 m" — because it read /localization_fit, the LIDAR's scan-to-map
+    metric, which is 0.00 wherever no lidar scan scored the pose. The rule it reads now is the
+    tracker's fused uncertainty (pepin.watch), the same one the goal server reads, and the
+    thresholds live there and nowhere else: this file may not grow a second copy of them."""
+    goto = sf.tree("ros/tools/goto_ros.py")
+    assert {"SIGMA_TOPIC", "Sigma", "Preflight", "BlindDriveWatch", "source_words"} <= sf.imported(
+        goto
+    ), "the readings and the rule both come from pepin.watch"
+    assert "0.15" not in sf.assignments(goto).values(), "the sigma thresholds live in pepin.watch"
+    assert "0.25" not in sf.assignments(goto).values()
+    assert "blind.observe" in sf.calls(goto) and "certainty.sigma" in sf.calls(goto)
+    # ...and the drive's own extra condition survives: a poor reading while the wheels stand
+    # still is a stuck cart, and the recoveries (odom frame) can still work it free.
+    armed = [line for line in sf.unparsed(goto, ast.IfExp) if "BlindDriveWatch(" in line]
+    assert armed and armed[0].endswith("else None"), (
+        "online SLAM publishes neither a sigma nor a fit: a watch that read that silence as 0.00"
+        " would cut every healthy drive of the mode, so it is not armed there at all"
+    )
+    assert sf.assignments(goto)["LOST_TRAVEL_M"] == "1.0"
+    assert sf.assignments(goto)["LOST_FOR_S"] == "15.0"
+    assert "travelled_while_lost" in sf.calls(goto)
+
+
+def test_goto_prints_a_preflight_before_it_sends_a_goal() -> None:
+    """Three checks, one line each, and a refusal names the reading behind it. The old gate
+    printed "localized: fit 0.78" or "not localized" — a verdict with no evidence in it, and on
+    a camera drive the number it came from was 0.00 by construction."""
+    goto = sf.tree("ros/tools/goto_ros.py")
+    defined = {f.name for f in ast.walk(goto) if isinstance(f, ast.FunctionDef)}
+    assert {"preflight", "cancel_all"} <= defined and "Certainty" in sf.names(goto)
+    gate = next(
+        f for f in ast.walk(goto) if isinstance(f, ast.FunctionDef) and f.name == "ensure_localized"
+    )
+    body = ast.unparse(gate)
+    assert "preflight(nav, certainty)" in body, "the tracker stack is judged by the preflight"
+    assert "tracker_here(nav)" in body, "...and online SLAM still by the map frame, as before"
+    flight = next(
+        f for f in ast.walk(goto) if isinstance(f, ast.FunctionDef) and f.name == "preflight"
+    )
+    printed = ast.unparse(flight)
+    assert "check.line()" in printed, "one line per check, whatever the verdict"
+    script = (REPO / "ros/goto.sh").read_text()
+    assert "preflight certainty" in script, "the header shows the operator what to expect"
+
+
+def test_goto_s_cancel_cancels_a_goal_it_never_sent() -> None:
+    """`ros/goto.sh cancel` crashed in rclpy's teardown ("the given context is not valid") and
+    cancelled nothing even when it did not: nav2_simple_commander's cancelTask cancels the goal
+    THIS process sent, and a process started to type "cancel" has sent none. The action's own
+    cancel service takes a zero goal id, which means every goal, and needs no handle."""
+    goto = sf.tree("ros/tools/goto_ros.py")
+    assert "CancelGoal" in sf.imported(goto)
+    cancel = next(
+        f for f in ast.walk(goto) if isinstance(f, ast.FunctionDef) and f.name == "cancel_all"
+    )
+    body = ast.unparse(cancel)
+    assert "_action/cancel_goal" in body and "CancelGoal.Request()" in body
+    assert "spin_until_future_complete" in body and "CANCEL_CONFIRM_S" in body
+    assert float(sf.assignments(goto)["CANCEL_CONFIRM_S"]) <= 3.0, "confirmed while he watches"
+    main = next(f for f in ast.walk(goto) if isinstance(f, ast.FunctionDef) and f.name == "main")
+    lines = ast.unparse(main).splitlines()
+    cancelled = next(i for i, line in enumerate(lines) if "cancel_all(node)" in line)
+    built = next(i for i, line in enumerate(lines) if "BasicNavigator()" in line)
+    assert cancelled < built, "no commander is built for a cancel: building one is what crashed"
+    assert "rclpy.ok()" in ast.unparse(main), "a context already shut down refuses every call"
+    assert "stop.sh" in " ".join(sf.strings(goto)), "the hard stop is named where cancel can fail"

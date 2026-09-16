@@ -42,7 +42,15 @@ from test_localizer_sources import drive, error  # noqa: E402
 from pepin.odometry import Pose2D  # noqa: E402
 from pepin.scanmatch import apply_motion, relative_motion  # noqa: E402
 from pepin.sources import CAMERA, DEPTH, GRAPH, LIDAR  # noqa: E402
-from pepin.watch import DRIVE_FIT, SOURCE_PATIENCE_S  # noqa: E402
+from pepin.watch import (  # noqa: E402
+    DRIVE_FIT,
+    DRIVE_SIGMA_M,
+    LOST_SIGMA_M,
+    SIGMA_TOPIC,
+    SOURCE_PATIENCE_S,
+    UNKNOWN_SIGMA,
+    Sigma,
+)
 
 BEAMS = 180
 FAN = [*range(160, 180), *range(0, 21)]  # the raycast's beams within +-40 degrees, in order
@@ -1186,3 +1194,77 @@ def test_a_normal_drive_is_never_refused_and_the_report_line_carries_the_count(
     node._report_tracking()
     line = next(line for line in node.get_logger().texts("info") if line.startswith("tracker:"))
     assert "odometry runaway 0" in line and "odometry_guard=on" in line
+
+
+def said(pub: Any) -> Sigma:
+    """The newest /localization/sigma message, read the way every consumer reads it."""
+    heard = Sigma.from_json(pub.sent[-1].data, 0.0)
+    assert heard is not None, pub.sent[-1].data
+    return heard
+
+
+def test_the_node_publishes_one_sigma_out_of_the_fusion_whichever_source_spoke() -> None:
+    """The failure of 2026-09-15, and its fix, in one drive: with sources=camera nothing here
+    scores a scan against the map, so /localization_fit goes out as 0.00 and every rule built on
+    it read the cart as lost — while the fusion was holding the pose to a few centimetres. That
+    fusion's own covariance is what /localization/sigma carries, so the camera's word collapses
+    it exactly as the lidar's match would; with nothing correcting it, it grows along the
+    odometry until every gate downstream refuses.
+    """
+    with ros_stubs.parameters(sources="camera", min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    sigma_pub = node.pubs[SIGMA_TOPIC]
+    node._check()  # before a map, a scan or a word: not localised, and the topic says so
+    first = said(sigma_pub)
+    assert first.xy_m == pytest.approx(UNKNOWN_SIGMA[0], abs=1e-3)
+    assert first.yaw_deg == pytest.approx(UNKNOWN_SIGMA[1], abs=1e-3)
+    assert first.xy_m > LOST_SIGMA_M, "no word yet may not start a drive"
+    node.subs["/map"][1](map_msg())
+    truth, odom = drive(8)
+    on_measure = node.subs["/localization/measurement"][1]
+    on_odom = node.subs["/odometry/filtered"][1]
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_odom(odom_msg(o, ts))
+        on_measure(measurement_msg(node, t, ts))
+    node._check()
+    assert node.pubs["localization_fit"].sent[-1].data == 0.0, "the lidar's metric, and no lidar"
+    word = said(sigma_pub)
+    assert word.xy_m < DRIVE_SIGMA_M, f"the camera is holding the pose: {word.xy_m:.3f} m"
+    assert json.loads(sigma_pub.sent[-1].data)["word_age_s"] < 0.5, "the word that did it"
+    assert len(sigma_pub.sent) >= len(node.pubs["/tracker_pose"].sent), "one per update, at least"
+    # ...and now nothing corrects it: the wheels turn, the camera says nothing, the check runs.
+    collapsed = word.xy_m
+    for i in range(1, 40):
+        ts = 101.0 + 0.5 * i
+        node.clock.seconds = ts
+        on_odom(odom_msg(Pose2D(odom[-1].x + 0.25 * i, odom[-1].y, odom[-1].theta), ts))
+        node._check()
+    grown = said(sigma_pub)
+    assert grown.xy_m > collapsed * 3, f"ten metres of dead reckoning: {grown.xy_m:.3f} m"
+    assert grown.xy_m > LOST_SIGMA_M, "...and a drive on it is cut"
+    told = json.loads(sigma_pub.sent[-1].data)
+    assert told["word_age_s"] > 15.0, "the seconds since the last accepted word ride along"
+    assert told["stamp"] == pytest.approx(node.clock.seconds), "...and the clock it was said at"
+    node._report_tracking()
+    line = node.logger.texts("info")[-1]
+    assert "sigma " in line and "word " in line and "a drive is cut over 0.25 m" in line
+    where = node.services["where_am_i"][1](None, ros_stubs.Trigger.Response())
+    assert "the number a drive is judged by" in where.message
+
+
+def test_a_seed_collapses_the_sigma_because_a_hand_is_a_word_too(node: Relocalizer) -> None:
+    """An operator who can see the cart is the surest source there is: after a seed the pose is
+    known to what that confidence buys, and the growth starts again from there. Without this a
+    hand seed could not clear a refusal — the sigma went on growing from a pose nobody holds."""
+    node.clock.seconds = 100.0
+    node.subs["/odometry/filtered"][1](odom_msg(Pose2D(0.0, 0.0, 0.0), 100.0))
+    node._check()
+    assert said(node.pubs[SIGMA_TOPIC]).xy_m > LOST_SIGMA_M
+    seed = PoseWithCovarianceStamped()
+    seed.pose.pose.position.x, seed.pose.pose.position.y = -9.5, 2.4
+    node.subs["/initialpose"][1](seed)
+    assert said(node.pubs[SIGMA_TOPIC]).xy_m < DRIVE_SIGMA_M
+    assert json.loads(node.pubs[SIGMA_TOPIC].sent[-1].data)["word_age_s"] == pytest.approx(0.0)

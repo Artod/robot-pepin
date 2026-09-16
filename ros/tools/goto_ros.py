@@ -17,18 +17,28 @@ Places live in the file named by --places (default /maps/places.yaml), one per m
 A goal pose published once on /goal_pose can be lost to discovery timing and gives
 no feedback; the action client here waits for Nav2, watches the task and prints
 distance remaining, recoveries and the final result.
+
+Before any goal is sent, three checks are printed, one line each, and any failure refuses the
+drive with the reading behind it (:class:`pepin.watch.Preflight`): has any source spoken to the
+tracker at all, is the pose sure enough to drive on (the fusion's own sigma —
+/localization/sigma — not the lidar's fit, which is 0.00 on a camera-only drive), and, where no
+lidar is holding the pose, does RTAB-Map's graph recognise the room and agree with the tracker
+about the place in it.
 """
 
 import json
 import math
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import rclpy
+from action_msgs.srv import CancelGoal
 from geometry_msgs.msg import PoseStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from nav_msgs.msg import Odometry
+from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
@@ -41,6 +51,17 @@ from pepin.runlink import (
     start_command,
     stop_command,
 )
+from pepin.watch import (
+    ADMIT_FIT,
+    BLIND_FIT,
+    DRIVE_SIGMA_M,
+    SIGMA_TOPIC,
+    BlindDriveWatch,
+    Preflight,
+    Sigma,
+    SourceWord,
+    source_words,
+)
 
 # How long the tracker's service is given to appear before this client decides the board is in
 # online SLAM and runs no tracker at all (pepin.deployment.runs_here). The same 5 s every other
@@ -51,9 +72,20 @@ TRACKER_PATIENCE_S = 5.0
 # order of patience for the frame it plans in.
 MAP_FRAME_FRESH_S = 1.0
 
-LOST_FIT, LOST_FOR_S = 0.30, 15.0  # fit below this for this long...
+# The drive's own watch: the pose uncertain past pepin.watch.LOST_SIGMA_M (or, on a board that
+# publishes no sigma, the fit under BLIND_FIT) for this long...
+LOST_FOR_S = 15.0
 LOST_TRAVEL_M = 1.0  # ...while the wheels carried it this far: that is driving blind. Spinning on a
-# stuck wheel with a lost fit is not — the recoveries (odom frame) can still work it free.
+# stuck wheel with a lost reading is not — the recoveries (odom frame) can still work it free.
+# How long the preflight waits for the board's first word about the pose. The tracker publishes
+# its sigma every check period (1 s) whatever the sensors do and its per-source report on every
+# update, so three seconds of nothing is the tracker itself being absent — which is a refusal
+# with a reason, not a reason to wait longer.
+CERTAINTY_WAIT_S = 3.0
+# A cancel must be confirmed inside the patience ros/goto.sh gives it (timeout 5): the operator
+# who typed "cancel" is watching the cart move.
+CANCEL_CONFIRM_S = 3.0
+NAV_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
 
 
 RECORDER_PATIENCE_S = 8.0  # the recorder may answer over a bridge; the goal server waits as long
@@ -129,6 +161,141 @@ class Tape:
         )
 
 
+class Certainty:
+    """What the board says about the pose, for the preflight and for the drive's own watch.
+
+    Three topics, in the order they are trusted. ``/localization/sigma`` is how sure the
+    tracker's FUSION is — the one number a drive is judged on, whichever source spoke into it
+    (:class:`pepin.watch.Sigma`). ``/localization/sources`` is who is holding the pose: every
+    source's health and the word it put in, which is what tells a camera-only drive apart from a
+    lidar one. ``/localization_fit`` is the lidar's own scan-to-map metric, kept as the fallback
+    for a board whose build predates the sigma — and never trusted over it, because it is 0.00
+    by construction wherever no lidar scan scored the pose.
+    """
+
+    def __init__(self, nav: BasicNavigator) -> None:
+        self._nav = nav
+        self.fit: float | None = None
+        self._sigma: Sigma | None = None
+        self._sigma_at: float | None = None
+        self._report: dict[str, object] | None = None
+        nav.create_subscription(Float32, "/localization_fit", self._on_fit, 10)
+        nav.create_subscription(String, SIGMA_TOPIC, self._on_sigma, 10)
+        nav.create_subscription(String, "/localization/sources", self._on_sources, 5)
+
+    def _on_fit(self, msg: Float32) -> None:
+        self.fit = float(msg.data)
+
+    def _on_sigma(self, msg: String) -> None:
+        heard = Sigma.from_json(msg.data, 0.0)
+        if heard is not None:  # a message that does not parse says nothing about the pose
+            self._sigma, self._sigma_at = heard, time.monotonic()
+
+    def _on_sources(self, msg: String) -> None:
+        try:
+            heard = json.loads(msg.data)
+        except ValueError:
+            return  # a message that does not parse is counted by the tracker, not obeyed here
+        if isinstance(heard, dict):
+            self._report = heard
+
+    def wait(self, seconds: float = CERTAINTY_WAIT_S) -> None:
+        """Spin until both words have arrived or the patience runs out. Neither is a heartbeat
+        this client can ask for: the sigma comes every check period and the source report on
+        every update, so what is not here within the patience is not coming."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not (self._sigma and self._report):
+            rclpy.spin_once(self._nav, timeout_sec=0.1)
+
+    def refresh(self, seconds: float = 2.0) -> None:
+        """Spin for ``seconds`` whatever has already arrived. After a whole-map search the
+        numbers held here are the ones from BEFORE it until the board's next publications land,
+        and a plain sleep processes no callback at all."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            rclpy.spin_once(self._nav, timeout_sec=0.1)
+
+    def sigma(self) -> Sigma | None:
+        """The fused uncertainty and how long ago it landed here; ``None`` where this board
+        publishes none at all, and the fit rules answer instead."""
+        if self._sigma is None:
+            return None
+        age = time.monotonic() - (self._sigma_at or time.monotonic())
+        return replace(self._sigma, age_s=max(0.0, age))
+
+    def words(self) -> list[SourceWord]:
+        """Every source's line of the tracker's last report; empty when none has arrived."""
+        return [] if self._report is None else source_words(self._report)
+
+    def heard(self) -> bool:
+        """Whether this board says anything at all about how sure the pose is. False in online
+        SLAM, where no tracker runs: there is nothing there for a drive's watch to read, and a
+        watch that took the silence for 0.00 would cut every healthy drive of that mode."""
+        return self._sigma is not None or self.fit is not None
+
+
+def preflight(nav: BasicNavigator, certainty: Certainty) -> bool:
+    """Print one line per check and answer whether the goal may be sent.
+
+    A refusal always names the reading that caused it. The one refusal that buys something first
+    is a pose that is simply not sure enough: standing still, that is exactly what a whole-map
+    search fixes, so the search is run once (the tracker's own /relocalize, as before) and the
+    three checks are asked again — after which a refusal is final.
+    """
+    certainty.wait()
+    checks = Preflight().checks(certainty.words(), certainty.sigma(), certainty.fit)
+    for check in checks:
+        print(check.line(), flush=True)
+    if Preflight.passed(checks):
+        return True
+    if not all(check.ok for check in checks if check.name != "certainty"):
+        print("not driving: the refusals above are not something a search can fix", flush=True)
+        return False
+    print("an unsure pose buys one whole-map search: asking the tracker...", flush=True)
+    client = nav.create_client(Trigger, "/relocalize")
+    if not client.wait_for_service(timeout_sec=5.0):
+        print("no /relocalize on this board: nothing to search with", flush=True)
+        return False
+    future = client.call_async(Trigger.Request())
+    rclpy.spin_until_future_complete(nav, future, timeout_sec=60.0)
+    result = future.result()
+    print(result.message if result else "no answer from /relocalize", flush=True)
+    certainty.refresh()  # the search's own seed lands at the very end of it
+    checks = Preflight().checks(certainty.words(), certainty.sigma(), certainty.fit)
+    for check in checks:
+        print(check.line(), flush=True)
+    return Preflight.passed(checks)
+
+
+def cancel_all(node: Node) -> str:
+    """Cancel every goal on the board's navigators and say what came of it.
+
+    Never through the commander's ``cancelTask``: that cancels the goal THIS PROCESS sent, and a
+    process started to type "cancel" has sent none — it held no goal handle, cancelled nothing,
+    printed "cancel requested" and then died in rclpy's teardown ("the given context is not
+    valid", 2026-09-15), so the only stop that ever worked was ros/stop.sh. An action server
+    also answers a plain service, ``<action>/_action/cancel_goal``, and a request with a zero
+    goal id and a zero stamp means EVERY goal: no handle needed, and the answer says how many
+    goals are cancelling.
+    """
+    said = []
+    for action in NAV_ACTIONS:
+        client = node.create_client(CancelGoal, f"/{action}/_action/cancel_goal")
+        if not client.wait_for_service(timeout_sec=CANCEL_CONFIRM_S / len(NAV_ACTIONS)):
+            said.append(f"{action}: no server answered")
+            continue
+        future = client.call_async(CancelGoal.Request())
+        rclpy.spin_until_future_complete(node, future, timeout_sec=CANCEL_CONFIRM_S)
+        answer = future.result()
+        if answer is None:
+            said.append(f"{action}: NOT confirmed in {CANCEL_CONFIRM_S:.0f} s — use ros/stop.sh")
+            continue
+        codes = {0: "accepted", 1: "rejected", 2: "no such goal", 3: "the goal had already ended"}
+        outcome = codes.get(int(answer.return_code), str(answer.return_code))
+        said.append(f"{action}: {outcome}, {len(answer.goals_canceling)} cancelling")
+    return "cancel — " + "; ".join(said)
+
+
 def pose(nav: BasicNavigator, x: float, y: float, yaw_deg: float) -> PoseStamped:
     p = PoseStamped()
     p.header.frame_id = "map"
@@ -177,13 +344,27 @@ def load_places(path: Path) -> dict[str, dict[str, float]]:
     return data
 
 
-def mark_place(nav: BasicNavigator, path: Path, name: str) -> str:
-    """Store the robot's current tracked pose under ``name``; refuses a weak fit."""
+def mark_place(nav: BasicNavigator, path: Path, name: str, certainty: Certainty) -> str:
+    """Store the robot's current tracked pose under ``name``, on the same evidence a drive
+    starts on: the fused sigma where the tracker publishes one, its fit where it does not.
+
+    A place marked while the cart does not know where it stands is a place nobody can drive to
+    afterwards, which is why this refuses at all — and the fit alone refused every mark on a
+    camera-only stack, where no lidar scan scores the pose (2026-09-15).
+    """
     pose = where_am_i(nav)
     if pose is None:
         return "cannot mark: the relocalizer is not answering"
     px, py, pyaw, fit = pose
-    if fit < 0.45:
+    certainty.wait()
+    sigma = certainty.sigma()
+    if sigma is not None:
+        if sigma.xy_m > DRIVE_SIGMA_M:
+            return (
+                f"NOT marked: the pose here is known to {sigma.phrase()}, over the"
+                f" {DRIVE_SIGMA_M:.2f} m a mark needs; stand still 2 s, or run relocalize first"
+            )
+    elif fit < ADMIT_FIT:
         return (
             f"NOT marked: the fit here is only {fit:.2f}; stand still 2 s, or run relocalize first"
         )
@@ -197,7 +378,7 @@ def mark_place(nav: BasicNavigator, path: Path, name: str) -> str:
     path.write_text(json.dumps(places, indent=2, sort_keys=True) + "\n")
     return (
         f"marked {name!r} at x {px:+.2f} m, y {py:+.2f} m, yaw {pyaw:+.0f} deg "
-        f"(fit {fit:.2f}) in {path}"
+        f"(fit {fit:.2f}" + ("" if sigma is None else f", sigma {sigma.phrase()}") + f") in {path}"
     )
 
 
@@ -236,16 +417,20 @@ def map_frame_age_s(nav: BasicNavigator, wait_s: float = 5.0) -> float | None:
     return age
 
 
-def ensure_localized(nav: BasicNavigator) -> bool:
-    """A weak fit before driving (the robot was carried, or just switched on) gets one whole-map
-    search first; drive only when the scan fits the map.
+def ensure_localized(nav: BasicNavigator, certainty: Certainty) -> bool:
+    """The preflight: may this goal be sent at all.
 
-    In online SLAM there is neither: the map is being built on the laptop and the board runs no
-    tracker, so ``/where_am_i`` and ``/relocalize`` do not exist and this check used to refuse
-    every goal of the mode after ten seconds of waiting for two absent services ("fit nan:
-    searching the whole map first..." then "not localized", 2026-09-14 20:03 and 20:04). What is
-    judged there instead is the map frame's own freshness — see :func:`map_frame_age_s`; a drive
-    whose correction then goes stale is cut by the goal server's own watch (pepin.watch).
+    Where a tracker runs, three checks are printed and any failure refuses the drive
+    (:func:`preflight`). The old rule this replaces read ``/localization_fit`` alone — the
+    LIDAR's scan-to-map fit — and so refused every camera-only drive out of hand, because
+    nothing there scores a scan against the map and the number is 0.00 by construction.
+
+    In online SLAM there is no tracker at all: the map is being built on the laptop, so
+    ``/where_am_i`` and ``/relocalize`` do not exist and this check used to refuse every goal of
+    the mode after ten seconds of waiting for two absent services ("fit nan: searching the whole
+    map first..." then "not localized", 2026-09-14 20:03 and 20:04). What is judged there
+    instead is the map frame's own freshness — see :func:`map_frame_age_s`; a drive whose
+    correction then goes stale is cut by the goal server's own watch (pepin.watch).
     """
     if not tracker_here(nav):
         age = map_frame_age_s(nav)
@@ -264,28 +449,12 @@ def ensure_localized(nav: BasicNavigator) -> bool:
             )
             return False
         print(
-            f"localized: online SLAM, map -> base_link {age * 1e3:.0f} ms old"
-            " (no fit here — no tracker matches a scan against a map still being built)",
+            f"preflight slam      ok       online SLAM, map -> base_link {age * 1e3:.0f} ms old"
+            " (no tracker here: nothing matches a scan against a map still being built)",
             flush=True,
         )
         return True
-    pose = where_am_i(nav)
-    if pose is not None and pose[3] >= 0.45:
-        print(f"localized: fit {pose[3]:.2f}", flush=True)
-        return True
-    print(
-        f"fit {pose[3] if pose else float('nan'):.2f}: searching the whole map first...", flush=True
-    )
-    client = nav.create_client(Trigger, "/relocalize")
-    if not client.wait_for_service(timeout_sec=5.0):
-        return False
-    future = client.call_async(Trigger.Request())
-    rclpy.spin_until_future_complete(nav, future, timeout_sec=60.0)
-    result = future.result()
-    print(result.message if result else "no answer from /relocalize", flush=True)
-    time.sleep(2.0)
-    pose = where_am_i(nav)
-    return pose is not None and pose[3] >= 0.45
+    return preflight(nav, certainty)
 
 
 def describe(x: float, y: float, yaw_deg: float, home: dict[str, float] | None = None) -> str:
@@ -345,13 +514,25 @@ def main() -> None:
     startup = time.monotonic()
     tape: Tape | None = None
     rclpy.init()
+    if args[0] == "cancel":
+        # Before the navigator exists: this process sends no goal, so it needs no commander —
+        # and building one is what used to end the cancel in rclpy's teardown instead of on the
+        # board's action server.
+        node = rclpy.create_node("goto_cancel")
+        try:
+            print(cancel_all(node), flush=True)
+        finally:
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+        return
     nav = BasicNavigator()
     print(
         f"startup: rclpy and the navigator ready at +{time.monotonic() - startup:.1f} s", flush=True
     )
     try:
         if args[0] == "mark":
-            print(mark_place(nav, places_path, args[1]))
+            print(mark_place(nav, places_path, args[1], Certainty(nav)))
             return
         if args[0] == "places":
             for name, p in sorted(load_places(places_path).items()):
@@ -359,10 +540,6 @@ def main() -> None:
                     f"{name:12s} x {p['x']:+.2f} m, y {p['y']:+.2f} m, "
                     f"yaw {p['yaw_deg']:+.0f} deg (fit {p['fit']:.2f})"
                 )
-            return
-        if args[0] == "cancel":
-            nav.cancelTask()
-            print("cancel requested")
             return
         if args[0] == "seed":
             x, y = float(args[1]), float(args[2])
@@ -393,24 +570,28 @@ def main() -> None:
         print(f"startup: Nav2 answered at +{time.monotonic() - startup:.1f} s", flush=True)
         print(describe(x, y, yaw, home), flush=True)
         checked = time.monotonic()
-        if not ensure_localized(nav):
-            print("not localized: not driving. Stand the robot still for 5 s and try again.")
+        certainty = Certainty(nav)
+        if not ensure_localized(nav, certainty):
+            print(
+                "not driving: the preflight refused above."
+                " Stand the cart still and run ros/goto.sh relocalize, or ros/goto.sh where."
+            )
             sys.exit(1)
         print(
             f"startup: localization checked in {time.monotonic() - checked:.1f} s, "
             f"{time.monotonic() - startup:.1f} s since this client began",
             flush=True,
         )
-        lost_since: list[float | None] = [None]
+        # The drive's own watch, on the same rule the goal server uses (pepin.watch): the fused
+        # sigma where the board publishes one, the lidar's fit where it does not — plus this
+        # client's extra condition, that the wheels actually carried the cart while it was lost.
+        blind = (
+            BlindDriveWatch(lost_fit=BLIND_FIT, patience_s=LOST_FOR_S)
+            if certainty.heard()
+            else None  # online SLAM: no tracker speaks here, and the goal server watches instead
+        )
         odom_xy: list[tuple[float, float] | None] = [None]
         lost_at_xy: list[tuple[float, float] | None] = [None]
-
-        def on_fit(msg: Float32) -> None:
-            if msg.data < LOST_FIT:
-                if lost_since[0] is None:
-                    lost_since[0], lost_at_xy[0] = time.monotonic(), odom_xy[0]
-            else:
-                lost_since[0] = None
 
         def on_odom(msg: Odometry) -> None:
             odom_xy[0] = (msg.pose.pose.position.x, msg.pose.pose.position.y)
@@ -420,7 +601,6 @@ def main() -> None:
                 return 0.0
             return math.hypot(odom_xy[0][0] - lost_at_xy[0][0], odom_xy[0][1] - lost_at_xy[0][1])
 
-        nav.create_subscription(Float32, "/localization_fit", on_fit, 10)
         nav.create_subscription(Odometry, "/odom", on_odom, 10)
         # The numbered tape, the one the replays and the reports are named by: opened before the
         # goal so its prelude holds the seconds before the cart moves, closed in `finally`.
@@ -437,15 +617,19 @@ def main() -> None:
         while not nav.isTaskComplete():
             fb = nav.getFeedback()
             now = time.monotonic()
-            if (
-                lost_since[0] is not None
-                and now - lost_since[0] > LOST_FOR_S
-                and travelled_while_lost() > LOST_TRAVEL_M
-            ):
+            lost = blind is not None and blind.observe(
+                certainty.fit or 0.0, now, sigma=certainty.sigma()
+            )
+            if blind is not None and blind.lost_since is None:
+                lost_at_xy[0] = None  # the pose is healthy again: the clock starts over
+            elif blind is not None and lost_at_xy[0] is None:
+                lost_at_xy[0] = odom_xy[0]  # where the wheels were when it first went bad
+            if lost and blind is not None and travelled_while_lost() > LOST_TRAVEL_M:
                 note(
                     nav,
-                    f"goto: localization lost for {now - lost_since[0]:.0f} s while the wheels "
-                    f"travelled {travelled_while_lost():.1f} m: cancelling, not driving blind",
+                    f"goto: the pose has been uncertain for {now - (blind.lost_since or now):.0f}"
+                    f" s ({blind.phrase()}, judged by the {blind.rule}) while the wheels"
+                    f" travelled {travelled_while_lost():.1f} m: cancelling, not driving blind",
                 )
                 nav.cancelTask()
                 break
@@ -476,7 +660,8 @@ def main() -> None:
         if tape is not None:
             tape.close()
         nav.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():  # a context already shut down refuses every call made on it
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

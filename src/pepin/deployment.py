@@ -205,6 +205,10 @@ BOARD_PUBLISHES = (
     "tof/right",
     "tracker_pose",
     "localization_fit",
+    # How sure the tracker's fusion is, whichever source spoke into it: the one number a goal
+    # gate and a blind-drive watch read (pepin.watch). It crosses for the operator's view — the
+    # judges that matter run on the board, beside the tracker.
+    "localization/sigma",
     "localization/sources",  # every scan source's word on each update, JSON (the tracker)
     # ...and how sure of itself the tracker is after fusing them (sigma_xy m, sigma_yaw deg,
     # JSON). The laptop's fusion reads it before it paints: a pose whose sigma has grown is not
@@ -311,8 +315,8 @@ _NOT_IN_SLAM = (
     "map",
     "tracker_pose",
     "localization_fit",
-    "localization/sources",
     "localization/sigma",
+    "localization/sources",
 )
 # The board drives exactly as in vision mode, minus those.
 SLAM_BOARD_PUBLISHES = tuple(n for n in VISION_BOARD_PUBLISHES if n not in _NOT_IN_SLAM)
