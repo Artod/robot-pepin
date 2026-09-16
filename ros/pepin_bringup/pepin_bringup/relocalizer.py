@@ -1003,6 +1003,7 @@ class Relocalizer(Node):
         self._slip_pub = self.create_publisher(Bool, "/slip", 5)  # wheels move, the world does not
         self.create_timer(30.0, self._report_tracking)
         self.create_timer(2.0, self._remember_pose)
+        self.create_timer(1.0, self._wheels_no_word)  # a mute cannot outlive a second of silence
         self.create_timer(0.2, self._apply_pending_seed)  # the worker's fix, applied here
         self.create_timer(0.05, self._send_map_odom)  # the frame stays alive, scans or not
         self.create_subscription(
@@ -1233,6 +1234,19 @@ class Relocalizer(Node):
         )
 
     def _on_wheels(self, msg: Odometry) -> None:
+        """One word from the wheels, judged against the picture."""
+        self._wheels_speak(float(msg.twist.twist.linear.x))
+
+    def _wheels_no_word(self) -> None:
+        """A moment with no word from the wheels at all — which is what a MUTED wheel sounds
+        like. Judged as "the wheels claim nothing", so a mute lasts at most one of these ticks
+        and the wheels get their voice back to speak for themselves; a slip that is still going
+        mutes them again within the watch's hold. Without this the mute would be permanent: a
+        muted wheel publishes nothing, and a watch fed only by wheels would never hear it stop.
+        """
+        self._wheels_speak(0.0)
+
+    def _wheels_speak(self, speed: float) -> None:
         """The wheels' own speed against the picture's. While the wheels claim to drive and the
         pictures stand still, the wheels are lying (:class:`pepin.slip.PictureSlip`) and their
         voice is taken away at the source — base_bridge's ``odom_publish`` — so the EKF never
@@ -1240,7 +1254,7 @@ class Relocalizer(Node):
         the camera stops testifying (a stale picture is no witness)."""
         change = self._picture_slip.change(
             self.get_clock().now().nanoseconds * 1e-9,
-            float(msg.twist.twist.linear.x),
+            speed,
             self._vo.speed,
             self._vo.at,
             self._wheels_muted,
