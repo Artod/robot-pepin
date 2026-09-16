@@ -40,7 +40,9 @@ NET=pepin-net
 # start: a subscription made against one bridge does not follow it through a restart (a costmap
 # kept a deaf transform listener for 139 s, run 0148), and a bridge restarted after the
 # containers breaks exactly those subscriptions. Later restarts of the board's bridge are handled
-# by pepin_bringup.bridge_watch inside each container.
+# by pepin_bringup.bridge_watch inside each container, which asks for this same restart over a topic
+# (/bridge/kick, answered by the board's own systemd) because it has no ssh key and must not have
+# one. The order below is the invariant: of two bridges the one that starts LAST gets working routes.
 settle_bridge() {
     ssh "root@$BOARD" "systemctl restart pepin-bridge" 2>/dev/null
     for _ in $(seq 1 30); do
@@ -257,7 +259,12 @@ curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' || { echo
 # The allow-lists (pepin.deployment.bridge_config) are one-way by side AND by mode: a topic
 # allowed as a publisher on both sides loops.
 echo "laptop bridge: restarting with $CONFIG (board on side=$SIDE, mode $MODE)"
-docker run -d --name pepin-zenoh --network "$NET" -p 8001:8000 -v "$HERE/$CONFIG:/config.json:ro" \
+# --init: the bridge binary is PID 1 in this container and installs no signal handlers, and PID 1
+# ignores every signal it has no handler for — so `docker stop` (and the bridge watch's repair
+# through the daemon) waited out the whole 30 s stop window and then SIGKILLed it, on every
+# restart. With tini as PID 1 the bridge is an ordinary child, SIGTERM's default action applies
+# and the stop is immediate. The window itself is unchanged; this is what makes it a ceiling.
+docker run -d --name pepin-zenoh --init --network "$NET" -p 8001:8000 -v "$HERE/$CONFIG:/config.json:ro" \
     -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.7.0 -c /config.json \
     -e "tcp/$BOARD:7447" -d 7 --rest-http-port 8000 >/dev/null
 settle_bridge  # BEFORE the containers: their subscriptions must be made against the bridge they will live with

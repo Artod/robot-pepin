@@ -259,12 +259,15 @@ check_laptop() {
     n="$(sed -n 's/.*bridge watch: \([0-9]*\) topics.*/\1/p' <<<"$line")"
     if [ -z "$line" ]; then
         fail 2.1 "bridge watch: no line yet (it reports once the routes settle; ros/laptop.sh logs vslam)"
-    elif [[ "$line" == *"DEAD ROUTES"* ]]; then
+    elif [[ "$line" == *"DEAD ROUTES"* || "$line" == *"WITHOUT A READER"* ]]; then
+        # Either side's routes: ours with no DDS endpoint, or the board's own pub routes with no
+        # reader — the fault of 2026-09-15, which read as "dead routes 0" until the watch started
+        # judging the far side too.
         fail 2.1 "bridge watch: ${line#*bridge watch: }"
     elif [ "${n:-0}" -lt 10 ]; then
         fail 2.1 "bridge watch: only $n topics carried, 10 expected: ${line#*bridge watch: }"
     else
-        pass 2.1 "bridge watch: $n topics, dead routes 0"
+        pass 2.1 "bridge watch: $n topics, dead routes 0, board routes without a reader 0"
     fi
 
     line="$(last '\]: depth: ')"

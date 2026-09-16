@@ -584,7 +584,7 @@ TRACKER_LINE = (
 VSLAM_LOG = "\n".join(
     (
         "[bridge_watch-9] [INFO] [1.0] [bridge_watch]: bridge watch: 10 topics Hz [scan 9.7]; "
-        "flow_watch=on; dead routes 0",
+        "flow_watch=on; dead routes 0; board routes without a reader 0",
         "[depth_stream-3] [INFO] [2.0] [depth_stream]: depth: 9.4 frames/s published (282 through "
         "the net, 0 dropped); lidar_anchor on [a 1.71 b +0.004 on 600 pairs], backend remote",
         "[depth_fusion-5] [INFO] [3.0] [depth_fusion]: fusion: 281 frames (9.3/s, 0 dropped, 0 "
@@ -904,6 +904,21 @@ def test_every_check_runs_even_when_the_first_ones_fail_and_the_run_goes_red(tmp
     assert "FAIL 2.1" in out and "DEAD ROUTES 2" in out
     assert "PASS 1.4" in out and "PASS 2.8" in out, "the checks after a failure still ran"
     assert "red: 3 of " in out
+
+
+def test_the_board_s_own_readerless_routes_fail_the_laptop_check(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The fault of 2026-09-15 reads as "dead routes 0" on this side: check 2.1 must catch the
+    other half of the watch's line too, or a link that carries nothing passes the restart."""
+    code, out, _ = _restart(
+        tmp_path,
+        "laptop",
+        FAKE_VSLAM=VSLAM_LOG.replace(
+            "board routes without a reader 0",
+            "BOARD ROUTES WITHOUT A READER 13 [/scan /tf]",
+        ),
+    )
+    assert code == 1, out
+    assert "FAIL 2.1" in out and "WITHOUT A READER 13" in out
 
 
 @pytest.mark.parametrize(

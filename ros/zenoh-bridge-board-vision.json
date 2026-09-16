@@ -6,7 +6,7 @@
           "^/(amcl_path|global_costmap/costmap|goal_pose|imu/data_raw|local_costmap/costmap|local_costmap/published_footprint|local_plan|localization/sources|localization_fit|map|neck/state|odom|odometry/filtered|pepin/run_status|plan|scan|tf|tf_static|tof/front|tof/left|tof/right|tracker_pose)$"
         ],
         "subscribers": [
-          "^/(contact_scan|depth_scan|localization/candidate|localization/graph_measurement|localization/measurement|map_lidar|rtabmap/info|rtabmap/map|rtabmap/mapGraph|rtabmap/mapPath|vo)$"
+          "^/(bridge/kick|contact_scan|depth_scan|localization/candidate|localization/graph_measurement|localization/measurement|map_lidar|rtabmap/info|rtabmap/map|rtabmap/mapGraph|rtabmap/mapPath|vo)$"
         ],
         "service_servers": [
           "^$"
@@ -21,9 +21,16 @@
           "^$"
         ]
       },
+      "pub_max_frequencies": [
+        "^/imu/data_raw$=20",
+        "^/odom$=20",
+        "^/odometry/filtered$=20",
+        "^/tf$=20"
+      ],
       "queries_timeout": {
         "default": 5.0
-      }
+      },
+      "reliable_routes_blocking": false
     }
   }
 }

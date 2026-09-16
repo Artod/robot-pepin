@@ -48,6 +48,18 @@ def routes(local_nodes: str = '["/depth_fusion"]', publishers: str = '["/base_br
     )
 
 
+def readerless_board_route(topic: str = "scan") -> str:
+    """A pub route of the BOARD's bridge as the admin printed it on 2026-09-15: the board's own
+    publisher, a remote route naming the laptop's bridge, and no dds_reader at all — thirteen of
+    these carried nothing while this watch said "dead routes 0"."""
+    return (
+        f'{{"key":"@/{BOARD_ZID}/ros2/route/topic/pub/{topic}","value":'
+        f'{{"dds_reader":"","local_nodes":["/ldlidar_node"],'
+        f'"remote_routes":["{LAPTOP_ZID}:{topic}"],"ros2_name":"/{topic}",'
+        f'"ros2_type":"sensor_msgs/msg/LaserScan"}}}}'
+    )
+
+
 def dead_vo() -> str:
     """The laptop bridge's pub route for /vo as the admin printed it on 2026-09-14: a publisher,
     the board's matching route, and no DDS reader at all."""
@@ -165,9 +177,11 @@ def test_a_route_that_carries_nothing_restarts_the_bridge_alone(monkeypatch: Any
 
 
 def test_a_silence_that_survives_the_restart_escalates_to_the_half(monkeypatch: Any) -> None:
+    """The ladder's last rung, with the middle one (the kick to the board) switched off."""
     repair = FakeRepair()
     node, admin, codes = build(monkeypatch, repair)
     node._switches.set("half_restart", True)  # the old escalation, asked for explicitly
+    node._switches.set("bridge_kick", False)
     drive(node, admin, [0.0, 20.0], messages=0)
     assert repair.restarts == 1
     drive(node, admin, [30.0, 60.0, 100.0], messages=0)  # inside the cooldown: nothing happens
@@ -367,6 +381,109 @@ def test_every_switch_is_in_the_table_and_printed() -> None:
         "half_restart",
         "flow_silence_s",
         "dead_routes",
+        "board_routes",
+        "bridge_kick",
         "bridge_restart",
     }
     assert all(flag.why and flag.on_when and flag.off_when for flag in FLAGS)
+
+
+# ---- the board's own routes, and the kick that mends them ---------------------------------
+
+
+def with_readerless_board() -> Admin:
+    """An admin whose board bridge has a pub route with no reader beside a healthy /imu route."""
+    admin = Admin()
+    admin.routes = routes()[:-1] + "," + readerless_board_route() + "]"
+    return admin
+
+
+def test_the_board_s_own_readerless_route_is_a_fault_this_side_can_see(monkeypatch: Any) -> None:
+    """2026-09-15: every topic stopped and the watch said "dead routes 0" — it judged this
+    bridge's routes alone. The board's are in the same network-wide reply."""
+    repair = FakeRepair()
+    node, admin, codes = build(monkeypatch, repair, with_readerless_board())
+    drive(node, admin, [0.0, 10.0], messages=48)
+    assert repair.restarts == 0, "not yet: a route caught between its creation and its endpoint"
+    drive(node, admin, [20.0], messages=48)
+    assert repair.restarts == 1 and codes == [], "the gentle repair first, as for any fault"
+
+
+def test_board_routes_off_leaves_the_far_side_unjudged(monkeypatch: Any) -> None:
+    repair = FakeRepair()
+    node, admin, codes = build(monkeypatch, repair, with_readerless_board())
+    node._switches.set("board_routes", False)
+    drive(node, admin, [0.0, 20.0, 40.0], messages=48)
+    assert repair.restarts == 0 and codes == []
+
+
+def test_the_report_line_counts_the_board_s_routes_without_a_reader(monkeypatch: Any) -> None:
+    repair = FakeRepair()
+    node, admin, _codes = build(monkeypatch, repair, with_readerless_board())
+    drive(node, admin, [0.0], messages=48)
+    node.round(60.0)
+    line = next(line for line in node.get_logger().texts("info") if "topics Hz" in line)
+    assert "BOARD ROUTES WITHOUT A READER 1 [/scan]" in line and "board_routes=on" in line
+
+
+def test_a_fault_that_survives_the_gentle_repair_kicks_the_board(monkeypatch: Any) -> None:
+    """The repair invariant: this side's bridge first, the board's after it — of two bridges the
+    one that starts last is the one that gets working routes."""
+    repair = FakeRepair()
+    node, admin, codes = build(monkeypatch, repair, with_readerless_board())
+    drive(node, admin, [0.0, 20.0], messages=48)
+    assert repair.restarts == 1 and not node.pubs["/bridge/kick"].sent, "the bridge alone first"
+    drive(node, admin, [25.0, 45.0], messages=48)  # the board's route is still readerless
+    sent = node.pubs["/bridge/kick"].sent
+    assert len(sent) == 1 and "/scan" in sent[0].data, "one kick, saying what is wrong"
+    assert codes == [] and repair.restarts == 1, "this half and its bridge are left alone"
+
+
+def test_the_board_bridge_that_comes_back_after_a_kick_is_not_a_new_fault(
+    monkeypatch: Any,
+) -> None:
+    """The board's bridge restarts with a new zenoh id BY CONSTRUCTION, so a watch that repaired
+    on that would restart the two bridges for ever."""
+    repair = FakeRepair()
+    node, admin, codes = build(monkeypatch, repair, with_readerless_board())
+    drive(node, admin, [0.0, 20.0, 25.0, 45.0], messages=48)
+    assert len(node.pubs["/bridge/kick"].sent) == 1
+    admin.board_zid = "0000000000000000000000000000ffff"  # the kicked bridge, back
+    admin.routes = routes()  # ...with its reader this time
+    node.round(70.0)
+    assert repair.restarts == 1 and codes == [], "no repair: this identity change was ours"
+    assert any("came back after our kick" in line for line in node.get_logger().texts("info"))
+
+
+def test_the_kick_is_off_when_the_switch_is_off(monkeypatch: Any) -> None:
+    repair = FakeRepair()
+    node, admin, codes = build(monkeypatch, repair, with_readerless_board())
+    node._switches.set("bridge_kick", False)
+    drive(node, admin, [0.0, 20.0, 25.0, 45.0, 65.0], messages=48)
+    assert not node.pubs["/bridge/kick"].sent and repair.restarts == 1 and codes == []
+
+
+# ---- the cooldown state machine ------------------------------------------------------------
+
+
+def test_the_cooldown_is_armed_once_and_then_runs_out(monkeypatch: Any) -> None:
+    """The bug of 2026-09-15: every failing round (five seconds apart) re-armed the 120 s
+    cooldown, so the gentle repair — allowed once per cooldown — never ran a second time at all.
+
+    The fault here is the board's readerless route, whose patience is ``flow_silence_s`` on this
+    watch's own clocks, so the timeline is readable: a repair at 20 s, the ladder spent at 45 s
+    (the kick is switched off), and the next gentle repair as soon as 120 s have passed since
+    then — not 120 s after the last failing round.
+    """
+    repair = FakeRepair()
+    node, admin, codes = build(monkeypatch, repair, with_readerless_board())
+    node._switches.set("bridge_kick", False)  # the ladder's middle rung out of the way
+    drive(node, admin, [0.0, 20.0], messages=48)
+    assert repair.restarts == 1, "the gentle repair"
+    drive(node, admin, [25.0, 45.0], messages=48)  # still readerless: the ladder is spent, cooling
+    drive(node, admin, [50.0, 80.0, 110.0, 140.0, 160.0], messages=48)
+    assert repair.restarts == 1, "still cooling down"
+    assert any("cooling down" in line for line in node.get_logger().texts("error"))
+    drive(node, admin, [170.0], messages=48)
+    assert repair.restarts == 2, "the cooldown ran out because no failing round pushed it forward"
+    assert codes == [], "and this half was never touched"

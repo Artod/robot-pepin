@@ -16,6 +16,12 @@ I2C=""
 # The IMU (0x68) and the ToF sensors (0x30-0x32) share this bus; docker run refuses to start
 # when a --device is missing, so a board without it simply gets no bus.
 [ -e /dev/i2c-2 ] && I2C="--device /dev/i2c-2"
+# The one directory this container writes for the board's own systemd: the laptop's request to
+# restart the zenoh bridge lands here as a file (pepin_bringup.bridge_kick) and
+# board/pepin-bridge-kick.path turns it into `systemctl restart pepin-bridge`. Same path inside
+# and outside, and on tmpfs: nothing survives a reboot and nothing touches the SD card. NOT
+# under /root/pepin-ros — ros/sync.sh rsyncs that tree with --delete.
+mkdir -p /run/pepin
 # shellcheck disable=SC2086
 # Not auto-removed: a stopped container keeps its log until the unit's ExecStartPre has saved it.
 # --stop-signal SIGINT beside the image's own STOPSIGNAL (ros/Dockerfile): SIGINT is what ros2
@@ -33,6 +39,7 @@ exec docker run $TTY \
     -v "$HERE/pepin_src:/ws/pepin_src:ro" \
     -v "$HERE/params:/params:ro" \
     -v "$HERE/maps:/maps" \
+    -v /run/pepin:/run/pepin \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-7}" \
     --name pepin-ros \
     pepin-ros "$@"

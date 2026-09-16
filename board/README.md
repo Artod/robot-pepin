@@ -30,6 +30,9 @@ talk to the servo bus directly (`scripts/base_smoke.py`, `jog.py`,
 | `board/pepin-tof.service` | `/etc/systemd/system/pepin-tof.service` |
 | `board/pepin-base.service` | `/etc/systemd/system/pepin-base.service` |
 | `board/pepin-ros.service` | `/etc/systemd/system/pepin-ros.service` (branch ros2-nav2: the ROS container at boot) |
+| `board/bridge_kick.sh` | `/usr/local/bin/bridge_kick.sh` (executable) |
+| `board/pepin-bridge-kick.path` | `/etc/systemd/system/pepin-bridge-kick.path` (then `systemctl enable --now pepin-bridge-kick.path`) |
+| `board/pepin-bridge-kick.service` | `/etc/systemd/system/pepin-bridge-kick.service` |
 | `board/ser2net-stale-locks.conf` | `/etc/systemd/system/ser2net.service.d/stale-locks.conf` |
 | `board/wifi-runtime-pm-on.conf` | `/etc/systemd/system/wifi-powersave-off.service.d/runtime-pm-on.conf` |
 | `src/pepin/` (the package, stdlib only on the board) | `/opt/pepin/pepin/` |
@@ -95,6 +98,34 @@ Notes that cost an evening each:
   reason the wheel loop lives on the board.
 
 Check from the laptop: `uv run python scripts/health_check.py --quick`.
+
+## The laptop's kick to the zenoh bridge
+
+The laptop may restart **one** unit here, `pepin-bridge`, and nothing else. It cannot ssh (its
+containers hold no key and must not), so `pepin_bringup.bridge_watch` on the laptop publishes one
+`std_msgs/String` on `/bridge/kick`; the run recorder inside `pepin-ros`
+(`pepin_bringup.bridge_kick`) writes `/run/pepin/bridge_kick` — the ROS container bind-mounts
+`/run/pepin` from the host at the same path (`ros/run.sh`), tmpfs, nothing on the SD card — and
+`pepin-bridge-kick.path` runs `/usr/local/bin/bridge_kick.sh`, which deletes the flag, refuses a
+second restart inside 120 s, and restarts `pepin-bridge` if it is active.
+
+Why: of two zenoh bridges the one that starts **last** gets working routes (a route's DDS
+endpoint is built when the route is created and only while the far bridge is already announcing).
+On 2026-09-15 a wireless stall made this bridge close its transport and reconnect with the same
+zenoh id and thirteen pub routes whose `dds_reader` was empty — nothing crossed until the unit
+was restarted by hand. The laptop restarts its own bridge first and asks for this one second,
+which is the order `ros/laptop.sh` has always used over ssh.
+
+Install (once; the code side rides `ros/sync.sh` as usual):
+
+```bash
+scp board/bridge_kick.sh root@pepin.local:/usr/local/bin/
+scp board/pepin-bridge-kick.path board/pepin-bridge-kick.service root@pepin.local:/etc/systemd/system/
+ssh root@pepin.local 'chmod +x /usr/local/bin/bridge_kick.sh; systemctl daemon-reload; systemctl enable --now pepin-bridge-kick.path'
+```
+
+`journalctl -u pepin-bridge-kick` says who asked and why; `ros/flags.sh set run_recorder
+bridge_kick false` (on the board) makes the handler log the request and ignore it.
 
 ## Stray ros2 CLI tools
 

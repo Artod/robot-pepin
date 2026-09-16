@@ -1,0 +1,12 @@
+[Unit]
+Description=Pepin: restart the zenoh bridge at the laptop's request
+# Never tied to the stack: this restarts ONE unit and nothing else, and it must be able to run
+# while pepin-ros is up (it always is when the request arrives).
+# The script keeps its own cooldown; this is the second fence, so a flag file written in a loop
+# cannot restart the bridge in a loop.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bridge_kick.sh

@@ -40,6 +40,22 @@ CONTAINER_STOP_TIMEOUT_S = 30
 # three odometry inputs and drives on the wheels and the gyro exactly as it does today.
 VO_TOPIC = "vo"
 
+# The laptop's one word to the board's own systemd: "restart your zenoh bridge, mine is newer".
+# A route's DDS endpoint is built when the route is created and only while the far bridge is
+# already announcing, so of two bridges the one that started LAST gets working routes and the
+# one that started first keeps routes with an empty endpoint — which is why ros/laptop.sh
+# restarts the board's bridge (settle_bridge, over ssh) right after it starts the laptop's. The
+# bridge watch has no ssh and must not have one: it publishes this topic instead, the board's
+# run recorder (pepin_bringup.bridge_kick) touches :data:`BRIDGE_KICK_FLAG`, and a systemd path
+# unit on the board (board/pepin-bridge-kick.path) does the restart with the board's own
+# privileges. One String, at most once per repair.
+BRIDGE_KICK_TOPIC = "bridge/kick"
+# The flag file, on the board, at the same path inside the container and on the host: the ROS
+# container bind-mounts /run/pepin (ros/run.sh), which is tmpfs — a kick never survives a reboot
+# and nothing of ours lives on the SD card for it. Not under /root/pepin-ros: ros/sync.sh rsyncs
+# that whole tree with --delete, which removes anything the board made there.
+BRIDGE_KICK_FLAG = "/run/pepin/bridge_kick"
+
 # The base's speed caps (config/base.json, the base server's own clamp). The C++ bridge on the
 # board clamps /cmd_vel too, at 0.25 m/s by default: for half a day every tape sat at 0.20 and
 # the bridge would have cut anything faster — one cap, the base's, passed to it at launch.
@@ -207,6 +223,7 @@ LAPTOP_PUBLISHES = (
     "depth_scan",  # the camera's depth folded onto the plane, for the board's local costmap
     "contact_scan",  # the same depth read at the floor: where bodies touch it (pepin.contact)
     VO_TOPIC,  # the camera's own odometry, gated here, fused by the board's EKF as odom1
+    BRIDGE_KICK_TOPIC,  # "restart your bridge after mine": the watch's last repair, not a drive
 )
 BOARD_SERVES = (
     "relocalize",
@@ -280,6 +297,7 @@ VISION_LAPTOP_PUBLISHES = (
     # is the failure of 2026-09-10. This one nobody else publishes, so it needs no owner rule.
     "map_lidar",
     VO_TOPIC,
+    BRIDGE_KICK_TOPIC,
 )
 # The saved map's own topics, the ones SLAM mode has no publisher for: /map is the laptop's here,
 # and the rest are the tracker's, which does not run because nothing matches a scan against a map
@@ -300,6 +318,7 @@ SLAM_LAPTOP_PUBLISHES = (
     "depth_scan",
     "contact_scan",
     VO_TOPIC,
+    BRIDGE_KICK_TOPIC,
 )
 
 
@@ -347,13 +366,73 @@ def bridge_allow(side: str, mode: str = "split") -> dict[str, list[str]]:
     }
 
 
+# How much of each topic may cross the wireless hop, in Hz, on the side that PUBLISHES it
+# (zenoh-bridge-ros2dds downsamples a pub route, so an entry only does something in the config
+# of the bridge whose ROS graph holds the writer — all four of these are the board's). Measured
+# at rest on 2026-09-15, 19:27, with the link healthy (scratch/bridge_logs_1927): the laptop
+# received tf 51.6 Hz, imu/data_raw 46.6, odometry/filtered 18.6, odom 16.2. In a drive that
+# same evening the link starved and the laptop saw tf 27.8, imu 19, scan 4 of 9.6, odom ~8 —
+# the radio cannot carry what the board offers, so the board offers less, and what it does
+# offer arrives instead of being dropped somewhere in the middle:
+PUB_MAX_FREQUENCY_HZ: dict[str, float] = {
+    # /tf is the big one: 51.6 Hz of it is the EKF's odom -> base_link at 50. Everything here
+    # reads it through tf2, which interpolates between samples — the depth stream's carry to a
+    # frame's stamp (pepin_bringup.depth_stream), RTAB-Map's odometry (odom_frame_id: odom) and
+    # the costmaps — so 50 ms between transforms is a smaller error than the 5 s of nothing a
+    # stalled link produced. /tf_static is NOT capped (it is latched and published once).
+    "tf": 20.0,
+    # The gyro, read by node_kit.LeanFeed for the camera's lean alone (the EKF that integrates
+    # it runs on the board, on the local copy, and never sees this route). A lean estimate
+    # rides a few degrees a second: 20 Hz is oversampling it already.
+    "imu/data_raw": 20.0,
+    # The wheels, read here only by the visual odometry's rest watch (is the cart standing
+    # still) — 16.2 Hz measured, so this cap is a ceiling on a burst, not a cut.
+    "odom": 20.0,
+    # The EKF's pose, read here by the laptop localizer, which decides once a second (18.6 Hz
+    # measured: again a ceiling, not a cut).
+    "odometry/filtered": 20.0,
+}
+
+
+def pub_max_frequencies(names: Sequence[str]) -> list[str]:
+    """The bridge's ``pub_max_frequencies`` entries for the topics of ``names`` that have a cap
+    in :data:`PUB_MAX_FREQUENCY_HZ`, in its own ``"<regex>=<float>"`` form.
+
+    The regex is anchored by us because the plugin does not anchor it and matches with
+    ``is_match`` (1.7.0 ``config.rs``): a bare ``/tf`` would cap ``/tf_static`` too.
+    """
+    wanted = {n.lstrip("/") for n in names}
+    return [
+        f"^/{name}$={PUB_MAX_FREQUENCY_HZ[name]:g}"
+        for name in sorted(wanted & set(PUB_MAX_FREQUENCY_HZ))
+    ]
+
+
 def bridge_config(side: str, mode: str = "split") -> dict[str, object]:
     """zenoh-bridge-ros2dds's configuration file for ``side`` in ``mode`` (its own strict
     schema: nothing but its keys). Written to ros/<bridge_config_name(side, mode)>; a test
-    keeps the files equal to this."""
+    keeps the files equal to this.
+
+    Two settings beside the allow-list, both about a link that stalls. ``reliable_routes_blocking``
+    is the bridge's default (true), and it is what killed the link on 2026-09-15: a RELIABLE DDS
+    writer's publications are pushed to zenoh with ``CongestionControl::Block``, so a 5 s wireless
+    stall on a 50 Hz topic filled the transmission queue and the board's bridge ended the
+    transport itself — "Unable to push non droppable network message ... Closing transport!" —
+    and reconnected with the same zenoh id and routes that were never rebuilt. False drops the
+    samples that do not fit instead, which is what every consumer here already tolerates (the
+    topics are periodic; a dropped /tf is one the next one replaces 50 ms later). The caps of
+    :data:`PUB_MAX_FREQUENCY_HZ` are the other half: they keep the queue from filling at all.
+    """
     return {
         "plugins": {
-            "ros2dds": {"allow": bridge_allow(side, mode), "queries_timeout": {"default": 5.0}}
+            "ros2dds": {
+                "allow": bridge_allow(side, mode),
+                "pub_max_frequencies": pub_max_frequencies(
+                    allowed_names(bridge_allow(side, mode)["publishers"][0])
+                ),
+                "queries_timeout": {"default": 5.0},
+                "reliable_routes_blocking": False,
+            }
         }
     }
 
@@ -475,6 +554,10 @@ BRIDGED_QOS: dict[str, tuple[str, int]] = {
     # measurement carries the stamp it was made at). A word that arrives late is dropped by the
     # gate's own age rule; one that never arrives because the route lost a QoS race is invisible.
     "/localization/graph_measurement": ("reliable", 5),
+    # The laptop's kick to the board's bridge: one String, and the one message of this robot
+    # that must not be dropped by a QoS race — it is sent exactly once per repair, while the
+    # link is already sick. RELIABLE on both ends, five deep (pepin_bringup.bridge_kick).
+    f"/{BRIDGE_KICK_TOPIC}": ("reliable", 5),
 }
 
 
@@ -593,6 +676,36 @@ def dead_routes(routes: Sequence[BridgeRoute], zid: str) -> tuple[str, ...]:
     return tuple(sorted({route.topic for route in routes if route.zid == zid and route.dead}))
 
 
+def far_dead_routes(routes: Sequence[BridgeRoute], zid: str) -> tuple[str, ...]:
+    """The topics the OTHER bridge publishes to us and has built no DDS reader for: its pub
+    routes with local publishers, no ``dds_reader``, and a remote route naming our own ``zid``.
+
+    The mirror of :func:`dead_routes`, and the fault that was invisible until 2026-09-15: the
+    watch judged the laptop's own routes only and printed "dead routes 0" while thirteen of the
+    board's pub routes had an empty reader, so nothing crossed from the board at all. It is the
+    same reading of the same network-wide admin reply — the board's routes are in it, keyed by
+    the board's zid — and the cure is the other one: the board's bridge must be restarted, which
+    this side cannot do by itself (:data:`BRIDGE_KICK_TOPIC`).
+
+    Only pub routes: a far sub route without its writer is the same class of fault, but it is
+    the far side's word about topics WE publish, and the watch already sees those starve from
+    the other end. The routes counted here are the ones measured empty on 2026-09-15.
+    """
+    mine = f"{zid}:"
+    return tuple(
+        sorted(
+            {
+                route.topic
+                for route in routes
+                if route.zid != zid
+                and route.direction == "pub"
+                and route.dead
+                and any(remote.startswith(mine) for remote in route.remote_routes)
+            }
+        )
+    )
+
+
 # Topics that are latched or event-driven on purpose: a map published once with transient
 # durability, the static transforms, a path only while a drive runs, a run status on change.
 # Their silence is not a dead route. A watch that judged them restarted a healthy bridge twenty
@@ -614,6 +727,7 @@ ON_DEMAND_TOPICS: frozenset[str] = frozenset(
         "/rtabmap/map",
         "/rtabmap/mapGraph",
         "/rtabmap/mapPath",
+        f"/{BRIDGE_KICK_TOPIC}",  # one message per repair, and none at all on a healthy link
     }
 )
 

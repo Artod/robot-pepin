@@ -46,6 +46,7 @@ from pepin.runlink import (
     parse_command,
 )
 from pepin.tape import RunTape, camera_clip_path, next_run_number
+from pepin_bringup.bridge_kick import BridgeKick
 from pepin_bringup.node_kit import Switches
 
 # The live flags (CLAUDE.md rule 19); their state is printed in the node's ready line.
@@ -64,6 +65,25 @@ FLAGS = FlagSet(
         on_when="always: without them a camera measurement cannot be compared to the lidar's"
         " truth after the fact",
         off_when="when the fusion is off anyway and the tape should stay small",
+    ),
+    Flag(
+        "bridge_kick",
+        True,
+        description="the laptop's request to restart THIS board's zenoh bridge (/bridge/kick)"
+        " is answered by touching /run/pepin/bridge_kick, which a systemd path unit on the board"
+        " turns into `systemctl restart pepin-bridge`; off, the request is logged and ignored",
+        why="of two bridges the one that started LAST gets working routes: a route's DDS"
+        " endpoint is built when the route is created and only while the far bridge is already"
+        " announcing. On 2026-09-15 a 5 s wireless stall made the board's bridge close the"
+        " transport and reconnect with the same zenoh id, and thirteen of its pub routes came"
+        " back with an empty dds_reader — nothing crossed from the board until its bridge was"
+        " restarted by hand. ros/laptop.sh cures that with ssh (settle_bridge); the laptop's"
+        " watch has no ssh and must never have one, so it asks here and the board's own systemd"
+        " does the restart. The handler costs this board one subscription to a topic that"
+        " carries nothing on a healthy link",
+        on_when="always on a split or vision stack: it is the only way the laptop can put the"
+        " board's routes back without a human",
+        off_when="while bisecting the bridge by hand, so nothing restarts under you",
     ),
 )
 
@@ -381,6 +401,11 @@ class RunRecorderNode(Node):
         self._recorder = RunRecorder(
             self, self._record_dir, fusion_records=lambda: self._switches.on("fusion_records")
         )
+        # The laptop's one way to restart the board's zenoh bridge without an ssh key
+        # (pepin_bringup.bridge_kick): this node hosts the handler because it is the only one
+        # of ours that runs on the board in every mode, and the handler is three lines and a
+        # file write.
+        self._kick = BridgeKick(self, enabled=lambda: self._switches.on("bridge_kick"))
         self._camera: subprocess.Popen[bytes] | None = None  # curl copying the stream
         self._camera_clip: Path | None = None
         latched = QoSProfile(

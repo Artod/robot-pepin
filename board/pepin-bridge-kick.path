@@ -1,0 +1,13 @@
+[Unit]
+Description=Pepin: watch for the laptop's request to restart this board's zenoh bridge
+# The flag file is written by the ROS container (pepin_bringup.bridge_kick) into /run/pepin,
+# which ros/run.sh bind-mounts from the host at the same path. /run is tmpfs: a request never
+# survives a reboot, and nothing of this lands on the SD card.
+Documentation=file:///usr/local/bin/bridge_kick.sh
+
+[Path]
+PathExists=/run/pepin/bridge_kick
+Unit=pepin-bridge-kick.service
+
+[Install]
+WantedBy=multi-user.target

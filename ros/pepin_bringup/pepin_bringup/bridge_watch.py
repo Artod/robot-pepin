@@ -18,6 +18,17 @@ that declared after the bridge started leaves it readerless for the bridge's lif
 fact about the admin's JSON, not a wait (:attr:`pepin.deployment.BridgeRoute.dead`), and it is
 read from the same reply this watch already fetches.
 
+*A route with no endpoint on the OTHER side.* The same fault, read from the same reply, about
+the board's own routes (2026-09-15): a five-second wireless stall on a reliable 50 Hz topic
+filled the board bridge's transmission queue, it closed the transport itself ("Unable to push
+non droppable network message ... Closing transport!") and reconnected with the same zenoh id
+and thirteen pub routes whose ``dds_reader`` was empty. Not one message crossed from the board
+for the rest of the evening, while this watch printed "dead routes 0" — it judged the laptop's
+routes alone (:func:`pepin.deployment.far_dead_routes` is the other half). This side cannot mend
+it: the board's bridge is what must be restarted, and it must be restarted AFTER this side's,
+because of two bridges the one that starts last is the one that gets working routes. So the
+repair ladder ends with a kick to the board (:mod:`pepin_bringup.bridge_kick`), never with ssh.
+
 *A route that carries nothing.* The route count says nothing about flow: a route exists on both
 admins, the far side's publisher exists, and not one message crosses — /depth_scan on
 2026-09-12, /imu/data_raw on 2026-09-13, each cured by restarting a bridge by hand. The cause is
@@ -55,8 +66,10 @@ from typing import Any, Protocol
 
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from std_msgs.msg import String
 
 from pepin.deployment import (
+    BRIDGE_KICK_TOPIC,
     CONTAINER_STOP_TIMEOUT_S,
     BridgeIdentity,
     FlowWatch,
@@ -66,16 +79,26 @@ from pepin.deployment import (
     bridge_zid,
     bridged_qos,
     dead_routes,
+    far_dead_routes,
     routes_settled,
     topic_flows,
 )
 from pepin.flags import UNMEASURED, Flag, FlagSet
-from pepin_bringup.node_kit import Switches, Worker, spin_main
+from pepin_bringup.node_kit import Switches, Worker, bridged_qos_profile, spin_main
 
 BRIDGE_CHANGED_EXIT = 3
 REPAIR_COOLDOWN_S = (
     120.0  # after a gentle repair that did not help, wait this long before the next one
 )
+# The kick to the board's bridge (pepin_bringup.bridge_kick), the step after the gentle repair.
+# Its cooldown is the long one: a board bridge restart takes ~25 s (its unit waits for the
+# stack's last node and 20 s more) and costs the robot every bridged topic for that time, so it
+# is asked for at most once in five minutes however long the fault lasts.
+KICK_COOLDOWN_S = 300.0
+# ...and for this long after a kick a NEW board bridge is the answer to it, not a fault: the
+# board's bridge comes back with a new zenoh id by construction, and repairing on that would be
+# an endless round of restarts.
+KICK_PATIENCE_S = 120.0
 POLL_S = 5.0
 ATTACH_S = 1.0
 REPORT_S = 60.0
@@ -149,6 +172,44 @@ FLAGS = FlagSet(
         on_when="always on a split stack: it is the earliest and cheapest signal there is",
         off_when="while bisecting the bridge by hand, or if a bridge version ever built a route's"
         " endpoint lazily enough that a healthy route reads as dead",
+    ),
+    Flag(
+        "board_routes",
+        True,
+        description="the BOARD's own routes are judged too: a pub route of the board's bridge"
+        " with publishers, a remote route naming this bridge and no dds_reader carries nothing"
+        " and is counted in the report line as 'board routes without a reader N'; off, only"
+        " this side's routes are judged, as before",
+        why="2026-09-15, the evening every topic stopped: this watch printed 'dead routes 0' for"
+        " an hour while thirteen of the board's pub routes had an empty dds_reader and nothing"
+        " crossed at all. dead_routes judged this bridge's routes alone, and the board's are in"
+        " the same network-wide admin reply this watch already fetches (the admin space is"
+        " network-wide: either bridge answers for both). The fault is invisible from every other"
+        " signal — the route count is right, the far side's publishers are alive, and the"
+        " message counters only say 'silent', which a starved wifi link says too",
+        on_when="always on a split or vision stack: it is the difference between 'the link is"
+        " slow' and 'the board's bridge must be restarted'",
+        off_when="while bisecting the bridge by hand",
+    ),
+    Flag(
+        "bridge_kick",
+        True,
+        description="when a fault survives the gentle repair, ask the BOARD to restart its own"
+        " bridge (one String on /bridge/kick; the board's run recorder touches a flag file and a"
+        " systemd path unit there does the restart); off, the ladder ends at the gentle repair"
+        " and the log, as before",
+        why="of two bridges the one that starts LAST gets working routes — a route's DDS"
+        " endpoint is built when the route is created and only while the far bridge is already"
+        " announcing — which is why ros/laptop.sh restarts the board's bridge over ssh"
+        " (settle_bridge) right after the laptop's, and why restarting this side alone could not"
+        " cure 2026-09-15: the readerless routes were the board's. This container has no ssh key"
+        " and must not have one, so the request crosses as a topic and the board's own systemd"
+        " does the restart. It is sent only after a restart of this side's bridge, so the order"
+        f" that works is the order that happens. {UNMEASURED}",
+        on_when="always once the board carries pepin-bridge-kick.path: it is the only repair"
+        " for the board's own routes that does not need a human",
+        off_when="on a board without the kick units installed (the message is then published"
+        " into nothing), or while bisecting the bridge by hand",
     ),
     Flag(
         "bridge_restart",
@@ -319,13 +380,22 @@ class BridgeWatch(Node):
         self._unknown: set[str] = set()  # topics whose ROS type this image cannot resolve
         self._counts: dict[str, int] = {}
         self._dead_since: dict[str, float] = {}  # topic -> when its route first read as dead
+        self._far_since: dict[str, float] = {}  # the same, for the board's own routes
         self._reported: dict[str, int] = {}
         self._reported_at = 0.0
         self._attempts = 0
         self._cooldown_until = 0.0
+        self._kick_until = 0.0  # no second kick to the board before this
+        self._expect_board_bridge = 0.0  # ...and until here a new board bridge is our own doing
         self._grace_s = grace_s
         self._started: float | None = None
         self._switches = Switches(self, FLAGS)
+        # The only message this watch sends. Created here, on the executor thread, published
+        # from the worker (rclpy's publish is thread-safe); the QoS is the topic's pinned one
+        # so the route cannot be built from a race (pepin.deployment.BRIDGED_QOS).
+        self._kick_pub = self.create_publisher(
+            String, f"/{BRIDGE_KICK_TOPIC}", bridged_qos_profile(BRIDGE_KICK_TOPIC)
+        )
         self._worker = Worker[float](
             self.round, name="bridge_watch", on_error=self.get_logger().error
         ).start()
@@ -402,20 +472,39 @@ class BridgeWatch(Node):
             self._expected = route_count(self._board) or None
             self.get_logger().info(f"bridge watch: {zid} has {self._expected or 0} routes")
         if self._identity.observe(zid, now):
+            if zid is not None and now < self._expect_board_bridge:
+                # We asked for this one: the board restarted its bridge because this watch
+                # kicked it, and that is the repair finishing, not a fault. Every clock starts
+                # again on the new routes, and the ladder starts from the top if they are wrong.
+                self._expect_board_bridge = 0.0
+                self._cooldown_until = now
+                self._attempts = 0
+                self._flow.repaired(now)
+                self._dead_since.clear()
+                self._far_since.clear()
+                self.get_logger().info(
+                    f"bridge watch: the board's bridge came back after our kick ({zid});"
+                    " judging its routes again from now"
+                )
+                return
             why = f"is a new one ({zid})" if zid else f"answered nothing for {SILENCE_S:.0f} s"
             # The board's bridge changed under us and this side's routes are the ones that come
             # back wrong: the gentle repair is the one that cured it on 2026-09-14, and the whole
             # half stays one bridge_restart=false away.
             self.mend(f"the board's bridge {why}", now, settle=True)
             return
-        watching = self._switches.on("flow_watch") or self._switches.on("dead_routes")
+        watching = (
+            self._switches.on("flow_watch")
+            or self._switches.on("dead_routes")
+            or self._switches.on("board_routes")
+        )
         if watching and zid is not None:
             self.check_flow(now)
 
     def check_flow(self, now: float) -> None:
         """Ask both bridges what should arrive here, count it, repair what is silent or dead."""
         self._flow.silence_s = float(self._switches["flow_silence_s"])
-        flows, dead = self.flows()
+        flows, dead, far_dead = self.flows()
         if self._switches.on("flow_watch"):
             for flow in flows:
                 expected = flow.judged  # periodic and due; a latched or on-demand topic is never
@@ -426,49 +515,66 @@ class BridgeWatch(Node):
                     flow.topic, self._counts.get(flow.topic, 0), expected and counted, now
                 )
         starved = self._flow.starved(now) if self._switches.on("flow_watch") else ()
-        rotten = self.rotten(dead if self._switches.on("dead_routes") else (), now)
+        rotten = self.rotten(
+            self._dead_since, dead if self._switches.on("dead_routes") else (), now
+        )
+        far_rotten = self.rotten(
+            self._far_since, far_dead if self._switches.on("board_routes") else (), now
+        )
         if now - self._reported_at >= REPORT_S:
-            self.report(flows, starved, dead, now)
-        if starved or rotten:
-            self.mend(self.fault(starved, rotten), now, grace=True)
+            self.report(flows, starved, dead, far_dead, now)
+        if starved or rotten or far_rotten:
+            self.mend(self.fault(starved, rotten, far_rotten), now, grace=True)
         elif self._flow.settled(now):
             self._attempts = 0  # a link healthy well past the last repair earns the gentle one
 
-    def flows(self) -> tuple[tuple[TopicFlow, ...], tuple[str, ...]]:
-        """What both bridges say about every allowed incoming topic, and the topics whose route
-        on this side is dead by its own endpoints (:func:`pepin.deployment.dead_routes`).
+    def flows(self) -> tuple[tuple[TopicFlow, ...], tuple[str, ...], tuple[str, ...]]:
+        """What both bridges say about every allowed incoming topic, the topics whose route on
+        this side is dead by its own endpoints (:func:`pepin.deployment.dead_routes`) and the
+        topics the BOARD publishes to us with no reader of its own
+        (:func:`pepin.deployment.far_dead_routes`).
 
-        One query for both: the zenoh admin space is network-wide, so the board's admin answers
-        for the laptop's bridge too.
+        One query for all three: the zenoh admin space is network-wide, so the board's admin
+        answers for the laptop's bridge too — and for its own routes, which is what makes the
+        far side judgeable from here at no extra cost.
         """
         if self._local_zid is None:
             self._local_zid = bridge_zid(fetch(f"{self._local_admin}/@/local/router") or "")
         if not self._allowed:
             self._allowed = self.allowed()
         if self._local_zid is None:
-            return (), ()
+            return (), (), ()
         routes = bridge_routes(fetch(f"http://{self._board}:8000/@/*/ros2/route/**", 6.0) or "")
         dead = dead_routes(routes, self._local_zid)
+        far_dead = far_dead_routes(routes, self._local_zid)
         if not self._allowed:
-            return (), dead
-        return topic_flows(routes, self._local_zid, self._allowed, watcher=WATCH_NODE), dead
+            return (), dead, far_dead
+        flows = topic_flows(routes, self._local_zid, self._allowed, watcher=WATCH_NODE)
+        return flows, dead, far_dead
 
-    def rotten(self, dead: tuple[str, ...], now: float) -> tuple[str, ...]:
-        """The dead routes that have stayed dead for the patience (``flow_silence_s``), so a
-        route caught in the seconds between its creation and its endpoint is not a fault."""
-        self._dead_since = {t: self._dead_since.get(t, now) for t in dead}
-        return tuple(
-            t for t, since in self._dead_since.items() if now - since >= self._flow.silence_s
-        )
+    def rotten(self, since: dict[str, float], dead: tuple[str, ...], now: float) -> tuple[str, ...]:
+        """The dead routes of ``since`` (this side's clocks or the board's) that have stayed
+        dead for the patience (``flow_silence_s``), so a route caught in the seconds between its
+        creation and its endpoint is not a fault. ``since`` is updated in place: a route that
+        came back loses its clock."""
+        for topic in dead:
+            since.setdefault(topic, now)
+        for topic in [t for t in since if t not in dead]:
+            del since[topic]
+        return tuple(t for t, first in since.items() if now - first >= self._flow.silence_s)
 
     @staticmethod
-    def fault(starved: tuple[str, ...], rotten: tuple[str, ...]) -> str:
+    def fault(
+        starved: tuple[str, ...], rotten: tuple[str, ...], far_rotten: tuple[str, ...] = ()
+    ) -> str:
         """One line naming what is wrong, for the log and for the escalation."""
         said = []
         if starved:
             said.append(f"{' '.join(starved)} carried nothing")
         if rotten:
             said.append(f"{' '.join(rotten)} has a route with no DDS endpoint")
+        if far_rotten:
+            said.append(f"the board's route for {' '.join(far_rotten)} has no reader")
         return " and ".join(said)
 
     def allowed(self) -> tuple[str, ...]:
@@ -485,13 +591,18 @@ class BridgeWatch(Node):
 
     def mend(self, why: str, now: float, grace: bool = False, settle: bool = False) -> None:
         """Put the routes back, least destructive first: the laptop's bridge container alone,
-        and the whole half only when a restart has already failed to mend the same fault.
+        then a kick to the board's bridge, and the whole half only after both.
 
-        One repair for all three faults — a starved topic, a dead route, a board bridge that
-        changed identity — because one thing cured all three by hand. ``grace`` holds off while
-        this half is younger than :data:`STARTUP_GRACE_S` (the routes are still being built, so
-        a fault read off them is not one); ``settle`` waits for the board's route count to stop
-        moving first, which a new bridge needs and a dead route does not.
+        One ladder for every fault — a starved topic, a dead route here, a readerless route on
+        the board, a board bridge that changed identity — because one thing cured all of them by
+        hand: a bridge restarted, and the board's restarted AFTER this side's. That order is the
+        ladder's shape, not a coincidence: of two bridges the one that starts last is the one
+        that gets working routes, so the kick is only ever sent once this side's bridge is new.
+
+        ``grace`` holds off while this half is younger than :data:`STARTUP_GRACE_S` (the routes
+        are still being built, so a fault read off them is not one); ``settle`` waits for the
+        board's route count to stop moving first, which a new bridge needs and a dead route does
+        not.
         """
         if grace and self._started is not None and now - self._started < self._grace_s:
             self.get_logger().warning(
@@ -515,20 +626,64 @@ class BridgeWatch(Node):
                 return
             self._flow.repaired(now)
             self._dead_since.clear()  # fresh routes: every clock starts again
+            self._far_since.clear()
             self._local_zid = None  # a new bridge has a new id; its routes are new too
             self.get_logger().error(f"bridge watch: {why}; {said}")
             return
-        again = "again after a bridge restart" if self._attempts else "and the gentle repair is off"
+        if self._attempts and self._switches.on("bridge_kick") and now >= self._kick_until:
+            self.kick(why, now)
+            return
         if self._switches.on("half_restart"):
-            self.restart_half(f"{why} {again}")
+            self.restart_half(f"{why} {self.stalled(now)}")
             return
         self.get_logger().error(
-            f"bridge watch: {why} {again}; half_restart is off — this half stays up; the hand"
-            f" repair is ros/restart.sh laptop; the gentle repair may run again in"
-            f" {REPAIR_COOLDOWN_S:.0f} s"
+            f"bridge watch: {why} {self.stalled(now)}; half_restart is off — this half stays up;"
+            f" the hand repair is ros/restart.sh laptop; the gentle repair may run again in"
+            f" {max(0.0, self._cooldown_until - now):.0f} s"
         )
         self._attempts = 0
-        self._cooldown_until = now + REPAIR_COOLDOWN_S
+        # Armed only when it is not already running: re-arming it on every failing round (five
+        # seconds apart) pushed it forever into the future, so the gentle repair, which is
+        # allowed once per cooldown, never ran a second time at all (2026-09-15).
+        if now >= self._cooldown_until:
+            self._cooldown_until = now + REPAIR_COOLDOWN_S
+
+    def stalled(self, now: float) -> str:
+        """Why nothing gentler is happening, for the log: which rung of the ladder is spent,
+        which cooldown is running, or which switch is off."""
+        if self._attempts and not self._switches.on("bridge_kick"):
+            return "again after a bridge restart, and the kick to the board is off"
+        if self._attempts:
+            return (
+                "again after a bridge restart, and the board was kicked less than"
+                f" {KICK_COOLDOWN_S:.0f} s ago ({self._kick_until - now:.0f} s to go)"
+            )
+        if now < self._cooldown_until:
+            return f"and the gentle repair is cooling down ({self._cooldown_until - now:.0f} s)"
+        return "and the gentle repair is off"
+
+    def kick(self, why: str, now: float) -> None:
+        """Ask the board to restart its own bridge: one message, and the clocks that keep this
+        watch from asking again or from reading the answer as a new fault.
+
+        The board's bridge comes back with a new zenoh id ~25 s later (its unit waits for the
+        stack), and that identity change is the repair landing, not a bridge that changed under
+        us — :data:`KICK_PATIENCE_S` is how long this watch remembers that it asked.
+        """
+        self._kick_until = now + KICK_COOLDOWN_S
+        self._expect_board_bridge = now + KICK_PATIENCE_S
+        self._cooldown_until = now + REPAIR_COOLDOWN_S  # nothing else while the board comes back
+        self._attempts = 0
+        self._flow.repaired(now)
+        self._dead_since.clear()
+        self._far_since.clear()
+        self._kick_pub.publish(String(data=why))
+        self.get_logger().error(
+            f"bridge watch: {why} after a bridge restart; asked the board to restart its own"
+            f" bridge (/{BRIDGE_KICK_TOPIC}); it is gone for ~25 s and comes back with a new"
+            f" zenoh id. Nothing else here for {REPAIR_COOLDOWN_S:.0f} s, no second kick for"
+            f" {KICK_COOLDOWN_S:.0f} s (board: journalctl -u pepin-bridge-kick -u pepin-bridge)"
+        )
 
     def restart_half(self, why: str) -> None:
         """The old action, kept: wait for the routes to settle, then end the process so the
@@ -543,10 +698,12 @@ class BridgeWatch(Node):
         flows: tuple[TopicFlow, ...],
         starved: tuple[str, ...],
         dead: tuple[str, ...],
+        far_dead: tuple[str, ...],
         now: float,
     ) -> None:
         """One line: what each watched topic carried since the last line, what is silent, how
-        many routes on this side have no DDS endpoint, and the switches (CLAUDE.md rule 19)."""
+        many routes have no DDS endpoint on this side and how many of the board's have no reader
+        of their own, and the switches (CLAUDE.md rule 19)."""
         window = max(1e-3, now - self._reported_at)
         self._reported_at = now
         carried = []
@@ -558,8 +715,13 @@ class BridgeWatch(Node):
             carried.append(f"{flow.topic.lstrip('/')} {since / window:.1f}")
         silent = f"; SILENT {' '.join(starved)}" if starved else ""
         rotten = f"; DEAD ROUTES {len(dead)} [{' '.join(dead)}]" if dead else "; dead routes 0"
+        far = (
+            f"; BOARD ROUTES WITHOUT A READER {len(far_dead)} [{' '.join(far_dead)}]"
+            if far_dead
+            else "; board routes without a reader 0"
+        )
         self.get_logger().info(
-            f"bridge watch: {len(carried)} topics Hz [{', '.join(carried)}]{silent}{rotten};"
+            f"bridge watch: {len(carried)} topics Hz [{', '.join(carried)}]{silent}{rotten}{far};"
             f" {self._switches.state()}"
         )
 

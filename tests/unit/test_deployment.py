@@ -593,3 +593,70 @@ def test_a_sub_route_without_its_writer_is_dead_and_a_route_nobody_wants_is_not(
     assert dead_routes(routes, LIVE_BOARD_ZID) == ("/vo",)
     quiet = bridge_routes(ADMIN_ROUTES)  # /neck/state: no reader, but no remote route either
     assert dead_routes(quiet, BOARD_ZID) == () and dead_routes(quiet, LAPTOP_ZID) == ()
+
+
+# The board's side of the same reply on 2026-09-15: its pub routes for /scan and /tf, ours as
+# the remote route on each, and an empty dds_reader on the first — thirteen of these carried
+# nothing all evening while the watch judged the laptop's routes alone and said "dead routes 0".
+BOARD_PUB_ROUTES = (
+    '[{"key":"@/' + LIVE_BOARD_ZID + '/ros2/route/topic/pub/scan","value":'
+    '{"dds_reader":"","local_nodes":["/ldlidar_node"],'
+    '"remote_routes":["' + LIVE_LAPTOP_ZID + ':scan"],"ros2_name":"/scan",'
+    '"ros2_type":"sensor_msgs/msg/LaserScan"}},'
+    '{"key":"@/' + LIVE_BOARD_ZID + '/ros2/route/topic/pub/tf","value":'
+    '{"dds_reader":"0110b40e222108dd30e3933e00002203","local_nodes":["/base_bridge"],'
+    '"remote_routes":["' + LIVE_LAPTOP_ZID + ':tf"],"ros2_name":"/tf",'
+    '"ros2_type":"tf2_msgs/msg/TFMessage"}},'
+    '{"key":"@/' + LIVE_BOARD_ZID + '/ros2/route/topic/pub/neck/state","value":'
+    '{"dds_reader":"","local_nodes":["/neck_state"],"remote_routes":[],'
+    '"ros2_name":"/neck/state","ros2_type":"sensor_msgs/msg/JointState"}}]'
+)
+
+
+def test_the_board_s_own_pub_route_without_a_reader_is_seen_from_the_laptop() -> None:
+    """The fault of 2026-09-15, and the only side it can be read from: the admin space is
+    network-wide, so the board's routes arrive in the reply the laptop's watch already fetches.
+    Judged only when the board's route names OUR bridge — a route nobody on this side asked for
+    has no reader on purpose (/neck/state here)."""
+    from pepin.deployment import bridge_routes, dead_routes, far_dead_routes
+
+    routes = bridge_routes(BOARD_PUB_ROUTES)
+    assert far_dead_routes(routes, LIVE_LAPTOP_ZID) == ("/scan",)
+    assert dead_routes(routes, LIVE_LAPTOP_ZID) == (), "none of these routes is ours"
+    assert far_dead_routes(routes, "0000000000000000000000000000ffff") == (), (
+        "another bridge's business: only the routes that name this one are judged here"
+    )
+    assert far_dead_routes(bridge_routes(LIVE_ROUTES), LIVE_LAPTOP_ZID) == (), (
+        "a healthy dump: the board's sub routes are not judged here, and nothing else is dead"
+    )
+
+
+def test_the_bridge_config_drops_reliable_blocking_and_caps_what_crosses_the_wifi() -> None:
+    """The two settings that killed the link on 2026-09-15 and the load that led to it: a
+    RELIABLE route blocked on a full queue made the board's bridge close the transport itself,
+    and 51.6 Hz of /tf plus 46.6 of /imu is more than the radio carries under load."""
+    import re
+
+    from pepin.deployment import BRIDGE_MODES, bridge_config, pub_max_frequencies
+
+    for mode in BRIDGE_MODES:
+        for side in ("board", "laptop"):
+            plugin = bridge_config(side, mode)["plugins"]["ros2dds"]  # type: ignore[index]
+            assert plugin["reliable_routes_blocking"] is False, (side, mode)
+        board = bridge_config("board", mode)["plugins"]["ros2dds"]["pub_max_frequencies"]  # type: ignore[index]
+        laptop = bridge_config("laptop", mode)["plugins"]["ros2dds"]["pub_max_frequencies"]  # type: ignore[index]
+        assert sorted(board) == [
+            "^/imu/data_raw$=20",
+            "^/odom$=20",
+            "^/odometry/filtered$=20",
+            "^/tf$=20",
+        ], mode
+        assert laptop == [], f"{mode}: the plugin downsamples where the publisher is, and it is"
+        " the board that publishes all four"
+    # The plugin does not anchor these regexes and matches with is_match (1.7.0 config.rs), so
+    # the anchors are ours: /tf_static is latched and must never be downsampled.
+    caps = [entry.split("=")[0] for entry in pub_max_frequencies(("tf", "odom"))]
+    assert [c for c in caps if re.compile(c).search("/tf_static")] == []
+    assert [c for c in caps if re.compile(c).search("/tf")] == ["^/tf$"]
+    assert pub_max_frequencies(("/tf",)) == pub_max_frequencies(("tf",)) == ["^/tf$=20"]
+    assert pub_max_frequencies(("depth_scan",)) == [], "a topic with no cap gets no entry"
