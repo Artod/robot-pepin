@@ -105,6 +105,11 @@ PICTURE_SLIP_MIN_SPEED_M_S = 0.05
 # wheels are muted on their first word instead (2026-09-16: 54 cm of invented motion became 37
 # with the hold charged every time).
 PICTURE_SLIP_RECENT_S = 2.0
+# What a zero-velocity update claims. The cart standing still is known to a centimetre a second
+# (the visual odometry's own drift at rest is 0.3 cm/s, measured 2026-09-16), and the claim must
+# be tighter than the wheels' own 3 cm/s or the lie would out-vote the truth.
+ZUPT_SIGMA_M_S = 0.01
+ZUPT_SIGMA_RAD_S = 0.02
 # A visual odometry older than this cannot testify: it drops frames and a 1.7 s gap was seen
 # live. With no witness the wheels are believed -- the cart must keep moving when the camera
 # half is gone (the board drives alone on a WiFi loss, by design).
@@ -251,3 +256,19 @@ class PictureSpeed:
         return self.speed
 
 
+
+
+def zero_twist_covariance(
+    sigma_m_s: float = ZUPT_SIGMA_M_S, sigma_yaw_rad_s: float = ZUPT_SIGMA_RAD_S
+) -> list[float]:
+    """The 6x6 twist covariance of a zero-velocity update: ``sigma_m_s`` on the two ground
+    velocities, ``sigma_yaw_rad_s`` on the yaw rate, and a huge number on everything nobody is
+    claiming. Tight on purpose — while the verdict stands, "the cart is not moving" is the best
+    measurement on the robot, and a loose one would be out-voted by the very wheels it answers.
+    """
+    unfused = 1e6
+    diagonal = [sigma_m_s**2, sigma_m_s**2, unfused, unfused, unfused, sigma_yaw_rad_s**2]
+    matrix = [0.0] * 36
+    for i, value in enumerate(diagonal):
+        matrix[i * 6 + i] = value
+    return matrix

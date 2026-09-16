@@ -105,7 +105,13 @@ from pepin.measurements import (
 )
 from pepin.odometry import Pose2D, RunawayWatch, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
-from pepin.slip import PictureSlip, PictureSlipVerdict, PictureSpeed, SlipWatch
+from pepin.slip import (
+    PictureSlip,
+    PictureSlipVerdict,
+    PictureSpeed,
+    SlipWatch,
+    zero_twist_covariance,
+)
 from pepin.sources import (
     CAMERA,
     CONTACT,
@@ -860,6 +866,7 @@ class Relocalizer(Node):
         self._vo = PictureSpeed()  # the camera's own speed, from its consecutive poses
         self._wheels_muted = False
         self._wheel_at: float | None = None  # when the wheels last said anything at all
+        self._zupt_pub = self.create_publisher(Odometry, "zupt", 5)
         self._wheel_params = AsyncParameterClient(self, "base_bridge")
         self._history = OdomHistory(horizon_s=5.0)
         # Every source's scans wait at the feed (a gate per source) and one of them drives the
@@ -1005,6 +1012,9 @@ class Relocalizer(Node):
         self.create_timer(30.0, self._report_tracking)
         self.create_timer(2.0, self._remember_pose)
         self.create_timer(0.2, self._wheels_no_word)  # a mute outlives at most a fifth of a second
+        self.create_timer(
+            0.1, self._still_while_slipping
+        )  # the zero-velocity update, while it holds
         self.create_timer(0.2, self._apply_pending_seed)  # the worker's fix, applied here
         self.create_timer(0.05, self._send_map_odom)  # the frame stays alive, scans or not
         self.create_subscription(
@@ -1272,6 +1282,23 @@ class Relocalizer(Node):
             watching=self._switches.on("slip_watch"),
         )
         self._mute_wheels(*change) if change is not None else None
+
+    def _still_while_slipping(self) -> None:
+        """Ten times a second, a zero-velocity update for as long as the wheels stand accused."""
+        self._hold_still() if self._wheels_muted else None
+
+    def _hold_still(self) -> None:
+        """While the wheels are known to be lying, tell the filter what IS true: the cart is not
+        moving. A muted wheel only takes a measurement away, and a filter without measurements
+        coasts on the velocity it last believed — 30 cm of invented motion survived muting alone
+        on 2026-09-16. This is the zero-velocity update of inertial navigation: x, y and yaw rate
+        at zero with a centimetre-class sigma, published only while the verdict stands."""
+        message = Odometry()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = "odom"
+        message.child_frame_id = "base_link"
+        message.twist.covariance = zero_twist_covariance()
+        self._zupt_pub.publish(message)
 
     def _mute_wheels(self, mute: bool, verdict: PictureSlipVerdict) -> None:
         """Set base_bridge's ``odom_publish`` to the opposite of ``mute`` and say why, once per

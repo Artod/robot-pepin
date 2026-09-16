@@ -189,6 +189,27 @@ ekf_filter_node:
     odom1_relative: false
     odom1_queue_size: 10
     odom1_pose_rejection_threshold: 3.0
+
+    # odom2: the zero-velocity update. A slip is not noise and not silence -- the wheels report
+    # metres the cart never travelled, and taking their voice away is not enough, because a
+    # filter with no measurement COASTS: it keeps the velocity it last believed and integrates
+    # it forward. Measured 2026-09-16 on wheels held in the air: muting them cut the invented
+    # motion from 54 cm to 30, and no amount of muting takes it lower. What stops it is the
+    # oldest trick in inertial navigation: while a detector says the vehicle stands still, feed
+    # the filter a pseudo-measurement of ZERO velocity. pepin_bringup.relocalizer publishes one
+    # at 10 Hz for exactly as long as pepin.slip.PictureSlip holds its verdict (the wheels claim
+    # speed, the camera's own odometry sees the picture standing) and nothing at all otherwise,
+    # so with the slip_watch flag off this input is silent and the filter is what it was.
+    # Velocities, not a pose: x, y and yaw rate, each with a 1 cm/s-class sigma in the message.
+    odom2: zupt
+    odom2_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom2_differential: false
+    odom2_relative: false
+    odom2_queue_size: 5
     # THE CAMERA'S COVARIANCE IS THE MESSAGE'S OWN, AND THERE IS NO OVERRIDE IN THIS FILE
     # (checked 2026-09-16). robot_localization has no per-source covariance parameter at all --
     # it reads pose.covariance off each PoseWithCovarianceStamped it takes -- so nothing here

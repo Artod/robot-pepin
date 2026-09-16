@@ -117,3 +117,15 @@ def test_a_fresh_slip_mutes_the_wheels_on_their_first_word() -> None:
     assert again.slipping, "caught a moment ago: no second hold"
     watch.feed(1.0, 0.13, 0.13, vo_at=1.0)  # the picture catches up: the slip is over
     assert not watch.feed(5.0, 0.13, 0.0, vo_at=5.0).slipping, "long past: the hold is charged"
+
+
+def test_a_zero_velocity_update_is_tighter_than_the_wheels_it_answers() -> None:
+    """The claim "the cart is not moving" must out-weigh the wheels that say otherwise, and it
+    must claim nothing about the axes nobody measured."""
+    from pepin.slip import ZUPT_SIGMA_M_S, zero_twist_covariance
+
+    matrix = zero_twist_covariance()
+    assert len(matrix) == 36
+    assert math.isclose(matrix[0], ZUPT_SIGMA_M_S**2) and math.isclose(matrix[7], ZUPT_SIGMA_M_S**2)
+    assert matrix[35] > 0.0 and matrix[14] > 1e3, "yaw rate claimed, z and roll left alone"
+    assert ZUPT_SIGMA_M_S < 0.03, "tighter than the wheels' own claim, or the lie wins"

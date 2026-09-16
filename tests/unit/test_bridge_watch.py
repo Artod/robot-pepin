@@ -402,7 +402,7 @@ def test_the_board_s_own_readerless_route_is_a_fault_this_side_can_see(monkeypat
     """2026-09-15: every topic stopped and the watch said "dead routes 0" — it judged this
     bridge's routes alone. The board's are in the same network-wide reply."""
     repair = FakeRepair()
-    node, admin, codes = build(monkeypatch, repair, with_readerless_board())
+    node, admin, _codes = build(monkeypatch, repair, with_readerless_board())
     drive(node, admin, [0.0, 10.0], messages=48)
     assert repair.restarts == 0, "not yet: a route caught between its creation and its endpoint"
     drive(node, admin, [20.0], messages=48)
