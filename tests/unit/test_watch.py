@@ -5,6 +5,7 @@ import math
 import numpy as np
 import pytest
 
+from pepin.measurements import GRAPH_FLOOR_XY_M
 from pepin.odometry import Pose2D
 from pepin.watch import (
     ADMIT_FIT,
@@ -21,6 +22,7 @@ from pepin.watch import (
     PAINT_EDGE_FRESH_S,
     PAINT_SIGMA_M,
     PROVISIONAL_FIT_CAP,
+    SIGMA_MEDIAN_S,
     SOURCE_PATIENCE_S,
     TF_FRESH_S,
     UNKNOWN_SIGMA,
@@ -33,6 +35,7 @@ from pepin.watch import (
     Preflight,
     Readiness,
     Sigma,
+    SigmaWindow,
     SourceSilence,
     Verdict,
     source_words,
@@ -377,9 +380,14 @@ SURE = np.diag([0.02**2, 0.02**2, math.radians(1.0) ** 2])  # a fused match of t
 
 def test_the_sigma_ladder_is_ordered_and_sits_inside_the_cart() -> None:
     """The two thresholds a drive lives by, read against the cart itself: the footprint is
-    0.55 m wide and Nav2 calls 0.10 m arrived. A goal starts under a fifth of that width and a
-    drive is cut just under half of it — and a pose nothing has measured is over both."""
-    assert 0.10 < DRIVE_SIGMA_M < LOST_SIGMA_M < 0.275
+    0.55 m wide and Nav2 calls 0.10 m arrived. Since 2026-09-16 the ladder has to admit the pose
+    GRAPH, whose word is worth 0.20 m (pepin.measurements.GRAPH_FLOOR_XY_M) — so a goal starts
+    under half the cart's width and a drive is cut under its whole width, and a pose nothing has
+    measured is still over both."""
+    assert GRAPH_FLOOR_XY_M < DRIVE_SIGMA_M < LOST_SIGMA_M < 0.55, (
+        "the graph's honest word must be able to start a drive, and neither rung may exceed the"
+        " cart's own width, past which its outline means nothing"
+    )
     assert GRAPH_AGREE_M < DRIVE_SIGMA_M
     assert UNKNOWN_SIGMA[0] > LOST_SIGMA_M, "before the first word nothing may drive"
 
@@ -398,12 +406,15 @@ def test_the_sigma_grows_along_the_odometry_and_collapses_on_a_word() -> None:
     # into position error, so the growth is LINEAR in the distance driven (1 deg of heading is
     # 1.7 cm per metre) rather than the square root a pile of independent steps would give.
     over_drive = over_lost = 0
-    for step in range(1, 21):
+    for step in range(1, 31):
         spread.carried(Pose2D(float(step), 0.0, 0.0))
         over_drive = over_drive or (step if spread.sigma()[0] > DRIVE_SIGMA_M else 0)
         over_lost = over_lost or (step if spread.sigma()[0] > LOST_SIGMA_M else 0)
-    assert (over_drive, over_lost) == (8, 14), "8 m of dead reckoning refuses a goal, 14 m cuts one"
-    spread.corrected(SURE, Pose2D(21.0, 0.0, 0.0), Pose2D(20.0, 0.0, 0.0), now=120.0)
+    assert (over_drive, over_lost) == (14, 22), (
+        "14 m of dead reckoning refuses a goal, 22 m cuts one — the distances the raised ladder"
+        " of 2026-09-16 buys (they were 8 m and 14 m at 0.15/0.25)"
+    )
+    spread.corrected(SURE, Pose2D(31.0, 0.0, 0.0), Pose2D(30.0, 0.0, 0.0), now=120.0)
     assert spread.sigma()[0] == pytest.approx(sure_xy, abs=1e-6), "one word collapses it again"
 
 
@@ -451,7 +462,7 @@ def test_a_goal_is_judged_by_the_sigma_where_there_is_one_and_the_fit_where_ther
     assert gate.verdict(0.0, None).rule == BY_FIT
     wide = gate.verdict(0.95, None, sigma=Sigma(0.41, 8.0, 0.1))
     assert (wide.ready, wide.search, wide.rule) == (False, True, BY_SIGMA)
-    assert "0.41 m" in wide.reason and "0.15" in wide.reason
+    assert "0.41 m" in wide.reason and f"{DRIVE_SIGMA_M:.2f}" in wide.reason
     bound = gate.verdict(0.0, None, sigma=Sigma(DRIVE_SIGMA_M, 3.0, 0.1))
     assert bound.ready, "the threshold itself is allowed, like every other bound here"
 
@@ -466,6 +477,48 @@ def test_a_sigma_that_stopped_arriving_is_not_a_sigma() -> None:
     assert gate.verdict(0.9, None, sigma=Sigma(0.02, 0.5, SOURCE_PATIENCE_S)).ready, "the bound"
 
 
+def test_the_certainty_is_the_window_s_median_and_not_the_last_flicker() -> None:
+    """The nook of 2026-09-16: the lidar's match flips between two hypotheses and the published
+    sigma flickers 0.01 <-> 0.31 m from one revolution to the next. One sample decides by luck —
+    the median over the window decides by what the place actually is."""
+    window = SigmaWindow()
+    assert window.median(0.0) is None, "no word yet is not a number: the fit rules answer"
+    flicker = (0.01, 0.31, 0.02, 0.31, 0.01, 0.30, 0.02)
+    for i, xy in enumerate(flicker):
+        window.add(Sigma(xy, 2.0, 0.0), now=100.0 + 0.25 * i)
+    now = 100.0 + 0.25 * (len(flicker) - 1)
+    reading = window.median(now)
+    assert reading is not None
+    assert reading.xy_m == pytest.approx(0.02), (
+        f"the median of the nook, not whichever scan landed last: {reading.xy_m:.3f} m"
+    )
+    assert reading.xy_m <= DRIVE_SIGMA_M, "a place that is mostly known may be driven from"
+    assert window.span() == pytest.approx(1.5)
+    # ...and a pose that is really lost moves the median, because MOST of the samples move.
+    for i in range(8):
+        window.add(Sigma(0.45, 9.0, 0.0), now=now + 0.25 * (i + 1))
+    lost = window.median(now + 2.0)
+    assert lost is not None and lost.xy_m > LOST_SIGMA_M, f"a real loss lands: {lost.xy_m:.3f} m"
+
+
+def test_the_window_ages_by_the_newest_sample_so_a_dead_tracker_is_seen() -> None:
+    """Freshness is "is the tracker still publishing", never "how old is the middle of the
+    window": a median that averaged the ages would let a tracker that stopped look alive."""
+    window = SigmaWindow()
+    for i in range(5):
+        window.add(Sigma(0.05, 1.0, 0.0), now=100.0 + 0.4 * i)
+    fresh = window.median(101.7)
+    assert fresh is not None and fresh.age_s == pytest.approx(0.1), "the newest sample's age"
+    assert fresh.fresh(SOURCE_PATIENCE_S)
+    stopped = window.median(130.0)
+    assert stopped is not None, "a tracker that stopped is a reading to refuse, not an absence"
+    assert stopped.age_s == pytest.approx(28.4) and not stopped.fresh(SOURCE_PATIENCE_S)
+    assert stopped.xy_m == pytest.approx(0.05), "the last thing it said, whatever its age"
+    assert window.window_s == SIGMA_MEDIAN_S
+    window.clear()
+    assert window.median(130.0) is None, "a whole-map search seeds a pose the samples never saw"
+
+
 def test_the_blind_drive_watch_reads_the_sigma_and_says_which_rule_judged() -> None:
     """The watch that cut the camera drives: with a sigma it judges the pose, with none the fit,
     and the phrase it leaves in the log names the reading, so a tape says which rule stopped the
@@ -475,8 +528,8 @@ def test_the_blind_drive_watch_reads_the_sigma_and_says_which_rule_judged() -> N
     assert blind.rule == BY_SIGMA and "0.06 m" in blind.phrase()
     lost = False
     for t in (10.0, 11.0, 12.0, 13.0, 15.0):
-        lost = blind.observe(0.99, t, sigma=Sigma(0.40, 9.0, 0.1))
-    assert lost and "over 0.25 m" in blind.phrase()
+        lost = blind.observe(0.99, t, sigma=Sigma(0.55, 9.0, 0.1))
+    assert lost and f"over {LOST_SIGMA_M:.2f} m" in blind.phrase()
     fit_only = BlindDriveWatch()
     assert not fit_only.observe(0.9, 0.0) and fit_only.rule == BY_FIT
     by_fit = False
@@ -550,7 +603,8 @@ def test_the_preflight_refuses_each_case_with_the_line_that_says_why() -> None:
     assert not asleep[0].ok and "no source has spoken in 3 s" in asleep[0].detail
     assert "lidar stale 41.0 s" in asleep[0].detail, "the roster is printed whole"
     wide = flight.checks(source_words(report(lidar=LIDAR_FRESH)), Sigma(0.44, 9.0, 0.2))
-    assert not wide[1].ok and "0.44 m" in wide[1].detail and "needs 0.15 m" in wide[1].detail
+    assert not wide[1].ok and "0.44 m" in wide[1].detail
+    assert f"needs {DRIVE_SIGMA_M:.2f} m" in wide[1].detail
     old_board = flight.checks(source_words(report(lidar=LIDAR_FRESH)), None, fit=0.31)
     assert not old_board[1].ok and "no /localization/sigma" in old_board[1].detail
     assert flight.checks(source_words(report(lidar=LIDAR_FRESH)), None, fit=0.9)[1].ok

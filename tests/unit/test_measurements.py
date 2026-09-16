@@ -15,6 +15,8 @@ import pytest
 
 from pepin.fusion import ODOM_XY_FLOOR_M, ODOM_YAW_FLOOR_RAD, PoseMeasurement
 from pepin.measurements import (
+    GRAPH_FLOOR_XY_M,
+    GRAPH_FLOOR_YAW_DEG,
     MEASUREMENT_MAX_AGE_S,
     REMOTE_FLOOR_XY_M,
     REMOTE_FLOOR_YAW_DEG,
@@ -385,12 +387,16 @@ def test_a_graph_gate_takes_nothing_until_the_roster_switches_it_on() -> None:
 
 def test_a_graph_measurement_claims_no_more_than_the_remote_floor() -> None:
     """RTAB-Map's own numbers are useless in both directions (706 m of standard deviation with no
-    closure, 8 mm right after one), so the word is worth the camera's measured floor and no more."""
+    closure, 8 mm right after one), so the word is worth the floor MEASURED FOR THE GRAPH and no
+    more -- 0.20 m / 8 deg since 2026-09-16, not the camera's 0.08 m it used to borrow, because a
+    graph word sat 22-23 cm and 12 deg off the lidar's pose in motion."""
     m = graph_measurement(Pose2D(1.0, 0.0, 0.0), Pose2D(), 1.0, "map-a")
     cov = np.asarray(m.covariance, dtype=float)
-    assert cov[0, 0] == pytest.approx(REMOTE_FLOOR_XY_M**2)
-    assert cov[1, 1] == pytest.approx(REMOTE_FLOOR_XY_M**2)
-    assert cov[2, 2] == pytest.approx(math.radians(REMOTE_FLOOR_YAW_DEG) ** 2)
+    assert GRAPH_FLOOR_XY_M > REMOTE_FLOOR_XY_M, "the graph is not as good as the camera"
+    assert GRAPH_FLOOR_YAW_DEG > REMOTE_FLOOR_YAW_DEG
+    assert cov[0, 0] == pytest.approx(GRAPH_FLOOR_XY_M**2)
+    assert cov[1, 1] == pytest.approx(GRAPH_FLOOR_XY_M**2)
+    assert cov[2, 2] == pytest.approx(math.radians(GRAPH_FLOOR_YAW_DEG) ** 2)
     assert np.count_nonzero(cov - np.diag(np.diagonal(cov))) == 0
     # and it travels: the board reads back exactly what was measured
     back = RemoteMeasurement.from_json(m.to_json())

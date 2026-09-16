@@ -95,6 +95,24 @@ ekf_filter_node:
     odom0_differential: false
     odom0_relative: false
     odom0_queue_size: 10
+    # A SLIPPING WHEEL IS NOW OUTVOTED, NOT AVERAGED IN (2026-09-16). On 2026-09-16 the cart stood
+    # still while the wheels spun on carpet: /odom reported 0.4 m of travel that never happened and
+    # the live pose walked with it. The wheels' own covariance says nothing about this — slip is not
+    # noise, it is a measurement that is simply wrong — so the only mechanism that can drop it is
+    # the filter's own prediction. robot_localization computes the Mahalanobis distance of each
+    # measurement's innovation against sqrt(P + R) and throws the measurement away past this many
+    # sigmas (ros_filter.cpp, checkMahalanobisThreshold); with no threshold set the default is
+    # effectively infinite and every wheel sample is fused however impossible it is.
+    # 5 SIGMA AND NOT 3: with R = 0.001 (m/s)^2 from the base bridge and the filter's own P around
+    # 0.001 between updates, one sigma is about 0.045 m/s, so 5 is roughly 0.22 m/s of disagreement
+    # — most of this cart's top speed, which a slip that invents 0.4 m reaches and an honest
+    # acceleration inside one 20 Hz period does not. 3 (0.13 m/s) would also catch a hard start,
+    # and a rejected honest wheel sample is the worse failure: the wheels are the only source of
+    # distance here. Tighten it only after a tape shows slip passing the gate.
+    # The pose threshold is declared with it and does nothing today — odom0_config fuses no pose
+    # index — so that a day someone turns x/y back on does not also silently turn the gate off.
+    odom0_twist_rejection_threshold: 5.0
+    odom0_pose_rejection_threshold: 5.0
     # /vo from the laptop's camera: rtabmap_odom's rgbd_odometry on the neck camera's picture and
     # the network's metric depth, gated by pepin_bringup.visual_odometry (a lost frame and a jump
     # no cart of this speed could have made never arrive here). The one input that cannot be
@@ -171,6 +189,24 @@ ekf_filter_node:
     odom1_relative: false
     odom1_queue_size: 10
     odom1_pose_rejection_threshold: 3.0
+    # THE CAMERA'S COVARIANCE IS THE MESSAGE'S OWN, AND THERE IS NO OVERRIDE IN THIS FILE
+    # (checked 2026-09-16). robot_localization has no per-source covariance parameter at all --
+    # it reads pose.covariance off each PoseWithCovarianceStamped it takes -- so nothing here
+    # needs removing and nothing here can be blamed for what /vo weighs. Written down because the
+    # 2026-09-16 slip was read as "the yaml overrode VO to a large constant sigma so it could
+    # never outvote the wheels", and half of that sentence is true in the WRONG FILE: the constant
+    # is stamped upstream, by pepin_bringup.visual_odometry, before the message is ever published
+    # (visual_odometry.py:361 -- vo_covariance "constant" writes vo_sigma_m / vo_yaw_sigma_deg
+    # over whatever rgbd_odometry computed).
+    # THE ONE WORD THAT HANDS THE FILTER RTABMAP'S OWN NUMBER:
+    #   ros/flags.sh set visual_odometry vo_covariance rtabmap
+    # live, no restart, and reversible with "constant". IT IS NOT A FREE SWITCH, which is why it
+    # is not the default: rtabmap's per-frame registration covariance is about 325x tighter than
+    # the shipped 7 cm sigma (scratch/vo_weight.py), which makes the camera the odometry of this
+    # cart rather than a second opinion -- and rgbd_odometry's covariance is its own optimiser's
+    # residual, not an error measured against anything. The measured way to let VO outvote a
+    # slipping wheel is the rejection gate on odom0 above, which drops the impossible wheel
+    # sample instead of trying to out-weigh it. Flip this only behind a drive that compares both.
     # /imu/data_raw from the MPU6050: THE YAW RATE (index 11) AND NOTHING ELSE. No orientation --
     # the chip gives none and the driver says so (orientation_covariance[0] = -1,
     # base_bridge.cpp:361), so roll and pitch cannot be fused from it either; two_d_mode holds

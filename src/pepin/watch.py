@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -62,16 +63,32 @@ ADMIT_MARGIN = 0.10  # ...and it must beat what the tracker already has by this 
 #
 # DRIVE_SIGMA_M — a goal may START when the pose is known to better than this. Above Nav2's own
 # arrival tolerance would make "arrived" a guess; at the half-width a planned gap is not a gap.
-# 0.15 m sits between them: the plan's clearances still mean what they say.
-# LOST_SIGMA_M — a drive already running is CUT above this. Just under the half-width: at 0.25 m
-# the cart's own outline is uncertain by nearly half its width and a corridor plan is fiction.
+# LOST_SIGMA_M — a drive already running is CUT above this. Under the half-width plus a margin:
+# past it the cart's own outline is uncertain by about half its width and a corridor plan is
+# fiction.
+# RAISED 2026-09-16, 0.15 -> 0.25 AND 0.25 -> 0.40, AND THE REASON IS NOT "GOALS WERE REFUSED".
+# The ladder was written when the lidar's fused match was the only thing that ever held the pose,
+# and it measures itself at 1-8 cm. The pose graph does not: on the tapes of 2026-09-16 its word
+# sat 22-23 cm and 12 deg from the lidar's in motion, which is now what it CLAIMS as well
+# (pepin.measurements.GRAPH_FLOOR_XY_M). An honest source whose honest sigma is 0.20 m can never
+# pass a 0.15 m gate, so the old numbers did not refuse an uncertain pose — they refused the
+# graph, and the only way to drive on it would have been to let it keep lying about itself. The
+# thresholds move instead, and they move with the floor they now have to admit: 0.25 m to start
+# (the graph's own claim plus a little) and 0.40 m to cut a drive already running.
+# WHAT IS SPENT: 0.25 m is no longer under Nav2's 0.10 m xy_goal_tolerance, so "arrived" on a
+# graph-held drive is arrived to a quarter of a metre, and the cut at 0.40 m sits ABOVE the
+# 0.275 m half-width — a plan through a gap narrower than the cart plus 0.4 m is not to be
+# trusted while the sigma is up there. Both stay under the 0.55 m footprint's full width, which
+# is the line where the cart's outline stops meaning anything at all. A lidar drive is unaffected:
+# it runs at 1-8 cm and never comes near either number.
 # Their translation to the old scale, for anyone reading a tape: where nothing has measured the
 # pose at all the spread falls back to the fit (:func:`pepin.fusion.sigma_from_fit`, 0.05 +
 # 0.30 * (1 - fit) metres), and on THAT scale 0.25 m is fit 0.33 — a hundredth from the
-# :data:`BLIND_FIT` 0.30 this replaces, so the bottom rung did not move — while 0.15 m is fit
-# 0.67, stricter than the :data:`DRIVE_FIT` 0.50 it replaces. The strictness is deliberate and
-# costs nothing in practice: a fused match measures itself at 1-8 cm, and the fit-derived number
-# is only reached when no source has measured the pose at all, which is not a drive.
+# :data:`BLIND_FIT` 0.30 the cut used to be, so a drive on an unmeasured pose is now cut where
+# the fit rung already cut it — while 0.40 m is off the end of the fit scale entirely, whose
+# worst reading is 0.35 m at a fit of zero. That is why :data:`UNKNOWN_SIGMA` below no longer
+# comes straight off the fit: the two scales stopped overlapping and the sentinel has to be
+# held over the cut on purpose.
 # The topic the tracker publishes them on, and the shape of what it publishes: a
 # std_msgs/String carrying JSON — ``sigma_xy`` in metres, ``sigma_yaw`` in degrees, ``stamp``
 # the tracker's clock when it was published and ``word_age_s`` the seconds since the last
@@ -80,12 +97,24 @@ ADMIT_MARGIN = 0.10  # ...and it must beat what the tracker already has by this 
 # because pepin_bringup.depth_fusion reads exactly these names. The name and the shape live
 # here, with the numbers read off them: this file is the contract.
 SIGMA_TOPIC = "/localization/sigma"
-DRIVE_SIGMA_M = 0.15
-LOST_SIGMA_M = 0.25
-# What the sigma reads before anything has corrected the pose at all: the spread a fit of zero
-# buys (:func:`pepin.fusion.sigma_from_fit`) — 0.35 m and 23 deg, over both thresholds above,
-# which is the honest answer to "how sure are you" before the first word.
-UNKNOWN_SIGMA = (sigma_from_fit(0.0)[0], math.degrees(sigma_from_fit(0.0)[1]))
+# How long a window of that topic one certainty judgement reads (:class:`SigmaWindow`): a single
+# sample is a single scan's luck, and in a nook it flickers 0.01 <-> 0.31 m between revolutions.
+# Two seconds is about 20 publications at the tracker's check period.
+SIGMA_MEDIAN_S = 2.0
+DRIVE_SIGMA_M = 0.25
+LOST_SIGMA_M = 0.40
+# What the sigma reads before anything has corrected the pose at all. It is a SENTINEL and not a
+# measurement: nothing has been measured, the cart may be anywhere the map is, and the only
+# property that has to hold is that it fails every rung of the ladder above. The fit-of-zero
+# spread (:func:`pepin.fusion.sigma_from_fit` — 0.35 m and 23 deg) said that well enough while
+# the cut sat at 0.25 m; with the cut at 0.40 m since 2026-09-16 it no longer does, and a drive
+# that had never heard a word would have run uncut. So the position is held over the cut
+# explicitly rather than left to a coincidence between two scales that were never tied together.
+# The heading keeps the fit's 23 deg, which is over every heading rung with room to spare.
+UNKNOWN_SIGMA = (
+    max(sigma_from_fit(0.0)[0], LOST_SIGMA_M + 0.05),
+    math.degrees(sigma_from_fit(0.0)[1]),
+)
 
 # How far the pose graph's own word may sit from the tracker before a camera-only drive is
 # refused: half of one 0.20 m planning cell — the graph recognising the room and agreeing to
@@ -350,6 +379,70 @@ class Sigma:
     def phrase(self) -> str:
         """``0.06 m / 1.2 deg`` — what the operator reads beside a verdict."""
         return f"{self.xy_m:.2f} m / {self.yaw_deg:.1f} deg"
+
+
+@dataclass
+class SigmaWindow:
+    """The last :data:`SIGMA_MEDIAN_S` of ``/localization/sigma`` read as ONE number: the median
+    of the samples in the window, not the newest of them.
+
+    One sample is not the certainty of the pose. In a nook the lidar's match flickers between two
+    hypotheses from scan to scan and the published sigma with it — 0.01 m one revolution, 0.31 m
+    the next (2026-09-16) — so a gate that reads whichever sample happened to be last either
+    starts a drive on a pose that is about to be 0.31 m wrong or refuses one that is 0.01 m
+    right, and which of the two it does is luck. The median over two seconds is the reading that
+    describes the nook instead of the revolution: it takes about 20 tracker publications, and it
+    moves only when MOST of them move, which is what a real loss of the pose looks like.
+
+    Two seconds and not more: it is the delay a genuine loss now costs every gate built on it,
+    and the drive watch's own patience is 4-15 s on top, so the total is unchanged in character.
+
+    ``age_s`` on the answer is the NEWEST sample's, never the median's: freshness is the question
+    "is the tracker still publishing", and the median must not make a dead tracker look alive.
+    """
+
+    window_s: float = SIGMA_MEDIAN_S
+    _samples: list[tuple[float, Sigma]] = field(default_factory=list, init=False)
+
+    def add(self, sigma: Sigma, now: float) -> None:
+        """One message landed at ``now`` (this machine's monotonic clock)."""
+        self._samples.append((now, sigma))
+        self._trim(now)
+
+    def median(self, now: float) -> Sigma | None:
+        """The window's reading at ``now``, or ``None`` while no sample has ever arrived — which
+        is what says this board publishes no sigma at all and the fit rules answer instead. With
+        every sample older than the window the newest one is still answered with, aged: a tracker
+        that has stopped is a reading the gates must SEE and refuse, not an absence they mistake
+        for an old build."""
+        self._trim(now)
+        if not self._samples:
+            return None
+        newest_at = self._samples[-1][0]
+        return Sigma(
+            statistics.median(s.xy_m for _, s in self._samples),
+            statistics.median(s.yaw_deg for _, s in self._samples),
+            max(0.0, now - newest_at),
+        )
+
+    def span(self) -> float:
+        """Seconds between the oldest and the newest sample now kept: how much of the window has
+        actually filled. 0.0 with one sample or none — a median of one sample is that sample, and
+        a caller that wants a window rather than a reading waits on this."""
+        if len(self._samples) < 2:
+            return 0.0
+        return self._samples[-1][0] - self._samples[0][0]
+
+    def clear(self) -> None:
+        """Forget every sample. What a whole-map search leaves behind: the pose it seeded is not
+        the pose the samples before it described, so blending the two describes neither."""
+        self._samples.clear()
+
+    def _trim(self, now: float) -> None:
+        """Drop everything older than the window, keeping the newest sample whatever its age."""
+        cutoff = now - self.window_s
+        kept = [entry for entry in self._samples if entry[0] >= cutoff]
+        self._samples = kept or self._samples[-1:]
 
 
 @dataclass

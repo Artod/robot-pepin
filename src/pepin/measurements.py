@@ -38,6 +38,8 @@ from pepin.sources import CAMERA, GRAPH, SourceRegistry
 from pepin.timeline import OdomTrail
 
 __all__ = [
+    "GRAPH_FLOOR_XY_M",
+    "GRAPH_FLOOR_YAW_DEG",
     "MEASUREMENT_MAX_AGE_S",
     "MeasurementGate",
     "MeasurementUpdate",
@@ -66,6 +68,19 @@ MEASUREMENT_MAX_AGE_S = 0.5
 # by its own self-check on top.
 REMOTE_FLOOR_XY_M = 0.08
 REMOTE_FLOOR_YAW_DEG = 5.0
+# The same idea for the POSE GRAPH, which is a different source with a different measured error
+# and gets its own floor rather than the camera's. Measured on the numbered tapes of 2026-09-16:
+# in motion the graph's word sat 22-23 cm and 12 deg from the lidar's pose — two and a half times
+# the camera's floor above, which is what a place recognised by appearance is worth while the cart
+# moves, against a lidar that scores the geometry under it. Fused at the camera's 8 cm the graph
+# outvoted the lidar it disagreed with by 8-9 cm of honest disagreement, and the fused sigma that
+# came out of it was smaller than the error that went in — which is the way a tracker lies.
+# 0.20 m and 8 deg: just under the measured spread, so the word still moves the pose (it is a real
+# measurement, not noise) and no longer wins an argument it should lose. It is a FLOOR, not a cap:
+# a graph word that claims worse than this keeps its own claim, and the gate's self-check still
+# inflates a source that scatters.
+GRAPH_FLOOR_XY_M = 0.20
+GRAPH_FLOOR_YAW_DEG = 8.0
 
 
 @dataclass(frozen=True)
@@ -211,8 +226,8 @@ def graph_measurement(
     map_id: str,
     source: str = GRAPH,
     fit: float = 1.0,
-    floor_xy_m: float = REMOTE_FLOOR_XY_M,
-    floor_yaw_deg: float = REMOTE_FLOOR_YAW_DEG,
+    floor_xy_m: float = GRAPH_FLOOR_XY_M,
+    floor_yaw_deg: float = GRAPH_FLOOR_YAW_DEG,
 ) -> RemoteMeasurement:
     """A pose graph's verdict about where the cart is, as a measurement on the SAME map the
     tracker drives on: the place the graph has the cart at, moved onto the map by the anchor.
@@ -228,8 +243,9 @@ def graph_measurement(
     its own pose variance as the whole session's accumulated odometry (497985 m2, a standard
     deviation of 706 m, measured on this stack 2026-09-14), and one that just closed one reports
     the loop link's alone (6.9e-05 m2, 8 mm) -- neither is what the answer is worth. The floor is
-    the camera's measured floor for the same reason it exists there: a remote word about a place
-    is worth centimetres, whatever its own arithmetic claims.
+    the GRAPH'S OWN measured floor (:data:`GRAPH_FLOOR_XY_M`, 0.20 m / 8 deg from the 2026-09-16
+    tapes), not the camera's 0.08 m it borrowed until then: a remote word about a place is worth
+    what that source was last seen to be worth, whatever its own arithmetic claims.
 
     ``fit`` is what the word CLAIMS, and it is the graph's confidence in its own recognition
     rather than anything measured against a scan: 1.0 is "the graph has just tied this place to

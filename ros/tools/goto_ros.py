@@ -30,7 +30,6 @@ import json
 import math
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 
 import rclpy
@@ -55,10 +54,12 @@ from pepin.watch import (
     ADMIT_FIT,
     BLIND_FIT,
     DRIVE_SIGMA_M,
+    SIGMA_MEDIAN_S,
     SIGMA_TOPIC,
     BlindDriveWatch,
     Preflight,
     Sigma,
+    SigmaWindow,
     SourceWord,
     source_words,
 )
@@ -173,13 +174,17 @@ class Certainty:
     lidar one. ``/localization_fit`` is the lidar's own scan-to-map metric, kept as the fallback
     for a board whose build predates the sigma — and never trusted over it, because it is 0.00
     by construction wherever no lidar scan scored the pose.
+
+    The sigma is read as a 2 s MEDIAN and never as one sample (:class:`pepin.watch.SigmaWindow`):
+    in a nook the lidar's match flickers between hypotheses and the published sigma with it, so
+    both the preflight and the drive's own watch would otherwise be decided by which revolution
+    happened to land last.
     """
 
     def __init__(self, nav: BasicNavigator) -> None:
         self._nav = nav
         self.fit: float | None = None
-        self._sigma: Sigma | None = None
-        self._sigma_at: float | None = None
+        self._sigma: SigmaWindow = SigmaWindow()
         self._report: dict[str, object] | None = None
         nav.create_subscription(Float32, "/localization_fit", self._on_fit, 10)
         nav.create_subscription(String, SIGMA_TOPIC, self._on_sigma, 10)
@@ -191,7 +196,7 @@ class Certainty:
     def _on_sigma(self, msg: String) -> None:
         heard = Sigma.from_json(msg.data, 0.0)
         if heard is not None:  # a message that does not parse says nothing about the pose
-            self._sigma, self._sigma_at = heard, time.monotonic()
+            self._sigma.add(heard, time.monotonic())
 
     def _on_sources(self, msg: String) -> None:
         try:
@@ -202,28 +207,34 @@ class Certainty:
             self._report = heard
 
     def wait(self, seconds: float = CERTAINTY_WAIT_S) -> None:
-        """Spin until both words have arrived or the patience runs out. Neither is a heartbeat
-        this client can ask for: the sigma comes every check period and the source report on
-        every update, so what is not here within the patience is not coming."""
+        """Spin until both words have arrived and the sigma's window has filled, or the patience
+        runs out. Neither word is a heartbeat this client can ask for: the sigma comes every check
+        period and the source report on every update, so what is not here within the patience is
+        not coming. The window's own 2 s is spent AFTER the first word rather than taken out of
+        the patience — a median of one sample is that one sample, which is the flicker this
+        client exists not to be decided by."""
         deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline and not (self._sigma and self._report):
+        while time.monotonic() < deadline and not (self.sigma() and self._report):
+            rclpy.spin_once(self._nav, timeout_sec=0.1)
+        filled = time.monotonic() + SIGMA_MEDIAN_S
+        while time.monotonic() < filled and self._sigma.span() < SIGMA_MEDIAN_S:
             rclpy.spin_once(self._nav, timeout_sec=0.1)
 
-    def refresh(self, seconds: float = 2.0) -> None:
+    def refresh(self, seconds: float = SIGMA_MEDIAN_S) -> None:
         """Spin for ``seconds`` whatever has already arrived. After a whole-map search the
         numbers held here are the ones from BEFORE it until the board's next publications land,
-        and a plain sleep processes no callback at all."""
+        and a plain sleep processes no callback at all. The sigma's window is dropped first: the
+        search seeded a different pose, and a median across the seam describes neither."""
+        self._sigma.clear()
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             rclpy.spin_once(self._nav, timeout_sec=0.1)
 
     def sigma(self) -> Sigma | None:
-        """The fused uncertainty and how long ago it landed here; ``None`` where this board
-        publishes none at all, and the fit rules answer instead."""
-        if self._sigma is None:
-            return None
-        age = time.monotonic() - (self._sigma_at or time.monotonic())
-        return replace(self._sigma, age_s=max(0.0, age))
+        """The fused uncertainty over the last 2 s — the median of the samples, aged by the
+        NEWEST of them — or ``None`` where this board publishes none at all, and the fit rules
+        answer instead."""
+        return self._sigma.median(time.monotonic())
 
     def words(self) -> list[SourceWord]:
         """Every source's line of the tracker's last report; empty when none has arrived."""
@@ -233,7 +244,7 @@ class Certainty:
         """Whether this board says anything at all about how sure the pose is. False in online
         SLAM, where no tracker runs: there is nothing there for a drive's watch to read, and a
         watch that took the silence for 0.00 would cut every healthy drive of that mode."""
-        return self._sigma is not None or self.fit is not None
+        return self.sigma() is not None or self.fit is not None
 
 
 def preflight(nav: BasicNavigator, certainty: Certainty) -> bool:

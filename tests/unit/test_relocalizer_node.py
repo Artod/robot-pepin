@@ -1250,7 +1250,8 @@ def test_the_node_publishes_one_sigma_out_of_the_fusion_whichever_source_spoke()
     assert told["stamp"] == pytest.approx(node.clock.seconds), "...and the clock it was said at"
     node._report_tracking()
     line = node.logger.texts("info")[-1]
-    assert "sigma " in line and "word " in line and "a drive is cut over 0.25 m" in line
+    assert "sigma " in line and "word " in line
+    assert f"a drive is cut over {LOST_SIGMA_M:.2f} m" in line
     where = node.services["where_am_i"][1](None, ros_stubs.Trigger.Response())
     assert "the number a drive is judged by" in where.message
 

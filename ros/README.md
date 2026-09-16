@@ -1348,7 +1348,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Off when:* when this node cannot hear /map_odom in a stack that is otherwise healthy — 'ros/go.sh where' prints 'correction_s' where one has ever landed, and prints none at all in that case; the drive then rests on the transform alone, as it did before
 - **`sigma_gate`** — bool, default on
   - *What:* a goal starts, and a running drive is cut, on the tracker's fused uncertainty (/localization/sigma); off, on its scan-to-map fit as before
-  - *Default:* on — a fit is ONE SENSOR'S metric — the share of one lidar revolution's beams that landed on the map — and it says nothing about a pose the camera is holding. On a camera-only drive it is 0.00 by construction, and every rule built on it read a healthy tracker as lost (2026-09-15). The sigma comes out of the fusion itself, so 0.15 m to start and 0.25 m to cut mean the same thing whichever source spoke — and it goes on growing along the odometry when none does, which a fit never did
+  - *Default:* on — a fit is ONE SENSOR'S metric — the share of one lidar revolution's beams that landed on the map — and it says nothing about a pose the camera is holding. On a camera-only drive it is 0.00 by construction, and every rule built on it read a healthy tracker as lost (2026-09-15). The sigma comes out of the fusion itself, so 0.25 m to start and 0.40 m to cut mean the same thing whichever source spoke — and it goes on growing along the odometry when none does, which a fit never did
   - *On when:* always on a stack whose tracker publishes the topic; a board that does not is judged by its fit by itself, with no flag to set
   - *Off when:* to put the fit rules back for a comparison, or if a sigma ever refuses drives the cart is plainly fit for
 
@@ -1909,9 +1909,13 @@ Open `ros/foxglove/pepin_nav.json` in Foxglove Studio:
   covariance that comes out of the tracker's information filter after each update, so it means the
   same thing whichever source spoke into it, and it grows along the odometry between corrections
   (`pepin.watch.PoseSpread`: this cart's own 2 % per metre and 0.7 of every reported turn, so
-  eight metres of dead reckoning refuses a goal and fourteen cuts one). A goal starts under 0.15 m
-  and a running drive is cut over 0.25 m (`pepin.watch`: the footprint is 0.55 m wide and Nav2
-  calls 0.10 m arrived). Before the first word it reads 0.35 m — not localised;
+  fourteen metres of dead reckoning refuses a goal and twenty-two cut one). A goal starts under
+  0.25 m and a running drive is cut over 0.40 m (`pepin.watch`: the footprint is 0.55 m wide, Nav2
+  calls 0.10 m arrived, and since 2026-09-16 the ladder has to admit the pose graph, whose own
+  measured word is worth 0.20 m). Before the first word it reads 0.45 m — not localised. `goto`
+  judges on a 2 s MEDIAN of this topic and never on one sample (`pepin.watch.SigmaWindow`): in a
+  nook the lidar's match flickers 0.01 ↔ 0.31 m between revolutions. The goal server still reads
+  the newest sample;
 - the `scan-to-map fit` plot (`/localization_fit`, 0..1) — the tracker's own score of the scan it
   matched, and a DIAGNOSTIC of the lidar, not a verdict on the pose: with no scan of the board's
   own at all (the camera's measurements driving alone) the plot reads 0.0 by design, because a fit
