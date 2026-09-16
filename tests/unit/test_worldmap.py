@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -528,6 +529,27 @@ def test_the_occupancy_message_fields_are_what_ros_expects() -> None:
         assert fields.as_list()[col + row * fields.width] == OCCUPIED
     row, col = rc(view, 0.0, 0.0)
     assert fields.data[col + row * fields.width] == FREE
+
+
+def test_the_digest_tells_a_republished_map_from_a_changed_one() -> None:
+    """What the publisher hashes to decide whether to send /map at all: the same slice twice is
+    the same string, one changed cell is not, and a map that moved or grew is a new map however
+    many of its cells stayed (the geometry is in the digest)."""
+    world = room()
+    view = world.lidar_slice()
+    fields = view.message_fields()
+    assert fields.digest() == view.message_fields().digest(), "the same cut is the same string"
+    assert "#" in fields.digest() and fields.digest().startswith("120x120@")
+
+    moved = replace(fields, origin_x=fields.origin_x + 1.0)
+    assert moved.digest() != fields.digest(), "a map that moved is a new map"
+    grown = replace(fields, width=fields.width + 1)
+    assert grown.digest() != fields.digest(), "and so is one that grew"
+
+    cells = fields.data.copy()
+    row, col = rc(view, 0.0, 0.0)
+    cells[col + row * fields.width] = OCCUPIED  # that cell was FREE
+    assert replace(fields, data=cells).digest() != fields.digest(), "one cell is enough"
 
 
 def test_the_slice_is_the_tracker_map_the_relocalizer_builds_from_a_message() -> None:

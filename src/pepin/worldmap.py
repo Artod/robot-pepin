@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -172,6 +173,22 @@ class OccupancyGridFields:
     def as_list(self) -> list[int]:
         """The cells as plain ints, the form rclpy accepts for an int8[] field."""
         return [int(v) for v in self.data]
+
+    def digest(self) -> str:
+        """This grid's geometry and the CRC of its cells (``280x250@-19.48,-5.48:0.050#1a2b3c4d``)
+        — what tells a republished map from a changed one without keeping a copy of the old one.
+
+        A publisher hashes the slice with this and sends nothing when the answer has not moved:
+        republishing a map is free for the publisher and expensive for every reader (a tracker
+        that adopts one rebuilds its matcher, its mask and its tracker; a costmap re-seeds its
+        static layer). The geometry is part of the answer because a map that moved or grew is a
+        new map however many of its cells stayed. A CRC over 70000 cells is well under a
+        millisecond. The spelling is ``pepin_bringup.msgs.map_digest``'s, taken one step earlier.
+        """
+        return (
+            f"{self.width}x{self.height}@{self.origin_x:.2f},{self.origin_y:.2f}"
+            f":{self.resolution:.3f}#{zlib.crc32(np.ascontiguousarray(self.data).tobytes()):08x}"
+        )
 
 
 @dataclass(frozen=True)

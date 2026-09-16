@@ -471,7 +471,7 @@ lidar writes its own layer into it and the volume IS the map (`src/pepin/worldma
   Nav2, the `map_server` and the owner rule above are not touched at all. The tracker adopts the
   first map on the topic it is asked for and no other, unless `map_refresh_s` says how often it
   may take a changed one: adopting rebuilds the matcher and the tracker and forgets the episode's
-  evidence, and `/map_lidar` is republished every second (`pepin.mapping.MapChoice`). Two things
+  evidence, and `/map_lidar` is republished at `map_hz` (`pepin.mapping.MapChoice`). Two things
   to know before pointing it there: the volume must have been **seeded** from the served map (an
   unseeded live volume held 52 % of that map's walls; a seeded one IS it, cell for cell), and the
   two grids have different sizes, so the map id differs and the laptop's candidates and camera
@@ -480,10 +480,30 @@ lidar writes its own layer into it and the volume IS the map (`src/pepin/worldma
   it may publish: `pepin.deployment.map_owner` per bridge mode — the board's `map_server` in
   `split` and `vision`, the laptop in `slam` — and `world_map:=true`, which is what keeps
   RTAB-Map's grid on `/rtabmap/map` instead of remapping it onto `/map`. With both, and
-  `map_source=volume`, the fusion node publishes the lidar slice as `/map` (transient local,
-  `map_hz`); without either it refuses and names the reason in its report line, so setting
-  `map_source volume` live in an ordinary SLAM run cannot put a second publisher on `/map` —
-  which is the failure this whole table exists to prevent.
+  `map_source=volume`, the fusion node publishes the lidar slice as `/map`; without either it
+  refuses and names the reason in its report line, so setting `map_source volume` live in an
+  ordinary SLAM run cannot put a second publisher on `/map` — which is the failure this whole
+  table exists to prevent.
+- **That `/map` is latched and published on change.** The slice is hashed
+  (`OccupancyGridFields.digest`: the geometry and a CRC of the cells) and an identical grid is
+  never sent twice — `map_hz` (0.5) is the ceiling on how often a *changed* one may go, not a
+  cadence — and the first one is published as soon as the seed is in the volume rather than at
+  the timer's first tick. A republication buys a subscriber nothing (transient local already
+  serves a late one the last map) and costs every reader a rebuild: a tracker that adopts one
+  rebuilds its matcher, its mask and its tracker on four A53 cores, a costmap re-seeds its
+  static layer and resizes every other layer with it. With the wifi down the board keeps the
+  last `/map` it was handed — a grid in memory does not stop working because its publisher went
+  away — so nothing new runs on the board for rule 20.
+- **Whether the volume may be the default `/map` is a measurement, and today it fails.**
+  `scratch/volume_vs_file_seating.py` replays the node's own tracker over the four tapes of
+  2026-09-13 once per map. A volume **seeded** from `flat3_straight` and sliced seats a median
+  **0.01 cm** from where the file puts it, with the same fit to two decimals — the same map. The
+  **live** snapshot of 2026-09-15 (that file plus a day's painting) seats a median **1.90 m**
+  away with the fit down **0.295**, re-seating 3.7-3.8 m off on two of the four tapes; only
+  52.9 % of the file's walls are still within a cell of it and 2070 of them have been carved
+  free. The mechanism is known and not fixed: `fit_gate` holds the **camera** path only, while a
+  lidar revolution is integrated at whatever pose TF gives, lost tracker or none. So
+  `map_source` stays `file` until the lidar path is gated too.
 - **Known room, unknown room, one machine.** The volume is written to `world_path`
   (`/maps/world_live.npz`) every `snapshot_s` and at shutdown, and loaded at start
   (`resume_volume`). A known room is a resumed snapshot — or a saved map seeded into the lidar's
@@ -683,8 +703,8 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `depth_fusion` | `band_half_z` | number 0.02..0.5 | 0.125 | yes | half the height band around the lidar's plane a frame is seated on, metres (config/fusion.json's band_half_z_m is the default); the band's centre is the plane the published base_link -> laser edge names, and both are printed in the report line |
 | `depth_fusion` | `lidar_layer` | bool | on | yes | /scan is integrated into the volume at the lidar's plane (rays carve free space, returns mark a surface); off, the volume is the camera's alone, as it was |
 | `depth_fusion` | `no_return_free` | bool | off | yes | a beam that came back with nothing carves free space out to the sensor's reach (an open door reads as open); off, it writes nothing at all |
-| `depth_fusion` | `map_source` | choice: file, volume | file | yes | where /map comes from: the saved file another node serves, or the volume's own lidar layer published from here at map_hz. Only where the stack was launched with world_map:=true; anywhere else volume is refused, because another node is on /map |
-| `depth_fusion` | `map_hz` | number 0.1..5 | 1.0 | yes | how often the volume's layer goes out as /map when map_source is volume |
+| `depth_fusion` | `map_source` | choice: file, volume | file | yes | where /map comes from: the saved file another node serves, or the volume's own lidar layer, published from here on change and at most every 1 / map_hz. Only where the stack was launched with world_map:=true; anywhere else volume is refused, because another node is on /map |
+| `depth_fusion` | `map_hz` | number 0.1..5 | 0.5 | yes | the most often the volume's layer may go out as /map when map_source is volume — a ceiling, not a cadence: a slice whose cells have not changed is not published at all, and the first one goes out as soon as the volume has its seed |
 | `depth_fusion` | `snapshot_s` | number 0..3600 | 60.0 | yes | how often the volume is written to world_path (0: only at shutdown) |
 | `depth_fusion` | `resume_volume` | bool | on | at start | a volume snapshot at world_path is loaded at start, so a known room is a resumed volume; off, the volume starts empty and grows from the sensors |
 | `depth_fusion` | `follow_correction` | bool | on | yes | the graph's correction moves the voxels, not only the pose: when map -> odom at a frame's own stamp differs from the one the volume is painted under by more than follow_correction_min_m / _min_deg, the whole content is carried rigidly by that difference before the frame goes in. SLAM mode only — on a known map the board's tracker owns map -> odom, the served map is the reference, and the volume never follows however this is set |
@@ -986,15 +1006,15 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *On when:* when a beam carries something that separates an open bearing from a mirror or a black surface — return quality, or the same emptiness confirmed from several viewpoints; nothing on this robot does today
   - *Off when:* leave it off: an open door stays unknown, which a planner may be told to cross (allow_unknown) rather than being told a lie
 - **`map_source`** — choice: file, volume, default file
-  - *What:* where /map comes from: the saved file another node serves, or the volume's own lidar layer published from here at map_hz. Only where the stack was launched with world_map:=true; anywhere else volume is refused, because another node is on /map (one of: file, volume)
-  - *Default:* file — the other state has been seen to break a run: on 2026-09-10 RTAB-Map's own grid landed on /map beside the board's static map and fed the laptop's global costmap a second, growing map. Two publishers of one /map is the failure, so the deployment's map_owner and the launch's world_map:=true must both agree before volume is allowed. The volume itself is good enough — its walls sit within one cell of the saved map 79.3 % of the time
-  - *On when:* volume where the laptop owns /map (ros/laptop.sh vslam --world-map) and the room is being mapped as it is driven
-  - *Off when:* file wherever a map server or RTAB-Map already publishes /map, which is every other mode
-- **`map_hz`** — number 0.1..5, default 1.0
-  - *What:* how often the volume's layer goes out as /map when map_source is volume (0.1..5)
-  - *Default:* 1.0 — default by design, unmeasured: 1 Hz is the cadence RTAB-Map's own map updates at, and /map is transient-local, so a subscriber that arrives late is served the last one regardless
-  - *On when:* raise it when the map is built while driving and the costmap lags visibly behind the room
-  - *Off when:* lower it on a busy laptop: every publication is a whole grid over the bridge
+  - *What:* where /map comes from: the saved file another node serves, or the volume's own lidar layer, published from here on change and at most every 1 / map_hz. Only where the stack was launched with world_map:=true; anywhere else volume is refused, because another node is on /map (one of: file, volume)
+  - *Default:* file — the SEEDED volume is the file exactly and the LIVE one is not the room. Both measured the same way, offline, on the four tapes of 2026-09-13 with the node's own tracker replayed once per map (scratch/volume_vs_file_seating.py): seeded from flat3_straight and sliced, the tracker seats a median 0.01 cm from where the file puts it with the same fit to two decimals — the same map, as the cell count already said (18274 of 18274 known cells agree). The live snapshot of 2026-09-15 21:22, the same file plus a day's painting, seats a median 1.90 m away with the fit down 0.295, and on two of the four tapes the tracker re-seated 3.7-3.8 m off; only 52.9 % of the file's walls are still within a cell of the volume's, and 2070 cells the file calls wall the volume has carved free. So the gate this default waits for (2 cm, 0.05 fit) is failed by the map the robot would actually be handed after a drive, and the mechanism is known: fit_gate holds the CAMERA path only, while a lidar revolution is integrated at whatever pose TF gives, lost tracker or none (_on_scan_work) — which is exactly what the laptop's dead routes of 2026-09-15 19:17 would have written. The other state has also been seen to break a run outright: on 2026-09-10 RTAB-Map's own grid landed on /map beside the board's static map and fed the laptop's global costmap a second, growing map. Two publishers of one /map is that failure, so the deployment's map_owner and the launch's world_map:=true must both agree before volume is allowed
+  - *On when:* volume where the laptop owns /map (ros/laptop.sh vslam --world-map) and the volume has been seeded and not driven away from the room — the tracker adopts the FIRST map it is handed (its map_refresh_s is 0), and that one is the seed itself
+  - *Off when:* file wherever a map server or RTAB-Map already publishes /map, which is every other mode — and, until the lidar path is gated on the fit too, wherever a drive's painting would reach the costmaps
+- **`map_hz`** — number 0.1..5, default 0.5
+  - *What:* the most often the volume's layer may go out as /map when map_source is volume — a ceiling, not a cadence: a slice whose cells have not changed is not published at all, and the first one goes out as soon as the volume has its seed (0.1..5)
+  - *Default:* 0.5 — what a republication costs is paid by the readers, not by this node: a tracker that ADOPTS a map rebuilds its correlative matcher, its static mask and its tracker on four A53 cores, and both costmaps re-seed their static layer. /map is transient-local, so nobody is waiting for a repeat — a late subscriber is served the last one regardless — which leaves no reason to send an unchanged grid and no reason to send a changed one oftener than the room changes. Half a hertz is two seconds of painting per map, and with the change gate a standing cart publishes nothing after the seed
+  - *On when:* raise it when the room is being mapped as it is driven and the costmap lags visibly behind it
+  - *Off when:* lower it on a busy laptop: every publication that does go is a whole grid over the bridge
 - **`snapshot_s`** — number 0..3600, default 60.0
   - *What:* how often the volume is written to world_path (0: only at shutdown) (0..3600)
   - *Default:* 60.0 — default by design, unmeasured: the write holds the model lock for about half a second on a grid of noise and less on a real one, which at the node's 9.0-9.5 fps is four or five frames dropped once a minute
