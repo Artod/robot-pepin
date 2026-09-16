@@ -83,7 +83,9 @@ LOST_TRAVEL_M = 1.0  # ...while the wheels carried it this far: that is driving 
 # with a reason, not a reason to wait longer.
 CERTAINTY_WAIT_S = 3.0
 # A cancel must be confirmed inside the patience ros/goto.sh gives it (timeout 5): the operator
-# who typed "cancel" is watching the cart move.
+# who typed "cancel" is watching the cart move. It is the budget for the WHOLE cancel, every
+# navigator in it: spent per action it was 9 s (a discovery wait plus a spin, twice) under a
+# shell timeout of 5, and the second navigator was never asked at all.
 CANCEL_CONFIRM_S = 3.0
 NAV_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
 
@@ -277,15 +279,26 @@ def cancel_all(node: Node) -> str:
     also answers a plain service, ``<action>/_action/cancel_goal``, and a request with a zero
     goal id and a zero stamp means EVERY goal: no handle needed, and the answer says how many
     goals are cancelling.
+
+    :data:`CANCEL_CONFIRM_S` is one deadline for all of them, shared: each navigator gets an
+    equal share of what is LEFT (half of it to find the service, the rest to be answered), so
+    one absent server cannot spend the patience the operator's shell gives the whole command.
     """
     said = []
-    for action in NAV_ACTIONS:
+    deadline = time.monotonic() + CANCEL_CONFIRM_S
+    for index, action in enumerate(NAV_ACTIONS):
+        share = max(deadline - time.monotonic(), 0.0) / (len(NAV_ACTIONS) - index)
+        if share <= 0.0:
+            said.append(f"{action}: not asked — the {CANCEL_CONFIRM_S:.0f} s was spent above")
+            continue
         client = node.create_client(CancelGoal, f"/{action}/_action/cancel_goal")
-        if not client.wait_for_service(timeout_sec=CANCEL_CONFIRM_S / len(NAV_ACTIONS)):
+        if not client.wait_for_service(timeout_sec=share / 2.0):
             said.append(f"{action}: no server answered")
             continue
         future = client.call_async(CancelGoal.Request())
-        rclpy.spin_until_future_complete(node, future, timeout_sec=CANCEL_CONFIRM_S)
+        rclpy.spin_until_future_complete(
+            node, future, timeout_sec=max(deadline - time.monotonic(), 0.0)
+        )
         answer = future.result()
         if answer is None:
             said.append(f"{action}: NOT confirmed in {CANCEL_CONFIRM_S:.0f} s — use ros/stop.sh")
