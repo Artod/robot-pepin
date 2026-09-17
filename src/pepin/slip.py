@@ -92,10 +92,11 @@ class SlipWatch:
 # The wheels are called liars when the picture shows less than this share of the speed they
 # claim. Honest driving disagrees by the depth scale's 5-10 %; a slip disagrees by everything.
 PICTURE_SLIP_RATIO = 0.5
-# How long the disagreement must hold before the wheels are dropped. The visual odometry
-# publishes at 2.7-3.3 Hz, so this is one or two of its frames: long enough that a single late
-# frame is not a slip, short enough that 0.4 s of a wheel's lie is all that reaches the filter.
-PICTURE_SLIP_HOLD_S = 0.4
+# How long the disagreement must hold before the wheels are dropped: about a frame and a half of
+# the visual odometry, long enough that one late picture is not a slip. It reaches the board at
+# 5.6 poses a second since its publish cap became a budget (2026-09-17; it was 2.7-3.3, and this
+# was 0.4 s), so a quarter of a second of a wheel's lie is all that gets through.
+PICTURE_SLIP_HOLD_S = 0.25
 # Below this the wheels are not claiming to drive anywhere and there is nothing to disbelieve.
 PICTURE_SLIP_MIN_SPEED_M_S = 0.05
 # How long a slip stays fresh in the watch's memory. The hold above is the price of the FIRST

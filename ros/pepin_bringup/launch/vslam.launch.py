@@ -339,11 +339,6 @@ VISUAL_ODOMETRY = {
     "publish_null_when_lost": True,
     "Reg/Force3DoF": "true",
     "Odom/ResetCountdown": "1",
-    # Features found on a half-size picture. Measured 2026-09-17: at full size the odometry kept
-    # 639 inliers of 862 features but produced 5.8 poses a second from depth arriving at 7.7 —
-    # the extraction was the bottleneck, not the pairing. Half the pixels is a quarter of the
-    # work, and 639 inliers is several times what a planar 3-DoF registration needs.
-    "Odom/ImageDecimation": "2",
 }
 
 KNOWN_MAP_DATABASE = "/maps/rtabmap.db"
