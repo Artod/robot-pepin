@@ -242,17 +242,20 @@ def test_a_pose_that_starts_at_the_origin_is_not_a_reset() -> None:
 
 
 def test_the_publish_cap_holds_the_rate_and_refuses_a_stamp_that_goes_backwards() -> None:
-    """Three hertz is three hertz, and two messages the filter cannot order are a division by a
-    gap of zero."""
-    cap = PublishCap(hz=3.0)
+    """Three hertz is three hertz ON AVERAGE, a bunch of two after a pause is not refused, and two
+    messages the filter cannot order are a division by a gap of zero."""
+    cap = PublishCap(hz=3.0, burst=2.0)
     assert cap.refuse(100.0) is None
-    assert cap.refuse(100.1) is not None, "9 Hz is what the board could not carry"
-    assert cap.refuse(100.2) is not None
-    assert cap.refuse(100.34) is None
-    repeated = cap.refuse(100.34)
+    assert cap.refuse(100.1) is None, "the second of a bunch: the budget is an average"
+    refused = cap.refuse(100.2)
+    assert refused is not None and "budget" in refused, "a third back to back is over it"
+    assert cap.refuse(100.5) is None, "a third of a second refills one pose at 3 Hz"
+    repeated = cap.refuse(100.5)
     assert repeated is not None and "behind" in repeated
     behind = cap.refuse(100.2)
     assert behind is not None and "behind" in behind
+    out = sum(cap.refuse(101.0 + i * 0.05) is None for i in range(200))
+    assert out <= 3.0 * 10.0 + 2, "ten seconds at 20 poses a second: no more than 3 Hz and a burst"
 
 
 def test_the_cap_at_zero_publishes_every_pose_but_still_orders_them() -> None:

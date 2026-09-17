@@ -276,18 +276,33 @@ class PublishCap:
     refusals are harmless to a :class:`VoTrack`, whose published pose is absolute.
     """
 
-    def __init__(self, hz: float = 3.0) -> None:
+    def __init__(self, hz: float = 3.0, burst: float = 2.0) -> None:
         self.hz = hz  # live: the node's vo_publish_hz flag writes it; 0 publishes every pose
+        self.burst = burst  # poses that may go out back to back after a pause
         self._last: float | None = None
+        self._tokens = burst
+        self._refilled: float | None = None
 
     def refuse(self, stamp: float) -> str | None:
         """``None`` when a pose with this stamp may be published — and it is then remembered as
-        the last published one — else the reason it may not."""
-        if self._last is not None:
-            if stamp <= self._last:
-                return f"a stamp {self._last - stamp:.3f} s behind the last published"
-            if self.hz > 0.0 and stamp - self._last < 1.0 / self.hz:
-                return f"the {self.hz:.1f} Hz cap ({(stamp - self._last) * 1000:.0f} ms since)"
+        the last published one — else the reason it may not.
+
+        The rate is a BUDGET, not a minimum gap: a token bucket that refills at ``hz`` and holds
+        ``burst``. The board's EKF needs the AVERAGE held down (it missed its 20 Hz at 9.4 poses a
+        second, 2026-09-14); it does not need poses spaced evenly. The visual odometry releases
+        its pairs in bunches — exact sync pairs a camera frame with the depth frame made from it
+        and hands them over as they come — and a minimum gap of 1/hz threw a third of them away
+        at an average of 5.8 a second (3.9 published, 2026-09-17), for a board that could take all
+        of them. Every pose the slip watch does not get is a slower verdict."""
+        if self._last is not None and stamp <= self._last:
+            return f"a stamp {self._last - stamp:.3f} s behind the last published"
+        if self.hz > 0.0:
+            gap = 0.0 if self._refilled is None else max(stamp - self._refilled, 0.0)
+            self._tokens = min(self.burst, self._tokens + gap * self.hz)
+            self._refilled = stamp
+            if self._tokens < 1.0:
+                return f"the {self.hz:.1f} Hz budget (a burst of {self.burst:.0f} spent)"
+            self._tokens -= 1.0
         self._last = stamp
         return None
 
