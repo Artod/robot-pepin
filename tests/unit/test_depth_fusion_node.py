@@ -113,7 +113,7 @@ def test_a_trusted_pose_paints_the_room(node: DepthFusion) -> None:
     [
         ("low_fit", "fit 0.31 under 0.50"),
         ("stale_fit", "the fit stopped"),
-        ("wide_sigma", "sigma 0.42 m over 0.10 m"),
+        ("wide_sigma", "sigma 0.42 m over 0.25 m"),
         ("stale_edge", "the map -> odom edge is"),
         ("no_edge", "no map -> odom edge"),
     ],

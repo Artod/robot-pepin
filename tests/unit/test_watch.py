@@ -355,7 +355,7 @@ def test_a_pose_is_painted_with_only_while_every_half_of_it_holds() -> None:
     assert trust.refusal(fit=0.90, fit_age_s=SOURCE_PATIENCE_S + 0.1, edge_age_s=0.0) is not None
 
     wide = trust.refusal(fit=0.90, fit_age_s=0.1, sigma_xy_m=0.42, edge_age_s=0.0) or ""
-    assert wide == "sigma 0.42 m over 0.10 m"
+    assert wide == f"sigma 0.42 m over {PAINT_SIGMA_M:.2f} m"
     assert trust.refusal(fit=0.90, fit_age_s=0.1, sigma_xy_m=PAINT_SIGMA_M, edge_age_s=0.0) is None
 
 
