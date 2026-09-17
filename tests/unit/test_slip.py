@@ -129,3 +129,16 @@ def test_a_zero_velocity_update_is_tighter_than_the_wheels_it_answers() -> None:
     assert math.isclose(matrix[0], ZUPT_SIGMA_M_S**2) and math.isclose(matrix[7], ZUPT_SIGMA_M_S**2)
     assert matrix[35] > 0.0 and matrix[14] > 1e3, "yaw rate claimed, z and roll left alone"
     assert ZUPT_SIGMA_M_S < 0.03, "tighter than the wheels' own claim, or the lie wins"
+
+
+def test_a_duplicate_visual_odometry_pose_does_not_read_as_a_standing_picture() -> None:
+    """The bridge delivered every pose twice, 2 ms apart: a copy with the same stamp must not
+    turn a driving picture into a zero speed, or the slip watch mutes honest wheels mid-drive."""
+    from pepin.slip import PictureSpeed
+
+    speed = PictureSpeed()
+    speed.feed(0.00, 0.0, stamp=10.0, now=100.00)
+    assert math.isclose(speed.feed(0.05, 0.0, stamp=10.2, now=100.20), 0.25, rel_tol=1e-6)
+    assert math.isclose(speed.feed(0.05, 0.0, stamp=10.2, now=100.202), 0.25, rel_tol=1e-6)
+    assert math.isclose(speed.feed(0.10, 0.0, stamp=10.4, now=100.40), 0.25, rel_tol=1e-6)
+    assert speed.at == 100.40, "freshness is the board's clock"

@@ -1241,6 +1241,7 @@ class Relocalizer(Node):
         self._vo.feed(
             msg.pose.pose.position.x,
             msg.pose.pose.position.y,
+            msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
             self.get_clock().now().nanoseconds * 1e-9,
         )
 

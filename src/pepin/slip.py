@@ -239,24 +239,34 @@ class PictureSlip:
 
 class PictureSpeed:
     """The camera's own speed from consecutive visual-odometry poses, and the moment it was last
-    measured. A gap longer than ``max_gap_s`` starts again rather than dividing by it."""
+    measured on the board's clock.
+
+    The GAP between two poses comes from their own stamps, which both come from the laptop's
+    clock — a difference of two stamps from one clock is safe whatever the board's clock says.
+    The FRESHNESS is the board's arrival time, because that is the clock the watch asks with. A
+    pose whose stamp is not newer than the last one is a duplicate and changes nothing: the
+    bridge was seen delivering every /vo message twice, 2 ms apart (2026-09-17, two bridge
+    subscriptions on the laptop), and each copy read as a picture that had not moved at all —
+    a zero speed that makes the slip watch call honest wheels liars in the middle of a drive."""
 
     def __init__(self, max_gap_s: float = 2.0) -> None:
         self.max_gap_s = max_gap_s
         self.speed = 0.0
         self.at: float | None = None
-        self._seen: tuple[float, float, float] | None = None
+        self._seen: tuple[float, float, float] | None = None  # x, y and the pose's own stamp
 
-    def feed(self, x: float, y: float, now: float) -> float:
-        """Take one pose and its moment; returns the speed in hand (m/s)."""
-        seen, self._seen = self._seen, (float(x), float(y), float(now))
-        gap = 0.0 if seen is None else now - seen[2]
-        if seen is not None and 0.0 < gap < self.max_gap_s:
+    def feed(self, x: float, y: float, stamp: float, now: float) -> float:
+        """Take one pose, its own stamp and the board's moment of arrival; returns the speed
+        in hand (m/s). A duplicate (a stamp not newer than the last) changes nothing."""
+        seen = self._seen
+        gap = 0.0 if seen is None else stamp - seen[2]
+        if seen is not None and gap <= 0.0:
+            return self.speed
+        self._seen = (float(x), float(y), float(stamp))
+        if seen is not None and gap < self.max_gap_s:
             self.speed = math.hypot(x - seen[0], y - seen[1]) / gap
-            self.at = now
+            self.at = float(now)
         return self.speed
-
-
 
 
 def zero_twist_covariance(
