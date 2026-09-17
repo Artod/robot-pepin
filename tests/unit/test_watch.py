@@ -631,3 +631,17 @@ def test_a_camera_only_drive_needs_the_graph_to_recognise_the_room() -> None:
         Sigma(0.08, 2.0, 0.1),
     )
     assert not quiet[2].ok, "a graph that stopped speaking recognises nothing now"
+
+
+def test_a_small_sigma_vouches_for_a_zero_fit_when_painting() -> None:
+    """Camera-only the tracker publishes fit 0.00 by construction and the pose is held by the
+    camera's words; the sigma is what answers for it, and the volume must keep growing."""
+    from pepin.watch import PAINT_SIGMA_M, PaintTrust
+
+    trust = PaintTrust()
+    assert trust.refusal(fit=0.0, fit_age_s=0.2, sigma_xy_m=0.05, edge_age_s=0.1) is None
+    tight = trust.refusal(fit=0.0, fit_age_s=0.2, sigma_xy_m=PAINT_SIGMA_M * 3, edge_age_s=0.1)
+    assert tight is not None, "a wide sigma vouches for nothing"
+    blind = trust.refusal(fit=0.0, fit_age_s=0.2, sigma_xy_m=None, edge_age_s=0.1)
+    assert blind is not None and "no sigma" in blind
+    assert trust.refusal(fit=0.9, fit_age_s=0.2, sigma_xy_m=None, edge_age_s=0.1) is None

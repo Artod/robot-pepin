@@ -169,5 +169,8 @@ def test_the_report_line_says_what_was_withheld_and_whether_a_sigma_speaks(
     node._on_fit(ros_stubs.Float32(data=0.10))
     node._on_scan_work(scan_msg())
     line = node._world_line(node._tally.take())
-    assert "lidar revolutions withheld: 1 (pose not trusted: fit 0.10 under 0.50)" in line
+    assert (
+        "lidar revolutions withheld: 1 (pose not trusted: fit 0.10 under 0.50 and no sigma"
+        " to vouch for it)"
+    ) in line
     assert "no /localization/sigma" in line

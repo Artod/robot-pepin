@@ -878,8 +878,14 @@ class PaintTrust:
         """
         if fit_age_s > self.patience_s:
             return f"the fit stopped {fit_age_s:.1f} s ago"
-        if fit < self.drive_fit:
-            return f"fit {fit:.2f} under {self.drive_fit:.2f}"
+        # A fit of zero is not a bad fit: with no lidar of its own the tracker publishes 0.00 by
+        # construction (the local_fit flag), and the pose is then held by the camera's words. The
+        # sigma is the number that answers for it — one covariance out of every source that
+        # spoke. Camera-only this branch used to refuse every frame, and the volume stopped
+        # growing the moment the lidar was muted (2026-09-17: the cloud froze at the base).
+        vouched = sigma_xy_m is not None and sigma_xy_m <= self.max_sigma_xy_m
+        if fit < self.drive_fit and not vouched:
+            return f"fit {fit:.2f} under {self.drive_fit:.2f} and no sigma to vouch for it"
         if sigma_xy_m is not None and sigma_xy_m > self.max_sigma_xy_m:
             return f"sigma {sigma_xy_m:.2f} m over {self.max_sigma_xy_m:.2f} m"
         if edge_age_s is None:
