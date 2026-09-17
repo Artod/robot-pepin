@@ -836,8 +836,13 @@ PAINT_EDGE_FRESH_S = 1.0
 # ...and how sure the tracker must be of itself, in metres, where it publishes a sigma at all
 # (/localization/sigma, its post-fusion covariance). A voxel is 5 cm: at 10 cm of standard
 # deviation a wall is written within two voxels of where it stands, which the surface averages
-# out; at half a metre it is written into the room.
-PAINT_SIGMA_M = 0.10
+# out; at half a metre it is written into the room. 0.25 and not 0.10 because of what the modes
+# can offer: with a lidar the tracker knows itself to 1-2 cm and this number never bites, while
+# CAMERA-ONLY the honest sigma is the graph word's own floor, 0.20 m (2026-09-17: the volume
+# stopped growing the moment the lidar was muted, and a robot that cannot paint without a lidar
+# can never wake up in a room it has not mapped). The price is written down: a wall painted at
+# 0.20 m of pose error is thickened by that much until the lidar or a closure sharpens it.
+PAINT_SIGMA_M = 0.25
 
 
 @dataclass(frozen=True)
