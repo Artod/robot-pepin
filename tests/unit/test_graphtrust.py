@@ -253,3 +253,24 @@ def test_the_agreement_window_keeps_only_its_last_words() -> None:
     assert agreement.count == 10 and agreement.rms() == pytest.approx(0.0)
     assert agreement.trust() == pytest.approx(1.0)
     assert Agreement(scale_m=AGREEMENT_SCALE_M).trust() == pytest.approx(1.0)
+
+
+def test_a_word_is_worth_the_wider_of_its_floor_and_the_scatter_it_shows() -> None:
+    """The floor covers what a word cannot see in itself — a whole frame sitting to one side.
+    The scatter is what it can: when words stop agreeing with the pose the odometry carries
+    between them, the graph is coming apart and the word must say so in metres."""
+    from pepin.graphtrust import Agreement
+    from pepin.measurements import GRAPH_FLOOR_XY_M
+
+    agreement = Agreement()
+    assert agreement.rms(0.0) is None, "nothing seen yet: the floor stands alone"
+    for i in range(4):
+        agreement.add(float(i), 0.01)
+    quiet = agreement.rms(4.0)
+    assert quiet is not None and max(GRAPH_FLOOR_XY_M, quiet) == GRAPH_FLOOR_XY_M
+    for i in range(4):
+        agreement.add(5.0 + i, 0.55)
+    loud = agreement.rms(9.0)
+    assert loud is not None and max(GRAPH_FLOOR_XY_M, loud) > GRAPH_FLOOR_XY_M, (
+        "words scattering half a metre are not worth the floor"
+    )

@@ -132,6 +132,7 @@ from pepin.graphtrust import (
     Recognition,
 )
 from pepin.measurements import (
+    GRAPH_FLOOR_XY_M,
     RemoteMeasurement,
     compose,
     graph_anchor,
@@ -140,6 +141,7 @@ from pepin.measurements import (
 )
 from pepin.odometry import Pose2D
 from pepin.tsdf import RigidPose
+from pepin.watch import SIGMA_TOPIC, Sigma
 from pepin.watchdog import GlobalCandidate, same_place
 from pepin_bringup.msgs import (
     map_id,
@@ -196,6 +198,10 @@ MAX_DISAGREEMENT_M = 1.5
 # candidate channel is for. 0.3 sits just above the tracker's own lost_below (0.25,
 # pepin.localization.Localizer): a fit at that floor explains nothing.
 TRACKER_TRUSTED_FIT = 0.3
+# ...and the widest the tracker's own post-fusion sigma may be for its pose to stand in for a
+# fit that was never measured (camera-only /localization_fit is 0.00 by construction). 0.30 m is
+# above the graph word's own floor of 0.20 and under the half-width of the cart.
+TRACKER_TRUSTED_SIGMA_M = 0.30
 BELIEF_FRESH_S = 3.0
 # How far apart in time the tracker's belief and the graph's own place may be when the anchor
 # between the two frames is learned from them: at the cart's 0.3 m/s half a second is 15 cm of
@@ -498,6 +504,7 @@ class RtabmapFrame(Node):
         self._pending_reason = ""  # ...and why the last of them was refused, said once per reason
         self._watch = AnchorWatch()  # what says the stored anchor no longer holds
         self._fit, self._fit_at = 0.0, -math.inf  # the lidar's own fit, and when it last spoke
+        self._sigma_xy: float | None = None  # the tracker's own post-fusion spread, where it says
         self._word: Pose2D | None = None  # the last place the graph put the cart, on the map
         self._gap_m = 0.0  # ...and how far that was from the tracker's own belief
         self._sent = 0  # graph measurements published
@@ -558,6 +565,7 @@ class RtabmapFrame(Node):
             PoseWithCovarianceStamped, TRACKER_POSE_TOPIC, self._on_tracker_pose, 5
         )
         self.create_subscription(Float32, FIT_TOPIC, self._on_fit, 5)
+        self.create_subscription(String, SIGMA_TOPIC, self._on_sigma, 5)
         self.create_timer(1.0 / RATE_HZ, self._publish)
         where = (
             f"map -> odom on {CORRECTION_TOPIC}, for the board"
@@ -998,7 +1006,14 @@ class RtabmapFrame(Node):
             self._withheld += 1
             return
         self._agree(word)
-        remote = graph_measurement(place, frame, stamp, self._map_id, fit=self._trust_now())
+        remote = graph_measurement(
+            place,
+            frame,
+            stamp,
+            self._map_id,
+            fit=self._trust_now(),
+            floor_xy_m=self._word_sigma_m(),
+        )
         self._propose(remote)
         if self._measurement is None or not self._switches.on("graph_measurement"):
             return
@@ -1013,6 +1028,26 @@ class RtabmapFrame(Node):
         self._sent += 1
         self._measurement.publish(String(data=remote.to_json(graphs=self._graphs)))
 
+    def _word_sigma_m(self) -> float:
+        """What this word is worth in metres: the graph's measured floor, or the scatter of the
+        last words when that is wider.
+
+        The floor is what the source was last seen to be worth against the lidar (median 19 cm
+        over 61 words, p90 38 cm, 2026-09-17) and it covers the part no word can see in itself —
+        a whole frame sitting a little to one side. The scatter is the part it CAN see, measured
+        here by :class:`pepin.graphtrust.Agreement`: when the words start disagreeing with the
+        pose the odometry carries between them, the graph is coming apart, and the word must say
+        so in the one language the fusion reads. Before this the word claimed the same 0.20 m
+        whether it sat 1 cm from the tracker or 2.6 m (the day's worst), and every gate
+        downstream — the goal's, the drive's, the volume's — believed it."""
+        spread = self._agreement.rms(self._now())
+        return GRAPH_FLOOR_XY_M if spread is None else max(GRAPH_FLOOR_XY_M, float(spread))
+
+    def _on_sigma(self, msg: String) -> None:
+        """The tracker's own post-fusion spread: what its pose is worth whatever sensor held it."""
+        sigma = Sigma.from_json(msg.data, age_s=0.0)
+        self._sigma_xy = None if sigma is None else sigma.xy_m
+
     def _lost(self) -> bool:
         """Whether the board's tracker has nothing trustworthy behind the pose it publishes: a
         fit below :data:`TRACKER_TRUSTED_FIT` (or no fit at all within :data:`FIT_FRESH_S`), or
@@ -1020,7 +1055,13 @@ class RtabmapFrame(Node):
         correction to an almost-right pose into the only opinion anyone has."""
         now = self._now()
         fit = self._fit if now - self._fit_at <= FIT_FRESH_S else 0.0
-        return fit < TRACKER_TRUSTED_FIT or now - self._belief_at > BELIEF_FRESH_S
+        # A fit of zero is not a lost tracker: camera-only it publishes 0.00 by construction and
+        # the pose is held by these very words. Before this the residual was therefore never
+        # taken in the one mode it is needed in, and the word's trust stood at 1.00 all the way
+        # into the table (2026-09-16). The sigma is what answers there: it is the tracker's own
+        # post-fusion spread, and a tracker riding a graph word reports that word's floor.
+        vouched = self._sigma_xy is not None and self._sigma_xy <= TRACKER_TRUSTED_SIGMA_M
+        return (fit < TRACKER_TRUSTED_FIT and not vouched) or now - self._belief_at > BELIEF_FRESH_S
 
     def _propose(self, remote: RemoteMeasurement) -> None:
         """The same word on the whole-map candidate channel — the door a measurement cannot
