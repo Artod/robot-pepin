@@ -269,15 +269,33 @@ class Places(Node):
         if refusal is not None:
             self._answer(request, ok=False, detail=refusal)
             return
-        if self._switches.on("label_nodes"):
-            if not self._forgetter.service_is_ready() or not self._labeller.service_is_ready():
-                self._answer(request, ok=False, detail=f"{SET_LABEL_SERVICE} is not answering")
-                return
-            self._forgetter.call_async(RemoveLabel.Request(label=request.name))
-            self._labeller.call_async(SetLabel.Request(node_id=HERE, node_label=request.name))
+        if self._switches.on("label_nodes") and not (
+            self._forgetter.service_is_ready() and self._labeller.service_is_ready()
+        ):
+            self._answer(request, ok=False, detail=f"{SET_LABEL_SERVICE} is not answering")
+            return
         if not self._lister.service_is_ready():
             self._answer(request, ok=False, detail=f"{LIST_LABELS_SERVICE} is not answering")
             return
+        if not self._switches.on("label_nodes"):
+            self._list(request)
+            return
+        # ONE AFTER THE OTHER, each on the answer of the one before. Sent together they race:
+        # live on 2026-09-19 RTAB-Map logged "List labels service: 1 labels found" 4 ms BEFORE
+        # "Set label "home" to last node", so the list did not hold the name yet and a mark
+        # RTAB-Map had taken was reported as refused.
+        forgotten = self._forgetter.call_async(RemoveLabel.Request(label=request.name))
+        forgotten.add_done_callback(lambda _done: self._label(request))
+
+    def _label(self, request: MarkRequest) -> None:
+        """Second step of a mark, once the old holder of the name has let go of it."""
+        labelled = self._labeller.call_async(
+            SetLabel.Request(node_id=HERE, node_label=request.name)
+        )
+        labelled.add_done_callback(lambda _done: self._list(request))
+
+    def _list(self, request: MarkRequest) -> None:
+        """Last step: ask which node holds the name now, and measure the cart against it."""
         future = self._lister.call_async(ListLabels.Request())
         future.add_done_callback(lambda done: self._measure(request, done.result()))
 

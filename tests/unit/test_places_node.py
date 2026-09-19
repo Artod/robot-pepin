@@ -336,3 +336,52 @@ def test_the_flags_are_the_three_the_report_line_prints(build: Build) -> None:
     line = node.logger.texts("info")[-1]
     assert "publish_places=on" in line and "label_nodes=on" in line
     assert "0 marked, 0 refused" in line and "nothing asked yet" in line
+
+
+class _Pending:
+    """A future that finishes when the test says so — what rclpy's really is. The shared stub's
+    future is already done the moment it is made, which is exactly why a race between three
+    service calls sent together could not be seen in a test (2026-09-19: live, RTAB-Map answered
+    ``list_labels`` 4 ms before it executed ``set_label``, and a mark it had taken read as
+    refused)."""
+
+    def __init__(self, result: Any = None) -> None:
+        self._result, self._callbacks = result, []
+
+    def add_done_callback(self, callback: Any) -> None:
+        self._callbacks.append(callback)
+
+    def finish(self) -> None:
+        for callback in self._callbacks:
+            callback(self)
+
+    def result(self) -> Any:
+        return self._result
+
+
+def test_the_three_calls_of_a_mark_go_one_after_the_other(build: Build) -> None:
+    """``remove_label``, then ``set_label`` on ITS answer, then ``list_labels`` on the answer of
+    that: the list is the only thing that says which node took the name, and asked early it does
+    not hold the name yet."""
+    node = build()
+    graph(node, {7: (1.0, 0.0, 0.0)})
+    cart(node, 1.2, 0.0)
+    asked: list[tuple[str, _Pending]] = []
+    for name, client in (
+        ("remove", node._forgetter),
+        ("set", node._labeller),
+        ("list", node._lister),
+    ):
+
+        def call_async(request: Any, name: str = name) -> _Pending:
+            pending = _Pending(ros_stubs.ListLabels.Response(ids=[7], labels=["desk"]))
+            asked.append((name, pending))
+            return pending
+
+        client.call_async = call_async  # type: ignore[method-assign]
+    node.subs["/places/mark"][1](ros_stubs.String(data=MarkRequest("desk", "tool-9").to_json()))
+    assert [name for name, _ in asked] == ["remove"], "nothing else is sent until it answers"
+    asked[0][1].finish()
+    assert [name for name, _ in asked] == ["remove", "set"]
+    asked[1][1].finish()
+    assert [name for name, _ in asked] == ["remove", "set", "list"]
