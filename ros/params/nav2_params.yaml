@@ -450,6 +450,12 @@ local_costmap:
           obstacle_min_range: 0.0
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
+        # /map_tracked, not /map: the relocalizer republishes the map it is TRACKING on (latched,
+        # once per adoption — pepin_bringup.relocalizer.TRACKED_MAP_TOPIC), so the planner's static
+        # map and the tracker's map are one thing by construction instead of two subscriptions to a
+        # third party that can disagree. With map_server gone from a known room (ros/nav.launch.py's
+        # map_server argument, off by default) nobody publishes /map on this board at all.
+        map_topic: /map_tracked
         map_subscribe_transient_local: True
       # On False the full grid is published only when its origin moves, so a robot standing still
       # publishes nothing but incremental updates — exactly when a stall needs looking at, and the
@@ -664,9 +670,15 @@ global_costmap:
         #     contact and ToF layers had gathered. On change rather than every second, that is
         #     paid once per change of the volume's extent instead of once per second — but it is
         #     still paid mid-drive.
-        # And it is not the way to plan on the volume in any case: depth_fusion's map_source
-        # flag publishes the volume ON /map under the one-owner rule, which is the topic this
-        # layer already reads.
+        # SINCE 2026-09-18 IT READS /map_tracked, and the three reasons above are answered rather
+        # than argued: the tracker republishes the very grid it matches on
+        # (pepin_bringup.relocalizer.TRACKED_MAP_TOPIC), so (1) the content is whatever the tracker
+        # accepted — and the tracker keeps a map only after its own choice took it; (2) the fallback
+        # is the tracker's, which is the board's own map cache (pepin.mapcache): with the laptop down
+        # at startup this layer gets the last map the board adopted instead of nothing; (3) a resize
+        # still costs what it cost, and it is paid when the tracker itself changes map, which is the
+        # only moment it can be paid honestly.
+        map_topic: /map_tracked
         map_subscribe_transient_local: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"

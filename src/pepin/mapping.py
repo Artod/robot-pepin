@@ -189,6 +189,13 @@ class MapChoice:
     :meth:`lapsed` names ``fallback`` and the caller offers what is waiting there; the wanted
     map still replaces it the moment it arrives. Once something IS adopted the fallback is over
     for good — a grid in memory does not stop working because its publisher went away.
+
+    A MAP WITH NOTHING IN IT IS NOT A MAP. An unknown room is a volume born empty, and its first
+    publication is an all-unknown grid: adopting that one spends the single adoption a
+    ``refresh_s`` of 0 allows, and the tracker then refuses every real map that follows for the
+    rest of the session. So :meth:`offer` takes an optional ``empty`` question and turns such a
+    grid away — counted like any other refusal, so the wait is visible — until the first sweep
+    has put something in it.
     """
 
     def __init__(
@@ -244,15 +251,26 @@ class MapChoice:
         return count
 
     def offer(
-        self, source: str, digest: Callable[[], str], now: float, adopt: Callable[[], None]
+        self,
+        source: str,
+        digest: Callable[[], str],
+        now: float,
+        adopt: Callable[[], None],
+        empty: Callable[[], bool] | None = None,
     ) -> bool:
         """A map has arrived on ``source``: call ``adopt`` and answer ``True`` when it becomes
         the map in use, else turn it away and answer ``False``.
 
-        ``digest`` is a function, not a string, because reading a whole grid's cells costs
-        something and the answer usually does not hang on them.
+        ``digest`` and ``empty`` are functions, not values, because reading a whole grid's cells
+        costs something and the answer usually does not hang on them. ``empty`` answers "has this
+        grid no known cell at all" and is what keeps an unknown room's first, blank publication
+        from spending the one adoption a ``refresh_s`` of 0 allows; a caller that does not ask it
+        behaves exactly as before.
         """
         if source != self._wanted and not (self.fell_back and source == self._fallback):
+            return False
+        if empty is not None and empty():
+            self._ignored += 1  # a grid with nothing in it: wait for the sweep that fills it
             return False
         fresh = ""
         if self.source == source:

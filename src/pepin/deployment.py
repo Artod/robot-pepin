@@ -197,6 +197,13 @@ BOARD_PUBLISHES = (
     "tf",
     "tf_static",
     "map",
+    # The map the board's TRACKER is on, republished latched by the relocalizer on every adoption
+    # (relocalizer.TRACKED_MAP_TOPIC): whichever source it took — the served file, a cold-boot
+    # cache, the laptop's /map_lidar — and however the volume has grown since. It has to cross the
+    # bridge because the laptop stamps its candidates and its camera measurements with THAT grid's
+    # id, and the board's own gates refuse a word about "another map"; deriving the id from /map
+    # instead was right only while /map was the one map there was.
+    "map_tracked",
     "odom",
     "odometry/filtered",
     "imu/data_raw",
@@ -343,6 +350,15 @@ SLAM_LAPTOP_PUBLISHES = (
 # the costmaps two maps and make the tracker rebuild on whichever arrived last, so anything on
 # the laptop that can publish a map (pepin_bringup.depth_fusion with map_source=volume) asks
 # here first and stays quiet where the answer is "board".
+#
+# ONE OWNER AND ONE MAP ARE NOT THE SAME QUESTION, and the answer to the second is not in this
+# table. The board keeps /map in the known-map modes because it must boot and localise with the
+# laptop off (CLAUDE.md rule 20) — but what it serves there is now the pair the laptop EXPORTS
+# from the fused volume at every snapshot (pepin.worldmap.export_path_for), so the file on the
+# board is a cache of the volume rather than a second, frozen picture of the room. The live
+# volume rides beside it on /map_lidar, with the same cells and — because the exported pair
+# carries the volume's own footprint — the same map id. Moving /map to the laptop in those modes
+# would break rule 20 and is not how "one map" is reached.
 MAP_OWNER = {"split": "board", "vision": "board", "slam": "laptop"}
 
 
@@ -732,6 +748,9 @@ ON_DEMAND_TOPICS: frozenset[str] = frozenset(
         "/map",
         "/map_camera",
         "/map_lidar",
+        # Latched like /map and for the same reason: published once per adoption, and a watch that
+        # judged its silence would restart a healthy bridge (2026-09-13 19:12).
+        "/map_tracked",
         "/tf_static",
         "/plan",
         "/local_plan",

@@ -9,8 +9,10 @@ import math
 
 import pytest
 
+from pepin.fusion import GATE
 from pepin.graphtrust import (
     ACCEPTED_HYPOTHESIS_ID,
+    AGREEMENT_SCALE,
     AGREEMENT_SCALE_M,
     DISTANCE_TRAVELLED_M,
     FILE_ANCHOR_TRUST,
@@ -19,7 +21,6 @@ from pepin.graphtrust import (
     LOOP_ID,
     PROXIMITY_ICP,
     PROXIMITY_VISUAL,
-    RECOGNITION_MAX_S,
     Agreement,
     GraphTrust,
     InfoIds,
@@ -190,7 +191,7 @@ def test_recognition_is_a_tie_to_the_database_and_not_to_this_start_s_own_nodes(
     assert recognition.update(info(1.0), InfoIds(ref_id=2050, loop_closure_id=41), 2.0) is True
     assert recognition.recognised is True and recognition.matches == 1
     report = recognition.report(withheld=19)
-    assert "recognised on node 41, 0 s of driving ago (1 matches)" in report.text()
+    assert "recognised on node 41 (1 matches)" in report.text()
 
     proximity = Recognition()
     proximity.update(info(0.0), InfoIds(ref_id=2000), 0.0)
@@ -201,25 +202,25 @@ def test_recognition_is_a_tie_to_the_database_and_not_to_this_start_s_own_nodes(
     assert localized.update(info(0.0), InfoIds(ref_id=2000, localized=True), 0.0) is True
 
 
-def test_a_recognition_expires_on_driving_seconds_and_a_restart_forgets_it() -> None:
-    """Standing at the charger does not move the cart away from the place it recognised, so the
-    expiry counts only the messages RTAB-Map's own distance counter grew in. A counter that FALLS
-    is a new session whose nodes are placed by the odometry again: it has recognised nothing."""
+def test_a_tie_never_expires_and_only_a_restart_forgets_it() -> None:
+    """A tie fixes the FRAME, and a frame does not go stale: how far the cart has driven since
+    rides the word's covariance, not a predicate. This used to expire on a clock of driving
+    seconds that charged VO jitter at a standstill — 991 s at a bookshelf with 587 words withheld
+    (2026-09-17), twice more in the two days before. A counter that FALLS is a new session whose
+    nodes are placed by the odometry again: that, and only that, loses the frame."""
     recognition = Recognition()
     recognition.update(info(0.0), InfoIds(ref_id=2000, loop_closure_id=41), 0.0)
     assert recognition.recognised is True
 
     recognition.update(info(0.0), InfoIds(ref_id=2000), 3600.0)  # an hour, counter still
-    assert recognition.driving_s == 0.0 and recognition.recognised is True
+    assert recognition.recognised is True
+    recognition.update(info(400.0), InfoIds(ref_id=2100), 9000.0)  # 400 m and 90 minutes later
+    assert recognition.recognised is True, "distance weakens the WORD, it does not untie the frame"
+    assert "recognised on node 41" in recognition.report().text()
 
-    recognition.update(info(4.0), InfoIds(ref_id=2100), 3600.0 + RECOGNITION_MAX_S - 1.0)
-    assert recognition.recognised is True, "119 s of driving is inside the patience"
-    recognition.update(info(9.0), InfoIds(ref_id=2200), 3600.0 + RECOGNITION_MAX_S + 80.0)
-    assert recognition.recognised is False
-    assert "recognition stale: 200 s of driving since node 41" in recognition.report(3).text()
-
-    recognition.update(info(0.2), InfoIds(ref_id=2300), 4000.0)  # RTAB-Map restarted
+    recognition.update(info(0.2), InfoIds(ref_id=2300), 9400.0)  # RTAB-Map restarted
     assert recognition.starts == 1 and recognition.matches == 0
+    assert recognition.recognised is False, "new nodes, placed by odometry: no common frame"
     assert "unrecognised since start: 3 words withheld" in recognition.report(3).text()
 
 
@@ -252,7 +253,25 @@ def test_the_agreement_window_keeps_only_its_last_words() -> None:
         agreement.add(0.01 * step, 1.0 if step < 20 else 0.0)
     assert agreement.count == 10 and agreement.rms() == pytest.approx(0.0)
     assert agreement.trust() == pytest.approx(1.0)
-    assert Agreement(scale_m=AGREEMENT_SCALE_M).trust() == pytest.approx(1.0)
+    assert Agreement(scale=AGREEMENT_SCALE).trust() == pytest.approx(1.0)
+
+
+def test_the_agreement_residual_counts_the_heading_and_not_only_the_metres() -> None:
+    """A word can be in exactly the right place facing 90 degrees the wrong way, and until
+    2026-09-18 such a word kept its fit 1.00 because only the position residual was measured. The
+    residual is 3-DOF now — the Mahalanobis distance the fusion's own gate judges — and a caller
+    that offers no covariance keeps the curve it had, so the metres alone still read as before."""
+    metres_only = Agreement()
+    metres_only.add(0.0, 0.01)
+    assert metres_only.trust() == pytest.approx(math.exp(-0.01 / AGREEMENT_SCALE_M))
+    assert metres_only.rms() == pytest.approx(0.01)
+
+    # the same centimetre of position, and a heading four sigmas out: a different word entirely
+    turned = Agreement()
+    turned.add(0.0, 0.01, math.sqrt(GATE) + 1.0)
+    assert turned.rms() == pytest.approx(0.01), "the scatter is still metres, for the covariance"
+    assert turned.sigmas() == pytest.approx(math.sqrt(GATE) + 1.0)
+    assert turned.trust() < ADMIT_FIT, "no candidate is admitted on a word facing the wrong way"
 
 
 def test_a_word_is_worth_the_wider_of_its_floor_and_the_scatter_it_shows() -> None:

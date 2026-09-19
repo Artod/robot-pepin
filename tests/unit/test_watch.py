@@ -568,13 +568,25 @@ def test_the_sources_report_is_read_for_who_is_holding_the_pose() -> None:
     source the flag has off is not evidence, and a half-written entry costs its own fields
     only."""
     words = {w.name: w for w in source_words(report(lidar=LIDAR_FRESH, camera={"health": "off"}))}
-    assert words["lidar"].spoke() and words["lidar"].delta_m == pytest.approx(0.0126, abs=1e-4)
-    assert not words["camera"].enabled and not words["camera"].spoke()
+    assert words["lidar"].spoke and words["lidar"].delta_m == pytest.approx(0.0126, abs=1e-4)
+    assert not words["camera"].enabled and not words["camera"].spoke
     assert source_words({}) == [] and source_words({"sources": "nonsense"}) == []
     broken = source_words(report(lidar={"health": "fresh 9.9 Hz", "fit": "x", "delta": ["a", 1]}))
-    assert broken[0].spoke() and broken[0].fit is None and broken[0].delta_m is None
-    stale = source_words(report(lidar={"health": "stale 2.1 s"}, camera={"health": "stale 41.0 s"}))
-    assert stale[0].spoke(SOURCE_PATIENCE_S) and not stale[1].spoke(SOURCE_PATIENCE_S)
+    assert not broken[0].spoke and broken[0].fit is None and broken[0].delta_m is None
+    # A source is "quiet" and a source is "not there" are different facts, and only the second is
+    # this check's: health alone, with no word behind it, is a source that has never spoken.
+    never = source_words(report(lidar={"health": "stale 2.1 s"}, camera={"health": "stale 41.0 s"}))
+    assert not never[0].spoke and not never[1].spoke
+    # And who HOLDS the pose is decided by travel, not by the clock: the lidar's word is the
+    # older one in seconds, the graph's is the one the cart has barely moved on since.
+    held = source_words(
+        report(
+            lidar={"health": "fresh 9.9 Hz", "fit": 0.8, "delta": [1.0, 0.0], "moved": 210.0},
+            graph={"health": "stale 20.6 s", "fit": 0.8, "delta": [1.0, 0.0], "moved": 4.0},
+        )
+    )
+    holder = Preflight.holding(held)
+    assert holder is not None and holder.name == "graph" and holder.moved_m == pytest.approx(0.04)
 
 
 def test_the_preflight_passes_a_lidar_drive_and_a_camera_drive_that_agrees() -> None:
@@ -582,12 +594,16 @@ def test_the_preflight_passes_a_lidar_drive_and_a_camera_drive_that_agrees() -> 
     the graph recognising the room and agreeing with the tracker."""
     flight = Preflight()
     lidar = flight.checks(source_words(report(lidar=LIDAR_FRESH)), Sigma(0.03, 0.8, 0.1))
-    assert Preflight.passed(lidar) and "the lidar is holding the pose" in lidar[2].detail
+    assert Preflight.passed(lidar) and "lidar is holding the pose" in lidar[2].detail
     camera = flight.checks(
         source_words(report(camera=CAMERA_FRESH, graph=GRAPH_FRESH)), Sigma(0.08, 2.0, 0.1)
     )
     assert Preflight.passed(camera)
-    assert "judged by sigma" in camera[1].detail and "0.05 m from the tracker" in camera[2].detail
+    # The camera's own scan match is the holder here — it and the graph are tied on travel, and
+    # the roster decides. Either is a fair answer: both measured this pose, neither is the lidar.
+    assert "judged by sigma" in camera[1].detail
+    assert "camera is holding the pose" in camera[2].detail
+    assert "0.04 m from the tracker" in camera[2].detail
 
 
 def test_the_preflight_refuses_each_case_with_the_line_that_says_why() -> None:
@@ -600,8 +616,16 @@ def test_the_preflight_refuses_each_case_with_the_line_that_says_why() -> None:
         source_words(report(lidar={"health": "stale 41.0 s"}, camera={"health": "absent"})),
         Sigma(0.03, 0.8, 0.1),
     )
-    assert not asleep[0].ok and "no source has spoken in 3 s" in asleep[0].detail
+    assert not asleep[0].ok and "no enabled source has ever spoken" in asleep[0].detail
     assert "lidar stale 41.0 s" in asleep[0].detail, "the roster is printed whole"
+    # A source that HAS spoken and then went quiet is not refused here — that is the sigma's
+    # job, and it is the one that knows how far the cart has driven on that word since.
+    quiet = flight.checks(
+        source_words(report(lidar={**LIDAR_FRESH, "health": "stale 41.0 s", "moved": 180.0})),
+        Sigma(0.44, 9.0, 0.1),
+    )
+    assert quiet[0].ok and "1.80 m driven since" in quiet[0].detail
+    assert not quiet[1].ok and "0.44 m" in quiet[1].detail
     wide = flight.checks(source_words(report(lidar=LIDAR_FRESH)), Sigma(0.44, 9.0, 0.2))
     assert not wide[1].ok and "0.44 m" in wide[1].detail
     assert f"needs {DRIVE_SIGMA_M:.2f} m" in wide[1].detail
@@ -610,27 +634,50 @@ def test_the_preflight_refuses_each_case_with_the_line_that_says_why() -> None:
     assert flight.checks(source_words(report(lidar=LIDAR_FRESH)), None, fit=0.9)[1].ok
 
 
-def test_a_camera_only_drive_needs_the_graph_to_recognise_the_room() -> None:
-    """Without the lidar nothing scores the scan against the map, so the evidence that the room
-    under the cart is the room on the map is RTAB-Map's graph: it has recognised the place (its
-    word carries a trust above zero) and it agrees with the tracker about where in it."""
+def test_the_holder_is_asked_the_same_two_questions_whoever_it_is() -> None:
+    """Nothing here knows a source by name. Whoever the cart has driven least since IS holding
+    the pose, and that one must have measured something (a fit above zero) sitting within
+    ``graph_agree_m`` of the pose it is holding. The check used to read "is it the lidar? then
+    fine; otherwise the graph must have recognised", which wrote "the lidar is the real one" into
+    the gate and made a camera-only drive a case to be argued for (2026-09-17)."""
     flight = Preflight()
-    no_graph = flight.checks(source_words(report(camera=CAMERA_FRESH)), Sigma(0.08, 2.0, 0.1))
-    assert not no_graph[2].ok and "not among the sources" in no_graph[2].detail
-    blind_graph = flight.checks(
-        source_words(report(camera=CAMERA_FRESH, graph={"health": "fresh 1.0 Hz", "fit": 0.0})),
+    nobody = flight.checks(
+        source_words(report(camera={"health": "fresh 4.8 Hz"}, graph={"health": "absent"})),
         Sigma(0.08, 2.0, 0.1),
     )
-    assert not blind_graph[2].ok and "recognised nothing" in blind_graph[2].detail
-    far = flight.checks(
-        source_words(report(camera=CAMERA_FRESH, graph=GRAPH_FAR)), Sigma(0.08, 2.0, 0.1)
+    assert not nobody[2].ok and "nothing is holding the pose" in nobody[2].detail
+    blind = flight.checks(
+        source_words(report(graph={"health": "fresh 1.0 Hz", "fit": 0.0, "delta": [1.0, 0.0]})),
+        Sigma(0.08, 2.0, 0.1),
     )
+    assert not blind[2].ok and "measured nothing" in blind[2].detail
+    far = flight.checks(source_words(report(graph=GRAPH_FAR)), Sigma(0.08, 2.0, 0.1))
     assert not far[2].ok and "0.50 m from the tracker" in far[2].detail
-    quiet = flight.checks(
-        source_words(report(camera=CAMERA_FRESH, graph={"health": "stale 41.0 s", "fit": 0.6})),
+    no_delta = flight.checks(
+        source_words(report(graph={"health": "stale 41.0 s", "fit": 0.6})), Sigma(0.08, 2.0, 0.1)
+    )
+    assert not no_delta[2].ok and "carries no delta" in no_delta[2].detail
+    # A cart parked on a good word still holds it: it has not moved off what was measured, and
+    # forty-one seconds of standing still is not evidence of anything at all. This is the case
+    # that stood at a bookshelf for three hours.
+    parked = flight.checks(
+        source_words(report(graph={**GRAPH_FRESH, "health": "stale 41.0 s", "moved": 0.0})),
         Sigma(0.08, 2.0, 0.1),
     )
-    assert not quiet[2].ok, "a graph that stopped speaking recognises nothing now"
+    assert Preflight.passed(parked), "a parked camera-only cart may start: the sigma vouches"
+    assert "graph is holding the pose" in parked[2].detail
+    # And the lidar loses the title by the same rule, with no name in it: the cart has driven
+    # 2.1 m since its word and 4 cm since the graph's.
+    both = flight.checks(
+        source_words(
+            report(
+                lidar={**LIDAR_FRESH, "health": "stale 12.0 s", "moved": 210.0},
+                graph={**GRAPH_FRESH, "moved": 4.0},
+            )
+        ),
+        Sigma(0.18, 4.0, 0.1),
+    )
+    assert Preflight.passed(both) and "graph is holding the pose" in both[2].detail
 
 
 def test_a_small_sigma_vouches_for_a_zero_fit_when_painting() -> None:
@@ -645,3 +692,35 @@ def test_a_small_sigma_vouches_for_a_zero_fit_when_painting() -> None:
     blind = trust.refusal(fit=0.0, fit_age_s=0.2, sigma_xy_m=None, edge_age_s=0.1)
     assert blind is not None and "no sigma" in blind
     assert trust.refusal(fit=0.9, fit_age_s=0.2, sigma_xy_m=None, edge_age_s=0.1) is None
+
+
+def test_a_word_at_the_right_place_facing_the_wrong_way_does_not_pass_the_gate() -> None:
+    """2026-09-17, the cart parked at home: the graph's word sat 0.00 m from the tracker and a
+    hundred degrees away from it (``last graph (-9.38, +2.49, -45 deg)`` against the lidar-held
+    +55 deg, ros/maps/rec/20260917_204956_goto_board.log at 00:45:23Z), and the preflight said
+    "its word is 0.00 m from the tracker (allowed 0.10 m)" and let the drive start. A pose is a
+    place AND a heading; the heading is judged by what the word itself claims to be worth."""
+    turned = {
+        "health": "fresh 1.0 Hz",
+        "fit": 1.0,
+        "delta": [0.0, 0.0, -100.0],  # centimetres, centimetres, degrees
+        "sigma": [20.0, 20.0, 8.0],  # the graph's own measured floor
+        "moved": 0.0,
+    }
+    word = source_words(report(graph=turned))[0]
+    assert word.delta_m == pytest.approx(0.0) and word.delta_deg == pytest.approx(-100.0)
+    assert word.heading_explained is False
+    checks = Preflight().checks(source_words(report(graph=turned)), Sigma(0.20, 8.0, 0.4))
+    assert not Preflight.passed(checks)
+    assert "-100 deg off it against the 8 deg it claims" in checks[2].detail
+    # ...and a word whose heading its own covariance can account for still passes, as before.
+    agreed = {**turned, "delta": [0.0, 0.0, -9.0]}
+    assert source_words(report(graph=agreed))[0].heading_explained is True
+    assert Preflight.passed(
+        Preflight().checks(source_words(report(graph=agreed)), Sigma(0.2, 8, 0))
+    )
+    # An older board that publishes no sigma at all cannot be judged on the heading, and is not
+    # refused for a number it never sent: the position check stands alone, as it did.
+    quiet = {"health": "fresh 1.0 Hz", "fit": 1.0, "delta": [0.0, 0.0, -100.0], "moved": 0.0}
+    assert source_words(report(graph=quiet))[0].heading_explained is None
+    assert Preflight.passed(Preflight().checks(source_words(report(graph=quiet)), Sigma(0.2, 8, 0)))

@@ -131,10 +131,7 @@ class PictureSlipVerdict:
     @property
     def said(self) -> str:
         """The verdict as a sentence for the log."""
-        return (
-            f"wheels {self.wheel_speed:.2f} m/s, picture {self.vo_speed:.2f} m/s"
-            f" ({self.reason})"
-        )
+        return f"wheels {self.wheel_speed:.2f} m/s, picture {self.vo_speed:.2f} m/s ({self.reason})"
 
 
 class PictureSlip:

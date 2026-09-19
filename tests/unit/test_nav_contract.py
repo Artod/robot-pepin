@@ -498,11 +498,65 @@ def test_both_doors_to_a_goal_open_the_numbered_tape() -> None:
     assert {"start_command", "stop_command"} <= sf.calls(goto)
     # ...and the drive must actually use it: the protocol being imported proved nothing about
     # the goal path calling it, which is exactly how this went unnoticed for four hours.
-    assert {"Tape", "tape.open", "tape.close"} <= sf.calls(goto)
+    assert {"Tape", "tape.open"} <= sf.calls(goto)
+    # ``tape.close`` may be CALLED or handed to the shutdown's guard (2026-09-18: every step of an
+    # interrupt runs through `guarded` so one failure cannot swallow the next), so the contract is
+    # that the closing happens at all, not the spelling of the call.
+    assert "tape.close" in sf.calls(goto) or "tape.close" in {
+        ast.unparse(n) for n in ast.walk(goto) if isinstance(n, ast.Attribute)
+    }, "the drive must close the tape it opened"
     assert any("taped" in text for text in sf.strings(goto)), "the log must name the tape"
     assert "--no-tape" in sf.strings(goto), "the drive without a numbered tape stays reachable"
     script = (REPO / "ros/goto.sh").read_text()
     assert "--no-tape" in script and "PEPIN_GOTO_TAPE" in script
+
+
+def test_the_static_layers_read_the_map_the_tracker_is_on_and_no_pgm_is_served() -> None:
+    """One map on the board (2026-09-18): the relocalizer republishes the grid it tracks on and both
+    costmaps' static layers read THAT, so the planner's static map cannot disagree with the
+    tracker's. The topic is written as a literal in both places and held equal here; the pgm leaves
+    the loop, reachable again with `map_server:=true`."""
+    params = yaml.safe_load((REPO / "ros/params/nav2_params.yaml").read_text())
+    layers = [
+        params[costmap][costmap]["ros__parameters"]["static_layer"]
+        for costmap in ("local_costmap", "global_costmap")
+    ]
+    assert [layer["map_topic"] for layer in layers] == ["/map_tracked", "/map_tracked"]
+    assert all(layer["map_subscribe_transient_local"] for layer in layers), "latched, or it waits"
+    node = sf.tree("ros/pepin_bringup/pepin_bringup/relocalizer.py")
+    assert "/map_tracked" in {
+        n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    }, "the relocalizer must carry the same literal"
+    launch = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
+    assert 'DeclareLaunchArgument("map_server", default_value="false"' in launch
+    assert 'if map_server and runs_here(side, "map_server", slam):' in launch
+
+
+def test_ctrl_c_cancels_the_goal_before_it_can_do_anything_else() -> None:
+    """The contract the two rocking-chair legs broke (2026-09-17): rclpy's own SIGINT handler had
+    torn the context down, the interrupt handler's first statement created a publisher for a note,
+    that raised, and the cancel on the next line never ran — the goal stayed alive on the board.
+    So: rclpy must not take SIGINT, and the interrupt path's first act is the cancel."""
+    goto = sf.tree("ros/tools/goto_ros.py")
+    init = sf.calls_to(goto, "rclpy.init")
+    assert init and all(
+        any(kw.arg == "signal_handler_options" for kw in call.keywords) for call in init
+    ), "rclpy must be told not to shut the context down under the handler"
+    handler = next(
+        node
+        for node in ast.walk(goto)
+        if isinstance(node, ast.FunctionDef) and node.name == "interrupted"
+    )
+    first = next(
+        sf.dotted(n.func)
+        for n in ast.walk(handler)
+        if isinstance(n, ast.Call) and sf.dotted(n.func) in {"guarded", "note", "nav.cancelTask"}
+    )
+    assert first == "guarded", "the cancel goes through the guard, first"
+    guards = [
+        n for n in ast.walk(handler) if isinstance(n, ast.Call) and sf.dotted(n.func) == "guarded"
+    ]
+    assert ast.unparse(guards[0].args[1]) == "nav.cancelTask", ast.unparse(guards[0])
 
 
 def test_goto_judges_online_slam_on_the_map_frame_not_on_a_fit() -> None:
@@ -876,8 +930,27 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
     shown = {t for t, c in room["topics"].items() if c.get("visible")}
     assert "/fusion/surface" in shown  # the fused surface is what the operator sees
     assert "/rtabmap/cloud_map" in room["topics"]  # RTAB-Map's cloud stays a click away
-    # the two floor grids that fought each other stay out; the local costmap is asked for
-    assert not shown & {"/map", "/rtabmap/map", "/global_costmap/costmap"}
+    # THE PLANNER'S OWN MAP IS SHOWN, and only one grid per plane. The owner watched the fused
+    # surface over the LOCAL costmap and could not see why a path went through a chair: the path
+    # is planned on the global costmap over /map, and both were hidden (2026-09-18). So those two
+    # are on, and every other occupancy grid — the local costmap's window on the same cells,
+    # RTAB-Map's own grid, and the volume's two other cross-sections — stays a click away,
+    # because three grids in one horizontal plane fight each other for depth.
+    # /map_tracked, not /map: the board's relocalizer republishes the map its TRACKER is on,
+    # latched, and in a known room nothing publishes /map on the board any more — so the topic
+    # that used to be "the map" is the one that may be silent, and the tracked one is what the
+    # planner and the operator must be looking at.
+    assert {"/map_tracked", "/global_costmap/costmap", "/plan"} <= shown
+    assert not shown & {
+        "/map",
+        "/rtabmap/map",
+        "/local_costmap/costmap",
+        "/map_lidar",
+        "/map_camera",
+    }
+    assert {"/map_lidar", "/map_camera"} <= set(room["topics"]), (
+        "the volume's own layers are in the layout, ready to be held against the served /map"
+    )
     laptop = (REPO / "ros/laptop.sh").read_text()
     vslam_run = next(
         c for c in sf.shell_commands(laptop) if "docker run -d --name pepin-vslam" in c
@@ -913,7 +986,8 @@ def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph(
     assert _rtabmap("KNOWN_MAP")["odom_frame_id"] == "odom"
     room = json.loads((REPO / "ros/foxglove/pepin_3d.json").read_text())["configById"]["3D!room"]
     assert room["topics"]["/depth_scan"]["visible"]
-    assert room["topics"]["/local_costmap/costmap"]["visible"]
+    # the camera's marks reach the costmap the PLANNER reads, which is the one now on screen
+    assert room["topics"]["/global_costmap/costmap"]["visible"]
 
 
 SENSOR_LAYERS = ("lidar_layer", "camera_layer", "contact_layer")
@@ -1403,11 +1477,13 @@ def test_the_graphs_correction_moves_the_volume_only_where_the_graph_owns_it() -
     for name in ("follow_correction_min_m", "follow_correction_min_deg", "follow_correction_min_s"):
         assert flags.flag(name).range is not None, f"{name}: a threshold is bounded"
         assert flags.flag(name).live, f"{name}: tunable while a map is being built"
-    # ...and the resample law itself is a live switch, because no real correction has judged it:
-    # on the live snapshot of 2026-09-14 the default blend costs 108 ms and puts the 99th
-    # occupied cell 9.7 cm out, the rejected nearest 9 ms and 2.5 cm (scratch/volume_shift_cost.py)
+    # ...and the resample law is a live switch whose default REVERSED on 2026-09-18, when
+    # LidarLaw.beam_footprint took away blend's reason for being it: with the free space in front
+    # of a wall weakly weighted, the weighted average is pulled into the wall and widens it — 430
+    # occupied cells to 516, worst cell 5.85 cm out, against nearest's 431 and exactly half a
+    # voxel (tests/unit/test_follow_correction.py, scratch/volume_shift_cost.py for the ms).
     law = flags.flag("follow_correction_law")
-    assert law.choices == ("blend", "nearest") and law.live and law.default == "blend"
+    assert law.choices == ("blend", "nearest") and law.live and law.default == "nearest"
     reads = sf.unparsed(follow, ast.Subscript)
     assert "self._switches['follow_correction_law']" in reads, "the move reads the law it uses"
 
@@ -1728,7 +1804,12 @@ def test_every_matcher_is_handed_heavy_cells_and_the_lidar_may_localise_on_the_v
         " file's walls (scratch/map_lidar_vs_pgm.py, 2026-09-14) and a tracker moved onto it"
         " scored fit 0.00 at the true pose and re-seated 4 m away at 0.99"
     )
-    assert tracker["map_refresh_s"] == 0.0, "and it is adopted once, as a served map always was"
+    assert tracker["map_refresh_s"] == 2.0, (
+        "a newer map is adopted at the publisher's own period (depth_fusion map_hz 0.5), which is"
+        " also inside what the board can afford: an adoption is ~65 ms on an A53 and the rebuild"
+        " duty budget allows one every 1.9 s (scratch/map_adoption_cost.py). 0 — 'the first map and"
+        " no other' — made a live volume swap a no-op until the flag was set by hand (2026-09-17)"
+    )
     assert tracker["map_fallback_s"] == 10.0, "a laptop topic never spoken for is not a blindfold"
     assert tracker["carry_pose_across_maps"] is True, "a new picture of the room is not a kidnap"
     relocalizer = sf.tree(f"{NODES}/relocalizer.py")
@@ -1748,22 +1829,26 @@ def test_no_launch_argument_reaches_a_node_as_an_empty_parameter_override() -> N
     launch = (REPO / VSLAM_LAUNCH).read_text()
     overrides = [ln.strip() for ln in launch.splitlines() if ":={" in ln]
     assert overrides, "the launch still hands the nodes parameter overrides"
-    may_be_empty = [ln for ln in overrides if "seed_map:=" in ln]
-    assert may_be_empty == ['+ (["-p", f"seed_map:={seed_map}"] if seed_map else []),'], (
+    may_be_empty = [ln for ln in overrides if "room:=" in ln]
+    assert may_be_empty == ['+ (["-p", f"room:={room}"] if room else []),'], (
         "the only override whose value may be empty is passed only when it has one"
     )
-    assert '"seed_map", default_value=""' in launch, "and empty is the unseeded default"
+    assert '"room", default_value=""' in launch, "and empty is 'nowhere recognised yet'"
 
 
-def test_a_reset_returns_a_seeded_volume_to_the_map_it_started_as() -> None:
-    """``/fusion/reset`` and the self-heal empty the model; where the launch named a seed map,
-    "empty" is the file, not a blank room. A blank room is what /map, /map_lidar and any tracker
-    pointed at them would carry from one service call — and with the relocalizer's map_topic on
-    /map_lidar and a refresh turned on, the board would adopt it and lose the flat."""
+def test_a_reset_empties_the_room_and_nothing_falls_back_to_a_picture() -> None:
+    """``/fusion/reset`` and the self-heal empty the model, and with no pgm in the loop "empty"
+    means empty. What makes that safe is not a fallback but a guard on the other side: a grid with
+    no known cell in it is refused by pepin.mapping.MapChoice before any tracker rebuilds on it,
+    so the board keeps the room it adopted until this volume has painted one again."""
     src = (REPO / NODES / "depth_fusion.py").read_text()
-    assert src.count("WorldMap(self._spec, self._mount)") == 2, (
-        "the volume is built in two places only: the start, and the one that re-seeds"
+    assert src.count("WorldMap(self._spec, self._mount") == 3, (
+        "the volume is built in three places only: the two starting states, and the reset's"
     )
+    # ...and the one that re-seeds keeps the map's identity: a reset is the same ROOM wiped back
+    # to what it was made of, and a new id would tell every consumer the cart had been carried
+    # somewhere else (pepin.worldmap.MapIdentity).
+    assert "identity=self._world.identity" in src
     assert src.count("self._world = self._fresh_world()") == 2, "the reset and the self-heal"
     assert "self._fresh_world" in sf.calls(sf.tree(f"{NODES}/depth_fusion.py"))
 

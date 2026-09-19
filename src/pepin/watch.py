@@ -31,7 +31,7 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-from pepin.fusion import Matrix, carry_pose, odometry_covariance, sigma_from_fit
+from pepin.fusion import GATE, Matrix, carry_pose, odometry_covariance, sigma_from_fit
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import relative_motion
 
@@ -910,34 +910,49 @@ class PaintTrust:
 LIDAR_SOURCE = "lidar"
 GRAPH_SOURCE = "graph"
 
+# HOW STALE a source's word may be is not asked here, and there is no constant for it, because
+# the stack already answers that properly: the tracker grows the pose's covariance along the
+# odometry from the last accepted word and collapses it on the next
+# (pepin_bringup.relocalizer.PoseSpread), so :data:`DRIVE_SIGMA_M` already IS "has the pose
+# decayed too far since somebody last vouched for it". A patience in seconds beside it is a
+# second, cruder copy of a measurement we take properly — a magic number where a number is
+# already computed — and it decided the question wrongly: the pose graph speaks once RTAB-Map
+# adds a node, which happens per metre travelled, so a cart parked at a shelf was declared
+# sourceless three seconds after stopping and no camera-only drive could ever start (2026-09-17).
+# What these checks are left with is what the sigma cannot say: WHETHER a source exists at all,
+# and WHOSE word the pose is standing on. Neither needs a threshold — the first is whether the
+# source has ever spoken, the second a comparison of how far the cart has driven since each
+# source's word.
+
 
 @dataclass(frozen=True)
 class SourceWord:
     """One source's line of ``/localization/sources``: whether the flag has it on at all, how
     healthy the node found it (``fresh 9.9 Hz`` / ``stale 2.1 s`` / ``absent`` / ``off``), the
-    fit of its last match and how far that match sat from the tracker's prediction."""
+    fit of its last match, how far that match sat from the tracker's prediction in position
+    (``delta_m``) and in HEADING (``delta_deg``), what the word claimed to be worth in heading
+    (``sigma_deg``) and how far the cart has driven since (``moved_m``). ``None`` wherever the
+    report carries no such number — an older board, or a source that has never spoken."""
 
     name: str
     health: str
     fit: float | None = None
     delta_m: float | None = None
+    moved_m: float | None = None
+    delta_deg: float | None = None
+    sigma_deg: float | None = None
 
     @property
     def enabled(self) -> bool:
         """False for a source the ``sources`` flag has off: it is not evidence of anything."""
         return self.health != "off"
 
-    def spoke(self, patience_s: float = SOURCE_PATIENCE_S) -> bool:
-        """Whether this source has said anything within ``patience_s`` — ``fresh`` by the
-        roster's own reckoning, or ``stale`` by less than the patience."""
-        if self.health.startswith("fresh"):
-            return True
-        if self.health.startswith("stale"):
-            try:
-                return float(self.health.split()[1]) <= patience_s
-            except (IndexError, ValueError):
-                return False
-        return False
+    @property
+    def spoke(self) -> bool:
+        """Whether this source has ever put a word in — a fit is a match it made. False is a
+        source that is broken, wired to the wrong flag or served by a dead tracker; never merely
+        a quiet one, which is the sigma's business and not this check's."""
+        return self.fit is not None
 
     @property
     def recognised(self) -> bool:
@@ -945,6 +960,25 @@ class SourceWord:
         trust rtabmap_frame put on the word it sent, so a fit above zero is a graph that knows
         where the cart is and nothing else is."""
         return self.fit is not None and self.fit > 0.0
+
+    @property
+    def heading_explained(self) -> bool | None:
+        """Whether the HEADING this source last proposed can be the heading the pose already has,
+        judged by what the word itself claimed to be worth: ``|delta_deg| <= sqrt(GATE) *
+        sigma_deg``, the same :data:`pepin.fusion.GATE` a fusion applies between two sources, read
+        as a bound on one axis. That is 3.37 of the word's own sigmas — generous for a single
+        direction on purpose, since the whole point is to refuse only a disagreement no covariance
+        can explain. ``None`` when the report carries neither number.
+
+        It is asked because the position agreement alone cannot answer it, and on 2026-09-17 it
+        did not: parked at home, the graph's word sat 0.00 m from the tracker and 100 degrees
+        away from it (``last graph (-9.38, +2.49, -45 deg)`` against a lidar-held +55 deg,
+        ros/maps/rec/20260917_204956_goto_board.log 00:45:23Z), and the gate read "its word is
+        0.00 m from the tracker" and let the drive start.
+        """
+        if self.delta_deg is None or self.sigma_deg is None or self.sigma_deg <= 0.0:
+            return None
+        return abs(self.delta_deg) <= math.sqrt(GATE) * self.sigma_deg
 
 
 def source_words(report: Mapping[str, Any]) -> list[SourceWord]:
@@ -962,16 +996,33 @@ def source_words(report: Mapping[str, Any]) -> list[SourceWord]:
             continue
         delta = entry.get("delta")
         distance: float | None = None
+        turn: float | None = None
         if isinstance(delta, Sequence) and not isinstance(delta, str) and len(delta) >= 2:
-            try:  # the report carries the correction in centimetres
+            try:  # the report carries the correction in centimetres, and its heading in degrees
                 distance = math.hypot(float(delta[0]), float(delta[1])) / 100.0
+                turn = float(delta[2]) if len(delta) >= 3 else None
             except (TypeError, ValueError):
-                distance = None
+                distance = turn = None
+        sigma = entry.get("sigma")
+        sigma_deg: float | None = None
+        if isinstance(sigma, Sequence) and not isinstance(sigma, str) and len(sigma) >= 3:
+            try:  # ...and what the word claimed: two centimetres and a heading in degrees
+                sigma_deg = float(sigma[2])
+            except (TypeError, ValueError):
+                sigma_deg = None
         try:
             fit = None if entry.get("fit") is None else float(entry["fit"])
         except (TypeError, ValueError):
             fit = None
-        words.append(SourceWord(str(name), str(entry.get("health", "")), fit, distance))
+        try:  # the report carries the travel since that source's word in centimetres
+            moved = None if entry.get("moved") is None else float(entry["moved"]) / 100.0
+        except (TypeError, ValueError):
+            moved = None
+        words.append(
+            SourceWord(
+                str(name), str(entry.get("health", "")), fit, distance, moved, turn, sigma_deg
+            )
+        )
     return words
 
 
@@ -999,10 +1050,12 @@ class Preflight:
     ``certainty`` is the pose sure enough to drive on? The fused sigma against
                   :data:`DRIVE_SIGMA_M`, or the fit against :data:`DRIVE_FIT` on a board that
                   publishes no sigma yet.
-    ``agreement`` on a camera-only drive there is no scan-to-map fit at all, so the evidence
-                  that the room under the cart is the room on the map is the pose graph: it has
-                  recognised the place, and its word sits within ``graph_agree_m`` of the
-                  tracker. With the lidar among the sources this check is the lidar itself.
+    ``agreement`` whoever is holding the pose, does their last word agree with the pose they are
+                  holding — a fit above zero (they measured something) sitting within
+                  ``graph_agree_m`` of it. Asked of the HOLDER and never of a source by name:
+                  this check used to read "is it the lidar? then fine; otherwise the graph must
+                  have recognised", which wrote "the lidar is the real one" into the gate and
+                  made camera-only a special case that had to be argued for (2026-09-17).
     """
 
     drive_sigma_m: float = DRIVE_SIGMA_M
@@ -1023,7 +1076,8 @@ class Preflight:
         return all(check.ok for check in checks)
 
     def sources(self, words: Sequence[SourceWord]) -> Check:
-        """Has any enabled source spoken within the patience."""
+        """Has any enabled source ever put a word in — is there evidence behind this pose at
+        all. How OLD that evidence may be is the sigma's question, not this one."""
         if not words:
             return Check(
                 "sources",
@@ -1031,11 +1085,18 @@ class Preflight:
                 "the tracker published no word at all: nothing on /localization/sources"
                 " (is the relocalizer up?)",
             )
-        live = [w for w in words if w.enabled and w.spoke(self.patience_s)]
-        roster = ", ".join(f"{w.name} {w.health}" for w in words) or "no source on the roster"
+        live = [w for w in words if w.enabled and w.spoke]
+        roster = (
+            ", ".join(
+                f"{w.name} {w.health}"
+                + ("" if w.moved_m is None else f" ({w.moved_m:.2f} m driven since)")
+                for w in words
+            )
+            or "no source on the roster"
+        )
         if live:
             return Check("sources", True, roster)
-        return Check("sources", False, f"no source has spoken in {self.patience_s:.0f} s: {roster}")
+        return Check("sources", False, f"no enabled source has ever spoken: {roster}")
 
     def certainty(self, sigma: Sigma | None, fit: float | None) -> Check:
         """Is the pose sure enough to start a drive: the sigma where there is one, the fit
@@ -1069,39 +1130,64 @@ class Preflight:
         )
 
     def agreement(self, words: Sequence[SourceWord]) -> Check:
-        """Where no lidar holds the pose, whether the graph recognises the room and agrees with
-        the tracker about where in it the cart stands."""
-        by_name = {w.name: w for w in words}
-        lidar = by_name.get(LIDAR_SOURCE)
-        if lidar is not None and lidar.enabled and lidar.spoke(self.patience_s):
-            return Check(
-                "agreement", True, f"the lidar is holding the pose ({lidar.health}): matched here"
-            )
-        graph = by_name.get(GRAPH_SOURCE)
-        if graph is None or not graph.enabled:
+        """Whether whoever is holding the pose measured something, and whether what they measured
+        agrees with the pose they are holding.
+
+        Who is holding it is decided by comparison and not by a clock or a name: of the sources
+        that have spoken, the one the cart has driven least since IS the one the current pose
+        rests on. A dead lidar loses the title to the graph as soon as the cart moves past its
+        last word, and a live one keeps it at every speed — with no patience to pick and nothing
+        to tune. The same questions are then asked of whoever that turns out to be, which is
+        what makes a camera-only drive an ordinary drive rather than a case to argue for.
+
+        Agreement is asked in POSITION and in HEADING, because a pose is both and this check used
+        to be only the first: on 2026-09-17 the graph's word sat 0.00 m from the tracker and a
+        hundred degrees away from it, and the gate passed the drive
+        (:attr:`SourceWord.heading_explained`).
+        """
+        holder = self.holding(words)
+        if holder is None:
+            roster = ", ".join(f"{w.name} {w.health}" for w in words) or "no source on the roster"
+            return Check("agreement", False, f"nothing is holding the pose: {roster}")
+        if not holder.recognised:
             return Check(
                 "agreement",
                 False,
-                "camera-only and the graph is not among the sources: nothing recognises the room",
-            )
-        if not graph.spoke(self.patience_s) or not graph.recognised:
-            return Check(
-                "agreement",
-                False,
-                f"camera-only and the graph has recognised nothing ({graph.health},"
-                f" fit {'none' if graph.fit is None else f'{graph.fit:.2f}'}): the cart may be"
+                f"{holder.name} is holding the pose ({holder.health}) but measured nothing"
+                f" (fit {'none' if holder.fit is None else f'{holder.fit:.2f}'}): the cart may be"
                 " anywhere on this map",
             )
-        if graph.delta_m is None:
+        if holder.delta_m is None:
             return Check(
                 "agreement",
                 False,
-                "camera-only and the graph's last word carries no delta: it measured nothing on"
-                " the tracker's last update",
+                f"{holder.name}'s last word carries no delta: there is nothing to say whether it"
+                " agrees with the pose it is holding",
             )
+        turn = (
+            "no heading in its word"
+            if holder.delta_deg is None
+            else f"{holder.delta_deg:+.0f} deg off it"
+            + (
+                ""
+                if holder.sigma_deg is None
+                else f" against the {holder.sigma_deg:.0f} deg it claims"
+            )
+        )
         return Check(
             "agreement",
-            graph.delta_m <= self.graph_agree_m,
-            f"camera-only: the graph recognises the room (fit {graph.fit:.2f}) and its word is"
-            f" {graph.delta_m:.2f} m from the tracker (allowed {self.graph_agree_m:.2f} m)",
+            holder.delta_m <= self.graph_agree_m and holder.heading_explained is not False,
+            f"{holder.name} is holding the pose (fit {holder.fit:.2f}) and its word is"
+            f" {holder.delta_m:.2f} m from the tracker (allowed {self.graph_agree_m:.2f} m),"
+            f" {turn}",
         )
+
+    @staticmethod
+    def holding(words: Sequence[SourceWord]) -> SourceWord | None:
+        """The enabled source the cart has driven the least since its word — the one the pose
+        currently rests on — or ``None`` when none has ever spoken. Ties go to roster order,
+        which puts the lidar first: standing still, every live source is equally the holder and
+        the widest fan is the fair answer. A word from a report that carries no travel at all
+        (an older board) ranks last and wins only when it is the only word there is."""
+        spoken = [w for w in words if w.enabled and w.spoke]
+        return min(spoken, key=lambda w: math.inf if w.moved_m is None else w.moved_m, default=None)

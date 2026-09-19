@@ -86,16 +86,28 @@ def off_the_moved_wall(view: OccupancySlice, shift: PlanarShift) -> np.ndarray:
 
 # ---- the move itself -------------------------------------------------------------------------
 def test_a_correction_carries_the_wall_by_exactly_what_it_says() -> None:
-    """10 cm and 3 degrees of graph correction: every wall cell in the slice a tracker matches
-    on stands where the correction puts it, within the voxel that cell is."""
+    """10 cm and 3 degrees of graph correction: every wall cell in the slice a tracker matches on
+    stands where the correction puts it, within the half voxel the resample quantises to.
+
+    THE MAXIMUM IS DERIVED AND UNCHANGED; THE MEDIAN MOVED WITH THE PAINTING LAW (2026-09-18). One
+    voxel is the sum of two halves and always was: a cell is called occupied while the crossing is
+    within half a voxel of it (``SliceLaw.occupied_t``), and ``nearest`` — the default resample
+    since the footprint law reversed the two (see the law comparison below) — takes the source
+    column within half a voxel. The old median bound of 0.02 was not derived: it described a volume
+    painted before ``LidarLaw.beam_footprint``, whose box came out as 718 occupied cells clustered
+    on the surface. The footprint law keeps only the 430 a return resolved, and a thin wall's cells
+    are spread across the voxel instead of piled at its centre, so the honest median is half of the
+    maximum. Measured: 5.00 cm and 2.44 cm against the 5.00 and 2.50 those two sentences allow.
+    """
     world = room()
     before = world.lidar_slice().counts()["occupied"]
     shift = PlanarShift(0.10, -0.04, math.radians(3.0))
-    world.shift(shift)
+    world.shift(shift)  # the default law: nearest
     view = world.lidar_slice()
     off = off_the_moved_wall(view, shift)
-    assert off.max() <= 0.05, "every occupied cell is on the moved wall, within one voxel"
-    assert np.median(off) <= 0.02, "and the bulk of them within half of that"
+    voxel = view.resolution_m
+    assert off.max() <= voxel, "half a voxel of cell plus half a voxel of resample, and no more"
+    assert np.median(off) <= 0.5 * voxel, "spread across that voxel, not piled at its edge"
     assert view.counts()["occupied"] >= 0.8 * before, "it is still a room, not a smear"
     assert view.origin == (-3.0, -3.0) and view.resolution_m == 0.05, "the grid never moves"
 
@@ -295,10 +307,19 @@ def test_the_lidars_claim_does_not_grow_by_a_ring_at_every_move() -> None:
 
 
 def test_the_nearest_law_moves_the_same_room_without_thinning_it() -> None:
-    """The other resample law the node carries (``follow_correction_law`` nearest): every cell
-    the map had it still has, each within half a voxel of where the correction points, and the
-    lidar's claim travels whole. It buys that with quantisation, which is why it is not the
-    default — and why it is a live flag rather than a decision (scratch/volume_shift_cost.py)."""
+    """The two resample laws held against each other, and the order they come in reversed on
+    2026-09-18: ``nearest`` keeps the room, ``blend`` widens it.
+
+    ``blend`` used to be the default because a weighted average THINS a wall — a surface averaged
+    with the free space in front of it — and the sensors repaint a thin wall while they never
+    repaint a bias. ``LidarLaw.beam_footprint`` took the premise away: a far crossing now weighs
+    only the share of its own disc that the voxel covers, so the free space in front of a wall is
+    weak while the return is full weight, and the average is pulled INTO the wall. Measured here:
+    blend takes 430 occupied cells to 516 — a wall two cells thick — with its worst cell 5.85 cm
+    from where the correction points, past the voxel; nearest takes 430 to 431 with its worst at
+    exactly half a voxel. So this test now pins the reversal rather than the old ordering, and the
+    node's ``follow_correction_law`` default moved with it.
+    """
     world, sharp = room(), room()
     shift = PlanarShift(0.10, -0.04, math.radians(3.0))
     before = world.lidar_slice().counts()["occupied"]
@@ -306,9 +327,14 @@ def test_the_nearest_law_moves_the_same_room_without_thinning_it() -> None:
     claim = int(np.count_nonzero(world.lidar_weight[:, :, lo:hi].max(axis=2) > 0.0))
     world.shift(shift, "blend")
     sharp.shift(shift, "nearest")
-    keen = sharp.lidar_slice()
-    assert keen.counts()["occupied"] >= before * 0.95, "nearest keeps the cells blend averages"
-    assert keen.counts()["occupied"] > world.lidar_slice().counts()["occupied"]
+    keen, blended = sharp.lidar_slice(), world.lidar_slice()
+    assert keen.counts()["occupied"] >= before * 0.95, "nearest keeps every cell the map had"
+    assert keen.counts()["occupied"] <= before * 1.05, "...and invents none: it is a resample"
+    assert blended.counts()["occupied"] > keen.counts()["occupied"] * 1.1, (
+        "blend is the one that widens the wall now, by a fifth of the cells"
+    )
+    assert off_the_moved_wall(keen, shift).max() <= keen.resolution_m, "a voxel, as derived above"
+    assert off_the_moved_wall(blended, shift).max() > blended.resolution_m, "and blend is past it"
     assert off_the_moved_wall(keen, shift).max() <= 0.05, "and each is on the moved wall"
     moved_claim = int(np.count_nonzero(sharp.lidar_weight[:, :, lo:hi].max(axis=2) > 0.0))
     assert moved_claim <= claim + 5, "a nearest move cannot spread the lidar's claim either"

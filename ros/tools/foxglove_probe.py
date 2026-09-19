@@ -41,7 +41,7 @@ OP_CLOSE = 0x8
 DEFAULT_REQUIRED = (
     "/scan",
     "/tf",
-    "/map",
+    "/map_tracked|/map",
     "/map_camera",
     "/tracker_pose",
     "/fusion/surface",

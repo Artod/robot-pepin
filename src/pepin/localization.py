@@ -36,9 +36,11 @@ from pepin.fusion import (
     PoseMeasurement,
     at_edge,
     covariance_from_score_surface,
+    explains,
     from_fit,
     from_peak,
     fuse,
+    odometry_covariance,
     peak_temperature,
 )
 from pepin.mapping import GridSpec, OccupancyGrid
@@ -68,6 +70,7 @@ SWITCHES = (
     "fusion",
     "covariance",
     "self_check",
+    "verify_remote",
 )
 
 logger = logging.getLogger(__name__)
@@ -172,6 +175,7 @@ class TrackStats:
     fused: int = 0  # updates whose correction was fused from more than one source
     rejected: int = 0  # source measurements a fusion left out for disagreeing with the surest
     bound: int = 0  # updates the anchor's match sat on the window's edge and corrected alone
+    unverified: int = 0  # remote-only corrections the belief could not account for (no local scan)
 
     def summary(self) -> str:
         """One log line, mean/min/max where a distribution matters; the per-source fits and
@@ -182,7 +186,8 @@ class TrackStats:
             f"carries {self.carries}, weak {self.weak}, lost {self.lost}, "
             f"silenced {self.silenced_points} returns over {self.silenced_scans} scans, "
             f"fit {self.fit.text()} at the match / {self.published_fit.text()} published, "
-            f"max step {self.step_xy_m * 100:.1f} cm / {self.step_deg:.2f} deg"
+            f"max step {self.step_xy_m * 100:.1f} cm / {self.step_deg:.2f} deg, "
+            f"unverified {self.unverified}"
         )
         if set(self.source_fit) - {LIDAR}:
             per_source = ", ".join(
@@ -240,6 +245,7 @@ class Localizer:
         fusion: bool = True,  # off: the widest enabled source corrects alone, the rest only report
         covariance: str = PEAK,  # how a match's covariance is read: its score peak, or the fit
         self_check: bool = True,  # every source's covariance widened by its own repeatability
+        verify_remote: bool = True,  # a remote word alone is held against the belief (see below)
     ) -> None:
         self._grid = grid
         # The tracker wants a continuous correction: quantised to the search step it corrects the
@@ -257,6 +263,7 @@ class Localizer:
         self.sources = sources if sources is not None else SourceRegistry()
         self.fusion = fusion
         self.covariance = covariance
+        self.verify_remote = verify_remote
         # Each scan source matched HERE vouches for itself: its match is checked against its own
         # previous match carried over the odometry, and its covariance is widened by what that
         # says about it (pepin.selfcheck). Never against another source's pose. Measurements
@@ -266,6 +273,14 @@ class Localizer:
         # (the anchor's own when it stood alone or was a bound), who anchored, and the pose it
         # all corrected from — what /localization/sources shows (``sources_report``).
         self.measurements: list[PoseMeasurement] = []
+        # Where the ODOMETRY stood when each source last put a word in, and where it stands now:
+        # the difference is how far the cart has driven on that source's last vouching, which is
+        # what "silent" actually means. A source that has said nothing while the cart has not
+        # moved has said nothing because nothing happened — RTAB-Map adds a node per metre of
+        # travel, so a parked cart hears from the graph never, and a silence counted in seconds
+        # called the only source of a camera-only drive dead within three of them (2026-09-17).
+        self._spoke_at: dict[str, Pose2D] = {}
+        self._last_word: dict[str, dict[str, Any]] = {}
         # ...and the lattice each of those was read off, by source: what a calibration of the
         # peak temperature needs (scratch/peak_temperature.py) and what a report may read the
         # sharpness of the last match from. Emptied at the head of every update, so a source
@@ -332,6 +347,7 @@ class Localizer:
             f"sources {','.join(self.sources.enabled) or 'none'}, "
             f"fusion {'on' if self.fusion else 'off'}, "
             f"covariance {self.covariance}, "
+            f"verify_remote {'on' if self.verify_remote else 'off'}, "
             f"{self._self_check.text()}"
         )
 
@@ -360,14 +376,28 @@ class Localizer:
         else:
             raise ValueError(f"{name}: not a switch of the tracker")
 
-    def sources_report(self, now: float) -> dict[str, Any]:
-        """Every source's word on the last update, ready for JSON: the anchor, the sources
-        fused, the ones a fusion rejected, and per source on the roster its health at ``now``
-        (``off`` when the flag has it off) with, when it measured, its fit, the correction it
-        proposed from the prediction (``delta``: cm, cm, deg), the roots of its covariance
-        diagonal (``sigma``: cm, cm, deg), whether its match was a bound (``edge``) and what
-        the source's own repeatability says about its covariance (``self_check``: the running
-        ratio and the factor it was widened by, :class:`pepin.selfcheck.SelfCheck`)."""
+    def sources_report(self, now: float, odom: Pose2D | None = None) -> dict[str, Any]:
+        """Every source's LAST word, ready for JSON: the anchor, the sources fused, the ones a
+        fusion rejected, and per source on the roster its health at ``now`` (``off`` when the
+        flag has it off) with, once it has ever measured, the word it put in — its fit, the
+        correction it proposed from the prediction it was measured against (``delta``: cm, cm,
+        deg), the roots of its covariance diagonal (``sigma``: cm, cm, deg), whether its match
+        was a bound (``edge``), what the source's own repeatability said about its covariance
+        (``self_check``: the running ratio and the factor it was widened by,
+        :class:`pepin.selfcheck.SelfCheck`) — and how far the cart has DRIVEN since (``moved``,
+        cm).
+
+        The last word and not this update's, because the two differ exactly where a reader needs
+        the answer: an update that matched nothing clears ``measurements``, and a report built
+        from that said the graph had never spoken one tick after it had. ``moved`` is the number
+        that puts an age on that word, and it is a DISTANCE because that is what the odometry
+        carrying the pose since then integrates — a parked cart's last word describes where it
+        stands however long ago it was said. Who is holding the pose now is then a comparison
+        between these numbers and needs no threshold at all.
+
+        ``odom`` is where the odometry stands now — the caller's newest, since this may be
+        published on a heartbeat with no update behind it; it falls back to the last update's.
+        """
         fused = self.fused
         report: dict[str, Any] = {
             "anchor": self.anchor,
@@ -376,30 +406,38 @@ class Localizer:
             "fit": round(self.confidence, 3),
             "sources": {},
         }
-        by_name = {m.source: m for m in self.measurements}
+        here = odom if odom is not None else self._last_odom
         for name in self.sources.names:
             health = self.sources.health(name).text(now) if self.sources.is_enabled(name) else "off"
-            entry: dict[str, Any] = {"health": health}
-            measurement = by_name.get(name)
-            if measurement is not None:
-                p = self.prediction
-                sx, sy, st = measurement.sigmas
-                entry.update(
-                    fit=round(measurement.fit, 3),
-                    delta=[
-                        round((measurement.x - p.x) * 100.0, 2),
-                        round((measurement.y - p.y) * 100.0, 2),
-                        round(math.degrees(wrap_angle(measurement.yaw - p.theta)), 2),
-                    ],
-                    sigma=[round(sx * 100.0, 2), round(sy * 100.0, 2), round(math.degrees(st), 2)],
-                    edge=measurement.edge,
-                    self_check=[
-                        round(self._self_check.record(name).ratio, 3),
-                        round(self._self_check.inflation(name), 3),
-                    ],
+            entry: dict[str, Any] = {"health": health, **self._last_word.get(name, {})}
+            spoke_at = self._spoke_at.get(name)
+            if spoke_at is not None and here is not None:
+                entry["moved"] = round(
+                    math.hypot(here.x - spoke_at.x, here.y - spoke_at.y) * 100.0, 1
                 )
             report["sources"][name] = entry
         return report
+
+    def _remember_word(self, measurement: PoseMeasurement, odom: Pose2D) -> None:
+        """Keep this source's word and where the odometry stood when it was said, so the report
+        can put an age on it later (:meth:`sources_report`)."""
+        p = self.prediction
+        sx, sy, st = measurement.sigmas
+        self._last_word[measurement.source] = {
+            "fit": round(measurement.fit, 3),
+            "delta": [
+                round((measurement.x - p.x) * 100.0, 2),
+                round((measurement.y - p.y) * 100.0, 2),
+                round(math.degrees(wrap_angle(measurement.yaw - p.theta)), 2),
+            ],
+            "sigma": [round(sx * 100.0, 2), round(sy * 100.0, 2), round(math.degrees(st), 2)],
+            "edge": measurement.edge,
+            "self_check": [
+                round(self._self_check.record(measurement.source).ratio, 3),
+                round(self._self_check.inflation(measurement.source), 3),
+            ],
+        }
+        self._spoke_at[measurement.source] = odom
 
     def _recovery_window(self) -> SearchWindow:
         """Recovery window sized to the uncertainty: grows with motion since the last good fit.
@@ -682,6 +720,56 @@ class Localizer:
         the fit, and the isotropic covariance that confidence buys (:func:`pepin.fusion.from_fit`).
         The tracker's own word on one scale with everybody else's."""
         return from_fit(self.pose, self.confidence, TRACKER, stamp)
+
+    def _explained_here(self, fused: PoseMeasurement, prediction: Pose2D) -> bool:
+        """Whether a correction made ENTIRELY of remote words may move the pose: does it agree
+        with this tracker's own belief within what the two covariances allow
+        (:func:`pepin.fusion.explains`, the same :data:`pepin.fusion.GATE` a fusion applies
+        between two sources)? False also LEAVES the pose where it was and marks the update as
+        having measured nothing, so the uncertainty grows and every gate downstream reads it.
+
+        This exists because the gate inside :func:`pepin.fusion.fuse` needs two measurements and
+        this case has one. With the lidar muted every update on 2026-09-17 carried exactly one
+        word — the pose graph's — so nothing was gated (the tapes report ``fused 0, rejected 0``),
+        and words whose heading was about 100 degrees off the room walked the tracker's heading
+        with it while the cart stood still: at 00:45Z the graph said (-9.38, +2.49, -45 deg) while
+        the lidar held +55 deg, and by 01:18Z the tracker had gone over to the graph's heading
+        (ros/maps/rec/20260917_204956_goto_board.log, 20260917_212759_goto_board.log; the cart
+        moved 4 cm in the whole half hour, by its own odometry).
+
+        A word that cannot be checked against a local match may not re-seed the belief; it may
+        only fail to confirm it. The pose then stands on the last word that WAS verified and its
+        spread grows along the odometry, which is what the drive gates are for. Nothing is tuned
+        here: as the belief loses confidence it widens, and a wide belief stops refusing — an
+        unsure tracker yields to a word, a sure one does not.
+
+        The belief is taken at the PREDICTION and widened by what the odometry that carried it
+        there costs (:func:`pepin.fusion.odometry_covariance` over the motion accumulated since
+        the last match that fitted). Without that term the belief over-claims exactly when it has
+        been coasting — which is when a remote word matters most: a lidar that drops out for a
+        second leaves a prediction the wheels' turn error has moved by tens of centimetres, and
+        the camera's perfectly good word then looks like a disagreement (the node's own dead-lidar
+        replay, tests/unit/test_relocalizer_node.py).
+        """
+        coasting = from_fit(prediction, self.confidence, TRACKER, fused.stamp)
+        belief = replace(
+            coasting, covariance=coasting.covariance + odometry_covariance(self._drift)
+        )
+        if explains(belief, fused):
+            return True
+        self.stats.unverified += 1
+        self.pose = prediction
+        self.confidence = self.published_fit = 0.0
+        self.fused = self.anchor = None
+        self.weak_scans += 1
+        logger.warning(
+            "the %s's word (%+.2f, %+.2f, %+.0f deg) is not what this pose could be "
+            "(%+.2f, %+.2f, %+.0f deg at fit %.2f): nothing local can check it, so the pose stays "
+            "and its spread grows",
+            fused.source, fused.x, fused.y, math.degrees(fused.yaw),
+            belief.x, belief.y, math.degrees(belief.yaw), belief.fit,
+        )  # fmt: skip
+        return False
 
     def refine(self, pose: Pose2D, points: NDArray[np.float64]) -> tuple[MatchResult, float]:
         """A coarse candidate sharpened with a medium and then the tracking window."""
@@ -978,7 +1066,11 @@ class Localizer:
         flag has off is ignored here as a scan of it would be. With no scan at all (a dead
         lidar) they correct the pose by themselves: the belief is then whatever the remote
         matcher says, blended in under the same gain, and the fit reported is the one it
-        measured — there is no scan here to measure a fit on.
+        measured — there is no scan here to measure a fit on. With ``verify_remote`` on, such a
+        correction must first agree with this tracker's own belief within what the two
+        covariances allow (:meth:`_explained_here`); one that does not leaves the pose where it
+        was and reports that this update measured nothing, because there is no local match here
+        to tell which of the two is right.
 
         ``trust_odometry=False`` discards the wheel step (slipping wheels): the pose is
         corrected from where it was, and the step is still consumed so it is never re-applied.
@@ -1065,6 +1157,7 @@ class Localizer:
         ] + external
         for measurement in self.measurements:
             stats.source_fit.setdefault(measurement.source, Running()).add(measurement.fit)
+            self._remember_word(measurement, odom)
         anchored = (
             next(m for m in self.measurements if m.source == anchor.source)
             if anchor is not None
@@ -1080,6 +1173,8 @@ class Localizer:
         if fused is None:
             fused = fuse(self.measurements)
         assert fused is not None  # neither usable nor external is empty
+        if anchor is None and self.verify_remote and not self._explained_here(fused, prediction):
+            return self.pose
         self.fused, self.anchor = fused, None if anchor is None else anchor.source
         if len(self.measurements) > 1 and self.fusion:
             if anchored is not None and anchored.edge:

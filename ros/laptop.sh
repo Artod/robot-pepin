@@ -13,7 +13,13 @@
 #   ros/laptop.sh vslam --resume  SLAM from the session's existing database instead of empty
 #   ros/laptop.sh vslam --world-map  /map comes from the fused volume (pepin.worldmap) instead of
 #                                 RTAB-Map's grid: one map both sensors write into, snapshotted
-#   ros/laptop.sh vslam --fresh   delete this mode's database before the run
+#   ros/laptop.sh vslam --fresh   build the room from nothing: this mode's database is deleted and
+#                            no volume snapshot is resumed, whatever is on disk. The existing
+#                            ros/maps/*.world.npz are left alone
+# The volume IS the map and its only file is /maps/<room>.world.npz — no pgm is read or written.
+# Which room is normally DETECTED (a place recogniser publishes the name on /place/room); until
+# that node exists, `start` records the board's map name in ros/.map and vslam passes its stem as
+# the room. --room=NAME overrides it.
 #   ros/laptop.sh vslam --no-vo   no visual odometry: rgbd_odometry and pepin_bringup.visual_odometry
 #                            do not start, and the board's EKF is the wheels and the gyro alone
 #   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
@@ -148,7 +154,16 @@ case "${1:-start}" in
         # read once on the only path that talks to it. This subcommand asks the board nothing.
         MODE="$(cat "$HERE/.mode" 2>/dev/null || echo vision)"
         if [ "$MODE" = slam ]; then SLAM=true; else SLAM=false; fi
-        CAMERA_ONLY=false; RESUME=false; FRESH=false; WORLD_MAP=false; SEED_MAP=""
+        CAMERA_ONLY=false; RESUME=false; FRESH=false; WORLD_MAP=false; RESUME_VOLUME=true
+        # WHICH ROOM. The volume resumes /maps/<room>.world.npz and nothing else — no pgm is a
+        # seed any more. The name should come from a place recogniser (/place/room, the node's
+        # adopt_room flag); until that exists it comes from the map name `start` read off the
+        # board and recorded in ros/.map, reduced to its stem, since that is the only name this
+        # room has. SLAM names none: nowhere is recognised there.
+        ROOM=""
+        if [ "$SLAM" != true ] && [ -r "$HERE/.map" ]; then
+            ROOM="$(basename "$(cat "$HERE/.map")" .yaml)"
+        fi
         # The camera as a third odometry (rtabmap_odom's rgbd_odometry + pepin_bringup.visual_odometry):
         # on unless --no-vo. It costs this laptop a quarter of a core and the robot nothing at
         # all until the node's vo_publish flag is turned on (ros/flags.sh set visual_odometry
@@ -165,15 +180,14 @@ case "${1:-start}" in
                 --camera-only) CAMERA_ONLY=true ;;
                 --resume) RESUME=true ;;
                 --world-map) WORLD_MAP=true ;;
-                # The served map the fused volume's lidar layer starts as, and whose cell
-                # lattice its grid is snapped to (pepin_bringup.depth_fusion): the path as the
-                # container sees it, /maps/NAME.yaml. Without it the volume grows from the
-                # sensors alone, as it always has.
-                --seed-map=*) SEED_MAP="${arg#--seed-map=}" ;;
+                # The room the volume belongs to, which names its file
+                # (/maps/<room>.world.npz, pepin_bringup.depth_fusion). Normally detected; this
+                # is the override, and a bare name, not a path.
+                --room=*) ROOM="${arg#--room=}" ;;
                 --fresh) FRESH=true ;;
                 --neck) STATIC_CAMERA_TF=false ;;
                 --no-vo) VO=false ;;
-                *) echo "usage: ros/laptop.sh vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck] [--world-map] [--no-vo] [--seed-map=/maps/NAME.yaml]"; exit 2 ;;
+                *) echo "usage: ros/laptop.sh vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck] [--world-map] [--no-vo] [--room=NAME]"; exit 2 ;;
             esac
         done
         if [ "$FRESH" = true ] && [ "$SLAM" = true ]; then
@@ -182,6 +196,16 @@ case "${1:-start}" in
         elif [ "$FRESH" = true ]; then
             rm -f "$HERE"/maps/rtabmap.db "$HERE"/maps/rtabmap.db-*
             echo "vslam: ros/maps/rtabmap.db deleted; RTAB-Map starts an empty map"
+        fi
+        # --fresh is the OVERRIDE of the detection, not the way to use it: no snapshot is
+        # resumed and the volume is born empty under the cart with a new identity minted for it
+        # (pepin.worldmap.MapIdentity). The room's name is kept, so the run still writes to that
+        # room's file; nothing is deleted before it does, so a --fresh run is a measurement and
+        # not a loss.
+        if [ "$FRESH" = true ]; then
+            RESUME_VOLUME=false
+            echo "vslam --fresh: the volume is born empty (no snapshot resumed); the existing"
+            echo "               ros/maps/*.world.npz are left untouched until it saves"
         fi
         pepin_remove_container pepin-vslam
         # The depth network on the laptop's GPU (ros/depth_host.sh): 20 ms a frame on Metal
@@ -201,7 +225,7 @@ case "${1:-start}" in
             -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} \
             "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "slam:=$SLAM" "camera_only:=$CAMERA_ONLY" "resume:=$RESUME" "world_map:=$WORLD_MAP" \
-            ${SEED_MAP:+"seed_map:=$SEED_MAP"} "vo:=$VO" >/dev/null  # an empty seed_map:= is a malformed launch argument: SLAM mode passes none (2026-09-14)
+            ${ROOM:+"room:=$ROOM"} "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null  # an empty room:= is a malformed launch argument: SLAM mode passes none (2026-09-14)
         [ "$SLAM" = true ] \
             && echo "vslam up in SLAM mode (camera_only $CAMERA_ONLY, resume $RESUME, static camera tf $STATIC_CAMERA_TF): the map grows on /map; board must be on ros/thin.sh slam. Foxglove ws://localhost:8765, save with ros/map.sh save NAME" \
             || echo "vslam up beside the known map (static camera tf $STATIC_CAMERA_TF): Foxglove at ws://localhost:8765, ros/laptop.sh logs vslam"
@@ -245,6 +269,11 @@ else
 fi
 # The mode the board is in, recorded for `ros/laptop.sh vslam`, which never asks the board itself.
 printf '%s\n' "$MODE" > "$HERE/.mode"
+# ...and WHICH MAP it serves, for the same reason: its stem is the only name this room has until a
+# place recogniser publishes one, and the volume's file is named after the room, so vslam must
+# know it without an ssh of its own. Only written where the board actually serves a map (split
+# mode); in vision and slam it is removed, so a stale name cannot resume the wrong room.
+if [ "$SIDE" = board ] && [ -n "${MAP:-}" ]; then printf '%s\n' "$MAP" > "$HERE/.map"; else rm -f "$HERE/.map"; fi
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 pepin_remove_container pepin-laptop pepin-zenoh
 # The board's bridge must be alive before this side connects: its REST admin answers when its

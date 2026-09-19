@@ -228,6 +228,7 @@ def graph_measurement(
     fit: float = 1.0,
     floor_xy_m: float = GRAPH_FLOOR_XY_M,
     floor_yaw_deg: float = GRAPH_FLOOR_YAW_DEG,
+    extra: Matrix | None = None,
 ) -> RemoteMeasurement:
     """A pose graph's verdict about where the cart is, as a measurement on the SAME map the
     tracker drives on: the place the graph has the cart at, moved onto the map by the anchor.
@@ -256,6 +257,13 @@ def graph_measurement(
     candidate channel reads as a score. 1.0 by default: a caller with no trust clock claims what
     this function claimed before there was one.
 
+    ``extra`` is a 3x3 the caller adds to that floor: what the ANCHOR ITSELF is uncertain by, in
+    the map frame, already propagated through this very composition
+    (:meth:`pepin.graphtie.Tie.word_covariance`). It is a matrix and not a radius because the
+    anchor's uncertainty is not isotropic — a rotation known to a degree costs nothing where it was
+    measured and 7 cm four metres away — and because that off-diagonal coupling is exactly what
+    tells the fusion which direction of this word to believe.
+
     Returns the measurement, ready to travel (:meth:`RemoteMeasurement.to_json`).
     """
     place = compose(anchor, pose)
@@ -263,6 +271,8 @@ def graph_measurement(
     covariance: NDArray[np.float64] = np.diag(
         [floor_xy_m**2, floor_xy_m**2, math.radians(floor_yaw_deg) ** 2]
     )
+    if extra is not None:
+        covariance = np.asarray(covariance + np.asarray(extra, dtype=float), dtype=np.float64)
     return RemoteMeasurement(
         x=x,
         y=y,
@@ -323,9 +333,11 @@ class MeasurementGate:
         self_check: bool = True,
         remote_floor_xy_m: float = REMOTE_FLOOR_XY_M,
         remote_floor_yaw_deg: float = REMOTE_FLOOR_YAW_DEG,
+        carry_stale_words: bool = True,
     ) -> None:
         self.sources = sources
         self.measurement_max_age_s = measurement_max_age_s
+        self.carry_stale_words = carry_stale_words
         self.remote_floor_xy_m = remote_floor_xy_m  # 0 switches the floor off
         self.remote_floor_yaw_deg = remote_floor_yaw_deg
         # Every remote source vouches for itself here, BEFORE the sources are fused into one
@@ -345,6 +357,7 @@ class MeasurementGate:
 
     switches: ClassVar[tuple[str, ...]] = (
         "measurement_max_age_s",
+        "carry_stale_words",
         "self_check",
         "remote_floor_xy_m",
         "remote_floor_yaw_deg",
@@ -360,6 +373,8 @@ class MeasurementGate:
             self.remote_floor_yaw_deg = float(value)
         elif name == "measurement_max_age_s":
             self.measurement_max_age_s = float(value)
+        elif name == "carry_stale_words":
+            self.carry_stale_words = bool(value)
         else:
             raise ValueError(f"{name}: not a switch of the measurement gate")
 
@@ -433,13 +448,25 @@ class MeasurementGate:
         or an empty list when the source is switched off or nothing survives the carry.
 
         Each is moved from the moment of its own scan to ``stamp`` over the odometry between
-        the two (:func:`pepin.fusion.carried`) and then consumed, whatever became of it: one
-        that the trail cannot reach (``uncovered``) or that is older than
-        :attr:`measurement_max_age_s` (``stale``) is counted and dropped, because a measurement
-        the carry cannot honestly move is not evidence about this instant. The survivors are
-        fused by their information with the usual disagreement gate, and the result is renamed
-        to :attr:`name`: the tracker fuses one camera word with the lidar's, and which sources
-        it was made of is in this gate's own report.
+        the two (:func:`pepin.fusion.carried`) and then consumed, whatever became of it. What
+        bounds the age is the ODOMETRY the board actually holds: a word whose own moment the trail
+        cannot reach is ``uncovered`` and dropped, because nothing can honestly move it here. A
+        word the trail does reach is CARRIED, and what the carry costs is already in its covariance
+        — :func:`pepin.fusion.odometry_covariance` over that motion, this cart's measured 2 % per
+        metre and 0.7 of every reported turn — so an old word arrives as a WIDE word rather than as
+        no word at all, which is what an information filter is for.
+
+        With ``carry_stale_words`` off the old rule comes back: a word older than
+        :attr:`measurement_max_age_s` is counted ``stale`` and dropped. That constant cost the
+        stack a fifth of the camera's evidence: over the tapes of 2026-09-17 the camera's words
+        arrived 272-364 ms old at the median with a p90 of 607-802 ms against a budget of 500 ms,
+        and 892 of 6037 `depth` words and 916 of 5694 `contact` words on tape 0374 alone were over
+        it on arrival (scratch/word_age.py) — dropped for being late by less than one carry's worth
+        of uncertainty.
+
+        The survivors are fused by their information with the usual disagreement gate, and the
+        result is renamed to :attr:`name`: the tracker fuses one camera word with the lidar's, and
+        which sources it was made of is in this gate's own report.
         """
         taken: list[PoseMeasurement] = []
         if not self.enabled():
@@ -448,7 +475,7 @@ class MeasurementGate:
         for source, remote in list(self._pending.items()):
             del self._pending[source]
             age = stamp - remote.stamp
-            if age > self.measurement_max_age_s:
+            if not self.carry_stale_words and age > self.measurement_max_age_s:
                 self._count("stale")
                 continue
             at_scan = odometry.at(remote.stamp)

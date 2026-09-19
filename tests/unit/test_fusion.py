@@ -23,6 +23,7 @@ from pepin.fusion import (
     carried,
     covariance_from_score_surface,
     disagreement,
+    explains,
     from_peak,
     fuse,
     odometry_covariance,
@@ -427,3 +428,19 @@ def test_a_carried_measurement_is_less_sure_than_the_one_that_was_measured() -> 
     assert math.sqrt(unmoved.covariance[0, 0]) == pytest.approx(
         math.sqrt(measured.covariance[0, 0] + ODOM_XY_FLOOR_M**2)
     )
+
+
+def test_one_measurement_is_never_gated_by_fuse_but_can_be_asked_about() -> None:
+    """Why ``explains`` exists: ``fuse`` gates a measurement against the SUREST one, so a lone
+    word passes through untouched — which is every camera-only update of 2026-09-17. The same
+    question asked against a belief refuses the word the tape recorded (the graph 100 deg out
+    against a lidar-held pose) and admits the one it recorded working (0.2-0.9 cm, a few deg)."""
+    belief = measurement(0.5, 0.0, math.radians(55.0), 0.08, 0.08, math.radians(5.0), "tracker")
+    lie = measurement(0.5, 0.0, math.radians(-45.0), 0.20, 0.20, math.radians(8.0), "graph")
+    honest = measurement(0.5, 0.0, math.radians(58.0), 0.20, 0.20, math.radians(8.0), "graph")
+    assert fuse([lie]) is lie, "one measurement is returned as it came: nothing to disagree with"
+    assert fuse([lie]).rejected == ()  # type: ignore[union-attr]
+    assert not explains(belief, lie) and explains(belief, honest)
+    wide = measurement(0.5, 0.0, math.radians(55.0), 0.35, 0.35, math.radians(23.0), "tracker")
+    assert explains(wide, lie) is False, "even a fit-of-zero belief denies a hundred degrees"
+    assert explains(wide, measurement(0.5, 0.0, math.radians(20.0), 0.2, 0.2, math.radians(8.0)))

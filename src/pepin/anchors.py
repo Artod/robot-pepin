@@ -1,25 +1,33 @@
-"""The anchor between a lidar map and a pose graph, kept on disk beside the map.
+"""The one-seating anchor file, and the seating test every tie measurement has to pass.
 
 A pose graph built on the filter's odometry starts wherever that odometry's origin happens to be:
 its nodes know the shape of the flat and nothing about where the lidar map's origin sits. ONE
-transform ties the two — ``map <- graph``, the ANCHOR (:func:`pepin.measurements.graph_anchor`) —
-and it is a property of the PAIR (this map, this graph database), not of a session. The same
-database opened again beside the same map deserves the same anchor; only a new database, or a new
-map, needs a new one.
+transform ties the two — ``map <- graph`` (:func:`pepin.measurements.graph_anchor`) — and it is a
+property of the PAIR (this map, this graph database), not of a session. The same database opened
+again beside the same map deserves the same transform; only a new database, or a new map, needs
+a new one.
 
-So it is written where the pair can find it: ``<map id>.graph_anchor.json`` beside the map, named
-by the map's own identity (``pepin_bringup.msgs.map_id``, ``239x215@-18.53,-4.38``) with the
-characters a file name would rather not carry replaced. The file carries that identity inside it
-too: a name can collide, an identity cannot.
+Two things live here. The first is the SEATING TEST (:func:`seating_refusal`): what the tracker's
+own error bar must be for a moment to be worth measuring the tie from at all. A fit is not an
+error bar — at the charger, along a sofa, the lidar's seatings spread up to 55 cm in y at fit
+0.67-0.79 because the scan is pinned in one axis only — so the gate is the published covariance
+and not the score. The second is the old ONE-SEATING FILE, ``<map id>.graph_anchor.json`` beside
+the map, named by the map's own identity (``pepin_bringup.msgs.map_id``,
+``239x215@-18.53,-4.38``) with the characters a file name would rather not carry replaced. The
+file carries that identity inside it too: a name can collide, an identity cannot.
 
-What the file buys is the wake-up. On the charger the cart's last pose is known, but a lidar-less
-start has nothing that says where the cart is on the map; with the anchor on file, the graph
-recognising the place IS the answer, and the tracker is told before its first scan.
+That file is now a STARTING POINT and nothing more. A transform fitted to one seating carries
+that seating's lever arm into every word the graph ever says — re-measured from another single
+seating across an RTAB-Map restart on 2026-09-17 it moved 0.40 m and 6.45 deg — and it used to
+be RE-LEARNED at runtime whenever the graph and the lidar disagreed for five seconds, which is
+fitting a constant to a variable and is how camera-only acquired a systematic offset. The tie is
+measured over MANY places instead (:mod:`pepin.graphtie`), and this file is read only until the
+first pairs exist, with the error bar that measurement gave it
+(:data:`pepin.graphtie.FILE_TIE_SIGMA_M`).
 
-What it costs is staleness. The odom frame the graph rides resets when the board restarts, and
-the anchor learned in the previous session then points at nothing. :class:`AnchorWatch` is the
-answer to that: with the lidar driving and its fit good, a disagreement that HOLDS is evidence
-the anchor is stale, and one that does not hold is a closure landing.
+What the file still buys is the wake-up. On the charger the cart's last pose is known, but a
+lidar-less start has nothing that says where the cart is on the map; with a tie on disk, the
+graph recognising the place IS the answer, and the tracker is told before its first scan.
 """
 
 from __future__ import annotations
@@ -33,14 +41,6 @@ from pathlib import Path
 from pepin.odometry import Pose2D
 
 SUFFIX = ".graph_anchor.json"
-# What "the anchor no longer holds" means. A loop closure moves the graph's word by centimetres
-# to a few tens of them (measured 2026-09-14: 2.2-3.2 cm median against the lidar truth on a
-# printer errand), so half a metre is past anything a closure does; 20 degrees is past anything
-# but a frame that has moved under the graph. Five seconds is what tells the two apart: a closure
-# lands and the word is back, a stale anchor stays wrong for as long as one looks at it.
-RELEARN_GAP_M = 0.5
-RELEARN_GAP_DEG = 20.0
-RELEARN_HOLD_S = 5.0
 # What a seating must be worth for the WHOLE graph's frame to be learned from it. A fit is not an
 # error bar: at "home" (the charger, along a sofa) the lidar's seatings spread up to 55 cm in y
 # within minutes at fit 0.67-0.79, because the scan there is pinned in one axis only — and an
@@ -115,19 +115,69 @@ def map_slug(map_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9.+-]", "_", map_id)
 
 
+def room_of(provenance: str) -> str:
+    """The ROOM a map is of, from the provenance its identity carries: ``seed:flat3_straight`` ->
+    ``flat3_straight``, ``resume:flat3_straight`` -> ``flat3_straight``, and ``""`` for a room with
+    no name yet (``fresh``, :data:`pepin.worldmap.BORN_FRESH`).
+
+    This is what every file beside the map should be named by, and the size@origin id is not. Both
+    spellings were measured on the parked cart on 2026-09-18: switching the board from the seed pgm
+    to the volume's exported slice changed the served id from ``239x215@-18.53,-4.38`` to
+    ``280x250@-19.48,-5.48`` — the same room, the same frame, the same lattice, the cart's pose
+    unchanged and the lidar's fit better (0.72 -> 0.96) — and every ``<map id>.graph_*`` file went
+    invisible. The id changes again whenever the volume grows a row; the room does not.
+    """
+    _, _, room = provenance.partition(":")
+    return room.strip()
+
+
+def room_from_identity(text: str) -> str:
+    """The room named by one ``/map_identity`` message (:meth:`pepin.worldmap.MapIdentity`, as
+    ``pepin_bringup.depth_fusion`` publishes it), or ``""`` when it names none.
+
+    The provenance field first (``from``: ``seed:<room>``), and the volume's own snapshot path
+    second (``world_path``: ``…/flat3_straight.world.npz`` -> ``flat3_straight``), because a volume
+    born fresh has no provenance to read but still keeps its files under the room's name. Anything
+    that does not parse is no room at all: a name guessed from a malformed message would put the
+    calibration of one flat beside another.
+    """
+    try:
+        said = json.loads(text)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(said, dict):
+        return ""
+    room = room_of(str(said.get("from", "")))
+    if room:
+        return room
+    path = str(said.get("world_path", ""))
+    stem = Path(path).name
+    for suffix in (".world.npz", ".world"):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)]
+    return ""
+
+
 def anchor_path(directory: Path | str, map_id: str) -> Path:
     """Where the anchor of ``map_id`` lives: ``<directory>/<slug>.graph_anchor.json``."""
     return Path(directory) / f"{map_slug(map_id)}{SUFFIX}"
 
 
-def load_anchor(directory: Path | str, map_id: str) -> Anchor | None:
-    """The anchor stored for ``map_id``, or ``None`` when no file has been written for it yet.
+def load_anchor(directory: Path | str, key: str, identity: str | None = None) -> Anchor | None:
+    """The anchor stored under ``key``, or ``None`` when no file has been written for it yet.
 
-    Raises ``ValueError`` when the file is there but cannot be believed — unreadable JSON, a
-    missing field, or an identity that is not this map's — because a wrong anchor is a cart
-    confidently in the wrong room, and silence is the safer answer only when it is said out loud.
+    ``identity`` is what the file must say it is about, when the caller has something to check: with
+    the legacy size@origin naming the file name and the identity inside are one string, and a
+    mismatch means a file of another map — a cart confidently in the wrong room. Under a ROOM name
+    they are two different things (a migrated file still carries whichever grid id was served on the
+    day it was written, and that id changes when the volume grows), so the caller passes ``None``
+    and the room name is the identity.
+
+    Raises ``ValueError`` when the file is there but cannot be believed — unreadable JSON, a missing
+    field, or an identity that is not the one asked for — because silence is the safer answer only
+    when it is said out loud.
     """
-    path = anchor_path(directory, map_id)
+    path = anchor_path(directory, key)
     if not path.exists():
         return None
     try:
@@ -136,11 +186,11 @@ def load_anchor(directory: Path | str, map_id: str) -> Anchor | None:
         stored = str(payload["map"])
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         raise ValueError(f"{path} is not an anchor: {error}") from error
-    if stored != map_id:
-        raise ValueError(f"{path} is the anchor of map {stored}, not of {map_id}")
+    if identity is not None and stored != identity:
+        raise ValueError(f"{path} is the anchor of map {stored}, not of {identity}")
     return Anchor(
         pose=pose,
-        map_id=map_id,
+        map_id=stored,
         learned_at=float(payload.get("learned_at", 0.0)),
         origin="file",
         relearns=int(payload.get("relearns", 0)),
@@ -161,52 +211,3 @@ def save_anchor(directory: Path | str, anchor: Anchor) -> Path:
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
     return path
-
-
-class AnchorWatch:
-    """Says when a stored anchor no longer holds, from the graph's word and the tracker's belief.
-
-    The anchor is a constant of the pair, so it is re-learned only on evidence that survives:
-    a TRUSTED tracker (the lidar driving, its fit at or above what the caller demands) and the
-    graph's word disagreeing by more than ``max_gap_m`` or ``max_gap_deg`` for longer than
-    ``hold_s`` without a break. With the lidar silent the clock is not even started — there is
-    nothing to re-learn FROM, and a graph corrected against a drifting dead-reckoned pose would
-    write its own drift into the file.
-    """
-
-    def __init__(
-        self,
-        max_gap_m: float = RELEARN_GAP_M,
-        max_gap_deg: float = RELEARN_GAP_DEG,
-        hold_s: float = RELEARN_HOLD_S,
-    ) -> None:
-        self._max_gap_m = max_gap_m
-        self._max_gap_deg = max_gap_deg
-        self._hold_s = hold_s
-        self._since: float | None = None
-
-    @property
-    def since(self) -> float | None:
-        """The moment the present disagreement started, or ``None`` while there is none."""
-        return self._since
-
-    def disagrees(self, gap_m: float, gap_deg: float) -> bool:
-        """Whether this gap is bigger than a loop closure ever accounts for."""
-        return gap_m > self._max_gap_m or abs(gap_deg) > self._max_gap_deg
-
-    def update(self, now: float, trusted: bool, gap_m: float, gap_deg: float) -> bool:
-        """Feed one word: ``True`` the moment a trusted tracker has disagreed for ``hold_s``.
-
-        The clock restarts after a ``True`` and whenever the gap closes or the tracker stops
-        being trusted, so one stale anchor produces exactly one re-learn.
-        """
-        if not trusted or not self.disagrees(gap_m, gap_deg):
-            self._since = None
-            return False
-        if self._since is None:
-            self._since = now
-            return False
-        if now - self._since < self._hold_s:
-            return False
-        self._since = None
-        return True

@@ -82,12 +82,25 @@ class GridSpec:
         )
 
     def centred_on_start(self) -> GridSpec:
-        """The same box with its x-y footprint centred on the map's origin: the shape a session
-        that starts in an unknown place needs (the map frame is born under the cart), against a
-        served map whose box covers that map's coordinates. Height is untouched."""
+        """The same box with its x-y footprint centred on the map's ORIGIN: what a session whose
+        map frame is born under the cart needs. Height is untouched.
+
+        Only the origin, so it is right only where the cart is AT the origin. A cart that wakes up
+        at (-9.4, +2.5) — a resumed room, or a map frame it did not create — is outside a box laid
+        out like this (2026-09-18: a node kicked without its room parameter came up on
+        (-7.0, -6.25) and could not have contained the cart at all). :meth:`centred_on` is the one
+        to call when the cart's own pose is known.
+        """
+        return self.centred_on((0.0, 0.0))
+
+    def centred_on(self, xy: tuple[float, float]) -> GridSpec:
+        """The same box with its x-y footprint centred on ``xy`` — the cart's own pose when a
+        volume is born, so the room grows outward from where the robot actually stands. Height is
+        untouched, and the box is only moved, never resized."""
         nx, ny, _nz = self.shape
         return dataclasses.replace(
-            self, origin=(-nx * self.voxel_m / 2, -ny * self.voxel_m / 2, self.origin[2])
+            self,
+            origin=(xy[0] - nx * self.voxel_m / 2, xy[1] - ny * self.voxel_m / 2, self.origin[2]),
         )
 
     def aligned_to(self, origin_xy: tuple[float, float], resolution_m: float) -> GridSpec:
@@ -334,7 +347,7 @@ class Tsdf:
         twin.sdf, twin.weight, twin.rgb = self.sdf.copy(), self.weight.copy(), self.rgb.copy()
         return twin
 
-    def shift(self, shift: PlanarShift, law: str = BLEND) -> ShiftedColumns:
+    def shift(self, shift: PlanarShift, law: str = NEAREST) -> ShiftedColumns:
         """Move everything in the model by a rigid planar ``shift`` — the volume follows the
         graph's correction instead of standing where the pose used to be — and return the
         column map it was resampled through, so another channel on the same grid (the lidar's
@@ -357,6 +370,19 @@ class Tsdf:
         of where it belongs — sharp, cheap, and systematically quantised.
 
         The colour is a picture, not a measurement, and always takes its nearest voxel.
+
+        SINCE 2026-09-18 THE DEFAULT IS ``nearest``, AND THE ARGUMENT FOR ``blend`` IS INVERTED.
+        ``blend`` was the default because a weighted average THINS a wall (a surface averaged with
+        the free space in front of it) and a thinned wall is repainted by the sensors, while a
+        quantisation bias is not. ``LidarLaw.beam_footprint`` removed the premise: a far crossing
+        now weighs only the share of its own disc that the voxel covers, so the free space in front
+        of a wall is weakly weighted while the return keeps its full weight — and the average is
+        pulled INTO the wall instead of out of it. Measured on the synthetic box, one move of 10 cm
+        / 3 deg: blend takes 430 occupied cells to 516 (+20 %, a wall two cells thick) with its
+        worst cell 5.85 cm from where the correction points, past the voxel; nearest takes 430 to
+        431 with its worst cell at exactly 5.00 cm, half a voxel, which is its documented
+        quantisation and nothing more. A widened wall is a bias in the one layer the cart drives
+        by, which is the failure class the old default existed to avoid.
         """
         columns = ShiftedColumns(self.spec, shift)
         if law == NEAREST:

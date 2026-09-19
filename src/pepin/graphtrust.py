@@ -35,17 +35,20 @@ degrees wrong (the last one 103 cm from the tracker, 102 more refused as too far
 flew. Two predicates came out of it, both here:
 
 :class:`Recognition` — has RTAB-Map accepted a loop closure, a proximity link or a localisation
-against the DATABASE IT LOADED since its own start, and was it recently enough
-(:data:`RECOGNITION_MAX_S` of driving; standing still does not expire it)? A closure to a node
-this session created is not that: the test is the matched id against the first node id this
-session built. Until that predicate holds, a node has no business publishing a word at all, and
-no business re-learning the anchor from one.
+against the DATABASE IT LOADED since its own start? A closure to a node this session created is
+not that: the test is the matched id against the first node id this session built. Until that
+holds there is no COMMON FRAME, a word would be a number in another coordinate system, and that
+-- not uncertainty -- is the only thing silence is the honest answer to. Once tied, the tie does
+not expire: how old it is rides the word's covariance (:class:`GraphTrust`), not a clock.
 
 :class:`Agreement` — how well the last words track the tracker's own pose carried forward by
-odometry between them, as an rms residual over a short window, ``exp(-r / scale_m)``. This is
+odometry between them, as an rms residual over a short window, ``exp(-r / scale)``. This is
 what tells a word riding a broken frame from a word riding a good one WITHOUT waiting for the
 next closure: a 1 m constant offset reads as 1 m of residual and a trust of 5e-5, while a word
 that follows odometry to the centimetre keeps its 1.0 whatever the metres since the last tie.
+The residual is 3-DOF since 2026-09-18 — a Mahalanobis distance under the joint covariance of the
+word and the belief, the same one :data:`pepin.fusion.GATE` judges — because a word can be in the
+right place facing the wrong way, and until then such a word kept its 1.00.
 
 Nothing here is ROS: a mapping of RTAB-Map's statistics in (``/rtabmap/info``'s ``stats_keys``
 and ``stats_values``), the ids of the same message, a number and a report line out.
@@ -58,8 +61,12 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from pepin.fusion import SIGMA_XY_M
+from pepin.measurements import GRAPH_FLOOR_XY_M
+
 __all__ = [
     "ACCEPTED_HYPOTHESIS_ID",
+    "AGREEMENT_SCALE",
     "AGREEMENT_SCALE_M",
     "AGREEMENT_WINDOW_S",
     "AGREEMENT_WORDS",
@@ -70,7 +77,6 @@ __all__ = [
     "LOOP_ID",
     "PROXIMITY_ICP",
     "PROXIMITY_VISUAL",
-    "RECOGNITION_MAX_S",
     "Agreement",
     "GraphReport",
     "GraphTrust",
@@ -93,23 +99,20 @@ GRAPH_TRUST_M = 5.0
 # 0.45) and just above the tracker's own lost_below (0.25): such a word may still be fused as a
 # measurement, but it can neither re-seed the pose nor make a lost tracker look found.
 FILE_ANCHOR_TRUST = 0.3
-# How long a recognition stands: two minutes of DRIVING past the last time RTAB-Map tied its
-# present to the database it loaded. It is driving seconds and not wall seconds because a cart
-# parked at the charger for an hour has not moved away from the place it recognised, while two
-# minutes at 0.3 m/s is some 30 m of travel -- six decay lengths of :data:`GRAPH_TRUST_M`, past
-# which the 0.79 m / 31 deg per 25 m the EKF odometry drifts has made the segment its own map.
-RECOGNITION_MAX_S = 120.0
-# The driving clock charges only for real travel. RTAB-Map's distance counter creeps by
-# millimetres while the cart is parked (its own odometry's jitter), and charging on that turned
-# "seconds of driving" into "seconds since start": 3648 s were counted over two minutes of
-# driving on 2026-09-16, which expired a healthy recognition and withheld every word.
-MOVED_EPS_M = 0.01  # a distance step under this is jitter, not a drive
 # The residual at which a word is worth 1/e of itself when its trust is judged by AGREEMENT.
 # 10 cm is the scale a graph word has when it is working: over tapes 0275/0276 the word sat
 # 0.7-0.8 cm from the lidar truth while driving and 0-8 cm at rest, and 2.2-3.2 cm over a
 # printer errand -- so 10 cm is several times the working spread and a tenth of the metre-scale
 # error of tape 0333, which lands at exp(-10) and stops the word being admitted anywhere.
 AGREEMENT_SCALE_M = 0.10
+# ...and the same scale in the units the residual is actually judged in now: SIGMAS of the joint
+# covariance of the word and the belief it is compared with, so a word that is right in position
+# and 90 degrees wrong in heading is no longer a word that agrees. The number is DERIVED and not
+# chosen: it is AGREEMENT_SCALE_M expressed in the joint sigma of a graph word worth its own floor
+# (pepin.measurements.GRAPH_FLOOR_XY_M, 0.20 m) against a tracker publishing its own
+# (pepin.fusion.SIGMA_XY_M, 0.05 m), so the curve a position-only residual rode before 2026-09-18
+# is the curve it rides now, with the heading counted as well.
+AGREEMENT_SCALE = AGREEMENT_SCALE_M / math.hypot(GRAPH_FLOOR_XY_M, SIGMA_XY_M)
 # The window the residual is taken over: the last ten seconds, and at most this many words. Long
 # enough that one word arriving mid-closure does not decide the trust, short enough that a frame
 # that has just broken is not vouched for by the minute before it.
@@ -277,66 +280,62 @@ class InfoIds:
 class RecognitionReport:
     """Whether RTAB-Map's present nodes are tied to the database it loaded, and what stands
     behind the answer: how many such acceptances this start has seen, which database node the
-    last one matched, how many seconds of DRIVING have passed since it, and how many words the
-    node has withheld meanwhile."""
+    last one matched, and how many words the node withheld while there was no tie at all."""
 
     recognised: bool
     matches: int
     matched_id: int
-    since_s: float
     withheld: int
 
     def text(self) -> str:
-        """``recognised on node 2841, 4 s of driving ago (3 matches)`` for a report line, or the
-        refusal that is keeping the node silent."""
+        """``recognised on node 2841 (3 matches)`` for a report line, or the refusal that is
+        keeping the node silent."""
         if self.recognised:
-            return (
-                f"recognised on node {self.matched_id}, {self.since_s:.0f} s of driving ago"
-                f" ({self.matches} matches)"
-            )
-        if self.matches == 0:
-            return f"unrecognised since start: {self.withheld} words withheld"
-        return (
-            f"recognition stale: {self.since_s:.0f} s of driving since node {self.matched_id},"
-            f" {self.withheld} words withheld"
-        )
+            return f"recognised on node {self.matched_id} ({self.matches} matches)"
+        return f"unrecognised since start: {self.withheld} words withheld"
 
 
 class Recognition:
-    """Has RTAB-Map recognised the database it LOADED since its own start, and recently enough?
+    """Has RTAB-Map been tied to the database it LOADED since its own start -- is there a COMMON
+    FRAME to speak in at all?
 
     Fed every ``/rtabmap/info`` -- the statistics and the message's graph ids -- it answers the
-    one question the decay clock cannot: whether the nodes the graph is building now are tied to
-    the map on disk at all, or form an unlinked segment placed by this session's odometry. A
-    word off such a segment is odometry dressed as a pose (tape 0333, 2026-09-15: 19 words about
-    a metre and 150 degrees wrong), and the anchor learned from one is worse still, because it
-    is baked into every word that follows.
+    one question no covariance can: whether the nodes the graph is building now are tied to the
+    map on disk at all, or form an unlinked segment placed by this session's odometry. A word off
+    such a segment is not an uncertain pose, it is a number in ANOTHER COORDINATE SYSTEM (tape
+    0333, 2026-09-15: 19 words about a metre and 150 degrees wrong), and the anchor learned from
+    one is worse still, because it is baked into every word that follows. That is the only thing
+    silence is ever the honest answer to.
 
-    What counts as recognition: a loop closure or a proximity link whose matched node is OLDER
-    than the first node this session built (``ref_id`` of the first message: everything below it
-    came off the loaded database), or a localisation pose, which RTAB-Map only publishes when it
-    has placed itself on the database. A closure INSIDE the new segment is not recognition,
-    which is exactly where the decay clock was fooled.
+    What counts: a loop closure or a proximity link whose matched node is OLDER than the first
+    node this session built (``ref_id`` of the first message: everything below it came off the
+    loaded database), or a localisation pose, which RTAB-Map only publishes when it has placed
+    itself on the database. A closure INSIDE the new segment is not recognition.
 
-    The clock is driving seconds, differenced off RTAB-Map's own distance counter: a message
-    whose counter grew charges the time since the previous message, and one whose counter stood
-    still charges nothing, so a cart parked for an hour wakes up as recognised as it fell asleep.
-    A counter that goes BACKWARDS is RTAB-Map restarted, and a restart forgets everything here:
-    a new start has recognised nothing until it says so.
+    ONCE TIED, A TIE DOES NOT EXPIRE. It used to, on a clock of "driving seconds" that charged
+    whenever RTAB-Map's distance counter grew -- and the counter grows from VO noise on a cart
+    that is standing still, so the clock ran while parked. On 2026-09-16 it reached 4279 s and
+    withheld 5220 words; on 2026-09-17 it reached 991 s at a bookshelf and withheld 587, and the
+    robot could not start a camera-only drive for three hours. Both times it was worked around --
+    the database pruned, the flag raised by hand -- and both workarounds died at the next deploy.
+    The intent behind the clock was sound and it now lives where it belongs: the word's own
+    covariance grows with the DISTANCE driven since the tie (:class:`GraphTrust`), so an old tie
+    makes a weak word rather than no word, and the drive gate refuses it on a number. A gate that
+    demands recognition before motion also has the causality backwards: motion is what produces
+    the views that make the next closure happen.
 
-    Pure: statistics and ids in, a predicate and a report out; ``max_driving_s`` is a live flag
-    the node writes straight onto the instance.
+    A distance counter that goes BACKWARDS is RTAB-Map restarted, and a restart forgets
+    everything here: new nodes are placed by odometry again, so the common frame is gone until a
+    new tie says otherwise.
+
+    Pure: statistics and ids in, a predicate and a report out.
     """
 
-    def __init__(self, max_driving_s: float = RECOGNITION_MAX_S) -> None:
-        self.max_driving_s = max_driving_s
+    def __init__(self) -> None:
         self._first_ref: int | None = None  # the first node id of this start
-        self._driving_s = 0.0  # seconds of driving heard since this start
-        self._matched_s: float | None = None  # ...at the last acceptance
         self._matches = 0  # acceptances this start
         self._matched_id = 0  # ...and the database node the last one matched
-        self._travelled: float | None = None  # the last distance counter read, to difference it
-        self._last_at: float | None = None  # ...and when it was read, by the node's clock
+        self._travelled: float | None = None  # the last distance counter read, to spot a restart
         self._starts = 0  # RTAB-Map restarts seen (a distance counter that fell)
 
     @property
@@ -350,25 +349,16 @@ class Recognition:
         return self._starts
 
     @property
-    def driving_s(self) -> float:
-        """Seconds of driving heard since this start: the clock the expiry is measured on."""
-        return self._driving_s
-
-    @property
-    def since_s(self) -> float:
-        """Seconds of driving since the last acceptance; ``inf`` when there has been none."""
-        return math.inf if self._matched_s is None else self._driving_s - self._matched_s
-
-    @property
     def recognised(self) -> bool:
-        """Whether a word may ride right now: an acceptance against the loaded database this
-        start, no older than :attr:`max_driving_s` of driving."""
-        return self.since_s <= self.max_driving_s
+        """Whether there is a common frame to speak in: this start has been tied to the loaded
+        database at least once. How OLD that tie is does not belong here -- it is carried by the
+        word's covariance (:class:`GraphTrust`)."""
+        return self._matches > 0
 
     def update(self, stats: Mapping[str, float], ids: InfoIds, now: float) -> bool:
-        """One ``/rtabmap/info`` in, at the node's clock ``now``: the driving clock advanced and
-        the ids read. Returns whether THIS message tied the present to the loaded database --
-        the moment the node starts speaking again."""
+        """One ``/rtabmap/info`` in (``now`` is kept for the node's call signature, and nothing
+        here is timed any more): a restart spotted and the ids read. Returns whether THIS message
+        tied the present to the loaded database."""
         self._advance(stats, now)
         if ids.ref_id > 0 and self._first_ref is None:
             self._first_ref = ids.ref_id
@@ -377,7 +367,6 @@ class Recognition:
             return False
         self._matches += 1
         self._matched_id = matched
-        self._matched_s = self._driving_s
         return True
 
     def report(self, withheld: int = 0) -> RecognitionReport:
@@ -387,36 +376,28 @@ class Recognition:
             recognised=self.recognised,
             matches=self._matches,
             matched_id=self._matched_id,
-            since_s=0.0 if self._matched_s is None else self.since_s,
             withheld=withheld,
         )
 
     def _advance(self, stats: Mapping[str, float], now: float) -> None:
-        """Charge the driving clock for the interval this message covers, and forget everything
-        when RTAB-Map's distance counter falls: that is a restart, not a drive backwards."""
+        """Forget everything when RTAB-Map's distance counter falls: that is a restart, not a
+        drive backwards. Nothing else is charged here -- the counter is read only to spot that."""
         travelled = stat(stats, DISTANCE_TRAVELLED_M)
-        moved = False
-        if travelled is not None:
-            distance = max(float(travelled), 0.0)
-            previous = self._travelled
-            if previous is not None and distance < previous:
-                self._restart()
-            else:
-                moved = previous is not None and distance > previous + MOVED_EPS_M
-            self._travelled = distance
-        if moved and self._last_at is not None:
-            self._driving_s += max(now - self._last_at, 0.0)
-        self._last_at = now
+        if travelled is None:
+            return
+        distance = max(float(travelled), 0.0)
+        previous = self._travelled
+        if previous is not None and distance < previous:
+            self._restart()
+        self._travelled = distance
 
     def _restart(self) -> None:
         """RTAB-Map opened a new session: its nodes are placed by the odometry again and nothing
         it recognised before belongs to them."""
         self._starts += 1
         self._first_ref = None
-        self._matched_s = None
         self._matches = 0
         self._matched_id = 0
-        self._driving_s = 0.0
 
     def _database_match(self, stats: Mapping[str, float], ids: InfoIds) -> int | None:
         """The database node this message tied the present to, or ``None``: a closure or a
@@ -434,14 +415,23 @@ class Recognition:
 class Agreement:
     """How well the graph's last words agree with the tracker's own pose carried forward by
     odometry between them: the rms of the last :data:`AGREEMENT_WORDS` residuals inside
-    :data:`AGREEMENT_WINDOW_S`, as a trust of ``exp(-r / scale_m)``.
+    :data:`AGREEMENT_WINDOW_S`, as a trust of ``exp(-r / scale)``.
 
     This is the other half of what tape 0333 needed. The decay clock asks how far the cart has
     driven since the graph last recognised something; this asks whether the words the graph is
     saying RIGHT NOW land where the cart actually is. A word riding a broken frame is a metre
-    out and reads as a metre of residual (a trust of 5e-5 at 10 cm scale) from the first word,
-    with no closure to wait for; a word riding a good one follows odometry to the centimetre and
-    keeps its 1.0 however many metres ago the last tie was.
+    out and reads as a metre of residual from the first word, with no closure to wait for; a word
+    riding a good one follows odometry to the centimetre and keeps its 1.0 however many metres ago
+    the last tie was.
+
+    EVERY WORD IS TWO RESIDUALS, because a word can be in the right place facing the wrong way.
+    ``add`` takes both: the distance in METRES, which is what the word's own covariance floor is
+    widened by (a scatter is a spread in the map, and the fusion reads metres), and the 3-DOF
+    Mahalanobis distance of the same disagreement under the joint covariance of the word and the
+    belief -- the very quantity :func:`pepin.fusion.disagreement` computes and
+    :data:`pepin.fusion.GATE` judges -- which is what the TRUST is made of, so a heading error
+    costs the word its vote exactly as a position error does. Until 2026-09-18 only the metres
+    existed and a word 90 degrees wrong at the right place kept its 1.00.
 
     An empty window is not a verdict: with no residual to go on the trust is 1.0, and it is the
     recognition predicate, not this, that decides whether a word may ride at all. The node feeds
@@ -452,44 +442,67 @@ class Agreement:
 
     def __init__(
         self,
-        scale_m: float = AGREEMENT_SCALE_M,
+        scale: float = AGREEMENT_SCALE,
         window_s: float = AGREEMENT_WINDOW_S,
         words: int = AGREEMENT_WORDS,
     ) -> None:
-        self.scale_m = scale_m
+        self.scale = scale
         self.window_s = window_s
         self.words = words
-        self._residuals: deque[tuple[float, float]] = deque()
+        # (moment, metres, sigmas): the same disagreement in the two languages it is read in.
+        self._residuals: deque[tuple[float, float, float]] = deque()
 
     @property
     def count(self) -> int:
         """How many residuals the window holds right now."""
         return len(self._residuals)
 
-    def add(self, at: float, residual_m: float) -> None:
-        """One word's distance from the odometry-propagated belief, metres, at the node's
-        clock."""
-        self._residuals.append((at, max(float(residual_m), 0.0)))
+    def add(self, at: float, residual_m: float, sigmas: float | None = None) -> None:
+        """One word's disagreement with the odometry-propagated belief at the node's clock: how
+        far in METRES, and how far in SIGMAS of the two covariances together (the square root of
+        :func:`pepin.fusion.disagreement`).
+
+        ``sigmas`` omitted means the caller has no covariance to normalise by, and the metres are
+        then read on the old scale (:data:`AGREEMENT_SCALE_M` in units of the same joint sigma
+        :data:`AGREEMENT_SCALE` is derived from) so that such a caller keeps the behaviour it had.
+        """
+        metres = max(float(residual_m), 0.0)
+        normalised = (
+            metres / AGREEMENT_SCALE_M * AGREEMENT_SCALE
+            if sigmas is None
+            else max(float(sigmas), 0.0)
+        )
+        self._residuals.append((at, metres, normalised))
         self._prune(at)
 
     def rms(self, at: float | None = None) -> float | None:
-        """The rms residual over the window, in metres, pruned to ``at`` first when given;
-        ``None`` while the window holds nothing."""
+        """The rms residual over the window, in METRES, pruned to ``at`` first when given;
+        ``None`` while the window holds nothing. This is the scatter a word's covariance is
+        widened by, so it stays in the units the fusion reads."""
+        return self._rms(1, at)
+
+    def sigmas(self, at: float | None = None) -> float | None:
+        """The same rms over the window in SIGMAS of the joint covariance -- the 3-DOF quantity
+        the trust is made of; ``None`` while the window holds nothing."""
+        return self._rms(2, at)
+
+    def trust(self, at: float | None = None) -> float:
+        """What the word's agreement is worth, in [0, 1]: ``exp(-r / scale)`` over the normalised
+        residual, and 1.0 while there is no residual to judge it on."""
+        residual = self.sigmas(at)
+        if residual is None:
+            return 1.0
+        if self.scale <= 0.0:
+            return 0.0
+        return min(max(math.exp(-residual / self.scale), 0.0), 1.0)
+
+    def _rms(self, column: int, at: float | None) -> float | None:
+        """The rms of one of the two columns the window holds, pruned to ``at`` first."""
         if at is not None:
             self._prune(at)
         if not self._residuals:
             return None
-        return math.sqrt(sum(r * r for _, r in self._residuals) / len(self._residuals))
-
-    def trust(self, at: float | None = None) -> float:
-        """What the word's agreement is worth, in [0, 1]: ``exp(-r / scale_m)``, and 1.0 while
-        there is no residual to judge it on."""
-        residual = self.rms(at)
-        if residual is None:
-            return 1.0
-        if self.scale_m <= 0.0:
-            return 0.0
-        return min(max(math.exp(-residual / self.scale_m), 0.0), 1.0)
+        return math.sqrt(sum(r[column] ** 2 for r in self._residuals) / len(self._residuals))
 
     def _prune(self, at: float) -> None:
         """Drop what is older than the window or past its last :attr:`words` entries."""

@@ -10,7 +10,9 @@ from synthetic import raycast_room
 from test_localization import PILLAR, furnished_room_map
 
 from pepin.dynamic import StaticMask, voting_mask
+from pepin.fusion import PoseMeasurement
 from pepin.localization import Localizer, ScanObservation
+from pepin.measurements import GRAPH_FLOOR_XY_M, GRAPH_FLOOR_YAW_DEG
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow, apply_motion, relative_motion
 from pepin.sources import CAMERA, CONTACT, DEPTH, GRAPH, LIDAR, SourceFeed, SourceRegistry
@@ -297,4 +299,84 @@ def test_the_switch_goes_by_flag_name_and_the_sources_report_is_ready_for_the_wi
     loc.update_from(truth, [])  # nothing to match: the prediction stands, nothing measured
     report = loc.sources_report(1.1)
     assert report["anchor"] is None and report["fused"] is None
-    assert report["sources"][LIDAR] == {"health": "fresh 0.0 Hz"} and report["fit"] == 0.0
+    # The lidar measured nothing this update, but the report is of its LAST word, not of this
+    # update: the word stands with 0.00 m driven since, which is what tells a source that has
+    # gone quiet from one that never spoke. An update that matched nothing used to erase both.
+    lidar = report["sources"][LIDAR]
+    assert lidar["health"] == "fresh 0.0 Hz" and lidar["moved"] == 0.0 and lidar["fit"] > 0.0
+    assert report["fit"] == 0.0, "the tracker's own confidence IS zero: nothing scored this pose"
+
+
+def graph_word(pose: Pose2D, stamp: float, fit: float = 1.0) -> PoseMeasurement:
+    """One pose-graph word as the board receives it: the place, and the graph's own measured
+    floor as its covariance (pepin.measurements.GRAPH_FLOOR_XY_M / _YAW_DEG, 0.20 m / 8 deg)."""
+    return PoseMeasurement(
+        pose.x,
+        pose.y,
+        pose.theta,
+        np.diag([GRAPH_FLOOR_XY_M**2, GRAPH_FLOOR_XY_M**2, math.radians(GRAPH_FLOOR_YAW_DEG) ** 2]),
+        GRAPH,
+        stamp,
+        fit,
+    )
+
+
+def test_a_lone_graph_word_a_hundred_degrees_out_does_not_walk_the_heading() -> None:
+    """The evening of 2026-09-17 in miniature: camera-only, every update carries exactly the
+    graph's word, and that word's heading is about 100 deg away from the pose the lidar left.
+    On the robot the tracker went over to it in half an hour with the cart standing still
+    (ros/maps/rec/20260917_204956_goto_board.log 00:45:23Z, ...212759... 01:18:23Z)."""
+    loc = tracker(sources=SourceRegistry(enabled=[GRAPH]))
+    here = Pose2D(0.5, 0.0, math.radians(55.0))
+    loc.pose, loc.confidence = here, 0.9  # what a lidar drive left behind
+    lie = Pose2D(here.x, here.y, math.radians(-45.0))  # the graph's word: right place, wrong way
+    for i in range(40):
+        loc.update_from(Pose2D(), [], measurements=[graph_word(lie, 1.0 + i)])
+    assert abs(math.degrees(wrap_angle(loc.pose.theta - here.theta))) < 1.0, (
+        "an unverifiable word that disagrees by a hundred degrees may not move the heading"
+    )
+    stats = loc.report()
+    assert stats.unverified == 40 and stats.matched == 0
+    assert loc.confidence == 0.0 and loc.fused is None, (
+        "the update measured nothing, and the sigma downstream must say so"
+    )
+
+
+def test_the_same_word_moves_the_pose_with_the_switch_off() -> None:
+    """The old behaviour is reachable, so a drive can be compared without a restart (rule 19)."""
+    loc = tracker(sources=SourceRegistry(enabled=[GRAPH]), verify_remote=False)
+    here = Pose2D(0.5, 0.0, math.radians(55.0))
+    loc.pose, loc.confidence = here, 0.9
+    lie = Pose2D(here.x, here.y, math.radians(-45.0))
+    for i in range(40):
+        loc.update_from(Pose2D(), [], measurements=[graph_word(lie, 1.0 + i)])
+    walked = abs(math.degrees(wrap_angle(loc.pose.theta - here.theta)))
+    assert walked > 45.0, "this is what the tape recorded: the word walks the heading"
+    assert loc.report().unverified == 0
+    assert "verify_remote off" in loc.settings()
+
+
+def test_an_honest_graph_word_still_corrects_the_pose_camera_only() -> None:
+    """The gate is not a mute: a word inside what the two covariances allow is taken as before,
+    which is the working camera-only case of tapes 0371/0372 (delta 0.2-0.9 cm)."""
+    loc = tracker(sources=SourceRegistry(enabled=[GRAPH]))
+    here = Pose2D(0.5, 0.0, math.radians(55.0))
+    loc.pose, loc.confidence = here, 0.9
+    word = Pose2D(here.x + 0.08, here.y, math.radians(58.0))
+    for i in range(20):
+        loc.update_from(Pose2D(), [], measurements=[graph_word(word, 1.0 + i)])
+    assert loc.report().unverified == 0
+    assert math.hypot(loc.pose.x - word.x, loc.pose.y - word.y) < 0.02
+    assert loc.confidence > 0.0 and loc.fused is not None
+
+
+def test_an_unsure_belief_yields_to_the_word_and_needs_no_threshold() -> None:
+    """Nothing is tuned: the belief's own covariance decides. A tracker that has measured nothing
+    for a while is wide, and a wide belief cannot refuse a word — which is how a cart carried to
+    another room is still found by the graph."""
+    loc = tracker(sources=SourceRegistry(enabled=[GRAPH]))
+    here = Pose2D(0.5, 0.0, math.radians(55.0))
+    loc.pose, loc.confidence = here, 0.0  # nothing has scored this pose
+    lie = Pose2D(here.x, here.y, math.radians(20.0))  # 35 deg out: inside a fit-of-zero belief
+    loc.update_from(Pose2D(), [], measurements=[graph_word(lie, 1.0)])
+    assert loc.report().unverified == 0 and loc.pose.theta != here.theta

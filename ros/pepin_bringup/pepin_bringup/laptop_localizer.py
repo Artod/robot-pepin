@@ -67,11 +67,13 @@ adopting it. The cost of a search and of a camera match is in every report line.
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
+import numpy as np
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from nav_msgs.msg import Odometry
@@ -85,7 +87,7 @@ from tf2_ros import Buffer
 
 from pepin.dynamic import StaticMask
 from pepin.flags import Flag, FlagSet
-from pepin.fusion import COVARIANCE_CHOICES, PEAK
+from pepin.fusion import COVARIANCE_CHOICES, GATE, PEAK, odometry_covariance
 from pepin.localization import Localizer
 from pepin.measurements import RemoteMeasurement
 from pepin.odometry import Pose2D
@@ -109,6 +111,7 @@ from pepin_bringup.msgs import (
     yaw_of,
 )
 from pepin_bringup.node_kit import Switches, Tally, TfLookup, Worker, spin_main
+from pepin_bringup.relocalizer import TRACKED_MAP_TOPIC
 
 SOURCES_TOPIC = "/localization/sources"  # the board's own account of who drives its tracker
 CANDIDATE_TOPIC = "/localization/candidate"  # what pepin_bringup.relocalizer subscribes to
@@ -130,6 +133,41 @@ THIN_TO = 90
 # the score surface: finer than the board's 9 cm / 1.5 deg because this machine can afford it.
 WINDOW = SearchWindow(xy_m=0.09, xy_step_m=0.015, theta_deg=9.0, theta_step_deg=0.75)
 # ...and the steps a camera match is read on, its extent being the two flags below.
+# HOW FAR THE TRUTH MAY BE FROM THE BELIEF, and both halves of it are measured, not chosen.
+#
+# The belief's own uncertainty comes from the board: /tracker_pose carries a covariance, grown
+# along the odometry between the pose it speaks for and the scan's stamp
+# (pepin.fusion.odometry_covariance). How many sigmas of it must be inside the window is not a
+# taste: pepin.fusion.GATE is the chi-square value this stack accepts a 3-DOF measurement at, so
+# sqrt(GATE) is the radius in sigmas that the fusion itself calls "still the same pose".
+#
+# The camera's OWN error is measured beside it and is NOT added to the window: on tape 0373 at rest
+# (scratch/remote_word_nees.py, n=321) the depth fan sits 6.6 cm forward, 11.1 cm sideways and 5.7
+# degrees from the lidar-held truth. These are kept here because they are what the fan's covariance
+# ought to CLAIM, not a distance to search: widening a window by a bias only buys a look-alike
+# (measured, see :meth:`DepthLocalizer._camera_window`).
+#
+# WHY THIS AND NOT THE FIXED 0.09 m: the fan's winner sat ON the window's edge in 6089 of 6608
+# words (92 %), and pepin.fusion's BOUND_INFLATION then widens a ~7 cm peak to ~70 cm — NEES
+# median 0.10 against 3, a source claiming to be ten times worse than it is and therefore ignored
+# by the filter. A window that CONTAINS the peak makes `edge` mean what it says. The measured
+# sweep that fixed 0.09 (scratch/camera_window_sweep.py) refuted a window that is ALWAYS wide; it
+# says nothing against one that is 0.09 while the belief is tight and opens only when the belief's
+# own covariance says the truth may be further out.
+WINDOW_SIGMAS = math.sqrt(GATE)
+CAMERA_FLOOR_M = 0.111
+CAMERA_FLOOR_DEG = 5.7
+# AND A CEILING, measured on the same sweep that fixed the 0.09 m floor
+# (scratch/camera_window_sweep.py, the four tapes of 2026-09-14): re-matched at 0.09 / 0.20 / 0.30
+# / 0.50 m the fan's error against the lidar truth is 9.0-23.2 cm at 0.09, 19.6-23.2 cm at 0.30 and
+# 42-55 cm at 0.50, every tape monotonically worse the wider it may look — the lattice a +-40
+# degree fan is matched on is a plateau with a rival 6 cm away scoring 0.99 of the winner, so past
+# some width the answer is a look-alike and not a measurement. 0.30 m is the widest the sweep still
+# measured as worth having; a belief looser than that is not something the camera can REFINE, and
+# looking for the cart at large is the camera SEARCH's job (camera_search_*), which has admission
+# rules of its own.
+CAMERA_WINDOW_MAX_M = 0.30
+CAMERA_WINDOW_MAX_DEG = 20.0
 CAMERA_STEP_M = 0.015
 CAMERA_STEP_DEG = 0.75
 # A camera scan is matched around the pose the tracker believes in, carried to the scan's own
@@ -396,6 +434,30 @@ FLAGS = FlagSet(
         range=(0.01, 1.0),
     ),
     Flag(
+        "camera_window_from_sigma",
+        True,
+        description="the window a camera scan is matched in is widened to hold the peak wherever"
+        " the board's own covariance, carried to the scan's stamp, says the truth may be further"
+        " out than camera_window_m: sqrt(pepin.fusion.GATE) sigmas plus the camera's measured"
+        " floor. Off, the two window flags are the whole width, as before",
+        why="measured by what the fixed window costs. On tape 0373 at rest the depth fan's winner"
+        " came back ON the window's edge in 6089 of 6608 words — 92 % — because the +-0.08 m"
+        " tracking window sits around a belief that is itself about 10 cm off, and"
+        " pepin.fusion.BOUND_INFLATION then widens a 7 cm peak to 70 cm in the report: the fan's"
+        " real error is 6.6/11.1 cm and 5.7 deg (n=321) and it CLAIMED 71.8/42.1 cm and 40.4 deg,"
+        " NEES median 0.10 where 3 is honest (scratch/remote_word_nees.py). A source that"
+        " under-claims tenfold is out-voted by a worse one, and camera-only that is the difference"
+        " between having a second opinion on the graph and not having one. Neither number in the"
+        " new width is chosen: sqrt(GATE) is the radius in sigmas this stack already accepts a"
+        " 3-DOF measurement at, and the 0.111 m / 5.7 deg floor is that same measurement of the"
+        " fan's own bias. The 0.09 m stays as the FLOOR, because the sweep that measured it"
+        " (scratch/camera_window_sweep.py: 9.0-23.2 cm of error at 0.09 against 42-55 cm at 0.50)"
+        " refuted a window that is always wide, not one that opens only when the belief is loose",
+        on_when="on: it is what makes the camera's covariance worth reading at all",
+        off_when="to reproduce the fixed window for an A/B, or on a laptop where the coarse pass"
+        " (9-15 ms at 0.5 m) cannot be afforded beside everything else",
+    ),
+    Flag(
         "camera_window_deg",
         9.0,
         description="half-width of the same window in heading, degrees",
@@ -495,7 +557,8 @@ class LaptopLocalizer(Node):
         self._map_id = ""
         self._grid: Any = None  # the board's map, for a camera matcher built without /map_camera
         self._camera: Localizer | None = None  # the matcher the camera scans are refined by
-        self._camera_map = ""  # which grid that is: "/map" or "/map_camera"
+        self._camera_map = ""  # which grid that is: TRACKED_MAP_TOPIC or "/map_camera"
+        self._pose_cov: Any = None  # the belief's own covariance, as the board published it
         self._camera_map_id = ""  # the band's shape and origin: a new one is worth a log line
         self._mask: StaticMask | None = None  # what that grid explains; built on first use
         self._mask_of: tuple[Any, int] | None = None  # ...the grid and version it was built on
@@ -527,7 +590,16 @@ class LaptopLocalizer(Node):
             reliability=ReliabilityPolicy.RELIABLE,
         )
         newest = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
-        self.create_subscription(OccupancyGridMsg, "/map", self._on_map, latched)
+        # THE MAP THE BOARD'S TRACKER IS ON, not "the map". Every word this node ships is stamped
+        # with a map id and the board refuses one about another map (pepin.measurements'
+        # MeasurementGate, pepin.watchdog's CandidateGate), so the id has to be the id of the grid
+        # the TRACKER adopted — not of whatever is on /map. Those were the same thing only while
+        # the served file was the one map there was: with the tracker on the volume's /map_lidar
+        # the ids differ by construction (280x250@-19.48,-5.48 against the file's
+        # 239x215@-18.53,-4.38) and every candidate and every camera measurement was refused as
+        # "elsewhere". The relocalizer republishes what it is tracking on, latched, exactly so that
+        # this subscription can exist, and it stays correct however the volume grows.
+        self.create_subscription(OccupancyGridMsg, TRACKED_MAP_TOPIC, self._on_map, latched)
         self.create_subscription(OccupancyGridMsg, CAMERA_MAP_TOPIC, self._on_camera_map, latched)
         self.create_subscription(LaserScan, self._scan_topic, self._on_scan, newest)
         for name, topic in CAMERA_SCANS:
@@ -613,8 +685,10 @@ class LaptopLocalizer(Node):
 
     # ---- inputs ----------------------------------------------------------------------------
     def _on_map(self, msg: OccupancyGridMsg) -> None:
-        """The board's saved map: a tracker of our own is built on it, for its search alone —
-        and, until ``/map_camera`` says otherwise, for the camera's matches too."""
+        """The map the board's TRACKER is on (``/map_tracked``): a tracker of our own is built on
+        it, for its search alone — and, until ``/map_camera`` says otherwise, for the camera's
+        matches too. Its id is the id every word this node ships is stamped with, which is the
+        whole reason this is that topic and not ``/map``."""
         self._grid = grid_from_msg(msg)
         self._map_id = map_id(msg)
         self._localizer = Localizer(
@@ -715,6 +789,11 @@ class LaptopLocalizer(Node):
         p = msg.pose.pose
         self._pose = Pose2D(p.position.x, p.position.y, yaw_of(p.orientation))
         self._pose_stamp = Time.from_msg(msg.header.stamp).nanoseconds * 1e-9
+        # ...and HOW SURE it is, which used to be thrown away here. It is what sizes the window a
+        # camera scan is matched in: a window that does not contain the peak reports every match
+        # as a bound and the fusion then inflates its covariance a hundredfold.
+        c = np.asarray(msg.pose.covariance, dtype=float).reshape(6, 6)
+        self._pose_cov = c[np.ix_((0, 1, 5), (0, 1, 5))]
 
     def _on_fit(self, msg: Float32) -> None:
         """The tracker's own scan-to-map fit: what a candidate must beat to disagree."""
@@ -749,13 +828,50 @@ class LaptopLocalizer(Node):
         return self._lidar_fresh
 
     # ---- the camera ------------------------------------------------------------------------
-    def _camera_window(self) -> SearchWindow:
-        """The window a camera scan is refined in, from the two flags that size it."""
+    def _camera_window(self, spread: tuple[float, float] | None = None) -> SearchWindow:
+        """The window a camera scan is refined in: the flags' own width, widened to hold the peak
+        wherever the belief says the truth may be further out.
+
+        THE WINDOW MUST CONTAIN THE PEAK. With a fixed +-0.09 m the fan's winner sat on the edge in
+        92 % of the words of tape 0373, and a bound is inflated a hundredfold in variance
+        (pepin.fusion's BOUND_INFLATION) — so a source whose real error is 7/11 cm claimed 72/42 cm
+        and the board's filter ignored it (NEES median 0.10 against 3). ``spread`` is the belief's
+        own sigma (position metres, heading degrees) carried to the scan's stamp, and the window is
+        ``sqrt(GATE)`` of it — the radius in sigmas the fusion itself calls the same pose — plus the
+        camera's measured floor. Never narrower than the flag: 0.09 m is the width the camera was
+        MEASURED to be accurate in, so a tight belief is matched exactly as it is today and only a
+        loose one opens the search.
+        """
+        xy = float(self._switches["camera_window_m"])
+        deg = float(self._switches["camera_window_deg"])
+        if spread is not None and self._switches.on("camera_window_from_sigma"):
+            # The BELIEF's own uncertainty only, and NOT the camera's measured bias beside it.
+            # Adding that bias was tried and refuted here: it widens the window by 2.8 cm while the
+            # lidar holds the pose (spread 0.002 m), and on the existing fan-of-somewhere-else case
+            # those 2.8 cm are enough to turn "nothing fits" into a 0.54-fit measurement 3 cm
+            # further out — the plateau really is that flat. The bias is an error the fan makes
+            # wherever it looks, so searching for it buys a look-alike and not a peak; it has to be
+            # calibrated out of the fan or forgiven by pepin.fusion's BOUND_INFLATION, neither of
+            # which is this window's business (see the report of 2026-09-18).
+            xy = min(max(xy, WINDOW_SIGMAS * spread[0]), CAMERA_WINDOW_MAX_M)
+            deg = min(max(deg, WINDOW_SIGMAS * spread[1]), CAMERA_WINDOW_MAX_DEG)
         return SearchWindow(
-            xy_m=float(self._switches["camera_window_m"]),
-            xy_step_m=CAMERA_STEP_M,
-            theta_deg=float(self._switches["camera_window_deg"]),
-            theta_step_deg=CAMERA_STEP_DEG,
+            xy_m=xy, xy_step_m=CAMERA_STEP_M, theta_deg=deg, theta_step_deg=CAMERA_STEP_DEG
+        )
+
+    def _belief_spread(self, stamp: float) -> tuple[float, float] | None:
+        """The belief's own sigma at ``stamp`` — (metres, degrees) — the board's published
+        covariance grown along the odometry of the carry; ``None`` while the board has published
+        none (and the flags' fixed window then stands, as before)."""
+        if self._pose_cov is None:
+            return None
+        then, now = self._history.at(self._pose_stamp), self._history.at(stamp)
+        total = self._pose_cov
+        if then is not None and now is not None:
+            total = total + odometry_covariance(relative_motion(then, now))
+        return (
+            float(math.sqrt(max(total[0, 0], total[1, 1]))),
+            float(math.degrees(math.sqrt(max(total[2, 2], 0.0)))),
         )
 
     def _camera_matcher(self) -> Localizer | None:
@@ -769,7 +885,7 @@ class LaptopLocalizer(Node):
                 global_retry=False,
                 covariance=str(self._switches["covariance"]),
             )
-            self._camera_map = "/map"
+            self._camera_map = TRACKED_MAP_TOPIC
         return self._camera
 
     def _camera_mask(self, localizer: Localizer) -> StaticMask | None:
@@ -903,16 +1019,36 @@ class LaptopLocalizer(Node):
         self._last_match[source] = stamp
         mask = self._camera_mask(localizer)
         silenced = localizer.stats.silenced_scans
+        # The window this scan is matched in, sized by the belief's own covariance. Past the fine
+        # lattice's own reach it is scored coarsely first (Localizer.coarse_measure, 9-15 ms at
+        # 0.5 m against 1.2 s for the fine window at that width) and refined in the tracking window
+        # around the winner — otherwise a wide window costs a second a scan and no cadence pays it.
+        window = self._camera_window(self._belief_spread(stamp))
+        self._tally.sample("window_m", window.xy_m)
         with self._tally.measure("camera"):
-            measured = localizer.measure(
-                belief,
-                scan.points,
-                source,
-                stamp,
-                min_known=TRACK_MIN_KNOWN,
-                trust=self._roster.source(source).trust,
-                mask=mask,
-            )
+            fine = self._camera_window()  # the flags' own width: the lattice this matcher holds
+            if window.xy_m > fine.xy_m or window.theta_deg > fine.theta_deg:
+                measured = localizer.coarse_measure(
+                    belief,
+                    scan.points,
+                    source,
+                    stamp,
+                    coarse=window,
+                    min_known=TRACK_MIN_KNOWN,
+                    trust=self._roster.source(source).trust,
+                    mask=mask,
+                )
+                self._tally.count("coarse")
+            else:
+                measured = localizer.measure(
+                    belief,
+                    scan.points,
+                    source,
+                    stamp,
+                    min_known=TRACK_MIN_KNOWN,
+                    trust=self._roster.source(source).trust,
+                    mask=mask,
+                )
         if localizer.stats.silenced_scans > silenced:
             self._tally.count("voted")  # this fan had furniture in it and it did not score
         self._tally.sample(f"fit_{source}", measured.fit)

@@ -52,6 +52,8 @@ Arguments: ``board`` (the robot's address for the camera stream), ``slam``, ``ca
 ``resume``, ``graph_odom`` (known-map mode: whose odometry the graph is built on),
 ``neighbor_refining`` (known-map mode: whether ICP refines the neighbour links and stiffens them
 with its own covariance — false, or no closure the graph finds survives RGBD/OptimizeMaxError),
+``memory`` (known-map mode: ``trust`` — start LOCALISING and let pepin_bringup.rtabmap_frame move
+the mode live on trust in the pose — ``map``, or ``localise``),
 ``vo``, ``database`` (empty: chosen by the mode), ``bridge_admin`` (the laptop
 bridge's REST admin, asked whether it still lists this launch's previous incarnation),
 ``static_camera_tf``
@@ -205,6 +207,55 @@ KNOWN_MAP = {
     # correction of the wheels between two nodes 5 cm apart — a centimetre of local metric
     # accuracy, against a graph that can close a loop at all. Back with neighbor_refining:=true.
     "RGBD/NeighborLinkRefining": "false",
+}
+
+# A KNOWN ROOM IS LOCALISED IN, NOT RE-MAPPED (``localize``, the default beside a known map since
+# 2026-09-18). Everything here follows from what the parked cart measured that evening.
+#
+# Mem/IncrementalMemory false is the whole of it: nothing is written to the database. That removes
+# the disease pepin.graphnodes exists to survive — the database stops growing, so no new session
+# becomes a new PIECE, no optimisation re-roots the graph, and the frame that moved from (-9.17,
+# -0.29, -147.5 deg) to (-11.10, +5.71, -27.8 deg) across one prune stops moving. Every entry of the
+# node table stays true, and the 43 sessions no lidar-held drive has visited become a fixed,
+# shrinking debt instead of a growing one.
+#
+# Mem/InitWMWithAllNodes true puts the whole database in the working memory at start, which is what
+# makes a wake-up anywhere in the flat possible: without it RTAB-Map can only recognise what its
+# memory management has paged in, and on the charger that is whatever the last session ended with.
+#
+# RGBD/LinearUpdate and RGBD/AngularUpdate 0 make a PARKED cart localise. With the defaults
+# (0.1 m / 0.1 rad) Memory/Small_movement read 1 on every update at rest and RTAB-Map skipped the
+# whole pipeline — measured live: not one update named a node until these were set to 0, and then
+# every update did (proximity_detection_id 88429). A wake-up is a cart that has not moved, so this
+# is not a tuning choice; it is the mode working at all.
+#
+# RGBD/OptimizeMaxError 0 (the check OFF) needs the argument spelled out, because it is the check
+# that rejects a CORRECT recognition. Parked in mapping mode RTAB-Map found this very place —
+# Loop/Highest_hypothesis_id 87418 at 0.978, Loop/Visual_inliers 328, ratio 0.41 — and threw it away
+# itself: Loop/Optimization_max_ang_error_ratio 5.03 against the parameter's 3.0. That ratio is a
+# statement about THE GRAPH and not about the recognition: accepting the closure would contradict
+# the piecewise-inconsistent database (sessions 1.6 m and 129 deg apart,
+# scratch/graph_tie_fit.py), so the check faithfully refuses every good recognition this database
+# can produce. Here it costs
+# nothing to switch off: with IncrementalMemory false the accepted link is never written, so a wrong
+# recognition cannot pollute anything — it can only produce one wrong WORD, and judging a word is
+# our job, done three times over (rtabmap_frame's 3-DOF chi-square against the odometry-carried
+# belief, the board's own information-filter gate, and the whole-map candidate rules that need three
+# agreeing pieces of evidence). The alternative — leaving it at 3.0 — is a camera that never speaks
+# beside this database, which is what the last three days measured.
+#
+# WHAT IT COSTS rtabmap_frame: the ids of this run become TEMPORARY (nothing is written), so a new
+# node may not be tabled — the node detects that by the id never appearing in /rtabmap/mapGraph and
+# the table then grows only through RECOGNISED nodes. Recognition and the "new start" detection are
+# unchanged (a matched id is still below this start's first ref, and a falling distance counter is
+# still a restart); Memory/Distance_travelled still creeps from VO jitter at rest, which is why the
+# word's sigma stopped reading it at all (graph_word_from_localization).
+LOCALIZE_KNOWN_MAP = {
+    "Mem/IncrementalMemory": "false",
+    "Mem/InitWMWithAllNodes": "true",
+    "RGBD/LinearUpdate": "0",
+    "RGBD/AngularUpdate": "0",
+    "RGBD/OptimizeMaxError": "0",
 }
 
 # RTAB-Map reads its odometry from TF here (odom_frame_id above), and TF carries no covariance,
@@ -370,17 +421,30 @@ def _after_ghost(*names: str) -> list:  # type: ignore[type-arg]
 
 
 def rtabmap_parameters(
-    slam: bool, camera_only: bool, graph_odom: bool = True, neighbor_refining: bool = False
+    slam: bool,
+    camera_only: bool,
+    graph_odom: bool = True,
+    neighbor_refining: bool = False,
+    memory: str = "trust",
 ) -> dict[str, object]:
     """Everything RTAB-Map is told for one mode: the common table under the mode's frames and
     grid. ``camera_only`` is read in SLAM mode alone — beside a known map the lidar is what
     makes the graph metric; ``graph_odom`` is read there alone too (false puts the graph back on
     the tracker's pose, :data:`TRACKER_ODOM`), and so is ``neighbor_refining`` (true puts ICP's
     own covariance back on the neighbour links, on which no loop closure survives the error-ratio
-    check — see :data:`KNOWN_MAP`)."""
+    check — see :data:`KNOWN_MAP`).
+
+    ``memory`` is the INITIAL mode beside a known map and nothing more: anything but ``map`` starts
+    RTAB-Map localising (:data:`LOCALIZE_KNOWN_MAP`), because that is what a wake-up in a known room
+    needs and because a database that is not written to cannot grow a new piece. From there
+    pepin_bringup.rtabmap_frame owns the switch and moves it live on trust in the pose
+    (``graph_memory``), calling RTAB-Map's own set_mode services — so this decides where a session
+    begins, not where it stays."""
     mode: dict[str, object] = dict(KNOWN_MAP) if graph_odom else {**KNOWN_MAP, **TRACKER_ODOM}
     if not slam and neighbor_refining:
         mode["RGBD/NeighborLinkRefining"] = "true"
+    if not slam and memory != "map":
+        mode = {**mode, **LOCALIZE_KNOWN_MAP}
     if slam:
         mode = {**SLAM, **(SLAM_CAMERA_ONLY if camera_only else SLAM_LIDAR)}
     return {**RTABMAP, **TF_ODOMETRY_VARIANCE, **mode}
@@ -398,13 +462,15 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     camera_only = _flag(context, "camera_only")
     resume = _flag(context, "resume")
     world_map = _flag(context, "world_map")
+    resume_volume = _flag(context, "resume_volume")
     graph_odom = _flag(context, "graph_odom")
     neighbor_refining = _flag(context, "neighbor_refining")
+    memory = LaunchConfiguration("memory").perform(context).strip().lower()
     mode = "slam" if slam else "vision"
     # Whether the fused volume may be /map at all: the mode's owner (pepin.deployment) and the
     # launch's own world_map, the two halves the node checks before it publishes anything.
     volume_owns_map = world_map and map_owner(mode) == "laptop"
-    seed_map = LaunchConfiguration("seed_map").perform(context)
+    room = LaunchConfiguration("room").perform(context)
     database = LaunchConfiguration("database").perform(context) or (
         SLAM_DATABASE if slam else KNOWN_MAP_DATABASE
     )
@@ -470,6 +536,13 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # RTAB-Map's correction, put where the mode needs it (pepin_bringup.rtabmap_frame): beside a
     # known map it is map -> rtabmap on this laptop's own /tf, so the voxels and the cart stay
     # together after a closure; in SLAM it is map -> odom and goes to the board as a message.
+    #
+    # ``fresh_frame`` follows SLAM, and it is the same fact said to another node: in SLAM this
+    # session creates the map AND the database at the cart's current pose in the same second, so
+    # ``map`` and ``rtabmap`` are one frame BY CONSTRUCTION and the tie between them is identity
+    # with no uncertainty — nothing to measure, no lidar needed, and every node tabled from the
+    # first one. Beside a known map the database is LOADED and the two frames are unrelated until
+    # something measures them, so it stays off.
     frame = ExecuteProcess(
         cmd=[
             "python3",
@@ -480,6 +553,10 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             f"slam:={'true' if slam else 'false'}",
             "-p",
             f"graph_odom:={'true' if graph_odom else 'false'}",
+            "-p",
+            f"fresh_frame:={'true' if slam else 'false'}",
+            "-p",
+            f"graph_memory:={memory}",
         ],
         output="screen",
         prefix=_after_ghost("/rtabmap_frame"),
@@ -564,14 +641,20 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             f"fit_gate:={'false' if slam else 'true'}",
             "-p",
             f"lidar_fit_gate:={'false' if slam else 'true'}",
+            # ONE MAP, ONE FILE. The volume resumes its OWN snapshot — named after the room, not
+            # after the session (pepin.worldmap.world_path_for) — and reads the saved pair only
+            # when there is no snapshot yet. --fresh passes this false, which is the whole of
+            # "an unknown room": no snapshot resumed and (below) no seed named.
+            "-p",
+            f"resume_volume:={'true' if resume_volume else 'false'}",
         ]
-        # The served map the volume's lidar layer starts as, and whose cell lattice the volume's
-        # grid is snapped to. A known room is a seeded volume and nothing else — and a slice
-        # seeded from the file IS that file, cell for cell (scratch/volume_vs_pgm.py).
-        # Only when there IS one: rcl refuses to parse an override with an empty value
-        # ("Couldn't parse parameter override rule: '-p seed_map:='"), and the node would die
-        # at rclpy.init on every unseeded launch — which is every launch there has ever been.
-        + (["-p", f"seed_map:={seed_map}"] if seed_map else []),
+        # WHICH ROOM, and that is the whole of "known or fresh": the name picks the volume's own
+        # file (/maps/<room>.world.npz) and nothing else — no pgm is read or written any more.
+        # Empty means nowhere recognised, and the node then waits for a recognition on
+        # /place/room. Only passed when there IS one: rcl refuses to parse an override with an
+        # empty value ("Couldn't parse parameter override rule: '-p room:='") and the node would
+        # die at rclpy.init on every unnamed launch.
+        + (["-p", f"room:={room}"] if room else []),
         output="screen",
         prefix=_after_ghost("/depth_fusion"),
         **RESPAWN,
@@ -646,7 +729,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 "odom_sensor_sync": False,
                 # the grid is republished every second: the operator watches it grow
                 "map_always_update": True,
-                **rtabmap_parameters(slam, camera_only, graph_odom, neighbor_refining),
+                **rtabmap_parameters(slam, camera_only, graph_odom, neighbor_refining, memory),
             }
         ],
         remappings=remappings,
@@ -711,11 +794,25 @@ def generate_launch_description() -> LaunchDescription:
             # since 2026-09-14: refined links are stiffer than the odometry they replace and
             # RGBD/OptimizeMaxError then rejects every closure the graph finds.
             DeclareLaunchArgument("neighbor_refining", default_value="false"),
+            # Known-map mode only: whether the database may LEARN. "trust" (the default) starts
+            # RTAB-Map LOCALISING — nothing written, the whole database in working memory, a parked
+            # cart recognised (LOCALIZE_KNOWN_MAP) — and hands the switch to
+            # pepin_bringup.rtabmap_frame, which moves it live on trust in the pose: the database
+            # may learn only while a sharp pose that is NOT held by the graph exists. "map" starts
+            # and stays in mapping mode (the arrangement of before 2026-09-18); "localise" freezes
+            # the database for the session. The same word is passed to rtabmap_frame's
+            # graph_memory flag, so one argument sets the initial mode and who decides after it.
+            DeclareLaunchArgument("memory", default_value="trust"),
             # The volume is /map instead of RTAB-Map's grid (pepin_bringup.depth_fusion)
             DeclareLaunchArgument("world_map", default_value="false"),
-            # The map the fused volume's lidar layer is seeded from (a map_server yaml as the
-            # container sees it, e.g. /maps/flat3_straight.yaml); empty seeds nothing.
-            DeclareLaunchArgument("seed_map", default_value=""),
+            # The room the cart is in, as a place recogniser names it (e.g. flat3_straight): it
+            # names the volume's own snapshot, /maps/<room>.world.npz
+            # (pepin.worldmap.world_path_for). Empty is "nowhere recognised yet" — the volume is
+            # born under the cart and a later recognition on /place/room may still name it.
+            DeclareLaunchArgument("room", default_value=""),
+            # The volume resumes that room's snapshot. False is ros/laptop.sh --fresh: a room
+            # built from nothing whatever is on disk.
+            DeclareLaunchArgument("resume_volume", default_value="true"),
             # The camera as a third odometry: rtabmap_odom's rgbd_odometry and the node that
             # gates it (pepin_bringup.visual_odometry). On by default because it is measured at
             # rest and costs only this laptop (0.25 core); what it costs the ROBOT is still

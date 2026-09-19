@@ -46,30 +46,58 @@
         }
       },
       "topics": {
+        "/map_tracked": {
+          "visible": true,
+          "colorMode": "custom",
+          "minColor": "#ffffffff",
+          "maxColor": "#000000ff",
+          "unknownColor": "#80808080",
+          "frameLocked": true,
+          "alpha": 1.0
+        },
         "/map": {
           "visible": false,
           "colorMode": "custom",
           "minColor": "#ffffffff",
           "maxColor": "#000000ff",
           "unknownColor": "#80808080",
+          "frameLocked": true,
+          "alpha": 1.0
+        },
+        "/map_lidar": {
+          "visible": false,
+          "colorMode": "custom",
+          "minColor": "#0b2b36ff",
+          "maxColor": "#00e5ffff",
+          "unknownColor": "#00000000",
+          "alpha": 0.6,
+          "frameLocked": true
+        },
+        "/map_camera": {
+          "visible": false,
+          "colorMode": "custom",
+          "minColor": "#2b1236ff",
+          "maxColor": "#ff4dd2ff",
+          "unknownColor": "#00000000",
+          "alpha": 0.6,
           "frameLocked": true
         },
         "/global_costmap/costmap": {
-          "visible": false,
+          "visible": true,
           "colorMode": "costmap",
-          "alpha": 0.35
+          "alpha": 0.45
         },
         "/local_costmap/costmap": {
-          "visible": true,
+          "visible": false,
           "colorMode": "costmap"
         },
         "/plan": {
-          "visible": false,
-          "lineWidth": 0.05,
+          "visible": true,
+          "lineWidth": 0.06,
           "color": "#00e676"
         },
         "/local_plan": {
-          "visible": false,
+          "visible": true,
           "lineWidth": 0.03,
           "color": "#ffea00"
         },

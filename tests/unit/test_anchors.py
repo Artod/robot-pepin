@@ -1,4 +1,5 @@
-"""The anchor kept beside its map: what the file holds, what it refuses, when it is re-learned."""
+"""The one-seating anchor file kept beside its map: what it holds, and what a seating must be
+worth for the tie between the two frames to be measured from it at all."""
 
 import json
 import math
@@ -7,9 +8,7 @@ from pathlib import Path
 import pytest
 
 from pepin.anchors import (
-    RELEARN_HOLD_S,
     Anchor,
-    AnchorWatch,
     anchor_path,
     describe_sigma,
     load_anchor,
@@ -53,48 +52,19 @@ def test_no_file_is_silence_and_a_broken_one_is_said_out_loud(tmp_path: Path) ->
     with pytest.raises(ValueError, match="not an anchor"):
         load_anchor(tmp_path, MAP)
 
+    # ...and a file of ANOTHER map under this one's name, which is only checkable while the file
+    # name and the identity inside are one string — the legacy size@origin naming. Under a room name
+    # they
+    # are two different things and the room is the identity (see load_anchor).
     save_anchor(tmp_path, Anchor(Pose2D(1.0, 0.0), "341x341@-8.50,-8.50"))
     foreign = anchor_path(tmp_path, "341x341@-8.50,-8.50")
     foreign.rename(anchor_path(tmp_path, MAP))
     with pytest.raises(ValueError, match="anchor of map"):
-        load_anchor(tmp_path, MAP)
-
-
-def test_a_closure_landing_is_not_a_stale_anchor() -> None:
-    """A loop closure moves the graph's word by centimetres and the word comes back; the watch
-    must not rewrite the file for that. Only a disagreement that HOLDS is evidence."""
-    watch = AnchorWatch()
-    assert not watch.update(0.0, True, 0.05, 1.0), "a closure-sized gap is not a gap at all"
-    assert watch.since is None
-
-    assert not watch.update(1.0, True, 0.9, 0.0), "the clock starts here"
-    assert watch.since == 1.0
-    assert not watch.update(1.0 + RELEARN_HOLD_S - 0.1, True, 0.9, 0.0)
-    assert not watch.update(3.0, True, 0.05, 0.0), "the word came back: nothing to re-learn"
-    assert watch.since is None
-
-
-def test_a_gap_that_holds_while_the_lidar_drives_fires_exactly_once() -> None:
-    """Five seconds of disagreement with a trusted tracker is the evidence; one stale anchor
-    must produce one re-learn, not one per graph message afterwards."""
-    watch = AnchorWatch()
-    watch.update(0.0, True, 0.9, 0.0)
-    assert watch.update(RELEARN_HOLD_S + 0.1, True, 0.9, 0.0)
-    assert watch.since is None, "the clock restarts: the next re-learn needs its own five seconds"
-    assert not watch.update(RELEARN_HOLD_S + 0.2, True, 0.9, 0.0)
-
-
-def test_a_turn_alone_is_enough_and_an_untrusted_tracker_is_never_evidence() -> None:
-    """Twenty degrees is past anything a closure accounts for, so a heading gap counts on its
-    own — but with the lidar silent there is nothing to re-learn FROM, and the clock never even
-    starts: a graph corrected against a dead-reckoned pose would write that drift into the file."""
-    watch = AnchorWatch()
-    assert watch.disagrees(0.0, 25.0) and watch.disagrees(0.0, -25.0)
-    assert not watch.disagrees(0.4, 19.0)
-
-    watch.update(0.0, False, 9.0, 90.0)
-    assert watch.since is None
-    assert not watch.update(100.0, False, 9.0, 90.0)
+        load_anchor(tmp_path, MAP, MAP)
+    read = load_anchor(tmp_path, MAP)
+    assert read is not None and read.map_id == "341x341@-8.50,-8.50", (
+        "asked nothing, told the truth"
+    )
 
 
 def test_a_seating_the_scan_pins_in_one_axis_only_is_no_place_to_learn_a_frame() -> None:

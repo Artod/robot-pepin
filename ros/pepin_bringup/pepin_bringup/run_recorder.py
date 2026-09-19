@@ -26,6 +26,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
+from action_msgs.msg import GoalStatusArray
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from nav_msgs.msg import Path as PathMsg
@@ -35,6 +36,7 @@ from sensor_msgs.msg import Imu, LaserScan, Range
 from std_msgs.msg import String
 
 from pepin.flags import Flag, FlagSet
+from pepin.mapcache import run_length_encode
 from pepin.mounts import Mounts
 from pepin.recording import imu_record, scan_record_from_ros
 from pepin.runlink import (
@@ -85,7 +87,54 @@ FLAGS = FlagSet(
         " board's routes back without a human",
         off_when="while bisecting the bridge by hand, so nothing restarts under you",
     ),
+    Flag(
+        "planner_records",
+        True,
+        description="what the PLANNER saw goes on the tape too: the global costmap (run-length"
+        " encoded, at most one grid per new plan), the goal status of Nav2's three actions"
+        " (navigate_to_pose, compute_path_to_pose, follow_path) and the pose graph's own words"
+        " (/localization/graph_measurement) beside the camera's; off, the tape holds what it held"
+        " before 2026-09-18",
+        why="the tape was blind exactly where the failures were. On 2026-09-17 two legs piled up"
+        " 78 and 90 recoveries in ~125 s with no path (ros/maps/rec/20260917_192935_goto.log,"
+        " ..._201425_goto.log) and the tapes could not say why: they carry /plan and the LOCAL"
+        " costmap, and the planner reads the GLOBAL one. The cart's own footprint was clear in"
+        " every one of the 1740 taped local grids (scratch/footprint_in_costmap.py), so the answer"
+        " was in the grid nobody recorded. Cost, measured on those tapes"
+        " (scratch/costmap_rle_cost.py): the planner's grid is 239x215 = 51385 cells, 195 kB of"
+        " raw JSON, and 16 kB run-length encoded over the four classes that decide whether the"
+        " cart FITS (unknown / free / inflated / the 99-100 lethal band) — 12-fold, and the"
+        " gradient it drops is cost, not feasibility. One grid per plan at the tapes' own 1.2 s"
+        " plan cadence is 13 kB/s beside the 55 kB/s the scans already write, and one encode of"
+        " 51k cells, 2.8 ms on the laptop's core. The status topics carry a message per"
+        " transition and the graph's words arrive at 1 Hz",
+        on_when="always while Nav2 is the thing being debugged",
+        off_when="on a long autonomy run where the tape must stay small, or to reproduce a tape"
+        " recorded before 2026-09-18",
+    ),
 )
+
+# How a taped grid's cells are encoded: :func:`pepin.mapcache.run_length_encode`, the one
+# implementation, shared with the map the relocalizer persists — a costmap and a saved map compress
+# the same way and a reader of either needs one decoder.
+RLE = "rle"
+# The four values a feasibility question needs, and the only ones the global grid is taped with:
+# Nav2's own unknown and free, everything inflated between them, and the 99-100 band that stops a
+# footprint. The gradient in between is what a cost function reads, and it is also what makes a
+# costmap incompressible — the local grids of 2026-09-17 shrink 1.5-fold raw and 8.6-fold reduced
+# (scratch/costmap_rle_cost.py). A record says which it is (``classes``), so no reader guesses.
+UNKNOWN, FREE, INFLATED, LETHAL_BAND = -1, 0, 1, 99
+
+
+def feasibility_classes(cells: list[int]) -> list[int]:
+    """One costmap's cells reduced to the four values that decide whether the cart fits
+    (:data:`UNKNOWN`, :data:`FREE`, :data:`INFLATED`, :data:`LETHAL_BAND`)."""
+    return [
+        UNKNOWN
+        if value < 0
+        else (FREE if value == 0 else (LETHAL_BAND if value >= 99 else INFLATED))
+        for value in cells
+    ]
 
 
 def _yaw(orientation: object) -> float:
@@ -116,9 +165,13 @@ class RunRecorder:
         directory: Path,
         tape: RunTape | None = None,
         fusion_records: Callable[[], bool] = lambda: True,
+        planner_records: Callable[[], bool] = lambda: True,
     ) -> None:
         self._node = node
         self._fusion_records = fusion_records
+        self._planner_records = planner_records  # the ``planner_records`` flag, read per record
+        self._plan_seq = 0  # how many plans this run has seen: the global costmap's throttle...
+        self._gcostmap_seq = -1  # ...and the plan the last taped grid belonged to
         self._last_kept: dict[str, float] = {}
         self._directory = directory
         self._tape = tape or RunTape()
@@ -179,6 +232,13 @@ class RunRecorder:
         want = "listen" if self._tape.recording else "deafen"
         if want == "listen" and not self._during_run:
             strings = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
+            # The global costmap is published whole ONCE and then only as updates, so a plain
+            # subscription started mid-drive hears nothing at all: it has to be latched.
+            latched = QoSProfile(
+                depth=1,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                reliability=ReliabilityPolicy.RELIABLE,
+            )
             self._during_run = [
                 self._node.create_subscription(
                     LaserScan, "/ldlidar_node/scan", self._on_scan, self._scan_qos
@@ -210,8 +270,30 @@ class RunRecorder:
                     )
                     for topic, handler in (
                         ("measurement", self._on_measurement),
+                        ("graph_measurement", self._on_measurement),
                         ("sources", self._on_sources),
                     )
+                ),
+                # ...and what the PLANNER saw, which is not the local grid the controller reads:
+                # the global costmap (latched, so this subscription gets the full grid at once and
+                # the updates after it) and the goal status of the three actions a drive runs
+                # through. Behind ``planner_records``; see the flag for the cost.
+                *(
+                    self._node.create_subscription(
+                        OccupancyGrid, "/global_costmap/costmap", self._on_global_costmap, latched
+                    )
+                    for _ in (0,)
+                    if self._planner_records()
+                ),
+                *(
+                    self._node.create_subscription(
+                        GoalStatusArray,
+                        f"/{action}/_action/status",
+                        lambda msg, a=action: self._on_action_status(a, msg),
+                        5,
+                    )
+                    for action in ("navigate_to_pose", "compute_path_to_pose", "follow_path")
+                    if self._planner_records()
                 ),
             ]
         elif want == "deafen" and self._during_run:
@@ -290,9 +372,14 @@ class RunRecorder:
         self._tape.add(imu_record(_stamp(msg.header), (w.x, w.y, w.z), (a.x, a.y, a.z)))
 
     def _on_plan(self, msg: PathMsg) -> None:
-        """Nav2's global plan as a polyline (at most 200 points), so a replay can draw it."""
+        """Nav2's global plan as a polyline (at most 200 points), so a replay can draw it.
+
+        A new plan is also what opens the window for one global costmap record: the grid the
+        planner read is worth taping exactly when the planner has just read it.
+        """
         if not self._keep("plan"):
             return
+        self._plan_seq += 1
         step = max(1, len(msg.poses) // 200)
         self._tape.add(
             {
@@ -339,10 +426,62 @@ class RunRecorder:
             }
         )
 
+    def _on_global_costmap(self, msg: OccupancyGrid) -> None:
+        """The grid the PLANNER plans on, at most one record per new plan.
+
+        Taped as the four classes that decide whether the cart fits, run-length encoded
+        (:func:`feasibility_classes`, :func:`run_length_encode`): 16 kB instead of 195 kB for this
+        flat's 239x215 cells. The throttle is the plan counter and not a clock — a grid nobody
+        planned on answers no question, and a drive that re-plans ten times a second would
+        otherwise write ten grids a second.
+        """
+        if not self._keep("gcostmap") or not self._planner_records():
+            return
+        if self._plan_seq == self._gcostmap_seq:
+            return
+        self._gcostmap_seq = self._plan_seq
+        info = msg.info
+        self._tape.add(
+            {
+                "t": _stamp(msg.header),
+                "topic": "gcostmap",
+                "origin": [round(info.origin.position.x, 3), round(info.origin.position.y, 3)],
+                "resolution": round(info.resolution, 3),
+                "width": int(info.width),
+                "height": int(info.height),
+                "encoding": RLE,
+                "classes": [UNKNOWN, FREE, INFLATED, LETHAL_BAND],
+                "plan": self._plan_seq,
+                "data": run_length_encode(feasibility_classes(list(msg.data))),
+            }
+        )
+
+    def _on_action_status(self, action: str, msg: Any) -> None:
+        """What became of Nav2's own actions — the planner's, the controller's, the whole drive's.
+
+        One record per status array, with each goal's status code (action_msgs/GoalStatus: 2
+        executing, 4 succeeded, 5 canceled, 6 aborted). This is the only place a tape can say that
+        a plan was ABORTED rather than never asked for, which is the question 78 recoveries with no
+        path raise (2026-09-17). The topics carry a message per transition, so they are nearly free.
+        """
+        if not self._keep("nav") or not self._planner_records():
+            return
+        self._tape.add(
+            {
+                "t": time.time(),
+                "topic": "nav",
+                "action": action,
+                "status": [int(s.status) for s in msg.status_list],
+            }
+        )
+
     def _on_measurement(self, msg: String) -> None:
-        """One pose the laptop measured out of a camera scan, kept verbatim: nothing here parses
-        it, so a malformed message is on the tape as evidence instead of lost. ``t`` is when it
-        ARRIVED; the moment it speaks for is ``stamp`` inside the JSON."""
+        """One pose the laptop measured out of a camera scan OR out of the pose graph, kept
+        verbatim: nothing here parses it, so a malformed message is on the tape as evidence instead
+        of lost. ``t`` is when it ARRIVED; the moment it speaks for is ``stamp`` inside the JSON,
+        and the two together are the age the board's gate charges it
+        (scratch/word_age.py; until 2026-09-18 the graph's own words were not taped at all, so that
+        age could not be read off a tape for the one source a camera-only drive runs on)."""
         if not self._fusion_records():
             return
         self._tape.add({"t": time.time(), "topic": "meas", "json": msg.data})
@@ -399,7 +538,10 @@ class RunRecorderNode(Node):
         self._record_dir = Path(str(self.declare_parameter("record_dir", "/maps/rec").value))
         self._switches = Switches(self, FLAGS)
         self._recorder = RunRecorder(
-            self, self._record_dir, fusion_records=lambda: self._switches.on("fusion_records")
+            self,
+            self._record_dir,
+            fusion_records=lambda: self._switches.on("fusion_records"),
+            planner_records=lambda: self._switches.on("planner_records"),
         )
         # The laptop's one way to restart the board's zenoh bridge without an ssh key
         # (pepin_bringup.bridge_kick): this node hosts the handler because it is the only one

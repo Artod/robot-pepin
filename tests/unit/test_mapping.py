@@ -160,3 +160,30 @@ def test_moving_the_flag_restarts_the_wait_for_the_new_map() -> None:
     choice.switch("map_topic", "map_lidar")
     assert choice.lapsed(11.0) is None, "the wait for map_lidar starts here"
     assert choice.lapsed(21.0) == "map"
+
+
+def test_a_map_with_nothing_in_it_is_not_adopted() -> None:
+    """An unknown room's first publication is an all-unknown grid. Adopting it spends the single
+    adoption a refresh_s of 0 allows, and the tracker then refuses every real map for the rest of
+    the session — so it is turned away, and counted, until the first sweep fills it."""
+    choice = MapChoice()
+    taken: list[str] = []
+    blank = True
+
+    def offer() -> bool:
+        return choice.offer(
+            "map", lambda: "d1", 0.0, lambda: taken.append("map"), empty=lambda: blank
+        )
+
+    assert not offer() and not taken and choice.source == ""
+    assert choice.take_ignored() == 1, "the wait is visible"
+    blank = False
+    assert offer() and taken == ["map"] and choice.source == "map"
+
+
+def test_a_caller_that_asks_nothing_about_the_cells_behaves_as_before() -> None:
+    """The question is optional: every existing caller passes four arguments and is unchanged."""
+    choice = MapChoice()
+    taken: list[str] = []
+    assert choice.offer("map", lambda: "d1", 0.0, lambda: taken.append("map"))
+    assert taken == ["map"]

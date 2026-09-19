@@ -13,8 +13,11 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import tempfile
 import time
 from collections.abc import Callable
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -22,6 +25,10 @@ import pytest
 import ros_stubs
 
 RCLPY = ros_stubs.install()
+
+# The board writes its adopted map beside the maps (/maps, read-only here): every node built in
+# this file writes into a temporary directory instead.
+CACHE_DIR = tempfile.mkdtemp(prefix="pepin-map-cache-")
 
 from pepin_bringup.relocalizer import (  # noqa: E402
     CLEAR_LOCAL_COSTMAP,
@@ -140,7 +147,7 @@ def node() -> Relocalizer:
     furnished room as its map."""
     # No match gap: the pacer spaces matches on the wall clock, and a test feeds a second of
     # scans in milliseconds.
-    with ros_stubs.parameters(sources="lidar,camera", min_match_gap_s=0.0):
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, sources="lidar,camera", min_match_gap_s=0.0):
         node = Relocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     node.subs["/map"][1](map_msg())
@@ -206,7 +213,7 @@ def test_the_node_takes_the_camera_as_a_measurement_and_never_as_a_scan(
     assert node.set_parameters([Parameter("sources", value="camera")])[0].successful
     assert node._registry.enabled == (CAMERA,)
     assert (
-        "sources=camera measurement_max_age_s=0.5 remote_floor_xy_m=0.08"
+        "sources=camera measurement_max_age_s=0.5 carry_stale_words=on remote_floor_xy_m=0.08"
         " remote_floor_yaw_deg=5.0 fusion=off" in node._switches.state()
     )
 
@@ -268,7 +275,11 @@ def test_a_dead_lidar_hands_the_node_to_the_camera_s_measurements_and_back(
     assert camera["sources"][LIDAR]["health"].startswith("stale")
     assert camera["sources"][CAMERA]["health"].startswith("fresh")
     assert {"fit", "delta", "sigma", "edge"} <= set(camera["sources"][CAMERA])
-    assert "fit" not in camera["sources"][LIDAR] and camera["sources"][DEPTH] == {"health": "off"}
+    # The dead lidar keeps the word it managed before it died, and the travel since says how much
+    # of the map has passed under the cart on it — a source that has gone quiet, not one that was
+    # never there. A source the flag has off carries nothing at all.
+    assert camera["sources"][LIDAR]["moved"] > 0.0 and camera["sources"][LIDAR]["fit"] > 0.0
+    assert camera["sources"][DEPTH] == {"health": "off"}
     assert camera["measurements"]["used"] == [DEPTH]
     assert camera["measurements"]["age_ms"] == 0.0, "it drove its own update"
     fused = json.loads(sources_pub.sent[-1].data)
@@ -284,8 +295,8 @@ def test_a_dead_lidar_hands_the_node_to_the_camera_s_measurements_and_back(
     # each was overtaken by a newer one before any update could take it
     assert "flags: rest_lock=on" in line and "sources=lidar,camera" in line
     assert (
-        "measurement_max_age_s=0.5 remote_floor_xy_m=0.08 remote_floor_yaw_deg=5.0 fusion=on"
-        in line
+        "measurement_max_age_s=0.5 carry_stale_words=on remote_floor_xy_m=0.08"
+        " remote_floor_yaw_deg=5.0 fusion=on" in line
     )
 
 
@@ -320,12 +331,23 @@ def test_a_measurement_is_carried_from_its_own_scan_to_the_update_that_takes_it(
     assert relative_motion(odom[2], apply_motion(odom[2], step)).x > 0.19, "the trail it rode"
 
 
-def test_a_measurement_older_than_the_gate_or_from_another_map_is_refused(
-    node: Relocalizer,
-) -> None:
+def test_a_measurement_older_than_the_gate_or_from_another_map_is_refused() -> None:
     """The failure of 2026-09-13 in one rule: a camera pose whose moment the update can no
     longer honestly carry it from is dropped, not fused. So is one measured against another map,
-    and a message that is not a measurement at all is counted and never obeyed."""
+    and a message that is not a measurement at all is counted and never obeyed.
+
+    ``carry_stale_words`` off, because since 2026-09-18 a word the odometry trail still reaches is
+    CARRIED at any age and only the trail's reach refuses one (the age budget threw away a fifth of
+    the camera's words, scratch/word_age.py). This test is the old rule's, and it keeps it alive."""
+    with ros_stubs.parameters(
+        map_cache_dir=CACHE_DIR,
+        sources="lidar,camera",
+        min_match_gap_s=0.0,
+        carry_stale_words=False,
+    ):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
     truth, odom = drive(4)
     on_scan, on_measure = node.subs["/scan"][1], node.subs["/localization/measurement"][1]
     on_odom = node.subs["/odometry/filtered"][1]
@@ -356,7 +378,7 @@ def test_a_late_executor_matches_the_lidar_late_instead_of_calling_it_stale() ->
     with the default flags: the node is the old gate. Every revolution the odometry covers is
     matched, 600 ms late, none expires, no "odometry ran late", and the status names the
     lidar as the anchor while its health reads stale."""
-    with ros_stubs.parameters(min_match_gap_s=0.0):
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, min_match_gap_s=0.0):
         node = Relocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     node.subs["/map"][1](map_msg())
@@ -388,7 +410,7 @@ def test_the_camera_alone_drives_without_a_first_search_and_the_watch_waits_for_
     any more than the fan itself could — every measurement drives an update, the fit is the one
     the laptop measured, the watch is off and the report line says so, /relocalize refuses. The
     lidar switched on and heard from turns the watch on."""
-    with ros_stubs.parameters(sources="camera", min_match_gap_s=0.0):
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, sources="camera", min_match_gap_s=0.0):
         node = Relocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     node.subs["/map"][1](map_msg())
@@ -446,7 +468,9 @@ def test_the_graph_alone_drives_the_updates_it_used_to_pile_up_at_its_gate() -> 
     cancelling after 15 s of "localization lost". Nothing triggered a fusion step — the lidar was
     not a source and only the camera's gate could drive one.
     """
-    with ros_stubs.parameters(sources="graph", local_fit=False, min_match_gap_s=0.0):
+    with ros_stubs.parameters(
+        map_cache_dir=CACHE_DIR, sources="graph", local_fit=False, min_match_gap_s=0.0
+    ):
         node = Relocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     node.subs["/map"][1](map_msg())
@@ -484,7 +508,7 @@ def test_the_lidar_drives_and_a_graph_word_only_rides_its_revolution() -> None:
     an update — the lidar does, and each word rides the next revolution, carried to its moment.
     Eight revolutions and eight words make seven updates (the first revolution is the search),
     not fifteen."""
-    with ros_stubs.parameters(sources="lidar,graph", min_match_gap_s=0.0):
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, sources="lidar,graph", min_match_gap_s=0.0):
         node = Relocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     node.subs["/map"][1](map_msg())
@@ -512,7 +536,9 @@ def test_the_camera_and_the_graph_make_one_update_between_them_never_two_per_wor
     """sources=camera,graph with no lidar: each word drives one update of its own, and two words
     waiting for the same odometry sample are taken by ONE update — fusing the same odometry step
     twice would count a step the cart never took."""
-    with ros_stubs.parameters(sources="camera,graph", local_fit=False, min_match_gap_s=0.0):
+    with ros_stubs.parameters(
+        map_cache_dir=CACHE_DIR, sources="camera,graph", local_fit=False, min_match_gap_s=0.0
+    ):
         node = Relocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     node.subs["/map"][1](map_msg())
@@ -892,7 +918,9 @@ def test_a_standing_cart_is_matched_about_once_a_second_even_after_a_seed() -> N
     So: a still cart is matched about once a second, before a seed and after one, with whatever
     the node puts on /initialpose handed straight back to it.
     """
-    with ros_stubs.parameters(min_match_gap_s=0.0):  # the pacer spaces on the wall clock
+    with ros_stubs.parameters(
+        map_cache_dir=CACHE_DIR, min_match_gap_s=0.0
+    ):  # the pacer spaces on the wall clock
         node = Relocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     node.subs["/map"][1](map_msg())
@@ -1025,7 +1053,7 @@ def test_the_tracker_takes_the_served_map_when_the_volume_never_speaks() -> None
     tracker must not sit blind waiting for it (CLAUDE.md rule 20). The served map is latched and
     already in hand; ten seconds later it is the map in use, and the volume still replaces it
     whenever it turns up."""
-    with ros_stubs.parameters(map_topic="map_lidar", min_match_gap_s=0.0):
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, map_topic="map_lidar", min_match_gap_s=0.0):
         node = Relocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     node.subs["/map"][1](map_msg())
@@ -1147,7 +1175,7 @@ def test_the_silence_is_measured_before_the_tracker_is_ready() -> None:
     nothing — and the number the report line prints beside the fit must already be the lidar's
     real age, not the `no source ever` it starts at, or every boot reads as a blind cart until
     the whole-map search lands (seconds on the board, minutes when it has to retry)."""
-    with ros_stubs.parameters(sources="lidar,camera", min_match_gap_s=0.0):
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, sources="lidar,camera", min_match_gap_s=0.0):
         node = Relocalizer()  # no /map: _check cannot get past its early return
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     assert node._source_age_s == math.inf, "nothing has spoken yet"
@@ -1215,7 +1243,7 @@ def test_the_node_publishes_one_sigma_out_of_the_fusion_whichever_source_spoke()
     it exactly as the lidar's match would; with nothing correcting it, it grows along the
     odometry until every gate downstream refuses.
     """
-    with ros_stubs.parameters(sources="camera", min_match_gap_s=0.0):
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, sources="camera", min_match_gap_s=0.0):
         node = Relocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     sigma_pub = node.pubs[SIGMA_TOPIC]
@@ -1320,3 +1348,165 @@ def test_a_word_that_jumps_the_pose_clears_nav2_s_local_costmap(node: Relocalize
     line = next(line for line in node.logger.texts("info") if line.startswith("tracker:"))
     assert "costmap cleared 2 times on jumps" in line
     assert "clear_costmap_on_jump=off clear_costmap_jump_m=0.1" in line
+
+
+def test_a_candidate_is_judged_against_a_fit_this_board_measured_not_a_remote_claim(
+    node: Relocalizer,
+) -> None:
+    """2026-09-17 21:18-21:28Z, camera-only and parked: the graph claimed fit 1.00, the tracker
+    reported it as its own, and all 27 whole-map answers the laptop sent per window came back
+    ``nothing`` — no honest lidar score beats 1.00 + BEAT_MARGIN — while the pose those answers
+    disagreed with was some 90 degrees off the room. The candidate's score and the fit it is
+    weighed against must be measured on the same machine."""
+    standing(node)
+    node.fit, node._fit_is_local = 1.00, False  # a remote source's claim, nothing here scored it
+    on_candidate = node.subs["/localization/candidate"][1]
+    for _ in range(3):
+        on_candidate(candidate_msg(node, CARRIED_TO, score=0.70))
+    assert node._pending_seed is not None, "a fit this board never measured cannot refuse a search"
+    assert "disagree 3" in node._candidates.report()
+    # ...and a fit a scan of this board DID measure still judges as before: a candidate that
+    # explains the room no better than the tracker's own match changes nothing.
+    node._pending_seed = None
+    node.fit, node._fit_is_local = 1.00, True
+    for _ in range(3):
+        on_candidate(candidate_msg(node, CARRIED_TO, score=0.70))
+    assert node._pending_seed is None
+    assert "nothing 3" in node._candidates.report()
+
+
+def test_an_all_unknown_first_grid_is_not_adopted_as_the_map() -> None:
+    """A fresh room's volume publishes a blank grid before the first sweep fills it. With
+    map_refresh_s at 0 the node allows one adoption per source, so that blank publication would
+    spend it and leave the tracker matching against nothing. It is turned away and counted, and the
+    grid that follows is adopted normally."""
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, sources="lidar,camera", min_match_gap_s=0.0):
+        node = Relocalizer()  # no map yet: the first grid this node sees is the blank one
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    blank = map_msg()
+    blank.data = [-1] * len(blank.data)
+    node.subs["/map"][1](blank)
+    assert node._grid is None, "nothing known in it: not a map"
+    assert node._choice.take_ignored() == 1, "and it is counted, not silently dropped"
+    node.subs["/map"][1](map_msg())
+    assert node._grid is not None and node._map_id
+
+
+def test_the_adopted_map_is_republished_latched_and_written_down(tmp_path: Path) -> None:
+    """One map on the board: the tracker republishes the grid it matches on for Nav2's static
+    layers, and writes it beside the maps so the next cold boot needs no pgm. The cache is written
+    once per ADOPTION — a second identical map changes no digest and writes nothing."""
+    from pepin_bringup.relocalizer import TRACKED_MAP_TOPIC
+
+    from pepin.mapcache import CACHE_NAME, read_cache
+
+    assert TRACKED_MAP_TOPIC == "/map_tracked", "the literal nav2_params.yaml reads"
+    with ros_stubs.parameters(map_cache_dir=str(tmp_path), min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
+    published = node.pubs[TRACKED_MAP_TOPIC].sent
+    assert len(published) == 1 and published[0].info.width == map_msg().info.width
+    assert (tmp_path / "map_cache.json").exists(), "the literal name, not a derived one"
+    cached = read_cache(tmp_path)
+    assert cached is not None and cached.source == "/map" and cached.map_id == node._map_id
+    assert cached.digest == node._choice.digest and cached.cells == list(map_msg().data)
+    before = (tmp_path / CACHE_NAME).stat().st_mtime_ns
+    node.subs["/map"][1](map_msg())  # the same map again: same digest, nothing adopted
+    assert len(node.pubs[TRACKED_MAP_TOPIC].sent) == 1
+    assert (tmp_path / CACHE_NAME).stat().st_mtime_ns == before, (
+        "an unchanged digest writes nothing"
+    )
+
+
+def test_a_cold_boot_with_no_live_map_tracks_on_the_board_s_own_cache(tmp_path: Path) -> None:
+    """The path that retires the pgm: nothing on any map topic, so after map_fallback_s the node
+    reads what it wrote itself, tracks on it, republishes it, and says in the report line that this
+    is a cache and how old it is — so nobody mistakes a cold boot for a live map."""
+    from pepin_bringup.relocalizer import TRACKED_MAP_TOPIC
+
+    from pepin.mapcache import MapCache, write_cache
+
+    grid = map_msg()
+    write_cache(
+        tmp_path,
+        MapCache(
+            cells=list(grid.data),
+            width=int(grid.info.width),
+            height=int(grid.info.height),
+            resolution_m=float(grid.info.resolution),
+            origin_xy=(grid.info.origin.position.x, grid.info.origin.position.y),
+            map_id="239x215@-18.53,-4.38",
+            digest="map_lidar#f5169d80",
+            stamp=time.time() - 7.4 * 3600.0,
+            source="/map_lidar",
+        ),
+    )
+    with ros_stubs.parameters(map_cache_dir=str(tmp_path), min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    assert node._grid is None, "no map has arrived on any topic"
+    node.clock.seconds = 100.0 + float(node._switches["map_fallback_s"]) + 1.0
+    node._check()
+    assert node._grid is not None, "the board tracks on the map it wrote down itself"
+    assert node.pubs[TRACKED_MAP_TOPIC].sent, "and Nav2's static layers get it too"
+    said = " ".join(node.logger.texts("warning"))
+    assert "no live map: tracking on the cache of 239x215@-18.53,-4.38 from /map_lidar" in said
+    assert "written 7.4 h ago" in said
+    node._report_tracking()
+    assert "the cache of 239x215@-18.53,-4.38" in node.logger.texts("info")[-1]
+
+
+def test_a_board_that_has_never_adopted_a_map_says_so_and_takes_nothing(tmp_path: Path) -> None:
+    """The very first boot of a room: no live map, no cache, no guess. The operator is told the two
+    ways out (bring the volume up, or launch with map_server:=true) and the node keeps waiting."""
+    with ros_stubs.parameters(map_cache_dir=str(tmp_path), min_match_gap_s=0.0):
+        node = Relocalizer()
+    node.clock.seconds = 100.0 + float(node._switches["map_fallback_s"]) + 1.0
+    node._check()
+    assert node._grid is None
+    said = " ".join(node.logger.texts("error"))
+    assert "NO MAP AND NO CACHE" in said and "map_server:=true" in said
+
+
+def test_a_corrupt_cache_is_refused_loudly_and_nothing_is_tracked_on(tmp_path: Path) -> None:
+    """Half a map is worse than none: the tracker would match against it and believe the answer."""
+    from pepin.mapcache import CACHE_NAME
+
+    (tmp_path / CACHE_NAME).write_text('{"version": 1, "encoding": "rle", "cells": [0, 3')
+    with ros_stubs.parameters(map_cache_dir=str(tmp_path), min_match_gap_s=0.0):
+        node = Relocalizer()
+    node.clock.seconds = 100.0 + float(node._switches["map_fallback_s"]) + 1.0
+    node._check()
+    assert node._grid is None
+    assert "THE MAP CACHE IS NOT READABLE" in " ".join(node.logger.texts("error"))
+
+
+def test_with_map_topic_on_the_volume_the_laptop_s_words_are_refused_as_another_map() -> None:
+    """A word about ANOTHER map is refused, whoever says it: with the tracker on the volume it
+    answers to the volume's id, and a camera measurement, a graph measurement or a whole-map
+    candidate stamped with some other grid's id is turned away. This is why the laptop stamps its
+    words with the id of /map_tracked — the grid this very node republishes — and no longer with
+    /map's (2026-09-18: live, "unknown_map 0" with the tracker on /map_lidar); a laptop half that
+    forgets that rule is mute here, and this test is what says so."""
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, map_topic="map_lidar", min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    standing(node)  # a tracked pose, so the candidate gate judges instead of waiting for one
+    volume = map_msg()
+    volume.info.width += 1  # the volume's grid is bigger than the served map's: another id
+    volume.data = list(volume.data) + [-1] * volume.info.height
+    node.subs["/map_lidar"][1](volume)
+    assert node._map_id and node._map_id != "239x215@-18.53,-4.38"
+    served = "239x215@-18.53,-4.38"  # what pepin_bringup.laptop_localizer stamps its words with
+    node.subs["/localization/measurement"][1](measurement_msg(node, Pose2D(), 100.0, map_id=served))
+    node.subs["/localization/graph_measurement"][1](
+        measurement_msg(node, Pose2D(), 100.0, map_id=served)
+    )
+    elsewhere = SimpleNamespace(_map_id=served)  # a candidate stamped with the SERVED map's id
+    node.subs["/localization/candidate"][1](candidate_msg(elsewhere, CARRIED_TO))
+    assert "elsewhere 1" in node._measurements.report(), "the camera's word, as another map's"
+    assert "elsewhere 1" in node._graph.report(), "and the graph's word with it"
+    # the candidate gate calls it `elsewhere` in its counters and `unknown_map` in its verdicts;
+    # either way the laptop's whole-map answer is refused for being about another map
+    assert "elsewhere 1" in node._candidates.report(), "and the laptop's whole-map candidate"

@@ -78,6 +78,8 @@ LaserScan = _msg(
     ranges=list,
     intensities=list,
 )
+# One ToF cone, as pepin_bringup.run_recorder subscribes to it.
+Range = _msg("Range", header=Header, range=0.0, min_range=0.0, max_range=0.0, field_of_view=0.0)
 PointField = _msg("PointField", name="", offset=0, datatype=0, count=0)
 for _name, _value in (("INT8", 1), ("UINT8", 2), ("UINT32", 6), ("FLOAT32", 7), ("FLOAT64", 8)):
     setattr(PointField, _name, _value)
@@ -423,7 +425,9 @@ class Client:
     are paid."""
 
     def __init__(self, srv_type: Any, name: str) -> None:
-        self.srv_type, self.name = srv_type, name
+        # ``srv_name``, as rclpy spells it: a stub that offered ``.name`` let a node log
+        # ``client.name`` through every test and crash on its first live call (2026-09-18).
+        self.srv_type, self.srv_name = srv_type, name
         self.ready = False
         self.response: Any = None
         self.calls: list[Any] = []
@@ -706,6 +710,7 @@ def install() -> Any:
             Image=Image,
             LaserScan=LaserScan,
             PointCloud2=PointCloud2,
+            Range=Range,
             PointField=PointField,
             Imu=Imu,
         ),

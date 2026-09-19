@@ -220,6 +220,22 @@ def disagreement(a: PoseMeasurement, b: PoseMeasurement) -> float:
     return float(d @ np.linalg.solve(joint, d))
 
 
+def explains(reference: PoseMeasurement, measurement: PoseMeasurement, gate: float = GATE) -> bool:
+    """Whether ``reference`` and ``measurement`` can be two readings of the same pose: their
+    :func:`disagreement` is within ``gate`` (:data:`GATE`, chi-square at 99 % over three degrees
+    of freedom), the very test :func:`fuse` applies between measurements.
+
+    It is spelled out as a predicate because :func:`fuse` can only apply it when there are two
+    measurements to compare, and the case that needs it most has one. Camera-only on 2026-09-17
+    every update carried exactly one measurement — the pose graph's word — so ``fuse`` returned it
+    untouched, no gate ran (the tapes' ``fused 0, rejected 0``), and the word walked the heading
+    some 90 degrees off over half an hour with the cart standing still. A caller that holds a
+    belief can ask this question of a lone word; who may then move the pose is the caller's rule,
+    not this module's.
+    """
+    return disagreement(reference, measurement) <= gate
+
+
 def fuse(measurements: Sequence[PoseMeasurement], gate: float = GATE) -> PoseMeasurement | None:
     """The information-weighted pose of several measurements: ``None`` for none, the one
     itself for one, and for more the information-filter update ``sum(L_i) mu = sum(L_i mu_i)``

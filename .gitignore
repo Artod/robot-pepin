@@ -31,8 +31,15 @@ ros/maps/*_throttle*
 ros/maps/rtabmap*.db*
 # the board's mode, recorded by ros/laptop.sh start so ros/laptop.sh vslam need not ask
 ros/.mode
+# ...and the map the board serves, recorded by the same start so vslam seeds from it
+ros/.map
 ros/maps/last_pose.json
 
 # written by the depth node at run time (the persisted affine law)
 ros/maps/depth_law.json
 ros/maps/world_*.npz
+# the volume's own snapshot and the pgm/yaml pair exported from it (the board's cache of the
+# one map); written at run time, never edited by hand
+ros/maps/*.world.npz
+ros/maps/*.world.pgm
+ros/maps/*.world.yaml

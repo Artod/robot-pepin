@@ -781,16 +781,18 @@ def test_restart_sh_parses_and_never_drives() -> None:
         assert f"{half} " in code or f"{half})" in code
 
 
-def test_the_laptop_half_is_seeded_with_the_map_the_board_serves(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """The camera half's fused volume is snapped to the lattice of the map it is seeded with, so
-    the seed is read from the board's own /etc/default/pepin-ros — never guessed, never a default.
-    The neck owns base_link -> camera_link, so --neck always goes with it."""
+def test_the_laptop_half_is_given_the_room_the_board_names(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The camera half's volume is the ROOM's — it resumes /maps/<room>.world.npz and is seeded
+    from no picture (no pgm in the running loop since 2026-09-18) — so the room is read from the
+    board's own /etc/default/pepin-ros, never guessed, never a default; a ".world" the board's
+    name may carry from an exported cache comes off. The neck owns base_link -> camera_link, so
+    --neck always goes with it."""
     code, out, sent = _restart(
         tmp_path, "laptop", "--no-check", FAKE_MAP="/maps/flat3_straight.yaml"
     )
     assert code == 0, out
     assert "laptop.sh start" in sent
-    assert "laptop.sh vslam --neck --seed-map=/maps/flat3_straight.yaml" in sent
+    assert "laptop.sh vslam --neck --room=flat3_straight" in sent
     assert not [c for c in sent if "--fresh" in c], "no --fresh without --fresh-graph"
     assert not [c for c in sent if c.startswith("ssh") and "restart pepin-ros" in c], sent
     assert "checks skipped" in out
@@ -817,7 +819,7 @@ def test_fresh_graph_empties_the_database_and_takes_the_anchor_of_that_map_with_
     (tmp_path / "bin/uv").chmod(0o755)
     code, out, sent = _restart(tmp_path, "laptop", "--no-check", "--fresh-graph")
     assert code == 0, out
-    assert "laptop.sh vslam --neck --seed-map=/maps/flat3.yaml --fresh" in sent
+    assert "laptop.sh vslam --neck --room=flat3 --fresh" in sent
     assert not anchor.exists(), out
     assert str(anchor) in out and "map <-> database" in out
 

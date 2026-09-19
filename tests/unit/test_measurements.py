@@ -125,9 +125,9 @@ def test_a_measurement_is_carried_to_the_moment_of_the_update_that_takes_it() ->
 
 def test_a_measurement_too_old_or_unreachable_is_dropped_and_counted() -> None:
     """The failure of 2026-09-13: a camera pose fused as if it spoke for the moment it was used
-    at. Past the age the carry is honest for, and past what the odometry remembers, it is
-    dropped — and the report line says which of the two it was."""
-    gate = MeasurementGate()
+    at. What the odometry cannot reach is dropped, and with ``carry_stale_words`` off the age does
+    it as it did before 2026-09-18 — the report line says which of the two it was."""
+    gate = MeasurementGate(carry_stale_words=False)
     assert gate.measurement_max_age_s == MEASUREMENT_MAX_AGE_S
     gate.offer(remote(stamp=100.0), "map1")
     assert gate.take(100.8, rolling(steps=11)) == [], "0.8 s old: past the gate"
@@ -209,10 +209,12 @@ def test_the_age_the_gate_refuses_past_is_a_live_switch() -> None:
     gate = MeasurementGate()
     assert gate.switches == (
         "measurement_max_age_s",
+        "carry_stale_words",
         "self_check",
         "remote_floor_xy_m",
         "remote_floor_yaw_deg",
     )
+    gate.switch("carry_stale_words", False)
     gate.switch("measurement_max_age_s", 1.0)
     gate.offer(remote(stamp=100.0), "map1")
     assert len(gate.take(100.8, rolling(steps=11))) == 1, "0.8 s is inside the new age"
@@ -401,3 +403,58 @@ def test_a_graph_measurement_claims_no_more_than_the_remote_floor() -> None:
     # and it travels: the board reads back exactly what was measured
     back = RemoteMeasurement.from_json(m.to_json())
     assert back.source == GRAPH and back.x == pytest.approx(1.0)
+
+
+def test_a_late_word_is_carried_and_widened_instead_of_dropped() -> None:
+    """2026-09-17, measured on the tapes (scratch/word_age.py): the camera's words arrive 272-364 ms
+    old at the median and p90 607-802 ms against a 500 ms budget, so 892 of 6037 `depth` and 916 of
+    5694 `contact` words on tape 0374 alone were thrown away on arrival. A word the odometry can
+    still reach is evidence; being late costs it covariance, which the carry already adds."""
+    gate = MeasurementGate()
+    gate.offer(remote(stamp=100.0, source=DEPTH), "map1")
+    taken = gate.take(100.8, rolling(steps=11))  # 0.8 s: the tape's own worst decile
+    assert len(taken) == 1, "0.8 s late and reachable: carried, not dropped"
+    assert "stale" not in gate.report()
+    # The pose moved with the cart: 0.8 s of the trail is 16 cm of travel.
+    fresh = MeasurementGate()
+    fresh.offer(remote(stamp=100.0, source=DEPTH), "map1")
+    now = fresh.take(100.0, rolling(steps=11))
+    # (the step is the cart's OWN forward motion, so in the map it lands along the word's heading)
+    assert len(now) == 1
+    assert math.hypot(taken[0].x - now[0].x, taken[0].y - now[0].y) == pytest.approx(0.16, abs=0.01)
+    # ...and it arrives WIDER than it was sent, by what the odometry over that carry costs. Shown on
+    # a word that claims more than the remote floor (the graph's 0.20 m), because under the floor
+    # the carry's own cost is invisible — which is the whole argument for carrying: 0.8 s of this
+    # cart's odometry is worth less than the floor every remote word already carries.
+    wide = np.diag([0.2**2, 0.2**2, math.radians(8.0) ** 2])
+    for gate_, at in ((MeasurementGate(), 100.8), (MeasurementGate(), 100.0)):
+        gate_.offer(remote(stamp=100.0, source=DEPTH, covariance=wide), "map1")
+        sigmas = np.sqrt(np.diag(gate_.take(at, rolling(steps=11))[0].covariance))
+        if at == 100.8:
+            late = sigmas
+        else:
+            prompt = sigmas
+    assert (late >= prompt).all() and late[0] > prompt[0], (late, prompt)
+    assert late[0] - prompt[0] < 0.02, "and the carry costs centimetres, not decimetres"
+
+
+def test_the_odometry_the_board_holds_is_the_only_bound_on_the_age() -> None:
+    """The age budget is gone as a tunable: what the trail cannot reach is still refused, and that
+    refusal is a fact about the board's own memory rather than a constant."""
+    gate = MeasurementGate()
+    gate.offer(remote(stamp=99.0), "map1")  # before the trail begins
+    assert gate.take(99.2, rolling()) == []
+    assert "uncovered 1" in gate.report()
+    gate.offer(remote(stamp=100.0), "map1")
+    assert len(gate.take(101.0, rolling(steps=11))) == 1, "inside the trail: taken at any age"
+
+
+def test_the_old_age_cut_is_one_switch_away() -> None:
+    """CLAUDE.md rule 19: the behaviour of before 2026-09-18 is reachable without a restart."""
+    gate = MeasurementGate()
+    gate.switch("carry_stale_words", False)
+    gate.offer(remote(stamp=100.0), "map1")
+    assert gate.take(100.8, rolling(steps=11)) == [] and "stale 1" in gate.report()
+    gate.switch("carry_stale_words", True)
+    gate.offer(remote(stamp=100.0), "map1")
+    assert len(gate.take(100.8, rolling(steps=11))) == 1

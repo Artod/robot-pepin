@@ -22,17 +22,23 @@ from pepin.lean import Lean
 from pepin.mapping import grid_from_pgm
 from pepin.tsdf import GridSpec, RigidPose
 from pepin.worldmap import (
+    BORN_FRESH,
     FREE,
     OCCUPIED,
     UNKNOWN,
     LidarLaw,
+    MapIdentity,
     OccupancySlice,
     PlanarMount,
     SliceLaw,
     SnapshotClock,
+    SnapshotTrust,
+    ViewGate,
     WorldMap,
     bearings_in_base,
+    export_path_for,
     trinary_from_log_odds,
+    world_path_for,
 )
 
 ROOM_M = 2.0  # the box: walls at x, y = +-2 m
@@ -263,9 +269,11 @@ def channels(world: WorldMap) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return world.volume.sdf, world.volume.weight, world.lidar_weight
 
 
-def scanned_box(pose_of: Callable[[float, float, float], RigidPose]) -> WorldMap:
+def scanned_box(
+    pose_of: Callable[[float, float, float], RigidPose], law: LidarLaw | None = None
+) -> WorldMap:
     """The box scanned eight times from LEVEL_POSES, each pose built by ``pose_of``."""
-    world = WorldMap(spec(), mount())
+    world = WorldMap(spec(), mount(), law=law)
     for i in range(8):
         x, y, yaw = LEVEL_POSES[i % len(LEVEL_POSES)]
         angles, ranges = box_scan(x, y)
@@ -277,9 +285,13 @@ def test_a_level_body_writes_the_voxels_it_has_always_written() -> None:
     """CLAUDE.md rule 19's old behaviour, to the bit. A pure-yaw pose is what the planar EKF
     gives and what ``imu_lean`` off leaves, and the map it writes must be the map that was
     written before the beams became rays — not "within a voxel": a night's map has to be
-    comparable with last night's, and a difference nobody can name is a bug nobody can find."""
+    comparable with last night's, and a difference nobody can name is a bug nobody can find.
+
+    Taken with ``return_wins`` off, which is what the law was when this digest was measured: the
+    flag changes which of a revolution's own samples a cell listens to, so it changes the map by
+    design (its own tests below). The old state stays reachable and stays pinned."""
     digest = hashlib.sha256()
-    for channel in channels(scanned_box(at)):
+    for channel in channels(scanned_box(at, LidarLaw(return_wins=False))):
         digest.update(np.ascontiguousarray(channel).tobytes())
     assert digest.hexdigest() == LEVEL_DIGEST
 
@@ -775,3 +787,236 @@ def test_the_message_packs_the_slice_the_way_map_server_decodes_it() -> None:
     body = slice_.to_pgm().split(b"\n", 3)[3]
     pixels = np.frombuffer(body, dtype=np.uint8).reshape(3, 4)
     assert pixels[2, 1] < 64, "the occupied cell sits in the pgm's LAST row: row 0 is the top"
+
+
+# ---- who the map is, and whether its file may be replaced -----------------------------------
+def test_the_map_s_own_files_are_named_after_the_room() -> None:
+    """ONE MAP, ONE FILE: the volume's snapshot and its exported pair live beside the saved pair
+    they were seeded from and carry the room's name, never the session's — so a second flat
+    cannot be resumed into the first."""
+    assert world_path_for("/maps/flat3_straight.yaml") == Path("/maps/flat3_straight.world.npz")
+    assert export_path_for("/maps/flat3_straight.world.npz") == Path("/maps/flat3_straight.world")
+    # ...and the pair a volume exports is what the next run's world_path_for would point back at
+    exported = export_path_for(world_path_for("/maps/flat1.yaml")).with_suffix(".yaml")
+    assert world_path_for(exported) == Path("/maps/flat1.world.npz")
+
+
+def test_an_identity_is_minted_from_the_birth_and_survives_a_snapshot(tmp_path: Path) -> None:
+    """The id must survive growth and be the same on both sides, so it is minted once from the
+    facts of the birth and carried — not derived from the box, which changes."""
+    world = room()
+    minted = world.born_from("seed:flat3_straight", 1700.0)
+    assert minted.token == MapIdentity.born("seed:flat3_straight", world.spec, 1700.0).token
+    assert minted.provenance == "seed:flat3_straight" and minted.born_s == 1700.0
+    # a different birth is a different map; the same birth is reproducible from a log
+    assert MapIdentity.born(BORN_FRESH, world.spec, 1700.0).token != minted.token
+
+    back = WorldMap.load(world.save(tmp_path / "flat3_straight.world.npz"), mount())
+    assert back.identity == minted, "a resumed volume is the same map, not a new one"
+    assert "seed:flat3_straight" in back.identity.text()
+
+
+def test_the_legacy_id_is_the_one_the_consumers_still_derive() -> None:
+    """Every consumer today computes size@origin off the message (pepin_bringup.msgs.map_id).
+    The volume spells it one step earlier so the two can never disagree, and the digest is built
+    on top of it."""
+    fields = room().lidar_slice().message_fields()
+    assert fields.legacy_id() == f"{fields.width}x{fields.height}@-3.00,-3.00"
+    assert fields.digest().startswith(fields.legacy_id() + ":0.050#")
+
+
+def test_the_exported_pair_is_the_same_map_as_the_published_grid(tmp_path: Path) -> None:
+    """The pair a map_server serves must be a CACHE of the volume and not a second map: the same
+    cells AND the same legacy id, which is what makes a word stamped on /map evidence about
+    /map_lidar. The yaml also carries the minted token for whoever moves onto it."""
+    world = room()
+    world.born_from("seed:flat3_straight", 1700.0)
+    view = world.lidar_slice()
+    yaml_path = world.export_pgm_yaml(tmp_path / "flat3_straight.world", view)
+    text = yaml_path.read_text()
+    assert f"map_id: {world.identity.token}" in text
+    assert "map_from: seed:flat3_straight" in text
+    grid = grid_from_pgm(yaml_path)
+    fields = view.message_fields()
+    assert grid.log_odds.shape == (fields.height, fields.width)
+    assert grid.spec.x_min_m == pytest.approx(fields.origin_x)
+    assert grid.spec.y_min_m == pytest.approx(fields.origin_y)
+    rows, cols = grid.log_odds.shape
+    served = f"{cols}x{rows}@{grid.spec.x_min_m:.2f},{grid.spec.y_min_m:.2f}"
+    assert served == fields.legacy_id(), "the file and the topic are one map, id and all"
+
+
+def test_the_export_never_lands_on_the_seed_it_was_born_from(tmp_path: Path) -> None:
+    """The seed pair (``flat3_straight.pgm`` + ``.yaml``) is the one file in the scheme a human
+    wrote; the export sits BESIDE it under ``.world``. pathlib reads ``.world`` as a suffix, and
+    the first live run replaced it and wrote the volume's slice over the seed (2026-09-18)."""
+    seed_pgm, seed_yaml = tmp_path / "flat3_straight.pgm", tmp_path / "flat3_straight.yaml"
+    seed_pgm.write_bytes(b"the seed")
+    seed_yaml.write_text("image: flat3_straight.pgm\n")
+    world = room()
+    for target in (export_path_for(world_path_for(seed_yaml)), world_path_for(seed_yaml)):
+        written = world.export_pgm_yaml(target)
+        assert written == tmp_path / "flat3_straight.world.yaml"
+        assert "image: flat3_straight.world.pgm" in written.read_text()
+    assert (tmp_path / "flat3_straight.world.pgm").exists()
+    assert seed_pgm.read_bytes() == b"the seed"
+    assert seed_yaml.read_text() == "image: flat3_straight.pgm\n"
+
+
+def test_the_export_leaves_the_previous_pair_whole_when_it_cannot_finish(tmp_path: Path) -> None:
+    """Both files are renamed into place, so a killed write leaves the last good pair rather
+    than a yaml pointing at half a picture (the failure a truncated .npz already taught us)."""
+    world = room()
+    base = tmp_path / "flat3_straight.world"
+    first = world.export_pgm_yaml(base)
+    pgm = tmp_path / "flat3_straight.world.pgm"
+    kept = (pgm.read_bytes(), first.read_text())
+    assert not list(tmp_path.glob("*.writing.*")), "nothing half-written is left behind"
+    pgm.chmod(0o444)
+    world.export_pgm_yaml(base)  # a rename over a read-only file still replaces it
+    assert pgm.read_bytes() == kept[0]
+    assert first.read_text() == kept[1]
+
+
+def test_a_snapshot_is_not_written_once_the_painting_has_stopped_being_trusted() -> None:
+    """The snapshot replaces the last one, so a run that has stopped painting at a pose the gate
+    vouches for must leave the last good map alone (ros/maps/world_live.npz.mess-20260917)."""
+    trust = SnapshotTrust(patience_s=3.0)
+    assert trust.refusal(0.0) is not None, "nothing painted yet: nothing to save"
+    assert "nothing has been painted yet" in str(trust.refusal(0.0))
+    trust.painted(10.0)
+    assert trust.refusal(11.0) is None
+    assert trust.refusal(13.0) is None, "inside the patience the feed is still speaking"
+    trust.withheld("fit 0.10 under 0.50 and no sigma to vouch for it")
+    refusal = trust.refusal(20.0)
+    assert refusal is not None and "fit 0.10" in refusal and "nothing for 10 s" in refusal
+    assert trust.refused == 3, "every refusal is counted for the report line"
+    trust.painted(21.0)
+    assert trust.refusal(21.5) is None, "a trusted revolution puts the file back in play"
+
+
+# ---- the closed loop: a view is evidence once, and only from somewhere else ------------------
+def test_a_view_is_evidence_once_and_the_grid_says_when_it_is_new() -> None:
+    """A parked cart sends the same revolution ten times a second and the weights counted every
+    one as an independent observation — which is how a standing cart walked 7 degrees in 35
+    minutes (2026-09-18). The gate's threshold is not one: a return at range r moves by the
+    translation plus r times the turn, so "a new view" is "a return left its voxel"."""
+    gate = ViewGate(voxel_m=0.05)
+    assert gate.admits(0.0, 0.0, 0.0, 5.0), "the first view is always new"
+    assert not gate.admits(0.0, 0.0, 0.0, 5.0), "and the same one again is not"
+    assert not gate.admits(0.02, 0.0, 0.0, 5.0), "2 cm moves no return out of its 5 cm cell"
+    assert gate.admits(0.06, 0.0, 0.0, 5.0), "6 cm does"
+    # ...and a turn counts by the LEVER: a hundredth of a radian is 5 cm at 5 m and 5 mm at 0.5
+    far = ViewGate(voxel_m=0.05, last=(0.06, 0.0, 0.0))
+    assert far.admits(0.06, 0.0, 0.011, 5.0)
+    near = ViewGate(voxel_m=0.05, last=(0.06, 0.0, 0.0))
+    assert not near.admits(0.06, 0.0, 0.011, 0.5)
+    assert gate.held == 2 and gate.seen == 4 and "50 %" in gate.report()
+
+
+def test_a_cell_counts_the_places_that_saw_it_not_the_times_it_was_seen() -> None:
+    """The channel a matcher's slice is cut by. A return raises it once per revolution; a
+    crossing never does — a crossing is not a view of a surface — and one revolution integrated
+    again from the same place is the caller's business (:class:`ViewGate`)."""
+    world = room()  # eight revolutions from LEVEL_POSES
+    seen = world.views[world.lidar_weight > 0.0]
+    assert seen.max() <= 8.0, "at most one view per revolution"
+    wall = world.views[np.abs(world.volume.sdf) < 0.1]
+    assert wall.max() >= 2.0, "the box's walls were seen from more than one place"
+    once = WorldMap(spec(), mount())
+    angles, ranges = box_scan()
+    for i in range(5):
+        once.integrate_scan(angles, ranges, at(0.0, 0.0, 0.0), stamp=100.0 + i)
+    assert once.views.max() == 5.0, "the volume counts what it is given; the gate is the filter"
+
+
+def test_the_matcher_s_slice_holds_only_what_two_places_agree_on() -> None:
+    """The cure's other half. A cell written from ONE place is the pose's own paint and matching
+    against it is matching the pose against itself; /map keeps it (a planner may plan around a
+    wall one pass saw), /map_lidar does not."""
+    world = WorldMap(spec(), mount())
+    gate = ViewGate(world.spec.voxel_m)
+    # Through the gate, as the node runs it: ten revolutions from one place are ONE view.
+    for i in range(10):
+        angles, ranges = box_scan(0.0, 0.0)
+        if gate.admits(0.0, 0.0, 0.0, float(ranges.max())):
+            world.integrate_scan(angles, ranges, at(0.0, 0.0, 0.0), stamp=100.0 + i)
+    assert gate.held == 9
+    planner = SliceLaw(min_weight=1.0)
+    matcher = SliceLaw(min_weight=1.0, min_views=2)
+    assert world.lidar_slice(planner).counts()["occupied"] > 0, "the planner sees one pass"
+    assert world.lidar_slice(matcher).counts()["occupied"] == 0, (
+        "a matcher is handed nothing it could match its own pose against"
+    )
+    # ...and the moment a SECOND place agrees, the wall joins the matcher's slice. That is how the
+    # two regimes meet: the map grows into unknown space freely, and the reference grows one
+    # viewpoint behind it.
+    angles, ranges = box_scan(1.0, 0.0)
+    assert gate.admits(1.0, 0.0, 0.0, float(ranges.max()))
+    world.integrate_scan(angles, ranges, at(1.0, 0.0, 0.0), stamp=200.0)
+    assert world.lidar_slice(matcher).counts()["occupied"] > 0
+
+
+def test_a_newborn_box_is_centred_on_the_cart_and_not_on_the_origin() -> None:
+    """A cart that wakes up at (-9.4, +2.5) in a frame somebody else made is outside a box laid
+    out around the origin, and a volume that does not contain the robot integrates the far wall
+    and nothing else (2026-09-18: a kicked node on a box from -7.0)."""
+    box = spec()
+    nx, ny, _nz = box.shape
+    here = box.centred_on((-9.4, 2.5))
+    assert here.shape == box.shape and here.origin[2] == box.origin[2]
+    assert here.origin[0] == pytest.approx(-9.4 - nx * box.voxel_m / 2)
+    assert here.origin[1] == pytest.approx(2.5 - ny * box.voxel_m / 2)
+    assert here.origin[0] < -9.4 < here.origin[0] + nx * box.voxel_m, "the cart is inside it"
+    assert box.centred_on_start().origin == box.centred_on((0.0, 0.0)).origin
+
+
+# ---- the frozen reference: the gauge of a session ------------------------------------------
+def test_the_matcher_reads_the_reference_where_it_knows_and_the_paint_where_it_does_not() -> None:
+    """INSIDE A SESSION THE REFERENCE IN KNOWN SPACE IS FROZEN. A tracker matching the slice it
+    paints has a null space it cannot see out of (2026-09-18: 7 deg in 35 min, wheels blocked), and
+    the gauge that fixes it is the volume as it was RESUMED — cells painted in sessions whose poses
+    cannot depend on this one's. Unknown space is where the loop is legitimately open."""
+    previous = room()  # the earlier session: the box seen from eight places
+    law = SliceLaw(min_weight=2.0)
+    reference = previous.reference(law, SliceLaw(), age_s=12.0 * 3600.0)
+    assert reference.known > 0 and "12.0 h old" in reference.text()
+
+    # this session paints a wall where the earlier one saw open floor, and one outside its reach
+    session = WorldMap(previous.spec, mount())
+    angles, ranges = box_scan(0.0, 0.0)
+    moved = np.where(np.abs(angles) < 0.2, ranges - 0.5, ranges)  # something in front of the cart
+    for i in range(3):
+        session.integrate_scan(angles, moved, at(0.0, 0.0, 0.0), stamp=100.0 + i)
+    live = session.lidar_slice(law)
+    handed = reference.over(live)
+    known = reference.lidar.values != UNKNOWN
+    assert np.array_equal(handed.values[known], reference.lidar.values[known]), (
+        "in known space a matcher reads the earlier session and nothing of this one"
+    )
+    assert np.array_equal(handed.values[~known], live.values[~known]), (
+        "and in unknown space it reads this session's own paint: the growth regime"
+    )
+    assert reference.grown(live) == int(np.count_nonzero(~known & (live.values != UNKNOWN)))
+
+
+def test_a_volume_born_empty_has_an_empty_reference_so_everything_is_growth() -> None:
+    """A wake-up is all unknown space, which is exactly right: there is nothing to be a gauge, the
+    session's paint IS the map, and ViewGate with min_views is the rule for that regime."""
+    empty = WorldMap(spec(), mount())
+    reference = empty.reference(SliceLaw(min_weight=2.0), SliceLaw(), age_s=math.inf)
+    assert reference.known == 0 and "born empty" in reference.text()
+    painted = room().lidar_slice(SliceLaw(min_weight=2.0))
+    assert np.array_equal(reference.over(painted).values, painted.values)
+    assert reference.grown(painted) == int(np.count_nonzero(painted.values != UNKNOWN))
+
+
+def test_a_reference_of_another_grid_says_nothing_at_all() -> None:
+    """A snapshot resumed onto another box cannot speak about this one's cells, and a silent
+    reference is the growth regime rather than a wrong answer."""
+    reference = room().reference(SliceLaw(min_weight=2.0), SliceLaw(), age_s=0.0)
+    other = WorldMap(replace(spec(), shape=(60, 60, 34)), mount())
+    angles, ranges = box_scan(0.0, 0.0)
+    other.integrate_scan(angles, ranges, at(0.0, 0.0, 0.0), stamp=100.0)
+    live = other.lidar_slice(SliceLaw(min_weight=1.0))
+    assert reference.over(live) is live

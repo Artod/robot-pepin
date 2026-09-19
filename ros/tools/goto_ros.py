@@ -30,7 +30,9 @@ import json
 import math
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import rclpy
 from action_msgs.srv import CancelGoal
@@ -39,6 +41,7 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
@@ -332,11 +335,64 @@ def pose(nav: BasicNavigator, x: float, y: float, yaw_deg: float) -> PoseStamped
 
 
 def note(nav: BasicNavigator, text: str) -> None:
-    """Say it here and on /pepin/note, which the relocalizer copies into the board log."""
+    """Say it here and on /pepin/note, which the relocalizer copies into the board log.
+
+    The publisher is made once, on the first note, and kept on the node: creating one needs a live
+    rcl context, and the one path that must never need anything is the interrupt path — on
+    2026-09-17 a note here was the FIRST statement after Ctrl-C, it raised "rcl node's context is
+    invalid", and the ``nav.cancelTask()`` on the next line never ran (both legs,
+    ros/maps/rec/20260917_192935_goto.log and ..._201425_goto.log).
+    """
     print(text, flush=True)
-    pub = nav.create_publisher(String, "/pepin/note", 1)
+    pub = getattr(nav, "_pepin_note_pub", None)
+    if pub is None:
+        pub = nav.create_publisher(String, "/pepin/note", 1)
+        nav._pepin_note_pub = pub
     pub.publish(String(data=text))
     time.sleep(0.2)  # let the message leave before a cancel or an exit
+
+
+def guarded(what: str, step: Callable[[], Any]) -> bool:
+    """Run one step of a shutdown and say whether it worked; never raise.
+
+    Every step of an interrupt is independent: the goal's cancel, the recorder's stop word, the
+    note, the teardown. Chaining them in one try block let the first failure swallow all the rest —
+    which is exactly how a Ctrl-C left a goal running on the board.
+    """
+    try:
+        step()
+        return True
+    except Exception as exc:  # a shutdown step may fail; the next one must still run
+        print(f"!! {what} failed: {exc.__class__.__name__}: {exc}", flush=True)
+        return False
+
+
+def interrupted(nav: BasicNavigator, tape: Tape | None) -> None:
+    """Ctrl-C: stop the robot first, then say so, in the order that matters if only one works.
+
+    The goal lives on the board's action server, not in this client, so dying silently leaves Nav2
+    driving toward it (2026-09-05: Ctrl-C on the laptop, the robot kept going; 2026-09-17: the same
+    thing again, this time because the handler's own first line raised). Hence: the cancel, then the
+    recorder's stop word, then the words — each :func:`guarded`, so a failure costs its own step and
+    nothing else. The context is still alive here because rclpy was told not to install its own
+    SIGINT handler (see :func:`main`), which is what makes any of this possible.
+    """
+    cancelled = guarded("cancelling the goal", nav.cancelTask)
+    if tape is not None:
+        guarded("closing the tape", tape.close)
+    guarded("the note", lambda: note(nav, "goto: interrupted by the operator, cancelling the goal"))
+    if not cancelled:
+        print("cancel NOT sent — run ros/stop.sh NOW", flush=True)
+        return
+    deadline, done = time.monotonic() + 5.0, False
+    while not done and time.monotonic() < deadline:
+        time.sleep(0.1)
+        try:
+            done = bool(nav.isTaskComplete())
+        except Exception as exc:  # the cancel is sent; this is only its confirmation
+            print(f"!! cannot confirm the cancel: {exc.__class__.__name__}: {exc}", flush=True)
+            break
+    print("cancelled" if done else "cancel NOT confirmed — use ros/stop.sh", flush=True)
 
 
 def where_am_i(nav: BasicNavigator) -> tuple[float, float, float, float] | None:
@@ -537,7 +593,13 @@ def main() -> None:
         sys.exit(2)
     startup = time.monotonic()
     tape: Tape | None = None
-    rclpy.init()
+    # SIGINT stays PYTHON's: rclpy's own handler shuts the context down the moment Ctrl-C lands, and
+    # then every call the interrupt path needs — create_publisher, cancelTask, publish — raises
+    # "context is invalid". On 2026-09-17 that turned an operator's Ctrl-C into a goal left running
+    # on the board twice (ros/maps/rec/20260917_192935_goto.log, ..._201425_goto.log). With NO the
+    # context outlives the signal, KeyboardInterrupt arrives as an ordinary exception, and the
+    # cancel goes out over a live link; `finally` still shuts the context down afterwards.
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     if args[0] == "cancel":
         # Before the navigator exists: this process sends no goal, so it needs no commander —
         # and building one is what used to end the cancel in rclpy's teardown instead of on the
@@ -575,7 +637,20 @@ def main() -> None:
         name = None
         home = load_places(places_path).get("home")
         if args[0] == "home":
-            x, y, yaw = (home["x"], home["y"], home["yaw_deg"]) if home else (0.0, 0.0, 0.0)
+            # An unmarked home used to fall back to the MAP ORIGIN in silence. On this map the
+            # origin sits 6.6 m beyond the right-hand edge, so `goto.sh home` sent the cart on a
+            # straight line out of the map and through the furniture in the way (2026-09-17,
+            # Artem watching). A place that was never marked is a place nobody can drive to, and
+            # the only honest answer is to say so.
+            if home is None:
+                known = ", ".join(sorted(load_places(places_path))) or "none yet"
+                print(
+                    f"no place 'home' in {places_path}: it was never marked on this map"
+                    f" (known here: {known}). Stand the cart where home is and run"
+                    " ros/goto.sh mark home."
+                )
+                sys.exit(2)
+            x, y, yaw = home["x"], home["y"], home["yaw_deg"]
             name = "home"
         elif not args[0].lstrip("-").replace(".", "", 1).isdigit():
             places = load_places(places_path)
@@ -672,20 +747,14 @@ def main() -> None:
         print(f"result: {name} after {time.monotonic() - started:.0f} s")
         print(arrival(nav, x, y, yaw), flush=True)
     except KeyboardInterrupt:
-        # The goal lives on the board's action server, not in this client: dying silently
-        # would leave Nav2 driving toward it (2026-09-05: Ctrl-C on the laptop, robot kept going).
-        note(nav, "goto: interrupted by the operator, cancelling the goal")
-        nav.cancelTask()
-        deadline = time.monotonic() + 5.0
-        while not nav.isTaskComplete() and time.monotonic() < deadline:
-            time.sleep(0.1)
-        print("cancelled" if nav.isTaskComplete() else "cancel NOT confirmed — use ros/stop.sh")
+        interrupted(nav, tape)
+        tape = None  # its stop word went out above; `finally` must not send a second one
     finally:
         if tape is not None:
-            tape.close()
-        nav.destroy_node()
+            guarded("closing the tape", tape.close)
+        guarded("destroying the node", nav.destroy_node)
         if rclpy.ok():  # a context already shut down refuses every call made on it
-            rclpy.shutdown()
+            guarded("shutting rclpy down", rclpy.shutdown)
 
 
 if __name__ == "__main__":

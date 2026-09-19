@@ -62,6 +62,7 @@ import math
 import os
 import threading
 import time
+from pathlib import Path as FilePath  # nav_msgs' Path owns the bare name here
 from typing import Any
 
 import numpy as np
@@ -88,9 +89,9 @@ from pepin.flags import Flag, FlagSet
 from pepin.fusion import COVARIANCE_CHOICES, PEAK, Matrix, published_covariance
 from pepin.localization import SWITCHES as TRACKER_SWITCHES
 from pepin.localization import Localizer
+from pepin.mapcache import CACHE_NAME, CacheBoot, MapCache, save
 from pepin.mapping import (
     MAP_FALLBACK_S,
-    MAP_REFRESH_S,
     MAP_TOPIC,
     MapChoice,
     OccupancyGrid,
@@ -162,6 +163,16 @@ DUMP_DIR = (
     "/maps/rec"  # every failed whole-map search leaves its scan here, for the offline autopsy
 )
 LAST_POSE_FILE = "/maps/last_pose.json"  # where the robot stood when the stack last ran
+# ...and where the MAP it stood on is kept, by this node, for the next cold boot: the directory the
+# cache file lives in (pepin.mapcache.CACHE_NAME). The board is the one holder of its own map — no
+# pgm in the loop and nothing exported from the laptop — so this file is what a boot with the laptop
+# down has to track on.
+MAP_CACHE_DIR = "/maps"
+# The topic this node republishes the map it is TRACKING on, latched. Nav2's static layers read it
+# (ros/params/nav2_params.yaml), so the planner's static map is the tracker's map by construction
+# instead of by two subscriptions to a third party that may disagree. The name is a literal here and
+# in that file, and tests/unit/test_nav_contract.py holds the two equal.
+TRACKED_MAP_TOPIC = "/map_tracked"
 LAST_POSE_MAX_AGE_S = 3600.0
 SLIP_SAID_AFTER = 3  # consecutive slipping scans before the log says it once
 # The laptop's whole-map watchdog (pepin_bringup.laptop_localizer) publishes a candidate here
@@ -183,6 +194,12 @@ GRAPH_MEASUREMENT_TOPIC = "/localization/graph_measurement"
 # The two maps this tracker can match on, by the name the ``map_topic`` flag calls each: what
 # the mode's map owner serves, and the lidar layer of the laptop's fused volume
 # (pepin_bringup.depth_fusion, flag lidar_map). Both are subscribed; one is adopted.
+# How often the tracker may adopt a newer map on the topic it is on: the publisher's own period
+# (depth_fusion map_hz 0.5, and only on change), which is also inside what the board can afford —
+# an adoption costs ~65 ms on an A53 and the rebuild duty budget allows one every 1.9 s
+# (scratch/map_adoption_cost.py). Derived, not chosen; the flag's `why` carries the arithmetic.
+MAP_REFRESH_DEFAULT_S = 2.0
+
 MAP_TOPICS = {"map": "/map", "map_lidar": "/map_lidar"}
 # Nav2's own service for emptying the rolling grid the controller steers by: the marks a
 # correction stranded there are erased in one call and marked again from the next scans. The
@@ -300,7 +317,8 @@ FLAGS = FlagSet(
         "measurement_max_age_s",
         MEASUREMENT_MAX_AGE_S,
         description="how old a pose measurement from the laptop may be, in seconds, at the"
-        " moment of the update that would take it: past this it is dropped instead of carried",
+        " moment of the update that would take it: past this it is dropped instead of carried."
+        " Read only while carry_stale_words is OFF",
         why="the number the day of 2026-09-13 asked for: the camera's word pulled the live pose"
         " 50 cm p90 off the truth while the board matched at 4.7 Hz with 147 ms per scan, and"
         " every one of those measurements was fused as if it spoke for the moment it was used"
@@ -313,6 +331,27 @@ FLAGS = FlagSet(
         off_when="lower it towards the measurement's own age (0.3 s) where the cart drives fast"
         " and a carry over a tenth of a second is already a decimetre",
         range=(0.05, 5.0),
+    ),
+    Flag(
+        "carry_stale_words",
+        True,
+        description="a remote word the odometry trail can still reach is CARRIED to the update"
+        " instead of being dropped for its age: what the carry costs is added to its covariance"
+        " (pepin.fusion.odometry_covariance) and the trail's own reach is the only bound. Off,"
+        " measurement_max_age_s decides as it did before 2026-09-18",
+        why="the age budget threw away a fifth of the camera's evidence for being late by less"
+        " than one carry's worth of uncertainty. Measured on the tapes of 2026-09-17"
+        " (scratch/word_age.py): the camera's words arrive 272-364 ms old at the median, p90"
+        " 607-802 ms, worst 1.9 s against a 500 ms budget, and 892 of 6037 `depth` and 916 of 5694"
+        " `contact` words on tape 0374 alone were already over it when they arrived. A carry of"
+        " 0.8 s at the cart's 0.3 m/s is 24 cm of travel, and the odometry's own error over it is"
+        " 0.5-2 cm by the model the carry already applies — an order under the 8 cm floor the word"
+        " carries anyway. A word that arrives late is a WIDER word, not no word; that is what an"
+        " information filter is for, and what the trail cannot reach is still refused"
+        " (`uncovered`)",
+        on_when="always: it removes a tunable rather than adding one",
+        off_when="to reproduce a tape recorded before 2026-09-18, or where the bridge delivers"
+        " bursts minutes old and the trail is long enough to carry them",
     ),
     Flag(
         "remote_floor_xy_m",
@@ -442,11 +481,12 @@ FLAGS = FlagSet(
     Flag(
         "local_fit",
         True,
-        description="/localization_fit carries only a fit a scan of THIS machine measured: with"
-        " no scan here at all — the camera's measurements driving the tracker alone — it carries"
-        " 0.0, the value it holds before the first match, and the camera's own fit rides"
-        " /localization/sources per source; off, the remote fit is published there as the"
-        " tracker's own",
+        description="a fit only counts where a scan of THIS machine measured it: with no scan here"
+        " at all — the camera's or the graph's words driving the tracker alone — /localization_fit"
+        " carries 0.0, the value it holds before the first match, the candidate gate is given that"
+        " same 0.0 to judge a whole-map answer against, and the remote source's own fit rides"
+        " /localization/sources per source; off, the remote fit is published and judged against as"
+        " the tracker's own",
         why="the number is read as 'how well the cart's own scan sits on /map' by everything"
         " downstream, and a remote one is neither. The camera's fit is measured on the laptop"
         " against /map_camera when depth_fusion publishes it (pepin_bringup.laptop_localizer),"
@@ -457,7 +497,13 @@ FLAGS = FlagSet(
         " p90 and 43.4 at worst over run 0171, while the fits those same matches reported were"
         " 0.41 and 0.62 (scratch/laptop_localizer_replay.txt). 0.0 and not NaN because"
         " every gate downstream compares with `<` and NaN passes them all silently"
-        " (pepin.watch.reported_fit)",
+        " (pepin.watch.reported_fit). The candidate gate was the one consumer that read the"
+        " tracker's raw fit instead of this one, and camera-only that fit is the GRAPH's own claim:"
+        " on 2026-09-17 21:18-21:28Z the graph claimed 1.00, so every one of the 27 whole-map"
+        " answers the laptop sent per window was judged 'nothing' — no lidar score can beat"
+        " 1.00 + BEAT_MARGIN — while the pose those answers disagreed with was some 90 degrees off"
+        " the room (ros/maps/rec/20260917_212759_goto_board.log). A candidate's score and the fit"
+        " it is weighed against have to be measured on the same machine or the comparison is void",
         on_when="always on a cart that has a lidar: a fit nothing here measured stops the goal"
         " server and the volume rather than vouching for a pose",
         off_when="to drive on the camera alone — a dead lidar, a lidar-less robot — where the"
@@ -521,6 +567,58 @@ FLAGS = FlagSet(
         range=(0.1, 60.0),
     ),
     Flag(
+        "map_cache",
+        True,
+        description="the map this tracker ADOPTS is written down beside the maps"
+        f" ({MAP_CACHE_DIR}/{CACHE_NAME}: the cells run-length encoded, the id and the minted"
+        " identity, the digest, the stamp and the topic it came from), atomically and only when"
+        " the digest changes; at start, with nothing live inside map_fallback_s, that cache is what"
+        " this node tracks on. Off, the node needs a map on a topic as before 2026-09-18",
+        why="the owner's rule is ONE map — the volume — and a board that cannot start without a pgm"
+        " served from a file has two. This node already is the board's one holder of the map (it"
+        " adopts, it rebuilds, it owns map -> odom), so it is the one that can keep it. THE CARD:"
+        " one write per ADOPTION and only on a changed digest, so at map_refresh_s of 2 s the worst"
+        " case is 16 kB every 2 s while the volume is actually changing (this flat's 51385 cells"
+        " are 195 kB of raw JSON and 16 kB run-length encoded, scratch/costmap_rle_cost.py) — 8"
+        " kB/s against the 55 kB/s a drive's tape already writes, and in practice a handful of"
+        " writes a drive because depth_fusion republishes only on change. A 32 GB card rated for"
+        " ~500 write cycles takes that for years; the tape, not this, is what wears it."
+        " ATOMICALLY because the alternative is losing the only map to a power cut mid-write:"
+        " temporary file, fsync, os.replace, fsync of the directory (pepin.mapcache.write_cache),"
+        " so a reader sees the previous cache whole or the new one whole",
+        on_when="always on the board: it is what makes a cold boot with the laptop down possible"
+        " without a file in the loop",
+        off_when="while measuring what a boot without any cache does, or on a machine whose card"
+        " must not be written at all",
+    ),
+    Flag(
+        "verify_remote",
+        True,
+        description="a correction made ENTIRELY of remote words — no local scan in the update, so"
+        " nothing here can check them — must agree with the tracker's own belief within what the"
+        " two covariances allow (pepin.fusion.GATE, the gate a fusion applies between two"
+        " sources). One that does not leaves the pose where it was and the update reports that it"
+        " measured nothing, so the spread grows and the drive gates read it; off, the word moves"
+        " the pose as it did before 2026-09-18",
+        why="the gate inside pepin.fusion.fuse compares each measurement with the SUREST one, so"
+        " it needs two, and the mode that needs it most has one. Camera-only on 2026-09-17 every"
+        " update carried exactly the pose graph's word: the tapes read `fused 0, rejected 0` over"
+        " 40 and 50 consecutive updates (0371, 0372) and no gate ran at all. Parked at home that"
+        " evening the graph's words read (-9.38, +2.49, -45 deg) while the lidar-held pose was"
+        " +55 deg and the room's own answer +51 to +57 deg (the board's search after today's"
+        " reboot; scratch/home_twin_search.py on the tape's last scan); with the lidar muted at"
+        " 00:48:39Z the tracker went over to the graph's heading by 01:18Z, some 90 degrees, while"
+        " the cart moved 4 cm in the whole half hour. The same evening the graph's words agreed"
+        " with the tracker to 0.2-0.9 cm in position (scratch/graph_word_vs_tracker.py), because"
+        " the anchor had been re-learned FROM the tracker and between closures the word is the"
+        " tracker's own odometry: the position agreement carried no information and the heading"
+        " was never checked",
+        on_when="always where a remote word can be the only source of an update — camera-only,"
+        " or a lidar that drops out mid-drive",
+        off_when="to replay a tape recorded before 2026-09-18, or to measure how far a remote"
+        " source would have taken the pose (it is still counted and reported when it is refused)",
+    ),
+    Flag(
         "accept_candidates",
         True,
         description=f"re-seed from the laptop watchdog's whole-map candidates ({CANDIDATE_TOPIC},"
@@ -581,19 +679,26 @@ FLAGS = FlagSet(
     ),
     Flag(
         "map_refresh_s",
-        MAP_REFRESH_S,
+        MAP_REFRESH_DEFAULT_S,
         description="the least time between two adoptions of the map topic: a newer map on the"
         " topic in use is taken only after this many seconds AND only if its cells changed."
         " 0 takes the first map and no other, which is what a served file has always done",
-        why="the cost is the measured one: adopting a map rebuilds the correlative matcher, the"
-        " static mask and the tracker and forgets the episode's candidates and measurements —"
-        " the whole-map lattice alone is 15 s on these four A53 cores — while /map_lidar is"
-        " republished at the fusion's map_hz, once a second. 0 is the old behaviour exactly: the"
-        " served map arrives once, latched, and is adopted once",
-        on_when="30-60 s with map_topic map_lidar in a room being mapped as it is driven: the"
-        " tracker then follows the volume as it hardens, at one rebuild a minute",
-        off_when="0 for a frozen map, and any time a rebuild mid-drive would cost more than a"
-        " stale map does",
+        why=f"{MAP_REFRESH_DEFAULT_S:.0f} s, and both halves of that number are measured rather"
+        " than chosen. THE COST: an adoption rebuilds the grid, the correlative matcher, the static"
+        " mask and the tracker, and the bill is paid on the first match after it, when the"
+        " matcher's lattice is built — 15-16 ms on the laptop's core for this flat's 239x215 cells"
+        " and the volume's 280x250 alike, so about 65 ms on an A53 at the 4.5x the board's own"
+        " report lines give for the same match (40-50 ms there against 8-12 ms here,"
+        " scratch/map_adoption_cost.py). THE BUDGET: at 10 revolutions a second and 45 ms a match"
+        " the tracker already owns 45 % of a core, and after a fifth for the rest of the node a"
+        " tenth of what is left is 3.5 % — which allows one adoption every 1.9 s. THE PUBLISHER"
+        " cannot offer them faster anyway: depth_fusion's map_hz is 0.5 and it republishes only on"
+        " change, so 2 s is both what the board can afford (3.3 % duty) and the fastest a new map"
+        " can arrive. The old default was 0 — 'adopt the first map and never another' — which made"
+        " a live volume swap a no-op until the flag was set by hand (2026-09-17 live)",
+        on_when="raise it in a room being mapped as it is driven, where the volume changes every"
+        " second and a rebuild mid-drive costs more than a slightly stale map",
+        off_when="0 for a frozen map that arrives once, latched — the served pgm's own behaviour",
         range=(0.0, 600.0),
     ),
     Flag(
@@ -853,6 +958,11 @@ class Relocalizer(Node):
         self._yaw_runaways = 0  # ...and how many of those were the frame spinning on the spot
         # The map in use, as every candidate and measurement is judged against.
         self._map_id = ""
+        self._map_identity = ""  # the publisher's minted name for this map, when it sends one
+        self._cache_dir = str(self.declare_parameter("map_cache_dir", MAP_CACHE_DIR).value)
+        self._cached: MapCache | None = None  # the cache this node is tracking on, if any
+        self._cache_boot = CacheBoot()  # the cold-boot read is attempted once, not every check
+        self._cache_written = 0.0  # when this node last wrote one
         self._pending_seed: tuple[str, Pose2D, float] | None = None
         self._scan_id = 0
         # Time alignment (pepin.timeline): the odometry is kept as a history and every scan waits
@@ -983,6 +1093,17 @@ class Relocalizer(Node):
         self._fit_pub = self.create_publisher(Float32, "localization_fit", 5)
         # Every source's word on each update, as JSON (Localizer.sources_report): the demo's
         # view of the lidar and the camera agreeing, disagreeing, or one of them gone.
+        # The map this tracker is on, for Nav2's static layers: latched, so a costmap that starts
+        # later still gets it, and published only when a map is adopted.
+        self._tracked_map_pub = self.create_publisher(
+            OccupancyGridMsg,
+            TRACKED_MAP_TOPIC,
+            QoSProfile(
+                depth=1,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                reliability=ReliabilityPolicy.RELIABLE,
+            ),
+        )
         self._sources_pub = self.create_publisher(String, "/localization/sources", 5)
         # The fit at the pose actually published (the blend), beside the tracker's own fit at
         # the matched pose: the two part ways while a carry is being absorbed.
@@ -1097,10 +1218,21 @@ class Relocalizer(Node):
 
     def _on_map_message(self, source: str, msg: OccupancyGridMsg) -> None:
         """A map arrived on one of :data:`MAP_TOPICS`: keep it as that topic's newest and offer
-        it to the choice, which adopts it or turns it away (:class:`pepin.mapping.MapChoice`)."""
+        it to the choice, which adopts it or turns it away (:class:`pepin.mapping.MapChoice`).
+
+        The choice is also told whether the grid has any KNOWN cell at all: a fresh room's volume
+        publishes a blank grid before the first sweep has filled it, and with ``map_refresh_s`` at 0
+        that one blank publication would spend the single adoption this node allows and leave the
+        tracker matching against nothing. Reading the cells is a function, so it costs nothing on
+        the ordinary path (pepin.mapping.MapChoice.offer).
+        """
         self._maps[source] = msg
         self._choice.offer(
-            source, lambda: map_digest(msg), self._now_s(), lambda: self._adopt(source, msg)
+            source,
+            lambda: map_digest(msg),
+            self._now_s(),
+            lambda: self._adopt(source, msg),
+            empty=lambda: not any(cell >= 0 for cell in msg.data),
         )
 
     def _offer_waiting(self) -> None:
@@ -1132,13 +1264,81 @@ class Relocalizer(Node):
 
     def _adopt(self, source: str, msg: OccupancyGridMsg) -> None:
         """Take ``msg`` as the map this tracker matches on: rebuild the matcher, the mask and the
-        tracker on it (:meth:`_on_map`) and say so. Called by the choice, never directly — a
-        rebuild costs seconds on this board and throws away the episode's evidence."""
+        tracker on it (:meth:`_on_map`), republish it for Nav2's static layers, write it down for
+        the next cold boot, and say so. Called by the choice, never directly — a rebuild costs
+        seconds on this board and throws away the episode's evidence."""
         self._on_map(msg)
         self.get_logger().info(
             f"map adopted from {MAP_TOPICS[source]}: {msg.info.width}x{msg.info.height} cells,"
             f" id {self._map_id}, digest {self._choice.digest.split('#')[-1]}"
         )
+        self._publish_tracked_map(msg)
+        self._persist_map(source, msg)
+
+    def _publish_tracked_map(self, msg: OccupancyGridMsg) -> None:
+        """Republish the map this tracker is on, latched, on :data:`TRACKED_MAP_TOPIC`.
+
+        Nav2's static layers read this and nothing else, so the planner's static map IS the
+        tracker's map — one map on the board, by construction rather than by two subscriptions to a
+        third party that can disagree. It costs one message per adoption (at most one every
+        ``map_refresh_s``), and the grid is the one already in hand.
+        """
+        self._tracked_map_pub.publish(msg)
+
+    def _persist_map(self, source: str, msg: OccupancyGridMsg) -> None:
+        """Write the adopted map beside the maps, for the next start with nothing live (the
+        ``map_cache`` flag).
+
+        Only on a changed digest, which the choice has already decided by calling here, and never
+        faster than the adoption rule allows — so the card sees one 16 kB write per real change of
+        the map. A failure is logged and nothing else: a board that cannot write its cache still
+        tracks, it only has a colder boot ahead of it.
+        """
+        cache = MapCache(
+            cells=list(msg.data),
+            width=int(msg.info.width),
+            height=int(msg.info.height),
+            resolution_m=float(msg.info.resolution),
+            origin_xy=(float(msg.info.origin.position.x), float(msg.info.origin.position.y)),
+            map_id=self._map_id,
+            digest=self._choice.digest,
+            stamp=time.time(),
+            source=MAP_TOPICS.get(source, source),
+            identity=self._map_identity,
+        )
+        self._cache_written = cache.stamp
+        self.get_logger().info(
+            save(FilePath(self._cache_dir), cache, enabled=self._switches.on("map_cache"))
+        )
+
+    def _take_cached_map(self) -> None:
+        """Nothing live inside ``map_fallback_s`` and no map adopted: track on the cache.
+
+        The one path that makes a pgm unnecessary. A board that has NEVER adopted anything has no
+        cache, and then it says so loudly and waits — the launch's map file is the only other
+        answer and it is behind a launch argument that is off in a known room (ros/nav.launch.py).
+        A cache that exists and does not parse is refused just as loudly: half a map is worse than
+        none, because the tracker would match against it and believe the answer.
+        """
+        answer = self._cache_boot.attempt(
+            FilePath(self._cache_dir),
+            enabled=self._switches.on("map_cache"),
+            have_map=self._grid is not None,
+            waited_s=self._now_s() - self._up_since_s,
+            patience_s=float(self._switches["map_fallback_s"]),
+        )
+        for level, text in answer.words:
+            getattr(self.get_logger(), level)(text)
+        for cache in answer.taken:  # none or one: the decision is pepin.mapcache's, not this node's
+            msg = OccupancyGridMsg()
+            msg.header.frame_id = "map"
+            msg.info.resolution = cache.resolution_m
+            msg.info.width, msg.info.height = cache.width, cache.height
+            msg.info.origin.position.x, msg.info.origin.position.y = cache.origin_xy
+            msg.data = list(cache.cells)
+            self._cached = cache
+            self._on_map(msg)
+            self._publish_tracked_map(msg)
 
     def _on_map(self, msg: OccupancyGridMsg) -> None:
         # The belief, before the old tracker is thrown away. Both maps are the same room on
@@ -1374,10 +1574,16 @@ class Relocalizer(Node):
             and not lidar_alive
             and self._switches.on("graph_reseed_while_driving")
         )
+        # The fit the candidate is weighed against must be one THIS machine measured, on the same
+        # scale as the candidate's own score: the same rule /localization_fit already follows
+        # (``local_fit``, ``_fit_is_local``). Camera-only the tracker's raw fit is the remote
+        # source's own claim — the graph claimed 1.00 on 2026-09-17 — and no honest lidar answer
+        # can beat a claim of 1.00, so every candidate was judged "nothing" exactly while the pose
+        # was 90 degrees out and the candidates were right.
         answer = self._candidates.observe(
             candidate,
             self._tracked_pose(),
-            self.fit,
+            self.fit if self._fit_is_local else 0.0,
             map_id=self._map_id,
             allow=(not self._navigating or only_localizer) and not (from_a_fan and lidar_alive),
             odometry=self._history,  # the trail the candidate is carried to this moment along
@@ -1486,7 +1692,21 @@ class Relocalizer(Node):
         self._spread.corrected(covariance, pose, odom, now)
         self._publish_sigma(now)
         self._published_fit_pub.publish(Float32(data=float(loc.published_fit)))
-        report = loc.sources_report(now)
+        self._publish_sources(loc, now, odom)
+
+    def _publish_sources(self, loc: Localizer, now: float, odom: Pose2D | None) -> None:
+        """Publish every source's word as JSON on ``/localization/sources`` — the scans', the
+        watchdog's and the camera's — with the candidates, the camera's measurements and the
+        graph beside them.
+
+        This goes out on the check period as well as on every update, because it is the only
+        place the stack says WHO is holding the pose, and a report published on updates alone
+        fell silent exactly where a reader needs it most: camera-only and parked, RTAB-Map adds
+        no node, no word arrives, no update runs — and the goal gate, finding nothing on the
+        topic, refused every camera-only start with "the tracker published no word at all"
+        while the tracker sat there healthy at 0.20 m (2026-09-17).
+        """
+        report = loc.sources_report(now, odom)
         report["candidates"] = self._candidates.status()  # the laptop's word, beside the scans'
         report["measurements"] = self._measurements.status()
         report["graph"] = self._graph.status()
@@ -1753,7 +1973,8 @@ class Relocalizer(Node):
             f", scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
             f"{self._spread.text(self._now_s())} "
             f"(drive under {DRIVE_SIGMA_M:.2f} m, a drive is cut over {LOST_SIGMA_M:.2f} m); "
-            f"map {MAP_TOPICS.get(self._choice.source, 'none')} "
+            f"map {MAP_TOPICS.get(self._choice.source, 'none')}"
+            f"{'' if self._cached is None else ' [' + self._cached.phrase() + ']'} "
             f"(id {self._map_id or 'none'}, {self._choice.take_ignored()} republications "
             f"ignored{fallback}); "
             f"{self._candidates.report()}; {self._measurements.report()}; "
@@ -1849,6 +2070,7 @@ class Relocalizer(Node):
         it is.
         """
         self._take_fallback_map()  # before every return below: a node with no map takes them all
+        self._take_cached_map()  # ...and with no live map at all, the one it wrote down itself
         now = self._now_s()
         # The filter's prediction step, and the sigma published whatever else this tick decides:
         # nothing corrected the pose since the last update, so it grew along the odometry. Before
@@ -1872,6 +2094,9 @@ class Relocalizer(Node):
         pose = self._tracked_pose()
         if self._matcher is None or loc is None or pose is None:
             return
+        # Beside the sigma, and for the same reason: who is holding the pose is a fact a reader
+        # needs most when nothing is speaking, and the only publication used to ride an update.
+        self._publish_sources(loc, now, self._history.newest)
         # Sampled exactly once: _moving() is an edge detector on odometry, and a second call in
         # the same tick compared a reading with itself and told the watch the robot stood still
         # at every speed — the "never re-seed a moving robot" gate was dead (review, 2026-09-09).

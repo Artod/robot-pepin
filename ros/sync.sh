@@ -9,7 +9,9 @@ BOARD="${PEPIN_HOST:-10.0.0.187}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # maps/rec and logs are written BY the board and fetched to the laptop; pushing them back would ship
 # hundreds of MB of camera video over WiFi onto the SD card (it did, 2026-09-06: a 4-minute sync).
-rsync -a --delete --exclude '__pycache__' --exclude 'pepin_src' --exclude 'maps/rec' --exclude 'maps/rtabmap*' --exclude 'logs' --exclude 'maps/*.places.yaml' --exclude 'maps/last_pose.json' "$HERE/" "root@$BOARD:/root/pepin-ros/"
+# The volume's snapshot (*.world.npz, ~11 MB) stays on the laptop that paints it; the pgm/yaml
+# pair exported from it DOES go, because that pair is the map the board serves.
+rsync -a --delete --exclude '__pycache__' --exclude 'pepin_src' --exclude 'maps/rec' --exclude 'maps/rtabmap*' --exclude 'maps/*.world.npz' --exclude 'maps/world_*.npz*' --exclude 'logs' --exclude 'maps/*.places.yaml' --exclude 'maps/last_pose.json' "$HERE/" "root@$BOARD:/root/pepin-ros/"
 ssh "root@$BOARD" "mkdir -p /root/pepin-ros/pepin_src/pepin /root/pepin-ros/pepin_src/config"
 rsync -a --delete --exclude '__pycache__' "$HERE/../src/pepin/" "root@$BOARD:/root/pepin-ros/pepin_src/pepin/"
 # The mounts (config/lidar.json, config/imu.json) beside the library: the container mounts

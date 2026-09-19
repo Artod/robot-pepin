@@ -8,7 +8,7 @@
 #                  tracker's first report line (up to 90 s)
 #   --deploy       ros/sync.sh instead of the bare restart: code + the library + config to the
 #                  board, the restart, and its census tail
-#   laptop         ros/laptop.sh start, then ros/laptop.sh vslam --neck --seed-map=<the map the
+#   laptop         ros/laptop.sh start, then ros/laptop.sh vslam --neck --room=<the room of the map the
 #                  board serves>, read from the board's /etc/default/pepin-ros as ros/goto.sh
 #                  reads it — a laptop half seeded with another map than the board serves is a
 #                  fusion snapped to the wrong lattice
@@ -175,7 +175,12 @@ restart_laptop() {
         return 1
     fi
     "$HERE/laptop.sh" start
-    args=(vslam --neck "--seed-map=$map")
+    # The ROOM, not a picture to seed from: the volume resumes /maps/<room>.world.npz and nothing
+    # else (no pgm is in the running loop since 2026-09-18). The room is the stem of the map the
+    # board names, with a ".world" the exported cache once carried taken off.
+    local room
+    room="$(basename "$map" .yaml)"; room="${room%.world}"
+    args=(vslam --neck "--room=$room")
     if [ "$FRESH_GRAPH" = true ]; then
         args+=(--fresh)
         drop_anchor
@@ -261,7 +266,7 @@ check_laptop() {
     last() { grep -aE "$1" <<<"$LOG" | tail -1 || true; }
 
     if ! started="$(docker inspect -f '{{.State.StartedAt}}' pepin-vslam 2>/dev/null)"; then
-        fail 2.1 "pepin-vslam is not running (ros/laptop.sh vslam --neck --seed-map=...); no laptop check could run"
+        fail 2.1 "pepin-vslam is not running (ros/laptop.sh vslam --neck --room=...); no laptop check could run"
         return 0
     fi
     LOG="$(docker logs --since "$started" pepin-vslam 2>&1 || true)"   # one fetch, every grep below

@@ -25,6 +25,7 @@ from pepin_bringup.laptop_localizer import (  # noqa: E402
     SearchJob,
 )
 from pepin_bringup.msgs import transform_from_rpy  # noqa: E402
+from pepin_bringup.relocalizer import TRACKED_MAP_TOPIC  # noqa: E402
 from ros_stubs import (  # noqa: E402
     Float32,
     Header,
@@ -93,7 +94,7 @@ def watch(
     with ros_stubs.parameters(**flags):
         node = LaptopLocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
-    node.subs["/map"][1](map_msg(furnished_room_map() if grid is None else grid))
+    node.subs[TRACKED_MAP_TOPIC][1](map_msg(furnished_room_map() if grid is None else grid))
     node.subs["/scan"][1](scan_msg(TRUTH))
     if believes is not None:
         node.subs["/tracker_pose"][1](pose_msg(believes))
@@ -237,7 +238,7 @@ def test_nothing_is_searched_without_a_map_or_a_scan() -> None:
     try:
         node._tick()  # no map, no scan
         node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
-        node.subs["/map"][1](map_msg(furnished_room_map()))
+        node.subs[TRACKED_MAP_TOPIC][1](map_msg(furnished_room_map()))
         node.subs["/scan"][1](scan_msg(TRUTH, t=101.0))
         node.subs["/scan"][1](
             LaserScan(header=Header(stamp=stamp(102.0), frame_id="laser"), ranges=[])
@@ -289,10 +290,13 @@ def test_a_camera_scan_around_the_board_s_belief_becomes_a_measurement() -> None
         sx, sy, syaw = answer.measurement().sigmas
         assert 0.0 < sx < 1.0 and 0.0 < sy < 1.0 and 0.0 < syaw < math.radians(45.0)
         sent = node.pubs["/localization/measurement"].sent[-1].data
-        assert '"matched_on": "/map"' in sent and '"belief_age_ms": 100.0' in sent
+        # /map_tracked, not /map: the grid the BOARD'S TRACKER is on is the one whose id every
+        # word here is stamped with, whichever source the tracker adopted (2026-09-18).
+        assert f'"matched_on": "{TRACKED_MAP_TOPIC}"' in sent
+        assert '"belief_age_ms": 100.0' in sent
         node._report()
         line = node.logger.texts("info")[-1]
-        assert "measurements: depth 1 at fit" in line and "against /map" in line
+        assert "measurements: depth 1 at fit" in line and f"against {TRACKED_MAP_TOPIC}" in line
         assert "camera_sources=depth,contact camera_match_hz=5.0" in line
     finally:
         node.close()

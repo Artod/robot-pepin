@@ -37,6 +37,9 @@ class Snapshot(Node):
             reliability=ReliabilityPolicy.RELIABLE,
         )
         sensor = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
+        # The map the tracker is on (the board republishes it, latched); /map as well, for a
+        # stack that still serves a file there.
+        self.create_subscription(OccupancyGrid, "/map_tracked", self.on_map, latched)
         self.create_subscription(OccupancyGrid, "/map", self.on_map, latched)
         self.create_subscription(LaserScan, "/scan", self.on_scan, sensor)
         self.create_subscription(PoseWithCovarianceStamped, "/amcl_pose", self.on_amcl, 5)

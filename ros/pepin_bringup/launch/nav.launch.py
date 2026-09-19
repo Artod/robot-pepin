@@ -74,6 +74,13 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # serves a saved map and nothing here matches a scan against one. The global costmap's static
     # layer takes /map over the bridge and pepin_bringup.slam_frame owns map -> odom instead.
     slam = LaunchConfiguration("slam").perform(context).lower() == "true"
+    # A pgm served by map_server is no longer part of the running loop: the relocalizer republishes
+    # the map it tracks on (pepin_bringup.relocalizer.TRACKED_MAP_TOPIC) and both costmaps' static
+    # layers read THAT (ros/params/nav2_params.yaml), and the board's own cold-boot map is the cache
+    # that node writes on every adoption (pepin.mapcache), not a file. So map_server is off by
+    # default in a known room and `map_server:=true` is what brings the file back — the very first
+    # boot of a room nobody has ever mapped, or a session that must start from a frozen pgm.
+    map_server = LaunchConfiguration("map_server").perform(context).lower() == "true"
     admin = LaunchConfiguration("bridge_admin").perform(context) or bridge_admin_for(side)
     params = LaunchConfiguration("params_file")
     map_file = LaunchConfiguration("map")
@@ -120,7 +127,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         ),
     }
     nodes = [catalogue[name] for name in nav_nodes(side)]
-    if runs_here(side, "map_server", slam):
+    if map_server and runs_here(side, "map_server", slam):
         nodes.append(catalogue["map_server"])
         nodes.append(
             ComposableNode(
@@ -280,6 +287,10 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("side", default_value="all", choices=list(SIDES)),
             # Online SLAM (ros/thin.sh slam): no map_server, no tracker, /map from the laptop.
             DeclareLaunchArgument("slam", default_value="false"),
+            # The pgm is out of the loop: on a known room the tracker's own map (live, or the cache
+            # it wrote itself) is the only map. true serves `map` through map_server again, which is
+            # what the FIRST boot of an unmapped room needs.
+            DeclareLaunchArgument("map_server", default_value="false", choices=["true", "false"]),
             DeclareLaunchArgument("board", default_value="10.0.0.187"),
             DeclareLaunchArgument("bridge_admin", default_value=""),  # empty: by side
             OpaqueFunction(function=_describe),
