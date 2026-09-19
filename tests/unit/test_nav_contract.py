@@ -2347,7 +2347,10 @@ def test_the_graphs_grid_is_the_one_map_and_the_tracker_is_the_one_owner_of_map_
         "kept for the depth-built grid of a lidar-less wake-up"
     )
     assert float(str(table["Grid/RangeMax"])) == 8.0
-    assert table["RGBD/NeighborLinkRefining"] == "false", "no closure survives a refined link"
+    assert table["RGBD/NeighborLinkRefining"] == "true", (
+        "the start value beside a living lidar, following the snapshots at run time: unrefined,"
+        " a parked cart's map turned +27 deg in 40 min with the gyro's bias (2026-09-19)"
+    )
     assert table["Reg/Strategy"] == "1", "ICP; 2 would drop every node that has no picture"
     assert table["Mem/BadSignaturesIgnored"] == "false", "a node with no picture is KEPT"
     assert table["RGBD/ProximityPathMaxNeighbors"] == "10", (

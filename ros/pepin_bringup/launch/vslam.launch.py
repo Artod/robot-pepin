@@ -214,7 +214,11 @@ RTABMAP = {
     # known map's database; a fresh SLAM database used to ship with it true, and that is the one
     # value of this table a SLAM session gives up on purpose, because the failure is total (no
     # closure ever) and the cost is a centimetre.
-    "RGBD/NeighborLinkRefining": "false",
+    # The START value, for a cart whose lidar is alive; at run time it FOLLOWS what the snapshots
+    # carry beside Reg/Strategy and Grid/Sensor (pepin.graphmode.REGISTRATION_PARAMETERS). True
+    # while there is a scan: unrefined, a parked cart's map turned +27 deg in 40 min with the
+    # gyro's bias (2026-09-19); refined, it held to a degree. The cost recorded above still stands.
+    "RGBD/NeighborLinkRefining": "true",
     "Rtabmap/DetectionRate": "1.0",
     # appearance: GFTT/ORB words, a few hundred per image
     "Kp/DetectorStrategy": "8",

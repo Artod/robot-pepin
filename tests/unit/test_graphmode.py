@@ -113,8 +113,18 @@ def test_only_reg_strategy_travels_with_the_verdict() -> None:
     companion parameter added here that the table does not carry would be accepted and ignored."""
     # The grid's sensor travels with the strategy: a scan writes the grid while there is one
     # (the mono depth beside it flattened the lidar tracker's match: sigma 0.47 m against 0.01).
-    assert registration_verdict(scan=False).parameters == {"Reg/Strategy": "0", "Grid/Sensor": "1"}
-    assert registration_verdict(scan=True).parameters == {"Reg/Strategy": "1", "Grid/Sensor": "0"}
+    # ...and the neighbour links are refined by the scan while there is one (unrefined, the map
+    # turned with the gyro's bias under a parked cart: +27 deg in 40 min).
+    assert registration_verdict(scan=False).parameters == {
+        "Reg/Strategy": "0",
+        "Grid/Sensor": "1",
+        "RGBD/NeighborLinkRefining": "false",
+    }
+    assert registration_verdict(scan=True).parameters == {
+        "Reg/Strategy": "1",
+        "Grid/Sensor": "0",
+        "RGBD/NeighborLinkRefining": "true",
+    }
     assert set(REGISTRATION_PARAMETERS) == {"0", "1"}, "VisIcp (2) is never asked for"
     for table in REGISTRATION_PARAMETERS.values():
         assert all(isinstance(value, str) for value in table.values()), (

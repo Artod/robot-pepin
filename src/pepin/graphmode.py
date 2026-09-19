@@ -123,10 +123,38 @@ STRATEGY_NAMES = {STRATEGY_VIS: "visual", STRATEGY_ICP: "ICP on the scans"}
 # the depth (1) — which only happens while MAPPING without a lidar, i.e. a wake-up on the camera
 # alone. Local grids are made per node, at the node's creation, with the value set then; and in
 # localisation mode nothing is written, so the value does not matter there (CoreWrapper.cpp:3153).
+#
+# AND SO DO THE NEIGHBOUR LINKS (same night, same cart, fresh database, parked, nothing touched).
+# Unrefined — the link between two nodes is the odometry's word — the EKF's yaw creeps at rest with
+# the gyro's bias while the wheels read exactly zero, RTAB-Map adds a node every few minutes at the
+# crept heading, re-renders its grid, and the tracker follows it: +1 -> +28 deg in 40 min, steady
+# +0.67 deg/min, at fit 0.95-0.98 and sigma 0.00 m the whole time (position held to 5 cm).
+# Refined by ICP — the scan says "no motion" — -1, -3, -2, -3, -3 deg over 20 min, no trend, and
+# the graph stays at two nodes. With no scan in the node there is nothing to refine with.
+#
+# These three are not three patches: together with Reg/Strategy they are EXACTLY the keys on which
+# the two measured tables of before World R differed (SLAM_LIDAR and SLAM_CAMERA_ONLY in
+# `git show e1d3b65:ros/pepin_bringup/launch/vslam.launch.py`; the fifth, Grid/RangeMax 8 / 3, now
+# travels as NaN in the depth itself). One table for every situation was the over-simplification;
+# what is one is the RULE — the parameters follow what the snapshots carry — and the two sets it
+# chooses between are the old tables, chosen by the data instead of by the operator.
+# KNOWN COST of refined links, measured 2026-09-14 beside a known map: a refined link carries
+# ICP's own tiny covariance (median 0.75 cm / 0.135 deg), and RGBD/OptimizeMaxError then rejects a
+# closure that asks more than ~2 cm of any one of them — every closure ACROSS two sessions did.
+# Watch the log for "Rejecting all added loop closures"; the launch's neighbor_refining argument
+# and graph_memory are the ways out.
 GRID_FROM_SCAN, GRID_FROM_DEPTH = "0", "1"
 REGISTRATION_PARAMETERS = {
-    STRATEGY_VIS: {"Reg/Strategy": STRATEGY_VIS, "Grid/Sensor": GRID_FROM_DEPTH},
-    STRATEGY_ICP: {"Reg/Strategy": STRATEGY_ICP, "Grid/Sensor": GRID_FROM_SCAN},
+    STRATEGY_VIS: {
+        "Reg/Strategy": STRATEGY_VIS,
+        "Grid/Sensor": GRID_FROM_DEPTH,
+        "RGBD/NeighborLinkRefining": "false",
+    },
+    STRATEGY_ICP: {
+        "Reg/Strategy": STRATEGY_ICP,
+        "Grid/Sensor": GRID_FROM_SCAN,
+        "RGBD/NeighborLinkRefining": "true",
+    },
 }
 
 # What a seating must be worth for the database to be taught from it. The peak's own covariance is
