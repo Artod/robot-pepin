@@ -41,8 +41,10 @@ OP_CLOSE = 0x8
 DEFAULT_REQUIRED = (
     "/scan",
     "/tf",
-    "/map_tracked|/map",
-    "/map_camera",
+    # The one map, at both ends of it: RTAB-Map's live grid as the laptop publishes it, and the
+    # grid the board's tracker accepted and drives on (both costmaps' static layers read that one).
+    "/map",
+    "/map_tracked",
     "/tracker_pose",
     "/fusion/surface",
     "/depth_scan",

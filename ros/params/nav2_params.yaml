@@ -639,45 +639,26 @@ global_costmap:
         input_sensor_type: ALL
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
-        # It reads /map and only /map: the map_server on THIS board serving the pgm named by
-        # nav.launch.py, latched (transient local, hence the line below), taken once at startup
-        # and re-taken whenever a new /map is published. subscribe_to_updates is left at its
-        # default False — nobody publishes /map_updates and a partial update is not something
-        # this stack has ever needed.
-        # A LATCHED MAP REPUBLISHED ON CHANGE IS FINE HERE, and that is what the volume sends
-        # (depth_fusion hashes the slice and publishes only a changed one, at most every
-        # 1 / map_hz): this layer keeps a live subscription with transient-local durability, so
-        # it takes the first map whenever it appears — before or after this node started — and
-        # re-takes every later one. Nothing here waits for a periodic map.
-        # Asked on 2026-09-14 whether it should read /map_lidar instead (the lidar layer of the
-        # laptop's fused volume) — no, and not for QoS reasons: that topic is latched too and a
-        # transient-local reader on the board does receive it (the tracker's own subscription
-        # does). Three reasons, in order:
-        #  1. content: a SEEDED volume's layer is this file exactly (18274 of 18274 known cells,
-        #     and the node's own tracker replayed on it seats a median 0.01 cm from where the
-        #     file puts it over the four tapes of 2026-09-13). A DRIVEN one is not: the live
-        #     snapshot of 2026-09-15 keeps 52.9 % of this file's walls, has carved 2070 of them
-        #     free, and the same replay seats a median 1.90 m away with the fit down 0.295
-        #     (scratch/volume_vs_file_seating.py). A planner on that map plans through the
-        #     missing half. The lidar path is the hole: depth_fusion's fit_gate holds the camera
-        #     frames only, and a revolution is integrated at whatever pose TF gives.
-        #  2. rule 20: the static layer has no fallback. With the laptop down at startup the
-        #     global costmap would hold no static map at all — the board could not plan a metre
-        #     on its own. The map_server stays the seed and the fallback.
-        #  3. geometry: the volume's grid is 280x250 cells against this map's 239x215, and a
-        #     static map of another size makes the layered costmap resize itself, which
-        #     matchSize()s every other layer and throws away the marks the lidar, camera,
-        #     contact and ToF layers had gathered. On change rather than every second, that is
-        #     paid once per change of the volume's extent instead of once per second — but it is
-        #     still paid mid-drive.
-        # SINCE 2026-09-18 IT READS /map_tracked, and the three reasons above are answered rather
-        # than argued: the tracker republishes the very grid it matches on
-        # (pepin_bringup.relocalizer.TRACKED_MAP_TOPIC), so (1) the content is whatever the tracker
-        # accepted — and the tracker keeps a map only after its own choice took it; (2) the fallback
-        # is the tracker's, which is the board's own map cache (pepin.mapcache): with the laptop down
-        # at startup this layer gets the last map the board adopted instead of nothing; (3) a resize
-        # still costs what it cost, and it is paid when the tracker itself changes map, which is the
-        # only moment it can be paid honestly.
+        # IT READS /map_tracked AND NOTHING ELSE: the grid the board's TRACKER adopted, which that
+        # node republishes latched on every adoption
+        # (pepin_bringup.relocalizer.TRACKED_MAP_TOPIC). So the planner's static map IS the map the
+        # pose is measured against, by construction rather than by two subscriptions to a third
+        # party that can disagree — and the fallback is the tracker's own, which is the board's map
+        # cache (pepin.mapcache): with the laptop down at startup this layer gets the last map the
+        # board adopted instead of nothing (CLAUDE.md rule 20). Nobody publishes /map on this board
+        # at all (ros/nav.launch.py's map_server argument, off by default).
+        # A LATCHED MAP REPUBLISHED ON CHANGE IS FINE HERE: this layer keeps a live subscription with
+        # transient-local durability (hence the line below), so it takes the first map whenever it
+        # appears — before or after this node started — and re-takes every later one.
+        # subscribe_to_updates stays at its default False: nobody publishes /map_tracked_updates and
+        # a partial update is not something this stack has ever needed.
+        # WHAT IT COSTS, and it is paid on purpose: the live map is RTAB-Map's grid, re-rendered
+        # whenever the graph grows a node or a closure bends it, so its size and its origin change.
+        # A static map of another size makes the layered costmap resize itself, which matchSize()s
+        # every other layer and throws away the marks the lidar, camera, contact and ToF layers had
+        # gathered. That is paid once per ADOPTION — at most one every map_refresh_s (2 s), and only
+        # when the cells really changed — which is the only moment it can be paid honestly: a
+        # planner cannot plan on a map the tracker is no longer on.
         map_topic: /map_tracked
         map_subscribe_transient_local: True
       inflation_layer:

@@ -122,6 +122,34 @@ SensorData = _msg(
     laser_scan_format=0,
     laser_scan_local_transform=Transform,
 )
+# rtabmap_msgs/MapGraph as the laptop's nodes read it, field for field as
+# /opt/ros/jazzy/share/rtabmap_msgs/msg/MapGraph.msg lists them: the map -> odom transform, the node
+# ids and their OPTIMISED poses as two parallel arrays, and the links with their information
+# matrices. pepin_bringup.depth_fusion reads poses_id + poses (the room's own movement,
+# pepin.graphbend) and pepin_bringup.rtabmap_frame reads map_to_odom in SLAM.
+Link_ = _msg(
+    "Link", from_id=0, to_id=0, type=0, transform=Transform, information=lambda: [0.0] * 36
+)
+MapGraph = _msg(
+    "MapGraph",
+    header=Header,
+    map_to_odom=Transform,
+    poses_id=list,
+    poses=list,
+    links=list,
+)
+# rtabmap_msgs/Info: the statistics table as two parallel arrays, and the node a closure or a
+# proximity link MATCHED — the one thing that says an update localised at all.
+Info = _msg(
+    "Info",
+    header=Header,
+    ref_id=0,
+    loop_closure_id=0,
+    proximity_detection_id=0,
+    landmark_id=0,
+    stats_keys=list,
+    stats_values=list,
+)
 CameraInfo = _msg(
     "CameraInfo",
     header=Header,
@@ -165,6 +193,54 @@ class Trigger:
 
     Request = _msg("Trigger_Request")
     Response = _msg("Trigger_Response", success=False, message="")
+
+
+class Empty:
+    """std_srvs/Empty: nothing in and nothing out, which is the whole of RTAB-Map's two set_mode
+    services and of its ``update_parameters``."""
+
+    Request = _msg("Empty_Request")
+    Response = _msg("Empty_Response")
+
+
+# rcl_interfaces/Parameter and ParameterValue as a node builds them for somebody ELSE's parameters
+# (rclpy.parameter.Parameter above is a different thing: the local value a node declares).
+ParameterMsg = _msg("Parameter", name="", value=None)
+ParameterValueMsg = _msg(
+    "ParameterValue", type=0, bool_value=False, integer_value=0, double_value=0.0, string_value=""
+)
+
+
+class SetParameters:
+    """rcl_interfaces/SetParameters: a list of parameters in, one result each back."""
+
+    Request = _msg("SetParameters_Request", parameters=list)
+    Response = _msg("SetParameters_Response", results=list)
+
+
+class SetLabel:
+    """rtabmap_msgs/SetLabel, field for field as SetLabel.srv:3-4 lists them — and the response is
+    EMPTY, so success and failure look the same to a caller (rtabmap_msgs/srv/SetLabel.srv). Node
+    id 0 means "the last node", or beside a loaded database the node nearest the last localisation
+    (rtabmap/core/Rtabmap.cpp's labelLocation)."""
+
+    Request = _msg("SetLabel_Request", node_id=0, node_label="")
+    Response = _msg("SetLabel_Response")
+
+
+class ListLabels:
+    """rtabmap_msgs/ListLabels: nothing in, the ids and their labels as two parallel arrays back
+    (ListLabels.srv:4-5). The only way to learn WHICH node a set_label landed on."""
+
+    Request = _msg("ListLabels_Request")
+    Response = _msg("ListLabels_Response", ids=list, labels=list)
+
+
+class RemoveLabel:
+    """rtabmap_msgs/RemoveLabel: a label in (RemoveLabel.srv:2), nothing back."""
+
+    Request = _msg("RemoveLabel_Request", label="")
+    Response = _msg("RemoveLabel_Response")
 
 
 DurationMsg = _msg("Duration", sec=0, nanosec=0)
@@ -678,7 +754,10 @@ def install() -> Any:
             ParameterType=ParameterType,
             IntegerRange=IntegerRange,
             FloatingPointRange=FloatingPointRange,
+            Parameter=ParameterMsg,
+            ParameterValue=ParameterValueMsg,
         ),
+        "rcl_interfaces.srv": _module("rcl_interfaces.srv", SetParameters=SetParameters),
         "builtin_interfaces": _module("builtin_interfaces"),
         "builtin_interfaces.msg": _module(
             "builtin_interfaces.msg", Time=Time, Duration=DurationMsg
@@ -712,7 +791,19 @@ def install() -> Any:
             "nav_msgs.msg", OccupancyGrid=OccupancyGrid, Odometry=Odometry, Path=Path_
         ),
         "rtabmap_msgs": _module("rtabmap_msgs"),
-        "rtabmap_msgs.msg": _module("rtabmap_msgs.msg", SensorData=SensorData),
+        "rtabmap_msgs.msg": _module(
+            "rtabmap_msgs.msg",
+            SensorData=SensorData,
+            MapGraph=MapGraph,
+            Info=Info,
+            Link=Link_,
+        ),
+        "rtabmap_msgs.srv": _module(
+            "rtabmap_msgs.srv",
+            SetLabel=SetLabel,
+            ListLabels=ListLabels,
+            RemoveLabel=RemoveLabel,
+        ),
         "nav2_msgs": _module("nav2_msgs"),
         "nav2_msgs.msg": _module("nav2_msgs.msg", ParticleCloud=ParticleCloud),
         "nav2_msgs.action": _module("nav2_msgs.action", NavigateToPose=NavigateToPose, Spin=Spin),
@@ -722,7 +813,7 @@ def install() -> Any:
             "action_msgs.msg", GoalStatus=GoalStatus, GoalStatusArray=GoalStatusArray
         ),
         "std_srvs": _module("std_srvs"),
-        "std_srvs.srv": _module("std_srvs.srv", Trigger=Trigger),
+        "std_srvs.srv": _module("std_srvs.srv", Trigger=Trigger, Empty=Empty),
         "tf2_msgs": _module("tf2_msgs"),
         "tf2_msgs.msg": _module("tf2_msgs.msg", TFMessage=TFMessage),
         "sensor_msgs": _module("sensor_msgs"),

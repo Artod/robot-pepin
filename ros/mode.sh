@@ -4,12 +4,14 @@
 #   ros/mode.sh sensors            lidar, base bridge, Foxglove — nothing that localises
 #   ros/mode.sh slam_toolbox       + slam_toolbox: build a map while driving (ros/teleop.sh),
 #                                  to SAVE and navigate on later — it cannot drive on it
-#   ros/mode.sh nav [MAP.yaml]     + Nav2 with the relocalizer on a saved map
-# Online SLAM — one map built while Nav2 drives it — is not a mode of this script: it lives on
-# both machines at once (ros/thin.sh slam on the board, ros/laptop.sh vslam --slam here).
+#   ros/mode.sh nav [MAP.yaml]     + Nav2 with the tracker, which owns map -> odom and adopts the
+#                                  map RTAB-Map's graph publishes (MAP.yaml only names the places
+#                                  book and the pgm a map_server:=true boot would serve)
 # Leaving slam_toolbox saves the map being built as /maps/autosave_<time> first: slam_toolbox holds
 # it in memory only, and a restart would throw away the drive that produced it.
-# Every mode here leaves online SLAM (PEPIN_SLAM=false): the board serves a map again.
+# Every mode here writes PEPIN_SLAM=false, which is the default and the only arrangement that
+# ships: the retired frame owner (slam_frame instead of the tracker) is CLAUDE.md rule 19's way
+# back and is turned on by hand in /etc/default/pepin-ros, never by this script.
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
@@ -20,8 +22,9 @@ case "$MODE" in
   sensors)      NAV=false; TOOLBOX=false ;;
   slam_toolbox) NAV=false; TOOLBOX=true ;;
   nav)          NAV=true;  TOOLBOX=false ;;
-  slam) echo "online SLAM is ros/thin.sh slam (the laptop's RTAB-Map builds the map, Nav2 drives it);
-             the old lidar-only mapper is ros/mode.sh slam_toolbox"; exit 2 ;;
+  slam) echo "there is no online-SLAM mode any more: ros/mode.sh nav drives whatever RTAB-Map's
+             graph publishes, empty room or known one (ros/laptop.sh vslam --fresh starts the
+             graph over); the old lidar-only mapper is ros/mode.sh slam_toolbox"; exit 2 ;;
   *) echo "unknown mode $MODE"; exit 2 ;;
 esac
 current_toolbox=$(ssh "root@$BOARD" "grep -c 'PEPIN_SLAM_TOOLBOX=true' /etc/default/pepin-ros 2>/dev/null || true")

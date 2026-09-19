@@ -4,22 +4,15 @@
 #   ros/laptop.sh            start (or restart) the bridge and the laptop-side Nav2 launch
 #   ros/laptop.sh stop       stop both
 #   ros/laptop.sh logs       follow the launch's output
-#   ros/laptop.sh vslam      start (or restart) the camera mapping container beside them, in the
-#                            mode `start` last read from the board (ros/.mode): beside the known
-#                            map the RTAB-Map database (ros/maps/rtabmap.db) is kept and the map
-#                            survives; in SLAM mode the session starts from an empty one
-#   ros/laptop.sh vslam --slam | --known-map   force the mode instead of taking the recorded one
-#   ros/laptop.sh vslam --camera-only   SLAM without the lidar: the grid is the camera's depth
-#   ros/laptop.sh vslam --resume  SLAM from the session's existing database instead of empty
-#   ros/laptop.sh vslam --world-map  /map comes from the fused volume (pepin.worldmap) instead of
-#                                 RTAB-Map's grid: one map both sensors write into, snapshotted
-#   ros/laptop.sh vslam --fresh   build the room from nothing: this mode's database is deleted and
-#                            no volume snapshot is resumed, whatever is on disk. The existing
-#                            ros/maps/*.world.npz are left alone
-# The volume IS the map and its only file is /maps/<room>.world.npz — no pgm is read or written.
-# Which room is normally DETECTED (a place recogniser publishes the name on /place/room); until
-# that node exists, `start` records the board's map name in ros/.map and vslam passes its stem as
-# the room. --room=NAME overrides it.
+#   ros/laptop.sh vslam      start (or restart) the camera mapping container beside them: RTAB-Map
+#                            on its one database (ros/maps/rtabmap.db), whose loop-closed grid is
+#                            THE map — published on /map for the board's tracker. The database is
+#                            kept across restarts and is only ever deleted by --fresh
+#   ros/laptop.sh vslam --camera-only   no lidar in the snapshots: the grid is the camera's depth
+#   ros/laptop.sh vslam --fresh   build the room from nothing: the database is deleted and no volume
+#                            snapshot is resumed, whatever is on disk. A fresh database is a NEW
+#                            frame, so ros/restart.sh --fresh-graph moves the old frame's volume
+#                            aside with it
 #   ros/laptop.sh vslam --no-vo   no visual odometry: rgbd_odometry and pepin_bringup.visual_odometry
 #                            do not start, and the board's EKF is the wheels and the gyro alone
 #   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
@@ -70,7 +63,7 @@ image() { docker image inspect pepin-laptop:latest >/dev/null 2>&1 && echo pepin
 # The nodes a kick can reach here, the container each lives in and the line it prints once up
 # (the kick waits for that line): the Python modules of vslam.launch.py, and the goal server of
 # the navigation half (it runs here on side=board only; on side=all: ros/thin.sh kick goal_server).
-KICKABLE="camera_stream depth_stream contact_scan depth_fusion laptop_localizer rtabmap_frame sensor_pack visual_odometry goal_server"
+KICKABLE="camera_stream depth_stream contact_scan depth_fusion laptop_localizer rtabmap_frame sensor_pack places visual_odometry goal_server"
 kick_target() {  # node name -> "container|start-up line"
     case "$1" in
         camera_stream) echo "pepin-vslam|camera stream from " ;;
@@ -80,6 +73,7 @@ kick_target() {  # node name -> "container|start-up line"
         laptop_localizer) echo "pepin-vslam|laptop localizer up: " ;;
         rtabmap_frame) echo "pepin-vslam|rtabmap frame up: " ;;
         sensor_pack) echo "pepin-vslam|sensor pack up" ;;
+        places) echo "pepin-vslam|places up: " ;;
         visual_odometry) echo "pepin-vslam|visual odometry up: " ;;
         goal_server) echo "pepin-laptop|goal server ready on port" ;;
         *) return 1 ;;
@@ -146,25 +140,12 @@ case "${1:-start}" in
         echo "$NAME did not print '$LINE' within 120 s: ros/laptop.sh logs ${C#pepin-}"; exit 4 ;;
     vslam)
         # Camera + lidar mapping beside the navigation half (ros/pepin_bringup/launch/vslam.launch.py),
-        # in one of two modes. Beside a KNOWN map the database is the map: it is kept across
-        # restarts (the launch never wipes it) and deleted only here, on request. In SLAM mode
-        # the map is what this session builds, in a database of its own, empty unless --resume.
-        #
-        # Which mode: the flags win, otherwise the one ros/laptop.sh start recorded when it last
-        # read the board (ros/.mode) — one source of truth, the board's own /etc/default/pepin-ros,
-        # read once on the only path that talks to it. This subcommand asks the board nothing.
-        MODE="$(cat "$HERE/.mode" 2>/dev/null || echo vision)"
-        if [ "$MODE" = slam ]; then SLAM=true; else SLAM=false; fi
-        CAMERA_ONLY=false; RESUME=false; FRESH=false; WORLD_MAP=false; RESUME_VOLUME=true
-        # WHICH ROOM. The volume resumes /maps/<room>.world.npz and nothing else — no pgm is a
-        # seed any more. The name should come from a place recogniser (/place/room, the node's
-        # adopt_room flag); until that exists it comes from the map name `start` read off the
-        # board and recorded in ros/.map, reduced to its stem, since that is the only name this
-        # room has. SLAM names none: nowhere is recognised there.
-        ROOM=""
-        if [ "$SLAM" != true ] && [ -r "$HERE/.map" ]; then
-            ROOM="$(basename "$(cat "$HERE/.map")" .yaml)"
-        fi
+        # and there is one arrangement of it (World R): the database is the map, it is kept across
+        # restarts (the launch never wipes it) and it is deleted only here, on request. Mapping a new
+        # room and driving a known one are the same launch with a different file on disk — the launch
+        # reads which it is and picks the memory mode itself — so this subcommand needs no mode, and
+        # asks the board nothing.
+        CAMERA_ONLY=false; FRESH=false; RESUME_VOLUME=true
         # The camera as a third odometry (rtabmap_odom's rgbd_odometry + pepin_bringup.visual_odometry):
         # on unless --no-vo. It costs this laptop a quarter of a core and the robot nothing at
         # all until the node's vo_publish flag is turned on (ros/flags.sh set visual_odometry
@@ -176,36 +157,23 @@ case "${1:-start}" in
         STATIC_CAMERA_TF=true
         for arg in ${*:2}; do
             case "$arg" in
-                --slam) SLAM=true ;;
-                --known-map) SLAM=false ;;
                 --camera-only) CAMERA_ONLY=true ;;
-                --resume) RESUME=true ;;
-                --world-map) WORLD_MAP=true ;;
-                # The room the volume belongs to, which names its file
-                # (/maps/<room>.world.npz, pepin_bringup.depth_fusion). Normally detected; this
-                # is the override, and a bare name, not a path.
-                --room=*) ROOM="${arg#--room=}" ;;
                 --fresh) FRESH=true ;;
                 --neck) STATIC_CAMERA_TF=false ;;
                 --no-vo) VO=false ;;
-                *) echo "usage: ros/laptop.sh vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck] [--world-map] [--no-vo] [--room=NAME]"; exit 2 ;;
+                *) echo "usage: ros/laptop.sh vslam [--fresh] [--camera-only] [--neck] [--no-vo]"; exit 2 ;;
             esac
         done
-        if [ "$FRESH" = true ] && [ "$SLAM" = true ]; then
-            rm -f "$HERE"/maps/rtabmap_slam.db "$HERE"/maps/rtabmap_slam.db-*
-            echo "vslam: ros/maps/rtabmap_slam.db deleted (a SLAM session starts empty anyway)"
-        elif [ "$FRESH" = true ]; then
-            rm -f "$HERE"/maps/rtabmap.db "$HERE"/maps/rtabmap.db-*
-            echo "vslam: ros/maps/rtabmap.db deleted; RTAB-Map starts an empty map"
-        fi
-        # --fresh is the OVERRIDE of the detection, not the way to use it: no snapshot is
-        # resumed and the volume is born empty under the cart with a new identity minted for it
-        # (pepin.worldmap.MapIdentity). The room's name is kept, so the run still writes to that
-        # room's file; nothing is deleted before it does, so a --fresh run is a measurement and
-        # not a loss.
+        # --fresh: an empty room, which is one fact on disk — the database gone. The launch reads
+        # that and starts RTAB-Map in mapping mode; the volume is born empty under the cart in the
+        # new frame (no snapshot resumed), and nothing existing is deleted except the database
+        # itself, so a --fresh run is a measurement and not a loss. The volume of the OLD frame is
+        # moved aside by ros/restart.sh --fresh-graph, which passes this flag.
         if [ "$FRESH" = true ]; then
+            rm -f "$HERE"/maps/rtabmap.db "$HERE"/maps/rtabmap.db-*
             RESUME_VOLUME=false
-            echo "vslam --fresh: the volume is born empty (no snapshot resumed); the existing"
+            echo "vslam --fresh: ros/maps/rtabmap.db deleted, so RTAB-Map starts an empty graph and"
+            echo "               the volume is born empty under the cart; the existing"
             echo "               ros/maps/*.world.npz are left untouched until it saves"
         fi
         pepin_remove_container pepin-vslam
@@ -225,11 +193,8 @@ case "${1:-start}" in
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
             -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} \
             "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
-            "slam:=$SLAM" "camera_only:=$CAMERA_ONLY" "resume:=$RESUME" "world_map:=$WORLD_MAP" \
-            ${ROOM:+"room:=$ROOM"} "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null  # an empty room:= is a malformed launch argument: SLAM mode passes none (2026-09-14)
-        [ "$SLAM" = true ] \
-            && echo "vslam up in SLAM mode (camera_only $CAMERA_ONLY, resume $RESUME, static camera tf $STATIC_CAMERA_TF): the map grows on /map; board must be on ros/thin.sh slam. Foxglove ws://localhost:8765, save with ros/map.sh save NAME" \
-            || echo "vslam up beside the known map (static camera tf $STATIC_CAMERA_TF): Foxglove at ws://localhost:8765, ros/laptop.sh logs vslam"
+            "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null
+        echo "vslam up (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and the board's tracker adopts it; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
         # The desktop app's socket died with the old container, and a Foxglove client never
         # re-attaches by itself: its panels stay on screen, empty, bound to channel ids this new
         # bridge does not have. So the app is told to reconnect (ros/foxglove.sh reopen waits for
@@ -242,7 +207,7 @@ case "${1:-start}" in
         fi
         exit 0 ;;
     start) ;;
-    *) echo "usage: ros/laptop.sh [start | stop | logs [vslam] | vslam [--slam|--known-map] [--fresh|--resume] [--camera-only] [--neck] [--no-vo] | kick NODE]"; exit 2 ;;
+    *) echo "usage: ros/laptop.sh [start | stop | logs [vslam] | vslam [--fresh] [--camera-only] [--neck] [--no-vo] | kick NODE]"; exit 2 ;;
 esac
 # Which half the board expects: on side=all (ros/thin.sh vision) the board drives by itself and
 # this side starts only the bridge — RTAB-Map and the camera come with "ros/laptop.sh vslam".
@@ -251,30 +216,20 @@ esac
 # No PEPIN_SIDE line in the board's file is side=all (ros/thin.sh vision and off delete it).
 SIDE="$(ssh "root@$BOARD" "grep -oE '^PEPIN_SIDE=.*' /etc/default/pepin-ros || echo PEPIN_SIDE=all" 2>/dev/null | cut -d= -f2 || true)"
 [ -n "$SIDE" ] || { echo "cannot read the board's side over ssh (root@$BOARD, /etc/default/pepin-ros): is it up?"; exit 1; }
-# ...and whether it is mapping from scratch: in SLAM mode the board serves no map, so /map and
-# the correction travel the other way and the bridge needs its own allow-list. No line at all is
-# false (ros/thin.sh on, vision and off delete it).
-SLAM_ON="$(ssh "root@$BOARD" "grep -oE '^PEPIN_SLAM=.*' /etc/default/pepin-ros || echo PEPIN_SLAM=false" 2>/dev/null | cut -d= -f2 || true)"
+# Which bridge allow-list this side needs, and it is one question: where Nav2's planner lives. The
+# map always comes FROM here (RTAB-Map's grid on /map) in both.
 if [ "$SIDE" = board ]; then
     # The map here chooses the places book, so it must be the board's map, not merely a valid one.
     MAP="${PEPIN_MAP:-$(ssh "root@$BOARD" "grep -oE '^PEPIN_MAP=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2 || true)}"
     [ -n "$MAP" ] || { echo "the board does not say which map it runs (ros/mode.sh nav MAP first)"; exit 1; }
     CONFIG=zenoh-bridge-laptop.json  # the split: this side publishes the plan and takes goals
     MODE=split
-elif [ "$SLAM_ON" = true ]; then
-    CONFIG=zenoh-bridge-laptop-slam.json  # this side publishes the only map there is
-    MODE=slam
 else
     CONFIG=zenoh-bridge-laptop-vision.json  # the board publishes the plan too; this side maps only
     MODE=vision
 fi
-# The mode the board is in, recorded for `ros/laptop.sh vslam`, which never asks the board itself.
+# The mode the board is in, recorded for anyone who needs it without an ssh of its own.
 printf '%s\n' "$MODE" > "$HERE/.mode"
-# ...and WHICH MAP it serves, for the same reason: its stem is the only name this room has until a
-# place recogniser publishes one, and the volume's file is named after the room, so vslam must
-# know it without an ssh of its own. Only written where the board actually serves a map (split
-# mode); in vision and slam it is removed, so a stale name cannot resume the wrong room.
-if [ "$SIDE" = board ] && [ -n "${MAP:-}" ]; then printf '%s\n' "$MAP" > "$HERE/.map"; else rm -f "$HERE/.map"; fi
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 pepin_remove_container pepin-laptop pepin-zenoh
 # The board's bridge must be alive before this side connects: its REST admin answers when its

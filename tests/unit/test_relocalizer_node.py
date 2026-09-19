@@ -940,11 +940,12 @@ def test_a_standing_cart_is_matched_about_once_a_second_even_after_a_seed() -> N
     assert node._rested >= 30
 
 
-# ---- which map the tracker matches on --------------------------------------------------------
-def volume_map_msg() -> Any:
-    """The lidar layer of the laptop's fused volume as depth_fusion publishes it (/map_lidar):
-    the same room on a larger, differently placed grid — which is exactly why it carries another
-    map id, and why the laptop's candidates about /map are no evidence about this one."""
+# ---- the one map, and when the tracker takes the next picture of it ---------------------------
+def bent_map_msg() -> Any:
+    """The same room after a loop closure: RTAB-Map clears its global map and re-assembles it from
+    the per-node grids at their new poses (rtabmap/core/GlobalMap.cpp), so the canvas itself moves
+    — another size, another origin, and therefore another map id, which is why the laptop stamps
+    its words with the id of /map_tracked rather than with the one it published."""
     msg = map_msg()
     msg.info.width += 2
     msg.info.origin.position.x -= 0.10
@@ -952,33 +953,27 @@ def volume_map_msg() -> Any:
     return msg
 
 
-def test_the_tracker_matches_on_the_served_map_until_the_flag_moves_it(node: Relocalizer) -> None:
-    """Both maps are subscribed always; /map_lidar arriving changes nothing while the flag says
-    map, and moving the flag adopts the map already in hand — a served map is published once and
-    latched, so waiting for the next publication would be waiting for ever."""
-    served = node._map_id
-    node.subs["/map_lidar"][1](volume_map_msg())
-    assert node._map_id == served and node._choice.source == "map"
-
-    assert node.set_parameters([Parameter("map_topic", value="map_lidar")])[0].successful
-    assert node._choice.source == "map_lidar" and node._map_id != served
-    assert node._grid.spec.width_m > 0.0 and node._matcher is not None, "rebuilt on the volume"
-
-    assert node.set_parameters([Parameter("map_topic", value="map")])[0].successful
-    assert node._map_id == served, "and back, without a restart"
+def test_the_tracker_matches_on_the_one_map_topic(node: Relocalizer) -> None:
+    """World R: there is one map and one topic, so there is nothing to choose and no flag to move
+    — /map is where RTAB-Map's grid arrives and the only place a map ever comes from."""
+    assert node._choice.source == "/map" and node._map_id and node._choice.adoptions == 1
+    assert "/map" in node.subs and "/map_lidar" not in node.subs
+    assert not any("map_topic" in str(name) for name in node._switches.flags.as_dict())
 
 
-def test_a_map_switch_keeps_the_cart_where_it_is(node: Relocalizer) -> None:
-    """The incident of 2026-09-14 18:13, in a test.
+def test_a_bent_map_keeps_the_cart_where_it_is_and_says_how_far_it_moved(
+    node: Relocalizer,
+) -> None:
+    """The incident of 2026-09-14 18:13, in a test, and now the ordinary case.
 
-    A live ``map_topic=map_lidar`` with the cart at home restarted the tracker at the ORIGIN —
-    the saved-pose file is keyed by map id, and the volume's grid has an id of its own — and the
-    next measurement-driven update published map -> odom for that origin pose. Nav2 logged
-    "global_costmap: Sensor origin at (0.01, -0.00) is out of map bounds" 110 times, the local
-    costmap stopped following the cart, and no goal succeeded until the stack was restarted.
+    A map swap with the cart at home restarted the tracker at the ORIGIN — the saved-pose file is
+    keyed by map id, and the new grid has an id of its own — and the next measurement-driven update
+    published map -> odom for that origin pose. Nav2 logged "global_costmap: Sensor origin at
+    (0.01, -0.00) is out of map bounds" 110 times, the local costmap stopped following the cart,
+    and no goal succeeded until the stack was restarted.
 
-    Both maps are the same room on grids aligned to the same file, so the pose survives the
-    switch and so does the transform the node broadcasts.
+    Under World R every loop closure re-renders the grid, so this arrives as an ordinary adoption:
+    the pose is carried, the matcher is rebuilt, and the report line says what the graph did.
     """
     stand(node, 100.0, 2.0)
     node.clock.seconds = 103.0
@@ -988,27 +983,28 @@ def test_a_map_switch_keeps_the_cart_where_it_is(node: Relocalizer) -> None:
     stand(node, 103.1, 1.0)
     loc = node._localizer
     assert loc is not None and math.hypot(loc.pose.x, loc.pose.y) > 0.1, "not at the origin"
-    before, frame = loc.pose, node._last_map_odom
+    before, frame, served = loc.pose, node._last_map_odom, node._map_id
 
-    node.subs["/map_lidar"][1](volume_map_msg())
-    assert node.set_parameters([Parameter("map_topic", value="map_lidar")])[0].successful
+    node.clock.seconds = 150.0  # past map_refresh_s: a re-render is adopted
+    node.subs["/map"][1](bent_map_msg())
     after = node._localizer
-    assert after is not None and after is not loc, "the tracker was rebuilt on the volume"
+    assert after is not None and after is not loc, "the tracker was rebuilt on the bent grid"
+    assert node._map_id != served, "another size and origin: another map id"
     assert (after.pose.x, after.pose.y, after.pose.theta) == (before.x, before.y, before.theta)
     assert node._tracker_initialised, "it knows where it is: no whole-map search, no origin pose"
     assert node._last_map_odom == frame, "and it broadcasts the very frame it broadcast before"
+    assert node._choice.adoptions == 2
+    node._report_tracking()
+    assert "2 adopted" in node.logger.texts("info")[-1]
+    assert "resized, origin moved 0.10 m" in node.logger.texts("info")[-1], "the bend is a number"
 
 
-def test_a_second_map_on_the_owners_own_topic_leaves_the_cart_where_it_is(
-    node: Relocalizer,
-) -> None:
-    """The volume takes /map over from the map server (ONE MAP, 2026-09-16): the topic's OWNER
-    changes, its name does not, and the same room now arrives there more than once instead of
-    being latched once and never repeated. Two gates keep the cart where it is — the choice
-    refuses a republication on the topic already in use (``map_refresh_s`` 0 is "the first map
-    and no other"), and where a changed one IS adopted the pose is carried across it, because
-    the same frame and origin is the same room and the cart did not move because the picture of
-    it did.
+def test_a_republished_map_leaves_the_cart_where_it_is(node: Relocalizer) -> None:
+    """RTAB-Map republishes its grid at its detection rate (1 Hz with map_always_update), and most
+    of those publications are the same cells. Two gates keep the cart where it is — the choice
+    refuses a republication that is too soon or unchanged (``map_refresh_s``), and where a changed
+    one IS adopted the pose is carried across it, because the same room re-rendered is still the
+    room the cart is standing in.
     """
     stand(node, 100.0, 2.0)
     node.clock.seconds = 103.0
@@ -1037,59 +1033,31 @@ def test_a_second_map_on_the_owners_own_topic_leaves_the_cart_where_it_is(
     assert node._last_map_odom == frame, "and the frame it broadcasts is the one it broadcast"
 
 
-def test_the_switch_can_be_told_to_find_the_cart_again(node: Relocalizer) -> None:
-    """The old behaviour stays reachable: with ``carry_pose_across_maps`` off the tracker looks
-    for itself on the new map before it trusts anything (a map of another place on the same
-    topic)."""
+def test_the_carry_can_be_told_to_find_the_cart_again(node: Relocalizer) -> None:
+    """The old behaviour stays reachable: with ``carry_pose_across_maps`` off the tracker looks for
+    itself on the new grid before it trusts anything (a map of another PLACE on the same topic)."""
     stand(node, 100.0, 2.0)
     assert node.set_parameters([Parameter("carry_pose_across_maps", value=False)])[0].successful
-    node.subs["/map_lidar"][1](volume_map_msg())
-    node.set_parameters([Parameter("map_topic", value="map_lidar")])
+    node.clock.seconds = 150.0
+    node.subs["/map"][1](bent_map_msg())
     assert not node._tracker_initialised
 
 
-def test_the_tracker_takes_the_served_map_when_the_volume_never_speaks() -> None:
-    """A board that starts with the laptop down: /map_lidar has no publisher at all and the
-    tracker must not sit blind waiting for it (CLAUDE.md rule 20). The served map is latched and
-    already in hand; ten seconds later it is the map in use, and the volume still replaces it
-    whenever it turns up."""
-    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, map_topic="map_lidar", min_match_gap_s=0.0):
-        node = Relocalizer()
-    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
-    node.subs["/map"][1](map_msg())
-    assert node._matcher is None, "nothing adopted: the tracker was asked for the volume"
-
-    node.clock.seconds = 1.0
-    node._check()
-    node.clock.seconds = 5.0
-    node._check()
-    assert node._matcher is None, "five seconds is not ten"
-
-    node.clock.seconds = 12.0
-    node._check()
-    assert node._choice.source == "map" and node._choice.fell_back
-    assert node._matcher is not None, "matching on the served file"
-
-    node.subs["/map_lidar"][1](volume_map_msg())
-    assert node._choice.source == "map_lidar" and not node._choice.fell_back
-
-
-def test_a_republished_volume_map_does_not_rebuild_the_tracker(node: Relocalizer) -> None:
-    """/map_lidar arrives at the fusion's map_hz, once a second, and every adoption rebuilds the
-    matcher and forgets the episode's evidence. The refresh gate is what makes it safe to point
-    the tracker at a map that is still being built."""
-    node.set_parameters([Parameter("map_topic", value="map_lidar")])
-    node.subs["/map_lidar"][1](volume_map_msg())
+def test_a_republished_map_does_not_rebuild_the_tracker(node: Relocalizer) -> None:
+    """RTAB-Map's grid arrives once a second, and every adoption rebuilds the matcher and forgets
+    the episode's evidence. The refresh gate is what makes it safe to track on a map that is still
+    being built."""
     first = node._matcher
     for _ in range(3):
-        node.subs["/map_lidar"][1](volume_map_msg())
+        node.subs["/map"][1](map_msg())
     assert node._matcher is first, "the same matcher: nothing was adopted"
+    assert node._choice.take_ignored() == 3, "and the refusals are visible"
 
     node.clock.seconds = 100.0
     assert node.set_parameters([Parameter("map_refresh_s", value=30.0)])[0].successful
-    changed = volume_map_msg()
+    changed = map_msg()
     changed.data[0] = 100 if changed.data[0] != 100 else 0
-    node.subs["/map_lidar"][1](changed)
+    node.subs["/map"][1](changed)
     assert node._matcher is not first, "old enough and its cells differ: adopted"
 
 
@@ -1437,9 +1405,9 @@ def test_a_cold_boot_with_no_live_map_tracks_on_the_board_s_own_cache(tmp_path: 
             resolution_m=float(grid.info.resolution),
             origin_xy=(grid.info.origin.position.x, grid.info.origin.position.y),
             map_id="239x215@-18.53,-4.38",
-            digest="map_lidar#f5169d80",
+            digest="239x215@-18.53,-4.38#f5169d80",
             stamp=time.time() - 7.4 * 3600.0,
-            source="/map_lidar",
+            source="/map",
         ),
     )
     with ros_stubs.parameters(map_cache_dir=str(tmp_path), min_match_gap_s=0.0):
@@ -1451,7 +1419,7 @@ def test_a_cold_boot_with_no_live_map_tracks_on_the_board_s_own_cache(tmp_path: 
     assert node._grid is not None, "the board tracks on the map it wrote down itself"
     assert node.pubs[TRACKED_MAP_TOPIC].sent, "and Nav2's static layers get it too"
     said = " ".join(node.logger.texts("warning"))
-    assert "no live map: tracking on the cache of 239x215@-18.53,-4.38 from /map_lidar" in said
+    assert "no live map: tracking on the cache of 239x215@-18.53,-4.38 from /map" in said
     assert "written 7.4 h ago" in said
     node._report_tracking()
     assert "the cache of 239x215@-18.53,-4.38" in node.logger.texts("info")[-1]
@@ -1482,23 +1450,25 @@ def test_a_corrupt_cache_is_refused_loudly_and_nothing_is_tracked_on(tmp_path: P
     assert "THE MAP CACHE IS NOT READABLE" in " ".join(node.logger.texts("error"))
 
 
-def test_with_map_topic_on_the_volume_the_laptop_s_words_are_refused_as_another_map() -> None:
-    """A word about ANOTHER map is refused, whoever says it: with the tracker on the volume it
-    answers to the volume's id, and a camera measurement, a graph measurement or a whole-map
-    candidate stamped with some other grid's id is turned away. This is why the laptop stamps its
-    words with the id of /map_tracked — the grid this very node republishes — and no longer with
-    /map's (2026-09-18: live, "unknown_map 0" with the tracker on /map_lidar); a laptop half that
+def test_a_word_about_the_grid_before_the_bend_is_refused_as_another_map() -> None:
+    """A word about ANOTHER map is refused, whoever says it: the tracker answers to the id of the
+    grid IT is on, and a camera measurement, a graph measurement or a whole-map candidate stamped
+    with some other grid's id is turned away. Under World R that is not a rare mistake but the
+    shape of every re-render — the grid's id changes with its size and origin — which is why the
+    laptop stamps its words with the id of /map_tracked, the grid this very node republishes, and
+    never with the one it published itself (2026-09-18 live: "unknown_map 0"). A laptop half that
     forgets that rule is mute here, and this test is what says so."""
-    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, map_topic="map_lidar", min_match_gap_s=0.0):
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, min_match_gap_s=0.0):
         node = Relocalizer()
     node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
     standing(node)  # a tracked pose, so the candidate gate judges instead of waiting for one
-    volume = map_msg()
-    volume.info.width += 1  # the volume's grid is bigger than the served map's: another id
-    volume.data = list(volume.data) + [-1] * volume.info.height
-    node.subs["/map_lidar"][1](volume)
+    node.clock.seconds = 150.0
+    bent = map_msg()
+    bent.info.width += 1  # the graph moved: another size, another id
+    bent.data = list(bent.data) + [-1] * bent.info.height
+    node.subs["/map"][1](bent)
     assert node._map_id and node._map_id != "239x215@-18.53,-4.38"
-    served = "239x215@-18.53,-4.38"  # what pepin_bringup.laptop_localizer stamps its words with
+    served = "239x215@-18.53,-4.38"  # the id the laptop had when it made these words
     node.subs["/localization/measurement"][1](measurement_msg(node, Pose2D(), 100.0, map_id=served))
     node.subs["/localization/graph_measurement"][1](
         measurement_msg(node, Pose2D(), 100.0, map_id=served)

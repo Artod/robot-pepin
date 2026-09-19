@@ -47,6 +47,20 @@ or only RECOGNISE (``graph_memory``, :class:`pepin.graphmode.ModeRule`) — a sh
 come out of the database itself, calling RTAB-Map's own set_mode services on a change of verdict
 that has held, and carrying the parameters each mode needs with it (:data:`MODE_PARAMETERS`).
 
+THE REGISTRATION, on the same discipline and for the same reason: it is a property of the moment and
+not of the launch. RTAB-Map's registration pipeline is ONE object for the process, and which PAIRS
+it can link depends on what the nodes carry — ICP links a pair of scans and nothing without one,
+visual registration links a pair of pictures and nothing without one — while under World R a node
+carries whatever sensor was looking. So the strategy follows the snapshots: sensor_pack says what
+its snapshots carry on :data:`SNAPSHOT_STATE_TOPIC` (latched), and
+:class:`pepin.graphmode.StrategyRule` turns that into ``Reg/Strategy``, acted on when a change has
+held for the hold the STATE ITSELF carries — the packer's own liveness window, so this node invents
+no number. It travels by the same path as the memory mode's parameters (:meth:`_set_parameters`),
+which is the only one rtabmap honours: a string set on the node, then its own ``update_parameters``,
+after which Memory re-creates the pipeline (the file:line is in :mod:`pepin.graphmode`). Without
+this a camera-only cart cannot localise at all — measured on 2026-09-18, a minute of camera-only
+snapshots under ICP formed not one metric link.
+
 In online SLAM (``slam`` on, ros/laptop.sh vslam --slam) RTAB-Map IS the map and its correction is
 literally ``map -> odom`` — but it must become a transform ON THE BOARD, where Nav2 and the
 reflexes look it up, and ``/tf`` crosses the bridge board -> laptop only (a topic allowed as a
@@ -89,7 +103,9 @@ from pepin.graphmode import (
     BY_TRUST,
     SHARP_SIGMA_DEG,
     SHARP_SIGMA_M,
+    STRATEGY_ICP,
     ModeRule,
+    StrategyRule,
     describe_sigma,
     seating_refusal,
 )
@@ -103,7 +119,8 @@ from pepin.measurements import (
     inverse,
 )
 from pepin.odometry import Pose2D
-from pepin.sources import GRAPH
+from pepin.snapshot import SnapshotState
+from pepin.sources import GRAPH, LIDAR
 from pepin.tsdf import RigidPose
 from pepin.watch import SIGMA_TOPIC, Preflight, Sigma, source_words
 from pepin.watchdog import GlobalCandidate, same_place
@@ -150,6 +167,11 @@ ODOM_FRAME, BASE_FRAME = "odom", "base_link"
 # enabled source the cart has driven the least since its word), so no rule here spells "lidar" and a
 # stereo matcher good to a few cm will teach the database the day it exists.
 SOURCES_TOPIC = "/localization/sources"
+# What pepin_bringup.sensor_pack's snapshots CARRY, latched: the evidence the registration strategy
+# follows (pepin.snapshot.SnapshotState). The same literal is sensor_pack's own STATE_TOPIC — one
+# name written on both sides of the contract, so a test can pin it. It does not cross the bridge:
+# both ends of it are on this laptop.
+SNAPSHOT_STATE_TOPIC = "/sensor_pack/state"
 # ...and the two services rtabmap_ros offers for the switch, verified live on 2026-09-18 to take
 # effect without a restart.
 RTABMAP_NODE = "/rtabmap/rtabmap"
@@ -323,6 +345,28 @@ FLAGS = FlagSet(
         " is a cart that knows where it stands and not which way it faces",
         off_when="raise it only with graph_memory_sigma_m, and for the same reasons",
     ),
+    Flag(
+        "registration_follows_snapshots",
+        True,
+        description="RTAB-Map's Reg/Strategy follows what the snapshots carry"
+        f" ({SNAPSHOT_STATE_TOPIC}): a scan in them means ICP (1), no scan means visual (0),"
+        " switched live through the node's own parameter path on a change that has held for the"
+        " hold the state carries. Off, the strategy stays whatever the launch table set and this"
+        " node only reports what it would have asked for",
+        why="on, because under ICP a camera-only cart cannot localise AT ALL, and that is"
+        " measured rather than reasoned: in a minute of camera-only snapshots on 2026-09-18"
+        " RTAB-Map logged 28 'Missing visual features or missing raw data to compute them' and 56"
+        " 'Requested laser scan data, but the sensor data doesn't have laser scan', and not one"
+        " update named a node. The strategy is one object for the process (the pipeline is deleted"
+        " and re-created when the parsed value differs from the one in hand,"
+        " rtabmap/core/Memory.cpp:721-731), so one table cannot serve a node with a scan and a node"
+        " without one — and which a node has is now data, not config. What is NOT measured yet is"
+        " that strategy 0 makes a camera-only link on THIS database: that is the live check",
+        on_when="always beside a known map, and above all in a camera-only test — it is the whole"
+        " difference between a camera that recognises a place and one that can act on it",
+        off_when="to reproduce the stage-1 behaviour (ICP throughout) under the same snapshots, or"
+        " if a live switch is ever seen to cost RTAB-Map its working memory",
+    ),
 )
 
 
@@ -370,6 +414,13 @@ class RtabmapFrame(Node):
         self._holder_at = -math.inf  # ...and when that report arrived, by our clock
         self._mode_pending: Any = None  # a switch the service has not answered yet
         self._mode_failed = 0  # switches the service refused or never answered
+        # ...and the other live switch: which registration RTAB-Map runs, decided by what the
+        # snapshots carry (pepin.graphmode.StrategyRule). It starts at the strategy the launch table
+        # set, so the rule asks for nothing until it has a reason to.
+        self._strategy = StrategyRule(STRATEGY_ICP)
+        self._snapshots: SnapshotState | None = None  # the last state sensor_pack published...
+        self._snapshots_at = -math.inf  # ...and when it reached us, by our clock
+        self._strategy_failed = 0  # strategy switches the parameter path could not take
         # THE TWO HALVES OF ONE UPDATE. The node a /rtabmap/info named and that message's stamp;
         # RTAB-Map's own localisation, its stamp and the planar 3x3 it measured. A word is made when
         # the two carry the same stamp, once (`_spent`): an update recognised nothing is silence.
@@ -449,6 +500,9 @@ class RtabmapFrame(Node):
         self.create_subscription(Float32, FIT_TOPIC, self._on_fit, 5)
         self.create_subscription(String, SIGMA_TOPIC, self._on_sigma, 5)
         self.create_subscription(String, SOURCES_TOPIC, self._on_sources, 5)
+        # Latched, matching sensor_pack's own publisher: this node may start after it, and the
+        # present state must not have to wait for the next change to arrive.
+        self.create_subscription(String, SNAPSHOT_STATE_TOPIC, self._on_snapshots, latched)
         # The mode services: this node owns the switch beside a known map, and touches neither in
         # SLAM, where the database IS the map being built.
         self._modes = (
@@ -500,8 +554,25 @@ class RtabmapFrame(Node):
             f" candidates, {self._blind} without odometry);"
             f" last word {word}; fit {self._trust_now():.2f} ({self._agreement_text()});"
             f" hypothesis {self._hypothesis:.2f}; rtabmap memory {self._mode_text()};"
+            f" rtabmap registration {self._strategy_text()};"
             f" map {self._map_id or 'unknown'};"
             f" flags: {self._switches.state(live_only=False)}"
+        )
+
+    def _strategy_text(self) -> str:
+        """RTAB-Map's registration for a report line: which strategy is set and why, what the
+        snapshots say it should be, and the switches the parameter path could not take."""
+        state = self._snapshots
+        if state is None:
+            said = f"nothing on {SNAPSHOT_STATE_TOPIC} yet"
+        else:
+            age = self._now() - self._snapshots_at
+            stale = " STALE" if age > state.refresh_s else ""
+            said = f"snapshots {state.text()}, {age:.1f} s ago{stale}"
+        return f"{self._strategy.text()}; {said}" + (
+            f", {self._strategy_failed} switches the parameter path could not take"
+            if self._strategy_failed
+            else ""
         )
 
     def _mode_text(self) -> str:
@@ -634,6 +705,16 @@ class RtabmapFrame(Node):
         holding = Preflight.holding(source_words(report))
         self._holder = None if holding is None else holding.name
         self._holder_at = self._now()
+
+    def _on_snapshots(self, msg: String) -> None:
+        """What pepin_bringup.sensor_pack's snapshots carry right now: the evidence RTAB-Map's
+        registration strategy follows, and the hold that change must survive (the packer's own
+        liveness window, carried in the message). A message that does not parse says nothing and is
+        ignored — the strategy in force is never changed on a reading nobody could read."""
+        state = SnapshotState.from_json(msg.data)
+        if state is None:
+            return
+        self._snapshots, self._snapshots_at = state, self._now()
 
     # ---- the word ------------------------------------------------------------------------
     def _try_word(self) -> None:
@@ -957,19 +1038,66 @@ class RtabmapFrame(Node):
         there keeps a node a second at a standstill and put 250 junk nodes in the database in one
         evening. They are string-typed on RTAB-Map's side, and the mode services do not carry them.
         """
+        self._set_parameters(MODE_PARAMETERS[mapping])
+
+    def _set_parameters(self, values: dict[str, str]) -> bool:
+        """Set these RTAB-Map parameters on its node and have it re-read them; whether the pair of
+        calls went out at all.
+
+        THE ONLY PATH RTAB-MAP HONOURS, and every part of it is necessary. The values are STRINGS
+        because rtabmap declares every one of its parameters as one and reads it back with
+        ``as_string()``; ``update_parameters`` is what copies them into rtabmap's own map and hands
+        the whole map to ``Rtabmap::parseParameters``, so a set alone changes nothing (there is no
+        on-set callback on that node at all); and a name the LAUNCH table never overrode is accepted
+        by the set and then never looked at, which is why the two parameter tables here
+        (:data:`MODE_PARAMETERS`, :data:`pepin.graphmode.REGISTRATION_PARAMETERS`) name only
+        parameters that table already carries. The file:line for all of it is in
+        :mod:`pepin.graphmode`.
+        """
         if self._tuner is None or not self._tuner.service_is_ready():
-            return
+            return False
         request = SetParameters.Request()
         request.parameters = [
             Parameter(
                 name=name,
                 value=ParameterValue(type=ParameterType.PARAMETER_STRING, string_value=value),
             )
-            for name, value in MODE_PARAMETERS[mapping].items()
+            for name, value in values.items()
         ]
         self._tuner.call_async(request)
-        if self._reread is not None and self._reread.service_is_ready():
-            self._reread.call_async(Empty.Request())
+        if self._reread is None or not self._reread.service_is_ready():
+            return False
+        self._reread.call_async(Empty.Request())
+        return True
+
+    # ---- RTAB-Map's registration ----------------------------------------------------------
+    def _decide_strategy(self) -> None:
+        """Ask RTAB-Map for the registration the snapshots need, on a change that has held.
+
+        The rule is :class:`pepin.graphmode.StrategyRule` and the hold is the one the STATE carries
+        — how long the packer itself takes to change its mind about a source — so nothing here is a
+        number. A state older than its own refresh is no evidence at all and the strategy in force
+        stays: sensor_pack having gone quiet is not the lidar having gone away.
+        """
+        if self._tuner is None or not self._switches.on("registration_follows_snapshots"):
+            return
+        state = self._snapshots
+        fresh = state is not None and self._now() - self._snapshots_at <= state.refresh_s
+        verdict = self._strategy.update(
+            self._now(),
+            state.refresh_s if state is not None else 0.0,
+            state.carries(LIDAR) if (state is not None and fresh) else None,
+            state.kind if state is not None else "",
+        )
+        if verdict is None:
+            return
+        if not self._set_parameters(verdict.parameters):
+            self._strategy_failed += 1
+            return
+        self.get_logger().info(
+            f"rtabmap registration: {verdict.text()} -> Reg/Strategy {verdict.strategy}"
+            f" (set on {RTABMAP_NODE} and re-read through {RTABMAP_NODE}/update_parameters)"
+        )
 
     # ---- outputs -------------------------------------------------------------------------
     @staticmethod
@@ -990,6 +1118,7 @@ class RtabmapFrame(Node):
         the board (held between graphs, because it does not move until the graph does). Beside a
         known map there is no transform to publish — the graph's map frame IS ``map``."""
         self._decide_mode()
+        self._decide_strategy()
         if self._correction is None:
             return
         parent, child = SLAM_FRAMES

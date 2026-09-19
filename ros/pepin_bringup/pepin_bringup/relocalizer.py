@@ -14,16 +14,29 @@ service on demand, and ``/where_am_i`` reports pose and fit as text.
 Frames: the scan is transformed into ``base_link`` with the static laser
 transform looked up once; poses are in ``map``.
 
-The map: whichever of ``/map`` (the served file, or whatever the mode's owner publishes) and
-``/map_lidar`` (the laptop volume's own lidar layer, :mod:`pepin_bringup.depth_fusion`) the
-``map_topic`` flag names. Both are subscribed always and the newest of each is kept, so the
-flag moves the tracker from the frozen file to the volume and back without a restart. Which of
-them is ADOPTED — matcher, static mask and tracker rebuilt, the episode's evidence forgotten —
-is :class:`pepin.mapping.MapChoice`'s decision, not this node's: the named topic only, and a
-second map on the same topic only once ``map_refresh_s`` has passed and its cells have actually
-changed. That gate is the whole reason the volume is safe to point at: it is republished every
-second, and adopting every publication would rebuild the matcher on four A53 cores once a
-second and throw away every candidate and measurement in between.
+THE MAP IS ONE MAP, on one topic (World R): ``/map``, RTAB-Map's loop-closed occupancy grid,
+published latched by the laptop and routed here (:mod:`pepin.deployment`). There is no second
+picture of the room to choose between any more — no served pgm in the loop, no volume slice — so
+there is no ``map_topic`` flag either. What is still a decision is WHEN a newly arrived grid is
+ADOPTED (matcher, static mask and tracker rebuilt, the episode's evidence forgotten), and that is
+:class:`pepin.mapping.MapChoice`'s: the first grid, and a later one only once ``map_refresh_s``
+has passed and its cells have actually changed. RTAB-Map republishes at its detection rate (1 Hz
+with ``map_always_update``) and re-renders the whole grid whenever a node is added or a loop
+closure moves a pose by more than a centimetre (``GridGlobal/UpdateError``,
+rtabmap/core/GlobalMap.cpp: the global map is cleared and re-assembled from the per-node grids),
+so adopting every publication would rebuild the matcher on four A53 cores once a second and throw
+away every candidate and measurement in between.
+
+A BENT MAP IS STILL THIS ROOM. A re-render can move the grid's origin, change its size and move
+walls by tens of centimetres, and it lands here as an ordinary adoption: the pose is carried
+(``carry_pose_across_maps``), the matcher and the mask are rebuilt on the new cells, the map's id
+changes with its geometry — which is why the laptop stamps its words with the id of
+``/map_tracked``, the grid this node accepted, and not with the one it published — and the report
+line says how far the origin moved and how many cells changed (:func:`pepin.mapping.map_shift`).
+
+And with nothing live at all this node tracks on the map it wrote down itself
+(:mod:`pepin.mapcache`, the ``map_cache`` flag): the board must know where it is with the laptop
+off (CLAUDE.md rule 20), and the live grid replaces the cache the moment it arrives.
 
 Sources: the lidar's revolution is matched here, on the board, through the one trigger path
 (:class:`pepin.sources.SourceFeed`) — the scan waits at its gate until the odometry covers its
@@ -94,7 +107,9 @@ from pepin.mapping import (
     MAP_FALLBACK_S,
     MAP_TOPIC,
     MapChoice,
+    MapShift,
     OccupancyGrid,
+    map_shift,
 )
 from pepin.measurements import (
     MEASUREMENT_MAX_AGE_S,
@@ -191,16 +206,11 @@ MEASUREMENT_TOPIC = "/localization/measurement"
 # word named `camera`, so a graph word dropped in there would move the pose under the camera's
 # name, with the camera's health and the camera's switch.
 GRAPH_MEASUREMENT_TOPIC = "/localization/graph_measurement"
-# The two maps this tracker can match on, by the name the ``map_topic`` flag calls each: what
-# the mode's map owner serves, and the lidar layer of the laptop's fused volume
-# (pepin_bringup.depth_fusion, flag lidar_map). Both are subscribed; one is adopted.
-# How often the tracker may adopt a newer map on the topic it is on: the publisher's own period
-# (depth_fusion map_hz 0.5, and only on change), which is also inside what the board can afford —
-# an adoption costs ~65 ms on an A53 and the rebuild duty budget allows one every 1.9 s
-# (scratch/map_adoption_cost.py). Derived, not chosen; the flag's `why` carries the arithmetic.
+# How often this tracker may adopt a newer grid on :data:`pepin.mapping.MAP_TOPIC`: what the board
+# can afford, since the publisher offers one every second. An adoption costs ~65 ms on an A53 and
+# the rebuild duty budget allows one every 1.9 s (scratch/map_adoption_cost.py). Derived, not
+# chosen; the flag's `why` carries the arithmetic.
 MAP_REFRESH_DEFAULT_S = 2.0
-
-MAP_TOPICS = {"map": "/map", "map_lidar": "/map_lidar"}
 # Nav2's own service for emptying the rolling grid the controller steers by: the marks a
 # correction stranded there are erased in one call and marked again from the next scans. The
 # gap is not a flag: emptying the grid costs Nav2 that rebuild, and a second is the shortest
@@ -487,12 +497,12 @@ FLAGS = FlagSet(
         " same 0.0 to judge a whole-map answer against, and the remote source's own fit rides"
         " /localization/sources per source; off, the remote fit is published and judged against as"
         " the tracker's own",
-        why="the number is read as 'how well the cart's own scan sits on /map' by everything"
+        why="the number is read as 'how well the cart's own scan sits on the map' by everything"
         " downstream, and a remote one is neither. The camera's fit is measured on the laptop"
-        " against /map_camera when depth_fusion publishes it (pepin_bringup.laptop_localizer),"
-        " and depth_fusion paints that very band only while /localization_fit >= 0.50: published"
-        " there, the camera's fit would bless the painting of the grid it was itself measured"
-        " against, a circle no drift can break out of. The replay measures what such a fit cannot"
+        " (pepin_bringup.laptop_localizer), against the very grid the painting it gates writes"
+        " into: published here, that fit would bless the painting of the map it was itself"
+        " measured against, a circle no drift can break out of. The replay measures what such a"
+        " fit cannot"
         " see: camera-only (split-no-lidar) sits 1.1 cm from lidar-only at the median, 25.1 at"
         " p90 and 43.4 at worst over run 0171, while the fits those same matches reported were"
         " 0.41 and 0.62 (scratch/laptop_localizer_replay.txt). 0.0 and not NaN because"
@@ -654,87 +664,71 @@ FLAGS = FlagSet(
         range=(1, 10),
     ),
     Flag(
-        "map_topic",
-        MAP_TOPIC,
-        description="which map this tracker matches on: /map, whatever the stack's map owner"
-        " publishes there (the served pgm in split and vision mode), or /map_lidar, the lidar"
-        " layer of the laptop's fused volume (pepin_bringup.depth_fusion, flag lidar_map)",
-        why="map is the default because the volume is unmeasured on the moving robot and"
-        " because of one known cost: the volume's grid is 280x250 cells and the served map"
-        " 239x215, so a tracker on /map_lidar answers to another map id, and the laptop's"
-        " candidates and camera measurements — stamped with the id of /map"
-        " (pepin_bringup.laptop_localizer) — are refused as evidence about another map until"
-        " that half moves too. Offline a SEEDED volume is the same map: its slice agrees with"
-        " flat3_straight.pgm on all 18274 cells that map knows, and the four tapes of"
-        " 2026-09-13 replayed on the exported slice give live error medians 0.6/0.5/1.3/0.7 cm"
-        " against the file's own 0.6/0.5/1.3/0.6 (scratch/volume_vs_pgm.py,"
-        " scratch/drive_bisect.py --map). An UNSEEDED volume is not: today's live snapshot holds"
-        " 52.1 % of the saved map's walls",
-        on_when="map_lidar to drive on the room as it is now — the volume carries what the cart"
-        " has seen since the file was frozen, and it hardens where the cart drives",
-        off_when="map wherever the laptop's watchdog and camera measurements must be believed,"
-        " and wherever the laptop may go away: /map is served on the board and the volume is"
-        " not",
-        choices=("map", "map_lidar"),
-    ),
-    Flag(
         "map_refresh_s",
         MAP_REFRESH_DEFAULT_S,
-        description="the least time between two adoptions of the map topic: a newer map on the"
-        " topic in use is taken only after this many seconds AND only if its cells changed."
-        " 0 takes the first map and no other, which is what a served file has always done",
+        description="the least time between two adoptions of /map: a newer grid is taken only"
+        " after this many seconds AND only if its cells changed. 0 takes the first grid and no"
+        " other, which is what a served file has always done",
         why=f"{MAP_REFRESH_DEFAULT_S:.0f} s, and both halves of that number are measured rather"
         " than chosen. THE COST: an adoption rebuilds the grid, the correlative matcher, the static"
         " mask and the tracker, and the bill is paid on the first match after it, when the"
         " matcher's lattice is built — 15-16 ms on the laptop's core for this flat's 239x215 cells"
-        " and the volume's 280x250 alike, so about 65 ms on an A53 at the 4.5x the board's own"
+        " and a 280x250 grid alike, so about 65 ms on an A53 at the 4.5x the board's own"
         " report lines give for the same match (40-50 ms there against 8-12 ms here,"
         " scratch/map_adoption_cost.py). THE BUDGET: at 10 revolutions a second and 45 ms a match"
         " the tracker already owns 45 % of a core, and after a fifth for the rest of the node a"
         " tenth of what is left is 3.5 % — which allows one adoption every 1.9 s. THE PUBLISHER"
-        " cannot offer them faster anyway: depth_fusion's map_hz is 0.5 and it republishes only on"
-        " change, so 2 s is both what the board can afford (3.3 % duty) and the fastest a new map"
-        " can arrive. The old default was 0 — 'adopt the first map and never another' — which made"
-        " a live volume swap a no-op until the flag was set by hand (2026-09-17 live)",
-        on_when="raise it in a room being mapped as it is driven, where the volume changes every"
-        " second and a rebuild mid-drive costs more than a slightly stale map",
-        off_when="0 for a frozen map that arrives once, latched — the served pgm's own behaviour",
+        " offers them FASTER than that: RTAB-Map republishes its grid at its detection rate, 1 Hz"
+        " with map_always_update (rtabmap_util/MapsManager.cpp: the message is rebuilt whenever a"
+        " node is added or a pose moves more than GridGlobal/UpdateError, 1 cm), so this flag is"
+        " what stands between a driving cart and one matcher rebuild a second. The old default"
+        " was 0 — 'adopt the first map and never another' — which under a live graph would freeze"
+        " the tracker on the first blob the session published",
+        on_when="raise it while a room is being mapped as it is driven, where the grid changes"
+        " every second and a rebuild mid-drive costs more than a slightly stale map",
+        off_when="0 to pin the tracker to the first grid it sees — a served pgm's own behaviour,"
+        " and the way to hold one picture still while something else is measured",
         range=(0.0, 600.0),
     ),
     Flag(
         "carry_pose_across_maps",
         True,
-        description="adopting another map keeps the pose the tracker holds instead of starting"
-        " again from the saved pose or the map origin: the two maps are the same room on grids"
-        " aligned to the same file, so a new picture of the room is no reason to forget where"
-        " the cart is",
-        why="measured by its absence. On 2026-09-14 18:13 a live map_topic=map_lidar with the"
-        " cart at home restarted the tracker at (0, 0, 0) — the saved-pose file is keyed by map"
-        " id and the volume's grid has another one — and the very next measurement-driven update"
-        " published map -> odom for that origin pose: Nav2 logged 'global_costmap: Sensor origin"
+        description="adopting a re-rendered map keeps the pose the tracker holds instead of"
+        " starting again from the saved pose or the pose the odometry gives: it is the same room"
+        " a moment later, so a new picture of it is no reason to forget where the cart is",
+        why="measured by its absence. On 2026-09-14 18:13 a live map swap with the cart at home"
+        " restarted the tracker at (0, 0, 0) — the saved-pose file is keyed by map id and the new"
+        " grid has another one — and the very next measurement-driven update published map -> odom"
+        " for that origin pose: Nav2 logged 'global_costmap: Sensor origin"
         " at (0.01, -0.00) is out of map bounds' 110 times, the local costmap stopped following"
-        " the cart, and no goal succeeded until the board's stack was restarted. The evidence IS"
-        " dropped at a switch (candidates, measurements, the graph's word, the LostWatch); the"
-        " POSE is not evidence about the map, it is where the cart is",
-        on_when="always, while both maps are the same room",
+        " the cart, and no goal succeeded until the board's stack was restarted. Under World R that"
+        " swap is no longer rare: every loop closure that moves a pose by a centimetre re-renders"
+        " the whole grid with a new origin, a new size and a new id, and each one arrives here as"
+        " an adoption. The evidence IS dropped at a switch (candidates, measurements, the graph's"
+        " word, the LostWatch); the POSE is not evidence about the map, it is where the cart is",
+        on_when="always, while a new grid is the same room bent by its own graph",
         off_when="a map of a DIFFERENT place arriving on the same topic, where a carried pose"
         " would be a lie: off makes the tracker find itself again before it publishes anything",
     ),
     Flag(
         "map_fallback_s",
         MAP_FALLBACK_S,
-        description="how long this tracker waits for the map map_topic names before it matches"
-        " on /map instead — only while it has adopted no map at all, and the wanted one still"
-        " replaces it the moment it arrives. 0 waits for ever, which is what the tracker did"
-        " before this existed",
-        why="the board must know where it is without the laptop (CLAUDE.md rule 20). /map is"
-        " served here, latched, and arrives in the first second; /map_lidar is the laptop's and"
-        " arrives only once the fusion is up — with the wifi down, never. A map already in use"
-        " needs no fallback at all: it is a grid in memory, and losing its publisher mid-drive"
-        " changes nothing, which is why this only ever fires before the first adoption",
-        on_when="10 s wherever map_topic names a laptop topic",
-        off_when="0 to see the tracker wait for the map it was asked for and nothing else — a"
-        " bring-up where a silent /map_lidar must be visible as silence, not papered over",
+        description="how long this tracker waits for a live /map before it tracks on the map it"
+        " wrote down itself (the map_cache flag, pepin.mapcache) — only while it has adopted"
+        " nothing at all, and the live grid replaces the cache the moment it arrives. 0 waits for"
+        " ever, which is what the tracker did before the cache existed",
+        why="the board must know where it is without the laptop (CLAUDE.md rule 20), and under"
+        " World R the map comes FROM the laptop: with the wifi down nothing will ever publish it,"
+        " and the cache is the whole of the board's independence. Ten seconds because a latched"
+        " grid arrives in the first second once the bridge's routes are up (RTAB-Map publishes it"
+        " transient-local, depth 1, reliable — rtabmap_util/MapsManager.cpp) and a cache is a"
+        " colder start that must not be taken while the live one is merely on its way. A map"
+        " already in use needs no fallback at all: it is a grid in memory, and losing its"
+        " publisher mid-drive changes nothing, which is why this only ever fires before the first"
+        " adoption",
+        on_when="always: it is the patience before a cold boot falls back to its own cache",
+        off_when="0 to see a bring-up wait for the live grid and nothing else — where a silent"
+        " /map must be visible as silence rather than papered over by yesterday's map",
         range=(0.0, 600.0),
     ),
     Flag(
@@ -958,7 +952,7 @@ class Relocalizer(Node):
         self._yaw_runaways = 0  # ...and how many of those were the frame spinning on the spot
         # The map in use, as every candidate and measurement is judged against.
         self._map_id = ""
-        self._map_identity = ""  # the publisher's minted name for this map, when it sends one
+        self._shift: MapShift | None = None  # what the last adoption did to the map before it
         self._cache_dir = str(self.declare_parameter("map_cache_dir", MAP_CACHE_DIR).value)
         self._cached: MapCache | None = None  # the cache this node is tracking on, if any
         self._cache_boot = CacheBoot()  # the cold-boot read is attempted once, not every check
@@ -1035,20 +1029,13 @@ class Relocalizer(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             reliability=ReliabilityPolicy.RELIABLE,
         )
-        # Both maps are subscribed and the newest of each kept; the flag says which is adopted,
-        # so moving the tracker from the served file to the volume needs no restart.
-        self._maps: dict[str, Any] = {}  # the newest message per topic name, adopted or not
-        # Which map is adopted, and when a newer one replaces it, is pepin.mapping's decision;
-        # the node keeps the messages and does as it is told.
+        # ONE map topic, latched to match the publisher (RTAB-Map's grid is transient-local, depth
+        # 1, reliable: a subscriber that connects late is handed the current grid at once, and a
+        # VOLATILE reader would not match that writer at all). When a newly arrived grid is adopted
+        # is pepin.mapping's decision; the node holds the message and does as it is told.
         self._choice = MapChoice()
-        self._choice.on_choice(self._offer_waiting)
-        for name, topic in MAP_TOPICS.items():
-            self.create_subscription(
-                OccupancyGridMsg,
-                topic,
-                lambda msg, name=name: self._on_map_message(name, msg),
-                latched,
-            )
+        self._map_topic = f"/{MAP_TOPIC}"
+        self.create_subscription(OccupancyGridMsg, self._map_topic, self._on_map_message, latched)
         # Depth 1: a match takes 40 ms and scans come every 100 ms; a deeper queue let the tracker
         # fall half a second behind reality and lose the lock in every turn (2026-09-06).
         self.create_subscription(
@@ -1216,64 +1203,46 @@ class Relocalizer(Node):
         self._static_mask = StaticMask(self._grid, grow)
         self.get_logger().info(f"static mask: the map explains a return within {grow:.2f} m")
 
-    def _on_map_message(self, source: str, msg: OccupancyGridMsg) -> None:
-        """A map arrived on one of :data:`MAP_TOPICS`: keep it as that topic's newest and offer
-        it to the choice, which adopts it or turns it away (:class:`pepin.mapping.MapChoice`).
+    def _on_map_message(self, msg: OccupancyGridMsg) -> None:
+        """A grid arrived on /map: offer it to the choice, which adopts it or turns it away
+        (:class:`pepin.mapping.MapChoice`).
 
-        The choice is also told whether the grid has any KNOWN cell at all: a fresh room's volume
-        publishes a blank grid before the first sweep has filled it, and with ``map_refresh_s`` at 0
-        that one blank publication would spend the single adoption this node allows and leave the
+        The choice is also told whether the grid has any KNOWN cell at all. RTAB-Map publishes no
+        placeholder — the message is built only once there are cells to put in it
+        (rtabmap_util/MapsManager.cpp: nothing is sent while the assembled grid is empty) — but a
+        frame that yielded no cells at all can still produce one, and with ``map_refresh_s`` at 0
+        that single blank publication would spend the one adoption this node allows and leave the
         tracker matching against nothing. Reading the cells is a function, so it costs nothing on
         the ordinary path (pepin.mapping.MapChoice.offer).
         """
-        self._maps[source] = msg
         self._choice.offer(
-            source,
+            self._map_topic,
             lambda: map_digest(msg),
             self._now_s(),
-            lambda: self._adopt(source, msg),
+            lambda: self._adopt(msg),
             empty=lambda: not any(cell >= 0 for cell in msg.data),
         )
 
-    def _offer_waiting(self) -> None:
-        """The ``map_topic`` flag moved: offer the choice whatever each topic last published, so
-        a map published once and latched long ago (every served map) is adopted now — waiting for
-        its publisher to speak again would be waiting for ever."""
-        for source, msg in list(self._maps.items()):
-            self._on_map_message(source, msg)
-
-    def _take_fallback_map(self) -> None:
-        """Once a second, before anything else this node does: when the map ``map_topic`` names
-        has never arrived, match on the one that has (:meth:`pepin.mapping.MapChoice.lapsed`).
-
-        This board serves /map itself and reads /map_lidar from the laptop, so a tracker asking
-        for the laptop's map with the wifi down would otherwise never start tracking at all
-        (CLAUDE.md rule 20). Silent once any map is adopted, and the wanted map replaces the
-        fallback the moment it speaks.
-        """
-        source = self._choice.lapsed(self._now_s())
-        msg = self._maps.get(source) if source is not None else None
-        if source is None or msg is None:
-            return
-        self.get_logger().warning(
-            f"nothing on {MAP_TOPICS[self._choice.wanted]} after"
-            f" {float(self._switches['map_fallback_s']):.0f} s: matching on {MAP_TOPICS[source]}"
-            " instead, and taking the wanted map as soon as it arrives"
-        )
-        self._on_map_message(source, msg)
-
-    def _adopt(self, source: str, msg: OccupancyGridMsg) -> None:
+    def _adopt(self, msg: OccupancyGridMsg) -> None:
         """Take ``msg`` as the map this tracker matches on: rebuild the matcher, the mask and the
         tracker on it (:meth:`_on_map`), republish it for Nav2's static layers, write it down for
-        the next cold boot, and say so. Called by the choice, never directly — a rebuild costs
-        seconds on this board and throws away the episode's evidence."""
+        the next cold boot, and say what the change was. Called by the choice, never directly — a
+        rebuild costs seconds on this board and throws away the episode's evidence.
+
+        The cache stops being the map in use here: a live grid is the newer picture by definition,
+        and a report line still naming the cache after one arrived read as a board that never got
+        its map. It is cleared AFTER the rebuild because the rebuild asks whether the pose it holds
+        was found on a cache (:meth:`_on_map`).
+        """
         self._on_map(msg)
+        self._cached = None
         self.get_logger().info(
-            f"map adopted from {MAP_TOPICS[source]}: {msg.info.width}x{msg.info.height} cells,"
+            f"map adopted from {self._map_topic}: {msg.info.width}x{msg.info.height} cells,"
             f" id {self._map_id}, digest {self._choice.digest.split('#')[-1]}"
+            + ("" if self._shift is None else f" ({self._shift.phrase()})")
         )
         self._publish_tracked_map(msg)
-        self._persist_map(source, msg)
+        self._persist_map(msg)
 
     def _publish_tracked_map(self, msg: OccupancyGridMsg) -> None:
         """Republish the map this tracker is on, latched, on :data:`TRACKED_MAP_TOPIC`.
@@ -1285,7 +1254,7 @@ class Relocalizer(Node):
         """
         self._tracked_map_pub.publish(msg)
 
-    def _persist_map(self, source: str, msg: OccupancyGridMsg) -> None:
+    def _persist_map(self, msg: OccupancyGridMsg) -> None:
         """Write the adopted map beside the maps, for the next start with nothing live (the
         ``map_cache`` flag).
 
@@ -1303,8 +1272,7 @@ class Relocalizer(Node):
             map_id=self._map_id,
             digest=self._choice.digest,
             stamp=time.time(),
-            source=MAP_TOPICS.get(source, source),
-            identity=self._map_identity,
+            source=self._map_topic,
         )
         self._cache_written = cache.stamp
         self.get_logger().info(
@@ -1314,11 +1282,23 @@ class Relocalizer(Node):
     def _take_cached_map(self) -> None:
         """Nothing live inside ``map_fallback_s`` and no map adopted: track on the cache.
 
-        The one path that makes a pgm unnecessary. A board that has NEVER adopted anything has no
-        cache, and then it says so loudly and waits — the launch's map file is the only other
-        answer and it is behind a launch argument that is off in a known room (ros/nav.launch.py).
-        A cache that exists and does not parse is refused just as loudly: half a map is worse than
-        none, because the tracker would match against it and believe the answer.
+        The one path that makes a pgm unnecessary, and the whole of the board's independence from
+        the laptop (CLAUDE.md rule 20): with the wifi down nothing will ever publish /map. A board
+        that has NEVER adopted anything has no cache, and then it says so loudly and waits — the
+        launch's map file is the only other answer and it is behind a launch argument that is off in
+        a known room (ros/nav.launch.py). A cache that exists and does not parse is refused just as
+        loudly: half a map is worse than none, because the tracker would match against it and
+        believe the answer.
+
+        A CACHE IS ONLY EVER A STAND-IN. It is read once, only while nothing has been adopted, and
+        the choice's ``source`` stays empty while it is in use — so the first live grid to arrive
+        replaces it with no gate to pass, whatever its geometry and whichever database it came
+        from. That is also the answer to a cache of a frame that no longer exists (the laptop
+        started a FRESH database while this board was down): nothing on the wire identifies a
+        session — not the grid, not /rtabmap/info, not /rtabmap/mapGraph — so the cache is not
+        checked against one, it is simply given up the moment a live map arrives, and the pose on
+        that new map comes from :meth:`_start_pose` rather than from the dead frame's coordinates,
+        because a pose held on a cache is never carried across (:meth:`_on_map`).
         """
         answer = self._cache_boot.attempt(
             FilePath(self._cache_dir),
@@ -1341,20 +1321,34 @@ class Relocalizer(Node):
             self._publish_tracked_map(msg)
 
     def _on_map(self, msg: OccupancyGridMsg) -> None:
-        # The belief, before the old tracker is thrown away. Both maps are the same room on
-        # grids aligned to the same pgm, so where the cart is does not change because the
-        # picture of the room did; only the map id does, and the saved-pose file is keyed by
-        # that id — which is how the live switch of 2026-09-14 18:13 restarted the tracker at
-        # the ORIGIN, published map -> odom for it, and left Nav2 logging "Sensor origin out of
-        # map bounds" 110 times with a rolling window that never came back.
+        # The belief, before the old tracker is thrown away. A re-rendered grid is the same room a
+        # moment later, so where the cart is does not change because the picture of the room did;
+        # only the map id does, and the saved-pose file is keyed by that id — which is how the live
+        # map swap of 2026-09-14 18:13 restarted the tracker at the ORIGIN, published map -> odom
+        # for it, and left Nav2 logging "Sensor origin out of map bounds" 110 times with a rolling
+        # window that never came back.
+        #   A POSE HELD ON THE CACHE IS NOT CARRIED. That one is not the same room a moment later:
+        # it is yesterday's map, and the live grid replacing it may belong to a database born since
+        # (ros/laptop.sh vslam --fresh), whose frame has nothing to do with the coordinates the
+        # cached pose is written in. Nothing on the wire says which database a grid comes from, so
+        # the cache's pose is given up with the cache and :meth:`_start_pose` answers instead: the
+        # saved pose when the id still matches, else the odometry's own — which in a map born under
+        # the cart is exactly right, and in a mature one is a poor guess the LostWatch turns into
+        # one whole-map search.
         carried = (
             self._localizer.pose
             if self._localizer is not None
             and self._tracker_initialised
+            and self._cached is None
             and self._switches.on("carry_pose_across_maps")
             else None
         )
-        self._grid = grid_from_msg(msg)
+        grid = grid_from_msg(msg)
+        # What this map did to the one it replaces, for the report line: a loop closure re-renders
+        # the whole grid, so a bend is a moved origin and a few thousand changed cells rather than
+        # anything a log would otherwise show (pepin.mapping.map_shift).
+        self._shift = map_shift(self._grid, grid)
+        self._grid = grid
         with self._episode:  # a candidate found on the old map is evidence about nothing here
             self._watch = LostWatch(**self._watch_args)  # type: ignore[arg-type]
             self._pending_seed = None
@@ -1376,8 +1370,9 @@ class Relocalizer(Node):
         self._localizer = Localizer(
             self._grid,
             # The pose this tracker already holds, or — at a start, where there is none — the one
-            # the previous run saved (a restart is not a trip back to the base).
-            carried if carried is not None else self._last_known_pose(),
+            # the previous run saved, or the one the odometry gives (:meth:`_start_pose`; a restart
+            # is not a trip back to the base, and neither is a map born under the cart).
+            carried if carried is not None else self._start_pose(),
             window=SearchWindow(xy_m=0.09, xy_step_m=0.03, theta_deg=9.0, theta_step_deg=1.5),
             # Lost (five weak scans): a wider, coarser local search every scan re-locks after a
             # slip; the whole map stays the worker's job (global_retry False).
@@ -1824,8 +1819,20 @@ class Relocalizer(Node):
         self._pacer.matched(mono, time.perf_counter() - t0)
         self._publish_update(loc, pose, odom, scan.stamp, now)
 
-    def _last_known_pose(self) -> Pose2D:
-        """The pose saved by the previous run if it is recent and was good, else the map origin."""
+    def _start_pose(self) -> Pose2D:
+        """Where to put the tracker on a map it has no pose on: the pose the previous run saved if
+        it is recent, was good and was on THIS map, else the pose this board is already publishing.
+
+        THE SECOND ANSWER IS THE ONE WORLD R CHANGED, and it matters most in a map that has just
+        been born. RTAB-Map roots a fresh session's map frame at the odometry pose of its first
+        node and optimises from the oldest node (``RGBD/OptimizeFromGraphEnd`` false), so until the
+        first loop closure that map frame IS the board's odom frame and the cart's place in it is
+        simply its odometry pose — which is exactly what this node has been broadcasting all along
+        (``map -> odom`` identity until the first fix). The old answer was the map's ORIGIN, a
+        corner of the grid the cart has never been at: harmless while the odometry sat near zero,
+        and a lie worth metres anywhere else, published as a correction the moment the first word
+        landed.
+        """
         try:
             with open(LAST_POSE_FILE) as f:
                 saved = json.load(f)
@@ -1840,7 +1847,7 @@ class Relocalizer(Node):
                 return pose
         except (OSError, KeyError, ValueError, TypeError):
             pass
-        return Pose2D()
+        return self._tracked_pose() or Pose2D()
 
     def _remember_pose(self) -> None:
         """Every 2 s: write the tracked pose and its fit, so the next start knows where we are."""
@@ -1869,11 +1876,29 @@ class Relocalizer(Node):
         localizer had rejected — and that single seed could discard a candidate the watch was
         holding. Now the tracker starts from its saved pose, a whole-map search proposes, and the
         1 Hz check asks again on a fresh scan; the pose moves once two searches agree.
+
+        AND A POSE THAT ALREADY FITS IS NOT SEARCHED FOR. The scan is scored where the tracker
+        already stands first, and a fit at or above the watch's own "lost" line ends the matter:
+        the cart is where it thinks it is and there is nothing for a whole-map search to propose.
+        That is what makes a map born under the cart safe — a newborn grid is built FROM this very
+        revolution at this very odometry pose, so the scan lies on it perfectly, while a search over
+        a grid that is one scan wide has no unique answer and would happily teleport the cart across
+        its own blob. It also saves a known room's cold boot the 10-20 s search it never needed
+        after a restart at rest.
         """
         loc = self._localizer
         assert loc is not None
         scan = self._scan_id
         try:
+            fit = 0.0 if self._matcher is None else self._matcher.inlier_fraction(loc.pose, points)
+            if fit >= self._watch.lost_fit:
+                self.get_logger().info(
+                    f"tracker starts at ({loc.pose.x:+.2f}, {loc.pose.y:+.2f}, "
+                    f"{math.degrees(loc.pose.theta):+.0f} deg): the scan already fits there at"
+                    f" {fit:.2f} (over {self._watch.lost_fit:.2f}), no whole-map search"
+                )
+                self._tracker_initialised = True
+                return
             found, confidence = loc.global_search(points, prior=loc.pose)
             yaw = math.degrees(found.pose.theta)
             where = f"({found.pose.x:+.2f}, {found.pose.y:+.2f}, {yaw:+.0f} deg)"
@@ -1957,8 +1982,9 @@ class Relocalizer(Node):
         if loc is None:
             return
         feed, pacer, track = self._feed.report(), self._pacer.report(), loc.report()
-        wanted = MAP_TOPICS.get(self._choice.wanted, self._choice.wanted)
-        fallback = f"; fallback, nothing on {wanted}" if self._choice.fell_back else ""
+        # What the last adoption did to the map: a loop closure's bend is a moved origin and a few
+        # thousand changed cells, and this is the only place it shows (pepin.mapping.map_shift).
+        shift = "" if self._shift is None else f", last {self._shift.phrase()}"
         self.get_logger().info(
             f"tracker: {feed.summary()}, rested {self._rested}, {pacer.summary()}, deskew "
             f"failed {self._deskew_failed}, odometry runaway {self._runaways} "
@@ -1973,10 +1999,10 @@ class Relocalizer(Node):
             f", scan age at match {self._last_scan_age_s * 1000:.0f} ms; "
             f"{self._spread.text(self._now_s())} "
             f"(drive under {DRIVE_SIGMA_M:.2f} m, a drive is cut over {LOST_SIGMA_M:.2f} m); "
-            f"map {MAP_TOPICS.get(self._choice.source, 'none')}"
+            f"map {self._choice.source or 'none'}"
             f"{'' if self._cached is None else ' [' + self._cached.phrase() + ']'} "
-            f"(id {self._map_id or 'none'}, {self._choice.take_ignored()} republications "
-            f"ignored{fallback}); "
+            f"(id {self._map_id or 'none'}, {self._choice.adoptions} adopted, "
+            f"{self._choice.take_ignored()} republications ignored{shift}); "
             f"{self._candidates.report()}; {self._measurements.report()}; "
             f"graph: {self._graph.report()}; "
             f"costmap cleared {self._clears} times on jumps; "
@@ -2069,8 +2095,9 @@ class Relocalizer(Node):
         The camera's fit is on ``/localization/sources``, per source, where it says whose word
         it is.
         """
-        self._take_fallback_map()  # before every return below: a node with no map takes them all
-        self._take_cached_map()  # ...and with no live map at all, the one it wrote down itself
+        # Before every return below: a node with no map takes them all. With nothing live inside
+        # the patience, the map this board wrote down itself is what it tracks on (rule 20).
+        self._take_cached_map()
         now = self._now_s()
         # The filter's prediction step, and the sigma published whatever else this tick decides:
         # nothing corrected the pose since the last update, so it grew along the odometry. Before

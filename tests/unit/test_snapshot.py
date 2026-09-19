@@ -19,6 +19,7 @@ from pepin.snapshot import (
     PAIR_PERIODS,
     Cadence,
     SnapshotPacker,
+    SnapshotState,
     StampRing,
 )
 
@@ -277,3 +278,108 @@ def test_the_patience_moves_with_the_flag_and_reaches_every_source() -> None:
     packer.set_pair_periods(0.5)
     assert packer.cadence(LIDAR).patience_s == pytest.approx(0.05)
     assert packer.cadence(CAMERA).pair_periods == 0.5
+
+
+# ---- a moment put back -------------------------------------------------------------------------
+def test_a_moment_the_caller_could_not_use_is_offered_again() -> None:
+    """The caller still has to place every member on the cart, and the transform that does it
+    arrives after the stamp it is for. A moment spent on a half-built message is a camera frame
+    lost; put back, the next arrival offers it again."""
+    packer = SnapshotPacker[str](("camera", "lidar"))
+    for stamp in (0.0, 0.1, 0.2):
+        packer.offer("lidar", stamp, f"scan {stamp}")
+    first = packer.plan()
+    assert first is not None and first.stamp == 0.2
+    packer.rewind()
+    again = packer.plan()
+    assert again is not None and again.stamp == 0.2, "the same moment, not the next one"
+    assert again.driver == "lidar"
+
+
+def test_a_moment_given_back_is_not_answered_with_twice_over() -> None:
+    packer = SnapshotPacker[str](("camera", "lidar"))
+    for stamp in (0.0, 0.1, 0.2):
+        packer.offer("lidar", stamp, "scan")
+    packer.plan()
+    packer.rewind()
+    packer.rewind()  # idempotent: two rewinds leave it where the first one did
+    assert packer.plan() is not None
+    assert packer.plan() is None, "and the moment is spent once it IS used"
+
+
+def test_a_rewind_before_any_plan_is_harmless() -> None:
+    packer = SnapshotPacker[str](("lidar",))
+    packer.rewind()
+    packer.offer("lidar", 0.0, "scan")
+    packer.offer("lidar", 0.1, "scan")
+    assert packer.plan() is not None
+
+
+def test_how_old_says_whether_a_moment_put_back_is_still_worth_waiting_on() -> None:
+    """The bound is the source's own pairing patience, and the age is in SENSOR time: a bridge
+    that stalls stalls both, so the wait is as long as the data itself stays the newest."""
+    packer = SnapshotPacker[str](("lidar",))
+    assert packer.how_old_s(0.0) == math.inf, "before the first message"
+    packer.offer("lidar", 0.0, "scan")
+    packer.offer("lidar", 0.1, "scan")
+    assert packer.how_old_s(0.1) == pytest.approx(0.0)
+    packer.offer("lidar", 0.4, "scan")
+    assert packer.how_old_s(0.1) == pytest.approx(0.3)
+    assert packer.cadence("lidar").patience_s is not None
+
+
+# ---- what the snapshots carry ------------------------------------------------------------------
+def test_the_state_is_the_enabled_sources_that_are_also_delivering() -> None:
+    """The one fact only the packer can answer, and the one RTAB-Map's registration follows."""
+    packer = SnapshotPacker[str](("camera", "lidar"))
+    assert packer.state().carrying == (), "nothing has spoken"
+    for stamp in (0.0, 0.1, 0.2):
+        packer.offer("lidar", stamp, "scan")
+    assert packer.state("lidar-only").carries("lidar")
+    assert not packer.state().carries("camera")
+    for stamp in (0.05, 0.15):
+        packer.offer("camera", stamp, "frame")
+    assert packer.state("full").carrying == ("camera", "lidar"), "roster order"
+
+
+def test_the_state_carries_the_hold_a_reader_must_give_a_change() -> None:
+    """The packer's own liveness window: how long IT takes to change its mind about a source, so
+    a reader inventing a number of its own would be inventing a worse one."""
+    packer = SnapshotPacker[str](("lidar",))
+    packer.offer("lidar", 0.0, "scan")
+    packer.offer("lidar", 0.2, "scan")
+    assert packer.state().refresh_s == pytest.approx(0.2 * LIVE_PERIODS)
+
+
+def test_an_unmeasured_packer_falls_back_to_the_rings_own_memory() -> None:
+    """Before any source has a period there is no liveness window either, and the honest answer is
+    the longest a message is worth pairing at all."""
+    packer = SnapshotPacker[str](("lidar",), window_s=1.5)
+    assert packer.state().refresh_s == pytest.approx(1.5)
+    assert packer.state().carrying == ()
+
+
+def test_a_source_the_flag_muted_leaves_the_state_even_while_it_delivers() -> None:
+    """``sources`` is the live A/B, so the state must follow it and not the wire."""
+    packer = SnapshotPacker[str](("camera", "lidar"))
+    for stamp in (0.0, 0.1, 0.2):
+        packer.offer("lidar", stamp, "scan")
+        packer.offer("camera", stamp, "frame")
+    assert packer.state().carrying == ("camera", "lidar")
+    packer.enable(("camera",))
+    assert packer.state().carrying == ("camera",)
+
+
+def test_the_state_survives_the_wire_unchanged() -> None:
+    state = SnapshotState(carrying=("camera",), kind="camera-only", refresh_s=0.59, stamp=1758.25)
+    assert SnapshotState.from_json(state.to_json()) == state
+    assert state.text() == "camera-only, carrying camera, refresh 0.59 s"
+    assert SnapshotState(("a", "b"), "a+b", 1.0, 0.0).text().startswith("a+b, carrying a+b")
+    assert SnapshotState((), "none yet", 1.0, 0.0).text().startswith("none yet, carrying nothing")
+
+
+def test_a_state_the_reader_cannot_parse_is_no_state_at_all() -> None:
+    """A reader acts on nothing it could not read: the strategy in force is never changed on a
+    message that does not parse."""
+    for text in ("", "not json", "[1]", '{"carrying": ["camera"]}', '{"kind": 3}'):
+        assert SnapshotState.from_json(text) is None

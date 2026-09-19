@@ -1,19 +1,26 @@
-"""The board's ``map -> odom`` while the laptop is mapping: one owner of the drive's frame.
+"""The board's ``map -> odom`` from the laptop's correction: the RETIRED owner of the drive's frame.
 
-In online SLAM the map is built on the laptop (RTAB-Map), but ``map -> odom`` is a transform the
-BOARD needs: Nav2's global costmap, the behaviour tree and every goal are looked up in ``map``
-there, and a lookup over WiFi is not a lookup. ``/tf`` crosses the bridge board -> laptop only —
-a topic allowed as a publisher on both sides loops until nothing crosses at all — so RTAB-Map's
-correction arrives as a message (``/map_odom``, published by pepin_bringup.rtabmap_frame with
-its ``slam`` switch on) and this node broadcasts it here, at :data:`RATE_HZ`.
+OFF BY DEFAULT SINCE WORLD R (2026-09-19), and kept whole because CLAUDE.md rule 19 says the old
+behaviour must stay reachable: ``ros/nav.launch.py slam:=true`` (the board's ``PEPIN_SLAM``) starts
+this node INSTEAD of the tracker, since two publishers of one edge fight. What replaced it is the
+tracker owning ``map -> odom`` in every situation — a known room, a room being mapped this minute,
+a kidnap, a link that is down — with RTAB-Map's graph speaking to it as a measurement and its grid
+arriving as the one map. Turning this on also needs the laptop to publish ``/map_odom`` again
+(pepin_bringup.rtabmap_frame's own ``slam`` switch); the bridge keeps a route for it.
+
+The argument it was built on still stands where it is used: ``map -> odom`` is a transform the BOARD
+needs — Nav2's global costmap, the behaviour tree and every goal are looked up in ``map`` there, and
+a lookup over WiFi is not a lookup — while ``/tf`` crosses the bridge board -> laptop only, since a
+topic allowed as a publisher on both sides loops until nothing crosses at all. So the correction
+arrives as a message (``/map_odom``) and this node broadcasts it here, at :data:`RATE_HZ`.
 
 Two things it does NOT do, both on purpose. It never invents a correction: with no message yet
 it broadcasts identity, which is exactly the truth at the start of a session (the map is born at
 the cart's first pose) and is what lets the board's Nav2 come up before the laptop's half does.
 And it re-stamps the correction with the current clock instead of forwarding the sender's stamp,
 because a correction is not a measurement: it stands until the graph moves again, and a
-transform stamped a second ago is one Nav2's 0.3 s tolerance refuses. This is the tracker's seat
-in SLAM mode — the relocalizer does not run, and nothing else may publish this edge.
+transform stamped a second ago is one Nav2's 0.3 s tolerance refuses. While it runs it holds the
+tracker's seat — the relocalizer does not run, and nothing else may publish this edge.
 
 The price of that re-stamping is that the edge is no evidence at all about the laptop: it stays
 milliseconds old with the laptop shut down, because the last correction is re-broadcast for

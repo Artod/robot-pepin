@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from pathlib import Path
 from typing import Any
 
@@ -307,3 +308,112 @@ def test_the_volume_reaches_no_matcher_and_no_planner(tmp_path: Path) -> None:
     assert [name for name, _period in node.timers] or True
     line = node._world_line(node._tally.take())
     assert "1 revolutions" in line and "lidar slice" in line and "camera band" in line
+
+
+# ---- the volume follows the GRAPH, not map -> odom ---------------------------------------------
+def graph_msg(poses: dict[int, tuple[float, float]]) -> Any:
+    """One /rtabmap/mapGraph: the ids and the optimised poses, as two parallel arrays."""
+    return ros_stubs.MapGraph(
+        poses_id=list(poses),
+        poses=[
+            ros_stubs.Pose(
+                position=ros_stubs.Point(x=x, y=y), orientation=ros_stubs.Quaternion(w=1.0)
+            )
+            for x, y in poses.values()
+        ],
+    )
+
+
+def test_the_fusion_reads_the_graph_and_not_only_the_correction(node: DepthFusion) -> None:
+    assert "/rtabmap/mapGraph" in node.subs
+    assert node.subs["/rtabmap/mapGraph"][0] is ros_stubs.MapGraph
+
+
+def test_a_graph_that_has_not_bent_moves_nothing(node: DepthFusion) -> None:
+    """Every message of a session that is only LOCALISING: nothing is written, so nothing is
+    optimised, every node comes back where it was, and the volume stands still."""
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({1: (0.0, 0.0), 9: (2.0, 0.0)}))
+    node._on_scan_work(scan_msg())
+    before = painted(node)
+    assert before > 0.0
+    for _ in range(3):
+        node.subs["/rtabmap/mapGraph"][1](graph_msg({1: (0.0, 0.0), 9: (2.0, 0.0)}))
+    assert node._follow(stamp(SCAN_S)) is True, "nothing is owed, so nothing is refused"
+    assert node._follower.applied == 0
+
+
+def test_a_bend_of_the_graph_carries_the_whole_volume(node: DepthFusion) -> None:
+    """A closure landed: the room's expression in map moved, so every voxel painted before it is
+    stale by that move and the content is carried rigidly."""
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({9: (2.0, 0.0)}))
+    node._on_scan_work(scan_msg())
+    assert node._follower.painted_in is not None, "the volume is anchored in the bend in force"
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({9: (2.0, 0.40)}))  # the graph moved the room
+    node._followed_at = 0.0  # the rate has not held this one back
+    assert node._follow(stamp(SCAN_S)) is True
+    assert node._follower.applied == 1
+    assert node._follower.last.dy == pytest.approx(0.40)
+    assert "the graph bent the room" in node.logger.texts("info")[-1]
+
+
+def test_a_bend_under_the_threshold_is_owed_and_paid_when_it_grows(node: DepthFusion) -> None:
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({9: (2.0, 0.0)}))
+    node._on_scan_work(scan_msg())
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({9: (2.0, 0.02)}))
+    node._followed_at = 0.0
+    assert node._follow(stamp(SCAN_S)) is True and node._follower.applied == 0, "under a voxel"
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({9: (2.0, 0.08)}))
+    assert node._follow(stamp(SCAN_S)) is True
+    assert node._follower.applied == 1
+    assert node._follower.last.dy == pytest.approx(0.08), "both bends, against one anchor"
+
+
+def test_nothing_is_painted_into_a_volume_that_owes_a_move(node: DepthFusion) -> None:
+    """An observation placed under the new bend and fused into a volume standing in the old one is
+    carried past the truth by the whole move when it lands (scratch/follow_refute.py)."""
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({9: (2.0, 0.0)}))
+    node._on_scan_work(scan_msg())
+    before = painted(node)
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({9: (2.0, 0.40)}))
+    node._followed_at = time.monotonic()  # the rate will not let the move through yet
+    node._on_scan_work(scan_msg())
+    assert painted(node) == before, "the revolution was refused, not painted into a stale volume"
+    assert node._tally.take().counts["follow_held"] == 1
+
+
+def test_the_correction_of_map_to_odom_alone_never_moves_the_volume(node: DepthFusion) -> None:
+    """The reason this is read from the graph at all: map -> odom moves when the CART is found
+    after drifting, and a volume that followed THAT would be dragged off the room by the whole
+    size of the recovery."""
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({9: (2.0, 0.0)}))
+    node._on_scan_work(scan_msg())
+    node._tf.buffer.transforms[("map", "odom")] = edge("map", "odom", SCAN_S)
+    node._tf.buffer.transforms[("map", "odom")].transform.translation.x = 2.0  # a 2 m re-seed
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({9: (2.0, 0.0)}))  # the room did NOT move
+    node._followed_at = 0.0
+    assert node._follow(stamp(SCAN_S)) is True
+    assert node._follower.applied == 0, "the cart was found; the room is where it was"
+
+
+def test_with_no_graph_at_all_nothing_is_followed_and_nothing_is_refused(node: DepthFusion) -> None:
+    """A session where RTAB-Map is not up: the volume is painted open-loop and simply never
+    follows, rather than refusing every observation."""
+    assert node._follow(stamp(SCAN_S)) is True
+    node._on_scan_work(scan_msg())
+    assert painted(node) > 0.0
+    assert node._tally.take().counts["no_correction"] >= 1
+    node._report()
+    assert "no graph, nothing to follow" in node.logger.texts("info")[-1]
+
+
+def test_follow_correction_off_leaves_the_voxels_where_they_are(node: DepthFusion) -> None:
+    """CLAUDE.md rule 19: the old behaviour without a restart."""
+    node._switches.set("follow_correction", False)
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({9: (2.0, 0.0)}))
+    node._on_scan_work(scan_msg())
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({9: (2.0, 0.40)}))
+    node._followed_at = 0.0
+    assert node._follow(stamp(SCAN_S)) is True
+    assert node._follower.applied == 0
+    node._report()
+    assert "follow: off (the graph bends, the voxels stay)" in node.logger.texts("info")[-1]

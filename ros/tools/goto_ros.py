@@ -10,7 +10,18 @@ Runs inside the container (rclpy + nav2_simple_commander):
     goto_ros.py mark NAME         remember where the robot stands now as place NAME
     goto_ros.py NAME              drive to a remembered place
     goto_ros.py places            list the remembered places
-Places live in the file named by --places (default /maps/places.yaml), one per map.
+
+A PLACE LIVES IN THE GRAPH, and this client asks the graph first. Under World R the map is
+RTAB-Map's loop-closed graph and it BENDS when a loop closes, so a place is the pose the cart had
+relative to a labelled graph node — pepin_bringup.places keeps those resolved into coordinates on
+the latched ``/places`` and takes a mark on ``/places/mark``. Both are topics, because this process
+runs inside the board's container and topics are what cross the zenoh bridge.
+
+Latched is what makes it usable: the last vocabulary the laptop published is still in this client's
+first callback after a WiFi drop, so ``go.sh printer`` works with the laptop asleep. When nothing
+answers there at all, the coordinates in the file named by --places (default /maps/places.yaml) are
+used with a plain warning — they are a frozen grid's numbers and the graph may have moved the room
+since. An unknown name is refused either way, as before.
 --no-tape drives without asking the run recorder for a numbered tape (the behaviour before
 2026-09-14, when every drive through this door went unrecorded by it).
 
@@ -26,8 +37,10 @@ lidar is holding the pose, does RTAB-Map's graph recognise the room and agree wi
 about the place in it.
 """
 
+import contextlib
 import json
 import math
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -45,6 +58,13 @@ from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
+from pepin.places import (
+    MARK_TOPIC,
+    MARKED_TOPIC,
+    PLACES_TOPIC,
+    Place,
+    places_from_json,
+)
 from pepin.runlink import (
     RUN_COMMAND_TOPIC,
     RUN_STATUS_TOPIC,
@@ -92,6 +112,15 @@ CERTAINTY_WAIT_S = 3.0
 # shell timeout of 5, and the second navigator was never asked at all.
 CANCEL_CONFIRM_S = 3.0
 NAV_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
+# How long the latched /places is given to land before the file beside the map answers instead. A
+# latched publisher delivers as soon as the two endpoints match, so this covers discovery over the
+# bridge and nothing else: the same 2 s every other "has the route come up" wait here uses, and a
+# drive must not pay more than that for a vocabulary that may simply not exist in this room.
+PLACES_WAIT_S = 2.0
+# ...and how long a MARK is given to be answered. Longer, because it is the whole round trip: the
+# request over the bridge, three of RTAB-Map's own services on the laptop, a file written, and the
+# answer back. The same patience the recorder gets, for the same reason — it answers over a bridge.
+MARK_WAIT_S = 8.0
 
 
 RECORDER_PATIENCE_S = 8.0  # the recorder may answer over a bridge; the goal server waits as long
@@ -424,6 +453,116 @@ def load_places(path: Path) -> dict[str, dict[str, float]]:
     return data
 
 
+class Vocabulary:
+    """The room's places as the GRAPH answers for them: the latched ``/places``, with the
+    coordinates beside the map as the fallback.
+
+    The graph's book is asked first because it is the only one that is still true after a loop
+    closure: each of its places is a pose relative to a labelled node, so it rides the node when the
+    graph bends, while a coordinate written into a file stays where the room used to be. The
+    fallback is announced in one plain line rather than used in silence — a drive that reached the
+    wrong shelf must say which book sent it there.
+    """
+
+    def __init__(self, nav: BasicNavigator, path: Path) -> None:
+        self._nav = nav
+        self._path = path
+        self._graph: dict[str, Place] = {}
+        self._heard = False
+        latched = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        nav.create_subscription(String, PLACES_TOPIC, self._on_places, latched)
+
+    def _on_places(self, msg: String) -> None:
+        self._graph, self._heard = places_from_json(msg.data), True
+
+    def wait(self, seconds: float = PLACES_WAIT_S) -> None:
+        """Spin until the latched vocabulary lands or the patience runs out. Short on purpose: a
+        latched publisher delivers on match, so what is not here quickly is not coming — the laptop
+        is asleep, or this room has no graph book yet."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not self._heard:
+            rclpy.spin_once(self._nav, timeout_sec=0.1)
+
+    def resolve(self, name: str) -> tuple[float, float, float] | None:
+        """``(x, y, yaw_deg)`` for a name — from the graph if it can answer, else from the file —
+        or ``None`` when neither knows it. Says which book answered, every time."""
+        place = self._graph.get(name)
+        if place is not None:
+            print(
+                f"place {name!r} from the graph ({PLACES_TOPIC}, {len(self._graph)} known): it"
+                " rides its labelled node, so a loop closure moves it with the room",
+                flush=True,
+            )
+            return place.x, place.y, place.theta_deg or 0.0
+        entry = load_places(self._path).get(name)
+        if entry is None:
+            return None
+        print(
+            f"!! place {name!r} is not in {PLACES_TOPIC}"
+            + ("" if self._heard else " (nothing published there at all)")
+            + f": falling back to the coordinates in {self._path}, which were written for a frozen"
+            " map and do not follow a loop closure",
+            flush=True,
+        )
+        return entry["x"], entry["y"], entry["yaw_deg"]
+
+    def known(self) -> str:
+        """Every name either book has, for a refusal that names what IS known."""
+        names = sorted(set(self._graph) | set(load_places(self._path)))
+        return ", ".join(names) or "none yet"
+
+    def graph_places(self) -> dict[str, Place]:
+        """What the graph answered with, for ``places`` to print beside the file's own."""
+        return dict(self._graph)
+
+
+def ask_mark(nav: BasicNavigator, name: str, timeout_s: float = MARK_WAIT_S) -> str:
+    """Ask pepin_bringup.places on the laptop to mark where the cart stands as ``name``, and say
+    what came of it.
+
+    A topic and not a service because this process runs in the board's container and services do
+    not cross the bridge here. The request carries an id of its own and the answer echoes it, which
+    is what tells this mark's answer from a latched one of an earlier mark — the answer topic is
+    latched so it survives a WiFi hiccup, and a latched message is by definition an old one until
+    the id matches.
+    """
+    answers: list[dict[str, Any]] = []
+    latched = QoSProfile(
+        depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE
+    )
+
+    def heard(msg: String) -> None:
+        with contextlib.suppress(ValueError):  # an answer nobody can read says nothing
+            answers.append(json.loads(msg.data))
+
+    nav.create_subscription(String, MARKED_TOPIC, heard, latched)
+    publisher = nav.create_publisher(
+        String, MARK_TOPIC, QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
+    )
+    request = {"name": name, "id": f"{os.getpid()}-{time.monotonic_ns()}"}
+    deadline = time.monotonic() + timeout_s
+    # Published more than once on purpose: the subscription on the laptop may not be matched yet
+    # when the first one goes out, and a request nobody received is a mark that silently never
+    # happened. The id makes a repeat free — the node answers one request once.
+    while time.monotonic() < deadline:
+        publisher.publish(String(data=json.dumps(request)))
+        for _ in range(10):
+            rclpy.spin_once(nav, timeout_sec=0.1)
+            for answer in answers:
+                if answer.get("id") == request["id"]:
+                    return ("marked: " if answer.get("ok") else "NOT marked: ") + str(
+                        answer.get("detail", "no reason given")
+                    )
+    return (
+        f"no answer on {MARKED_TOPIC} in {timeout_s:.0f} s: is the laptop's places node up"
+        f" (ros/laptop.sh vslam) and does {MARK_TOPIC} cross the bridge?"
+    )
+
+
 def mark_place(nav: BasicNavigator, path: Path, name: str, certainty: Certainty) -> str:
     """Store the robot's current tracked pose under ``name``, on the same evidence a drive
     starts on: the fused sigma where the tracker publishes one, its fit where it does not.
@@ -618,13 +757,28 @@ def main() -> None:
     )
     try:
         if args[0] == "mark":
-            print(mark_place(nav, places_path, args[1], Certainty(nav)))
+            print(ask_mark(nav, args[1]))
             return
         if args[0] == "places":
+            vocabulary = Vocabulary(nav, places_path)
+            vocabulary.wait()
+            graph = vocabulary.graph_places()
+            for name, place in sorted(graph.items()):
+                print(
+                    f"{name:12s} x {place.x:+.2f} m, y {place.y:+.2f} m, "
+                    f"yaw {place.theta_deg or 0.0:+.0f} deg (from the graph)"
+                )
             for name, p in sorted(load_places(places_path).items()):
+                if name in graph:
+                    continue
                 print(
                     f"{name:12s} x {p['x']:+.2f} m, y {p['y']:+.2f} m, "
-                    f"yaw {p['yaw_deg']:+.0f} deg (fit {p['fit']:.2f})"
+                    f"yaw {p['yaw_deg']:+.0f} deg (from {places_path}, does not follow the graph)"
+                )
+            if not graph:
+                print(
+                    f"nothing on {PLACES_TOPIC}: the laptop's places node is not up, or this room"
+                    " has no graph book yet (ros/go.sh mark NAME makes one)"
                 )
             return
         if args[0] == "seed":
@@ -635,31 +789,37 @@ def main() -> None:
             print(f"AMCL seeded at ({x:.2f}, {y:.2f}) yaw {yaw:.0f} deg")
             return
         name = None
-        home = load_places(places_path).get("home")
+        # The graph's own book first, the file beside the map second (:class:`Vocabulary`): a
+        # coordinate written for a frozen grid is not where the furniture is once a loop has closed.
+        vocabulary = Vocabulary(nav, places_path)
+        vocabulary.wait()
+        home_at = vocabulary.resolve("home") if args[0] == "home" else None
+        home = (
+            {"x": home_at[0], "y": home_at[1], "yaw_deg": home_at[2]}
+            if home_at is not None
+            else load_places(places_path).get("home")
+        )
         if args[0] == "home":
             # An unmarked home used to fall back to the MAP ORIGIN in silence. On this map the
             # origin sits 6.6 m beyond the right-hand edge, so `goto.sh home` sent the cart on a
             # straight line out of the map and through the furniture in the way (2026-09-17,
             # Artem watching). A place that was never marked is a place nobody can drive to, and
             # the only honest answer is to say so.
-            if home is None:
-                known = ", ".join(sorted(load_places(places_path))) or "none yet"
+            if home_at is None:
                 print(
-                    f"no place 'home' in {places_path}: it was never marked on this map"
-                    f" (known here: {known}). Stand the cart where home is and run"
-                    " ros/goto.sh mark home."
+                    f"no place 'home' in {PLACES_TOPIC} or {places_path}: it was never marked on"
+                    f" this map (known here: {vocabulary.known()}). Stand the cart where home is"
+                    " and run ros/go.sh mark home."
                 )
                 sys.exit(2)
-            x, y, yaw = home["x"], home["y"], home["yaw_deg"]
+            x, y, yaw = home_at
             name = "home"
         elif not args[0].lstrip("-").replace(".", "", 1).isdigit():
-            places = load_places(places_path)
-            if args[0] not in places:
-                known = ", ".join(sorted(places)) or "none yet (goto_ros.py mark NAME)"
-                print(f"unknown place {args[0]!r}; known: {known}")
+            at = vocabulary.resolve(args[0])
+            if at is None:
+                print(f"unknown place {args[0]!r}; known: {vocabulary.known()}")
                 sys.exit(2)
-            name, place = args[0], places[args[0]]
-            x, y, yaw = place["x"], place["y"], place["yaw_deg"]
+            name, (x, y, yaw) = args[0], at
         else:
             x, y = float(args[0]), float(args[1])
             yaw = float(args[2]) if len(args) > 2 else 0.0

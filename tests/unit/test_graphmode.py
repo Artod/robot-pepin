@@ -1,5 +1,8 @@
-"""When the graph's database may LEARN and when it may only RECOGNISE (pepin.graphmode), and the
-seating test that decides it: what a pose must be worth to teach from at all."""
+"""RTAB-Map's two live switches (pepin.graphmode): when the database may LEARN and when it may only
+RECOGNISE — with the seating test that decides it — and which REGISTRATION the snapshots need.
+
+Both rules are pure and both are acted on only once a change has held, so both are tested the same
+way: a reading and a clock in, the verdict to act on out."""
 
 import math
 
@@ -8,8 +11,13 @@ from pepin.graphmode import (
     ALWAYS_MAP,
     LOCALISING,
     MAPPING,
+    REGISTRATION_PARAMETERS,
+    STRATEGY_ICP,
+    STRATEGY_VIS,
     ModeRule,
+    StrategyRule,
     describe_sigma,
+    registration_verdict,
     seating_refusal,
 )
 
@@ -84,3 +92,93 @@ def test_the_mode_can_be_pinned_either_way() -> None:
     frozen = ModeRule(hold_s=2.0, override=ALWAYS_LOCALISE)
     told = frozen.update(0.0, None, "lidar")
     assert told is not None and told.mapping is False
+
+
+# ---- the registration follows the snapshot ----------------------------------------------------
+def test_the_strategy_is_chosen_by_what_the_snapshots_carry() -> None:
+    """The whole rule, as a pure function: a scan in the snapshots means ICP, no scan means
+    visual. The values are RTAB-Map's own (Parameters.h:677, "0=Vis, 1=Icp, 2=VisIcp")."""
+    assert registration_verdict(scan=True).strategy == "1" == STRATEGY_ICP
+    assert registration_verdict(scan=False).strategy == "0" == STRATEGY_VIS
+    assert registration_verdict(scan=True).name == "ICP on the scans"
+    assert registration_verdict(scan=False).name == "visual"
+    assert registration_verdict(scan=False, kind="camera-only").why == (
+        "the snapshots carry no scan (snapshots camera-only)"
+    )
+
+
+def test_only_reg_strategy_travels_with_the_verdict() -> None:
+    """ONE parameter each, and it must be one the launch table already overrode: rtabmap inserts
+    only overridden keys into the map update_parameters re-reads (CoreWrapper.cpp:362-379), so a
+    companion parameter added here that the table does not carry would be accepted and ignored."""
+    assert registration_verdict(scan=False).parameters == {"Reg/Strategy": "0"}
+    assert registration_verdict(scan=True).parameters == {"Reg/Strategy": "1"}
+    assert set(REGISTRATION_PARAMETERS) == {"0", "1"}, "VisIcp (2) is never asked for"
+    for table in REGISTRATION_PARAMETERS.values():
+        assert all(isinstance(value, str) for value in table.values()), (
+            "rtabmap declares every parameter as a string and reads it back with as_string()"
+        )
+
+
+def test_the_rule_asks_for_nothing_until_it_has_a_reason_to() -> None:
+    """Unlike the memory rule, whose first verdict IS the initial mode: the launch table has
+    already set Reg/Strategy, so a rule that agreed with it would rebuild the pipeline for
+    nothing."""
+    rule = StrategyRule(STRATEGY_ICP)
+    assert rule.update(now=0.0, hold_s=1.0, scan=True, kind="full") is None
+    assert rule.update(now=5.0, hold_s=1.0, scan=True, kind="full") is None
+    assert rule.strategy == STRATEGY_ICP and rule.switches == 0
+
+
+def test_a_change_is_acted_on_only_once_it_has_held_for_the_evidences_own_refresh() -> None:
+    rule = StrategyRule(STRATEGY_ICP)
+    rule.update(now=0.0, hold_s=1.0, scan=True, kind="full")
+    assert rule.update(now=1.0, hold_s=1.0, scan=False, kind="camera-only") is None, "just now"
+    assert rule.update(now=1.5, hold_s=1.0, scan=False, kind="camera-only") is None, "not yet"
+    verdict = rule.update(now=2.1, hold_s=1.0, scan=False, kind="camera-only")
+    assert verdict is not None and verdict.strategy == STRATEGY_VIS
+    assert rule.strategy == STRATEGY_VIS and rule.switches == 1
+    assert rule.update(now=3.0, hold_s=1.0, scan=False, kind="camera-only") is None, "once"
+
+
+def test_a_source_that_stutters_for_one_snapshot_cannot_rebuild_the_pipeline() -> None:
+    """The hold exists for exactly this: the lidar missing from one snapshot is not the lidar
+    going away, and the registration pipeline is deleted and re-created on every change."""
+    rule = StrategyRule(STRATEGY_ICP)
+    rule.update(now=0.0, hold_s=1.0, scan=True, kind="full")
+    assert rule.update(now=0.5, hold_s=1.0, scan=False, kind="camera-only") is None
+    assert rule.update(now=0.9, hold_s=1.0, scan=True, kind="full") is None, "back already"
+    assert rule.update(now=2.0, hold_s=1.0, scan=True, kind="full") is None
+    assert rule.switches == 0
+
+
+def test_silence_is_not_evidence_that_the_lidar_is_gone() -> None:
+    """No snapshot state at all — the packer has not spoken, or its last word is older than its
+    own refresh — leaves the strategy in force: a node that lost its state topic must not stop
+    linking scans."""
+    rule = StrategyRule(STRATEGY_ICP)
+    for now in (0.0, 1.0, 5.0, 60.0):
+        assert rule.update(now=now, hold_s=1.0, scan=None) is None
+    assert rule.strategy == STRATEGY_ICP and rule.switches == 0
+    assert "nothing said about the snapshots" in rule.text()
+
+
+def test_the_hold_starts_over_when_the_evidence_comes_back() -> None:
+    """A gap in the state must not count towards the hold of the change that follows it."""
+    rule = StrategyRule(STRATEGY_ICP)
+    rule.update(now=0.0, hold_s=1.0, scan=False, kind="camera-only")
+    rule.update(now=0.5, hold_s=1.0, scan=None)
+    assert rule.update(now=1.2, hold_s=1.0, scan=False, kind="camera-only") is None, (
+        "the hold began again when the evidence did"
+    )
+    assert rule.update(now=2.3, hold_s=1.0, scan=False, kind="camera-only") is not None
+
+
+def test_the_report_line_says_which_strategy_and_why() -> None:
+    rule = StrategyRule(STRATEGY_ICP)
+    rule.update(now=0.0, hold_s=1.0, scan=True, kind="full")
+    assert (
+        rule.text() == "ICP on the scans (the snapshots carry a scan (snapshots full), 0 switches)"
+    )
+    rule.update(now=1.0, hold_s=1.0, scan=False, kind="camera-only")
+    assert "asking visual" in rule.text(), "a verdict waiting out its hold is visible"

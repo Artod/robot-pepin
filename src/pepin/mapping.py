@@ -155,95 +155,58 @@ def grid_from_pgm(yaml_path: str | Path) -> OccupancyGrid:
     return grid
 
 
-MAP_TOPIC = "map"  # the map a tracker matches on unless it is told otherwise
-MAP_REFRESH_S = 0.0  # ...and how long before a newer one on that same topic may replace it
-# How long a tracker waits for the map it was asked to match on before it takes the one that is
-# there instead. Only ever while NOTHING has been adopted yet: a map already in use survives its
-# publisher going away (it is a grid in memory, not a subscription), so a link lost mid-drive
-# costs nothing, while a link that was never up would otherwise leave the board with no map at
-# all. Ten seconds because a served file is latched and arrives in the first second, while a grid
-# a mapping process builds only starts once that process is up.
+# THE ONE MAP TOPIC (World R): RTAB-Map's loop-closed occupancy grid, published by the laptop and
+# routed to the board's tracker (pepin.deployment). There is no second map and therefore no choice
+# of topic any more — the flag that used to name one is gone, and this is the name both ends spell.
+MAP_TOPIC = "map"
+MAP_REFRESH_S = 0.0  # how long before a newer map on that topic may replace the one in use
+# How long a tracker waits for the live map before it tracks on the one it wrote down itself
+# (pepin.mapcache). Only ever while NOTHING has been adopted yet: a map already in use survives its
+# publisher going away (it is a grid in memory, not a subscription), so a link lost mid-drive costs
+# nothing, while a link that was never up would otherwise leave the board with no map at all
+# (CLAUDE.md rule 20). Ten seconds because the live grid is latched and arrives in the first second
+# once the bridge's routes are up, and the cache is a colder start that should not be taken early.
 MAP_FALLBACK_S = 10.0
 
 
 class MapChoice:
-    """Which of several maps a tracker matches on, and when a newly arrived one replaces it.
+    """When a newly arrived map replaces the one a tracker is matching on.
 
-    A robot can be handed more than one picture of the same room: the file a map server serves,
-    and a grid that is still being built while the cart drives. The node keeps the
-    newest message of every topic; this holds the decision, so the node itself branches on
-    nothing. A map on a topic nobody asked for is kept and not adopted; the first map on the
-    asked-for topic is adopted; a later one on the SAME topic is adopted only once
-    ``refresh_s`` seconds have passed AND its cells have actually changed.
+    The first map on :data:`MAP_TOPIC` is adopted; a later one is adopted only once ``refresh_s``
+    seconds have passed AND its cells have actually changed. The node keeps the newest message;
+    this holds the decision, so the node itself branches on nothing.
 
-    That gate is the point. Adopting a map is expensive and destructive — the caller rebuilds
-    its matcher and its tracker and forgets the evidence gathered on the old map — while a
-    growing grid is republished every second. ``refresh_s`` 0 is the behaviour a served file
-    has always had: the first map, and no other.
+    That gate is the point. Adopting a map is expensive and destructive — the caller rebuilds its
+    matcher and its tracker and forgets the evidence gathered on the old map — while RTAB-Map's
+    grid is re-rendered whenever its graph grows a node or a closure bends it, which on a driving
+    cart is about once a second. ``refresh_s`` 0 is the behaviour a served file has always had: the
+    first map, and no other.
 
-    And the wanted map may never come. A grid built by a process on another machine arrives only
-    once that machine is up, while a served file is the board's own, so a tracker asking for the
-    first with the wifi down would wait for ever with a map sitting on the other topic (CLAUDE.md
-    rule 20: nothing on the board may depend on the laptop to start). After ``fallback_after_s``
-    with nothing adopted at all, :meth:`lapsed` names ``fallback`` and the caller offers what is
-    waiting there; the wanted map still replaces it the moment it arrives. Once something IS
-    adopted the fallback is over for good — a grid in memory does not stop working because its
-    publisher went away.
-
-    A MAP WITH NOTHING IN IT IS NOT A MAP. A map being built in an unknown room starts as an
-    all-unknown grid: adopting that one spends the single adoption a
-    ``refresh_s`` of 0 allows, and the tracker then refuses every real map that follows for the
-    rest of the session. So :meth:`offer` takes an optional ``empty`` question and turns such a
-    grid away — counted like any other refusal, so the wait is visible — until the first sweep
-    has put something in it.
+    A MAP WITH NOTHING IN IT IS NOT A MAP. A database born in this second publishes a grid with no
+    known cell in it at all: adopting that one spends the single adoption a ``refresh_s`` of 0
+    allows, and the tracker then refuses every real map that follows for the rest of the session.
+    So :meth:`offer` takes an optional ``empty`` question and turns such a grid away — counted like
+    any other refusal, so the wait is visible — until the first node has put something in it.
     """
 
     def __init__(
         self,
-        wanted: str = MAP_TOPIC,
         refresh_s: float = MAP_REFRESH_S,
-        fallback: str = MAP_TOPIC,
-        fallback_after_s: float = MAP_FALLBACK_S,
     ) -> None:
-        self._wanted = wanted
         self._refresh_s = refresh_s
-        self._fallback = fallback
-        self._fallback_after_s = fallback_after_s
-        self._on_choice: Callable[[], None] = lambda: None
         self.source = ""  # the topic the map in use came from ("" until the first is adopted)
         self.digest = ""  # and what its cells were
         self.taken_s = 0.0  # when it was adopted, on the caller's clock
-        self.fell_back = False  # is the map in use the fallback, taken while the wanted one hid?
-        self._waiting_since_s: float | None = None  # when the wait for the wanted map began
+        self.adoptions = 0  # how many maps this tracker has taken since it started
         self._ignored = 0  # arrivals turned away since the last report
 
-    switches = ("map_topic", "map_refresh_s", "map_fallback_s")
-
-    def on_choice(self, callback: Callable[[], None]) -> None:
-        """Call ``callback`` whenever the wanted topic changes: the caller offers it whatever
-        each topic last published, so a map published once and latched long ago is adopted now
-        rather than never."""
-        self._on_choice = callback
+    switches = ("map_refresh_s",)
 
     def switch(self, name: str, value: object) -> None:
-        """Move one of :attr:`switches` (the node's live flags) — the topic to match on, or the
-        least time between two adoptions of it."""
+        """Move one of :attr:`switches` (the node's live flags): the least time between two
+        adoptions of the map topic."""
         if name == "map_refresh_s":
             self._refresh_s = float(value)  # type: ignore[arg-type]
-            return
-        if name == "map_fallback_s":
-            self._fallback_after_s = float(value)  # type: ignore[arg-type]
-            return
-        moved = str(value) != self._wanted
-        self._wanted = str(value)
-        if moved:
-            self._waiting_since_s = None  # the wait for THIS map starts now
-            self._on_choice()
-
-    @property
-    def wanted(self) -> str:
-        """The topic the tracker is asking for, whether or not a map has arrived on it."""
-        return self._wanted
 
     def take_ignored(self) -> int:
         """How many arrivals the gate turned away since this was last asked, and reset."""
@@ -263,15 +226,14 @@ class MapChoice:
 
         ``digest`` and ``empty`` are functions, not values, because reading a whole grid's cells
         costs something and the answer usually does not hang on them. ``empty`` answers "has this
-        grid no known cell at all" and is what keeps an unknown room's first, blank publication
+        grid no known cell at all" and is what keeps a newborn database's first, blank publication
         from spending the one adoption a ``refresh_s`` of 0 allows; a caller that does not ask it
         behaves exactly as before.
+
+        The cheap gate goes first, and on this board that is the point: RTAB-Map republishes its
+        grid every second and almost every publication is refused for being too soon or unchanged,
+        so the questions that read 50000 cells are asked only of a grid that is about to be adopted.
         """
-        if source != self._wanted and not (self.fell_back and source == self._fallback):
-            return False
-        if empty is not None and empty():
-            self._ignored += 1  # a grid with nothing in it: wait for the sweep that fills it
-            return False
         fresh = ""
         if self.source == source:
             if self._refresh_s <= 0.0 or now - self.taken_s < self._refresh_s:
@@ -281,29 +243,61 @@ class MapChoice:
             if fresh == self.digest:
                 self._ignored += 1
                 return False
+        if empty is not None and empty():
+            self._ignored += 1  # a grid with nothing in it: wait for the node that fills it
+            return False
         self.source = source
         self.taken_s = now
         self.digest = fresh or digest()
-        self.fell_back = source != self._wanted
+        self.adoptions += 1
         adopt()
         return True
 
-    def lapsed(self, now: float) -> str | None:
-        """The topic to take a map from instead, because the wanted one has never spoken: the
-        fallback's name once ``fallback_after_s`` has passed with nothing adopted at all, else
-        None. The caller then offers whatever is waiting on that topic and :meth:`offer` does
-        the rest; calling this every second is the intended use.
 
-        Silent for ever once a map is in use: a tracker that HAS a map has nothing to gain from
-        a rebuild on a lesser one, whatever happened to the publisher (CLAUDE.md rule 20 is
-        about starting without the laptop, not about surviving it).
-        """
-        if self.source or self._wanted == self._fallback or self._fallback_after_s <= 0.0:
-            return None
-        if self._waiting_since_s is None:
-            self._waiting_since_s = now  # the clock starts the first time it is asked
-            return None
-        if now - self._waiting_since_s < self._fallback_after_s:
-            return None
-        self.fell_back = True  # so the fallback's map is accepted by offer()
-        return self._fallback
+@dataclass(frozen=True)
+class MapShift:
+    """What a newly adopted map did to the one it replaces: how far its origin moved, whether it
+    is another size, and how many cells changed their mind where the two overlap.
+
+    Under World R this is the shape of every map change. RTAB-Map re-renders its whole grid from
+    the per-node local grids at their current poses, so a new node extends it (the origin walks
+    out, the size grows) and a loop closure BENDS it (the same walls, tens of centimetres away).
+    The tracker carries its pose across such a change and rebuilds its matcher on the new cells,
+    and this is what its report line says about the change, so a bend is visible as a number
+    instead of as a drive that mysteriously goes wrong.
+    """
+
+    origin_m: float
+    resized: bool
+    changed_cells: int
+
+    def phrase(self) -> str:
+        """``the graph moved the map 0.35 m and 1832 cells`` for a report line; ``the first map``
+        when there was nothing to compare with."""
+        if self.resized and not self.changed_cells:
+            return f"resized, origin moved {self.origin_m:.2f} m"
+        if self.resized:
+            return f"resized, origin moved {self.origin_m:.2f} m, {self.changed_cells} cells over"
+        return f"origin moved {self.origin_m:.2f} m, {self.changed_cells} cells changed"
+
+
+def map_shift(before: OccupancyGrid | None, after: OccupancyGrid) -> MapShift | None:
+    """How ``after`` differs from the map it replaces, or ``None`` when there was none.
+
+    The cells are compared only where the two grids agree on their geometry — same resolution,
+    same size, same origin — because anything else is a re-render on another lattice and counting
+    "changed cells" across it would compare a cell with its neighbour. A resized map reports its
+    origin's move and no cell count; the phrase says which it was.
+    """
+    if before is None:
+        return None
+    moved = math.dist(
+        (before.spec.x_min_m, before.spec.y_min_m), (after.spec.x_min_m, after.spec.y_min_m)
+    )
+    same = (
+        before.spec.shape == after.spec.shape
+        and before.spec.resolution_m == after.spec.resolution_m
+        and moved == 0.0
+    )
+    changed = int(np.count_nonzero(before.log_odds != after.log_odds)) if same else 0
+    return MapShift(origin_m=moved, resized=not same, changed_cells=changed)

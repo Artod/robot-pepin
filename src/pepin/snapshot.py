@@ -55,10 +55,18 @@ a stamp at least ``min_gap_s`` newer than the last snapshot it answered with, so
 every sensor has gone quiet produces no snapshots at all instead of republishing the last one for
 ever, and a caller that asks on every arriving message still gets one snapshot per ``min_gap_s``
 of SENSOR time.
+
+...AND A MOMENT THE CALLER COULD NOT USE IS NOT SPENT (:meth:`SnapshotPacker.rewind`). A snapshot
+is only half of a message: the caller still has to place every member on the cart, and the
+transform that does it arrives tens of milliseconds behind the stamp it is for. A caller that
+cannot build the message YET puts the moment back and is offered it again on the next arrival,
+until the moment has left that member's own pairing patience — which is how a camera frame waits
+for the neck's edge without anybody blocking a thread for it.
 """
 
 from __future__ import annotations
 
+import json
 import math
 from collections import deque
 from collections.abc import Iterable, Sequence
@@ -256,6 +264,62 @@ class Snapshot[T]:
         return math.inf if entry is None else abs(entry[0] - self.stamp)
 
 
+@dataclass(frozen=True)
+class SnapshotState:
+    """WHAT THE SNAPSHOTS CARRY right now — the one fact about the packer that another process has
+    to know, because a mapper's registration is chosen by it (:class:`pepin.graphmode.StrategyRule`)
+    and only the packer can answer it.
+
+    ``carrying`` is the enabled sources that are also DELIVERING, by the packer's own liveness rule
+    and not by anybody's guess; ``kind`` is the last snapshot's own word (``full``, ``lidar-only``,
+    ``camera-only``) for a report line; ``refresh_s`` is how long the packer itself takes to change
+    this answer, which is the hold a reader must give a change before acting on it; ``stamp`` is the
+    SENSOR-clock moment the answer is about, so a reader can see a state that has stopped moving.
+    """
+
+    carrying: tuple[str, ...]
+    kind: str
+    refresh_s: float
+    stamp: float
+
+    def carries(self, name: str) -> bool:
+        """Whether source ``name`` is in the snapshots being packed."""
+        return name in self.carrying
+
+    def to_json(self) -> str:
+        """The state as the one latched message that crosses to a reader."""
+        return json.dumps(
+            {
+                "carrying": list(self.carrying),
+                "kind": self.kind,
+                "refresh_s": round(self.refresh_s, 3),
+                "stamp": round(self.stamp, 6),
+            }
+        )
+
+    @classmethod
+    def from_json(cls, text: str) -> SnapshotState | None:
+        """One such message back, or ``None`` when it is not one: a reader acts on nothing it
+        could not parse rather than on a default."""
+        try:
+            heard = json.loads(text)
+            return cls(
+                carrying=tuple(str(name) for name in heard["carrying"]),
+                kind=str(heard["kind"]),
+                refresh_s=float(heard["refresh_s"]),
+                stamp=float(heard["stamp"]),
+            )
+        except (TypeError, ValueError, KeyError):
+            return None
+
+    def text(self) -> str:
+        """``camera-only, carrying camera, refresh 0.6 s`` for a report line."""
+        return (
+            f"{self.kind}, carrying {'+'.join(self.carrying) or 'nothing'},"
+            f" refresh {self.refresh_s:.2f} s"
+        )
+
+
 class SnapshotPacker[T]:
     """Every source's recent messages, and one snapshot of whatever is alive when asked.
 
@@ -273,10 +337,12 @@ class SnapshotPacker[T]:
         pair_periods: float = PAIR_PERIODS,
     ) -> None:
         self._names = tuple(names)
+        self._window_s = window_s  # the rings' memory: the fallback refresh of state()
         self._rings = {name: StampRing[T](window_s) for name in self._names}
         self._cadence = {name: Cadence(pair_periods=pair_periods) for name in self._names}
         self._enabled: tuple[str, ...] = self._names
         self._last_stamp: float | None = None  # the stamp of the snapshot last answered with
+        self._before_last: float | None = None  # ...and the one before it, for rewind()
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -307,6 +373,26 @@ class SnapshotPacker[T]:
     def cadence(self, name: str) -> Cadence:
         """One source's measured period and its two patiences."""
         return self._cadence[name]
+
+    def rewind(self) -> None:
+        """The last snapshot answered with was NOT used: forget that it was answered, so the same
+        moment is offered again on the next arrival.
+
+        For a caller that cannot finish the message yet — a member whose transform TF does not
+        cover — and must not spend the moment on a half-built one. Idempotent and good for one
+        step: two rewinds in a row leave the packer where the first one did, because only the
+        stamp before the last is remembered and a moment already given back is not answered with
+        again until a source moves the driver's stamp forward.
+        """
+        if self._before_last is not None or self._last_stamp is not None:
+            self._last_stamp, self._before_last = self._before_last, None
+
+    def how_old_s(self, stamp: float) -> float:
+        """How far the newest moment any ENABLED source has delivered is past ``stamp``; ``inf``
+        before the first message. What says whether a moment a caller put back is still worth
+        waiting on (against the source's own :attr:`Cadence.patience_s`)."""
+        now = self.now_s()
+        return math.inf if now is None else now - stamp
 
     def set_pair_periods(self, value: float) -> None:
         """Move every source's pairing patience to this multiple of its own measured period."""
@@ -363,12 +449,38 @@ class SnapshotPacker[T]:
                 silent.append(other)
             else:
                 members[other] = entry
-        self._last_stamp = stamp
+        self._before_last, self._last_stamp = self._last_stamp, stamp
         return Snapshot(
             driver=name,
             stamp=stamp,
             members={key: members[key] for key in self._names if key in members},
             silent=tuple(silent),
+        )
+
+    def state(self, kind: str = "none yet") -> SnapshotState:
+        """What the snapshots carry, for a reader outside this process (:class:`SnapshotState`).
+
+        ``carrying`` is every ENABLED source the packer would put in a snapshot asked for now — it
+        is delivering by :meth:`Cadence.alive`, the same test :meth:`plan` uses. ``refresh_s`` is
+        the widest liveness window among them, because that is how long the packer itself takes to
+        change its mind about a source that stops: derived, not chosen. Before any source has a
+        measured period there is no window either, and the answer is the ring's own memory
+        (:data:`pepin.depth.SCAN_WINDOW_S`) — the longest a message is worth pairing at all.
+        """
+        now = self.now_s()
+        carrying = tuple(
+            name for name in self._enabled if now is not None and self._cadence[name].alive(now)
+        )
+        windows = [
+            window
+            for name in self._enabled
+            if (window := self._cadence[name].liveness_s) is not None
+        ]
+        return SnapshotState(
+            carrying=carrying,
+            kind=kind,
+            refresh_s=max(windows) if windows else self._window_s,
+            stamp=0.0 if now is None else now,
         )
 
     def report(self, stamp: float | None = None) -> str:

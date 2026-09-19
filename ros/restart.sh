@@ -8,14 +8,13 @@
 #                  tracker's first report line (up to 90 s)
 #   --deploy       ros/sync.sh instead of the bare restart: code + the library + config to the
 #                  board, the restart, and its census tail
-#   laptop         ros/laptop.sh start, then ros/laptop.sh vslam --neck --room=<the room of the map the
-#                  board serves>, read from the board's /etc/default/pepin-ros as ros/goto.sh
-#                  reads it — a laptop half seeded with another map than the board serves is a
-#                  fusion snapped to the wrong lattice
+#   laptop         ros/laptop.sh start, then ros/laptop.sh vslam --neck. Nothing about the map is
+#                  passed any more: the database IS the map (World R), the launch reads whether it
+#                  exists and the board's tracker adopts whatever grid it publishes
 #   --fresh-graph  the camera half starts on an empty RTAB-Map database (laptop.sh vslam --fresh)
-#                  AND the graph anchor of the served map is deleted: the anchor is a property of
-#                  the map <-> database PAIR (pepin.anchors), so an empty database beside a kept
-#                  anchor is a graph speaking in the previous database's frame
+#                  AND the volume of the old frame is moved aside: the volume is painted in the
+#                  graph's frame, so a kept snapshot beside an empty database is a room painted
+#                  somewhere else
 #   both           board first, then laptop; the checks run after both are up, so the two topics
 #                  the laptop feeds the board are asked for when there is a laptop to feed them
 #   --no-check     restart only
@@ -59,7 +58,7 @@ for arg in "$@"; do
     esac
 done
 if [ "$HALF" = board ] && [ "$FRESH_GRAPH" = true ]; then
-    echo "--fresh-graph is the laptop's database and its anchor: ros/restart.sh laptop|both"
+    echo "--fresh-graph is the laptop's database and its volume: ros/restart.sh laptop|both"
     exit 2
 fi
 
@@ -90,11 +89,15 @@ board_rate() {  # TOPIC -> one line: is it reaching the board, and how fast.
         "docker exec pepin-ros /pepin_entrypoint.sh timeout -s KILL 15 python3 /tools/topic_rate.py $1 5" \
         2>&1 || true
 }
-served_map() {  # the map file the board serves, as the container spells it (/maps/NAME.yaml)
-    ssh "root@$BOARD" "grep -oE '^PEPIN_MAP=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2 || true
-}
+# Both read the tracker's own "map ... (id <size>@<origin>, N adopted, ..." from its report line,
+# anchored on "(id " rather than on the topic: a cold-boot line carries the cache's own phrase in
+# between, and that phrase names a topic too.
 map_id_now() {  # the identity of the map the board's tracker is matching on, as it spells it
-    sed -n 's/.*map \/[^ ]* (id \(.*\), [0-9][0-9]* republications.*/\1/p' \
+    sed -n 's/.*(id \(.*\), [0-9][0-9]* adopted.*/\1/p' \
+        <<<"$(board_last "$REPORT_WINDOW_S" "relocalizer\]: tracker:")"
+}
+adoptions_now() {  # how many maps that tracker has taken since it started (0 = it has none)
+    sed -n 's/.*(id .*, \([0-9][0-9]*\) adopted.*/\1/p' \
         <<<"$(board_last "$REPORT_WINDOW_S" "relocalizer\]: tracker:")"
 }
 over() { awk -v v="${1:-0}" -v t="$2" 'BEGIN { exit !(v + 0 > t) }'; }  # VALUE > THRESHOLD, floats
@@ -156,25 +159,15 @@ drop_volume() {  # --fresh-graph: the volume shares the database's frame, so it 
 
 restart_laptop() {
     step "restarting the laptop"
-    local map args
-    map="$(served_map)"
-    if [ -z "$map" ]; then
-        echo "the board does not say which map it serves (/etc/default/pepin-ros PEPIN_MAP):"
-        echo "  ros/mode.sh nav MAP on the board first — the camera half must be seeded with the"
-        echo "  map the board serves, not with a valid one"
-        return 1
-    fi
-    "$HERE/laptop.sh" start
-    # The ROOM, not a picture to seed from: the volume resumes /maps/<room>.world.npz and nothing
-    # else (no pgm is in the running loop since 2026-09-18). The room is the stem of the map the
-    # board names, with a ".world" the exported cache once carried taken off.
-    local room
-    room="$(basename "$map" .yaml)"; room="${room%.world}"
-    args=(vslam --neck "--room=$room")
+    # Nothing about the map is passed: one database, one grid, and the launch reads for itself
+    # whether that database exists (an empty room is the file being absent).
+    local args
+    args=(vslam --neck)
     if [ "$FRESH_GRAPH" = true ]; then
         args+=(--fresh)
         drop_volume
     fi
+    "$HERE/laptop.sh" start
     "$HERE/laptop.sh" "${args[@]}"
     wait_for "laptop" "$WAIT_LAPTOP_S" pepin-vslam "\]: depth: " || true
 }
@@ -195,12 +188,17 @@ check_board() {
         fail 1.2 "tracker: no report line in ${REPORT_WINDOW_S} s (is the relocalizer up? ros/watch.sh)"
     else
         value="$(sed -n 's/.* sources=\([a-z,]*\).*/\1/p' <<<"$line")"
-        n="$(sed -n 's/.* map_topic=\([a-z_]*\).*/\1/p' <<<"$line")"
+        n="$(adoptions_now)"
         out="$(sed -n 's/.*, fit \([0-9.]*\)[^0-9].*/\1/p' <<<"$line")"
-        if [ -n "$value" ] && [ -n "$n" ]; then
-            pass 1.2 "tracker: sources=$value, map_topic=$n, fit ${out:-?}, map $(map_id_now)"
+        if [ -z "$value" ]; then
+            fail 1.2 "tracker: its line carries no sources= (ros/flags.sh list relocalizer)"
+        elif [ "${n:-0}" -eq 0 ] 2>/dev/null; then
+            # One map (World R): the grid is RTAB-Map's, over the bridge. A tracker that has adopted
+            # none has no map at all — the laptop half is down and the cache was refused or absent,
+            # or /map is not crossing.
+            fail 1.2 "tracker: sources=$value but 0 maps adopted — it has no map (is the laptop half up? does /map cross? ros/laptop.sh logs vslam)"
         else
-            fail 1.2 "tracker: its line carries no sources= or map_topic= (ros/flags.sh list relocalizer)"
+            pass 1.2 "tracker: sources=$value, $n map(s) adopted, fit ${out:-?}, map $(map_id_now)"
         fi
     fi
 
@@ -229,7 +227,9 @@ check_board() {
     fi
 
     n=6
-    for value in /depth_scan /vo; do
+    # /map first: it is THE map (World R), RTAB-Map's grid republished at its detection rate (1 Hz,
+    # map_always_update) and routed here for the tracker. Then the camera's other two words.
+    for value in /map /depth_scan /vo; do
         out="$(board_rate "$value")"
         if [[ "$out" == *" Hz over "* ]]; then
             pass "1.$n" "$value reaches the board: ${out#*: }"
@@ -239,14 +239,26 @@ check_board() {
         n=$((n + 1))
     done
 
+    # The costmaps' one source: the grid the tracker ADOPTED, republished latched by it
+    # (pepin_bringup.relocalizer.TRACKED_MAP_TOPIC) and read by both static layers
+    # (ros/params/nav2_params.yaml). It is published once per adoption, so a RATE says nothing here
+    # and the question is whether it is advertised at all: a tracker that has republished no map
+    # leaves both costmaps without a static map and the planner with nothing to plan on.
+    out="$(board_rate /map_tracked)"
+    if [[ "$out" == *"not advertised"* ]]; then
+        fail "1.$n" "/map_tracked is not advertised on the board: the tracker republished no map, so neither costmap's static layer has one"
+    else
+        pass "1.$n" "/map_tracked advertised by the tracker: both static layers have their source (${out#*: })"
+    fi
+
     out="$(ssh "root@$BOARD" "systemctl is-active pepin-base; journalctl -u pepin-base -n 200 --no-pager 2>/dev/null | grep -aE 'torque (on|off)' | tail -1" 2>/dev/null || true)"
     value="$(head -1 <<<"$out")"; line="$(sed -n '2p' <<<"$out")"
     if [ "$value" != active ]; then
-        fail 1.8 "base: pepin-base is ${value:-unreachable} (the wheels' own server; systemctl status pepin-base)"
+        fail 1.10 "base: pepin-base is ${value:-unreachable} (the wheels' own server; systemctl status pepin-base)"
     elif [[ "$line" == *"torque on"* ]]; then
-        fail 1.8 "base: the wheels are still armed — its last word is '${line#*: }' (a torque left standing holds the wheels and heats the servos)"
+        fail 1.10 "base: the wheels are still armed — its last word is '${line#*: }' (a torque left standing holds the wheels and heats the servos)"
     else
-        pass 1.8 "base: active, no torque left standing${line:+ (last: ${line##*: })}"
+        pass 1.10 "base: active, no torque left standing${line:+ (last: ${line##*: })}"
     fi
 }
 
@@ -256,7 +268,7 @@ check_laptop() {
     last() { grep -aE "$1" <<<"$LOG" | tail -1 || true; }
 
     if ! started="$(docker inspect -f '{{.State.StartedAt}}' pepin-vslam 2>/dev/null)"; then
-        fail 2.1 "pepin-vslam is not running (ros/laptop.sh vslam --neck --room=...); no laptop check could run"
+        fail 2.1 "pepin-vslam is not running (ros/laptop.sh vslam --neck); no laptop check could run"
         return 0
     fi
     LOG="$(docker logs --since "$started" pepin-vslam 2>&1 || true)"   # one fetch, every grep below
@@ -329,17 +341,30 @@ check_laptop() {
         fail 2.6 "rtabmap: no rtabmap process in pepin-vslam (it dies on a database it cannot open): ${value:-nothing answered}"
     fi
 
+    # The one input RTAB-Map reads (pepin_bringup.sensor_pack): a snapshot per moment out of
+    # whatever sensor is alive. No snapshots is a mapper that is fed nothing, and then neither the
+    # graph nor the grid can move, whatever else looks healthy.
+    line="$(last '\]: sensor pack: ')"
+    value="$(sed -n 's/.*sensor pack: \([0-9.]*\) snapshots\/s.*/\1/p' <<<"$line")"
+    if [ -z "$line" ]; then
+        fail 2.7 "sensor pack: no report line (is the node up? ros/laptop.sh logs vslam)"
+    elif ! over "$value" 0; then
+        fail 2.7 "sensor pack: ${value:-no} snapshots/s — RTAB-Map is fed nothing, so its graph and its grid cannot move (does /scan cross? is the camera up?)"
+    else
+        pass 2.7 "sensor pack: $value snapshots/s into RTAB-Map"
+    fi
+
+    # ...and the graph's own word to the board's tracker (pepin_bringup.rtabmap_frame): it is one
+    # measurement among the tracker's sources now, never a correction, so what this asks is whether
+    # the node hears RTAB-Map at all — /rtabmap/info arriving is the whole of its input.
     line="$(last '\]: rtabmap frame: ')"
     n="$(sed -n 's/.*over \([0-9]*\) infos.*/\1/p' <<<"$line")"
-    value="$(grep -oE 'from (file|learned)' <<<"$line" | head -1 | cut -d' ' -f2 || true)"
     if [ -z "$line" ]; then
-        fail 2.7 "rtabmap frame: no report line (ros/laptop.sh logs vslam)"
-    elif [ -z "$value" ]; then
-        fail 2.7 "rtabmap frame: no anchor yet — the graph has said nothing the tracker could be tied to"
+        fail 2.10 "rtabmap frame: no report line (ros/laptop.sh logs vslam)"
     elif [ "${n:-0}" -eq 0 ] 2>/dev/null; then
-        fail 2.7 "rtabmap frame: anchor from $value but over 0 infos — the graph's trust is deaf (rtabmap's /info is not arriving)"
+        fail 2.10 "rtabmap frame: over 0 infos — it hears nothing from RTAB-Map (/rtabmap/info is not arriving)"
     else
-        pass 2.7 "rtabmap frame: anchor from $value, graph trust over $n infos"
+        pass 2.10 "rtabmap frame: RTAB-Map heard over $n infos"
     fi
 
     check_foxglove

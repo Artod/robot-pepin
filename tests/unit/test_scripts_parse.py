@@ -434,34 +434,6 @@ def test_a_node_that_does_not_answer_is_reported_not_guessed(tmp_path) -> None: 
     assert not [c for c in sent if "param set" in c], sent
 
 
-def test_in_slam_mode_the_costmap_half_switches_and_the_tracker_half_says_it_is_absent(  # type: ignore[no-untyped-def]
-    tmp_path,
-) -> None:
-    """Online SLAM runs no relocalizer at all — RTAB-Map owns the pose — so there is nobody to
-    ask about `sources`. The switch used to fall into the "did not answer" path and exit 1 with
-    the tracker half unexplained; now the costmap half applies, the tracker half is named as
-    absent, and the status is 0: the mode is not a failure."""
-    code, out, sent = _sensor(
-        tmp_path,
-        "camera",
-        "off",
-        FAKE_SLAM="true",
-        FAKE_SOURCES="none",  # the fake flags.sh refuses: nothing may ask it in this mode
-        FAKE_LAYERS="true",
-    )
-    assert code == 0, out
-    assert "tracker: none in slam mode" in out
-    assert "did not answer about its sources" not in out
-    assert not [c for c in sent if c.startswith("flags ")], "no tracker is asked anything"
-    for layer in ("camera_layer", "contact_layer"):
-        assert f"{BOARD} ros2 param set {LOCAL} {layer}.enabled false" in sent
-
-    code, out, sent = _sensor(tmp_path, "status", FAKE_SLAM="true", FAKE_LAYERS="true")
-    assert code == 0, out
-    assert "tracker: none in slam mode" in out
-    assert f"costmap {LOCAL}:  lidar_layer=on  camera_layer=on  contact_layer=on" in out
-
-
 def test_switching_the_camera_on_says_what_it_did_to_the_last_two_drives(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """The one command that stalled two drives on 2026-09-13 (near-hull marks, 2 cm of
     clearance) says so as it is run, not only in the README."""
@@ -578,8 +550,9 @@ TRACKER_LINE = (
     "[python3-6] [INFO] [1789428031.2] [relocalizer]: tracker: scans 227, matched 133, "
     "silenced 4155 returns over 133 scans, fit 0.66/0.47/0.83 at the match; "
     "sources: anchor lidar; watch fit 0.80, last source 0.2 s ago; "
-    "map /map (id 239x215@-18.53,-4.38, 0 republications ignored); "
-    "flags: rest_lock=on sources=lidar,graph map_topic=map"
+    "map /map (id 239x215@-18.53,-4.38, 3 adopted, 12 republications ignored, "
+    "last origin moved 0.00 m, 1832 cells changed); "
+    "flags: rest_lock=on sources=lidar,graph map_refresh_s=2.0"
 )
 VSLAM_LOG = "\n".join(
     (
@@ -593,6 +566,8 @@ VSLAM_LOG = "\n".join(
         "published, 0 dropped",
         "[laptop_localizer-6] [INFO] [5.0] [laptop_localizer]: laptop localizer: 4 candidates "
         "from 27 scans; tracker fit 0.66; skipped: off 0",
+        "[sensor_pack-4] [INFO] [5.5] [sensor_pack]: sensor pack: 1.00 snapshots/s of 54 scans "
+        "and 60 camera frames (kind both 27); carrying nothing said yet",
         "[rtabmap_frame-8] [INFO] [6.0] [rtabmap_frame]: rtabmap frame: 27 graphs, anchor "
         "(-0.11, +0.02, +1.3 deg) from file, last word (-11.32, +0.71, +132 deg), 6 cm from the "
         "tracker; graph trusted 1.00 over 27 infos; flags: graph_trust=on",
@@ -781,28 +756,19 @@ def test_restart_sh_parses_and_never_drives() -> None:
         assert f"{half} " in code or f"{half})" in code
 
 
-def test_the_laptop_half_is_given_the_room_the_board_names(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """The camera half's volume is the ROOM's — it resumes /maps/<room>.world.npz and is seeded
-    from no picture (no pgm in the running loop since 2026-09-18) — so the room is read from the
-    board's own /etc/default/pepin-ros, never guessed, never a default; a ".world" the board's
-    name may carry from an exported cache comes off. The neck owns base_link -> camera_link, so
-    --neck always goes with it."""
-    code, out, sent = _restart(
-        tmp_path, "laptop", "--no-check", FAKE_MAP="/maps/flat3_straight.yaml"
-    )
+def test_the_laptop_half_is_started_without_a_word_about_the_map(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Nothing about the map is passed any more (World R): the database IS the map, the launch
+    reads for itself whether it exists, and the board's tracker adopts whatever grid it publishes.
+    The board is not asked which map it serves, because there is no answer that would change
+    anything here. The neck owns base_link -> camera_link, so --neck always goes with it."""
+    code, out, sent = _restart(tmp_path, "laptop", "--no-check", FAKE_MAP="")
     assert code == 0, out
     assert "laptop.sh start" in sent
-    assert "laptop.sh vslam --neck --room=flat3_straight" in sent
+    assert "laptop.sh vslam --neck" in sent
+    assert not [c for c in sent if "--room=" in c], "the room entity went with World R"
     assert not [c for c in sent if "--fresh" in c], "no --fresh without --fresh-graph"
     assert not [c for c in sent if c.startswith("ssh") and "restart pepin-ros" in c], sent
     assert "checks skipped" in out
-
-
-def test_a_board_without_a_map_refuses_instead_of_seeding_the_wrong_one(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    code, out, sent = _restart(tmp_path, "laptop", "--no-check", FAKE_MAP="")
-    assert code == 0, out  # --no-check: the restart failed, its reason printed, nothing checked
-    assert "the board does not say which map it serves" in out
-    assert not [c for c in sent if c.startswith("laptop.sh")], "nothing started on a guess"
 
 
 def test_fresh_graph_empties_the_database_and_moves_the_volume_of_its_frame_aside(
@@ -816,7 +782,7 @@ def test_fresh_graph_empties_the_database_and_moves_the_volume_of_its_frame_asid
     world.write_bytes(b"the old frame")
     code, out, sent = _restart(tmp_path, "laptop", "--no-check", "--fresh-graph")
     assert code == 0, out
-    assert "laptop.sh vslam --neck --room=flat3 --fresh" in sent
+    assert "laptop.sh vslam --neck --fresh" in sent
     assert not world.exists(), out
     kept = list(world.parent.glob("rtabmap.world.npz.before-fresh-*"))
     assert len(kept) == 1 and kept[0].read_bytes() == b"the old frame", out
@@ -901,7 +867,7 @@ def test_every_check_runs_even_when_the_first_ones_fail_and_the_run_goes_red(tmp
     )
     assert code == 1, out
     assert "FAIL 1.2" in out and "no report line" in out
-    assert "FAIL 1.8" in out and "still armed" in out
+    assert "FAIL 1.10" in out and "still armed" in out
     assert "FAIL 2.1" in out and "DEAD ROUTES 2" in out
     assert "PASS 1.4" in out and "PASS 2.8" in out, "the checks after a failure still ran"
     assert "red: 3 of " in out
@@ -954,7 +920,7 @@ def test_a_thin_report_line_fails_the_node_it_belongs_to_not_the_run(tmp_path) -
     assert code == 1, out
     assert "FAIL 2.2" in out and "1.2 frames/s" in out
     assert "FAIL 2.3" in out and "14 frames refused at bound" in out
-    assert "FAIL 2.7" in out and "trust is deaf" in out
+    assert "FAIL 2.10" in out and "hears nothing from RTAB-Map" in out
 
 
 def test_a_flag_off_its_default_is_seen_but_never_fails_the_run(tmp_path) -> None:  # type: ignore[no-untyped-def]

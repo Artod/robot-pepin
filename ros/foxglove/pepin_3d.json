@@ -58,26 +58,8 @@
         "/map": {
           "visible": false,
           "colorMode": "custom",
-          "minColor": "#ffffffff",
-          "maxColor": "#000000ff",
-          "unknownColor": "#80808080",
-          "frameLocked": true,
-          "alpha": 1.0
-        },
-        "/map_lidar": {
-          "visible": false,
-          "colorMode": "custom",
           "minColor": "#0b2b36ff",
           "maxColor": "#00e5ffff",
-          "unknownColor": "#00000000",
-          "alpha": 0.6,
-          "frameLocked": true
-        },
-        "/map_camera": {
-          "visible": false,
-          "colorMode": "custom",
-          "minColor": "#2b1236ff",
-          "maxColor": "#ff4dd2ff",
           "unknownColor": "#00000000",
           "alpha": 0.6,
           "frameLocked": true
@@ -132,10 +114,6 @@
           "visible": false,
           "type": "arrow",
           "color": "#00e5ff"
-        },
-        "/rtabmap/map": {
-          "colorMode": "costmap",
-          "visible": false
         },
         "/rtabmap/mapPath": {
           "visible": true,

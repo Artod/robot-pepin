@@ -2,8 +2,12 @@
 # Drive the robot through Nav2 on the board, with feedback. Usage:
 #   ros/goto.sh X Y [YAW_DEG]    drive to map coordinates (meters, degrees)
 #   ros/goto.sh home             back to the start spot (map origin, facing as at start)
-#   ros/goto.sh mark NAME        stand the robot somewhere: remember that spot as NAME (per map)
-#   ros/goto.sh NAME             drive to a remembered place      ros/goto.sh places   list them
+#   ros/goto.sh mark NAME        stand the robot somewhere: remember that spot as NAME — a labelled
+#                                RTAB-Map node plus the cart's offset from it, so the place rides
+#                                the node when a loop closure bends the map
+#   ros/goto.sh NAME             drive to a remembered place: the graph's book (/places, latched)
+#                                first, the map file's coordinates second and with a warning
+#   ros/goto.sh places           list both books, each entry saying which one it came from
 #   ros/goto.sh seed X Y [YAW]   after placing the robot by hand: tell AMCL where it is
 #   ros/goto.sh cancel           cancel every goal on the board's navigators; it prints what came
 #                                of it within 3 s (ros/stop.sh is the hard stop that also brakes)
@@ -42,8 +46,13 @@ case "${1:-}" in
   # cancel" (2026-09-14 11:20: the cart went on butting a table for a minute after the "cancel").
   cancel) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh timeout 5 python3 /tools/goto_ros.py cancel"; exit ;;
   relocalize) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/call.py /relocalize 90"; exit ;;
-  mark|places) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/goto_ros.py --places $PLACES $*"
-               rsync -aq "root@$BOARD:/root/pepin-ros$PLACES" "$(dirname "$0")/maps/" 2>/dev/null; exit ;;  # the book is backed up on the laptop too
+  # A place lives in RTAB-Map's GRAPH now: the client asks the laptop's places node over the bridge
+  # (/places/mark, answered on /places/marked) and the book is written on the LAPTOP, beside the
+  # graph database it hangs on (ros/maps/rtabmap.places.json) — a node id means nothing without the
+  # database it is an id in, so the two stay together and nothing is rsynced back from the board.
+  # --places still names the old per-map file: it is the fallback the client falls back TO, and
+  # `places` prints both books with each entry saying which it came from.
+  mark|places) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/goto_ros.py --places $PLACES $*"; exit ;;
 esac
 # -t + -it: Ctrl-C travels through both ptys to goto_ros.py, which cancels the task on the board
 STAMP=$(date +%Y%m%d_%H%M%S)

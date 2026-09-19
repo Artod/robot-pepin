@@ -19,7 +19,10 @@ SIDES = ("all", "board", "laptop")
 # In bring-up order: the tree last, because loading it needs the planner side's costmap service.
 BOARD_NAV_NODES = ("controller_server", "behavior_server", "velocity_smoother", "bt_navigator")
 LAPTOP_NAV_NODES = ("planner_server",)
-MAP_NODES = ("map_server",)  # the map is served from the board: the tracker needs it there
+# The pgm server, on the board and off by default: under World R the one map is RTAB-Map's live
+# grid and the board's own cache of it (pepin.mapcache), so a file is only ever the seed of a room
+# nobody has mapped yet (ros/nav.launch.py's map_server argument).
+MAP_NODES = ("map_server",)
 
 HEARTBEAT_TOPIC = "laptop/heartbeat"
 HEARTBEAT_HZ = 2.0
@@ -91,18 +94,25 @@ def nav_nodes(side: str) -> tuple[str, ...]:
     raise ValueError(f"side must be one of {SIDES}, not {side!r}")
 
 
-def runs_here(side: str, node: str, slam: bool = False) -> bool:
+def runs_here(side: str, node: str, slam_frame: bool = False) -> bool:
     """Whether a named piece runs on ``side``: Nav2 nodes, the map, the tracker, the goal server.
 
-    ``slam`` is the online-SLAM mode, where the map does not exist before the drive: RTAB-Map on
-    the laptop builds it and owns the correction, so the board serves no saved map and runs no
-    scan-matching tracker, and one node of its own (``slam_frame``) puts that correction on the
-    board's ``map -> odom``. Exactly one owner of that edge in either mode.
+    THE TRACKER ALWAYS RUNS (World R). It is the AMCL seat — 10 Hz, its own whole-map search for a
+    kidnap, and the one owner of ``map -> odom`` in every situation, whether the map is RTAB-Map's
+    live grid, the board's cache of it or a served file. There is no arrangement left in which the
+    board takes that edge from a message.
+
+    ``slam_frame`` is the retired one, kept reachable and off by default (CLAUDE.md rule 19,
+    ros/nav.launch.py's ``slam`` argument): that node broadcasts ``map -> odom`` from the laptop's
+    correction instead, and it is the one case where the tracker stands down, because two
+    publishers of one edge fight.
     """
-    if node in MAP_NODES or node == "relocalizer":
-        return side in ("all", "board") and not slam
+    if node in MAP_NODES:
+        return side in ("all", "board")
+    if node == "relocalizer":
+        return side in ("all", "board") and not slam_frame
     if node == "slam_frame":
-        return side in ("all", "board") and slam
+        return side in ("all", "board") and slam_frame
     if node == "goal_server":  # it carries the laptop's heartbeat too
         return side in ("all", "laptop")
     if node == "run_recorder":  # the tape is written where the sensors are
@@ -196,14 +206,20 @@ BOARD_PUBLISHES = (
     "scan",
     "tf",
     "tf_static",
-    "map",
     # The map the board's TRACKER is on, republished latched by the relocalizer on every adoption
-    # (relocalizer.TRACKED_MAP_TOPIC): whichever source it took — the served file, a cold-boot
-    # cache, the laptop's /map_lidar — and however the volume has grown since. It has to cross the
-    # bridge because the laptop stamps its candidates and its camera measurements with THAT grid's
-    # id, and the board's own gates refuse a word about "another map"; deriving the id from /map
-    # instead was right only while /map was the one map there was.
+    # (relocalizer.TRACKED_MAP_TOPIC): whichever source it took — the live grid, or the cold-boot
+    # cache of it — and whatever the graph has done to it since. It has to cross the bridge because
+    # the laptop stamps its candidates and its camera measurements with THAT grid's id
+    # (:func:`pepin_bringup.msgs.map_id` is the grid's size and origin), and the board's own gates
+    # refuse a word about "another map". The live grid's id changes at every growth and every
+    # bend; this topic is what keeps the two halves talking about one map anyway, because the
+    # laptop reads the id off the map the BOARD accepted instead of off the one it published.
+    # /map itself is NOT here: under World R the board publishes no map at all (map_server is an
+    # escape hatch for a room nobody has mapped, and its /map then stays local to the board).
     "map_tracked",
+    # "mark where I stand as NAME", from the board's goal client to the laptop's places node: a
+    # topic and not a service, because only topics cross this bridge reliably.
+    "places/mark",
     "odom",
     "odometry/filtered",
     "imu/data_raw",
@@ -224,11 +240,19 @@ BOARD_PUBLISHES = (
 )
 LAPTOP_PUBLISHES = (
     "plan",
+    # The room's places resolved against the graph (latched JSON) and the answer to a mark.
+    "places",
+    "places/marked",
     "pepin/run",
     HEARTBEAT_TOPIC,
     "planner_selector",
     "controller_selector",
-    "rtabmap/map",
+    # THE MAP (World R): RTAB-Map's loop-closed occupancy grid, remapped onto /map by the laptop's
+    # launch, latched, re-rendered whenever its graph changes. It is the one map there is — the
+    # board's tracker matches on it, adopts it under pepin.mapping.MapChoice's gate and republishes
+    # it as /map_tracked for the costmaps — so it crosses in every mode, and the board publishes
+    # nothing on this name.
+    "map",
     "rtabmap/mapGraph",
     "rtabmap/mapPath",
     "rtabmap/info",
@@ -262,21 +286,25 @@ def _names_regex(names: tuple[str, ...]) -> str:
     return "^/(" + "|".join(sorted(set(names))) + ")$" if names else "^$"
 
 
-# The bridge's two modes. "split" (ros/thin.sh on): the board keeps the reflexes, the laptop
-# plans and takes goals. "vision" (ros/thin.sh vision): every drive stays on the board and the
-# bridge carries topics only — RTAB-Map and the camera on the laptop, the operator's Foxglove
-# there too — so what the laptop half would publish in the split (the plan, the global costmap)
-# now comes FROM the board, and the laptop side publishes none of it (a topic allowed as a
-# publisher on both sides loops). No services or actions cross in vision mode: actions over the
-# bridge aborted the navigation container ("Failed to accept new goal", 2026-09-10 16:06).
-# "slam" (ros/thin.sh slam) is vision mode with the map turned around: RTAB-Map on the laptop
-# IS the map, built while the cart drives, so the board serves no saved map and runs no tracker.
-# The grid crosses laptop -> board as /map (the global costmap's static layer reads it,
-# transient local) and the graph's correction as /rtabmap/mapGraph, which pepin_bringup.slam_frame
-# turns into map -> odom ON THE BOARD. /tf itself still crosses one way only (board -> laptop):
-# a topic allowed as a publisher on both sides loops until nothing crosses at all, so the
-# correction travels as a message and becomes a transform where the reflexes look it up.
-BRIDGE_MODES = ("split", "vision", "slam")
+# The bridge's two modes, and they are one question: WHERE NAV2'S PLANNER LIVES. "split"
+# (ros/thin.sh on): the board keeps the reflexes, the laptop plans and takes goals. "vision"
+# (ros/thin.sh vision): every drive stays on the board and the bridge carries topics only —
+# RTAB-Map and the camera on the laptop, the operator's Foxglove there too — so what the laptop
+# half would publish in the split (the plan, the global costmap) now comes FROM the board, and the
+# laptop side publishes none of it (a topic allowed as a publisher on both sides loops). No
+# services or actions cross in vision mode: actions over the bridge aborted the navigation
+# container ("Failed to accept new goal", 2026-09-10 16:06).
+#
+# THERE IS NO "slam" MODE ANY MORE (World R, 2026-09-19). It was vision mode with the map turned
+# around — the laptop's grid as /map, no tracker on the board, the graph's correction broadcast
+# there by pepin_bringup.slam_frame — and every one of those is now simply how the stack runs: the
+# laptop's grid IS /map in both modes, the tracker always runs and always owns map -> odom, and
+# the graph's word reaches it as a measurement like the camera's. What is left of that mode is the
+# retired frame owner behind a launch argument (:func:`runs_here`, ros/nav.launch.py's ``slam``),
+# for which /map_odom still has a route below. /tf itself crosses one way only (board -> laptop):
+# a topic allowed as a publisher on both sides loops until nothing crosses at all, which is why
+# every correction travels as a message and becomes a transform where the reflexes look it up.
+BRIDGE_MODES = ("split", "vision")
 VISION_BOARD_PUBLISHES = (
     *BOARD_PUBLISHES,
     "plan",
@@ -287,7 +315,11 @@ VISION_BOARD_PUBLISHES = (
     "amcl_path",
 )
 VISION_LAPTOP_PUBLISHES = (
-    "rtabmap/map",
+    "places",  # see LAPTOP_PUBLISHES
+    "places/marked",
+    # THE MAP: RTAB-Map's grid, remapped onto /map by the laptop's launch, latched (see
+    # LAPTOP_PUBLISHES). The board's tracker matches on it and nothing else.
+    "map",
     "rtabmap/mapGraph",
     "rtabmap/mapPath",
     "rtabmap/info",
@@ -295,7 +327,7 @@ VISION_LAPTOP_PUBLISHES = (
     "contact_scan",
     # The laptop's whole-map watchdog (pepin_bringup.laptop_localizer) proposing a place to the
     # board's tracker, once a second, as JSON. Vision mode only: this is where the laptop sees
-    # the board's /scan and /map, and in SLAM mode there is no saved map to search.
+    # the board's /scan and the map the board accepted (/map_tracked).
     "localization/candidate",
     # ...and the camera's poses, measured on the laptop out of /depth_scan and /contact_scan and
     # fused by the board's tracker (pepin.measurements). The scans themselves still cross for the
@@ -307,66 +339,23 @@ VISION_LAPTOP_PUBLISHES = (
     # by a gate of its own on the board. A topic apart from the camera's because the board's
     # measurement gate fuses everything on one topic into one word under one name.
     "localization/graph_measurement",
-    # ...and the lidar layer of that same volume, on a topic of its own (depth_fusion's
-    # lidar_map flag): the map the board's tracker matches on when its map_topic flag names it.
-    # NOT /map — the board's map_server owns that in this mode, and two publishers of one /map
-    # is the failure of 2026-09-10. This one nobody else publishes, so it needs no owner rule.
-    "map_lidar",
+    # THE RETIRED FRAME OWNER's channel (CLAUDE.md rule 19): with ros/nav.launch.py's ``slam``
+    # argument on, the board runs no tracker and pepin_bringup.slam_frame broadcasts map -> odom
+    # from this message instead (published by pepin_bringup.rtabmap_frame's own ``slam`` switch).
+    # Nothing publishes it in the arrangement that ships, so the route carries nothing and the
+    # flow watch never judges it (:data:`ON_DEMAND_TOPICS`) — it is here so that turning the old
+    # behaviour back on needs no new bridge config.
+    "map_odom",
     VO_TOPIC,
     BRIDGE_KICK_TOPIC,
 )
-# The saved map's own topics, the ones SLAM mode has no publisher for: /map is the laptop's here,
-# and the rest are the tracker's, which does not run because nothing matches a scan against a map
-# that does not exist yet. Named, not spelled out below, so a topic added to the vision list
-# reaches SLAM mode by itself unless it is one of these.
-_NOT_IN_SLAM = (
-    "map",
-    "tracker_pose",
-    "localization_fit",
-    "localization/sigma",
-    "localization/sources",
-)
-# The board drives exactly as in vision mode, minus those.
-SLAM_BOARD_PUBLISHES = tuple(n for n in VISION_BOARD_PUBLISHES if n not in _NOT_IN_SLAM)
-# RTAB-Map's grid is remapped onto /map in this mode (there is no second map to fight), so
-# /rtabmap/map is not published at all; the graph and its correction still are.
-SLAM_LAPTOP_PUBLISHES = (
-    "map",
-    "localization/measurement",  # the camera's poses; harmless where no tracker listens
-    "map_odom",  # RTAB-Map's correction as a message; the board broadcasts it as map -> odom
-    "rtabmap/mapGraph",
-    "rtabmap/mapPath",
-    "rtabmap/info",
-    "depth_scan",
-    "contact_scan",
-    VO_TOPIC,
-    BRIDGE_KICK_TOPIC,
-)
-
-
-# Who publishes /map in each mode — one owner, always. In "split" and "vision" the board serves
-# the saved map (:data:`MAP_NODES` run there, and the tracker beside them needs it local); in
-# "slam" there is no saved map and the laptop's own grid IS /map. A second publisher would feed
-# the costmaps two maps and make the tracker rebuild on whichever arrived last, so anything on
-# the laptop that can publish a map (pepin_bringup.depth_fusion with map_source=volume) asks
-# here first and stays quiet where the answer is "board".
-#
-# ONE OWNER AND ONE MAP ARE NOT THE SAME QUESTION, and the answer to the second is not in this
-# table. The board keeps /map in the known-map modes because it must boot and localise with the
-# laptop off (CLAUDE.md rule 20) — but what it serves there is now the pair the laptop EXPORTS
-# from the fused volume at every snapshot (pepin.worldmap.export_path_for), so the file on the
-# board is a cache of the volume rather than a second, frozen picture of the room. The live
-# volume rides beside it on /map_lidar, with the same cells and — because the exported pair
-# carries the volume's own footprint — the same map id. Moving /map to the laptop in those modes
-# would break rule 20 and is not how "one map" is reached.
-MAP_OWNER = {"split": "board", "vision": "board", "slam": "laptop"}
-
-
-def map_owner(mode: str = "split") -> str:
-    """The side that publishes /map in ``mode`` ("board" or "laptop")."""
-    if mode not in BRIDGE_MODES:
-        raise ValueError(f"a bridge mode is one of {BRIDGE_MODES}, not {mode!r}")
-    return MAP_OWNER[mode]
+# ONE MAP AND ONE OWNER OF IT. Under World R the laptop publishes /map in both modes — RTAB-Map's
+# grid and nothing else — and the board publishes no map at all: the tracker republishes what it
+# adopted as /map_tracked, which is the name both costmaps' static layers read
+# (ros/params/nav2_params.yaml). There is no table of owners left to consult, and no mode in which
+# a second map exists to fight the first. The one way back to a file is ros/nav.launch.py's
+# `map_server:=true` for a room nobody has mapped; that /map is served on the board and stays
+# there, because a bridge routes only what these lists name.
 
 
 def bridge_allow(side: str, mode: str = "split") -> dict[str, list[str]]:
@@ -377,8 +366,6 @@ def bridge_allow(side: str, mode: str = "split") -> dict[str, list[str]]:
         laptop: _Names = (LAPTOP_PUBLISHES, LAPTOP_SERVES, LAPTOP_ACTIONS)
     elif mode == "vision":
         board, laptop = (VISION_BOARD_PUBLISHES, (), ()), (VISION_LAPTOP_PUBLISHES, (), ())
-    elif mode == "slam":
-        board, laptop = (SLAM_BOARD_PUBLISHES, (), ()), (SLAM_LAPTOP_PUBLISHES, (), ())
     else:
         raise ValueError(f"a bridge mode is one of {BRIDGE_MODES}, not {mode!r}")
     if side == "board":
@@ -471,7 +458,7 @@ def bridge_config(side: str, mode: str = "split") -> dict[str, object]:
 def bridge_config_name(side: str, mode: str = "split") -> str:
     """The file under ros/ that carries :func:`bridge_config` for ``side`` and ``mode``: the
     board's unit reads it as ``$PEPIN_BRIDGE_CONFIG`` (ros/thin.sh sets it with the mode),
-    ros/laptop.sh picks its own by the side and the SLAM flag the board reports."""
+    ros/laptop.sh picks its own by the side the board reports."""
     if mode not in BRIDGE_MODES:
         raise ValueError(f"a bridge mode is one of {BRIDGE_MODES}, not {mode!r}")
     return f"zenoh-bridge-{side}.json" if mode == "split" else f"zenoh-bridge-{side}-{mode}.json"
@@ -745,9 +732,9 @@ def far_dead_routes(routes: Sequence[BridgeRoute], zid: str) -> tuple[str, ...]:
 # 0.8 Hz and /imu/data_raw at 3.7 Hz on the laptop until the next ordered restart).
 ON_DEMAND_TOPICS: frozenset[str] = frozenset(
     {
+        # The one map: latched, and republished only when RTAB-Map's graph changes it. A grid that
+        # says nothing for a minute is a room whose graph has not moved, not a dead route.
         "/map",
-        "/map_camera",
-        "/map_lidar",
         # Latched like /map and for the same reason: published once per adoption, and a watch that
         # judged its silence would restart a healthy bridge (2026-09-13 19:12).
         "/map_tracked",
@@ -758,9 +745,11 @@ ON_DEMAND_TOPICS: frozenset[str] = frozenset(
         "/goal_pose",
         "/pepin/run_status",
         "/rtabmap/info",
-        "/rtabmap/map",
         "/rtabmap/mapGraph",
         "/rtabmap/mapPath",
+        # The retired frame owner's correction: nobody publishes it in the arrangement that ships,
+        # and its route exists only so rule 19's way back needs no new config.
+        "/map_odom",
         f"/{BRIDGE_KICK_TOPIC}",  # one message per repair, and none at all on a healthy link
     }
 )
@@ -886,6 +875,7 @@ LAPTOP_SLAM_NODES = (
     "/sensor_pack",  # the one input RTAB-Map reads: a snapshot of whatever sensor is alive
     "/rtabmap/rtabmap",
     "/rtabmap_frame",
+    "/places",  # the room's vocabulary, resolved against the graph
     "/foxglove_bridge",
     "/rgbd_odometry",  # the camera's odometry (vo:=true, the default)
     "/visual_odometry",  # and the node that gates it for the board's EKF

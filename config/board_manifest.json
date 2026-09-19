@@ -24,7 +24,7 @@
     {
       "name": "nav2_container",
       "match": "component_container_isolated .*__node:=nav2_container",
-      "role": "Nav2 in one process: the map server, the AMCL-seat tracker, the planner, the controller loop that drives the wheels, the behaviours and the behaviour tree.",
+      "role": "Nav2 in one process: the AMCL-seat tracker's costmaps, the planner, the controller loop that drives the wheels, the behaviours and the behaviour tree (and a map server only when one is asked for).",
       "on_board_because": [
         "real-time",
         "wifi-loss"
@@ -33,7 +33,7 @@
       "components": [
         {
           "name": "map_server",
-          "role": "serves the saved map (absent in SLAM mode)"
+          "role": "serves a pgm (nav.launch.py map_server:=true, OFF by default: the one map is the tracker's live grid and its cache, and a file is only the seed of a room nobody has mapped)"
         },
         {
           "name": "planner_server",
@@ -110,7 +110,7 @@
     {
       "name": "relocalizer",
       "match": "pepin_bringup/relocalizer|pepin_bringup\\.relocalizer",
-      "role": "Scan-matching pose tracker and kidnapped-robot recovery: matches /scan against the saved map, owns map -> odom, searches the whole map when the fit dies.",
+      "role": "Scan-matching pose tracker and kidnapped-robot recovery, and the ONE owner of map -> odom in every situation: matches /scan against the map RTAB-Map's graph publishes (or, with nothing live, the board's own cache of it), republishes that map as /map_tracked for the costmaps, and searches the whole map when the fit dies.",
       "on_board_because": [
         "real-time",
         "wifi-loss"
@@ -329,7 +329,7 @@
     {
       "name": "slam_frame",
       "match": "pepin_bringup\\.slam_frame",
-      "role": "In online SLAM, broadcasts the laptop's RTAB-Map correction as map -> odom — the tracker's seat while there is no saved map.",
+      "role": "RETIRED (World R, 2026-09-19), off by default and kept reachable by CLAUDE.md rule 19: broadcasts the laptop's RTAB-Map correction as map -> odom instead of the tracker, from /map_odom.",
       "on_board_because": [
         "real-time"
       ],
@@ -339,7 +339,7 @@
         "cpu_percent": 20.0,
         "rss_mb": 90.0
       },
-      "note": "A guess from the other small rclpy nodes: it runs only in SLAM mode (never together with the relocalizer, which it replaces), and no census has caught it yet."
+      "note": "A guess from the other small rclpy nodes, and it will stay one: this node runs only with nav.launch.py's slam:=true (the board's PEPIN_SLAM), never together with the relocalizer, which owns map -> odom in every situation the stack ships with. No census has caught it."
     },
     {
       "name": "link_watch",

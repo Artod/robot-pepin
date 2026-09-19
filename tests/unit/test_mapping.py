@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pytest
 
-from pepin.mapping import GridSpec, MapChoice, OccupancyGrid, transform_to_world
+from pepin.mapping import GridSpec, MapChoice, OccupancyGrid, map_shift, transform_to_world
 from pepin.odometry import Pose2D
 
 
@@ -39,7 +39,7 @@ def test_log_odds_are_clamped() -> None:
     assert grid.log_odds.max() <= 5.0 and grid.log_odds.min() >= -5.0
 
 
-# ---- MapChoice: which map a tracker matches on -----------------------------------------------
+# ---- MapChoice: when a tracker takes the next picture of the one map -------------------------
 
 
 class Adopted:
@@ -56,52 +56,39 @@ def offer(choice: MapChoice, source: str, digest: str, now: float, taken: Adopte
     return choice.offer(source, lambda: digest, now, taken)
 
 
-def test_the_first_map_on_the_wanted_topic_is_adopted_and_another_topic_is_not() -> None:
-    choice, taken = MapChoice("map"), Adopted()
-    assert not offer(choice, "map_lidar", "a", 0.0, taken), "nobody asked for that topic"
-    assert offer(choice, "map", "b", 0.0, taken)
-    assert (taken.count, choice.source, choice.digest) == (1, "map", "b")
+def test_the_first_grid_on_the_one_topic_is_adopted() -> None:
+    """One map, one topic (World R): there is nothing to choose between, only when to take the
+    next picture of it."""
+    choice, taken = MapChoice(), Adopted()
+    assert offer(choice, "/map", "b", 0.0, taken)
+    assert (taken.count, choice.source, choice.digest) == (1, "/map", "b")
+    assert choice.adoptions == 1
 
 
 def test_a_republished_map_is_ignored_while_the_refresh_is_zero() -> None:
-    """The served file's behaviour, and the default: the first map and no other. /map_lidar is
-    republished every second, and every adoption rebuilds the matcher on four A53 cores."""
-    choice, taken = MapChoice("map_lidar"), Adopted()
-    offer(choice, "map_lidar", "a", 0.0, taken)
+    """A served file's behaviour: the first map and no other. RTAB-Map's grid arrives once a
+    second, and every adoption rebuilds the matcher on four A53 cores."""
+    choice, taken = MapChoice(), Adopted()
+    offer(choice, "/map", "a", 0.0, taken)
     for t in (1.0, 2.0, 600.0):
-        assert not offer(choice, "map_lidar", "changed", t, taken)
+        assert not offer(choice, "/map", "changed", t, taken)
     assert taken.count == 1 and choice.take_ignored() == 3 and choice.take_ignored() == 0
 
 
 def test_with_a_refresh_a_changed_map_is_taken_and_an_unchanged_one_is_not() -> None:
-    choice, taken = MapChoice("map_lidar", refresh_s=30.0), Adopted()
-    offer(choice, "map_lidar", "a", 0.0, taken)
-    assert not offer(choice, "map_lidar", "b", 29.0, taken), "too soon"
-    assert not offer(choice, "map_lidar", "a", 31.0, taken), "old enough, but the same cells"
-    assert offer(choice, "map_lidar", "b", 31.0, taken)
-    assert taken.count == 2 and choice.digest == "b"
-
-
-def test_moving_the_flag_adopts_the_other_map_whatever_the_refresh_says() -> None:
-    """A map on the OTHER topic is the operator asking for it: no gate applies, and the caller
-    is told to offer what every topic last published (a served map speaks once, latched)."""
-    choice, taken = MapChoice("map"), Adopted()
-    offer(choice, "map", "file", 0.0, taken)
-    moved = Adopted()
-    choice.on_choice(moved)
-    choice.switch("map_topic", "map_lidar")
-    assert moved.count == 1 and choice.wanted == "map_lidar"
-    assert offer(choice, "map_lidar", "volume", 0.1, taken)
-    assert taken.count == 2 and choice.source == "map_lidar"
-    choice.switch("map_topic", "map_lidar")
-    assert moved.count == 1, "the same topic again is not a move"
+    choice, taken = MapChoice(refresh_s=30.0), Adopted()
+    offer(choice, "/map", "a", 0.0, taken)
+    assert not offer(choice, "/map", "b", 29.0, taken), "too soon"
+    assert not offer(choice, "/map", "a", 31.0, taken), "old enough, but the same cells"
+    assert offer(choice, "/map", "b", 31.0, taken)
+    assert taken.count == 2 and choice.digest == "b" and choice.adoptions == 2
 
 
 def test_the_refresh_is_a_live_switch_of_its_own() -> None:
-    choice, taken = MapChoice("map_lidar"), Adopted()
-    offer(choice, "map_lidar", "a", 0.0, taken)
+    choice, taken = MapChoice(), Adopted()
+    offer(choice, "/map", "a", 0.0, taken)
     choice.switch("map_refresh_s", 10.0)
-    assert offer(choice, "map_lidar", "b", 11.0, taken) and taken.count == 2
+    assert offer(choice, "/map", "b", 11.0, taken) and taken.count == 2
 
 
 def test_the_digest_is_read_only_when_the_answer_hangs_on_the_cells() -> None:
@@ -112,78 +99,88 @@ def test_the_digest_is_read_only_when_the_answer_hangs_on_the_cells() -> None:
         reads()
         return "a"
 
-    choice = MapChoice("map_lidar")
-    choice.offer("map_lidar", digest, 0.0, Adopted())  # the first: the cells are remembered
-    choice.offer("map", digest, 1.0, Adopted())  # another topic
-    choice.offer("map_lidar", digest, 2.0, Adopted())  # a republication under refresh 0
+    choice = MapChoice()
+    choice.offer("/map", digest, 0.0, Adopted())  # the first: the cells are remembered
+    choice.offer("/map", digest, 2.0, Adopted())  # a republication under refresh 0
     assert reads.count == 1
 
 
-def test_the_wanted_map_never_speaking_falls_back_to_the_one_that_is_there() -> None:
-    """The board serves /map itself and reads /map_lidar from the laptop: a tracker asking for
-    the laptop's map with the wifi down must not wait for ever (CLAUDE.md rule 20)."""
-    choice, taken = MapChoice("map_lidar", fallback="map", fallback_after_s=10.0), Adopted()
-    assert choice.lapsed(0.0) is None, "the clock starts at the first ask"
-    assert choice.lapsed(9.0) is None
-    assert choice.lapsed(10.0) == "map"
-    assert offer(choice, "map", "file", 10.0, taken)
-    assert (taken.count, choice.source, choice.fell_back) == (1, "map", True)
-
-    assert choice.lapsed(60.0) is None, "a map is in use: the fallback is over"
-    assert offer(choice, "map_lidar", "volume", 61.0, taken), "the wanted map still replaces it"
-    assert (taken.count, choice.source, choice.fell_back) == (2, "map_lidar", False)
-
-
-def test_a_map_in_use_is_never_dropped_because_its_publisher_went_quiet() -> None:
-    """A grid in memory does not stop working when the laptop does; a rebuild on a lesser map
-    would cost the board 15 s of lattice and every candidate it holds, for nothing."""
-    choice, taken = MapChoice("map_lidar", fallback="map", fallback_after_s=10.0), Adopted()
-    offer(choice, "map_lidar", "volume", 0.0, taken)
-    assert choice.lapsed(1000.0) is None and not choice.fell_back
-
-
-def test_the_fallback_is_a_live_switch_and_zero_waits_for_ever() -> None:
-    choice = MapChoice("map_lidar", fallback="map", fallback_after_s=10.0)
-    choice.switch("map_fallback_s", 0.0)
-    choice.lapsed(0.0)
-    assert choice.lapsed(1000.0) is None, "0: the behaviour before the fallback existed"
-    choice.switch("map_fallback_s", 5.0)
-    choice.lapsed(1000.0)
-    assert choice.lapsed(1006.0) == "map"
-
-
-def test_moving_the_flag_restarts_the_wait_for_the_new_map() -> None:
-    """The tracker asked for another map at this moment; the seconds it spent waiting for the
-    previous one are not seconds it waited for this one."""
-    choice = MapChoice("map", fallback="map", fallback_after_s=10.0)
-    choice.lapsed(0.0)
-    choice.switch("map_topic", "map_lidar")
-    assert choice.lapsed(11.0) is None, "the wait for map_lidar starts here"
-    assert choice.lapsed(21.0) == "map"
+def test_a_republication_is_refused_before_anything_reads_its_cells() -> None:
+    """The board's own budget: RTAB-Map offers a grid a second and nearly all of them are refused,
+    so neither the digest nor the emptiness question may be asked of one that is too soon."""
+    reads = Adopted()
+    choice = MapChoice()
+    choice.offer("/map", lambda: "a", 0.0, Adopted(), empty=lambda: bool(reads()))
+    assert reads.count == 1, "the first grid is asked once"
+    choice.offer("/map", lambda: "b", 0.5, Adopted(), empty=lambda: bool(reads()))
+    assert reads.count == 1 and choice.take_ignored() == 1
 
 
 def test_a_map_with_nothing_in_it_is_not_adopted() -> None:
-    """An unknown room's first publication is an all-unknown grid. Adopting it spends the single
-    adoption a refresh_s of 0 allows, and the tracker then refuses every real map for the rest of
-    the session — so it is turned away, and counted, until the first sweep fills it."""
+    """A newborn database can publish a grid with no known cell in it. Adopting that one spends the
+    single adoption a refresh_s of 0 allows, and the tracker then refuses every real map for the
+    rest of the session — so it is turned away, and counted, until a node fills it."""
     choice = MapChoice()
     taken: list[str] = []
     blank = True
 
     def offer() -> bool:
         return choice.offer(
-            "map", lambda: "d1", 0.0, lambda: taken.append("map"), empty=lambda: blank
+            "/map", lambda: "d1", 0.0, lambda: taken.append("/map"), empty=lambda: blank
         )
 
-    assert not offer() and not taken and choice.source == ""
+    assert not offer() and not taken and choice.source == "" and choice.adoptions == 0
     assert choice.take_ignored() == 1, "the wait is visible"
     blank = False
-    assert offer() and taken == ["map"] and choice.source == "map"
+    assert offer() and taken == ["/map"] and choice.source == "/map"
 
 
 def test_a_caller_that_asks_nothing_about_the_cells_behaves_as_before() -> None:
     """The question is optional: every existing caller passes four arguments and is unchanged."""
     choice = MapChoice()
     taken: list[str] = []
-    assert choice.offer("map", lambda: "d1", 0.0, lambda: taken.append("map"))
-    assert taken == ["map"]
+    assert choice.offer("/map", lambda: "d1", 0.0, lambda: taken.append("/map"))
+    assert taken == ["/map"]
+
+
+# ---- map_shift: what a re-rendered grid did to the one before it ------------------------------
+
+
+def _grid(x_min: float = 0.0, cells: int = 4) -> OccupancyGrid:
+    return OccupancyGrid(
+        GridSpec(
+            resolution_m=0.05,
+            x_min_m=x_min,
+            y_min_m=0.0,
+            width_m=cells * 0.05,
+            height_m=cells * 0.05,
+        )
+    )
+
+
+def test_the_first_map_is_compared_with_nothing() -> None:
+    assert map_shift(None, _grid()) is None
+
+
+def test_a_grid_of_the_same_geometry_reports_the_cells_that_changed() -> None:
+    """The ordinary re-render: RTAB-Map assembled the same canvas again and a few cells moved."""
+    before, after = _grid(), _grid()
+    after.log_odds[1, 1] = 4.0
+    after.log_odds[2, 2] = -4.0
+    shift = map_shift(before, after)
+    assert shift is not None and not shift.resized and shift.changed_cells == 2
+    assert shift.origin_m == 0.0 and "2 cells changed" in shift.phrase()
+
+
+def test_a_bent_map_reports_its_moved_origin_and_counts_no_cells() -> None:
+    """A loop closure clears RTAB-Map's global map and re-assembles it, so the canvas itself moves
+    (rtabmap/core/GlobalMap.cpp). Across two lattices a cell is not the same cell, so nothing is
+    counted and the phrase says the map was resized."""
+    shift = map_shift(_grid(), _grid(x_min=-0.30))
+    assert shift is not None and shift.resized and shift.changed_cells == 0
+    assert shift.origin_m == pytest.approx(0.30) and "resized" in shift.phrase()
+
+
+def test_a_grown_map_is_a_resize_even_at_the_same_origin() -> None:
+    shift = map_shift(_grid(), _grid(cells=8))
+    assert shift is not None and shift.resized and shift.origin_m == 0.0

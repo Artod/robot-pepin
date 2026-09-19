@@ -16,12 +16,13 @@ map, tracker) and gets a link watch, the laptop takes the planner and the goal s
 itself is data in ``pepin.deployment`` so a test can hold it; this file only reads it.
 Command chain: controller/behaviors -> cmd_vel_nav -> velocity_smoother -> /cmd_vel -> base_bridge.
 
-``slam:=true`` (ros/thin.sh slam) is the same stack on a map that does not exist yet: RTAB-Map on
-the laptop builds it while the cart drives and publishes it as ``/map``, which the global
-costmap's static layer reads (transient local, and every planner here allows unknown space), so
-this launch starts no map_server and no scan-matching tracker — pepin_bringup.slam_frame owns
-``map -> odom`` instead, from the correction the laptop sends it. One map, one owner of the
-frame, in either mode.
+THE TRACKER ALWAYS RUNS and owns ``map -> odom`` (World R): the map is RTAB-Map's live grid from
+the laptop (or, with nothing live, the board's own cache of it), and this node is the AMCL seat on
+it in every situation — a known room, a room being mapped this minute, a kidnap, a link that is
+down. ``slam:=true`` is the RETIRED arrangement, kept reachable by CLAUDE.md rule 19 and off by
+default: there the tracker stands down and pepin_bringup.slam_frame broadcasts ``map -> odom`` from
+the laptop's correction instead (``/map_odom``), because two publishers of one edge fight. The
+board's own systemd carries it as ``PEPIN_SLAM`` in /etc/default/pepin-ros.
 """
 
 from launch import LaunchDescription
@@ -70,10 +71,9 @@ def _after_ghost(admin: str, *names: str) -> str:
 
 def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     side = LaunchConfiguration("side").perform(context)
-    # Online SLAM: the map is being built on the laptop while the cart drives, so nothing here
-    # serves a saved map and nothing here matches a scan against one. The global costmap's static
-    # layer takes /map over the bridge and pepin_bringup.slam_frame owns map -> odom instead.
-    slam = LaunchConfiguration("slam").perform(context).lower() == "true"
+    # The retired frame owner (CLAUDE.md rule 19): the tracker stands down and
+    # pepin_bringup.slam_frame broadcasts map -> odom from the laptop's correction instead.
+    slam_frame = LaunchConfiguration("slam").perform(context).lower() == "true"
     # A pgm served by map_server is no longer part of the running loop: the relocalizer republishes
     # the map it tracks on (pepin_bringup.relocalizer.TRACKED_MAP_TOPIC) and both costmaps' static
     # layers read THAT (ros/params/nav2_params.yaml), and the board's own cold-boot map is the cache
@@ -127,7 +127,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         ),
     }
     nodes = [catalogue[name] for name in nav_nodes(side)]
-    if map_server and runs_here(side, "map_server", slam):
+    if map_server and runs_here(side, "map_server"):
         nodes.append(catalogue["map_server"])
         nodes.append(
             ComposableNode(
@@ -169,11 +169,11 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     )
     # The ROS nodes; the watches below are plain processes and start at once.
     actions: list = [container]  # type: ignore[type-arg]
-    if runs_here(side, "slam_frame", slam):
-        # The laptop's RTAB-Map correction, broadcast here as map -> odom
-        # (pepin_bringup.slam_frame): /tf crosses the bridge board -> laptop only, so the
-        # correction arrives as a message on /map_odom and becomes a transform where Nav2 and
-        # the behaviours look it up. The tracker's seat while there is no map to track against.
+    if runs_here(side, "slam_frame", slam_frame):
+        # The RETIRED owner of map -> odom, off by default: the laptop's RTAB-Map correction
+        # broadcast here (pepin_bringup.slam_frame), because /tf crosses the bridge board -> laptop
+        # only and the correction therefore arrives as a message on /map_odom. Reachable so a
+        # regression in the tracker's own ownership can be turned off in the field, not reverted.
         actions.append(
             ExecuteProcess(
                 cmd=["python3", "-m", "pepin_bringup.slam_frame"],
@@ -182,8 +182,9 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 **RESPAWN,
             )
         )
-    if runs_here(side, "relocalizer", slam):
-        # Kidnapped-robot recovery: the whole map is searched when the scan stops fitting.
+    if runs_here(side, "relocalizer", slam_frame):
+        # The pose tracker and kidnapped-robot recovery, the one owner of map -> odom: the whole
+        # map is searched when the scan stops fitting.
         # Respawned, it re-seeds from /maps/last_pose.json (written every 2 s while the fit is
         # good): a kick at rest costs the seconds it takes to start, nothing else.
         actions.append(
@@ -209,14 +210,9 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     if runs_here(side, "goal_server"):
         # Waits for orders on a socket so a goal costs a socket write, not a client boot.
         # Its places book follows the map in use: /maps/flat3.yaml -> /maps/flat3.places.yaml.
-        # A SLAM session gets a book of its own, empty until the drive marks something: the saved
-        # map's places are coordinates in a frame this new map does not share, and "go printer"
-        # would drive at a spot that means nothing here.
         places: object = PythonExpression(
             ["'", LaunchConfiguration("map"), "'.rsplit('.', 1)[0] + '.places.yaml'"]
         )
-        if slam:
-            places = "/maps/slam.places.yaml"
         actions.append(
             Node(
                 package="pepin_bringup",
@@ -285,7 +281,9 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("map", default_value="/maps/20260903_182653_lap3_loop.yaml"),
             DeclareLaunchArgument("params_file", default_value="/params/nav2_params.yaml"),
             DeclareLaunchArgument("side", default_value="all", choices=list(SIDES)),
-            # Online SLAM (ros/thin.sh slam): no map_server, no tracker, /map from the laptop.
+            # The retired owner of map -> odom (rule 19): pepin_bringup.slam_frame instead of the
+            # tracker, from the laptop's /map_odom. Off — the tracker owns that edge in every
+            # situation now — and reachable through the board's PEPIN_SLAM.
             DeclareLaunchArgument("slam", default_value="false"),
             # The pgm is out of the loop: on a known room the tracker's own map (live, or the cache
             # it wrote itself) is the only map. true serves `map` through map_server again, which is

@@ -2,8 +2,6 @@
 # Flip the board between the whole stack and the reflex half. Usage:
 #   ros/thin.sh on      board runs side=board + the zenoh bridge; the laptop plans and takes goals
 #   ros/thin.sh vision  board runs the whole stack AND the bridge: the laptop only maps and watches
-#   ros/thin.sh slam    online SLAM: the laptop's RTAB-Map IS the map (no map server, no tracker
-#                       on the board); Nav2 drives the map while it grows
 #   ros/thin.sh off     board runs the whole stack, bridge stopped
 #   ros/thin.sh kick NODE  restart one node of the board's stack from the synced sources (seconds)
 #   ros/thin.sh         show the current side and bridge
@@ -13,7 +11,8 @@ BOARD="${PEPIN_HOST:-10.0.0.187}"
 # The nodes a kick can reach on the board and the line each prints once up (the kick waits for
 # it): our own processes of nav.launch.py, and the neck node of robot.launch.py (ros/feature.sh
 # neck on). The goal server is here on side=all only (on side=board it lives on the laptop:
-# ros/laptop.sh kick goal_server).
+# ros/laptop.sh kick goal_server). slam_frame is the retired owner of map -> odom and only runs
+# with PEPIN_SLAM=true (CLAUDE.md rule 19), but a kick still reaches it where it does.
 KICKABLE="relocalizer run_recorder goal_server neck_state slam_frame"
 kick_line() {  # node name -> start-up line
     case "$1" in
@@ -42,25 +41,15 @@ case "${1:-}" in
         # RTAB-Map and the camera on the laptop. Actions over the bridge aborted the navigation
         # container ("Failed to accept new goal", 2026-09-10 16:06); topics never failed.
         # The bridge reads the vision allow-list (zenoh-bridge-board-vision.json, synced with
-        # ros/: the board publishes the plan and the costmaps too, the laptop only its map and
-        # depth) through PEPIN_BRIDGE_CONFIG, written here together with the mode.
+        # ros/: the board publishes the plan and the costmaps too, the laptop the ONE map — its
+        # RTAB-Map grid on /map — and the camera's scans and words) through PEPIN_BRIDGE_CONFIG,
+        # written here together with the mode. PEPIN_SLAM is deleted in the same breath: there is
+        # no mode in which the board takes map -> odom from a message any more, and the tracker
+        # stands down only if somebody sets that line by hand (CLAUDE.md rule 19).
         ssh "root@$BOARD" "sed -i '/^PEPIN_SIDE=/d; /^PEPIN_BRIDGE=/d; /^PEPIN_BRIDGE_CONFIG=/d; /^PEPIN_SLAM=/d' /etc/default/pepin-ros; printf 'PEPIN_BRIDGE=on\\nPEPIN_BRIDGE_CONFIG=zenoh-bridge-board-vision.json\\n' >> /etc/default/pepin-ros;
             test -f /root/pepin-ros/zenoh-bridge-board-vision.json || echo 'WARNING: no zenoh-bridge-board-vision.json on the board: ros/sync.sh first';
             systemctl enable pepin-bridge >/dev/null 2>&1; systemctl daemon-reload; systemctl restart pepin-ros && sleep 8; systemctl is-active pepin-ros pepin-bridge | tr '\\n' ' '; echo"
         echo "board on side=all with the bridge; now: ros/laptop.sh (bridge) and ros/laptop.sh vslam" ;;
-    slam)
-        # Online SLAM. The robot is put somewhere unknown: there is no saved map, so this board
-        # serves none (no map_server) and matches no scan against one (no relocalizer). The
-        # laptop's RTAB-Map builds ONE map from the camera and the lidar, publishes it as /map,
-        # and sends its correction as /map_odom, which pepin_bringup.slam_frame broadcasts here
-        # as map -> odom. Nav2 stays on, because driving the map while it grows is the point.
-        # The mode and the bridge's allow-list are written in the same breath on purpose: with
-        # the board still publishing a /map of its own the costmap would take whichever map
-        # arrived last, and "one map for both sensors" would be two.
-        ssh "root@$BOARD" "sed -i '/^PEPIN_SIDE=/d; /^PEPIN_BRIDGE=/d; /^PEPIN_BRIDGE_CONFIG=/d; /^PEPIN_NAV=/d; /^PEPIN_SLAM=/d; /^PEPIN_SLAM_TOOLBOX=/d' /etc/default/pepin-ros; printf 'PEPIN_BRIDGE=on\\nPEPIN_BRIDGE_CONFIG=zenoh-bridge-board-slam.json\\nPEPIN_NAV=true\\nPEPIN_SLAM=true\\nPEPIN_SLAM_TOOLBOX=false\\n' >> /etc/default/pepin-ros;
-            test -f /root/pepin-ros/zenoh-bridge-board-slam.json || echo 'WARNING: no zenoh-bridge-board-slam.json on the board: ros/sync.sh first';
-            systemctl enable pepin-bridge >/dev/null 2>&1; systemctl daemon-reload; systemctl restart pepin-ros && sleep 8; systemctl is-active pepin-ros pepin-bridge | tr '\\n' ' '; echo"
-        echo "board in SLAM mode (Nav2 on, no map server, no tracker); now: ros/laptop.sh, then ros/laptop.sh vslam" ;;
     off)
         ssh "root@$BOARD" "sed -i '/^PEPIN_SIDE=/d; /^PEPIN_BRIDGE=/d; /^PEPIN_BRIDGE_CONFIG=/d; /^PEPIN_SLAM=/d' /etc/default/pepin-ros; systemctl disable --now pepin-bridge >/dev/null 2>&1; docker rm -f zenoh-bridge >/dev/null 2>&1; systemctl restart pepin-ros && sleep 8; systemctl is-active pepin-ros; true"
         echo "board on side=all (whole stack on the robot)" ;;

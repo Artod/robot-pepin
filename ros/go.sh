@@ -3,8 +3,10 @@
 # so a command costs one ssh hop and a socket write instead of booting a client (8-15 s before).
 #   ros/go.sh printer | home | NAME     drive to a named place
 #   ros/go.sh -1.0 0.3 [YAW_DEG]        drive to map coordinates
-#   ros/go.sh mark NAME                 remember this spot under NAME
-#   ros/go.sh where | places | cancel
+#   ros/go.sh mark NAME                 remember this spot under NAME, in RTAB-Map's own graph:
+#                                       the labelled node beside the cart plus the cart's offset
+#                                       from it, so the place rides the node when a loop closes
+#   ros/go.sh where | places | cancel   places lists both books: the graph's and the map file's
 #   ros/go.sh planner navfn|lattice|theta|smac|hybrid   swap the planner (and its controller)
 #   ros/go.sh trip                      printer, then home — the round trip, one command
 #   ros/go.sh round [NAME]              one full turn in place, judged by the gyro, recorded
@@ -27,9 +29,16 @@ case "${1:-}" in
         NAME="${2:-move}"; shift 2 2>/dev/null || shift $#
         ssh -o ConnectTimeout=10 "root@$BOARD" 'docker exec -i pepin-ros /pepin_entrypoint.sh python3 - '"$NAME $*"'' < "$(cd "$(dirname "$0")" && pwd)/tools/move.py"; exit $? ;;
     "") echo "usage: ros/go.sh printer | home | X Y [YAW] | mark NAME | where | places | cancel | planner navfn|lattice|theta|smac|hybrid | trip | round | move NAME SEG..."; exit 2 ;;
-    mark)   REQUEST="{\"cmd\":\"mark\",\"name\":\"${2:?a name}\"}" ;;
+    # A PLACE LIVES IN THE GRAPH NOW, so mark and places go through the board's goal CLIENT
+    # (ros/tools/goto_ros.py) and not through the goal server's instant socket. The server writes a
+    # coordinate into a file beside a frozen map; under World R the map bends when a loop closes and
+    # that coordinate stops naming the furniture. The client asks the laptop's places node instead
+    # (/places/mark, answered on /places/marked), which labels the graph node the cart is at and
+    # stores the cart's offset FROM it — so the place rides the node. The price is the client's own
+    # 8-15 s of startup instead of a socket write; a mark happens once and a drive happens often.
+    mark|places)
+        ssh -o ConnectTimeout=10 "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/goto_ros.py $*"; exit $? ;;
     where)  REQUEST='{"cmd":"where"}' ;;
-    places) REQUEST='{"cmd":"places"}' ;;
     cancel) REQUEST='{"cmd":"cancel"}' ;;
     planner) REQUEST="{\"cmd\":\"planner\",\"name\":\"${2:?navfn, lattice, theta or smac}\"}" ;;
     -*|[0-9]*) REQUEST="{\"cmd\":\"go\",\"x\":$1,\"y\":${2:?y},\"yaw_deg\":${3:-0}}" ;;

@@ -8,87 +8,45 @@ topics a node opened, what it broadcast, and what it published.
 
 import json
 import math
-import sys
-import types
 from typing import Any
 
 import numpy as np
 import pytest
 import ros_stubs
 
+from pepin.snapshot import SnapshotState
 from pepin.tsdf import RigidPose
 
 ros_stubs.install()
 
 
-class _MapGraph:
+def _MapGraph(map_to_odom: Any, stamp: Any = None) -> Any:  # noqa: N802 — it stands for the type
     """rtabmap_msgs/MapGraph as the laptop's node still reads it — in SLAM only, where the
     correction IS ``map -> odom`` and belongs on the board."""
+    return ros_stubs.MapGraph(
+        map_to_odom=map_to_odom,
+        header=ros_stubs.Header(stamp=stamp if stamp is not None else _stamp(0.0)),
+    )
 
-    def __init__(self, map_to_odom: Any, stamp: Any = None) -> None:
-        self.map_to_odom = map_to_odom
-        self.header = types.SimpleNamespace(stamp=stamp if stamp is not None else _stamp(0.0))
 
-
-class _Info:
+def _Info(  # noqa: N802 — it stands for the type
+    stats: dict[str, float],
+    loop_closure_id: int = 0,
+    proximity_detection_id: int = 0,
+    stamp: float = 7.0,
+) -> Any:
     """rtabmap_msgs/Info as the laptop's node reads it: RTAB-Map's statistics table (the keys and
     the values in two parallel arrays, read for the report line alone) and the node a closure or a
-    proximity link MATCHED — the one thing that says this update localised at all."""
+    proximity link MATCHED — the one thing that says this update localised at all. The stamp is
+    what pairs this message with the localisation of the SAME update."""
+    return ros_stubs.Info(
+        stats_keys=list(stats),
+        stats_values=[float(value) for value in stats.values()],
+        loop_closure_id=loop_closure_id,
+        proximity_detection_id=proximity_detection_id,
+        header=ros_stubs.Header(stamp=_stamp(stamp)),
+    )
 
-    def __init__(
-        self,
-        stats: dict[str, float],
-        loop_closure_id: int = 0,
-        proximity_detection_id: int = 0,
-        stamp: float = 7.0,
-    ) -> None:
-        self.stats_keys = list(stats)
-        self.stats_values = [float(value) for value in stats.values()]
-        self.loop_closure_id = loop_closure_id
-        self.proximity_detection_id = proximity_detection_id
-        # The stamp is what pairs this message with the localisation of the SAME update.
-        self.header = types.SimpleNamespace(stamp=_stamp(stamp))
-
-
-sys.modules.setdefault("rtabmap_msgs", types.ModuleType("rtabmap_msgs"))
-sys.modules.setdefault("rtabmap_msgs.msg", types.ModuleType("rtabmap_msgs.msg"))
-sys.modules["rtabmap_msgs.msg"].MapGraph = _MapGraph  # type: ignore[attr-defined]
-sys.modules["rtabmap_msgs.msg"].Info = _Info  # type: ignore[attr-defined]
-
-
-class _Empty:
-    """std_srvs/Empty: the request and the response both carry nothing, which is the whole of
-    RTAB-Map's two set_mode services."""
-
-    class Request:
-        pass
-
-    class Response:
-        pass
-
-
-class _SetParameters:
-    """rcl_interfaces/SetParameters as this node uses it: a list of parameters in, nothing read
-    back — RTAB-Map's own parameters are string-typed and re-read on update_parameters."""
-
-    class Request:
-        def __init__(self) -> None:
-            self.parameters: list[Any] = []
-
-    class Response:
-        pass
-
-
-sys.modules.setdefault("std_srvs", types.ModuleType("std_srvs"))
-sys.modules.setdefault("std_srvs.srv", types.ModuleType("std_srvs.srv"))
-sys.modules["std_srvs.srv"].Empty = _Empty  # type: ignore[attr-defined]
-sys.modules.setdefault("rcl_interfaces.srv", types.ModuleType("rcl_interfaces.srv"))
-sys.modules["rcl_interfaces.srv"].SetParameters = _SetParameters  # type: ignore[attr-defined]
-# ...and the two message types ros_stubs does not carry, added beside its own rather than in place
-# of them: ParameterType is already there with every wire constant on it.
-_interfaces = sys.modules["rcl_interfaces.msg"]
-_interfaces.Parameter = types.SimpleNamespace  # type: ignore[attr-defined]
-_interfaces.ParameterValue = types.SimpleNamespace  # type: ignore[attr-defined]
 
 from pepin_bringup import rtabmap_frame, slam_frame  # noqa: E402
 from pepin_bringup.msgs import transform_from_pose  # noqa: E402
@@ -689,3 +647,126 @@ def test_the_mode_override_keeps_both_old_arrangements_reachable() -> None:
         _fit(frozen, 0.7, at=0.0)
         frozen.timers[0][1]()
     assert len(frozen.service_clients[rtabmap_frame.LOCALISATION_SERVICE].calls) == 1
+
+
+# ---- the registration follows the snapshots ----------------------------------------------------
+def _snapshots(node: Any, carrying: tuple[str, ...], kind: str, refresh_s: float = 0.5) -> None:
+    """What pepin_bringup.sensor_pack's snapshots carry, on its own latched topic."""
+    node.subs[rtabmap_frame.SNAPSHOT_STATE_TOPIC][1](
+        ros_stubs.String(
+            data=SnapshotState(
+                carrying=carrying, kind=kind, refresh_s=refresh_s, stamp=1.0
+            ).to_json()
+        )
+    )
+
+
+def _tuner_ready(node: Any) -> tuple[Any, Any]:
+    """RTAB-Map's parameter path, up: the set and the re-read it needs to be honoured at all."""
+    tuner = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters"]
+    reread = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/update_parameters"]
+    tuner.ready = reread.ready = True
+    return tuner, reread
+
+
+def _strategies(tuner: Any) -> list[str]:
+    """Every Reg/Strategy that went out, in order, as the STRING rtabmap reads back."""
+    out = []
+    for request in tuner.calls:
+        for parameter in request.parameters:
+            if parameter.name == "Reg/Strategy":
+                out.append(parameter.value.string_value)
+    return out
+
+
+def test_the_snapshot_state_is_read_latched_from_the_packer_s_own_topic() -> None:
+    node = rtabmap_frame.RtabmapFrame()
+    assert rtabmap_frame.SNAPSHOT_STATE_TOPIC == "/sensor_pack/state", (
+        "the same literal pepin_bringup.sensor_pack publishes on"
+    )
+    assert rtabmap_frame.SNAPSHOT_STATE_TOPIC in node.subs
+
+
+def test_camera_only_snapshots_switch_the_registration_to_visual() -> None:
+    """The one thing that makes a camera-only cart able to localise at all: under ICP it forms no
+    metric link (28 'Missing visual features' in a minute, 2026-09-18)."""
+    node = rtabmap_frame.RtabmapFrame()
+    tuner, reread = _tuner_ready(node)
+    node.clock.seconds = 10.0
+    _snapshots(node, ("camera",), "camera-only", refresh_s=0.5)
+    node.timers[0][1]()
+    assert not _strategies(tuner), "not before the change has held"
+    node.clock.seconds = 10.6
+    _snapshots(node, ("camera",), "camera-only", refresh_s=0.5)
+    node.timers[0][1]()
+    assert _strategies(tuner) == ["0"], "Vis, as a string: every rtabmap parameter is one"
+    assert reread.calls, "a set alone changes nothing — update_parameters is what re-reads them"
+    assert "rtabmap registration: visual" in node.logger.texts("info")[-1]
+    assert "Reg/Strategy 0" in node.logger.texts("info")[-1]
+
+
+def test_the_scan_coming_back_switches_it_back_to_icp() -> None:
+    node = rtabmap_frame.RtabmapFrame()
+    tuner, _ = _tuner_ready(node)
+    for seconds in (10.0, 10.6):
+        node.clock.seconds = seconds
+        _snapshots(node, ("camera",), "camera-only")
+        node.timers[0][1]()
+    for seconds in (11.0, 11.6):
+        node.clock.seconds = seconds
+        _snapshots(node, ("camera", "lidar"), "full")
+        node.timers[0][1]()
+    assert _strategies(tuner) == ["0", "1"]
+
+
+def test_the_launch_s_own_strategy_is_never_re_sent() -> None:
+    """The table already set Reg/Strategy 1, and every change deletes and re-creates the
+    registration pipeline (Memory.cpp:721-731): agreeing with it must cost nothing."""
+    node = rtabmap_frame.RtabmapFrame()
+    tuner, _ = _tuner_ready(node)
+    for seconds in (10.0, 11.0, 12.0, 20.0):
+        node.clock.seconds = seconds
+        _snapshots(node, ("camera", "lidar"), "full")
+        node.timers[0][1]()
+    assert not _strategies(tuner)
+
+
+def test_a_state_older_than_its_own_refresh_leaves_the_strategy_where_it_is() -> None:
+    """sensor_pack going quiet is not the lidar going away."""
+    node = rtabmap_frame.RtabmapFrame()
+    tuner, _ = _tuner_ready(node)
+    node.clock.seconds = 10.0
+    _snapshots(node, ("camera",), "camera-only", refresh_s=0.5)
+    node.clock.seconds = 30.0  # the state stopped arriving twenty seconds ago
+    node.timers[0][1]()
+    assert not _strategies(tuner)
+    node._report()
+    assert "STALE" in node.logger.texts("info")[-1]
+
+
+def test_the_switch_is_a_flag_and_off_it_only_reports() -> None:
+    node = rtabmap_frame.RtabmapFrame()
+    tuner, _ = _tuner_ready(node)
+    node._switches.set("registration_follows_snapshots", False)
+    for seconds in (10.0, 10.6, 12.0):
+        node.clock.seconds = seconds
+        _snapshots(node, ("camera",), "camera-only")
+        node.timers[0][1]()
+    assert not _strategies(tuner)
+    node._report()
+    assert "rtabmap registration ICP on the scans" in node.logger.texts("info")[-1]
+
+
+def test_a_parameter_path_that_is_not_up_is_counted_and_retried() -> None:
+    """A switch the path could not take must not be forgotten: the rule asked for it, so the
+    report line has to say the pipeline is not what it thinks."""
+    node = rtabmap_frame.RtabmapFrame()
+    node.clock.seconds = 10.0
+    _snapshots(node, ("camera",), "camera-only")
+    node.timers[0][1]()
+    node.clock.seconds = 10.6
+    _snapshots(node, ("camera",), "camera-only")
+    node.timers[0][1]()
+    assert node._strategy_failed == 1
+    node._report()
+    assert "switches the parameter path could not take" in node.logger.texts("info")[-1]
