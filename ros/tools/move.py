@@ -9,8 +9,9 @@ Segments, executed in order with a short rest between: ``f0.40`` drives 0.40 m s
 Guards, because this writes /cmd_vel past every one of Nav2's: it refuses to move while a
 navigation goal is running (the action's latched status); it aborts when no odometry arrives
 within ODOM_WAIT_S; each straight leg stops the moment the lidar reads anything nearer than
-STOP_M inside a +-SECTOR_DEG cone in the direction of travel (angle 0 of the scan = the cart's
-front), and a forward leg is refused outright when the cone's nearest return is not at least
+STOP_M inside a +-SECTOR_DEG cone in the direction of travel — beams are turned into the cart's
+own axes through the laser's mount from TF, and without that transform nothing moves — and a
+forward leg is refused outright when the cone's nearest return is not at least
 MARGIN_M beyond the leg's length; every leg is capped in time at twice its nominal duration.
 """
 
@@ -20,6 +21,7 @@ import sys
 import time
 
 import rclpy
+import rclpy.time
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
@@ -27,6 +29,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
+from tf2_ros import Buffer, TransformListener
 
 SPEED, RATE = 0.15, 0.35  # m/s straight, rad/s turning
 STOP_M, MARGIN_M, SECTOR_DEG = 0.40, 0.30, 25.0
@@ -73,20 +76,36 @@ class Travel:
 
 
 class Cone:
-    """The nearest lidar return inside +-SECTOR_DEG of a direction (0 = front, pi = back)."""
+    """The nearest lidar return inside +-SECTOR_DEG of a direction IN THE CART'S AXES (0 = front,
+    pi = back).
+
+    The scan's own angle 0 is not the cart's front: the LD19 hangs upside down and turned 87.5
+    degrees (config/lidar.json), so a beam is first turned through the laser's mount, read once
+    from TF. From 2026-09-15 to 2026-09-19 this guard took the scan's angles for the cart's and so
+    watched the cart's SIDES while it drove forwards and backwards; it was found when the "front"
+    reading shrank after a metre in reverse."""
 
     def __init__(self) -> None:
         self.scan: LaserScan | None = None
+        self.mount: tuple[float, float, float, float] | None = None  # quaternion base <- laser
+
+    def _in_base(self, angle: float) -> float:
+        """A beam's direction in the laser's frame as an angle in the cart's frame."""
+        x, y, z, w = self.mount  # type: ignore[misc]
+        vx, vy = math.cos(angle), math.sin(angle)  # the beam lies in the laser's own plane
+        bx = (1 - 2 * (y * y + z * z)) * vx + 2 * (x * y - z * w) * vy
+        by = 2 * (x * y + z * w) * vx + (1 - 2 * (x * x + z * z)) * vy
+        return math.atan2(by, bx)
 
     def nearest(self, direction: float) -> float | None:
         s = self.scan
-        if s is None:
+        if s is None or self.mount is None:
             return None
         best = None
         for i, r in enumerate(s.ranges):
             if not (s.range_min < r < s.range_max) or math.isnan(r):
                 continue
-            a = s.angle_min + i * s.angle_increment
+            a = self._in_base(s.angle_min + i * s.angle_increment)
             d = (a - direction + math.pi) % (2 * math.pi) - math.pi
             if abs(d) <= math.radians(SECTOR_DEG) and (best is None or r < best):
                 best = r
@@ -138,6 +157,8 @@ for action in NAV_ACTIONS:
 node.create_subscription(Odometry, "/odometry/filtered", lambda m: feed_odom("filtered", m), 20)
 node.create_subscription(Odometry, "/odom", lambda m: feed_odom("odom", m), 20)
 node.create_subscription(LaserScan, "/scan", on_scan, 10)
+tf_buffer = Buffer()
+tf_listener = TransformListener(tf_buffer, node)
 spin(ODOM_WAIT_S)
 if any(navigating.values()):
     finish(2, "refused: a navigation goal is running; ros/go.sh cancel first")
@@ -145,6 +166,16 @@ if travel.heard == 0:
     finish(3, f"aborted: no odometry on /odometry/filtered or /odom within {ODOM_WAIT_S:.0f} s")
 if cone.scan is None:
     finish(3, "aborted: no /scan within the wait; the lidar guard cannot run")
+try:
+    edge = tf_buffer.lookup_transform("base_link", cone.scan.header.frame_id, rclpy.time.Time())
+    q = edge.transform.rotation
+    cone.mount = (q.x, q.y, q.z, q.w)
+except Exception as error:
+    finish(
+        3,
+        f"aborted: no base_link <- {cone.scan.header.frame_id} in TF ({error}); a guard that"
+        " does not know where the lidar points cannot run",
+    )
 front, back = cone.nearest(0.0), cone.nearest(math.pi)
 print(
     f"judging by /{'odometry/filtered' if travel.source == 'filtered' else 'odom'};"
