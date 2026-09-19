@@ -293,7 +293,8 @@ private:
   /// rules and the reasons). Two atomic stores, so the 50 Hz IMU loop never waits on this thread.
   void witness_rest(const BaseState & state, const BodyTwist & wheels)
   {
-    const bool twist_is_zero = wheels.linear == 0.0 && wheels.angular == 0.0;
+    (void)wheels;  // the twist is what /odom carries; rest is judged on the wheels' own travel
+    const bool twist_is_zero = tick_dither_.still(state.d_left_m, state.d_right_m);
     still_since_.store(
       rest_witness_.judge(state.stamp_s, monotonic_s(), state.moving, twist_is_zero));
     witness_at_.store(rest_witness_.at());
@@ -591,6 +592,9 @@ private:
   std::atomic<bool> imu_bias_tracking_{true};  // ... and this one by the IMU thread too
   TwistFromPose twist_from_pose_{kStateGapMaxS};  // touched from the reader thread only
   RestWitness rest_witness_{kStateGapMaxS};       // ... and so is this one
+  // One encoder tick of wheel travel: pi * wheel_diameter_m / ticks_per_rev of config/base.json
+  // (0.125 m, 4096) = 9.587e-5 m — the unit the state lines' dl/dr come in, seen live.
+  TickDither tick_dither_{3.14159265358979323846 * 0.125 / 4096.0};  // reader thread only
   std::array<double, 36> pose_covariance_{};
   std::array<double, 36> twist_covariance_{};
 

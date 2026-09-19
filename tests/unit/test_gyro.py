@@ -229,3 +229,31 @@ def test_gyro_bias_contract_the_cpp_bridge_mirrors() -> None:
     assert tracker.age_s(26.0) == pytest.approx(5.0)
     assert tracker.block_samples == 4
     assert tracker.ready
+
+
+def test_a_parked_carts_flickering_encoder_is_rest_and_a_creep_is_not() -> None:
+    """Live 2026-09-19: parked on its charger the cart's right encoder flipped by one tick on
+    every state line, the measured twist was never exactly zero, no rest block ever came and the
+    gyro stayed silent. One tick is the encoder's own quantum: within it nothing has been seen to
+    move; a creep of one tick a line in one direction leaves the band on its second line."""
+    from pepin.gyro import TickDither
+
+    tick = math.pi * 0.125 / 4096  # config/base.json, 9.587e-5 m — the literal seen on the wire
+    assert tick == pytest.approx(9.587379924285257e-05)
+    dither = TickDither(tick)
+    assert all(dither.still(0.0, step) for step in (-tick, tick, -tick, tick, 0.0, -tick))
+    creep = TickDither(tick)
+    assert creep.still(tick, 0.0)
+    assert not creep.still(tick, 0.0), "two ticks one way is motion"
+    assert creep.still(0.0, 0.0), "and the band is re-anchored where the wheels are now"
+
+
+def test_the_cpp_bridge_carries_the_same_dither_rule() -> None:
+    from pathlib import Path
+
+    REPO = Path(__file__).resolve().parents[2]  # noqa: N806
+    header = (REPO / "ros/pepin_base_cpp/include/pepin_base_cpp/gyro_bias.hpp").read_text()
+    bridge = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
+    assert "class TickDither" in header and "kTickSlack = 1e-6" in header
+    assert "tick_dither_.still(state.d_left_m, state.d_right_m)" in bridge
+    assert "wheels.linear == 0.0" not in bridge, "exact zero never happens on a parked cart"

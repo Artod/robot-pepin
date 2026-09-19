@@ -18,6 +18,10 @@ import math
 from dataclasses import dataclass
 
 
+# Float slack on "within one tick": the travel is a sum of doubles that are each exactly one tick.
+TICK_SLACK = 1e-6
+
+
 @dataclass(frozen=True)
 class GyroBias:
     """A gyro zero in rad/s, on the chip's own axes (the bias is subtracted before mounting)."""
@@ -25,6 +29,35 @@ class GyroBias:
     x: float = 0.0
     y: float = 0.0
     z: float = 0.0
+
+
+class TickDither:
+    """Whether the wheels have stayed within ONE encoder tick of where they came to rest.
+
+    A parked cart does not read zero: live on 2026-09-19 the right encoder of a cart on its charger
+    flipped by one tick on every state line (``dr`` -9.587e-05, +9.587e-05, ... m) — the last bit of
+    a quantised angle — so "the measured twist is exactly zero" was never true and the rest block
+    never came. One tick is the encoder's quantisation unit (pi * wheel diameter / ticks per
+    revolution, config/base.json), not a tuned tolerance: a wheel whose NET travel since it stopped
+    is within one tick has not been seen to move, and a creep of one tick a line in one direction
+    leaves that band on its second line.
+    """
+
+    def __init__(self, tick_m: float) -> None:
+        self._tick_m = tick_m
+        self._left_m = 0.0
+        self._right_m = 0.0
+
+    def still(self, d_left_m: float, d_right_m: float) -> bool:
+        """One state line's wheel travel; ``True`` while neither wheel has left the band. A line
+        that leaves it re-anchors the band where the wheels are now."""
+        self._left_m += d_left_m
+        self._right_m += d_right_m
+        band = self._tick_m * (1.0 + TICK_SLACK)
+        if abs(self._left_m) <= band and abs(self._right_m) <= band:
+            return True
+        self._left_m = self._right_m = 0.0
+        return False
 
 
 class RestWitness:

@@ -29,6 +29,42 @@ struct GyroBias
   double z = 0.0;
 };
 
+/// Float slack on "within one tick": pepin.gyro.TICK_SLACK.
+constexpr double kTickSlack = 1e-6;
+
+/// Whether the wheels have stayed within ONE encoder tick of where they came to rest — the twin
+/// of pepin.gyro.TickDither. A parked cart does not read zero: live on 2026-09-19 the right
+/// encoder flipped by one tick on every state line (dr -9.587e-05, +9.587e-05, ... m), so "the
+/// measured twist is exactly zero" was never true and the rest block never came. One tick is the
+/// encoder's quantisation unit, not a tuned tolerance; a creep of one tick a line in one direction
+/// leaves the band on its second line.
+class TickDither
+{
+public:
+  explicit TickDither(double tick_m)
+  : tick_m_(tick_m) {}
+
+  /// One state line's wheel travel; true while neither wheel has left the band. A line that
+  /// leaves it re-anchors the band where the wheels are now.
+  bool still(double d_left_m, double d_right_m)
+  {
+    left_m_ += d_left_m;
+    right_m_ += d_right_m;
+    const double band = tick_m_ * (1.0 + kTickSlack);
+    if (std::abs(left_m_) <= band && std::abs(right_m_) <= band) {
+      return true;
+    }
+    left_m_ = 0.0;
+    right_m_ = 0.0;
+    return false;
+  }
+
+private:
+  double tick_m_;
+  double left_m_ = 0.0;
+  double right_m_ = 0.0;
+};
+
 /// The wheels' word on whether the cart is standing still, boiled down to one timestamp.
 ///
 /// The twin of pepin.gyro.RestWitness (src/pepin/gyro.py:37). Fed one wheel state line at a time,
