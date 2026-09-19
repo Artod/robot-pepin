@@ -883,6 +883,7 @@ LAPTOP_SLAM_NODES = (
     "/contact_scan",
     "/depth_fusion",
     "/laptop_localizer",
+    "/sensor_pack",  # the one input RTAB-Map reads: a snapshot of whatever sensor is alive
     "/rtabmap/rtabmap",
     "/rtabmap_frame",
     "/foxglove_bridge",

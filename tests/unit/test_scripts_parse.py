@@ -805,23 +805,22 @@ def test_a_board_without_a_map_refuses_instead_of_seeding_the_wrong_one(tmp_path
     assert not [c for c in sent if c.startswith("laptop.sh")], "nothing started on a guess"
 
 
-def test_fresh_graph_empties_the_database_and_takes_the_anchor_of_that_map_with_it(
+def test_fresh_graph_empties_the_database_and_moves_the_volume_of_its_frame_aside(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
-    """The anchor ties one map to one graph database (pepin.anchors). A fresh database beside a
-    kept anchor speaks in the previous database's frame, so --fresh-graph removes both, and says
-    which file it removed."""
-    anchor = tmp_path / "ros/maps/239x215_-18.53_-4.38.graph_anchor.json"
-    anchor.parent.mkdir(parents=True, exist_ok=True)
-    anchor.write_text("{}")
-    (tmp_path / "bin").mkdir(exist_ok=True)
-    (tmp_path / "bin/uv").write_text(f'#!/bin/bash\nprintf "%s\\n" "{anchor}"\n')  # pepin.anchors
-    (tmp_path / "bin/uv").chmod(0o755)
+    """One frame (World R): the graph's map frame IS ``map`` and the fused volume is painted in it.
+    An empty database starts a new frame, so --fresh-graph moves the old frame's volume aside —
+    moved, never deleted — and says so. The file names are literals on purpose."""
+    world = tmp_path / "ros/maps/rtabmap.world.npz"
+    world.parent.mkdir(parents=True, exist_ok=True)
+    world.write_bytes(b"the old frame")
     code, out, sent = _restart(tmp_path, "laptop", "--no-check", "--fresh-graph")
     assert code == 0, out
     assert "laptop.sh vslam --neck --room=flat3 --fresh" in sent
-    assert not anchor.exists(), out
-    assert str(anchor) in out and "map <-> database" in out
+    assert not world.exists(), out
+    kept = list(world.parent.glob("rtabmap.world.npz.before-fresh-*"))
+    assert len(kept) == 1 and kept[0].read_bytes() == b"the old frame", out
+    assert "moved aside" in out
 
 
 def test_fresh_graph_is_refused_on_the_board_half_that_owns_neither(tmp_path) -> None:  # type: ignore[no-untyped-def]

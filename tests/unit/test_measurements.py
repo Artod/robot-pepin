@@ -23,7 +23,6 @@ from pepin.measurements import (
     MeasurementGate,
     RemoteMeasurement,
     compose,
-    graph_anchor,
     graph_measurement,
     inverse,
 )
@@ -74,7 +73,7 @@ def test_a_measurement_travels_as_one_message_and_comes_back_whole() -> None:
     """Everything the receiver needs to judge and fuse it is in the one JSON message: the
     place, how sure it is per direction, who measured it, when, how well it fitted and the map
     it means something on. The sender's own notes ride along and a reader ignores them."""
-    sent = remote().to_json(belief_age_ms=40.0, matched_on="/map_camera")
+    sent = remote().to_json(belief_age_ms=40.0, matched_on="/map_tracked")
     back = RemoteMeasurement.from_json(sent)
     assert (back.x, back.y) == (1.0, 2.0) and abs(back.yaw - 0.5) < 1e-9
     assert back.source == DEPTH and back.stamp == 100.0 and back.map_id == "map1"
@@ -82,7 +81,7 @@ def test_a_measurement_travels_as_one_message_and_comes_back_whole() -> None:
     assert np.allclose(back.covariance, SURE)
     assert back.measurement().sigmas[0] == pytest.approx(0.04, abs=1e-3)
     assert back.text() == "depth (+1.00, +2.00, +29 deg) fit 0.60"
-    assert '"matched_on": "/map_camera"' in sent
+    assert '"matched_on": "/map_tracked"' in sent
 
 
 def test_a_message_that_is_not_a_measurement_says_so() -> None:
@@ -329,36 +328,35 @@ def test_a_remote_word_is_never_fused_tighter_than_the_measured_floor() -> None:
     assert gate._floored(tight) is tight, "zero floors change nothing"
 
 
-def test_a_graph_word_is_its_own_place_read_through_the_anchor() -> None:
-    """The graph's word is where the GRAPH has the cart, moved onto the map by the anchor: an
-    identity anchor leaves it alone, and a real one rotates and shifts it as one rigid move."""
+def test_a_graph_word_is_the_localisation_itself_in_the_one_map_frame() -> None:
+    """RTAB-Map's optimised map frame IS `map`, so a localisation it publishes is already a place on
+    our map: the word carries it through untouched. Everything that used to sit between the two —
+    an anchor learned from one seating, a tie fitted over pairs, a per-node table — was a cure for
+    two frames, and there is one frame now."""
     place = Pose2D(2.0, 1.0, math.pi / 2)
-    still = graph_measurement(place, Pose2D(), 10.0, "map-a")
-    assert still.source == GRAPH
-    assert (still.x, still.y) == pytest.approx((2.0, 1.0))
-    assert still.yaw == pytest.approx(math.pi / 2)
-    assert still.map_id == "map-a" and still.stamp == 10.0
-
-    moved = graph_measurement(place, Pose2D(0.1, -0.2, math.pi / 2), 10.0, "map-a")
-    # a quarter turn of the frame, then the shift: (2, 1) -> (-1, 2) -> (-0.9, 1.8)
-    assert (moved.x, moved.y) == pytest.approx((-0.9, 1.8))
-    assert moved.yaw == pytest.approx(math.pi)
+    word = graph_measurement(place, 10.0, "map-a")
+    assert word.source == GRAPH
+    assert (word.x, word.y) == pytest.approx((2.0, 1.0))
+    assert word.yaw == pytest.approx(math.pi / 2)
+    assert word.map_id == "map-a" and word.stamp == 10.0
 
 
-def test_the_anchor_is_what_makes_the_graph_s_first_word_the_tracker_s_own_pose() -> None:
-    """The anchor is learned from one pair — where the tracker says the cart is, where the graph
-    has it — and it is exactly the transform that reads the second back as the first. A graph
-    that has closed no loop therefore tells the tracker its own answer, which is why the graph
-    never drives an update by itself; once a closure moves the graph's place, the word moves with
-    it, by the closure and by nothing else."""
-    tracker, place = Pose2D(3.0, -1.0, math.pi / 4), Pose2D(0.5, 0.25, -math.pi / 3)
-    anchor = graph_anchor(tracker, place)
-    first = graph_measurement(place, anchor, 1.0, "map-a")
-    assert (first.x, first.y, first.yaw) == pytest.approx((tracker.x, tracker.y, tracker.theta))
+def test_rtabmap_s_own_covariance_rides_on_the_word_and_is_floored_and_never_replaced() -> None:
+    """What the registration against the recognised node was worth is RTAB-Map's to say, and it is
+    the one number here that is a measurement — but its own arithmetic is useless in both
+    directions (706 m of sigma with no closure, 8 mm right after one), so the floor is raised under
+    it and a claim already wider than the floor is left exactly as it came."""
+    tight = graph_measurement(
+        Pose2D(1.0, 0.0, 0.0), 1.0, "map-a", measured=np.diag([1e-4, 1e-4, 1e-6])
+    )
+    cov = np.asarray(tight.covariance, dtype=float)
+    assert cov[0, 0] == pytest.approx(GRAPH_FLOOR_XY_M**2), "a graph sure of itself is not"
+    assert cov[2, 2] == pytest.approx(math.radians(GRAPH_FLOOR_YAW_DEG) ** 2)
 
-    closed = compose(Pose2D(0.12, -0.04, 0.0), place)  # the graph moves the cart 12 cm
-    after = graph_measurement(closed, anchor, 2.0, "map-a")
-    assert math.hypot(after.x - first.x, after.y - first.y) == pytest.approx(0.126491, abs=1e-5)
+    measured = np.array([[1.0, 0.2, 0.0], [0.2, 1.0, 0.0], [0.0, 0.0, 0.5]])
+    wide = graph_measurement(Pose2D(1.0, 0.0, 0.0), 1.0, "map-a", measured=measured)
+    kept = np.asarray(wide.covariance, dtype=float)
+    assert kept == pytest.approx(measured), "a registration measured as wide stays wide, arms too"
 
 
 def test_compose_and_inverse_are_each_other_s_undoing() -> None:
@@ -375,7 +373,7 @@ def test_a_graph_gate_takes_nothing_until_the_roster_switches_it_on() -> None:
     registry = SourceRegistry(enabled=(LIDAR,))
     gate = MeasurementGate(registry, name=GRAPH)
     history = trail((1.0, Pose2D()), (2.0, Pose2D()))
-    word = graph_measurement(Pose2D(1.0, 0.0, 0.0), Pose2D(), 1.5, "map-a")
+    word = graph_measurement(Pose2D(1.0, 0.0, 0.0), 1.5, "map-a")
     assert gate.offer(word, "map-a") and gate.pending == (GRAPH,)
     assert gate.take(1.6, history) == [], "the roster has not switched it on"
 
@@ -392,7 +390,7 @@ def test_a_graph_measurement_claims_no_more_than_the_remote_floor() -> None:
     closure, 8 mm right after one), so the word is worth the floor MEASURED FOR THE GRAPH and no
     more -- 0.20 m / 8 deg since 2026-09-16, not the camera's 0.08 m it used to borrow, because a
     graph word sat 22-23 cm and 12 deg off the lidar's pose in motion."""
-    m = graph_measurement(Pose2D(1.0, 0.0, 0.0), Pose2D(), 1.0, "map-a")
+    m = graph_measurement(Pose2D(1.0, 0.0, 0.0), 1.0, "map-a")
     cov = np.asarray(m.covariance, dtype=float)
     assert GRAPH_FLOOR_XY_M > REMOTE_FLOOR_XY_M, "the graph is not as good as the camera"
     assert GRAPH_FLOOR_YAW_DEG > REMOTE_FLOOR_YAW_DEG

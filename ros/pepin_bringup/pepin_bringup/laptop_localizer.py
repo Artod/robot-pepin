@@ -30,7 +30,7 @@ full revolution. With this node off, or the link down, the board simply has no c
 measurements and tracks on the lidar as it always did.
 
 THE CAMERA'S OWN SEARCH (``camera_search``, off). The same whole-map search, run on a camera
-fan over the camera's own slice of the world, so that a cart whose lidar is gone can be FOUND
+fan over the map the tracker is on, so that a cart whose lidar is gone can be FOUND
 and not only followed. It runs only where it can help — the board says its lidar is not feeding
 its tracker, or this node's own lidar search says nothing on this map fits
 (:func:`pepin.watchdog.camera_search_need`, fed by ``/localization/sources``) — because a
@@ -42,15 +42,15 @@ times in 60 on the heavy band and 2 in 60 with a roughened fan, and in every mis
 not among the places the search returned at all. The machinery is here, measured, and waiting
 for a band dense enough to answer.
 
-In: ``/scan`` and ``/map`` (the board's, over the bridge; the laser mount from ``/tf_static``),
-``/depth_scan`` and ``/contact_scan`` (local — no bridge hop), ``/odometry/filtered`` (the trail
-a belief is carried along), and the board's own word, ``/tracker_pose`` with
-``/localization_fit``. ``/map_camera`` — the camera's own band of the world volume
-(pepin_bringup.depth_fusion, ``map_source=volume``) — is what the camera scans are matched
-against when it exists, because a tabletop the lidar's plane never sees is in that slice and in
-no other; the measurement is still labelled with ``/map``'s id, since that is the map the board
-holds. Out: the candidate, the measurement, and ``/localization/candidate_pose`` for the
-operator's 3D view.
+In: ``/scan`` and ``/map_tracked`` (the board's, over the bridge; the laser mount from
+``/tf_static``), ``/depth_scan`` and ``/contact_scan`` (local — no bridge hop),
+``/odometry/filtered`` (the trail a belief is carried along), and the board's own word,
+``/tracker_pose`` with ``/localization_fit``. BOTH HALVES MATCH ON ONE GRID: the map the board's
+tracker is on, whichever it adopted. A camera fan used to be matched against a slice of the fused
+volume instead (``/map_camera``), and that was a loop with no gauge in it — the volume was painted
+at the poses the fan helped produce. The volume is open-loop now and nothing localises against it.
+Out: the candidate, the measurement, and ``/localization/candidate_pose`` for the operator's 3D
+view.
 
 One search, one revolution: a revolution already in hand is never searched twice. A message
 repeating the stamp in hand is dropped, a revolution nobody has replaced within
@@ -117,7 +117,6 @@ SOURCES_TOPIC = "/localization/sources"  # the board's own account of who drives
 CANDIDATE_TOPIC = "/localization/candidate"  # what pepin_bringup.relocalizer subscribes to
 CANDIDATE_POSE_TOPIC = "/localization/candidate_pose"  # the same, for Foxglove
 MEASUREMENT_TOPIC = "/localization/measurement"  # the camera's poses, for the board's tracker
-CAMERA_MAP_TOPIC = "/map_camera"  # the camera's own band of the world volume, when there is one
 CAMERA_SCANS = ((DEPTH, "/depth_scan"), (CONTACT, "/contact_scan"))
 # The camera's scans arrive in base_link already (pepin_bringup.depth_stream, contact_scan):
 # no mount to apply, unlike the lidar's, which is looked up from /tf_static.
@@ -312,14 +311,14 @@ FLAGS = FlagSet(
         DEPTH,
         description="which camera fan the whole-map search runs on: the depth band or the"
         " floor-contact line",
-        why="the depth fan, because it is cut from the very band the search matches against"
-        f" ({CAMERA_MAP_TOPIC}, the volume's camera band) while the contact line marks where the"
-        " floor meets an obstacle, which that band does not hold. The live tapes of 2026-09-13"
-        " say the same in fits against /map_camera: depth 1.00 median (p10 0.78, 557 matches),"
-        " contact 0.54 median (p10 0.35, 431 matches) — the contact line explains that map half"
-        " as well, and a global fix is exactly where the weaker explanation cannot be afforded",
-        on_when="depth wherever the volume's camera band is what is being searched",
-        off_when="contact to measure the floor line against the same band, or where the depth"
+        why="the depth fan, because it carries the room's surfaces while the contact line marks"
+        " only where the floor meets an obstacle. Measured on the live tapes of 2026-09-13, then"
+        " against the volume's own camera band (the slice this node no longer reads): depth 1.00"
+        " median (p10 0.78, 557 matches), contact 0.54 median (p10 0.35, 431 matches) — the"
+        " contact line explains a map half as well, and a global fix is exactly where the weaker"
+        " explanation cannot be afforded",
+        on_when="depth, always, while this feature is off anyway",
+        off_when="contact to measure the floor line against the same grid, or where the depth"
         " network is the thing in doubt",
         choices=(DEPTH, CONTACT),
     ),
@@ -413,7 +412,8 @@ FLAGS = FlagSet(
         " board's belief carried to that scan's moment",
         why="0.09 is the width the camera is ACCURATE in, measured and not inherited: the four"
         " tapes of 2026-09-14 (105644, 105747, 110103, 110529) re-matched at 0.09 / 0.20 / 0.30"
-        " / 0.50 m against the volume's camera band (scratch/camera_window_sweep.py) give a"
+        " / 0.50 m (scratch/camera_window_sweep.py, against the fused volume's camera band as it"
+        " was then read) give a"
         " median error against the lidar truth of 9.0/9.7/19.6/23.2 cm at 0.09 and 42/55/63/49"
         " cm at 0.50 — every tape monotonically worse the wider it may look, with the forward"
         " bias growing from +3.5...+11.8 cm to +14...+50 cm. The reason is on the same tapes:"
@@ -555,11 +555,9 @@ class LaptopLocalizer(Node):
         self._tally = Tally(STAGES)
         self._localizer: Localizer | None = None
         self._map_id = ""
-        self._grid: Any = None  # the board's map, for a camera matcher built without /map_camera
+        self._grid: Any = None  # the map the board's tracker is on: what BOTH halves match on
         self._camera: Localizer | None = None  # the matcher the camera scans are refined by
-        self._camera_map = ""  # which grid that is: TRACKED_MAP_TOPIC or "/map_camera"
         self._pose_cov: Any = None  # the belief's own covariance, as the board published it
-        self._camera_map_id = ""  # the band's shape and origin: a new one is worth a log line
         self._mask: StaticMask | None = None  # what that grid explains; built on first use
         self._mask_of: tuple[Any, int] | None = None  # ...the grid and version it was built on
         self._roster = SourceRegistry(enabled=(DEPTH, CONTACT))  # for the sources' own trust
@@ -600,7 +598,6 @@ class LaptopLocalizer(Node):
         # "elsewhere". The relocalizer republishes what it is tracking on, latched, exactly so that
         # this subscription can exist, and it stays correct however the volume grows.
         self.create_subscription(OccupancyGridMsg, TRACKED_MAP_TOPIC, self._on_map, latched)
-        self.create_subscription(OccupancyGridMsg, CAMERA_MAP_TOPIC, self._on_camera_map, latched)
         self.create_subscription(LaserScan, self._scan_topic, self._on_scan, newest)
         for name, topic in CAMERA_SCANS:
             self.create_subscription(LaserScan, topic, partial(self._on_camera_scan, name), newest)
@@ -685,10 +682,15 @@ class LaptopLocalizer(Node):
 
     # ---- inputs ----------------------------------------------------------------------------
     def _on_map(self, msg: OccupancyGridMsg) -> None:
-        """The map the board's TRACKER is on (``/map_tracked``): a tracker of our own is built on
-        it, for its search alone — and, until ``/map_camera`` says otherwise, for the camera's
-        matches too. Its id is the id every word this node ships is stamped with, which is the
-        whole reason this is that topic and not ``/map``."""
+        """The map the board's TRACKER is on (``/map_tracked``): the ONE grid both halves of this
+        node work on — the whole-map search and the camera's own matches.
+
+        Its id is the id every word this node ships is stamped with, which is the whole reason this
+        is that topic and not ``/map``: the board refuses a word about another map, and what the
+        tracker adopted is by construction what its gates expect. A camera fan used to be matched
+        against a slice of the fused volume instead, which was a loop with no gauge in it — the
+        volume was painted at the poses the fan helped produce.
+        """
         self._grid = grid_from_msg(msg)
         self._map_id = map_id(msg)
         self._localizer = Localizer(
@@ -698,39 +700,11 @@ class LaptopLocalizer(Node):
             global_retry=False,
             covariance=str(self._switches["covariance"]),
         )
-        if self._camera_map != CAMERA_MAP_TOPIC:
-            self._camera = None  # rebuilt on the next camera scan, on this grid
+        self._camera = None  # rebuilt on the next camera scan, on this grid
         self._tally.count("maps")
         self.get_logger().info(
             f"map received: {msg.info.width}x{msg.info.height} cells, id {self._map_id}"
         )
-
-    def _on_camera_map(self, msg: OccupancyGridMsg) -> None:
-        """The camera's own band of the world volume (pepin_bringup.depth_fusion): the slice the
-        camera's scans are cut from, and so the one they are matched against. The seats and
-        tabletops in it are in no other view of the map; the measurement is still labelled with
-        /map's id, because that is the map the board holds."""
-        grid = grid_from_msg(msg)
-        self._camera = Localizer(
-            grid,
-            Pose2D(),
-            window=self._camera_window(),
-            global_retry=False,
-            covariance=str(self._switches["covariance"]),
-        )
-        self._camera_map = CAMERA_MAP_TOPIC
-        self._tally.count("camera_maps")
-        # The volume republishes its band once a second whether or not it changed shape, and one
-        # line per publication buried the log (3600 identical lines an hour, 2026-09-13). The
-        # line a person needs is the one where the band becomes a different grid; the rest are a
-        # count in the report.
-        shape = map_id(msg)
-        if shape != self._camera_map_id:
-            self._camera_map_id = shape
-            self.get_logger().info(
-                f"camera map received: {msg.info.width}x{msg.info.height} cells, id {shape};"
-                " the camera's scans are matched against the volume's own band from now on"
-            )
 
     def _on_scan(self, msg: LaserScan) -> None:
         """The board's lidar revolution, moved into base_link by the mount read once.
@@ -875,8 +849,12 @@ class LaptopLocalizer(Node):
         )
 
     def _camera_matcher(self) -> Localizer | None:
-        """The matcher the camera's scans are refined by: the volume's camera band once
-        ``/map_camera`` has arrived, else the board's own map; ``None`` before any map."""
+        """The matcher the camera's scans are refined by: the map the board's tracker is on, in its
+        own narrower window (:meth:`_camera_window`); ``None`` before any map has arrived.
+
+        Built lazily and dropped whenever a map arrives or a window flag moves, so the next scan is
+        matched on the grid and in the window just asked for.
+        """
         if self._camera is None and self._grid is not None:
             self._camera = Localizer(
                 self._grid,
@@ -885,15 +863,13 @@ class LaptopLocalizer(Node):
                 global_retry=False,
                 covariance=str(self._switches["covariance"]),
             )
-            self._camera_map = TRACKED_MAP_TOPIC
         return self._camera
 
     def _camera_mask(self, localizer: Localizer) -> StaticMask | None:
         """What the grid the camera is matched against explains, for the match's vote
         (``explained_vote``): ``None`` with the flag off. Built on first use and kept until that
-        grid is replaced — /map_camera arrives once a second and a dilation of the whole grid is
-        not worth doing per scan, while a mask of the PREVIOUS band would silence the returns of
-        a room that has since moved on."""
+        grid is replaced — a dilation of the whole grid is not worth doing per scan, while a mask
+        of the PREVIOUS map would silence the returns of a room that has since moved on."""
         if not self._switches.on("explained_vote"):
             return None
         grid = localizer.grid
@@ -1069,7 +1045,7 @@ class LaptopLocalizer(Node):
                         else round((stamp - self._pose_stamp) * 1e3, 1)
                     ),
                     belief_from=self._belief_from,
-                    matched_on=self._camera_map,
+                    matched_on=TRACKED_MAP_TOPIC,
                 )
             )
         )
@@ -1116,10 +1092,8 @@ class LaptopLocalizer(Node):
         The fan is offered only to an idle worker: ``offer`` replaces what waits, and the
         lidar's own search is never the thing that gets thrown away.
 
-        The fan is searched against the camera's own slice of the world (``/map_camera``), the
-        grid its matches are made on: a fan cut from the band can only be placed on the band.
-        Until that band has arrived there is no camera search at all — the board's ``/map`` is
-        the matcher's fallback for refining a pose, never for finding one.
+        The fan is searched over the map the board's tracker is on — the same grid its refining
+        matches are made on, and the only grid in the stack anything localises against.
         Everything that stops a search is counted with its own name, so the report line says why
         the board heard nothing from this half.
         """
@@ -1132,16 +1106,14 @@ class LaptopLocalizer(Node):
         if not need:
             self._tally.count("cam_not_needed")
             return
-        # The camera's band, or nothing. _camera_matcher falls back to the board's own /map
-        # until /map_camera has arrived — which is right for REFINING a pose somebody already
-        # holds, and wrong for a global search: every number this feature was measured on
-        # (scratch/camera_kidnap_offline.py, and the 0.80 twin cut that is its only judge) was
-        # taken on the volume's camera band, and a fan cut from the band searched over the
-        # lidar's plane is a regime nobody has measured. The board's map id must be in hand
-        # too: a candidate carrying "" is refused as "elsewhere" by the board's gate and breaks
-        # a lidar streak on the way out.
-        if self._camera is None or self._camera_map != CAMERA_MAP_TOPIC or not self._map_id:
-            self._tally.count("cam_no_band")
+        # A matcher and the board's map id, or nothing. The id must be in hand: a candidate
+        # carrying "" is refused as "elsewhere" by the board's gate and breaks a lidar streak on
+        # the way out. What the fan is searched OVER is now the map the tracker is on, while every
+        # number this feature was measured on (scratch/camera_kidnap_offline.py, and the 0.80 twin
+        # cut that is its only judge) was taken on the fused volume's camera band — which is one
+        # more reason the flag ships off until it is measured again on this grid.
+        if self._camera is None or not self._map_id:
+            self._tally.count("cam_no_map")
             return
         source = str(self._switches["camera_search_source"])
         scan = self._camera_scan.get(source)
@@ -1175,7 +1147,7 @@ class LaptopLocalizer(Node):
             self._search_camera(job.source, job.scan)
 
     def _search_camera(self, source: str, scan: TimedScan) -> None:
-        """The search thread, camera half: the whole of ``/map_camera`` searched on one fan,
+        """The search thread, camera half: the whole of the tracker's map searched on one fan,
         with no belief and no prior, and the winner published as a candidate naming its source.
 
         Two things stand between a place found here and the board's tracker, and neither is the
@@ -1195,11 +1167,11 @@ class LaptopLocalizer(Node):
         (:func:`pepin.watchdog.min_fit_for`) and never lengthens a lidar streak with it.
         """
         localizer, map_id_now = self._camera, self._map_id
-        # The band and the board's map id are checked again on this thread: the job was offered
+        # The matcher and the board's map id are checked again on this thread: the job was offered
         # a moment ago and a map may have been replaced since (:meth:`_on_map` drops the camera
-        # matcher when the band is not what it holds).
-        if localizer is None or self._camera_map != CAMERA_MAP_TOPIC or not map_id_now:
-            self._tally.count("cam_no_band")
+        # matcher whenever one arrives).
+        if localizer is None or not map_id_now:
+            self._tally.count("cam_no_map")
             return
         started = time.perf_counter()
         places = localizer.global_candidates(scan.points, CAMERA_THETA_STEP_DEG, THIN_TO)
@@ -1239,7 +1211,7 @@ class LaptopLocalizer(Node):
         self._tally.count(f"cam_{verdict}")
         self._tally.count("cam_published")
         self._pub.publish(
-            String(data=candidate.to_json(verdict=str(verdict), matched_on=self._camera_map))
+            String(data=candidate.to_json(verdict=str(verdict), matched_on=TRACKED_MAP_TOPIC))
         )
 
     def _search(self, scan: TimedScan) -> None:
@@ -1337,8 +1309,7 @@ class LaptopLocalizer(Node):
         )
         last = "none yet" if self._sent is None else self._sent.text()
         return (
-            f"measurements: {sent} (against {self._camera_map or 'no map'}"
-            f" {self._camera_map_id or '-'}, received {c['camera_maps']}x,"
+            f"measurements: {sent} (against {TRACKED_MAP_TOPIC} {self._map_id or '-'},"
             f" {c['voted']} with unexplained returns silenced), last {last};"
             f" belief: tracker {c['belief_tracker']}, tf {c['belief_tf']};"
             f" rejected: no belief {c['no_belief']}, stale belief {c['stale_belief']},"
@@ -1361,7 +1332,7 @@ class LaptopLocalizer(Node):
             f" refused: ambiguous {c['cam_ambiguous']}, low fit {c['cam_low_fit']},"
             f" found nothing {c['cam_found_nothing']};"
             f" skipped: off {c['cam_off']}, lidar healthy {c['cam_not_needed']},"
-            f" no fan {c['cam_nothing_to_search']}, no camera map {c['cam_no_band']},"
+            f" no fan {c['cam_nothing_to_search']}, no map {c['cam_no_map']},"
             f" nothing new {c['cam_stale']},"
             f" thin {c['cam_thin']}, still searching {c['cam_busy']};"
             f" last {last}; lidar verdict"

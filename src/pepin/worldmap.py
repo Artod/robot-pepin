@@ -1,11 +1,8 @@
-"""One map for both sensors: the volume IS the map, and each sensor reads its own slice.
+"""The fused volume of a room: both sensors paint into it, and NOTHING localises against it.
 
-Until now a "known room" and an "unknown room" were two different machines. The tracker matched
-scans against a frozen picture (``flat3.pgm`` through map_server) while the TSDF volume
-(:mod:`pepin.tsdf`), built from the camera alone, was a pretty surface nobody localised against.
-This module makes the volume the map itself:
+A TSDF volume (:mod:`pepin.tsdf`) both sensors write into:
 
-* the lidar writes its own layer into it — every beam carves free space along its run and marks
+* the lidar writes its own layer — every beam carves free space along its run and marks
   a surface at its return, at the height the ray itself is at (the beam plus or minus one
   voxel: the level sweep of a level body, and the climbing ray of a body leaning over a
   slipper, which at 5 degrees is 44 cm off the plane at 5 m), on its own weight channel;
@@ -15,12 +12,17 @@ This module makes the volume the map itself:
   push a wall half a metre in the one layer the cart drives by. Only that plane is handed back —
   where a leaning beam climbs into the camera's band it is an observation like any other, which
   the camera may correct;
-* a horizontal band of the volume reads out as an occupancy grid (:class:`OccupancySlice`), so
-  the lidar localises against the slice at its plane, the camera against its band
-  (``camera_band_m``), and Nav2 gets the 2D projection as ``/map`` — one entity, three views;
-* the whole thing snapshots to an ``.npz`` and loads back, so a known room is a loaded snapshot
-  and an unknown one an empty volume. There is no mode switch, and "maturity" is not a flag: it
-  is the weight in a cell, which grows with every observation and is what a slice thresholds on.
+* a horizontal band reads out as an occupancy grid (:class:`OccupancySlice`) for a picture, a
+  map_server pair or an offline instrument — never for a matcher;
+* the whole thing snapshots to an ``.npz`` and loads back, so a room the cart has painted comes
+  back as it was left.
+
+THE VOLUME IS OPEN-LOOP, and that is the one hard rule here. It is painted at the pose the tracker
+gives, and no pose is ever estimated against it: a tracker that matches the slice it is painting
+has a null space it cannot see out of — turn the map and the heading together and a bearing-only
+scan maps onto itself — and a cart parked with its wheels blocked walked 7 degrees and 5-7 cm in 35
+minutes through it at fit 0.97-0.99 (2026-09-18). The room's own geometry is RTAB-Map's loop-closed
+graph and its occupancy grid; this volume is the 3D surface beside it.
 
 No ROS here (the message is returned as plain fields), no file formats beyond the snapshot and
 the map_server pair the existing tooling already reads.
@@ -38,11 +40,9 @@ tape, which is where they already live; the snapshot is a warm cache, never the 
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import math
 import os
-import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -75,95 +75,55 @@ FREE, OCCUPIED, UNKNOWN = 0, 100, -1
 PGM_FREE, PGM_OCCUPIED, PGM_UNKNOWN = 254, 0, 205
 
 LIDAR, CAMERA = "lidar", "camera"  # the sensors a snapshot's frame list names
-# 1 carried no identity. A map that cannot say which room it is is exactly what this version
-# exists to end, so a version-1 snapshot is refused by :meth:`WorldMap.load` and the caller
-# starts from the seed instead — which is what "the snapshot is a warm cache, never the only
-# copy" has always meant. The default snapshot path moves with this version too
-# (:func:`world_path_for`), so nothing is silently read on the old name either.
-SNAPSHOT_VERSION = 3
+# 4 dropped the minted map identity: a volume no longer claims to be a room, because the room's
+# geometry is the graph database's and this is the surface painted in that database's frame. A
+# snapshot of any other version is refused by :meth:`WorldMap.load` and the caller starts empty —
+# which is what "the snapshot is a warm cache, never the only copy" has always meant.
+SNAPSHOT_VERSION = 4
 
-# What a map is born from, and what a report line and a snapshot call it.
-BORN_FRESH = "fresh"  # nowhere recognised: the map frame is under the cart and nothing is in it
-BORN_ROOM = "room"  # a recognised room's first volume, born under the cart in that room's name
-BORN_RESUME = "resume"  # this very map, carried over from its own snapshot
-
-# The suffixes of the one map's own files, beside the maps: the volume, and the map_server pair
-# exported from its lidar layer for whoever cannot read a volume (the board's map_server, the
-# operator's tools). ``flat3_straight.world.npz`` + ``flat3_straight.world.pgm``/``.yaml``.
+# The suffixes of the volume's own files: the snapshot, and the map_server pair an offline export
+# writes from its lidar layer for whoever cannot read a volume (the operator's tools, the
+# instruments in scratch/). ``rtabmap.world.npz`` + ``rtabmap.world.pgm``/``.yaml``.
 WORLD_SUFFIX = ".world.npz"
 EXPORT_STEM = ".world"
-# Where a room's volume lives: ros/maps, mounted at /maps in the containers that write one.
+# Where a volume lives: ros/maps, mounted at /maps in the containers that write one.
 MAPS_DIR = "/maps"
 
 
-def world_path_for(room: str | Path, maps: str | Path = MAPS_DIR) -> Path:
-    """One room's own volume: ``flat3_straight`` -> ``/maps/flat3_straight.world.npz``.
+def world_path_for(database: str | Path, maps: str | Path = MAPS_DIR) -> Path:
+    """The volume that belongs to one graph database: ``rtabmap.db`` ->
+    ``/maps/rtabmap.world.npz``.
 
-    ONE MAP, ONE FILE, AND THE ROOM NAMES IT. The npz is the volume's canon and the only
-    persistent thing in the loop — there is no pgm beside it, neither as a seed nor as an
-    exported picture. Naming the file after the ROOM (what a place recogniser calls this place)
-    rather than after the session is what stops a second flat resuming into the first.
+    THE FRAME IS THE DATABASE'S, SO THE VOLUME IS NAMED AFTER THE DATABASE. Every voxel in here
+    was painted at a pose expressed in the frame RTAB-Map's optimised graph defines, so a volume
+    resumed beside ANOTHER database is a room drawn in coordinates nothing shares — which is why a
+    fresh database means a fresh volume, and the file name is what makes that visible instead of
+    silent.
 
-    A ``room`` that already looks like a path is used as one, so an explicit file still works;
+    A ``database`` that already looks like a path is used as one, so an explicit file still works;
     a bare name lands in ``maps``. The suffix is APPENDED to the stem, never through
     ``with_suffix``: pathlib reads ``.world`` as a suffix and would replace it, which is exactly
-    how the first live export wrote itself over the seed's own pgm (2026-09-18).
+    how the first live export wrote itself over a seed's own pgm (2026-09-18).
     """
-    named = Path(room)
+    named = Path(database)
     home = named.parent if named.parent != Path(".") else Path(maps)
     return home / (named.stem + WORLD_SUFFIX)
 
 
 def export_path_for(world_path: str | Path) -> Path:
-    """Where an OFFLINE export of a volume goes: ``flat3_straight.world.npz`` ->
-    ``flat3_straight.world`` (``.pgm``/``.yaml`` appended by :meth:`WorldMap.export_pgm_yaml`).
+    """Where an OFFLINE export of a volume goes: ``rtabmap.world.npz`` -> ``rtabmap.world``
+    (``.pgm``/``.yaml`` appended by :meth:`WorldMap.export_pgm_yaml`).
 
     Nothing in the running loop calls this. A pgm of the volume is a second file claiming to be
-    the map, and the board persists the map it ADOPTED rather than a picture the laptop made for
-    it — so an export exists for an operator who wants to look at a volume in map_server's own
-    format, and for the offline instruments in scratch/, and for nobody else.
+    the map, and the room's own geometry is the graph's grid — so an export exists for an operator
+    who wants to look at a volume in map_server's own format, and for the offline instruments in
+    scratch/, and for nobody else.
 
     Only the ``.npz`` comes off, so the pair keeps the ``.world`` in its name and can never land
     on a room's other files.
     """
     path = Path(world_path)
     return path.with_suffix("") if path.suffix == ".npz" else path
-
-
-@dataclass(frozen=True)
-class MapIdentity:
-    """WHO a map is, minted once when it is born and carried for as long as it lives.
-
-    Until now a map was identified by its shape and origin ("239x215@-18.53,-4.38",
-    ``pepin_bringup.msgs.map_id``): the only thing a nav_msgs/OccupancyGrid carries that tells
-    two maps apart. That spelling answers the wrong question twice. It says a volume and the
-    file it was seeded from are different maps although every known cell of them agrees (the
-    volume's box is the config's 280x250, the file's own 239x215), so a word about the room
-    stamped on one side is refused on the other; and it would say a map that grew a row is a
-    different room, which is exactly when a growing volume must still be itself.
-
-    So the identity is minted at birth from the facts of that birth — what it was born from, on
-    which grid, at which second — and travels in the snapshot and in the exported yaml. The
-    token is a CRC of those facts rather than a random number, so the same birth mints the same
-    id and a run is reproducible from its log (CLAUDE.md: seed, config, fingerprint).
-
-    The old spelling stays derivable (:meth:`OccupancyGridFields.legacy_id`) and stays the id
-    every consumer uses today; nothing breaks until they move.
-    """
-
-    token: str
-    born_s: float
-    provenance: str  # BORN_FRESH, or "seed:<name>" — what this room was made of
-
-    @classmethod
-    def born(cls, provenance: str, spec: GridSpec, at_s: float) -> MapIdentity:
-        """Mint an identity for a map being born now: the token is a CRC of the birth."""
-        facts = f"{provenance}|{spec.origin}|{spec.shape}|{spec.voxel_m}|{at_s:.3f}"
-        return cls(f"{zlib.crc32(facts.encode()):08x}", at_s, provenance)
-
-    def text(self) -> str:
-        """The identity for a report line: ``1a2b3c4d born from seed:flat3_straight``."""
-        return f"{self.token} born from {self.provenance}"
 
 
 @dataclass(frozen=True)
@@ -264,13 +224,8 @@ class SliceLaw:
     """
 
     min_weight: float = 2.0  # observations a voxel needs before it may speak at all
-    min_views: int = 0  # ...and from how many DISTINCT places (0: the question is not asked)
     free_above: float = 0.5  # half a truncation, one voxel, from anything
     occupied_below: float | None = None  # default: half a voxel, in truncation units
-
-    def judges(self, views: Float32) -> npt.NDArray[np.bool_] | bool:
-        """Which cells may speak under this law's view cut: all of them when it asks nothing."""
-        return True if self.min_views <= 0 else views >= self.min_views
 
     def occupied_t(self, spec: GridSpec) -> float:
         """The occupied threshold in the field's own units for ``spec``: half a voxel, which is
@@ -302,36 +257,6 @@ class OccupancyGridFields:
     def as_list(self) -> list[int]:
         """The cells as plain ints, the form rclpy accepts for an int8[] field."""
         return [int(v) for v in self.data]
-
-    def legacy_id(self) -> str:
-        """This grid's identity the way every consumer still spells it —
-        ``280x250@-19.48,-5.48`` — taken one step before the message, exactly as
-        ``pepin_bringup.msgs.map_id`` takes it from one.
-
-        It is "legacy" because it answers "which box" and not "which room"
-        (:class:`MapIdentity`), and it is kept because the board's tracker, the laptop's
-        localizer, the frame node and the anchor file names are all keyed on it today. A volume
-        whose exported pair a map_server serves has the SAME legacy id on both sides — same
-        width, height and origin — which is what lets a word stamped on /map be evidence about
-        /map_lidar at last.
-        """
-        return f"{self.width}x{self.height}@{self.origin_x:.2f},{self.origin_y:.2f}"
-
-    def digest(self) -> str:
-        """This grid's geometry and the CRC of its cells (``280x250@-19.48,-5.48:0.050#1a2b3c4d``)
-        — what tells a republished map from a changed one without keeping a copy of the old one.
-
-        A publisher hashes the slice with this and sends nothing when the answer has not moved:
-        republishing a map is free for the publisher and expensive for every reader (a tracker
-        that adopts one rebuilds its matcher, its mask and its tracker; a costmap re-seeds its
-        static layer). The geometry is part of the answer because a map that moved or grew is a
-        new map however many of its cells stayed. A CRC over 70000 cells is well under a
-        millisecond. The spelling is ``pepin_bringup.msgs.map_digest``'s, taken one step earlier.
-        """
-        return (
-            f"{self.legacy_id()}"
-            f":{self.resolution:.3f}#{zlib.crc32(np.ascontiguousarray(self.data).tobytes()):08x}"
-        )
 
 
 @dataclass(frozen=True)
@@ -410,24 +335,9 @@ class OccupancySlice:
         ).astype(np.uint8)
         return f"P5\n{cols} {rows}\n255\n".encode() + pixels[::-1].tobytes()
 
-    def to_yaml(self, image: str, identity: MapIdentity | None = None) -> str:
-        """The map_server metadata for :meth:`to_pgm`, field for field as ros/maps/*.yaml, plus
-        the map's own identity where it has one.
-
-        ``map_id``, ``map_born`` and ``map_from`` are extra keys: map_server reads the seven it
-        knows by name and ignores the rest, so the pair stays loadable by every tool that reads
-        one today, while an operator (and, once they move, the consumers of the id) can see
-        which room this picture is of and what it was made of.
-        """
-        extra = (
-            ""
-            if identity is None
-            else (
-                f"map_id: {identity.token}\n"
-                f"map_born: {identity.born_s:.0f}\n"
-                f"map_from: {identity.provenance}\n"
-            )
-        )
+    def to_yaml(self, image: str) -> str:
+        """The map_server metadata for :meth:`to_pgm`, field for field as ros/maps/*.yaml, so the
+        pair is loadable by every tool that reads one today."""
         return (
             f"image: {image}\n"
             "mode: trinary\n"
@@ -436,7 +346,7 @@ class OccupancySlice:
             "negate: 0\n"
             "occupied_thresh: 0.65\n"
             "free_thresh: 0.196\n"
-        ) + extra
+        )
 
 
 class WorldMap:
@@ -453,24 +363,18 @@ class WorldMap:
         mount: PlanarMount | None = None,
         law: LidarLaw | None = None,
         protect_lidar_layer: bool = True,
-        identity: MapIdentity | None = None,
     ) -> None:
         self.spec = spec
         self.mount = mount if mount is not None else PlanarMount()
         self.law = law if law is not None else LidarLaw()
         self.protect_lidar_layer = protect_lidar_layer
-        # Who this map is, for as long as it lives (:class:`MapIdentity`). A volume made without
-        # one is born fresh here and then told what it was seeded from, so no code path can end
-        # up with a map that cannot say which room it is.
-        born = MapIdentity.born(BORN_FRESH, spec, 0.0)
-        self.identity = identity if identity is not None else born
         self.volume = Tsdf(spec)
         self.lidar_weight: Float32 = np.zeros(spec.shape, dtype=np.float32)
         # How many DISTINCT places have seen a surface in each voxel. Not a count of
         # observations — that is the weight, and a parked cart inflates it by ten a second — but
-        # a count of viewpoints: what makes a cell evidence about a pose it did not come from
-        # (:class:`SliceLaw`, ``min_views``). Raised at most once per accepted revolution, and
-        # only by a RETURN: a crossing is not a view of a surface.
+        # a count of viewpoints, which is what says a cell is the room and not one pose's own
+        # paint. Raised at most once per accepted revolution (:class:`ViewGate`), and only by a
+        # RETURN: a crossing is not a view of a surface. Read by :meth:`maturity`.
         self.views: Float32 = np.zeros(spec.shape, dtype=np.float32)
         self.lidar_plane_m: float = self.mount.z_m
         self.stamp: float = 0.0  # the newest observation in the volume (the sensors' clock)
@@ -847,7 +751,7 @@ class WorldMap:
         hi = max(hi, lo + 1) if lo < nz else nz
         sdf = self.volume.sdf[:, :, lo:hi]
         weight = self.volume.weight[:, :, lo:hi]
-        known = (weight >= law.min_weight) & law.judges(self.views[:, :, lo:hi])
+        known = weight >= law.min_weight
         nearest = np.where(known, sdf, np.inf).min(axis=2)  # how open the column is
         crossing = np.where(known, np.abs(sdf), np.inf).min(axis=2)  # how near a surface it is
         maturity = np.where(known, weight, 0.0).max(axis=2)
@@ -865,52 +769,23 @@ class WorldMap:
         )
 
     def lidar_slice(self, law: SliceLaw | None = None) -> OccupancySlice:
-        """The layer at the lidar's plane: what the lidar localises against, and what goes out
-        as ``/map``. The plane is the mount's height from ``config/lidar.json`` until a scan
+        """The layer at the lidar's plane: the room as the beams drew it, for a picture and for an
+        offline export. The plane is the mount's height from ``config/lidar.json`` until a scan
         says otherwise (the cart's own z, should the floor ever not be zero)."""
         half = self.law.layer_half_m
         return self.slice(self.lidar_plane_m - half, self.lidar_plane_m + half, law)
 
     def camera_band_slice(self, law: SliceLaw | None = None) -> OccupancySlice:
-        """The band the camera speaks for (``camera_band_m`` of config/fusion.json, the band
-        /depth_scan marks in): what the camera sources localise against — seats and tabletops
-        the lidar's plane never sees are in here and in no other view of the map.
-
-        The band a MATCHER is handed is cut with its own, far higher ``min_weight`` than the
-        one a picture is cut with (:meth:`hardness`): a cell the camera painted two frames ago
-        at the pose it is now asking about is not evidence about that pose.
-        """
+        """The band the camera paints (``camera_band_m`` of config/fusion.json, the band
+        /depth_scan marks in): seats and tabletops the lidar's plane never sees. A readout for an
+        instrument, never for a matcher — nothing localises against this volume."""
         lo, hi = self.spec.camera_band_m
         return self.slice(lo, hi, law)
-
-    def hardness(self, law: SliceLaw, floor: SliceLaw | None = None) -> dict[str, float]:
-        """How much of the camera's band is hard enough to localise on: the occupied cells the
-        matcher's cut (``law``) keeps, the occupied cells the map's own, lenient cut (``floor``,
-        the default law where the caller has none) finds, and the share of the second the first
-        keeps.
-
-        A share near 1 means the band is as hard as it is big — every wall in it has been
-        integrated for seconds from more than one frame. A share near 0 means the matcher would
-        be handed a band the camera painted a moment ago at the very pose it is asking about,
-        which is how camera-only localisation walked away in 20-33 cm steps (2026-09-13) — or,
-        on a volume just seeded from a saved map, a band with nothing in it at all:
-        :meth:`seed_from_grid` writes one weight per cell and a matcher cut above it sees none
-        of them.
-        """
-        hard = self.camera_band_slice(law).counts()
-        soft = self.camera_band_slice(floor if floor is not None else SliceLaw()).counts()
-        share = hard["occupied"] / soft["occupied"] if soft["occupied"] else 0.0
-        return {
-            "occupied": float(hard["occupied"]),
-            "occupied_floor": float(soft["occupied"]),
-            "share": float(share),
-            "min_weight": float(law.min_weight),
-        }
 
     def to_occupancy_grid_message_fields(
         self, slice_: OccupancySlice | None = None
     ) -> OccupancyGridFields:
-        """The fields of the ``/map`` message a node publishes: the lidar's slice by default."""
+        """The fields of an occupancy-grid message for a viewer: the lidar's slice by default."""
         return (slice_ if slice_ is not None else self.lidar_slice()).message_fields()
 
     def export_pgm_yaml(self, path: str | Path, slice_: OccupancySlice | None = None) -> Path:
@@ -918,37 +793,30 @@ class WorldMap:
         already is, so map_server, ``pepin.mapping.grid_from_pgm`` and the operator scripts read
         the volume with no new reader. Returns the yaml's path.
 
-        This pair is the volume's CACHE, not a second map: it is what a map_server serves so the
-        board can boot and localise with the laptop off (CLAUDE.md rule 20) while there is still
-        only one room. Both files are written beside their targets and renamed into place, and
-        the pgm before the yaml, so a process killed mid-write leaves the previous pair intact
-        rather than a yaml pointing at half a picture — the failure a truncated snapshot already
-        taught us (2026-09-14).
+        OFFLINE ONLY: nothing in the running loop calls this, and the pair is not a map anything
+        drives on — the room's own geometry is the graph's. Both files are written beside their
+        targets and renamed into place, and the pgm before the yaml, so a process killed mid-write
+        leaves the previous pair intact rather than a yaml pointing at half a picture — the failure
+        a truncated snapshot already taught us (2026-09-14).
         """
-        # ``.npz`` and nothing else: a base of ``flat3_straight.world`` must stay that, or the
-        # pair would be written over ``flat3_straight.pgm`` — the seed every run reads.
+        # ``.npz`` and nothing else: a base of ``rtabmap.world`` must stay that, or the pair would
+        # be written over another file of the same stem.
         given = Path(path)
         base = given.with_suffix("") if given.suffix == ".npz" else given
         view = slice_ if slice_ is not None else self.lidar_slice()
         base.parent.mkdir(parents=True, exist_ok=True)
         # Appended, never ``with_suffix``: pathlib reads ``.world`` as the suffix of
-        # ``flat3_straight.world`` and would replace it — which is exactly how the first live
-        # run of this export wrote the volume's slice over the seed's own pgm (2026-09-18).
+        # ``rtabmap.world`` and would replace it — which is exactly how the first live
+        # run of this export wrote the volume's slice over a seed's own pgm (2026-09-18).
         pgm = base.with_name(base.name + ".pgm")
         yaml_path = base.with_name(base.name + ".yaml")
         tmp_pgm = base.with_name(base.name + ".writing.pgm")
         tmp_yaml = base.with_name(base.name + ".writing.yaml")
         tmp_pgm.write_bytes(view.to_pgm())
-        tmp_yaml.write_text(view.to_yaml(pgm.name, self.identity))
+        tmp_yaml.write_text(view.to_yaml(pgm.name))
         os.replace(tmp_pgm, pgm)
         os.replace(tmp_yaml, yaml_path)
         return yaml_path
-
-    def reference(self, lidar_law: SliceLaw, camera_law: SliceLaw, age_s: float) -> MapReference:
-        """This volume's two matcher layers frozen as they stand: the gauge of the session about
-        to start (:class:`MapReference`). Called once, before a revolution of this session has
-        gone in."""
-        return MapReference(self.lidar_slice(lidar_law), self.camera_band_slice(camera_law), age_s)
 
     def maturity(self) -> dict[str, float]:
         """How grown-up the volume is, for a report line: voxels either sensor has spoken for,
@@ -966,25 +834,18 @@ class WorldMap:
             "plane_m": self.lidar_plane_m,
         }
 
-    def report(self, lidar_law: SliceLaw | None = None, camera_law: SliceLaw | None = None) -> str:
-        """One phrase for the node's report line: both slices as the node actually cuts them,
-        how hard the camera's band is, and how mature the volume is.
-
-        The laws are the live ones (the node's flags), not the defaults: a report that shows a
-        slice nobody publishes says nothing about what the matchers were handed.
-        """
+    def report(self, law: SliceLaw | None = None) -> str:
+        """One phrase for the node's report line: what the two layers hold and how mature the
+        volume is. ``law`` cuts both slices; the default is the module's own."""
         stats = self.maturity()
-        lidar = self.lidar_slice(lidar_law).counts()
-        law = camera_law if camera_law is not None else SliceLaw()
+        lidar = self.lidar_slice(law).counts()
         camera = self.camera_band_slice(law).counts()
-        hard = self.hardness(law, lidar_law)
         return (
             f"lidar slice {lidar['occupied']} occupied / {lidar['free']} free /"
             f" {lidar['unknown']} unknown, camera band {camera['occupied']} occupied /"
-            f" {camera['free']} free (hard {hard['share'] * 100:.0f} % of"
-            f" {hard['occupied_floor']:.0f} above weight {hard['min_weight']:.0f}),"
-            f" {stats['voxels']:.0f} voxels"
-            f" ({stats['lidar_voxels']:.0f} the lidar's, mean weight {stats['mean_weight']:.1f})"
+            f" {camera['free']} free, {stats['voxels']:.0f} voxels"
+            f" ({stats['lidar_voxels']:.0f} the lidar's, {stats['views']:.0f} seen from two"
+            f" places, mean weight {stats['mean_weight']:.1f})"
         )
 
     # ---- the snapshot --------------------------------------------------------------------
@@ -1007,9 +868,6 @@ class WorldMap:
             tmp,
             version=np.array(SNAPSHOT_VERSION),
             spec=np.frombuffer(json.dumps(self._spec_json()).encode(), dtype=np.uint8),
-            identity=np.frombuffer(
-                json.dumps(dataclasses.asdict(self.identity)).encode(), dtype=np.uint8
-            ),
             sdf=self.volume.sdf,
             weight=self.volume.weight,
             lidar_weight=self.lidar_weight,
@@ -1040,8 +898,8 @@ class WorldMap:
     def load(
         cls, path: str | Path, mount: PlanarMount | None = None, law: LidarLaw | None = None
     ) -> WorldMap:
-        """A volume saved by :meth:`save`, grid and all — a known room is this and nothing
-        else. Raises ``ValueError`` for a snapshot of another version."""
+        """A volume saved by :meth:`save`, grid and all. Raises ``ValueError`` for a snapshot of
+        another version — including one written before the volume stopped claiming to be a map."""
         data = np.load(Path(path))
         version = int(data["version"])
         if version != SNAPSHOT_VERSION:
@@ -1058,8 +916,7 @@ class WorldMap:
             weight_cap=raw["weight_cap"],
             camera_band_m=(raw["camera_band_m"][0], raw["camera_band_m"][1]),
         )
-        raw_id = json.loads(bytes(data["identity"].tobytes()).decode())
-        world = cls(spec, mount=mount, law=law, identity=MapIdentity(**raw_id))
+        world = cls(spec, mount=mount, law=law)
         world.volume.sdf[:] = data["sdf"]
         world.volume.weight[:] = data["weight"]
         world.volume.rgb[:] = data["rgb"]
@@ -1078,25 +935,13 @@ class WorldMap:
         world._rows = world._plane_rows(world.lidar_plane_m) if world.lidar_weight.any() else None
         return world
 
-    def born_from(self, provenance: str, at_s: float) -> MapIdentity:
-        """Mint this volume's identity now that what it is made of is known, and return it.
-
-        A volume is constructed before its seed is read, so the id it is born with is provisional
-        (``fresh``); the node calls this the moment it knows — ``seed:flat3_straight`` for a room
-        written in from a saved pair, :data:`BORN_FRESH` for one that starts empty. A RESUMED
-        volume never passes through here: it keeps the identity its snapshot carries, which is
-        the whole point of minting one.
-        """
-        self.identity = MapIdentity.born(provenance, self.spec, at_s)
-        return self.identity
-
     def seed_from_grid(
         self, values: Int8, resolution_m: float, origin: tuple[float, float], weight: float = 4.0
     ) -> int:
-        """Write a saved 2D map (the trinary values of ``/map`` or of a pgm) into the lidar's
-        layer as its starting state: an occupied cell becomes a surface, a free one open air,
-        an unknown one stays unknown. This is all a "known room" ever was — after it the volume
-        keeps growing from the sensors, and nothing in the stack can tell the two apart.
+        """Write a saved 2D map (the trinary values of an occupancy grid or of a pgm) into the
+        lidar's layer as its starting state: an occupied cell becomes a surface, a free one open
+        air, an unknown one stays unknown. OFFLINE ONLY — nothing in the running loop seeds a
+        volume from a picture; it is here for the instruments that build one from a tape.
 
         Returns how many cells were seeded. Cells are matched by their centres, so a saved map
         of a different resolution or origin still lands where it belongs.
@@ -1220,73 +1065,6 @@ class SnapshotClock:
         return math.inf if self.last_s <= 0.0 else now - self.last_s
 
 
-@dataclass(frozen=True)
-class MapReference:
-    """The matcher's reference: the volume as it was RESUMED, before this session painted a cell.
-
-    INSIDE A SESSION THE REFERENCE IN KNOWN SPACE IS FROZEN. A tracker that matches the slice it
-    is painting has a null space it cannot see out of — turn the map and the heading together and
-    a bearing-only scan maps onto itself — and a cart parked with its wheels blocked walked 7
-    degrees in 35 minutes through it (2026-09-18, fit 0.97-0.99 the whole way). The gauge that
-    fixes it already exists and needs no new sensor: the cells of EARLIER sessions, painted at
-    poses that cannot depend on the pose being estimated now. Live, on the same evening, the same
-    tracker on a static snapshot of the same volume held (-9.39, +2.48, +51 deg) for hours at fit
-    0.82-0.96 with the whole-map search agreeing.
-
-    A count of views cannot stand in for this. Two views from this session's own drifting poses
-    are two views; independence is not how many looked but whether what they looked from was
-    derived from the answer.
-
-    So a matcher is handed :meth:`over` — the reference wherever the reference KNOWS the cell, and
-    this session's own paint only where the reference says unknown. Unknown space is where the
-    loop is legitimately open (a wake-up, a new room, a door onto a corridor): there the session's
-    paint IS the map, it drifts as SLAM drifts, and it is bounded the moment the cart re-enters
-    known space. :class:`ViewGate` and ``min_views`` remain the rule for THAT regime.
-
-    Painting is untouched by any of this: the volume, the surface cloud, the costmap-facing /map
-    and the snapshot are complete. Only what a MATCHER is allowed to read is frozen.
-
-    The slices are cut once, with the laws in force at start; a law moved live afterwards changes
-    this session's paint and not the reference, and the report line says how old the reference is.
-    """
-
-    lidar: OccupancySlice
-    camera: OccupancySlice
-    age_s: float  # how old the snapshot it came from was, seconds; inf for a volume born empty
-
-    @property
-    def known(self) -> int:
-        """Cells of the lidar layer the reference has an opinion about: the size of the gauge."""
-        counts = self.lidar.counts()
-        return counts["known"]
-
-    def over(self, live: OccupancySlice, reference: OccupancySlice | None = None) -> OccupancySlice:
-        """``live`` with the reference laid over it wherever the reference knows the cell: what a
-        matcher is handed. ``reference`` picks which layer (the lidar's by default)."""
-        base = self.lidar if reference is None else reference
-        if base.values.shape != live.values.shape:
-            return live  # another grid entirely: the reference cannot speak about it
-        known = base.values != UNKNOWN
-        return dataclasses.replace(
-            live,
-            values=np.ascontiguousarray(np.where(known, base.values, live.values)),
-            sdf=np.ascontiguousarray(np.where(known, base.sdf, live.sdf)),
-            weight=np.ascontiguousarray(np.where(known, base.weight, live.weight)),
-        )
-
-    def grown(self, live: OccupancySlice) -> int:
-        """How many cells of ``live`` are this session's own paint in space the reference knows
-        nothing about: the number the report line prints beside the reference's size."""
-        if self.lidar.values.shape != live.values.shape:
-            return int(np.count_nonzero(live.values != UNKNOWN))
-        return int(np.count_nonzero((self.lidar.values == UNKNOWN) & (live.values != UNKNOWN)))
-
-    def text(self) -> str:
-        """The reference for a report line: its size and how old the snapshot behind it was."""
-        age = "born empty" if self.age_s == math.inf else f"{self.age_s / 3600:.1f} h old"
-        return f"{self.known} cells from a snapshot {age}"
-
-
 @dataclass
 class ViewGate:
     """Whether a revolution is a NEW view of the room, or the one already in the volume again.
@@ -1294,9 +1072,9 @@ class ViewGate:
     A VIEW IS EVIDENCE ONCE. A parked cart sends the same revolution ten times a second — two
     thousand an hour — and the volume's weights count every one of them as an independent
     observation, which is how a standing cart's own paint came to outweigh everything else in the
-    map within a second (2026-09-18: 7 degrees of drift in 35 minutes, wheels blocked). RTAB-Map
-    says the same thing with RGBD/LinearUpdate, and :func:`pepin.watchdog.same_place` already
-    spells it for the node table; this is the grid's own version of it.
+    volume within a second (2026-09-18: 7 degrees of drift in 35 minutes, wheels blocked, while the
+    tracker was still matching the slice it was painting). RTAB-Map says the same thing with
+    RGBD/LinearUpdate; this is the grid's own version of it.
 
     WHAT "ALREADY INTEGRATED" MEANS IS READ OFF THE GRID, not chosen. A return at range ``r``
     moves in the map by the cart's translation plus ``r`` times its turn, so a pose that moves no

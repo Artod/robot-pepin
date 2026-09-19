@@ -19,7 +19,6 @@ import ros_stubs
 RCLPY = ros_stubs.install()
 
 from pepin_bringup.laptop_localizer import (  # noqa: E402
-    CAMERA_MAP_TOPIC,
     FLAGS,
     LaptopLocalizer,
     SearchJob,
@@ -347,23 +346,22 @@ def test_without_a_belief_to_start_from_nothing_is_measured() -> None:
         node.close()
 
 
-def test_the_camera_matches_the_volume_s_own_band_when_the_fusion_publishes_it() -> None:
-    """The lidar's plane and the camera's band are two cross-sections of one room, and a scan
-    must be matched against its own: once pepin_bringup.depth_fusion publishes /map_camera, that
-    is the grid the camera's scans are refined on — and the measurement still carries /map's id,
-    because that is the map the board holds."""
+def test_the_camera_matches_the_one_grid_the_tracker_is_on() -> None:
+    """BOTH HALVES MATCH ON ONE GRID. A camera fan used to be refined against a slice of the fused
+    volume (/map_camera), which was a loop with no gauge in it — the volume was painted at the very
+    poses the fan helped produce. The volume is open-loop now, and the map the board's tracker
+    adopted is what a fan is matched on, in the camera's own narrower window."""
     node = watch()
     try:
         standing(node)
-        node.subs[CAMERA_MAP_TOPIC][1](map_msg(furnished_room_map()))
         node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
-        assert node._camera_map == CAMERA_MAP_TOPIC
+        assert node._camera is not None and node._camera.grid is node._grid
         assert measured(node).map_id == node._map_id
-        assert '"matched_on": "/map_camera"' in (
+        assert f'"matched_on": "{TRACKED_MAP_TOPIC}"' in (
             node.pubs["/localization/measurement"].sent[-1].data
         )
         node._report()
-        assert "against /map_camera" in node.logger.texts("info")[-1]
+        assert f"against {TRACKED_MAP_TOPIC}" in node.logger.texts("info")[-1]
     finally:
         node.close()
 
@@ -568,7 +566,6 @@ def test_a_fan_searches_the_whole_map_when_the_lidar_is_not_driving() -> None:
     node = watch(camera_search=True, camera_search_max_ambiguity=1.0, camera_search_min_fit=0.0)
     try:
         standing(node)
-        node.subs[CAMERA_MAP_TOPIC][1](map_msg(furnished_room_map()))  # the band, not /map
         node.subs["/localization/sources"][1](sources_msg("off"))
         node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
         node._tick_camera(time.monotonic())
@@ -593,7 +590,6 @@ def test_an_ambiguous_fan_is_never_published() -> None:
     node = watch(camera_search=True, camera_search_max_ambiguity=0.0)
     try:
         standing(node)
-        node.subs[CAMERA_MAP_TOPIC][1](map_msg(furnished_room_map()))
         node.subs["/localization/sources"][1](sources_msg("stale 2.1 s"))
         node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
         node._tick_camera(time.monotonic())
@@ -605,22 +601,21 @@ def test_an_ambiguous_fan_is_never_published() -> None:
         node.close()
 
 
-def test_a_fan_is_never_searched_over_the_lidar_s_map() -> None:
-    """The band is the only grid a fan may be SEARCHED on. Until /map_camera arrives the
-    camera's matcher falls back to the board's /map — right for refining a pose somebody holds,
-    and a regime nobody measured for finding one — so the search does not run and says so."""
+def test_a_fan_is_never_searched_before_the_board_s_map_has_arrived() -> None:
+    """A candidate carrying no map id is refused as "elsewhere" by the board's gate and breaks a
+    lidar streak on the way out, so a search without one does not run at all and says so."""
     node = watch(camera_search=True, camera_search_max_ambiguity=1.0, camera_search_min_fit=0.0)
     try:
+        node._localizer, node._grid, node._map_id = None, None, ""
         standing(node)
         node.subs["/localization/sources"][1](sources_msg("off"))
         node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
         node._tick_camera(time.monotonic())
-        assert node._camera_map != CAMERA_MAP_TOPIC, "the fallback grid is what is in hand here"
         assert not node.pubs["/localization/candidate"].sent
         node._report()
-        assert "no camera map 1" in node.logger.texts("info")[-1]
-        # ...and the moment the band arrives, the next fan is searched.
-        node.subs[CAMERA_MAP_TOPIC][1](map_msg(furnished_room_map()))
+        assert "no map 1" in node.logger.texts("info")[-1]
+        # ...and the moment the tracker's map arrives, the next fan is searched.
+        node.subs[TRACKED_MAP_TOPIC][1](map_msg(furnished_room_map()))
         node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.2))
         node._tick_camera(time.monotonic())
         assert until(lambda: node.pubs["/localization/candidate"].sent)
@@ -657,7 +652,6 @@ def test_a_fan_never_throws_away_the_lidar_s_waiting_search() -> None:
     node = watch(camera_search=True, camera_search_max_ambiguity=1.0, camera_search_min_fit=0.0)
     try:
         standing(node)
-        node.subs[CAMERA_MAP_TOPIC][1](map_msg(furnished_room_map()))
         node.subs["/localization/sources"][1](sources_msg("off"))
         node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
         node._worker.stop()  # the thread is gone; what is offered now stays waiting

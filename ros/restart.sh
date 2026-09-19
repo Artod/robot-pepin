@@ -143,25 +143,15 @@ restart_board() {
     docker restart pepin-zenoh >/dev/null && echo "laptop bridge restarted"
 }
 
-drop_anchor() {  # --fresh-graph: the anchor of the map the board serves, for the new database
-    local id path
-    id="$(map_id_now)"
-    if [ -z "$id" ]; then
-        echo "--fresh-graph: the board's tracker did not say which map id it serves, so no anchor"
-        echo "  was removed; delete ros/maps/<map id>.graph_anchor.json by hand if one is stale"
-        return 0
+drop_volume() {  # --fresh-graph: the volume shares the database's frame, so it goes with it
+    # One frame (World R): the graph's map frame IS `map`, and the fused volume is painted in it.
+    # An empty database starts a new frame, and a volume kept from the old one would be a room
+    # painted somewhere else — so the snapshot beside the database is moved aside, never deleted.
+    local world="$HERE/maps/rtabmap.world.npz"
+    if [ -f "$world" ]; then
+        mv "$world" "$world.before-fresh-$(date +%Y%m%d_%H%M%S)"
+        echo "--fresh-graph: the volume of the old frame moved aside ($world.before-fresh-*)"
     fi
-    path="$(cd "$HERE/.." && uv run -q python -c \
-        'import sys; from pepin.anchors import anchor_path; print(anchor_path(sys.argv[1], sys.argv[2]))' \
-        "$HERE/maps" "$id")"
-    if [ -f "$path" ]; then
-        rm -f "$path"
-        echo "--fresh-graph: removed $path"
-    else
-        echo "--fresh-graph: no anchor on file for map $id"
-    fi
-    echo "  (the anchor is map <-> database, not per session: an empty database beside a kept"
-    echo "  anchor would put every word the graph says in the old database's frame)"
 }
 
 restart_laptop() {
@@ -183,7 +173,7 @@ restart_laptop() {
     args=(vslam --neck "--room=$room")
     if [ "$FRESH_GRAPH" = true ]; then
         args+=(--fresh)
-        drop_anchor
+        drop_volume
     fi
     "$HERE/laptop.sh" "${args[@]}"
     wait_for "laptop" "$WAIT_LAPTOP_S" pepin-vslam "\]: depth: " || true

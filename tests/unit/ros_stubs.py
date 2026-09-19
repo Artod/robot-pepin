@@ -102,6 +102,26 @@ Imu = _msg(
     angular_velocity=Vector3,
     linear_acceleration=Vector3,
 )
+# rtabmap_msgs/SensorData as pepin_bringup.sensor_pack fills it, field for field as
+# ``ros2 interface show rtabmap_msgs/msg/SensorData`` prints them in the laptop image
+# (rtabmap_msgs 0.22.1): the two raw images, the two camera-info ARRAYS, the local-transform
+# ARRAY beside them, and the laser scan with its own four fields. The fields this node never
+# writes (the compressed halves, the features, the grid, the IMU, the GPS, the landmarks) are
+# left out on purpose: a node that started writing one would fail here as it would on the robot.
+SensorData = _msg(
+    "SensorData",
+    header=Header,
+    left=Image,
+    right=Image,
+    left_camera_info=list,
+    right_camera_info=list,
+    local_transform=list,
+    laser_scan=PointCloud2,
+    laser_scan_max_pts=0,
+    laser_scan_max_range=0.0,
+    laser_scan_format=0,
+    laser_scan_local_transform=Transform,
+)
 CameraInfo = _msg(
     "CameraInfo",
     header=Header,
@@ -691,6 +711,8 @@ def install() -> Any:
         "nav_msgs.msg": _module(
             "nav_msgs.msg", OccupancyGrid=OccupancyGrid, Odometry=Odometry, Path=Path_
         ),
+        "rtabmap_msgs": _module("rtabmap_msgs"),
+        "rtabmap_msgs.msg": _module("rtabmap_msgs.msg", SensorData=SensorData),
         "nav2_msgs": _module("nav2_msgs"),
         "nav2_msgs.msg": _module("nav2_msgs.msg", ParticleCloud=ParticleCloud),
         "nav2_msgs.action": _module("nav2_msgs.action", NavigateToPose=NavigateToPose, Spin=Spin),

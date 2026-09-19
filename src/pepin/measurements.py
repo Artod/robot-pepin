@@ -45,7 +45,6 @@ __all__ = [
     "MeasurementUpdate",
     "RemoteMeasurement",
     "compose",
-    "graph_anchor",
     "graph_measurement",
     "inverse",
     "remote_update",
@@ -203,80 +202,53 @@ def inverse(pose: Pose2D) -> Pose2D:
     )
 
 
-def graph_anchor(tracker: Pose2D, graph: Pose2D) -> Pose2D:
-    """The edge from a pose graph's own frame to the lidar map, learned once at the start of a
-    session: where the graph's frame sits on the map, so that the graph's answer about the cart
-    reads as a place on the map.
-
-    ``tracker`` is where the board's tracker says the cart is (map frame) and ``graph`` is where
-    the same cart is according to the graph at that instant (the graph's frame). Returns the
-    transform that carries the second onto the first -- ``map <- graph`` -- and it is a constant
-    of the session: RTAB-Map refuses an initial pose in mapping mode ("Initial pose can only be
-    set in localization mode (Mem/IncrementalMemory=false), ignoring it", librtabmap_core
-    0.22.1), so the graph starts at ITS odometry's origin and the offset is learned here instead
-    of imposed there.
-    """
-    return compose(tracker, inverse(graph))
-
-
 def graph_measurement(
     pose: Pose2D,
-    anchor: Pose2D,
     stamp: float,
     map_id: str,
     source: str = GRAPH,
     fit: float = 1.0,
     floor_xy_m: float = GRAPH_FLOOR_XY_M,
     floor_yaw_deg: float = GRAPH_FLOOR_YAW_DEG,
-    extra: Matrix | None = None,
+    measured: Matrix | None = None,
 ) -> RemoteMeasurement:
-    """A pose graph's verdict about where the cart is, as a measurement on the SAME map the
-    tracker drives on: the place the graph has the cart at, moved onto the map by the anchor.
+    """A pose graph's localisation as a measurement on the map the tracker drives on.
 
-    ``pose`` is where the graph says the cart is IN THE GRAPH'S OWN FRAME (RTAB-Map's
-    ``map_to_odom`` composed with the filter's ``odom -> base_link``: the graph's opinion, built
-    from its own odometry and every closure it has accepted) and ``anchor`` is where that frame
-    sits on the lidar map (:func:`graph_anchor`, learned once at the start of the session).
-    Composing the two reads the graph's answer back in map coordinates: no second owner of
-    ``map -> odom``, one more word in the fusion.
+    ``pose`` is already IN THE MAP FRAME: the graph's optimised map frame IS ``map``, so there is
+    no tie to compose and nothing to learn — RTAB-Map's own localisation in the database it loaded
+    (``/rtabmap/localization_pose``) is a place on our map as it stands. Everything that used to
+    sit between the two — an anchor learned from one seating, a calibration fitted over pairs, a
+    per-node table — was a cure for two frames, and two frames were the disease.
 
-    The covariance is the floor and nothing else. A graph that has never closed a loop reports
-    its own pose variance as the whole session's accumulated odometry (497985 m2, a standard
-    deviation of 706 m, measured on this stack 2026-09-14), and one that just closed one reports
-    the loop link's alone (6.9e-05 m2, 8 mm) -- neither is what the answer is worth. The floor is
-    the GRAPH'S OWN measured floor (:data:`GRAPH_FLOOR_XY_M`, 0.20 m / 8 deg from the 2026-09-16
-    tapes), not the camera's 0.08 m it borrowed until then: a remote word about a place is worth
-    what that source was last seen to be worth, whatever its own arithmetic claims.
+    ``measured`` is RTAB-Map's own 3x3 for that localisation (x, y, yaw), FLOORED here and not
+    replaced: its diagonal is raised to ``floor_xy_m`` / ``floor_yaw_deg`` where it claims better.
+    A graph's own arithmetic is not what its answer is worth — one that has never closed a loop
+    reports the whole session's accumulated odometry (497985 m2, 706 m of sigma, measured on this
+    stack 2026-09-14) and one that just closed a loop reports the link's alone (6.9e-05 m2, 8 mm)
+    — while the floor is what this source was last SEEN to be worth against the lidar
+    (:data:`GRAPH_FLOOR_XY_M`, 0.20 m / 8 deg, the 2026-09-16 tapes). With no covariance at all the
+    word is worth exactly the floor, which is what it claimed before RTAB-Map's own was read.
 
-    ``fit`` is what the word CLAIMS, and it is the graph's confidence in its own recognition
-    rather than anything measured against a scan: 1.0 is "the graph has just tied this place to
-    one it knows", and it decays with the distance driven since that tie
-    (:class:`pepin.graphtrust.GraphTrust`). It is not a discount on the covariance -- the floor
-    above is what the word is worth geometrically either way -- but it is what the receiver
-    publishes as its confidence when nothing local measured one, and what the whole-map
-    candidate channel reads as a score. 1.0 by default: a caller with no trust clock claims what
-    this function claimed before there was one.
-
-    ``extra`` is a 3x3 the caller adds to that floor: what the ANCHOR ITSELF is uncertain by, in
-    the map frame, already propagated through this very composition
-    (:meth:`pepin.graphtie.Tie.word_covariance`). It is a matrix and not a radius because the
-    anchor's uncertainty is not isotropic — a rotation known to a degree costs nothing where it was
-    measured and 7 cm four metres away — and because that off-diagonal coupling is exactly what
-    tells the fusion which direction of this word to believe.
+    ``fit`` is what the word CLAIMS, and it is the graph's agreement with the pose the odometry
+    carries between its words (:class:`pepin.graphtrust.Agreement`), not anything measured against
+    a scan. It is not a discount on the covariance -- the floor above is what the word is worth
+    geometrically either way -- but it is what the receiver publishes as its confidence when
+    nothing local measured one, and what the whole-map candidate channel reads as a score.
 
     Returns the measurement, ready to travel (:meth:`RemoteMeasurement.to_json`).
     """
-    place = compose(anchor, pose)
-    x, y, yaw = place.x, place.y, place.theta
-    covariance: NDArray[np.float64] = np.diag(
-        [floor_xy_m**2, floor_xy_m**2, math.radians(floor_yaw_deg) ** 2]
+    floors = np.array([floor_xy_m**2, floor_xy_m**2, math.radians(floor_yaw_deg) ** 2], dtype=float)
+    covariance: NDArray[np.float64] = (
+        np.asarray(np.diag(floors), dtype=np.float64)
+        if measured is None
+        else np.array(measured, dtype=np.float64)
     )
-    if extra is not None:
-        covariance = np.asarray(covariance + np.asarray(extra, dtype=float), dtype=np.float64)
+    if measured is not None:
+        np.fill_diagonal(covariance, np.maximum(np.diag(covariance), floors))
     return RemoteMeasurement(
-        x=x,
-        y=y,
-        yaw=yaw,
+        x=pose.x,
+        y=pose.y,
+        yaw=pose.theta,
         covariance=covariance,
         source=source,
         stamp=stamp,

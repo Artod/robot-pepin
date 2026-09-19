@@ -18,9 +18,7 @@ import source_facts as sf
 import yaml
 
 from pepin.flags import load_table
-from pepin.tsdf import GridSpec
 from pepin.watch import PAINT_SIGMA_M
-from pepin.worldmap import LidarLaw
 
 REPO = Path(__file__).resolve().parents[2]
 PARAMS = yaml.safe_load((REPO / "ros/params/nav2_params.yaml").read_text())
@@ -53,9 +51,10 @@ def _started_after_ghost_wait(launch: ast.Module) -> set[str]:
 
 
 def _rtabmap(table: str) -> dict[str, object]:
-    """One of vslam.launch.py's RTAB-Map tables (``RTABMAP``, ``KNOWN_MAP``, ``SLAM``,
-    ``SLAM_LIDAR``, ``SLAM_CAMERA_ONLY``) as a dict. The modes overlay the common table, so a
-    contract names the one it means instead of the union of every dict literal in the file."""
+    """One of vslam.launch.py's RTAB-Map tables as a dict. Since 2026-09-19 there is ONE — the
+    ``RTABMAP`` table that serves every situation — beside ``LOCALIZE``, ``TF_ODOMETRY_VARIANCE``
+    and ``TRIPLE_SUBSCRIPTIONS`` (the way back to the three subscriptions), so a contract names
+    the one it means instead of the union of every dict literal in the file."""
     return dict(ast.literal_eval(sf.assignments(sf.tree(VSLAM_LAUNCH))[table]))
 
 
@@ -626,17 +625,18 @@ def test_the_numbered_tape_says_which_clock_named_it() -> None:
 
 
 def test_the_camera_slam_lives_beside_the_tracker_never_over_it() -> None:
-    """RTAB-Map on the laptop publishes its own frame and no map -> odom: the board's tracker
-    keeps the reflexes' frame; the camera is nominal until calibrated and says so."""
+    """World R's one frame, owned by nobody here: RTAB-Map's map frame IS ``map`` and it publishes
+    no transform into it, because the board's tracker owns ``map -> odom`` and this graph's
+    correction travels as a measurement and as a grid. The camera is nominal until calibrated and
+    says so."""
     vslam = sf.tree(VSLAM_LAUNCH)
     params = sf.dict_items(vslam)
-    assert params["publish_tf"] == {"False"}, "neither mode lets RTAB-Map into a tf tree"
-    assert _rtabmap("KNOWN_MAP")["map_frame_id"] == "rtabmap"
+    assert params["publish_tf"] == {"False"}, "in no situation is RTAB-Map in a tf tree"
+    assert _rtabmap("RTABMAP")["map_frame_id"] == "map", "one frame, since 2026-09-19"
     rtabmap = sf.keywords(_node_named(vslam, "rtabmap"))
     assert ast.unparse(rtabmap["namespace"]) == "'rtabmap'", (
         "its relative 'map' output must not land on /map"
     )
-    assert _rtabmap("KNOWN_MAP")["subscribe_scan"] is True
     assert _rtabmap("RTABMAP")["Reg/Strategy"] == "1"
     assert "pepin_bringup.camera_stream" in sf.strings(vslam)
     laptop = (REPO / "ros/laptop.sh").read_text()
@@ -810,6 +810,7 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
         "/contact_scan",
         "/depth_fusion",
         "/laptop_localizer",
+        "/sensor_pack",
         "/rtabmap/rtabmap",
         "/rtabmap_frame",
         "/foxglove_bridge",
@@ -899,17 +900,20 @@ def test_every_respawned_node_waits_for_its_own_ghost_first() -> None:
 
 def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
     """The laptop turns the camera's frames into depth images (a network on CPU, the lidar sets
-    the scale), RTAB-Map builds its grid from the lidar and that depth in 3D, the cloud is drawn
+    the scale), RTAB-Map builds its grid from the lidar AND that depth per node, the cloud is drawn
     by the operator's Foxglove connected to the laptop, and the image carries the weights."""
     vslam = sf.tree(VSLAM_LAUNCH)
-    params = sf.dict_items(vslam)
     assert "pepin_bringup.depth_stream" in sf.strings(vslam)
-    assert params["subscribe_depth"] == {"True"}
+    table = _rtabmap("RTABMAP")
+    assert table["subscribe_depth"] is False and table["subscribe_sensor_data"] is True
+    assert _rtabmap("TRIPLE_SUBSCRIPTIONS")["subscribe_depth"] is True, "the way back, and only it"
     assert "('depth/image', '/camera/depth')" in sf.unparsed(vslam, ast.Tuple)
-    known = _rtabmap("KNOWN_MAP")
-    assert known["Grid/Sensor"] == "2" and known["Grid/3D"] == "true"  # 0.22's Grid/FromDepth
-    assert "Grid/MaxObstacleHeight" in _rtabmap("RTABMAP")
-    assert {"camera", "depth", "rtabmap", "frame", "foxglove"} <= _started_after_ghost_wait(vslam)
+    assert table["Grid/Sensor"] == "2", "0.22's Grid/FromDepth: the scan AND the depth per node"
+    assert table["Grid/3D"] == "false", "the grid the board is handed is 2D"
+    assert "Grid/MaxObstacleHeight" in table
+    assert {"camera", "depth", "pack", "rtabmap", "frame", "foxglove"} <= _started_after_ghost_wait(
+        vslam
+    )
     node = sf.tree(f"{NODES}/depth_stream.py")
     assert "/camera/depth" in sf.strings(node)
     # The correction is the library's pipeline, run whole; the node owns no copy of a stage.
@@ -961,8 +965,9 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
 def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph() -> None:
     """The depth folded onto the plane goes to the board as /depth_scan and is wired into the
     local costmap's camera layer (which ships off, see the test below); the camera stamps frames
-    with the board's capture time; map -> rtabmap comes from RTAB-Map's own correction on the
-    laptop, not from a fixed identity on the board."""
+    with the board's capture time; and the graph owns no frame of its own on this robot — its
+    optimised map frame IS `map`, so the only edge rtabmap_frame ever publishes is SLAM's
+    map -> odom, as a message home."""
     from pepin.deployment import LAPTOP_PUBLISHES
 
     assert "depth_scan" in LAPTOP_PUBLISHES
@@ -980,10 +985,11 @@ def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph(
     nav = sf.tree(NAV_LAUNCH)
     assert not any("odom_to_rtabmap" in s for s in sf.strings(nav) | sf.names(nav))
     frame = sf.tree(f"{NODES}/rtabmap_frame.py")
-    assert "/rtabmap/mapGraph" in sf.strings(frame)
-    assert "('map', 'rtabmap')" in sf.unparsed(frame, ast.Tuple)
-    # RTAB-Map's odometry is the EKF's own, beside the known map as in SLAM
-    assert _rtabmap("KNOWN_MAP")["odom_frame_id"] == "odom"
+    assert "/rtabmap/mapGraph" in sf.strings(frame), "read in SLAM, where it IS map -> odom"
+    tuples = sf.unparsed(frame, ast.Tuple)
+    assert "('map', 'odom')" in tuples and "('map', 'rtabmap')" not in tuples, "one frame"
+    # RTAB-Map's odometry is the EKF's own, in every situation
+    assert _rtabmap("RTABMAP")["odom_frame_id"] == "odom"
     room = json.loads((REPO / "ros/foxglove/pepin_3d.json").read_text())["configById"]["3D!room"]
     assert room["topics"]["/depth_scan"]["visible"]
     # the camera's marks reach the costmap the PLANNER reads, which is the one now on screen
@@ -1102,15 +1108,22 @@ def test_the_contact_scan_only_marks_and_stays_off_until_it_is_measured() -> Non
     # The camera's two scans keep the rule that separates clearing from marking: depth_scan
     # clears with inf, so the node's range_max must stay above the layer's obstacle range.
     camera = _p("local_costmap")["camera_layer"]["depth_scan"]
-    declared = sf.calls_to(sf.tree(f"{NODES}/depth_stream.py"), "self.declare_parameter")
-    scan_max_range = next(
-        ast.literal_eval(call.args[1])
+    depth = sf.tree(f"{NODES}/depth_stream.py")
+    declared = sf.calls_to(depth, "self.declare_parameter")
+    # The default is the module's DEPTH_REACH_M and not a literal of its own: since 2026-09-19 the
+    # scan's cap and the PUBLISHED depth's reach are one number, because they are one claim about
+    # how far this network's scale is still a measurement.
+    default = next(
+        ast.unparse(call.args[1])
         for call in declared
         if ast.unparse(call.args[0]) == "'scan_max_range'"
     )
+    assert default == "DEPTH_REACH_M", "one constant for the scan's cap and the image's reach"
+    scan_max_range = ast.literal_eval(sf.assignments(depth)["DEPTH_REACH_M"])
     assert camera["inf_is_valid"] is True and camera["obstacle_max_range"] < scan_max_range, (
         "an inf ray clears to range_max: below that, every one of them marks instead"
     )
+    assert load_table(REPO / NODES / "depth_stream.py")["depth_reach_m"] == scan_max_range
 
 
 def test_the_floor_s_edge_is_a_node_of_the_kit_and_crosses_the_bridge() -> None:
@@ -1348,8 +1361,6 @@ def test_the_frames_are_fused_into_one_surface_beside_rtabmap_s_cloud() -> None:
     fusion_flags = load_table(REPO / NODES / "depth_fusion.py")
     assert {"enabled", "align", "min_weight", "surface_hz"} <= set(fusion_flags.names)
     assert fusion_flags.flag("surface_hz").range is not None, "a rate is bounded"
-    assert fusion_flags.flag("map_source").choices == ("file", "volume")
-    assert fusion_flags.flag("map_source").default == "file", "the old behaviour is the default"
     assert not fusion_flags.flag("resume_volume").live, "a start-up choice, not a live switch"
     assert "Switches" in sf.imported(node) and "self._switches.state" in sf.calls(node)
     assert {"/fusion/reset", "/fusion/surface"} <= sf.strings(node)
@@ -1361,66 +1372,31 @@ def test_the_frames_are_fused_into_one_surface_beside_rtabmap_s_cloud() -> None:
         assert panel["topics"]["/rtabmap/cloud_map"]["visible"] is False
 
 
-def test_the_volume_is_the_map_and_only_one_side_publishes_it() -> None:
-    """pepin.worldmap in the node: /scan is integrated into the same volume the camera writes,
-    the lidar layer reads out as /map when the flag says volume AND the mode says this side
-    owns /map, and the snapshot is what a next run resumes from. The launch tells the node
-    which mode the stack is in — nothing else can know it."""
+def test_the_volume_is_open_loop_and_no_slice_of_it_is_published() -> None:
+    """pepin.worldmap in the node: /scan is integrated into the same volume the camera writes, the
+    snapshot is what a next run resumes from — and NOTHING localises against it. A tracker matching
+    the slice it is painting has a null space it cannot see out of (2026-09-18: a cart with its
+    wheels blocked walked 7 degrees and 5-7 cm in 35 minutes at fit 0.97-0.99), so the room's own
+    geometry is the graph's grid and this node publishes one thing: the surface cloud."""
     node = sf.tree(f"{NODES}/depth_fusion.py")
-    assert {"WorldMap", "PlanarMount", "SliceLaw", "SnapshotClock"} <= sf.imported(node)
-    assert "map_owner" in sf.imported(node), "who owns /map is deployment's table, not a guess"
+    assert {"WorldMap", "PlanarMount", "SnapshotClock", "ViewGate"} <= sf.imported(node)
     assert sf.assignments(node)["LIDAR_CONFIG"] == "'/ws/config/lidar.json'", "the plane is read"
-    assert {"/scan", "/map"} <= sf.strings(node)
+    assert "/scan" in sf.strings(node)
     calls = sf.calls(node)
     assert "self._world.integrate_scan" in calls and "self._world.integrate_depth" in calls
-    assert "self._world.lidar_slice" in calls and "self._world.save" in calls
-    vslam = sf.tree(VSLAM_LAUNCH)
-    assert "world_map" in sf.strings(vslam), "a launch argument of its own"
-    passed = sf.unparsed(vslam, ast.JoinedStr)
-    assert any("mode:=" in text for text in passed), "the node is told the bridge mode"
-    assert any("map_source:=" in text for text in passed)
-    # The remap that puts RTAB-Map's grid on /map is a launch decision, so the launch's own
-    # answer travels with the mode: a map_source flipped live afterwards must not be able to
-    # put a second publisher on /map (the failure of 2026-09-10 01:00).
-    assert any("world_map:=" in text for text in passed), "and whether the volume owns /map"
-    assert "world_map" in sf.strings(node), "which the node reads before it publishes anything"
-    assert "self._world_map" in sf.unparsed(node, ast.Attribute)
-    assert load_table(REPO / NODES / "depth_fusion.py").flag("map_source").live, (
-        "still an A/B switch where the launch allows it"
-    )
-    assert not load_table(REPO / NODES / "depth_fusion.py").flag("no_return_free").default, (
-        "the old behaviour is the default"
-    )
-    assert load_table(REPO / NODES / "depth_fusion.py").flag("map_min_weight").range == (
-        0.0,
-        LidarLaw.max_weight,
-    ), (
-        "/map has its own maturity flag, capped at the lidar's own weight cap: above it the"
-        " whole published map goes unknown while the cart drives on it"
-    )
-
-
-def test_the_map_is_published_on_change_and_the_first_one_does_not_wait_for_the_timer() -> None:
-    """/map is latched, so a republication buys no subscriber anything and costs every reader a
-    rebuild (the board's tracker its matcher, mask and tracker; both costmaps their static
-    layer). The node therefore hashes the slice and sends only a changed one, ``map_hz`` being
-    the ceiling and not a cadence — and it publishes the first one itself, as soon as the seed
-    is in the volume, instead of leaving a board without a map for 1 / map_hz."""
-    node = sf.tree(f"{NODES}/depth_fusion.py")
-    assert "fields.digest" in sf.calls(node), "the slice's own identity, not a private hash"
-    assert "self._map_digest" in sf.unparsed(node, ast.Attribute), "the last one out is kept"
-    assert "self._publish_map" in sf.calls(node), (
-        "called in __init__ after the seed, not only handed to the timer"
-    )
+    assert "self._world.save" in calls
+    topics = {s for s in sf.strings(node) if s == "/map" or s.startswith("/map_")}
+    assert topics == set(), f"the volume reaches no matcher and no planner: {topics}"
+    assert "occupancy_grid" not in sf.imported(node), "no grid leaves this node at all"
     flags = load_table(REPO / NODES / "depth_fusion.py")
-    assert flags.flag("map_hz").default == 0.5 and flags.flag("map_hz").range == (0.1, 5.0)
-    # The measurement that gates the default (scratch/volume_vs_file_seating.py, the four tapes
-    # of 2026-09-13): a SEEDED volume's slice seats a median 0.01 cm from the file's with the
-    # same fit, the LIVE snapshot 1.90 m away with the fit down 0.295. The flag says so.
-    assert flags.flag("map_source").default == "file", (
-        "the volume owns /map only on a passing seating measurement; the live one fails it"
-    )
-    assert "0.01 cm" in flags.flag("map_source").why and "1.90 m" in flags.flag("map_source").why
+    assert {"map_source", "map_hz", "lidar_map", "camera_map", "map_identity"}.isdisjoint(
+        set(flags.names)
+    ), "the flags that published the volume went with the publication"
+    assert not flags.flag("no_return_free").default, "the old behaviour is the default"
+    # The snapshot belongs to the graph DATABASE whose frame every voxel was painted in, so a
+    # fresh database means a fresh volume rather than a room drawn in coordinates nothing shares.
+    assert sf.assignments(node)["DATABASE"] == "'/maps/rtabmap.db'"
+    assert "world_path_for" in sf.imported(node)
 
 
 def test_nothing_is_painted_at_a_pose_nobody_trusts() -> None:
@@ -1488,21 +1464,14 @@ def test_the_graphs_correction_moves_the_volume_only_where_the_graph_owns_it() -
     assert "self._switches['follow_correction_law']" in reads, "the move reads the law it uses"
 
 
-def test_the_slam_mode_s_two_fusion_switches_come_from_the_launch_not_the_operator() -> None:
-    """Both were set by hand in the first world-map SLAM session (2026-09-13 14:05): the volume
-    fused 0 frames until fit_gate came off (no tracker runs in SLAM, so /localization_fit never
-    arrives), and map_source had to be moved to volume for /map. The launch knows the mode, so
-    the launch is where both are decided — and both stay live flags, so a session can still
-    compare A against B without a restart."""
+def test_the_slam_mode_s_fusion_gate_comes_from_the_launch_not_the_operator() -> None:
+    """It was set by hand in the first world-map SLAM session (2026-09-13 14:05): the volume fused
+    0 frames until fit_gate came off, because no tracker runs in SLAM and /localization_fit never
+    arrives. The launch knows the mode, so the launch is where it is decided — and it stays a live
+    flag, so a session can still compare A against B without a restart."""
     vslam = sf.tree(VSLAM_LAUNCH)
     passed = sf.unparsed(vslam, ast.JoinedStr)
     assert "f\"fit_gate:={('false' if slam else 'true')}\"" in passed
-    assert "f\"map_source:={('volume' if volume_owns_map else 'file')}\"" in passed
-    # ...and "may the volume be /map" is the same two-part answer the node checks, not a guess.
-    assert "map_owner" in sf.imported(vslam), "the mode's owner is deployment's table"
-    assert "volume_owns_map = world_map and map_owner(mode) == 'laptop'" in sf.unparsed(
-        vslam, ast.Assign
-    )
     fusion = load_table(REPO / NODES / "depth_fusion.py")
     assert fusion.flag("fit_gate").live and fusion.flag("fit_gate").default is True, (
         "the launch overrides a default for one mode; it does not change what the flag ships as"
@@ -1727,43 +1696,120 @@ def test_the_pose_graph_reaches_the_tracker_as_a_measurement_of_its_own() -> Non
     assert graph.remote, "no scan of it here: it is never matched and never anchors"
     laptop = sf.tree(f"{NODES}/rtabmap_frame.py")
     assert topic in sf.strings(laptop)
-    assert {"graph_measurement", "graph_anchor", "compose"} <= sf.imported(laptop)
+    assert {"graph_measurement", "compose"} <= sf.imported(laptop)
+    # ONE FRAME: the graph's optimised map frame IS `map`, so the word is the localisation itself
+    # and there is nothing between the two to learn, fit or table.
+    assert "graph_anchor" not in sf.imported(laptop) and "Tie" not in sf.imported(laptop)
+    assert "/rtabmap/localization_pose" in sf.strings(laptop), "a localisation, not an integration"
     flags = load_table(REPO / NODES / "rtabmap_frame.py")
     assert flags["graph_measurement"] is True, (
         "on since 2026-09-14: harmless beside the lidar (test A), the pose of a lidar-less cart"
     )
-    assert flags["graph_odom"] is True and flags.flag("graph_odom").live is False
+    gone = {"graph_odom", "graph_tie_from_pairs", "graph_word_from_nodes", "fresh_frame"}
+    assert gone.isdisjoint(set(flags.names)), (
+        "the tie and the node table are gone, and so are the flags that chose between them"
+    )
 
 
 def test_the_known_map_graph_rides_the_filter_s_own_odometry() -> None:
-    """CLAUDE.md's one odometry: RTAB-Map beside the known map is built on the EKF's
-    odom -> base_link, not on the tracker's pose, which teleports when it relocalises and made
-    every loop closure unacceptable (a neighbour edge of 0.888 m against a 0.244 m sigma, error
-    ratio 3.64 over RGBD/OptimizeMaxError's 3.0, 2026-09-14). It owns no transform either way."""
-    assert _rtabmap("KNOWN_MAP")["odom_frame_id"] == "odom"
-    assert _rtabmap("KNOWN_MAP")["map_frame_id"] == "rtabmap", "a frame of its own"
-    assert _rtabmap("TRACKER_ODOM")["odom_frame_id"] == "map", "the old one, one argument away"
-    assert _rtabmap("SLAM")["odom_frame_id"] == "odom", "SLAM is untouched"
-    assert _rtabmap("SLAM")["map_frame_id"] == "map"
+    """CLAUDE.md's one odometry: RTAB-Map is built on the EKF's odom -> base_link, not on the
+    tracker's pose, which teleports when it relocalises and made every loop closure unacceptable
+    (a neighbour edge of 0.888 m against a 0.244 m sigma, error ratio 3.64 over
+    RGBD/OptimizeMaxError's 3.0, 2026-09-14). It owns no transform, in any situation, and the
+    table that used to put the graph back on the tracker's pose is gone with the argument that
+    selected it."""
+    table = _rtabmap("RTABMAP")
+    assert table["odom_frame_id"] == "odom"
+    assert table["map_frame_id"] == "map", "World R's one frame"
+    names = sf.assignments(sf.tree(VSLAM_LAUNCH))
+    assert {"TRACKER_ODOM", "KNOWN_MAP", "SLAM", "SLAM_LIDAR", "SLAM_CAMERA_ONLY"}.isdisjoint(
+        names
+    ), "one table for every situation: the mode tables and the tracker-odometry one are gone"
     vslam = sf.tree(VSLAM_LAUNCH)
-    assert "graph_odom" in sf.strings(vslam), "the switch between the two, a launch argument"
-    assert "publish_tf" in sf.strings(vslam), "and RTAB-Map owns no transform in either"
+    arguments = {ast.unparse(c.args[0]) for c in sf.calls_to(vslam, "DeclareLaunchArgument")}
+    assert "'graph_odom'" not in arguments, "the switch between them is gone too"
+    assert "publish_tf" in sf.strings(vslam), "and RTAB-Map owns no transform in any of them"
     frame = sf.tree(f"{NODES}/rtabmap_frame.py")
-    assert {"odom", "base_link"} <= sf.strings(frame), "the odometry the graph is composed with"
+    assert {"odom", "base_link"} <= sf.strings(frame), "the odometry a word is stamped by"
     assert "self._lookup.transform" in sf.calls(frame)
+
+
+def _launch_dicts(launch: str) -> dict[str, dict[str, object]]:
+    """Every module-level dict literal of ``launch``, by name: the tables a node is told from."""
+    out: dict[str, dict[str, object]] = {}
+    for name, source in sf.assignments(sf.tree(launch)).items():
+        try:
+            value = ast.literal_eval(source)
+        except (ValueError, SyntaxError, TypeError):
+            continue
+        if isinstance(value, dict):
+            out[name] = value
+    return out
+
+
+def test_rtabmap_is_told_one_table_reading_one_snapshot_topic_and_owns_no_transform() -> None:
+    """Stage one of World R, held as a contract. A "mode" was which sensors are alive, which is
+    data: so there is exactly ONE RTAB-Map table, it reads ONE topic
+    (``subscribe_sensor_data``, mutually exclusive with every other subscription), and it
+    publishes no transform — the board's tracker owns map -> odom. The way back to the
+    synchronised triple is one launch argument, and it is the only other place a subscription is
+    named."""
+    vslam = sf.tree(VSLAM_LAUNCH)
+    tables = _launch_dicts(VSLAM_LAUNCH)
+    assert [name for name, t in tables.items() if any(k.startswith("Grid/") for k in t)] == [
+        "RTABMAP"
+    ], "one grid, one table"
+    assert [name for name, t in tables.items() if "map_frame_id" in t] == ["RTABMAP"], "one frame"
+    assert [name for name, t in tables.items() if "subscribe_sensor_data" in t] == [
+        "RTABMAP",
+        "TRIPLE_SUBSCRIPTIONS",
+    ], "the table and the way back, and nothing else"
+    table = tables["RTABMAP"]
+    assert table["subscribe_sensor_data"] is True
+    for name in ("subscribe_depth", "subscribe_rgb", "subscribe_scan", "subscribe_odom"):
+        assert table[name] is False, f"{name}: rtabmap turns it off anyway; say it out loud"
+    # No transform out of this launch, in any situation: neither the parameter nor a broadcaster.
+    assert sf.dict_items(vslam)["publish_tf"] == {"False"}
+    assert not {"TransformBroadcaster", "StaticTransformBroadcaster"} & sf.imported(vslam)
+
+    # One literal topic name, written on both sides of the contract (read from the sources: this
+    # file never imports a ROS node, and rclpy is not installed here).
+    node = sf.assignments(sf.tree(f"{NODES}/sensor_pack.py"))
+    assert node["SENSOR_DATA_TOPIC"] == "'/rtabmap/sensor_data'"
+    assert sf.assignments(vslam)["SENSOR_DATA_TOPIC"] == node["SENSOR_DATA_TOPIC"]
+    assert "('sensor_data', SENSOR_DATA_TOPIC)" in sf.unparsed(vslam, ast.Tuple)
+    assert "pepin_bringup.sensor_pack" in sf.strings(vslam)
+    assert "_after_ghost('/sensor_pack')" in sf.unparsed(vslam, ast.Call)
+
+    # The arguments: the nine ros/laptop.sh passes are all still declared, and the mode-selecting
+    # ones are gone. camera_only survives as one flag of one node, not as a table.
+    arguments = {ast.unparse(c.args[0]) for c in sf.calls_to(vslam, "DeclareLaunchArgument")}
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    start = laptop.index("ros2 launch pepin_bringup vslam.launch.py")
+    command = laptop[start : laptop.index(">/dev/null", start)]
+    passed = {f"'{name}'" for name in re.findall(r'"?(\w+):=\$', command)}
+    assert len(passed) == 9, passed
+    assert passed <= arguments, (
+        f"ros/laptop.sh passes what this launch no longer declares: {passed - arguments}"
+    )
+    assert "'sensor_pack'" in arguments and "'memory'" in arguments
+    assert "'graph_odom'" not in arguments
+    passes_sources = [s for s in sf.unparsed(vslam, ast.JoinedStr) if "sources:=" in s]
+    assert len(passes_sources) == 1, "camera_only reaches exactly one node's sources flag"
+    assert {"camera", "camera,lidar"} <= sf.strings(vslam), "the two rosters it picks between"
 
 
 def test_the_laptop_localizer_matches_the_camera_where_the_camera_is() -> None:
     """The other half of the same rule, on the laptop: /depth_scan and /contact_scan are
     subscribed LOCALLY (they are published on this machine — no bridge hop), matched in a small
     window around the board's belief carried to the scan's stamp, and published as one JSON
-    measurement. The band the volume cuts for the camera (/map_camera) is what they are matched
-    against when the fusion publishes one."""
+    measurement. BOTH HALVES MATCH ON ONE GRID — the map the board's tracker is on — because a fan
+    matched against a slice of the volume it helped paint is a loop with no gauge in it."""
     node = sf.tree(f"{NODES}/laptop_localizer.py")
     assert "super().__init__('laptop_localizer')" in sf.unparsed(node, ast.Call)
-    assert {"/depth_scan", "/contact_scan", "/map_camera", "/localization/measurement"} <= (
-        sf.strings(node)
-    )
+    assert {"/depth_scan", "/contact_scan", "/localization/measurement"} <= sf.strings(node)
+    assert "/map_camera" not in sf.strings(node), "nothing localises against the volume"
+    assert "TRACKED_MAP_TOPIC" in sf.imported(node), "the grid the tracker itself adopted"
     assert {"RemoteMeasurement", "Localizer", "OdomHistory"} <= sf.imported(node)
     calls = sf.calls(node)
     assert {"localizer.measure", "RemoteMeasurement.of", "remote.to_json"} <= calls
@@ -1775,40 +1821,18 @@ def test_the_laptop_localizer_matches_the_camera_where_the_camera_is() -> None:
     assert flags["global_watch"] is True, "the watchdog half is untouched"
 
 
-def test_every_matcher_is_handed_heavy_cells_and_the_lidar_may_localise_on_the_volume() -> None:
-    """One volume, two references, each cut with its own maturity. /map_camera — the band the
-    camera's own scans are matched against — is cut far above the map's own threshold, because a
-    cell the camera painted two frames ago at the pose it is asking about is not evidence about
-    that pose (2026-09-13: camera-only localisation walked away in 20-33 cm steps). /map_lidar
-    carries the lidar layer on a topic of its own, so the board's tracker can be pointed at the
-    volume (its map_topic flag) while Nav2 and the map_server keep the /map they own — the owner
-    rule that protects /map is not touched at all."""
-    from pepin.deployment import ON_DEMAND_TOPICS, VISION_LAPTOP_PUBLISHES
-
-    fusion = load_table(REPO / NODES / "depth_fusion.py")
-    assert fusion["camera_map_min_weight"] >= 10.0 * fusion["map_min_weight"], (
-        "a matcher's reference is cut in the tens of observations, a map in the units"
-    )
-    assert fusion.flag("camera_map_min_weight").range == (0.0, GridSpec.max_weight)
-    assert fusion["lidar_map"] is True, "the layer is on the wire where it can be compared"
-    node = sf.tree(f"{NODES}/depth_fusion.py")
-    assert sf.assignments(node)["LIDAR_MAP_TOPIC"] == "'/map_lidar'"
-    assert "self._world.hardness" in sf.calls(node) or "self._world.report" in sf.calls(node)
-    # It crosses to the board, and its silence is not a dead route: it is latched and off by
-    # default, like /map and /map_camera.
-    assert "map_lidar" in VISION_LAPTOP_PUBLISHES and "/map_lidar" in ON_DEMAND_TOPICS
+def test_the_tracker_adopts_one_map_and_never_treats_a_new_picture_as_a_kidnap() -> None:
+    """Which map the board's tracker matches on is pepin.mapping.MapChoice's decision, and the
+    fused volume is no longer one of the answers: nothing localises against it, so the slices it
+    used to publish (/map_lidar, /map_camera) are gone and the grid a matcher reads comes from
+    whoever owns /map."""
     tracker = load_table(REPO / NODES / "relocalizer.py")
-    assert tracker.flag("map_topic").choices == ("map", "map_lidar")
-    assert tracker["map_topic"] == "map", (
-        "the served map is still the default: the live volume's lidar layer holds 69.7 % of the"
-        " file's walls (scratch/map_lidar_vs_pgm.py, 2026-09-14) and a tracker moved onto it"
-        " scored fit 0.00 at the true pose and re-seated 4 m away at 0.99"
-    )
+    assert tracker["map_topic"] == "map", "the map its owner publishes, and no volume's slice"
     assert tracker["map_refresh_s"] == 2.0, (
-        "a newer map is adopted at the publisher's own period (depth_fusion map_hz 0.5), which is"
-        " also inside what the board can afford: an adoption is ~65 ms on an A53 and the rebuild"
-        " duty budget allows one every 1.9 s (scratch/map_adoption_cost.py). 0 — 'the first map and"
-        " no other' — made a live volume swap a no-op until the flag was set by hand (2026-09-17)"
+        "a newer map is adopted at the publisher's own period, which is also inside what the board"
+        " can afford: an adoption is ~65 ms on an A53 and the rebuild duty budget allows one every"
+        " 1.9 s (scratch/map_adoption_cost.py). 0 — 'the first map and no other' — made a live map"
+        " swap a no-op until the flag was set by hand (2026-09-17)"
     )
     assert tracker["map_fallback_s"] == 10.0, "a laptop topic never spoken for is not a blindfold"
     assert tracker["carry_pose_across_maps"] is True, "a new picture of the room is not a kidnap"
@@ -1829,26 +1853,30 @@ def test_no_launch_argument_reaches_a_node_as_an_empty_parameter_override() -> N
     launch = (REPO / VSLAM_LAUNCH).read_text()
     overrides = [ln.strip() for ln in launch.splitlines() if ":={" in ln]
     assert overrides, "the launch still hands the nodes parameter overrides"
-    may_be_empty = [ln for ln in overrides if "room:=" in ln]
-    assert may_be_empty == ['+ (["-p", f"room:={room}"] if room else []),'], (
-        "the only override whose value may be empty is passed only when it has one"
-    )
-    assert '"room", default_value=""' in launch, "and empty is 'nowhere recognised yet'"
+    # Every one of them interpolates a word this file chooses, never a launch argument that may
+    # arrive empty: the two arguments whose default IS empty (``room`` and ``database``) reach no
+    # node as an override at all, and ``database`` is resolved to a path before it is used.
+    empty_by_default = {
+        ast.unparse(c.args[0]).strip("'")
+        for c in sf.calls_to(sf.tree(VSLAM_LAUNCH), "DeclareLaunchArgument")
+        if ast.unparse(sf.keywords(c).get("default_value", ast.Constant(None))) == "''"
+    }
+    assert empty_by_default == {"room", "database"}
+    for name in empty_by_default:
+        assert not [ln for ln in overrides if f"{name}:=" in ln], (
+            f"{name} may be empty and must not reach a node as an override"
+        )
 
 
-def test_a_reset_empties_the_room_and_nothing_falls_back_to_a_picture() -> None:
-    """``/fusion/reset`` and the self-heal empty the model, and with no pgm in the loop "empty"
-    means empty. What makes that safe is not a fallback but a guard on the other side: a grid with
-    no known cell in it is refused by pepin.mapping.MapChoice before any tracker rebuilds on it,
-    so the board keeps the room it adopted until this volume has painted one again."""
+def test_a_reset_empties_the_volume_and_nothing_falls_back_to_a_picture() -> None:
+    """``/fusion/reset`` and the self-heal empty the volume, and with no pgm in the loop "empty"
+    means empty. Nothing outside this node reads it, so emptying it costs no tracker anything — it
+    costs the surface cloud until the sensors have painted one again."""
     src = (REPO / NODES / "depth_fusion.py").read_text()
     assert src.count("WorldMap(self._spec, self._mount") == 3, (
-        "the volume is built in three places only: the two starting states, and the reset's"
+        "the volume is built in three places only: the placeholder __init__ holds until the"
+        " starting state is known, the starting state's own, and the reset's"
     )
-    # ...and the one that re-seeds keeps the map's identity: a reset is the same ROOM wiped back
-    # to what it was made of, and a new id would tell every consumer the cart had been carried
-    # somewhere else (pepin.worldmap.MapIdentity).
-    assert "identity=self._world.identity" in src
     assert src.count("self._world = self._fresh_world()") == 2, "the reset and the self-heal"
     assert "self._fresh_world" in sf.calls(sf.tree(f"{NODES}/depth_fusion.py"))
 
@@ -2098,6 +2126,9 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         "contact_scan",
         "depth_fusion",
         "laptop_localizer",
+        # The one input RTAB-Map reads (2026-09-19). It keeps nothing across a restart but a
+        # second of each source's stamps, which is what it takes to measure a period again.
+        "sensor_pack",
         "rtabmap_frame",
         "foxglove_bridge",
         # The camera as a third odometry: rtabmap's node and ours. Neither carries state the
@@ -2274,13 +2305,9 @@ def test_online_slam_has_one_map_and_one_owner_of_map_to_odom() -> None:
     up: rtabmap_frame publishes no transform at all in this mode and slam_frame is the single
     publisher of that edge, exactly as the tracker is on a known map."""
     vslam = sf.tree(VSLAM_LAUNCH)
-    slam, lidar, camera_only = (
-        _rtabmap("SLAM"),
-        _rtabmap("SLAM_LIDAR"),
-        _rtabmap("SLAM_CAMERA_ONLY"),
-    )
-    assert slam["odom_frame_id"] == "odom" and slam["map_frame_id"] == "map"
-    assert sf.dict_items(vslam)["publish_tf"] == {"False"}, "in neither mode, in either tree"
+    table = _rtabmap("RTABMAP")
+    assert table["odom_frame_id"] == "odom" and table["map_frame_id"] == "map"
+    assert sf.dict_items(vslam)["publish_tf"] == {"False"}, "in no situation, in either tree"
     assert "('map', '/map')" in sf.unparsed(vslam, ast.Tuple), "the grid IS the map here"
     under_slam = [
         ast.unparse(n)
@@ -2296,30 +2323,24 @@ def test_online_slam_has_one_map_and_one_owner_of_map_to_odom() -> None:
     assert sf.dict_items(vslam)["delete_db_on_start"] == {"slam and (not resume)"}
     names = sf.assignments(vslam)
     assert names["SLAM_DATABASE"] != names["KNOWN_MAP_DATABASE"]
-    # With the lidar the 2D grid is the SCAN's (Grid/Sensor 0): the camera's metric scale is
-    # scene-dependent and a map the cart plans on may not be built out of it. Without the lidar
-    # it is the depth's, ray-traced so the floor becomes free space, and capped where the
-    # network's scale stops being a measurement.
-    assert lidar["subscribe_scan"] is True and lidar["Grid/Sensor"] == "0"
-    assert lidar["RGBD/NeighborLinkRefining"] == "true", "the scan refines the wheels' link"
-    assert camera_only["subscribe_scan"] is False and camera_only["Grid/Sensor"] == "1"
-    assert camera_only["Grid/RayTracing"] == "true", "or free space stays unknown"
-    assert float(str(camera_only["Grid/RangeMax"])) <= 3.5
-    assert camera_only["RGBD/NeighborLinkRefining"] == "false"
-    # ...and with no scan in a node there is nothing for ICP to register: the common table's
-    # Reg/Strategy 1 would fail every loop closure and every proximity link before it was
-    # scored, leaving dead reckoning with a database. rtabmap_ros does not catch this — its one
-    # scan-aware ICP rule fires when a scan IS subscribed.
-    assert _rtabmap("RTABMAP")["Reg/Strategy"] == "1", "ICP wherever the lidar is in the node"
-    assert camera_only["Reg/Strategy"] == "0", "Vis: the depth gives the words their 3D positions"
-    assert "Reg/Strategy" not in lidar, "the lidar mode keeps the common table's ICP"
-    for table in (lidar, camera_only):
-        assert table["Grid/3D"] == "false", "Nav2's static layer reads a 2D grid"
-    common = _rtabmap("RTABMAP")
-    assert {"Grid/MaxGroundHeight", "Grid/MaxObstacleHeight", "Grid/NormalsSegmentation"} <= set(
-        common
+    # The grid is the same one in every situation: from BOTH sensors per node, 2D for Nav2's
+    # static layer, ray-traced because Grid/Sensor 2 gives up the cheap path that carves a scan's
+    # own free space, and reaching as far as the LIDAR does — the camera's own reach travels in
+    # the camera's data (pepin_bringup.depth_stream's depth_reach), not in this parameter.
+    assert table["Grid/Sensor"] == "2" and table["Grid/3D"] == "false"
+    assert table["Grid/RayTracing"] == "true", "or free space stays unknown with Grid/Sensor 2"
+    assert float(str(table["Grid/RangeMax"])) == 8.0
+    assert table["RGBD/NeighborLinkRefining"] == "false", "no closure survives a refined link"
+    assert table["Reg/Strategy"] == "1", "ICP; 2 would drop every node that has no picture"
+    assert table["Mem/BadSignaturesIgnored"] == "false", "a node with no picture is KEPT"
+    assert table["RGBD/ProximityPathMaxNeighbors"] == "10", (
+        "the wrapper only inserts this while a scan is SUBSCRIBED (CoreWrapper.cpp:489-504), and"
+        " it no longer is: unsaid it falls back to 0, which disables one-to-many proximity"
     )
-    assert common["RGBD/OptimizeFromGraphEnd"] == "false", "the jump belongs in map -> odom"
+    assert {"Grid/MaxGroundHeight", "Grid/MaxObstacleHeight", "Grid/NormalsSegmentation"} <= set(
+        table
+    )
+    assert table["RGBD/OptimizeFromGraphEnd"] == "false", "the jump belongs in map -> odom"
     # The correction: a message out of the laptop, a transform on the board, one publisher each.
     frame = sf.tree(f"{NODES}/rtabmap_frame.py")
     flags = load_table(REPO / NODES / "rtabmap_frame.py")

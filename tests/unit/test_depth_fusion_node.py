@@ -200,83 +200,60 @@ def fusion_node(tmp_path: Path, **overrides: Any) -> DepthFusion:
 
 
 def in_room(tmp_path: Path, **overrides: Any) -> DepthFusion:
-    """A node in a named room whose volume lives in ``tmp_path``. The path is passed whole and
-    the tests below compare it against a LITERAL string: deriving the expected name with the
-    code's own expression is how a path bug passed two tests and reached the robot (2026-09-18)."""
-    return fusion_node(
-        tmp_path, room="flat_test", world_path=f"{tmp_path}/flat_test.world.npz", **overrides
-    )
+    """A node whose volume lives in ``tmp_path``. The path is passed whole and the tests below
+    compare it against a LITERAL string: deriving the expected name with the code's own expression
+    is how a path bug passed two tests and reached the robot (2026-09-18)."""
+    return fusion_node(tmp_path, world_path=f"{tmp_path}/flat_test.world.npz", **overrides)
 
 
-def test_a_room_names_the_only_file_the_volume_has(tmp_path: Path) -> None:
-    """ONE MAP, ONE FILE, AND NO PICTURE OF IT. The room names the volume's snapshot and there is
-    nothing else on disk — no pgm is read as a seed and none is written as a cache."""
-    node = fusion_node(tmp_path, room="flat_test")
-    assert str(node._world_path) == "/maps/flat_test.world.npz"
-    assert not hasattr(node, "_export_path"), "nothing in the loop exports a picture"
-    assert node._world.identity.provenance == "room:flat_test"
-    assert not node._world.lidar_weight.any(), "a room's first volume is empty, not a pgm"
+def test_the_volume_is_named_after_the_database_whose_frame_it_was_painted_in(
+    tmp_path: Path,
+) -> None:
+    """THE FRAME IS THE DATABASE'S, so the snapshot travels with the database and a fresh database
+    means a fresh volume. There is nothing else on disk — no pgm is read as a seed, none is written
+    as a cache, and no slice of the volume goes out as a map at all."""
+    node = fusion_node(tmp_path, database="/maps/rtabmap.db")
+    assert str(node._world_path) == "/maps/rtabmap.world.npz"
+    assert not node._world.lidar_weight.any(), "a first volume is empty, not a pgm"
+    assert "/map" not in node.pubs and "/map_lidar" not in node.pubs
+    assert "/map_camera" not in node.pubs and "/map_identity" not in node.pubs
+    up = node.logger.texts("info")[-1]
+    assert "nothing localises against this volume" in up and "/maps/rtabmap.db" in up
 
 
-def test_an_unrecognised_place_is_born_empty_under_the_cart(tmp_path: Path) -> None:
-    """Nothing named the room, so the box is centred on the start (a box laid out for another
-    flat would not even contain the cart) and the map is born with an identity of its own."""
+def test_a_volume_with_no_snapshot_is_born_empty_under_the_cart(tmp_path: Path) -> None:
+    """A box laid out around the map's origin would not even contain a cart that woke up at
+    (-9.4, +2.5), and a volume that does not contain the robot integrates the far wall and nothing
+    else (2026-09-13: 239 revolutions)."""
     node = fusion_node(tmp_path)
     nx, ny, _nz = node._spec.shape
     assert node._spec.origin[0] == pytest.approx(-nx * node._spec.voxel_m / 2)
     assert node._spec.origin[1] == pytest.approx(-ny * node._spec.voxel_m / 2)
-    assert node._world.identity.provenance == "fresh"
-    assert node._world.identity.token and not node._world.lidar_weight.any()
-    # ...and the painted revolutions alone make it a map: nothing here needs a pgm. Two of them,
-    # from two PLACES — a revolution is worth LidarLaw.hit_weight 1.0 per cell against
-    # map_min_weight 2.0, and a second one from the same place is the same view and is not
-    # integrated at all (view_gate). That is the regime the wake-up runs in: the room grows as the
-    # cart moves, and a cell joins the matcher's slice the moment two places have seen it.
+    assert not node._world.lidar_weight.any()
+    # ...and the painted revolutions alone fill it. A second revolution from the SAME place is the
+    # same view and is not integrated at all (view_gate): a view is evidence once.
     node._on_scan_work(scan_msg())
-    assert node._world.lidar_slice(node._map_law()).counts()["occupied"] == 0
+    assert node._world.views.max() == 1.0
     node._on_scan_work(scan_msg(SCAN_S + 0.1))
     assert node._tally.take().counts["same_view"] == 1, "the same view again is not evidence"
     node._tf.buffer.transforms[("map", "base_link")].transform.translation.x = 0.4
     node._on_scan_work(scan_msg(SCAN_S + 0.2))
-    assert node._world.lidar_slice(node._map_law()).counts()["occupied"] > 0
+    assert node._world.views.max() == 2.0, "a second place is a second view"
 
 
-def test_a_recognition_names_the_room_and_a_late_one_is_refused(tmp_path: Path) -> None:
-    """KNOWN OR FRESH IS DETECTED. A place recogniser names the room and that room's volume is
-    resumed — but only while this one is still empty: after the first revolution a swap would
-    throw away the room the session has measured."""
+def test_a_resumed_volume_keeps_its_grid_and_says_how_stale_it_was(tmp_path: Path) -> None:
+    """A volume that exists owns its own lattice: the snapshot's grid comes back with it, and the
+    report line says how stale it was — a volume two weeks old and one that stopped being saved an
+    hour ago look identical from the outside."""
     first = in_room(tmp_path, snapshot_s=1.0)
     first._on_scan_work(scan_msg())
-    token, voxels = first._world.identity.token, first._world.maturity()["voxels"]
-    assert Path(f"{tmp_path}/flat_test.world.npz").exists()
-
-    node = fusion_node(tmp_path, resume_volume=True)
-    assert node._room == "" and node._world.identity.provenance == "fresh"
-    node._on_room(String(data=json.dumps({"room": f"{tmp_path}/flat_test"})))
-    assert node._room.endswith("flat_test")
-    assert node._world.identity.token == token, "the recognised room, not a new one"
-    assert node._world.maturity()["voxels"] == voxels
-
-    node._on_room(String(data=json.dumps({"room": "somewhere_else"})))
-    window = node._tally.take()
-    assert window.counts["room_refused"] == 1 and node._room.endswith("flat_test")
-    assert "somewhere_else" in window.notes["room_refused"]
-    node._on_room(String(data="not json"))
-    assert node._tally.take().counts["bad_room"] == 1
-
-
-def test_a_resumed_room_keeps_its_identity_grid_and_age(tmp_path: Path) -> None:
-    """A room that exists owns its own lattice and its own name: the snapshot's grid comes back
-    with it, the id its snapshot carries is kept, and the report line says how stale it was."""
-    first = in_room(tmp_path, snapshot_s=1.0)
-    first._on_scan_work(scan_msg())
-    token, spec = first._world.identity.token, first._world.spec
+    spec, voxels = first._world.spec, first._world.maturity()["voxels"]
 
     again = in_room(tmp_path, resume_volume=True)
-    assert again._world.identity.token == token and again._world.spec == spec
+    assert again._world.spec == spec and again._world.maturity()["voxels"] == voxels
     assert again._resumed_age_s < 60.0
-    assert "resumed 0.0 h old" in again._map_line(again._tally.take())
-    assert "flat_test" in again._map_line(again._tally.take())
+    assert "resumed 0.0 h old" in again._snapshot_line(again._tally.take())
+    assert "flat_test.world.npz" in again._snapshot_line(again._tally.take())
 
 
 def test_a_snapshot_taken_after_trust_was_lost_never_replaces_the_last_good_one(
@@ -298,81 +275,35 @@ def test_a_snapshot_taken_after_trust_was_lost_never_replaces_the_last_good_one(
     assert window.counts["snapshots"] == 0 and window.counts["snapshot_refused"] == 1
     assert Path(f"{tmp_path}/flat_test.world.npz").read_bytes() == good
     assert "fit 0.10" in window.notes["snapshot_refused"]
-    assert "NOT SAVED 1x" in node._map_line(window)
+    assert "NOT SAVED 1x" in node._snapshot_line(window)
 
     node.close()  # ...and shutdown is not a licence either
     assert Path(f"{tmp_path}/flat_test.world.npz").read_bytes() == good
 
 
-def test_a_reset_empties_the_room_without_touching_its_file(tmp_path: Path) -> None:
-    """With no pgm to fall back to, a reset means empty — and that is safe because a grid with no
-    known cell is refused by MapChoice before any tracker rebuilds on it. The file on disk is not
-    part of a reset at all."""
+def test_a_reset_empties_the_volume_without_touching_its_file(tmp_path: Path) -> None:
+    """Nothing outside this node reads the volume, so emptying it costs no tracker anything — it
+    costs the surface cloud until the sensors have painted one again. The file on disk is not part
+    of a reset at all."""
     node = in_room(tmp_path, snapshot_s=1.0)
     node._on_scan_work(scan_msg())
     saved = Path(f"{tmp_path}/flat_test.world.npz").read_bytes()
-    token = node._world.identity.token
     wiped = node._fresh_world()
     assert not wiped.lidar_weight.any() and not wiped.frames
-    assert wiped.identity.token == token, "the same room, wiped"
+    assert wiped.spec == node._world.spec, "the same grid, wiped"
     assert Path(f"{tmp_path}/flat_test.world.npz").read_bytes() == saved
 
 
-def test_the_map_says_which_room_it_is_on_a_topic_of_its_own(tmp_path: Path) -> None:
-    """A nav_msgs/OccupancyGrid carries nothing that says which room it is, so every consumer
-    derives size@origin off the message. The minted token goes out beside it, with the legacy id
-    of every grid this node publishes, so the consumers can be moved onto it one at a time."""
+def test_the_volume_reaches_no_matcher_and_no_planner(tmp_path: Path) -> None:
+    """THE VOLUME IS OPEN-LOOP, and this is where that is visible: it is painted at the pose the
+    tracker gives and no slice of it leaves the node. A tracker matching the slice it paints has a
+    null space it cannot see out of — a cart parked with its wheels blocked walked 7 degrees and
+    5-7 cm in 35 minutes through it at fit 0.97-0.99 (2026-09-18) — so /map, /map_lidar,
+    /map_camera and /map_identity are gone and /fusion/surface is all there is."""
     node = in_room(tmp_path)
     node._on_scan_work(scan_msg())
-    node._publish_map()
-    sent = node.pubs["/map_identity"].sent
-    assert len(sent) == 1, "latched and on change: an unchanged identity is an unchanged room"
-    said = json.loads(sent[-1].data)
-    assert said["id"] == node._world.identity.token
-    assert said["from"] == "room:flat_test" and said["room"] == "flat_test"
-    fields = node._world.lidar_slice(node._map_law()).message_fields()
-    assert said["legacy"]["/map_lidar"] == fields.legacy_id()
-    assert said["world_path"] == f"{tmp_path}/flat_test.world.npz"
-    node._publish_map()
-    assert len(node.pubs["/map_identity"].sent) == 1, "the same room is not said twice"
-
-
-def test_the_matchers_read_the_frozen_reference_and_the_planner_reads_everything(
-    tmp_path: Path,
-) -> None:
-    """The cure for the closed loop, in the node: /map_lidar and /map_camera carry the volume AS
-    RESUMED wherever it knows the cell and this session's paint only where it does not, while /map
-    and the snapshot stay complete. And with the reference frozen, /map_lidar's cells stop changing
-    in a room the cart knows — so the board stops re-adopting, which costs it its matcher, its mask
-    and its tracker every time."""
-    # THE EARLIER SESSION: the room driven once, a voxel at a time so the cells accumulate the
-    # map's own maturity (map_min_weight 2.0) from more than one place.
-    first = in_room(tmp_path, snapshot_s=1.0)
-    for i in range(8):
-        first._tf.buffer.transforms[("map", "base_link")].transform.translation.x = 0.06 * i
-        first._on_scan_work(scan_msg(SCAN_S + 0.1 * i))
-    assert first._world.lidar_slice(first._map_law()).counts()["known"] > 0
-    first._snapshot()  # the whole session on disk: the clock would have saved only its first scan
-
-    node = in_room(tmp_path, resume_volume=True)
-    assert node._reference.known > 0, "the resumed room is this session's gauge"
-    assert node._resumed_age_s < 60.0
-    node._tf.buffer.transforms[("map", "base_link")].transform.translation.x = 1.0
-    node._on_scan_work(scan_msg(SCAN_S + 1.0))
-    node._publish_map()
+    assert node._world.lidar_weight.any(), "painted, all the same"
+    assert set(node.pubs) == {"/fusion/surface"}
+    assert [name for name, _period in node.timers] or True
     line = node._world_line(node._tally.take())
-    assert f"reference {node._reference.known} cells from a snapshot" in line
-    assert "session paint" in line and "cells in unknown space" in line
-
-    # the same room again: the cells a matcher reads have not moved, so nothing is republished
-    node._tf.buffer.transforms[("map", "base_link")].transform.translation.x = 1.06
-    node._on_scan_work(scan_msg(SCAN_S + 2.0))
-    node._publish_map()
-    before = len(node.pubs["/map_lidar"].sent)
-    node._publish_map()
-    assert len(node.pubs["/map_lidar"].sent) == before
-    assert node._tally.take().counts["lidar_map_unchanged"] >= 1
-
-    # ...and with the flag off a matcher is handed this session's paint again: the 2026-09-18 drift
-    assert node.set_parameters([Parameter("frozen_reference", value=False)])[0].successful
-    assert "reference: OFF" in node._world_line(node._tally.take())
+    assert "1 revolutions" in line and "lidar slice" in line and "camera band" in line

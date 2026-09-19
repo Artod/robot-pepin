@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -22,12 +21,10 @@ from pepin.lean import Lean
 from pepin.mapping import grid_from_pgm
 from pepin.tsdf import GridSpec, RigidPose
 from pepin.worldmap import (
-    BORN_FRESH,
     FREE,
     OCCUPIED,
     UNKNOWN,
     LidarLaw,
-    MapIdentity,
     OccupancySlice,
     PlanarMount,
     SliceLaw,
@@ -450,22 +447,6 @@ def test_the_matchers_band_holds_only_cells_many_frames_agree_on() -> None:
     assert wall_at(world.camera_band_slice(SliceLaw(min_weight=20.0)), 1.0, 0.0)
 
 
-def test_the_band_says_how_hard_it_is_and_the_report_line_carries_it() -> None:
-    """The share is what tells an operator whether the matcher has a reference at all: at the
-    threshold the map is cut with it is 1, and above everything in the volume it is 0."""
-    world = room()
-    intr, pose = looking_ahead(0.8)
-    for _ in range(3):
-        world.integrate_depth(flat_depth(intr, 1.0), None, intr, pose, stamp=200.0)
-    soft = SliceLaw()
-    assert world.hardness(soft)["share"] == 1.0, "the cut and the floor are the same cut"
-    empty = world.hardness(SliceLaw(min_weight=1e6))
-    assert empty["occupied"] == 0.0 and empty["share"] == 0.0
-    assert empty["occupied_floor"] > 0.0 and empty["min_weight"] == 1e6
-    line = world.report(camera_law=SliceLaw(min_weight=20.0))
-    assert "hard" in line and "above weight 20" in line
-
-
 def test_the_camera_may_fill_the_layer_where_the_lidar_never_spoke() -> None:
     """Protection is per cell, not per height: the layer is the lidar's only where it looked."""
     world = room()  # nothing behind the wall was ever seen by the lidar
@@ -541,27 +522,6 @@ def test_the_occupancy_message_fields_are_what_ros_expects() -> None:
         assert fields.as_list()[col + row * fields.width] == OCCUPIED
     row, col = rc(view, 0.0, 0.0)
     assert fields.data[col + row * fields.width] == FREE
-
-
-def test_the_digest_tells_a_republished_map_from_a_changed_one() -> None:
-    """What the publisher hashes to decide whether to send /map at all: the same slice twice is
-    the same string, one changed cell is not, and a map that moved or grew is a new map however
-    many of its cells stayed (the geometry is in the digest)."""
-    world = room()
-    view = world.lidar_slice()
-    fields = view.message_fields()
-    assert fields.digest() == view.message_fields().digest(), "the same cut is the same string"
-    assert "#" in fields.digest() and fields.digest().startswith("120x120@")
-
-    moved = replace(fields, origin_x=fields.origin_x + 1.0)
-    assert moved.digest() != fields.digest(), "a map that moved is a new map"
-    grown = replace(fields, width=fields.width + 1)
-    assert grown.digest() != fields.digest(), "and so is one that grew"
-
-    cells = fields.data.copy()
-    row, col = rc(view, 0.0, 0.0)
-    cells[col + row * fields.width] = OCCUPIED  # that cell was FREE
-    assert replace(fields, data=cells).digest() != fields.digest(), "one cell is enough"
 
 
 def test_the_slice_is_the_tracker_map_the_relocalizer_builds_from_a_message() -> None:
@@ -695,28 +655,6 @@ def test_a_seeded_map_becomes_the_lidars_own_layer_at_once() -> None:
     assert np.array_equal(fresh.lidar_slice().values, view.values), "the seed stands"
 
 
-def test_a_seeded_volume_hands_a_matcher_cut_above_the_seed_s_weight_nothing() -> None:
-    """What a seeded start costs the camera, stated once so nobody discovers it on the robot:
-    seeding writes ONE weight per cell (4.0), so the map's own cut carries every seeded wall
-    while a matcher's cut in the tens carries none of them, and /map_camera goes out
-    all-unknown until the camera has painted its own frames on a cell. The band then hardens at
-    the lidar's poses, which is the point — but the camera says nothing while it does."""
-    world = room()
-    view = world.lidar_slice()
-    fresh = WorldMap(spec(), mount())
-    seeded = fresh.seed_from_grid(view.values, view.resolution_m, view.origin)
-    assert seeded > 0
-    walls = view.counts()["occupied"]
-    assert fresh.camera_band_slice(SliceLaw(min_weight=2.0)).counts()["occupied"] == walls
-    hard = fresh.hardness(SliceLaw(min_weight=20.0), SliceLaw(min_weight=2.0))
-    assert hard == {
-        "occupied": 0.0,
-        "occupied_floor": float(walls),
-        "share": 0.0,
-        "min_weight": 20.0,
-    }, "a seeded wall is invisible to any cut above the weight seeding wrote"
-
-
 def test_maturity_and_the_report_line_say_what_is_in_the_volume() -> None:
     world = room()
     stats = world.maturity()
@@ -746,14 +684,14 @@ def test_the_snapshot_clock_fires_on_the_period() -> None:
 
 
 def test_the_message_packs_the_slice_the_way_map_server_decodes_it() -> None:
-    """The row order of /map, /map_lidar and /map_camera, pinned.
+    """The row order of an occupancy grid and of the exported pgm, pinned.
 
-    A tracker pointed at /map_lidar scored fit 0.00 at the true pose on 2026-09-14 and re-seated
-    four metres away at 0.99, and a flipped row order was the first suspect. It is not the fault
-    (scratch/map_lidar_vs_pgm.py: the live slice agrees with the served file on 69.7 % of its
-    walls as packed and on 15-21 % under every flip — the volume is simply not the file yet), so
-    this fixes the convention in a test instead of in a memory: data row 0 is the ORIGIN row,
-    the lowest y, and the pgm's first row is the top one, the highest y.
+    A tracker once pointed at a slice of this volume scored fit 0.00 at the true pose (2026-09-14)
+    and a flipped row order was the first suspect. It was not the fault
+    (scratch/map_lidar_vs_pgm.py: the live slice agreed with the served file on 69.7 % of its walls
+    as packed and on 15-21 % under every flip — the volume was simply not the file), so this fixes
+    the convention in a test instead of in a memory: data row 0 is the ORIGIN row, the lowest y,
+    and the pgm's first row is the top one, the highest y.
     """
     values = np.full((3, 4), UNKNOWN, dtype=np.int8)
     values[0, 1] = OCCUPIED  # the second cell of the origin row
@@ -789,78 +727,49 @@ def test_the_message_packs_the_slice_the_way_map_server_decodes_it() -> None:
     assert pixels[2, 1] < 64, "the occupied cell sits in the pgm's LAST row: row 0 is the top"
 
 
-# ---- who the map is, and whether its file may be replaced -----------------------------------
-def test_the_map_s_own_files_are_named_after_the_room() -> None:
-    """ONE MAP, ONE FILE: the volume's snapshot and its exported pair live beside the saved pair
-    they were seeded from and carry the room's name, never the session's — so a second flat
-    cannot be resumed into the first."""
-    assert world_path_for("/maps/flat3_straight.yaml") == Path("/maps/flat3_straight.world.npz")
-    assert export_path_for("/maps/flat3_straight.world.npz") == Path("/maps/flat3_straight.world")
-    # ...and the pair a volume exports is what the next run's world_path_for would point back at
-    exported = export_path_for(world_path_for("/maps/flat1.yaml")).with_suffix(".yaml")
-    assert world_path_for(exported) == Path("/maps/flat1.world.npz")
+# ---- the volume's own file, and whether it may be replaced --------------------------------
+def test_the_volume_is_named_after_the_graph_database_whose_frame_it_holds() -> None:
+    """THE FRAME IS THE DATABASE'S. Every voxel was painted at a pose in RTAB-Map's own optimised
+    frame, so a volume resumed beside another database is a room drawn in coordinates nothing
+    shares — and the file name is what makes a fresh database mean a fresh volume, not a silent
+    mismatch."""
+    assert world_path_for("/maps/rtabmap.db") == Path("/maps/rtabmap.world.npz")
+    bare = world_path_for("rtabmap.db")
+    assert bare == Path("/maps/rtabmap.world.npz"), "a bare name lands in the maps directory"
+    assert export_path_for("/maps/rtabmap.world.npz") == Path("/maps/rtabmap.world")
+    # ...and the pair an offline export writes is what world_path_for would point back at
+    exported = export_path_for(world_path_for("/maps/slam.db")).with_suffix(".yaml")
+    assert world_path_for(exported) == Path("/maps/slam.world.npz")
 
 
-def test_an_identity_is_minted_from_the_birth_and_survives_a_snapshot(tmp_path: Path) -> None:
-    """The id must survive growth and be the same on both sides, so it is minted once from the
-    facts of the birth and carried — not derived from the box, which changes."""
+def test_an_offline_export_reads_back_as_the_slice_it_was_written_from(tmp_path: Path) -> None:
+    """The pair is for an operator's eyes and for the instruments in scratch/, so what matters is
+    that map_server's own reader gets the volume back cell for cell and origin for origin."""
     world = room()
-    minted = world.born_from("seed:flat3_straight", 1700.0)
-    assert minted.token == MapIdentity.born("seed:flat3_straight", world.spec, 1700.0).token
-    assert minted.provenance == "seed:flat3_straight" and minted.born_s == 1700.0
-    # a different birth is a different map; the same birth is reproducible from a log
-    assert MapIdentity.born(BORN_FRESH, world.spec, 1700.0).token != minted.token
-
-    back = WorldMap.load(world.save(tmp_path / "flat3_straight.world.npz"), mount())
-    assert back.identity == minted, "a resumed volume is the same map, not a new one"
-    assert "seed:flat3_straight" in back.identity.text()
-
-
-def test_the_legacy_id_is_the_one_the_consumers_still_derive() -> None:
-    """Every consumer today computes size@origin off the message (pepin_bringup.msgs.map_id).
-    The volume spells it one step earlier so the two can never disagree, and the digest is built
-    on top of it."""
-    fields = room().lidar_slice().message_fields()
-    assert fields.legacy_id() == f"{fields.width}x{fields.height}@-3.00,-3.00"
-    assert fields.digest().startswith(fields.legacy_id() + ":0.050#")
-
-
-def test_the_exported_pair_is_the_same_map_as_the_published_grid(tmp_path: Path) -> None:
-    """The pair a map_server serves must be a CACHE of the volume and not a second map: the same
-    cells AND the same legacy id, which is what makes a word stamped on /map evidence about
-    /map_lidar. The yaml also carries the minted token for whoever moves onto it."""
-    world = room()
-    world.born_from("seed:flat3_straight", 1700.0)
     view = world.lidar_slice()
-    yaml_path = world.export_pgm_yaml(tmp_path / "flat3_straight.world", view)
-    text = yaml_path.read_text()
-    assert f"map_id: {world.identity.token}" in text
-    assert "map_from: seed:flat3_straight" in text
+    yaml_path = world.export_pgm_yaml(tmp_path / "rtabmap.world", view)
     grid = grid_from_pgm(yaml_path)
     fields = view.message_fields()
     assert grid.log_odds.shape == (fields.height, fields.width)
     assert grid.spec.x_min_m == pytest.approx(fields.origin_x)
     assert grid.spec.y_min_m == pytest.approx(fields.origin_y)
-    rows, cols = grid.log_odds.shape
-    served = f"{cols}x{rows}@{grid.spec.x_min_m:.2f},{grid.spec.y_min_m:.2f}"
-    assert served == fields.legacy_id(), "the file and the topic are one map, id and all"
 
 
-def test_the_export_never_lands_on_the_seed_it_was_born_from(tmp_path: Path) -> None:
-    """The seed pair (``flat3_straight.pgm`` + ``.yaml``) is the one file in the scheme a human
-    wrote; the export sits BESIDE it under ``.world``. pathlib reads ``.world`` as a suffix, and
-    the first live run replaced it and wrote the volume's slice over the seed (2026-09-18)."""
-    seed_pgm, seed_yaml = tmp_path / "flat3_straight.pgm", tmp_path / "flat3_straight.yaml"
-    seed_pgm.write_bytes(b"the seed")
-    seed_yaml.write_text("image: flat3_straight.pgm\n")
+def test_the_export_never_lands_on_another_file_of_the_same_stem(tmp_path: Path) -> None:
+    """The export sits BESIDE the room's other files under ``.world``. pathlib reads ``.world`` as a
+    suffix and would REPLACE it, which is exactly how the first live run of this export wrote the
+    volume's slice over a seed's own pgm (2026-09-18)."""
+    other_pgm, other_yaml = tmp_path / "rtabmap.pgm", tmp_path / "rtabmap.yaml"
+    other_pgm.write_bytes(b"not the volume")
+    other_yaml.write_text("image: rtabmap.pgm\n")
     world = room()
-    for target in (export_path_for(world_path_for(seed_yaml)), world_path_for(seed_yaml)):
+    for target in (export_path_for(world_path_for(other_yaml)), world_path_for(other_yaml)):
         written = world.export_pgm_yaml(target)
-        assert written == tmp_path / "flat3_straight.world.yaml"
-        assert "image: flat3_straight.world.pgm" in written.read_text()
-    assert (tmp_path / "flat3_straight.world.pgm").exists()
-    assert seed_pgm.read_bytes() == b"the seed"
-    assert seed_yaml.read_text() == "image: flat3_straight.pgm\n"
+        assert written == tmp_path / "rtabmap.world.yaml"
+        assert "image: rtabmap.world.pgm" in written.read_text()
+    assert (tmp_path / "rtabmap.world.pgm").exists()
+    assert other_pgm.read_bytes() == b"not the volume"
+    assert other_yaml.read_text() == "image: rtabmap.pgm\n"
 
 
 def test_the_export_leaves_the_previous_pair_whole_when_it_cannot_finish(tmp_path: Path) -> None:
@@ -930,31 +839,25 @@ def test_a_cell_counts_the_places_that_saw_it_not_the_times_it_was_seen() -> Non
     assert once.views.max() == 5.0, "the volume counts what it is given; the gate is the filter"
 
 
-def test_the_matcher_s_slice_holds_only_what_two_places_agree_on() -> None:
-    """The cure's other half. A cell written from ONE place is the pose's own paint and matching
-    against it is matching the pose against itself; /map keeps it (a planner may plan around a
-    wall one pass saw), /map_lidar does not."""
+def test_the_view_gate_keeps_a_parked_cart_from_voting_a_thousand_times() -> None:
+    """A VIEW IS EVIDENCE ONCE, and the weight used to count ten a second. Through the gate, as the
+    node runs it, ten revolutions from one place are ONE view — and a cart that has moved a whole
+    voxel at its own farthest return is a new view, which is the grid's number and not a chosen one.
+    """
     world = WorldMap(spec(), mount())
     gate = ViewGate(world.spec.voxel_m)
-    # Through the gate, as the node runs it: ten revolutions from one place are ONE view.
     for i in range(10):
         angles, ranges = box_scan(0.0, 0.0)
         if gate.admits(0.0, 0.0, 0.0, float(ranges.max())):
             world.integrate_scan(angles, ranges, at(0.0, 0.0, 0.0), stamp=100.0 + i)
     assert gate.held == 9
-    planner = SliceLaw(min_weight=1.0)
-    matcher = SliceLaw(min_weight=1.0, min_views=2)
-    assert world.lidar_slice(planner).counts()["occupied"] > 0, "the planner sees one pass"
-    assert world.lidar_slice(matcher).counts()["occupied"] == 0, (
-        "a matcher is handed nothing it could match its own pose against"
-    )
-    # ...and the moment a SECOND place agrees, the wall joins the matcher's slice. That is how the
-    # two regimes meet: the map grows into unknown space freely, and the reference grows one
-    # viewpoint behind it.
+    assert world.views.max() == 1.0, "one place, one view, however long the cart stands there"
+    assert world.lidar_slice(SliceLaw(min_weight=1.0)).counts()["occupied"] > 0
+
     angles, ranges = box_scan(1.0, 0.0)
     assert gate.admits(1.0, 0.0, 0.0, float(ranges.max()))
     world.integrate_scan(angles, ranges, at(1.0, 0.0, 0.0), stamp=200.0)
-    assert world.lidar_slice(matcher).counts()["occupied"] > 0
+    assert world.views.max() == 2.0, "a metre away is a second place, and it says so"
 
 
 def test_a_newborn_box_is_centred_on_the_cart_and_not_on_the_origin() -> None:
@@ -969,54 +872,3 @@ def test_a_newborn_box_is_centred_on_the_cart_and_not_on_the_origin() -> None:
     assert here.origin[1] == pytest.approx(2.5 - ny * box.voxel_m / 2)
     assert here.origin[0] < -9.4 < here.origin[0] + nx * box.voxel_m, "the cart is inside it"
     assert box.centred_on_start().origin == box.centred_on((0.0, 0.0)).origin
-
-
-# ---- the frozen reference: the gauge of a session ------------------------------------------
-def test_the_matcher_reads_the_reference_where_it_knows_and_the_paint_where_it_does_not() -> None:
-    """INSIDE A SESSION THE REFERENCE IN KNOWN SPACE IS FROZEN. A tracker matching the slice it
-    paints has a null space it cannot see out of (2026-09-18: 7 deg in 35 min, wheels blocked), and
-    the gauge that fixes it is the volume as it was RESUMED — cells painted in sessions whose poses
-    cannot depend on this one's. Unknown space is where the loop is legitimately open."""
-    previous = room()  # the earlier session: the box seen from eight places
-    law = SliceLaw(min_weight=2.0)
-    reference = previous.reference(law, SliceLaw(), age_s=12.0 * 3600.0)
-    assert reference.known > 0 and "12.0 h old" in reference.text()
-
-    # this session paints a wall where the earlier one saw open floor, and one outside its reach
-    session = WorldMap(previous.spec, mount())
-    angles, ranges = box_scan(0.0, 0.0)
-    moved = np.where(np.abs(angles) < 0.2, ranges - 0.5, ranges)  # something in front of the cart
-    for i in range(3):
-        session.integrate_scan(angles, moved, at(0.0, 0.0, 0.0), stamp=100.0 + i)
-    live = session.lidar_slice(law)
-    handed = reference.over(live)
-    known = reference.lidar.values != UNKNOWN
-    assert np.array_equal(handed.values[known], reference.lidar.values[known]), (
-        "in known space a matcher reads the earlier session and nothing of this one"
-    )
-    assert np.array_equal(handed.values[~known], live.values[~known]), (
-        "and in unknown space it reads this session's own paint: the growth regime"
-    )
-    assert reference.grown(live) == int(np.count_nonzero(~known & (live.values != UNKNOWN)))
-
-
-def test_a_volume_born_empty_has_an_empty_reference_so_everything_is_growth() -> None:
-    """A wake-up is all unknown space, which is exactly right: there is nothing to be a gauge, the
-    session's paint IS the map, and ViewGate with min_views is the rule for that regime."""
-    empty = WorldMap(spec(), mount())
-    reference = empty.reference(SliceLaw(min_weight=2.0), SliceLaw(), age_s=math.inf)
-    assert reference.known == 0 and "born empty" in reference.text()
-    painted = room().lidar_slice(SliceLaw(min_weight=2.0))
-    assert np.array_equal(reference.over(painted).values, painted.values)
-    assert reference.grown(painted) == int(np.count_nonzero(painted.values != UNKNOWN))
-
-
-def test_a_reference_of_another_grid_says_nothing_at_all() -> None:
-    """A snapshot resumed onto another box cannot speak about this one's cells, and a silent
-    reference is the growth regime rather than a wrong answer."""
-    reference = room().reference(SliceLaw(min_weight=2.0), SliceLaw(), age_s=0.0)
-    other = WorldMap(replace(spec(), shape=(60, 60, 34)), mount())
-    angles, ranges = box_scan(0.0, 0.0)
-    other.integrate_scan(angles, ranges, at(0.0, 0.0, 0.0), stamp=100.0)
-    live = other.lidar_slice(SliceLaw(min_weight=1.0))
-    assert reference.over(live) is live

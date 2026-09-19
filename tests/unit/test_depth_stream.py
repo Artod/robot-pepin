@@ -29,11 +29,13 @@ RCLPY = ros_stubs.install()
 from camera_configs import CALIBRATION, camera_config  # noqa: E402
 from pepin_bringup.depth_stream import (  # noqa: E402
     CARRY_WAIT_S,
+    DEPTH_REACH_M,
     FLAGS,
     SCAN_RANGE_M,
     DepthStream,
 )
 from pepin_bringup.msgs import (  # noqa: E402
+    array_from_image,
     image_from_array,
     pose_from_transform,
     scan_from_ranges,
@@ -324,10 +326,12 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
         parallax_anchor=False,
         lidar_sigma_m=0.0,
         fan_floor_gate="off",
+        depth_reach=False,
     )
-    # the affine law alone on the beams alone, every beam weighing the same, and the fan's floor
-    # gate off: this reference is the chain of before 2026-09-15, and every switch that has moved
-    # it since is named here — the floor's, the wall's and the parallax's pairs all ship on today
+    # the affine law alone on the beams alone, every beam weighing the same, the fan's floor gate
+    # off and the camera's reach not yet gated: this reference is the chain of before 2026-09-15,
+    # and every switch that has moved it since is named here — the floor's, the wall's and the
+    # parallax's pairs all ship on today, and so does depth_reach (2026-09-19)
     assert node._pipeline.switches == {name: FLAGS[name] for name in node._pipeline.names} | {
         "range_law": False,
         "frame_law": False,
@@ -432,6 +436,7 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
         floor_pairs=False,
         parallax_anchor=False,
         fan_floor_gate="off",
+        depth_reach=False,
     )  # the gate off, and the floor's and the parallax's pairs off (on by default since
     # 2026-09-16, and they would move the seeded law off the reference's): this test is about
     # WHICH pose the chain uses, not about the fan's floor nor about the rulers of the law
@@ -1053,3 +1058,74 @@ def test_scan_honours_pan_off_folds_the_fan_as_if_the_head_looked_ahead(build: B
         assert math.degrees(scan.angle_min) == pytest.approx(-40.0, abs=1e-6)
     node.set_parameters([Param("scan_honours_pan", True)])  # and back, without a restart
     assert float(np.mean(_marked_deg(_fan_of(node, 10.0)))) == pytest.approx(10.0, abs=0.6)
+
+
+# ---- the camera answers for its own depth ---------------------------------------------------
+def test_the_reach_is_one_number_for_the_image_and_for_the_scan() -> None:
+    """The published depth's reach and /depth_scan's cap are the same physical claim, so they are
+    the same constant: two literals would drift, and the costmap's obstacle_max_range of 2.5 m has
+    to stay under both."""
+    assert DEPTH_REACH_M == 3.0
+    assert FLAGS["depth_reach_m"] == 3.0
+    assert FLAGS["depth_reach"] is True
+    assert SCAN_MAX_RANGE == DEPTH_REACH_M, "this file's own reference uses the node's default"
+
+
+def test_the_published_depth_is_nan_past_the_reach_and_the_scan_is_untouched(
+    build: Build,
+) -> None:
+    """Two nodes, the same seeded law and the same frame of a wall 3.5 m off: the one with
+    ``depth_reach`` on publishes NaN exactly where the other published more than 3 m, and nothing
+    else moves — same finite pixels to the bit, same /depth_scan to the bit."""
+    # Every ruler off and the law seeded: the two nodes then publish the SAME pixels bit for bit,
+    # because a law that still moves moves at so much per SECOND of wall time (``law_slew``) and
+    # two nodes never see the same wall time.
+    frozen = dict(
+        law=LAW,
+        fan_floor_gate="off",
+        lidar_anchor=False,
+        range_law=False,
+        frame_law=False,
+        floor_pairs=False,
+        wall_anchor=False,
+        parallax_anchor=False,
+    )
+    off, off_net = build(**frozen)
+    on, on_net = build(**frozen)
+    assert off.set_parameters([Param("depth_reach", False)])[0].successful
+    assert off._switches.on("depth_reach") is False and on._switches.on("depth_reach") is True
+    frame(off, off_net, CONFIG_CAM, 3.5, 0)
+    frame(on, on_net, CONFIG_CAM, 3.5, 0)
+    raw = np.asarray(array_from_image(published(off)[0][0]), dtype=float)
+    gated = np.asarray(array_from_image(published(on)[0][0]), dtype=float)
+    assert raw.shape == gated.shape == (HEIGHT, WIDTH)
+    beyond = raw > 3.0
+    assert beyond.any() and (~beyond & np.isfinite(raw)).any(), "the frame has both halves"
+    assert np.all(np.isnan(gated[beyond])), "past 3 m the camera says nothing"
+    assert np.array_equal(gated[~beyond], raw[~beyond], equal_nan=True), "and nothing else moves"
+    assert np.array_equal(
+        np.asarray(published(off)[1][0].ranges),
+        np.asarray(published(on)[1][0].ranges),
+        equal_nan=True,
+    ), "/depth_scan is built before the gate and is unchanged"
+    on._report()
+    line = on.logger.texts("info")[-1]
+    share = int(beyond.sum()) / (HEIGHT * WIDTH) * 100.0
+    assert f"published NaN past 3.0 m over {share:.1f}% of the pixels" in line
+    assert "depth_reach=on depth_reach_m=3.0" in line
+    off._report()
+    assert "published NaN past" not in off.logger.texts("info")[-1]
+
+
+def test_the_reach_moves_live_and_a_nearer_one_says_less(build: Build) -> None:
+    """The flag is a number a drive may move without a restart: at 1.5 m the same frame of a wall
+    3.5 m off keeps only what stands within 1.5 m, and the report line says over how much of the
+    picture."""
+    node, net = build(law=LAW, fan_floor_gate="off", lidar_anchor=False, parallax_anchor=False)
+    frame(node, net, CONFIG_CAM, 3.5, 0)
+    wide = np.asarray(array_from_image(published(node)[0][0]), dtype=float)
+    assert node.set_parameters([Param("depth_reach_m", 1.5)])[0].successful
+    frame(node, net, CONFIG_CAM, 3.5, 1)
+    near = np.asarray(array_from_image(published(node)[0][1]), dtype=float)
+    assert np.nanmax(near) <= 1.5
+    assert np.count_nonzero(np.isnan(near)) > np.count_nonzero(np.isnan(wide))

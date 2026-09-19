@@ -17,54 +17,32 @@ while the tracker reports a fit the cart may drive on (``/localization_fit`` >=
 fused frame — the board's clock) is the zero-crossing of the field, published beside RTAB-Map's
 cloud.
 
-THE WORLD MAP. The same volume is also the map itself (:mod:`pepin.worldmap`): ``/scan`` is
-integrated into it along the beams' own rays — carving free space, a surface at each return, on
-the lidar's own weight channel, which the camera's scale-uncertain depth may not repaint — and
-the layer at the lidar's plane reads out as an occupancy grid. The rays follow the body: with
+THE VOLUME (:mod:`pepin.worldmap`). ``/scan`` is integrated into the same volume along the beams'
+own rays — carving free space, a surface at each return, on the lidar's own weight channel, which
+the camera's scale-uncertain depth may not repaint. The rays follow the body: with
 ``imu_lean`` on the scan is placed by the leaning pose, so a beam that climbs 44 cm over 5 m
 while the cart tips writes a tabletop where it hit one instead of a wall at the plane, and a
 revolution taken past ``lean_gate_deg`` is dropped rather than believed. A lean gravity did
 not vote for (``lean_min_quality``: a drifting gyro's own signature) is no lean at all, and the
 measurement is placed level instead of by a number nobody measured.
 
-With ``map_source=volume`` that grid IS the map: it goes out as ``/map``, latched (transient
-local), so the tracker and Nav2 localise and plan on the volume rather than on a frozen file,
-and a "known room" is just a volume that was seeded (``seed_map``) or resumed from a snapshot
-(``resume_volume``) instead of an empty one. The saved file is the SEED and nothing else
-afterwards — a picture written into the lidar's layer at start, never matched against, never
-served. The publication is on change, not on a clock: the slice is hashed
-(``OccupancyGridFields.digest``) and an identical grid is never sent again, ``map_hz`` is only
-the ceiling on how often a changed one may go, and the first goes out as soon as the seed is in.
-That is what a republication costs the READERS — a tracker that adopts a map rebuilds its
-matcher, its mask and its tracker on four A53 cores, and both costmaps re-seed their static
-layer. With the wifi down the board keeps the last /map it was handed (a latched subscriber
-holds it, and a grid in memory does not stop working because its publisher went away), so
-nothing on the board waits for this node once it has a map: CLAUDE.md rule 20 is satisfied by
-the subscribers that already exist, and nothing new runs there.
+THE VOLUME IS OPEN-LOOP, AND THAT IS THE ARCHITECTURE. It is painted at the pose the tracker
+gives, and NOTHING localises against it: no slice of it goes out as a map, no matcher reads it, no
+pose is estimated on it. A tracker that matches the slice it is painting has a null space it cannot
+see out of — turn the map and the heading together and a bearing-only scan maps onto itself — and a
+cart parked with its wheels blocked walked 7 degrees and 5-7 cm in 35 minutes through it at fit
+0.97-0.99 (2026-09-18), every step under a tenth of a degree. The room's own geometry is RTAB-Map's
+loop-closed graph and its occupancy grid; this node paints the 3D surface beside it.
 
-Exactly one publisher of /map, and both halves of that are launch decisions this node is told:
-the bridge mode says which side owns the topic (:func:`pepin.deployment.map_owner`) and the
-``world_map`` parameter says whether the launch kept RTAB-Map's grid off it. Without both, the
-volume is refused on /map however ``map_source`` is set afterwards. Beside /map goes
-``/map_camera``, the band the camera speaks for
-(``camera_band_m``, the band /depth_scan marks in): the slice the camera's own scans are matched
-against on the laptop (:mod:`pepin_bringup.laptop_localizer`), because a tabletop the lidar's
-plane never sees is in that picture and in no other. The volume is snapshotted to ``world_path``
-every ``snapshot_s`` and at shutdown.
+``/fusion/surface`` is therefore the only thing this node publishes about the room, and the volume
+is snapshotted to ``world_path`` every ``snapshot_s`` and at shutdown. The snapshot is named after
+the graph DATABASE it shares a frame with (:func:`pepin.worldmap.world_path_for`): every voxel was
+painted at a pose in that database's optimised frame, so a fresh database means a fresh volume.
 
-EVERY MATCHER IS HANDED HEAVY CELLS. ``/map_camera`` is cut with its own threshold
-(``camera_map_min_weight``, 20 against the map's 2): a cell the camera painted two frames ago at
-the pose it is now asking about is not evidence about that pose, and that circle is how
-camera-only localisation walked away in 20-33 cm steps (2026-09-13). Painting is untouched — the
-cell is in the volume from the first frame and simply does not appear in the matcher's slice
-until it is heavy — and the report line says what the threshold costs: the share of the band's
-occupied cells it keeps. The lidar's own layer can be matched on too: with ``lidar_map`` the same
-slice that would be ``/map`` also goes out as ``/map_lidar``, a topic of its own the board's
-tracker can be pointed at (its ``map_topic`` flag) while Nav2 keeps the ``/map`` it has. A volume
-the tracker is pointed at must have been seeded from the saved file (``seed_map``), which also
-snaps the grid to that file's cell lattice.
+A VIEW IS EVIDENCE ONCE (``view_gate``): a parked cart sends the same revolution ten times a
+second, and the volume's weights used to count every one as an independent observation.
 
-THE GRAPH MOVES THE MAP. In online SLAM the graph is the skeleton and ``map -> odom`` is its
+THE GRAPH MOVES THE VOLUME. In online SLAM the graph is the skeleton and ``map -> odom`` is its
 correction: RTAB-Map optimises, pepin_bringup.rtabmap_frame sends the new edge to the board and
 pepin_bringup.slam_frame broadcasts it, and from that moment every voxel painted under the old
 edge is stale by the difference — the pose moved, the room did not, and a loop drive could never
@@ -79,10 +57,10 @@ corrections are measured against the same anchor and move the volume together wh
 While a move is owed but the rate has not let it through, nothing is painted at all: an
 observation placed under the new correction and fused into a volume still standing in the old
 one is carried past the truth by the whole of that move when it lands.
-The grid never moves, nothing is re-seeded and nothing extra is published: the trackers follow
-``map -> odom`` themselves, and the next slice out of this node is simply the moved one. Only in
+The grid never moves and nothing extra is published: the trackers follow ``map -> odom``
+themselves, and the next surface out of this node is simply the moved one. Only in
 SLAM mode, where the graph owns that edge — on a known map the board's tracker owns it, the
-served map is the reference, and the volume stands still whatever the flag says.
+graph's own grid is the reference, and the volume stands still whatever the flag says.
 
 NOTHING IS PAINTED AT A POSE NOBODY TRUSTS. The volume is written in the MAP frame and a TSDF
 cannot be un-integrated, so an observation placed by a wrong pose does not add noise — it
@@ -100,9 +78,8 @@ that session ended with keeps 52.9 % of the saved map's walls and has carved 207
 
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
 ``fit_gate``, ``lidar_fit_gate``, ``paint_sigma_m``, ``imu_lean``, ``lean_gate_deg``,
-``lean_min_quality``, ``self_heal``, ``align``,
-``min_weight``, ``map_min_weight``, ``camera_map_min_weight``, ``lidar_map``, ``surface_hz``,
-``band_half_z``, ``lidar_layer``, ``no_return_free``, ``map_source``, ``map_hz``, ``snapshot_s``,
+``lean_min_quality``, ``self_heal``, ``align``, ``min_weight``, ``surface_hz``,
+``band_half_z``, ``lidar_layer``, ``no_return_free``, ``view_gate``, ``snapshot_s``,
 ``resume_volume``, ``follow_correction``, ``follow_correction_min_m``,
 ``follow_correction_min_deg``, ``follow_correction_min_s``, ``follow_correction_law``; their
 state is printed in every report line, beside the band itself and the source of the plane it is
@@ -122,14 +99,12 @@ from typing import Any
 
 import numpy as np
 from message_filters import Subscriber, TimeSynchronizer
-from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
-from pepin.deployment import map_owner
 from pepin.depth import Intrinsics
 from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import BASE_FRAME, MAP_FRAME, ODOM_FRAME, FramePoser
@@ -146,13 +121,9 @@ from pepin.tsdf import (
 )
 from pepin.watch import DRIVE_FIT, PAINT_SIGMA_M, SOURCE_PATIENCE_S, PaintTrust
 from pepin.worldmap import (
-    BORN_FRESH,
-    BORN_ROOM,
     CorrectionFollower,
     LidarLaw,
-    OccupancySlice,
     PlanarMount,
-    SliceLaw,
     SnapshotClock,
     SnapshotTrust,
     ViewGate,
@@ -163,7 +134,6 @@ from pepin.worldmap import (
 from pepin_bringup.msgs import (
     array_from_image,
     cloud_from_points,
-    occupancy_grid,
     rpy_from_transform,
     scan_arrays,
     stamp_seconds,
@@ -181,18 +151,11 @@ from pepin_bringup.node_kit import (
 
 CONFIG = "/ws/config/fusion.json"
 LIDAR_CONFIG = "/ws/config/lidar.json"
-# The volume's own file, beside the maps (ros/maps is mounted at /maps). A room that HAS a saved
-# pair keeps its volume next to it, named after the room (`world_path_for`): flat3_straight.yaml
-# -> flat3_straight.world.npz. This one is the fallback for a room with no saved pair at all —
-# an unknown place, born under the cart — and it is where `world_live.npz` used to be.
-WORLD_PATH = "/maps/world_live.npz"
-CAMERA_MAP_TOPIC = "/map_camera"  # the camera's band of the volume, for its own matcher
-LIDAR_MAP_TOPIC = "/map_lidar"  # the volume's own lidar layer, for the board's tracker
-IDENTITY_TOPIC = "/map_identity"  # who the map on those topics is (JSON), latched
-# Where a place recogniser says which room the cart woke up in: std_msgs/String carrying JSON
-# ``{"room": "<name>"}``, latched, published only for a place its publisher vouches for. That one
-# name is the whole of "known or fresh" (:meth:`DepthFusion._on_room`).
-ROOM_TOPIC = "/place/room"
+# The graph database the volume's frame belongs to, as the containers see it, and the volume's own
+# file beside it (`world_path_for`): /maps/rtabmap.db -> /maps/rtabmap.world.npz. Every voxel was
+# painted at a pose in that database's optimised frame, so the two travel together and a fresh
+# database means a fresh volume.
+DATABASE = "/maps/rtabmap.db"
 SCAN_TOPIC = "/scan"
 SIGMA_TOPIC = "/localization/sigma"  # the tracker's post-fusion sigma, JSON; may never come
 TF_WAIT_S = 0.3
@@ -201,7 +164,7 @@ PAIR_QUEUE = 40  # depth arrives a fraction of a second after its image; pair by
 BAND_STRIDE = 3
 BAND_MIN_POINTS = 50  # a frame with fewer points in the band is not worth a yaw search
 AT_BOUND_STREAK = 30  # ~3 s of frames refused at the search's bound: the model no longer fits
-STAGES = ("align", "integrate", "scan", "map")
+STAGES = ("align", "integrate", "scan")
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration; their state is printed in every report line.
@@ -255,8 +218,8 @@ FLAGS = FlagSet(
         " session keeps 52.9 % of the saved map's walls, has carved 2070 of them free, and the"
         " node's own tracker replayed on its slice seats a median 1.90 m from where the file"
         " puts it, re-seating 3.7-3.8 m off on two of four tapes"
-        " (scratch/volume_vs_file_seating.py). That measurement is also what keeps map_source at"
-        " file; this gate is the half of the cure that is in this node. What it costs a HEALTHY"
+        " (scratch/volume_vs_file_seating.py). That measurement is also part of why nothing"
+        " localises against this volume any more. What it costs a HEALTHY"
         " drive was measured too, on the same four tapes with the predicate applied to every"
         " recorded revolution (scratch/paint_gate_on_a_tape.py): 452 of 10048 withheld, 4.5 %,"
         " and that is an upper bound — 439 of them are the recorded pose's own gap (the tape"
@@ -287,24 +250,6 @@ FLAGS = FlagSet(
         off_when="lower it for a mapping run whose product must be exact: fewer frames, all of"
         " them from a pose the tracker was certain of",
         range=(0.01, 2.0),
-    ),
-    Flag(
-        "camera_map",
-        True,
-        description="the volume's camera band goes out on /map_camera at map_hz whoever owns"
-        " /map: beside a known map the lidar keeps the served file and the camera's scans are"
-        " matched against this band of the volume, their own cross-section of the room; off,"
-        " /map_camera is published only where the volume is the map (SLAM with world_map)",
-        why="the camera's fan is the whole height 0.15-1.3 m and the lidar's map is one plane"
-        " at 0.38 m: held to that plane the fan scored fit 0.34 at the right pose and the fused"
-        " pose moved 0.8-1.5 cm off the lidar's (2026-09-13, drive_bisect on runs 190024 and"
-        " 190422 against 184701 and 185621). Nobody else publishes /map_camera, so the owner"
-        " rule that protects /map has nothing to protect here",
-        on_when="always beside a known map: it is the only reference the camera's scans can"
-        " honestly be matched against, and it costs one slice per map_hz",
-        off_when="to reproduce the old behaviour, the camera matched against the lidar's /map;"
-        " or where the band is known to be wrong (a volume painted at a wrong pose) until it is"
-        " wiped",
     ),
     Flag(
         "imu_lean",
@@ -399,97 +344,16 @@ FLAGS = FlagSet(
     Flag(
         "min_weight",
         2.0,
-        description="observations a voxel needs before it is shown in /fusion/surface (the debug"
-        " cloud only: /map has map_min_weight)",
+        description="observations a voxel needs before it is shown in /fusion/surface, the one"
+        " thing this node publishes about the room",
         why="inherited from the map slice, where it was measured: at min_weight 2 the lidar slice"
         " holds 905 walls and at 6 it holds 817, the cells a single pass wrote falling out"
-        " (scratch/worldmap_from_tape.txt). For the debug cloud itself nothing was measured; it"
-        " is the same number so the picture and the map agree",
+        " (scratch/worldmap_from_tape.txt). For the cloud itself nothing was measured; it is the"
+        " same number so the picture and the volume's own report agree",
         on_when="raise it to show only what several frames agree on",
         off_when="0 shows every voxel ever touched, noise included — a look at what one pass"
         " sees; it changes nothing the cart drives on",
         range=(0.0, 100.0),
-    ),
-    Flag(
-        "map_min_weight",
-        2.0,
-        description="observations a voxel needs before it speaks in /map. Its own flag, and"
-        " capped at the lidar's own weight cap",
-        why="the cap is measured: lidar cells saturate at LidarLaw.max_weight 20 while the"
-        " volume's own cap is 60, so anything above 20 leaves the whole map unknown — a synthetic"
-        " box at min_weight 21 published free 0, occupied 0, unknown 14400, with Nav2 and the"
-        " tracker driving on that. The 2.0 is the slice's own measured maturity (905 walls at 2,"
-        " 817 at 6)",
-        on_when="raise it towards 20 for a map that must be certain — a world the cart has driven"
-        " more than once, saved to file",
-        off_when="lower it towards 0 in a fresh room, where the cart must plan through what a"
-        " single pass saw",
-        range=(0.0, LidarLaw.max_weight),
-    ),
-    Flag(
-        "camera_map_min_weight",
-        20.0,
-        description="observations a voxel needs before it speaks in /map_camera — the band the"
-        " camera's own scans are MATCHED against. Its own flag, far above map_min_weight: a"
-        " picture may show what one frame saw, a reference may not",
-        why="measured on the live volume (scratch/camera_band_weights.py on ros/maps/"
-        "world_live.npz, 190066 frames): the band's occupied columns carry weight p25 20.0,"
-        " median 29.3, and the band holds 21276 occupied cells at weight 2, 14285 at 20 (67 %),"
-        " 9510 at 50 — so the tens are reachable, with two thirds of the walls surviving. The"
-        " columns the lidar never wrote, the camera's own, fall from 148 to 26 over the same"
-        " step. The number itself is the volume's weighting read at the frame rate: at"
-        " weight_ref_m 2.0 m an observation weighs 1 and the stream runs 8-9 frames a second, so"
-        " 20 is 20 frames, 2.5 s of watching one cell from 2 m (5.6 s from 3 m, 10 s at the 4 m"
-        " range limit, and 0.6 s at the weight_cap 4.0, a metre and nearer). Below that a cell"
-        " is one glance from one place — which is how camera-only localisation walked away in"
-        " 20-33 cm and 15-23 deg steps on 2026-09-13, matching a band it had painted itself at"
-        " the drifting pose. 20 is also the lidar's own cap (LidarLaw.max_weight): a saturated"
-        " lidar cell still speaks in the band at exactly 20 and nothing the lidar wrote speaks"
-        " above it (the lidar slice holds 3561 occupied cells at 20 and 0 at 30)",
-        on_when="raise it toward the volume's cap 60 for a room the cart has driven more than"
-        " once: only walls integrated for many seconds from several places would remain",
-        off_when="lower it to map_min_weight to reproduce the old behaviour — the matcher handed"
-        " every cell two frames had touched. The report line says what the band costs: the share"
-        " of its occupied cells this threshold keeps. Those numbers are a volume painted through"
-        " 190066 frames; a volume that was just SEEDED (seed_map) or started fresh has nothing"
-        " hard in it at all — WorldMap.seed_from_grid writes weight 4.0 per cell, so a seeded"
-        " flat3_straight gives 3837 occupied cells at the map's cut and 0 at this one, and"
-        " /map_camera goes out all-unknown until the camera has painted its own 20 frames on a"
-        " cell. That is the architecture and not a fault — the band hardens at the lidar's poses"
-        " while the camera says nothing — but it means the camera contributes no measurement for"
-        " the first minutes of a seeded drive (laptop_localizer counts them low_fit), and the"
-        " report line reads 'hard 0 % of 3837' while it lasts",
-        range=(0.0, GridSpec.max_weight),
-    ),
-    Flag(
-        "lidar_map",
-        True,
-        description="the volume's lidar layer also goes out on /map_lidar, at map_hz, whoever"
-        " owns /map: a topic of its own the board's tracker can be pointed at (the relocalizer's"
-        " map_topic flag) while Nav2 and the map_server keep the /map they have",
-        why="it ships ON as a PUBLICATION and nothing more: no consumer is pointed at it by"
-        " default (the tracker's map_topic stays `map`), and it is the only way to see, live,"
-        " how far the volume's lidar layer has come from the served file — the question that"
-        " decided 2026-09-14, when a tracker moved onto it scored fit 0.00 at the true pose and"
-        " re-seated 4 m away at 0.99. The packing is not the fault: slicing the live volume and"
-        " decoding the message the way map_server does puts 69.7 % of the file's walls within a"
-        " cell of the volume's and 67.6 % the other way, while every flipped packing scores"
-        " 0.15-0.21 (scratch/map_lidar_vs_pgm.py). Those two numbers, not the topic, are what"
-        " the tracker's default waits for. A SEEDED volume's layer IS the served map: 18274 of"
-        " the pgm's 18274 known cells agree, every wall of each inside one cell of the other,"
-        " and the four tapes of 2026-09-13 replayed on the exported slice give live pose error"
-        " medians 0.6/0.5/1.3/0.7 cm against the file's own 0.6/0.5/1.3/0.6 — the same map"
-        " (scratch/volume_vs_pgm.py, scratch/drive_bisect.py --map). The cost to know about is"
-        " the map id: the volume's grid is 280x250 cells"
-        " and the served map 239x215, so a tracker that adopts /map_lidar answers to another map"
-        " id and the laptop's candidates and camera measurements — stamped with the id of /map"
-        " (pepin_bringup.laptop_localizer) — are refused as evidence about another map until"
-        " that half moves too",
-        on_when="the default: the layer is on the wire where anyone can compare it with the"
-        " file, and the board's tracker can be moved onto it live (map_topic) the day the two"
-        " agree",
-        off_when="on a laptop with nothing to spare, or a bring-up where the bridge must carry"
-        " only what is read: it costs one slice per map_hz and one latched topic",
     ),
     Flag(
         "surface_hz",
@@ -536,8 +400,8 @@ FLAGS = FlagSet(
         " volume says free the saved map agrees 91.3 % of the time — for 1 ms a scan (575 scans"
         " in 0.8 s). It is also protected from the camera: 0 of 13499 lidar cells were changed by"
         " depth, while the camera filled 922 cells the lidar never reached",
-        on_when="on wherever the volume is the map (map_source volume) or the surface must show"
-        " what the lidar knows",
+        on_when="on wherever the surface must show what the lidar knows, which is every mode: the"
+        " beams are the only metric truth in the volume",
         off_when="to measure the camera alone — what the depth adds, and where it lies",
     ),
     Flag(
@@ -558,58 +422,6 @@ FLAGS = FlagSet(
         " (allow_unknown) rather than being told a lie",
     ),
     Flag(
-        "map_source",
-        "file",
-        description="where /map comes from: the saved file another node serves, or the volume's"
-        " own lidar layer, published from here on change and at most every 1 / map_hz. Only"
-        " where the stack was launched with world_map:=true; anywhere else volume is refused,"
-        " because another node is on /map",
-        why="the SEEDED volume is the file exactly and the LIVE one is not the room. Both"
-        " measured the same way, offline, on the four tapes of 2026-09-13 with the node's own"
-        " tracker replayed once per map (scratch/volume_vs_file_seating.py): seeded from"
-        " flat3_straight and sliced, the tracker seats a median 0.01 cm from where the file puts"
-        " it with the same fit to two decimals — the same map, as the cell count already said"
-        " (18274 of 18274 known cells agree). The live snapshot of 2026-09-15 21:22, the same"
-        " file plus a day's painting, seats a median 1.90 m away with the fit down 0.295, and on"
-        " two of the four tapes the tracker re-seated 3.7-3.8 m off; only 52.9 % of the file's"
-        " walls are still within a cell of the volume's, and 2070 cells the file calls wall the"
-        " volume has carved free. So the gate this default waits for (2 cm, 0.05 fit) is failed"
-        " by the map the robot would actually be handed after a drive, and the mechanism is"
-        " known: fit_gate holds the CAMERA path only, while a lidar revolution is integrated at"
-        " whatever pose TF gives, lost tracker or none (_on_scan_work) — which is exactly what"
-        " the laptop's dead routes of 2026-09-15 19:17 would have written. The other state has"
-        " also been seen to break a run outright: on 2026-09-10 RTAB-Map's own grid landed on"
-        " /map beside the board's static map and fed the laptop's global costmap a second,"
-        " growing map. Two publishers of one /map is that failure, so the deployment's map_owner"
-        " and the launch's world_map:=true must both agree before volume is allowed",
-        on_when="volume where the laptop owns /map (ros/laptop.sh vslam --world-map) and the"
-        " volume has been seeded and not driven away from the room — the tracker adopts the"
-        " FIRST map it is handed (its map_refresh_s is 0), and that one is the seed itself",
-        off_when="file wherever a map server or RTAB-Map already publishes /map, which is every"
-        " other mode — and, until the lidar path is gated on the fit too, wherever a drive's"
-        " painting would reach the costmaps",
-        choices=("file", "volume"),
-    ),
-    Flag(
-        "map_hz",
-        0.5,
-        description="the most often the volume's layer may go out as /map when map_source is"
-        " volume — a ceiling, not a cadence: a slice whose cells have not changed is not"
-        " published at all, and the first one goes out as soon as the volume has its seed",
-        why="what a republication costs is paid by the readers, not by this node: a tracker that"
-        " ADOPTS a map rebuilds its correlative matcher, its static mask and its tracker on four"
-        " A53 cores, and both costmaps re-seed their static layer. /map is transient-local, so"
-        " nobody is waiting for a repeat — a late subscriber is served the last one regardless"
-        " — which leaves no reason to send an unchanged grid and no reason to send a changed one"
-        " oftener than the room changes. Half a hertz is two seconds of painting per map, and"
-        " with the change gate a standing cart publishes nothing after the seed",
-        on_when="raise it when the room is being mapped as it is driven and the costmap lags"
-        " visibly behind it",
-        off_when="lower it on a busy laptop: every publication that does go is a whole grid over"
-        " the bridge",
-        range=(0.1, 5.0),
-    ),
-    Flag(
         "snapshot_s",
         60.0,
         description="how often the volume is written to world_path (0: only at shutdown)",
@@ -623,13 +435,12 @@ FLAGS = FlagSet(
     Flag(
         "resume_volume",
         True,
-        description="a volume snapshot at world_path is loaded at start, so a known room is a"
-        " resumed volume; off, the volume starts empty and is seeded from the saved pair"
-        " (seed_map) where the launch named one, and grows from the sensors where it did not."
-        " world_path is the room's OWN file — flat3_straight.yaml -> flat3_straight.world.npz —"
-        " so a second room cannot be resumed into the first",
-        why="the saved pair is the SEED and the volume is the map: resuming its own snapshot is"
-        " what makes yesterday's painting yesterday's map instead of a picture thrown away every"
+        description="a volume snapshot at world_path is loaded at start, so a room the cart has"
+        " painted before comes back as it was left; off, the volume starts empty and grows from the"
+        " sensors. world_path belongs to the graph DATABASE whose frame the voxels were painted in"
+        " (rtabmap.db -> rtabmap.world.npz), so a fresh database means a fresh volume",
+        why="resuming its own snapshot is what makes yesterday's painting yesterday's surface"
+        " instead of a picture thrown away every"
         " morning. Measured, on the four tapes of 2026-09-13 painted through"
         " scratch/volume_drive_regression.py: a volume seeded from flat3_straight and driven"
         " through a whole tape keeps 79.8 % of the walls it LOOKED at (the two thirds of the flat"
@@ -639,64 +450,11 @@ FLAGS = FlagSet(
         " one tape cost 3.9 more points and nothing after that. The one hard rule around it is a"
         " guard: a snapshot is resumed only onto the grid config/fusion.json describes, so a"
         " changed grid starts empty instead of resuming into the wrong place",
-        on_when="on in the room the snapshot was taken in — the default, and what makes the"
-        " volume the map",
-        off_when="off for a new room, after the map's origin moves, or to measure how fast the"
-        " volume fills from nothing (ros/laptop.sh --fresh passes it off and names no seed)",
+        on_when="on in the room the snapshot was taken in, beside the database it was painted"
+        " in — the default",
+        off_when="off for a new room, beside a fresh database, or to measure how fast the"
+        " volume fills from nothing (ros/laptop.sh --fresh passes it off)",
         live=False,
-    ),
-    Flag(
-        "adopt_room",
-        True,
-        description=f"a recognition arriving on {ROOM_TOPIC} while the volume is still empty"
-        " names the room, and that room's snapshot is resumed; off, the node keeps the room it"
-        " was launched with (or none) whatever is recognised",
-        why="known or fresh must be DETECTED, not typed: a robot switched on somewhere does not"
-        " know whether the room is one it has mapped, and until now an operator answered for it"
-        " with ros/laptop.sh --fresh — which means the wrong answer is one forgotten flag away,"
-        " and the wrong answer is either a room built twice or yesterday's room driven in a new"
-        " place. The place recogniser already answers this question for the words it puts on the"
-        " graph; this is the same answer applied to the volume. No confidence floor is read here"
-        " on purpose: judging somebody else's evidence a second time is a second threshold nobody"
-        " measured, so the publisher must only name a place it vouches for. The window is the"
-        " volume's own emptiness — after the first painted revolution a recognition is a loop"
-        " closure's business, not a start-up decision, and a swap would throw away the room this"
-        " session measured. What the wrong answer costs is measured on both sides: a room built"
-        " from nothing where one existed throws away the 18274 known cells the previous session"
-        " left, and a room resumed in the wrong place puts the cart outside its own box — on"
-        " 2026-09-18 a node that came up with no room name laid its 280x250 box out from"
-        " (-7.0, -6.25) while the cart stood at x = -9.4, where it could have integrated nothing"
-        " but the far wall (as on 2026-09-13, when 239 revolutions did exactly that)",
-        on_when="the default, wherever a place recogniser runs: the room names its own file",
-        off_when="for a measurement that must stay on the volume it was pointed at, and while"
-        " the recogniser's room names are in doubt (the report line counts what it refused)",
-    ),
-    Flag(
-        "frozen_reference",
-        True,
-        description=f"the slices a MATCHER reads ({LIDAR_MAP_TOPIC} and {CAMERA_MAP_TOPIC}) are the"
-        " volume AS RESUMED wherever that reference knows the cell, and this session's own paint"
-        " only where it says unknown (pepin.worldmap.MapReference); off, both carry this session's"
-        " paint everywhere, which is what they did until 2026-09-18. /map, the surface cloud, the"
-        " snapshot and the painting itself are untouched either way",
-        why="a tracker that matches the slice it is painting has a null space it cannot see out"
-        " of: turn the map and the heading together and a bearing-only scan maps onto itself. On"
-        " 2026-09-18 a cart parked with its wheels blocked walked 7 degrees and 5-7 cm in 35"
-        " minutes through that null space at fit 0.97-0.99, every step under a tenth of a degree —"
-        " and the SAME tracker on a static snapshot of the SAME volume held (-9.39, +2.48, +51"
-        " deg) for hours at fit 0.82-0.96 with the whole-map search agreeing three times. The"
-        " gauge is therefore not missing: it is the cells of earlier sessions, painted at poses"
-        " that cannot depend on the pose being estimated now. Reproduced and cured closed-loop"
-        " (scratch/volume_closed_loop.py): with this session's paint in the matcher's slice the"
-        " four tapes of 2026-09-13 drift 0.72-14.26 degrees and 0.4-49.9 cm at fit 0.99-1.00,"
-        " where the open-loop replay of the same tapes reports 0.3 cm; a count of views cannot"
-        " stand in for it, because two views from this session's own drifting poses are two views"
-        " (map_lidar_min_views alone measured 1.582 deg/min parked against the old law's 0.268)",
-        on_when="always in a room the robot has been in before: it is what makes the board's"
-        " tracker safe on the volume at all",
-        off_when="to reproduce the drift for a comparison. A volume born empty has an empty"
-        " reference, so in a new room this changes nothing — everything is unknown space, the"
-        " session's paint IS the map, and view_gate with map_lidar_min_views is the rule there",
     ),
     Flag(
         "view_gate",
@@ -705,71 +463,26 @@ FLAGS = FlagSet(
         " integrated again (pepin.worldmap.ViewGate: the pose must have moved a whole voxel at the"
         " scan's own farthest return before it counts as a new view); off, every revolution is"
         " painted, which is what this node did until 2026-09-18",
-        why="A VIEW IS EVIDENCE ONCE, and it was being counted ten times a second. Measured on the"
-        " robot: with the board's tracker matching the volume it was painting, a cart parked with"
-        " its wheels blocked walked 7 degrees and 5-7 cm in 35 minutes at fit 0.97-0.99, every"
-        " step under a tenth of a degree — the pose never moved, the map turned under it, and the"
-        " tracker followed its own paint. Rotation about the sensor is the EXACT null space of that"
-        " loop (turn the map and the heading together and a bearing-only scan maps onto itself), so"
-        " nothing inside it can hold the heading. Reproduced offline and cured offline"
+        why="A VIEW IS EVIDENCE ONCE, and it was being counted ten times a second: a parked cart"
+        " sends the same revolution ten times a second and every one of them used to weigh as an"
+        " independent observation, so a standing cart's own paint outgrew everything else in the"
+        " volume within a second. Measured on the robot while the board's tracker still matched the"
+        " volume it was painting: a cart parked with its wheels blocked walked 7 degrees and 5-7 cm"
+        " in 35 minutes at fit 0.97-0.99, every step under a tenth of a degree. That closed loop is"
+        " gone — nothing localises against this volume now — and the gate stays because what it"
+        " measures is the volume's own honesty: a weight that counts one view a thousand times"
+        " calls a single glance a wall the room agrees on. Offline"
         " (scratch/volume_closed_loop.py, 2000 revolutions of a standing cart from tape"
-        " 20260913_190422): the old law drifts 0.268 deg/min at fit 1.00, this gate alone holds"
-        " 1993 of the 2000 revolutions and drifts 0.018 deg/min, and with the matcher's own cut"
-        " beside it (map_lidar_min_views) 0.001 deg/min — 268 times better — at fit 1.00 and with"
-        " 100 % of the room's walls kept against 94.2 %. The threshold is not one: a return at"
+        " 20260913_190422) the old law drifts 0.268 deg/min at fit 1.00 and this gate alone holds"
+        " 1993 of the 2000 revolutions and drifts 0.018 deg/min, with 100 % of the room's walls"
+        " kept against 94.2 %. The threshold is not one: a return at"
         " range r moves in the map by the translation plus r times the turn, so 'a new view' is"
         " 'no return of this scan stays in the cell it was in', which is the grid's voxel and the"
         " scan's own reach and nothing chosen",
-        on_when="always, and especially wherever the tracker matches this volume: it is what makes"
-        " the closed loop stable at all",
+        on_when="always: it is what keeps a weight a count of observations of the room rather than"
+        " a count of seconds parked",
         off_when="to reproduce the drift for a comparison, or where the volume must integrate a"
         " long stare on purpose (a mapping run of one corner with the cart on a tripod)",
-    ),
-    Flag(
-        "map_lidar_min_views",
-        2,
-        description=f"how many DISTINCT places must have seen a surface before the cell speaks in"
-        f" {LIDAR_MAP_TOPIC} — the slice a tracker MATCHES on. 0 asks nothing, as before. /map and"
-        " the picture are untouched: the planner may plan around a wall one pass saw",
-        why="weight is a count of observations and a parked cart makes two thousand of them an"
-        " hour out of one view, so 'heavy' cannot mean 'independent'. A cell written from ONE place"
-        " is the pose's own paint, and matching a scan against it is matching the pose against"
-        " itself — which is the 2026-09-18 drift. Two is not a tuned number: it is the smallest"
-        " integer that means 'two different places agree', hence the smallest that can be evidence"
-        " about a pose derived from neither. Measured beside the view gate"
-        " (scratch/volume_closed_loop.py, parked): this cut ALONE is harmful — 1.582 deg/min"
-        " against the old law's 0.268, because it strips the matcher's reference while the paint"
-        " goes on unchecked — and with the gate it takes 0.018 deg/min to 0.001 and puts the fit"
-        " back to 1.00. The two are one cure and the A/B must move them together. The same rule"
-        " the camera's band has had since 2026-09-13 (camera_map_min_weight 20), stated in views"
-        " instead of in weight, because views are what the weight was standing in for",
-        on_when="2 wherever a tracker is pointed at this topic: it is the anchor that fixes the"
-        " loop's gauge",
-        off_when="0 in a room being explored, where nothing has two views yet and the matcher"
-        " would be handed an empty grid — but see view_gate: the honest answer in unknown space is"
-        " that the volume is not yet a reference, and the pose is the graph's and the odometry's"
-        " until the cart has looked at a cell from two places",
-        range=(0, 10),
-    ),
-    Flag(
-        "map_identity",
-        True,
-        description=f"the map's minted identity goes out on {IDENTITY_TOPIC} as JSON, latched:"
-        " the token minted when this map was born, what it was born from, and the legacy"
-        " size@origin id of each grid this node publishes",
-        why="a nav_msgs/OccupancyGrid carries nothing that says WHICH ROOM it is, so every"
-        " consumer derives an id from its shape and origin (pepin_bringup.msgs.map_id). That"
-        " answers the wrong question twice: it calls a volume and the file it was seeded from two"
-        " maps although all 18274 of the file's known cells agree with the volume's"
-        " (scratch/volume_vs_pgm.py), and it would call a map that grew a row a different room."
-        " The minted token is a CRC of the birth (what it was made of, on which grid, at which"
-        " second), so it survives growth, is equal on both sides, and is reproducible from a log."
-        " Nothing consumes it yet — the relocalizer, the laptop localizer, rtabmap_frame and the"
-        " anchor file names are all still keyed on the legacy id, which this message also"
-        " carries so the two can be held against each other while they move",
-        on_when="on: it is one latched string and the only place the stack says which room it is"
-        " looking at",
-        off_when="on a bring-up where the bridge must carry only what is read",
     ),
     Flag(
         "follow_correction",
@@ -905,50 +618,28 @@ class DepthFusion(Node):
         self._plane_z_m = load_lidar_mount().z_m
         self._plane_source = "config"
         self._band_z_m = band_z_m(self._plane_z_m, band_half_z_m())
-        # Which side owns /map in the mode the stack was brought up in: with the board serving a
-        # saved map, a second publisher here would give the costmaps two maps and the tracker a
-        # map to rebuild on every second (2026-09-10 01:00, RTAB-Map's grid beside the board's).
+        # Which mode the stack was brought up in: the one thing it decides here is whether the
+        # GRAPH owns map -> odom, which is what says whether the volume must follow a correction.
         self._mode = str(self.get_parameter("mode").value)
-        # The other half of the same question, and it is a launch decision, not a live one: in
-        # SLAM the launch remaps RTAB-Map's grid onto /map unless it was brought up with
-        # world_map:=true, and no flag set afterwards can move that remap. Told here so that
-        # flipping map_source live cannot put a second publisher on /map.
-        self._world_map = bool(self.declare_parameter("world_map", False).value)
-        self._map_mine = map_owner(self._mode) == "laptop" and self._world_map
-        self._map_refusal = self._why_not_mine()
-        # ONE MAP, ONE FILE, AND NO PICTURE OF IT ANYWHERE. The volume is the map: it resumes its
-        # OWN snapshot, named after the ROOM (``flat3_straight`` -> /maps/flat3_straight.world.npz,
-        # pepin.worldmap.world_path_for), and there is no pgm in the loop at all — not as a seed,
-        # not as an exported cache. A saved pgm is a picture of a room as it was on some evening;
-        # writing it into the lidar's layer put walls into the volume that the lidar had not seen
-        # and that the drive then had to carve back out, and exporting one made a second file
-        # claiming to be the map (and, on 2026-09-18, wrote itself over the seed). The board
-        # persists the last map it ADOPTED, which is this volume, so nothing here has to hand it a
-        # picture.
+        # NOTHING LOCALISES AGAINST THIS VOLUME, so it publishes no map and claims to be no room.
+        # Its frame is the graph DATABASE's — every voxel was painted at a pose in RTAB-Map's
+        # optimised frame — so the snapshot is named after the database it belongs to
+        # (pepin.worldmap.world_path_for: /maps/rtabmap.db -> /maps/rtabmap.world.npz) and a fresh
+        # database means a fresh volume. There is no pgm in the loop at all, neither as a seed nor
+        # as an exported cache: a saved picture put walls into the volume the lidar had not seen,
+        # and an export made a second file claiming to be the map (2026-09-18, when it wrote itself
+        # over the seed).
         #
-        # The room's name is not an operator's choice either: it is what a recognition says
-        # (``room``, and the live topic below). Empty means "nowhere recognised yet" — the box is
-        # then centred on the cart, because an unknown place has no coordinates and a box laid out
-        # for another flat would not even contain the cart (2026-09-13: 239 revolutions integrated
-        # only the far wall).
-        #
-        # config/fusion.json's box describes a volume being BORN, and a newborn is always centred
-        # on the cart: a room that already exists owns its own grid, which comes back with its
-        # snapshot (:meth:`_start_state`). That is why nothing is snapped to a file's lattice any
-        # more — there is no file to be a third of a cell away from.
-        self._room = str(self.declare_parameter("room", "").value)
-        # A stale launch still passing the old argument must say so out loud rather than silently
-        # becoming an unrecognised place: on 2026-09-18 a kick under a launch that still passed
-        # seed_map brought this node up with room empty, on a box from (-7.0, -6.25) that could
-        # not contain a cart standing at x = -9.4.
-        if str(self.declare_parameter("seed_map", "").value):
-            self.get_logger().error(
-                "seed_map is gone: no pgm is read into the volume any more. This launch is stale —"
-                " restart it (ros/laptop.sh vslam) so the room's name reaches this node as room:="
-            )
+        # config/fusion.json's box describes a volume being BORN, and a newborn is centred on the
+        # cart: a volume that already exists owns its own grid, which comes back with its snapshot
+        # (:meth:`_start_state`). A box laid out around the map's origin would not even contain a
+        # cart that woke up at (-9.4, +2.5) — 2026-09-13, when 239 revolutions integrated the far
+        # wall and nothing else.
         self._spec = self._spec.centred_on_start()
-        default_world = str(world_path_for(self._room)) if self._room else WORLD_PATH
-        self._world_path = Path(str(self.declare_parameter("world_path", default_world).value))
+        self._database = Path(str(self.declare_parameter("database", DATABASE).value))
+        self._world_path = Path(
+            str(self.declare_parameter("world_path", str(world_path_for(self._database))).value)
+        )
         # The lidar's plane is calibrated, never typed: it comes from config/lidar.json, the one
         # file the board's launch publishes the laser transform from.
         self._mount = PlanarMount.from_config(
@@ -964,9 +655,6 @@ class DepthFusion(Node):
         # the tracker's own topic (sigma_xy metres, sigma_yaw degrees). Nobody may publish
         # it yet, and the gate below works without it — an absent sigma is not a refusal.
         self.create_subscription(String, SIGMA_TOPIC, self._on_sigma, reliable)
-        # Which room the cart is in, from whoever recognises places: latched, because the answer
-        # is published once when the place is recognised and this node may come up after it.
-        self.create_subscription(String, ROOM_TOPIC, self._on_room, self._latched())
         self.create_service(Trigger, "/fusion/reset", self._on_reset)
         # the depth copies the image's header, so the pair has one exact stamp; the synchronizer
         # keeps PAIR_QUEUE of each and calls back under its own lock, on the executor thread
@@ -1016,93 +704,52 @@ class DepthFusion(Node):
             QoSProfile(depth=2, reliability=ReliabilityPolicy.RELIABLE),
         )
         self._laser: tuple[PlanarMount, float, bool] | None = None  # mount, yaw, upside down
-        self._map_pub: Any = None  # made on the first publish: only where this side owns /map
-        self._map_digest = ""  # ...and the cells last sent there: an unchanged map is not resent
-        self._camera_map_pub: Any = None  # ...and the camera's own band, beside it
-        self._lidar_map_pub: Any = None  # ...and the lidar layer on a topic of its own
-        self._lidar_digest = ""  # ...whose cells are hashed too: the board re-adopts on change
-        self._identity_pub: Any = None  # ...and who the map on all of them is
-        self._identity_said = ""  # ...said once and on change: it is latched
         self._snapshots = SnapshotClock(float(self._switches["snapshot_s"]))
         # ...and whether the volume in memory is fit to replace the one on disk at all
         # (pepin.worldmap.SnapshotTrust): a run that loses the tracker must leave the last good
-        # map where it is. ros/maps/world_live.npz.mess-20260917 is the file that rule is for.
+        # volume where it is. ros/maps/world_live.npz.mess-20260917 is the file that rule is for.
         self._trust = SnapshotTrust(SOURCE_PATIENCE_S)
-        # ...and whether a revolution is a NEW view at all (pepin.worldmap.ViewGate): the cure for
-        # the closed loop, whose voxel is the grid's own.
+        # ...and whether a revolution is a NEW view at all (pepin.worldmap.ViewGate): a view is
+        # evidence once, and the threshold is the grid's own voxel.
         self._views = ViewGate(self._spec.voxel_m)
         # The volume follows map -> odom only where the GRAPH owns that edge: in SLAM mode it is
         # RTAB-Map's correction and the room it built must travel with it. On a known map the
         # same edge is the board tracker's own output, which wanders with every measurement it
-        # fuses, and the served map is the reference nothing may drag around.
+        # fuses, and the graph's own grid is the reference nothing may drag around.
         self._graph_map = self._mode == "slam"
         self._follower = CorrectionFollower()
         self._follow_ms = 0.0  # the last resample's cost, a level the report line reads
         self._followed_at = 0.0  # monotonic seconds of the last move: the throttle
         self._start_state()
-        # THE GAUGE, cut with the MAP's own law and not the matcher's — a reference cell's
-        # independence comes from having been painted in an earlier session, not from a view count,
-        # and the views cut exists only for this session's paint in unknown space
-        # (:meth:`_lidar_map_law`) — and frozen before a revolution of this session goes in: the
-        # volume exactly as it was resumed (:class:`pepin.worldmap.MapReference`). A volume born
-        # empty freezes an empty reference, which is right — at a wake-up all space is unknown.
-        self._reference = self._world.reference(
-            self._map_law(), self._camera_map_law(), self._resumed_age_s
-        )
-        self._grown = 0  # cells this session has painted where the reference knows nothing
         self._surface_timer = self.create_timer(
             self._period(self._switches["surface_hz"]), self._publish_surface
         )
-        self._map_timer = self.create_timer(
-            self._period(self._switches["map_hz"]), self._publish_map
-        )
         self.create_timer(30.0, self._report)
-        # The seed is in the volume by now, so the map goes out AT ONCE rather than at the map
-        # timer's first tick: a board coming up beside this node must not wait 1 / map_hz for
-        # the only /map there is before its tracker has anything to match a scan against.
-        self._publish_map()
         nx, ny, nz = self._spec.shape
         self.get_logger().info(
             f"fusion up: {nx}x{ny}x{nz} voxels of {self._spec.voxel_m * 100:.0f} cm from"
             f" {self._spec.origin}; {self._switches.state()}; {self._band_text()}; fused while"
-            f" /localization_fit >= {DRIVE_FIT:.2f}; mode {self._mode}, /map"
-            f" {'is this volume' if self._map_mine else f'not ours ({self._map_refusal})'};"
-            f" room {self._room or '(unrecognised)'}, map {self._world.identity.text()};"
-            f" snapshot {self._world_path}; the volume"
+            f" /localization_fit >= {DRIVE_FIT:.2f}; mode {self._mode}; nothing localises against"
+            f" this volume — it is painted open-loop and published only as /fusion/surface;"
+            f" snapshot {self._world_path} (the frame of {self._database}); the volume"
             f" {'follows' if self._graph_map else 'does not follow'} map -> odom"
             f" ({'the graph owns it here' if self._graph_map else 'the tracker owns it here'})"
         )
 
-    def _why_not_mine(self) -> str | None:
-        """Why this node may not publish /map in the stack it was launched into, or ``None``
-        when it may: the phrase the report line and the refusal log say."""
-        if map_owner(self._mode) != "laptop":
-            return f"/map is the {map_owner(self._mode)}'s in {self._mode} mode"
-        if not self._world_map:
-            return "launched without world_map: RTAB-Map's grid is on /map"
-        return None
-
     def _start_state(self) -> None:
-        """What the volume starts as: the named room's own snapshot if there is one, else a new
-        empty volume born under the cart with an identity of its own.
+        """What the volume starts as: the snapshot beside this graph database if there is one, else
+        a new empty volume born under the cart.
 
         TWO STATES, NOT THREE, AND NEITHER OF THEM IS A PICTURE. There used to be a middle one —
-        a saved pgm written into the lidar's layer — and it was the reason the map had to be
-        carved back into shape: it put walls in the volume the lidar had not seen, on an evening
-        that had passed. A room is now either one this robot has already built (resume it, keep
-        the identity the snapshot carries, and the GRID the snapshot carries with it: a room that
-        exists owns its own lattice) or one it has not (born empty, here, now, with a minted id).
+        a saved pgm written into the lidar's layer — and it was the reason the volume had to be
+        carved back into shape: it put walls in it the lidar had not seen, on an evening
+        that had passed. So the volume is either one this robot has already painted (resume it, and
+        the GRID the snapshot carries with it: a volume that exists owns its own lattice) or one it
+        has not (born empty, here, now). ``resume_volume`` is the override for a measurement.
 
-        KNOWN OR FRESH IS DETECTED, NOT CHOSEN. The choice rests entirely on ``self._room``, and
-        that name comes from a recognition (:meth:`_on_room`), not from an operator: a place the
-        robot recognises names the room and the room names the file. ``resume_volume`` is the
-        override for a measurement, nothing more.
-
-        ``self._provenance`` is what the report line says the map is made of, and
-        ``self._resumed_age_s`` how old what was resumed was, so a volume two weeks stale is
+        ``self._resumed_age_s`` is how old what was resumed was, so a volume two weeks stale is
         visible rather than assumed fresh.
         """
-        self._provenance = BORN_FRESH
         self._resumed_age_s = math.inf
         # A NEWBORN IS CENTRED ON THE CART, not on the map's origin. The map frame is born under
         # the cart only where this session creates it; a cart that wakes up at (-9.4, +2.5) in a
@@ -1117,13 +764,13 @@ class DepthFusion(Node):
             try:
                 resumed = WorldMap.load(self._world_path, self._mount)
             except (ValueError, OSError, zipfile.BadZipFile, KeyError) as exc:
-                # a snapshot cut mid-write by a hard reset is a 403-byte zip (2026-09-14), and a
-                # snapshot of an older version carries no identity: born empty rather than dying
-                # at every respawn
+                # a snapshot cut mid-write by a hard reset is a 403-byte zip (2026-09-14), and one
+                # of an older version is another volume's format: born empty rather than dying at
+                # every respawn
                 self.get_logger().warning(f"{self._world_path}: not resumed ({exc})")
             else:
                 if abs(resumed.spec.voxel_m - self._spec.voxel_m) > 1e-9:
-                    # The one thing that cannot be the same map: another lattice pitch. The box
+                    # The one thing that cannot be the same volume: another lattice pitch. The box
                     # and its origin may differ freely — they are the room's, not the config's.
                     self.get_logger().warning(
                         f"{self._world_path}: saved at {resumed.spec.voxel_m * 100:.1f} cm a voxel,"
@@ -1132,70 +779,23 @@ class DepthFusion(Node):
                 else:
                     self._world = resumed
                     self._spec = resumed.spec
-                    self._provenance = resumed.identity.provenance
                     self._resumed_age_s = max(0.0, time.time() - self._world_path.stat().st_mtime)
                     stats = resumed.maturity()
                     self.get_logger().info(
                         f"resumed {self._world_path}: {stats['voxels']:.0f} voxels,"
                         f" {stats['frames']:.0f} frames, stamp {resumed.stamp:.0f}, written"
-                        f" {self._resumed_age_s / 3600:.1f} h ago; map {resumed.identity.text()}"
+                        f" {self._resumed_age_s / 3600:.1f} h ago"
                     )
                     return
-        born = f"{BORN_ROOM}:{self._room}" if self._room else BORN_FRESH
         self._world = WorldMap(self._spec, self._mount)
-        self._world.born_from(born, time.time())
-        self._provenance = born
         self.get_logger().info(
             f"no snapshot at {self._world_path}: the volume is born empty under the cart on"
-            f" {self._spec.shape} voxels from {self._spec.origin};"
-            f" map {self._world.identity.text()}"
-        )
-
-    def _on_room(self, msg: String) -> None:
-        """A recognition named the place: JSON ``{"room": "<name>"}`` on :data:`ROOM_TOPIC`.
-
-        WAKING UP IS A RECOGNITION, NOT A FLAG. A robot switched on somewhere does not know
-        whether the room is one it has mapped; the place recogniser does, and the moment it says
-        so this node resumes that room's volume — so "known or fresh" is answered by evidence,
-        exactly once, at the start of a session. The publisher must only ever name a place it
-        vouches for: there is no confidence floor here, because a second judgement of somebody
-        else's evidence is a second threshold nobody measured.
-
-        ONLY WHILE THE VOLUME IS STILL EMPTY. Once anything has been painted, swapping the volume
-        would throw away the room this session has measured, and a recognition arriving mid-drive
-        is a loop closure's business, not a start-up decision. So a late name is logged and
-        refused, with the count in the report line.
-        """
-        try:
-            named = str(json.loads(msg.data)["room"])
-        except (ValueError, TypeError, KeyError):
-            self._tally.count("bad_room")
-            return
-        if not named or named == self._room:
-            return
-        painted = bool(self._world.frames) or bool(self._world.lidar_weight.any())
-        if painted or not self._switches.on("adopt_room"):
-            self._tally.count("room_refused")
-            self._tally.note("room_refused", f"{named} (the volume already holds a room)")
-            return
-        self._room = named
-        self._world_path = Path(world_path_for(named))
-        with self._lock:
-            self._start_state()
-            # ...and THAT room's resumed volume is this session's gauge, frozen here for the same
-            # reason it is frozen at start: nothing of this session has painted into it yet.
-            self._reference = self._world.reference(
-                self._map_law(), self._camera_map_law(), self._resumed_age_s
-            )
-        self._identity_said = ""  # ...and the new room says who it is at the next publication
-        self.get_logger().info(
-            f"the place was recognised as {named}: the volume is now {self._world_path},"
-            f" map {self._world.identity.text()}"
+            f" {self._spec.shape} voxels from {self._spec.origin}"
         )
 
     def close(self) -> None:
         """Stop the workers and the TF listener, snapshot the volume, and wait for them all,
-        before the node is destroyed: a run's map outlives the run."""
+        before the node is destroyed: a run's volume outlives the run."""
         if not self._worker.stop():
             self.get_logger().warning("the fusion worker did not finish its frame; leaving anyway")
         self._scans.stop()
@@ -1265,10 +865,9 @@ class DepthFusion(Node):
         if name == "snapshot_s":
             self._snapshots = SnapshotClock(float(new), self._snapshots.last_s)
             return
-        timers = {"surface_hz": "_surface_timer", "map_hz": "_map_timer"}
-        if name not in timers:
+        if name != "surface_hz":
             return
-        timer = getattr(self, timers[name])
+        timer = self._surface_timer
         try:
             timer.timer_period_ns = int(self._period(float(new)) * 1e9)
         except (AttributeError, TypeError) as exc:  # an rclpy without a live period
@@ -1292,20 +891,14 @@ class DepthFusion(Node):
         self._tally.note(kind, text)
 
     def _fresh_world(self) -> WorldMap:
-        """An empty volume of the same room: every cell forgotten, the identity kept.
+        """An empty volume on the same grid: every cell forgotten.
 
-        There is nothing to fall back to any more. A reset used to re-seed the room from a saved
-        pgm; with no picture in the loop, "empty" means empty, and what it hands /map_lidar is a
-        blank room from one service call. That is safe now for a reason and not by luck: a grid
-        with no known cell in it is refused by :class:`pepin.mapping.MapChoice` before any tracker
-        rebuilds on it, so the board keeps the room it adopted until this volume has painted one
-        again. The snapshot on disk is untouched by a reset, and the guard in :meth:`_snapshot`
-        keeps it that way until the painting is trusted again.
-
-        The identity is kept: this is the same ROOM, wiped back to nothing, and a reset that
-        minted a new id would tell every consumer the cart had been carried elsewhere.
+        Nothing outside this node reads the volume, so emptying it costs no tracker anything — it
+        costs the surface cloud until the sensors have painted one again. The snapshot on disk is
+        untouched by a reset, and the guard in :meth:`_snapshot` keeps it that way until the
+        painting is trusted again.
         """
-        return WorldMap(self._spec, self._mount, identity=self._world.identity)
+        return WorldMap(self._spec, self._mount)
 
     def _on_reset(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         with self._lock:
@@ -1320,10 +913,10 @@ class DepthFusion(Node):
                 queue.clear()
         self._tally.take()
         response.success = True
-        response.message = f"the model of {self._room or 'this unrecognised place'} is empty"
+        response.message = "the volume is empty"
         self.get_logger().info(
-            "fusion: model, pairing queues and tallies reset; the model is empty and keeps the"
-            f" room's identity ({self._world.identity.text()}); {self._world_path} is untouched"
+            "fusion: model, pairing queues and tallies reset; the volume is empty and"
+            f" {self._world_path} is untouched"
         )
         return response
 
@@ -1527,17 +1120,18 @@ class DepthFusion(Node):
         return True
 
     def _snapshot(self) -> None:
-        """Write the volume to ``world_path`` — the map the next run wakes up on.
+        """Write the volume to ``world_path`` — the surface the next run wakes up on, beside the
+        graph database whose frame it was painted in.
 
         NO PICTURE OF IT IS WRITTEN. This used to export a map_server pair beside the snapshot so
-        the board could boot on it; the board persists the last map it ADOPTED instead, which is
-        this volume, and a pgm in the loop is a second file claiming to be the map (on 2026-09-18
-        the first live export wrote itself over the seed's own pgm). ``WorldMap.export_pgm_yaml``
+        the board could boot on it; the board drives on the graph's own grid instead, and a pgm in
+        the loop is a second file claiming to be the map (on 2026-09-18 the first live export wrote
+        itself over the seed's own pgm). ``WorldMap.export_pgm_yaml``
         remains, for an operator and for the offline instruments, and nothing in the running loop
         calls it.
 
         ONLY WHILE THE PAINTING IS TRUSTED. A snapshot replaces the last one, so a run that has
-        stopped painting at a pose the gate vouches for must leave the last good map exactly
+        stopped painting at a pose the gate vouches for must leave the last good volume exactly
         where it is: ``ros/maps/world_live.npz.mess-20260917`` is what the other rule produces —
         one false camera word, painted, saved, permanent. The question is asked of
         :class:`pepin.worldmap.SnapshotTrust`, which is satisfied by an observation actually
@@ -1691,209 +1285,6 @@ class DepthFusion(Node):
             )
         )
 
-    def _map_law(self) -> SliceLaw:
-        """How a cell earns a voice in /map: the lidar layer's own maturity flag
-        (``map_min_weight``), which the PLANNER reads. A planner may plan around a wall one pass
-        saw; a matcher may not match on it (:meth:`_lidar_map_law`)."""
-        return SliceLaw(min_weight=float(self._switches["map_min_weight"]))
-
-    def _lidar_map_law(self) -> SliceLaw:
-        """How a cell earns a voice in /map_lidar — the slice a tracker MATCHES on: the map's own
-        maturity AND ``map_lidar_min_views`` distinct places (:class:`pepin.worldmap.SliceLaw`).
-
-        This is where /map and /map_lidar stop being the same cut, and the reason is the closed
-        loop: a cell written from one place is the pose's own paint, and a tracker matching on it
-        is matching the pose against itself. The same rule the camera's band has had since
-        2026-09-13, stated in viewpoints instead of in weight.
-        """
-        return SliceLaw(
-            min_weight=float(self._switches["map_min_weight"]),
-            min_views=int(self._switches["map_lidar_min_views"]),
-        )
-
-    def _camera_map_law(self) -> SliceLaw:
-        """How a cell earns a voice in /map_camera: ``camera_map_min_weight``, far above the
-        map's own, because that band is a MATCHER's reference and not a picture — a cell the
-        camera painted two frames ago at the pose it is being asked about is not evidence."""
-        return SliceLaw(min_weight=float(self._switches["camera_map_min_weight"]))
-
-    @staticmethod
-    def _latched() -> QoSProfile:
-        """Transient local and reliable: a subscriber that arrives late is still served the
-        last map published, which is what every consumer of a map expects."""
-        return QoSProfile(
-            depth=1,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            reliability=ReliabilityPolicy.RELIABLE,
-        )
-
-    def _publish_map(self) -> None:
-        """The volume's lidar layer as /map, at most every ``1 / map_hz`` and only when its cells
-        changed, when the flag says the map comes from the volume and nothing else in this stack
-        is on /map — and, beside it, the band the camera speaks for as /map_camera.
-
-        ON CHANGE, NOT ON A CLOCK. /map is latched (transient local), so a subscriber that
-        arrives late is served the last one whether or not it was just republished — and the
-        cost of a republication is paid by the readers: the board's tracker rebuilds its
-        correlative matcher, its static mask and its tracker on every map it ADOPTS (seconds on
-        four A53 cores; its ``map_refresh_s`` gate is what keeps it to the first one), and both
-        costmaps re-seed their static layer. So the slice is hashed
-        (:meth:`pepin.worldmap.OccupancyGridFields.digest`) and a grid identical to the one
-        already out is not sent at all; the timer is only the ceiling
-        on how often a changed one may go. The first message is not waited for either: it is
-        published as soon as the volume has its seed, so a board bringing its tracker up has a
-        map within a second of this node instead of within ``1 / map_hz``.
-
-        Two cross-sections of one room: the lidar's plane is what the lidar localises against
-        and what Nav2 plans on, and the camera's band (``camera_band_m``, the band /depth_scan
-        marks in) holds the seats and tabletops that plane never sees. The camera's scans are
-        matched against their own slice where there is one (pepin_bringup.laptop_localizer),
-        which is why it goes out on a topic of its own instead of staying inside this node.
-        Nobody else publishes /map_camera, so it needs no owner rule: with ``camera_map`` on
-        it goes out beside a known map too, where /map stays the served file. The same is true
-        of ``/map_lidar`` (flag ``lidar_map``), which carries the lidar layer — the very cut
-        /map would carry — on a topic of its own, so the board's tracker can be pointed at the
-        volume (the relocalizer's ``map_topic``) while Nav2 keeps the /map it has and the owner
-        rule above is not touched at all. Both of those go out on every tick, unhashed: they are
-        read by matchers that want the freshest cut and by an operator watching the volume grow.
-        The band is painted by the camera itself at the tracker's pose, and it is the only
-        reference the camera's scans can honestly be matched against — held to the lidar's plane
-        instead, the whole-height fan scored fit 0.34 at the right pose and pulled the fused pose
-        a centimetre off (2026-09-13, runs 190024/190422).
-        """
-        mine = self._switches["map_source"] == "volume" and self._map_mine
-        if self._switches["map_source"] == "volume" and not self._map_mine:
-            self._tally.count("map_refused")
-        camera_map = self._switches.on("camera_map")
-        lidar_map = self._switches.on("lidar_map")
-        unchanged: OccupancySlice | None = None  # a slice held back by the hash, for the identity
-        if not mine and not camera_map and not lidar_map:
-            return
-        with self._tally.measure("map"), self._lock:
-            law = self._map_law()
-            camera_law = self._camera_map_law()
-            view = self._world.lidar_slice(law) if mine else None
-            camera = self._world.camera_band_slice(camera_law) if camera_map else None
-            # NOT the same cut as /map any more: a matcher is handed only what places other than
-            # this one have seen (:meth:`_lidar_map_law`), while the planner keeps everything the
-            # room has shown.
-            lidar_view = self._world.lidar_slice(self._lidar_map_law()) if lidar_map else None
-            # THE MATCHERS READ THE GAUGE. The reference — the volume as it was resumed, painted
-            # in sessions whose poses cannot depend on this one's — wherever it knows the cell;
-            # this session's paint only where it says unknown, which is where the loop is
-            # legitimately open. /map above is untouched: a planner plans on everything seen.
-            if self._switches.on("frozen_reference"):
-                if lidar_view is not None:
-                    self._grown = self._reference.grown(lidar_view)
-                    lidar_view = self._reference.over(lidar_view)
-                if camera is not None:
-                    camera = self._reference.over(camera, self._reference.camera)
-            stamp = self._last_stamp
-        when = stamp if stamp is not None else self.get_clock().now().to_msg()
-        if view is not None:
-            fields = view.message_fields()
-            digest = fields.digest()
-            if digest == self._map_digest:  # the same room as the last one out: nobody rebuilds
-                self._tally.count("map_unchanged")
-            else:
-                if self._map_pub is None:  # transient local: a late subscriber still gets it
-                    self._map_pub = self.create_publisher(OccupancyGridMsg, "/map", self._latched())
-                    self.get_logger().info(
-                        f"/map is the volume's now: {view.shape[1]}x{view.shape[0]} cells of"
-                        f" {view.resolution_m * 100:.0f} cm from {view.origin}, the layer"
-                        f" {view.band_m[0]:.2f}-{view.band_m[1]:.2f} m; republished only when"
-                        " these cells change, at most every"
-                        f" {self._period(self._switches['map_hz']):.1f} s"
-                    )
-                self._map_pub.publish(occupancy_grid(fields, when, "map"))
-                self._map_digest = digest
-                self._tally.count("map_changed")
-        if camera is not None:
-            if self._camera_map_pub is None:
-                self._camera_map_pub = self.create_publisher(
-                    OccupancyGridMsg, CAMERA_MAP_TOPIC, self._latched()
-                )
-                self.get_logger().info(
-                    f"{CAMERA_MAP_TOPIC} is the volume's camera band now:"
-                    f" {camera.band_m[0]:.2f}-{camera.band_m[1]:.2f} m, what the camera's own"
-                    " scans are matched against"
-                )
-            self._camera_map_pub.publish(occupancy_grid(camera.message_fields(), when, "map"))
-        if lidar_view is not None:
-            # ON CHANGE, like /map and for the same reason: adopting a map costs the board its
-            # matcher, its static mask and its tracker on four A53 cores. With the reference
-            # frozen, the cells only move when UNKNOWN space is filled in, so a cart driving
-            # through a room it knows republishes nothing at all.
-            lidar_digest = lidar_view.message_fields().digest()
-            if lidar_digest == self._lidar_digest:
-                self._tally.count("lidar_map_unchanged")
-                unchanged, lidar_view = lidar_view, None
-            else:
-                self._lidar_digest = lidar_digest
-        if lidar_view is not None:
-            if self._lidar_map_pub is None:
-                self._lidar_map_pub = self.create_publisher(
-                    OccupancyGridMsg, LIDAR_MAP_TOPIC, self._latched()
-                )
-                self.get_logger().info(
-                    f"{LIDAR_MAP_TOPIC} is the volume's lidar layer now:"
-                    f" {lidar_view.shape[1]}x{lidar_view.shape[0]} cells of"
-                    f" {lidar_view.resolution_m * 100:.0f} cm from {lidar_view.origin}, the layer"
-                    f" {lidar_view.band_m[0]:.2f}-{lidar_view.band_m[1]:.2f} m — the map a"
-                    " tracker pointed at this topic matches on"
-                )
-            self._lidar_map_pub.publish(occupancy_grid(lidar_view.message_fields(), when, "map"))
-        # The identity says who the map on these topics IS, so it is told from the slices as CUT,
-        # not as published: a grid held back because its cells had not changed is still that map.
-        self._publish_identity(view, lidar_view if lidar_view is not None else unchanged, camera)
-        self._tally.count("maps")
-
-    def _publish_identity(
-        self,
-        view: OccupancySlice | None,
-        lidar_view: OccupancySlice | None,
-        camera: OccupancySlice | None,
-    ) -> None:
-        """Say WHICH ROOM the grids just published are of, on a latched topic of its own.
-
-        A nav_msgs/OccupancyGrid has no field for it, so every consumer derives an id from the
-        message's own shape and origin (``pepin_bringup.msgs.map_id``) — which calls a volume and
-        the file it was seeded from two different maps although all their known cells agree, and
-        would call a map that grew a row a third. The minted token
-        (:class:`pepin.worldmap.MapIdentity`) answers the question the consumers are really
-        asking, and this message carries both it and the legacy id of every grid this node put
-        out, so the two can be held against each other while the consumers move onto the token.
-
-        Latched and sent on CHANGE, like the maps themselves: an unchanged identity is an
-        unchanged room and a late subscriber is served the last one anyway.
-        """
-        if not self._switches.on("map_identity"):
-            return
-        identity = self._world.identity
-        said = {
-            "id": identity.token,
-            "born_s": round(identity.born_s, 3),
-            "from": identity.provenance,
-            "legacy": {
-                topic: grid.message_fields().legacy_id()
-                for topic, grid in (
-                    ("/map", view),
-                    (LIDAR_MAP_TOPIC, lidar_view),
-                    (CAMERA_MAP_TOPIC, camera),
-                )
-                if grid is not None
-            },
-            "room": self._room,
-            "world_path": str(self._world_path),
-        }
-        text = json.dumps(said, sort_keys=True)
-        if text == self._identity_said:
-            return
-        if self._identity_pub is None:
-            self._identity_pub = self.create_publisher(String, IDENTITY_TOPIC, self._latched())
-        self._identity_pub.publish(String(data=text))
-        self._identity_said = text
-
     def _report(self) -> None:
         self._read_plane(0.0)  # a board that came up after this node still moves the band
         w = self._tally.take()
@@ -1918,49 +1309,24 @@ class DepthFusion(Node):
         )
 
     def _world_line(self, w: Window) -> str:
-        """The map half of the report: what the lidar wrote, what the slices hold, where /map
-        comes from and how old the snapshot is."""
+        """The volume half of the report: what the lidar wrote, what the two layers hold, how many
+        revolutions were the same view again, and how old the snapshot is."""
         c = w.counts
         with self._lock:
-            text = self._world.report(self._map_law(), self._camera_map_law())
-        source = str(self._switches["map_source"])
-        if source == "volume" and self._map_refusal is not None:
-            source = f"volume (refused {c['map_refused']}x: {self._map_refusal})"
-        elif source == "volume":
-            source = (
-                f"volume ({c['map_changed']} published, {c['map_unchanged']} unchanged,"
-                f" {w.ms_per('map', 'maps'):.0f} ms)"
-            )
-        lidar_map = (
-            f"{LIDAR_MAP_TOPIC} on" if self._switches.on("lidar_map") else f"{LIDAR_MAP_TOPIC} off"
-        )
+            text = self._world.report()
         return (
             f"world: {c['revolutions']} revolutions ({c['scans_dropped']} dropped,"
             f" {w.ms_per('scan', 'revolutions'):.0f} ms), {self._withheld_line(w)}, {text};"
-            f" /map from {source}; {lidar_map}; {self._reference_line(w)};"
-            f" {self._views.report()}; {self._map_line(w)}"
+            f" {self._views.report()}; {self._snapshot_line(w)}"
         )
 
-    def _reference_line(self, w: Window) -> str:
-        """What the matchers are reading: the size and age of the frozen gauge, how much of this
-        session's own paint stands in unknown space beside it, and how often the slice a tracker
-        adopts actually changed (it should not, in a room the cart already knows)."""
-        if not self._switches.on("frozen_reference"):
-            return (
-                "reference: OFF — the matchers read this session's own paint (the 2026-09-18 drift)"
-            )
-        return (
-            f"reference {self._reference.text()}, session paint {self._grown} cells in unknown"
-            f" space; {LIDAR_MAP_TOPIC} {int(w.counts['lidar_map_unchanged'])} unchanged"
-        )
+    def _snapshot_line(self, w: Window) -> str:
+        """How safe the volume's file is: whether this one was resumed and how old it was, the
+        snapshot's age — and, when the guard is refusing, that the file on disk is NOT this volume
+        and why.
 
-    def _map_line(self, w: Window) -> str:
-        """WHICH map this is and how safe its file is: the minted identity, what the volume was
-        made of and how old that was, the snapshot's age — and, when the guard is refusing, that
-        the file on disk is NOT this volume and why.
-
-        A map two weeks stale and a map that stopped being saved an hour ago look identical from
-        the outside, and both of them are how a wrong room gets driven on.
+        A volume two weeks stale and one that stopped being saved an hour ago look identical from
+        the outside.
         """
         age = self._snapshots.age_s(time.monotonic())
         resumed = (
@@ -1975,13 +1341,9 @@ class DepthFusion(Node):
             if refused
             else ""
         )
-        refused_room = int(w.counts["room_refused"])
-        late = f", {refused_room} late room names refused" if refused_room else ""
         return (
-            f"map {self._world.identity.text()} in {self._room or 'an unrecognised place'}"
-            f" ({resumed}); snapshot"
-            f" {'never' if age == math.inf else f'{age:.0f} s old'} at {self._world_path}"
-            f"{late}{held}"
+            f"volume {resumed}; snapshot"
+            f" {'never' if age == math.inf else f'{age:.0f} s old'} at {self._world_path}{held}"
         )
 
     def _withheld_line(self, w: Window) -> str:

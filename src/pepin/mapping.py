@@ -156,14 +156,13 @@ def grid_from_pgm(yaml_path: str | Path) -> OccupancyGrid:
 
 
 MAP_TOPIC = "map"  # the map a tracker matches on unless it is told otherwise
-MAP_LIDAR_TOPIC = "map_lidar"  # ...and the other one: the lidar layer of the fused volume
 MAP_REFRESH_S = 0.0  # ...and how long before a newer one on that same topic may replace it
 # How long a tracker waits for the map it was asked to match on before it takes the one that is
 # there instead. Only ever while NOTHING has been adopted yet: a map already in use survives its
 # publisher going away (it is a grid in memory, not a subscription), so a link lost mid-drive
 # costs nothing, while a link that was never up would otherwise leave the board with no map at
-# all. Ten seconds because the served file is latched and arrives in the first second, while the
-# volume's slice only starts when the laptop's fusion is up.
+# all. Ten seconds because a served file is latched and arrives in the first second, while a grid
+# a mapping process builds only starts once that process is up.
 MAP_FALLBACK_S = 10.0
 
 
@@ -171,7 +170,7 @@ class MapChoice:
     """Which of several maps a tracker matches on, and when a newly arrived one replaces it.
 
     A robot can be handed more than one picture of the same room: the file a map server serves,
-    and a slice of a volume that is still being built while the cart drives. The node keeps the
+    and a grid that is still being built while the cart drives. The node keeps the
     newest message of every topic; this holds the decision, so the node itself branches on
     nothing. A map on a topic nobody asked for is kept and not adopted; the first map on the
     asked-for topic is adopted; a later one on the SAME topic is adopted only once
@@ -179,19 +178,20 @@ class MapChoice:
 
     That gate is the point. Adopting a map is expensive and destructive — the caller rebuilds
     its matcher and its tracker and forgets the evidence gathered on the old map — while a
-    volume's slice is republished every second. ``refresh_s`` 0 is the behaviour a served file
+    growing grid is republished every second. ``refresh_s`` 0 is the behaviour a served file
     has always had: the first map, and no other.
 
-    And the wanted map may never come. The volume's slice is published by the laptop and the
-    served file by the board itself, so a tracker asking for the volume with the wifi down would
-    wait for ever with a map sitting on the other topic (CLAUDE.md rule 20: nothing on the board
-    may depend on the laptop to start). After ``fallback_after_s`` with nothing adopted at all,
-    :meth:`lapsed` names ``fallback`` and the caller offers what is waiting there; the wanted
-    map still replaces it the moment it arrives. Once something IS adopted the fallback is over
-    for good — a grid in memory does not stop working because its publisher went away.
+    And the wanted map may never come. A grid built by a process on another machine arrives only
+    once that machine is up, while a served file is the board's own, so a tracker asking for the
+    first with the wifi down would wait for ever with a map sitting on the other topic (CLAUDE.md
+    rule 20: nothing on the board may depend on the laptop to start). After ``fallback_after_s``
+    with nothing adopted at all, :meth:`lapsed` names ``fallback`` and the caller offers what is
+    waiting there; the wanted map still replaces it the moment it arrives. Once something IS
+    adopted the fallback is over for good — a grid in memory does not stop working because its
+    publisher went away.
 
-    A MAP WITH NOTHING IN IT IS NOT A MAP. An unknown room is a volume born empty, and its first
-    publication is an all-unknown grid: adopting that one spends the single adoption a
+    A MAP WITH NOTHING IN IT IS NOT A MAP. A map being built in an unknown room starts as an
+    all-unknown grid: adopting that one spends the single adoption a
     ``refresh_s`` of 0 allows, and the tracker then refuses every real map that follows for the
     rest of the session. So :meth:`offer` takes an optional ``empty`` question and turns such a
     grid away — counted like any other refusal, so the wait is visible — until the first sweep

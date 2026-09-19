@@ -206,6 +206,12 @@ CAMERA_TF_MAX_AGE_S = 1.0  # the neck's newest edge is the head's pose while it 
 TF_DEAD_S = 3.0  # an edge whose newest sample is older than this is dead: no frame waits for it
 PAN_NOTICE_RAD = math.radians(1.0)  # a head turned more than this is worth a line in the report
 SCAN_BEFORE = "floor_anchor"  # the scan is built from the depth as it stands before this stage
+# How far this camera answers for its own depth, in metres. ONE number for two uses — the
+# published image's reach (the ``depth_reach`` flag) and /depth_scan's own cap
+# (``scan_max_range``) — because they are the same physical claim, and two literals would drift:
+# the costmap's obstacle_max_range of 2.5 m has to stay under the scan's cap, and the camera half
+# of RTAB-Map's grid has to stay under the image's. Measured: see the ``depth_reach_m`` flag.
+DEPTH_REACH_M = 3.0
 TRACK_FLAGS = (  # the ones that decide the shape of a parallax measurement: track or pair
     "parallax_tracking",
     "parallax_track_min_obs",
@@ -1401,6 +1407,49 @@ FLAGS = FlagSet(
         " measurement taken while the projection ignored the pan (the yaw-offset probes of"
         " config/neck.json's pan_note were)",
     ),
+    Flag(
+        "depth_reach",
+        True,
+        description="the PUBLISHED depth image is NaN past depth_reach_m: the camera answers for"
+        " its own data and says nothing where it does not vouch for the range. /depth_scan is"
+        " unaffected (it is capped at the same range already) and so is every law — the gate is"
+        " applied to the image on its way out, after the pipeline",
+        why="a NaN depth pixel makes no point in any consumer: rtabmap drops it from the cloud"
+        " before the grid (pcl::isFinite, rtabmap/core/util3d.cpp:644), Nav2's obstacle layer"
+        " neither marks nor raytraces it (verified against obstacle_layer.cpp 1.3.12 on"
+        " 2026-09-11), and pepin.tsdf integrates only finite depths. Without the gate the camera's"
+        " far half is a fiction that outvotes the lidar: 44 % of the camera's costmap marks within"
+        " 2.5 m were BEHIND the wall the lidar sees (run 0224, camera layer alone, 2026-09-11),"
+        " and the wall-truth eval put the network 1.24-1.27 of the truth in the middle and top"
+        " thirds of the picture against 0.998 at the beams (errand 0313,"
+        " scratch/wall_truth_eval.py). It is what lets ONE Grid/RangeMax serve both sensors in"
+        " vslam.launch.py: the lidar's 8 m, with the camera's reach carried in the camera's data",
+        on_when="always while any grid, costmap or volume is built from BOTH this depth and the"
+        " lidar — which is every mode since 2026-09-19",
+        off_when="to measure the network past its reach (a range-law session that wants the far"
+        " bins), and to reproduce a volume or a costmap from before this gate",
+    ),
+    Flag(
+        "depth_reach_m",
+        DEPTH_REACH_M,
+        description="metres past which the published depth is NaN; the same number /depth_scan is"
+        " capped at",
+        why=f"{DEPTH_REACH_M:.1f} is the reach this stack already stands on in two places: the"
+        " scan's own cap (scan_max_range, which the costmap's obstacle_max_range of 2.5 m must"
+        " stay under — 2026-09-11 05:25, or an inf ray marks a lethal ring) and the camera-only"
+        " grid's Grid/RangeMax. What the range law measured across it: after the law 0.8-1.2 m"
+        " reads +0.1 %, 1.2-1.6 +0.4 %, 1.6-2.0 -0.5 %, and 2.0-2.5 m stays -20 % under any law"
+        " z = f(d) at one neck pitch because the network SATURATES there (true 1.75 and 2.2 m"
+        " arrive at the same network depth ~3.1, 2026-09-15 15:30) — softened the next day to a"
+        " place fact, with the frame law reading +2.7 % over 2.5-6 m on a drive. So the honest"
+        " statement is that the last metre before 3 m is worth a fifth of itself at worst and"
+        " nothing is claimed past it",
+        on_when="raise it only with a wall-truth measurement at the new range on the current"
+        " geometry, and raise Grid/RangeMax's camera half nowhere — it is the lidar's",
+        off_when="lower it where the network is known to be worse: a dark room, a patterned floor,"
+        " a head pitched far down (the saturation moves with the pitch)",
+        range=(0.3, 12.0),
+    ),
 )
 FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
 
@@ -1537,7 +1586,7 @@ class DepthStream(Node):
         newest = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(Image, "/camera/depth", reliable)
         self._scan_pub = self.create_publisher(LaserScan, "/depth_scan", reliable)
-        self._scan_max_range = float(self.declare_parameter("scan_max_range", 3.0).value)
+        self._scan_max_range = float(self.declare_parameter("scan_max_range", DEPTH_REACH_M).value)
         self._expected_key: object = None  # the optics and head pose the floor ruler was cut for
         self._expected: Array = np.zeros((0, 0))
         self._law_file = Path(str(self.declare_parameter("law_file", LAW_FILE).value))
@@ -1958,10 +2007,32 @@ class DepthStream(Node):
             scan = self._as_scan(result.before(SCAN_BEFORE), msg, ctx)
         with tally.measure("publish"):
             self._pub.publish(
-                image_from_array(result.depth, "32FC1", msg.header.stamp, msg.header.frame_id)
+                image_from_array(
+                    self._vouched(result.depth), "32FC1", msg.header.stamp, msg.header.frame_id
+                )
             )
             self._scan_pub.publish(scan)
         tally.count("frames")
+
+    def _vouched(self, depth: Array) -> Array:
+        """The depth as this camera is willing to answer for it: NaN past ``depth_reach_m``, on a
+        copy so nothing the pipeline still holds is touched. Off (``depth_reach``), the array
+        itself, which is what every consumer read before 2026-09-19.
+
+        A sensor answers for its own data: NaN is the one value that makes no point in any consumer
+        downstream — no cell in RTAB-Map's grid, no mark and no raytrace in Nav2's obstacle layer,
+        no voxel in the volume — so the range this network's scale stops being a measurement over
+        is stated once, here, instead of in each consumer's own cap."""
+        if not self._switches.on("depth_reach"):
+            return depth
+        reach = float(self._switches["depth_reach_m"])
+        beyond = np.asarray(depth) > reach  # NaN compares false: what is already unknown stays so
+        self._tally.count("beyond_reach", int(np.count_nonzero(beyond)))
+        if not beyond.any():
+            return depth
+        vouched: Array = np.array(depth, copy=True)  # the pipeline's own dtype, not a cast
+        vouched[beyond] = np.nan
+        return vouched
 
     def _no_model(self, exc: DepthModelError) -> None:
         """The CPU model cannot be built (no cached weights and no hub, or no memory): the cause
@@ -2215,6 +2286,11 @@ class DepthStream(Node):
             )
         return "no scan came within SCAN_MAX_AGE_S of any frame: is /scan alive?"
 
+    def _pixels(self) -> int:
+        """How many pixels a published depth image has, from the optics the last camera_info
+        described; 0 while none has arrived (the report's share then reads 0.0 %)."""
+        return 0 if self._intr is None else self._intr.width * self._intr.height
+
     def _plane_in_view(self) -> float | None:
         """How far ahead the lidar's plane enters the picture at the head's last pose, or
         ``None`` while the optics or the mount are still unknown."""
@@ -2266,6 +2342,12 @@ class DepthStream(Node):
             extra += "; fan pan from the mount)" if self._switches.on("scan_honours_pan") else ")"
         if c["fan_gated"]:
             extra += f", floor-gated {c['fan_gated']} bearings ({self._switches['fan_floor_gate']})"
+        if self._switches.on("depth_reach") and c["frames"]:
+            share = c["beyond_reach"] / max(c["frames"] * self._pixels(), 1) * 100.0
+            extra += (
+                f", published NaN past {float(self._switches['depth_reach_m']):.1f} m over"
+                f" {share:.1f}% of the pixels"
+            )
         if c["camera_panned"]:
             how = "with the pan" if self._switches.on("scan_honours_pan") else "as if not"
             extra += f", head panned {c['camera_panned']} frames (projected {how})"
