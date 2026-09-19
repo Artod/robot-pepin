@@ -263,14 +263,18 @@ RTABMAP = {
     "DbSqlite3/JournalMode": "1",
     "DbSqlite3/Synchronous": "1",
     "Optimizer/GravitySigma": "0",
-    # ---- the grid: BOTH sensors per node, each answering for its own reach ---------------------
-    # 0=scan, 1=depth, 2=both (0.22's name for the old Grid/FromDepth). 2 is what makes one table
-    # possible: the two halves of LocalGridMaker::createLocalMap are independent, so a node with no
-    # scan is warned about once and still gets its cells from the depth, a node with no picture
-    # gets them from the scan, and a node with both has the two concatenated
-    # (rtabmap/core/LocalGridMaker.cpp:237-286 for the scan half, :288-405 for the depth half and
-    # the concatenation).
-    "Grid/Sensor": "2",
+    # ---- the grid: written by the sensor that can vouch at the grid's grade ---------------------
+    # 0=scan, 1=depth, 2=both. The START value is the scan, and the value FOLLOWS what the
+    # snapshots carry at run time beside Reg/Strategy (pepin.graphmode.REGISTRATION_PARAMETERS,
+    # set by rtabmap_frame through update_parameters): a node with a scan gives the grid its scan,
+    # a node without one gives its depth. "Both" (2) was tried first and measured on the parked
+    # cart 2026-09-19: the mono network's smeared depth beside the lidar's walls made a newborn map
+    # of ~2000 occupied cells on 5 x 4 m, the lidar tracker's match on it went flat (sigma 0.47 m /
+    # 34 deg at fit 0.97, the pose wandering 10 cm and 4 deg in 90 s on a still map); from the scan
+    # alone the same room is ~500 cells and the tracker reads 0.01 m / 0.1 deg. RTAB-Map's grid has
+    # no per-sensor weight, so a sensor that cannot vouch at the lidar's grade must not write while
+    # the lidar does. The camera's obstacles still reach Nav2 through the costmap's camera layer.
+    "Grid/Sensor": "0",
     # A 2D grid, not voxels. With Grid/3D true the operator saw RTAB-Map's own cloud_map beside the
     # fusion's volume; under World R the grid is the thing the BOARD is handed, and the room in
     # three dimensions is pepin.worldmap's volume, which is built from the same depth.

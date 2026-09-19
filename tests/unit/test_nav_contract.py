@@ -910,7 +910,10 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
     assert table["subscribe_depth"] is False and table["subscribe_sensor_data"] is True
     assert _rtabmap("TRIPLE_SUBSCRIPTIONS")["subscribe_depth"] is True, "the way back, and only it"
     assert "('depth/image', '/camera/depth')" in sf.unparsed(vslam, ast.Tuple)
-    assert table["Grid/Sensor"] == "2", "0.22's Grid/FromDepth: the scan AND the depth per node"
+    assert table["Grid/Sensor"] == "0", (
+        "the grid starts on the scan and follows the snapshots at run time (pepin.graphmode):"
+        " with both sensors the mono depth flattened the lidar tracker's match (2026-09-19)"
+    )
     assert table["Grid/3D"] == "false", "the grid the board is handed is 2D"
     assert "Grid/MaxObstacleHeight" in table
     assert {"camera", "depth", "pack", "rtabmap", "frame", "foxglove"} <= _started_after_ghost_wait(
@@ -2339,8 +2342,10 @@ def test_the_graphs_grid_is_the_one_map_and_the_tracker_is_the_one_owner_of_map_
     # static layer, ray-traced because Grid/Sensor 2 gives up the cheap path that carves a scan's
     # own free space, and reaching as far as the LIDAR does — the camera's own reach travels in
     # the camera's data (pepin_bringup.depth_stream's depth_reach), not in this parameter.
-    assert table["Grid/Sensor"] == "2" and table["Grid/3D"] == "false"
-    assert table["Grid/RayTracing"] == "true", "or free space stays unknown with Grid/Sensor 2"
+    assert table["Grid/Sensor"] == "0" and table["Grid/3D"] == "false"
+    assert table["Grid/RayTracing"] == "true", (
+        "kept for the depth-built grid of a lidar-less wake-up"
+    )
     assert float(str(table["Grid/RangeMax"])) == 8.0
     assert table["RGBD/NeighborLinkRefining"] == "false", "no closure survives a refined link"
     assert table["Reg/Strategy"] == "1", "ICP; 2 would drop every node that has no picture"

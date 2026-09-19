@@ -110,9 +110,23 @@ STRATEGY_NAMES = {STRATEGY_VIS: "visual", STRATEGY_ICP: "ICP on the scans"}
 # SLAM_CAMERA_ONLY table changed was the input and the grid, which World R settled once for every
 # node, and each of these two names is already in the launch table — which is the condition for a
 # live set to be seen at all (CoreWrapper.cpp:362-379).
+#
+# THE GRID'S SENSOR TRAVELS WITH IT (2026-09-19, measured on the parked cart, fresh database both
+# times, scratch/map_vs_pose_walk.py). With the grid built from BOTH sensors (Grid/Sensor 2) the
+# newborn map held 1958-2207 occupied cells on 5 x 4 m — the mono network's smeared depth laid
+# beside the lidar's walls — and the lidar tracker's match on it was flat: fit 0.97, published
+# sigma 0.47 m / 34 deg, the pose wandering 9.8 cm and 3.9 deg in 90 s over a map that had turned
+# 0.23 deg and an odometry that had turned 0.5. Built from the SCAN alone (0) the same room is
+# 480-538 cells, sigma 0.00-0.01 m / 0.1 deg, 0.8 cm in 90 s. RTAB-Map's grid has no per-sensor
+# weight, so a sensor that cannot vouch at the lidar's grade must not write while the lidar does:
+# a node that carries a scan gives the grid its scan (0); a node with no scan gives what it has,
+# the depth (1) — which only happens while MAPPING without a lidar, i.e. a wake-up on the camera
+# alone. Local grids are made per node, at the node's creation, with the value set then; and in
+# localisation mode nothing is written, so the value does not matter there (CoreWrapper.cpp:3153).
+GRID_FROM_SCAN, GRID_FROM_DEPTH = "0", "1"
 REGISTRATION_PARAMETERS = {
-    STRATEGY_VIS: {"Reg/Strategy": STRATEGY_VIS},
-    STRATEGY_ICP: {"Reg/Strategy": STRATEGY_ICP},
+    STRATEGY_VIS: {"Reg/Strategy": STRATEGY_VIS, "Grid/Sensor": GRID_FROM_DEPTH},
+    STRATEGY_ICP: {"Reg/Strategy": STRATEGY_ICP, "Grid/Sensor": GRID_FROM_SCAN},
 }
 
 # What a seating must be worth for the database to be taught from it. The peak's own covariance is
