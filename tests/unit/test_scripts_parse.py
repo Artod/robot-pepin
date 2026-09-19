@@ -568,9 +568,13 @@ VSLAM_LOG = "\n".join(
         "from 27 scans; tracker fit 0.66; skipped: off 0",
         "[sensor_pack-4] [INFO] [5.5] [sensor_pack]: sensor pack: 1.00 snapshots/s of 54 scans "
         "and 60 camera frames (kind both 27); carrying nothing said yet",
-        "[rtabmap_frame-8] [INFO] [6.0] [rtabmap_frame]: rtabmap frame: 27 graphs, anchor "
-        "(-0.11, +0.02, +1.3 deg) from file, last word (-11.32, +0.71, +132 deg), 6 cm from the "
-        "tracker; graph trusted 1.00 over 27 infos; flags: graph_trust=on",
+        # The node's own wording, as a LITERAL (ros/pepin_bringup/pepin_bringup/rtabmap_frame.py):
+        # the check used to parse "over N infos", which had been gone for a day, and failed a
+        # healthy node on it (2026-09-19).
+        "[rtabmap_frame-8] [INFO] [6.0] [rtabmap_frame]: rtabmap frame: 118 updates, 0 recognised "
+        "a node, 118 localisations heard, 0 words (0 sent, 0 refused by the gate, 0 candidates, 0 "
+        "without odometry); last word (-11.32, +0.71, +132 deg); fit 1.00 (agrees); flags: "
+        "graph_trust=on",
     )
 )
 FAKE_RESTART_LIB = r"""#!/bin/bash
@@ -915,12 +919,12 @@ def test_a_thin_report_line_fails_the_node_it_belongs_to_not_the_run(tmp_path) -
         "laptop",
         FAKE_VSLAM=VSLAM_LOG.replace("9.4 frames/s", "1.2 frames/s")
         .replace("at bound 0", "at bound 14")
-        .replace("over 27 infos", "over 0 infos"),
+        .replace("frame: 118 updates", "frame: 0 updates"),
     )
     assert code == 1, out
     assert "FAIL 2.2" in out and "1.2 frames/s" in out
-    assert "FAIL 2.3" in out and "14 frames refused at bound" in out
-    assert "FAIL 2.10" in out and "hears nothing from RTAB-Map" in out
+    assert "FAIL 2.3" in out and "14 refused at bound" in out
+    assert "FAIL 2.10" in out and "0 updates" in out
 
 
 def test_a_flag_off_its_default_is_seen_but_never_fails_the_run(tmp_path) -> None:  # type: ignore[no-untyped-def]

@@ -35,10 +35,19 @@ class GridSpec:
 
     @property
     def shape(self) -> tuple[int, int]:
-        """Grid size in cells as (rows, cols) = (height, width), rounded up."""
+        """Grid size in cells as (rows, cols) = (height, width), rounded up.
+
+        The division is rounded to the nanometre before the ceiling, and that is not cosmetic: an
+        extent of a whole number of cells is not exact in binary, so ``121 * 0.05 / 0.05`` is
+        121.00000000000001 and a bare ceiling made 122 rows out of 121. Every grid whose height in
+        cells is 96, 101, 106, 111, 116, 121, 126 ... hit it, and the cost was a ValueError inside
+        :func:`pepin_bringup.msgs.grid_from_msg` — "could not broadcast (121, 160) into (122, 160)"
+        — raised in the map callback, so the board would simply stop adopting maps the moment
+        RTAB-Map's growing canvas reached one of those sizes (found by the churn test, 2026-09-19).
+        """
         return (
-            math.ceil(self.height_m / self.resolution_m),
-            math.ceil(self.width_m / self.resolution_m),
+            math.ceil(round(self.height_m / self.resolution_m, 9)),
+            math.ceil(round(self.width_m / self.resolution_m, 9)),
         )
 
 
@@ -256,38 +265,77 @@ class MapChoice:
 
 @dataclass(frozen=True)
 class MapShift:
-    """What a newly adopted map did to the one it replaces: how far its origin moved, whether it
-    is another size, and how many cells changed their mind where the two overlap.
+    """What a newly adopted map did to the one it replaces: how far its origin moved, whether it is
+    another size, how many cells changed their mind where the two overlap, and how close to the cart
+    the nearest of those cells is.
 
-    Under World R this is the shape of every map change. RTAB-Map re-renders its whole grid from
-    the per-node local grids at their current poses, so a new node extends it (the origin walks
-    out, the size grows) and a loop closure BENDS it (the same walls, tens of centimetres away).
-    The tracker carries its pose across such a change and rebuilds its matcher on the new cells,
-    and this is what its report line says about the change, so a bend is visible as a number
-    instead of as a drive that mysteriously goes wrong.
+    Under World R this is the shape of every map change. RTAB-Map re-renders its whole grid from the
+    per-node local grids at their current poses, so a new node extends it (the origin walks out, the
+    size grows), a loop closure BENDS it (the same walls, tens of centimetres away) — and, parked in
+    mapping mode, its probabilistic cells simply flicker across the occupancy threshold a handful at
+    a time, once a second, for ever. Those three are not the same event and must not cost the same:
+    the first live run of World R adopted 59 maps in its first minutes and threw the tracker's
+    belief away at every one of them (2026-09-19).
     """
 
     origin_m: float
     resized: bool
     changed_cells: int
+    # Distance from the pose this was measured at to the nearest changed cell: ``inf`` when nothing
+    # changed at all, and 0.0 when there was no pose to measure from — an unmeasurable change counts
+    # as a near one, because a tracker that does not yet know where it is must take the newest map.
+    nearest_change_m: float = math.inf
+
+    def matters(self, reach_m: float) -> bool:
+        """Whether this change is one a tracker whose scan reaches ``reach_m`` can notice at all.
+
+        A grid of another size or origin always matters: the lattice the matcher scores on is a
+        different lattice, and the pose's own coordinates have moved with it. Cells that changed
+        FURTHER AWAY than the scan reaches do not: no beam of the revolution being matched ends
+        there, so no score, no mask vote and no fit can differ by one part — while adopting it
+        rebuilds the matcher, the mask and the tracker and (before 2026-09-19) forgot the episode.
+        """
+        return self.resized or self.nearest_change_m <= reach_m
+
+    @property
+    def widen_m(self) -> float:
+        """How much less sure the pose is BECAUSE of this change, in metres of position sigma.
+
+        The origin's move, and nothing else. A bend of 0.35 m moved the room under a belief that
+        was measured against the room before it, so the belief is worth 0.35 m less — that is a
+        fact about the map, not about the cart. Six flickering cells move the room by nothing and
+        are worth nothing; counting them would make a parked cart less and less sure of a pose it
+        has never stopped measuring, which is exactly the defect this answers.
+        """
+        return self.origin_m
 
     def phrase(self) -> str:
-        """``the graph moved the map 0.35 m and 1832 cells`` for a report line; ``the first map``
-        when there was nothing to compare with."""
+        """``origin moved 0.35 m, 1832 cells changed`` for a report line."""
+        near = (
+            "" if self.nearest_change_m == math.inf else f" (nearest {self.nearest_change_m:.1f} m)"
+        )
         if self.resized and not self.changed_cells:
             return f"resized, origin moved {self.origin_m:.2f} m"
         if self.resized:
             return f"resized, origin moved {self.origin_m:.2f} m, {self.changed_cells} cells over"
-        return f"origin moved {self.origin_m:.2f} m, {self.changed_cells} cells changed"
+        return f"origin moved {self.origin_m:.2f} m, {self.changed_cells} cells changed{near}"
 
 
-def map_shift(before: OccupancyGrid | None, after: OccupancyGrid) -> MapShift | None:
+def map_shift(
+    before: OccupancyGrid | None, after: OccupancyGrid, at: tuple[float, float] | None = None
+) -> MapShift | None:
     """How ``after`` differs from the map it replaces, or ``None`` when there was none.
 
-    The cells are compared only where the two grids agree on their geometry — same resolution,
-    same size, same origin — because anything else is a re-render on another lattice and counting
+    The cells are compared only where the two grids agree on their geometry — same resolution, same
+    size, same origin — because anything else is a re-render on another lattice and counting
     "changed cells" across it would compare a cell with its neighbour. A resized map reports its
     origin's move and no cell count; the phrase says which it was.
+
+    ``at`` is where the cart stands, in world metres: with it, the distance to the NEAREST changed
+    cell is measured too, which is what tells a flicker on the far side of the room from a wall that
+    has moved beside the cart. It costs one pass over the changed cells' indices and nothing when
+    nothing changed. Without it — a tracker that has no pose yet — a change reads as a near one, so
+    the newest map is taken rather than deferred on a question nobody could answer.
     """
     if before is None:
         return None
@@ -299,5 +347,95 @@ def map_shift(before: OccupancyGrid | None, after: OccupancyGrid) -> MapShift | 
         and before.spec.resolution_m == after.spec.resolution_m
         and moved == 0.0
     )
-    changed = int(np.count_nonzero(before.log_odds != after.log_odds)) if same else 0
-    return MapShift(origin_m=moved, resized=not same, changed_cells=changed)
+    if not same:
+        return MapShift(origin_m=moved, resized=True, changed_cells=0)
+    rows, cols = np.nonzero(before.log_odds != after.log_odds)
+    nearest = math.inf if len(rows) == 0 else 0.0
+    if len(rows) and at is not None:
+        res = after.spec.resolution_m
+        xs = after.spec.x_min_m + (cols + 0.5) * res
+        ys = after.spec.y_min_m + (rows + 0.5) * res
+        nearest = float(np.sqrt(np.min((xs - at[0]) ** 2 + (ys - at[1]) ** 2)))
+    return MapShift(
+        origin_m=moved, resized=False, changed_cells=len(rows), nearest_change_m=nearest
+    )
+
+
+def worth_adopting(grid: OccupancyGrid, shift: MapShift | None, reach_m: float) -> bool:
+    """Whether a grid that has passed the choice's cheap gate is worth the rebuild it costs.
+
+    Two questions, in the order they are cheap. A MAP WITH NOTHING IN IT IS NOT A MAP: a database
+    born in this second can publish a grid with no known cell at all, and adopting that spends the
+    one adoption a ``refresh_s`` of 0 allows. And a change the scan cannot reach is not a change:
+    see :meth:`MapShift.matters`. The first map (``shift`` None) is always worth taking.
+    """
+    if not np.any(grid.log_odds != 0.0):
+        return False
+    return shift is None or shift.matters(reach_m)
+
+
+def scan_reach_m(points: NDArray[np.float64], default: float) -> float:
+    """How far the farthest return of one revolution is, in metres — the radius inside which a
+    changed cell can still move this tracker's score. ``default`` for a scan with no points."""
+    if len(points) == 0:
+        return default
+    return float(np.sqrt(np.max(points[:, 0] ** 2 + points[:, 1] ** 2)))
+
+
+def widened(covariance: NDArray[np.float64] | None, metres: float) -> NDArray[np.float64] | None:
+    """``covariance`` (a 3x3 pose covariance) with ``metres`` of position sigma added in quadrature.
+
+    What a map change costs the belief that was measured on the map before it
+    (:attr:`MapShift.widen_m`). The heading is left alone: this measures the grid's translation, and
+    claiming a rotation from it would be a number nobody measured.
+    """
+    if covariance is None or metres <= 0.0:
+        return covariance
+    grown = np.array(covariance, dtype=np.float64, copy=True)
+    grown[0, 0] += metres * metres
+    grown[1, 1] += metres * metres
+    return grown
+
+
+class MapChain:
+    """The ids of the grids this tracker has adopted since the last change of FRAME.
+
+    A map id is its size and origin (:func:`pepin_bringup.msgs.map_id`), and under World R the size
+    changes whenever RTAB-Map's canvas grows — every few seconds while a room is being mapped. A
+    word from the laptop is stamped with the id the board had when the word was made, so by the time
+    it arrives the board may be one or two ids further on and the gate refuses it as "another map":
+    live, 2026-09-19, ``candidates 26 (nothing 9, unknown_map 17)`` — two thirds of the laptop's
+    whole-map answers thrown away for no other reason.
+
+    They are all the same room, so they are all the same evidence. What is NOT the same room is a
+    frame that has changed: a cache of yesterday replaced by a live grid, a database born since, a
+    pose the tracker could not carry across. Those break the chain, and then a word about the old
+    ids is refused as it must be. The chain is bounded by that and by nothing else — no count, no
+    age — and in practice it holds one entry per distinct geometry (tens, not thousands: a flicker
+    re-uses its id).
+    """
+
+    def __init__(self) -> None:
+        self._ids: set[str] = set()
+
+    def adopted(self, map_id: str, *, new_frame: bool) -> None:
+        """A map was adopted; ``new_frame`` — the belief did not survive it — starts the chain."""
+        self._ids = set() if new_frame else self._ids
+        self._ids.add(map_id)
+
+    def holds(self, map_id: str) -> bool:
+        """Whether a word stamped with ``map_id`` is about the room this tracker is in."""
+        return map_id in self._ids
+
+    def accepted(self, claimed: str, current: str) -> str:
+        """The id to hand a gate that judges a word by equality: the word's own when this chain
+        holds it (so the gate accepts it), else the current one (so the gate refuses it).
+
+        An adapter, on purpose: whether two ids are the same room is this chain's business, and
+        whether a word is worth fusing is the gate's (:mod:`pepin.measurements`).
+        """
+        return claimed if self.holds(claimed) else current
+
+    def text(self) -> str:
+        """``1 id`` / ``4 ids since the frame changed`` for a report line."""
+        return f"{len(self._ids)} id{'' if len(self._ids) == 1 else 's'}"

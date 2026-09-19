@@ -72,6 +72,17 @@ def stamp(t: float) -> Any:
     return TimeMsg(sec=whole, nanosec=round((t - whole) * 1e9))
 
 
+def changed_near_the_cart(msg: Any) -> Any:
+    """``msg`` with one cell flipped WITHIN the reach of a revolution taken at the origin — where
+    the tests park the cart. A cell that changes further away than the scan reaches is not worth
+    a rebuild and the tracker defers it (pepin.mapping.MapShift.matters): a different test."""
+    cell = msg.info.width * round((0.0 - msg.info.origin.position.y) / msg.info.resolution) + round(
+        (0.5 - msg.info.origin.position.x) / msg.info.resolution
+    )
+    msg.data[cell] = 100 if msg.data[cell] != 100 else 0
+    return msg
+
+
 def map_msg(grid: Any = None) -> Any:
     """A grid as the map server publishes it; the furnished room by default."""
     grid = furnished_room_map() if grid is None else grid
@@ -1022,8 +1033,7 @@ def test_a_republished_map_leaves_the_cart_where_it_is(node: Relocalizer) -> Non
 
     node.clock.seconds = 150.0
     assert node.set_parameters([Parameter("map_refresh_s", value=30.0)])[0].successful
-    painted = map_msg()  # ...and one the fusion has painted a cell into
-    painted.data[0] = 100 if painted.data[0] != 100 else 0
+    painted = changed_near_the_cart(map_msg())  # ...and one with a cell the cart can see changed
     node.subs["/map"][1](painted)
     after = node._localizer
     assert after is not None and after is not loc, "a changed map, old enough: adopted"
@@ -1055,10 +1065,8 @@ def test_a_republished_map_does_not_rebuild_the_tracker(node: Relocalizer) -> No
 
     node.clock.seconds = 100.0
     assert node.set_parameters([Parameter("map_refresh_s", value=30.0)])[0].successful
-    changed = map_msg()
-    changed.data[0] = 100 if changed.data[0] != 100 else 0
-    node.subs["/map"][1](changed)
-    assert node._matcher is not first, "old enough and its cells differ: adopted"
+    node.subs["/map"][1](changed_near_the_cart(map_msg()))
+    assert node._matcher is not first, "old enough and a cell it can see differs: adopted"
 
 
 def test_the_published_fit_falls_to_zero_once_every_source_has_gone_silent(
@@ -1480,3 +1488,142 @@ def test_a_word_about_the_grid_before_the_bend_is_refused_as_another_map() -> No
     # the candidate gate calls it `elsewhere` in its counters and `unknown_map` in its verdicts;
     # either way the laptop's whole-map answer is refused for being about another map
     assert "elsewhere 1" in node._candidates.report(), "and the laptop's whole-map candidate"
+
+
+# ---- the churn of a live graph under a parked cart --------------------------------------------
+def flickering_map(seed: int, rows: int = 0) -> Any:
+    """The room again, with ``seed`` cells of its free space flipped and ``rows`` rows added.
+
+    This is what RTAB-Map's grid really does under a PARKED cart (live, 2026-09-19): it is
+    re-rendered at the detection rate, its probabilistic cells cross the occupancy threshold back
+    and forth a handful at a time, and now and then the canvas grows by a row or a column. Every one
+    of those is a changed digest, and every changed digest used to be an adoption.
+    """
+    msg = map_msg()
+    data = list(msg.data)
+    free = [i for i, cell in enumerate(data) if cell == 0]
+    for k in range(seed):
+        data[free[(k * 977) % len(free)]] = 100
+    if rows:
+        data += [-1] * (rows * msg.info.width)
+        msg.info.height += rows
+    msg.data = data
+    return msg
+
+
+def parked_churn(node: Relocalizer, t0: float, seconds: float, period_s: float = 2.0) -> int:
+    """A parked cart for ``seconds``, with a flickering grid arriving once a second and a changed
+    one adopted every ``period_s``; returns how many maps the choice took."""
+    still = Pose2D()
+    for i in range(round(seconds * 10)):
+        ts = t0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        node.subs["/scan"][1](lidar_msg(still, ts))
+        node.subs["/odometry/filtered"][1](odom_msg(still, ts, vx=0.0))
+        assert until(lambda: node._tracker_initialised)
+        if i % 10 == 9:  # RTAB-Map's own cadence: one grid a second
+            step = i // 10
+            node.subs["/map"][1](flickering_map(1 + step % 6, rows=1 if step % 5 == 4 else 0))
+        node._check() if i % 10 == 0 else None
+    return node._choice.adoptions
+
+
+def test_a_flickering_grid_does_not_unsettle_a_parked_tracker() -> None:
+    """THE DEFECT OF THE FIRST LIVE RUN (2026-09-19, parked, fresh database). RTAB-Map republished
+    its grid about once a second; a few cells crossed the occupancy threshold each time and the
+    canvas grew by a row now and then, so the board adopted 59 maps in the first minutes — and every
+    adoption rebuilt the tracker, forgot the episode's evidence and restarted the match cadence.
+    The line read "matched 1 ... rest-locked 1 (dt - s, gain 0.05/0.05/0.05) ... fit 0.97" beside
+    "map cache written" 59 times, and the published sigma never settled (0.52 m / 32.4 deg at fit
+    0.97 on a cart that had not moved, against 0.02 m / 1.3 deg on the first boot before the churn
+    built up).
+
+    A change of the picture that does not change the FRAME is not a reason to be unsure, to forget
+    or to start again: the belief, its covariance, the evidence and the cadence all survive it,
+    widened only by what the change itself can account for.
+    """
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
+    stand(node, 100.0, 3.0)
+    settled = node._spread.sigma()
+    assert settled[0] < 0.10 and settled[1] < 5.0, f"a parked cart knows where it is: {settled}"
+
+    # The gate's own memory is the episode's evidence, and an adoption used to wipe it
+    # (CandidateGate.forget, MeasurementGate.forget): under the churn no streak of agreeing
+    # candidates could ever reach the three a re-seat needs, because it was cut every two seconds.
+    elsewhere = SimpleNamespace(_map_id=node._map_id)
+    node.subs["/localization/candidate"][1](candidate_msg(elsewhere, CARRIED_TO))
+    verdict = node._candidates.status()["verdict"]
+    assert verdict, "the gate judged something"
+
+    taken = parked_churn(node, 200.0, 30.0)
+    assert taken >= 2, f"the grid really did change under it ({taken} adoptions)"
+    sigma = node._spread.sigma()
+    assert sigma[0] <= settled[0] * 1.5 and sigma[0] < 0.25, (
+        f"the sigma must stay what the scan supports, not grow with the churn: {sigma}"
+    )
+    assert sigma[1] < 10.0, f"and so must the heading: {sigma}"
+    node._report_tracking()
+    line = node.logger.texts("info")[-1]
+    assert "dt - s" not in line and "gain 0.05/0.05/0.05" not in line, (
+        f"the rest lock kept its own cadence across the adoptions: {line}"
+    )
+    assert "rest-locked" in line and "dt 1.0" in line, line
+    assert node._candidates.status()["verdict"] == verdict, "the gate's memory survived the churn"
+    assert node._chain.text() != "1 id", "every id of this frame is remembered for the laptop"
+
+    # The card: one write, not one per adoption (MAP_CACHE_MIN_GAP_S).
+    writes = [t for t in node.logger.texts("info") if t.startswith("map cache written")]
+    skipped = [t for t in node.logger.texts("info") if t.startswith("map cache: this adoption")]
+    assert len(writes) == 1 and len(skipped) >= 1, (len(writes), len(skipped))
+
+
+def test_a_flicker_the_scan_cannot_reach_is_not_adopted_at_all() -> None:
+    """The cheapest half of the same answer: a cell that changed further away than the revolution
+    reaches cannot move one beam's score, so the grid is turned away and nothing is rebuilt. The
+    same cell changed WITHIN reach is adopted at once — the rule is the scan's reach, not a period.
+    """
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
+    stand(node, 100.0, 3.0)
+    node.clock.seconds = 200.0
+    node._scan_reach_m = 1.0  # a revolution that sees a metre: the flat's far wall is out of reach
+    matcher, adopted = node._matcher, node._choice.adoptions
+
+    far = map_msg()
+    cell = far.info.width * (far.info.height - 1)  # the grid's far corner
+    far.data[cell] = 100 if far.data[cell] != 100 else 0
+    node.subs["/map"][1](far)
+    assert node._choice.adoptions == adopted, "a change out of reach is not worth a rebuild"
+    assert node._matcher is matcher, "and nothing was rebuilt"
+    assert node._shift is not None and node._shift.nearest_change_m > 1.0
+
+    node.subs["/map"][1](changed_near_the_cart(map_msg()))
+    assert node._choice.adoptions == adopted + 1, "a change it can see is taken at once"
+    assert node._matcher is not matcher
+
+
+def test_a_bend_of_the_graph_still_widens_the_belief() -> None:
+    """The other side of the rule: a loop closure MOVES the room under a pose that was measured
+    against the room before it, and the belief must say so. The widening is the origin's own move
+    (pepin.mapping.MapShift.widen_m) — 0.30 m of bend is 0.30 m of position sigma, added in
+    quadrature to whatever the scan had earned."""
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
+    stand(node, 100.0, 3.0)
+    before = node._spread.sigma()
+
+    node.clock.seconds = 200.0
+    bent = map_msg()
+    bent.info.origin.position.x -= 0.30  # the graph re-rendered the canvas somewhere else
+    node.subs["/map"][1](bent)
+    assert node._shift is not None and node._shift.resized
+    assert node._shift.widen_m == pytest.approx(0.30)
+    after = node._spread.sigma()
+    assert after[0] == pytest.approx(math.hypot(before[0], 0.30), abs=1e-6), (before, after)

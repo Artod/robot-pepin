@@ -106,10 +106,14 @@ from pepin.mapcache import CACHE_NAME, CacheBoot, MapCache, save
 from pepin.mapping import (
     MAP_FALLBACK_S,
     MAP_TOPIC,
+    MapChain,
     MapChoice,
     MapShift,
     OccupancyGrid,
     map_shift,
+    scan_reach_m,
+    widened,
+    worth_adopting,
 )
 from pepin.measurements import (
     MEASUREMENT_MAX_AGE_S,
@@ -119,6 +123,7 @@ from pepin.measurements import (
     RemoteMeasurement,
     remote_update,
 )
+from pepin.mounts import load_lidar
 from pepin.odometry import Pose2D, RunawayWatch, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow
 from pepin.slip import (
@@ -183,6 +188,15 @@ LAST_POSE_FILE = "/maps/last_pose.json"  # where the robot stood when the stack 
 # pgm in the loop and nothing exported from the laptop — so this file is what a boot with the laptop
 # down has to track on.
 MAP_CACHE_DIR = "/maps"
+# ...and how often it may be rewritten. THE CACHE IS A COLD-BOOT FALLBACK AND NOTHING ELSE: its only
+# reader is a board that starts with no live map, and a picture a minute old is worth as much there
+# as one a second old — the live grid arrives within a second of the routes coming up, and a room
+# does not change in a minute. The card is what decides the number: one write is 16 kB run-length
+# encoded (this flat's 51385 cells, scratch/costmap_rle_cost.py), so a write per adoption under a
+# live graph is 8 kB/s — 690 MB a day of wear for a file nobody reads. At one a minute it is 23 MB a
+# day and the cache is at most a minute behind the map. The first adoption is always written: a
+# board with no cache at all is the one case where being a minute late costs a boot.
+MAP_CACHE_MIN_GAP_S = 60.0
 # The topic this node republishes the map it is TRACKING on, latched. Nav2's static layers read it
 # (ros/params/nav2_params.yaml), so the planner's static map is the tracker's map by construction
 # instead of by two subscriptions to a third party that may disagree. The name is a literal here and
@@ -953,6 +967,17 @@ class Relocalizer(Node):
         # The map in use, as every candidate and measurement is judged against.
         self._map_id = ""
         self._shift: MapShift | None = None  # what the last adoption did to the map before it
+        # Every id this tracker has adopted since the belief last started over: the laptop stamps a
+        # word with the id the board had when it made it, and under a growing canvas that is one or
+        # two ids back by the time it arrives (live 2026-09-19: 17 of 26 candidates refused as
+        # "unknown_map"). All the same room until the frame changes (pepin.mapping.MapChain).
+        self._chain = MapChain()
+        self._offered: OccupancyGrid | None = None  # the grid being judged, built once
+        # How far the last matched revolution reached: the radius inside which a changed cell can
+        # still move this tracker's score, and so the radius that decides whether a re-rendered grid
+        # is worth a rebuild at all (pepin.mapping.MapShift.matters). The lidar's own maximum until
+        # the first scan, from the one file that owns it.
+        self._scan_reach_m = load_lidar().max_range_m
         self._cache_dir = str(self.declare_parameter("map_cache_dir", MAP_CACHE_DIR).value)
         self._cached: MapCache | None = None  # the cache this node is tracking on, if any
         self._cache_boot = CacheBoot()  # the cold-boot read is attempted once, not every check
@@ -1207,21 +1232,40 @@ class Relocalizer(Node):
         """A grid arrived on /map: offer it to the choice, which adopts it or turns it away
         (:class:`pepin.mapping.MapChoice`).
 
-        The choice is also told whether the grid has any KNOWN cell at all. RTAB-Map publishes no
-        placeholder — the message is built only once there are cells to put in it
-        (rtabmap_util/MapsManager.cpp: nothing is sent while the assembled grid is empty) — but a
-        frame that yielded no cells at all can still produce one, and with ``map_refresh_s`` at 0
-        that single blank publication would spend the one adoption this node allows and leave the
-        tracker matching against nothing. Reading the cells is a function, so it costs nothing on
-        the ordinary path (pepin.mapping.MapChoice.offer).
+        What the choice asks back is :meth:`_unworthy`, and that is where the churn of a live graph
+        is stopped. Both of its questions read the whole grid, so they are asked only of a
+        publication that has already passed the cheap gate (the refresh period and the digest).
         """
         self._choice.offer(
             self._map_topic,
             lambda: map_digest(msg),
             self._now_s(),
             lambda: self._adopt(msg),
-            empty=lambda: not any(cell >= 0 for cell in msg.data),
+            empty=lambda: self._unworthy(msg),
         )
+
+    def _unworthy(self, msg: OccupancyGridMsg) -> bool:
+        """Whether this grid is not worth the rebuild it costs: it has no known cell at all, or
+        nothing changed in it that this tracker's own scan can reach
+        (:func:`pepin.mapping.worth_adopting`).
+
+        RTAB-Map re-renders its grid at its detection rate and, parked in mapping mode, its
+        probabilistic cells flicker across the occupancy threshold a handful at a time — every one
+        a changed digest. The first live run adopted 59 maps in its first minutes and rebuilt the
+        matcher, the mask and the tracker at each of them (2026-09-19). A cell that changed further
+        away than the revolution reaches cannot move one beam's score, so the grid is turned away
+        and counted like any other refusal; the NEXT publication is offered afresh, and the moment
+        the cart turns towards that cell it is taken.
+
+        The grid is built here and kept: :meth:`_on_map` uses this very object rather than
+        converting the message twice (a 51000-cell ``np.where`` each time).
+        """
+        self._offered = grid_from_msg(msg)
+        pose = self._tracked_pose()
+        self._shift = map_shift(
+            self._grid, self._offered, at=None if pose is None else (pose.x, pose.y)
+        )
+        return not worth_adopting(self._offered, self._shift, self._scan_reach_m)
 
     def _adopt(self, msg: OccupancyGridMsg) -> None:
         """Take ``msg`` as the map this tracker matches on: rebuild the matcher, the mask and the
@@ -1258,11 +1302,16 @@ class Relocalizer(Node):
         """Write the adopted map beside the maps, for the next start with nothing live (the
         ``map_cache`` flag).
 
-        Only on a changed digest, which the choice has already decided by calling here, and never
-        faster than the adoption rule allows — so the card sees one 16 kB write per real change of
-        the map. A failure is logged and nothing else: a board that cannot write its cache still
-        tracks, it only has a colder boot ahead of it.
+        ON A CADENCE, not on every adoption (:data:`MAP_CACHE_MIN_GAP_S`). The cache's only reader
+        is a board that boots with no live map, and for that reader a picture a minute old is worth
+        what one a second old is worth — while a write per adoption under a live graph is 8 kB/s of
+        card wear for a file nobody reads (59 writes in the first minutes of 2026-09-19). The first
+        adoption always writes: a board with no cache at all is the one case where a minute's delay
+        costs a boot. A failure is logged and nothing else: a board that cannot write its cache
+        still tracks, it only has a colder boot ahead of it.
         """
+        now = time.time()
+        due = not self._cache_written or now - self._cache_written >= MAP_CACHE_MIN_GAP_S
         cache = MapCache(
             cells=list(msg.data),
             width=int(msg.info.width),
@@ -1271,12 +1320,15 @@ class Relocalizer(Node):
             origin_xy=(float(msg.info.origin.position.x), float(msg.info.origin.position.y)),
             map_id=self._map_id,
             digest=self._choice.digest,
-            stamp=time.time(),
+            stamp=now,
             source=self._map_topic,
         )
-        self._cache_written = cache.stamp
+        self._cache_written = cache.stamp if due else self._cache_written
         self.get_logger().info(
             save(FilePath(self._cache_dir), cache, enabled=self._switches.on("map_cache"))
+            if due
+            else f"map cache: this adoption was not written down, the last write is"
+            f" {now - self._cache_written:.0f} s old (one per {MAP_CACHE_MIN_GAP_S:.0f} s)"
         )
 
     def _take_cached_map(self) -> None:
@@ -1343,18 +1395,21 @@ class Relocalizer(Node):
             and self._switches.on("carry_pose_across_maps")
             else None
         )
-        grid = grid_from_msg(msg)
-        # What this map did to the one it replaces, for the report line: a loop closure re-renders
-        # the whole grid, so a bend is a moved origin and a few thousand changed cells rather than
-        # anything a log would otherwise show (pepin.mapping.map_shift).
-        self._shift = map_shift(self._grid, grid)
+        # The grid :meth:`_unworthy` already built and judged, or a conversion of its own for the
+        # cache path, which goes straight to the tracker without passing the choice.
+        grid = self._offered if self._offered is not None else grid_from_msg(msg)
+        self._shift = self._shift if self._offered is not None else None
+        self._offered = None
         self._grid = grid
-        with self._episode:  # a candidate found on the old map is evidence about nothing here
-            self._watch = LostWatch(**self._watch_args)  # type: ignore[arg-type]
-            self._pending_seed = None
-            self._candidates.forget()
-            self._measurements.forget()  # nor is a pose measured against the old one
-            self._graph.forget()  # nor the graph's word about it
+        # A CHANGE OF THE PICTURE IS NOT A REASON TO FORGET THE EPISODE. It used to be: every
+        # adoption dropped the LostWatch's streak, the pending seed and all three gates' words, and
+        # with a live graph re-rendering the grid every second that meant a tracker that never
+        # accumulated evidence about anything — 59 adoptions in the first minutes of the first live
+        # run (2026-09-19). The evidence is about the ROOM, and a re-render is the same room; what
+        # makes it evidence about nothing is a change of FRAME, which is exactly the case where the
+        # pose could not be carried.
+        reseated = carried is None
+        self._forget_episode() if reseated else None
         self._matcher = CorrelativeMatcher(self._grid)
         self._static_mask = StaticMask(self._grid, float(self._switches["map_grow"]))
         # lost_after huge: update() must never run a whole-map search in the executor thread on
@@ -1403,8 +1458,36 @@ class Relocalizer(Node):
         # accepted, and a carry onto a map that is NOT this room is caught by the fresh
         # LostWatch above, which re-seeds through the whole-map search like any other loss.
         self._tracker_initialised = carried is not None
-        self._motion.reset()
-        self._last_match_stamp_s = None  # the next match is the first one on this map
+        # The belief's own uncertainty survives too — the spread is not rebuilt with the tracker —
+        # widened by what THIS change can account for and nothing else: the map's translation
+        # (pepin.mapping.MapShift.widen_m). A bend of 0.35 m moved the room under a pose measured
+        # against the room before it; six flickering cells moved nothing, and charging the pose for
+        # them is how a parked cart at fit 0.97 came to report 0.52 m of sigma (2026-09-19).
+        self._spread.covariance = widened(
+            self._spread.covariance, 0.0 if self._shift is None else self._shift.widen_m
+        )
+        # The match cadence is the CART's, not the map's. Resetting these at every adoption made
+        # every match "the first match on this map": dt_s None, so the rest lock fell back to its
+        # gain of 0.05 instead of its 6 s time constant, at every single match, for ever (live
+        # 2026-09-19: "rest-locked 1 (dt - s, gain 0.05/0.05/0.05)"). A re-seated tracker is a
+        # different matter — there the cart really is somewhere else now.
+        self._motion.reset() if reseated else None
+        self._last_match_stamp_s = None if reseated else self._last_match_stamp_s
+        # ...and every id of this room, so a word stamped with the grid the laptop had a second ago
+        # is still evidence about the room the tracker is in (pepin.mapping.MapChain).
+        self._chain.adopted(self._map_id, new_frame=reseated)
+
+    def _forget_episode(self) -> None:
+        """Throw away everything this tracker had gathered about WHERE it is: the loss streak, the
+        pending seed and all three gates' waiting words. Only for an adoption the pose could not be
+        carried across — a cold-boot cache replaced by a live grid, a database born since, a map of
+        another place — because then the evidence really is about a room that is no longer here."""
+        with self._episode:  # a candidate found on the old map is evidence about nothing here
+            self._watch = LostWatch(**self._watch_args)  # type: ignore[arg-type]
+            self._pending_seed = None
+            self._candidates.forget()
+            self._measurements.forget()  # nor is a pose measured against the old one
+            self._graph.forget()  # nor the graph's word about it
 
     def _on_scan(self, msg: LaserScan) -> None:
         """The lidar's revolution, moved into base_link by the mount looked up once."""
@@ -1579,7 +1662,7 @@ class Relocalizer(Node):
             candidate,
             self._tracked_pose(),
             self.fit if self._fit_is_local else 0.0,
-            map_id=self._map_id,
+            map_id=self._chain.accepted(candidate.map_id, self._map_id),
             allow=(not self._navigating or only_localizer) and not (from_a_fan and lidar_alive),
             odometry=self._history,  # the trail the candidate is carried to this moment along
         )
@@ -1601,7 +1684,7 @@ class Relocalizer(Node):
         except (KeyError, TypeError, ValueError) as exc:
             self._measurements.malformed(str(exc))
             return
-        self._measurements.offer(remote, self._map_id)
+        self._measurements.offer(remote, self._chain.accepted(remote.map_id, self._map_id))
         self._track_pending()
 
     def _on_graph_measurement(self, msg: String) -> None:
@@ -1616,7 +1699,7 @@ class Relocalizer(Node):
         except (KeyError, TypeError, ValueError) as exc:
             self._graph.malformed(str(exc))
             return
-        self._graph.offer(remote, self._map_id)
+        self._graph.offer(remote, self._chain.accepted(remote.map_id, self._map_id))
         self._track_pending()
 
     def _track_on_measurements(self, now: float) -> None:
@@ -1783,6 +1866,10 @@ class Relocalizer(Node):
             else None
         )
         self._last_scan_age_s = now - scan.stamp
+        # How far this revolution reached: the radius inside which a cell that changes can still
+        # move a score, and so the radius that decides whether a re-rendered grid is worth a
+        # rebuild (pepin.mapping.MapShift.matters). One max over the 120 matched points.
+        self._scan_reach_m = scan_reach_m(scan.points, self._scan_reach_m)
         points, whole = deskewed(scan, self._history)
         self._deskew_failed += not whole
         # Slip: the wheels claim a step but the scan is the same picture as a tenth of a second ago.
@@ -2001,7 +2088,8 @@ class Relocalizer(Node):
             f"(drive under {DRIVE_SIGMA_M:.2f} m, a drive is cut over {LOST_SIGMA_M:.2f} m); "
             f"map {self._choice.source or 'none'}"
             f"{'' if self._cached is None else ' [' + self._cached.phrase() + ']'} "
-            f"(id {self._map_id or 'none'}, {self._choice.adoptions} adopted, "
+            f"(id {self._map_id or 'none'}, {self._chain.text()} this frame, "
+            f"{self._choice.adoptions} adopted, "
             f"{self._choice.take_ignored()} republications ignored{shift}); "
             f"{self._candidates.report()}; {self._measurements.report()}; "
             f"graph: {self._graph.report()}; "

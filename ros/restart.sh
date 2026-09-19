@@ -301,17 +301,22 @@ check_laptop() {
         pass 2.2 "depth stream: $value frames/s, law $n"
     fi
 
+    # JUDGED ON WHAT IT RECEIVES, NOT ON WHAT IT PAINTS. A parked cart integrates a view once and
+    # then recognises it as the same view for ever ("291/300 revolutions (97 %) were the same view
+    # again"), so a rate of PAINTED frames is near zero on a healthy node and this check read that
+    # as a dead one (2026-09-19). The frames it was handed is the liveness; "at bound" stays a
+    # failure because it means the volume's edge is refusing real observations.
     line="$(last '\]: fusion: ')"
-    value="$(sed -n 's/.*: fusion: [0-9]* frames (\([0-9.]*\)\/s.*/\1/p' <<<"$line")"
+    value="$(sed -n 's/.*: fusion: \([0-9]*\) frames.*/\1/p' <<<"$line")"
     n="$(sed -n 's/.*at bound \([0-9]*\)[^0-9].*/\1/p' <<<"$line")"
     if [ -z "$line" ]; then
         fail 2.3 "depth fusion: no report line (ros/laptop.sh logs vslam)"
-    elif ! over "$value" 5; then
-        fail 2.3 "depth fusion: ${value:-no} frames/s (over 5 expected)"
+    elif ! over "$value" 0; then
+        fail 2.3 "depth fusion: ${value:-no} frames received in the window — the camera is not reaching it"
     elif [ "${n:-0}" -ne 0 ] 2>/dev/null; then
-        fail 2.3 "depth fusion: $value frames/s but $n frames refused at bound (the volume's edge: the seed map and the lattice)"
+        fail 2.3 "depth fusion: $value frames but $n refused at bound (the volume's edge)"
     else
-        pass 2.3 "depth fusion: $value frames/s, at bound 0"
+        pass 2.3 "depth fusion: $value frames received, at bound 0"
     fi
 
     line="$(last '\]: vo: ')"
@@ -356,15 +361,19 @@ check_laptop() {
 
     # ...and the graph's own word to the board's tracker (pepin_bringup.rtabmap_frame): it is one
     # measurement among the tracker's sources now, never a correction, so what this asks is whether
-    # the node hears RTAB-Map at all — /rtabmap/info arriving is the whole of its input.
+    # the node hears RTAB-Map at all. The fragment is a LITERAL of that node's own line —
+    # "rtabmap frame: 118 updates, 0 recognised a node, 118 localisations heard, 0 words (...)" —
+    # because the previous wording ("over N infos") had been gone for a day and this check failed a
+    # healthy node on it (2026-09-19).
     line="$(last '\]: rtabmap frame: ')"
-    n="$(sed -n 's/.*over \([0-9]*\) infos.*/\1/p' <<<"$line")"
+    n="$(sed -n 's/.*rtabmap frame: \([0-9]*\) updates.*/\1/p' <<<"$line")"
+    value="$(sed -n 's/.*, \([0-9]*\) localisations heard.*/\1/p' <<<"$line")"
     if [ -z "$line" ]; then
         fail 2.10 "rtabmap frame: no report line (ros/laptop.sh logs vslam)"
     elif [ "${n:-0}" -eq 0 ] 2>/dev/null; then
-        fail 2.10 "rtabmap frame: over 0 infos — it hears nothing from RTAB-Map (/rtabmap/info is not arriving)"
+        fail 2.10 "rtabmap frame: 0 updates — it hears nothing from RTAB-Map (/rtabmap/info is not arriving)"
     else
-        pass 2.10 "rtabmap frame: RTAB-Map heard over $n infos"
+        pass 2.10 "rtabmap frame: $n updates from RTAB-Map, ${value:-0} localisations heard"
     fi
 
     check_foxglove
