@@ -177,6 +177,24 @@
       ],
       "minLogLevel": 2,
       "nameFilter": {}
+    },
+    "Image!head": {
+      "cameraState": {},
+      "followMode": "follow-pose",
+      "imageMode": {
+        "imageTopic": "/camera/image",
+        "calibrationTopic": "/camera/camera_info",
+        "synchronize": false,
+        "rotation": 0,
+        "flipHorizontal": false,
+        "flipVertical": false
+      },
+      "scene": {},
+      "transforms": {},
+      "topics": {},
+      "layers": {},
+      "publish": {},
+      "foxglovePanelTitle": "head camera"
     }
   },
   "globalVariables": {},
@@ -187,7 +205,12 @@
   "layout": {
     "direction": "row",
     "first": "3D!room",
-    "second": "RosOut!log",
-    "splitPercentage": 80
+    "second": {
+      "direction": "column",
+      "first": "Image!head",
+      "second": "RosOut!log",
+      "splitPercentage": 60
+    },
+    "splitPercentage": 68
   }
 }
