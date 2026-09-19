@@ -62,7 +62,7 @@ from pepin.deployment import (
     next_transition,
 )
 from pepin.flags import Flag, FlagSet
-from pepin.places import heading_residual_deg
+from pepin.places import PLACES_TOPIC, heading_residual_deg, places_from_json
 from pepin.runlink import (
     RUN_COMMAND_TOPIC,
     RUN_STATUS_TOPIC,
@@ -207,6 +207,19 @@ class GoalServer(Node):
         self._correction_at: float | None = None
         self.create_subscription(TransformStamped, CORRECTION_TOPIC, self._on_correction, 5)
         self._gate = GoalGate()
+        # THE ROOM'S PLACES, FROM THE GRAPH (World R). The laptop's places node republishes every
+        # named place as a pose in `map`, recomputed whenever the graph bends (latched, so the last
+        # known book survives a WiFi drop). Once it has been heard, a name means what IT says and
+        # nothing else: the yaml beside the old map holds coordinates of a frame that no longer
+        # exists, and on 2026-09-19 `go home` took (-9.39, +2.53) from it, the planner answered
+        # "Goal Coordinates ... outside bounds" and the behaviour tree spun recoveries.
+        self._graph_places: dict[str, dict[str, float]] | None = None
+        self.create_subscription(
+            String,
+            PLACES_TOPIC,
+            self._on_places,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
         # Latched: the behaviour tree reads its selector once, whenever it next ticks.
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._planner_pick = self.create_publisher(String, "planner_selector", latched)
@@ -488,8 +501,18 @@ class GoalServer(Node):
         else:
             self._send(connection, {"event": "error", "detail": f"unknown command {command!r}"})
 
+    def _on_places(self, msg: String) -> None:
+        """The graph's book, as the places node last published it."""
+        self._graph_places = {
+            name: {"x": place.x, "y": place.y, "yaw_deg": place.theta_deg or 0.0}
+            for name, place in places_from_json(msg.data).items()
+        }
+
     def places(self) -> dict[str, dict[str, float]]:
-        """The named places of the map in use; an absent book is an empty one."""
+        """The named places of the map in use: the graph's book once it has been heard — and then
+        ONLY it — else the file beside the map; an absent book is an empty one."""
+        if self._graph_places is not None:
+            return dict(self._graph_places)
         try:
             data: dict[str, dict[str, float]] = json.loads(self._places_path.read_text())
             return data

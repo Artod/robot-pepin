@@ -166,14 +166,16 @@ if travel.heard == 0:
     finish(3, f"aborted: no odometry on /odometry/filtered or /odom within {ODOM_WAIT_S:.0f} s")
 if cone.scan is None:
     finish(3, "aborted: no /scan within the wait; the lidar guard cannot run")
+assert cone.scan is not None  # finish() above does not return
+laser_frame = cone.scan.header.frame_id
 try:
-    edge = tf_buffer.lookup_transform("base_link", cone.scan.header.frame_id, rclpy.time.Time())
+    edge = tf_buffer.lookup_transform("base_link", laser_frame, rclpy.time.Time())
     q = edge.transform.rotation
     cone.mount = (q.x, q.y, q.z, q.w)
 except Exception as error:
     finish(
         3,
-        f"aborted: no base_link <- {cone.scan.header.frame_id} in TF ({error}); a guard that"
+        f"aborted: no base_link <- {laser_frame} in TF ({error}); a guard that"
         " does not know where the lidar points cannot run",
     )
 front, back = cone.nearest(0.0), cone.nearest(math.pi)
