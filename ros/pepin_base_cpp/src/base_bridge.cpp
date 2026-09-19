@@ -26,6 +26,10 @@
 // executor). Wheel odometry over-reports a turn in place by 10-25% on carpet; the fix is
 // a gyro yaw rate fused with the wheels in an EKF, configured outside this node. The IMU
 // is optional in the strong sense: nothing about it can stop the wheels from working.
+//
+// The gyro's ZERO is re-measured for as long as the node lives, from the rest the WHEELS witness:
+// the chip's bias moves with temperature, and a zero taken once at boot turned RTAB-Map's map
+// +27 deg in 40 min under a parked cart. See gyro_bias.hpp, witness_rest() and read_imu().
 
 #include <algorithm>
 #include <array>
@@ -33,6 +37,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -48,6 +53,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include "pepin_base_cpp/gyro_bias.hpp"
 #include "pepin_base_cpp/link.hpp"
 #include "pepin_base_cpp/mpu6050.hpp"
 #include "pepin_base_cpp/protocol.hpp"
@@ -63,6 +69,17 @@ constexpr double kStatusHz = 2.0;  // how often link up/down transitions are log
 constexpr double kGyroStdDev = 0.02;   // rad/s
 constexpr double kAccelStdDev = 0.5;   // m/s^2
 constexpr double kRadToDeg = 57.29577951308232;
+
+// TwistFromPose's own max_gap_s, named here because a second reader needs the same number: a
+// state stream with a gap this long is not a measurement, so the estimator re-primes AND the rest
+// the wheels were witnessing is over (witness_rest, still_witness). One number, two users.
+constexpr double kStateGapMaxS = 1.0;
+
+// The wheels' word crosses to the IMU thread through plain atomic doubles, so the 50 Hz loop
+// never waits on the reader thread's lock. On anything ROS 2 runs on these are single
+// instructions; the assert is here so a port that changes that fails to build instead of
+// silently taking a mutex inside std::atomic.
+static_assert(std::atomic<double>::is_always_lock_free, "the IMU loop must not lock");
 
 /// Bridges the base server to ROS: /odom and odom->base_link out, /cmd_vel down to wheels.
 class BaseBridge : public rclcpp::Node
@@ -105,6 +122,15 @@ public:
     const auto up = declare_parameter<std::string>("imu_up_axis", "y");
     imu_up_axis_ = up.empty() ? 'z' : static_cast<char>(std::tolower(up[0]));
     imu_bias_s_ = declare_parameter<double>("imu_bias_s", 2.0);
+    // KEEPING THE GYRO'S ZERO HONEST (CLAUDE.md rule 19; gyro_bias.hpp has the measurements).
+    // On, the bias is re-measured from every block of rest the wheels witness, for as long as the
+    // node lives. Off is what this node shipped with: one block over the first `imu_bias_s` after
+    // start, subtracted forever — and the chip's bias moves with temperature, so hours later the
+    // EKF's yaw crept +0.19, -0.54 and +0.67 deg/min in one night on a cart whose wheels read
+    // 0.00, and RTAB-Map's map turned +27 deg in 40 min under it (2026-09-19). Read per sample,
+    // so `ros2 param set /base_bridge imu_bias_tracking false` compares the two without a restart
+    // (it takes effect at the next block: switching mid-block abandons the block in progress).
+    imu_bias_tracking_ = declare_parameter<bool>("imu_bias_tracking", true);
     // WHAT /odom's TWIST MEANS. The base server's state line reports v and w as the twist it
     // was COMMANDED to apply -- snapshot() copies self.twist, which is whatever /cmd_vel last
     // asked for (src/pepin/base_server.py:466) -- while its x/y/theta are integrated from the
@@ -174,6 +200,15 @@ private:
       std::chrono::duration<double>(seconds));
   }
 
+  /// Monotonic seconds: the one clock the IMU thread, the reader thread and the bias tracker
+  /// share. Not the ROS clock on purpose — this measures durations on the board, and a clock
+  /// that can be stepped or replayed has no business deciding how long a cart has stood still.
+  static double monotonic_s()
+  {
+    return std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+
   /// Reader thread: publish a state line at once; anything else (a pong) is ignored.
   void on_state_line(const nlohmann::json & message)
   {
@@ -189,7 +224,7 @@ private:
     const bool publish = get_parameter("odom_publish").as_bool();
     odom_publish_ = publish;
     if (!publish) {
-      twist_from_pose_.reset();  // the gap this mute makes is not a measurement
+      forget_wheel_twist();  // the gap this mute makes is not a measurement
       return;
     }
     const auto stamp = now();
@@ -245,11 +280,37 @@ private:
     const auto source = get_parameter("odom_twist_source").as_string();
     const bool measured = source != "commanded";
     twist_measured_ = measured;
-    if (!measured) {
-      twist_from_pose_.reset();
-      return BodyTwist{state.v, state.w};
-    }
-    return twist_from_pose_.update(state.x, state.y, state.theta, state.stamp_s);
+    // Differenced on every line whatever /odom ends up carrying: the measured twist is also the
+    // wheels' word on whether the cart is standing still, which the gyro's bias needs in both
+    // modes (witness_rest below), and a switch back to "measured" then has a real twist at once
+    // instead of one re-priming zero. `commanded` changes what is published, not what is measured.
+    const auto wheels = twist_from_pose_.update(state.x, state.y, state.theta, state.stamp_s);
+    witness_rest(state, wheels);
+    return measured ? wheels : BodyTwist{state.v, state.w};
+  }
+
+  /// Reader thread: publish the wheels' word on rest for the gyro's zero (RestWitness has the
+  /// rules and the reasons). Two atomic stores, so the 50 Hz IMU loop never waits on this thread.
+  void witness_rest(const BaseState & state, const BodyTwist & wheels)
+  {
+    const bool twist_is_zero = wheels.linear == 0.0 && wheels.angular == 0.0;
+    still_since_.store(
+      rest_witness_.judge(state.stamp_s, monotonic_s(), state.moving, twist_is_zero));
+    witness_at_.store(rest_witness_.at());
+  }
+
+  /// Re-prime the wheels' twist, and with it the rest it was witnessing.
+  void forget_wheel_twist()
+  {
+    twist_from_pose_.reset();
+    rest_witness_.forget();
+    still_since_.store(0.0);
+  }
+
+  /// IMU thread: the time since which the WHEELS have witnessed rest, or 0 when they have not.
+  double still_witness(double now) const
+  {
+    return rest_witnessed(still_since_.load(), witness_at_.load(), now, kStateGapMaxS);
   }
 
   /// Forward a twist at once (clamped to the ceiling); remember it until it goes stale.
@@ -298,21 +359,53 @@ private:
   std::string switch_state() const
   {
     return std::string("imu_publish=") + (imu_publish_ ? "on" : "off") + " odom_publish=" +
-           (odom_publish_ ? "on" : "off");
+           (odom_publish_ ? "on" : "off") + " imu_bias_tracking=" +
+           (imu_bias_tracking_ ? "on" : "off");
+  }
+
+  /// The gyro's zero as a report line prints it: the bias, the rest blocks behind it, its age.
+  ///
+  /// ``gyro bias +0.001 -0.028 +0.074 deg/s, 12 rest blocks of 100 samples, last 34 s ago`` — the
+  /// line the static check reads to see that blocks keep arriving under a parked cart. Written
+  /// from the IMU thread's atomics, so the status timer may print it without waiting for a sample.
+  std::string gyro_bias_state() const
+  {
+    char line[192];
+    const long blocks = bias_blocks_.load();
+    if (blocks == 0) {
+      std::snprintf(line, sizeof(line), "gyro bias: no rest block yet, nothing published");
+      return line;
+    }
+    std::snprintf(
+      line, sizeof(line),
+      "gyro bias %+.3f %+.3f %+.3f deg/s, %ld rest block%s of %ld samples, last %.0f s ago",
+      bias_x_.load() * kRadToDeg, bias_y_.load() * kRadToDeg, bias_z_.load() * kRadToDeg,
+      blocks, blocks == 1 ? "" : "s", bias_block_samples_.load(),
+      monotonic_s() - bias_at_.load());
+    return line;
   }
 
   /// Say it once whenever the link comes up or goes down, with the switches that decide
-  /// whether anything is published at all (CLAUDE.md rule 19).
+  /// whether anything is published at all (CLAUDE.md rule 19) — and once a minute, whatever the
+  /// link does, where the gyro's zero stands.
+  ///
+  /// The periodic line lives on this timer rather than on the IMU thread so its "last block N s
+  /// ago" is a real age: on a parked cart it is what shows that rest blocks keep arriving, and on
+  /// a cart that never stands still it is what shows they do not.
   void log_link_status()
   {
+    if (imu_publisher_) {
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 60000, "%s", gyro_bias_state().c_str());
+    }
     const auto change = link_->take_status_change();
     if (!change.has_value()) {
       return;
     }
     if (change->first) {
       RCLCPP_INFO(
-        get_logger(), "%s; odom twist: %s, %s", change->second.c_str(),
-        twist_measured_ ? "measured" : "commanded", switch_state().c_str());
+        get_logger(), "%s; odom twist: %s, %s; %s", change->second.c_str(),
+        twist_measured_ ? "measured" : "commanded", switch_state().c_str(),
+        gyro_bias_state().c_str());
     } else {
       RCLCPP_WARN(get_logger(), "%s", change->second.c_str());
     }
@@ -331,6 +424,8 @@ private:
       imu_device_.c_str(), static_cast<int>(imu_rate_hz_),
       static_cast<unsigned>(imu_.who_am_i()), imu_up_axis_, imu_frame_.c_str());
     imu_publisher_ = create_publisher<sensor_msgs::msg::Imu>("imu/data_raw", 10);
+    gyro_bias_ = GyroBiasTracker(imu_bias_s_, imu_rate_hz_);
+    bias_block_samples_ = gyro_bias_.block_samples();
     imu_running_ = true;
     imu_thread_ = std::thread([this] {read_imu();});
   }
@@ -345,22 +440,26 @@ private:
     imu_.close_device();
   }
 
-  /// IMU thread: estimate the gyro bias while the cart stands still, then publish forever.
+  /// IMU thread: keep the gyro's zero from the wheels' rest, and publish once there is one.
   ///
-  /// Nothing is published during the bias window on purpose — a raw yaw rate offset fed to
-  /// the EKF exactly while it initialises is worse than no measurement at all.
+  /// Nothing is published before a bias exists on purpose — a raw yaw rate offset fed to the EKF
+  /// exactly while it initialises is worse than no measurement at all. Under `imu_bias_tracking`
+  /// that is no longer a stopwatch but the wheels' word: the cart may be rolling when this node
+  /// starts (the old code could not know, and took the roll as its zero), so the first block waits
+  /// for witnessed rest however long that takes, and says so every 10 s while it waits.
   void read_imu()
   {
     const auto tick = period(1.0 / imu_rate_hz_);
     auto next = std::chrono::steady_clock::now();
-    const auto bias_until = next + period(imu_bias_s_);
-    double bias_x = 0.0;
-    double bias_y = 0.0;
-    double bias_z = 0.0;
-    long samples = 0;
-    bool calibrating = imu_bias_s_ > 0.0;
-    if (calibrating) {
-      RCLCPP_INFO(get_logger(), "gyro bias: hold still for %.1f s", imu_bias_s_);
+    const double boot_s = monotonic_s();
+    // `imu_bias_tracking` off is the contract this node shipped with: one block, taken on trust
+    // the moment the node starts, never replaced. Dating the last motion one block before the
+    // start declares the settle window already over, which is exactly what it used to do.
+    const double assumed_motion_at = boot_s - imu_bias_s_;
+    if (imu_bias_s_ > 0.0) {
+      RCLCPP_INFO(
+        get_logger(), "gyro bias: %ld samples (%.1f s) per rest block, %.1f s of settling first",
+        gyro_bias_.block_samples(), imu_bias_s_, imu_bias_s_);
     }
     while (imu_running_) {
       next += tick;
@@ -379,26 +478,42 @@ private:
           get_logger(), *get_clock(), 5000, "IMU read failed: %s", error.c_str());
         continue;
       }
-      if (calibrating) {
-        bias_x += sample->gyro_x;
-        bias_y += sample->gyro_y;
-        bias_z += sample->gyro_z;
-        ++samples;
-        if (std::chrono::steady_clock::now() < bias_until) {
-          continue;
+      const double t = monotonic_s();
+      const bool tracking = get_parameter("imu_bias_tracking").as_bool();
+      imu_bias_tracking_ = tracking;
+      bool took_block = false;
+      if (tracking) {
+        took_block = gyro_bias_.update(
+          t, sample->gyro_x, sample->gyro_y, sample->gyro_z, still_witness(t));
+      } else if (!gyro_bias_.ready()) {
+        took_block = gyro_bias_.update(
+          t, sample->gyro_x, sample->gyro_y, sample->gyro_z, assumed_motion_at);
+      }
+      if (took_block) {
+        const GyroBias bias = gyro_bias_.bias();
+        bias_x_ = bias.x;
+        bias_y_ = bias.y;
+        bias_z_ = bias.z;
+        bias_blocks_ = gyro_bias_.blocks();
+        bias_at_ = t;
+        if (gyro_bias_.blocks() == 1) {
+          // The one block worth a line of its own: the IMU starts publishing on it. Every block
+          // after it is a parked cart's routine, reported once a minute by log_link_status.
+          RCLCPP_INFO(get_logger(), "%s; imu/data_raw is live", gyro_bias_state().c_str());
         }
-        calibrating = false;
-        if (samples > 0) {
-          bias_x /= static_cast<double>(samples);
-          bias_y /= static_cast<double>(samples);
-          bias_z /= static_cast<double>(samples);
+      }
+      if (!gyro_bias_.ready()) {
+        if (t - boot_s > 2.0 * imu_bias_s_) {  // settle plus block: the earliest one can close
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 10000,
+            "gyro bias: the wheels have not witnessed %.1f s of rest (%.1f s after the last "
+            "motion) in %.0f s; imu/data_raw stays silent. Is the cart moving, is /odom muted, "
+            "is the base link up? `imu_bias_tracking false` takes the old boot-only bias.",
+            imu_bias_s_, imu_bias_s_, t - boot_s);
         }
-        RCLCPP_INFO(
-          get_logger(), "gyro bias %.3f %.3f %.3f deg/s over %ld samples",
-          bias_x * kRadToDeg, bias_y * kRadToDeg, bias_z * kRadToDeg, samples);
         continue;
       }
-      publish_imu(*sample, bias_x, bias_y, bias_z);
+      publish_imu(*sample, gyro_bias_.bias());
     }
   }
 
@@ -427,7 +542,7 @@ private:
   }
 
   /// One sample as sensor_msgs/Imu, unless ``imu_publish`` is off — then nothing goes out.
-  void publish_imu(const ImuSample & sample, double bias_x, double bias_y, double bias_z)
+  void publish_imu(const ImuSample & sample, const GyroBias & bias)
   {
     const bool publish = get_parameter("imu_publish").as_bool();
     imu_publish_ = publish;
@@ -440,8 +555,8 @@ private:
     message.orientation_covariance[0] = -1.0;  // the ROS way to say "no orientation here"
     double gyro[3];
     double accel[3];
-    to_base_axes(imu_up_axis_, sample.gyro_x - bias_x, sample.gyro_y - bias_y,
-      sample.gyro_z - bias_z, gyro);
+    to_base_axes(imu_up_axis_, sample.gyro_x - bias.x, sample.gyro_y - bias.y,
+      sample.gyro_z - bias.z, gyro);
     to_base_axes(imu_up_axis_, sample.accel_x, sample.accel_y, sample.accel_z, accel);
     message.angular_velocity.x = gyro[0];
     message.angular_velocity.y = gyro[1];
@@ -473,9 +588,26 @@ private:
   std::atomic<bool> twist_measured_{true};  // read by the status timer, written by the reader
   std::atomic<bool> imu_publish_{true};   // what the report line says; written by the IMU thread
   std::atomic<bool> odom_publish_{true};  // ... and this one by the reader thread
-  TwistFromPose twist_from_pose_;  // touched from the reader thread only
+  std::atomic<bool> imu_bias_tracking_{true};  // ... and this one by the IMU thread too
+  TwistFromPose twist_from_pose_{kStateGapMaxS};  // touched from the reader thread only
+  RestWitness rest_witness_{kStateGapMaxS};       // ... and so is this one
   std::array<double, 36> pose_covariance_{};
   std::array<double, 36> twist_covariance_{};
+
+  // THE WHEELS' WORD ON REST, from the reader thread to the IMU thread (witness_rest,
+  // still_witness). Two doubles instead of a lock: the 50 Hz loop must never wait on a TCP
+  // reader, and a torn read is impossible for a lock-free atomic double (see the static_assert).
+  std::atomic<double> still_since_{0.0};  // monotonic start of the rest spell; 0 = not at rest
+  std::atomic<double> witness_at_{0.0};   // when a state line last judged it; staleness is silence
+  // The gyro's zero, and the same numbers again for whoever prints the report line. Owned by the
+  // IMU thread exactly as twist_from_pose_ is owned by the reader thread.
+  GyroBiasTracker gyro_bias_;
+  std::atomic<double> bias_x_{0.0};
+  std::atomic<double> bias_y_{0.0};
+  std::atomic<double> bias_z_{0.0};
+  std::atomic<long> bias_blocks_{0};
+  std::atomic<long> bias_block_samples_{0};
+  std::atomic<double> bias_at_{0.0};
 
   std::mutex mutex_;  // guards the command the resend timer repeats
   std::optional<std::pair<double, double>> command_;

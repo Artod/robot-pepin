@@ -86,7 +86,7 @@
         },
         {
           "name": "base_bridge",
-          "role": "wheel speeds and odometry over TCP 3336, /cmd_vel in, /odom out (C++ build when base_bridge_cpp:=true, else its own Python process)"
+          "role": "wheel speeds and odometry over TCP 3336, /cmd_vel in, /odom out, and the MPU6050's yaw rate as imu/data_raw whose zero is re-measured from the rest the wheels witness (C++ build when base_bridge_cpp:=true, else its own Python process)"
         },
         {
           "name": "base_to_laser",
