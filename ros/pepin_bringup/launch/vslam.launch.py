@@ -218,11 +218,23 @@ RTABMAP = {
     # carry beside Reg/Strategy and Grid/Sensor (pepin.graphmode.REGISTRATION_PARAMETERS). True
     # while there is a scan: unrefined, a parked cart's map turned +27 deg in 40 min with the
     # gyro's bias (2026-09-19); refined, it held to a degree. The cost recorded above still stands.
-    "RGBD/NeighborLinkRefining": "true",
+    # False since the gyro's bias is tracked at rest (pepin.graphmode has the measurement): refined
+    # links made RGBD/OptimizeMaxError reject 87 closures on the first real drive.
+    "RGBD/NeighborLinkRefining": "false",
     "Rtabmap/DetectionRate": "1.0",
     # appearance: GFTT/ORB words, a few hundred per image
     "Kp/DetectorStrategy": "8",
     "Kp/MaxFeatures": "400",
+    # ONE FRAME ACROSS SESSIONS. Without this, every time the memory goes (back) to mapping beside
+    # a loaded database RTAB-Map opens a NEW map rooted at the odometry's pose, unlinked to the old
+    # one until some later closure: /rtabmap/mapGraph then carries that one new node, the grid is
+    # re-rendered from it alone in the ODOMETRY's frame, and the tracker, the places and the
+    # costmaps all find themselves in another frame. Live 2026-09-19 at the bookshelf: "places: 3
+    # in the book, 0 the graph can place (68 graphs, 1 nodes)", the tracker at (-1.60, -1.13) —
+    # the odometry's coordinates — with the cart standing on the place marked (-2.72, -1.22).
+    # With it, a new map is started only ON a closure with the previous one, so its first node is
+    # already tied to the old graph and the frame never changes.
+    "Rtabmap/StartNewMapOnLoopClosure": "true",
     "Mem/RehearsalSimilarity": "0.30",
     # What a node costs on disk. Measured on the known map's database 2026-09-14 (20.93 GB,
     # 33020 nodes, 85 m travelled, one evening): 634 KB a node, of which the depth PNG is 432 KB,
@@ -271,7 +283,8 @@ RTABMAP = {
     # 0=scan, 1=depth, 2=both. The START value is the scan, and the value FOLLOWS what the
     # snapshots carry at run time beside Reg/Strategy (pepin.graphmode.REGISTRATION_PARAMETERS,
     # set by rtabmap_frame through update_parameters): a node with a scan gives the grid its scan,
-    # a node without one gives its depth. "Both" (2) was tried first and measured on the parked
+    # a node without one adds nothing (the value does NOT follow the snapshots: a change
+    # re-renders the WHOLE grid, 2026-09-19). "Both" (2) was tried first and measured on the parked
     # cart 2026-09-19: the mono network's smeared depth beside the lidar's walls made a newborn map
     # of ~2000 occupied cells on 5 x 4 m, the lidar tracker's match on it went flat (sigma 0.47 m /
     # 34 deg at fit 0.97, the pose wandering 10 cm and 4 deg in 90 s on a still map); from the scan
@@ -775,7 +788,13 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # get_subscription_count gate, and map_cleanup drops the per-node grid cache when the last
     # subscriber goes): the board's tracker and the operator's Foxglove are what keep it alive, and
     # a bridge with no route for /map means a laptop that assembles no map at all.
-    remappings.append(("map", "/map"))
+    #   Since 2026-09-19 the grid reaches /map THROUGH pepin_bringup.rtabmap_frame (GRID_TOPIC ->
+    # MAP_TOPIC, flag grid_needs_tie): before this start has recognised a node of the database it
+    # loaded, RTAB-Map's graph is the current node alone and its grid is one scan drawn where the
+    # odometry puts the cart — the tracker adopted that, matched the scan on a picture of itself
+    # at fit 1.00 and stood 1.26 m off. /map still has ONE publisher, and that node's subscription
+    # is what keeps the grid being built.
+    remappings.append(("map", "/rtabmap/grid"))
     rtabmap = Node(
         package="rtabmap_slam",
         executable="rtabmap",
