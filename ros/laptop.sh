@@ -58,8 +58,39 @@ settle_bridge() {
 # (pepin_bringup.ghost_wait) still covers whatever a crash left behind. The window and the
 # signal are ros/lib.sh's, the same ones board/pepin-ros.service and the launches use; the 15 s
 # this used to spend was under RTAB-Map's own close of a 20 GB database.
-# The laptop image (ros/laptop-build.sh) carries RTAB-Map on top of the board's image.
-image() { docker image inspect pepin-laptop:latest >/dev/null 2>&1 && echo pepin-laptop || echo pepin-ros; }
+# The laptop image (ros/laptop-build.sh) carries RTAB-Map on top of the board's image. Under
+# PEPIN_RMW=zenoh the same image with rmw_zenoh_cpp in it: PEPIN_IMAGE overrides either.
+image() {
+    if [ -n "${PEPIN_IMAGE:-}" ]; then echo "$PEPIN_IMAGE"; return; fi
+    if pepin_rmw_is_zenoh; then echo pepin-laptop:zenoh; return; fi
+    docker image inspect pepin-laptop:latest >/dev/null 2>&1 && echo pepin-laptop || echo pepin-ros
+}
+# The middleware flags every node container here is given. Under cyclone this is the one flag
+# it has always had; under zenoh it is the session (a peer of THIS machine's router) plus
+# ZENOH_ROUTER_CHECK_ATTEMPTS=0, so a container started before the router survives and joins
+# when it appears instead of dying on the start order.
+RMW_ENV=(-e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp)
+if pepin_rmw_is_zenoh; then
+    RMW_ENV=(-e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e PEPIN_RMW=zenoh -e ZENOH_ROUTER_CHECK_ATTEMPTS=0
+             -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_session_override)")
+fi
+# One zenoh router per machine, and this is the laptop's. It is started before any node here and
+# left alone afterwards: a node's connect retry is infinite, so containers may come and go under
+# it, and it is the only process on this side that talks to the board. Started idempotently —
+# `ros/laptop.sh start` and `ros/laptop.sh vslam` both need it and either may come first.
+zrouter_up() {
+    pepin_rmw_is_zenoh || return 0
+    docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
+    if docker ps --format '{{.Names}}' | grep -qx "$PEPIN_ZROUTER_LAPTOP"; then
+        echo "laptop zenoh router already up ($PEPIN_ZROUTER_LAPTOP); left alone"; return 0
+    fi
+    pepin_remove_container "$PEPIN_ZROUTER_LAPTOP"  # the one gentle way to stop a container here
+    docker run -d --name "$PEPIN_ZROUTER_LAPTOP" --network "$NET" --restart unless-stopped \
+        -e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-7}" \
+        -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_router_override "$BOARD")" \
+        "$(image)" /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd >/dev/null
+    echo "laptop zenoh router up: $PEPIN_ZROUTER_LAPTOP, dialling tcp/$BOARD:$PEPIN_ZROUTER_PORT"
+}
 # The nodes a kick can reach here, the container each lives in and the line it prints once up
 # (the kick waits for that line): the Python modules of vslam.launch.py, and the goal server of
 # the navigation half (it runs here on side=board only; on side=all: ros/thin.sh kick goal_server).
@@ -101,7 +132,10 @@ MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/pyth
         -v /var/run/docker.sock:/var/run/docker.sock)
 case "${1:-start}" in
     stop)
+        # The router is this side's own, so a stop takes it too — but only under zenoh, so that
+        # a stop under cyclone touches exactly the three containers it always has.
         pepin_remove_container pepin-laptop pepin-vslam pepin-zenoh
+        if pepin_rmw_is_zenoh; then pepin_remove_container "$PEPIN_ZROUTER_LAPTOP"; fi
         [ "${PEPIN_DEPTH_HOST:-}" = 0 ] || "$HERE/depth_host.sh" stop
         echo "laptop side stopped"; exit 0 ;;
     logs)
@@ -177,6 +211,7 @@ case "${1:-start}" in
             echo "               ros/maps/*.world.npz are left untouched until it saves"
         fi
         pepin_remove_container pepin-vslam
+        zrouter_up  # under zenoh this half has no bridge to wait for, only its own router
         # The depth network on the laptop's GPU (ros/depth_host.sh): 20 ms a frame on Metal
         # against 170 ms on the CPU in the container (2026-09-11), so it is on wherever it can
         # run (depth_host_wanted). The node reads PEPIN_DEPTH_BACKEND (auto: the service, the
@@ -191,7 +226,7 @@ case "${1:-start}" in
             echo "depth network on the CPU in the container (PEPIN_DEPTH_HOST=1 for the GPU service)"
         fi
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
-            -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} \
+            -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} \
             "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null
         echo "vslam up (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and the board's tracker adopts it; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
@@ -232,6 +267,15 @@ fi
 printf '%s\n' "$MODE" > "$HERE/.mode"
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 pepin_remove_container pepin-laptop pepin-zenoh
+if pepin_rmw_is_zenoh; then
+    # No bridge on either side: this half's nodes are peers of this machine's router, and that
+    # router holds the one link to the board's. So none of the bridge choreography below applies
+    # — no waiting for the board's REST admin, no allow-list, and above all no settle_bridge:
+    # the ordering it exists to fix (of two bridges the one that starts LAST gets working routes)
+    # is a zenoh-bridge-ros2dds property, not a zenoh one. A restart of either router is
+    # recovered from by the nodes' own infinite connect retry.
+    zrouter_up
+else
 # The board's bridge must be alive before this side connects: its REST admin answers when its
 # zenoh runtime does (a wedged bridge stays "Up" and answers nothing — 2026-09-09).
 for _ in $(seq 1 30); do
@@ -253,10 +297,11 @@ docker run -d --name pepin-zenoh --init --network "$NET" -p 8001:8000 -v "$HERE/
     -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.7.0 -c /config.json \
     -e "tcp/$BOARD:7447" -d 7 --rest-http-port 8000 >/dev/null
 settle_bridge  # BEFORE the containers: their subscriptions must be made against the bridge they will live with
+fi
 if [ "$SIDE" != board ]; then
     echo "board on side=$SIDE, mode $MODE: it drives by itself; bridge up for the laptop's mapping (ros/laptop.sh vslam)"; exit 0
 fi
 docker run -d --name pepin-laptop --network "$NET" -p 3337:3337 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
-    -e ROS_DOMAIN_ID=7 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+    -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" \
     "$(image)" ros2 launch pepin_bringup nav.launch.py side:=laptop "map:=$MAP" "board:=$BOARD" >/dev/null
 echo "laptop side up: planner + goal server (port 3337 here), bridged to $BOARD; ros/laptop.sh logs"
