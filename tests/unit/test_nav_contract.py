@@ -17,6 +17,7 @@ import pytest
 import source_facts as sf
 import yaml
 
+from pepin.deployment import rmw_is_zenoh
 from pepin.flags import load_table
 from pepin.watch import PAINT_SIGMA_M
 
@@ -743,7 +744,12 @@ def test_the_laptop_half_restarts_with_the_board_s_bridge() -> None:
         assert "pepin_bringup.bridge_watch" in sf.strings(src), launch
         assert "Shutdown" in sf.calls(src), launch
     laptop = (REPO / "ros/laptop.sh").read_text()
-    assert laptop.count("--restart unless-stopped") == 2
+    # The two NODE containers restart on their own. Named, not counted: under
+    # PEPIN_RMW=zenoh this side also runs a router container with the same policy, and a
+    # bare count would have read that as one of the halves.
+    for container in ("pepin-vslam", "pepin-laptop"):
+        line = next(ln for ln in laptop.splitlines() if f"docker run -d --name {container} " in ln)
+        assert "--restart unless-stopped" in line, container
     lines = laptop.splitlines()
     settles = [i for i, line in enumerate(lines) if line.split("#")[0].strip() == "settle_bridge"]
     starts = [i for i, line in enumerate(lines) if "docker run -d --name pepin-laptop" in line]
@@ -2790,3 +2796,63 @@ def test_goto_s_cancel_cancels_a_goal_it_never_sent() -> None:
     assert cancelled < built, "no commander is built for a cancel: building one is what crashed"
     assert "rclpy.ok()" in ast.unparse(main), "a context already shut down refuses every call"
     assert "stop.sh" in " ".join(sf.strings(goto)), "the hard stop is named where cancel can fail"
+
+
+def test_rmw_switch_defaults_to_cyclone() -> None:
+    """PEPIN_RMW unset is the stack that has always run: no zenoh anywhere in what starts."""
+    assert not rmw_is_zenoh({}), "no PEPIN_RMW means CycloneDDS plus the bridges"
+    assert not rmw_is_zenoh({"PEPIN_RMW": "cyclone"})
+    assert rmw_is_zenoh({"PEPIN_RMW": "zenoh"})
+    lib = (REPO / "ros/lib.sh").read_text()
+    assert 'PEPIN_RMW="${PEPIN_RMW:-cyclone}"' in lib, "the shell default is cyclone too"
+    # The board's unit carries the same default, so a file without the line is the old stack.
+    unit = (REPO / "board/pepin-ros.service").read_text()
+    assert "Environment=PEPIN_RMW=cyclone" in unit
+    assert "EnvironmentFile=-/etc/default/pepin-ros" in unit, "the value survives a reboot"
+
+
+def test_rmw_zenoh_swaps_the_image_and_keeps_cyclone_byte_for_byte() -> None:
+    """ros/run.sh adds the middleware only under zenoh, and starts the same image otherwise."""
+    run = (REPO / "ros/run.sh").read_text()
+    assert 'IMAGE="${PEPIN_IMAGE:-pepin-ros}"' in run, "cyclone starts pepin-ros, as before"
+    assert 'IMAGE="${PEPIN_IMAGE:-pepin-ros:zenoh}"' in run, (
+        "zenoh starts the image with rmw_zenoh in it"
+    )
+    assert "RMW_IMPLEMENTATION=rmw_zenoh_cpp" in run
+    # Start order must not be able to kill a node: the router may not be up yet.
+    assert "ZENOH_ROUTER_CHECK_ATTEMPTS=0" in run
+    assert 'RMWENV=""' in run, "under cyclone the docker run line gains nothing at all"
+
+
+def test_zenoh_router_starts_before_the_stack_and_outlives_its_restarts() -> None:
+    """The board's router is its own unit: ordered before the stack, never dragged by it."""
+    unit = (REPO / "board/pepin-zrouter.service").read_text()
+    assert "Before=pepin-ros.service" in unit, "the router is up before the nodes that dial it"
+    assert "PartOf=" not in unit and "BindsTo=" not in unit, (
+        "a router restarted with every stack restart would drop the laptop's half each time"
+    )
+    assert "Restart=always" in unit
+    assert "--network host" in unit, "the board's nodes reach it over the host loopback"
+    assert "rmw_zenohd" in unit
+    assert "WantedBy=multi-user.target" in unit, "it comes back on its own after a reboot"
+
+
+def test_zenoh_runs_no_bridge_anywhere() -> None:
+    """Under zenoh nothing bridge-shaped starts: not the sidecar, not the watch of it."""
+    bridge_unit = (REPO / "board/pepin-bridge.service").read_text()
+    assert bridge_unit.count('[ "$PEPIN_RMW" != zenoh ]') == 4, (
+        "every guard of the bridge unit — both ExecStartPre, ExecStart and ExecStartPost — "
+        "stands the unit down under zenoh"
+    )
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert "zrouter_up" in laptop, "the laptop starts its own router instead of the bridge"
+    assert "if pepin_rmw_is_zenoh; then" in laptop
+    # The bridge path itself is untouched and still reachable under the default.
+    assert "settle_bridge" in laptop, "the cyclone path keeps its bridge choreography"
+    assert "eclipse/zenoh-bridge-ros2dds:1.7.0" in laptop
+    for launch in ("nav.launch.py", "vslam.launch.py"):
+        src = (REPO / "ros/pepin_bringup/launch" / launch).read_text()
+        assert "rmw_is_zenoh()" in src, (
+            f"{launch} must not start a watch of a bridge that is not there"
+        )
+        assert "pepin_bringup.bridge_watch" in src, f"{launch} keeps the watch for the cyclone path"
