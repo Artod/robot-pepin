@@ -22,6 +22,25 @@ I2C=""
 # and outside, and on tmpfs: nothing survives a reboot and nothing touches the SD card. NOT
 # under /root/pepin-ros — ros/sync.sh rsyncs that tree with --delete.
 mkdir -p /run/pepin
+# Which middleware this container speaks (ros/lib.sh has the whole story; the value comes from
+# /etc/default/pepin-ros through board/pepin-ros.service). Unset or "cyclone" leaves everything
+# exactly as it was: the image's own ENV is rmw_cyclonedds_cpp and nothing below is added.
+# "zenoh" swaps the image for one with rmw_zenoh_cpp in it and adds three variables:
+#   RMW_IMPLEMENTATION    the middleware itself
+#   PEPIN_RMW             read by the launches, which then start no bridge watch
+#   ZENOH_ROUTER_CHECK_ATTEMPTS=0  do not block on the router at start-up. The session's own
+#       connect retry is infinite for a peer (connect/timeout_ms -1, exit_on_failure false in
+#       the shipped session config), so a node started before pepin-zrouter comes up stays
+#       alive and joins when the router appears, instead of dying on a start-order race.
+# No session config is passed: the shipped default (peer, connect tcp/localhost:7447, listen
+# tcp/localhost:0) is already the shape the board wants — nodes talk to each other directly
+# over the host loopback, and only what leaves the board goes through the router.
+IMAGE="${PEPIN_IMAGE:-pepin-ros}"
+RMWENV=""
+if [ "${PEPIN_RMW:-cyclone}" = zenoh ]; then
+    IMAGE="${PEPIN_IMAGE:-pepin-ros:zenoh}"
+    RMWENV="-e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e PEPIN_RMW=zenoh -e ZENOH_ROUTER_CHECK_ATTEMPTS=0"
+fi
 # shellcheck disable=SC2086
 # Not auto-removed: a stopped container keeps its log until the unit's ExecStartPre has saved it.
 # --stop-signal SIGINT beside the image's own STOPSIGNAL (ros/Dockerfile): SIGINT is what ros2
@@ -41,5 +60,6 @@ exec docker run $TTY \
     -v "$HERE/maps:/maps" \
     -v /run/pepin:/run/pepin \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-7}" \
+    $RMWENV \
     --name pepin-ros \
-    pepin-ros "$@"
+    "$IMAGE" "$@"

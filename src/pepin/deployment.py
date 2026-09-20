@@ -9,7 +9,8 @@ recorder. The split is data, so a test can hold it and the launch file merely re
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import os
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -462,6 +463,19 @@ def bridge_config_name(side: str, mode: str = "split") -> str:
     if mode not in BRIDGE_MODES:
         raise ValueError(f"a bridge mode is one of {BRIDGE_MODES}, not {mode!r}")
     return f"zenoh-bridge-{side}.json" if mode == "split" else f"zenoh-bridge-{side}-{mode}.json"
+
+
+def rmw_is_zenoh(env: Mapping[str, str] | None = None) -> bool:
+    """Whether this process speaks rmw_zenoh_cpp rather than CycloneDDS plus the two
+    zenoh-bridge-ros2dds sidecars.
+
+    ``PEPIN_RMW`` is the one switch (ros/lib.sh has the whole story): unset or ``cyclone`` means
+    the stack that has always run, ``zenoh`` means one ``rmw_zenohd`` router per machine and no
+    bridge at all. A launch asks this to decide whether to start a watch of a bridge that does
+    not exist — under zenoh ``pepin_bringup.bridge_watch`` would find no admin, exit, and take
+    the whole launch down with it (its exit is wired to ``Shutdown``).
+    """
+    return (env if env is not None else os.environ).get("PEPIN_RMW", "cyclone") == "zenoh"
 
 
 def bridge_admin_for(side: str) -> str:

@@ -13,6 +13,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ros-jazzy-slam-toolbox \
         ros-jazzy-foxglove-bridge \
         ros-jazzy-rmw-cyclonedds-cpp \
+        ros-jazzy-rmw-zenoh-cpp \
         ros-jazzy-tf2-tools \
         ros-jazzy-rqt-graph \
         python3-colcon-common-extensions \

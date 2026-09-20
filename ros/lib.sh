@@ -20,6 +20,59 @@ export RSYNC_RSH="ssh $PEPIN_SSH_OPTS"
 # visual memory is the slowest thing in it — and docker SIGKILLs at its end, which is why the
 # database is also configured to survive a kill (DbSqlite3/JournalMode in vslam.launch.py).
 PEPIN_STOP_TIMEOUT_S="${PEPIN_STOP_TIMEOUT_S:-30}"  # = pepin.deployment.CONTAINER_STOP_TIMEOUT_S
+
+# Which middleware the stack speaks. cyclone (the default) is CycloneDDS with the two
+# zenoh-bridge-ros2dds sidecars that carry the graph across the Mac's NAT; zenoh is
+# rmw_zenoh_cpp with one rmw_zenohd router per machine and no bridge at all. Nothing but this
+# variable changes between them, and with it unset every script starts exactly what it did
+# before. The board reads it from /etc/default/pepin-ros (board/pepin-ros.service's
+# EnvironmentFile), so it survives a reboot; the laptop reads it from the environment.
+#
+# The topology under zenoh, and why it is this one: rmw_zenoh's SHIPPED session default is
+# mode "peer", connect tcp/localhost:7447, listen tcp/localhost:0 — "accept incoming
+# connections only from localhost, all communications with other hosts are routed by the Zenoh
+# router". On the board (one host network namespace) that makes every node a peer of every
+# other over the loopback, so scan, tf, odometry and the costmaps never touch the router
+# process: measured 0.0 % router CPU for a 10 Hz x 100 kB flow, against 24 % when the same two
+# nodes are clients. So the board needs NO session config at all. The Mac's containers do not
+# share a loopback, so its nodes are told to gossip-connect to routers only and reach each
+# other through the Mac's own router — which never sends that traffic over the WiFi.
+PEPIN_RMW="${PEPIN_RMW:-cyclone}"
+PEPIN_ZROUTER_PORT="${PEPIN_ZROUTER_PORT:-7447}"
+PEPIN_ZROUTER_BOARD=pepin-zrouter          # the board's router container (host network)
+PEPIN_ZROUTER_LAPTOP=pepin-zrouter-laptop  # the laptop's router container (on pepin-net)
+pepin_rmw_is_zenoh() { [ "$PEPIN_RMW" = zenoh ]; }
+# What a node on the laptop is told: reach the laptop's router by container name, and listen on
+# the container's own address rather than on its loopback.
+#
+# The listen line is not cosmetic, it is the whole reason this side needs a config at all. The
+# shipped default is listen tcp/localhost:0, which assumes every peer shares one loopback — true
+# on the board (one host network namespace), false here, where pepin-laptop and pepin-vslam are
+# separate namespaces on pepin-net. With the default the two learn each other through gossip,
+# each dials the other's advertised tcp/127.0.0.1:<port> into its OWN loopback, and NOTHING is
+# delivered: measured 0 of ~220 messages at both 100 kB and 1 MB. And a router does not rescue
+# them — zenoh peers route peer-to-peer, so two peers that cannot reach each other cannot talk
+# even while both are attached to the same router (0 delivered with gossip autoconnect forced to
+# routers only). Listening on 0.0.0.0:0 makes the advertised locator the container's address on
+# pepin-net, which its neighbour can actually reach: 212 of ~220 delivered. The board never
+# learns these locators, because gossip multihop is off by default and the two routers are one
+# hop apart.
+#
+# The fallback, if a future Docker network ever makes container-to-container direct links
+# impossible: mode="client" with the same connect endpoint (214 of ~220 delivered, measured),
+# which routes everything on this machine through this machine's router. Never a client of the
+# BOARD's router — that would send this laptop's camera and depth traffic over the WiFi twice.
+pepin_zenoh_session_override() {
+    printf 'connect/endpoints=["tcp/%s:%s"];listen/endpoints=["tcp/0.0.0.0:0"]' \
+        "$PEPIN_ZROUTER_LAPTOP" "$PEPIN_ZROUTER_PORT"
+}
+# What the laptop's router is told: listen where the shipped router config already listens
+# (tcp/[::]:7447) and dial OUT to the board's router. Router-to-router is the only link that
+# crosses the WiFi, and it is made from this side because the board cannot reach into the
+# Docker VM's NAT.
+pepin_zenoh_router_override() {  # <board ip>
+    printf 'connect/endpoints=["tcp/%s:%s"]' "$1" "$PEPIN_ZROUTER_PORT"
+}
 pepin_stop_container() {  # NAME...: stop gently, leave the stopped container (a unit keeps its log)
     [ "$#" -gt 0 ] || return 0
     docker stop -t "$PEPIN_STOP_TIMEOUT_S" "$@" >/dev/null 2>&1 || true
