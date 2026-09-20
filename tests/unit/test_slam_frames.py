@@ -274,22 +274,26 @@ def test_in_slam_the_laptop_sends_the_correction_home_and_touches_no_tf() -> Non
     assert rtabmap_frame.MEASUREMENT_TOPIC not in node.pubs, "no word where there is no database"
 
 
-def test_the_word_is_the_localisation_itself_stamped_on_the_board_s_clock() -> None:
-    """One frame, so the word is RTAB-Map's own localisation carried through untouched. Its STAMP
-    is not: a localisation is stamped on the laptop's clock and judged on the board's, minutes
-    apart, so the stamp comes from the odom -> base_link transform the board broadcasts ("graph
-    stale 128.5 s", 2026-09-17)."""
+def test_the_word_is_the_localisation_itself_stamped_with_its_picture_s_moment() -> None:
+    """One frame, so the word is RTAB-Map's own localisation carried through untouched — and it
+    says where the cart was WHEN THE PICTURE WAS TAKEN, 0.1-1.4 s before the localisation is
+    published. Stamped "now" it put a turning cart 12-35 degrees behind the truth (tapes 0386 and
+    0388, 2026-09-19); stamped with its own moment, with the odometry looked up at that moment, the
+    board carries it to its update over its own odometry."""
     node = rtabmap_frame.RtabmapFrame()
     _map(node)
     _odom(node, 0.2, 0.0, seconds=7.0)
     _belief(node, 1.0, 2.0)
-    _match(node, matched=41, stamp=99.0)  # the laptop's own clock, minutes off the board's
-    _localize(node, 1.0, 2.0, stamp=99.0)
+    _match(node, matched=41, stamp=6.1)  # the picture is 0.9 s older than the newest odometry
+    _localize(node, 1.0, 2.0, stamp=6.1)
     (sent,) = node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent
     word = json.loads(sent.data)
     assert (word["x"], word["y"]) == (1.0, 2.0), "the localisation, as it came"
     assert word["source"] == "graph" and word["map"] == "3x4@1.00,2.00"
-    assert word["stamp"] == 7.0, "the board's clock, off its own odometry transform"
+    assert word["stamp"] == 6.1, "the picture's moment, not the moment the word was made"
+    target, source, asked, _timeout = node._lookup.buffer.calls[-1]
+    assert (target, source) == ("odom", "base_link")
+    assert asked.nanoseconds == 6_100_000_000, "and the odometry of THAT moment"
     assert word["node"] == 41 and node._words == 1 and node._sent == 1
     node.timers[1][1]()
     report = node.logger.texts("info")[-1]
@@ -559,6 +563,7 @@ def test_the_mode_follows_trust_in_the_pose_and_not_a_sensor_s_name() -> None:
     it kept a node a second — while in localisation mode with the updates ungated every update named
     a node. So the mode is switched live, on the rule and never on a flag alone."""
     node = rtabmap_frame.RtabmapFrame()
+    node._tied = True  # this start has already recognised a node of the map it loaded
     _ready(node)
     _map(node)
     _sources(node, holder="lidar")
@@ -616,6 +621,7 @@ def test_the_sharpness_gate_can_be_opened_in_the_field() -> None:
     where no seating is ever sharp — with the sigmas in the report line to read first."""
     with ros_stubs.parameters(graph_memory_sigma_m=1.0, graph_memory_sigma_deg=180.0):
         node = rtabmap_frame.RtabmapFrame()
+        node._tied = True  # this start has already recognised a node of the loaded map
         _ready(node)
         _map(node)
         _sources(node, holder="depth")
@@ -770,3 +776,98 @@ def test_a_parameter_path_that_is_not_up_is_counted_and_retried() -> None:
     assert node._strategy_failed == 1
     node._report()
     assert "switches the parameter path could not take" in node.logger.texts("info")[-1]
+
+
+def test_the_memory_never_maps_before_this_start_is_tied_to_the_loaded_map() -> None:
+    """A switch to mapping before RTAB-Map has recognised one node of the database it LOADED opens
+    a new map in the odometry's frame, unlinked to the old one (live 2026-09-19: 2 nodes in the
+    graph instead of 173, no place had a node to ride, the tracker 1.1 m off in odometry
+    coordinates). So by trust the verdict stays "localise" until an update names an OLDER node."""
+    node = rtabmap_frame.RtabmapFrame()
+    _ready(node)
+    _map(node)
+    _sources(node, holder="lidar")
+    _belief(node, 1.0, 2.0)
+    _fit(node, 0.7, at=0.0)  # everything the rule otherwise needs to say "map"
+    node.timers[0][1]()
+    assert not node.service_clients["/rtabmap/rtabmap/set_mode_mapping"].calls
+    node._first_ref, node._tied = 900, True  # an update named node 412 of the loaded map
+    for step in range(1, 60):  # past the rule's hold, with the evidence kept fresh
+        node.clock.seconds = step * 0.1
+        _sources(node, holder="lidar")
+        _belief(node, 1.0, 2.0)
+        _fit(node, 0.7, at=step * 0.1)
+        node.timers[0][1]()
+    assert node.service_clients["/rtabmap/rtabmap/set_mode_mapping"].calls
+
+
+def _grid(node: Any, stamp: float) -> None:
+    """One grid as RTAB-Map publishes it, stamped with the update it was assembled at."""
+    from nav_msgs.msg import OccupancyGrid
+
+    msg = OccupancyGrid()
+    msg.header = ros_stubs.Header(stamp=_stamp(stamp))
+    node.subs[rtabmap_frame.GRID_TOPIC][1](msg)
+
+
+def _update(node: Any, ref_id: int, matched: int = 0, stamp: float = 7.0) -> None:
+    """One /rtabmap/info naming the node this update CREATED and the older node it matched."""
+    info = _Info({}, loop_closure_id=matched, stamp=stamp)
+    info.ref_id = ref_id
+    node.subs[rtabmap_frame.INFO_TOPIC][1](info)
+
+
+def test_a_grid_is_not_the_map_until_this_start_is_tied_to_the_loaded_graph() -> None:
+    """Before its first recognition RTAB-Map's graph is the current node alone and its grid is that
+    node's scan drawn where the odometry puts the cart; the tracker matched the live scan on it at
+    fit 1.00 and stood 1.26 m off (live 2026-09-19). Such a grid never reaches /map; a grid stamped
+    before the tying update does not either; everything from the tie on does."""
+    node = rtabmap_frame.RtabmapFrame()
+    sent = node.pubs[rtabmap_frame.MAP_TOPIC].sent
+    _grid(node, stamp=1.0)
+    assert not sent, "no update heard: nothing says what this grid is made of"
+    _update(node, ref_id=5600, stamp=2.0)  # a loaded database: the numbering continues
+    _grid(node, stamp=2.0)
+    assert not sent and node._grids_withheld == 2
+    _update(node, ref_id=5601, matched=5046, stamp=3.0)  # a node of the LOADED map
+    _grid(node, stamp=2.5)
+    assert not sent, "assembled before the tie: still the lone scan"
+    _grid(node, stamp=3.0)
+    _grid(node, stamp=4.0)
+    assert len(sent) == 2 and node._grids_relayed == 2
+    assert "this start is tied to the loaded map" in node._tie_text()
+
+
+def test_the_grid_of_an_empty_database_is_the_map_from_the_first_update() -> None:
+    """A start that loaded nothing numbers its first node 1: there is no older map to tie to and
+    its grid is its own map (the first session of a room)."""
+    node = rtabmap_frame.RtabmapFrame()
+    _update(node, ref_id=1, stamp=1.0)
+    _grid(node, stamp=1.0)
+    assert len(node.pubs[rtabmap_frame.MAP_TOPIC].sent) == 1
+    assert "nothing was loaded" in node._tie_text()
+
+
+def test_the_grid_gate_is_a_live_switch() -> None:
+    """grid_needs_tie off is the behaviour before 2026-09-19: every grid is relayed as it comes."""
+    node = rtabmap_frame.RtabmapFrame()
+    node._switches.set("grid_needs_tie", False)
+    _update(node, ref_id=5600, stamp=2.0)
+    _grid(node, stamp=2.0)
+    assert len(node.pubs[rtabmap_frame.MAP_TOPIC].sent) == 1
+
+
+def test_the_word_s_stamp_is_a_live_switch() -> None:
+    """word_at_picture_time off is the word of 2026-09-17..19: stamped with the newest odom ->
+    base_link stamp the board broadcast, for an arrangement whose localisations are not on the
+    board's clock at all (a laptop-stamped picture: "graph stale 128.5 s")."""
+    node = rtabmap_frame.RtabmapFrame()
+    node._switches.set("word_at_picture_time", False)
+    _map(node)
+    _odom(node, 0.2, 0.0, seconds=7.0)
+    _belief(node, 1.0, 2.0)
+    _match(node, matched=41, stamp=99.0)  # the laptop's own clock, minutes off the board's
+    _localize(node, 1.0, 2.0, stamp=99.0)
+    (sent,) = node.pubs[rtabmap_frame.MEASUREMENT_TOPIC].sent
+    assert json.loads(sent.data)["stamp"] == 7.0, "the board's clock, off its odometry transform"
+    assert node._lookup.buffer.calls[-1][2].nanoseconds == 0, "the newest edge, no moment asked"

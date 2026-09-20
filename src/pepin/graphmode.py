@@ -143,17 +143,31 @@ STRATEGY_NAMES = {STRATEGY_VIS: "visual", STRATEGY_ICP: "ICP on the scans"}
 # closure that asks more than ~2 cm of any one of them — every closure ACROSS two sessions did.
 # Watch the log for "Rejecting all added loop closures"; the launch's neighbor_refining argument
 # and graph_memory are the ways out.
-GRID_FROM_SCAN, GRID_FROM_DEPTH = "0", "1"
+#
+# Grid/Sensor DOES NOT TRAVEL WITH THEM — it did for half a day and that was wrong (2026-09-19,
+# first camera-only drive under World R). A change of Grid/Sensor makes RTAB-Map re-render its
+# WHOLE grid from the other sensor, not just the next node: the moment the snapshots went
+# camera-only the lidar-built map of 215x262 cells became a depth-built 81x52, the costmaps' static
+# layer and the lidar's fit went with it, and I cancelled a drive that Artem saw arrive at the
+# bookshelf. The grid's sensor is a property of the MAP — what it was built from — and stays at the
+# launch's value (the scan); a node with no scan simply adds nothing to the grid.
 REGISTRATION_PARAMETERS = {
     STRATEGY_VIS: {
         "Reg/Strategy": STRATEGY_VIS,
-        "Grid/Sensor": GRID_FROM_DEPTH,
         "RGBD/NeighborLinkRefining": "false",
     },
     STRATEGY_ICP: {
         "Reg/Strategy": STRATEGY_ICP,
-        "Grid/Sensor": GRID_FROM_SCAN,
-        "RGBD/NeighborLinkRefining": "true",
+        # FALSE AGAIN, 2026-09-19 afternoon, on the first real drive. Refining was switched on the
+        # night before to stop a parked cart's map turning with the odometry — but the root of that
+        # was the gyro's bias frozen at boot, cured the same morning in the base bridge
+        # (/odometry/filtered -0.01 deg/min at rest). With the root gone only the known cost was
+        # left, and it came at once: over a 3 m teleop drive RTAB-Map logged "Rejecting all added
+        # loop closures" 89 times, 87 of them on a NEIGHBOUR edge (type=0) whose refined covariance
+        # made a 2.6 deg or 11.6 cm residual read as a ratio of 3.7-4.6 against
+        # RGBD/OptimizeMaxError 3.0 — the disease of 2026-09-14, exactly. Unrefined, a neighbour
+        # link carries the odometry's own honest uncertainty, which is what that check compares to.
+        "RGBD/NeighborLinkRefining": "false",
     },
 }
 

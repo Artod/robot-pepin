@@ -48,7 +48,74 @@ Measured on the robot, on the board, during real drives.
 | Loop closure over a 33 m lap (mapping) | 5 cm |
 | Goal tolerance | 0.10 m / 0.20 rad |
 | Board memory with the whole stack up | 590 MB used, 5 MB swap (1.08 GB and a full 734 MB swap before tracetools was rebuilt without LTTng) |
-| Unit tests | 376, mypy strict, 86% coverage floor |
+| Unit tests | 1,610, mypy strict |
+
+## One map, three sensor modes
+
+Since September 2026 the robot has ONE map and one owner of `map → odom`, and it drives with
+whatever sensors are alive: lidar + camera, lidar only, or the head camera alone.
+
+```
+ LAPTOP (Docker, Apple-silicon GPU)                        │ BOARD (Orange Pi Zero 3)
+                                                           │
+ head camera ◄── MJPEG over HTTP, stamped at capture ──────┼── ustreamer
+   ├─► depth network (Depth Anything V2, metric) ──► depth │
+   │      └─► depth scan + contact scan ───────────────────┼─► Nav2 costmap layers (camera, contact)
+   ├─► visual odometry ────────────────────────────────────┼─► EKF: wheels + gyro (+ VO) ─► odom→base_link
+   └─► sensor_pack: ONE snapshot per moment ◄──────────────┼── /scan (while the lidar lives), /tf
+          full │ lidar-only │ camera-only — whatever is alive
+          ▼                                                │
+     RTAB-Map — THE map: loop-closed graph + occupancy     │
+     grid, multi-session; places ride graph nodes          │
+       · registration follows the snapshot (ICP / visual)  │
+       · the database learns only from a pose sharper than │
+         3 cm / 1° that the graph itself does not hold     │
+       ├─► grid ── only once this start is tied to the ────┼─► tracker adopts it, caches it on disk,
+       │           graph it loaded                         │   republishes it for the costmaps
+       └─► "words": recognised pose + covariance, ─────────┼─► tracker
+           stamped with the PICTURE's moment               │     ├─ lidar scan match, 10 Hz, 1–2 cm,
+                                                           │     │  whole-map FFT search when lost
+                                                           │     ├─ information-filter fusion; a late
+                                                           │     │  word is carried over odometry to now
+                                                           │     └─► map→odom, 20 Hz — one owner, and it
+                                                           │         keeps driving with the laptop gone
+```
+
+Measured on the robot, 19–20 September 2026, one flat, legs of 2–4 m between three named places:
+
+| Mode | What holds the pose | Result | Leg time |
+| --- | --- | --- | --- |
+| lidar + camera | scan match; the graph's words ride along | arrival 5–7 cm, 1–6° from the mark | 15–34 s |
+| lidar only | scan match | arrival 2–7 cm | 14–28 s |
+| camera only — lidar out of the tracker and the costmaps | RTAB-Map's words (claimed floor 0.20 m / 8°) over wheel + gyro odometry | a 3-leg tour, 8.8 m: **1.4 cm / 1°** from the lidar's re-seat at the end; every tracker update came from the graph, 49 words, none of the tour on dead reckoning after a last word | 18–20 s |
+| no word at all (6 m, from a sharp start) | wheels + gyro alone | 14 cm / 4° at the end | — |
+
+What made the camera-only mode work was mostly not the camera:
+
+- **The gyro's bias is tracked at rest.** Heading creep is −0.01 °/min parked; with the bias frozen
+  at boot it was 0.2–0.7 °/min, which the lidar matcher had been silently absorbing ten times a
+  second. Over turns of 30–180° the EKF heading is 2.2–3.6° RMS against the lidar (539 scans),
+  about 2° of that being the scan matcher's own noise.
+- **A word is stamped with the moment its picture was taken.** A localisation leaves RTAB-Map
+  0.13–1.35 s after its picture (median 0.93 s). Stamped "now", every word taken in a turn lagged
+  the truth by the turn rate times that age — 12–35° — and one such word put the cart into a
+  chair. The camera's own stamp is good to 0.05 s against the gyro.
+- **The grid reaches the tracker only when it is tied to the loaded graph.** Before its first
+  recognition RTAB-Map's grid is one scan drawn where the odometry puts the cart; a tracker that
+  adopts it matches the live scan on a picture of itself (fit 1.00, 1.26 m off). Until the tie the
+  board tracks on the grid it cached.
+- **A goal starts on any pose the cart has.** Certainty is one number — the pose covariance,
+  grown along the odometry (2 % of the distance, 5 % of a turn, measured) and shrunk by every
+  accepted word; a drive is cut when it passes 0.40 m. A cart parked facing a bookshelf, where the
+  camera recognises nothing, used to refuse every goal while knowing its pose to 26 cm.
+- **The bridge watch reports and repairs nothing by default.** Its repairs fired on healthy links
+  (a camera-only tracker publishes its pose only when a word moves it) and cured none of the
+  broken ones.
+
+Honest limits: the mono depth network gives a noisy obstacle fan (10–20 recoveries per camera-only
+leg); after a laptop restart the first tie to the loaded graph needs the cart within 0.2 m of a
+recorded node while the lidar drives the registration; waking up in an unknown room with a dead
+lidar is not supported yet.
 
 ## Architecture
 
@@ -140,7 +207,8 @@ And back:
 
 ## Localisation
 
-There is no AMCL in the loop. AMCL's parameters are still in the file and it can be run for
+The section above says who owns what since September 2026; this one is the board's tracker in
+detail. There is no AMCL in the loop. AMCL's parameters are still in the file and it can be run for
 comparison, but `tf_broadcast` is false: the frame belongs to our own tracker, because AMCL only
 searches where its particles already are, and a cart that gets carried across the room needs to
 find itself again with nobody's help.
@@ -181,7 +249,10 @@ transform for "now".
 
 ## The map it runs on
 
-The map is built once, from a recorded drive, and then frozen. The 33 m lap below returned to
+The live map is RTAB-Map's loop-closed grid (see *One map, three sensor modes*); the board keeps
+the last grid it adopted on disk. What follows is the offline pipeline the first maps were built
+with, and the measurement of what each stage is worth. That map was built once, from a recorded
+drive, and then frozen. The 33 m lap below returned to
 its exact starting point, so the distance between the end of each estimated path and its start
 is that method's honest error.
 

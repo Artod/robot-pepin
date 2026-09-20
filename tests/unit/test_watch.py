@@ -5,6 +5,7 @@ import math
 import numpy as np
 import pytest
 
+from pepin.fusion import EKF_YAW_PER_TURN, ODOM_YAW_FLOOR_RAD, ODOM_YAW_PER_TURN
 from pepin.measurements import GRAPH_FLOOR_XY_M
 from pepin.odometry import Pose2D
 from pepin.watch import (
@@ -418,15 +419,23 @@ def test_the_sigma_grows_along_the_odometry_and_collapses_on_a_word() -> None:
     assert spread.sigma()[0] == pytest.approx(sure_xy, abs=1e-6), "one word collapses it again"
 
 
-def test_a_turn_nobody_corrects_is_what_really_costs_this_cart() -> None:
-    """Carpet eats 40-60 % of every in-place turn this differential drive reports (the gyro
-    measured it, 2026-09-11), so the heading is where dead reckoning falls apart first — and
-    the sigma has to say so while the position sigma is still small."""
+def test_a_turn_nobody_corrects_costs_the_belief_what_the_ekf_heading_is_worth() -> None:
+    """NEW RULE (2026-09-19): the belief's heading grows by EKF_YAW_PER_TURN of every reported
+    turn, not by the wheels-only ODOM_YAW_PER_TURN the measurement carry pays. A turn still
+    costs — the heading is where dead reckoning falls apart first — but it costs what the
+    gyro-held EKF heading was measured to be worth (0.05, scratch/ekf_heading_error_per_turn.py),
+    not the 0.7 of carpet slip, which priced one quarter turn at 63 deg of sigma."""
     spread = PoseSpread()
     spread.corrected(SURE, Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 0.0, 0.0), now=0.0)
     spread.carried(Pose2D(0.0, 0.0, math.radians(90.0)))
     _, yaw = spread.sigma()
-    assert yaw > 30.0, f"a quarter turn on nobody's word is not 1 deg of certainty: {yaw:.1f}"
+    grown = math.hypot(math.radians(1.0), ODOM_YAW_FLOOR_RAD + EKF_YAW_PER_TURN * math.pi / 2)
+    assert yaw == pytest.approx(math.degrees(grown), abs=1e-6), "the word's own sigma, widened"
+    assert 2.0 < yaw < 6.0, f"a quarter turn costs a few degrees, not tens: {yaw:.1f}"
+    wheels = PoseSpread(yaw_per_turn=ODOM_YAW_PER_TURN)
+    wheels.corrected(SURE, Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 0.0, 0.0), now=0.0)
+    wheels.carried(Pose2D(0.0, 0.0, math.radians(90.0)))
+    assert wheels.sigma()[1] > 60.0, "the old constant is still reachable, and it is the flag's"
 
 
 def test_the_path_costs_and_not_the_displacement() -> None:
@@ -460,11 +469,38 @@ def test_a_goal_is_judged_by_the_sigma_where_there_is_one_and_the_fit_where_ther
     assert camera_only.ready and camera_only.rule == BY_SIGMA
     assert not gate.verdict(0.0, None).ready, "the same drive on an older board: the fit rules"
     assert gate.verdict(0.0, None).rule == BY_FIT
-    wide = gate.verdict(0.95, None, sigma=Sigma(0.41, 8.0, 0.1))
-    assert (wide.ready, wide.search, wide.rule) == (False, True, BY_SIGMA)
-    assert "0.41 m" in wide.reason and f"{DRIVE_SIGMA_M:.2f}" in wide.reason
     bound = gate.verdict(0.0, None, sigma=Sigma(DRIVE_SIGMA_M, 3.0, 0.1))
     assert bound.ready, "the threshold itself is allowed, like every other bound here"
+
+
+def test_a_pose_the_cart_has_starts_a_goal_whatever_its_number() -> None:
+    """NEW RULE (2026-09-19): with a sigma published, a goal is refused for the pose's sake only
+    where there is NO pose. Old rule: anything over DRIVE_SIGMA_M was refused into a whole-map
+    lidar search. Camera-only at the bookshelf the camera recognises nothing, the belief had
+    grown to 0.26 m along the odometry, and that search had no scan to match — the cart refused
+    goal after goal at a pose it knew. The old rule stays reachable by the flag."""
+    gate = GoalGate()
+    wide = gate.verdict(0.0, None, sigma=Sigma(0.26, 9.0, 0.1))
+    assert (wide.ready, wide.search, wide.rule) == (True, False, BY_SIGMA)
+    assert gate.verdict(0.0, None, sigma=Sigma(0.95, 30.0, 0.1)).ready, "a loose pose is a pose"
+    old = GoalGate(start_on_a_known_pose=False)
+    refused = old.verdict(0.0, None, sigma=Sigma(0.26, 9.0, 0.1))
+    assert (refused.ready, refused.search, refused.rule) == (False, True, BY_SIGMA)
+    assert "0.26 m" in refused.reason and f"{DRIVE_SIGMA_M:.2f}" in refused.reason
+
+
+def test_a_goal_is_refused_where_nothing_has_ever_corrected_the_pose() -> None:
+    """NEW RULE (2026-09-19): the one localisation refusal left. The sentinel PoseSpread returns
+    before its first word is not a measurement of anything — the cart may be anywhere the map is
+    — and it is said on the wire rather than guessed from the sentinel's value, so a belief that
+    has honestly grown past it is still a pose. A whole-map search is the only thing that can
+    start a drive there, so the refusal asks for one."""
+    gate = GoalGate()
+    nothing = gate.verdict(0.0, None, sigma=Sigma(*UNKNOWN_SIGMA, 0.1, known=False))
+    assert (nothing.ready, nothing.search, nothing.rule) == (False, True, BY_SIGMA)
+    assert "nothing has ever corrected the pose" in nothing.reason
+    grown = gate.verdict(0.0, None, sigma=Sigma(UNKNOWN_SIGMA[0] + 0.2, 30.0, 0.1))
+    assert grown.ready, "wider than the sentinel, but measured: still a pose"
 
 
 def test_a_sigma_that_stopped_arriving_is_not_a_sigma() -> None:
@@ -536,6 +572,22 @@ def test_the_blind_drive_watch_reads_the_sigma_and_says_which_rule_judged() -> N
     for t in (1.0, 2.0, 3.0, 4.0, 5.0, 6.0):
         by_fit = fit_only.observe(0.1, t)
     assert by_fit and "fit 0.10 under 0.30" in fit_only.phrase()
+
+
+def test_a_fit_of_zero_can_never_cut_a_drive_that_has_a_sigma() -> None:
+    """THE RULE (pinned 2026-09-19, and it already held): during a drive the cut is the sigma's
+    whenever one is published — LOST_SIGMA_M — and a fit of 0.00, which is what camera-only
+    publishes by construction, cannot stop the cart by itself for any length of time. Only
+    without a sigma does the fit answer, which is a board that publishes none at all."""
+    blind = BlindDriveWatch()
+    held = Sigma(0.10, 3.0, 0.1)
+    for t in range(0, 120):  # two minutes of fit 0.00 beside a healthy pose
+        assert not blind.observe(0.0, float(t), sigma=held), f"cut at {t} s on the lidar's fit"
+    assert blind.rule == BY_SIGMA and "0.10 m" in blind.phrase()
+    cut = False
+    for t in range(120, 140):
+        cut = blind.observe(0.99, float(t), sigma=Sigma(LOST_SIGMA_M + 0.01, 9.0, 0.1))
+    assert cut, "the sigma over the cut still stops it, whatever the fit says"
 
 
 def test_a_drive_is_cut_when_the_sigma_stops_arriving_mid_way() -> None:

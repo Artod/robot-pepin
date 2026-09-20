@@ -27,11 +27,16 @@ them. That is what tells a word riding a broken frame from one riding a good fra
 for the next closure — tape 0333 of 2026-09-15, where nineteen words about a metre and 150 degrees
 out rode with fit 1.00 and the pose flew.
 
-THE STAMP comes from the board's ``odom -> base_link`` transform and never from the localisation.
-A localisation is stamped on the LAPTOP's clock and the word is judged on the BOARD's: the two run
-minutes apart, so a word stamped here arrives already older than the tracker's patience — fused,
-but counted as a source that has not spoken in two minutes, and the goal gate then refuses every
-camera-only drive ("graph stale 128.5 s", 2026-09-17).
+THE STAMP is the moment the PICTURE was taken (``word_at_picture_time``): the localisation's own
+stamp, which under the snapshots is the board's clock (the picture's X-Timestamp travels through
+the depth, the snapshot and RTAB-Map's update unchanged), with ``odom -> base_link`` looked up AT
+that moment. The board's tracker carries the word over its odometry from there to its update
+(``carry_stale_words``). Until 2026-09-19 the word was stamped with the board's NEWEST odometry
+stamp instead — right on 2026-09-17, when a localisation carried the laptop's clock, minutes from
+the board's ("graph stale 128.5 s") — and that said "the cart is HERE NOW" about a picture
+0.1-1.4 s old: nothing on a parked cart, and on a cart turning at 25 deg/s a heading 12-35 deg
+behind the truth (tapes 0386 and 0388: the heading error of EVERY word taken in a turn had the
+sign of minus the turn rate; tape 0388 ended in a chair).
 
 A WORD IS REFUSED IN 3 DOF, not by position alone: the squared Mahalanobis distance between the
 word and the tracker's odometry-carried belief, under the sum of their covariances, against
@@ -127,6 +132,7 @@ from pepin.watchdog import GlobalCandidate, same_place
 from pepin_bringup.msgs import (
     map_id,
     pose_from_transform,
+    stamp_from_seconds,
     stamp_seconds,
     transform_from_pose,
     yaw_of,
@@ -160,6 +166,13 @@ INFO_TOPIC = "/rtabmap/info"
 LOCALIZATION_TOPIC = "/rtabmap/localization_pose"
 TRACKER_POSE_TOPIC = "/tracker_pose"
 TRACKED_MAP_TOPIC = "/map_tracked"  # pepin_bringup.relocalizer publishes it, latched
+# RTAB-Map's grid as RTAB-Map publishes it (its "map" output, remapped in vslam.launch.py), and
+# the ONE map topic this node relays it onto once the grid is the map (grid_needs_tie).
+GRID_TOPIC = "/rtabmap/grid"
+MAP_TOPIC = "/map"
+# RTAB-Map numbers nodes from 1 and a loaded database continues its own numbering, so a start
+# whose first node is 1 loaded nothing: its grid is its own and there is no older map to tie to.
+FIRST_ID_OF_AN_EMPTY_DATABASE = 1
 FIT_TOPIC = "/localization_fit"
 ODOM_FRAME, BASE_FRAME = "odom", "base_link"
 # The board's own account of who is driving its tracker, which is what decides whether RTAB-Map may
@@ -213,6 +226,10 @@ BELIEF_FRESH_S = 3.0
 # covers float rounding and a build that stamps one of the two with its publish time. Past it they
 # are two different updates and no node is named for that localisation.
 UPDATE_MAX_SKEW_S = 0.5
+# How long a word waits for odom -> base_link AT ITS PICTURE'S MOMENT. The picture is 0.13-1.35 s
+# old when its localisation arrives and /tf crosses the bridge in well under 0.1 s, so the edge is
+# almost always there already; the wait covers the youngest words and no more.
+WORD_TF_WAIT_S = 0.2
 
 FLAGS = FlagSet(
     Flag(
@@ -367,6 +384,52 @@ FLAGS = FlagSet(
         off_when="to reproduce the stage-1 behaviour (ICP throughout) under the same snapshots, or"
         " if a live switch is ever seen to cost RTAB-Map its working memory",
     ),
+    Flag(
+        "word_at_picture_time",
+        True,
+        description="a graph word is stamped with the moment its PICTURE was taken — the"
+        " localisation's own stamp, the board's clock under the snapshots — and odom -> base_link"
+        " is looked up at that moment; the board carries the word to its update over its odometry"
+        " (relocalizer carry_stale_words). Off, the word is stamped with the newest odom ->"
+        " base_link stamp heard, as it was until 2026-09-19",
+        why="on, measured 2026-09-19. A localisation is published 0.13-1.35 s after its picture"
+        " (median 0.93 s, scratch/word_stamp_vs_board_now.py: the depth network and RTAB-Map's"
+        " update), on the board's clock. Stamped 'now', every word taken in a turn was behind the"
+        " truth by the turn rate times that age: tape 0388 -30.4 and -35.5 deg at +22 and +26"
+        " deg/s,"
+        " tape 0386 nine of nine turning words with the sign of minus the turn rate (+20 deg at -25"
+        " deg/s ... -24 deg at +22 deg/s) and under 2 deg on the straights"
+        " (scratch/tape_0388_word_stamp_latency.py). The camera's own stamp is good to 0.05 s"
+        " against the gyro (scratch/camera_stamp_vs_gyro_lag.py), so the age is this pipeline's"
+        " and nothing else's. The fusion took the -30 deg word (sigma 8 deg on both sides of the"
+        " gate) and camera-only tape 0388 drove 0.5-0.7 m off its pose into a mapped obstacle",
+        on_when="always under the snapshots (sensor_pack), where the picture's stamp is the"
+        " board's",
+        off_when="only in an arrangement whose localisations are NOT on the board's clock"
+        " (sensor_pack:=false with laptop-stamped pictures): there the stamped lookup finds no"
+        " odometry, the report counts the words as 'without odometry', and this switch is the way"
+        " back to the old stamp",
+    ),
+    Flag(
+        "grid_needs_tie",
+        True,
+        description=f"RTAB-Map's grid ({GRID_TOPIC}) is relayed onto {MAP_TOPIC} — the one map the"
+        " board's tracker adopts — only once this start has recognised a node of the database it"
+        " LOADED (or loaded none), and only grids stamped after that recognition. Until then the"
+        " board keeps the map it cached. Off, every grid is relayed as it comes",
+        why="on, measured 2026-09-19: before its first recognition RTAB-Map's graph is the current"
+        " node ALONE (1 node against 254 loaded) and its grid is that node's one scan drawn where"
+        " the ODOMETRY puts the cart. The tracker adopted it, matched the live scan on a picture of"
+        " itself (fit 1.00, the whole-map search agreeing) and stood 1.26 m from where the graph"
+        " and RTAB-Map's own scan registration put the cart; its cache kept the picture across"
+        " restarts (scratch/scan_at_two_poses.py, scratch/grid_alone.py). After the first"
+        " recognition the grid came back as the room (216x152), the tracker re-seated on it at fit"
+        " 0.89 and RTAB-Map's word landed 1 cm from it",
+        on_when="always: a grid that is not tied to the loaded graph is not the map, whatever"
+        " frame id it carries",
+        off_when="to reproduce the self-matching tracker of 2026-09-19, or to watch the raw grid"
+        " reach the board while debugging the bridge",
+    ),
 )
 
 
@@ -429,6 +492,11 @@ class RtabmapFrame(Node):
         self._spent: float | None = None  # the stamp of the update a word was already made from
         self._infos = 0  # /rtabmap/info messages consumed...
         self._named = 0  # ...of which this many recognised a database node
+        self._first_ref: int | None = None  # the first node id this start created
+        self._tied = False  # whether this start has recognised a node of the loaded database
+        self._tied_stamp = 0.0  # the stamp of the update that tied it: older grids are not the map
+        self._grids_relayed = 0
+        self._grids_withheld = 0
         self._localizations = 0  # localisations heard
         self._hypothesis = 0.0  # how close the last update came to recognising something
         self._node = 0  # the node the last word was hung on, for the report line
@@ -493,7 +561,12 @@ class RtabmapFrame(Node):
         # (SLAM modes, the first boot of a room) speaks there and an older board publishes
         # nothing else.
         self.create_subscription(OccupancyGridMsg, TRACKED_MAP_TOPIC, self._on_map, latched)
-        self.create_subscription(OccupancyGridMsg, "/map", self._on_map, latched)
+        self.create_subscription(OccupancyGridMsg, MAP_TOPIC, self._on_map, latched)
+        # RTAB-Map's grid passes through here on its way to being THE map (grid_needs_tie). This
+        # subscription is also what keeps RTAB-Map assembling a grid at all: it builds one only
+        # while somebody listens (MapsManager's subscription-count gate).
+        self._map_pub = self.create_publisher(OccupancyGridMsg, MAP_TOPIC, latched)
+        self.create_subscription(OccupancyGridMsg, GRID_TOPIC, self._on_grid, latched)
         self.create_subscription(
             PoseWithCovarianceStamped, TRACKER_POSE_TOPIC, self._on_tracker_pose, 5
         )
@@ -555,7 +628,8 @@ class RtabmapFrame(Node):
             f" last word {word}; fit {self._trust_now():.2f} ({self._agreement_text()});"
             f" hypothesis {self._hypothesis:.2f}; rtabmap memory {self._mode_text()};"
             f" rtabmap registration {self._strategy_text()};"
-            f" map {self._map_id or 'unknown'};"
+            f" map {self._map_id or 'unknown'}, {self._grids_relayed} grids relayed,"
+            f" {self._grids_withheld} withheld ({self._tie_text()});"
             f" flags: {self._switches.state(live_only=False)}"
         )
 
@@ -636,6 +710,34 @@ class RtabmapFrame(Node):
         the tracker refuses a word about another map, and a frame id is not a map id."""
         self._map_id = map_id(msg)
 
+    def _tie_text(self) -> str:
+        """One phrase for the report: whether this start stands in the map it loaded."""
+        if self._first_ref is None:
+            return "no update heard yet"
+        if self._first_ref == FIRST_ID_OF_AN_EMPTY_DATABASE:
+            return "nothing was loaded: the grid is this start's own map"
+        if self._tied:
+            return "this start is tied to the loaded map"
+        return "this start has not recognised a node of the loaded map yet"
+
+    def _grid_is_the_map(self, stamp: float) -> bool:
+        """Whether a grid RTAB-Map stamped at ``stamp`` is assembled from the map it loaded: this
+        start is tied to the loaded graph and the grid is not older than the tie, or nothing was
+        loaded and the grid is this start's own map."""
+        if self._first_ref == FIRST_ID_OF_AN_EMPTY_DATABASE:
+            return True
+        return self._tied and stamp >= self._tied_stamp
+
+    def _on_grid(self, msg: OccupancyGridMsg) -> None:
+        """RTAB-Map's grid on its way to the tracker: relayed onto the one map topic when it IS
+        the map, withheld while it is only this start's own scans in the odometry's frame."""
+        stamp = stamp_seconds(getattr(getattr(msg, "header", None), "stamp", None) or _zero_stamp())
+        if self._switches.on("grid_needs_tie") and not self._grid_is_the_map(stamp):
+            self._grids_withheld += 1
+            return
+        self._grids_relayed += 1
+        self._map_pub.publish(msg)
+
     def _on_info(self, msg: Info) -> None:
         """One RTAB-Map update: WHICH NODE it recognised, if any, and how close the last hypothesis
         came.
@@ -650,11 +752,19 @@ class RtabmapFrame(Node):
         hypothesis = stat(stats, HIGHEST_HYPOTHESIS)
         if hypothesis is not None:
             self._hypothesis = float(hypothesis)
+        ref = int(getattr(msg, "ref_id", 0))
+        if ref > 0 and self._first_ref is None:
+            # the first node this start made: everything older is the loaded map
+            self._first_ref = ref
         matched = _matched_id(msg)
         if matched <= 0:
             return
-        self._named += 1
         stamp = stamp_seconds(getattr(getattr(msg, "header", None), "stamp", None) or _zero_stamp())
+        if self._first_ref is not None and matched < self._first_ref and not self._tied:
+            # this start has recognised a node of the map it LOADED; grids from here on are
+            # assembled from the whole graph
+            self._tied, self._tied_stamp = True, stamp
+        self._named += 1
         self._matched = (matched, stamp)
         self._try_word()
 
@@ -736,16 +846,17 @@ class RtabmapFrame(Node):
         if self._spent is not None and localized_stamp == self._spent:
             return
         self._spent = localized_stamp
-        self._offer(node_id, place, covariance)
+        self._offer(node_id, place, covariance, localized_stamp)
 
-    def _offer(self, node_id: int, place: Pose2D, covariance: Matrix) -> None:
+    def _offer(self, node_id: int, place: Pose2D, covariance: Matrix, taken_at: float) -> None:
         """One graph word: the localisation ``place`` — already in the map frame — published as a
         measurement for the board's fusion, or offered on the candidate channel instead.
 
-        THE STAMP IS THE BOARD'S. It comes from the ``odom -> base_link`` transform the board
-        broadcasts, never from the localisation: a localisation is stamped on the laptop's clock
-        and the word is judged on the board's, the two run minutes apart, and a word stamped here
-        arrives already older than the tracker's patience ("graph stale 128.5 s", 2026-09-17).
+        THE STAMP IS THE PICTURE'S MOMENT, ``taken_at`` — the localisation's own stamp, the
+        board's clock under the snapshots — and the odometry the word is compared at is looked up
+        AT that moment (``word_at_picture_time``; see the module docstring for what stamping it
+        "now" cost). With the switch off the newest ``odom -> base_link`` stamp is used, as before
+        2026-09-19.
 
         The word is remembered whatever the flags say — the report line is how a session is judged
         before it is allowed to move anything — and sent only with ``graph_measurement`` on, a map
@@ -765,11 +876,19 @@ class RtabmapFrame(Node):
         that knows where the cart is. It is safe because the word depends on nothing this session
         measured — one frame, RTAB-Map's own recognition, and its own covariance.
         """
-        transform = self._lookup.transform(ODOM_FRAME, BASE_FRAME)
+        at_picture = self._switches.on("word_at_picture_time")
+        transform = (
+            self._lookup.transform(
+                ODOM_FRAME, BASE_FRAME, stamp_from_seconds(taken_at), WORD_TF_WAIT_S
+            )
+            if at_picture
+            else self._lookup.transform(ODOM_FRAME, BASE_FRAME)
+        )
         odom = self._planar(transform)
         if transform is None or odom is None:
             self._blind += 1
             return
+        stamp = taken_at if at_picture else stamp_seconds(transform.header.stamp)
         self._word_odom = odom
         self._words += 1
         self._node = node_id
@@ -781,7 +900,7 @@ class RtabmapFrame(Node):
         # word against.
         remote = graph_measurement(
             place,
-            stamp_seconds(transform.header.stamp),
+            stamp,
             self._map_id,
             floor_xy_m=self._sigma_m,
             floor_yaw_deg=GRAPH_FLOOR_YAW_DEG,
@@ -1008,9 +1127,21 @@ class RtabmapFrame(Node):
         if not self._modes:
             return
         stale = self._now() - self._holder_at > FIT_FRESH_S
+        # NOT BEFORE THIS START IS TIED TO THE MAP IT LOADED. A switch to mapping before RTAB-Map
+        # has recognised one node of the loaded database opens a new map in the ODOMETRY's frame,
+        # unlinked to the old one; parked, it then never processes a frame and never ties at all.
+        # Live 2026-09-19: the rule's first verdict ("the pose is held by lidar") went out a second
+        # after start, /rtabmap/mapGraph carried 2 nodes instead of 173, the places had no node to
+        # ride and the tracker sat in odometry coordinates 1.1 m from the bookshelf it stood at.
+        # (This is what pepin.graphtrust.Recognition used to say; its job outlived the anchor.)
+        untied = None
+        if str(self._switches["graph_memory"]) == BY_TRUST and not self._tied:
+            untied = "this start has not recognised a node of the loaded map yet"
         verdict = self._mode.update(
             self._now(),
-            self._unsharp() or ("the board has not said who holds the pose" if stale else None),
+            untied
+            or self._unsharp()
+            or ("the board has not said who holds the pose" if stale else None),
             None if stale else self._holder,
             describe_sigma(self._belief_sigma),
         )

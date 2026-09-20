@@ -161,6 +161,28 @@ FLAGS = FlagSet(
         off_when="to put the fit rules back for a comparison, or if a sigma ever refuses drives"
         " the cart is plainly fit for",
     ),
+    Flag(
+        "start_on_a_known_pose",
+        True,
+        description="where the tracker publishes a sigma, a goal is refused for the pose's sake"
+        " only when there is NO pose — nothing has ever corrected it, or the sigma stopped"
+        f" arriving; off, a drive starts under {DRIVE_SIGMA_M:.2f} m and anything over it buys a"
+        " whole-map search first, as before",
+        why="2026-09-19, camera-only at the bookshelf: parked close to it the camera recognises"
+        " nothing (PnP 0 of 20 inliers), so no word arrives and the belief grows along the"
+        " odometry — 0.26 m, a pose the cart plainly had. The old rule refused the goal and sent"
+        " it to _find_myself, which is a whole-map LIDAR search judged by the fit, and with the"
+        " lidar out of the tracker's sources that fit is 0.00 by construction: 'still lost (fit"
+        " 0.00)', goal after goal, with nothing the cart could do to earn a drive. A sigma is"
+        " evidence for stopping a drive that is already running (BlindDriveWatch,"
+        f" {LOST_SIGMA_M:.2f} m), where the readings keep coming and a cut costs a stop; it is"
+        " not evidence for refusing to move at all",
+        on_when="always where a sigma is published, and above all camera-only: it is the"
+        " difference between a cart that drives on what it knows and one that waits for a sensor"
+        " it does not have",
+        off_when="to put the 0.25 m start threshold back for a comparison, or where a drive must"
+        " never begin on a pose looser than Nav2's own arrival tolerance",
+    ),
 )
 
 PLANNERS = {
@@ -589,10 +611,15 @@ class GoalServer(Node):
         return bool(self._relocalize.service_is_ready())
 
     def _ready(self, pose: dict[str, float] | None = None) -> Readiness:
-        """May a goal start now (:class:`pepin.watch.GoalGate`): the tracker's fit where a
-        tracker runs; where none does, the age of map -> base_link AND the age of the SLAM
-        correction, which is the only one of the two a dead laptop stops. ``pose`` is a reading
-        already taken by the caller (mark's), so the edge is not looked up twice."""
+        """May a goal start now (:class:`pepin.watch.GoalGate`): the tracker's sigma where it
+        publishes one and its fit where it does not; where no tracker runs, the age of
+        map -> base_link AND the age of the SLAM correction, which is the only one of the two a
+        dead laptop stops. ``pose`` is a reading already taken by the caller (mark's), so the
+        edge is not looked up twice. The gate is kept in step with its live flag here rather
+        than at the switch, so one reading and one rule answer every caller."""
+        self._gate = replace(
+            self._gate, start_on_a_known_pose=self._switches.on("start_on_a_known_pose")
+        )
         if self._switches.on("tf_pose") and not self._tracker_here():
             edge = self._tf_pose() if pose is None else pose
             watched = self._correction() if self._switches.on("correction_watch") else None

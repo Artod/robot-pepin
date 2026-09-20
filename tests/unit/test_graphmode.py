@@ -117,13 +117,11 @@ def test_only_reg_strategy_travels_with_the_verdict() -> None:
     # turned with the gyro's bias under a parked cart: +27 deg in 40 min).
     assert registration_verdict(scan=False).parameters == {
         "Reg/Strategy": "0",
-        "Grid/Sensor": "1",
         "RGBD/NeighborLinkRefining": "false",
     }
     assert registration_verdict(scan=True).parameters == {
         "Reg/Strategy": "1",
-        "Grid/Sensor": "0",
-        "RGBD/NeighborLinkRefining": "true",
+        "RGBD/NeighborLinkRefining": "false",
     }
     assert set(REGISTRATION_PARAMETERS) == {"0", "1"}, "VisIcp (2) is never asked for"
     for table in REGISTRATION_PARAMETERS.values():
