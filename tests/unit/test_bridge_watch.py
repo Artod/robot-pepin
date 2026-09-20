@@ -118,11 +118,21 @@ class ExitsError(Exception):
 
 
 def build(
-    monkeypatch: Any, repair: Any, admin: Any = None, grace_s: float = 0.0
+    monkeypatch: Any,
+    repair: Any,
+    admin: Any = None,
+    grace_s: float = 0.0,
+    repairs: bool = True,
 ) -> tuple[BridgeWatch, Admin, list[int]]:
     """A watch with its admin and repair faked, its worker thread stopped: the test calls
     ``round`` itself, as the timer would. ``grace_s`` is the startup grace, zero unless the
-    test is about it."""
+    test is about it.
+
+    NEW RULE (2026-09-20): ``bridge_restart`` and ``bridge_kick`` are OFF by default — the ladder
+    fired on healthy links (a camera-only tracker that publishes /tracker_pose only when a word
+    moves it; a tracker with no map) and healed none of them. The ladder is still there behind
+    its switches, so the tests of it switch it on (``repairs``); the default has a test of its own.
+    """
     admin = admin or Admin()
     codes: list[int] = []
 
@@ -141,6 +151,9 @@ def build(
     monkeypatch.setitem(sys.modules, "rosidl_runtime_py", types.ModuleType("rosidl_runtime_py"))
     node = BridgeWatch(BOARD, ADMIN, repair=repair, exit_with=exit_with, grace_s=grace_s)
     node.close()  # the worker thread: this test is the one driving the rounds
+    if repairs:
+        node._switches.set("bridge_restart", True)
+        node._switches.set("bridge_kick", True)
     return node, admin, codes
 
 
@@ -174,6 +187,22 @@ def test_a_route_that_carries_nothing_restarts_the_bridge_alone(monkeypatch: Any
     assert repair.restarts == 0, "not yet: the patience is twenty seconds"
     drive(node, admin, [20.0], messages=0)
     assert repair.restarts == 1 and codes == [], "the bridge restarted; this half lives on"
+
+
+def test_by_default_a_silent_route_is_reported_and_nothing_is_restarted(monkeypatch: Any) -> None:
+    """NEW RULE (2026-09-20). A topic that carries nothing is not proof of a dead route: camera-only
+    the tracker publishes /tracker_pose only when a word moves it, 20 s without one restarted the
+    bridge, the laptop lost /tf with it and two legs of a camera-only tour ran on odometry alone.
+    With the switches as they ship the watch measures and says so — and restarts nothing, kicks
+    nothing and never takes this half down."""
+    repair = FakeRepair()
+    node, admin, codes = build(monkeypatch, repair, repairs=False)
+    with contextlib.suppress(ExitsError):
+        drive(node, admin, [0.0, 20.0, 60.0, 150.0, 300.0], messages=0)
+    assert repair.restarts == 0 and codes == [], "reported, not repaired"
+    assert "/bridge/kick" not in {topic for topic, pub in node.pubs.items() if pub.sent}
+    report = " ".join(node.logger.texts("error") + node.logger.texts("warning"))
+    assert "carried nothing" in report, "the reading itself stays in the log"
 
 
 def test_a_silence_that_survives_the_restart_escalates_to_the_half(monkeypatch: Any) -> None:
@@ -398,11 +427,25 @@ def with_readerless_board() -> Admin:
     return admin
 
 
+def board_watched(monkeypatch: Any, repair: FakeRepair) -> tuple[Any, Admin, list[int]]:
+    """A watch over a readerless BOARD route with ``board_routes`` switched ON.
+
+    NEW RULE (2026-09-19): the flag is OFF by default, because a board route with no reader is a
+    normal state — camera-only nothing on the laptop subscribes to /scan — and the repair fired
+    on it, restarted the board's bridge and cost RTAB-Map 13 minutes of snapshots. Every test of
+    the board-route ladder below therefore switches it on to have a fault to drive at all.
+    """
+    node, admin, codes = build(monkeypatch, repair, with_readerless_board())
+    node._switches.set("board_routes", True)
+    return node, admin, codes
+
+
 def test_the_board_s_own_readerless_route_is_a_fault_this_side_can_see(monkeypatch: Any) -> None:
     """2026-09-15: every topic stopped and the watch said "dead routes 0" — it judged this
-    bridge's routes alone. The board's are in the same network-wide reply."""
+    bridge's routes alone. The board's are in the same network-wide reply. Behind the
+    ``board_routes`` flag, which is off by default (see :func:`board_watched`)."""
     repair = FakeRepair()
-    node, admin, _codes = build(monkeypatch, repair, with_readerless_board())
+    node, admin, _codes = board_watched(monkeypatch, repair)
     drive(node, admin, [0.0, 10.0], messages=48)
     assert repair.restarts == 0, "not yet: a route caught between its creation and its endpoint"
     drive(node, admin, [20.0], messages=48)
@@ -412,17 +455,24 @@ def test_the_board_s_own_readerless_route_is_a_fault_this_side_can_see(monkeypat
     )
 
 
-def test_board_routes_off_leaves_the_far_side_unjudged(monkeypatch: Any) -> None:
+def test_board_routes_off_is_the_default_and_leaves_the_far_side_unjudged(
+    monkeypatch: Any,
+) -> None:
+    """NEW RULE (2026-09-19): off by default. On 2026-09-19 the cart drove camera-only, nobody
+    on the laptop read /scan, the board's pub route for it legitimately had no reader, and this
+    watch kicked the board's bridge — taking the laptop's /tf subscription with it and starving
+    RTAB-Map of snapshots for 13 minutes. Nothing is repaired on that reading unless it is
+    switched on by hand."""
     repair = FakeRepair()
     node, admin, codes = build(monkeypatch, repair, with_readerless_board())
-    node._switches.set("board_routes", False)
+    assert not node._switches.on("board_routes"), "the default, not something a test set"
     drive(node, admin, [0.0, 20.0, 40.0], messages=48)
-    assert repair.restarts == 0 and codes == []
+    assert repair.restarts == 0 and codes == [] and not node.pubs["/bridge/kick"].sent
 
 
 def test_the_report_line_counts_the_board_s_routes_without_a_reader(monkeypatch: Any) -> None:
     repair = FakeRepair()
-    node, admin, _codes = build(monkeypatch, repair, with_readerless_board())
+    node, admin, _codes = board_watched(monkeypatch, repair)
     drive(node, admin, [0.0], messages=48)
     node.round(60.0)
     line = next(line for line in node.get_logger().texts("info") if "topics Hz" in line)
@@ -431,9 +481,10 @@ def test_the_report_line_counts_the_board_s_routes_without_a_reader(monkeypatch:
 
 def test_a_fault_that_survives_the_gentle_repair_kicks_the_board(monkeypatch: Any) -> None:
     """The repair invariant: this side's bridge first, the board's after it — of two bridges the
-    one that starts last is the one that gets working routes."""
+    one that starts last is the one that gets working routes. Behind the ``board_routes`` flag,
+    off by default (see :func:`board_watched`)."""
     repair = FakeRepair()
-    node, admin, codes = build(monkeypatch, repair, with_readerless_board())
+    node, admin, codes = board_watched(monkeypatch, repair)
     drive(node, admin, [0.0, 20.0], messages=48)
     assert not repair.restarts and len(node.pubs["/bridge/kick"].sent) == 1, (
         "the far side's fault is the far side's bridge: kicked first, this side's repair after"
@@ -453,9 +504,10 @@ def test_the_board_bridge_that_comes_back_after_a_kick_is_not_a_new_fault(
     monkeypatch: Any,
 ) -> None:
     """The board's bridge restarts with a new zenoh id BY CONSTRUCTION, so a watch that repaired
-    on that would restart the two bridges for ever."""
+    on that would restart the two bridges for ever. Behind the ``board_routes`` flag, off by
+    default (see :func:`board_watched`)."""
     repair = FakeRepair()
-    node, admin, codes = build(monkeypatch, repair, with_readerless_board())
+    node, admin, codes = board_watched(monkeypatch, repair)
     drive(node, admin, [0.0, 20.0, 25.0, 45.0], messages=48)
     assert len(node.pubs["/bridge/kick"].sent) == 1
     admin.board_zid = "0000000000000000000000000000ffff"  # the kicked bridge, back
@@ -469,8 +521,9 @@ def test_the_board_bridge_that_comes_back_after_a_kick_is_not_a_new_fault(
 
 
 def test_the_kick_is_off_when_the_switch_is_off(monkeypatch: Any) -> None:
+    """Behind the ``board_routes`` flag, off by default (see :func:`board_watched`)."""
     repair = FakeRepair()
-    node, admin, codes = build(monkeypatch, repair, with_readerless_board())
+    node, admin, codes = board_watched(monkeypatch, repair)
     node._switches.set("bridge_kick", False)
     drive(node, admin, [0.0, 20.0, 25.0, 45.0, 65.0], messages=48)
     assert not node.pubs["/bridge/kick"].sent and repair.restarts == 1 and codes == [], (
@@ -488,10 +541,11 @@ def test_the_cooldown_is_armed_once_and_then_runs_out(monkeypatch: Any) -> None:
     The fault here is the board's readerless route, whose patience is ``flow_silence_s`` on this
     watch's own clocks, so the timeline is readable: a repair at 20 s, the ladder spent at 45 s
     (the kick is switched off), and the next gentle repair as soon as 120 s have passed since
-    then — not 120 s after the last failing round.
+    then — not 120 s after the last failing round. That fault is behind the ``board_routes``
+    flag, off by default (see :func:`board_watched`).
     """
     repair = FakeRepair()
-    node, admin, codes = build(monkeypatch, repair, with_readerless_board())
+    node, admin, codes = board_watched(monkeypatch, repair)
     node._switches.set("bridge_kick", False)  # the ladder's middle rung out of the way
     drive(node, admin, [0.0, 20.0], messages=48)
     assert repair.restarts == 1, "the gentle repair"

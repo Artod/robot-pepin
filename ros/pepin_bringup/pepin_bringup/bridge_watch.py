@@ -175,25 +175,28 @@ FLAGS = FlagSet(
     ),
     Flag(
         "board_routes",
-        True,
+        False,
         description="the BOARD's own routes are judged too: a pub route of the board's bridge"
         " with publishers, a remote route naming this bridge and no dds_reader carries nothing"
         " and is counted in the report line as 'board routes without a reader N'; off, only"
         " this side's routes are judged, as before",
-        why="2026-09-15, the evening every topic stopped: this watch printed 'dead routes 0' for"
-        " an hour while thirteen of the board's pub routes had an empty dds_reader and nothing"
-        " crossed at all. dead_routes judged this bridge's routes alone, and the board's are in"
-        " the same network-wide admin reply this watch already fetches (the admin space is"
-        " network-wide: either bridge answers for both). The fault is invisible from every other"
-        " signal — the route count is right, the far side's publishers are alive, and the"
-        " message counters only say 'silent', which a starved wifi link says too",
-        on_when="always on a split or vision stack: it is the difference between 'the link is"
-        " slow' and 'the board's bridge must be restarted'",
-        off_when="while bisecting the bridge by hand",
+        why="it cannot tell a broken route from a topic nobody here wants, and the second is a"
+        " normal mode. On 2026-09-19 the cart drove camera-only: no node on the laptop subscribes"
+        " to /scan then, so the board's pub route for it legitimately had no dds_reader, this"
+        " watch called it a board route without a reader and kicked the board's bridge. The"
+        " restart took the laptop's /tf subscription with it and RTAB-Map received no snapshot"
+        " for 13 minutes — a repair that caused the outage it was watching for. It found a real"
+        " fault once (2026-09-15, thirteen readerless pub routes while every topic was dead), so"
+        " the reading stays in the report line; only the repair it triggers is off",
+        on_when="while chasing a repeat of 2026-09-15 — every topic silent with the route count"
+        " right — and only with every consumer of every board topic running, so a readerless"
+        " route means what this rule assumes it means",
+        off_when="off by default, and always in a mode where the laptop deliberately does not"
+        " read a board topic (camera-only, a muted sensor, a stack with half the nodes down)",
     ),
     Flag(
         "bridge_kick",
-        True,
+        False,
         description="when a fault survives the gentle repair, ask the BOARD to restart its own"
         " bridge (one String on /bridge/kick; the board's run recorder touches a flag file and a"
         " systemd path unit there does the restart); off, the ladder ends at the gentle repair"
@@ -205,15 +208,17 @@ FLAGS = FlagSet(
         " cure 2026-09-15: the readerless routes were the board's. This container has no ssh key"
         " and must not have one, so the request crosses as a topic and the board's own systemd"
         " does the restart. It is sent only after a restart of this side's bridge, so the order"
-        f" that works is the order that happens. {UNMEASURED}",
-        on_when="always once the board carries pepin-bridge-kick.path: it is the only repair"
-        " for the board's own routes that does not need a human",
+        f" that works is the order that happens. {UNMEASURED}"
+        " OFF BY DEFAULT since 2026-09-20: see bridge_restart — the ladder this is the last rung"
+        " of fired on healthy links three times in two days and healed none of them",
+        on_when="while watching a link that is known to die for real, with somebody reading the"
+        " log: it is the only repair for the board's own routes that does not need a human",
         off_when="on a board without the kick units installed (the message is then published"
         " into nothing), or while bisecting the bridge by hand",
     ),
     Flag(
         "bridge_restart",
-        True,
+        False,
         description="repair a dead route, a starved topic or a board bridge that changed identity"
         " by restarting the laptop's bridge container alone (Docker Engine API over"
         " /var/run/docker.sock); off, the repair is the old one — this whole half restarts, which"
@@ -226,8 +231,18 @@ FLAGS = FlagSet(
         " restart. It is also the answer to a board bridge that changed identity: on 2026-09-14"
         " restarting this whole half on that event left the laptop bridge's /vo route without a"
         " DDS reader, and what cured it was a restart of the laptop's bridge alone with the nodes"
-        f" up. {UNMEASURED}",
-        on_when="always: it is strictly less destructive than the fallback",
+        f" up. {UNMEASURED}"
+        " OFF BY DEFAULT since 2026-09-20, measured: the repairs fired on links that were not"
+        " broken and cured nothing that was. Camera-only, the tracker publishes /tracker_pose only"
+        " when a word moves it; 20 s without one read as a dead route, the bridge was restarted,"
+        " the laptop lost /tf and /scan with it, RTAB-Map received no snapshot, and legs 2 and 3"
+        " of that evening's camera-only tour (6 m) were driven on odometry alone"
+        " (scratch/tour_who_held_the_pose.py: 0 graph words on tapes 0398 and 0399). The night"
+        " before, a tracker left without a map was silent for an hour and the ladder restarted the"
+        " bridges 20 times over it. The watch still measures and reports; with half_restart off"
+        " as well, nothing is restarted",
+        on_when="while watching a link that is known to die for real, with somebody reading the"
+        " log — it is strictly less destructive than the fallback",
         off_when="when the laptop's bridge must not be touched — bisecting it by hand, or"
         " running without the docker socket mounted",
     ),
