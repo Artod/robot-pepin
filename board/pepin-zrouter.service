@@ -1,0 +1,31 @@
+[Unit]
+Description=Pepin zenoh router: the board's half of the rmw_zenoh transport (PEPIN_RMW=zenoh only)
+# Deliberately NOT PartOf/BindsTo pepin-ros.service. Every node of the stack is a zenoh PEER
+# that keeps an infinite connect retry to this router, and the router is what carries the link
+# to the laptop; a router that went down and up with every stack restart would take the laptop's
+# half with it each time, which is the failure the zenoh-bridge sidecar used to have. It starts
+# before the stack at boot and then stays up on its own.
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+Before=pepin-ros.service
+StartLimitIntervalSec=0
+
+[Service]
+# PEPIN_RMW=zenoh in /etc/default/pepin-ros is the whole switch; unset (or cyclone) and this
+# unit does nothing at all, so it is safe to leave enabled while the robot runs on CycloneDDS.
+EnvironmentFile=-/etc/default/pepin-ros
+Environment=PEPIN_RMW=cyclone
+Environment=PEPIN_ZIMAGE=pepin-ros:zenoh
+ExecStartPre=-/usr/bin/docker rm -f pepin-zrouter
+# No config file and no ZENOH_CONFIG_OVERRIDE: the shipped router default already listens on
+# tcp/[::]:7447, which is every interface — the board's nodes reach it over the loopback and the
+# laptop's router dials it over the WiFi. --network host so the loopback it listens on is the
+# same loopback the stack's container lives in.
+ExecStart=/bin/sh -c '[ "$PEPIN_RMW" = zenoh ] || exec sleep infinity; exec /usr/bin/docker run --rm --name pepin-zrouter --network host $PEPIN_ZIMAGE /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd'
+ExecStop=-/usr/bin/docker stop -t 5 pepin-zrouter
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

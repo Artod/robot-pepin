@@ -224,6 +224,21 @@
       "note": "Measured 12 % / 52 MB for the pair: the bridge itself is 11 % / 23 MB and the `docker run` supervisor that holds it is ~1 % / 29 MB — the same regex claims both, because killing one kills the other. Runs only when PEPIN_SIDE=board or PEPIN_BRIDGE=on, but by then it is part of every drive, so it is expected whenever it is configured; a census with no bridge running is not red on its own (see `when`)."
     },
     {
+      "name": "zenoh_router",
+      "match": "rmw_zenohd|docker run .*--name pepin-zrouter",
+      "role": "The board's half of the rmw_zenoh transport (PEPIN_RMW=zenoh): the one process that carries this board's graph to the laptop's router. Board-internal traffic does NOT pass through it — every node here is a zenoh peer of every other over the host loopback (measured 0.0 % router CPU for a 10 Hz x 100 kB board-internal flow, against 1.4 % with the same two nodes as clients).",
+      "on_board_because": [
+        "real-time",
+        "wifi-loss"
+      ],
+      "owner": "pepin-zrouter.service (docker run pepin-ros:zenoh rmw_zenohd, --network host)",
+      "when": "sometimes",
+      "budget": {
+        "cpu_percent": 15.0,
+        "rss_mb": 60.0
+      }
+    },
+    {
       "name": "base_server",
       "match": "pepin\\.base_server",
       "role": "The wheels next to the UART: speed commands, odometry ticks and the deadman, on TCP 3336. The last thing between a runaway and a stopped cart.",
