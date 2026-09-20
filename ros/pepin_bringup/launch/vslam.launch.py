@@ -87,7 +87,7 @@ from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from pepin.deployment import CONTAINER_STOP_TIMEOUT_S, laptop_launch_nodes
+from pepin.deployment import CONTAINER_STOP_TIMEOUT_S, laptop_launch_nodes, rmw_is_zenoh
 
 # How long a node of this launch is given to end on SIGINT before the launch escalates to
 # SIGTERM, and then how long before SIGKILL. launch's own defaults are 5 s and 5 s, which is
@@ -909,17 +909,27 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("bridge_admin", default_value="http://pepin-zenoh:8000"),
             DeclareLaunchArgument("static_camera_tf", default_value="true"),
             # A new board bridge means new subscriptions are needed: the watch exits, the launch
-            # shuts down, the container's restart policy brings this half back.
-            ExecuteProcess(
-                cmd=[
-                    "python3",
-                    "-m",
-                    "pepin_bringup.bridge_watch",
-                    LaunchConfiguration("board"),
-                    LaunchConfiguration("bridge_admin"),  # this side's bridge: the flow watch
-                ],
-                output="screen",
-                on_exit=[Shutdown(reason="the board's bridge restarted")],
+            # shuts down, the container's restart policy brings this half back. Under
+            # PEPIN_RMW=zenoh there is no bridge to watch, and a watch that found no admin would
+            # exit at once and shut this launch down on every start.
+            *(
+                []
+                if rmw_is_zenoh()
+                else [
+                    ExecuteProcess(
+                        cmd=[
+                            "python3",
+                            "-m",
+                            "pepin_bringup.bridge_watch",
+                            LaunchConfiguration("board"),
+                            LaunchConfiguration(
+                                "bridge_admin"
+                            ),  # this side's bridge: the flow watch
+                        ],
+                        output="screen",
+                        on_exit=[Shutdown(reason="the board's bridge restarted")],
+                    )
+                ]
             ),
             OpaqueFunction(function=_describe),
         ]

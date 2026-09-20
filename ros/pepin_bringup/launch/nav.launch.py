@@ -48,6 +48,7 @@ from pepin.deployment import (
     laptop_launch_nodes,
     nav_container_nodes,
     nav_nodes,
+    rmw_is_zenoh,
     runs_here,
 )
 
@@ -237,20 +238,22 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         ]
         # A new board bridge means new subscriptions are needed: the watch exits, the launch
         # shuts down, the container's restart policy brings this half back
-        # (pepin_bringup.bridge_watch).
-        actions.append(
-            ExecuteProcess(
-                cmd=[
-                    "python3",
-                    "-m",
-                    "pepin_bringup.bridge_watch",
-                    LaunchConfiguration("board"),
-                    admin,  # this side's bridge: what the flow watch reads the allow-list from
-                ],
-                output="screen",
-                on_exit=[Shutdown(reason="the board's bridge restarted")],
+        # (pepin_bringup.bridge_watch). Under PEPIN_RMW=zenoh there is no bridge to watch: the
+        # watch would find no admin, exit, and take this launch down with it on every start.
+        if not rmw_is_zenoh():
+            actions.append(
+                ExecuteProcess(
+                    cmd=[
+                        "python3",
+                        "-m",
+                        "pepin_bringup.bridge_watch",
+                        LaunchConfiguration("board"),
+                        admin,  # this side's bridge: what the flow watch reads the allow-list from
+                    ],
+                    output="screen",
+                    on_exit=[Shutdown(reason="the board's bridge restarted")],
+                )
             )
-        )
     if runs_here(side, "link_watch"):
         # As a module, not a console script: a new entry point needs an image rebuild, a module
         # on the mounted package path does not.

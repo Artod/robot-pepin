@@ -139,7 +139,9 @@ restart_board() {
     # /depth_scan, the localisation words) with no reader on the board — measured after every
     # `restart.sh board --deploy` on 2026-09-16. Restarting the laptop's bridge here makes it
     # the newer one again. Nothing to do when this half is not up.
-    if [ "$SIDES" != board ] || ! docker ps --format '{{.Names}}' | grep -qx pepin-zenoh; then
+    # Under zenoh there is no second bridge to be the newer one: both halves are peers of their
+    # own router, and a node that lost its router reconnects to it by itself.
+    if pepin_rmw_is_zenoh || [ "$SIDES" != board ] || ! docker ps --format '{{.Names}}' | grep -qx pepin-zenoh; then
         return 0
     fi
     step "the laptop's bridge, after the board's: the newer bridge is the one with live routes"
@@ -275,7 +277,12 @@ check_laptop() {
 
     line="$(last 'bridge watch: [0-9]+ topics')"
     n="$(sed -n 's/.*bridge watch: \([0-9]*\) topics.*/\1/p' <<<"$line")"
-    if [ -z "$line" ]; then
+    if pepin_rmw_is_zenoh; then
+        # There is no bridge and no watch of one under zenoh: what this check is really asking —
+        # do the board's topics reach this half — is asked again by 2.5 (the localizer hears the
+        # board's belief) and by the rate kit, both of which read the data itself.
+        pass 2.1 "bridge watch: n/a under PEPIN_RMW=zenoh (no bridge; 2.5 and the rate kit read the flows)"
+    elif [ -z "$line" ]; then
         fail 2.1 "bridge watch: no line yet (it reports once the routes settle; ros/laptop.sh logs vslam)"
     elif [[ "$line" == *"DEAD ROUTES"* || "$line" == *"WITHOUT A READER"* ]]; then
         # Either side's routes: ours with no DDS endpoint, or the board's own pub routes with no
