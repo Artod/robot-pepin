@@ -2239,6 +2239,10 @@ def test_the_hook_checks_the_shell_scripts_and_the_board_s_books_come_home() -> 
     assert "root@$BOARD:/root/pepin-ros/maps/" in fetch
     sync = (REPO / "ros/sync.sh").read_text()
     assert "--exclude 'maps/*.places.yaml'" in sync, "the board's book is the truth: never pushed"
+    assert "--exclude 'maps/map_cache.json'" in sync, (
+        "the board's own map cache exists only there: a deploy with --delete must not remove it"
+    )
+    assert "--exclude 'maps/last_pose.json'" in sync, "nor the pose the tracker wrote down"
     tracked = subprocess.run(
         ["git", "ls-files", "ros/maps"], capture_output=True, text=True, cwd=REPO, check=True
     ).stdout
