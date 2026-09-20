@@ -443,8 +443,10 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
     ]
     assert armed and armed[0].endswith("else None"), "no fit to watch without a tracker"
     # The fallback is a flag, so the old behaviour is one `ros/flags.sh set` away (rule 19).
+    # start_on_a_known_pose joined the table on 2026-09-19: with a sigma published, a goal is
+    # refused for the pose's sake only where nothing has ever corrected it.
     flags = load_table(REPO / NODES / "goal_server.py")
-    assert flags.names == ("tf_pose", "correction_watch", "sigma_gate")
+    assert flags.names == ("tf_pose", "correction_watch", "sigma_gate", "start_on_a_known_pose")
     assert all(flags.flag(name).live for name in flags.names)
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"
 
@@ -2239,6 +2241,10 @@ def test_the_hook_checks_the_shell_scripts_and_the_board_s_books_come_home() -> 
     assert "root@$BOARD:/root/pepin-ros/maps/" in fetch
     sync = (REPO / "ros/sync.sh").read_text()
     assert "--exclude 'maps/*.places.yaml'" in sync, "the board's book is the truth: never pushed"
+    assert "--exclude 'maps/map_cache.json'" in sync, (
+        "the board's own map cache exists only there: a deploy with --delete must not remove it"
+    )
+    assert "--exclude 'maps/last_pose.json'" in sync, "nor the pose the tracker wrote down"
     tracked = subprocess.run(
         ["git", "ls-files", "ros/maps"], capture_output=True, text=True, cwd=REPO, check=True
     ).stdout
@@ -2325,10 +2331,16 @@ def test_the_graphs_grid_is_the_one_map_and_the_tracker_is_the_one_owner_of_map_
     table = _rtabmap("RTABMAP")
     assert table["odom_frame_id"] == "odom" and table["map_frame_id"] == "map"
     assert sf.dict_items(vslam)["publish_tf"] == {"False"}, "in no situation, in either tree"
-    assert "('map', '/map')" in sf.unparsed(vslam, ast.Tuple), "the grid IS the map"
-    assert "remappings.append(('map', '/map'))" in sf.unparsed(vslam, ast.Call), (
+    # The grid IS the map — once it is assembled from the graph RTAB-Map LOADED. It leaves RTAB-Map
+    # on its own topic and pepin_bringup.rtabmap_frame relays it onto /map (grid_needs_tie): before
+    # the first recognition the grid is one scan where the odometry puts the cart, and a tracker
+    # that adopts it matches itself (2026-09-19: fit 1.00, 1.26 m off).
+    assert "remappings.append(('map', '/rtabmap/grid'))" in sf.unparsed(vslam, ast.Call), (
         "unconditionally: there is no second map left for it to make way for"
     )
+    assert "('map', '/map')" not in sf.unparsed(vslam, ast.Tuple), "/map has one publisher"
+    frame = sf.tree(f"{NODES}/rtabmap_frame.py")
+    assert {"/rtabmap/grid", "/map", "grid_needs_tie"} <= set(sf.strings(frame))
     assert not [
         n for n in ast.walk(vslam) if isinstance(n, ast.If) and "slam" in ast.unparse(n.test)
     ], "no mode decides anything in this launch any more"
@@ -2347,9 +2359,9 @@ def test_the_graphs_grid_is_the_one_map_and_the_tracker_is_the_one_owner_of_map_
         "kept for the depth-built grid of a lidar-less wake-up"
     )
     assert float(str(table["Grid/RangeMax"])) == 8.0
-    assert table["RGBD/NeighborLinkRefining"] == "true", (
-        "the start value beside a living lidar, following the snapshots at run time: unrefined,"
-        " a parked cart's map turned +27 deg in 40 min with the gyro's bias (2026-09-19)"
+    assert table["RGBD/NeighborLinkRefining"] == "false", (
+        "refined links made OptimizeMaxError reject 87 closures on the first real drive; the gyro's"
+        " bias tracked at rest removed the reason they had been switched on (2026-09-19)"
     )
     assert table["Reg/Strategy"] == "1", "ICP; 2 would drop every node that has no picture"
     assert table["Mem/BadSignaturesIgnored"] == "false", "a node with no picture is KEPT"

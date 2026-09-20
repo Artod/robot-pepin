@@ -17,7 +17,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-
 # Float slack on "within one tick": the travel is a sum of doubles that are each exactly one tick.
 TICK_SLACK = 1e-6
 
