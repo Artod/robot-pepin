@@ -50,6 +50,7 @@ from synthetic import raycast_room  # noqa: E402
 from test_localization import PILLAR, furnished_room_map  # noqa: E402
 from test_localizer_sources import drive, error  # noqa: E402
 
+from pepin.fusion import ODOM_YAW_PER_TURN  # noqa: E402
 from pepin.odometry import Pose2D  # noqa: E402
 from pepin.scanmatch import apply_motion, relative_motion  # noqa: E402
 from pepin.sources import CAMERA, DEPTH, GRAPH, LIDAR  # noqa: E402
@@ -1072,13 +1073,16 @@ def test_a_republished_map_does_not_rebuild_the_tracker(node: Relocalizer) -> No
 def test_the_published_fit_falls_to_zero_once_every_source_has_gone_silent(
     node: Relocalizer,
 ) -> None:
-    """No source, no confidence. On 2026-09-14 this node published fit 0.70 for 141 s with
-    sources=camera and not one measurement arriving, and the goal server — which reads only that
-    number — took `printer` and then `home` and drove both on dead reckoning. Silence longer than
-    source_patience_s now publishes 0.00, which is under every rung of the ladder at once: a new
-    goal is refused (drive_fit 0.50) and the running one is stopped (blind_fit 0.30). The watch
-    that searches the whole map hears nothing of it — it reads the tracker's OWN fit — so a dead
-    sensor cannot start a re-seed frenzy on a scan that is not there."""
+    """NEW RULE (2026-09-19): the fit stands until a source corrects it — fit_needs_a_source is
+    OFF by default, and zeroing the fit on silence is what the flag now buys. The rule itself is
+    unchanged and tested here with the flag on: on 2026-09-14 this node published fit 0.70 for
+    141 s with sources=camera and not one measurement arriving, and the goal server — which read
+    only that number — took `printer` and then `home` and drove both on dead reckoning. What
+    replaced it is /localization/sigma, which grows along the odometry whenever no word lands and
+    which every gate reads in front of the fit. The watch that searches the whole map hears
+    nothing of either — it reads the tracker's OWN fit — so a dead sensor cannot start a re-seed
+    frenzy on a scan that is not there."""
+    node._switches.set("fit_needs_a_source", True)
     truth, odom = drive(3)
     on_scan, on_odom = node.subs["/scan"][1], node.subs["/odometry/filtered"][1]
     for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
@@ -1105,7 +1109,9 @@ def test_the_published_fit_falls_to_zero_once_every_source_has_gone_silent(
     line = node.logger.texts("info")[-1]
     assert "no source for 3.5 s (published as 0.00)" in line
     assert "fit_needs_a_source=on source_patience_s=3.0" in line
-    # Off, the old behaviour: the last fit measured stands until a source corrects it again.
+
+    # The flag off — the DEFAULT since 2026-09-19: the last fit measured stands until a source
+    # corrects it again, and the silence is still said out loud in the report line.
     assert node.set_parameters([Parameter("fit_needs_a_source", value=False)])[0].successful
     node._check()
     assert fit.sent[-1].data == pytest.approx(measured)
@@ -1116,6 +1122,35 @@ def test_the_published_fit_falls_to_zero_once_every_source_has_gone_silent(
     assert node.set_parameters([Parameter("source_patience_s", value=10.0)])[0].successful
     node._check()
     assert fit.sent[-1].data == pytest.approx(measured)
+
+
+def test_by_default_a_silent_source_leaves_the_fit_where_the_last_scan_put_it(
+    node: Relocalizer,
+) -> None:
+    """NEW RULE (2026-09-19): fit_needs_a_source defaults OFF, so the published fit means what it
+    always meant — the last lidar revolution's inlier fraction — and silence is read off
+    /localization/sigma, which grows along the odometry and cannot be faked by a stale number.
+    Zeroing the fit cost more than it bought: camera-only the 0.00 is the NORMAL reading, and it
+    fed a cascade of lidar-shaped refusals at the bookshelf on 2026-09-19."""
+    truth, odom = drive(3)
+    on_scan, on_odom = node.subs["/scan"][1], node.subs["/odometry/filtered"][1]
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_scan(lidar_msg(t, ts))
+        on_odom(odom_msg(o, ts))
+    fit = node.pubs["localization_fit"]
+    node.clock.seconds = 100.3
+    node._check()
+    node._check()
+    measured = fit.sent[-1].data
+    assert measured > DRIVE_FIT
+    node.clock.seconds = 100.2 + SOURCE_PATIENCE_S + 10.0
+    node._check()
+    assert fit.sent[-1].data == pytest.approx(measured), "the fit stands: nothing zeroes it"
+    node._report_tracking()
+    line = node.logger.texts("info")[-1]
+    assert "fit_needs_a_source=off" in line and "(published as 0.00)" not in line
 
 
 def test_a_cart_standing_still_is_not_a_cart_without_a_source(node: Relocalizer) -> None:
@@ -1228,6 +1263,7 @@ def test_the_node_publishes_one_sigma_out_of_the_fusion_whichever_source_spoke()
     assert first.xy_m == pytest.approx(UNKNOWN_SIGMA[0], abs=1e-3)
     assert first.yaw_deg == pytest.approx(UNKNOWN_SIGMA[1], abs=1e-3)
     assert first.xy_m > LOST_SIGMA_M, "no word yet may not start a drive"
+    assert not first.known, "and it says so out loud: this is the sentinel, not a measurement"
     node.subs["/map"][1](map_msg())
     truth, odom = drive(8)
     on_measure = node.subs["/localization/measurement"][1]
@@ -1241,6 +1277,7 @@ def test_the_node_publishes_one_sigma_out_of_the_fusion_whichever_source_spoke()
     assert node.pubs["localization_fit"].sent[-1].data == 0.0, "the lidar's metric, and no lidar"
     word = said(sigma_pub)
     assert word.xy_m < DRIVE_SIGMA_M, f"the camera is holding the pose: {word.xy_m:.3f} m"
+    assert word.known, "a word has corrected the pose: there is a pose now"
     assert json.loads(sigma_pub.sent[-1].data)["word_age_s"] < 0.5, "the word that did it"
     assert len(sigma_pub.sent) >= len(node.pubs["/tracker_pose"].sent), "one per update, at least"
     # ...and now nothing corrects it: the wheels turn, the camera says nothing, the check runs.
@@ -1256,6 +1293,50 @@ def test_the_node_publishes_one_sigma_out_of_the_fusion_whichever_source_spoke()
     told = json.loads(sigma_pub.sent[-1].data)
     assert told["word_age_s"] > 15.0, "the seconds since the last accepted word ride along"
     assert told["stamp"] == pytest.approx(node.clock.seconds), "...and the clock it was said at"
+    assert told["known"] is True, "grown wide, and still a pose the cart has"
+
+
+def test_the_belief_s_heading_grows_by_the_ekf_s_measured_share_of_a_turn() -> None:
+    """NEW RULE (2026-09-19): the tracked pose's heading sigma grows by belief_yaw_per_turn of
+    every reported turn — 0.05, what the EKF heading was measured to be worth against the lidar
+    truth — and not by the wheels-only 0.7 the measurement carry pays. With 0.7 the cart of that
+    evening read 42 deg of heading sigma and 0.42 m of position after 18 in-place recoveries and
+    half a metre of driving, both over the gates, for a heading the gyro knew to a couple of
+    degrees. 0.7 stays one `ros/flags.sh set` away (rule 19)."""
+    with ros_stubs.parameters(map_cache_dir=CACHE_DIR, sources="camera", min_match_gap_s=0.0):
+        node = Relocalizer()
+    node._tf.buffer.transforms[("base_link", "laser")] = TransformStamped()
+    node.subs["/map"][1](map_msg())
+    sigma_pub, on_odom = node.pubs[SIGMA_TOPIC], node.subs["/odometry/filtered"][1]
+    truth, odom = drive(3)
+    for i, (o, t) in enumerate(zip(odom, truth, strict=True)):
+        ts = 100.0 + 0.1 * i
+        node.clock.seconds = ts + 0.02
+        on_odom(odom_msg(o, ts))
+        node.subs["/localization/measurement"][1](measurement_msg(node, t, ts))
+    node._check()
+    seated = said(sigma_pub).yaw_deg
+
+    spun = {"theta": odom[-1].theta, "t": 101.0, "turn": 0}
+
+    def recoveries(turns: int) -> float:
+        """Heading sigma in degrees after ``turns`` more quarter turns in place, 2 deg at a
+        time; the clock and the heading carry on from the last call."""
+        for _ in range(turns):
+            spun["turn"] += 1
+            for _ in range(45):
+                spun["theta"] += math.radians(2.0) * (1.0 if spun["turn"] % 2 else -1.0)
+                spun["t"] += 0.1
+                node.clock.seconds = spun["t"]
+                on_odom(odom_msg(Pose2D(odom[-1].x, odom[-1].y, spun["theta"]), spun["t"]))
+                node._check()
+        return said(sigma_pub).yaw_deg
+
+    measured = recoveries(4)
+    assert measured < seated + 3.0, f"four quarter turns cost a degree or two: {measured:.1f} deg"
+    node._switches.set("belief_yaw_per_turn", ODOM_YAW_PER_TURN)
+    wheels = recoveries(4)
+    assert wheels > measured + 10.0, f"the old constant, still reachable: {wheels:.1f} deg"
     node._report_tracking()
     line = node.logger.texts("info")[-1]
     assert "sigma " in line and "word " in line

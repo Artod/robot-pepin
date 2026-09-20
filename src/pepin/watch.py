@@ -31,7 +31,14 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-from pepin.fusion import GATE, Matrix, carry_pose, odometry_covariance, sigma_from_fit
+from pepin.fusion import (
+    EKF_YAW_PER_TURN,
+    GATE,
+    Matrix,
+    carry_pose,
+    odometry_covariance,
+    sigma_from_fit,
+)
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import relative_motion
 
@@ -93,9 +100,11 @@ ADMIT_MARGIN = 0.10  # ...and it must beat what the tracker already has by this 
 # comes straight off the fit: the two scales stopped overlapping and the sentinel has to be
 # held over the cut on purpose.
 # The topic the tracker publishes them on, and the shape of what it publishes: a
-# std_msgs/String carrying JSON — ``sigma_xy`` in metres, ``sigma_yaw`` in degrees, ``stamp``
-# the tracker's clock when it was published and ``word_age_s`` the seconds since the last
-# accepted word of any source. One text message rather than a typed one because every consumer
+# std_msgs/String carrying JSON — ``sigma_xy`` in metres, ``sigma_yaw`` in degrees, ``known``
+# whether anything has ever corrected this pose (added 2026-09-19: it is the one state a goal is
+# refused in, and the sentinel's value is not a safe way to ask), ``stamp`` the tracker's clock
+# when it was published and ``word_age_s`` the seconds since the last accepted word of any
+# source. One text message rather than a typed one because every consumer
 # of it already speaks this dialect (/localization/sources, /localization/measurement) and
 # because pepin_bringup.depth_fusion reads exactly these names. The name and the shape live
 # here, with the numbers read off them: this file is the contract.
@@ -343,31 +352,50 @@ class Sigma:
     publishes no such word at all (a build from before 2026-09-15), and the fit rules are the
     fallback there. A word that HAS arrived and then stopped is a different thing entirely: the
     tracker is dead or stalled, and :meth:`fresh` is what the gates ask before believing it.
+
+    ``known`` is the third thing a reading can be: the tracker is publishing, the numbers are
+    there, and NOTHING has ever corrected the pose — :data:`UNKNOWN_SIGMA`, the sentinel
+    :meth:`PoseSpread.sigma` returns before its first word. That is the one state in which a
+    goal is refused for the pose's sake (:class:`GoalGate`), so it is said out loud on the wire
+    rather than inferred from the sentinel's value: a belief that has really grown past the
+    sentinel is still a pose, and a cart that has never localised at any number is not.
     """
 
     xy_m: float
     yaw_deg: float
     age_s: float
+    known: bool = True  # something has corrected this pose at least once
 
     @classmethod
     def from_json(cls, text: str, age_s: float) -> Sigma | None:
         """One ``/localization/sigma`` message as the tracker writes it, read ``age_s`` seconds
         after it landed; ``None`` for anything that does not parse or does not carry the two
         numbers — a message nobody can read is not a reason to drive, and not a reason to
-        raise in a subscription either."""
+        raise in a subscription either.
+
+        A message from a board that does not say ``known`` (a build from before 2026-09-19) is
+        read by the sentinel's own value, which is what said it there."""
         try:
             heard = json.loads(text)
-            return cls(float(heard["sigma_xy"]), float(heard["sigma_yaw"]), age_s)
+            xy = float(heard["sigma_xy"])
+            return cls(
+                xy,
+                float(heard["sigma_yaw"]),
+                age_s,
+                bool(heard.get("known", xy < UNKNOWN_SIGMA[0])),
+            )
         except (TypeError, ValueError, KeyError):
             return None
 
     def to_json(self, stamp: float, word_age_s: float) -> str:
-        """The message the tracker publishes: the two numbers, the clock it was published at,
-        and how long it is since a source's word last corrected the pose."""
+        """The message the tracker publishes: the two numbers, whether anything has ever
+        corrected the pose, the clock it was published at, and how long it is since a source's
+        word last corrected it."""
         return json.dumps(
             {
                 "sigma_xy": round(self.xy_m, 4),
                 "sigma_yaw": round(self.yaw_deg, 3),
+                "known": self.known,
                 "stamp": round(stamp, 3),
                 "word_age_s": round(word_age_s, 3),
             }
@@ -417,15 +445,19 @@ class SigmaWindow:
         is what says this board publishes no sigma at all and the fit rules answer instead. With
         every sample older than the window the newest one is still answered with, aged: a tracker
         that has stopped is a reading the gates must SEE and refuse, not an absence they mistake
-        for an old build."""
+        for an old build.
+
+        ``known`` is the NEWEST sample's, never a median: a cart that has just heard its first
+        word has a pose, and half a window of samples from before it must not say otherwise."""
         self._trim(now)
         if not self._samples:
             return None
-        newest_at = self._samples[-1][0]
+        newest_at, newest = self._samples[-1]
         return Sigma(
             statistics.median(s.xy_m for _, s in self._samples),
             statistics.median(s.yaw_deg for _, s in self._samples),
             max(0.0, now - newest_at),
+            newest.known,
         )
 
     def span(self) -> float:
@@ -469,20 +501,31 @@ class PoseSpread:
     * :meth:`carried` — the prediction step, run between corrections: the covariance travels
       through the composition's Jacobian and is widened by what the odometry's own error over
       that step costs (:func:`pepin.fusion.odometry_covariance`, this cart's measured 2 % per
-      metre and 0.7 of every reported turn). The tracker's filter has no process noise of its
-      own — its correction is a blend, not a Kalman step — so this is the honest one: it is the
-      same model the measurement carry already pays, applied to the belief itself. It is
-      accumulated STEP BY STEP, so a cart that drives a circle back to where it started is not
-      reported as certain: it is the path that costs, not the displacement.
+      metre and ``yaw_per_turn`` of every reported turn). The tracker's filter has no process
+      noise of its own — its correction is a blend, not a Kalman step — so this is the honest
+      one. It is accumulated STEP BY STEP, so a cart that drives a circle back to where it
+      started is not reported as certain: it is the path that costs, not the displacement.
+
+    The BELIEF's turn term is not the measurement carry's. The carry's self-check is priced at
+    the wheels-only end on purpose (:data:`pepin.fusion.ODOM_YAW_PER_TURN`, 0.7: what is left
+    when the IMU drops; see the comment there). The belief travels on the EKF heading, which has
+    the gyro in it, and that is a different number: :data:`pepin.fusion.EKF_YAW_PER_TURN`,
+    measured on the lidar-held drives of 2026-09-19. Replay that evening's camera-only cart
+    through this model — a graph word's own 0.20 m / 8 deg, 18 in-place recoveries, half a
+    metre driven — and 0.7
+    gives 0.42 m / 42 deg, over both gates, for a heading the gyro knew to a couple of degrees;
+    the cart's own line read 28 deg. With the measured term the same path reads 0.22 m / 9.1 deg.
 
     Before the first correction there is no covariance at all and the sigma is what a fit of
-    zero buys (0.35 m, 23 deg): not localised, which is what a gate should read then.
+    zero buys (0.35 m, 23 deg): not localised, which is what a gate should read then, and what
+    :meth:`known` says out loud.
     """
 
     covariance: Matrix | None = None
     pose: Pose2D | None = None  # the map pose the covariance belongs to (the Jacobian's arm)
     odom: Pose2D | None = None  # ...and the odometry reading of that same moment
     corrected_at_s: float | None = field(default=None)
+    yaw_per_turn: float = EKF_YAW_PER_TURN  # the belief's own turn term, a live flag on the node
 
     def corrected(self, covariance: Matrix, pose: Pose2D, odom: Pose2D | None, now: float) -> None:
         """An accepted word of any source: adopt its fused covariance and anchor it here."""
@@ -496,7 +539,12 @@ class PoseSpread:
         motion = relative_motion(self.odom, odom)
         pose, covariance = carry_pose(self.pose, self.covariance, motion)
         self.pose, self.odom = pose, odom
-        self.covariance = covariance + odometry_covariance(motion)
+        self.covariance = covariance + odometry_covariance(motion, yaw_per_turn=self.yaw_per_turn)
+
+    def known(self) -> bool:
+        """Whether anything has ever corrected this pose: False before the first word, when
+        :meth:`sigma` is the :data:`UNKNOWN_SIGMA` sentinel and not a measurement of anything."""
+        return self.covariance is not None
 
     def sigma(self) -> tuple[float, float]:
         """``(position metres, heading degrees)``: the position sigma is the root of the LARGEST
@@ -580,6 +628,18 @@ class GoalGate:
     On a saved map the fit is now only the FALLBACK: where the tracker publishes its fused
     sigma (:class:`Sigma`), that is what the goal is judged on, because a fit belongs to the
     lidar and a drive may be held by the camera alone (:data:`DRIVE_SIGMA_M`).
+
+    START ON A KNOWN POSE (2026-09-19). Where a sigma is published, the only localisation
+    refusal left is "there is no pose at all": nothing has ever corrected it
+    (:meth:`PoseSpread.known`, the :data:`UNKNOWN_SIGMA` sentinel), or the tracker has stopped
+    saying. A pose the cart HAS is driven on whatever its number, because the number is no
+    longer what a refusal buys anything with: the refusal used to send the goal into a whole-map
+    LIDAR search, and camera-only at a bookshelf that search has nothing to match and the cart
+    stood at a sigma of 0.26 m refusing goal after goal while it knew perfectly well where it
+    was. What the sigma still decides is the drive already running (:class:`BlindDriveWatch`,
+    :data:`LOST_SIGMA_M`), where the evidence keeps arriving and a cut costs nothing but a stop.
+    ``start_on_a_known_pose`` off is the old rule: a drive starts under ``drive_sigma_m`` and
+    anything over it buys a search first.
     """
 
     drive_fit: float = DRIVE_FIT
@@ -587,6 +647,7 @@ class GoalGate:
     fresh_s: float = TF_FRESH_S
     correction_fresh_s: float = CORRECTION_FRESH_S
     sigma_patience_s: float = SOURCE_PATIENCE_S
+    start_on_a_known_pose: bool = True
 
     def verdict(
         self,
@@ -610,6 +671,17 @@ class GoalGate:
                     reason=f"the tracker's sigma stopped {sigma.age_s:.1f} s ago: it publishes"
                     " one every check period whatever the sensors do, so this is the tracker"
                     " itself, not a quiet sensor",
+                )
+            if self.start_on_a_known_pose:
+                if sigma.known:
+                    return Readiness(True, tracker=True, rule=BY_SIGMA)
+                return Readiness(
+                    False,
+                    tracker=True,
+                    search=True,
+                    rule=BY_SIGMA,
+                    reason="nothing has ever corrected the pose: the cart may be anywhere the"
+                    " map is, and a whole-map search is the only thing that can start a drive",
                 )
             if sigma.xy_m <= self.drive_sigma_m:
                 return Readiness(True, tracker=True, rule=BY_SIGMA)

@@ -10,6 +10,7 @@ from test_localization import PILLAR, furnished_room_map
 
 from pepin.fusion import (
     BOUND_INFLATION,
+    EKF_YAW_PER_TURN,
     FIT_FLOOR,
     MIN_SIGMA_XY_M,
     MIN_SIGMA_YAW_RAD,
@@ -410,6 +411,27 @@ def test_a_carry_costs_what_the_odometry_costs() -> None:
         ODOM_XY_FLOOR_M + ODOM_XY_PER_M * 0.10 + ODOM_YAW_FLOOR_RAD * 0.10
     )
     assert driving[2, 2] == still[2, 2], "driving straight adds no heading error of its own"
+
+
+def test_the_measurement_carry_still_pays_the_wheels_and_the_belief_does_not() -> None:
+    """NEW RULE (2026-09-19): the turn term is the CALLER'S, and the two callers pay different
+    prices. A measurement carried over a step is carried by the two wheels, and the self-check's
+    denominator must stay the wheels-only 0.7 — it is what the tracker holds when the IMU drops.
+    A belief carried by the EKF heading pays EKF_YAW_PER_TURN, measured on the lidar-held drives
+    of 2026-09-19 (scratch/ekf_heading_error_per_turn.py). The default is the wheels', so
+    `carried` — the fusion self-check's carry — is untouched by the change."""
+    turn = Pose2D(0.0, 0.0, math.radians(90.0))
+    assert odometry_covariance(turn)[2, 2] == odometry_covariance(turn, ODOM_YAW_PER_TURN)[2, 2]
+    wheels = math.degrees(math.sqrt(odometry_covariance(turn)[2, 2]))
+    belief = math.degrees(math.sqrt(odometry_covariance(turn, EKF_YAW_PER_TURN)[2, 2]))
+    assert wheels == pytest.approx(math.degrees(ODOM_YAW_FLOOR_RAD) + 90.0 * ODOM_YAW_PER_TURN)
+    assert belief == pytest.approx(math.degrees(ODOM_YAW_FLOOR_RAD) + 90.0 * EKF_YAW_PER_TURN)
+    assert EKF_YAW_PER_TURN < 0.1 < ODOM_YAW_PER_TURN, "a few percent of the turn, not most of it"
+    measured = measurement(1.0, 2.0, 0.0, 0.01, 0.01, math.radians(0.5))
+    moved = carried(measured, turn, 1.13)
+    assert moved.covariance[2, 2] == pytest.approx(
+        measured.covariance[2, 2] + odometry_covariance(turn)[2, 2]
+    ), "the measurement carry is the wheels', unchanged"
 
 
 def test_a_carried_measurement_is_less_sure_than_the_one_that_was_measured() -> None:

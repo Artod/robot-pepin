@@ -40,6 +40,7 @@ from pepin.watch import (  # noqa: E402
     SIGMA_TOPIC,
     SOURCE_PATIENCE_S,
     TF_FRESH_S,
+    UNKNOWN_SIGMA,
     BlindDriveWatch,
     Sigma,
 )
@@ -368,10 +369,10 @@ def test_a_tracker_that_comes_up_late_is_still_found(tmp_path) -> None:  # type:
     assert node._pose_now()["fit"] == 0.8, "and its pose is the answer again"
 
 
-def tracker_sigma(node: Any, xy_m: float, yaw_deg: float = 1.2) -> None:
+def tracker_sigma(node: Any, xy_m: float, yaw_deg: float = 1.2, known: bool = True) -> None:
     """The tracker's fused uncertainty on the wire, as pepin_bringup.relocalizer publishes it:
     one JSON string, the shape pepin.watch.Sigma defines."""
-    said = Sigma(xy_m, yaw_deg, 0.0).to_json(stamp=node.clock.seconds, word_age_s=0.1)
+    said = Sigma(xy_m, yaw_deg, 0.0, known).to_json(stamp=node.clock.seconds, word_age_s=0.1)
     node.subs[SIGMA_TOPIC][1](String(data=said))
 
 
@@ -388,10 +389,37 @@ def test_a_camera_only_drive_is_gated_on_the_sigma_and_not_on_the_lidar_s_fit(tm
     node._switches.set("sigma_gate", False)
     assert not node._ready().ready and node._ready().rule == BY_FIT
     assert "sigma_gate=off" in node._switches.state()
-    node._switches.set("sigma_gate", True)
-    tracker_sigma(node, 0.44)
-    wide = node._ready()
-    assert not wide.ready and wide.search and "0.44 m" in wide.reason
+
+
+def test_a_goal_starts_on_a_pose_the_cart_has_however_wide_it_is(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """NEW RULE (2026-09-19): with a sigma published, the only localisation refusal left is
+    "there is no pose". OLD RULE: anything over 0.25 m was refused and sent to _find_myself — a
+    whole-map LIDAR search judged by the fit — and camera-only at the bookshelf that fit is 0.00
+    by construction, so a cart standing at 0.26 m with the lidar out of its sources could never
+    earn a drive. The flag puts the 0.25 m threshold back (rule 19)."""
+    node = server(tmp_path)
+    tracker_says(node, 0.0)  # the lidar is not a source: no scan scores this pose
+    tracker_sigma(node, 0.26, yaw_deg=9.0)
+    ready = node._ready()
+    assert (ready.ready, ready.search, ready.rule) == (True, False, BY_SIGMA)
+    assert "start_on_a_known_pose=on" in node._switches.state()
+    node._switches.set("start_on_a_known_pose", False)
+    refused = node._ready()
+    assert not refused.ready and refused.search and "0.26 m" in refused.reason
+
+
+def test_a_cart_that_has_never_localised_is_the_one_goal_still_refused(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """NEW RULE (2026-09-19): nothing has ever corrected the pose — the tracker says so on the
+    wire rather than leaving the sentinel's value to be guessed at — so there is no pose to
+    drive on and the refusal asks for the whole-map search that is the only way out of it."""
+    node = server(tmp_path)
+    tracker_says(node, 0.0)
+    tracker_sigma(node, UNKNOWN_SIGMA[0], yaw_deg=UNKNOWN_SIGMA[1], known=False)
+    lost = node._ready()
+    assert (lost.ready, lost.search, lost.rule) == (False, True, BY_SIGMA)
+    assert "nothing has ever corrected the pose" in lost.reason
+    tracker_sigma(node, UNKNOWN_SIGMA[0] + 0.3, yaw_deg=30.0)
+    assert node._ready().ready, "wider than the sentinel, but measured: a pose, and a drive"
 
 
 def test_a_sigma_that_stops_arriving_stops_the_drive_under_way(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -410,3 +438,20 @@ def test_a_sigma_that_stops_arriving_stops_the_drive_under_way(tmp_path) -> None
     for tick in range(1, 8):
         cut = blind.observe(node.fit, float(tick), sigma=node._sigma())
     assert cut and "stopped" in blind.phrase(), blind.phrase()
+
+
+def test_a_running_camera_drive_is_never_cut_by_the_lidar_s_fit_of_zero(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """THE RULE (pinned 2026-09-19, and it already held): mid-drive the cut is the sigma's while
+    one is published — LOST_SIGMA_M — and the 0.00 camera-only publishes by construction can
+    never stop the cart on its own. The node feeds the watch both readings every tick, and this
+    is the pin that keeps the fit from creeping back into that decision."""
+    node = server(tmp_path)
+    tracker_says(node, 0.0)
+    blind = BlindDriveWatch()
+    for tick in range(0, 200):  # ten seconds of drive at the loop's 0.05 s, and then some
+        node.clock.seconds = NOW + 0.05 * tick
+        tracker_sigma(node, 0.18, yaw_deg=7.0)
+        assert not blind.observe(node.fit, node.clock.seconds, sigma=node._sigma()), (
+            f"cut at tick {tick} on fit {node.fit:.2f} beside a pose known to 0.18 m"
+        )
+    assert blind.rule == BY_SIGMA and "0.18 m" in blind.phrase()

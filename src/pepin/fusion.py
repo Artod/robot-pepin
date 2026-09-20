@@ -174,20 +174,50 @@ ODOM_XY_PER_M = 0.02
 ODOM_YAW_FLOOR_RAD = math.radians(0.05)
 ODOM_YAW_PER_TURN = 0.7
 
+# ...and what the SAME carry costs a belief that travels on the EKF heading instead of the two
+# wheels. ODOM_YAW_PER_TURN above is the wheels-only end on purpose, and for the self-check it
+# must stay that: the check's denominator is what the tracker is left holding when the IMU drops.
+# The tracker's BELIEF is a different rider — pepin.watch.PoseSpread grows it along
+# /odometry/filtered, the EKF heading with the gyro in it — and charging that heading the wheels'
+# slip broke a camera-only drive on 2026-09-19: the cart read 28 deg of heading sigma after 18
+# in-place recoveries and a position sigma over the start gate, and the next goal was refused
+# for a pose it had. Replayed through this model — a graph word's own 0.20 m / 8 deg, then 18
+# quarter turns in the tracker's ~2 deg steps and half a metre of driving — 0.7 gives
+# 0.42 m / 42 deg, over both DRIVE_SIGMA_M and LOST_SIGMA_M, which is that evening.
+# MEASURED (scratch/ekf_heading_error_per_turn.py, three lidar-held drives of 2026-09-19 — tapes
+# 0390, 0391, 0393, 539 scans matched on the evening's grid at a median fit of 0.65-0.71): over
+# windows chosen by accumulated |EKF turn|, the heading error is 2.2 deg RMS at 30 deg of turn,
+# 2.3 at 60, 3.0 at 90 and 3.6 at 180 — it barely grows, so the whole-window ratio falls from
+# 0.070 to 0.020 as the window widens, which is not what a per-turn term does. Split into a
+# constant and a slope (rms^2 = floor^2 + (k*turn)^2) it is 2.1-2.2 deg of scan-matcher noise per
+# window — the truth's own, 0.9 deg RMS on the straights at each of the two ends — plus
+# k = 0.011-0.016 of the turn. ADOPTED 0.05: three times the fitted slope and above every
+# whole-window ratio from 60 deg up, while the 30 deg windows (0.070) cannot resolve a slope at
+# all under 2 deg of matcher noise. It is a fourteenth of 0.7.
+# WHAT IT IS NOT: a per-STEP number read off a per-WINDOW measurement. PoseSpread accumulates
+# this term step by step and variances add, so a 90 degree turn taken in N steps pays
+# k * 90 / sqrt(N) rather than k * 90 — at the tracker's ~2 degree steps, about a seventh of it.
+# The same 18 recoveries and half-metre leg now grow the belief from 0.20 m / 8 deg to
+# 0.22 m / 9.1 deg, which is under both gates and close to what the EKF heading is worth.
+EKF_YAW_PER_TURN = 0.05
 
-def odometry_covariance(motion: Pose2D) -> Matrix:
+
+def odometry_covariance(motion: Pose2D, yaw_per_turn: float | None = None) -> Matrix:
     """The odometry's OWN error over one carry as a 3x3 covariance over x, y, yaw (metres^2,
     radians^2): the floors plus what the carry's distance and turn are worth.
 
     ``motion`` is the carry's step in the base frame of the moment carried FROM
-    (:func:`pepin.scanmatch.relative_motion` over the odometry). Diagonal: a differential
-    drive's two scale errors are not correlated in any way this cart has measured, and the one
-    coupling that matters — a heading wrong by ``sigma_yaw`` puts the end of a carry of
-    ``distance`` that far to the side — is folded into the position sigma rather than modelled
-    as an off-diagonal term nobody could calibrate.
+    (:func:`pepin.scanmatch.relative_motion` over the odometry). ``yaw_per_turn`` is the share
+    of the reported turn the rider pays: :data:`ODOM_YAW_PER_TURN`, the default, for a
+    measurement carried by the wheels, :data:`EKF_YAW_PER_TURN` for a belief carried by the EKF
+    heading. Diagonal: a differential drive's two scale errors are not correlated in any way
+    this cart has measured, and the one coupling that matters — a heading wrong by ``sigma_yaw``
+    puts the end of a carry of ``distance`` that far to the side — is folded into the position
+    sigma rather than modelled as an off-diagonal term nobody could calibrate.
     """
+    share = ODOM_YAW_PER_TURN if yaw_per_turn is None else yaw_per_turn
     distance = math.hypot(motion.x, motion.y)
-    sigma_yaw = ODOM_YAW_FLOOR_RAD + ODOM_YAW_PER_TURN * abs(motion.theta)
+    sigma_yaw = ODOM_YAW_FLOOR_RAD + share * abs(motion.theta)
     sigma_xy = ODOM_XY_FLOOR_M + ODOM_XY_PER_M * distance + sigma_yaw * distance
     return np.asarray(np.diag([sigma_xy**2, sigma_xy**2, sigma_yaw**2]), dtype=np.float64)
 

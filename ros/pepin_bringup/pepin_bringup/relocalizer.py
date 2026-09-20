@@ -99,7 +99,14 @@ from tf2_ros import Buffer, TransformBroadcaster
 
 from pepin.dynamic import STATIC_M, StaticMask, occluded
 from pepin.flags import Flag, FlagSet
-from pepin.fusion import COVARIANCE_CHOICES, PEAK, Matrix, published_covariance
+from pepin.fusion import (
+    COVARIANCE_CHOICES,
+    EKF_YAW_PER_TURN,
+    ODOM_YAW_PER_TURN,
+    PEAK,
+    Matrix,
+    published_covariance,
+)
 from pepin.localization import SWITCHES as TRACKER_SWITCHES
 from pepin.localization import Localizer
 from pepin.mapcache import CACHE_NAME, CacheBoot, MapCache, save
@@ -557,22 +564,23 @@ FLAGS = FlagSet(
     ),
     Flag(
         "fit_needs_a_source",
-        True,
+        False,
         description="/localization_fit falls to 0.00 once no enabled source has spoken for"
         " source_patience_s — no lidar revolution, no camera measurement — instead of repeating"
         " the last fit measured; off, the fit stands until a source corrects it again",
-        why="2026-09-14: with sources=camera and the laptop's measurements not arriving after a"
-        " restart, this node published fit 0.70 for 141 s while nothing at all had corrected the"
-        " pose, and the goal server — which reads only that number (pepin.watch.GoalGate,"
-        " drive_fit 0.50) — accepted `printer` and then `home` and drove both on dead reckoning."
-        " 0.00 is under every rung of the ladder at once: the goal server refuses the next goal"
-        " and its BlindDriveWatch (blind_fit 0.30, patience 4 s) stops the drive already running."
-        " The watch that searches the whole map is NOT touched — it reads this node's own fit,"
-        " never the published one — so a silent sensor cannot start a re-seed frenzy on no scan",
-        on_when="always: a fit nobody measured is not a fit, and every gate downstream believes"
-        " this number",
-        off_when="to watch the tracker coast on odometry alone in a bench experiment, where"
-        " nothing downstream is allowed to drive",
+        why="off since 2026-09-19, because the rule it was written for is now enforced by a"
+        " number that cannot be faked. It was added on 2026-09-14, when this node published fit"
+        " 0.70 for 141 s with nothing correcting the pose and the goal server drove two goals on"
+        " dead reckoning; the day after, /localization/sigma arrived (pepin.watch.PoseSpread),"
+        " it grows along the odometry whenever no word lands, and every gate downstream reads it"
+        " in front of the fit — so silence already shows as a widening pose. What zeroing the fit"
+        " cost instead: camera-only there is no lidar to speak, the published 0.00 is then the"
+        " NORMAL reading, and it fed a cascade of lidar-shaped refusals at the bookshelf on"
+        " 2026-09-19 — a goal refused into a whole-map lidar search that had nothing to match",
+        on_when="on a board that publishes no /localization/sigma at all (a build from before"
+        " 2026-09-15), where the fit is the only number the gates have",
+        off_when="off wherever the sigma is published: the fit then means what it always meant,"
+        " the last lidar revolution's inlier fraction, and no gate infers silence from it",
     ),
     Flag(
         "source_patience_s",
@@ -589,6 +597,32 @@ FLAGS = FlagSet(
         off_when="lower it towards the sources' own stale_after_s (0.5 s lidar, 1.0 s camera)"
         " where a drive must stop the moment the sensors go quiet",
         range=(0.1, 60.0),
+    ),
+    Flag(
+        "belief_yaw_per_turn",
+        EKF_YAW_PER_TURN,
+        description="the share of every reported turn the tracked pose's HEADING sigma grows by"
+        " between corrections (pepin.watch.PoseSpread, accumulated step by step); the"
+        " measurement carry's own term (pepin.fusion.carried, the fusion self-check) is not this"
+        f" number and stays at {ODOM_YAW_PER_TURN:.2f}",
+        why="0.05, measured: over three lidar-held drives of 2026-09-19 (tapes 0390/0391/0393,"
+        " 539 scans matched on the evening's grid, scratch/ekf_heading_error_per_turn.py) the"
+        " EKF heading's error against the lidar truth is 2.2 deg RMS over 30 deg of accumulated"
+        " turn and 3.6 deg over 180 deg — it barely grows, so it is 2.2 deg of scan-matcher noise"
+        " per window plus 0.016 of the turn, and 0.05 is three times that slope. The belief used"
+        f" the wheels-only {ODOM_YAW_PER_TURN:.2f} until then, which is what a differential"
+        " drive's two encoders are worth on carpet and not what an EKF heading with a gyro in it"
+        " is. On 2026-09-19 a camera-only cart read 28 deg of heading sigma after 18 in-place"
+        " recoveries and a position sigma over the start gate, and its goals were refused;"
+        " replayed through the model, 18 quarter turns and half a metre of driving from a graph"
+        " word's own 0.20 m / 8 deg price at 0.42 m / 42 deg with 0.70 and 0.22 m / 9.1 deg with"
+        " this number",
+        on_when=f"raise it towards {ODOM_YAW_PER_TURN:.2f} on a cart driving with the IMU dead —"
+        " there the heading IS the two wheels and the slip is real",
+        off_when="lower it only against a fresh measurement of the same kind: this number is"
+        " what the tracker admits it does not know, and under the truth it is an overconfident"
+        " pose that no gate can catch",
+        range=(0.0, 1.0),
     ),
     Flag(
         "map_cache",
@@ -2042,8 +2076,9 @@ class Relocalizer(Node):
 
     def _publish_sigma(self, now: float) -> None:
         """Publish how sure the pose is on :data:`SIGMA_TOPIC`, as the JSON
-        :class:`pepin.watch.Sigma` defines: position sigma (m), heading sigma (deg), this
-        clock, and the seconds since the last accepted word.
+        :class:`pepin.watch.Sigma` defines: position sigma (m), heading sigma (deg), whether
+        anything has ever corrected this pose, this clock, and the seconds since the last
+        accepted word.
 
         Sent from two places and no others: from every update, where the fusion has just
         corrected the pose, and from the once-a-second check, where nothing has and the spread
@@ -2054,9 +2089,8 @@ class Relocalizer(Node):
         xy, yaw = self._spread.sigma()
         age = self._spread.age_s(now)
         word_age = age if age != math.inf else max(0.0, now - self._up_since_s)
-        self._sigma_pub.publish(
-            String(data=Sigma(xy, yaw, 0.0).to_json(stamp=now, word_age_s=word_age))
-        )
+        said = Sigma(xy, yaw, 0.0, self._spread.known())
+        self._sigma_pub.publish(String(data=said.to_json(stamp=now, word_age_s=word_age)))
 
     def _report_tracking(self) -> None:
         """Every 30 s: where every released scan went (per source, with the rides), what the
@@ -2192,6 +2226,8 @@ class Relocalizer(Node):
         # every early return below, for the same reason as the silence underneath — the pose's
         # uncertainty is a fact about the ODOMETRY since the last word, not about whether this
         # node has a map, a scan or a pose yet — and it is what a goal gate will refuse on.
+        # The turn term is read off the flag every tick, so it can be moved on a standing cart.
+        self._spread.yaw_per_turn = float(self._switches["belief_yaw_per_turn"])
         self._spread.carried(self._history.newest)
         self._publish_sigma(now)
         # Measured before anything can return: the silence is a fact about the SENSORS, not
