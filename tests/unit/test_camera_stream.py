@@ -619,6 +619,14 @@ def test_the_mono_rig_s_two_flags_are_refused_on_a_stereo_head_with_their_reason
     assert not refused.successful and "its own stereo calibration" in refused.reason
     assert node._switches["scale"] == 1.0 and not node._switches.on("undistort")
     assert node.set_parameters([Param("scale", 1.0)])[0].successful, "the value it already has"
+    # A launch override lands before the node can refuse it, so at start they are CORRECTED:
+    # the flags' printed state must be what the pixels are, not what somebody asked for.
+    overridden, _ = build(
+        config=stereo_config(tmp_path, ideal_stereo_calibration()), scale=0.5, undistort=True
+    )
+    assert overridden._switches["scale"] == 1.0 and not overridden._switches.on("undistort")
+    assert overridden._published.size == (800, 600) and overridden._published.maps is None
+    assert any("this head is stereo" in line for line in overridden.logger.texts("warning"))
 
 
 def test_the_stereo_report_line_names_the_rig_the_evidence_and_every_stage(

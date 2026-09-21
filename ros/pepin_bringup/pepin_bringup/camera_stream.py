@@ -212,11 +212,20 @@ class CameraStream(Node):
         self._published = self._published_for(
             self._scale(), self._switches.on("undistort"), rectifier
         )
-        # A stereo rig publishes at its calibration's size, so the flag is put where the picture
-        # is: through the parameter server, so `ros2 param get` and the report line agree with
-        # the pixels instead of printing the mono rig's 0.5 over a full-size eye.
+        # The mono rig's two flags, put where the picture is on a stereo one: a scale of 1.0
+        # because the eyes go out at their calibration's size, and undistort off because the
+        # stereo calibration is what rectifies here. Through the parameter server, so
+        # `ros2 param get` and the report line agree with the pixels rather than printing 0.5
+        # over a full-size eye or an "on" that nothing acts on. A launch override lands before
+        # this, which is why it is a correction and not a default.
         if self._rig is not None and float(self._switches["scale"]) != 1.0:
             self._switches.set("scale", 1.0)
+        if self._rig is not None and self._switches.on("undistort"):
+            self.get_logger().warning(
+                "undistort is the mono rig's flag and this head is stereo: turning it off, the"
+                " stereo calibration is what rectifies both eyes here"
+            )
+            self._switches.set("undistort", False)
         # Reliable, like RTAB-Map's subscribers: a best-effort image never matched them.
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         self._image_pub = self.create_publisher(Image, "/camera/image", reliable)
