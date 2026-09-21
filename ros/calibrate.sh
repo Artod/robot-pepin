@@ -7,6 +7,17 @@
 #   ros/calibrate.sh --no-window      the same with no window: a text coverage report
 #   ros/calibrate.sh --board 9x6 --square 0.024    another board (inner corners, square in metres)
 #   ros/calibrate.sh --images DIR     re-fit from the frames a previous run saved under data/
+#
+# With a STEREO head the same board measures both lenses and the bar between them, and writes
+# config/stereo_calibration.json instead (the same printed board, the same window, the same
+# no-keys collection — hold it where the hint says and move it):
+#   ros/calibrate.sh stereo           calibrate the stereo head: both eyes of every frame
+#   ros/calibrate.sh stereo --no-window          the same over ssh
+#   ros/calibrate.sh stereo --images DIR         re-fit a saved session under data/stereo_calib/
+#   ros/calibrate.sh stereo --square 0.0245      the square really on the paper, metres
+# It refuses to write a result whose stereo RMS, baseline or rectified epipolar error is bad,
+# and says what to reshoot; the accepted pairs are saved first, so a bad run is re-fitted and
+# not reshot.
 # No keys to press: hold the board where the hint says, keep it still, and the shot is taken on
 # its own countdown. About 25 well-spread views, then the fit is printed and written to
 # config/camera.json — but only when the RMS reprojection error is under 0.5 px and the views
@@ -18,6 +29,11 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE/.." || exit 1
 BOARD="${PEPIN_HOST:-10.0.0.187}"
+if [ "${1:-}" = "stereo" ]; then
+    shift
+    uv run -q python ros/tools/stereo_calibrate.py --host "$BOARD" "$@"
+    exit $?
+fi
 uv run -q python scripts/calibrate_camera.py --host "$BOARD" "$@"
 status=$?
 # --print leaves a PDF to send to a printer; on this laptop, show it.
