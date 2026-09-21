@@ -205,6 +205,7 @@ from pepin.depth_pipeline import (
 from pepin.depth_service import (
     DEFAULT_URL,
     MODES,
+    DepthBackend,
     DepthModelError,
     Fallback,
     LazyDepth,
@@ -1568,7 +1569,9 @@ class NetworkSource:
 
     name = "network"
 
-    def __init__(self, backend: Callable[[], Any], note: Callable[[], str] = lambda: "") -> None:
+    def __init__(
+        self, backend: Callable[[], DepthBackend], note: Callable[[], str] = lambda: ""
+    ) -> None:
         self._backend, self._note = backend, note
 
     def __call__(self, views: Views) -> Array:
