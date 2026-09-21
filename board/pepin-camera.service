@@ -1,0 +1,28 @@
+# The head camera as an MJPEG stream over HTTP (ustreamer, port 8080): the laptop's camera node
+# reads it and stamps every frame with the moment the board sent it (X-Timestamp).
+#
+# WHICH camera is one file on the board, /etc/default/pepin-camera, so a rig is swapped without
+# editing a unit (the values below are the mono webcam's, the rig this unit was written for):
+#   PEPIN_CAMERA_DEVICE      a /dev/v4l/by-id path, never /dev/videoN — the index moves when a
+#                            second camera is plugged in
+#   PEPIN_CAMERA_RESOLUTION  the stereo module delivers ONE side-by-side frame (left | right):
+#                            1600x600 is 800x600 an eye
+#   PEPIN_CAMERA_FPS         what the camera is asked for
+#   PEPIN_CAMERA_ENCODER     CPU re-encodes every frame on an A53 core; HW passes the camera's own
+#                            MJPEG through untouched — the only sane choice for a 1600x600 stream
+[Unit]
+Description=Pepin head camera MJPEG stream (ustreamer, http 8080)
+After=network.target
+
+[Service]
+EnvironmentFile=-/etc/default/pepin-camera
+Environment=PEPIN_CAMERA_DEVICE=/dev/v4l/by-id/usb-XIFT_webcam_AC310_20250819-video-index0
+Environment=PEPIN_CAMERA_RESOLUTION=1280x720
+Environment=PEPIN_CAMERA_FPS=15
+Environment=PEPIN_CAMERA_ENCODER=CPU
+ExecStart=/usr/bin/ustreamer --device ${PEPIN_CAMERA_DEVICE} --format MJPEG --encoder ${PEPIN_CAMERA_ENCODER} --resolution ${PEPIN_CAMERA_RESOLUTION} --desired-fps ${PEPIN_CAMERA_FPS} --host :: --port 8080 --drop-same-frames 30
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
