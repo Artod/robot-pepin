@@ -232,10 +232,10 @@
         "wifi-loss"
       ],
       "owner": "pepin-zrouter.service (docker run pepin-ros:zenoh rmw_zenohd, --network host)",
-      "when": "sometimes",
+      "when": "always",
       "budget": {
-        "cpu_percent": 15.0,
-        "rss_mb": 60.0
+        "cpu_percent": 20.0,
+        "rss_mb": 100.0
       }
     },
     {
