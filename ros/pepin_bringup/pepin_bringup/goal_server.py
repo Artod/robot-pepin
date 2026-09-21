@@ -162,6 +162,22 @@ FLAGS = FlagSet(
         " the cart is plainly fit for",
     ),
     Flag(
+        "places_from_the_file",
+        False,
+        description="before the graph's book of places has been heard, a name is answered from"
+        " the yaml beside the map (coordinates of the frozen-grid era); off, a name is refused"
+        " until the book arrives, with that reason",
+        why="that file holds coordinates of a frame that no longer exists, and the board keeps its"
+        " own stale copy (the sync excludes it). Twice a name was answered from it and sent the"
+        " cart at a point outside the map: `home` -> (-9.39, +2.53) on 2026-09-19, `printer` ->"
+        " (-11.38, +0.77) on 2026-09-21, 2.1 s after RTAB-Map's first graph of a cold start of"
+        " both halves — the planner said 'outside bounds', the behaviour tree ran 33 recoveries"
+        " in 28 s and backed the cart into a sofa. A refusal costs a second try a minute later",
+        on_when="only on a robot driven without the laptop's graph at all, on the old frozen map",
+        off_when="always under World R: a place rides a graph node, and only the graph can say"
+        " where that node is now",
+    ),
+    Flag(
         "start_on_a_known_pose",
         True,
         description="where the tracker publishes a sigma, a goal is refused for the pose's sake"
@@ -531,15 +547,30 @@ class GoalServer(Node):
         }
 
     def places(self) -> dict[str, dict[str, float]]:
-        """The named places of the map in use: the graph's book once it has been heard — and then
-        ONLY it — else the file beside the map; an absent book is an empty one."""
+        """The named places of the map in use: the graph's book, and ONLY it. Until the book has
+        been heard there are no places — a name is refused with that reason — unless
+        ``places_from_the_file`` asks for the yaml beside the map, the answer this server gave
+        before World R."""
         if self._graph_places is not None:
             return dict(self._graph_places)
+        if not self._switches.on("places_from_the_file"):
+            return {}
         try:
             data: dict[str, dict[str, float]] = json.loads(self._places_path.read_text())
             return data
         except (OSError, ValueError):
             return {}
+
+    def _why_no_place(self, name: str) -> str:
+        """The refusal for a name that cannot be answered, saying which of the two it is: the
+        book has not arrived at all, or it has and the name is not in it."""
+        if self._graph_places is None and not self._switches.on("places_from_the_file"):
+            return (
+                f"no place {name!r} yet: the graph's book of places has not arrived from the"
+                " laptop (is ros/laptop.sh vslam up, and has RTAB-Map published its first graph?)"
+                " — a name is never answered from the old map's file"
+            )
+        return f"no such place: {name!r}"
 
     def _pose_now(self) -> dict[str, float]:
         """Where the cart stands: the tracker's own pose where a tracker answers, else the TF
@@ -687,7 +718,8 @@ class GoalServer(Node):
         """
         target = self._target_of(request)
         if target is None:
-            self._send(connection, {"event": "error", "detail": "no such place"})
+            detail = self._why_no_place(str(request.get("place", "")))
+            self._send(connection, {"event": "error", "detail": detail})
             return
         x, y, yaw_deg, name = target
         ready = self._ready()

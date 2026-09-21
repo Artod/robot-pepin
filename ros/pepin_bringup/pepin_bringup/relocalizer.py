@@ -107,6 +107,7 @@ from pepin.fusion import (
     Matrix,
     published_covariance,
 )
+from pepin.lastpose import FrameHold, known_room, saved_start
 from pepin.localization import SWITCHES as TRACKER_SWITCHES
 from pepin.localization import Localizer
 from pepin.mapcache import CACHE_NAME, CacheBoot, MapCache, save
@@ -759,6 +760,23 @@ FLAGS = FlagSet(
         " would be a lie: off makes the tracker find itself again before it publishes anything",
     ),
     Flag(
+        "frame_needs_a_pose",
+        True,
+        description="on a KNOWN map — the disk holds a cached map and a pose saved on it — map ->"
+        " odom is not broadcast until this tracker has a pose on a map; on a map being born"
+        " (nothing on disk) the identity goes out from the first tick, as it always did",
+        why="a default is a refusal, never (0, 0). The identity is the truth only in a map born"
+        " under the cart (World R: that map's frame IS the odometry's). On a known map it is a lie"
+        " for as long as the tracker waits for its map: on 2026-09-21 it was broadcast for 9.5 s"
+        " after every start and then jumped to the saved pose 2.9 m away (the base no longer sat"
+        " at the map's origin) — and a jump of the pose is what sends Nav2's RangeSensorLayer into"
+        " a ~4e9-iteration loop under the costmap mutex. Every consumer already treats a missing"
+        " map -> odom honestly (the ToF bridge's gate stays shut, Nav2's costmaps wait up to"
+        " their initial_transform_timeout of 60 s, and the cache seats the tracker in ~10 s)",
+        on_when="always",
+        off_when="to reproduce a start from before this gate",
+    ),
+    Flag(
         "map_fallback_s",
         MAP_FALLBACK_S,
         description="how long this tracker waits for a live /map before it tracks on the map it"
@@ -988,6 +1006,11 @@ class Relocalizer(Node):
         self._last_match_stamp_s: float | None = None  # scan stamp of the previous match: dt_s
         self._last_scan_age_s = 0.0
         self._last_map_odom = (0.0, 0.0, 0.0)  # the belief until the first fix: the base
+        # No pose has set map -> odom yet; whether it may be said before one does is
+        # pepin.lastpose.FrameHold's decision (the ``frame_needs_a_pose`` flag).
+        self._frame = FrameHold(
+            lambda: known_room(FilePath(LAST_POSE_FILE), FilePath(self._cache_dir))
+        )
         # Nav2's local costmap keeps what the camera marked at the pose before a correction, and
         # nothing outside the fan erases it. Which step in map -> odom is a jump worth emptying
         # it for is pepin.watch.JumpClear's decision; this node only makes the call.
@@ -1789,6 +1812,7 @@ class Relocalizer(Node):
         published, and every source's word as JSON — the scans', the watchdog's and the
         camera's."""
         self._last_map_odom = map_to_odom(pose, odom)
+        self._frame.define()
         self._send_map_odom()
         # The step this transform takes IS what the word moved the pose by — the cart's own
         # motion sits in odom -> base_link — so the watch reads it and clears Nav2's local
@@ -1954,21 +1978,11 @@ class Relocalizer(Node):
         and a lie worth metres anywhere else, published as a correction the moment the first word
         landed.
         """
-        try:
-            with open(LAST_POSE_FILE) as f:
-                saved = json.load(f)
-            age = time.time() - float(saved["time"])
-            same_map = saved.get("map") == self._map_id  # a pose means nothing on another map
-            if same_map and age <= LAST_POSE_MAX_AGE_S and float(saved.get("fit", 0.0)) >= LOST_FIT:
-                pose = Pose2D(float(saved["x"]), float(saved["y"]), float(saved["theta"]))
-                self.get_logger().info(
-                    f"starting from the last known pose ({pose.x:+.2f}, {pose.y:+.2f}, "
-                    f"{math.degrees(pose.theta):+.0f} deg), saved {age:.0f} s ago"
-                )
-                return pose
-        except (OSError, KeyError, ValueError, TypeError):
-            pass
-        return self._tracked_pose() or Pose2D()
+        start = saved_start(
+            FilePath(LAST_POSE_FILE), self._map_id, time.time(), LAST_POSE_MAX_AGE_S, LOST_FIT
+        )
+        self.get_logger().info(start.note)  # either way: a silent fallback is found an hour late
+        return start.pose or self._tracked_pose() or Pose2D()
 
     def _remember_pose(self) -> None:
         """Every 2 s: write the tracked pose and its fit, so the next start knows where we are."""
@@ -2051,6 +2065,8 @@ class Relocalizer(Node):
         buffer so nobody extrapolates, and keeps a fresh correction from waiting half a second
         behind a stale future-dated one.
         """
+        if self._frame.silent(self._switches.on("frame_needs_a_pose")):
+            return  # a known map, and no pose on it yet: say nothing rather than "the origin"
         x, y, yaw = self._last_map_odom
         future = self.get_clock().now() + Duration(seconds=self._tf_future_s)
         self._tf_pub.sendTransform(
@@ -2445,6 +2461,7 @@ class Relocalizer(Node):
         self._last_map_odom = (
             map_to_odom(pose, newest) if newest is not None else self._last_map_odom
         )
+        self._frame.defined = self._frame.defined or newest is not None
         self._send_map_odom()
         # A seed is an accepted word like any other — the operator's hand, or two searches that
         # agreed — so the uncertainty collapses to what that confidence buys and starts growing

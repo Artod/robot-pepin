@@ -455,3 +455,32 @@ def test_a_running_camera_drive_is_never_cut_by_the_lidar_s_fit_of_zero(tmp_path
             f"cut at tick {tick} on fit {node.fit:.2f} beside a pose known to 0.18 m"
         )
     assert blind.rule == BY_SIGMA and "0.18 m" in blind.phrase()
+
+
+def test_a_name_is_never_answered_from_the_old_map_s_file(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The yaml beside the map holds coordinates of a frame that no longer exists. Until the
+    graph's book has arrived a named goal is refused with THAT reason — on 2026-09-21 `printer`
+    was answered from the file 2.1 s after a cold start, as (-11.38, +0.77), outside the map,
+    and the behaviour tree backed the cart into a sofa. The flag gives the old answer back."""
+    (tmp_path / "places.yaml").write_text(
+        json.dumps({"printer": {"x": -11.38, "y": 0.77, "yaw_deg": 140.0}})
+    )
+    node = server(tmp_path)
+    assert node.places() == {}
+    wire = Wire()
+    node._handle({"cmd": "go", "place": "printer"}, wire)
+    (event,) = wire.events()
+    assert event["event"] == "error" and "has not arrived" in event["detail"]
+    assert not node._client.goals, "nothing was sent to Nav2"
+
+    node._on_places(ros_stubs.String(data=json.dumps({"places": {}})))
+    wire = Wire()
+    node._handle({"cmd": "go", "place": "printer"}, wire)
+    assert "no such place" in wire.events()[0]["detail"], "the book arrived and has no such name"
+
+    with ros_stubs.parameters(
+        port=0, places=str(tmp_path / "places.yaml"), record_dir=str(tmp_path),
+        places_from_the_file=True,
+    ):  # fmt: skip
+        old = GoalServer()
+    assert old.places()["printer"]["x"] == -11.38

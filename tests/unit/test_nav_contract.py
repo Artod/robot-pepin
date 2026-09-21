@@ -130,20 +130,104 @@ def test_arriving_means_arriving() -> None:
 
 
 def test_a_tof_return_is_marked_across_its_whole_cone() -> None:
-    """One cell is a mark the planner squeezes past; the sensor cannot say where in the cone."""
+    """One cell is a mark the planner squeezes past; the sensor cannot say where in the cone.
+
+    Two shapes of the same promise. The kept RangeSensorLayer blocks say it with
+    ``inflate_cone: 1.0`` over the real 27 degree ``phi``; the fan that feeds the ObstacleLayers
+    says it by putting the one measured distance on EVERY beam of the cone, and by having enough
+    beams that no costmap cell inside the arc is skipped at the sensor's own ceiling.
+    """
+    from pepin.tof_horizon import cone_beams
+
     for costmap in ("local_costmap", "global_costmap"):
         for sensor in ("front", "left", "right"):
             layer = _p(costmap)[f"tof_{sensor}_layer"]
             assert layer["inflate_cone"] == 1.0
             assert layer["phi"] <= 0.5, "phi must model the real 27 degree cone"
+    facts = sf.assignments(sf.tree(f"{NODES}/tof_bridge.py"))
+    fov, cell = float(facts["_FIELD_OF_VIEW_RAD"]), float(facts["_COSTMAP_CELL_M"])
+    assert cell == _p("local_costmap")["resolution"], "the fan is drawn on that costmap's cells"
+    for ceiling in (0.9586, 0.5680, 0.5858):  # the three mounts of config/tof.json
+        beams = cone_beams(ceiling, fov, cell)
+        assert ceiling * fov / (beams - 1) <= cell, "a gap in the cone at its widest"
 
 
 def test_each_tof_owns_its_own_layer() -> None:
-    """2026-09-08: one shared layer let the dead front sensor clear the side sensors' marks."""
+    """2026-09-08: one shared layer let the dead front sensor clear the side sensors' marks.
+
+    Still one layer per sensor after 2026-09-21, and now it is an ObstacleLayer with a grid of
+    its own per whisker — the same property by a different mechanism, and the one that made the
+    change safe: a shared ObstacleLayer would have let the front sensor's clearing rays scrub
+    the side sensors' marks exactly as the shared probability grid did.
+    """
     layers = [name for name in _p("local_costmap")["plugins"] if name.startswith("tof_")]
-    assert len(layers) == 3, "the three ToF must not share a probability grid"
+    assert len(layers) == 3, "the three ToF must not share a grid"
     for sensor, layer in zip(("front", "left", "right"), layers, strict=True):
-        assert _p("local_costmap")[layer]["topics"] == [f"/tof/{sensor}"]
+        block = _p("local_costmap")[layer]
+        assert layer == f"tof_{sensor}_scan_layer", layers
+        assert block["plugin"].endswith("ObstacleLayer")
+        assert block["observation_sources"].split() == [f"tof_{sensor}_scan"]
+        assert block[f"tof_{sensor}_scan"]["topic"] == f"/tof/{sensor}/scan"
+    # ...and the blocks of the plugin they replaced are kept, unlisted, for the way back.
+    for sensor in ("front", "left", "right"):
+        assert _p("local_costmap")[f"tof_{sensor}_layer"]["topics"] == [f"/tof/{sensor}"]
+
+
+def test_the_whiskers_do_not_run_in_the_plugin_with_the_unbounded_loop() -> None:
+    """2026-09-21, the second RangeSensorLayer defect and the reason the ToF left it.
+
+    ``range_sensor_layer.cpp:362-369`` clamps ``bx0``/``by0`` at zero and ``bx1``/``by1`` at the
+    grid's size, then walks ``for (unsigned int x = bx0; x <= (unsigned int)bx1; x++)``: a cone
+    entirely off the grid's left or bottom edge leaves the upper bounds NEGATIVE, the cast makes
+    them about 4e9, and one thread spins for ever holding the costmap's mutex. It needs one jump
+    of the pose in ``map`` between a reading's stamp and the update — a tracker restart, a
+    relocalisation, the cart lifted — so no publisher can gate it the way ``tf_gate`` gates the
+    first defect. Reproduced with ``ros/thin.sh kick relocalizer`` (tid 191 of the Nav2
+    container: 415 s of CPU in 700 s). So: no costmap may LIST a RangeSensorLayer, the whiskers
+    are ObstacleLayers fed by a fan, and the flag that goes back is live.
+    """
+    for costmap in ("local_costmap", "global_costmap"):
+        parameters = _p(costmap)
+        for name in parameters["plugins"]:
+            assert not parameters[name]["plugin"].endswith("RangeSensorLayer"), (
+                f"{costmap}.{name}: the unbounded loop is one pose jump away"
+            )
+    flags = load_table(REPO / NODES / "tof_bridge.py")
+    assert flags["range_as"] == "scan" and flags.flag("range_as").live
+    assert flags.flag("range_as").choices == ("scan", "range")
+    source = (REPO / "ros/params/nav2_params.yaml").read_text()
+    assert "range_sensor_layer.cpp:362-369" in source, "the defect is named where it is answered"
+
+
+def test_a_whisker_clears_its_cone_without_marking_a_ring_at_the_ceiling() -> None:
+    """The lesson /depth_scan paid for, applied to the fan. "Nothing within my trusted range" is
+    +inf on every beam; Nav2's laserScanValidInfCallback turns that into a point at the scan's
+    ``range_max`` minus a tenth of a millimetre, so if ``obstacle_max_range`` reached the fan's
+    own range_max the CLEARING point would be marked instead — a lethal ring at the ceiling. The
+    fan's range_max is the sensor's ceiling (tof_bridge), so every marking range here must sit
+    below it while the raytrace range may reach it."""
+    for sensor, ceiling in (("front", 0.9586), ("left", 0.5680), ("right", 0.5858)):
+        source = _p("local_costmap")[f"tof_{sensor}_scan_layer"][f"tof_{sensor}_scan"]
+        assert source["inf_is_valid"] is True, "an inf is how a whisker says 'clear'"
+        assert source["marking"] is True and source["clearing"] is True
+        assert source["obstacle_max_range"] < ceiling - 0.04, sensor
+        assert ceiling - 0.01 <= source["raytrace_max_range"] <= ceiling + 0.01, sensor
+        assert source["data_type"] == "LaserScan"
+        # No sensor_frame: the cone's origin is the sensor, and the fan carries that frame.
+        assert "sensor_frame" not in source, sensor
+
+
+def test_a_whisker_never_erases_what_the_lidar_or_the_camera_saw() -> None:
+    """Each whisker clears in a grid of its own, and that grid reaches the master by MAXIMUM
+    (combination_method 1, every layer here) — so a cone that says "free" can never lower a
+    lethal cell another sensor wrote. The order in the list is the other half of it: the ToF
+    stand after the three sensor layers, so they are the last to write and still cannot."""
+    plugins = _p("local_costmap")["plugins"]
+    for sensor in ("front", "left", "right"):
+        assert _p("local_costmap")[f"tof_{sensor}_scan_layer"]["combination_method"] == 1
+    tof = [name for name in plugins if name.startswith("tof_")]
+    assert plugins.index("lidar_layer") < plugins.index(tof[0])
+    assert plugins.index("camera_layer") < plugins.index(tof[0])
 
 
 def test_the_tof_whiskers_serve_the_local_costmap_only() -> None:
@@ -254,6 +338,14 @@ def test_the_planners_buy_a_berth_with_cost_not_with_walls() -> None:
 
 
 def test_the_tof_layers_never_stall_either_costmap() -> None:
+    """A whisker that goes quiet must never be able to stop the robot, and since 2026-09-21 its
+    silence is a DESIGNED state: tof_bridge's tf_gate withheld 480 readings over 8 s while the
+    tracker restarted. So the scan sources carry no expected_update_rate (a buffer given a rate
+    calls itself stale and Nav2 answers every goal with "Costmap timed out waiting for update",
+    2026-09-07), and the kept range layers keep their no_readings_timeout."""
+    for sensor in ("front", "left", "right"):
+        layer = _p("local_costmap")[f"tof_{sensor}_scan_layer"]
+        assert layer[f"tof_{sensor}_scan"]["expected_update_rate"] == 0.0
     for costmap in ("local_costmap", "global_costmap"):
         for sensor in ("front", "left", "right"):
             assert _p(costmap)[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
@@ -273,7 +365,7 @@ def test_the_range_layers_are_fed_only_what_they_can_be_asked_to_transform() -> 
     assert _p("local_costmap")["transform_tolerance"] == 0.3
     assert _p("global_costmap")["transform_tolerance"] == 1.0
     flags = load_table(REPO / NODES / "tof_bridge.py")
-    assert flags.names == ("dynamic_mounts", "tf_gate", "tf_gate_max_lag_s")
+    assert flags.names == ("dynamic_mounts", "tf_gate", "tf_gate_max_lag_s", "range_as")
     assert all(flag.live for flag in flags), "a wedge is turned off in the field, not reverted"
     assert flags["dynamic_mounts"] is True and flags["tf_gate"] is True
     facts = sf.assignments(sf.tree(f"{NODES}/tof_bridge.py"))
@@ -503,7 +595,13 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
     # start_on_a_known_pose joined the table on 2026-09-19: with a sigma published, a goal is
     # refused for the pose's sake only where nothing has ever corrected it.
     flags = load_table(REPO / NODES / "goal_server.py")
-    assert flags.names == ("tf_pose", "correction_watch", "sigma_gate", "start_on_a_known_pose")
+    assert flags.names == (
+        "tf_pose",
+        "correction_watch",
+        "sigma_gate",
+        "places_from_the_file",
+        "start_on_a_known_pose",
+    )
     assert all(flags.flag(name).live for name in flags.names)
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"
 
@@ -1112,6 +1210,9 @@ def test_a_dead_sensor_cannot_stall_a_costmap_that_the_others_still_feed() -> No
                 assert layer[source]["expected_update_rate"] == 0.0, f"{costmap}.{name}.{source}"
         for sensor in ("front", "left", "right"):
             assert params[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
+            scan = params.get(f"tof_{sensor}_scan_layer")  # the local costmap's, since 2026-09-21
+            if scan is not None:
+                assert scan[f"tof_{sensor}_scan"]["expected_update_rate"] == 0.0, sensor
 
 
 def test_only_the_measured_layer_is_on_by_default() -> None:
@@ -1129,6 +1230,9 @@ def test_only_the_measured_layer_is_on_by_default() -> None:
         )
         for sensor in ("front", "left", "right"):
             assert params[f"tof_{sensor}_layer"]["enabled"] is True
+            scan = params.get(f"tof_{sensor}_scan_layer")
+            if scan is not None:
+                assert scan["enabled"] is True, sensor
 
 
 def test_a_layer_that_never_clears_forgets_a_source_that_died() -> None:

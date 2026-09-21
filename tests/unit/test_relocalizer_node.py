@@ -1708,3 +1708,54 @@ def test_a_bend_of_the_graph_still_widens_the_belief() -> None:
     assert node._shift.widen_m == pytest.approx(0.30)
     after = node._spread.sigma()
     assert after[0] == pytest.approx(math.hypot(before[0], 0.30), abs=1e-6), (before, after)
+
+
+def test_on_a_known_map_the_frame_is_not_said_before_a_pose_defines_it(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A default is a refusal, never (0, 0). With a cached map and a pose saved on that very map
+    on disk, this is a known room: map -> odom stays unsaid until the tracker has a pose on a
+    map, instead of the identity going out for the ten seconds the map takes and then jumping
+    metres to the saved pose (2026-09-21: that jump is what sent Nav2's range layer into its
+    endless loop). With nothing on disk the map is being born under the cart and the identity
+    is the truth, from the first tick, as it always was; and the flag gives the old start back."""
+    import pepin_bringup.relocalizer as module
+
+    from pepin.mapcache import MapCache, write_cache
+
+    known = tmp_path / "known"
+    known.mkdir()
+    pose_file = known / "last_pose.json"
+    monkeypatch.setattr(module, "LAST_POSE_FILE", str(pose_file))
+    write_cache(
+        known,
+        MapCache(
+            cells=[0] * 4, width=2, height=2, resolution_m=0.05, origin_xy=(0.0, 0.0),
+            map_id="2x2@0.00,0.00", digest="d", stamp=time.time(), source="/map",
+        ),
+    )  # fmt: skip
+    pose_file.write_text(json.dumps({"x": -0.4, "y": 2.9, "theta": 1.7, "fit": 0.9,
+                                     "time": time.time(), "map": "2x2@0.00,0.00"}))  # fmt: skip
+    with ros_stubs.parameters(map_cache_dir=str(known), min_match_gap_s=0.0):
+        waiting = Relocalizer()
+    waiting._send_map_odom()
+    assert not waiting._tf_pub.sent, "a known room and no pose yet: nothing is said"
+    waiting._frame.define()  # what the first update or an accepted seed does
+    waiting._send_map_odom()
+    assert len(waiting._tf_pub.sent) == 1
+
+    newborn = tmp_path / "newborn"
+    newborn.mkdir()
+    monkeypatch.setattr(module, "LAST_POSE_FILE", str(newborn / "last_pose.json"))
+    with ros_stubs.parameters(map_cache_dir=str(newborn), min_match_gap_s=0.0):
+        born = Relocalizer()
+    born._send_map_odom()
+    assert len(born._tf_pub.sent) == 1, "a map being born: the identity is the truth"
+
+    monkeypatch.setattr(module, "LAST_POSE_FILE", str(pose_file))
+    with ros_stubs.parameters(
+        map_cache_dir=str(known), min_match_gap_s=0.0, frame_needs_a_pose=False
+    ):
+        old = Relocalizer()
+    old._send_map_odom()
+    assert len(old._tf_pub.sent) == 1, "the flag off is the start this tracker always made"
