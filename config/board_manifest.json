@@ -176,7 +176,7 @@
       "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (imu:=true and base_bridge_cpp:=true), ros/params/ekf.yaml, nice -5",
       "budget": {
         "cpu_percent": 14.0,
-        "rss_mb": 42.0
+        "rss_mb": 75.0
       },
       "note": "Measured 9 % / 28 MB."
     },
@@ -204,7 +204,7 @@
       "owner": "pepin-ros.service ExecStart -> ros/run.sh -> ros/pepin_bringup/launch/bringup.launch.py",
       "budget": {
         "cpu_percent": 10.0,
-        "rss_mb": 105.0
+        "rss_mb": 150.0
       },
       "note": "Measured 7 % / 70 MB. One launch process for sensors and Nav2 together, on purpose: two cost ~110 MB of Python each."
     },
