@@ -24,7 +24,7 @@ Environment=PEPIN_BRIDGE_CONFIG=zenoh-bridge-board.json
 # Under PEPIN_RMW=zenoh there is no DDS graph to bridge: the stack speaks zenoh natively to
 # pepin-zrouter.service and the laptop's router talks to that one. Every guard below therefore
 # starts with "not zenoh", and the unit idles exactly as it does on side=all.
-Environment=PEPIN_RMW=cyclone
+Environment=PEPIN_RMW=zenoh
 # The bridge runs for a split stack (side=board) or when the laptop only watches and maps
 # (PEPIN_BRIDGE=on: RTAB-Map and the camera on the laptop, every drive on the board — actions
 # over the bridge crashed the navigation container, topics never did). Otherwise it exits.

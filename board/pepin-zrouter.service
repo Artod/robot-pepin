@@ -15,7 +15,7 @@ StartLimitIntervalSec=0
 # PEPIN_RMW=zenoh in /etc/default/pepin-ros is the whole switch; unset (or cyclone) and this
 # unit does nothing at all, so it is safe to leave enabled while the robot runs on CycloneDDS.
 EnvironmentFile=-/etc/default/pepin-ros
-Environment=PEPIN_RMW=cyclone
+Environment=PEPIN_RMW=zenoh
 Environment=PEPIN_ZIMAGE=pepin-ros:zenoh
 ExecStartPre=-/usr/bin/docker rm -f pepin-zrouter
 # No config file and no ZENOH_CONFIG_OVERRIDE: the shipped router default already listens on

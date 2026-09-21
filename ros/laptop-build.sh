@@ -4,4 +4,6 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 docker build -f "$HERE/Dockerfile.laptop" -t pepin-laptop:latest "$HERE"
+# The image carries both middlewares; the default transport starts the :zenoh tag (ros/lib.sh).
+docker tag pepin-laptop:latest pepin-laptop:zenoh
 echo "pepin-laptop:latest built"

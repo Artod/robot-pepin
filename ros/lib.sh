@@ -21,12 +21,19 @@ export RSYNC_RSH="ssh $PEPIN_SSH_OPTS"
 # database is also configured to survive a kill (DbSqlite3/JournalMode in vslam.launch.py).
 PEPIN_STOP_TIMEOUT_S="${PEPIN_STOP_TIMEOUT_S:-30}"  # = pepin.deployment.CONTAINER_STOP_TIMEOUT_S
 
-# Which middleware the stack speaks. cyclone (the default) is CycloneDDS with the two
-# zenoh-bridge-ros2dds sidecars that carry the graph across the Mac's NAT; zenoh is
-# rmw_zenoh_cpp with one rmw_zenohd router per machine and no bridge at all. Nothing but this
-# variable changes between them, and with it unset every script starts exactly what it did
-# before. The board reads it from /etc/default/pepin-ros (board/pepin-ros.service's
+# Which middleware the stack speaks. zenoh (the default since 2026-09-20) is rmw_zenoh_cpp with
+# one rmw_zenohd router per machine and no bridge at all; cyclone is CycloneDDS with the two
+# zenoh-bridge-ros2dds sidecars that carry the graph across the Mac's NAT — the stack that ran
+# until then, kept whole and reachable with PEPIN_RMW=cyclone. Nothing but this variable changes
+# between them. The board reads it from /etc/default/pepin-ros (board/pepin-ros.service's
 # EnvironmentFile), so it survives a reboot; the laptop reads it from the environment.
+#   Why the default moved, measured on the robot on 2026-09-20: start order stopped mattering and
+# a restart of either half, of a single node or of a router heals by itself (under the bridges a
+# restarted tracker left Nav2 deaf to map -> odom and a restarted bridge took /tf from the laptop);
+# map -> odom reaches the laptop at 20 Hz instead of the bridge's capped 7.7 Hz; the board's CPU is
+# the same parked (idle 41.6 % against 42.2 %) and under a drive-like load (13.5 % against 13.9 %);
+# ten legs in three sensor modes reached with no transport error. The price is about 200 MB of
+# board memory (roughly 40 MB a process).
 #
 # The topology under zenoh, and why it is this one: rmw_zenoh's SHIPPED session default is
 # mode "peer", connect tcp/localhost:7447, listen tcp/localhost:0 — "accept incoming
@@ -37,7 +44,7 @@ PEPIN_STOP_TIMEOUT_S="${PEPIN_STOP_TIMEOUT_S:-30}"  # = pepin.deployment.CONTAIN
 # nodes are clients. So the board needs NO session config at all. The Mac's containers do not
 # share a loopback, so its nodes are told to gossip-connect to routers only and reach each
 # other through the Mac's own router — which never sends that traffic over the WiFi.
-PEPIN_RMW="${PEPIN_RMW:-cyclone}"
+PEPIN_RMW="${PEPIN_RMW:-zenoh}"
 PEPIN_ZROUTER_PORT="${PEPIN_ZROUTER_PORT:-7447}"
 PEPIN_ZROUTER_BOARD=pepin-zrouter          # the board's router container (host network)
 PEPIN_ZROUTER_LAPTOP=pepin-zrouter-laptop  # the laptop's router container (on pepin-net)

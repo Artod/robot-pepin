@@ -34,7 +34,7 @@ Environment=PEPIN_SIDE=all
 # rmw_zenoh_cpp against pepin-zrouter.service, and pepin-bridge.service stands down. Set in
 # /etc/default/pepin-ros so it survives a reboot; ros/run.sh turns it into the container's image
 # and environment.
-Environment=PEPIN_RMW=cyclone
+Environment=PEPIN_RMW=zenoh
 # One container per boot; --rm so a stale one never blocks the name. The image is built by ros/build.sh.
 # No RTC on this board: it boots with yesterday's clock and NTP jumps it hours forward a minute
 # later; every "seconds since the last reading" check in Nav2 then sees stale data and the first

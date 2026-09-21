@@ -112,6 +112,19 @@ What made the camera-only mode work was mostly not the camera:
   (a camera-only tracker publishes its pose only when a word moves it) and cured none of the
   broken ones.
 
+**Transport between the two machines.** Since 20 September 2026 the stack speaks `rmw_zenoh`
+natively: one `rmw_zenohd` router per machine, every node a peer of its own machine's router, and
+the only link over WiFi is router to router, dialled from the laptop (Docker Desktop's NAT). Measured
+on the robot against the previous arrangement (CycloneDDS plus two `zenoh-bridge-ros2dds`
+processes): the board's CPU is the same parked (idle 41.6 % against 42.2 %) and under a drive-like
+load (13.5 % against 13.9 %); `map → odom` reaches the laptop at 20 Hz instead of a capped 7.7 Hz;
+the start order of the halves stopped mattering; a restart of either half, of one node or of a
+router heals by itself — the laptop half was stopped six seconds into a leg, the cart finished
+alone, and the link came back without touching the board. The price is about 200 MB of board
+memory. The previous transport is kept whole behind one variable: `PEPIN_RMW=cyclone` in
+`/etc/default/pepin-ros` on the board and in the laptop's environment (`ros/lib.sh` tells the
+whole story).
+
 Honest limits: the mono depth network gives a noisy obstacle fan (10–20 recoveries per camera-only
 leg); after a laptop restart the first tie to the loaded graph needs the cart within 0.2 m of a
 recorded node while the lidar drives the registration; waking up in an unknown room with a dead

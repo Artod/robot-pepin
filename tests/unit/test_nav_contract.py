@@ -2806,21 +2806,31 @@ def test_goto_s_cancel_cancels_a_goal_it_never_sent() -> None:
     assert "stop.sh" in " ".join(sf.strings(goto)), "the hard stop is named where cancel can fail"
 
 
-def test_rmw_switch_defaults_to_cyclone() -> None:
-    """PEPIN_RMW unset is the stack that has always run: no zenoh anywhere in what starts."""
-    assert not rmw_is_zenoh({}), "no PEPIN_RMW means CycloneDDS plus the bridges"
-    assert not rmw_is_zenoh({"PEPIN_RMW": "cyclone"})
+def test_rmw_switch_defaults_to_zenoh_and_cyclone_stays_reachable() -> None:
+    """NEW RULE (2026-09-20): PEPIN_RMW unset is rmw_zenoh — measured CPU-neutral on the board,
+    order-free at start and self-healing over restarts — and PEPIN_RMW=cyclone is the whole old
+    stack (CycloneDDS plus the two bridges), kept and startable. The default is the same in the
+    shell, in the three units and in Python, and every container is TOLD which one it is."""
+    assert rmw_is_zenoh({}), "no PEPIN_RMW means rmw_zenoh and the routers"
     assert rmw_is_zenoh({"PEPIN_RMW": "zenoh"})
+    assert not rmw_is_zenoh({"PEPIN_RMW": "cyclone"}), "the bridges are one variable away"
     lib = (REPO / "ros/lib.sh").read_text()
-    assert 'PEPIN_RMW="${PEPIN_RMW:-cyclone}"' in lib, "the shell default is cyclone too"
-    # The board's unit carries the same default, so a file without the line is the old stack.
-    unit = (REPO / "board/pepin-ros.service").read_text()
-    assert "Environment=PEPIN_RMW=cyclone" in unit
-    assert "EnvironmentFile=-/etc/default/pepin-ros" in unit, "the value survives a reboot"
+    assert 'PEPIN_RMW="${PEPIN_RMW:-zenoh}"' in lib, "the shell default is zenoh too"
+    for name in ("pepin-ros.service", "pepin-zrouter.service", "pepin-bridge.service"):
+        unit = (REPO / "board" / name).read_text()
+        assert "Environment=PEPIN_RMW=zenoh" in unit, name
+        assert "EnvironmentFile=-/etc/default/pepin-ros" in unit, "the value survives a reboot"
+    run = (REPO / "ros/run.sh").read_text()
+    assert 'RMWENV="-e PEPIN_RMW=cyclone"' in run, "a cyclone container is told it is one"
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert "-e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp -e PEPIN_RMW=cyclone" in laptop
+    for build in ("ros/build.sh", "ros/laptop-build.sh"):
+        assert ":zenoh" in (REPO / build).read_text(), "a rebuild keeps the default's tag current"
 
 
-def test_rmw_zenoh_swaps_the_image_and_keeps_cyclone_byte_for_byte() -> None:
-    """ros/run.sh adds the middleware only under zenoh, and starts the same image otherwise."""
+def test_rmw_zenoh_swaps_the_image_and_cyclone_starts_the_old_one() -> None:
+    """ros/run.sh starts the image with rmw_zenoh in it by default, and the plain image under
+    cyclone, whose own ENV is rmw_cyclonedds_cpp."""
     run = (REPO / "ros/run.sh").read_text()
     assert 'IMAGE="${PEPIN_IMAGE:-pepin-ros}"' in run, "cyclone starts pepin-ros, as before"
     assert 'IMAGE="${PEPIN_IMAGE:-pepin-ros:zenoh}"' in run, (
@@ -2829,7 +2839,6 @@ def test_rmw_zenoh_swaps_the_image_and_keeps_cyclone_byte_for_byte() -> None:
     assert "RMW_IMPLEMENTATION=rmw_zenoh_cpp" in run
     # Start order must not be able to kill a node: the router may not be up yet.
     assert "ZENOH_ROUTER_CHECK_ATTEMPTS=0" in run
-    assert 'RMWENV=""' in run, "under cyclone the docker run line gains nothing at all"
 
 
 def test_zenoh_router_starts_before_the_stack_and_outlives_its_restarts() -> None:

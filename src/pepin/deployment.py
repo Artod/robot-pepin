@@ -469,13 +469,15 @@ def rmw_is_zenoh(env: Mapping[str, str] | None = None) -> bool:
     """Whether this process speaks rmw_zenoh_cpp rather than CycloneDDS plus the two
     zenoh-bridge-ros2dds sidecars.
 
-    ``PEPIN_RMW`` is the one switch (ros/lib.sh has the whole story): unset or ``cyclone`` means
-    the stack that has always run, ``zenoh`` means one ``rmw_zenohd`` router per machine and no
-    bridge at all. A launch asks this to decide whether to start a watch of a bridge that does
-    not exist — under zenoh ``pepin_bringup.bridge_watch`` would find no admin, exit, and take
-    the whole launch down with it (its exit is wired to ``Shutdown``).
+    ``PEPIN_RMW`` is the one switch (ros/lib.sh has the whole story): unset or ``zenoh`` means
+    one ``rmw_zenohd`` router per machine and no bridge at all (the default since 2026-09-20),
+    ``cyclone`` means the stack that ran until then. The start scripts pass the value into every
+    container explicitly, so this default only decides for a process started by hand. A launch
+    asks this to decide whether to start a watch of a bridge that does not exist — under zenoh
+    ``pepin_bringup.bridge_watch`` would find no admin, exit, and take the whole launch down
+    with it (its exit is wired to ``Shutdown``).
     """
-    return (env if env is not None else os.environ).get("PEPIN_RMW", "cyclone") == "zenoh"
+    return (env if env is not None else os.environ).get("PEPIN_RMW", "zenoh") == "zenoh"
 
 
 def bridge_admin_for(side: str) -> str:

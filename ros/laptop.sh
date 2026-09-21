@@ -69,7 +69,7 @@ image() {
 # it has always had; under zenoh it is the session (a peer of THIS machine's router) plus
 # ZENOH_ROUTER_CHECK_ATTEMPTS=0, so a container started before the router survives and joins
 # when it appears instead of dying on the start order.
-RMW_ENV=(-e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp)
+RMW_ENV=(-e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp -e PEPIN_RMW=cyclone)
 if pepin_rmw_is_zenoh; then
     RMW_ENV=(-e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e PEPIN_RMW=zenoh -e ZENOH_ROUTER_CHECK_ATTEMPTS=0
              -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_session_override)")

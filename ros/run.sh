@@ -35,11 +35,13 @@ mkdir -p /run/pepin
 # No session config is passed: the shipped default (peer, connect tcp/localhost:7447, listen
 # tcp/localhost:0) is already the shape the board wants — nodes talk to each other directly
 # over the host loopback, and only what leaves the board goes through the router.
-IMAGE="${PEPIN_IMAGE:-pepin-ros}"
-RMWENV=""
-if [ "${PEPIN_RMW:-cyclone}" = zenoh ]; then
-    IMAGE="${PEPIN_IMAGE:-pepin-ros:zenoh}"
-    RMWENV="-e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e PEPIN_RMW=zenoh -e ZENOH_ROUTER_CHECK_ATTEMPTS=0"
+# The value is ALWAYS passed into the container: the launches ask pepin.deployment.rmw_is_zenoh,
+# whose own default is zenoh, so a cyclone container must be told it is one.
+IMAGE="${PEPIN_IMAGE:-pepin-ros:zenoh}"
+RMWENV="-e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e PEPIN_RMW=zenoh -e ZENOH_ROUTER_CHECK_ATTEMPTS=0"
+if [ "${PEPIN_RMW:-zenoh}" = cyclone ]; then
+    IMAGE="${PEPIN_IMAGE:-pepin-ros}"  # the image's own ENV is rmw_cyclonedds_cpp
+    RMWENV="-e PEPIN_RMW=cyclone"
 fi
 # shellcheck disable=SC2086
 # Not auto-removed: a stopped container keeps its log until the unit's ExecStartPre has saved it.
