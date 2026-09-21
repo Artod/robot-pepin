@@ -159,6 +159,8 @@ lidar is not supported yet.
                                          │ /scan + map ─► relocalizer ─► map→odom        20 Hz
                                          │ 3x VL53L1X ─► pepin-tof :3335 ─► tof_bridge
                                          │              ─► /tof/{front,left,right}       14 Hz
+                                         │              ─► /tof/*/scan (the cone as a fan,
+                                         │                 what the local costmap marks on)
 ```
 
 The sensor nodes and the base bridge are composed into one container process at `nice -10`; Nav2

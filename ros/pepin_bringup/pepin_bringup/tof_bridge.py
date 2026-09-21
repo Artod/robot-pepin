@@ -1,11 +1,42 @@
-"""ROS 2 node: the board's three VL53L1X sensors as sensor_msgs/Range, plus their frames.
+"""ROS 2 node: the board's three VL53L1X sensors as sensor_msgs/Range and as scan fans, plus
+their frames.
 
 The lidar sees one horizontal slice of the room; these three look where it
 cannot — low and in front, at the height of a shoe, a cable, a cat. The board
 publishes all three at ~15 Hz in millimetres and says ``null`` when a sensor
 got no return; ROS wants metres and, by convention, ``+inf`` for "nothing
 within max_range"; a reading equal to max_range means "nothing seen", which is
-what Nav2's range layer clears the cone on.
+what a costmap clears the cone on.
+
+EACH CONE ALSO LEAVES AS A LaserScan (2026-09-21, the ``range_as`` flag), and that is how Nav2
+is fed now: ``/tof/<name>/scan``, a small fan in the sensor's own frame, read by an
+``ObstacleLayer``. Nav2 Jazzy's ``RangeSensorLayer`` — the plugin written for exactly this
+message — carries two unfixed defects that have each taken this robot's navigation down, and
+the second one cannot be held off by any publisher:
+
+1. it calls ``canTransform(..., the message's stamp, timeout=transform_tolerance)`` once per
+   message, and tf2 blocks the WHOLE timeout on any failure, so a broken chain buries
+   ``updateMap()`` in a backlog it never drains (the ``tf_gate`` below, and the paragraphs
+   after it);
+2. ``range_sensor_layer.cpp:362-369`` (copy in scratch/nav2_hang/src/) clamps its cell bounds
+   with ``bx0 = std::max(0, bx0); bx1 = std::min(size_x_, bx1)`` and then walks
+   ``for (unsigned int x = bx0; x <= (unsigned int)bx1; x++)``. When the cone lies entirely
+   left of or below the grid, ``bx1``/``by1`` stay NEGATIVE, the cast makes them about 4e9, and
+   the loop runs for ever holding the costmap's mutex: one thread at 100 %, "Pose Goes Off
+   Grid", every service timing out, zero plans. It takes a jump of the pose in ``map`` between
+   a Range's stamp and the costmap update — a tracker restart, a relocalisation, the cart
+   carried by hand — and it was reproduced on this robot on 2026-09-21 with
+   ``ros/thin.sh kick relocalizer`` (tid 191 of the Nav2 container: 415 s of CPU in 700 s).
+   The jump happens AFTER the reading has left, so this bridge cannot gate it.
+
+An ``ObstacleLayer`` has neither defect: its MessageFilter drops what it cannot place instead
+of blocking on it, its queue is bounded, and it walks the points it was given rather than a
+cell rectangle. What it costs is that a cone must arrive as points — hence the fan, one beam
+every cell-width of arc at the sensor's ceiling (:func:`pepin.tof_horizon.cone_beams`), every
+beam carrying the one distance the sensor measured, because a whisker cannot say where across
+its 27 degrees the thing stands and the honest mark is the whole arc. The old layers stay in
+ros/params/nav2_params.yaml, unlisted; ``range_as:=range`` and one line of ``plugins:`` put
+them back (CLAUDE.md rule 19).
 
 The mounts are read from config/tof.json through :class:`pepin.mounts.Mounts` (measured
 2026-09-04, +-1 cm; a parameter may still nudge one) and published once as static transforms
@@ -51,12 +82,20 @@ one publisher, behind two live flags (:data:`FLAGS`, ``ros/flags.sh set tof_brid
     the reading — ``map -> odom`` is dated 0.1 s into the future and re-sent every 0.05 s
     (relocalizer.py:980, :1186, :2042-2058) and the EKF's newest stamp is at most one 0.05 s
     period old — so the measured lag sits at or below zero and essentially nothing is withheld.
-    Silence is safe on the other side too: every ToF layer runs with ``no_readings_timeout: 0.0``
-    (ros/params/nav2_params.yaml), so a topic that stops says nothing rather than stalling a
-    costmap — which is the whole reason withholding is a legitimate answer here.
+    Silence is safe on the other side too: every ToF layer runs without a rate to live up to
+    (``expected_update_rate: 0.0`` on the scan sources, ``no_readings_timeout: 0.0`` on the old
+    range layers, ros/params/nav2_params.yaml), so a topic that stops says nothing rather than
+    stalling a costmap — which is the whole reason withholding is a legitimate answer here.
 
-With both flags off the node behaves exactly as it did before: the static mounts alone, and
-every reading published whatever TF says.
+``range_as``
+    ``scan`` (the default) publishes each cone on ``/tof/<name>/scan`` as well, for the
+    ObstacleLayer that feeds Nav2 now; ``range`` is the node as it was, the Range topics alone.
+    The sensor_msgs/Range is published EITHER WAY and unchanged: it is what the run recorder
+    tapes (run_recorder.py:261) and what Foxglove draws, and the three of them together cost
+    less than one lidar revolution.
+
+With every flag off the node behaves exactly as it did before: the static mounts alone, every
+reading published whatever TF says, and nothing but the three Range topics.
 """
 
 from __future__ import annotations
@@ -71,25 +110,31 @@ from typing import Any, Protocol
 
 from rclpy.duration import Duration
 from rclpy.node import Node
-from sensor_msgs.msg import Range
+from sensor_msgs.msg import LaserScan, Range
 from tf2_ros import Buffer, StaticTransformBroadcaster, TransformBroadcaster, TransformListener
 
 from pepin.flags import Flag, FlagSet
 from pepin.footprint import CONTACT_BAND_M
 from pepin.mounts import TOF_FRAME, Mount, Mounts
-from pepin.tof_horizon import RangeHold, trusted_max_range
+from pepin.tof_horizon import RangeHold, cone_beams, trusted_max_range
 from pepin_bringup.link import JsonLineLink
-from pepin_bringup.msgs import transform_from_rpy
+from pepin_bringup.msgs import scan_from_ranges, transform_from_rpy
 from pepin_bringup.node_kit import Switches, TfLookup, spin_main, stamp_seconds
 from pepin_bringup.protocol import TOF_NAMES, parse_tof, parse_tof_status
 
 # VL53L1X: a ~27 deg cone, 4 cm dead zone, 1.3 m in short mode (the mode the board runs).
 _FIELD_OF_VIEW_RAD = 0.47
-# Readings inside the contact band are dropped by the range layer (below min_range): a printer
-# 5 cm from the bumper is what the cart parked against, not a wall to refuse.
+# Readings inside the contact band are dropped before any layer sees them — the fan's own
+# range_min, which laser_geometry's projector filters on, and the Range's: a printer 5 cm from
+# the bumper is what the cart parked against, not a wall to refuse.
 _MIN_RANGE_M = CONTACT_BAND_M
 _MAX_RANGE_M = 1.3
 _CROSSTALK_M = 0.12  # nearer than this is the sensor seeing its own surroundings
+_UNKNOWN_RANGE_M = -1.0  # below any min_range: a reading that must neither mark nor clear
+# The cell of the costmap the fan is drawn on (ros/params/nav2_params.yaml, local_costmap's
+# resolution): it sets how many beams a cone needs (:func:`pepin.tof_horizon.cone_beams`).
+_COSTMAP_CELL_M = 0.05
+_SCAN_TOPIC = "tof/{name}/scan"
 
 _DRAIN_HZ = 15.0  # readings come at ~15 Hz; a faster timer only burns the A53
 _SILENCE_WARN_S = 20.0  # a sensor with nothing valid for this long is reported, not trusted
@@ -106,9 +151,9 @@ _GATE_MAX_LAG_S = 0.5  # see the tf_gate_max_lag_s flag for the arithmetic behin
 _GATE_DETAIL_CHARS = 90  # how much of tf2's own complaint fits in a report line
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
-# other declaration, and printed in every report line. Both defaults are ON: they are the fix
-# for the Nav2 wedge of 2026-09-21 (the module docstring), and with both off this node is byte
-# for byte the one that shipped before it.
+# other declaration, and printed in every report line. Every default is the 2026-09-21 answer to
+# the two RangeSensorLayer defects (the module docstring), and with all of them the other way
+# this node is byte for byte the one that shipped before them.
 FLAGS = FlagSet(
     Flag(
         "dynamic_mounts",
@@ -173,6 +218,39 @@ FLAGS = FlagSet(
         " line's withheld counts and the lag it prints are the measurement to raise it by",
         off_when="lower it towards 0.1 s to prove that a suspected wedge is a stale chain: the"
         " gate then shuts on exactly the windows the costmap would have blocked in",
+    ),
+    Flag(
+        "range_as",
+        "scan",
+        choices=("scan", "range"),
+        description="what Nav2 is fed with: scan also publishes each cone on /tof/<name>/scan as"
+        " a small LaserScan fan for an ObstacleLayer; range publishes nothing there, which is the"
+        " node before 2026-09-21 and needs the three RangeSensorLayer blocks back in the local"
+        " costmap's plugins list. The sensor_msgs/Range topics are published either way",
+        why="nav2_costmap_2d::RangeSensorLayer carries two defects that are both unfixed on main"
+        " and have each stopped this robot. One: it asks tf2 to transform every message at the"
+        " message's own stamp with transform_tolerance as the timeout, and tf2 blocks the whole"
+        " timeout on any failure, so a broken chain amplifies 4.5x per update cycle until"
+        " updateMap never returns (4 of 7 board starts on 2026-09-21; scratch/nav2_hang/"
+        "wedge_gain.py) — that one the tf_gate above holds off. Two: after clamping its cell"
+        " bounds to the grid (range_sensor_layer.cpp:362-369) bx1/by1 stay NEGATIVE when the cone"
+        " falls off the left or bottom edge, and the loops cast them to unsigned: about 4e9"
+        " iterations holding the costmap mutex, one thread at 100 % for ever, 'Pose Goes Off"
+        " Grid', every service timing out and zero plans. It takes one jump of the pose in map"
+        " between a reading's stamp and the update — a tracker restart, a relocalisation, the"
+        " cart carried by hand — and no publisher can gate it, because the jump happens after"
+        " the reading has left. Reproduced on 2026-09-21 with ros/thin.sh kick relocalizer (tid"
+        " 191 of the Nav2 container: 415 s of CPU in 700 s). An ObstacleLayer drops what it"
+        " cannot place instead of blocking on it and walks points instead of a cell rectangle, so"
+        " it has neither; the fan is what turns one distance into points, one beam per costmap"
+        " cell of arc at the sensor's ceiling (pepin.tof_horizon.cone_beams: 11 beams front, 7"
+        " and 7 at the sides), every beam carrying that distance",
+        on_when="always while Nav2 reads the ToF: it is the arrangement with no unbounded loop"
+        " and no blocking transform in it",
+        off_when="to compare against the old plugin, or if an ObstacleLayer ever proves worse at"
+        " a cone than the range layer was — put tof_front_layer, tof_left_layer and"
+        " tof_right_layer back into the local costmap's plugins list at the same time, or the"
+        " whiskers reach no costmap at all",
     ),
 )
 
@@ -325,7 +403,8 @@ class Gate:
 
 
 class TofBridge(Node):
-    """Bridges the ToF server to ROS: /tof/front, /tof/left, /tof/right and their static frames."""
+    """Bridges the ToF server to ROS: /tof/front, /tof/left, /tof/right, the scan fan of each
+    (/tof/<name>/scan, with ``range_as`` at ``scan``) and the three sensor frames."""
 
     def __init__(self, probe: ChainProbe | None = None) -> None:
         """Declare parameters, publish the sensor frames, and start reading the ToF server.
@@ -344,6 +423,13 @@ class TofBridge(Node):
         self._range_pubs = {
             name: self.create_publisher(Range, f"tof/{name}", 10) for name in TOF_NAMES
         }
+        # The fans exist whatever ``range_as`` says: a publisher nobody writes to costs an entry
+        # in the graph, and the flag has to be live in BOTH directions — turning it back to
+        # ``scan`` on a running robot must put the cones on the wire on the next reading.
+        self._scan_pubs = {
+            name: self.create_publisher(LaserScan, _SCAN_TOPIC.format(name=name), 10)
+            for name in TOF_NAMES
+        }
         self._readings: queue.Queue[tuple[dict[str, float | None], dict[str, int | None]]] = (
             queue.Queue(maxsize=_QUEUE_MAX)
         )
@@ -361,6 +447,11 @@ class TofBridge(Node):
             name: trusted_max_range(self._mounts[name][2], _FIELD_OF_VIEW_RAD, _MAX_RANGE_M)
             for name in TOF_NAMES
         }
+        # The fan each cone is drawn as, fixed once from that sensor's own ceiling: enough beams
+        # that neighbours land at most one costmap cell apart where the arc is widest, which is
+        # at the ceiling (:func:`pepin.tof_horizon.cone_beams`). The cone is symmetric about the
+        # sensor's own x axis, and the mount carries the yaw, so the fan needs none.
+        self._fan = {name: self._fan_for(name) for name in TOF_NAMES}
         self._hold = RangeHold(_HOLD_S)
         # The mounts go out ONE way at a time. With ``dynamic_mounts`` (the default) they ride on
         # /tf with every reading's own stamp, which no late joiner can miss. With the flag off
@@ -397,7 +488,9 @@ class TofBridge(Node):
         self.create_timer(_STATUS_REPORT_S, self._report_status)
         self.get_logger().info(
             "tof ceilings: "
-            + ", ".join(f"{n} {self._ceiling[n]:.2f} m" for n in TOF_NAMES)
+            + ", ".join(
+                f"{n} {self._ceiling[n]:.2f} m ({self._fan[n][2]} beams)" for n in TOF_NAMES
+            )
             + f"; gate chain {self._global_frame} <- {self._base_frame}"
             + f"; flags: {self._switches.state()}"
         )
@@ -409,6 +502,12 @@ class TofBridge(Node):
     def close(self) -> None:
         """Close the link, on the way out."""
         self._link.stop()
+
+    def _fan_for(self, name: str) -> tuple[float, float, int]:
+        """Sensor ``name``'s cone as a fan: ``(angle_min_rad, angle_increment_rad, beams)``,
+        symmetric about the sensor's own x axis and spanning the whole field of view."""
+        beams = cone_beams(self._ceiling[name], _FIELD_OF_VIEW_RAD, _COSTMAP_CELL_M)
+        return -_FIELD_OF_VIEW_RAD / 2.0, _FIELD_OF_VIEW_RAD / (beams - 1), beams
 
     def _build_probe(self) -> ChainProbe:
         """The gate's window on TF: a short buffer and a listener on this node's own executor."""
@@ -535,7 +634,7 @@ class TofBridge(Node):
                 self._mount_tf.sendTransform([self._mount_transform(n, stamp) for n in ranges])
             for name, distance_m in ranges.items():
                 if allowed:
-                    self._publish_range(name, distance_m, statuses.get(name), stamp)
+                    self._publish_reading(name, distance_m, statuses.get(name), stamp)
                 else:
                     self._withhold(name, distance_m)
                 self._warn_if_silent(name)
@@ -568,15 +667,47 @@ class TofBridge(Node):
             self._last_valid[name] = time.monotonic()
             self._warned[name] = False
 
-    def _publish_range(
+    def _publish_reading(
         self, name: str, distance_m: float | None, status: int | None, stamp: Any
     ) -> None:
-        """One sensor's reading as a sensor_msgs/Range at ``stamp`` (the whole line's, so it
-        matches the mount sent with it); no return becomes its own ``max_range``.
+        """One sensor's reading on both faces of this bridge at ``stamp`` (the whole line's, so
+        it matches the mount sent with it): the sensor_msgs/Range it has always published, and —
+        with ``range_as`` at ``scan`` — the same cone as a fan for Nav2's ObstacleLayer.
 
-        A reading past the sensor's floor horizon is reported as "nothing seen" rather than as an
+        The verdict is taken ONCE, here, so the two messages can never disagree about what the
+        sensor said.
+        """
+        value = self._verdict(name, distance_m, status)
+        self._publish_range(name, value, stamp)
+        if self._switches["range_as"] == "scan":
+            self._publish_scan(name, value, stamp)
+
+    def _verdict(self, name: str, distance_m: float | None, status: int | None) -> float:
+        """What sensor ``name`` says right now, in metres: the return itself, the last one while
+        the hold lasts, its ceiling for "nothing within the trusted range", or
+        :data:`_UNKNOWN_RANGE_M` for "I do not know" — a sensor that did not answer, or a
+        reading so near that it is the sensor's own window.
+
+        A reading past the sensor's floor horizon counts as "nothing seen" rather than as an
         obstacle: past that distance the cone is looking at the carpet.
         """
+        if status is None or status == 255:
+            return _UNKNOWN_RANGE_M  # a sensor that has left the bus is not an empty room
+        # Below 12 cm the VL53L1X reports crosstalk from whatever sits at its window (the front
+        # sensor flickered 0.05 <-> 1.3 m with nothing there, 2026-09-06), and neither is that.
+        if distance_m is not None and distance_m < _CROSSTALK_M:
+            return _UNKNOWN_RANGE_M
+        now = time.monotonic()
+        value = self._hold.publish(name, distance_m, self._ceiling[name], now)
+        if distance_m is not None and distance_m <= self._ceiling[name]:
+            self._last_valid[name] = now
+            self._warned[name] = False
+        return value
+
+    def _publish_range(self, name: str, value: float, stamp: Any) -> None:
+        """The verdict as a sensor_msgs/Range: no return becomes the sensor's own ``max_range``,
+        and "I do not know" goes out below ``min_range``, which a costmap neither marks nor
+        clears on."""
         message = Range()
         message.header.stamp = stamp
         message.header.frame_id = TOF_FRAME.format(name=name)
@@ -584,22 +715,42 @@ class TofBridge(Node):
         message.field_of_view = _FIELD_OF_VIEW_RAD
         message.min_range = _MIN_RANGE_M
         message.max_range = self._ceiling[name]
-        # Below 12 cm the VL53L1X reports crosstalk from whatever sits at its window (the front
-        # sensor flickered 0.05 <-> 1.3 m with nothing there, 2026-09-06); such a reading is
-        # published below min_range, which the costmap layer drops: neither a mark nor a clear.
-        now = time.monotonic()
-        if status is None or status == 255:
-            # A sensor that has left the bus is not an empty room: below min_range the layer
-            # neither marks nor clears, which is the honest "I do not know".
-            message.range = -1.0
-        elif distance_m is not None and distance_m < _CROSSTALK_M:
-            message.range = -1.0  # below min_range: the layer neither marks nor clears
-        else:
-            message.range = self._hold.publish(name, distance_m, self._ceiling[name], now)
-            if distance_m is not None and distance_m <= self._ceiling[name]:
-                self._last_valid[name] = now
-                self._warned[name] = False
+        message.range = value
         self._range_pubs[name].publish(message)
+
+    def _publish_scan(self, name: str, value: float, stamp: Any) -> None:
+        """The same verdict as a sensor_msgs/LaserScan fan on ``/tof/<name>/scan``, in the
+        sensor's own frame — what Nav2's ObstacleLayer marks and clears with.
+
+        Three answers, and the fan says each of them the way that layer reads it. A RETURN: every
+        beam carries it, because a whisker cannot say where across its 27 degrees the thing
+        stands and the whole arc is the honest mark. NOTHING within the trusted range: every beam
+        is ``+inf``, which the layer's ``inf_is_valid`` turns into a clear out to the fan's own
+        ``range_max`` (Nav2's laserScanValidInfCallback puts the point at ``range_max`` minus a
+        tenth of a millimetre — which is why ``obstacle_max_range`` in the yaml sits a cell below
+        it, or that clearing point would MARK a lethal ring at the ceiling). I DO NOT KNOW: every
+        beam is NaN, which the projector drops — neither a mark nor a clear, the silence the
+        Range's ``-1.0`` has always meant.
+        """
+        angle_min, increment, beams = self._fan[name]
+        ceiling = self._ceiling[name]
+        if value < _MIN_RANGE_M:
+            beam = math.nan
+        elif value >= ceiling:
+            beam = math.inf
+        else:
+            beam = value
+        self._scan_pubs[name].publish(
+            scan_from_ranges(
+                [beam] * beams,
+                angle_min,
+                increment,
+                stamp,
+                TOF_FRAME.format(name=name),
+                _MIN_RANGE_M,
+                ceiling,
+            )
+        )
 
     def _warn_if_silent(self, name: str) -> None:
         """Say once when a sensor has produced no valid measurement for a long time.

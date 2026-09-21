@@ -1,10 +1,12 @@
-"""A ToF may only be believed as far as its cone stays off the floor."""
+"""A ToF may only be believed as far as its cone stays off the floor, and its cone may only be
+drawn with enough beams to reach every cell of it."""
 
 import math
 
-from pepin.tof_horizon import RangeHold, floor_horizon, trusted_max_range
+from pepin.tof_horizon import RangeHold, cone_beams, floor_horizon, trusted_max_range
 
 FOV = 0.47  # the VL53L1X cone, radians
+CELL = 0.05  # the local costmap's resolution (ros/params/nav2_params.yaml)
 
 
 def test_the_low_sensors_are_believed_to_about_half_a_metre() -> None:
@@ -49,3 +51,23 @@ def test_sensors_are_held_independently() -> None:
     hold.publish("left", 0.3, 0.57, now=0.0)
     assert hold.publish("right", None, 0.59, now=0.1) == 0.59
     assert hold.publish("left", None, 0.57, now=0.5) == 0.3
+
+
+def test_a_cone_is_drawn_with_no_gap_in_it_at_its_widest() -> None:
+    """The fan tof_bridge publishes for Nav2's ObstacleLayer is a row of points on an arc, and
+    the arc is widest at the sensor's ceiling: the spacing there must be at most one costmap
+    cell, and then every nearer range is denser still. The three mounts of config/tof.json."""
+    for ceiling in (trusted_max_range(h, FOV, 1.3) for h in (0.27, 0.16, 0.165)):
+        beams = cone_beams(ceiling, FOV, CELL)
+        assert ceiling * FOV / (beams - 1) <= CELL
+        assert (ceiling * FOV) / beams > CELL / 2, "and not a beam more than that needs"
+    assert cone_beams(trusted_max_range(0.27, FOV, 1.3), FOV, CELL) == 11
+    assert cone_beams(trusted_max_range(0.16, FOV, 1.3), FOV, CELL) == 7
+    assert cone_beams(trusted_max_range(0.165, FOV, 1.3), FOV, CELL) == 7
+
+
+def test_a_cone_is_always_at_least_its_own_two_edges() -> None:
+    """A sensor with no mount measured, or a degenerate cell: the fan must still be a fan."""
+    assert cone_beams(0.0, FOV, CELL) == 2
+    assert cone_beams(0.1, FOV, CELL) == 2, "an arc under one cell is its two edges"
+    assert cone_beams(0.57, 0.0, CELL) == 2 and cone_beams(0.57, FOV, 0.0) == 2

@@ -1,6 +1,7 @@
-"""The ToF bridge under the ROS stubs: the precondition it owns before a Range leaves it.
+"""The ToF bridge under the ROS stubs: the precondition it owns before a reading leaves it, and
+the shape it leaves in.
 
-A Range whose frame cannot be placed in the global frame is not a lost measurement, it is a
+A reading whose frame cannot be placed in the global frame is not a lost measurement, it is a
 wedge: Nav2's RangeSensorLayer blocks a whole ``transform_tolerance`` per message on any
 transform failure, three layers per costmap receive 15 Hz each, and the costmap's first update
 then never ends (scratch/nav2_hang/, and the node's own docstring). So this file holds the
@@ -8,11 +9,18 @@ contract of the two flags that answer it — ``dynamic_mounts`` (the mount goes 
 reading, so no late joiner can miss the frame) and ``tf_gate`` (no reading leaves while the
 chain that must place it is broken or stale) — including the two properties that keep the gate
 from becoming its own failure: it judges ``map <- base_link``, never the mount it suppresses
-itself, and with both flags off the node is the one that shipped before them.
+itself, and with every flag the other way the node is the one that shipped before them.
+
+...and the contract of ``range_as``, the answer to that plugin's OTHER defect (an unbounded
+loop over unsigned cell bounds, range_sensor_layer.cpp:362-369, which no publisher can gate):
+every cone also leaves as a small LaserScan fan for an ObstacleLayer, and what that fan says
+for a return, for "nothing within my trusted range" and for "I do not know" is exactly what the
+layer reads as a mark, a clear and a silence.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pytest
@@ -24,6 +32,8 @@ from pepin_bringup import tof_bridge as module  # noqa: E402
 from pepin_bringup.tof_bridge import FLAGS, ChainState, Gate, TfChainProbe, TofBridge  # noqa: E402
 from ros_stubs import Buffer, Header, TransformStamped  # noqa: E402
 from ros_stubs import Time as TimeMsg  # noqa: E402
+
+from pepin.tof_horizon import cone_beams  # noqa: E402
 
 READING = {"front": 500, "left": 900, "right": None, "status": {"front": 0, "left": 0, "right": 2}}
 NAMES = ("front", "left", "right")
@@ -83,6 +93,12 @@ def feed(node: TofBridge, reading: dict[str, Any] | None = None) -> None:
 def published(node: TofBridge) -> list[Any]:
     """Every Range that left the node, over all three topics."""
     return [msg for name in NAMES for msg in node.pubs[f"tof/{name}"].sent]
+
+
+def scans(node: TofBridge, name: str = "") -> list[Any]:
+    """Every LaserScan that left the node, over one sensor's fan topic or over all three."""
+    wanted = (name,) if name else NAMES
+    return [msg for n in wanted for msg in node.pubs[f"tof/{n}/scan"].sent]
 
 
 def test_a_fresh_chain_lets_the_reading_out_with_its_mount_on_the_same_stamp(
@@ -250,7 +266,93 @@ def test_the_gate_is_shut_until_something_proves_otherwise() -> None:
 def test_the_flags_are_the_features_own_names_and_live() -> None:
     """Rule 19: a flag is named after its feature, every one of these takes effect at once, and
     each carries the measurement its default rests on."""
-    assert FLAGS.names == ("dynamic_mounts", "tf_gate", "tf_gate_max_lag_s")
+    assert FLAGS.names == ("dynamic_mounts", "tf_gate", "tf_gate_max_lag_s", "range_as")
     assert all(flag.live and flag.measured for flag in FLAGS)
     assert FLAGS["dynamic_mounts"] is True and FLAGS["tf_gate"] is True
     assert FLAGS["tf_gate_max_lag_s"] == 0.5
+    assert FLAGS["range_as"] == "scan"
+
+
+# ---- the fan: one cone as points, because a RangeSensorLayer is not safe to run ---------------
+def test_a_return_is_marked_across_the_whole_cone_with_no_gap_in_it(monkeypatch: Any) -> None:
+    """The fan IS the cone. Every beam carries the one distance the sensor measured — a whisker
+    cannot say where across its 27 degrees the thing stands — the fan spans the whole field of
+    view symmetrically about the sensor's own axis, and it has enough beams that neighbours land
+    at most one costmap cell apart where the arc is widest, at the sensor's ceiling. The front
+    whisker's 0.96 m ceiling needs 11 beams, the two low ones 7."""
+    node = bridge(monkeypatch, FakeProbe())
+    feed(node)
+    fov = module._FIELD_OF_VIEW_RAD
+    for name in NAMES:
+        scan = scans(node, name)[-1]
+        ceiling = node._ceiling[name]
+        assert scan.header.frame_id == f"tof_{name}", "the cone's origin is the sensor"
+        assert scan.range_min == module._MIN_RANGE_M, "the contact band is dropped by min_range"
+        assert scan.range_max == ceiling, "the fan never announces reach the sensor has not got"
+        assert len(scan.ranges) == cone_beams(ceiling, fov, module._COSTMAP_CELL_M)
+        assert scan.angle_min == pytest.approx(-fov / 2)
+        assert scan.angle_max == pytest.approx(fov / 2)
+        assert ceiling * scan.angle_increment <= module._COSTMAP_CELL_M, "a gap in the cone"
+    assert [round(r, 3) for r in scans(node, "front")[-1].ranges] == [0.5] * 11
+    assert len(scans(node, "left")[-1].ranges) == 7
+
+
+def test_nothing_in_range_is_an_inf_on_every_beam_so_the_cone_clears(monkeypatch: Any) -> None:
+    """A whisker clears by saying +inf: Nav2's laserScanValidInfCallback puts that point at the
+    fan's own range_max less a tenth of a millimetre and raytraces the cone free. The two
+    readings that mean "nothing" — none at all, and one past the sensor's floor horizon — must
+    both come out that way, and the Range beside it still says the ceiling as it always did."""
+    node = bridge(monkeypatch, FakeProbe())
+    feed(node, {"front": None, "left": 1200, "right": None, "status": dict.fromkeys(NAMES, 2)})
+    for name in ("front", "right"):
+        assert all(math.isinf(r) and r > 0 for r in scans(node, name)[-1].ranges), name
+        assert node.pubs[f"tof/{name}"].sent[-1].range == node._ceiling[name]
+    # left read 1.20 m, past its 0.57 m floor horizon: the carpet, not a wall
+    assert all(math.isinf(r) for r in scans(node, "left")[-1].ranges)
+
+
+def test_a_sensor_that_did_not_answer_neither_marks_nor_clears(monkeypatch: Any) -> None:
+    """ "I do not know" is NaN on every beam: the callback leaves it alone (it only rewrites
+    positive infinities) and laser_geometry's projector drops it, so the cone is neither marked
+    nor cleared — which is what the Range's -1.0 has always meant. A sensor off the bus is not
+    an empty room, and neither is a reading from the sensor's own window."""
+    node = bridge(monkeypatch, FakeProbe())
+    reading = {"front": 60, "left": 500, "right": 500, "status": {"front": 0, "right": 0}}
+    feed(node, reading)  # left has no verdict at all: the sensor did not answer
+    front, left = scans(node, "front")[-1], scans(node, "left")[-1]
+    assert all(math.isnan(r) for r in front.ranges), "0.06 m is the sensor's own window"
+    assert all(math.isnan(r) for r in left.ranges), "a sensor that did not answer at all"
+    assert node.pubs["tof/front"].sent[-1].range == -1.0, "the Range says the same thing"
+    assert not any(math.isnan(r) for r in scans(node, "right")[-1].ranges)
+
+
+def test_the_fan_rides_with_the_mount_and_the_range_on_one_stamp(monkeypatch: Any) -> None:
+    """One gate decision, one stamp, one set of mounts for all six messages of a line: a
+    consumer that takes the mount first can place every cone without waiting for anything."""
+    node = bridge(monkeypatch, FakeProbe(ChainState(-0.04)))
+    feed(node)
+    stamps = {(m.header.stamp.sec, m.header.stamp.nanosec) for m in published(node)}
+    assert len(stamps) == 1
+    assert {(s.header.stamp.sec, s.header.stamp.nanosec) for s in scans(node)} == stamps
+    assert {(t.header.stamp.sec, t.header.stamp.nanosec) for t in node._mount_tf.sent} == stamps
+
+
+def test_a_shut_gate_withholds_the_fans_too(monkeypatch: Any) -> None:
+    """The gate is about the CHAIN that must place a cone, and a fan needs it exactly as a Range
+    does: nothing on either topic while it is shut."""
+    node = bridge(monkeypatch, FakeProbe(ChainState(None, "Lookup: no chain")))
+    feed(node)
+    assert published(node) == [] and scans(node) == []
+
+
+def test_the_old_plugin_is_one_live_flag_away(monkeypatch: Any) -> None:
+    """Rule 19: ``range_as=range`` is the node before 2026-09-21 — the three Range topics and
+    nothing on the fans — and the switch works in both directions on a running robot, because a
+    field that has to be reverted is not a switch."""
+    node = bridge(monkeypatch, FakeProbe(), range_as="range")
+    feed(node)
+    assert len(published(node)) == 3 and scans(node) == []
+    assert node.set_parameters([Param("range_as", "scan")])[0].successful
+    feed(node)
+    assert len(scans(node)) == 3, "a flag flipped live puts the cones on the wire at once"
+    assert not node.set_parameters([Param("range_as", "cone")])[0].successful

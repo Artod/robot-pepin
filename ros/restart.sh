@@ -82,6 +82,20 @@ board_count() {  # WINDOW_S PATTERN -> how many lines of the board container's l
     answer="$(ssh "root@$BOARD" "docker logs --since ${1}s pepin-ros 2>&1 | grep -acE $(printf '%q' "$2")" 2>/dev/null || true)"
     [[ "$answer" =~ ^[0-9]+$ ]] && printf '%s\n' "$answer" || printf '?\n'
 }
+board_hot_thread() {  # -> "TID SHARE COMM" for the busiest thread of the board's Nav2 component
+    # container, or nothing at all when the board could not be asked. SHARE is that thread's
+    # cumulative CPU time divided by the process's own lifetime, so 1.00 means "has done nothing
+    # but run since it started" — the signature of a costmap loop spinning under its mutex, which
+    # writes no log line of any kind. One `ps` over the multiplexed ssh and nothing else: the ROS
+    # CLI costs seconds of A53 on this board, and `ps -L` reads /proc, which the host sees for
+    # every process in every container.
+    ssh "root@$BOARD" '
+        pid=$(pgrep -f component_container_isolated | head -1)
+        [ -n "$pid" ] || exit 0
+        ps -L -p "$pid" -o tid=,times=,etimes=,comm= 2>/dev/null |
+            awk "\$3 > 0 { printf \"%s %.2f %s\n\", \$1, \$2 / \$3, \$4 }" |
+            sort -k2 -rn | head -1' 2>/dev/null || true
+}
 board_rate() {  # TOPIC -> one line: is it reaching the board, and how fast.
     # ros/tools/topic_rate.py, not `ros2 topic hz`: the CLI costs ~4.5 s of start-up on four A53
     # cores before it measures anything, the tool is one rclpy node and answers in one line.
@@ -274,19 +288,50 @@ check_board() {
     # whole restart, not the report window; the container is recreated on every restart
     # (board/pepin-ros.service), so no older start can match. A board that runs no Nav2
     # (PEPIN_NAV=false) has nothing to judge here and is not failed for it.
+    # Since 2026-09-21 the whiskers feed ObstacleLayers instead and no RangeSensorLayer is
+    # listed in either costmap, so the count below is zero by construction — which is exactly
+    # why it is KEPT: one of these lines means a range layer is running again (an old
+    # nav2_params.yaml on the board, a plugins list edited back by hand), and that is worth a
+    # failed check on its own.
     value="$(board_last "$((WAIT_BOARD_S + REPORT_WINDOW_S))" 'Activating planner_server')"
     line="$(board_last "$((WAIT_BOARD_S + REPORT_WINDOW_S))" 'planner_server connected with bond')"
     n="$(board_count "$REPORT_WINDOW_S" "Range sensor layer can't transform")"
     if [ -z "$value" ]; then
         warn 1.11 "nav2: no 'Activating planner_server' in the board's log — Nav2 does not run on this half (PEPIN_NAV), nothing to judge"
     elif [ -z "$line" ]; then
-        fail 1.11 "nav2: planner_server was activated and never bonded — it is WEDGED in its global costmap's first update ($n x 'Range sensor layer can't transform' in the last ${REPORT_WINDOW_S} s). Goals are accepted and nothing is planned; restart the board half (ros/restart.sh board) and, if it comes back, ros/tools/coldstart_soak.sh"
+        fail 1.11 "nav2: planner_server was activated and never bonded — it is WEDGED in a costmap's first update ($n x 'Range sensor layer can't transform' in the last ${REPORT_WINDOW_S} s). Goals are accepted and nothing is planned; restart the board half (ros/restart.sh board) and, if it comes back, ros/tools/coldstart_soak.sh"
     elif [ "$n" = "?" ]; then
         fail 1.11 "nav2: planner_server bonded, but the board's log could not be read for the range-layer complaint (ssh root@$BOARD docker logs pepin-ros)"
     elif [ "$n" != 0 ]; then
-        fail 1.11 "nav2: $n x 'Range sensor layer can't transform' in the last ${REPORT_WINDOW_S} s — a costmap update is blocking a whole transform_tolerance per ToF message and is on its way to the wedge: read tof_bridge's gate in its report line (ros/watch.sh, ros/flags.sh list tof_bridge) and restart the board half"
+        fail 1.11 "nav2: $n x 'Range sensor layer can't transform' in the last ${REPORT_WINDOW_S} s — a RangeSensorLayer is running on this board although no costmap lists one any more: the board's ros/params/nav2_params.yaml is older than this checkout (ros/restart.sh board --deploy), and that plugin is the Nav2 wedge of 2026-09-21"
     else
-        pass 1.11 "nav2: planner_server connected with bond, 0 range-layer transform failures in the last ${REPORT_WINDOW_S} s"
+        pass 1.11 "nav2: planner_server connected with bond, no RangeSensorLayer running (0 range-layer transform failures in the last ${REPORT_WINDOW_S} s)"
+    fi
+
+    # ...and the failure that leaves no line in any log: a costmap thread spinning on its own.
+    # range_sensor_layer.cpp:362-369 clamps bx0/by0 at zero, clamps bx1/by1 at the grid's size
+    # and then walks `for (unsigned int x = bx0; x <= (unsigned int)bx1; x++)`, so a cone that
+    # falls entirely off the grid's left or bottom edge leaves bx1 NEGATIVE and the cast turns
+    # it into about 4e9 iterations under the costmap mutex. Nothing is printed; the symptoms are
+    # "Pose Goes Off Grid", services timing out, zero plans — and one thread at 100 %. That is
+    # the measurement, and it is taken the only way this board is ever measured: /proc through
+    # `ps` over ssh, never the ROS CLI (a `ros2 node list` costs seconds of A53 here). The share
+    # is a thread's cumulative CPU time over the process's own lifetime — 1.00 is a thread that
+    # has done nothing else since it started, and the wedged one measured 415 s of 700 s (0.59)
+    # on 2026-09-21 because it only began to spin partway through. Nobody has yet measured what
+    # the busiest thread of a HEALTHY container costs, so only the unmistakable case fails and
+    # the middle is a WARN carrying the number; tighten it once a few healthy restarts have
+    # printed theirs. A board that could not be read says so and is not failed for it.
+    line="$(board_hot_thread)"
+    value="${line#* }"; value="${value%% *}"   # the share
+    if [[ ! "$value" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        warn 1.12 "nav2 threads: could not read the container's threads over ssh (ps -L on the board); the pegged-thread check did not run"
+    elif over "$value" 0.90; then
+        fail 1.12 "nav2 threads: thread ${line%% *} has used $value of the Nav2 container's whole lifetime (${line##* }) — that is a costmap update spinning under the mutex, not work: goals will be accepted and nothing planned. Restart the board half and check that no RangeSensorLayer is listed (ros/params/nav2_params.yaml)"
+    elif over "$value" 0.50; then
+        warn 1.12 "nav2 threads: busiest thread ${line%% *} at $value of the container's lifetime (${line##* }) — high, but this board has never been measured at rest; watch it (ros/board.sh census)"
+    else
+        pass 1.12 "nav2 threads: busiest thread ${line%% *} at $value of the container's lifetime (${line##* }), none pegged"
     fi
 }
 

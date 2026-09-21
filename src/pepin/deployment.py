@@ -224,6 +224,13 @@ BOARD_PUBLISHES = (
     "odom",
     "odometry/filtered",
     "imu/data_raw",
+    # The three whiskers as sensor_msgs/Range: the tape's copy (run_recorder) and the operator's
+    # picture in Foxglove. /tof/<name>/scan — the same cone as the fan Nav2's ObstacleLayer marks
+    # and clears with since 2026-09-21 (tof_bridge's range_as, ros/params/nav2_params.yaml) — is
+    # deliberately NOT here: its only consumer is the LOCAL costmap, which is the controller's
+    # and therefore always on the board (BOARD_NAV_NODES), so routing it would spend the radio on
+    # a topic that never leaves the machine it is read on. The Range beside it carries the same
+    # measurement for anyone watching from the laptop.
     "tof/front",
     "tof/left",
     "tof/right",

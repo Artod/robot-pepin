@@ -23,7 +23,10 @@
 #   activation -> bond   seconds from "Activating planner_server" to "connected with bond",
 #                        or TIMEOUT when the bond never came within ACTIVATION_TIMEOUT_S
 #   can't transform      "Range sensor layer can't transform" lines: the wedge running. Any is a
-#                        failure — one of them is already a blocked costmap update
+#                        failure — one of them is already a blocked costmap update. Since
+#                        2026-09-21 no costmap lists a RangeSensorLayer at all (the whiskers
+#                        arrive as scan fans for an ObstacleLayer, tof_bridge's range_as), so a
+#                        line here means the board is running an older ros/params/nav2_params.yaml
 #   invalid frame        `Invalid frame ID` lines: a consumer that was handed a frame it does not
 #                        have. Recorded, not judged: the lidar's own frame is late on healthy
 #                        starts too, and only the ToF ones wedge a costmap

@@ -268,13 +268,142 @@ local_costmap:
       footprint_padding: 0.0
       resolution: 0.05
       footprint: "[[0.0625, 0.275], [0.0625, -0.275], [-0.30, -0.275], [-0.30, 0.275]]"
-      plugins: ["lidar_layer", "camera_layer", "contact_layer", "tof_front_layer", "tof_left_layer", "tof_right_layer", "inflation_layer"]
-      # The three VL53L1X at bumper height (tof_bridge -> sensor_msgs/Range): they see the rocking
-      # chair's rails, a box on the floor, a carpet roll — everything under the lidar plane.
-      # ONE LAYER PER SENSOR, on purpose: a single layer fed by all three shares one probability
-      # grid, so the front sensor — which reported "nothing" in 801 of 802 frames on 2026-09-08 —
-      # cleared the marks the side sensors had just written wherever the cones overlap (from
-      # 0.62 m out). Separate layers cannot erase each other's evidence.
+      plugins: ["lidar_layer", "camera_layer", "contact_layer", "tof_front_scan_layer", "tof_left_scan_layer", "tof_right_scan_layer", "inflation_layer"]
+      # The three VL53L1X at bumper height (tof_bridge): they see the rocking chair's rails, a box
+      # on the floor, a carpet roll — everything under the lidar plane.
+      # ONE LAYER PER SENSOR, on purpose: a single layer fed by all three shares one grid, so the
+      # front sensor — which reported "nothing" in 801 of 802 frames on 2026-09-08 — cleared the
+      # marks the side sensors had just written wherever the cones overlap (from 0.62 m out).
+      # Separate layers cannot erase each other's evidence.
+      #
+      # THEY ARE ObstacleLayers SINCE 2026-09-21, fed by /tof/<name>/scan and not by
+      # sensor_msgs/Range, because nav2_costmap_2d::RangeSensorLayer carries two defects that are
+      # unfixed on main and have each stopped this robot:
+      #   1. it calls tf2's canTransform once per message at the MESSAGE's stamp with
+      #      transform_tolerance as the timeout, and tf2 blocks the whole timeout on any failure,
+      #      so a broken chain amplifies 4.5x per update cycle here (15 Hz x 0.3 s) until
+      #      updateMap() never returns and planner_server hangs in Activating — 4 of 7 board
+      #      starts on 2026-09-21 (scratch/nav2_hang/wedge_gain.py);
+      #   2. range_sensor_layer.cpp:362-369 clamps its cell bounds with bx0 = max(0, bx0) and
+      #      bx1 = min(size_x_, bx1), then loops `for (unsigned int x = bx0; x <= (unsigned)bx1;)`:
+      #      when the cone falls entirely off the grid's left or bottom edge bx1/by1 stay NEGATIVE
+      #      and the cast makes them ~4e9, so one thread spins for ever holding the costmap mutex
+      #      ("Pose Goes Off Grid", every service timing out, zero plans). One jump of the pose in
+      #      map between a reading's stamp and the update is enough — a tracker restart, a
+      #      relocalisation, the cart carried by hand — and no publisher can gate it, because the
+      #      jump happens after the reading has left. Reproduced on 2026-09-21 with
+      #      `ros/thin.sh kick relocalizer`: tid 191 of the Nav2 container, 415 s of CPU in 700 s.
+      # An ObstacleLayer has neither: its MessageFilter drops what it cannot place instead of
+      # blocking on it, its queue is bounded, and it walks the points it was given rather than a
+      # rectangle of cells. tof_bridge draws each cone as a fan for it (flag `range_as`, default
+      # `scan`) — one beam per costmap cell of arc at the sensor's own ceiling, every beam
+      # carrying the one distance the sensor measured, which is the same "the whole arc, at that
+      # range" the range layer's inflate_cone: 1.0 stood for: 11 beams front (ceiling 0.96 m), 7
+      # and 7 at the sides (0.57 and 0.59 m). THE WAY BACK (CLAUDE.md rule 19) is two moves:
+      # `ros/flags.sh set tof_bridge range_as range` and "tof_front_layer", "tof_left_layer",
+      # "tof_right_layer" in the plugins list above instead of the three *_scan_layer names —
+      # those three blocks are kept below, unlisted, exactly as they were driven.
+      #
+      # combination_method 1 (Maximum) on all three, like every other layer here: a whisker's
+      # clearing lives in its OWN grid and reaches the master as a maximum, so it can never erase
+      # the lidar's or the camera's mark — which is also why the ToF stand after them in the list.
+      tof_front_scan_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        combination_method: 1
+        observation_sources: tof_front_scan
+        tof_front_scan:
+          topic: /tof/front/scan
+          data_type: "LaserScan"
+          marking: True
+          clearing: True
+          # No sensor_frame: the cone's origin IS the sensor, and the fan says so in its own
+          # header (tof_front, published by tof_bridge). Naming base_link here would raytrace
+          # every clear from 2.7 cm behind the eye and, for the side sensors, 15 cm across it.
+          #
+          # inf_is_valid, and this is how a whisker CLEARS: "nothing within my trusted range" is
+          # +inf on every beam, and Nav2's laserScanValidInfCallback turns it into a point at
+          # range_max - 0.1 mm, which raytraces the cone free. NaN (the sensor did not answer, or
+          # it is looking at its own window) is left alone by that callback and dropped by the
+          # projector: neither a mark nor a clear, which is what -1.0 on /tof/front has always
+          # meant. That is the whole reason obstacle_max_range sits BELOW the fan's range_max:
+          # at or above it, the clearing point itself would be marked as a lethal ring at the
+          # ceiling (the depth fan's lesson, /depth_scan above).
+          inf_is_valid: True
+          # 0.9586 m is this sensor's ceiling (0.85 x 0.27 m mount / tan(0.235 rad),
+          # pepin.tof_horizon.trusted_max_range) and the fan's own range_max; a cell below it is
+          # what may be marked, the ceiling itself is what may be cleared.
+          obstacle_max_range: 0.90
+          obstacle_min_range: 0.0  # the contact band is the FAN's range_min (0.08 m), dropped by
+                                   # the projector before this layer ever sees it: one floor, not two
+          raytrace_max_range: 0.96
+          raytrace_min_range: 0.0
+          # Not a filter, a statement of where the plane is: the fan lies at the sensor's own
+          # mount height (config/tof.json: 0.27 m front, 0.16 and 0.165 m at the sides) and
+          # nothing but the cart's own pitch can move it, so the band is set wide enough that no
+          # pitch this cart survives could drop a reading.
+          min_obstacle_height: 0.0
+          max_obstacle_height: 0.5
+          # 0.0, like every other source here: a rate to live up to makes the buffer call itself
+          # stale the moment the source goes quiet, the layer stops being current and Nav2 answers
+          # every goal with "Costmap timed out waiting for update" (2026-09-07). Silence is a
+          # LEGITIMATE state of this topic by construction — tof_bridge's tf_gate withheld 480
+          # readings over 8 s on 2026-09-21 while the tracker restarted — so a rate here would
+          # turn the wedge's cure into the wedge's replacement.
+          expected_update_rate: 0.0
+          # 0.0: the last cone stands until the next one replaces it, and WHEN a cone stops being
+          # true is the publisher's decision, not a second clock here — tof_bridge holds a real
+          # return for 1.2 s (pepin.tof_horizon.RangeHold) and then says "nothing", which clears.
+          # The frozen-phantom danger of a persistence-less buffer is the global costmap's (a
+          # grid that never rolls); these three layers live only in this rolling 3 x 3 m window.
+          observation_persistence: 0.0
+      tof_left_scan_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        combination_method: 1
+        observation_sources: tof_left_scan
+        tof_left_scan:
+          # The lower left whisker: 7 beams over the same 0.47 rad cone (the arc is shorter, so
+          # fewer beams reach every cell of it). See tof_front_scan above for every number's why.
+          topic: /tof/left/scan
+          data_type: "LaserScan"
+          marking: True
+          clearing: True
+          inf_is_valid: True
+          # ceiling 0.5680 m (0.85 x 0.16 m / tan(0.235)); a cell below it marks, the ceiling clears
+          obstacle_max_range: 0.51
+          obstacle_min_range: 0.0
+          raytrace_max_range: 0.57
+          raytrace_min_range: 0.0
+          min_obstacle_height: 0.0
+          max_obstacle_height: 0.5
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+      tof_right_scan_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        combination_method: 1
+        observation_sources: tof_right_scan
+        tof_right_scan:
+          # The lower right whisker. See tof_front_scan above for every number's why.
+          topic: /tof/right/scan
+          data_type: "LaserScan"
+          marking: True
+          clearing: True
+          inf_is_valid: True
+          # ceiling 0.5858 m (0.85 x 0.165 m / tan(0.235)); a cell below it marks, the ceiling clears
+          obstacle_max_range: 0.53
+          obstacle_min_range: 0.0
+          raytrace_max_range: 0.59
+          raytrace_min_range: 0.0
+          min_obstacle_height: 0.0
+          max_obstacle_height: 0.5
+          expected_update_rate: 0.0
+          observation_persistence: 0.0
+      # THE THREE RangeSensorLayer BLOCKS BELOW ARE KEPT AND UNLISTED (2026-09-21). They are the
+      # arrangement every drive until today was made on, and nothing about them was wrong except
+      # the plugin they run in; putting them back is the two moves named above. Their comments
+      # are the sensor's, not the plugin's, and still true.
       tof_front_layer:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
         enabled: True
@@ -530,7 +659,11 @@ global_costmap:
       # transform_tolerance of 1.0 s x 15 Hz a sensor = 15x per update cycle; see tof_bridge's
       # tf_gate). What only a whisker saw stops the cart in the local map and is driven around
       # there. The three layer blocks below are kept: putting them back is this one line, with
-      # "tof_front_layer", "tof_left_layer", "tof_right_layer" before "inflation_layer".
+      # "tof_front_layer", "tof_left_layer", "tof_right_layer" before "inflation_layer" — and if
+      # a whisker is ever wanted in a room-scale plan again, it comes back as the ObstacleLayers
+      # the local costmap runs now (tof_*_scan_layer there), never as a RangeSensorLayer: this
+      # grid does not roll, so the unbounded loop of range_sensor_layer.cpp:362-369 fires here
+      # every time the pose jumps off the edge of a map that is bigger than the window.
       plugins: ["static_layer", "lidar_layer", "camera_layer", "contact_layer", "inflation_layer"]
       # ONE LAYER PER SENSOR, like the three ToF below and for the same reason: separate layers
       # cannot erase each other's evidence, and each is switched on its own while the robot runs

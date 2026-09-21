@@ -1,4 +1,5 @@
-"""How far a level ToF sensor may be believed before its own cone hits the floor.
+"""How far a level ToF sensor may be believed before its own cone hits the floor, and how many
+beams it takes to draw that cone on a costmap without leaving holes in it.
 
 A VL53L1X mounted level at height h with a cone of half-angle fov/2 starts illuminating the
 floor at h / tan(fov/2): every reading beyond that distance can be the floor rather than an
@@ -24,6 +25,22 @@ def floor_horizon(height_m: float, fov_rad: float, margin: float = FLOOR_MARGIN)
 def trusted_max_range(height_m: float, fov_rad: float, sensor_max_m: float) -> float:
     """The sensor's own ceiling, lowered to where the floor enters its cone."""
     return min(sensor_max_m, floor_horizon(height_m, fov_rad))
+
+
+def cone_beams(ceiling_m: float, fov_rad: float, cell_m: float) -> int:
+    """How many beams a cone of ``fov_rad`` needs to reach every ``cell_m`` cell inside it.
+
+    A cone drawn as a fan of beams is a row of points on an arc, and the widest that arc ever
+    gets is at the sensor's own ceiling: neighbouring beams stand ``r * fov / (n - 1)`` apart at
+    range r. Asking that spacing to be at most one costmap cell at ``ceiling_m`` therefore
+    covers every nearer range too, where the same fan is denser. So ``n - 1`` is the arc at the
+    ceiling measured in cells, rounded up, and never below one — a cone is at least its own two
+    edges. The front whisker (ceiling 0.96 m, 0.47 rad, 0.05 m cells) needs 0.45 m / 0.05 =
+    9.01 -> 10 gaps, 11 beams; the two low ones (0.57 and 0.59 m) need 6 gaps, 7 beams.
+    """
+    if ceiling_m <= 0.0 or fov_rad <= 0.0 or cell_m <= 0.0:
+        return 2
+    return 1 + max(1, math.ceil(ceiling_m * fov_rad / cell_m))
 
 
 class RangeHold:
