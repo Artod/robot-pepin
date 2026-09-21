@@ -28,7 +28,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from pepin.camera import OPTICAL_RPY, CameraConfig
+from pepin.camera import OPTICAL_RPY, CameraConfig, active_camera
 from pepin.deployment import config_file
 from pepin.lidar import LidarMount
 
@@ -165,12 +165,18 @@ def load_lidar_mount(config_dir: str | Path | None = None) -> Mount:
 
 
 def load_camera_mounts(
-    config_dir: str | Path | None = None, camera: str = "overview"
+    config_dir: str | Path | None = None, camera: str | None = None
 ) -> CameraMounts:
     """The camera's two static frames (``base_link -> camera_link -> camera_optical``) from
-    ``config/camera.json`` alone — again one sensor's file, see :func:`load_lidar_mount`."""
+    ``config/camera.json`` alone — again one sensor's file, see :func:`load_lidar_mount`.
+
+    No name is the ACTIVE camera (:func:`pepin.camera.active_camera`), so the frames follow the
+    rig the robot is wearing: a stereo head's mount is its LEFT eye's, which is the frame both
+    eyes' pictures are stamped in.
+    """
     data = json.loads(config_path(config_dir, "camera.json").read_text())
-    return CameraMounts.from_config(CameraConfig.from_json(data[camera]))
+    name = active_camera(data, camera)
+    return CameraMounts.from_config(CameraConfig.from_json(data[name], name))
 
 
 @dataclass(frozen=True)
@@ -184,10 +190,11 @@ class Mounts:
     tof: Mapping[str, Mount]  # by sensor name; a sensor whose mount is null is left out
 
     @classmethod
-    def load(cls, config_dir: str | Path | None = None, camera: str = "overview") -> Mounts:
+    def load(cls, config_dir: str | Path | None = None, camera: str | None = None) -> Mounts:
         """Read lidar.json, imu.json, camera.json and tof.json from ``config_dir``, or from
         wherever :func:`pepin.deployment.config_file` finds them (a checkout, the board's
-        synced copy, the laptop containers' /ws/config) when no directory is given.
+        synced copy, the laptop containers' /ws/config) when no directory is given. No camera
+        name is the active one (:func:`load_camera_mounts`).
 
         All four files, so a caller that needs one sensor takes the narrow reader beside this
         one (:func:`load_lidar_mount`, :func:`load_camera_mounts`) instead of dying on a file

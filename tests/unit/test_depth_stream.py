@@ -91,7 +91,7 @@ WIDTH, HEIGHT = 640, 360  # what camera_stream publishes at scale 0.5
 # The mount and the nominal field of view: the two numbers a calibration never rewrites (it
 # writes an intrinsics block beside them). The nodes under test are given a config of their own,
 # with the optics pinned to this nominal pinhole — see the build fixture.
-CONFIG = CameraConfig.load(CAMERA_JSON)
+CONFIG = CameraConfig.load(CAMERA_JSON, name="overview")
 K, _D, _R, _P = camera_info_arrays(WIDTH, HEIGHT, CONFIG.hfov_deg)
 INTR = Intrinsics.from_camera_info(K, WIDTH, HEIGHT)
 CONFIG_CAM = CameraPose(*mount_transform(CONFIG)[:3], mount_transform(CONFIG)[4])

@@ -18,6 +18,9 @@
 #   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
 #                            neck on): the camera node here keeps its static edge off
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
+#   PEPIN_CAMERA=overview ros/laptop.sh vslam   run the OTHER camera rig for one container:
+#                            config/camera.json's "active" is the standing answer (see the
+#                            "Camera rigs" section of ros/README.md), this overrides it
 #   ros/laptop.sh vslam      also starts the depth network on the laptop's GPU (ros/depth_host.sh)
 #                            and tells the node to use it, when torch's Metal backend is there;
 #                            PEPIN_DEPTH_HOST=0 keeps the network on the CPU in the container,
@@ -218,6 +221,15 @@ case "${1:-start}" in
         # CPU model while it does not answer; its depth_backend flag switches live) and
         # PEPIN_DEPTH_URL (the host as the container sees it); without them the node runs on
         # the CPU as before.
+        # WHICH CAMERA the head is, when this shell says so: config/camera.json's "active" is the
+        # standing answer and PEPIN_CAMERA overrides it for one container, so a rig is compared
+        # without editing a file (PEPIN_CAMERA=overview ros/laptop.sh vslam). Unset by default:
+        # the file decides, on both halves of the robot.
+        CAMERA_ENV=()
+        if [ -n "${PEPIN_CAMERA:-}" ]; then
+            CAMERA_ENV=(-e "PEPIN_CAMERA=$PEPIN_CAMERA")
+            echo "camera rig: $PEPIN_CAMERA (PEPIN_CAMERA overrides config/camera.json's active)"
+        fi
         DEPTH_ENV=()
         if depth_host_wanted; then
             "$HERE/depth_host.sh" start
@@ -226,7 +238,7 @@ case "${1:-start}" in
             echo "depth network on the CPU in the container (PEPIN_DEPTH_HOST=1 for the GPU service)"
         fi
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
-            -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} \
+            -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} ${CAMERA_ENV[@]+"${CAMERA_ENV[@]}"} \
             "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null
         echo "vslam up (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and the board's tracker adopts it; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"

@@ -21,8 +21,9 @@ REPO = Path(__file__).resolve().parents[2]
 def test_the_config_loads_and_names_the_board() -> None:
     """The committed config's shape, not its state: this is the one test that reads the real
     file, and a checkerboard run (ros/calibrate.sh) must not break it — it adds an intrinsics
-    block and flips calibrated, and rewrites nothing asserted here."""
-    cfg = CameraConfig.load(REPO / "config/camera.json", board="10.0.0.187")
+    block and flips calibrated, and rewrites nothing asserted here. The mono rig by NAME, so
+    what it pins stays pinned while the robot's head is whatever it is."""
+    cfg = CameraConfig.load(REPO / "config/camera.json", name="overview", board="10.0.0.187")
     assert cfg.stream == "http://10.0.0.187:8080/stream"
     assert (cfg.width, cfg.height) == (1280, 720)
     # the mount measured 2026-09-12: the pitch off the encoder and the level frames
@@ -46,7 +47,7 @@ def test_a_nominal_pinhole_puts_the_field_of_view_across_the_image() -> None:
 
 
 def test_the_mount_and_the_optical_frame_follow_rep_103() -> None:
-    cfg = CameraConfig.load(REPO / "config/camera.json")
+    cfg = CameraConfig.load(REPO / "config/camera.json", name="overview")
     x, y, z, roll, pitch, yaw = mount_transform(cfg)
     assert (x, y, z) == (0.0, 0.0, 1.203) and (roll, yaw) == (0.0, 0.0)
     assert pitch == pytest.approx(math.radians(23.8))  # down is positive (REP 103)

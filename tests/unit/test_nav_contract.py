@@ -1877,18 +1877,19 @@ def test_no_launch_argument_reaches_a_node_as_an_empty_parameter_override() -> N
     overrides = [ln.strip() for ln in launch.splitlines() if ":={" in ln]
     assert overrides, "the launch still hands the nodes parameter overrides"
     # Every one of them interpolates a word this file chooses, never a launch argument that may
-    # arrive empty: the one argument whose default IS empty (``database``) reaches no node as an
-    # override at all, and is resolved to a path before it is used.
+    # arrive empty. Two arguments default to empty and each is resolved BEFORE it is used:
+    # ``database`` to a path (``... or DATABASE``), which reaches no node as an override at all,
+    # and ``camera`` to the rig ``camera_rig`` answers with — a name from config/camera.json,
+    # which is never empty because that reader raises instead of shrugging.
     empty_by_default = {
         ast.unparse(c.args[0]).strip("'")
         for c in sf.calls_to(sf.tree(VSLAM_LAUNCH), "DeclareLaunchArgument")
         if ast.unparse(sf.keywords(c).get("default_value", ast.Constant(None))) == "''"
     }
-    assert empty_by_default == {"database"}
-    for name in empty_by_default:
-        assert not [ln for ln in overrides if f"{name}:=" in ln], (
-            f"{name} may be empty and must not reach a node as an override"
-        )
+    assert empty_by_default == {"database", "camera"}
+    assert not [ln for ln in overrides if "database:=" in ln]
+    assert "rig = camera_rig(" in launch, "the rig is resolved in the launch, once"
+    assert 'f"camera:={rig}"' in launch, "and it is the resolved word that reaches the node"
 
 
 def test_a_reset_empties_the_volume_and_nothing_falls_back_to_a_picture() -> None:

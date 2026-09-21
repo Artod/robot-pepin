@@ -1,33 +1,55 @@
 """The camera as numbers: where it sits on the cart, what it sees, and how ROS wants that said.
 
-The overview camera is a 1280x720 webcam on the neck, 1.23 m above the floor over the wheel
-axle. Its optics are either measured or guessed: a checkerboard calibration
-(``scripts/calibrate_camera.py``, ``ros/calibrate.sh``) writes an ``intrinsics`` block into
-``config/camera.json`` and flips ``calibrated``; until then the numbers are the nominal pinhole
-of the configured field of view — enough for appearance-based loop closure, not for measuring
-with. :func:`optics` is the one place that decides between the two and scales the answer to the
-size a node actually publishes; every consumer of the camera's focal length comes through it,
-so turning a calibration on changes one file and no code.
+``config/camera.json`` holds the camera RIGS BY NAME and says which one the robot's head is
+(``"active"``). Today there are two. ``overview`` is the 1280x720 mono webcam on the neck,
+1.23 m above the floor over the wheel axle. ``stereo`` is the global-shutter stereo module taped
+in its place: the board streams ONE side-by-side frame and the laptop cuts it into two eyes
+(:mod:`pepin.stereo`), so its ``width``/``height`` are ONE EYE and the transport frame's size
+lives in its ``rig`` block (:class:`StereoRig`) — a camera block with a ``rig`` block IS a
+stereo head. Which one a process reads is :func:`active_camera`: an explicit name beats
+``PEPIN_CAMERA`` in the environment, which beats the file's ``"active"``, which beats
+``overview``. Nothing in the stack names a rig: a node loads the active camera and prints which
+it got.
+
+The optics are either measured or guessed. For the mono rig a checkerboard calibration
+(``scripts/calibrate_camera.py``, ``ros/calibrate.sh``) writes an ``intrinsics`` block and flips
+``calibrated``; for a stereo rig ``calibrated`` means ``config/stereo_calibration.json`` exists
+and loads, and the pinhole then comes from :class:`pepin.stereo.Rectifier` rather than from this
+file. Until either exists the numbers are the nominal pinhole of the configured field of view —
+enough for appearance-based loop closure, not for measuring with. :func:`optics` is the one
+place that decides between measured and nominal and scales the answer to the size a node
+actually publishes; every consumer of the camera's focal length comes through it, so turning a
+calibration on changes one file and no code.
 
 Everything here is pure so the node only carries messages: :class:`CameraConfig` reads
 ``config/camera.json``, :class:`Calibration` is its ``intrinsics`` block (and
-:func:`write_calibration` puts one there), :class:`Optics` is what a node publishes as
-``sensor_msgs/CameraInfo``, :func:`mount_transform` and :func:`optical_rotation` the two static
-transforms (``base_link -> camera_link`` x-forward, ``camera_link -> camera_optical`` z-forward
-as OpenCV and RTAB-Map expect).
+:func:`write_calibration` puts one there), :class:`StereoRig` its ``rig`` block, :class:`Optics`
+is what a node publishes as ``sensor_msgs/CameraInfo``, :func:`mount_transform` and
+:func:`optical_rotation` the two static transforms (``base_link -> camera_link`` x-forward,
+``camera_link -> camera_optical`` z-forward as OpenCV and RTAB-Map expect).
 """
 
 from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 # ROS's optical frame: z forward, x right, y down. From an x-forward link that is a roll of
 # -90 degrees followed by a yaw of -90 degrees (REP 103).
 OPTICAL_RPY = (-math.pi / 2, 0.0, -math.pi / 2)
+
+# The file's key that names the robot's head, the environment variable that overrides it for one
+# process, and the camera every one of them falls back to (the rig that was here first).
+ACTIVE_KEY = "active"
+CAMERA_ENV = "PEPIN_CAMERA"
+DEFAULT_CAMERA = "overview"
+# The stereo calibration file, named in a rig block and read from beside config/camera.json.
+STEREO_CALIBRATION = "stereo_calibration.json"
 
 
 @dataclass(frozen=True)
@@ -117,9 +139,52 @@ class Calibration:
 
 
 @dataclass(frozen=True)
+class StereoRig:
+    """The ``rig`` block of a stereo camera: how the two eyes travel in one transport frame.
+
+    ``frame_width`` x ``frame_height`` is what ustreamer puts on the wire (1600x600 today, both
+    eyes side by side); the camera's own ``width``/``height`` beside this block are ONE EYE.
+    ``upside_down`` says the module is mounted turned over, which
+    :class:`pepin.stereo.SideBySide` undoes by rotating each half and swapping them.
+    ``baseline_m_nominal`` is the vendor's distance between the lenses — a sanity check for a
+    calibration's own baseline, never a measurement to compute depth with.
+    """
+
+    layout: str
+    frame_width: int
+    frame_height: int
+    upside_down: bool = False
+    baseline_m_nominal: float = 0.0
+    calibration: str = STEREO_CALIBRATION
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> StereoRig:
+        """From a camera block's ``rig``; an unknown layout raises, since a node that guessed
+        how the eyes are packed would publish two halves of one picture."""
+        layout = str(data["layout"])
+        if layout != "side_by_side":
+            raise ValueError(f"{layout!r}: the only stereo layout this stack cuts is side_by_side")
+        return cls(
+            layout=layout,
+            frame_width=int(data["frame_width"]),
+            frame_height=int(data["frame_height"]),
+            upside_down=bool(data.get("upside_down", False)),
+            baseline_m_nominal=float(data.get("baseline_m_nominal", 0.0)),
+            calibration=str(data.get("calibration", STEREO_CALIBRATION)),
+        )
+
+    def calibration_path(self, config_dir: str | Path) -> Path:
+        """Where the stereo calibration lives: beside ``config/camera.json``."""
+        return Path(config_dir) / self.calibration
+
+
+@dataclass(frozen=True)
 class CameraConfig:
-    """One camera of ``config/camera.json``: its stream, image size, optics (nominal field of
-    view, and the checkerboard's :class:`Calibration` once there is one) and mount."""
+    """One camera of ``config/camera.json``: its stream, image size (one EYE for a stereo rig),
+    optics (nominal field of view, and the checkerboard's :class:`Calibration` once there is
+    one), mount, and — for a stereo head — the :class:`StereoRig` that says how its two eyes
+    arrive. ``name`` is which camera of the file this is, so a node that asked for the active
+    one can say which it got."""
 
     stream: str
     width: int
@@ -133,16 +198,25 @@ class CameraConfig:
     link_frame: str = "camera_link"
     optical_frame: str = "camera_optical"
     calibration: Calibration | None = None
+    rig: StereoRig | None = None
+    name: str = DEFAULT_CAMERA
+
+    @property
+    def stereo(self) -> bool:
+        """Whether this camera is a stereo head (its block carries a ``rig``)."""
+        return self.rig is not None
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> CameraConfig:
+    def from_json(cls, data: dict[str, Any], name: str = DEFAULT_CAMERA) -> CameraConfig:
         """From one camera's block of ``config/camera.json``. The ``intrinsics`` block is read
         only while ``calibrated`` is true: a measurement left in the file but switched off is
-        history, not optics."""
+        history, not optics. A stereo block carries no intrinsics of its own — its ``calibrated``
+        is decided by :meth:`load`, which knows where the calibration file would be."""
         mount = data["mount"]
         frames = data.get("frames", {})
         calibrated = bool(data.get("calibrated", False))
         block = data.get("intrinsics")
+        rig = data.get("rig")
         return cls(
             stream=str(data["stream"]),
             width=int(data["width"]),
@@ -156,16 +230,81 @@ class CameraConfig:
             link_frame=str(frames.get("link", "camera_link")),
             optical_frame=str(frames.get("optical", "camera_optical")),
             calibration=Calibration.from_json(block) if calibrated and block else None,
+            rig=StereoRig.from_json(rig) if rig else None,
+            name=name,
         )
 
     @classmethod
     def load(
-        cls, path: str | Path, name: str = "overview", board: str = "127.0.0.1"
+        cls,
+        path: str | Path,
+        name: str | None = None,
+        board: str = "127.0.0.1",
+        environ: Mapping[str, str] | None = None,
     ) -> CameraConfig:
-        """Read ``config/camera.json`` and fill the stream's ``{board}`` placeholder."""
-        data = json.loads(Path(path).read_text())[name]
-        cfg = cls.from_json(data)
-        return cls(**{**cfg.__dict__, "stream": cfg.stream.format(board=board)})
+        """Read ``config/camera.json``, fill the stream's ``{board}`` placeholder, and answer
+        with the camera ``name`` — or, with no name (the usual call), with whichever camera is
+        ACTIVE: :func:`active_camera` decides, so a node never has a rig's name in its code.
+
+        For a stereo rig ``calibrated`` is answered here and means one thing: the calibration
+        file the ``rig`` block names, beside this config, exists and parses. Nothing else in the
+        stack has to know where that file lives to say whether the head can measure.
+        """
+        file = Path(path)
+        data = json.loads(file.read_text())
+        chosen = active_camera(data, name, environ)
+        cfg = cls.from_json(data[chosen], chosen)
+        cfg = replace(cfg, stream=cfg.stream.format(board=board))
+        if cfg.rig is None:
+            return cfg
+        return replace(cfg, calibrated=_stereo_calibrated(cfg.rig, file.parent))
+
+
+def _stereo_calibrated(rig: StereoRig, config_dir: Path) -> bool:
+    """Whether the stereo calibration ``rig`` names exists beside the config and loads: a
+    half-written or truncated file is not a calibration (:meth:`pepin.stereo.StereoCalibration
+    .load` raises on one), and a head that cannot rectify must say so rather than measure."""
+    from pepin.stereo import StereoCalibration  # a numpy import a launch file should not pay for
+
+    try:
+        StereoCalibration.load(rig.calibration_path(config_dir))
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return False
+    return True
+
+
+def camera_names(data: Mapping[str, Any]) -> list[str]:
+    """The cameras ``config/camera.json`` holds, in the file's order: a top-level block with a
+    ``stream`` is a camera, everything else (``active``, ``notes``) is not."""
+    return [
+        key
+        for key, block in data.items()
+        if isinstance(block, dict) and "stream" in block and "mount" in block
+    ]
+
+
+def active_camera(
+    data: Mapping[str, Any], name: str | None = None, environ: Mapping[str, str] | None = None
+) -> str:
+    """Which camera of ``config/camera.json`` this process reads, in precedence order: an
+    explicit ``name``, then ``PEPIN_CAMERA`` in the environment (``ros/laptop.sh`` forwards it
+    into the container), then the file's ``"active"``, then ``overview``. An empty string
+    anywhere is "nobody said", so a launch can pass its argument through unconditionally.
+
+    A name no block answers to raises ``ValueError`` listing the names there are: a typo must
+    stop the node at start, never leave it publishing another rig's optics.
+    """
+    env = os.environ if environ is None else environ
+    chosen = (
+        name or env.get(CAMERA_ENV) or str(data.get(ACTIVE_KEY, "")) or DEFAULT_CAMERA
+    ).strip()
+    names = camera_names(data)
+    if chosen not in names:
+        raise ValueError(
+            f"no camera named {chosen!r} in config/camera.json;"
+            f" the cameras are {', '.join(names) or 'none'}"
+        )
+    return chosen
 
 
 def intrinsics(width: int, height: int, hfov_deg: float) -> tuple[float, float, float, float]:
@@ -232,21 +371,26 @@ def optics(cfg: CameraConfig, width: int, height: int) -> Optics:
 
     The one reader of the camera's optics. Nothing else in the stack decides between measured
     and nominal — a node asks here and prints :attr:`Optics.source`.
+
+    A stereo rig has no ``intrinsics`` block of its own, so the answer here is always its
+    nominal ONE-EYE pinhole; the measured one is the rectified pinhole
+    (:class:`pepin.stereo.Rectifier`), which the camera node puts on the wire as ``CameraInfo``.
+    The source says which of those two a reader is holding, because a stack quietly measuring
+    with a vendor's field of view looks exactly like one measuring with a calibration.
     """
     calibration = cfg.calibration
     if calibration is None:
         fx, fy, cx, cy = intrinsics(width, height, cfg.hfov_deg)
-        return Optics(
-            fx,
-            fy,
-            cx,
-            cy,
-            width,
-            height,
-            (),
-            False,
-            f"nominal {cfg.hfov_deg:.0f} deg field of view (uncalibrated)",
-        )
+        if cfg.rig is not None:
+            source = f"nominal {cfg.hfov_deg:.0f} deg field of view, one eye" + (
+                " (the rectified pinhole of config/stereo_calibration.json is on"
+                " /camera/camera_info)"
+                if cfg.calibrated
+                else " (uncalibrated stereo head)"
+            )
+        else:
+            source = f"nominal {cfg.hfov_deg:.0f} deg field of view (uncalibrated)"
+        return Optics(fx, fy, cx, cy, width, height, (), False, source)
     scaled = calibration.scaled(width, height)
     return Optics(
         scaled.fx,

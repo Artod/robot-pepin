@@ -27,6 +27,14 @@ NECK = REPO / "config/neck.json"
 CAMERA = REPO / "config/camera.json"
 
 
+def _camera() -> CameraConfig:
+    """The MONO camera's block, by name. config/neck.json's reference pose was measured against
+    that webcam ("mount_measured"), so these tests keep asking for it whatever rig the robot's
+    head is; a stereo head's mount is its left eye's, half a baseline to the side, and nobody
+    has re-measured the neck against one."""
+    return CameraConfig.load(CAMERA, name="overview")
+
+
 def _with(cfg: NeckConfig, **reference: object) -> NeckConfig:
     """``cfg`` with fields of its reference replaced."""
     return NeckConfig(
@@ -60,7 +68,7 @@ def test_the_reference_pose_is_the_camera_mount_of_the_same_day() -> None:
     file does not yet know it says so: the ticks are null until read, and the note says with
     which command; the signs are UNVERIFIED until someone watched the picture move."""
     cfg = NeckConfig.from_json(NECK)
-    camera = CameraConfig.load(CAMERA)
+    camera = _camera()
     ref = cfg.reference
     assert (ref.x_m, ref.y_m, ref.z_m, ref.pitch_deg) == (
         camera.x_m,
@@ -86,7 +94,7 @@ def test_an_unread_reference_ignores_the_encoders_and_answers_the_static_mount()
     for pan, tilt in ((2048, 2048), (1000, 3000), (4095, 0)):
         assert joint_angles(blind, pan, tilt) == at_rest
         assert camera_pose(blind, joint_angles(blind, pan, tilt)) == pytest.approx(
-            mount_transform(CameraConfig.load(CAMERA)), abs=1e-12
+            mount_transform(_camera()), abs=1e-12
         )
     half = _with(blind, pan_ticks=2048)  # one of the two is no reference either
     assert not half.reference.known and joint_angles(half, 2148, 2300) == at_rest
@@ -97,9 +105,7 @@ def test_at_the_reference_ticks_the_dynamic_transform_equals_the_static_one() ->
     cfg = _read(NeckConfig.from_json(NECK))
     angles = joint_angles(cfg, cfg.reference.pan_ticks or 0, cfg.reference.tilt_ticks or 0)
     assert angles == NeckAngles(0.0, math.radians(cfg.reference.pitch_deg))
-    assert camera_pose(cfg, angles) == pytest.approx(
-        mount_transform(CameraConfig.load(CAMERA)), abs=1e-12
-    )
+    assert camera_pose(cfg, angles) == pytest.approx(mount_transform(_camera()), abs=1e-12)
     for sign in (1, -1):  # the signs decide the direction of motion, never the rest pose
         flipped = _with(cfg, pan_sign=sign, tilt_sign=sign)
         assert camera_pose(flipped, joint_angles(flipped, 2048, 2300)) == pytest.approx(

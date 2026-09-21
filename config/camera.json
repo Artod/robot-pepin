@@ -1,4 +1,5 @@
 {
+  "active": "stereo",
   "overview": {
     "stream": "http://{board}:8080/stream",
     "width": 1280,
@@ -38,5 +39,31 @@
       "date": "2026-09-13"
     }
   },
-  "notes": "The lens is measured: ros/calibrate.sh (45 views of a 9x6 checkerboard, rms 0.23 px, 2026-09-13) wrote the intrinsics block and set calibrated: true, and pepin.camera.optics answers from it. hfov_deg is the nominal pinhole that reader falls back to when calibrated is false — it is 82.94, the field of view the calibration measured, because the best known number is what a bad calibration must be switched off onto; it was 78.0, the lidar-beam fit of 2026-09-10, and 70 is the vendor number that put the image edges 8 deg wrong. The mount beside it is measured too: the pitch from the level frames and the encoder, the height from a tape (see the mount note). The 78 / 26 self-calibration is STALE and is not the source of any number in this file any more."
+  "stereo": {
+    "stream": "http://{board}:8080/stream",
+    "width": 800,
+    "height": 600,
+    "hfov_deg": 94.0,
+    "rig": {
+      "layout": "side_by_side",
+      "frame_width": 1600,
+      "frame_height": 600,
+      "upside_down": true,
+      "baseline_m_nominal": 0.063,
+      "calibration": "stereo_calibration.json"
+    },
+    "mount": {
+      "x_m": 0.0,
+      "y_m": 0.0315,
+      "z_m": 1.203,
+      "pitch_deg": 23.8,
+      "note": "PART MEASURED, PART PROVISIONAL. z_m 1.203 and pitch_deg 23.8 are the overview camera's MEASURED mount (see its own note: the tape and the encoder, 2026-09-12), taken over because the module is taped onto that webcam at the same height and tilt — the tape has not been read again for the module itself, so the few millimetres the tape adds are unmeasured. y_m +0.0315 is PROVISIONAL AND UNMEASURED: half the nominal baseline (0.063 m) to the robot's LEFT, on the assumption that the module is centred where the webcam's lens was and that this block describes the LEFT eye (ROS stereo convention: the pair's optical frame is the left camera's, and this mount is the frame both /camera/image and /camera/right/image are stamped in). Replace all four with a measurement of the module itself; the baseline that matters for depth is the calibration's, never this one."
+    },
+    "frames": {
+      "link": "camera_link",
+      "optical": "camera_optical"
+    },
+    "notes": "The stereo head: ONE side-by-side MJPEG frame of 1600x600 from ustreamer on the board (rig.frame_width x rig.frame_height), cut into two 800x600 eyes by pepin.stereo.SideBySide. width/height are ONE EYE — the picture every consumer of /camera/image sees — while the frame on the wire is twice as wide. upside_down is MEASURED on a real frame: the module is taped upside down, so each half is turned 180 deg and the halves trade places, and only then is the disparity of near objects positive. hfov_deg 94.0 and baseline_m_nominal 0.063 are the VENDOR's numbers, the nominal pinhole pepin.camera.optics falls back to while there is no calibration; both are replaced by config/stereo_calibration.json the moment it exists (the rectified pinhole and the baseline come from there, never from here). This block has no intrinsics of its own: calibrated means that file exists and loads."
+  },
+  "notes": "The lens is measured: ros/calibrate.sh (45 views of a 9x6 checkerboard, rms 0.23 px, 2026-09-13) wrote the intrinsics block and set calibrated: true, and pepin.camera.optics answers from it. hfov_deg is the nominal pinhole that reader falls back to when calibrated is false — it is 82.94, the field of view the calibration measured, because the best known number is what a bad calibration must be switched off onto; it was 78.0, the lidar-beam fit of 2026-09-10, and 70 is the vendor number that put the image edges 8 deg wrong. The mount beside it is measured too: the pitch from the level frames and the encoder, the height from a tape (see the mount note). The 78 / 26 self-calibration is STALE and is not the source of any number in this file any more. WHICH camera the robot's head is, is the top-level \"active\" above: every node that reads this file asks pepin.camera for the active one, and PEPIN_CAMERA in a node's environment overrides it (ros/laptop.sh forwards it into the container). The board's own half of the switch is /etc/default/pepin-camera (board/pepin-camera.service): the device and the resolution ustreamer serves. The two must agree — \"active\": \"stereo\" beside a board still streaming 1280x720 mono is a node splitting a webcam picture down the middle."
 }

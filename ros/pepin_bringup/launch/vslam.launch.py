@@ -67,9 +67,13 @@ pepin_bringup.rtabmap_frame move the mode live on trust in the pose — ``map``,
 admin, asked whether it still lists this launch's previous incarnation), ``static_camera_tf``
 (default true: the camera node broadcasts base_link -> camera_link from config/camera.json; false
 when the board's neck node publishes that edge live — ros/feature.sh neck on, ``ros/laptop.sh
-vslam --neck`` — since two publishers of one edge fight).
+vslam --neck`` — since two publishers of one edge fight), ``camera`` (which rig of
+config/camera.json the head is; empty, the default, means that file's own ``"active"`` or
+``PEPIN_CAMERA`` — :func:`camera_rig` resolves it once for the whole launch and the report line
+names it).
 """
 
+import json
 from pathlib import Path
 
 from launch import LaunchContext, LaunchDescription
@@ -87,7 +91,13 @@ from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from pepin.deployment import CONTAINER_STOP_TIMEOUT_S, laptop_launch_nodes, rmw_is_zenoh
+from pepin.camera import active_camera
+from pepin.deployment import (
+    CONTAINER_STOP_TIMEOUT_S,
+    config_file,
+    laptop_launch_nodes,
+    rmw_is_zenoh,
+)
 
 # How long a node of this launch is given to end on SIGINT before the launch escalates to
 # SIGTERM, and then how long before SIGKILL. launch's own defaults are 5 s and 5 s, which is
@@ -546,9 +556,24 @@ def _flag(context: LaunchContext, name: str) -> bool:
     return LaunchConfiguration(name).perform(context).lower() == "true"
 
 
+def camera_rig(name: str) -> str:
+    """Which camera of ``config/camera.json`` this launch's nodes read: the ``camera`` argument
+    if it says anything, else ``PEPIN_CAMERA`` in the container's environment (ros/laptop.sh
+    passes it in), else the file's own ``"active"`` (pepin.camera.active_camera decides, here as
+    everywhere).
+
+    Resolved ONCE, here, and handed to the camera node, so the launch's report line names the
+    rig that is actually being published and a typo stops the launch at start instead of leaving
+    one node on another camera. The other readers of that file — the depth node, the contact
+    scan — answer the same question from the same file and the same variable.
+    """
+    return active_camera(json.loads(config_file("camera.json").read_text()), name)
+
+
 def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     """The nodes of this launch, once the arguments have values."""
     board = LaunchConfiguration("board")
+    rig = camera_rig(LaunchConfiguration("camera").perform(context).strip())
     camera_only = _flag(context, "camera_only")
     resume_volume = _flag(context, "resume_volume")
     neighbor_refining = _flag(context, "neighbor_refining")
@@ -683,6 +708,10 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             ["board:=", board],
             "-p",
             ["static_camera_tf:=", LaunchConfiguration("static_camera_tf")],
+            # The rig, resolved once for the whole launch (camera_rig): the node then publishes
+            # that camera's optics and mount, and says which it got in its first line.
+            "-p",
+            f"camera:={rig}",
         ],
         output="screen",
         prefix=_after_ghost("/camera_stream"),
@@ -857,7 +886,8 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         " place once a second and measures the camera's pose at 5 Hz for the board's tracker"
     )
     report = (
-        f"vslam up: {session}; RTAB-Map reads {feed}; one parameter table for every situation,"
+        f"vslam up: {session}; camera rig: {rig} (config/camera.json's active, or PEPIN_CAMERA,"
+        f" or camera:=); RTAB-Map reads {feed}; one parameter table for every situation,"
         " map_frame_id map and publish_tf off (the board's tracker owns map -> odom);"
         f" neighbor_refining={'on' if neighbor_refining else 'off'} (off: the neighbour links"
         " carry the odometry's own covariance, so a loop closure has somewhere to go);" + vo_note
@@ -927,6 +957,12 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("database", default_value=""),  # empty: DATABASE
             DeclareLaunchArgument("bridge_admin", default_value="http://pepin-zenoh:8000"),
             DeclareLaunchArgument("static_camera_tf", default_value="true"),
+            # WHICH CAMERA the head is, by the name of a block in config/camera.json ("overview",
+            # the mono webcam; "stereo", the side-by-side module). Empty — the default — leaves it
+            # to PEPIN_CAMERA in the container (ros/laptop.sh forwards it) and then to that file's
+            # own "active", so switching the rig is one word in one file and no launch argument at
+            # all. A name no block answers to stops this launch at start.
+            DeclareLaunchArgument("camera", default_value=""),
             # A new board bridge means new subscriptions are needed: the watch exits, the launch
             # shuts down, the container's restart policy brings this half back. Under
             # PEPIN_RMW=zenoh there is no bridge to watch, and a watch that found no admin would
