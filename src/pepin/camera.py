@@ -200,6 +200,12 @@ class CameraConfig:
     calibration: Calibration | None = None
     rig: StereoRig | None = None
     name: str = DEFAULT_CAMERA
+    # Where the lens really sits and looks RELATIVE TO ``camera_link``, in the link's own axes
+    # (x forward, y left, z up; metres and degrees, the six fields of a mount). The link is the
+    # neck's — the board publishes it from the encoders — so a head that is not the one the neck
+    # was measured with (a module taped onto the old webcam) says its own offset here, and it
+    # goes into ``camera_link -> camera_optical``. Empty: the lens is the link.
+    eye: tuple[tuple[str, float], ...] = ()
 
     @property
     def stereo(self) -> bool:
@@ -232,6 +238,11 @@ class CameraConfig:
             calibration=Calibration.from_json(block) if calibrated and block else None,
             rig=StereoRig.from_json(rig) if rig else None,
             name=name,
+            eye=tuple(
+                (key, float(value))
+                for key, value in data.get("eye", {}).items()
+                if isinstance(value, (int, float))
+            ),
         )
 
     @classmethod

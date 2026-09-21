@@ -41,6 +41,15 @@ IMU_FRAME = "imu_link"
 TOF_FRAME = "tof_{name}"
 
 
+def rpy_from_rotation(rotation: Array) -> tuple[float, float, float]:
+    """``(roll, pitch, yaw)`` of a rotation matrix in ROS's fixed-axis convention
+    (yaw * pitch * roll), the inverse of :func:`rotation_from_rpy` away from pitch = +-90."""
+    pitch = math.asin(max(-1.0, min(1.0, -float(rotation[2, 0]))))
+    roll = math.atan2(float(rotation[2, 1]), float(rotation[2, 2]))
+    yaw = math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))
+    return roll, pitch, yaw
+
+
 def rotation_from_rpy(roll: float, pitch: float, yaw: float) -> Array:
     """The 3x3 rotation Rz(yaw) Ry(pitch) Rx(roll), radians: a vector in the sensor's axes
     into the parent frame — the same rotation :func:`pepin.camera.quaternion_from_rpy` and the
@@ -101,6 +110,21 @@ class Mount:
         """The sensor's origin in ``base_link``, metres."""
         return np.array([self.x_m, self.y_m, self.z_m], dtype=np.float64)
 
+    def then(self, child: Mount) -> Mount:
+        """This mount followed by ``child`` (a mount given in THIS sensor's axes) as one mount in
+        the parent's: ``parent -> self -> child`` collapsed to ``parent -> child``."""
+        rotation = self.rotation() @ child.rotation()
+        origin = self.translation() + self.rotation() @ child.translation()
+        roll, pitch, yaw = rpy_from_rotation(rotation)
+        return Mount(
+            float(origin[0]),
+            float(origin[1]),
+            float(origin[2]),
+            math.degrees(roll),
+            math.degrees(pitch),
+            math.degrees(yaw),
+        )
+
 
 # The optical frame of a camera relative to its link (REP 103): z looks along the link's x,
 # x points right, y down — a roll of -90 degrees followed by a yaw of -90.
@@ -136,9 +160,14 @@ class CameraMounts:
 
     @classmethod
     def from_config(cls, cfg: CameraConfig) -> CameraMounts:
-        """From one camera of ``config/camera.json``."""
+        """From one camera of ``config/camera.json``. A camera with an ``eye`` block — the lens'
+        own offset from the neck's link — gets it composed into ``link -> optical``: the link
+        stays the neck's, whoever publishes it."""
         link = Mount(x_m=cfg.x_m, y_m=cfg.y_m, z_m=cfg.z_m, pitch_deg=cfg.pitch_deg)
-        return cls(link, OPTICAL_MOUNT, cfg.link_frame, cfg.optical_frame)
+        optical = OPTICAL_MOUNT
+        if cfg.eye:
+            optical = Mount.from_json(dict(cfg.eye)).then(OPTICAL_MOUNT)
+        return cls(link, optical, cfg.link_frame, cfg.optical_frame)
 
 
 def config_path(config_dir: str | Path | None, name: str) -> Path:

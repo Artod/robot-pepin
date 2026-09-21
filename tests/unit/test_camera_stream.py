@@ -664,9 +664,9 @@ def test_a_stereo_frame_of_the_wrong_size_is_counted_and_named_in_the_report(
 
 
 def test_the_static_edges_are_the_active_rig_s_mount(build: Build, tmp_path: Path) -> None:
-    """The same three edges, from the camera the node is actually publishing: a stereo head's
-    base_link -> camera_link is its LEFT eye's mount, half a baseline off the centre line, and
-    the mono webcam's is on it."""
+    """The same three edges, from the camera the node is actually publishing: the link is the
+    neck's under either head, and a stereo head's camera_link -> camera_optical carries its left
+    eye's own offset where the webcam's is the bare REP 103 turn."""
     node, _ = build(config=stereo_config(tmp_path, ideal_stereo_calibration()))
     assert edges(node) == [
         ("base_link", "camera_link"),
@@ -674,9 +674,13 @@ def test_the_static_edges_are_the_active_rig_s_mount(build: Build, tmp_path: Pat
         ("base_link", "laser"),
     ]
     link = node._static.sent[0].transform.translation
-    assert (link.x, link.y, link.z) == (0.0, 0.0315, 1.203)
+    assert (link.x, link.y, link.z) == (0.0, 0.0, 1.203)
+    eye = node._static.sent[1].transform.translation
+    assert eye.y == pytest.approx(0.0305) and eye.z > 0.0
     mono, _ = build()
     assert mono._static.sent[0].transform.translation.y == 0.0
+    lens = mono._static.sent[1].transform.translation
+    assert (lens.x, lens.y, lens.z) == (0.0, 0.0, 0.0)
 
 
 def test_the_mono_rig_is_exactly_the_node_it_always_was(build: Build) -> None:

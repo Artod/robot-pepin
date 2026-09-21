@@ -54,10 +54,19 @@
     },
     "mount": {
       "x_m": 0.0,
-      "y_m": 0.0315,
+      "y_m": 0.0,
       "z_m": 1.203,
       "pitch_deg": 23.8,
-      "note": "PART MEASURED, PART PROVISIONAL. z_m 1.203 and pitch_deg 23.8 are the overview camera's MEASURED mount (see its own note: the tape and the encoder, 2026-09-12), taken over because the module is taped onto that webcam at the same height and tilt — the tape has not been read again for the module itself, so the few millimetres the tape adds are unmeasured. y_m +0.0315 is PROVISIONAL AND UNMEASURED: half the nominal baseline (0.063 m) to the robot's LEFT, on the assumption that the module is centred where the webcam's lens was and that this block describes the LEFT eye (ROS stereo convention: the pair's optical frame is the left camera's, and this mount is the frame both /camera/image and /camera/right/image are stamped in). Replace all four with a measurement of the module itself; the baseline that matters for depth is the calibration's, never this one."
+      "note": "The NECK's link, exactly the overview camera's measured mount (z_m 1.203, pitch_deg 23.8: the tape and the encoder, 2026-09-12), because the module is taped onto that webcam and the board publishes base_link -> camera_link from the neck's encoders either way. Where the module's LEFT eye sits and looks relative to that link is the 'eye' block below — never folded into this one, so the neck's frame means the same thing under every head."
+    },
+    "eye": {
+      "x_m": -0.011,
+      "y_m": 0.0305,
+      "z_m": 0.025,
+      "roll_deg": -3.7,
+      "pitch_deg": -5.6,
+      "yaw_deg": 4.3,
+      "note": "The rectified LEFT eye in camera_link's axes (x forward, y left, z up), composed into camera_link -> camera_optical. MEASURED 2026-09-21 with the robot parked square to a door, at 2 m and again at 3 m: the floor's plane in the stereo depth gives the eye's pitch, roll and height (18.0-18.8 deg down where the link says 24.06; 1.227-1.233 m where the link says 1.203), the door's plane against the lidar's line through the same door gives its yaw (5.3-5.7 deg left where the neck's pan says 0.97). The two scenes agree to 0.7 deg and these are their mean. The module is taped, so a knock changes these: the depth node's law line (a 1.00) is the alarm. y_m is NOT measured: half the calibrated 61 mm baseline to the left, assuming the module is centred on the webcam's lens."
     },
     "frames": {
       "link": "camera_link",

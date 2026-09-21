@@ -72,8 +72,8 @@ def test_the_lidar_mount_is_the_lidar_s_own_transform() -> None:
 def test_the_camera_s_two_frames_are_exactly_what_the_camera_node_publishes() -> None:
     """base_link -> camera_link is pepin.camera.mount_transform (the neck's pitch, x forward);
     camera_link -> camera_optical is the REP 103 rotation (-90, 0, -90 deg) and no offset."""
-    cfg = CameraConfig.load(CONFIG / "camera.json")
-    camera = Mounts.load(CONFIG).camera
+    cfg = CameraConfig.load(CONFIG / "camera.json", "overview")
+    camera = Mounts.load(CONFIG, "overview").camera
     assert camera.link.transform() == mount_transform(cfg)
     assert camera.link.pitch_deg == 23.8 and camera.link.z_m == 1.203
     assert camera.optical.transform()[:3] == (0.0, 0.0, 0.0)
@@ -85,6 +85,23 @@ def test_the_camera_s_two_frames_are_exactly_what_the_camera_node_publishes() ->
     assert np.allclose(r @ [0.0, 0.0, 1.0], [1.0, 0.0, 0.0], atol=1e-12)
     assert np.allclose(r @ [1.0, 0.0, 0.0], [0.0, -1.0, 0.0], atol=1e-12)
     assert np.allclose(r @ [0.0, 1.0, 0.0], [0.0, 0.0, -1.0], atol=1e-12)
+
+
+def test_a_head_taped_onto_the_neck_s_camera_says_its_own_eye_and_the_link_stays_the_neck_s() -> (
+    None
+):
+    """The stereo module's ``eye`` block goes into camera_link -> camera_optical: the link is
+    the webcam's measured one (the board publishes it from the neck), and the optical frame is
+    the eye's offset followed by the REP 103 turn — a lens looking up and left of the link."""
+    mono = Mounts.load(CONFIG, "overview").camera
+    stereo = Mounts.load(CONFIG, "stereo").camera
+    assert stereo.link == mono.link, "the neck's frame means the same under every head"
+    eye = Mount.from_json(dict(CameraConfig.load(CONFIG / "camera.json", "stereo").eye))
+    assert stereo.optical == eye.then(OPTICAL_MOUNT)
+    assert np.allclose(stereo.optical.translation(), eye.translation())
+    axis = stereo.optical.rotation() @ [0.0, 0.0, 1.0]  # where the picture looks, in the link
+    assert axis[1] > 0.0 and axis[2] > 0.0, "left of and above the link's own x"
+    assert Mount().then(OPTICAL_MOUNT).transform() == pytest.approx(OPTICAL_MOUNT.transform())
 
 
 def test_every_static_frame_of_the_cart_is_listed_once_under_its_name() -> None:

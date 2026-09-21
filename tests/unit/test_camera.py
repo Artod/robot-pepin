@@ -130,19 +130,20 @@ def test_the_stereo_block_is_one_eye_beside_the_frame_that_carries_two() -> None
     assert cfg.rig.calibration_path("/ws/config") == Path("/ws/config/stereo_calibration.json")
 
 
-def test_the_stereo_mount_is_the_left_eye_beside_the_webcam_s_own() -> None:
-    """The module is taped onto the webcam: the same measured height and pitch, with the left
-    eye half a nominal baseline to the robot's LEFT — provisional, and the block says so."""
+def test_the_stereo_mount_is_the_neck_s_link_and_the_eye_is_a_block_of_its_own() -> None:
+    """The module is taped onto the webcam: its link IS the webcam's measured one, on the centre
+    line (the board publishes it from the neck). What the left eye adds — measured against the
+    floor, a door and the lidar — is the ``eye`` block, and its one unmeasured number says so."""
     mono = CameraConfig.load(CAMERA_JSON, name="overview")
     stereo = CameraConfig.load(CAMERA_JSON, name="stereo")
     assert stereo.rig is not None
-    assert (stereo.z_m, stereo.pitch_deg) == (mono.z_m, mono.pitch_deg)
-    assert stereo.y_m == pytest.approx(stereo.rig.baseline_m_nominal / 2)
-    x, y, z, roll, pitch, yaw = mount_transform(stereo)
-    assert (x, y, z) == (0.0, 0.0315, 1.203) and (roll, yaw) == (0.0, 0.0)
-    assert pitch == pytest.approx(math.radians(23.8))
-    block = json.loads(CAMERA_JSON.read_text())["stereo"]["mount"]
-    assert "PROVISIONAL" in block["note"] and "MEASURED" in block["note"]
+    assert mount_transform(stereo) == mount_transform(mono)
+    assert mono.eye == ()
+    eye = dict(stereo.eye)
+    assert set(eye) == {"x_m", "y_m", "z_m", "roll_deg", "pitch_deg", "yaw_deg"}
+    assert eye["pitch_deg"] < 0.0 < eye["yaw_deg"], "the module looks up and left of the webcam"
+    note = json.loads(CAMERA_JSON.read_text())["stereo"]["eye"]["note"]
+    assert "MEASURED" in note and "NOT measured" in note
 
 
 def test_a_stereo_rig_is_calibrated_exactly_when_its_calibration_file_loads(
