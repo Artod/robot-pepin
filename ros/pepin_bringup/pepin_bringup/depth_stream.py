@@ -64,28 +64,22 @@ see that module). ``fx`` and the baseline are read off the two ``camera_info`` m
 node never opens the calibration file. The picture, its stamp and its frame are the left eye's
 throughout, exactly as the mono path publishes them.
 
-WHAT THE CORRECTION STAGES MEAN under a metric source, decided 2026-09-20: every one of them
-stays ON, because for none of them can it be shown on this robot that it hurts.
-* The lidar's law (``lidar_anchor`` + ``affine_law`` / ``range_law`` / ``frame_law``) stays on
-  as the READOUT it becomes: against a metric depth its fit should converge to a 1.00 b +0.000,
-  and that number in the report line is the stereo head's metric accuracy against the lidar,
-  measured on every drive for free. Two things follow and are done here. The law file is per
-  source (``law_file``, whose default under ``stereo`` is a file of its own), because the mono
-  network's a 1.28 applied to a metric depth would put every obstacle a quarter too far. And
-  with no file, ``stereo`` seeds the IDENTITY law instead of withholding: a stereo depth is
-  publishable the moment it exists, and waiting POOL_MIN_SAMPLES beams for permission to publish
-  a measurement would be the lidar granting a licence it did not issue.
-* ``edge_filter`` stays on. It was built for the mono network's flying pixels, and SGBM produces
-  none on a rendered depth step (0.00 % of the pixels beside it off by more than 25 cm), but it
-  also drops the halo around every hole the matcher left — :func:`pepin.depth.edge_mask` calls a
-  pixel with an unknown neighbour an edge — and that halo is exactly where a block straddling a
-  depth discontinuity put its worst answers. It costs pixels; nothing here shows it hurts.
-* ``floor_pairs``, ``floor_anchor``, ``wall_anchor``, ``wall_correct`` stay on. They add rulers
-  and pulls from assumed geometry, which a measurement does not need; without a calibrated rig
-  to measure against, turning them off would be a guess, so they are left and named here.
-* ``parallax_anchor`` stays on and is the first candidate to switch off under stereo: it
-  triangulates the cart's own motion over seconds to do, worse, what a 6 cm baseline does in one
-  exposure. It costs milliseconds a frame, not correctness.
+WHAT THE CORRECTION STAGES MEAN under a metric source. Until the head was calibrated every one
+of them stayed on (2026-09-20: nothing to measure against, so switching any off was a guess). With
+the checkerboard calibration of 2026-09-21 (epipolar 0.23 px; a printed board's span read to
++0.8 % on frames the fit never saw) the defaults under ``depth_source: stereo`` are
+:data:`STEREO_DEFAULTS`, every one still a live flag:
+* The scale-recovering stages are OFF — ``floor_pairs``, ``wall_anchor``, ``parallax_anchor``,
+  ``range_law``, ``frame_law``. They exist to give the mono network a scale; a stereo depth has
+  one, and they cost ~30 ms a frame between them.
+* The lidar's pairs are still collected and the affine law still fitted, but it WATCHES
+  (``law_watch``): the depth goes out as measured, and the law's numbers in the report line are
+  the head's health — a 1.00 b +0.000 while the rig is as calibrated. Applied, the law hurt: in a
+  cluttered room the lidar's plane, 0.8 m under the lens, pairs its far returns with whatever
+  stands in front of them, and b went to its -0.200 bound. The law file is per source
+  (``law_file``) and with no file ``stereo`` seeds the identity law.
+* ``edge_filter`` and ``floor_anchor`` stay on: they clean a measurement rather than rescale it —
+  the halo around every hole the matcher left, and the matcher's ripple on a glossy floor.
 
 The network runs where ``depth_backend`` says: ``local`` is the CPU model in this container
 (0.2-0.3 s a frame), ``remote`` the same network on the laptop's GPU behind
@@ -121,7 +115,7 @@ import time
 import traceback
 from collections import Counter, deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -282,6 +276,21 @@ TRACK_FLAGS = (  # the ones that decide the shape of a parallax measurement: tra
     "parallax_correction_tol_m",
     "parallax_undistort",
 )
+
+# What a METRIC source changes in the chain, by flag name (the rest keep FLAGS' defaults; every
+# one stays a live flag, so the mono chain can be A/B-ed on a stereo depth at any time). Off:
+# the stages that exist to recover a scale the mono network does not have — the rulers from
+# assumed geometry, the parallax ring, the range and frame laws. The lidar's pairs are still
+# collected and the affine law still fitted, as a witness (``law_watch``). What is left cleans a
+# measurement rather than rescaling it: ``edge_filter``, ``floor_anchor``, the reach.
+STEREO_DEFAULTS: dict[str, Any] = {
+    "floor_pairs": False,
+    "wall_anchor": False,
+    "parallax_anchor": False,
+    "range_law": False,
+    "frame_law": False,
+    "law_watch": True,
+}
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration, and printed in every report line. One bool per stage of the pipeline, in
@@ -567,6 +576,23 @@ FLAGS = FlagSet(
         off_when="set it back to 3.0 to reproduce the clipped law in the field, side by side, with"
         " no restart",
         range=(0.5, 20.0),
+    ),
+    Flag(
+        "law_watch",
+        False,
+        description="the affine law is fitted on the lidar's pairs and printed, and the depth is"
+        " published exactly as the source measured it; no frame waits for a law",
+        why="off for the network, whose depth is 1.6-2.0x long until the law corrects it. ON"
+        " under depth_source stereo (STEREO_DEFAULTS): a calibrated head is metric by"
+        " construction — the checkerboard calibration of 2026-09-21 reads a printed board's"
+        " span to +0.8 % on frames it never saw (scratch/stereo/board_metric_check.py) — and the"
+        " law fitted on a cluttered room pulled b to its -0.200 bound, because the lidar's plane"
+        " is 0.8 m under the lens and its far returns project onto whatever stands in front of"
+        " them. Watching, the same fit is the head's health line: a 1.00 while the rig is as"
+        " calibrated, anything else once it has been knocked. It costs the fit alone",
+        on_when="the source is metric (stereo) and the lidar is a witness, not a ruler",
+        off_when="the depth needs the lidar's scale (the mono network), or as an A/B of what the"
+        " law would do to a stereo depth",
     ),
     Flag(
         "law_slew",
@@ -1509,6 +1535,21 @@ FLAGS = FlagSet(
 FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
 
 
+def flags_for(source: str) -> FlagSet:
+    """The node's flags with the defaults of its depth source: :data:`FLAGS` as declared for the
+    mono network, the same flags with :data:`STEREO_DEFAULTS` for a metric stereo head."""
+    if source != "stereo":
+        return FlagSet(*FLAGS)
+    return FlagSet(
+        *(
+            replace(flag, default=STEREO_DEFAULTS[flag.name])
+            if flag.name in STEREO_DEFAULTS
+            else flag
+            for flag in FLAGS
+        )
+    )
+
+
 class MonoDepth:
     """Depth Anything V2 behind one call: an RGB array in, a float32 depth image of the same
     size out, in the network's own (approximate) metres."""
@@ -1749,7 +1790,8 @@ class DepthStream(Node):
         self._pair_wait_s = float(self.declare_parameter("stereo_pair_wait_s", PAIR_WAIT_S).value)
         self._stereo_reach_m = float(self.declare_parameter("stereo_reach_m", 0.0).value)
         self._stereo_matcher_settings = self._matcher_settings()
-        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
+        self._switches = Switches(self, flags_for(source_name), on_change=self._on_switch)
+        self._law.watching = bool(self._switches["law_watch"])
         for name in self._pipeline.names:  # a launch override reaches the stage it names
             self._pipeline.set(name, self._switches.on(name))
         set_scale_ceiling(float(self._switches["scale_ceiling"]))  # and the law's bound
@@ -1915,6 +1957,8 @@ class DepthStream(Node):
             self._net.mode = str(new)
         elif name == "scale_ceiling":
             set_scale_ceiling(float(new))  # the next fit is bounded by it; the law in hand is not
+        elif name == "law_watch":
+            self._law.watching = bool(new)  # from the next frame on
         elif name == "law_slew":
             self._law.slew_per_s = float(new)  # from the next fit on
         elif name == "imu_lean":  # both posers over the same TF lean the same way

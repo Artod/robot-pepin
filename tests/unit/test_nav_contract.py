@@ -1582,7 +1582,11 @@ def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_p
         tables[path.stem] = flags
         assert "self._switches.state" in sf.calls(node), f"{path.name}: the report line"
         switches = sf.calls_to(node, "Switches")
-        assert len(switches) == 1 and ast.unparse(switches[0].args[1]) == "FLAGS", path.name
+        # FLAGS itself, or flags_for(...): the same table with a depth source's own defaults
+        table = ast.unparse(switches[0].args[1])
+        assert len(switches) == 1 and (table == "FLAGS" or table.startswith("flags_for(")), (
+            path.name
+        )
         assert "self.add_on_set_parameters_callback" not in sf.calls(node), path.name
         declared = {
             ast.literal_eval(c.args[0]) for c in sf.calls_to(node, "self.declare_parameter")

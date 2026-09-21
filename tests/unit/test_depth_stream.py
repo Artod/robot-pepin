@@ -1240,6 +1240,26 @@ def test_a_stereo_node_keeps_its_own_law_file_and_seeds_the_identity_law(build: 
     assert not plain._law.ready, "the mono node still waits for its beams"
 
 
+def test_a_stereo_head_runs_the_cleaning_stages_and_only_watches_the_lidar_law(
+    build: Build,
+) -> None:
+    """The rig decides the chain with no flag to remember: under stereo the scale-recovering
+    stages are off and the affine law watches; the mono node's chain is what it always was; and
+    every one of them is still a flag a launch or a person can turn back."""
+    node, _net = build(depth_source="stereo")
+    switches = node._pipeline.switches
+    for off in ("floor_pairs", "wall_anchor", "parallax_anchor", "range_law", "frame_law"):
+        assert not switches[off], off
+    for on in ("edge_filter", "lidar_anchor", "affine_law", "floor_anchor"):
+        assert switches[on], on
+    assert node._law.watching
+    plain, _net2 = build()
+    assert not plain._law.watching
+    assert plain._pipeline.switches["range_law"] and plain._pipeline.switches["parallax_anchor"]
+    back, _net3 = build(depth_source="stereo", law_watch=False, range_law=True)
+    assert not back._law.watching and back._pipeline.switches["range_law"]
+
+
 def test_the_stereo_source_pairs_the_right_eye_by_its_exact_stamp(build: Build) -> None:
     """Both eyes come out of ONE transport frame with ONE stamp, so the pairing is exact: the
     right eye of this picture's stamp reaches the matcher, and the published depth is the

@@ -982,6 +982,20 @@ class AffineLaw(LawStage):
         self._clock = clock
         self._last_fit: float | None = None  # when the law last moved, for the slew's seconds
         self._asked: tuple[float, float] | None = None  # the fit the slew is still walking to
+        # Watching: the law is fitted and reported, and the depth goes out as it came in. It is
+        # what the law is for under a METRIC source (a calibrated stereo head): nothing to
+        # correct, and a fit that leaves a 1.00 says the head has been knocked.
+        self.watching = False
+
+    def run(self, depth: Array, frame: Frame) -> tuple[Array, Verdict]:
+        """Fit and apply as every law does — or, while :attr:`watching`, fit only: the depth is
+        returned untouched and no frame is ever withheld for want of a law."""
+        if not self.watching:
+            return super().run(depth, frame)
+        pool = frame.pool_capped()
+        self.fit(pool)
+        n = 0 if pool is None else pool.size
+        return depth, Verdict(self.name, True, pairs=n, note=self.describe())
 
     def seed(self, a: float, b: float) -> None:
         """Start from a saved law (the map's): applied until POOL_MIN_SAMPLES live pairs exist."""
@@ -1072,7 +1086,8 @@ class AffineLaw(LawStage):
         asked = ""
         if self._asked is not None:
             asked = f", slewing to a {self._asked[0]:.2f} b {self._asked[1]:+.3f}"
-        return f"a {self.a:.2f} b {self.b:+.3f} on {self.pooled} pairs{source}{edge}{asked}"
+        role = "watching, depth untouched: " if self.watching else ""
+        return f"{role}a {self.a:.2f} b {self.b:+.3f} on {self.pooled} pairs{source}{edge}{asked}"
 
 
 class FloorGeometry:

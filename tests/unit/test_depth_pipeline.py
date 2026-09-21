@@ -255,6 +255,22 @@ def test_the_depth_before_a_stage_is_the_last_output_before_it_or_the_raw() -> N
         stopped.before("floor_anchor")
 
 
+def test_a_watching_law_fits_and_reports_and_leaves_the_depth_as_it_was_measured() -> None:
+    """Under a metric source the law is a witness: the lidar's pairs still fit it, the report
+    says what it found, the depth goes out untouched and no frame waits for a law."""
+    law = AffineLaw()
+    law.watching = True
+    pipeline = DepthPipeline([EdgeFilter(), LidarAnchor(), law], off=["edge_filter"])
+    raw = _network(_scene(2.0), 1.4, 0.01, noise=0.0, seed=0)  # a depth the law WOULD rescale
+    result = pipeline.run(raw, _context(_wall_returns(2.0)))
+    assert not result.withheld, "a watching law never withholds, fitted or not"
+    assert result.depth is result.after["lidar_anchor"], "the depth is not touched"
+    assert law.pooled > 0 and "watching" in law.describe()
+    law.watching = False
+    applied = pipeline.run(raw, _context(_wall_returns(2.0)))
+    assert applied.withheld or applied.depth is not applied.after["lidar_anchor"]
+
+
 def test_a_seeded_law_publishes_at_once_and_pairs_join_and_carry_their_lift() -> None:
     law = AffineLaw()
     law.seed(1.4, 0.01)
