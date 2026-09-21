@@ -51,6 +51,42 @@ bearings of /depth_scan are the cart's whichever way the neck looks, and the fan
 window sits off base_link's x by the pan. The depth image the pipeline corrects is still
 projected as if the head looked along that x: the anchors read pixels and heights, not bearings.
 
+WHERE THE RAW DEPTH COMES FROM is one node parameter, ``depth_source``, and everything after it
+is the same chain. ``network`` (the default) is the mono network described above.  ``stereo`` is
+the calibrated stereo head: the node then also subscribes to ``/camera/right/image`` and
+``/camera/right/camera_info``, pairs the right eye with the left picture by EXACT stamp (both
+halves of one transport frame carry the same one, so a right eye that has not arrived within
+``stereo_pair_wait_s`` is never coming and the frame is dropped and counted), and
+:class:`pepin.stereo_depth.StereoDepth` measures the depth instead of guessing it —
+``z = fx * baseline / disparity``, metric by construction, NaN wherever the match is not
+trusted and NaN past the rig's own reach (2.2 m, where the disparity error model crosses 10 cm;
+see that module). ``fx`` and the baseline are read off the two ``camera_info`` messages, so this
+node never opens the calibration file. The picture, its stamp and its frame are the left eye's
+throughout, exactly as the mono path publishes them.
+
+WHAT THE CORRECTION STAGES MEAN under a metric source, decided 2026-09-20: every one of them
+stays ON, because for none of them can it be shown on this robot that it hurts.
+* The lidar's law (``lidar_anchor`` + ``affine_law`` / ``range_law`` / ``frame_law``) stays on
+  as the READOUT it becomes: against a metric depth its fit should converge to a 1.00 b +0.000,
+  and that number in the report line is the stereo head's metric accuracy against the lidar,
+  measured on every drive for free. Two things follow and are done here. The law file is per
+  source (``law_file``, whose default under ``stereo`` is a file of its own), because the mono
+  network's a 1.28 applied to a metric depth would put every obstacle a quarter too far. And
+  with no file, ``stereo`` seeds the IDENTITY law instead of withholding: a stereo depth is
+  publishable the moment it exists, and waiting POOL_MIN_SAMPLES beams for permission to publish
+  a measurement would be the lidar granting a licence it did not issue.
+* ``edge_filter`` stays on. It was built for the mono network's flying pixels, and SGBM produces
+  none on a rendered depth step (0.00 % of the pixels beside it off by more than 25 cm), but it
+  also drops the halo around every hole the matcher left — :func:`pepin.depth.edge_mask` calls a
+  pixel with an unknown neighbour an edge — and that halo is exactly where a block straddling a
+  depth discontinuity put its worst answers. It costs pixels; nothing here shows it hurts.
+* ``floor_pairs``, ``floor_anchor``, ``wall_anchor``, ``wall_correct`` stay on. They add rulers
+  and pulls from assumed geometry, which a measurement does not need; without a calibrated rig
+  to measure against, turning them off would be a guess, so they are left and named here.
+* ``parallax_anchor`` stays on and is the first candidate to switch off under stereo: it
+  triangulates the cart's own motion over seconds to do, worse, what a 6 cm baseline does in one
+  exposure. It costs milliseconds a frame, not correctness.
+
 The network runs where ``depth_backend`` says: ``local`` is the CPU model in this container
 (0.2-0.3 s a frame), ``remote`` the same network on the laptop's GPU behind
 :mod:`pepin.depth_service` (ros/depth_host.sh, 26 ms a round trip), ``auto`` the service while
@@ -85,6 +121,7 @@ import time
 import traceback
 from collections import Counter, deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -177,6 +214,13 @@ from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import FramePoser
 from pepin.lean import LEAN_QUALITY_FLOOR
 from pepin.parallax import MATCHERS, TRACK_SIGMA_MODELS, to_gray
+from pepin.stereo_depth import (
+    Baseline,
+    MatcherSettings,
+    StereoDepth,
+    StereoMatcher,
+    StereoUnavailableError,
+)
 from pepin.tsdf import RigidPose
 from pepin_bringup.msgs import (
     array_from_image,
@@ -198,6 +242,16 @@ from pepin_bringup.node_kit import (
 
 CONFIG = "/ws/config/camera.json"
 LAW_FILE = "/maps/depth_law.json"  # ros/maps on the laptop, mounted at /maps by ros/laptop.sh
+STEREO_LAW_FILE = "/maps/depth_law_stereo.json"  # a metric source keeps its own law, never the
+# network's: the mono law's a 1.28 applied to a depth that is already metres is a quarter too far
+DEPTH_SOURCES = ("network", "stereo")  # where a frame's RAW depth comes from; a node parameter
+RIGHT_IMAGE = "/camera/right/image"
+RIGHT_INFO = "/camera/right/camera_info"
+# How long a left picture waits for the right eye of its own stamp. Both are published from one
+# transport frame, so this is the transport's jitter and nothing else: 50 ms is ten times the
+# measured map->odom period and a right eye later than that is not coming.
+PAIR_WAIT_S = 0.05
+PAIR_BUFFER = 8  # right eyes held while their left halves are matched; the newest wins anyway
 DEFAULT_MODEL = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
 SCAN_RANGE_M = 6.0
 STAGES = ("network", "pose", "samples", "pipeline", "scan", "publish")
@@ -1479,6 +1533,78 @@ class MonoDepth:
         return depth
 
 
+@dataclass(frozen=True)
+class Views:
+    """The pictures of one moment a depth source may read: the left eye — which is the mono
+    path's only picture — and, on a stereo head, the right eye of the very same stamp."""
+
+    rgb: npt.NDArray[np.uint8]
+    right: npt.NDArray[np.uint8] | None = None
+
+
+class DepthSource(Protocol):
+    """Whatever turns the views of one moment into a RAW depth image in metres, before any
+    correction stage has seen it. The node asks one of these per frame and knows no more about
+    where a metre came from."""
+
+    name: str
+
+    def __call__(self, views: Views) -> Array:
+        """The raw depth of this moment, same size as the left picture, metres."""
+        ...
+
+    def report(self) -> str:
+        """This source's clause of the node's report line."""
+        ...
+
+
+class NetworkSource:
+    """The mono network as a depth source: the left picture alone through the backend switch,
+    the right eye ignored — bit for bit what the node did before there was a second source.
+
+    The switch itself stays the node's (``depth_backend`` moves its mode live and the node's
+    own error handling reads it), so this asks for it per frame instead of holding a second
+    reference that a live change would not reach."""
+
+    name = "network"
+
+    def __init__(self, backend: Callable[[], Any], note: Callable[[], str] = lambda: "") -> None:
+        self._backend, self._note = backend, note
+
+    def __call__(self, views: Views) -> Array:
+        """The network's depth of the left picture."""
+        depth: Array = self._backend()(views.rgb)
+        return depth
+
+    def report(self) -> str:
+        """Which backend answered and what the CPU model is doing."""
+        return f"backend {getattr(self._backend(), 'status', '?')}{self._note()}"
+
+
+class StereoSource:
+    """The stereo head as a depth source: the two eyes of one moment through
+    :class:`pepin.stereo_depth.StereoDepth`, which measures metres instead of guessing them.
+
+    A frame with no right eye never reaches here — the node pairs by stamp and counts what it
+    cannot pair — so the one thing this refuses is a rig whose ``camera_info`` has not arrived."""
+
+    name = "stereo"
+
+    def __init__(self, depth: StereoDepth) -> None:
+        self.depth = depth
+
+    def __call__(self, views: Views) -> Array:
+        """The measured depth of this pair; raises when the right eye or the rig is missing."""
+        if views.right is None:
+            raise StereoUnavailableError("no right eye for this frame")
+        out: Array = np.asarray(self.depth(views.rgb, views.right), dtype=float)
+        return out
+
+    def report(self) -> str:
+        """The matcher, its milliseconds, the share of pixels answered for and the rig's range."""
+        return self.depth.describe()
+
+
 class EdgeHistory(Protocol):
     """What :class:`LiveEdgeHistory` needs of a TF history: the ask that waits, the ask that
     does not, and the newest edge there is (:class:`pepin_bringup.node_kit.TfHistory`)."""
@@ -1575,6 +1701,13 @@ class DepthStream(Node):
         # Eight threads: 0.3 s a frame at 18 threads took nine cores of the laptop (876 % CPU);
         # the map adds a node a second, so a slower frame costs nothing the map would notice.
         threads = int(self.declare_parameter("threads", 8).value)
+        # Where a frame's RAW depth comes from. A parameter, not a live flag: it decides which
+        # topics this node subscribes to, and the launch that starts the stereo rig is the one
+        # thing that knows which head is on the robot.
+        source_name = str(self.declare_parameter("depth_source", DEPTH_SOURCES[0]).value)
+        if source_name not in DEPTH_SOURCES:
+            raise ValueError(f"depth_source must be one of {DEPTH_SOURCES}, not {source_name!r}")
+        self._stereo_on = source_name == "stereo"
         cfg = CameraConfig.load(config, board=board)
         x, y, z, _roll, pitch, _yaw = mount_transform(cfg)
         self._camera_config = CameraPose(x, y, z, pitch)  # the fallback while TF has no edge
@@ -1589,7 +1722,10 @@ class DepthStream(Node):
         self._scan_max_range = float(self.declare_parameter("scan_max_range", DEPTH_REACH_M).value)
         self._expected_key: object = None  # the optics and head pose the floor ruler was cut for
         self._expected: Array = np.zeros((0, 0))
-        self._law_file = Path(str(self.declare_parameter("law_file", LAW_FILE).value))
+        # A law is a source's own: the mono network's a 1.28 applied to a depth that is already
+        # metric would put every obstacle a quarter too far, and the other way round.
+        default_law = STEREO_LAW_FILE if self._stereo_on else LAW_FILE
+        self._law_file = Path(str(self.declare_parameter("law_file", default_law).value))
         # The depth service as this container sees it (host.docker.internal is the laptop);
         # read at start: the client reconnects by itself, the address does not move.
         depth_url = str(
@@ -1629,6 +1765,21 @@ class DepthStream(Node):
         self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
         self.create_subscription(Image, "/camera/image", self._on_image, newest)
         self.create_subscription(LaserScan, "/scan", self._on_scan, reliable)
+        # The right eye, and the two numbers that turn a disparity into metres. Only under
+        # ``depth_source: stereo``: a mono head publishes neither topic, and a subscription to a
+        # topic nobody writes costs the transport a discovery entry for nothing.
+        self._right_tx: float | None = None  # the right eye's P[0,3] = -fx * baseline
+        self._right: deque[tuple[tuple[int, int], Image]] = deque(maxlen=PAIR_BUFFER)
+        self._right_ready = threading.Condition()
+        self._pair_wait_s = float(self.declare_parameter("stereo_pair_wait_s", PAIR_WAIT_S).value)
+        self._stereo: StereoDepth | None = None
+        if self._stereo_on:
+            self._stereo = StereoDepth(
+                matcher=StereoMatcher(self._matcher_settings()),
+                reach=float(self.declare_parameter("stereo_reach_m", 0.0).value),
+            )
+            self.create_subscription(CameraInfo, RIGHT_INFO, self._on_right_info, reliable)
+            self.create_subscription(Image, RIGHT_IMAGE, self._on_right, newest)
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
         # Every lookup of a frame's path goes through the guard: one that would wait for an
         # edge already dead (the board's TF route gone) is refused instead, and the caller's
@@ -1656,12 +1807,43 @@ class DepthStream(Node):
             f"depth backend {self._net.status}: service at {depth_url}; the CPU model"
             f" ({model_name}, {threads} threads) loads on its first local frame"
         )
+        # The one object the worker asks for a raw depth. The mono path is the same backend
+        # switch it always was, wrapped; the stereo path measures instead.
+        self._source: DepthSource = (
+            StereoSource(self._stereo)
+            if self._stereo is not None
+            else NetworkSource(lambda: self._net, self._model_note)
+        )
         self._fatal = Fatal(self)  # the worker's way out when no backend can answer
         self._worker = Worker(self._process, name="depth", on_error=self._on_work_error).start()
         self.create_timer(30.0, self._report)
+        if self._stereo is not None:
+            self.get_logger().info(
+                f"raw depth from the stereo head ({self._stereo.matcher.settings.describe()}):"
+                f" {RIGHT_IMAGE} paired with /camera/image by exact stamp,"
+                f" {self._pair_wait_s * 1e3:.0f} ms of grace; fx and the baseline"
+                f" come from {RIGHT_INFO}"
+            )
         self.get_logger().info(
             "depth stream up: /camera/image -> /camera/depth, /depth_scan; camera pose from TF"
             f" (config/camera.json's pitch {math.degrees(pitch):.1f} deg while TF has no edge)"
+        )
+
+    def _matcher_settings(self) -> MatcherSettings:
+        """The stereo matcher's numbers as this launch set them: the module's measured defaults
+        unless a parameter says otherwise. They are parameters and not live flags because a
+        matcher rebuilt mid-drive would change what the costmap is being marked from."""
+        default = MatcherSettings()
+        return MatcherSettings(
+            num_disparities=int(
+                self.declare_parameter("stereo_num_disparities", default.num_disparities).value
+            ),
+            block_size=int(self.declare_parameter("stereo_block_size", default.block_size).value),
+            mode=str(self.declare_parameter("stereo_mode", default.mode).value),
+            downscale=int(self.declare_parameter("stereo_downscale", default.downscale).value),
+            texture_threshold=float(
+                self.declare_parameter("stereo_texture_threshold", default.texture_threshold).value
+            ),
         )
 
     def close(self) -> None:
@@ -1679,6 +1861,18 @@ class DepthStream(Node):
         named in the log line and left alone — the next save drops it. Without a file nothing
         is published until POOL_MIN_SAMPLES beam pairs are pooled."""
         saved = load_law(self._law_file, now)
+        if saved is None and self._stereo_on:
+            # A stereo depth is already metres. Withholding it until POOL_MIN_SAMPLES beams have
+            # been pooled would make the lidar grant a licence it did not issue, and the first
+            # minute of every run would publish nothing. The identity law is what "no correction
+            # needed" is written as; the live fit replaces it as the beams arrive, and what it
+            # fits to is then the READOUT of how metric this head is (a 1.00 b +0.000 is right).
+            self._law.seed(1.0, 0.0)
+            self.get_logger().info(
+                f"no saved depth law at {self._law_file}: a stereo depth is metric already, so"
+                " the identity law (a 1.00 b +0.000) stands until the beams fit one"
+            )
+            return
         if saved is None:
             self.get_logger().info(
                 f"no saved depth law at {self._law_file}: publishing waits for"
@@ -1923,6 +2117,98 @@ class DepthStream(Node):
         straightens the pixels it measures with (``parallax_undistort``)."""
         self._intr = Intrinsics.from_camera_info(msg.k, msg.width, msg.height)
         self._dist = tuple(float(v) for v in msg.d)
+        self._stereo_geometry()
+
+    def _on_right_info(self, msg: CameraInfo) -> None:
+        """The right eye's rectified projection: ``P[0, 3]`` is ``-fx * baseline``, ROS's stereo
+        convention, and it is the only place this node learns how far apart the eyes are."""
+        self._right_tx = float(msg.p[3])
+        self._stereo_geometry()
+
+    def _stereo_geometry(self) -> None:
+        """Hand the stereo source the rig's two numbers as soon as both ``camera_info`` messages
+        have named them — the left eye's ``fx`` and the right eye's ``P[0, 3]`` — and say in the
+        log what the rig can then measure and how far. Done once; a rig that describes itself
+        wrongly is refused loudly rather than half-believed."""
+        stereo = self._stereo
+        if stereo is None or stereo.geometry is not None:
+            return
+        if self._intr is None or self._right_tx is None:
+            return
+        try:
+            rig = Baseline.from_projection(self._intr.fx, self._right_tx)
+        except StereoUnavailableError as exc:
+            self.get_logger().error(
+                f"the stereo rig cannot be read: {exc}", throttle_duration_sec=30
+            )
+            return
+        stereo.geometry = rig
+        self.get_logger().info(
+            f"stereo rig: fx {rig.fx:.1f} px, baseline {rig.baseline_m * 100:.2f} cm, so one"
+            f" pixel of disparity is {rig.fx * rig.baseline_m:.1f} m — this head measures"
+            f" {stereo.near:.2f} to {stereo.reach:.2f} m"
+        )
+
+    def _on_right(self, msg: Image) -> None:
+        """Keep the last few right eyes by their exact stamp, and wake whichever left picture is
+        waiting for one of them. Bounded: the worker keeps only the newest left frame anyway, so
+        a right eye whose left half was dropped is simply pushed out of the ring."""
+        with self._right_ready:
+            self._right.append(((int(msg.header.stamp.sec), int(msg.header.stamp.nanosec)), msg))
+            self._right_ready.notify_all()
+
+    def _right_at(self, stamp: Any) -> npt.NDArray[np.uint8] | None:
+        """The right eye of EXACTLY this stamp, waiting up to ``stereo_pair_wait_s`` for it, or
+        ``None``.
+
+        Exact, not nearest: both eyes are cut from ONE transport frame and published with one
+        stamp, so a near miss is a different exposure and pairing it would measure a disparity
+        that is half parallax from the cart's own motion. The wait exists only because the two
+        publications cross the transport separately and the left one can win the race."""
+        key = (int(stamp.sec), int(stamp.nanosec))
+        deadline = time.monotonic() + max(self._pair_wait_s, 0.0)
+        with self._right_ready:
+            while True:
+                for held, msg in reversed(self._right):
+                    if held == key:
+                        right = array_from_image(msg)
+                        return None if right is None or right.ndim != 2 else right
+                left = deadline - time.monotonic()
+                if left <= 0.0:
+                    return None
+                self._right_ready.wait(left)
+
+    def _views(self, msg: Image) -> Views | None:
+        """The pictures this frame's depth is measured from: the left one always, and under
+        ``depth_source: stereo`` the right eye of the same stamp. ``None`` — the frame is
+        dropped — for a picture this node cannot read or a right eye that never arrived."""
+        rgb = array_from_image(msg)
+        if rgb is None or rgb.ndim != 3:
+            self.get_logger().warning(
+                f"cannot read {msg.encoding} images", throttle_duration_sec=30
+            )
+            return None
+        if not self._stereo_on:
+            return Views(rgb)
+        t0 = time.perf_counter()
+        right = self._right_at(msg.header.stamp)
+        self._tally.sample("pair_wait_s", time.perf_counter() - t0)
+        if right is None:
+            self._tally.count("unpaired")
+            self.get_logger().warning(
+                f"no right eye stamped like this picture within {self._pair_wait_s * 1e3:.0f} ms:"
+                f" is {RIGHT_IMAGE} alive and does the camera publish both eyes with one stamp?",
+                throttle_duration_sec=30,
+            )
+            return None
+        if right.shape != rgb.shape[:2]:
+            self._tally.count("unpaired")
+            self.get_logger().warning(
+                f"the right eye is {right.shape} and the left {rgb.shape[:2]}: not one rig",
+                throttle_duration_sec=30,
+            )
+            return None
+        return Views(rgb, right)
 
     def _on_scan(self, msg: LaserScan) -> None:
         """Keep the last SCAN_WINDOW_S of scans: the frame picks the one nearest its exposure.
@@ -1946,18 +2232,19 @@ class DepthStream(Node):
         """One frame through the network, then the pipeline — the anchors, the law, the edges,
         the floor — the scan from the depth before the floor anchor, and out; or withheld by
         a law that does not exist yet."""
-        rgb = array_from_image(msg)
-        if rgb is None or rgb.ndim != 3:
-            self.get_logger().warning(
-                f"cannot read {msg.encoding} images", throttle_duration_sec=30
-            )
-            return
         tally = self._tally
-        with tally.measure("network"):
+        with tally.measure("network"):  # the raw depth source: the network, or the stereo matcher
+            views = self._views(msg)
+            if views is None:
+                return
+            rgb = views.rgb
             try:
-                depth = self._net(rgb)
+                depth = self._source(views)
             except DepthModelError as exc:
                 self._no_model(exc)
+                return
+            except StereoUnavailableError as exc:
+                self._no_stereo(exc)
                 return
         with tally.measure("pose"):  # includes the TF wait for the neck's edge
             cam, cam_optical = self._camera_at(msg.header.stamp)
@@ -2048,6 +2335,16 @@ class DepthStream(Node):
             return
         self.get_logger().error(
             f"{detail}\nthe service is down too: frames are lost until it answers",
+            throttle_duration_sec=30,
+        )
+
+    def _no_stereo(self, exc: StereoUnavailableError) -> None:
+        """The stereo head cannot answer this frame — no ``camera_info`` from both eyes yet, or
+        two eyes of different sizes. Nothing is published and nothing is fatal: the rig describes
+        itself on a latched-enough topic and the next frame is likely to have it."""
+        self._tally.count("no_stereo")
+        self.get_logger().warning(
+            f"the stereo head cannot answer: {exc}; is {RIGHT_INFO} alive?",
             throttle_duration_sec=30,
         )
 
@@ -2242,8 +2539,8 @@ class DepthStream(Node):
             f"depth: {w.rate('frames'):.1f} frames/s published ({c['processed']} through the"
             f" net, {c['dropped']} dropped, {c['withheld']} withheld); {self._pipeline.report()};"
             f" {c['verdicts']} lidar verdicts ({per_verdict:.0f} pairs each; held {c['held']} of"
-            f" {c['processed']} frames){self._extras(w)}, backend {self._net.status}"
-            f"{self._model_note()}, flags: {self._switches.state()}, ms median/max:"
+            f" {c['processed']} frames){self._extras(w)}, source {self._source.name}:"
+            f" {self._source.report()}, flags: {self._switches.state()}, ms median/max:"
             f" {w.stages()}"
         )
         self._pipeline.reset_stats()
@@ -2334,6 +2631,16 @@ class DepthStream(Node):
             dead = self._dead_edge(w, edge, "asks")
             if dead:
                 extra += f", {dead}"
+        if self._stereo_on:
+            waits = w.samples.get("pair_wait_s", [])
+            extra += f", unpaired {c['unpaired']} frames"
+            if waits:
+                extra += (
+                    f" (right eye waited {float(np.median(waits)) * 1e3:.1f} ms median,"
+                    f" {max(waits) * 1e3:.1f} max)"
+                )
+            if c["no_stereo"]:
+                extra += f", rig unknown {c['no_stereo']} frames"
         if c["carry_insane"]:
             extra += f", carry insane {c['carry_insane']} frames (the odometry ran away)"
         if c["camera_from_config"]:

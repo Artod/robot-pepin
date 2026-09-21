@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 import pytest
 import ros_stubs
+import stereo_scenes as scenes
 
 RCLPY = ros_stubs.install()
 
@@ -83,6 +84,7 @@ from pepin.depth_pipeline import (  # noqa: E402
     standard_pipeline,
 )
 from pepin.mounts import load_lidar_mount, rotation_from_rpy  # noqa: E402
+from pepin.stereo_depth import StereoMatcher  # noqa: E402
 from pepin.tsdf import RigidPose  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
@@ -1129,3 +1131,220 @@ def test_the_reach_moves_live_and_a_nearer_one_says_less(build: Build) -> None:
     near = np.asarray(array_from_image(published(node)[0][1]), dtype=float)
     assert np.nanmax(near) <= 1.5
     assert np.count_nonzero(np.isnan(near)) > np.count_nonzero(np.isnan(wide))
+
+
+# ---- the stereo head as the second source ---------------------------------------------------
+BASELINE_M = 0.063  # the module's nominal; the node learns it from the right eye's P[0,3]
+
+
+class FakeMatcher(StereoMatcher):
+    """A matcher whose answer the test writes: the disparities of a known scene, in order, and
+    the shapes it was handed so a test can prove the right eye reached it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.disparities: list[np.ndarray] = []
+        self.seen: list[tuple[Any, Any]] = []
+
+    def __call__(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+        self.seen.append((np.asarray(left).shape, np.asarray(right).shape))
+        return self.disparities.pop(0)
+
+
+def _right_info(stamp: Any, baseline_m: float = BASELINE_M) -> Any:
+    """The right eye's camera_info: the same rectified pinhole, its baseline in ``P[0, 3]``."""
+    p = [0.0] * 12
+    p[0], p[5], p[2], p[6] = INTR.fx, INTR.fy, INTR.cx, INTR.cy
+    p[3] = -INTR.fx * baseline_m
+    return ros_stubs.CameraInfo(
+        header=ros_stubs.Header(stamp=stamp, frame_id="camera_optical"),
+        height=HEIGHT,
+        width=WIDTH,
+        k=list(K),
+        p=p,
+    )
+
+
+def _right_image(stamp: Any) -> Any:
+    """The right eye as the camera node publishes it: rectified mono8, the left one's stamp."""
+    return ros_stubs.Image(
+        header=ros_stubs.Header(stamp=stamp, frame_id="camera_optical"),
+        height=HEIGHT,
+        width=WIDTH,
+        encoding="mono8",
+        step=WIDTH,
+        data=bytes(WIDTH * HEIGHT),
+    )
+
+
+def _disparity(z: np.ndarray, baseline_m: float = BASELINE_M) -> np.ndarray:
+    """The disparity a rig of this fx and baseline would measure for a true depth image."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(np.isfinite(z) & (z > 0), INTR.fx * baseline_m / z, np.nan).astype(
+            np.float32
+        )
+
+
+def rig(node: DepthStream) -> FakeMatcher:
+    """Tell the node's stereo source what rig it is on (the right eye's camera_info) and put a
+    scripted matcher in front of it; returns the matcher for the test to load."""
+    node.subs["/camera/right/camera_info"][1](_right_info(_stamp(0)))
+    matcher = FakeMatcher()
+    assert node._stereo is not None
+    node._stereo.matcher = matcher
+    return matcher
+
+
+def stereo_frame(
+    node: DepthStream,
+    matcher: FakeMatcher,
+    cam: CameraPose,
+    wall_x: float,
+    k: int,
+    right: bool = True,
+) -> Any:
+    """One stereo frame: the true scene as a disparity for the matcher, the right eye delivered
+    (unless ``right`` says otherwise), the scan of the moment, the left picture processed."""
+    stamp = _stamp(k)
+    for edge in node._tf.buffer.transforms.values():
+        edge.header.stamp = stamp
+    matcher.disparities.append(_disparity(_scene(cam, wall_x)))
+    if right:
+        node.subs["/camera/right/image"][1](_right_image(stamp))
+    node.subs["/scan"][1](_scan(wall_x, stamp))
+    node._process(_image(stamp))
+    return stamp
+
+
+def test_the_network_is_the_default_source_and_subscribes_to_no_right_eye(build: Build) -> None:
+    """The head on the robot today is one camera: nothing about this node changes until a launch
+    says ``depth_source: stereo``, and it does not sit on topics nobody publishes."""
+    node, _net = build()
+    assert node._source.name == "network" and node._stereo is None
+    assert "/camera/right/image" not in node.subs
+    assert "/camera/right/camera_info" not in node.subs
+    assert node.declared["law_file"] == "/maps/depth_law.json"
+    assert node.declared["depth_source"] == "network"
+
+
+def test_a_stereo_node_keeps_its_own_law_file_and_seeds_the_identity_law(build: Build) -> None:
+    """A stereo depth is metres already. With no law of its own saved it starts from a 1.00
+    b +0.000 and publishes at once, instead of withholding until the lidar has pooled enough
+    beams to grant permission — and it never reads the mono network's law file, whose a 1.28
+    would put every obstacle a quarter too far."""
+    node, _net = build(depth_source="stereo")
+    assert node.declared["law_file"] == "/maps/depth_law_stereo.json"
+    assert node._law.ready and (node._law.a, node._law.b) == (1.0, 0.0)
+    assert any("identity law" in text for text in node.logger.texts("info"))
+    plain, _net2 = build()
+    assert not plain._law.ready, "the mono node still waits for its beams"
+
+
+def test_the_stereo_source_pairs_the_right_eye_by_its_exact_stamp(build: Build) -> None:
+    """Both eyes come out of ONE transport frame with ONE stamp, so the pairing is exact: the
+    right eye of this picture's stamp reaches the matcher, and the published depth is the
+    metres the rig measured, at the left picture's own stamp and frame."""
+    node, _net = build(depth_source="stereo", stereo_reach_m=10.0, lidar_anchor=False)
+    matcher = rig(node)
+    assert node._source.name == "stereo"
+    assert node._stereo is not None and node._stereo.geometry is not None
+    assert node._stereo.geometry.baseline_m == pytest.approx(BASELINE_M)
+    stamp = stereo_frame(node, matcher, CONFIG_CAM, 2.0, 0)
+    assert matcher.seen == [((HEIGHT, WIDTH, 3), (HEIGHT, WIDTH))], "both eyes reached it"
+    depths, scans = published(node)
+    assert len(depths) == 1 and len(scans) == 1
+    assert depths[0].header.stamp == stamp and depths[0].header.frame_id == "camera_optical"
+    assert scans[0].header.stamp == stamp and scans[0].header.frame_id == "base_link"
+    measured = np.asarray(array_from_image(depths[0]), dtype=float)
+    truth = _scene(CONFIG_CAM, 2.0)
+    both = np.isfinite(measured) & np.isfinite(truth)
+    assert both.sum() > 10_000
+    assert float(np.median(np.abs(measured[both] - truth[both]) / truth[both])) < 0.01
+
+
+def test_a_left_picture_with_no_right_eye_of_its_stamp_is_dropped_and_counted(
+    build: Build,
+) -> None:
+    """A right eye of a NEIGHBOURING stamp is a different exposure: pairing it would measure the
+    cart's own motion as disparity. So the frame is dropped, counted, and named in the report
+    line — and the wait it cost is there too, because it is paid on the frame path."""
+    node, _net = build(depth_source="stereo", stereo_reach_m=10.0, stereo_pair_wait_s=0.0)
+    matcher = rig(node)
+    node.subs["/camera/right/image"][1](_right_image(_stamp(7)))  # a stamp no picture will have
+    stereo_frame(node, matcher, CONFIG_CAM, 2.0, 0, right=False)
+    assert published(node)[0] == [] and matcher.disparities, "nothing measured, nothing published"
+    matcher.disparities.clear()
+    stereo_frame(node, matcher, CONFIG_CAM, 2.0, 1)
+    assert len(published(node)[0]) == 1, "the very next paired frame goes out"
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "unpaired 1 frames" in line and "right eye waited" in line
+    assert "source stereo: 128px/5px 3way" in line and "% valid" in line
+
+
+def test_a_frame_before_the_rig_describes_itself_is_lost_and_said_so(build: Build) -> None:
+    """fx and the baseline arrive on camera_info. Until the RIGHT eye's has, the node cannot
+    turn a disparity into a metre, and it says so rather than publishing a guess."""
+    node, _net = build(depth_source="stereo")
+    assert node._stereo is not None and node._stereo.geometry is None
+    matcher = FakeMatcher()
+    node._stereo.matcher = matcher
+    matcher.disparities.append(_disparity(_scene(CONFIG_CAM, 2.0)))
+    node.subs["/camera/right/image"][1](_right_image(_stamp(0)))
+    node._process(_image(_stamp(0)))
+    assert published(node)[0] == []
+    assert any("cannot answer" in text for text in node.logger.texts("warning"))
+    node._report()
+    assert "rig unknown 1 frames" in node.logger.texts("info")[-1]
+
+
+def test_the_matcher_s_holes_survive_the_whole_chain_and_the_fan(build: Build) -> None:
+    """The network's depth is dense and a matcher's is not: the left band it cannot search, the
+    blank wall, the occlusions. Every stage on, every hole must stay a hole — NaN through the
+    edge filter, the laws, the floor anchor and out — and /depth_scan must answer NaN for a
+    bearing with no finite pixel at all (unknown: a costmap neither marks nor clears it) rather
+    than clearing it to the horizon."""
+    node, _net = build(depth_source="stereo", stereo_reach_m=10.0, fan_floor_gate="off")
+    matcher = rig(node)
+    truth = _scene(CONFIG_CAM, 2.0)
+    holed = _disparity(truth)
+    holed[:, : WIDTH // 4] = np.nan  # the band no right eye reaches into
+    holed[:, WIDTH // 4 : WIDTH // 2] = np.nan  # a blank wall the texture gate refused
+    matcher.disparities.append(holed)
+    node.subs["/camera/right/image"][1](_right_image(_stamp(0)))
+    node.subs["/scan"][1](_scan(2.0, _stamp(0)))
+    node._process(_image(_stamp(0)))
+    depths, scans = published(node)
+    assert len(depths) == 1, "a holed depth is still a depth"
+    out = np.asarray(array_from_image(depths[0]), dtype=float)
+    assert np.all(np.isnan(out[:, : WIDTH // 2])), "a hole must not be filled by any stage"
+    assert np.isfinite(out[:, WIDTH // 2 + 4 :]).any(), "and the rest must survive"
+    ranges = np.asarray(scans[0].ranges)
+    assert np.isnan(ranges).any(), "a bearing with no finite pixel is unknown, not clear"
+    assert np.isfinite(ranges).any(), "and the half that was measured marks the fan"
+
+
+def test_the_real_matcher_measures_a_rendered_room_through_the_whole_node(build: Build) -> None:
+    """One pass with nothing faked but the room: a rectified pair rendered from a known depth
+    goes in as bgr8 and mono8, the node's own StereoMatcher runs on it, and what comes out of
+    /camera/depth is the room's metres — no lidar, no law fitted, no network anywhere. This is
+    the wiring test: the eyes reach OpenCV in the right order and the answer is not mirrored,
+    which a disparity of the wrong sign would make look like an empty picture."""
+    node, _net = build(
+        depth_source="stereo", stereo_reach_m=10.0, lidar_anchor=False, fan_floor_gate="off"
+    )
+    node.subs["/camera/right/camera_info"][1](_right_info(_stamp(0)))
+    truth = np.where(np.isfinite(_scene(CONFIG_CAM, 2.0)), _scene(CONFIG_CAM, 2.0), 6.0)
+    texture = scenes.noise_texture((HEIGHT, WIDTH), np.random.default_rng(11))
+    left, right = scenes.render_pair(truth, texture, fx_b=INTR.fx * BASELINE_M)
+    colour = np.repeat(left[:, :, None], 3, axis=2)
+    stamp = _stamp(0)
+    node.subs["/camera/right/image"][1](image_from_array(right, "mono8", stamp, "camera_optical"))
+    node._process(image_from_array(colour, "bgr8", stamp, "camera_optical"))
+    depths, _scans = published(node)
+    assert len(depths) == 1
+    measured = np.asarray(array_from_image(depths[0]), dtype=float)
+    both = np.isfinite(measured) & (truth < 5.0)
+    assert both.mean() > 0.3, "the real matcher answered for almost nothing"
+    assert float(np.median(np.abs(measured[both] - truth[both]) / truth[both])) < 0.03
+    assert not np.isfinite(measured[:, :128]).any(), "the band no right eye reaches is unknown"

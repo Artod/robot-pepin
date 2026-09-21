@@ -1905,15 +1905,18 @@ def test_a_reset_empties_the_volume_and_nothing_falls_back_to_a_picture() -> Non
 
 
 def test_the_depth_network_runs_where_the_backend_flag_says_and_the_cpu_model_waits() -> None:
-    """The depth node calls one backend where it called the model (``self._net(rgb)``); that
-    backend is the switch between the laptop's GPU service and the CPU model in the container
-    (pepin.depth_service.Fallback), picked live by the ``depth_backend`` flag whose default
-    comes from PEPIN_DEPTH_BACKEND, and the CPU model is built on its first local frame, never
-    at start. laptop.sh sets the flag and the service's address only when it starts the
-    service; without them the node is on the CPU as before."""
+    """The depth node asks ONE depth source for a frame's raw depth (``self._source(views)``,
+    2026-09-20: the stereo head is the second one) and the network source calls the backend with
+    the left picture and nothing else; that backend is the switch between the laptop's GPU
+    service and the CPU model in the container (pepin.depth_service.Fallback), picked live by
+    the ``depth_backend`` flag whose default comes from PEPIN_DEPTH_BACKEND, and the CPU model is
+    built on its first local frame, never at start. laptop.sh sets the flag and the service's
+    address only when it starts the service; without them the node is on the CPU as before."""
     node = sf.tree(f"{NODES}/depth_stream.py")
     assert {"Fallback", "RemoteDepth", "LazyDepth"} <= sf.imported(node)
-    assert "self._net(rgb)" in sf.unparsed(node, ast.Call), "the call site did not move"
+    calls = sf.unparsed(node, ast.Call)
+    assert "self._source(views)" in calls, "the worker asks one source for the raw depth"
+    assert "self._backend()(views.rgb)" in calls, "the network source calls the backend"
     switch = sf.calls_to(node, "Fallback")
     assert len(switch) == 1 and sf.dotted(switch[0].args[0]) == "RemoteDepth()"
     assert ast.unparse(sf.keywords(switch[0])["mode"]) == "self._switches['depth_backend']"
