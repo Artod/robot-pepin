@@ -1741,6 +1741,14 @@ class DepthStream(Node):
         self._last_verdict_wall = time.time()  # the law's age is the beams', not the node's
         self._seed_laws(time.time())
         self._pipeline = standard_pipeline(self._law, range_stage=self._range)
+        # The stereo source's start-up parameters, declared HERE: once the flag kit below is
+        # built, its parameter callback refuses every name that is not a flag ("not a flag of
+        # this node"), so a parameter declared after it kills the node at start — it did, on the
+        # robot's first stereo start (2026-09-21), and the ROS stubs of the unit tests cannot
+        # show it.
+        self._pair_wait_s = float(self.declare_parameter("stereo_pair_wait_s", PAIR_WAIT_S).value)
+        self._stereo_reach_m = float(self.declare_parameter("stereo_reach_m", 0.0).value)
+        self._stereo_matcher_settings = self._matcher_settings()
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         for name in self._pipeline.names:  # a launch override reaches the stage it names
             self._pipeline.set(name, self._switches.on(name))
@@ -1774,12 +1782,11 @@ class DepthStream(Node):
         self._right_tx: float | None = None  # the right eye's P[0,3] = -fx * baseline
         self._right: deque[tuple[tuple[int, int], Image]] = deque(maxlen=PAIR_BUFFER)
         self._right_ready = threading.Condition()
-        self._pair_wait_s = float(self.declare_parameter("stereo_pair_wait_s", PAIR_WAIT_S).value)
         self._stereo: StereoDepth | None = None
         if self._stereo_on:
             self._stereo = StereoDepth(
-                matcher=StereoMatcher(self._matcher_settings()),
-                reach=float(self.declare_parameter("stereo_reach_m", 0.0).value),
+                matcher=StereoMatcher(self._stereo_matcher_settings),
+                reach=self._stereo_reach_m,
             )
             self.create_subscription(CameraInfo, RIGHT_INFO, self._on_right_info, reliable)
             self.create_subscription(Image, RIGHT_IMAGE, self._on_right, newest)
