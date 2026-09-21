@@ -2877,3 +2877,13 @@ def test_zenoh_runs_no_bridge_anywhere() -> None:
             f"{launch} must not start a watch of a bridge that is not there"
         )
         assert "pepin_bringup.bridge_watch" in src, f"{launch} keeps the watch for the cyclone path"
+
+
+def test_the_camera_rig_decides_who_measures_the_depth() -> None:
+    """One choice, the rig's name: a stereo head gets the matched eyes as its depth source, the
+    webcam gets the network, and the depth node is told at launch (it decides its subscriptions)."""
+    launch = (REPO / VSLAM_LAUNCH).read_text()
+    assert 'f"depth_source:={depth_source(rig)}"' in launch
+    assert 'return "stereo" if CameraConfig.load(config_file("camera.json"), rig).stereo' in launch
+    config = json.loads((REPO / "config/camera.json").read_text())
+    assert "rig" in config["stereo"] and "rig" not in config["overview"]

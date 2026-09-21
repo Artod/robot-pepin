@@ -91,7 +91,7 @@ from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from pepin.camera import active_camera
+from pepin.camera import CameraConfig, active_camera
 from pepin.deployment import (
     CONTAINER_STOP_TIMEOUT_S,
     config_file,
@@ -570,6 +570,14 @@ def camera_rig(name: str) -> str:
     return active_camera(json.loads(config_file("camera.json").read_text()), name)
 
 
+def depth_source(rig: str) -> str:
+    """What measures the depth on this rig (pepin_bringup.depth_stream's ``depth_source``): a
+    stereo head measures it (``stereo``: the two eyes matched), a single camera has the network
+    guess it (``network``). Decided by the camera block itself, so the rig's name is the only
+    thing anybody chooses."""
+    return "stereo" if CameraConfig.load(config_file("camera.json"), rig).stereo else "network"
+
+
 def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     """The nodes of this launch, once the arguments have values."""
     board = LaunchConfiguration("board")
@@ -604,6 +612,9 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             "--ros-args",
             "-p",
             ["board:=", board],
+            # The rig decides who measures the depth; everything after the raw depth is one chain.
+            "-p",
+            f"depth_source:={depth_source(rig)}",
         ],
         output="screen",
         prefix=_after_ghost("/depth_stream"),
