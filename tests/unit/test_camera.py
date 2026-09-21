@@ -1,21 +1,27 @@
-"""The camera's numbers: optics from a field of view, the mount as transforms."""
+"""The camera's numbers: which rig the head is, optics from a field of view, the mount."""
 
+import json
 import math
 from pathlib import Path
 
 import numpy as np
 import pytest
+from camera_configs import ideal_stereo_calibration
 
 from pepin.camera import (
     CameraConfig,
+    active_camera,
     camera_info_arrays,
+    camera_names,
     intrinsics,
     mount_transform,
     optical_rotation,
+    optics,
     quaternion_from_rpy,
 )
 
 REPO = Path(__file__).resolve().parents[2]
+CAMERA_JSON = REPO / "config/camera.json"
 
 
 def test_the_config_loads_and_names_the_board() -> None:
@@ -64,3 +70,99 @@ def test_the_mount_and_the_optical_frame_follow_rep_103() -> None:
     assert np.allclose(rot @ np.array([0.0, 0.0, 1.0]), [1.0, 0.0, 0.0], atol=1e-9)  # z -> forward
     assert np.allclose(rot @ np.array([1.0, 0.0, 0.0]), [0.0, -1.0, 0.0], atol=1e-9)  # x -> right
     assert np.allclose(rot @ np.array([0.0, 1.0, 0.0]), [0.0, 0.0, -1.0], atol=1e-9)  # y -> down
+
+
+# ---- which rig the head is -------------------------------------------------------------------
+def test_the_file_names_its_cameras_and_says_which_one_is_the_head() -> None:
+    """The committed config's shape again: two rigs by name, an ``active`` that is one of them,
+    and the keys that are not cameras (``active``, ``notes``) left out of the list."""
+    data = json.loads(CAMERA_JSON.read_text())
+    assert camera_names(data) == ["overview", "stereo"]
+    assert data["active"] in camera_names(data)
+    assert active_camera(data, environ={}) == data["active"]
+
+
+def test_the_active_camera_is_decided_in_one_place_and_in_one_order() -> None:
+    """An explicit name beats PEPIN_CAMERA, which beats the file's ``active``, which beats the
+    mono rig that was here first. An empty string anywhere is "nobody said", so a launch passes
+    its argument through without having to know whether it was given."""
+    data = json.loads(CAMERA_JSON.read_text())
+    assert active_camera(data, "overview", {"PEPIN_CAMERA": "stereo"}) == "overview"
+    assert active_camera(data, "", {"PEPIN_CAMERA": "overview"}) == "overview"
+    assert active_camera(data, None, {"PEPIN_CAMERA": ""}) == data["active"]
+    bare = {name: block for name, block in data.items() if name != "active"}
+    assert active_camera(bare, None, {}) == "overview"
+
+
+def test_an_unknown_camera_stops_the_node_and_names_the_ones_there_are() -> None:
+    """A typo in PEPIN_CAMERA or in ``camera:=`` must not leave a node publishing another rig's
+    optics: it raises at start, saying what it could have been asked for."""
+    data = json.loads(CAMERA_JSON.read_text())
+    with pytest.raises(ValueError, match=r"no camera named 'sterio'.*overview, stereo"):
+        active_camera(data, "sterio", {})
+    with pytest.raises(ValueError, match="no camera named 'stereo'"):
+        active_camera({"overview": data["overview"]}, None, {"PEPIN_CAMERA": "stereo"})
+
+
+def test_the_environment_overrides_the_file_for_one_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ros/laptop.sh forwards PEPIN_CAMERA into the container, and that is the whole of running
+    the other rig for one container: the loader with no name reads it."""
+    monkeypatch.setenv("PEPIN_CAMERA", "overview")
+    assert CameraConfig.load(CAMERA_JSON).name == "overview"
+    monkeypatch.delenv("PEPIN_CAMERA")
+    assert CameraConfig.load(CAMERA_JSON).name == json.loads(CAMERA_JSON.read_text())["active"]
+
+
+# ---- the stereo rig --------------------------------------------------------------------------
+def test_the_stereo_block_is_one_eye_beside_the_frame_that_carries_two() -> None:
+    """width/height are ONE EYE — the picture every consumer of /camera/image sees — while the
+    rig block carries what is on the wire: one 1600x600 side-by-side frame from a module that is
+    mounted upside down, and the vendor's baseline as a number to compare a calibration with."""
+    cfg = CameraConfig.load(CAMERA_JSON, name="stereo", board="10.0.0.187")
+    assert cfg.stereo and cfg.rig is not None
+    assert (cfg.width, cfg.height) == (800, 600) and cfg.hfov_deg == 94.0
+    assert (cfg.rig.frame_width, cfg.rig.frame_height) == (1600, 600)
+    assert cfg.rig.layout == "side_by_side" and cfg.rig.upside_down
+    assert cfg.rig.baseline_m_nominal == 0.063
+    assert cfg.stream == "http://10.0.0.187:8080/stream"  # one camera on the board, one stream
+    assert cfg.rig.calibration_path("/ws/config") == Path("/ws/config/stereo_calibration.json")
+
+
+def test_the_stereo_mount_is_the_left_eye_beside_the_webcam_s_own() -> None:
+    """The module is taped onto the webcam: the same measured height and pitch, with the left
+    eye half a nominal baseline to the robot's LEFT — provisional, and the block says so."""
+    mono = CameraConfig.load(CAMERA_JSON, name="overview")
+    stereo = CameraConfig.load(CAMERA_JSON, name="stereo")
+    assert stereo.rig is not None
+    assert (stereo.z_m, stereo.pitch_deg) == (mono.z_m, mono.pitch_deg)
+    assert stereo.y_m == pytest.approx(stereo.rig.baseline_m_nominal / 2)
+    x, y, z, roll, pitch, yaw = mount_transform(stereo)
+    assert (x, y, z) == (0.0, 0.0315, 1.203) and (roll, yaw) == (0.0, 0.0)
+    assert pitch == pytest.approx(math.radians(23.8))
+    block = json.loads(CAMERA_JSON.read_text())["stereo"]["mount"]
+    assert "PROVISIONAL" in block["note"] and "MEASURED" in block["note"]
+
+
+def test_a_stereo_rig_is_calibrated_exactly_when_its_calibration_file_loads(
+    tmp_path: Path,
+) -> None:
+    """There is no intrinsics block for a stereo head: what makes it able to measure is
+    config/stereo_calibration.json, and half a file is not a calibration. The optics answered
+    here stay the nominal ONE-EYE pinhole either way — the measured one is the rectified pinhole
+    the camera node puts on /camera/camera_info — but the source says which the reader holds."""
+    data = json.loads(CAMERA_JSON.read_text())
+    config = tmp_path / "camera.json"
+    config.write_text(json.dumps(data))
+    blind = CameraConfig.load(config, name="stereo")
+    assert not blind.calibrated and blind.calibration is None
+    assert "uncalibrated stereo head" in optics(blind, 800, 600).source
+    (tmp_path / "stereo_calibration.json").write_text('{"width": 800, "height"')  # a torn write
+    assert not CameraConfig.load(config, name="stereo").calibrated
+    ideal_stereo_calibration().write(tmp_path / "stereo_calibration.json")
+    seeing = CameraConfig.load(config, name="stereo")
+    assert seeing.calibrated and seeing.calibration is None
+    lens = optics(seeing, 800, 600)
+    assert not lens.calibrated and "on /camera/camera_info" in lens.source
+    assert lens.hfov_deg == pytest.approx(94.0), "the nominal pinhole of one eye"

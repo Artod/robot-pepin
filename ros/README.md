@@ -299,6 +299,50 @@ Watch the map grow with the `ros/foxglove/pepin_slam.json` layout at `ws://local
 To go back to driving a saved map: `ros/thin.sh vision` (which leaves SLAM mode), then
 `ros/mode.sh nav /maps/flat3_slam.yaml`.
 
+## Camera rigs
+
+The head is a RIG chosen by name. `config/camera.json` holds the cameras as named blocks and one
+key says which of them the robot is wearing:
+
+| rig | what it is | what the laptop publishes |
+| --- | --- | --- |
+| `overview` | the mono AC310 webcam, 1280x720, checkerboard-calibrated (45 views, 0.23 px) | `/camera/image` (bgr8, half size by default) + `/camera/camera_info` |
+| `stereo` | the global-shutter stereo module, ONE 1600x600 side-by-side frame at 10 fps, 800x600 an eye, taped upside down | the same two topics for the LEFT eye (rectified) plus `/camera/right/image` (mono8) + `/camera/right/camera_info`, all four under one stamp in the left eye's optical frame |
+
+**Switching rigs takes two edits, one per half of the robot.** They must agree: `"active":
+"stereo"` beside a board still serving the webcam is a node cutting a 1280x720 picture down the
+middle (it says so, with both sizes, in every report line).
+
+* **The board** — which device ustreamer opens and at what resolution: `/etc/default/pepin-camera`
+  (`PEPIN_CAMERA_DEVICE`, a `/dev/v4l/by-id` path; `PEPIN_CAMERA_RESOLUTION`, `1600x600` for the
+  stereo module and `1280x720` for the webcam; `PEPIN_CAMERA_ENCODER=HW`, which passes the
+  camera's own MJPEG through instead of re-encoding it on an A53 core). The unit reading it is
+  `board/pepin-camera.service`; `systemctl restart pepin-camera` after an edit.
+* **The laptop** — which block of `config/camera.json` every node reads: the top-level `"active"`.
+  `PEPIN_CAMERA=overview ros/laptop.sh vslam` overrides it for one container (the variable is
+  forwarded in), and `camera:=<name>` overrides both for one launch. The order lives in one
+  function, `pepin.camera.active_camera`; a name no block answers to stops the launch at start.
+
+**What stereo publishes.** The laptop decodes the side-by-side frame once, cuts it into the two
+eyes as the robot sees them (`pepin.stereo.SideBySide`: an upside-down module's halves are turned
+back and swapped — verified on a real frame, only then is the disparity of near objects positive)
+and, **with `config/stereo_calibration.json`**, rectifies both onto one pinhole with the rows
+aligned. Then four messages go out with ONE stamp (the board's capture time) and the LEFT eye's
+`camera_optical` frame: the left picture with the rectified `CameraInfo` (`P`'s Tx zero, no
+distortion), and the right picture in grey with the same `K` and `P[0,3] = -fx * baseline`. That
+is where the baseline lives from then on — on the wire, not in a config. Everything that already
+reads `/camera/image` + `/camera/camera_info` sees one ordinary camera.
+
+**Without that file** the head cannot measure: only the left eye goes out, unrectified, with the
+nominal one-eye pinhole of `hfov_deg`, nothing is published on the right topics, and the report
+line says `NOT RECTIFIED ... depth has no source`. The rectifier costs about a second to build,
+so it is built once and rebuilt only when the calibration file's mtime moves — a calibration
+finished while the robot is running is picked up without a restart, and the log says so.
+
+On a stereo rig the two mono flags are refused with their reason: `undistort`, because the stereo
+calibration is what rectifies here, and any `scale` but 1.0, because the eyes are published at
+the size their remap tables were built for, which is the size a disparity is in pixels of.
+
 ## Camera calibration
 
 The neck camera's optics were a guess: one field-of-view number (78 deg, fitted against the lidar

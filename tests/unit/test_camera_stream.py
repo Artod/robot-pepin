@@ -7,6 +7,7 @@ out, which is the point: the pump must be joined before the node is destroyed.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 import urllib.request
@@ -21,13 +22,24 @@ import ros_stubs
 RCLPY = ros_stubs.install()
 
 import cv2  # noqa: E402
-from camera_configs import CALIBRATION, camera_config  # noqa: E402
-from pepin_bringup.camera_stream import FLAGS, CameraStream  # noqa: E402
+from camera_configs import (  # noqa: E402
+    CALIBRATION,
+    camera_config,
+    ideal_stereo_calibration,
+    stereo_config,
+)
+from pepin_bringup.camera_stream import (  # noqa: E402
+    FLAGS,
+    RIGHT_IMAGE_TOPIC,
+    RIGHT_INFO_TOPIC,
+    CameraStream,
+)
 from pepin_bringup.msgs import stamp_seconds  # noqa: E402
 from pepin_bringup.node_kit import spin_main  # noqa: E402
 
 from pepin.camera import quaternion_from_rpy  # noqa: E402
 from pepin.mounts import Mounts  # noqa: E402
+from pepin.stereo import SideBySide  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO / "config"
@@ -176,6 +188,27 @@ def build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Build]:
 def edges(node: CameraStream) -> list[tuple[str, str]]:
     """The static transforms the node broadcast, as (parent, child)."""
     return [(t.header.frame_id, t.child_frame_id) for t in node._static.sent]
+
+
+def side_by_side(width: int = 1600, height: int = 600) -> np.ndarray:
+    """One transport frame of the stereo module as it arrives: the two halves marked in their
+    own corners, so a swap or a missing rotation shows up as a pixel in the wrong place. The
+    module is taped upside down, so the frame is the picture turned over — the mark of the eye
+    that will become the robot's LEFT sits in the second half."""
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    half = width // 2
+    frame[0, 0] = (255, 0, 0)  # the first half's corner: the RIGHT eye's bottom right
+    frame[0, half] = (0, 255, 0)  # the second half's: the LEFT eye's bottom right
+    frame[height - 1, width - 1] = (0, 0, 255)  # and the left eye's top left
+    return frame
+
+
+def stereo_jpeg(width: int = 1600, height: int = 600) -> bytes:
+    """:func:`side_by_side` as the JPEG the board sends (quality 100, so the marked pixels
+    survive the encoder and a test can follow them through the splitter)."""
+    ok, buffer = cv2.imencode(".jpg", side_by_side(width, height), [cv2.IMWRITE_JPEG_QUALITY, 100])
+    assert ok
+    return bytes(buffer)
 
 
 # ---- the static transforms -------------------------------------------------------------------
@@ -462,3 +495,196 @@ def test_the_pump_is_joined_before_the_node_is_destroyed_or_the_context_shut_dow
     order.append("shutdown" if RCLPY.log[-1] == "try_shutdown" else "no shutdown")
     assert order == ["pump out", "destroy", "shutdown"]
     assert built[0].pubs["/camera/image"].sent, "the frame before the signal still went out"
+
+
+# ---- the stereo rig --------------------------------------------------------------------------
+def published_image(msg: Any) -> np.ndarray:
+    """A published ``sensor_msgs/Image`` back as the array it was made from."""
+    channels = 3 if msg.encoding == "bgr8" else 1
+    array = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, channels)
+    return array if channels == 3 else array[:, :, 0]
+
+
+def test_a_stereo_rig_publishes_two_rectified_eyes_of_one_frame_under_one_stamp(
+    build: Build, tmp_path: Path
+) -> None:
+    """The four messages ROS stereo wants, out of ONE side-by-side frame: the left eye in colour
+    with the rectified pinhole (P's Tx zero, no distortion left, R the identity) and the right
+    eye in grey with the same K and ``P[0, 3] = -fx * baseline`` — the baseline read off the
+    wire, not out of a config. One stamp, the board's, on all four; one frame id, the LEFT eye's
+    optical frame, because that is the frame the pair is measured in."""
+    config = stereo_config(tmp_path, ideal_stereo_calibration())
+    node, _ = build(multipart([(1_750_000_000.25, stereo_jpeg())]), config=config)
+    images = node.pubs["/camera/image"].sent
+    assert until(lambda: images), "the pump published nothing"
+    left, info = images[0], node.pubs["/camera/camera_info"].sent[0]
+    right = node.pubs[RIGHT_IMAGE_TOPIC].sent[0]
+    right_info = node.pubs[RIGHT_INFO_TOPIC].sent[0]
+    assert (left.width, left.height) == (800, 600) and left.encoding == "bgr8"
+    assert (right.width, right.height) == (800, 600) and right.encoding == "mono8"
+    assert len(right.data) == 800 * 600 and right.step == 800
+    stamps = {(m.header.stamp.sec, m.header.stamp.nanosec) for m in (left, info, right, right_info)}
+    assert len(stamps) == 1, "the four messages are one moment"
+    assert stamp_seconds(left.header.stamp) == pytest.approx(1_750_000_000.25, abs=1e-6)
+    frames = {m.header.frame_id for m in (left, info, right, right_info)}
+    assert frames == {"camera_optical"}, "the pair lives in the left eye's optical frame"
+    assert (info.width, info.height) == (800, 600) and info.d == [0.0] * 5
+    assert info.r == [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    assert info.k[0] == pytest.approx(700.0, abs=0.01)
+    assert info.k[2] == pytest.approx(400.0, abs=0.01)
+    assert info.p[3] == 0.0, "the left eye is the origin of the rectified pair"
+    assert list(right_info.k) == list(info.k) and right_info.d == [0.0] * 5
+    assert right_info.p[3] == pytest.approx(-info.k[0] * 0.063, abs=1e-6)
+    assert right_info.p[3] / -right_info.p[0] == pytest.approx(0.063, abs=1e-9)
+
+
+def test_the_upside_down_module_s_eyes_are_turned_back_and_swapped(
+    build: Build, tmp_path: Path
+) -> None:
+    """The module is taped upside down, so each half is rotated 180 degrees and the halves trade
+    places: what goes out as the LEFT eye is the SECOND half of the frame, turned. The
+    calibration here is two ideal pinholes, whose rectification is the identity, so the pixels on
+    the wire are the splitter's own and the swap is visible in them."""
+    node, _ = build(config=stereo_config(tmp_path, ideal_stereo_calibration()))
+    frame = side_by_side()
+    node._publish(frame, 2.0)
+    left = published_image(node.pubs["/camera/image"].sent[-1])
+    right = published_image(node.pubs[RIGHT_IMAGE_TOPIC].sent[-1])
+    expected_left, expected_right = SideBySide(upside_down=True).eyes(frame)
+    assert np.array_equal(left, expected_left), "the left eye is the second half, turned"
+    assert np.array_equal(right, cv2.cvtColor(expected_right, cv2.COLOR_BGR2GRAY))
+    assert tuple(left[-1, -1]) == (0, 255, 0), "the second half's mark is at the bottom right"
+    assert tuple(left[0, 0]) == (0, 0, 255)
+    assert not np.array_equal(left, frame[:, :800]), "the halves really did trade places"
+
+
+def test_an_uncalibrated_stereo_head_sends_the_left_eye_alone_and_says_it_cannot_measure(
+    build: Build, tmp_path: Path
+) -> None:
+    """No config/stereo_calibration.json: the left eye goes out unrectified with the nominal
+    one-eye pinhole (94 degrees across 800 px), NOTHING is published on the right topics — a
+    right picture with no measured baseline is a depth nobody can compute and everybody would
+    try to — and both the start-up warning and the report line say so in words."""
+    node, _ = build(multipart([(1.0, stereo_jpeg())]), config=stereo_config(tmp_path))
+    assert until(lambda: node.pubs["/camera/image"].sent)
+    assert node.pubs[RIGHT_IMAGE_TOPIC].sent == [] and node.pubs[RIGHT_INFO_TOPIC].sent == []
+    image = node.pubs["/camera/image"].sent[0]
+    info = node.pubs["/camera/camera_info"].sent[0]
+    assert (image.width, image.height) == (800, 600) and image.encoding == "bgr8"
+    assert info.k[0] == pytest.approx(400.0 / math.tan(math.radians(47.0)), abs=0.01)
+    assert (info.k[2], info.k[5]) == (400.0, 300.0) and info.p[3] == 0.0
+    warning = " ".join(node.logger.texts("warning"))
+    assert (
+        "THE STEREO HEAD IS UNCALIBRATED" in warning and "no stereo_calibration.json yet" in warning
+    )
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "NOT RECTIFIED" in line and "depth has no source" in line
+
+
+def test_a_calibration_finished_while_the_node_runs_is_picked_up_without_a_restart(
+    build: Build, tmp_path: Path
+) -> None:
+    """The rectifier costs about a second to build, so it is built once — and rebuilt when
+    config/stereo_calibration.json's mtime moves, which is what an evening's calibration is. The
+    frame after it is rectified and the right eye starts, with the log saying which file and what
+    it measured."""
+    node, _ = build(config=stereo_config(tmp_path))
+    node._publish(side_by_side(), 1.0)
+    assert node.pubs[RIGHT_IMAGE_TOPIC].sent == []
+    ideal_stereo_calibration().write(tmp_path / "stereo_calibration.json")
+    node._calibration_checked = 0.0  # the pump looks every CALIBRATION_POLL_S; this is that look
+    node._check_calibration()
+    node._publish(side_by_side(), 2.0)
+    assert len(node.pubs[RIGHT_IMAGE_TOPIC].sent) == 1, "the eye after the calibration"
+    assert node.pubs["/camera/camera_info"].sent[-1].k[0] == pytest.approx(700.0, abs=0.01)
+    assert node.pubs[RIGHT_INFO_TOPIC].sent[-1].p[3] < 0.0
+    appeared = [line for line in node.logger.texts("info") if "stereo calibration appeared" in line]
+    assert appeared and "opencv stereo 2026-09-20" in appeared[0] and "rms 0.21 px" in appeared[0]
+
+
+def test_the_mono_rig_s_two_flags_are_refused_on_a_stereo_head_with_their_reason(
+    build: Build, tmp_path: Path
+) -> None:
+    """``scale`` and ``undistort`` belong to the mono webcam. A stereo head publishes at its
+    calibration's own size — the size its remap tables were built for and a disparity is in
+    pixels of — and is rectified by that calibration, so the node pins the scale to 1.0 at start
+    and refuses both changes with the reason instead of quietly doing nothing."""
+    node, _ = build(config=stereo_config(tmp_path, ideal_stereo_calibration()))
+    assert node._switches["scale"] == 1.0, "pinned at start, so the report line is not a lie"
+    assert node._published.size == (800, 600)
+    refused = node.set_parameters([Param("scale", 0.5)])[0]
+    assert not refused.successful and "calibration's own size" in refused.reason
+    refused = node.set_parameters([Param("undistort", True)])[0]
+    assert not refused.successful and "its own stereo calibration" in refused.reason
+    assert node._switches["scale"] == 1.0 and not node._switches.on("undistort")
+    assert node.set_parameters([Param("scale", 1.0)])[0].successful, "the value it already has"
+
+
+def test_the_stereo_report_line_names_the_rig_the_evidence_and_every_stage(
+    build: Build, tmp_path: Path
+) -> None:
+    """The line an operator reads: how the eyes arrive and whether they are rectified (with the
+    calibration's method, day and RMS), then the milliseconds of every stage of a frame —
+    decode, split, rectify, publish — as median/p95 over the period (CLAUDE.md rule 15)."""
+    config = stereo_config(tmp_path, ideal_stereo_calibration())
+    node, _ = build(multipart([(1.0, stereo_jpeg()), (1.1, stereo_jpeg())]), config=config)
+    assert until(lambda: len(node.pubs["/camera/image"].sent) == 2)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert line.startswith("camera: ") and "frames/s" in line
+    assert "rig: stereo (1600x600 side_by_side -> 800x600 an eye, turned upright)" in line
+    assert "rectified: opencv stereo 2026-09-20, rms 0.21 px, 24 views, baseline 63.0 mm" in line
+    assert "stages: " in line and " ms median/p95" in line
+    for stage in ("decode", "split", "rectify", "publish"):
+        assert f"{stage} " in line.split("stages: ")[1]
+    assert "flags: scale=1.0 undistort=off static_camera_tf=on" in line
+
+
+def test_a_stereo_frame_of_the_wrong_size_is_counted_and_named_in_the_report(
+    build: Build, tmp_path: Path
+) -> None:
+    """The board's half of the switch is /etc/default/pepin-camera. If it is still serving the
+    mono webcam while this side is on the stereo rig, the node would be cutting a webcam picture
+    down the middle: it says so, with both sizes, in every report line."""
+    node, _ = build(config=stereo_config(tmp_path, ideal_stereo_calibration()))
+    node._publish(np.zeros((720, 1280, 3), dtype=np.uint8), 1.0)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "1 frames of the wrong size" in line and "1280x720" in line
+    assert "the rig says 1600x600" in line and "/etc/default/pepin-camera" in line
+
+
+def test_the_static_edges_are_the_active_rig_s_mount(build: Build, tmp_path: Path) -> None:
+    """The same three edges, from the camera the node is actually publishing: a stereo head's
+    base_link -> camera_link is its LEFT eye's mount, half a baseline off the centre line, and
+    the mono webcam's is on it."""
+    node, _ = build(config=stereo_config(tmp_path, ideal_stereo_calibration()))
+    assert edges(node) == [
+        ("base_link", "camera_link"),
+        ("camera_link", "camera_optical"),
+        ("base_link", "laser"),
+    ]
+    link = node._static.sent[0].transform.translation
+    assert (link.x, link.y, link.z) == (0.0, 0.0315, 1.203)
+    mono, _ = build()
+    assert mono._static.sent[0].transform.translation.y == 0.0
+
+
+def test_the_mono_rig_is_exactly_the_node_it_always_was(build: Build) -> None:
+    """The contract the stereo path must not touch: with the overview camera active this node
+    advertises TWO topics and no more, publishes one bgr8 picture at half the webcam's size with
+    its own CameraInfo, keeps the scale flag at 0.5, and its report line carries no rig and no
+    stage timings — it is the line that has been in the logs since 2026-09-09."""
+    node, _ = build(multipart([(1.0, jpeg(1280, 720))]))
+    assert until(lambda: node.pubs["/camera/image"].sent)
+    assert set(node.pubs) == {"/camera/image", "/camera/camera_info"}
+    assert node._rig is None and node._split is None and node._published.rectifier is None
+    image = node.pubs["/camera/image"].sent[0]
+    assert (image.width, image.height) == (640, 360) and image.encoding == "bgr8"
+    assert node._switches["scale"] == 0.5
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "rig:" not in line and "stages:" not in line
+    assert line.startswith("camera: ") and "frames/s, optics: nominal 83 deg" in line
+    assert line.endswith("flags: scale=0.5 undistort=off static_camera_tf=on")
