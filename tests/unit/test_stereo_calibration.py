@@ -29,10 +29,12 @@ from pepin.stereo_calibration import (
     StereoFit,
     calibrate_pairs,
     choose_model,
+    corner_spacings,
     match_order,
     moved_enough,
     row_offset,
     stereo_fit,
+    subpix_half_window,
 )
 
 BOARD = Board(9, 6, 0.0245)
@@ -111,6 +113,21 @@ def test_a_blurred_or_half_visible_board_is_refused_with_the_reason() -> None:
     assert kept.captured and len(collector.pairs) == 1
     again = collector.offer((left, right), 500.0)
     assert not again.captured and "move the board" in again.message
+
+
+def test_a_board_held_too_far_is_refused_and_the_operator_is_told_to_come_closer() -> None:
+    collector = PairCollector(BOARD, SIZE)
+    far = _grid_corners((400.0, 300.0), span=48.0)  # squares of 12 px
+    verdict = collector.offer((far, far - np.array([[[4.0, 0.0]]], dtype=np.float32)), 500.0)
+    assert not verdict.captured and "closer" in verdict.message
+    assert not collector.pairs
+
+
+def test_the_refinement_window_never_reaches_the_neighbouring_corner() -> None:
+    smallest, typical = corner_spacings(_grid_corners((400.0, 300.0), span=48.0), BOARD)
+    assert smallest == pytest.approx(12.0, abs=0.1) and typical == pytest.approx(12.7, abs=0.1)
+    assert subpix_half_window(12.0) == 4  # a 9 px window inside a 12 px square
+    assert subpix_half_window(60.0) == 11 and subpix_half_window(4.0) == 3
 
 
 def test_the_collector_wants_the_corners_of_the_frame_before_it_is_done() -> None:

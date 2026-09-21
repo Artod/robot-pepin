@@ -59,6 +59,18 @@ MOVE_FRACTION = 0.06  # of the frame's diagonal
 SCALE_STEP = 0.18  # |log(area / previous area)|, about a 20 % change of distance
 TILT_STEP = 0.07  # of pepin.calibration's tilt, 0 fronto-parallel towards 1 fully squashed
 SHARP_MIN = 40.0  # Laplacian variance over the board's box; a blurred board is under this
+# A board held far away is a board of small squares, and small squares are badly measured corners.
+# Measured 2026-09-21 on the robot's head (800 px an eye): 47 views with squares of 9-16 px fitted
+# an eye to 2.8 px, and the views with squares of 16 px and more fitted it to 0.3 px. A far board
+# is also nearly the same view every time, which leaves the focal length unmeasured (it came out
+# at 543, 603 and 1119 px from three subsets of that session).
+MIN_SQUARE_PX = 18.0
+# The sub-pixel refinement looks at a window around each corner; a window wider than a square
+# sees the neighbouring corners and lands between them. Half-window = this fraction of the
+# smallest corner spacing, within the bounds.
+SUBPIX_WINDOW_FRACTION = 0.4
+SUBPIX_HALF_WINDOW_MIN = 3
+SUBPIX_HALF_WINDOW_MAX = 11
 
 # What a fit must reach before it is written. The epipolar error is the operational one: a block
 # matcher searches along a row, so a pair whose rows disagree by a pixel is searching the wrong
@@ -143,6 +155,25 @@ def find_pair(left_image: Any, right_image: Any, board: Board) -> tuple[Corners,
     return found_left, ordered
 
 
+def corner_spacings(corners: Corners, board: Board) -> tuple[float, float]:
+    """``(smallest, typical)`` distance between neighbouring corners of a board, pixels. The
+    smallest bounds the refinement window; the typical one — the median along the board's less
+    foreshortened direction — is how large a square looks, whatever the tilt."""
+    grid = np.asarray(corners, dtype=np.float64).reshape(board.rows, board.cols, 2)
+    along = np.linalg.norm(np.diff(grid, axis=1), axis=2)
+    down = np.linalg.norm(np.diff(grid, axis=0), axis=2)
+    smallest = float(min(along.min(), down.min()))
+    typical = float(max(np.median(along), np.median(down)))
+    return smallest, typical
+
+
+def subpix_half_window(smallest_spacing_px: float) -> int:
+    """The refinement's half-window for a board whose closest corners are this far apart: never
+    so wide that it reaches the neighbouring corner."""
+    half = int(SUBPIX_WINDOW_FRACTION * smallest_spacing_px)
+    return max(SUBPIX_HALF_WINDOW_MIN, min(SUBPIX_HALF_WINDOW_MAX, half))
+
+
 def find_corners_classic(image: Any, board: Board) -> Corners | None:
     """One eye's sub-pixel corners, or ``None``: ``findChessboardCorners`` refined by
     ``cornerSubPix``, never the SB detector."""
@@ -154,7 +185,8 @@ def find_corners_classic(image: Any, board: Board) -> Corners | None:
     if not found:
         return None
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-    refined = cv2.cornerSubPix(grey, corners, (11, 11), (-1, -1), criteria)
+    half = subpix_half_window(corner_spacings(corners, board)[0])
+    refined = cv2.cornerSubPix(grey, corners, (half, half), (-1, -1), criteria)
     points = np.asarray(refined, dtype=np.float32)
     height, width = grey.shape[:2]
     flat = points.reshape(-1, 2)
@@ -218,11 +250,13 @@ class PairCollector:
         size: tuple[int, int],
         target: int = TARGET_VIEWS,
         sharp_min: float = SHARP_MIN,
+        min_square_px: float = MIN_SQUARE_PX,
     ) -> None:
         self.board = board
         self.size = size
         self.target = target
         self.sharp_min = sharp_min
+        self.min_square_px = min_square_px
         self.pairs: list[Pair] = []
 
     @property
@@ -249,6 +283,14 @@ class PairCollector:
         left, right = corners
         if len(left) != self.board.corners or len(right) != self.board.corners:
             return Verdict(False, None, "board only partly visible — move it into both eyes")
+        square = min(corner_spacings(left, self.board)[1], corner_spacings(right, self.board)[1])
+        if square < self.min_square_px:
+            return Verdict(
+                False,
+                None,
+                f"too far: a square is {square:.0f} px, under {self.min_square_px:.0f} — "
+                "bring the board closer",
+            )
         cell, area, tilt = view_shape(left, self.size)
         view = View(np.asarray(left, dtype=np.float32), cell, area, tilt)
         if sharpness < self.sharp_min:
