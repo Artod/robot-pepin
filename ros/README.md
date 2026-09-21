@@ -82,6 +82,14 @@ silence as good news. What is checked:
 | 1.5 | no `Extrapolation` / `out of map bounds` / `Off Grid` in the last 60 s |
 | 1.6, 1.7 | `/depth_scan` and `/vo` really reach the board (`ros/tools/topic_rate.py`, one 5 s measurement each — not `ros2 topic hz`, which costs ~4.5 s of A53 before it measures anything) |
 | 1.8 | `pepin-base` is active and no `torque on` is left standing in its journal |
+| 1.11 | Nav2 is **active**, not merely running: the lifecycle manager got `planner_server connected with bond`, and the log carries zero `Range sensor layer can't transform` lines. A `planner_server` that activated and never bonded is wedged inside its global costmap's first update — tf2's `canTransform` costs a whole `transform_tolerance` per untransformable Range and the three ToF layers deliver 15 Hz each, so the backlog outgrows the drain and the update never ends (`scratch/nav2_hang/wedge_gain.py`; the publisher's side of the fix is `tof_bridge`'s `dynamic_mounts` and `tf_gate`). Goals are then accepted and nothing is planned. A board that runs no Nav2 is a `WARN`, never a failure |
+
+`ros/tools/coldstart_soak.sh [N]` is the acceptance test behind that check: N cold starts of the
+board half (10 by default), each timed from `Activating planner_server` to the bond, with the
+range-layer and `Invalid frame ID` counts beside it, one row per start and a non-zero exit unless
+every start passed. It restarts processes and reads logs — **the robot does not move**, and it
+refuses to begin while a navigation goal is running. The hang appeared on 4 of 7 starts on
+2026-09-21, which is why one green restart is not an answer.
 
 | # | laptop |
 |---|---|
@@ -756,6 +764,8 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `depth_fusion` | `self_heal` | bool | off | yes | a streak of 30 frames refused at the alignment bound empties the model, so it re-seeds from the next frame instead of staying frozen until a human resets it |
 | `depth_fusion` | `align` | bool | on | yes | frame-to-model: a frame's lidar-height band is turned about the cart to fit the model before it is fused, and a frame whose best turn is the search's bound (+-4 deg) is refused |
 | `depth_fusion` | `min_weight` | number 0..100 | 2.0 | yes | observations a voxel needs before it is shown in /fusion/surface, the one thing this node publishes about the room |
+| `depth_fusion` | `marks_source` | choice: volume, frame | volume | yes | where the camera's MARKS in the costmap come from (/depth_marks): volume, the accumulated model's own surface sliced around the cart at min_weight (pepin.volume_scan — the very surface /fusion/surface draws); frame, the latest /depth_scan relayed unchanged, which is what marked the costmap until 2026-09-21. Either way /depth_scan itself keeps CLEARING the layer: a single frame is the eyewitness of what is open now |
+| `depth_fusion` | `marks_min_z` | number 0..1 | 0.15 | yes | the floor of the height band /depth_marks reads the volume in, metres above the cart's own floor plane; the band's top is the volume's own camera band (config/fusion.json's camera_band_m) |
 | `depth_fusion` | `surface_hz` | number 0.1..10 | 1.0 | yes | how often /fusion/surface is published (the crossing search costs a fraction of a second) |
 | `depth_fusion` | `band_half_z` | number 0.02..0.5 | 0.125 | yes | half the height band around the lidar's plane a frame is seated on, metres (config/fusion.json's band_half_z_m is the default); the band's centre is the plane the published base_link -> laser edge names, and both are printed in the report line |
 | `depth_fusion` | `lidar_layer` | bool | on | yes | /scan is integrated into the volume at the lidar's plane (rays carve free space, returns mark a surface); off, the volume is the camera's alone, as it was |
@@ -895,6 +905,9 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `sensor_pack` | `pack_hz` | number 0.1..15 | 1.0 | yes | at most this many snapshots a second of SENSOR time (the stamps' own clock, not this laptop's) |
 | `sensor_pack` | `pair_periods` | number 0.5..10 | 1.5 | yes | how many of its OWN measured periods a source's message may be from the snapshot's stamp and still be paired with it (pepin.snapshot) |
 | `sensor_pack` | `tf_retry` | bool | on | yes | a member whose transform TF cannot answer for yet does not cost the snapshot: the moment is put back and offered again on the next arrival, until it has left that member's own pairing patience (pair_periods of its measured period). Off, the member is dropped at once and the snapshot goes out without it — the behaviour of before 2026-09-19 |
+| `tof_bridge` | `dynamic_mounts` | bool | on | yes | each sensor's mount base_link -> tof_<name> is published on /tf with the Range's own stamp, beside that Range, as well as once on /tf_static; off: the static broadcast alone, which is every consumer's only chance to learn the frame |
+| `tof_bridge` | `tf_gate` | bool | on | yes | a Range leaves only while map <- base_link resolves in this node's own TF buffer right now and its latest common time is no more than tf_gate_max_lag_s behind the reading; off: every reading is published whatever TF says |
+| `tof_bridge` | `tf_gate_max_lag_s` | number 0..10 | 0.5 | yes | how far behind a reading's stamp the newest moment of map <- base_link may be and still let that reading out; 0 demands a chain at least as new as the reading |
 | `visual_odometry` | `vo_publish` | bool | on | yes | the gated visual odometry leaves this laptop as /vo, where the board's EKF fuses it as a third input beside the wheels and the gyro; off, the node still measures and reports and the EKF is exactly what it was without it |
 | `visual_odometry` | `vo_covariance` | choice: dynamic, constant, rtabmap | dynamic | yes | whose covariance rides on the published pose: `dynamic`, the registration's own sigma and the depth scale's share of the step just taken added in quadrature (pepin.visual_odometry.scaled_covariance); the documented constant (vo_sigma_m, vo_yaw_sigma_deg); or the one rtabmap's registration computed, untouched |
 | `visual_odometry` | `vo_sigma_m` | number 0.001..1 | 0.07 | yes | the constant position sigma of one visual-odometry pose, in metres; the EKF differences two of them into a velocity and the covariance rides along — as (this pose's + the previous pose's) TIMES the gap, so what the filter actually weighs is a velocity variance of 2 * sigma^2 * dt |
@@ -1051,7 +1064,17 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *What:* observations a voxel needs before it is shown in /fusion/surface, the one thing this node publishes about the room (0..100)
   - *Default:* 2.0 — inherited from the map slice, where it was measured: at min_weight 2 the lidar slice holds 905 walls and at 6 it holds 817, the cells a single pass wrote falling out (scratch/worldmap_from_tape.txt). For the cloud itself nothing was measured; it is the same number so the picture and the volume's own report agree
   - *On when:* raise it to show only what several frames agree on
-  - *Off when:* 0 shows every voxel ever touched, noise included — a look at what one pass sees; it changes nothing the cart drives on
+  - *Off when:* 0 shows every voxel ever touched, noise included — a look at what one pass sees; SINCE 2026-09-21 IT DOES CHANGE WHAT THE CART DRIVES ON: the same number decides what /depth_marks marks the camera layer with
+- **`marks_source`** — choice: volume, frame, default volume
+  - *What:* where the camera's MARKS in the costmap come from (/depth_marks): volume, the accumulated model's own surface sliced around the cart at min_weight (pepin.volume_scan — the very surface /fusion/surface draws); frame, the latest /depth_scan relayed unchanged, which is what marked the costmap until 2026-09-21. Either way /depth_scan itself keeps CLEARING the layer: a single frame is the eyewitness of what is open now (one of: volume, frame)
+  - *Default:* volume — the first stereo drive measured what one frame is worth as a mark (tape ros/maps/rec/0415_*): SGBM on the herringbone parquet answers small blobs of disparity 2-5 px too large, which lift FLOOR pixels to 0.15-0.24 m — inside the band the fan marks in — at about one false bearing a frame, a different bearing each time. In the costmap that is 100-300 lethal cells the lidar never saw, 115 'collision ahead' a minute and 44 recoveries in one drive. The same frames fused into the volume look clean, because fusing is what a single opinion cannot survive: a weighted average and the free space every later ray carves through the blob. So the marks come from the model and the clearing stays with the frames — the nvblox arrangement (a probabilistic volume, a 2D slice of it, the costmap), and no floor-specific rule anywhere in it
+  - *On when:* volume: wherever the camera layer marks at all. A mark then needs the same agreement a point of /fusion/surface needs, and the bearings behind the head are answered too — the volume remembers the table the cart has driven past
+  - *Off when:* frame reproduces the pre-2026-09-21 costmap exactly (the fan itself, marks and all) without a restart: the A/B for whether a missing mark is the volume's fault, and the way back if the volume is ever seen to hold a ghost
+- **`marks_min_z`** — number 0..1, default 0.15
+  - *What:* the floor of the height band /depth_marks reads the volume in, metres above the cart's own floor plane; the band's top is the volume's own camera band (config/fusion.json's camera_band_m) (0..1)
+  - *Default:* 0.15 — default by design, unmeasured as a marks floor: it is pepin.depth's SCAN_MIN_Z_M, the height /depth_scan has always marked from and the floor of config/fusion.json's camera_band_m, so the two scans of one layer speak about one band. RAISING IT IS NOT THE CURE FOR A FLOOR THAT MARKS ITSELF — that is a floor-specific heuristic, and the thing this topic exists to avoid; what keeps the parquet out of the marks is that a blob one frame invented is not a surface in the volume
+  - *On when:* raise it only to measure what a band costs — how much of a real low obstacle (a plinth, a box) leaves the marks with it
+  - *Off when:* lower it toward the floor to see what the volume itself holds down there, never to chase a false mark
 - **`surface_hz`** — number 0.1..10, default 1.0
   - *What:* how often /fusion/surface is published (the crossing search costs a fraction of a second) (0.1..10)
   - *Default:* 1.0 — default by design, unmeasured; what is measured is the cost it protects — the surface build took 45 ms a second and stalled the node's executor until it was moved onto a snapshot taken outside the model lock
@@ -1775,6 +1798,24 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *On when:* always: a camera frame is the only thing in a snapshot that can recognise a place, and it is the one whose transform is late
   - *Off when:* to measure what the retry is worth — the report line's 'tf waits' against its 'frames TF could not place' is the same comparison with it on
 
+#### `tof_bridge`
+
+- **`dynamic_mounts`** — bool, default on
+  - *What:* each sensor's mount base_link -> tof_<name> is published on /tf with the Range's own stamp, beside that Range, as well as once on /tf_static; off: the static broadcast alone, which is every consumer's only chance to learn the frame
+  - *Default:* on — a static transform is published ONCE, and under rmw_zenoh a subscriber that matched a moment too early or too late never gets it: on 2026-09-21 Nav2's container did not see the tof_* mounts for 157 s on 4 of 7 board starts (scratch/nav2_hang/timeline.py on board_full_1550.log), and re-sending the static transforms for the first 120 s did not cure it — any window longer than a second is enough. A missing frame is what makes RangeSensorLayer block its whole transform_tolerance per message (4.5x local, 15x global amplification, scratch/nav2_hang/wedge_gain.py) until updateMap never returns and planner_server hangs in Activating. A transform republished with every reading cannot be missed by a late joiner, and it costs three TransformStamped at 15 Hz
+  - *On when:* always on this robot: every consumer of /tof/* needs the mount to place a cone, and nothing else publishes that edge
+  - *Off when:* to reproduce the pre-2026-09-21 node, or if another publisher ever owns base_link -> tof_* — two publishers of one edge fight. The static broadcast keeps running either way, so the frames still exist
+- **`tf_gate`** — bool, default on
+  - *What:* a Range leaves only while map <- base_link resolves in this node's own TF buffer right now and its latest common time is no more than tf_gate_max_lag_s behind the reading; off: every reading is published whatever TF says
+  - *Default:* on — a Range published while its chain is broken is not a lost measurement, it is a wedge: tf2's canTransform blocks the FULL timeout on any failure and RangeSensorLayer calls it once per message with the message's own stamp, so 15 Hz against a 0.3 s (local) / 1.0 s (global) tolerance means 4.5 and 15 messages arrive per message drained, the backlog passes the 10 s TF cache, every message then fails although TF is healthy, and the costmap's first update never ends — 4 of 7 board starts on 2026-09-21, measured at exactly 1/tolerance (3.262/s and 0.996/s) for 600 s (scratch/nav2_hang/wedge_gain.py, range_drain.py). The check here is the cheap opposite of that one: tf2 with timeout 0, which answers from the buffer and never waits. In health it withholds nothing — the chain is AHEAD of the reading (map -> odom dated 0.1 s ahead, relocalizer.py:2042; the EKF at 20 Hz, ros/params/ekf.yaml:26; the reading stamped 0.06 s behind now)
+  - *On when:* always while Nav2's costmaps read /tof/*: it is the one place that can refuse to feed the wedge, and a closed gate says so in every report line
+  - *Off when:* to reproduce the pre-2026-09-21 node, or when the ToF cones must be watched in Foxglove with no tracker running at all (no map -> odom, so the gate would be shut and nothing would reach the topic)
+- **`tf_gate_max_lag_s`** — number 0..10, default 0.5
+  - *What:* how far behind a reading's stamp the newest moment of map <- base_link may be and still let that reading out; 0 demands a chain at least as new as the reading (0..10)
+  - *Default:* 0.5 — both links of the chain are published at 20 Hz — map -> odom every 0.05 s dated 0.1 s ahead (relocalizer.py:1186, :2055) and odom -> base_link by the EKF at frequency 20.0 (ros/params/ekf.yaml:26), stamped at the filter's own time — while a reading is stamped 0.06 s behind now and drained at 15 Hz. So in health the newest moment of the chain is within one filter period of the reading and the measured lag sits at or below zero; 0.5 s is ten missed periods of both publishers at once, which is a publisher that stopped (a tracker restarting, an EKF whose sources all went quiet), not jitter. It is also well inside tf2's 10 s cache, so nothing is withheld for a reason that would have healed by itself a moment later
+  - *On when:* raise it on a board so loaded that healthy readings are withheld — the report line's withheld counts and the lag it prints are the measurement to raise it by
+  - *Off when:* lower it towards 0.1 s to prove that a suspected wedge is a stale chain: the gate then shuts on exactly the windows the costmap would have blocked in
+
 #### `visual_odometry`
 
 - **`vo_publish`** — bool, default on
@@ -1972,7 +2013,18 @@ are unchanged and exits 1 — so the costmap column is what holds, and the modes
 
 The camera is one sensor read twice from the same frames: `depth_scan` is the band 8 cm-1.3 m
 above the floor (table tops, seats, a hand) and `contact_scan` is where the floor ends (chair
-feet, a plinth) — so `camera on` moves two costmap layers at once. In the tracker it is ONE
+feet, a plinth) — so `camera on` moves two costmap layers at once.
+
+**Inside the camera layer, a frame clears and the MODEL marks** (2026-09-21). `/depth_scan` is a
+single frame, and a single stereo frame is an eyewitness of what is open, not evidence that
+something is there: SGBM on the herringbone parquet lifts floor pixels to 0.15-0.24 m in small
+flickering blobs, and the first stereo drive left the costmap with 100-300 lethal cells the lidar
+never saw, 115 "collision ahead" a minute and 44 recoveries. So the layer's `depth_scan` source
+now only clears, and a second source marks: `/depth_marks`, the fused volume's own surface — the
+one `/fusion/surface` draws, at `depth_fusion`'s `min_weight` — sliced around the cart over the
+whole turn (`pepin.volume_scan`, published at the rate the volume is integrated). `ros/flags.sh
+set depth_fusion marks_source frame` relays the frame's own fan onto `/depth_marks` instead and
+is the pre-2026-09-21 costmap, live, for an A/B. In the tracker it is ONE
 source, `camera`, and the difference is where the matching happens. **The camera's scans are
 matched on the laptop**, where the depth network already runs (`pepin_bringup.laptop_localizer`):
 each scan is matched in a small window around the pose the board believes in, carried to that
@@ -2028,7 +2080,8 @@ nodes' own report lines in `docker logs` instead of subscribing to anything.
 
 Open `ros/foxglove/pepin_nav.json` in Foxglove Studio:
 
-- the 3D panel's `/scan` and `/depth_scan` beside `/local_costmap/costmap` and
+- the 3D panel's `/scan`, `/depth_scan` (what the camera clears with) and `/depth_marks` (what it
+  marks with: the volume's surface, yellow) beside `/local_costmap/costmap` and
   `/global_costmap/costmap` — switching a layer changes the grid within a costmap cycle, and the
   marks that remain tell you which sensor drew them;
 - `/localization/sigma` in a Raw Messages panel (JSON: `sigma_xy` metres, `sigma_yaw` degrees,

@@ -13,7 +13,7 @@ BOARD="${PEPIN_HOST:-10.0.0.187}"
 # neck on). The goal server is here on side=all only (on side=board it lives on the laptop:
 # ros/laptop.sh kick goal_server). slam_frame is the retired owner of map -> odom and only runs
 # with PEPIN_SLAM=true (CLAUDE.md rule 19), but a kick still reaches it where it does.
-KICKABLE="relocalizer run_recorder goal_server neck_state slam_frame"
+KICKABLE="relocalizer run_recorder goal_server neck_state slam_frame tof_bridge"
 kick_line() {  # node name -> start-up line
     case "$1" in
         relocalizer) echo "relocalizer up: " ;;
@@ -21,6 +21,7 @@ kick_line() {  # node name -> start-up line
         goal_server) echo "goal server ready on port" ;;
         neck_state) echo "neck state up: " ;;
         slam_frame) echo "slam frame up: " ;;
+        tof_bridge) echo "tof ceilings: " ;;
         *) return 1 ;;
     esac
 }

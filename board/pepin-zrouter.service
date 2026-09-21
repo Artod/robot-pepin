@@ -23,6 +23,17 @@ ExecStartPre=-/usr/bin/docker rm -f pepin-zrouter
 # laptop's router dials it over the WiFi. --network host so the loopback it listens on is the
 # same loopback the stack's container lives in.
 ExecStart=/bin/sh -c '[ "$PEPIN_RMW" = zenoh ] || exec sleep infinity; exec /usr/bin/docker run --rm --name pepin-zrouter --network host $PEPIN_ZIMAGE /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd'
+# `docker run` returns as soon as the container exists, not when rmw_zenohd is ACCEPTING on
+# 7447 — so Before=pepin-ros.service orders the two starts and nothing more, and the stack's
+# nodes come up against a router that is still binding. Zenoh sessions then form raggedly, and
+# a transient-local publication made in that window is never re-queried: on 2026-09-21 that
+# delayed /tf_static to Nav2's container by 24 s (the lidar's frame) to 157 s (the ToF mounts),
+# which is exactly the window that wedges Nav2's RangeSensorLayer for good
+# (scratch/nav2_hang/, and the tof_bridge module docstring). So the unit is not "started" until
+# the port answers: 30 s in 0.5 s steps, and a router that never listens fails the unit loudly
+# instead of letting the whole stack start behind it. bash for /dev/tcp — nothing else here
+# opens a socket, and the board already runs bash units (board/reap_ros2_cli.sh).
+ExecStartPost=/bin/bash -c '[ "$PEPIN_RMW" = zenoh ] || exit 0; timeout 30 bash -c "until (exec 3<>/dev/tcp/127.0.0.1/7447) 2>/dev/null; do sleep 0.5; done" || { echo "pepin-zrouter: nothing is accepting on tcp/127.0.0.1:7447 after 30 s; the stack must not start behind a router that is not listening" >&2; exit 1; }'
 ExecStop=-/usr/bin/docker stop -t 5 pepin-zrouter
 Restart=always
 RestartSec=5

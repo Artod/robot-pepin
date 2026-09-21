@@ -390,11 +390,21 @@ local_costmap:
         # the camera-only drive and the measurement, and True becomes the default when it says so.
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True  # measured 2026-09-13: the table top the lidar cannot see; a live flip was lost at every restart of 2026-09-14
-        observation_sources: depth_scan
+        # TWO SOURCES, ONE CAMERA, AND THE SPLIT IS WHAT EACH IS EVIDENCE OF (2026-09-21). A single
+        # depth frame is an eyewitness of what is OPEN right now — it clears — but it is not
+        # evidence that something is THERE: SGBM on the herringbone parquet lifts floor pixels to
+        # 0.15-0.24 m in small blobs, about one false bearing a frame, and the first stereo drive
+        # left this layer with 100-300 lethal cells the lidar never saw, 115 "collision ahead" a
+        # minute and 44 recoveries (tape ros/maps/rec/0415_*). What is THERE comes from the
+        # accumulated volume instead: the same frames fused with weights and carved by every later
+        # ray, sliced around the cart by pepin_bringup.depth_fusion into /depth_marks. Frames
+        # clear, the model marks (the nvblox arrangement), and `ros/flags.sh set depth_fusion
+        # marks_source frame` puts the old behaviour back live.
+        observation_sources: depth_scan depth_marks
         depth_scan:
           # The camera's depth folded onto the plane (pepin_bringup.depth_stream on the laptop):
-          # what stands 8 cm to 1.3 m above the floor — table tops, seats, a hand — marks and
-          # clears like the lidar, three times a second, out to 3 m.
+          # what stands 8 cm to 1.3 m above the floor — table tops, seats, a hand — three times a
+          # second, out to 3 m. CLEARING ONLY since 2026-09-21 (see above).
           topic: /depth_scan
           # The last cloud is re-applied at every update until the next one arrives; a source that
           # goes silent (a laptop stall, a container restart) would freeze a phantom in the map.
@@ -403,7 +413,7 @@ local_costmap:
           data_type: "LaserScan"
           sensor_frame: base_link
           expected_update_rate: 0.0
-          marking: True
+          marking: False
           clearing: True
           raytrace_max_range: 3.0
           obstacle_max_range: 2.5
@@ -411,6 +421,24 @@ local_costmap:
           # node's scan_max_range (3.0) must stay ABOVE obstacle_max_range or every inf ray marks
           # a lethal ring at range_max instead of clearing. NaN rays neither mark nor clear.
           inf_is_valid: True
+        depth_marks:
+          # The volume's own surface — the one /fusion/surface draws, at depth_fusion's min_weight
+          # — sliced over the same height band around the cart and published as a fan over the
+          # whole turn (the model remembers what is behind the head; a frame cannot).
+          topic: /depth_marks
+          observation_persistence: 1.0
+          data_type: "LaserScan"
+          sensor_frame: base_link
+          expected_update_rate: 0.0
+          marking: True
+          clearing: False
+          # No ray of its own: this scan says where the model holds a surface, never that anything
+          # is free — the clearing above is the camera's, and it is a frame's job.
+          obstacle_max_range: 2.5
+          # A bearing the volume holds nothing at is NaN, never inf: this topic cannot clear, so
+          # an inf would become a point at range_max and MARK a lethal ring there (the contact
+          # layer's lesson). NaN rays neither mark nor clear, whatever this says.
+          inf_is_valid: False
       contact_layer:
         # Where the floor ENDS, read off the same depth frames (pepin.contact, published by
         # pepin_bringup.contact_scan): the feet of chairs, a low box, a plinth — what neither the
@@ -494,9 +522,16 @@ global_costmap:
       # lidar's own obstacle layer at 10 Hz and from the ToF, both of which mark into this costmap
       # in real time. So unsurveyed ground is driven on sensor evidence instead of being feared.
       track_unknown_space: false
-      # The ToF are in here too, not just in the local costmap: a plan is what routes around an
-      # obstacle, and a sensor whose returns never reach the planner can only ever stop the robot.
-      plugins: ["static_layer", "lidar_layer", "camera_layer", "contact_layer", "tof_front_layer", "tof_left_layer", "tof_right_layer", "inflation_layer"]
+      # The ToF are NOT in here (2026-09-21; they were, on the argument that a plan is what routes
+      # around an obstacle and a sensor the planner never hears can only stop the robot). They are
+      # short whiskers — 0.6-1.0 m cones in front of the bumper — and belong to the controller's
+      # local map: a room-scale plan gained nothing from a cone that lives for a fraction of a
+      # second, and this costmap was the worst amplifier of the RangeSensorLayer wedge (its
+      # transform_tolerance of 1.0 s x 15 Hz a sensor = 15x per update cycle; see tof_bridge's
+      # tf_gate). What only a whisker saw stops the cart in the local map and is driven around
+      # there. The three layer blocks below are kept: putting them back is this one line, with
+      # "tof_front_layer", "tof_left_layer", "tof_right_layer" before "inflation_layer".
+      plugins: ["static_layer", "lidar_layer", "camera_layer", "contact_layer", "inflation_layer"]
       # ONE LAYER PER SENSOR, like the three ToF below and for the same reason: separate layers
       # cannot erase each other's evidence, and each is switched on its own while the robot runs
       # (`ros2 param set /global_costmap/global_costmap camera_layer.enabled true`) — which is how a
@@ -543,18 +578,34 @@ global_costmap:
         # camera_layer.enabled true`), and by default once a drive says the marks are real.
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True  # measured 2026-09-13: the table top the lidar cannot see; a live flip was lost at every restart of 2026-09-14
-        observation_sources: depth_scan
+        # The same split as the local costmap's camera layer above, and it matters more here: this
+        # grid does not roll, so a phantom from one frame stays until something raytraces through
+        # it. Single frames clear, the accumulated volume marks (/depth_marks,
+        # pepin_bringup.depth_fusion).
+        observation_sources: depth_scan depth_marks
         depth_scan:
           topic: /depth_scan
           observation_persistence: 1.0
           data_type: "LaserScan"
           sensor_frame: base_link
           expected_update_rate: 0.0
-          marking: True
+          marking: False
           clearing: True
           raytrace_max_range: 3.0
           obstacle_max_range: 2.5
           inf_is_valid: True
+        depth_marks:
+          topic: /depth_marks
+          observation_persistence: 1.0
+          data_type: "LaserScan"
+          sensor_frame: base_link
+          expected_update_rate: 0.0
+          marking: True
+          clearing: False
+          obstacle_max_range: 2.5
+          # NaN for "the volume holds nothing here", never inf: with clearing off an inf would
+          # mark a lethal ring at range_max.
+          inf_is_valid: False
       contact_layer:
         # Where the floor ENDS, read off the same depth frames (pepin.contact, published by
         # pepin_bringup.contact_scan): the feet of chairs, a low box, a plinth — what neither the

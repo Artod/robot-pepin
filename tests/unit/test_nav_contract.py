@@ -140,11 +140,22 @@ def test_a_tof_return_is_marked_across_its_whole_cone() -> None:
 
 def test_each_tof_owns_its_own_layer() -> None:
     """2026-09-08: one shared layer let the dead front sensor clear the side sensors' marks."""
-    for costmap in ("local_costmap", "global_costmap"):
-        layers = [name for name in _p(costmap)["plugins"] if name.startswith("tof_")]
-        assert len(layers) == 3, f"{costmap}: the three ToF must not share a probability grid"
-        for sensor, layer in zip(("front", "left", "right"), layers, strict=True):
-            assert _p(costmap)[layer]["topics"] == [f"/tof/{sensor}"]
+    layers = [name for name in _p("local_costmap")["plugins"] if name.startswith("tof_")]
+    assert len(layers) == 3, "the three ToF must not share a probability grid"
+    for sensor, layer in zip(("front", "left", "right"), layers, strict=True):
+        assert _p("local_costmap")[layer]["topics"] == [f"/tof/{sensor}"]
+
+
+def test_the_tof_whiskers_serve_the_local_costmap_only() -> None:
+    """2026-09-21: the ToF are short whiskers for the controller's map. In the global costmap
+    they bought a room-scale plan nothing and were the worst amplifier of the RangeSensorLayer
+    wedge (transform_tolerance 1.0 s x 15 Hz = 15x per update cycle), which hung planner_server's
+    activation on 4 of 7 board starts. Their blocks stay in the file: returning them is one
+    line of the plugin list."""
+    plugins = _p("global_costmap")["plugins"]
+    assert not [name for name in plugins if name.startswith("tof_")], plugins
+    for sensor in ("front", "left", "right"):
+        assert _p("global_costmap")[f"tof_{sensor}_layer"]["topics"] == [f"/tof/{sensor}"]
 
 
 def test_a_pivot_the_cart_cannot_make_is_preferred_less_than_an_arc() -> None:
@@ -183,6 +194,8 @@ def test_the_operator_scripts_parse_and_keep_their_safety_lines() -> None:
         "laptop.sh",
         "thin.sh",
         "flags.sh",
+        "restart.sh",
+        "tools/coldstart_soak.sh",
     ):
         subprocess.run(["bash", "-n", str(REPO / "ros" / script)], check=True)
     stop = (REPO / "ros/stop.sh").read_text()
@@ -244,6 +257,49 @@ def test_the_tof_layers_never_stall_either_costmap() -> None:
     for costmap in ("local_costmap", "global_costmap"):
         for sensor in ("front", "left", "right"):
             assert _p(costmap)[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
+
+
+def test_the_range_layers_are_fed_only_what_they_can_be_asked_to_transform() -> None:
+    """The Nav2 wedge of 2026-09-21. tf2's canTransform blocks the WHOLE timeout on any failure
+    and RangeSensorLayer calls it once per message with the message's own stamp, so three layers
+    at 15 Hz against a 0.3 s (local) and 1.0 s (global) tolerance amplify 4.5x and 15x: the
+    backlog outgrows the drain, every message ages past the 10 s TF cache, the first costmap
+    update never ends and planner_server hangs in Activating (scratch/nav2_hang/wedge_gain.py).
+    The tolerances stay where they are — stability would need one under 67 ms, below this
+    robot's own TF latency — and the PUBLISHER holds the precondition instead: no Range leaves
+    tof_bridge while the chain that must place it is broken, and the mounts go out with every
+    reading so no late joiner can be missing the frame. Both are live switches with the old
+    behaviour one `ros/flags.sh set` away (rule 19)."""
+    assert _p("local_costmap")["transform_tolerance"] == 0.3
+    assert _p("global_costmap")["transform_tolerance"] == 1.0
+    flags = load_table(REPO / NODES / "tof_bridge.py")
+    assert flags.names == ("dynamic_mounts", "tf_gate", "tf_gate_max_lag_s")
+    assert all(flag.live for flag in flags), "a wedge is turned off in the field, not reverted"
+    assert flags["dynamic_mounts"] is True and flags["tf_gate"] is True
+    facts = sf.assignments(sf.tree(f"{NODES}/tof_bridge.py"))
+    assert facts["_GLOBAL_FRAME"] == "'map'", "the frame the costmaps place a cone in"
+    assert float(facts["_STAMP_LAG_S"]) < flags["tf_gate_max_lag_s"], (
+        "a reading must not be born already too stale for the gate that judges it"
+    )
+
+
+def test_a_cold_start_is_judged_and_can_be_soaked() -> None:
+    """The gap that let the wedge ship: the transport's acceptance had no "N cold starts, Nav2
+    fully active" test, so a hang that appears on 4 of 7 starts looked like bad luck. The
+    restart's checks now name it, and the soak repeats it without ever moving the robot."""
+    restart = (REPO / "ros/restart.sh").read_text()
+    assert "planner_server connected with bond" in restart, "active, not merely running"
+    assert "Range sensor layer can't transform" in restart, "the wedge's own line"
+    soak = REPO / "ros/tools/coldstart_soak.sh"
+    assert soak.stat().st_mode & 0o111, "it is run as a command"
+    text = soak.read_text()
+    assert "nav_goal_running.py" in text, "it refuses to restart the stack under a live goal"
+    assert "THE ROBOT DOES NOT MOVE" in text
+    assert "systemctl restart pepin-ros" in text, "restart.sh's own mechanism"
+    # The other half of a cold start: `docker run` returns before rmw_zenohd accepts, and the
+    # stack started behind a router that was still binding is what delayed /tf_static by 157 s.
+    router = (REPO / "board/pepin-zrouter.service").read_text()
+    assert "ExecStartPost=" in router and "/dev/tcp/127.0.0.1/7447" in router
 
 
 def test_two_controllers_and_only_the_footprint_planner_may_plan_a_reverse() -> None:
@@ -680,6 +736,7 @@ def test_the_bridge_routes_only_what_the_split_needs_and_only_one_way() -> None:
         "/map",
         "/rtabmap/mapGraph",
         "/depth_scan",
+        "/depth_marks",
         "/contact_scan",
     ):
         assert re.compile(laptop["publishers"][0]).search(name) and re.compile(
@@ -984,6 +1041,7 @@ def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph(
     source = layer["depth_scan"]
     assert source["topic"] == "/depth_scan" and source["data_type"] == "LaserScan"
     assert source["inf_is_valid"] is True
+    assert "depth_marks" in LAPTOP_PUBLISHES, "and what that layer MARKS with, see below"
     node = sf.tree(f"{NODES}/depth_stream.py")
     assert "/depth_scan" in sf.strings(node) and "depth_to_scan" in sf.calls(node)
     camera = sf.tree(f"{NODES}/camera_stream.py")
@@ -1020,7 +1078,8 @@ def test_one_layer_per_sensor_so_a_demo_can_switch_one_off_live() -> None:
         sensors = [name for name in plugins if name in SENSOR_LAYERS]
         assert sensors == list(SENSOR_LAYERS), f"{costmap}: {plugins}"
         tof = [name for name in plugins if name.startswith("tof_")]
-        assert plugins.index(sensors[-1]) < plugins.index(tof[0]), "sensors before the ToF"
+        if tof:  # the whiskers stand in the local costmap only
+            assert plugins.index(sensors[-1]) < plugins.index(tof[0]), "sensors before the ToF"
         assert plugins[-1] == "inflation_layer", "inflation is always last"
         if "static_layer" in plugins:
             assert plugins[0] == "static_layer"
@@ -1132,6 +1191,43 @@ def test_the_contact_scan_only_marks_and_stays_off_until_it_is_measured() -> Non
         "an inf ray clears to range_max: below that, every one of them marks instead"
     )
     assert load_table(REPO / NODES / "depth_stream.py")["depth_reach_m"] == scan_max_range
+
+
+def test_the_camera_layer_clears_from_a_frame_and_marks_from_the_volume() -> None:
+    """A single depth frame is an eyewitness of what is OPEN, not evidence that something is
+    THERE: on the first stereo drive SGBM's blobs on the parquet (floor pixels lifted to
+    0.15-0.24 m, about one false bearing a frame) left the costmap with 100-300 lethal cells the
+    lidar never saw, 115 'collision ahead' a minute and 44 recoveries (tape ros/maps/rec/0415_*).
+    So the camera layer's two sources are split by what each is evidence of: /depth_scan clears
+    and marks nothing, /depth_marks — the fused volume's own surface sliced around the cart
+    (pepin_bringup.depth_fusion, pepin.volume_scan) — marks and clears nothing. Both costmaps,
+    because the global one does not roll and keeps a phantom longest."""
+    from pepin.volume_scan import MARKS_RANGE_M
+
+    node = sf.tree(f"{NODES}/depth_fusion.py")
+    topic = ast.literal_eval(sf.assignments(node)["MARKS_TOPIC"])
+    assert topic == "/depth_marks"
+    assert "marks_ranges" in sf.calls(node) and "/depth_scan" in sf.strings(node)
+    flags = load_table(REPO / NODES / "depth_fusion.py")
+    assert flags["marks_source"] == "volume", "the volume marks by default"
+    assert flags.flag("marks_source").choices == ("volume", "frame"), "the old way, live"
+    for costmap in ("local_costmap", "global_costmap"):
+        layer = _p(costmap)["camera_layer"]
+        assert layer["observation_sources"].split() == ["depth_scan", "depth_marks"], costmap
+        frame, volume = layer["depth_scan"], layer["depth_marks"]
+        assert frame["marking"] is False and frame["clearing"] is True, costmap
+        assert volume["topic"] == topic and volume["data_type"] == "LaserScan"
+        assert volume["marking"] is True and volume["clearing"] is False, costmap
+        # NaN is "the volume holds nothing here" and there is no inf on this topic at all; valid,
+        # an inf would become a point at range_max and MARK a ring there, as the contact layer
+        # taught us.
+        assert volume["inf_is_valid"] is False, costmap
+        assert volume["sensor_frame"] == "base_link"
+        assert volume["expected_update_rate"] == 0.0, "no source may stall a costmap by dying"
+        assert volume["observation_persistence"] > 0.0, "...and a dead source must be forgotten"
+        # One window for the two words of one camera, and inside the fan's own reach: a mark the
+        # layer would have to discard is a mark nobody sees.
+        assert volume["obstacle_max_range"] == frame["obstacle_max_range"] < MARKS_RANGE_M
 
 
 def test_the_floor_s_edge_is_a_node_of_the_kit_and_crosses_the_bridge() -> None:
@@ -1588,8 +1684,12 @@ def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_p
             path.name
         )
         assert "self.add_on_set_parameters_callback" not in sf.calls(node), path.name
+        # A name built per sensor (tof_bridge's f"{name}_x") is not a literal and cannot be
+        # compared with a flag's name here; every literal one is.
         declared = {
-            ast.literal_eval(c.args[0]) for c in sf.calls_to(node, "self.declare_parameter")
+            ast.literal_eval(c.args[0])
+            for c in sf.calls_to(node, "self.declare_parameter")
+            if isinstance(c.args[0], ast.Constant)
         }
         assert not declared & set(flags.names), f"{path.name}: a flag declared twice"
         for flag in flags:
@@ -2175,7 +2275,9 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
     # The board's sensor launch runs one of our processes too: the neck node (ros/feature.sh
     # neck on). The drivers around it are ROS packages the container restarts with the launch.
     robot = _launch_processes("robot.launch.py")
-    assert _respawning(robot) == {"neck_state"}
+    # tof_bridge since 2026-09-21: it died once on the robot and stayed dead, and a near-field
+    # sensor that silently never comes back is worse than one that was never on.
+    assert _respawning(robot) == {"neck_state", "tof_bridge"}
     for launch in (vslam, nav):
         for watch in ("ghost_wait", "bridge_watch"):
             assert "respawn" not in launch[watch], watch

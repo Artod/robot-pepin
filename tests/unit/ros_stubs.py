@@ -78,8 +78,19 @@ LaserScan = _msg(
     ranges=list,
     intensities=list,
 )
-# One ToF cone, as pepin_bringup.run_recorder subscribes to it.
-Range = _msg("Range", header=Header, range=0.0, min_range=0.0, max_range=0.0, field_of_view=0.0)
+# One ToF cone, field for field as pepin_bringup.tof_bridge fills it and run_recorder reads it,
+# with the two radiation types the message declares as class constants.
+Range = _msg(
+    "Range",
+    header=Header,
+    radiation_type=0,
+    range=0.0,
+    min_range=0.0,
+    max_range=0.0,
+    field_of_view=0.0,
+)
+for _name, _value in (("ULTRASOUND", 0), ("INFRARED", 1)):
+    setattr(Range, _name, _value)
 PointField = _msg("PointField", name="", offset=0, datatype=0, count=0)
 for _name, _value in (("INT8", 1), ("UINT8", 2), ("UINT32", 6), ("FLOAT32", 7), ("FLOAT64", 8)):
     setattr(PointField, _name, _value)
@@ -334,6 +345,10 @@ class RclpyTime:
     def __add__(self, other: Any) -> RclpyTime:
         return RclpyTime(nanoseconds=self.nanoseconds + other.nanoseconds)
 
+    def __sub__(self, other: Any) -> RclpyTime:
+        """rclpy's: a Duration off a Time is a Time (a stamp dated backwards)."""
+        return RclpyTime(nanoseconds=self.nanoseconds - other.nanoseconds)
+
 
 class Duration:
     """rclpy.duration.Duration: seconds in, nanoseconds kept."""
@@ -391,9 +406,14 @@ class TimeSynchronizer:
 
 
 class Buffer:
-    """tf2_ros.Buffer: a test fills ``transforms`` by (target, source) or sets ``error``."""
+    """tf2_ros.Buffer: a test fills ``transforms`` by (target, source) or sets ``error``.
 
-    def __init__(self) -> None:
+    ``cache_time`` is kept the way the real one keeps it (a node that asks for a short history
+    must not fail here), never enforced: these lookups have no history to trim.
+    """
+
+    def __init__(self, cache_time: Any = None) -> None:
+        self.cache_time = cache_time
         self.transforms: dict[tuple[str, str], Any] = {}
         self.error: Exception | None = None
         self.calls: list[tuple[Any, ...]] = []
@@ -450,14 +470,18 @@ class _Thread:
 
 
 class StaticTransformBroadcaster:
-    """tf2_ros': keeps every transform a node asked it to send, in order."""
+    """tf2_ros': keeps every transform a node asked it to send, in order — and in ``batches``,
+    the calls themselves, because how many MESSAGES a node sends is a cost on the board."""
 
     def __init__(self, node: Any) -> None:
         self.node = node
         self.sent: list[Any] = []
+        self.batches: list[list[Any]] = []
 
     def sendTransform(self, transforms: Any) -> None:  # noqa: N802 — tf2_ros' own name
-        self.sent.extend(transforms if isinstance(transforms, list) else [transforms])
+        items = list(transforms) if isinstance(transforms, list) else [transforms]
+        self.batches.append(items)
+        self.sent.extend(items)
 
 
 class TransformBroadcaster(StaticTransformBroadcaster):

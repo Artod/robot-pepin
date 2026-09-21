@@ -262,6 +262,32 @@ check_board() {
     else
         pass 1.10 "base: active, no torque left standing${line:+ (last: ${line##*: })}"
     fi
+
+    # Nav2 is not "up" until it is ACTIVE. planner_server's activation blocks inside its global
+    # costmap's first update, and a costmap whose range layers cannot transform a Range never
+    # finishes one: tf2's canTransform costs its whole transform_tolerance per message, the ToF
+    # layers receive 15 Hz each, and the backlog outgrows the drain until the update never
+    # returns (4 of 7 board starts on 2026-09-21; scratch/nav2_hang/wedge_gain.py, and the
+    # tof_bridge module docstring for the fix). Two questions, one line: did the lifecycle
+    # manager get planner_server's bond, and is the log free of the complaint that says the
+    # wedge is running. The bond is printed once at activation, so it is looked for across the
+    # whole restart, not the report window; the container is recreated on every restart
+    # (board/pepin-ros.service), so no older start can match. A board that runs no Nav2
+    # (PEPIN_NAV=false) has nothing to judge here and is not failed for it.
+    value="$(board_last "$((WAIT_BOARD_S + REPORT_WINDOW_S))" 'Activating planner_server')"
+    line="$(board_last "$((WAIT_BOARD_S + REPORT_WINDOW_S))" 'planner_server connected with bond')"
+    n="$(board_count "$REPORT_WINDOW_S" "Range sensor layer can't transform")"
+    if [ -z "$value" ]; then
+        warn 1.11 "nav2: no 'Activating planner_server' in the board's log — Nav2 does not run on this half (PEPIN_NAV), nothing to judge"
+    elif [ -z "$line" ]; then
+        fail 1.11 "nav2: planner_server was activated and never bonded — it is WEDGED in its global costmap's first update ($n x 'Range sensor layer can't transform' in the last ${REPORT_WINDOW_S} s). Goals are accepted and nothing is planned; restart the board half (ros/restart.sh board) and, if it comes back, ros/tools/coldstart_soak.sh"
+    elif [ "$n" = "?" ]; then
+        fail 1.11 "nav2: planner_server bonded, but the board's log could not be read for the range-layer complaint (ssh root@$BOARD docker logs pepin-ros)"
+    elif [ "$n" != 0 ]; then
+        fail 1.11 "nav2: $n x 'Range sensor layer can't transform' in the last ${REPORT_WINDOW_S} s — a costmap update is blocking a whole transform_tolerance per ToF message and is on its way to the wedge: read tof_bridge's gate in its report line (ros/watch.sh, ros/flags.sh list tof_bridge) and restart the board half"
+    else
+        pass 1.11 "nav2: planner_server connected with bond, 0 range-layer transform failures in the last ${REPORT_WINDOW_S} s"
+    fi
 }
 
 check_laptop() {

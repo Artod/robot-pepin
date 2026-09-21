@@ -284,11 +284,16 @@ def generate_launch_description() -> LaunchDescription:
         ),
     )
     # Off by default for now: a rclpy process costs ~140 MB and Nav2 does not read Range yet.
+    # Respawned like every other node of this launch: on 2026-09-21 the bridge died once (a
+    # logging call rclpy refuses) and stayed dead — a near-field sensor that silently never comes
+    # back is worse than one that was never on.
     tof = Node(
         package="pepin_bringup",
         executable="tof_bridge",
         output="screen",
         condition=IfCondition(LaunchConfiguration("tof")),
+        prefix=_after_ghost("/tof_bridge"),
+        **RESPAWN,
     )
     # The neck's encoders and the live camera transform (pepin_bringup.neck_state). As a module,
     # like the recorder: the image's console scripts are generated at build time and the sources
