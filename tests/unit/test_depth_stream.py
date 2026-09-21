@@ -1282,6 +1282,23 @@ def test_the_stereo_source_pairs_the_right_eye_by_its_exact_stamp(build: Build) 
     assert float(np.median(np.abs(measured[both] - truth[both]) / truth[both])) < 0.01
 
 
+def test_the_fan_never_announces_a_range_the_stereo_head_does_not_measure(build: Build) -> None:
+    """The costmap clears an ``inf`` bearing out to the scan's own range_max, so under a stereo
+    head that number is the rig's reach and not the mono-era 3 m; a rig that reaches further
+    than the fan was ever asked to look changes nothing."""
+    node, _net = build(depth_source="stereo", lidar_anchor=False)
+    matcher = rig(node)
+    assert node._stereo is not None
+    reach = float(node._stereo.reach)
+    assert 0.5 < reach < 3.0
+    stereo_frame(node, matcher, CONFIG_CAM, 1.5, 0)
+    _depths, scans = published(node)
+    assert scans[0].range_max == pytest.approx(reach)
+    far, _net2 = build(depth_source="stereo", stereo_reach_m=10.0, lidar_anchor=False)
+    rig(far)
+    assert far._scan_max_range == pytest.approx(3.0)
+
+
 def test_a_left_picture_with_no_right_eye_of_its_stamp_is_dropped_and_counted(
     build: Build,
 ) -> None:

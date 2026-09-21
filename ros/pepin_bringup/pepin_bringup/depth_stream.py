@@ -2197,10 +2197,15 @@ class DepthStream(Node):
             )
             return
         stereo.geometry = rig
+        # The fan must not announce a range the head never measures: the costmap clears an
+        # "inf" bearing out to the scan's own range_max, and between the rig's reach and the
+        # mono-era 3.0 m that would be free space nobody saw.
+        self._scan_max_range = min(self._scan_max_range, float(stereo.reach))
         self.get_logger().info(
             f"stereo rig: fx {rig.fx:.1f} px, baseline {rig.baseline_m * 100:.2f} cm, so one"
             f" pixel of disparity is {rig.fx * rig.baseline_m:.1f} m — this head measures"
-            f" {stereo.near:.2f} to {stereo.reach:.2f} m"
+            f" {stereo.near:.2f} to {stereo.reach:.2f} m, and /depth_scan says so"
+            f" (range_max {self._scan_max_range:.2f} m)"
         )
 
     def _on_right(self, msg: Image) -> None:
