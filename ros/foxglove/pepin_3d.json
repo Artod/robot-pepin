@@ -131,6 +131,12 @@
           "colorMode": "flat",
           "flatColor": "#ff3b3b"
         },
+        "/depth_marks": {
+          "visible": true,
+          "pointSize": 5,
+          "colorMode": "flat",
+          "flatColor": "#ffea00"
+        },
         "/fusion/surface": {
           "visible": true,
           "pointSize": 5,

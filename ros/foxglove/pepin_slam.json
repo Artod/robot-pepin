@@ -86,6 +86,12 @@
           "colorMode": "flat",
           "flatColor": "#ff3b3b"
         },
+        "/depth_marks": {
+          "visible": false,
+          "pointSize": 5,
+          "colorMode": "flat",
+          "flatColor": "#ffea00"
+        },
         "/contact_scan": {
           "visible": false,
           "pointSize": 4,

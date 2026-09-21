@@ -347,6 +347,29 @@ class Tsdf:
         twin.sdf, twin.weight, twin.rgb = self.sdf.copy(), self.weight.copy(), self.rgb.copy()
         return twin
 
+    def window(self, box: tuple[slice, slice, slice]) -> Tsdf:
+        """One box of the grid as a volume of its own — the same voxels, on a :class:`GridSpec`
+        whose origin is the box's own corner, so everything read out of it lands in the same map
+        metres it did here.
+
+        What :meth:`snapshot` is for the whole model, this is for a neighbourhood: a copy of a
+        few megabytes instead of the grid, taken in well under a millisecond, so a caller that
+        needs the surface around the cart many times a second (``/depth_marks``,
+        :mod:`pepin.volume_scan`) holds the model's lock for the copy and does the reading
+        outside it. A box is only voxels, and a planar move never touches the lattice, so the
+        twin stays true until the very voxels it copied change.
+        """
+        corner = [sl.indices(n)[0] for sl, n in zip(box, self.sdf.shape, strict=True)]
+        ox, oy, oz = (
+            o + i * self.spec.voxel_m for o, i in zip(self.spec.origin, corner, strict=True)
+        )
+        twin = Tsdf.__new__(Tsdf)
+        sdf = self.sdf[box].copy()
+        nx, ny, nz = sdf.shape
+        twin.spec = dataclasses.replace(self.spec, origin=(ox, oy, oz), shape=(nx, ny, nz))
+        twin.sdf, twin.weight, twin.rgb = sdf, self.weight[box].copy(), self.rgb[box].copy()
+        return twin
+
     def shift(self, shift: PlanarShift, law: str = NEAREST) -> ShiftedColumns:
         """Move everything in the model by a rigid planar ``shift`` — the volume follows the
         graph's correction instead of standing where the pose used to be — and return the
@@ -515,22 +538,43 @@ class Tsdf:
         self.colour_weight[at] = np.minimum(self.spec.max_weight, cw_new)
 
     # ---- readout -------------------------------------------------------------------------
-    def surface(self, min_weight: float = 2.0) -> tuple[Array, Uint8]:
+    def surface(
+        self, min_weight: float = 2.0, box: tuple[slice, slice, slice] | None = None
+    ) -> tuple[Array, Uint8]:
         """Points where the field crosses zero between two weighted neighbours, interpolated
         to the crossing along each axis: the model's surface as (n, 3) map points and colours
-        (each point's colour from the neighbour nearer the surface, the smaller |sdf|)."""
+        (each point's colour from the neighbour nearer the surface, the smaller |sdf|).
+
+        ``box`` is a sub-box of the grid (voxel index slices) to search instead of the whole of
+        it — the same test on fewer voxels, for a caller that needs the surface AROUND THE CART
+        many times a second rather than the room once (:mod:`pepin.volume_scan`). A crossing is
+        still a crossing between two neighbours, so a surface on the box's outer face, whose
+        other neighbour lies outside, is not reported: the box is widened by the caller, not
+        here. Nothing else changes — ``None`` searches everything, as it always did.
+        """
         s = self.spec
         pts: list[Array] = []
         cols: list[Uint8] = []
-        known = self.weight >= min_weight
+        sel = box if box is not None else (slice(None), slice(None), slice(None))
+        corner = np.array([sl.indices(n)[0] for sl, n in zip(sel, self.sdf.shape, strict=True)])
+        field, rgb = self.sdf[sel], self.rgb[sel]
+        known = self.weight[sel] >= min_weight
+        # The crossing test without np.sign, which cost two float passes per axis: "the signs
+        # differ and the first is not zero" is "the first is positive and the second is not, or
+        # the first is negative and the second is not" — the same mask (verified cell for cell
+        # on the live volume, scratch/marks_slice_cost.py) at a third of the time, which is what
+        # lets /depth_marks take this readout twenty times a second.
+        positive, negative = field > 0.0, field < 0.0
         for axis in range(3):
             a = [slice(None)] * 3
             b = [slice(None)] * 3
             a[axis] = slice(0, -1)
             b[axis] = slice(1, None)
-            sa, sb = self.sdf[tuple(a)], self.sdf[tuple(b)]
+            sa, sb = field[tuple(a)], field[tuple(b)]
             ka, kb = known[tuple(a)], known[tuple(b)]
-            cross = ka & kb & (np.sign(sa) != np.sign(sb)) & (sa != 0)
+            pa, pb = positive[tuple(a)], positive[tuple(b)]
+            na, nb = negative[tuple(a)], negative[tuple(b)]
+            cross = ka & kb & ((pa & ~pb) | (na & ~nb))
             if not np.any(cross):
                 continue
             ia = np.argwhere(cross)
@@ -538,11 +582,11 @@ class Tsdf:
             frac = va / (va - vb)
             idx = ia.astype(float)
             idx[:, axis] += frac
-            pts.append((idx + 0.5) * s.voxel_m + np.array(s.origin))
+            pts.append((idx + corner + 0.5) * s.voxel_m + np.array(s.origin))
             ib = ia.copy()
             ib[:, axis] += 1
             nearer = np.where((np.abs(vb) < np.abs(va))[:, None], ib, ia)
-            cols.append(self.rgb[nearer[:, 0], nearer[:, 1], nearer[:, 2]])
+            cols.append(rgb[nearer[:, 0], nearer[:, 1], nearer[:, 2]])
         if not pts:
             return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.uint8)
         return np.concatenate(pts), np.concatenate(cols)

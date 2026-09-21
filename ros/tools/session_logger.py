@@ -14,9 +14,10 @@ fused, what a fusion rejected, every source's fit, delta, sigma and self-check r
 together answer offline what the day of 2026-09-13 could not answer live: how far the camera's
 word was from the lidar's truth, per source (`scratch/camera_error.py`).
 
-``--camera-scans`` adds the camera's raw scans (/depth_scan, /contact_scan) as ``depth_scan`` /
-``contact_scan`` records, off by default: /depth_scan is already consumed on this board by the
-costmap's depth layer, but /contact_scan's layer is off, so subscribing to it here would open a
+``--camera-scans`` adds the camera's raw scans (/depth_scan, /depth_marks, /contact_scan) as
+``depth_scan`` / ``depth_marks`` / ``contact_scan`` records, off by default: the first two are
+already consumed on this board by the costmap's camera layer (the frame clears, the volume's
+marks mark), but /contact_scan's layer is off, so subscribing to it here would open a
 new bridge route from the laptop for a recording — the board carries what is real-time critical
 and nothing else (CLAUDE.md rule 20), and this is the owner's switch, not the recorder's habit.
 
@@ -51,7 +52,14 @@ from pepin.recording import scan_record_from_ros
 
 FSYNC_EVERY_S = 2.0
 # The camera's virtual scans, by the topic they arrive on and the record they are written as.
-CAMERA_SCANS = (("/depth_scan", "depth_scan"), ("/contact_scan", "contact_scan"))
+# /depth_marks is the one the costmap MARKS from since 2026-09-21 (the fused volume's surface,
+# pepin_bringup.depth_fusion), so a replay that asks "what did the cart think was there" needs it
+# beside the frame's own fan; the board already consumes it, so it opens no new route.
+CAMERA_SCANS = (
+    ("/depth_scan", "depth_scan"),
+    ("/depth_marks", "depth_marks"),
+    ("/contact_scan", "contact_scan"),
+)
 
 
 def _stop_if_stale(node: "SessionLogger", started: float, limit: float) -> None:

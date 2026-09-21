@@ -28,13 +28,17 @@ measurement is placed level instead of by a number nobody measured.
 
 THE VOLUME IS OPEN-LOOP, AND THAT IS THE ARCHITECTURE. It is painted at the pose the tracker
 gives, and NOTHING localises against it: no slice of it goes out as a map, no matcher reads it, no
-pose is estimated on it. A tracker that matches the slice it is painting has a null space it cannot
+pose is estimated on it. What a slice of it DOES do since 2026-09-21 is mark the costmap
+(``/depth_marks`` below) — an obstacle the planner routes around, never a measurement anything
+seats itself on, and the loop that rule forbids is the one through the POSE. A tracker that
+matches the slice it is painting has a null space it cannot
 see out of — turn the map and the heading together and a bearing-only scan maps onto itself — and a
 cart parked with its wheels blocked walked 7 degrees and 5-7 cm in 35 minutes through it at fit
 0.97-0.99 (2026-09-18), every step under a tenth of a degree. The room's own geometry is RTAB-Map's
 loop-closed graph and its occupancy grid; this node paints the 3D surface beside it.
 
-``/fusion/surface`` is therefore the only thing this node publishes about the room, and the volume
+``/fusion/surface`` and ``/depth_marks`` — the same surface, as a cloud for a person and as a fan
+for the costmap — are therefore everything this node says about the room, and the volume
 is snapshotted to ``world_path`` every ``snapshot_s`` and at shutdown. The snapshot is named after
 the graph DATABASE it shares a frame with (:func:`pepin.worldmap.world_path_for`): every voxel was
 painted at a pose in that database's optimised frame, so a fresh database means a fresh volume.
@@ -90,9 +94,25 @@ keeps its last good value here for ever, and when the laptop's routes from the b
 that session ended with keeps 52.9 % of the saved map's walls and has carved 2070 of them free
 (scratch/volume_vs_file_seating.py).
 
+THE COSTMAP'S CAMERA MARKS COME FROM THE VOLUME (``/depth_marks``, 2026-09-21). A single stereo
+frame is not evidence that something is THERE: SGBM on a herringbone parquet answers small blobs
+of disparity 2-5 px too large, which lift floor pixels to 0.15-0.24 m — inside the band the fan
+marks in — at about one false bearing a frame, and the first stereo drive left the costmap with
+100-300 lethal cells the lidar never saw, 115 "collision ahead" a minute and 44 recoveries (tape
+ros/maps/rec/0415_*). The same frames fused into this volume look clean, because a weighted
+average and the free space later rays carve are exactly what one wrong opinion does not survive.
+So this node slices the volume's own surface — the same surface ``/fusion/surface`` draws, at the
+same ``min_weight`` — around the cart into a LaserScan over the whole turn in ``base_link``
+(:mod:`pepin.volume_scan`), published at the rate the volume is integrated and stamped with the
+observation that was just integrated. The costmap's camera layer MARKS from it and CLEARS from
+``/depth_scan``: the frame is the eyewitness of what is open now, the model is what remembers
+what is there. ``marks_source`` frame relays ``/depth_scan`` onto the same topic unchanged, which
+is the pre-2026-09-21 costmap without a restart. No floor-specific rule anywhere in this.
+
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
 ``fit_gate``, ``lidar_fit_gate``, ``paint_sigma_m``, ``imu_lean``, ``lean_gate_deg``,
-``lean_min_quality``, ``self_heal``, ``align``, ``min_weight``, ``surface_hz``,
+``lean_min_quality``, ``self_heal``, ``align``, ``min_weight``, ``marks_source``,
+``marks_min_z``, ``surface_hz``,
 ``band_half_z``, ``lidar_layer``, ``no_return_free``, ``view_gate``, ``snapshot_s``,
 ``resume_volume``, ``follow_correction``, ``follow_correction_min_m``,
 ``follow_correction_min_deg``, ``follow_correction_min_s``, ``follow_correction_law``; their
@@ -135,6 +155,17 @@ from pepin.tsdf import (
     backproject,
     band_half_z_m,
 )
+from pepin.volume_scan import (
+    MARKS_ANGLE_MIN,
+    MARKS_MIN_RANGE_M,
+    MARKS_MIN_Z_M,
+    MARKS_RANGE_M,
+    MARKS_STEP,
+    MarksLaw,
+    empty_marks,
+    marks_ranges,
+    marks_window,
+)
 from pepin.watch import DRIVE_FIT, PAINT_SIGMA_M, SOURCE_PATIENCE_S, PaintTrust
 from pepin.worldmap import (
     CorrectionFollower,
@@ -152,6 +183,7 @@ from pepin_bringup.msgs import (
     cloud_from_points,
     rpy_from_transform,
     scan_arrays,
+    scan_from_ranges,
     stamp_seconds,
 )
 from pepin_bringup.node_kit import (
@@ -173,6 +205,16 @@ LIDAR_CONFIG = "/ws/config/lidar.json"
 # database means a fresh volume.
 DATABASE = "/maps/rtabmap.db"
 SCAN_TOPIC = "/scan"
+# THE CAMERA'S TWO WORDS TO THE COSTMAP, and which of them is evidence of what. ``/depth_scan``
+# is one frame folded onto the plane (pepin_bringup.depth_stream): an eyewitness of what is OPEN
+# right now, and from 2026-09-21 that is all it is asked for — it clears. ``/depth_marks`` is
+# this node's answer to what is THERE: the accumulated volume's own surface, sliced around the
+# cart (pepin.volume_scan), and it only marks. The two names are one layer in
+# ros/params/nav2_params.yaml.
+DEPTH_SCAN_TOPIC = "/depth_scan"
+MARKS_TOPIC = "/depth_marks"
+VOLUME = "volume"  # what marks_source chooses between: the model's surface...
+FRAME = "frame"  # ...or the single frame's own fan, relayed
 # RTAB-Map's optimised graph: the node ids and their poses in ``map``, which is the only signal
 # that says the ROOM has moved (pepin.graphbend). Published once per processed snapshot, so about
 # once a second at Rtabmap/DetectionRate 1.0 — and only while somebody subscribes, which this does.
@@ -184,7 +226,7 @@ PAIR_QUEUE = 40  # depth arrives a fraction of a second after its image; pair by
 BAND_STRIDE = 3
 BAND_MIN_POINTS = 50  # a frame with fewer points in the band is not worth a yaw search
 AT_BOUND_STREAK = 30  # ~3 s of frames refused at the search's bound: the model no longer fits
-STAGES = ("align", "integrate", "scan")
+STAGES = ("align", "integrate", "scan", "marks")
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration; their state is printed in every report line.
@@ -372,8 +414,54 @@ FLAGS = FlagSet(
         " same number so the picture and the volume's own report agree",
         on_when="raise it to show only what several frames agree on",
         off_when="0 shows every voxel ever touched, noise included — a look at what one pass"
-        " sees; it changes nothing the cart drives on",
+        " sees; SINCE 2026-09-21 IT DOES CHANGE WHAT THE CART DRIVES ON: the same number decides"
+        " what /depth_marks marks the camera layer with",
         range=(0.0, 100.0),
+    ),
+    Flag(
+        "marks_source",
+        VOLUME,
+        choices=(VOLUME, FRAME),
+        description="where the camera's MARKS in the costmap come from (/depth_marks): volume,"
+        " the accumulated model's own surface sliced around the cart at min_weight"
+        " (pepin.volume_scan — the very surface /fusion/surface draws); frame, the latest"
+        " /depth_scan relayed unchanged, which is what marked the costmap until 2026-09-21."
+        " Either way /depth_scan itself keeps CLEARING the layer: a single frame is the"
+        " eyewitness of what is open now",
+        why="the first stereo drive measured what one frame is worth as a mark (tape"
+        " ros/maps/rec/0415_*): SGBM on the herringbone parquet answers small blobs of"
+        " disparity 2-5 px too large, which lift FLOOR pixels to 0.15-0.24 m — inside the band"
+        " the fan marks in — at about one false bearing a frame, a different bearing each time."
+        " In the costmap that is 100-300 lethal cells the lidar never saw, 115 'collision ahead'"
+        " a minute and 44 recoveries in one drive. The same frames fused into the volume look"
+        " clean, because fusing is what a single opinion cannot survive: a weighted average and"
+        " the free space every later ray carves through the blob. So the marks come from the"
+        " model and the clearing stays with the frames — the nvblox arrangement (a probabilistic"
+        " volume, a 2D slice of it, the costmap), and no floor-specific rule anywhere in it",
+        on_when="volume: wherever the camera layer marks at all. A mark then needs the same"
+        " agreement a point of /fusion/surface needs, and the bearings behind the head are"
+        " answered too — the volume remembers the table the cart has driven past",
+        off_when="frame reproduces the pre-2026-09-21 costmap exactly (the fan itself, marks and"
+        " all) without a restart: the A/B for whether a missing mark is the volume's fault, and"
+        " the way back if the volume is ever seen to hold a ghost",
+    ),
+    Flag(
+        "marks_min_z",
+        MARKS_MIN_Z_M,
+        description="the floor of the height band /depth_marks reads the volume in, metres above"
+        " the cart's own floor plane; the band's top is the volume's own camera band"
+        " (config/fusion.json's camera_band_m)",
+        why="default by design, unmeasured as a marks floor: it is pepin.depth's SCAN_MIN_Z_M,"
+        " the height /depth_scan has always marked from and the floor of config/fusion.json's"
+        " camera_band_m, so the two scans of one layer speak about one band. RAISING IT IS NOT"
+        " THE CURE FOR A FLOOR THAT MARKS ITSELF — that is a floor-specific heuristic, and the"
+        " thing this topic exists to avoid; what keeps the parquet out of the marks is that a"
+        " blob one frame invented is not a surface in the volume",
+        on_when="raise it only to measure what a band costs — how much of a real low obstacle"
+        " (a plinth, a box) leaves the marks with it",
+        off_when="lower it toward the floor to see what the volume itself holds down there,"
+        " never to chase a false mark",
+        range=(0.0, 1.0),
     ),
     Flag(
         "surface_hz",
@@ -687,6 +775,13 @@ class DepthFusion(Node):
         self._tally = Tally(STAGES)
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(PointCloud2, "/fusion/surface", reliable)
+        # The costmap's camera MARKS: the volume's surface around the cart, one range per
+        # bearing, published at the rate the volume is integrated (:meth:`_publish_marks`).
+        self._marks_pub = self.create_publisher(LaserScan, MARKS_TOPIC, reliable)
+        # ...and the frame the marks used to come from, so the old behaviour is one live flag
+        # away (marks_source frame relays this message unchanged). Local to the laptop: the
+        # depth stream publishes it here, and only the OUTPUT of this node crosses to the board.
+        self.create_subscription(LaserScan, DEPTH_SCAN_TOPIC, self._on_depth_scan, reliable)
         self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
         self.create_subscription(Float32, "/localization_fit", self._on_fit, reliable)
         # How sure the tracker is of itself, beside how well its last scan fitted: JSON on
@@ -737,6 +832,7 @@ class DepthFusion(Node):
         self._last_stamp: Any = None  # the last fused frame's header stamp, the board's clock
         self._bound_streak = 0  # consecutive frames refused at the bound (self-healing)
         self._surface_points = 0
+        self._marks_bearings = 0  # bearings the last slice of the volume filled: a report level
         self._worker = Worker(self._on_work, name="fusion", on_error=self._on_work_error).start()
         # The scan has its own worker: integrating a revolution takes milliseconds, but it waits
         # for the lock a camera frame holds, and the executor thread must not wait with it.
@@ -778,7 +874,8 @@ class DepthFusion(Node):
             f"fusion up: {nx}x{ny}x{nz} voxels of {self._spec.voxel_m * 100:.0f} cm from"
             f" {self._spec.origin}; {self._switches.state()}; {self._band_text()}; fused while"
             f" /localization_fit >= {DRIVE_FIT:.2f}; mode {self._mode}; nothing localises against"
-            f" this volume — it is painted open-loop and published only as /fusion/surface;"
+            f" this volume — it is painted open-loop and published as /fusion/surface and as the"
+            f" costmap's camera marks on {MARKS_TOPIC} ({self._switches['marks_source']});"
             f" snapshot {self._world_path} (the frame of {self._database}); the volume follows the"
             f" bend of the graph's own node poses on {GRAPH_TOPIC}, never the change in map -> odom"
             " (which moves when the CART is found and not only when the room does)"
@@ -1057,6 +1154,9 @@ class DepthFusion(Node):
             )
         self._tally.count("revolutions")
         self._tally.count("scan_voxels", touched)
+        # ...and the costmap hears what the volume holds now, at the pose this revolution was
+        # painted by and on its own stamp.
+        self._publish_marks(base, msg.header.stamp)
         now = time.monotonic()
         self._trust.painted(now)  # ...and the map on disk may be replaced by this one
         if self._snapshots.due(now) and self._switches["snapshot_s"] > 0.0:
@@ -1284,6 +1384,7 @@ class DepthFusion(Node):
             self._last_stamp = stamp
         self._tally.count("frames")
         self._tally.count("voxels", touched)
+        self._publish_marks(base, stamp)  # the camera's own turn to move the marks
         now = time.monotonic()
         self._trust.painted(now)  # ...and the map on disk may be replaced by this one
         # The camera's own clock on the snapshot as well as the lidar's: a camera-only run (the
@@ -1343,6 +1444,68 @@ class DepthFusion(Node):
         self._tally.count("refused_" + reason.value)
 
     # ---- outputs -------------------------------------------------------------------------
+    def _on_depth_scan(self, msg: LaserScan) -> None:
+        """One fan from a single depth frame (``/depth_scan``). It is the costmap's CLEARING
+        source and this node does not read it at all — except under ``marks_source`` frame,
+        where it is relayed onto ``/depth_marks`` unchanged, which is exactly how the camera
+        layer marked before the volume took the job over (CLAUDE.md rule 19)."""
+        self._tally.count("depth_scans")
+        if str(self._switches["marks_source"]) != FRAME:
+            return
+        self._marks_pub.publish(msg)
+        self._tally.count("marks")
+
+    def _marks_law(self) -> MarksLaw:
+        """How the volume is read out as marks right now: the node's own ``min_weight`` — the
+        one criterion for what this model calls a surface, shared with ``/fusion/surface`` — the
+        band between ``marks_min_z`` and the volume's own camera band, and the fan's reach."""
+        return MarksLaw(
+            min_weight=float(self._switches["min_weight"]),
+            band_m=(float(self._switches["marks_min_z"]), self._spec.camera_band_m[1]),
+            range_m=MARKS_RANGE_M,
+        )
+
+    def _publish_marks(self, base: RigidPose, stamp: Any) -> None:
+        """Publish what the volume holds around the cart as ``/depth_marks``: one range per half
+        degree of the whole turn, in base_link, stamped with the observation that was just
+        integrated — the board's clock, the pose that observation was placed by.
+
+        Called from both paint paths, so the marks go out at the rate the volume is integrated —
+        about 10 Hz of revolutions plus the camera's own 9-9.5 fps while the cart drives, the
+        camera alone while it stands still (a revolution from a place already seen is not
+        integrated at all, ``view_gate``), and nothing while the paint gates withhold. The
+        neighbourhood is copied under the model lock and read outside it; both halves are timed
+        into the report line's ``ms a slice``.
+
+        A bearing with no surface in the band is NaN: this topic never clears and never says a
+        thing about free space. The clearing is ``/depth_scan``'s, in the same costmap layer.
+        """
+        if str(self._switches["marks_source"]) != VOLUME:
+            return  # the frame's own fan is being relayed instead, on arrival
+        law = self._marks_law()
+        with self._tally.measure("marks"):
+            # The lock is held for the COPY of the neighbourhood and not for the reading of it:
+            # a window is a fraction of a millisecond, the crossing search over it is
+            # milliseconds, and this runs at the rate the volume is integrated — the other
+            # worker must not queue behind it.
+            with self._lock:
+                window = marks_window(self._world.volume, base, law)
+            ranges = empty_marks(law) if window is None else marks_ranges(window, base, law)
+        self._marks_bearings = int(np.count_nonzero(np.isfinite(ranges)))
+        self._marks_pub.publish(
+            scan_from_ranges(
+                ranges,
+                MARKS_ANGLE_MIN,
+                MARKS_STEP,
+                stamp,
+                BASE_FRAME,
+                MARKS_MIN_RANGE_M,
+                # a hair above the fan's own reach: a consumer drops a range AT range_max
+                law.range_m + self._spec.voxel_m,
+            )
+        )
+        self._tally.count("marks")
+
     def _publish_surface(self) -> None:
         with self._lock:  # a copy under the lock (milliseconds), the crossing search outside it
             snapshot = self._world.volume.snapshot()
@@ -1377,9 +1540,29 @@ class DepthFusion(Node):
             f" align {w.ms_per('align', 'frames'):.0f} ms, {self._turns(w)};"
             f" refused: {self._refusals(w) or 'none'}; skipped: {skipped};"
             f" no image {c['no_image']}; surface {self._surface_points} points;"
+            f" {self._marks_line(w)};"
             f" {self._band_text()}; {self._world_line(w)}; {self._follow_line(w)};"
             f" {self._lean.report()};"
             f" flags: {self._switches.state()}" + (f"; tf: {tf_text}" if tf_text else "")
+        )
+
+    def _marks_line(self, w: Window) -> str:
+        """The costmap half of the report: where the camera's marks came from this window, how
+        many went out and how fast, what one slice of the volume cost, how many bearings it
+        filled and in which band — the numbers a drive is judged on without a debugger."""
+        c = w.counts
+        if str(self._switches["marks_source"]) == FRAME:
+            return (
+                f"marks: {MARKS_TOPIC} relayed from {DEPTH_SCAN_TOPIC}, {int(c['marks'])} of"
+                f" {int(c['depth_scans'])} frames ({w.rate('marks'):.1f}/s) — the volume is not"
+                " read (marks_source frame)"
+            )
+        law = self._marks_law()
+        return (
+            f"marks: {int(c['marks'])} from the volume ({w.rate('marks'):.1f}/s,"
+            f" {w.ms_per('marks', 'marks'):.1f} ms a slice), {self._marks_bearings} bearings of"
+            f" {round(2 * math.pi / MARKS_STEP)} filled, band {law.band_m[0]:.2f}-"
+            f"{law.band_m[1]:.2f} m within {law.range_m:.1f} m at min_weight {law.min_weight:g}"
         )
 
     def _world_line(self, w: Window) -> str:

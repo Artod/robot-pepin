@@ -258,6 +258,10 @@ LAPTOP_PUBLISHES = (
     "rtabmap/mapPath",
     "rtabmap/info",
     "depth_scan",  # the camera's depth folded onto the plane, for the board's local costmap
+    # ...and what that layer MARKS with since 2026-09-21: the fused volume's own surface sliced
+    # around the cart (pepin_bringup.depth_fusion, pepin.volume_scan). The frame above clears,
+    # the model marks — one stereo frame's blobs were 100-300 lethal cells the lidar never saw.
+    "depth_marks",
     "contact_scan",  # the same depth read at the floor: where bodies touch it (pepin.contact)
     VO_TOPIC,  # the camera's own odometry, gated here, fused by the board's EKF as odom1
     BRIDGE_KICK_TOPIC,  # "restart your bridge after mine": the watch's last repair, not a drive
@@ -325,6 +329,7 @@ VISION_LAPTOP_PUBLISHES = (
     "rtabmap/mapPath",
     "rtabmap/info",
     "depth_scan",
+    "depth_marks",  # see LAPTOP_PUBLISHES: the volume's marks for the board's camera layer
     "contact_scan",
     # The laptop's whole-map watchdog (pepin_bringup.laptop_localizer) proposing a place to the
     # board's tracker, once a second, as JSON. Vision mode only: this is where the laptop sees
@@ -766,6 +771,12 @@ ON_DEMAND_TOPICS: frozenset[str] = frozenset(
         # The retired frame owner's correction: nobody publishes it in the arrangement that ships,
         # and its route exists only so rule 19's way back needs no new config.
         "/map_odom",
+        # The camera's marks: published once per observation INTEGRATED into the volume, so it
+        # stops the moment the paint gates withhold — a tracker that has lost its fit, a
+        # `enabled false`, a camera and a lidar both quiet. Every one of those is a legitimate
+        # state of a healthy link, and /depth_scan keeps flowing beside it: a watch that judged
+        # this silence would restart a healthy bridge exactly as the map's did on 2026-09-13.
+        "/depth_marks",
         f"/{BRIDGE_KICK_TOPIC}",  # one message per repair, and none at all on a healthy link
     }
 )

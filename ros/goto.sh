@@ -33,7 +33,8 @@
 # LAPTOP's local clock: ros/maps/rec/<stamp>_goto.jsonl). With PEPIN_GOTO_TAPE=off it is started
 # on its own, so a drive without a numbered tape is still recorded. The two clocks are explained
 # in ros/maps/README.md.
-# PEPIN_REC_CAMERA_SCANS=1 adds /depth_scan and /contact_scan to the session logger's tape.
+# PEPIN_REC_CAMERA_SCANS=1 adds /depth_scan, /depth_marks and /contact_scan to the session
+# logger's tape.
 # PEPIN_GOTO_TAPE=off drives without asking the recorder for a numbered one.
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
@@ -118,8 +119,8 @@ trap finish EXIT
 trap 'finish; exit 143' HUP TERM
 # Any recorder left over from a run whose cleanup never ran would keep a core busy: clear it first.
 ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f session_logger.py >/dev/null 2>&1; true"
-# PEPIN_REC_CAMERA_SCANS=1 also tapes /depth_scan and /contact_scan on the board. Off by
-# default: /contact_scan has no other consumer there, so recording it opens a bridge route from
+# PEPIN_REC_CAMERA_SCANS=1 also tapes /depth_scan, /depth_marks and /contact_scan on the board.
+# Off by default: /contact_scan has no other consumer there, so recording it opens a route from
 # the laptop (the board carries what is real-time critical and nothing else).
 REC_FLAGS=""
 if [ -n "${PEPIN_REC_CAMERA_SCANS:-}" ]; then REC_FLAGS="--camera-scans"; fi

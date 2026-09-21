@@ -47,7 +47,10 @@ DEFAULT_REQUIRED = (
     "/map_tracked",
     "/tracker_pose",
     "/fusion/surface",
+    # The camera's two words to the costmap: the frame that clears and the volume's slice that
+    # marks (pepin_bringup.depth_fusion, 2026-09-21).
     "/depth_scan",
+    "/depth_marks",
     "/camera/image|/camera/image/compressed",
     "/rtabmap/mapGraph",
     "/plan",

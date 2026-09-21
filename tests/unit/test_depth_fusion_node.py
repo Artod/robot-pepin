@@ -296,18 +296,84 @@ def test_a_reset_empties_the_volume_without_touching_its_file(tmp_path: Path) ->
 
 
 def test_the_volume_reaches_no_matcher_and_no_planner(tmp_path: Path) -> None:
-    """THE VOLUME IS OPEN-LOOP, and this is where that is visible: it is painted at the pose the
-    tracker gives and no slice of it leaves the node. A tracker matching the slice it paints has a
+    """THE VOLUME IS OPEN-LOOP, and this is where that is visible: no MAP of it leaves the node
+    and nothing seats a pose on it. A tracker matching the slice it paints has a
     null space it cannot see out of — a cart parked with its wheels blocked walked 7 degrees and
     5-7 cm in 35 minutes through it at fit 0.97-0.99 (2026-09-18) — so /map, /map_lidar,
-    /map_camera and /map_identity are gone and /fusion/surface is all there is."""
+    /map_camera and /map_identity are gone. What does leave is the surface: as a cloud
+    (/fusion/surface) and as the costmap's camera marks (/depth_marks), which is an obstacle to
+    route around and never a measurement to seat anything on."""
     node = in_room(tmp_path)
     node._on_scan_work(scan_msg())
     assert node._world.lidar_weight.any(), "painted, all the same"
-    assert set(node.pubs) == {"/fusion/surface"}
+    assert set(node.pubs) == {"/fusion/surface", "/depth_marks"}
     assert [name for name, _period in node.timers] or True
     line = node._world_line(node._tally.take())
     assert "1 revolutions" in line and "lidar slice" in line and "camera band" in line
+
+
+# ---- the costmap's camera marks: the volume, sliced ------------------------------------------
+def marks(node: DepthFusion) -> Any:
+    """The last /depth_marks message the node published."""
+    return node.pubs["/depth_marks"].sent[-1]
+
+
+def test_every_integration_publishes_the_marks_and_a_young_volume_says_nothing(
+    node: DepthFusion,
+) -> None:
+    """The marks go out at the rate the volume is integrated, in base_link, on the observation's
+    own stamp — and a volume that has seen one revolution agrees on nothing yet, so every
+    bearing is NaN: a costmap neither marks nor clears from those."""
+    node._on_scan_work(scan_msg())
+    assert len(node.pubs["/depth_marks"].sent) == 1
+    out = marks(node)
+    assert out.header.frame_id == "base_link"
+    assert (out.header.stamp.sec, out.header.stamp.nanosec) == (int(SCAN_S), 0)
+    ranges = np.array(out.ranges)
+    assert ranges.size == 720 and out.angle_min == pytest.approx(-math.pi)
+    assert out.angle_increment == pytest.approx(math.radians(0.5))
+    assert out.range_max > 3.0, "a mark AT the fan's reach must survive the projection"
+    assert not np.isfinite(ranges).any(), "one revolution is not agreement"
+    assert node._tally.take().counts["marks"] == 1
+
+
+def test_what_the_volume_agrees_on_marks_at_its_own_range(node: DepthFusion) -> None:
+    """Two revolutions from two places, and the room the beams drew comes back as ranges: the
+    box wall is 2 m from where the cart stood, and that is what the bearing carries."""
+    node._switches.set("min_weight", 0.5)
+    node._on_scan_work(scan_msg())
+    node._tf.buffer.transforms[("map", "base_link")].transform.translation.x = 0.4
+    node._on_scan_work(scan_msg(SCAN_S + 0.2))
+    ranges = np.array(marks(node).ranges)
+    assert np.isfinite(ranges).any()
+    assert float(np.nanmin(ranges)) == pytest.approx(2.0, abs=0.1), "the wall of the box"
+    assert float(np.nanmax(ranges)) <= 3.0, "and nothing past the fan's own reach"
+
+
+def test_marks_source_frame_relays_the_single_frame_s_own_fan(node: DepthFusion) -> None:
+    """CLAUDE.md rule 19: the costmap of before 2026-09-21 without a restart — /depth_scan's own
+    fan, unchanged, on the topic the layer marks from, and the volume not read at all."""
+    assert node._switches.set("marks_source", "frame") == "volume"
+    fan = scan_msg(SCAN_S)
+    node.subs["/depth_scan"][1](fan)
+    assert marks(node) is fan, "relayed, not rebuilt"
+    node._on_scan_work(scan_msg())
+    assert len(node.pubs["/depth_marks"].sent) == 1, "the volume publishes nothing in this mode"
+    counts = node._tally.take().counts
+    assert counts["marks"] == 1 and counts["depth_scans"] == 1
+
+
+def test_the_report_line_says_where_the_marks_came_from(node: DepthFusion) -> None:
+    """A drive is judged on the report line: which source the costmap's marks had, how many went
+    out, what a slice of the volume cost and in which band it was read."""
+    node._on_scan_work(scan_msg())
+    line = node._marks_line(node._tally.take())
+    assert "marks: 1 from the volume" in line and "ms a slice" in line
+    assert "band 0.15-1.30 m within 3.0 m at min_weight 2" in line
+    node._switches.set("marks_source", "frame")
+    node.subs["/depth_scan"][1](scan_msg())
+    relayed = node._marks_line(node._tally.take())
+    assert "/depth_marks relayed from /depth_scan" in relayed and "1 of 1 frames" in relayed
 
 
 # ---- the volume follows the GRAPH, not map -> odom ---------------------------------------------

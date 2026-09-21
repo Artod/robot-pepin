@@ -456,7 +456,10 @@ def test_a_latched_or_on_demand_topic_is_never_judged_for_flow() -> None:
     from pepin.deployment import ON_DEMAND_TOPICS, TopicFlow
 
     waiting = ("/depth_fusion",)
-    for topic in ("/map", "/tf_static", "/plan"):
+    # /depth_marks is one message per observation INTEGRATED into the volume, so it stops
+    # whenever the paint gates withhold (a tracker that lost its fit) while /depth_scan goes on
+    # flowing beside it: a legitimate state of a healthy link, judged by nothing.
+    for topic in ("/map", "/tf_static", "/plan", "/depth_marks"):
         assert topic in ON_DEMAND_TOPICS
         flow = TopicFlow(topic, "some/msg/Type", True, waiting)
         assert flow.should_flow and not flow.judged, topic

@@ -93,10 +93,13 @@ def test_asked_for_they_are_taped_compactly(tmp_path: Path) -> None:
     infinities as null — the shape a replay already reads the lidar's returns in."""
     logger = module().SessionLogger(str(tmp_path / "run.jsonl"), camera_scans=True)
     logger.subs["/depth_scan"][1](scan())
+    # ...and what the costmap actually MARKS with since 2026-09-21 (the volume's own surface,
+    # pepin_bringup.depth_fusion): a replay that asks what the cart thought was there needs it
+    logger.subs["/depth_marks"][1](scan())
     logger.subs["/contact_scan"][1](scan())
     records = tape(logger)
-    assert [r["topic"] for r in records] == ["depth_scan", "contact_scan"]
+    assert [r["topic"] for r in records] == ["depth_scan", "depth_marks", "contact_scan"]
     assert records[0]["ranges"] == [1.0, None, 2.5]
     assert records[0]["angle_min"] == pytest.approx(-0.7)
     assert records[0]["angle_increment"] == pytest.approx(0.01)
-    assert math.isfinite(records[0]["t"]) and logger.camera_scans == 2
+    assert math.isfinite(records[0]["t"]) and logger.camera_scans == 3
