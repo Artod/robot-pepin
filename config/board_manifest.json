@@ -149,7 +149,7 @@
         "cpu_percent": 20.0,
         "rss_mb": 102.0
       },
-      "note": "Measured 13 % / 68 MB. An rclpy process costs ~65 MB before it does anything."
+      "note": "Measured 13 % / 68 MB. An rclpy process costs ~65 MB before it does anything. The tf_gate of 2026-09-21 put an rclpy TF listener in here and took it to 20-37 % of a core; it came out on 2026-09-22 (the whiskers reach Nav2 as scan fans instead), so the next census should read 13 % again."
     },
     {
       "name": "neck_state",

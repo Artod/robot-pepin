@@ -181,8 +181,8 @@ def test_the_whiskers_do_not_run_in_the_plugin_with_the_unbounded_loop() -> None
     entirely off the grid's left or bottom edge leaves the upper bounds NEGATIVE, the cast makes
     them about 4e9, and one thread spins for ever holding the costmap's mutex. It needs one jump
     of the pose in ``map`` between a reading's stamp and the update — a tracker restart, a
-    relocalisation, the cart lifted — so no publisher can gate it the way ``tf_gate`` gates the
-    first defect. Reproduced with ``ros/thin.sh kick relocalizer`` (tid 191 of the Nav2
+    relocalisation, the cart lifted — which happens after the reading has left, so no publisher
+    can hold it off. Reproduced with ``ros/thin.sh kick relocalizer`` (tid 191 of the Nav2
     container: 415 s of CPU in 700 s). So: no costmap may LIST a RangeSensorLayer, the whiskers
     are ObstacleLayers fed by a fan, and the flag that goes back is live.
     """
@@ -338,11 +338,12 @@ def test_the_planners_buy_a_berth_with_cost_not_with_walls() -> None:
 
 
 def test_the_tof_layers_never_stall_either_costmap() -> None:
-    """A whisker that goes quiet must never be able to stop the robot, and since 2026-09-21 its
-    silence is a DESIGNED state: tof_bridge's tf_gate withheld 480 readings over 8 s while the
-    tracker restarted. So the scan sources carry no expected_update_rate (a buffer given a rate
-    calls itself stale and Nav2 answers every goal with "Costmap timed out waiting for update",
-    2026-09-07), and the kept range layers keep their no_readings_timeout."""
+    """A whisker that goes quiet must never be able to stop the robot: a sensor can leave the
+    bus, a cone can be dropped by the layer's own message filter while TF is catching up, and
+    tof_bridge is restarted on its own (ros/thin.sh kick). So the scan sources carry no
+    expected_update_rate (a buffer given a rate calls itself stale and Nav2 answers every goal
+    with "Costmap timed out waiting for update", 2026-09-07), and the kept range layers keep
+    their no_readings_timeout."""
     for sensor in ("front", "left", "right"):
         layer = _p("local_costmap")[f"tof_{sensor}_scan_layer"]
         assert layer[f"tof_{sensor}_scan"]["expected_update_rate"] == 0.0
@@ -351,27 +352,26 @@ def test_the_tof_layers_never_stall_either_costmap() -> None:
             assert _p(costmap)[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
 
 
-def test_the_range_layers_are_fed_only_what_they_can_be_asked_to_transform() -> None:
+def test_the_whiskers_are_fed_to_a_layer_that_drops_what_it_cannot_place() -> None:
     """The Nav2 wedge of 2026-09-21. tf2's canTransform blocks the WHOLE timeout on any failure
     and RangeSensorLayer calls it once per message with the message's own stamp, so three layers
     at 15 Hz against a 0.3 s (local) and 1.0 s (global) tolerance amplify 4.5x and 15x: the
     backlog outgrows the drain, every message ages past the 10 s TF cache, the first costmap
     update never ends and planner_server hangs in Activating (scratch/nav2_hang/wedge_gain.py).
     The tolerances stay where they are — stability would need one under 67 ms, below this
-    robot's own TF latency — and the PUBLISHER holds the precondition instead: no Range leaves
-    tof_bridge while the chain that must place it is broken, and the mounts go out with every
-    reading so no late joiner can be missing the frame. Both are live switches with the old
-    behaviour one `ros/flags.sh set` away (rule 19)."""
+    robot's own TF latency — and the answer is the CONSUMER: an ObstacleLayer's message filter
+    drops what it cannot place instead of blocking on it. For one day the publisher guarded it
+    too (a tf_gate and dynamic mounts); both came out on 2026-09-22 with the range layers they
+    were written for, so the bridge is one live flag wide again (rule 19)."""
     assert _p("local_costmap")["transform_tolerance"] == 0.3
     assert _p("global_costmap")["transform_tolerance"] == 1.0
     flags = load_table(REPO / NODES / "tof_bridge.py")
-    assert flags.names == ("dynamic_mounts", "tf_gate", "tf_gate_max_lag_s", "range_as")
-    assert all(flag.live for flag in flags), "a wedge is turned off in the field, not reverted"
-    assert flags["dynamic_mounts"] is True and flags["tf_gate"] is True
-    facts = sf.assignments(sf.tree(f"{NODES}/tof_bridge.py"))
-    assert facts["_GLOBAL_FRAME"] == "'map'", "the frame the costmaps place a cone in"
-    assert float(facts["_STAMP_LAG_S"]) < flags["tf_gate_max_lag_s"], (
-        "a reading must not be born already too stale for the gate that judges it"
+    assert flags.names == ("range_as",), "the gate's flags left with the range layers"
+    assert all(flag.live for flag in flags), "a regression is turned off in the field, not reverted"
+    source = (REPO / NODES / "tof_bridge.py").read_text()
+    assert "from tf2_ros import StaticTransformBroadcaster\n" in source, (
+        "the mounts leave on /tf_static alone: the gate's TF listener cost 20-37 % of an A53 core,"
+        " and a mount on /tf with the reading's stamp made the ObstacleLayer's filter drop the fan"
     )
 
 

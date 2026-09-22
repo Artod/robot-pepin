@@ -11,13 +11,12 @@ what a costmap clears the cone on.
 EACH CONE ALSO LEAVES AS A LaserScan (2026-09-21, the ``range_as`` flag), and that is how Nav2
 is fed now: ``/tof/<name>/scan``, a small fan in the sensor's own frame, read by an
 ``ObstacleLayer``. Nav2 Jazzy's ``RangeSensorLayer`` — the plugin written for exactly this
-message — carries two unfixed defects that have each taken this robot's navigation down, and
-the second one cannot be held off by any publisher:
+message — carries two unfixed defects that have each taken this robot's navigation down:
 
 1. it calls ``canTransform(..., the message's stamp, timeout=transform_tolerance)`` once per
    message, and tf2 blocks the WHOLE timeout on any failure, so a broken chain buries
-   ``updateMap()`` in a backlog it never drains (the ``tf_gate`` below, and the paragraphs
-   after it);
+   ``updateMap()`` in a backlog it never drains (4 of 7 board starts on 2026-09-21;
+   scratch/nav2_hang/wedge_gain.py has the arithmetic and the measurement);
 2. ``range_sensor_layer.cpp:362-369`` (copy in scratch/nav2_hang/src/) clamps its cell bounds
    with ``bx0 = std::max(0, bx0); bx1 = std::min(size_x_, bx1)`` and then walks
    ``for (unsigned int x = bx0; x <= (unsigned int)bx1; x++)``. When the cone lies entirely
@@ -27,7 +26,7 @@ the second one cannot be held off by any publisher:
    a Range's stamp and the costmap update — a tracker restart, a relocalisation, the cart
    carried by hand — and it was reproduced on this robot on 2026-09-21 with
    ``ros/thin.sh kick relocalizer`` (tid 191 of the Nav2 container: 415 s of CPU in 700 s).
-   The jump happens AFTER the reading has left, so this bridge cannot gate it.
+   The jump happens AFTER the reading has left, so no publisher could hold it off.
 
 An ``ObstacleLayer`` has neither defect: its MessageFilter drops what it cannot place instead
 of blocking on it, its queue is bounded, and it walks the points it was given rather than a
@@ -38,54 +37,27 @@ its 27 degrees the thing stands and the honest mark is the whole arc. The old la
 ros/params/nav2_params.yaml, unlisted; ``range_as:=range`` and one line of ``plugins:`` put
 them back (CLAUDE.md rule 19).
 
+THE PUBLISHER DOES NOT GUARD THE CONSUMER (2026-09-22). For one day this node carried two more
+switches against defect 1: a ``tf_gate`` that withheld every reading while ``map <- base_link``
+did not resolve in a TF buffer of its own, and ``dynamic_mounts`` that put
+``base_link -> tof_<name>`` on ``/tf`` beside each reading. Defect 1 left with the range layers
+on the very same day, so the gate guarded nothing — and both cost: the rclpy TF listener took
+this process from 13 % to 20-37 % of an A53 core (config/board_manifest.json), and a mount
+arriving on ``/tf`` with the reading's own stamp made the ObstacleLayer's message filter DROP
+every fan ("timestamp on the message is earlier than all the data in the transform cache", 723
+drops in one drive), so the whiskers neither marked nor cleared. Both are out; the code stays
+reachable on branch ``stereo`` (commits 3d8c966, e4535f3). What a costmap cannot place it now
+drops by itself, in microseconds, which is the whole point of the layer the ToF moved to.
+
 The mounts are read from config/tof.json through :class:`pepin.mounts.Mounts` (measured
-2026-09-04, +-1 cm; a parameter may still nudge one) and published once as static transforms
-from base_link, so a range in ``tof_left`` lands in the right place without anyone having to
-know where the shelf is.
+2026-09-04, +-1 cm; a parameter may still nudge one) and published as static transforms from
+base_link — at start and again once a second for ``static_tf_resend_s``, because under
+rmw_zenoh a subscriber that matched a moment too early or too late never gets a one-shot
+(Nav2's container did not see the ToF mounts for 157 s on 4 of 7 board starts of 2026-09-21).
+So a range in ``tof_left`` lands in the right place without anyone having to know where the
+shelf is.
 
-THE BRIDGE OWNS THE PRECONDITION OF ITS OWN MESSAGES (2026-09-21). A Range whose frame cannot
-be placed in the global frame is not a harmless message: Nav2's ``RangeSensorLayer`` calls
-``canTransform(global_frame, frame, THE MESSAGE'S STAMP, timeout=transform_tolerance)`` once
-per message, and tf2's ``canTransform`` blocks the WHOLE timeout on any failure — a missing
-frame, a stamp outside the cache, a chain that does not resolve — with no short-circuit
-(scratch/nav2_hang/src/buffer.cpp:121-130, range_sensor_layer.cpp:220-232). Three ToF layers
-per costmap, 15 Hz each, tolerance 0.3 s local and 1.0 s global: the per-cycle amplification
-is 4.5x and 15x, so any window in which readings flow while the chain is broken buries
-``updateMap()`` in a backlog it can never drain — the messages age out of the 10 s TF cache
-before they are reached, the costmap mutex is held, ``Costmap2DROS::start()`` never returns
-and ``planner_server`` hangs in *Activating* (4 of 7 board starts on 2026-09-21;
-scratch/nav2_hang/wedge_gain.py has the arithmetic and the measurement). ``enabled: false``
-does not help — the drain runs before the check — and the tolerance is shared with
-``getRobotPose`` and is not live. So the two halves of that precondition are held here, at the
-one publisher, behind two live flags (:data:`FLAGS`, ``ros/flags.sh set tof_bridge ...``):
-
-``dynamic_mounts``
-    besides the static broadcast, each sensor's ``base_link -> tof_<name>`` goes out on ``/tf``
-    with the Range's own stamp, beside that Range. A static transform is sent once, and a
-    late-joining subscriber that matched a moment too early or too late never gets it (Nav2's
-    container did not see the ToF mounts for 157 s on 2026-09-21); a transform republished with
-    every reading cannot be missed.
-
-``tf_gate``
-    a Range leaves only while the chain that will have to place it is alive and fresh. THE
-    RULE, and why it is this one: the gate asks this node's OWN TF buffer for
-    ``map <- base_link`` at tf2's "latest" (time 0, timeout 0 — never a blocking wait), which
-    resolves to the chain's latest common time and carries it in the answer's own stamp, and it
-    opens when that moment is no more than ``tf_gate_max_lag_s`` behind the reading's stamp.
-    Two deliberate choices. (1) ``base_link``, not ``tof_<name>``: the mount is THIS node's own
-    transform, published here and suppressed here when the gate shuts, so a gate that judged
-    itself on it would shut once and never reopen — a guard must never be fed by what it
-    suppresses. (2) The latest common time, not the reading's exact stamp: the reading is
-    stamped :data:`_STAMP_LAG_S` behind now while the EKF stamps ``odom -> base_link`` at its
-    own 20 Hz (ros/params/ekf.yaml:26), so an exact-stamp lookup would fail on the ordinary gap
-    between two filter ticks and throw away healthy readings. In health the chain is AHEAD of
-    the reading — ``map -> odom`` is dated 0.1 s into the future and re-sent every 0.05 s
-    (relocalizer.py:980, :1186, :2042-2058) and the EKF's newest stamp is at most one 0.05 s
-    period old — so the measured lag sits at or below zero and essentially nothing is withheld.
-    Silence is safe on the other side too: every ToF layer runs without a rate to live up to
-    (``expected_update_rate: 0.0`` on the scan sources, ``no_readings_timeout: 0.0`` on the old
-    range layers, ros/params/nav2_params.yaml), so a topic that stops says nothing rather than
-    stalling a costmap — which is the whole reason withholding is a legitimate answer here.
+One live flag is left (:data:`FLAGS`, ``ros/flags.sh set tof_bridge ...``):
 
 ``range_as``
     ``scan`` (the default) publishes each cone on ``/tof/<name>/scan`` as well, for the
@@ -93,9 +65,6 @@ one publisher, behind two live flags (:data:`FLAGS`, ``ros/flags.sh set tof_brid
     The sensor_msgs/Range is published EITHER WAY and unchanged: it is what the run recorder
     tapes (run_recorder.py:261) and what Foxglove draws, and the three of them together cost
     less than one lidar revolution.
-
-With every flag off the node behaves exactly as it did before: the static mounts alone, every
-reading published whatever TF says, and nothing but the three Range topics.
 """
 
 from __future__ import annotations
@@ -104,14 +73,12 @@ import contextlib
 import math
 import queue
 import time
-from collections.abc import Iterable
-from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 from rclpy.duration import Duration
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan, Range
-from tf2_ros import Buffer, StaticTransformBroadcaster, TransformBroadcaster, TransformListener
+from tf2_ros import StaticTransformBroadcaster
 
 from pepin.flags import Flag, FlagSet
 from pepin.footprint import CONTACT_BAND_M
@@ -119,7 +86,7 @@ from pepin.mounts import TOF_FRAME, Mount, Mounts
 from pepin.tof_horizon import RangeHold, cone_beams, trusted_max_range
 from pepin_bringup.link import JsonLineLink
 from pepin_bringup.msgs import scan_from_ranges, transform_from_rpy
-from pepin_bringup.node_kit import Switches, TfLookup, spin_main, stamp_seconds
+from pepin_bringup.node_kit import Switches, spin_main
 from pepin_bringup.protocol import TOF_NAMES, parse_tof, parse_tof_status
 
 # VL53L1X: a ~27 deg cone, 4 cm dead zone, 1.3 m in short mode (the mode the board runs).
@@ -145,80 +112,10 @@ _QUEUE_MAX = 100
 # A reading is stamped this far behind "now": it is at least that old (sensor -> ToF server ->
 # TCP -> here), and a stamp behind the newest odom -> base_link never makes a costmap wait.
 _STAMP_LAG_S = 0.06
-_GLOBAL_FRAME = "map"  # the frame a costmap places a Range in; the ``global_frame`` parameter
-_TF_CACHE_S = 2.0  # the gate asks only about the newest moment; the board pays for the rest
-_GATE_MAX_LAG_S = 0.5  # see the tf_gate_max_lag_s flag for the arithmetic behind the number
-_GATE_DETAIL_CHARS = 90  # how much of tf2's own complaint fits in a report line
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
-# other declaration, and printed in every report line. Every default is the 2026-09-21 answer to
-# the two RangeSensorLayer defects (the module docstring), and with all of them the other way
-# this node is byte for byte the one that shipped before them.
+# other declaration, and printed in every report line.
 FLAGS = FlagSet(
-    Flag(
-        "dynamic_mounts",
-        True,
-        description="each sensor's mount base_link -> tof_<name> is published on /tf with the"
-        " Range's own stamp, beside that Range, as well as once on /tf_static; off: the static"
-        " broadcast alone, which is every consumer's only chance to learn the frame",
-        why="a static transform is published ONCE, and under rmw_zenoh a subscriber that matched"
-        " a moment too early or too late never gets it: on 2026-09-21 Nav2's container did not"
-        " see the tof_* mounts for 157 s on 4 of 7 board starts (scratch/nav2_hang/timeline.py on"
-        " board_full_1550.log), and re-sending the static transforms for the first 120 s did not"
-        " cure it — any window longer than a second is enough. A missing frame is what makes"
-        " RangeSensorLayer block its whole transform_tolerance per message (4.5x local, 15x"
-        " global amplification, scratch/nav2_hang/wedge_gain.py) until updateMap never returns"
-        " and planner_server hangs in Activating. A transform republished with every reading"
-        " cannot be missed by a late joiner, and it costs three TransformStamped at 15 Hz",
-        on_when="always on this robot: every consumer of /tof/* needs the mount to place a cone,"
-        " and nothing else publishes that edge",
-        off_when="to reproduce the pre-2026-09-21 node, or if another publisher ever owns"
-        " base_link -> tof_* — two publishers of one edge fight. The static broadcast keeps"
-        " running either way, so the frames still exist",
-    ),
-    Flag(
-        "tf_gate",
-        True,
-        description="a Range leaves only while map <- base_link resolves in this node's own TF"
-        " buffer right now and its latest common time is no more than tf_gate_max_lag_s behind"
-        " the reading; off: every reading is published whatever TF says",
-        why="a Range published while its chain is broken is not a lost measurement, it is a wedge:"
-        " tf2's canTransform blocks the FULL timeout on any failure and RangeSensorLayer calls it"
-        " once per message with the message's own stamp, so 15 Hz against a 0.3 s (local) / 1.0 s"
-        " (global) tolerance means 4.5 and 15 messages arrive per message drained, the backlog"
-        " passes the 10 s TF cache, every message then fails although TF is healthy, and the"
-        " costmap's first update never ends — 4 of 7 board starts on 2026-09-21, measured at"
-        " exactly 1/tolerance (3.262/s and 0.996/s) for 600 s (scratch/nav2_hang/wedge_gain.py,"
-        " range_drain.py). The check here is the cheap opposite of that one: tf2 with timeout 0,"
-        " which answers from the buffer and never waits. In health it withholds nothing — the"
-        " chain is AHEAD of the reading (map -> odom dated 0.1 s ahead, relocalizer.py:2042; the"
-        " EKF at 20 Hz, ros/params/ekf.yaml:26; the reading stamped 0.06 s behind now)",
-        on_when="always while Nav2's costmaps read /tof/*: it is the one place that can refuse to"
-        " feed the wedge, and a closed gate says so in every report line",
-        off_when="to reproduce the pre-2026-09-21 node, or when the ToF cones must be watched in"
-        " Foxglove with no tracker running at all (no map -> odom, so the gate would be shut and"
-        " nothing would reach the topic)",
-    ),
-    Flag(
-        "tf_gate_max_lag_s",
-        _GATE_MAX_LAG_S,
-        range=(0.0, 10.0),
-        description="how far behind a reading's stamp the newest moment of map <- base_link may"
-        " be and still let that reading out; 0 demands a chain at least as new as the reading",
-        why="both links of the chain are published at 20 Hz — map -> odom every 0.05 s dated 0.1 s"
-        " ahead (relocalizer.py:1186, :2055) and odom -> base_link by the EKF at frequency 20.0"
-        " (ros/params/ekf.yaml:26), stamped at the filter's own time — while a reading is stamped"
-        " 0.06 s behind now and drained at 15 Hz. So in health the newest moment of the chain is"
-        " within one filter period of the reading and the measured lag sits at or below zero;"
-        " 0.5 s is ten missed periods of both publishers at once, which is a publisher that"
-        " stopped (a tracker restarting, an EKF whose sources all went quiet), not jitter. It is"
-        " also well inside tf2's 10 s cache, so nothing is withheld for a reason that would have"
-        " healed by itself a moment later",
-        on_when="raise it on a board so loaded that healthy readings are withheld — the report"
-        " line's withheld counts and the lag it prints are the measurement to raise it by",
-        off_when="lower it towards 0.1 s to prove that a suspected wedge is a stale chain: the"
-        " gate then shuts on exactly the windows the costmap would have blocked in",
-    ),
     Flag(
         "range_as",
         "scan",
@@ -232,7 +129,7 @@ FLAGS = FlagSet(
         " message's own stamp with transform_tolerance as the timeout, and tf2 blocks the whole"
         " timeout on any failure, so a broken chain amplifies 4.5x per update cycle until"
         " updateMap never returns (4 of 7 board starts on 2026-09-21; scratch/nav2_hang/"
-        "wedge_gain.py) — that one the tf_gate above holds off. Two: after clamping its cell"
+        "wedge_gain.py). Two: after clamping its cell"
         " bounds to the grid (range_sensor_layer.cpp:362-369) bx1/by1 stay NEGATIVE when the cone"
         " falls off the left or bottom edge, and the loops cast them to unsigned: about 4e9"
         " iterations holding the costmap mutex, one thread at 100 % for ever, 'Pose Goes Off"
@@ -261,164 +158,16 @@ def _status_key(item: tuple[int | None, int]) -> tuple[int, int]:
     return (1, 0) if status is None else (0, status)
 
 
-@dataclass(frozen=True)
-class ChainState:
-    """What TF says about one chain right now: ``lag_s`` is how far behind the reading the newest
-    moment the chain covers is (negative when the chain is ahead of it, which is the healthy
-    case), or ``None`` with tf2's own words in ``detail`` when the chain does not resolve."""
-
-    lag_s: float | None
-    detail: str = ""
-
-
-class ChainProbe(Protocol):
-    """The one question the bridge asks TF before it lets a reading out, and it must not block.
-
-    A protocol so the node is driven in a unit test by a four-line fake, and the only piece that
-    needs tf2 at all is :class:`TfChainProbe`.
-    """
-
-    def chain(self, frame: str, stamp_s: float) -> ChainState:
-        """The state of ``<global frame> <- frame`` in the prober's own buffer right now, judged
-        against a reading stamped ``stamp_s`` (seconds). Answers from what is already there."""
-        ...
-
-
-class TfChainProbe:
-    """:class:`ChainProbe` over tf2: a short buffer fed by a listener on the node's own executor.
-
-    The buffer keeps ``cache_s`` of history because the gate only ever asks about the newest
-    moment, and every second kept is board memory. The listener runs WITHOUT a thread of its own
-    (``spin_thread=False``): this node already spins, and a second executor buys nothing on four
-    A53 cores. The lookup is tf2's "latest" (time 0) with timeout 0, which resolves to the
-    chain's latest common time and carries that moment in the answer's own stamp — so one
-    non-blocking call says both whether the chain exists and how fresh it is.
-    """
-
-    def __init__(
-        self, node: Any, global_frame: str = _GLOBAL_FRAME, cache_s: float = _TF_CACHE_S
-    ) -> None:
-        """Start the listener and the buffer that answer for ``global_frame <- ...``."""
-        self.global_frame = global_frame
-        self._detail = ""
-        buffer = Buffer(cache_time=Duration(seconds=cache_s))
-        self._listener = TransformListener(buffer, node, spin_thread=False)
-        self._lookup = TfLookup(node, buffer=buffer, on_failure=self._failed)
-
-    def chain(self, frame: str, stamp_s: float) -> ChainState:
-        """:class:`ChainProbe`: the chain's lag behind a reading stamped ``stamp_s``, or the
-        reason tf2 gives for having no chain at all."""
-        self._detail = ""
-        transform = self._lookup.transform(self.global_frame, frame, None, 0.0)
-        if transform is None:
-            return ChainState(None, self._detail or f"{self.global_frame} <- {frame}: no answer")
-        return ChainState(stamp_s - stamp_seconds(transform.header.stamp))
-
-    def _failed(self, kind: str, text: str) -> None:
-        """tf2's own complaint, kept for the gate's report line."""
-        self._detail = f"{kind}: {text}"
-
-
-class Gate:
-    """The bridge's precondition as a switch with a memory: open or shut, since when, why, and
-    how many readings it has withheld — everything the report line and the log need.
-
-    Pure bookkeeping over what a :class:`ChainProbe` answered, so the decision is unit-testable
-    with no ROS and no clock of its own. It starts SHUT: nothing has been proven yet, and the
-    first reading judged opens it within one drain period when the chain is up.
-    """
-
-    def __init__(
-        self, names: Iterable[str], max_lag_s: float = _GATE_MAX_LAG_S, now_s: float = 0.0
-    ) -> None:
-        """A gate that counts the readings of ``names`` it withholds, born shut at monotonic
-        ``now_s`` — so "shut for N s" counts from the node's start, not from the clock's zero."""
-        self.max_lag_s = max_lag_s
-        self.open = False
-        self.since_s = now_s
-        self.detail = "no reading judged yet"
-        self.lag_s: float | None = None
-        self.withheld = dict.fromkeys(names, 0)  # this report period
-        self.withheld_total = dict.fromkeys(names, 0)  # since the node started
-        self._change: str | None = None
-
-    def judge(self, state: ChainState, now_s: float) -> bool:
-        """Take one probe answer at monotonic ``now_s``: True when a reading may leave. A change
-        of state is remembered for :meth:`take_change`, so the log says it once."""
-        self.lag_s = state.lag_s
-        allowed = state.lag_s is not None and state.lag_s <= self.max_lag_s
-        if state.lag_s is None:
-            self.detail = state.detail
-        elif allowed:
-            self.detail = f"lag {state.lag_s:+.2f} s"
-        else:
-            self.detail = f"the chain is {state.lag_s:.2f} s behind the reading"
-        if allowed != self.open:
-            self._change = self._transition(allowed, now_s)
-            self.open, self.since_s = allowed, now_s
-        return allowed
-
-    def withhold(self, name: str) -> None:
-        """One reading of ``name`` the gate did not let out."""
-        self.withheld[name] = self.withheld.get(name, 0) + 1
-        self.withheld_total[name] = self.withheld_total.get(name, 0) + 1
-
-    def take_change(self) -> str | None:
-        """The one line to log about the last change of state, once; ``None`` when nothing
-        changed — the link's own habit (:class:`pepin_bringup.link.JsonLineLink`)."""
-        change, self._change = self._change, None
-        return change
-
-    def report(self, now_s: float, enabled: bool) -> str:
-        """The gate for the node's report line, and a fresh counting period starts: its state and
-        for how long, the lag or the reason, and what it withheld in this period and since the
-        node started. Never silent — a shut gate that said nothing would look exactly like three
-        dead sensors."""
-        held = " ".join(f"{name} {n}" for name, n in self.withheld.items())
-        total = sum(self.withheld_total.values())
-        self.withheld = dict.fromkeys(self.withheld, 0)
-        since = f" (since start {total})" if total else ""
-        if not enabled:
-            return f"gate off, every reading leaves; withheld {held}{since}"
-        state = "open" if self.open else "SHUT"
-        return (
-            f"gate {state} for {max(now_s - self.since_s, 0.0):.0f} s"
-            f" ({self.detail[:_GATE_DETAIL_CHARS]}); withheld {held}{since}"
-        )
-
-    def _transition(self, opening: bool, now_s: float) -> str:
-        """The sentence for the log when the gate moves, with how long it stood the other way."""
-        stood = f"{max(now_s - self.since_s, 0.0):.0f} s"
-        if opening:
-            held = sum(self.withheld_total.values())
-            return (
-                f"tf gate open: {self.detail}; it was shut for {stood} and withheld {held}"
-                " readings — the chain that places a cone is back"
-            )
-        return (
-            f"tf gate SHUT after {stood} open: {self.detail}. No /tof/* message leaves while the"
-            " chain is broken — a Range Nav2 cannot place blocks its range layer for a whole"
-            " transform_tolerance and wedges the costmap (scratch/nav2_hang/)"
-        )
-
-
 class TofBridge(Node):
     """Bridges the ToF server to ROS: /tof/front, /tof/left, /tof/right, the scan fan of each
     (/tof/<name>/scan, with ``range_as`` at ``scan``) and the three sensor frames."""
 
-    def __init__(self, probe: ChainProbe | None = None) -> None:
-        """Declare parameters, publish the sensor frames, and start reading the ToF server.
-
-        ``probe`` is the gate's window on TF; left out, the node builds the real one
-        (:class:`TfChainProbe`) the first time the gate needs it — with ``tf_gate`` off it
-        builds none at all, so the node costs exactly what it cost before the gate existed.
-        """
+    def __init__(self) -> None:
+        """Declare parameters, publish the sensor frames, and start reading the ToF server."""
         super().__init__("tof_bridge")
         host = str(self.declare_parameter("host", "127.0.0.1").value)
         port = int(self.declare_parameter("port", 3335).value)
         self._base_frame = str(self.declare_parameter("base_frame", "base_link").value)
-        # The frame the costmaps place a cone in, and so the frame the gate judges the chain to.
-        self._global_frame = str(self.declare_parameter("global_frame", _GLOBAL_FRAME).value)
 
         self._range_pubs = {
             name: self.create_publisher(Range, f"tof/{name}", 10) for name in TOF_NAMES
@@ -453,45 +202,33 @@ class TofBridge(Node):
         # sensor's own x axis, and the mount carries the yaw, so the fan needs none.
         self._fan = {name: self._fan_for(name) for name in TOF_NAMES}
         self._hold = RangeHold(_HOLD_S)
-        # The mounts go out ONE way at a time. With ``dynamic_mounts`` (the default) they ride on
-        # /tf with every reading's own stamp, which no late joiner can miss. With the flag off
-        # they are the static broadcast this node always made — sent once and then again, once a
-        # second, for the first ``static_tf_resend_s`` seconds (under rmw_zenoh a subscriber that
-        # matched a moment too early or too late never gets a one-shot: Nav2's container did not,
-        # on 4 of 7 board starts of 2026-09-21); 0 is the single shot it was.
-        # NEVER BOTH: tf2 re-allocates a frame's cache whenever the same edge arrives as the
-        # other kind (static <-> dynamic), wiping its history; a lookup that lands just after
-        # sees a one-sample cache and throws NoDataForExtrapolationException, which Nav2's
-        # RangeSensorLayer does not catch — the whole Nav2 container aborted that way 66 s into
-        # a start on 2026-09-21, while the re-send and the dynamic mounts ran side by side.
+        # The mounts are ONE edge published ONE way: base_link -> tof_<name> on /tf_static, sent
+        # now and then again, once a second, for the first ``static_tf_resend_s`` seconds (under
+        # rmw_zenoh a subscriber that matched a moment too early or too late never gets a
+        # one-shot: Nav2's container did not, on 4 of 7 board starts of 2026-09-21); 0 is a
+        # single shot. Never also on /tf: tf2 re-allocates a frame's cache whenever the same edge
+        # arrives as the other kind (static <-> dynamic), wiping its history, and a lookup that
+        # lands just after sees a one-sample cache and throws NoDataForExtrapolationException —
+        # the whole Nav2 container aborted that way 66 s into a start on 2026-09-21.
         self._static_resend_s = float(
             self.declare_parameter("static_tf_resend_s", _STATIC_TF_RESEND_S).value
         )
-        self._static_tf: StaticTransformBroadcaster | None = None
-        self._static_resend: Any = None
-        self._static_resend_until = 0.0
-        self._mount_tf = TransformBroadcaster(self)
+        self._static_tf = StaticTransformBroadcaster(self)
+        self._static_resend_until = time.monotonic() + self._static_resend_s
+        self._send_static_mounts()
+        self._static_resend = self.create_timer(1.0, self._resend_static)
         self._last_valid = dict.fromkeys(TOF_NAMES, time.monotonic())  # judged from startup
         self._warned = dict.fromkeys(TOF_NAMES, False)
         self._status_counts: dict[str, dict[int | None, int]] = {n: {} for n in TOF_NAMES}
         # The switches are built after the LAST ordinary declare_parameter: the kit's callback
         # runs on declarations too and refuses every name that is not a flag.
-        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
-        if not self._switches.on("dynamic_mounts"):
-            self._start_static_mounts()
-        self._gate = Gate(
-            TOF_NAMES, float(self._switches["tf_gate_max_lag_s"]), now_s=time.monotonic()
-        )
-        self._probe = probe
-        if self._probe is None and self._switches.on("tf_gate"):
-            self._probe = self._build_probe()
+        self._switches = Switches(self, FLAGS)
         self.create_timer(_STATUS_REPORT_S, self._report_status)
         self.get_logger().info(
             "tof ceilings: "
             + ", ".join(
                 f"{n} {self._ceiling[n]:.2f} m ({self._fan[n][2]} beams)" for n in TOF_NAMES
             )
-            + f"; gate chain {self._global_frame} <- {self._base_frame}"
             + f"; flags: {self._switches.state()}"
         )
 
@@ -509,26 +246,6 @@ class TofBridge(Node):
         beams = cone_beams(self._ceiling[name], _FIELD_OF_VIEW_RAD, _COSTMAP_CELL_M)
         return -_FIELD_OF_VIEW_RAD / 2.0, _FIELD_OF_VIEW_RAD / (beams - 1), beams
 
-    def _build_probe(self) -> ChainProbe:
-        """The gate's window on TF: a short buffer and a listener on this node's own executor."""
-        self.get_logger().info(
-            f"tf gate: watching {self._global_frame} <- {self._base_frame}, at most"
-            f" {self._switches['tf_gate_max_lag_s']:.2f} s behind a reading"
-        )
-        return TfChainProbe(self, self._global_frame, _TF_CACHE_S)
-
-    def _on_switch(self, name: str, old: Any, new: Any) -> None:
-        """A flag moved: the gate takes its new bound, and a gate turned on gets its listener."""
-        if name == "dynamic_mounts":
-            if new:
-                self._stop_static_mounts()
-            else:
-                self._start_static_mounts()
-        elif name == "tf_gate_max_lag_s":
-            self._gate.max_lag_s = float(new)
-        elif name == "tf_gate" and new and self._probe is None:
-            self._probe = self._build_probe()
-
     def _resolve_mount(self, name: str, measured: Mount) -> tuple[float, float, float, float]:
         """The mount of sensor ``name`` as ``(x_m, y_m, z_m, yaw_rad)``: what config/tof.json
         measured, each number overridable by a parameter (``left_z`` and the like)."""
@@ -539,46 +256,26 @@ class TofBridge(Node):
             float(self.declare_parameter(f"{name}_yaw", math.radians(measured.yaw_deg)).value),
         )
 
-    def _start_static_mounts(self) -> None:
-        """The static way (``dynamic_mounts`` off): the three mounts on /tf_static now, and again
-        once a second while the re-send window lasts."""
-        if self._static_tf is None:
-            self._static_tf = StaticTransformBroadcaster(self)
+    def _send_static_mounts(self) -> None:
+        """The three mounts on /tf_static, as they stand at this moment."""
         self._static_tf.sendTransform([self._mount_transform(name) for name in TOF_NAMES])
-        self._static_resend_until = time.monotonic() + self._static_resend_s
-        if self._static_resend is None:
-            self._static_resend = self.create_timer(1.0, self._resend_static)
-        else:
-            self._static_resend.reset()
-
-    def _stop_static_mounts(self) -> None:
-        """The dynamic way took over: no further static message leaves this node. (One already
-        latched stays latched for late joiners until the node restarts — a flag flipped at run
-        time is an A/B, the default start never publishes a static mount at all.)"""
-        if self._static_resend is not None:
-            self._static_resend.cancel()
 
     def _resend_static(self) -> None:
         """Send the three mounts again while the start-up window lasts, then stop the timer."""
-        if (
-            self._static_tf is None
-            or self._switches.on("dynamic_mounts")
-            or time.monotonic() >= self._static_resend_until
-        ):
-            self._stop_static_mounts()
+        if time.monotonic() >= self._static_resend_until:
+            self._static_resend.cancel()
             return
-        self._static_tf.sendTransform([self._mount_transform(name) for name in TOF_NAMES])
+        self._send_static_mounts()
 
-    def _mount_transform(self, name: str, stamp: Any = None) -> Any:
-        """Where sensor ``name`` sits on the robot, as a base_link -> tof_<name> transform, at
-        ``stamp`` (the reading's own, for the dynamic mount) or at this moment."""
+    def _mount_transform(self, name: str) -> Any:
+        """Where sensor ``name`` sits on the robot, as a base_link -> tof_<name> transform."""
         x, y, z, yaw = self._mounts[name]
         return transform_from_rpy(
             self._base_frame,
             TOF_FRAME.format(name=name),
             (x, y, z),
             (0.0, 0.0, yaw),
-            self.get_clock().now().to_msg() if stamp is None else stamp,
+            self.get_clock().now().to_msg(),
         )
 
     def _enqueue_ranges(self, message: dict[str, Any]) -> None:
@@ -607,18 +304,14 @@ class TofBridge(Node):
             report.append(f"{name} [{share}]")
             self._status_counts[name] = {}
         self.get_logger().info(
-            "tof status "
-            + "; ".join(report)
-            + f"; {self._gate.report(time.monotonic(), self._switches.on('tf_gate'))}"
-            + f"; flags: {self._switches.state()}"
+            "tof status " + "; ".join(report) + f"; flags: {self._switches.state()}"
         )
 
     def _publish_pending(self) -> None:
         """ROS thread: publish every reading the reader queued, then report link changes.
 
-        One stamp and one gate decision per line of readings: the three sensors are read
-        together, the same chain places all three, and a consumer must see the mount and the
-        Range it belongs to carrying the same moment.
+        One stamp per line of readings: the three sensors are read together, and a consumer must
+        see every message of one line carrying the same moment.
         """
         while True:
             try:
@@ -626,53 +319,18 @@ class TofBridge(Node):
             except queue.Empty:
                 break
             stamp = (self.get_clock().now() - Duration(seconds=_STAMP_LAG_S)).to_msg()
-            allowed = self._gate_allows(stamp)
-            if allowed and self._switches.on("dynamic_mounts"):
-                # The three mounts first and in ONE message, then the readings: a consumer that
-                # takes them in that order has every frame in its buffer before it tries to place
-                # a cone, and the board pays for 15 TF messages a second instead of 45.
-                self._mount_tf.sendTransform([self._mount_transform(n, stamp) for n in ranges])
             for name, distance_m in ranges.items():
-                if allowed:
-                    self._publish_reading(name, distance_m, statuses.get(name), stamp)
-                else:
-                    self._withhold(name, distance_m)
+                self._publish_reading(name, distance_m, statuses.get(name), stamp)
                 self._warn_if_silent(name)
         self._log_link_status()
-
-    def _gate_allows(self, stamp: Any) -> bool:
-        """Whether the chain that will have to place a reading stamped ``stamp`` is alive and
-        fresh right now (``tf_gate``); always true with the flag off, and every change of the
-        gate's mind is said once in the log."""
-        if not self._switches.on("tf_gate") or self._probe is None:
-            return True
-        state = self._probe.chain(self._base_frame, stamp_seconds(stamp))
-        allowed = self._gate.judge(state, time.monotonic())
-        change = self._gate.take_change()
-        if change is not None:
-            # Two call sites on purpose: rclpy refuses one call site that changes its severity
-            # between calls (ValueError), and that killed this node the first time the gate shut
-            # on the robot (2026-09-21) — nothing a test on the ROS stubs could see.
-            if allowed:
-                self.get_logger().info(change)
-            else:
-                self.get_logger().warning(change)
-        return allowed
-
-    def _withhold(self, name: str, distance_m: float | None) -> None:
-        """A reading the gate did not let out: counted, and the sensor's own liveness clock kept
-        running — a shut gate must not be reported as three sensors that went blind."""
-        self._gate.withhold(name)
-        if distance_m is not None and distance_m <= self._ceiling[name]:
-            self._last_valid[name] = time.monotonic()
-            self._warned[name] = False
 
     def _publish_reading(
         self, name: str, distance_m: float | None, status: int | None, stamp: Any
     ) -> None:
         """One sensor's reading on both faces of this bridge at ``stamp`` (the whole line's, so
-        it matches the mount sent with it): the sensor_msgs/Range it has always published, and —
-        with ``range_as`` at ``scan`` — the same cone as a fan for Nav2's ObstacleLayer.
+        the three sensors agree about the moment): the sensor_msgs/Range it has always
+        published, and — with ``range_as`` at ``scan`` — the same cone as a fan for Nav2's
+        ObstacleLayer.
 
         The verdict is taken ONCE, here, so the two messages can never disagree about what the
         sensor said.
