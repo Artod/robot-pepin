@@ -631,6 +631,22 @@ def parameters(**values: Any) -> Iterator[None]:
             PARAMETERS.pop(name, None)
 
 
+class Timer:
+    """rclpy's: the handle ``create_timer`` hands back, which a node cancels and restarts."""
+
+    def __init__(self, period_s: float, callback: Any) -> None:
+        self.period_s, self.callback = period_s, callback
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        """Stop firing; the node keeps the handle."""
+        self.cancelled = True
+
+    def reset(self) -> None:
+        """Start firing again, from now."""
+        self.cancelled = False
+
+
 class Node:
     """rclpy.node.Node as the nodes here use it: parameters over :data:`PARAMETERS`, publishers
     and subscriptions kept by topic, timers kept by period, one clock and one logger."""
@@ -686,8 +702,9 @@ class Node:
         self.service_clients[name] = Client(srv_type, name)
         return self.service_clients[name]
 
-    def create_timer(self, period_s: float, callback: Any) -> None:
+    def create_timer(self, period_s: float, callback: Any) -> Timer:
         self.timers.append((period_s, callback))
+        return Timer(period_s, callback)
 
     def get_clock(self) -> Clock:
         return self.clock

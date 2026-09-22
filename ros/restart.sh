@@ -314,7 +314,8 @@ check_board() {
     # finishes one: tf2's canTransform costs its whole transform_tolerance per message, the ToF
     # layers receive 15 Hz each, and the backlog outgrows the drain until the update never
     # returns (4 of 7 board starts on 2026-09-21; scratch/nav2_hang/wedge_gain.py, and the
-    # tof_bridge module docstring for the fix). Two questions, one line: did the lifecycle
+    # tof_bridge module docstring for the fix: the whiskers feed ObstacleLayers, which drop
+    # what they cannot place instead of blocking on it). Two questions, one line: did the lifecycle
     # manager get planner_server's bond, and is the log free of the complaint that says the
     # wedge is running. The bond is printed once at activation, so it is looked for across the
     # whole restart, not the report window; the container is recreated on every restart
