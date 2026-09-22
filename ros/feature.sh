@@ -8,6 +8,11 @@
 #                                the wheels. Off, the bridge publishes odom -> base_link itself
 #                                and nothing publishes /odometry/filtered, which the relocalizer
 #                                and every recorded drive read
+#   ros/feature.sh laser_odom on|off
+#                                the lidar's own scan-to-scan odometry (rf2o, ~100 MB) as a twist
+#                                for the EKF (odom3). On by default. A source of the filter, never
+#                                its switch: off, the wheels, the gyro and the camera are what
+#                                they were. It publishes no transform — the EKF owns odom -> base_link
 #   ros/feature.sh tof on|off    the three ToF sensors into the local costmap (a Python bridge, ~150 MB)
 #   ros/feature.sh neck on|off   the neck's encoders as /neck/state and the live base_link -> camera_link
 #                                (a Python node, ~150 MB); the laptop's SLAM must then run with
@@ -16,8 +21,8 @@
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
-FEATURE="${1:?cpp | imu | ekf | tof | neck}"; STATE="${2:?on | off}"
-case "$FEATURE" in cpp) VAR=PEPIN_CPP_BRIDGE ;; imu) VAR=PEPIN_IMU ;; ekf) VAR=PEPIN_EKF ;; tof) VAR=PEPIN_TOF ;; neck) VAR=PEPIN_NECK ;; *) echo "unknown feature $FEATURE"; exit 2 ;; esac
+FEATURE="${1:?cpp | imu | ekf | laser_odom | tof | neck}"; STATE="${2:?on | off}"
+case "$FEATURE" in cpp) VAR=PEPIN_CPP_BRIDGE ;; imu) VAR=PEPIN_IMU ;; ekf) VAR=PEPIN_EKF ;; laser_odom) VAR=PEPIN_LASER_ODOM ;; tof) VAR=PEPIN_TOF ;; neck) VAR=PEPIN_NECK ;; *) echo "unknown feature $FEATURE"; exit 2 ;; esac
 case "$STATE" in on) VAL=true ;; off) VAL=false ;; *) echo "on or off"; exit 2 ;; esac
 if { [ "$FEATURE" = imu ] || [ "$FEATURE" = ekf ]; } && [ "$VAL" = true ]; then
     ssh "root@$BOARD" "grep -q 'PEPIN_CPP_BRIDGE=true' /etc/default/pepin-ros" || { echo "$FEATURE needs the C++ bridge: ros/feature.sh cpp on first"; exit 1; }

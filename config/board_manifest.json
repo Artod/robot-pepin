@@ -116,11 +116,12 @@
         "wifi-loss"
       ],
       "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn, ghost wait)",
+      "when": "sometimes",
       "budget": {
         "cpu_percent": 90.0,
         "rss_mb": 121.0
       },
-      "note": "Measured 60 % / 80 MB standing still; a whole-map search is a burst well above that and short. Second biggest consumer on the board."
+      "note": "Measured 60 % / 80 MB standing still; a whole-map search is a burst well above that and short. 'sometimes' since 2026-09-22, when the board became odometry only and the map localiser a mode rather than the default: four A53 cores do not hold the tracker AND the laser odometry that replaces what it gave the EKF (90 % + 20 %), and 1.5 GB does not hold both either. Absent is IDLE now, not MISSING; running, it is measured against this budget exactly as before."
     },
     {
       "name": "run_recorder",
@@ -150,6 +151,21 @@
         "rss_mb": 102.0
       },
       "note": "Measured 13 % / 68 MB. An rclpy process costs ~65 MB before it does anything."
+    },
+    {
+      "name": "laser_odometry",
+      "match": "rf2o_laser_odometry_node",
+      "role": "Laser odometry: matches each LD19 scan against the one before it (rf2o, scan to scan, no map) and publishes /odom_laser, which the EKF fuses as a twist (odom3). The one odometry input a wheel spinning on carpet cannot fool.",
+      "on_board_because": [
+        "real-time",
+        "wifi-loss"
+      ],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (laser_odom:=true, respawn, ghost wait, nice -5)",
+      "budget": {
+        "cpu_percent": 20.0,
+        "rss_mb": 105.0
+      },
+      "note": "TO MEASURE: every number here is an estimate and the first census after this feature lands replaces it. Where it comes from: RF2O's paper reports 0.9 ms per scan on one desktop core at 1080 beams; ours are 455, and an A53 at 1.5 GHz with no tuned SIMD is taken at 10x a desktop core, so 4-8 ms of the 100 ms between scans -> 4-8 %, +50 % -> 12, rounded to 20 because nothing is measured. The memory is a C++ ROS node's measured 28 MB (ekf_node) plus the ~40 MB of zenoh session every process on this board carries, and the same headroom. If the census says OVER, the honest lever is the node's freq, not this number."
     },
     {
       "name": "neck_state",

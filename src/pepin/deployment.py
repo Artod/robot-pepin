@@ -60,6 +60,37 @@ BRIDGE_KICK_TOPIC = "bridge/kick"
 # that whole tree with --delete, which removes anything the board made there.
 BRIDGE_KICK_FLAG = "/run/pepin/bridge_kick"
 
+# LASER ODOMETRY (rf2o, on the board): the cart's planar motion from consecutive scans, scan to
+# scan and against no map at all. It replaces what the lidar tracker used to give the EKF by
+# implication — a second opinion on how far and how fast the cart really went, which a wheel
+# spinning on carpet cannot fool — and it is on the board because it must survive a WiFi loss
+# (CLAUDE.md rule 20: real-time, wifi-loss, and it consumes no camera).
+# It is NOT in the bridge's allow-lists below on purpose: the only node that reads it is the EKF,
+# which runs beside it on the board, and under rmw_zenoh (the default since 2026-09-20) the laptop
+# sees it anyway without a route. Put it in BOARD_PUBLISHES the day a laptop node needs it.
+LASER_ODOM_TOPIC = "odom_laser"
+# The node's loop rate. It consumes the newest scan each turn, so above the lidar's own rate it
+# only finds nothing to do, and below it it drops scans: the LD19 is configured for 10 Hz
+# (robot.launch.py, lidar.bins 455) and measures 9.6-10 at the board.
+LASER_ODOM_HZ = 10.0
+# What the node CLAIMS about its own twist, as the diagonal of twist.covariance. It is stamped
+# here and not computed by rf2o, which publishes an empty matrix — and an empty matrix is not
+# "unknown" to robot_localization, it is a variance of 1e-9 (ekf.cpp: a measurement covariance
+# under 1e-9 is raised to 1e-9) and therefore a source that outvotes the wheels AND the gyro on
+# every sample. The same lesson as the camera's, and the same answer: a constant, deliberately
+# weak, stamped where the message is born (ros/params/ekf.yaml's /vo block, visual_odometry.py).
+#
+# vx = 0.0009 (m/s)^2, sigma 3 cm/s: the wheels' own 0.001 at half their rate, so a scan match
+# carries about half the wheels' information per second — a real second opinion on distance,
+# which is the input the 2026-09-16 carpet slip had none of, and not a replacement for them.
+# vyaw = 0.0025 (rad/s)^2, sigma 0.05 rad/s: about 3 % of the gyro's information per second
+# (0.0004 at 47 Hz). The gyro still owns heading; this is the vote that survives a dead MPU6050.
+# vy is published (the patched node measures it) and NOT fused: the wheels' vy = 0 is a
+# kinematic truth and a scan matcher's lateral estimate is the noisiest of the three.
+# NONE OF THE THREE IS MEASURED ON THIS CART YET. They are sized to be quiet; the drive that
+# measures them is in ros/README.md, and until it exists nobody may tighten them.
+LASER_ODOM_TWIST_VARIANCE: dict[str, float] = {"vx": 0.0009, "vy": 0.01, "vyaw": 0.0025}
+
 # The base's speed caps (config/base.json, the base server's own clamp). The C++ bridge on the
 # board clamps /cmd_vel too, at 0.25 m/s by default: for half a day every tape sat at 0.20 and
 # the bridge would have cut anything faster — one cap, the base's, passed to it at launch.
