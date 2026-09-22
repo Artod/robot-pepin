@@ -63,6 +63,12 @@ def scan_msg(t: float = SCAN_S) -> Any:
     )
 
 
+# Every node built here publishes one fan per integration: the shipped ``marks_hz`` is a 5 Hz cap
+# on the WIRE to the board, and a test that integrates two revolutions in the same millisecond of
+# wall time would read the first fan back as the second. The cap has its own test below.
+MARKS_EVERY_FRAME = 0.0
+
+
 def small_config(tmp_path: Path) -> Path:
     """config/fusion.json with a 6 x 6 m box around the origin instead of the flat's: the same
     voxel, laws and bands, on a grid the synthetic room of this file sits inside."""
@@ -90,6 +96,7 @@ def node(tmp_path: Path) -> DepthFusion:
         resume_volume=False,
         snapshot_s=0.0,
         imu_lean=False,
+        marks_hz=MARKS_EVERY_FRAME,
     ):
         node = DepthFusion()
     buffer = node._tf.buffer
@@ -195,6 +202,7 @@ def fusion_node(tmp_path: Path, **overrides: Any) -> DepthFusion:
         "resume_volume": False,
         "snapshot_s": 0.0,
         "imu_lean": False,
+        "marks_hz": MARKS_EVERY_FRAME,
     }
     params.update(overrides)
     with ros_stubs.parameters(**params):
@@ -325,6 +333,13 @@ def marks(node: DepthFusion) -> Any:
     return node.pubs["/depth_marks"].sent[-1]
 
 
+def at_map(node: DepthFusion, x: float) -> None:
+    """Stand the cart at (x, 0) in the map frame: a revolution from a place the volume has
+    already seen is not integrated at all (``view_gate``), so a test that wants a second one
+    moves the cart first."""
+    node._tf.buffer.transforms[("map", "base_link")].transform.translation.x = x
+
+
 def test_every_integration_publishes_the_marks_and_a_young_volume_says_nothing(
     node: DepthFusion,
 ) -> None:
@@ -368,6 +383,52 @@ def test_marks_source_frame_relays_the_single_frame_s_own_fan(node: DepthFusion)
     assert len(node.pubs["/depth_marks"].sent) == 1, "the volume publishes nothing in this mode"
     counts = node._tally.take().counts
     assert counts["marks"] == 1 and counts["depth_scans"] == 1
+
+
+def test_the_marks_hz_cap_thins_the_topic_and_not_the_volume(node: DepthFusion) -> None:
+    """CLAUDE.md rule 19, and the point of the cap: the board's local costmap reads this topic 5
+    times a second, so a second fan in the same millisecond is never put on the wire — while the
+    revolution behind it is integrated exactly as before. The volume is the proof: the marks of
+    the one published fan carry the wall the SECOND revolution drew."""
+    node._switches.set("min_weight", 0.5)
+    node._switches.set("marks_hz", 1.0)
+    node._on_scan_work(scan_msg())
+    at_map(node, 0.4)  # a place the volume has not seen: the view gate lets the revolution in
+    node._on_scan_work(scan_msg(SCAN_S + 0.2))
+    assert len(node.pubs["/depth_marks"].sent) == 1, "one fan a second, and no more"
+    counts = node._tally.take().counts
+    assert counts["marks"] == 1 and counts["marks_thinned"] == 1
+    assert counts["revolutions"] == 2, "both revolutions went into the volume"
+    node._switches.set("marks_hz", MARKS_EVERY_FRAME)
+    at_map(node, 0.8)
+    node._on_scan_work(scan_msg(SCAN_S + 0.4))
+    ranges = np.array(marks(node).ranges)
+    assert np.isfinite(ranges).any(), "and what they drew is in the next fan that does go out"
+    assert float(np.nanmax(ranges)) <= 3.0, "nothing past the fan's own reach"
+
+
+def test_the_marks_hz_cap_holds_the_relayed_frame_too(node: DepthFusion) -> None:
+    """One gate for both sources of the topic: under ``marks_source`` frame the rate on the wire
+    is the flag's as well, or the cap would be a promise the old path does not keep."""
+    node._switches.set("marks_source", "frame")
+    node._switches.set("marks_hz", 1.0)
+    node.subs["/depth_scan"][1](scan_msg(SCAN_S))
+    node.subs["/depth_scan"][1](scan_msg(SCAN_S + 0.1))
+    assert len(node.pubs["/depth_marks"].sent) == 1
+    counts = node._tally.take().counts
+    assert counts["depth_scans"] == 2 and counts["marks"] == 1 and counts["marks_thinned"] == 1
+
+
+def test_the_report_line_says_what_the_cap_held_back(node: DepthFusion) -> None:
+    """A rate below the camera's own must read as the cap and not as a node that has stopped
+    slicing, and the state of the flag is in the line either way."""
+    node._switches.set("marks_hz", 1.0)
+    node._on_scan_work(scan_msg())
+    at_map(node, 0.4)
+    node._on_scan_work(scan_msg(SCAN_S + 0.2))
+    assert "1 held by the marks_hz 1 cap" in node._marks_line(node._tally.take())
+    node._switches.set("marks_hz", MARKS_EVERY_FRAME)
+    assert "marks_hz 0: every frame" in node._marks_line(node._tally.take())
 
 
 def test_the_report_line_says_where_the_marks_came_from(node: DepthFusion) -> None:
@@ -502,6 +563,7 @@ def odom_node(tmp_path: Path, **overrides: Any) -> DepthFusion:
         "lidar_config": str(REPO / "config" / "lidar.json"),
         "world_path": f"{tmp_path}/flat_test.world.npz",
         "imu_lean": False,
+        "marks_hz": MARKS_EVERY_FRAME,
     }
     params.update(overrides)
     with ros_stubs.parameters(**params):

@@ -604,6 +604,10 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
         # jump_clear joined on 2026-09-22, default off: RTAB-Map owns map -> odom now, and the
         # clear of Nav2's local costmap on a step of that edge moved here from the lidar tracker.
         "jump_clear",
+        # ...and pose_topic the same day, default on: this node parses /tf for navigation anyway,
+        # so it republishes what it reads as /pose and the board keeps ONE TF listener
+        # (run_recorder's loc_from flag is the reader's half of it).
+        "pose_topic",
     )
     assert all(flags.flag(name).live for name in flags.names)
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"

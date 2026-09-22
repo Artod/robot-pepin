@@ -108,6 +108,10 @@ observation that was just integrated. The costmap's camera layer MARKS from it a
 ``/depth_scan``: the frame is the eyewitness of what is open now, the model is what remembers
 what is there. ``marks_source`` frame relays ``/depth_scan`` onto the same topic unchanged, which
 is the pre-2026-09-21 costmap without a restart. No floor-specific rule anywhere in this.
+The topic goes out at ``marks_hz`` (5 Hz), which is the board's local costmap's own
+``update_frequency``: the fan crosses the routers to a grid that is read five times a second,
+and a frame held back by the cap is still fused into the volume. The stop reflex is bounded by
+that costmap tick, never by this publisher.
 
 AND SINCE 2026-09-22 THE VOLUME LIVES IN ``odom`` (``volume_frame``). Its job is LOCAL OBSTACLE
 MEMORY — the nvblox local mapper beside a pose graph, the pattern STVL follows — and local memory
@@ -130,7 +134,7 @@ The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``e
 ``volume_frame``,
 ``fit_gate``, ``lidar_fit_gate``, ``paint_sigma_m``, ``imu_lean``, ``lean_gate_deg``,
 ``lean_min_quality``, ``self_heal``, ``align``, ``min_weight``, ``marks_source``,
-``marks_min_z``, ``surface_hz``,
+``marks_min_z``, ``marks_hz``, ``surface_hz``,
 ``band_half_z``, ``lidar_layer``, ``no_return_free``, ``view_gate``, ``snapshot_s``,
 ``resume_volume``, ``follow_correction``, ``follow_correction_min_m``,
 ``follow_correction_min_deg``, ``follow_correction_min_s``, ``follow_correction_law``; their
@@ -520,6 +524,27 @@ FLAGS = FlagSet(
         range=(0.0, 1.0),
     ),
     Flag(
+        "marks_hz",
+        5.0,
+        description="the cap on how often /depth_marks is PUBLISHED, in hertz; 0 publishes every"
+        " frame, which is what this topic did until 2026-09-22. Only the publication is thinned:"
+        " every frame and every revolution is still fused into the volume, and a slice that is"
+        " not published is not computed either (the gate is read before the crossing search)",
+        why="the one consumer of this topic is the board's LOCAL costmap, whose"
+        " update_frequency is 5.0 (ros/params/nav2_params.yaml, 'the stop reflex's slowest link:"
+        " a mark waits for this tick'). The topic was published at the rate the volume is"
+        " integrated — the camera's 9-9.5 fps plus ~10 Hz of revolutions — so between two and"
+        " four of every five fans crossed the zenoh routers to the board only to be overwritten"
+        " in the layer before it was next read. The stop reflex is bounded by the costmap tick"
+        " and not by this publisher, so nothing about how fast the cart stops changes",
+        on_when="raise it only with the costmap's own update_frequency, and only after measuring"
+        " what the board does with the extra fans",
+        off_when="0 is the pre-2026-09-22 behaviour, one fan per fused frame: the A/B for"
+        " whether a missing mark is the cap's fault, and what a bench test on one machine (no"
+        " routers in the path) may as well use",
+        range=(0.0, 30.0),
+    ),
+    Flag(
         "surface_hz",
         1.0,
         description="how often /fusion/surface is published (the crossing search costs a fraction"
@@ -841,6 +866,7 @@ class DepthFusion(Node):
         # The costmap's camera MARKS: the volume's surface around the cart, one range per
         # bearing, published at the rate the volume is integrated (:meth:`_publish_marks`).
         self._marks_pub = self.create_publisher(LaserScan, MARKS_TOPIC, reliable)
+        self._marks_at = 0.0  # monotonic seconds of the last published fan: the marks_hz cap
         # ...and the frame the marks used to come from, so the old behaviour is one live flag
         # away (marks_source frame relays this message unchanged). Local to the laptop: the
         # depth stream publishes it here, and only the OUTPUT of this node crosses to the board.
@@ -1673,8 +1699,28 @@ class DepthFusion(Node):
         self._tally.count("depth_scans")
         if str(self._switches["marks_source"]) != FRAME:
             return
+        if not self._marks_due():
+            return
         self._marks_pub.publish(msg)
         self._tally.count("marks")
+
+    def _marks_due(self) -> bool:
+        """Whether ``/depth_marks`` may go out now, and the cap's clock moved on when it may
+        (``marks_hz``; 0 is every frame).
+
+        One gate for both sources of the topic — the volume's slice and the relayed frame — so
+        the rate on the wire is the flag's whatever ``marks_source`` says. Monotonic seconds:
+        this is a cap on a publisher, not a measurement of anything in the room.
+        """
+        hz = float(self._switches["marks_hz"])
+        if hz <= 0.0:
+            return True
+        now = time.monotonic()
+        if now - self._marks_at < 1.0 / hz:
+            self._tally.count("marks_thinned")
+            return False
+        self._marks_at = now
+        return True
 
     def _marks_law(self) -> MarksLaw:
         """How the volume is read out as marks right now: the node's own ``min_weight`` — the
@@ -1700,9 +1746,16 @@ class DepthFusion(Node):
 
         A bearing with no surface in the band is NaN: this topic never clears and never says a
         thing about free space. The clearing is ``/depth_scan``'s, in the same costmap layer.
+
+        ``marks_hz`` caps the RATE of this topic (5 Hz, the local costmap's own
+        ``update_frequency``): the frame that is not published is still fused, and the slice it
+        would have been read out as is not computed at all — the gate is asked before the
+        crossing search, which is the whole cost of this method.
         """
         if str(self._switches["marks_source"]) != VOLUME:
             return  # the frame's own fan is being relayed instead, on arrival
+        if not self._marks_due():
+            return  # the costmap has not read the last fan yet (marks_hz)
         law = self._marks_law()
         with self._tally.measure("marks"):
             # The lock is held for the COPY of the neighbourhood and not for the reading of it:
@@ -1804,16 +1857,26 @@ class DepthFusion(Node):
         if str(self._switches["marks_source"]) == FRAME:
             return (
                 f"marks: {MARKS_TOPIC} relayed from {DEPTH_SCAN_TOPIC}, {int(c['marks'])} of"
-                f" {int(c['depth_scans'])} frames ({w.rate('marks'):.1f}/s) — the volume is not"
-                " read (marks_source frame)"
+                f" {int(c['depth_scans'])} frames ({w.rate('marks'):.1f}/s){self._cap_text(w)} —"
+                " the volume is not read (marks_source frame)"
             )
         law = self._marks_law()
         return (
             f"marks: {int(c['marks'])} from the volume ({w.rate('marks'):.1f}/s,"
-            f" {w.ms_per('marks', 'marks'):.1f} ms a slice), {self._marks_bearings} bearings of"
+            f" {w.ms_per('marks', 'marks'):.1f} ms a slice){self._cap_text(w)},"
+            f" {self._marks_bearings} bearings of"
             f" {round(2 * math.pi / MARKS_STEP)} filled, band {law.band_m[0]:.2f}-"
             f"{law.band_m[1]:.2f} m within {law.range_m:.1f} m at min_weight {law.min_weight:g}"
         )
+
+    def _cap_text(self, w: Window) -> str:
+        """What the ``marks_hz`` cap did this window, or nothing at all when it is off: how many
+        fans it held back, so a rate below the camera's own is read as the cap and not as a node
+        that has stopped slicing."""
+        hz = float(self._switches["marks_hz"])
+        if hz <= 0.0:
+            return " (marks_hz 0: every frame)"
+        return f" ({int(w.counts['marks_thinned'])} held by the marks_hz {hz:g} cap)"
 
     def _world_line(self, w: Window) -> str:
         """The volume half of the report: what the lidar wrote, what the two layers hold, how many

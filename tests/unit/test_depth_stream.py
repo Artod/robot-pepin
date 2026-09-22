@@ -102,6 +102,7 @@ CONFIG_CAM = CameraPose(*mount_transform(CONFIG)[:3], mount_transform(CONFIG)[4]
 LIDAR_Z_M = load_lidar_mount().z_m
 LIDAR_MOUNT = RigidPose(np.eye(3), np.array([0.0, 0.0, LIDAR_Z_M]))
 SCAN_MAX_RANGE = 3.0  # the node's default
+SCAN_EVERY_FRAME = 0.0  # ``scan_hz`` off: one fan per frame, which is what these tests count
 WALLS = (1.0, 1.5, 2.5, 3.5, 2.0, 3.0)  # views enough for POOL_MIN_SAMPLES pairs and a spread
 LAW = (1.3, 0.03)  # the network's own error: 1 / z = a / D + b
 
@@ -278,6 +279,10 @@ def build(tmp_path: Path) -> Iterator[Build]:
         law_file = law_file or tmp_path / f"depth_law_{len(made)}.json"
         if law is not None:
             save_law(law_file, law[0], law[1], 500, time.time())
+        # One fan per frame, as the node published before 2026-09-22: the shipped ``scan_hz`` is
+        # a 5 Hz cap on the WIRE to the board, and a test that pushes six frames through in the
+        # same millisecond of wall time would see one of them. The cap has its own test below.
+        params.setdefault("scan_hz", SCAN_EVERY_FRAME)
         with ros_stubs.parameters(config=nominal, law_file=str(law_file), **params):
             node = DepthStream()
         made.append(node)
@@ -1131,6 +1136,43 @@ def test_the_reach_moves_live_and_a_nearer_one_says_less(build: Build) -> None:
     near = np.asarray(array_from_image(published(node)[0][1]), dtype=float)
     assert np.nanmax(near) <= 1.5
     assert np.count_nonzero(np.isnan(near)) > np.count_nonzero(np.isnan(wide))
+
+
+# ---- the cap on the wire (scan_hz) ----------------------------------------------------------
+def test_the_scan_hz_cap_thins_the_topic_and_touches_nothing_else(build: Build) -> None:
+    """CLAUDE.md rule 19. The board's local costmap reads /depth_scan five times a second, so a
+    second fan in the same millisecond never goes on the wire — while the frame behind it is
+    processed exactly as before: the depth image is published every time, the law keeps pooling
+    and the fan that DOES go out is the newest frame's, not a cached one."""
+    node, net = build(law=LAW, fan_floor_gate="off", lidar_anchor=False, parallax_anchor=False)
+    assert node._switches["scan_hz"] == SCAN_EVERY_FRAME, "this file's nodes publish every frame"
+    assert node.set_parameters([Param("scan_hz", 1.0)])[0].successful
+    frame(node, net, CONFIG_CAM, 1.0, 0)
+    frame(node, net, CONFIG_CAM, 3.5, 1)
+    depths, scans = published(node)
+    assert len(depths) == 2, "the image is not thinned: it is not what crosses to the board"
+    assert len(scans) == 1, "one fan a second, and no more"
+    assert node.set_parameters([Param("scan_hz", SCAN_EVERY_FRAME)])[0].successful
+    stamp = frame(node, net, CONFIG_CAM, 3.5, 2)
+    scans = published(node)[1]
+    assert len(scans) == 2 and scans[-1].header.stamp == stamp, "the newest frame's, never a copy"
+
+
+def test_the_report_line_says_what_the_scan_cap_held_back(build: Build) -> None:
+    """A fan rate below the frame rate must read as the cap and not as a pipeline that has
+    stopped answering."""
+    node, net = build(law=LAW, fan_floor_gate="off", lidar_anchor=False, parallax_anchor=False)
+    assert node.set_parameters([Param("scan_hz", 1.0)])[0].successful
+    frame(node, net, CONFIG_CAM, 1.0, 0)
+    frame(node, net, CONFIG_CAM, 1.5, 1)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "/depth_scan 1 fans" in line and "1 held by the scan_hz 1 cap" in line
+    assert "scan_hz=1.0" in line, "and the switch's own state is in the same line"
+    assert node.set_parameters([Param("scan_hz", SCAN_EVERY_FRAME)])[0].successful
+    frame(node, net, CONFIG_CAM, 2.0, 2)
+    node._report()
+    assert "scan_hz 0: every frame" in node.logger.texts("info")[-1]
 
 
 # ---- the stereo head as the second source ---------------------------------------------------

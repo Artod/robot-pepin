@@ -16,6 +16,7 @@ test_places_node) pin it there with an autouse ``localizer="tracker"``.
 from __future__ import annotations
 
 import ast
+import math
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -221,24 +222,73 @@ def test_a_goal_starts_without_a_tracker_and_without_a_map_odom_pulse() -> None:
     assert not node._tracker_here(), "and the one-second probe for it is not paid at all"
 
 
-def test_the_tape_and_the_session_log_read_the_pose_from_tf_instead() -> None:
+def _loc_rows(recorder: Any) -> list[dict[str, Any]]:
+    """The tape's `loc` records so far."""
+    return [r for _t, r in recorder._tape._buffer if r.get("topic") == "loc"]
+
+
+def test_the_tape_reads_the_pose_from_the_goal_server_s_topic() -> None:
     """A tape with no pose in it is a drive nobody can replay, and /tracker_pose has no publisher
-    here. ``source`` says which of the two wrote each record; no invented confidence, because TF
-    carries no covariance."""
+    here. Since 2026-09-22 the edge arrives as a topic — the goal server parses /tf for
+    navigation anyway — so this node starts NO listener of its own: two rclpy TF listeners on a
+    4-core A53 cost ~56 % of a core to read one pose. The row is the row it always was, ``source``
+    ``tf`` because it is that same edge, and no invented confidence."""
     from pepin_bringup import run_recorder
 
     node = run_recorder.RunRecorderNode()
     recorder = node._recorder
-    assert recorder._tf is not None, "the listener exists only in this role"
-    recorder._tf = _FakeTf(x=0.5, y=-1.5, yaw_deg=90.0, age_s=0.0)  # type: ignore[assignment]
-    recorder._loc_from_tf()
-    taped = [record for _t, record in recorder._tape._buffer]
-    records = [r for r in taped if r.get("topic") == "loc"]
+    assert recorder._tf is None, "no second listener on the board"
+    assert run_recorder.POSE_TOPIC in node.subs, "the pose arrives as a topic in this role"
+    node.subs[run_recorder.POSE_TOPIC][1](_pose_msg(x=0.5, y=-1.5, yaw_deg=90.0))
+    records = _loc_rows(recorder)
     assert records and records[-1]["source"] == "tf"
     assert records[-1]["x"] == 0.5 and records[-1]["y"] == -1.5
+    assert records[-1]["theta"] == pytest.approx(math.pi / 2, abs=1e-4)
     assert "confidence" not in records[-1], "TF carries no covariance; a made-up one is a lie"
+    assert run_recorder.POSE_TOPIC in " ".join(node.logger.texts()), "the ready line says so"
+
+
+def test_the_old_listener_is_one_flag_away_and_costs_nothing_while_it_is_off() -> None:
+    """CLAUDE.md rule 19: ``loc_from`` tf is the path of before 2026-09-22, reachable live. The
+    listener is built on the first tick that asks for it — never in the constructor — so the
+    switch that is off costs this board no /tf subscription at all."""
+    from pepin_bringup import run_recorder
+
+    node = run_recorder.RunRecorderNode()
+    recorder = node._recorder
+    node.subs[run_recorder.POSE_TOPIC][1](_pose_msg(x=0.5, y=-1.5, yaw_deg=90.0))
+    assert len(_loc_rows(recorder)) == 1
+    assert node._switches.set("loc_from", "tf") == "pose_topic"
+    node.subs[run_recorder.POSE_TOPIC][1](_pose_msg(x=9.0, y=9.0, yaw_deg=0.0))
+    assert len(_loc_rows(recorder)) == 1, "the topic is ignored while the listener owns the rows"
+    recorder._tf = _FakeTf(x=1.5, y=-0.5, yaw_deg=0.0, age_s=0.0)  # type: ignore[assignment]
+    recorder._last_kept.clear()  # the 5 Hz thinning, not the flag, is what would drop this one
+    recorder._loc_from_tf()
+    records = _loc_rows(recorder)
+    assert len(records) == 2 and records[-1]["source"] == "tf", "the same row, the other reader"
+    assert records[-1]["x"] == 1.5 and records[-1]["y"] == -0.5
     logger = (REPO / "ros/tools/session_logger.py").read_text()
     assert "_loc_from_tf" in logger and '"source": "tf"' in logger
+
+
+def test_the_goal_server_republishes_the_pose_it_already_reads() -> None:
+    """The other half of the switch: this node owns navigation and the jump watch, so it keeps
+    the board's one TF listener and puts what it reads on /pose — stamped with the TRANSFORM's
+    own stamp, never with now (2026-09-19, the chair)."""
+    from pepin_bringup import goal_server
+
+    node = _goal_server()
+    assert goal_server.POSE_TOPIC in node.pubs, "published where no tracker answers"
+    node._tf = _FakeTf(x=-0.25, y=2.77, yaw_deg=90.0, age_s=0.05)
+    node._publish_pose()
+    sent = node.pubs[goal_server.POSE_TOPIC].sent
+    assert len(sent) == 1 and sent[0].header.frame_id == "map"
+    assert sent[0].pose.position.x == -0.25 and sent[0].pose.position.y == 2.77
+    assert sent[0].pose.orientation.z == pytest.approx(math.sin(math.pi / 4))
+    assert sent[0].header.stamp == _stamp(-0.05), "the edge's own stamp, not this moment"
+    assert node._switches.set("pose_topic", False) is True
+    node._publish_pose()
+    assert len(sent) == 1, "off, nothing is published and the readers fall back to loc_from tf"
 
 
 def test_a_mark_is_taken_from_the_transform_and_refused_when_it_goes_stale() -> None:
@@ -328,7 +378,7 @@ class _FakeTf:
         self._x, self._y, self._age = x, y, age_s
         self._yaw = math.radians(yaw_deg)
 
-    def transform(self, _parent: str, _child: str, timeout_s: float = 0.0) -> Any:
+    def transform(self, _parent: str, _child: str, _at: Any = None, timeout_s: float = 0.0) -> Any:
         import math
 
         return ros_stubs.TransformStamped(
@@ -340,6 +390,22 @@ class _FakeTf:
                 ),
             ),
         )
+
+
+def _pose_msg(x: float, y: float, yaw_deg: float, at_s: float = 0.0) -> Any:
+    """What the goal server puts on ``/pose``: the cart in ``map``, on the edge's own stamp."""
+    import math
+
+    yaw = math.radians(yaw_deg)
+    return ros_stubs.PoseStamped(
+        header=ros_stubs.Header(stamp=_stamp(at_s), frame_id="map"),
+        pose=ros_stubs.Pose(
+            position=ros_stubs.Point(x=x, y=y, z=0.0),
+            orientation=ros_stubs.Quaternion(
+                x=0.0, y=0.0, z=math.sin(yaw / 2), w=math.cos(yaw / 2)
+            ),
+        ),
+    )
 
 
 def _stamp(offset_s: float) -> Any:

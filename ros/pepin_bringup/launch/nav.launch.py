@@ -237,10 +237,18 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                     "pepin_bringup.run_recorder",
                     "--ros-args",
                     # Where the tape's `loc` records come from: the tracker's /tracker_pose under
-                    # "tracker", map -> base_link out of TF under "rtabmap", where no tracker
-                    # publishes a pose at all and a tape without one is a drive nobody can replay.
+                    # "tracker", map -> base_link under "rtabmap", where no tracker publishes a
+                    # pose at all and a tape without one is a drive nobody can replay.
                     "-p",
                     f"localizer:={owner}",
+                    # ...and by which of the two readers of that edge (the `loc_from` flag). The
+                    # goal server parses /tf here anyway and republishes what it reads on /pose,
+                    # so this node needs no listener of its own — but only where that node is on
+                    # THIS machine. On a split stack it is the laptop's, and a tape that lost its
+                    # pose rows with the WiFi is the one thing this recorder is on the board to
+                    # prevent, so there it reads the edge itself.
+                    "-p",
+                    f"loc_from:={'pose_topic' if runs_here(side, 'goal_server') else 'tf'}",
                 ],
                 output="screen",
                 prefix=_after_ghost(admin, "/run_recorder"),

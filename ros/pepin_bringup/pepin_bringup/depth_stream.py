@@ -102,8 +102,10 @@ the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anch
 ``parallax_anchor``, ``affine_law``, ``range_law``, ``frame_law``,
 ``wall_correct``, ``floor_anchor`` — plus ``depth_backend``, ``scale_ceiling``, the largest
 1 / scale the law may be fitted to, ``law_slew``, how fast that law may move between fits,
-``tf_dead_s``, how stale a TF edge may be before no frame waits for it, ``imu_lean`` and
-``lean_min_quality``; their state is printed in every report line.
+``tf_dead_s``, how stale a TF edge may be before no frame waits for it, ``imu_lean``,
+``lean_min_quality`` and ``scan_hz``, the cap on how often ``/depth_scan`` is published (5 Hz,
+the board's local costmap's own ``update_frequency`` — every frame is still processed, the cap
+is on the publisher); their state is printed in every report line.
 """
 
 from __future__ import annotations
@@ -1531,6 +1533,27 @@ FLAGS = FlagSet(
         " a head pitched far down (the saturation moves with the pitch)",
         range=(0.3, 12.0),
     ),
+    Flag(
+        "scan_hz",
+        5.0,
+        description="the cap on how often /depth_scan is PUBLISHED, in hertz; 0 publishes one fan"
+        " per frame, which is what this topic did until 2026-09-22. The cap is on the publisher"
+        " alone: every frame still goes through the network and the whole pipeline, every law is"
+        " still fitted from it, and the depth image on /camera/depth is not thinned at all",
+        why="the consumers of this topic are the board's two costmaps, which read it at their own"
+        " update_frequency — 5.0 local, 2.0 global (ros/params/nav2_params.yaml) — and"
+        " pepin_bringup.depth_fusion, which uses it to CLEAR. This node publishes at the"
+        " camera's rate, ~9 Hz, so roughly four of every nine fans crossed the zenoh routers to"
+        " the board to be overwritten in the layer before it was next read. The stop reflex is"
+        " bounded by the costmap tick and not by this publisher, so nothing about how fast the"
+        " cart stops changes",
+        on_when="raise it with the local costmap's own update_frequency, never above the"
+        " camera's frame rate (a cap above the source publishes every frame and nothing more)",
+        off_when="0 is the pre-2026-09-22 behaviour, one fan per frame: what a bench test on one"
+        " machine (no routers in the path) may as well use, and the A/B for whether a mark the"
+        " costmap failed to clear is the cap's fault",
+        range=(0.0, 30.0),
+    ),
 )
 FLOOR_STAGES = ("floor_anchor", "floor_pairs")  # the stages that read the IMU's up vector
 
@@ -1763,6 +1786,7 @@ class DepthStream(Node):
         newest = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(Image, "/camera/depth", reliable)
         self._scan_pub = self.create_publisher(LaserScan, "/depth_scan", reliable)
+        self._scan_at = 0.0  # monotonic seconds of the last published fan: the scan_hz cap
         self._scan_max_range = float(self.declare_parameter("scan_max_range", DEPTH_REACH_M).value)
         self._expected_key: object = None  # the optics and head pose the floor ruler was cut for
         self._expected: Array = np.zeros((0, 0))
@@ -2357,8 +2381,29 @@ class DepthStream(Node):
                     self._vouched(result.depth), "32FC1", msg.header.stamp, msg.header.frame_id
                 )
             )
-            self._scan_pub.publish(scan)
+            if self._scan_due():
+                self._scan_pub.publish(scan)
+                tally.count("scans")
         tally.count("frames")
+
+    def _scan_due(self) -> bool:
+        """Whether ``/depth_scan`` may go out now, and the cap's clock moved on when it may
+        (``scan_hz``; 0 is one fan per frame).
+
+        The fan itself is measured either way — it is built before the floor anchor, out of a
+        frame that has already been through the whole pipeline — so this holds back a
+        publication and nothing else. Monotonic seconds: a cap on a publisher is not a
+        measurement of anything in the room.
+        """
+        hz = float(self._switches["scan_hz"])
+        if hz <= 0.0:
+            return True
+        now = time.monotonic()
+        if now - self._scan_at < 1.0 / hz:
+            self._tally.count("scans_thinned")
+            return False
+        self._scan_at = now
+        return True
 
     def _vouched(self, depth: Array) -> Array:
         """The depth as this camera is willing to answer for it: NaN past ``depth_reach_m``, on a
@@ -2596,7 +2641,8 @@ class DepthStream(Node):
         law = self._law
         self.get_logger().info(
             f"depth: {w.rate('frames'):.1f} frames/s published ({c['processed']} through the"
-            f" net, {c['dropped']} dropped, {c['withheld']} withheld); {self._pipeline.report()};"
+            f" net, {c['dropped']} dropped, {c['withheld']} withheld); {self._scan_line(w)};"
+            f" {self._pipeline.report()};"
             f" {c['verdicts']} lidar verdicts ({per_verdict:.0f} pairs each; held {c['held']} of"
             f" {c['processed']} frames){self._extras(w)}, source {self._source.name}:"
             f" {self._source.report()}, flags: {self._switches.state()}, ms median/max:"
@@ -2663,6 +2709,19 @@ class DepthStream(Node):
         if self._local.failed:
             return f" (CPU model failed: {self._local.failed})"
         return " (CPU model not loaded)"
+
+    def _scan_line(self, w: Window) -> str:
+        """What went out on ``/depth_scan`` this window and what the ``scan_hz`` cap held back:
+        the rate the costmaps' clearing source actually arrives at, so a fan rate below the
+        frame rate is read as the cap and not as a pipeline that has stopped answering."""
+        published = int(w.counts["scans"])
+        if float(self._switches["scan_hz"]) <= 0.0:
+            return f"/depth_scan {published} fans ({w.rate('scans'):.1f}/s, scan_hz 0: every frame)"
+        return (
+            f"/depth_scan {published} fans ({w.rate('scans'):.1f}/s,"
+            f" {int(w.counts['scans_thinned'])} held by the scan_hz"
+            f" {float(self._switches['scan_hz']):g} cap)"
+        )
 
     def _dead_edge(self, w: Window, name: str, unit: str = "frames") -> str:
         """``neck edge dead 97 frames (344 s stale)`` when :class:`LiveEdgeHistory` refused to

@@ -43,6 +43,17 @@ empty that grid on such a step while it owned the edge; RTAB-Map owns it now, so
 here — a 5 Hz read of the edge into :class:`pepin.watch.JumpClear`, one asynchronous clear per
 jump, under the ``jump_clear`` flag, which ships OFF (nobody has yet watched RTAB-Map's own
 corrections with it).
+
+AND BECAUSE IT ALREADY PARSES ``/tf``, IT IS THE BOARD'S ONE LISTENER. A TF listener is a
+subscription to the whole stream — RTAB-Map's ``map -> odom`` at 20 Hz, the board's
+``odom -> base_link`` at 50 Hz, the statics — deserialised in Python whatever one pose the reader
+wanted out of it, and two of them ran on a 4-core A53: this one and the tape recorder's. So this
+node republishes the pose it reads as ``/pose`` (PoseStamped in ``map``, 5 Hz, stamped with the
+transform's own stamp) under the ``pose_topic`` flag, and pepin_bringup.run_recorder subscribes to
+that instead of running a listener of its own (its ``loc_from`` flag). The topic is not published
+at all where a tracker runs — ``/tracker_pose`` is that topic with a covariance on it — nor on a
+split stack, where this node is the laptop's and the recorder is the board's: a pose that crossed
+the WiFi to be written to a tape is what putting that recorder on the board prevents.
 """
 
 from __future__ import annotations
@@ -75,6 +86,7 @@ from pepin.deployment import (
     HEARTBEAT_HZ,
     HEARTBEAT_TOPIC,
     next_transition,
+    runs_here,
 )
 from pepin.flags import Flag, FlagSet
 from pepin.places import PLACES_TOPIC, heading_residual_deg, places_from_json
@@ -126,6 +138,12 @@ CORRECTION_TOPIC = "/map_odom"  # the SLAM half's pulse; the board's slam_frame 
 CLEAR_LOCAL_COSTMAP = "/local_costmap/clear_entirely_local_costmap"
 CLEAR_MIN_GAP_S = 1.0
 JUMP_WATCH_HZ = 5.0  # how often map -> odom is read for a step: twice Nav2's own control period
+# THE BOARD'S ONE POSE TOPIC (flag pose_topic). This node already parses /tf for the pose; every
+# other node on the board that wants it reads this instead of starting a second listener
+# (pepin_bringup.run_recorder's loc_from). 5 Hz is the rate the tape thinned its `loc` rows to
+# anyway (RunRecorder.LOC_TF_PERIOD_S) and the local costmap's own update_frequency.
+POSE_TOPIC = "/pose"
+POSE_HZ = 5.0
 TF_WAIT_S = 0.3  # how long a pose lookup waits for the edge: the drive thread asks, not a callback
 TF_FIRST_WAIT_S = 2.0  # ...and the first one waits for the listener's buffer to fill at all
 TRACKER_WAIT_S = 1.0  # the one probe for "is there a tracker at all" — its relocalise service
@@ -249,6 +267,29 @@ FLAGS = FlagSet(
         off_when="the shipped state, and back to it the moment a clear is seen to cost more than"
         " it buys — a controller replanning around a grid that keeps being emptied under it",
     ),
+    Flag(
+        "pose_topic",
+        True,
+        description=f"the pose this node reads out of TF is republished as {POSE_TOPIC}"
+        f" (geometry_msgs/PoseStamped in {MAP_FRAME}, {POSE_HZ:.0f} Hz, stamped with the"
+        " transform's own stamp), so the other nodes on this board can have the pose without a"
+        " TF listener of their own. Inert where a tracker runs (there /tracker_pose is that topic"
+        " already) and on a split stack, where the reader is on the other machine and reads the"
+        " edge itself. Off, nothing is published and this node's listener goes back to being"
+        " started on the first ask",
+        why="a TF listener is a subscription to the whole /tf stream — RTAB-Map's map -> odom at"
+        " 20 Hz plus the board's odom -> base_link at 50 Hz plus the statics — deserialised in"
+        " Python whatever the reader wanted out of it. Two of them ran on a 4-core A53 to read"
+        " one pose now and then: this node's, for `where`, the preflight and the jump watch"
+        " (~22 % of a core), and pepin_bringup.run_recorder's 5 Hz read for the tape's `loc`"
+        " rows (~34 %), on a board measured at 252 % with the real-time loops starving"
+        " (2026-09-22). This node owns navigation and the jump watch, so its listener is the one"
+        " that stays and the tape reads the topic instead (run_recorder's loc_from)",
+        on_when="always where this node and the tape recorder share a machine: it is what lets"
+        " every other node there read the pose for the price of a 5 Hz PoseStamped",
+        off_when="to put the two independent listeners back for a comparison — turn this off"
+        " here and run_recorder's loc_from to tf, or the tape loses its pose rows",
+    ),
 )
 
 PLANNERS = {
@@ -265,6 +306,13 @@ class GoalServer(Node):
 
     def __init__(self) -> None:
         super().__init__("goal_server")
+        # Callbacks can run BEFORE this constructor is done: node_kit.TfLookup starts a spin
+        # thread for THIS node, so from the moment the pose publisher below creates one, every
+        # timer and subscription of this node may fire against a half-built object. Until the
+        # last line of __init__ the timers that were added with that listener drop their tick
+        # (the pattern depth_fusion paid for on 2026-09-22, when a pair that met a half-built
+        # node killed the executor and silenced the marks).
+        self._up = False
         self._places_path = Path(str(self.declare_parameter("places", "/maps/places.yaml").value))
         self._record_dir = Path(str(self.declare_parameter("record_dir", "/maps/rec").value))
         self._port = int(self.declare_parameter("port", PORT).value)
@@ -374,11 +422,14 @@ class GoalServer(Node):
         # declarations too, and a name outside the table is refused there (node_kit.Switches).
         self._switches = Switches(self, FLAGS)
         self._start_jump_watch()  # the map -> odom jump watch (flag jump_clear, default off)
+        self._start_pose_topic()  # /pose, the board's one pose topic (flag pose_topic)
         threading.Thread(target=self._serve, daemon=True).start()
         self.get_logger().info(
             f"goal server ready on port {self._port}; localizer {self._localizer}"
-            f" ({self._pose_source_note()}); {self._switches.state()}"
+            f" ({self._pose_source_note()}); {self._pose_topic_note()};"
+            f" {self._switches.state()}"
         )
+        self._up = True  # last: everything above exists, the timers may run
 
     def _pose_source_note(self) -> str:
         """Where this node will look for the cart's pose, in one phrase for the report line."""
@@ -1035,6 +1086,67 @@ class GoalServer(Node):
         self.get_logger().warning(f"still lost after the search: fit {self.fit:.2f}")
         self._send(connection, {"event": "error", "detail": f"still lost (fit {self.fit:.2f})"})
         return False
+
+    # ---- the board's one pose topic (flag pose_topic) -----------------------------------------
+    def _start_pose_topic(self) -> None:
+        """Wire ``/pose``: the cart's pose in ``map``, five times a second, out of the TF
+        listener this node already owns.
+
+        Only where no tracker runs, and only where the reader is on this machine. Under
+        ``tracker`` the board's relocalizer publishes ``/tracker_pose``, which is this topic with
+        a covariance on it, and a second opinion on one pose is what CLAUDE.md's one-localiser
+        rule exists to forbid. On a SPLIT stack this node is the laptop's while the tape recorder
+        is the board's, and a pose that crossed the WiFi to be written to the tape is exactly
+        what putting that recorder on the board is meant to prevent — so there it reads the edge
+        itself (its ``loc_from`` tf) and nothing is published here. Either way the timer is not
+        created and the flag is inert; the start line says which it is.
+
+        The listener is built HERE, in the constructor, rather than on the first ask: this timer
+        wants it from the first tick, and it is the one listener the board keeps (the flag's
+        ``why``). It starts a spin thread for this node, which is why ``_up`` guards the tick.
+        """
+        if self._localizer == "tracker" or not runs_here(self._side, "run_recorder"):
+            return
+        self._pose_pub = self.create_publisher(PoseStamped, POSE_TOPIC, 5)
+        if self._tf is None:
+            self._tf = TfLookup(self)
+        self.create_timer(1.0 / POSE_HZ, self._publish_pose)
+
+    def _pose_topic_note(self) -> str:
+        """Where the rest of the board gets the pose from, in one phrase for the start line."""
+        if self._localizer == "tracker":
+            return f"{POSE_TOPIC} not published: the tracker's own /tracker_pose is that topic"
+        if not runs_here(self._side, "run_recorder"):
+            return (
+                f"{POSE_TOPIC} not published: its reader is on the other machine (side"
+                f" {self._side}) and reads the edge there"
+            )
+        if not self._switches.on("pose_topic"):
+            return f"{POSE_TOPIC} off: every reader of the pose parses /tf for itself"
+        return f"{POSE_TOPIC} at {POSE_HZ:.0f} Hz from map -> base_link, for the board's readers"
+
+    def _publish_pose(self) -> None:
+        """One pose onto ``/pose``, or nothing at all: this is a relay of an edge, never a
+        measurement of its own.
+
+        Stamped with the TRANSFORM's stamp and not with now — a pose stamped "now" is how a
+        stale reading becomes a fresh lie (2026-09-19). The edge is read from whatever is in the
+        buffer and never waited for: this runs on the executor thread, beside the socket's own
+        callbacks, and a missing edge is simply no message.
+        """
+        if not self._up or not self._switches.on("pose_topic") or self._tf is None:
+            return
+        transform = self._tf.transform(MAP_FRAME, BASE_FRAME, None, 0.0)
+        if transform is None:
+            return
+        message = PoseStamped()
+        message.header.stamp = transform.header.stamp
+        message.header.frame_id = MAP_FRAME
+        message.pose.position.x = transform.transform.translation.x
+        message.pose.position.y = transform.transform.translation.y
+        message.pose.position.z = transform.transform.translation.z
+        message.pose.orientation = transform.transform.rotation
+        self._pose_pub.publish(message)
 
     # ---- the map -> odom jump watch (flag jump_clear) -----------------------------------------
     def _start_jump_watch(self) -> None:

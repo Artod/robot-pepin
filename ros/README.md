@@ -47,7 +47,7 @@ does the same in the laptop's containers; `ros/laptop.sh kick` and `ros/thin.sh 
 name list what each can reach). The laptop's SLAM container is its own: `ros/laptop.sh vslam`
 restarts it with the RTAB-Map database kept, `ros/laptop.sh vslam --fresh` deletes the database
 first and starts an empty map (in SLAM mode the session starts empty anyway: see below). Only a Dockerfile change (apt packages, the C++
-driver) needs `ros/build.sh`, which stops the container first and uses BuildKit's apt cache.
+driver) needs a rebuilt image — `ros/build-image.sh` on the laptop, see **Building the image**.
 
 ## Restarting
 
@@ -840,6 +840,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `depth_fusion` | `min_weight` | number 0..100 | 2.0 | yes | observations a voxel needs before it is shown in /fusion/surface, the one thing this node publishes about the room |
 | `depth_fusion` | `marks_source` | choice: volume, frame | volume | yes | where the camera's MARKS in the costmap come from (/depth_marks): volume, the accumulated model's own surface sliced around the cart at min_weight (pepin.volume_scan — the very surface /fusion/surface draws); frame, the latest /depth_scan relayed unchanged, which is what marked the costmap until 2026-09-21. Either way /depth_scan itself keeps CLEARING the layer: a single frame is the eyewitness of what is open now |
 | `depth_fusion` | `marks_min_z` | number 0..1 | 0.15 | yes | the floor of the height band /depth_marks reads the volume in, metres above the cart's own floor plane; the band's top is the volume's own camera band (config/fusion.json's camera_band_m) |
+| `depth_fusion` | `marks_hz` | number 0..30 | 5.0 | yes | the cap on how often /depth_marks is PUBLISHED, in hertz; 0 publishes every frame, which is what this topic did until 2026-09-22. Only the publication is thinned: every frame and every revolution is still fused into the volume, and a slice that is not published is not computed either (the gate is read before the crossing search) |
 | `depth_fusion` | `surface_hz` | number 0.1..10 | 1.0 | yes | how often /fusion/surface is published (the crossing search costs a fraction of a second) |
 | `depth_fusion` | `band_half_z` | number 0.02..0.5 | 0.125 | yes | half the height band around the lidar's plane a frame is seated on, metres (config/fusion.json's band_half_z_m is the default); the band's centre is the plane the published base_link -> laser edge names, and both are printed in the report line |
 | `depth_fusion` | `lidar_layer` | bool | on | yes | /scan is integrated into the volume at the lidar's plane (rays carve free space, returns mark a surface); off, the volume is the camera's alone, as it was |
@@ -905,12 +906,14 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `depth_stream` | `scan_honours_pan` | bool | on | yes | fold /depth_scan onto the floor through the neck's pan: the fan's bearings turn with the head and its angular window turns with them, so angle_min comes out at pan - 40 deg instead of -40. The pan is the yaw of the same base_link <- camera_optical edge the volume path reads (camera_tf_latest); with no such edge the config mount's straight-ahead yaw stands in, and the report line's config counter says for how many frames. Off: the fan is projected as if the head looked along the cart's x, whatever the encoders say |
 | `depth_stream` | `depth_reach` | bool | on | yes | the PUBLISHED depth image is NaN past depth_reach_m: the camera answers for its own data and says nothing where it does not vouch for the range. /depth_scan is unaffected (it is capped at the same range already) and so is every law — the gate is applied to the image on its way out, after the pipeline |
 | `depth_stream` | `depth_reach_m` | number 0.3..12 | 3.0 | yes | metres past which the published depth is NaN; the same number /depth_scan is capped at |
+| `depth_stream` | `scan_hz` | number 0..30 | 5.0 | yes | the cap on how often /depth_scan is PUBLISHED, in hertz; 0 publishes one fan per frame, which is what this topic did until 2026-09-22. The cap is on the publisher alone: every frame still goes through the network and the whole pipeline, every law is still fitted from it, and the depth image on /camera/depth is not thinned at all |
 | `goal_server` | `tf_pose` | bool | on | yes | where no tracker answers, the cart's pose is read from TF (map -> base_link) and a goal is judged by how fresh that edge is; off, only the tracker is ever asked |
 | `goal_server` | `correction_watch` | bool | on | yes | where no tracker answers, the SLAM correction (/map_odom) must be arriving for a goal to start, and a drive is cut when it stops; off, the age of map -> base_link is the only evidence read |
 | `goal_server` | `sigma_gate` | bool | on | yes | a goal starts, and a running drive is cut, on the tracker's fused uncertainty (/localization/sigma); off, on its scan-to-map fit as before |
 | `goal_server` | `places_from_the_file` | bool | off | yes | before the graph's book of places has been heard, a name is answered from the yaml beside the map (coordinates of the frozen-grid era); off, a name is refused until the book arrives, with that reason |
 | `goal_server` | `start_on_a_known_pose` | bool | on | yes | where the tracker publishes a sigma, a goal is refused for the pose's sake only when there is NO pose — nothing has ever corrected it, or the sigma stopped arriving; off, a drive starts under 0.25 m and anything over it buys a whole-map search first, as before |
 | `goal_server` | `jump_clear` | bool | off | yes | map -> odom is read from TF five times a second and, when it STEPS further than 0.10 m, Nav2's local costmap is emptied ("/local_costmap/clear_entirely_local_costmap", asynchronously, at most once per 1 s): the marks in that grid were laid where the cart used to be. The step in that edge is the correction alone — the cart's own motion lives in odom -> base_link — whoever published it. Off, nothing reads the edge and no listener is started for it |
+| `goal_server` | `pose_topic` | bool | on | yes | the pose this node reads out of TF is republished as /pose (geometry_msgs/PoseStamped in map, 5 Hz, stamped with the transform's own stamp), so the other nodes on this board can have the pose without a TF listener of their own. Inert where a tracker runs (there /tracker_pose is that topic already) and on a split stack, where the reader is on the other machine and reads the edge itself. Off, nothing is published and this node's listener goes back to being started on the first ask |
 | `laptop_localizer` | `tf_belief` | bool | on | yes | when /tracker_pose has been silent for a second, the pose a camera scan is matched around is looked up from TF (map -> base_link at that scan's stamp) instead of carried from the last /tracker_pose; off, a silent board means no camera measurements at all |
 | `laptop_localizer` | `global_watch` | bool | on | yes | run the whole-map search once every watch_period_s and publish what it finds on /localization/candidate; off, this half of the node is a subscriber that costs nothing and the board is back to searching for itself only once it is already lost |
 | `laptop_localizer` | `watch_period_s` | number 0.2..60 | 1.0 | yes | seconds between searches |
@@ -977,6 +980,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `run_recorder` | `fusion_records` | bool | on | yes | the camera's measurements (/localization/measurement) and the tracker's account of each update (/localization/sources) go on the numbered tape as the 'meas' and 'srcs' records scratch/camera_error.py reads |
 | `run_recorder` | `bridge_kick` | bool | on | yes | the laptop's request to restart THIS board's zenoh bridge (/bridge/kick) is answered by touching /run/pepin/bridge_kick, which a systemd path unit on the board turns into `systemctl restart pepin-bridge`; off, the request is logged and ignored |
 | `run_recorder` | `planner_records` | bool | on | yes | what the PLANNER saw goes on the tape too: the global costmap (run-length encoded, at most one grid per new plan), the goal status of Nav2's three actions (navigate_to_pose, compute_path_to_pose, follow_path) and the pose graph's own words (/localization/graph_measurement) beside the camera's; off, the tape holds what it held before 2026-09-18 |
+| `run_recorder` | `loc_from` | choice: pose_topic, tf | pose_topic | yes | where the tape's `loc` rows come from where no tracker publishes one: pose_topic, the goal server's /pose (it parses /tf for navigation anyway and republishes what it reads); tf, this node's own TF listener at 0.2 s, which is what it ran until 2026-09-22. The rows are identical either way — same fields, same 5 Hz, source 'tf' in both, because both are that same edge. Inert where a tracker runs: there the rows come from /tracker_pose |
 | `sensor_pack` | `sensor_pack` | bool | on | yes | snapshots are published; off, the node subscribes and counts and RTAB-Map is fed nothing at all |
 | `sensor_pack` | `sources` | list of: camera, lidar | camera,lidar | yes | which sensors may enter a snapshot: the live A/B for camera-only and lidar-only mapping, with no restart and without muting a publisher |
 | `sensor_pack` | `pack_hz` | number 0.1..15 | 1.0 | yes | at most this many snapshots a second of SENSOR time (the stamps' own clock, not this laptop's) |
@@ -1155,6 +1159,11 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* 0.15 — default by design, unmeasured as a marks floor: it is pepin.depth's SCAN_MIN_Z_M, the height /depth_scan has always marked from and the floor of config/fusion.json's camera_band_m, so the two scans of one layer speak about one band. RAISING IT IS NOT THE CURE FOR A FLOOR THAT MARKS ITSELF — that is a floor-specific heuristic, and the thing this topic exists to avoid; what keeps the parquet out of the marks is that a blob one frame invented is not a surface in the volume
   - *On when:* raise it only to measure what a band costs — how much of a real low obstacle (a plinth, a box) leaves the marks with it
   - *Off when:* lower it toward the floor to see what the volume itself holds down there, never to chase a false mark
+- **`marks_hz`** — number 0..30, default 5.0
+  - *What:* the cap on how often /depth_marks is PUBLISHED, in hertz; 0 publishes every frame, which is what this topic did until 2026-09-22. Only the publication is thinned: every frame and every revolution is still fused into the volume, and a slice that is not published is not computed either (the gate is read before the crossing search) (0..30)
+  - *Default:* 5.0 — the one consumer of this topic is the board's LOCAL costmap, whose update_frequency is 5.0 (ros/params/nav2_params.yaml, 'the stop reflex's slowest link: a mark waits for this tick'). The topic was published at the rate the volume is integrated — the camera's 9-9.5 fps plus ~10 Hz of revolutions — so between two and four of every five fans crossed the zenoh routers to the board only to be overwritten in the layer before it was next read. The stop reflex is bounded by the costmap tick and not by this publisher, so nothing about how fast the cart stops changes
+  - *On when:* raise it only with the costmap's own update_frequency, and only after measuring what the board does with the extra fans
+  - *Off when:* 0 is the pre-2026-09-22 behaviour, one fan per fused frame: the A/B for whether a missing mark is the cap's fault, and what a bench test on one machine (no routers in the path) may as well use
 - **`surface_hz`** — number 0.1..10, default 1.0
   - *What:* how often /fusion/surface is published (the crossing search costs a fraction of a second) (0.1..10)
   - *Default:* 1.0 — default by design, unmeasured; what is measured is the cost it protects — the surface build took 45 ms a second and stalled the node's executor until it was moved onto a snapshot taken outside the model lock
@@ -1483,6 +1492,11 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* 3.0 — 3.0 is the reach this stack already stands on in two places: the scan's own cap (scan_max_range, which the costmap's obstacle_max_range of 2.5 m must stay under — 2026-09-11 05:25, or an inf ray marks a lethal ring) and the camera-only grid's Grid/RangeMax. What the range law measured across it: after the law 0.8-1.2 m reads +0.1 %, 1.2-1.6 +0.4 %, 1.6-2.0 -0.5 %, and 2.0-2.5 m stays -20 % under any law z = f(d) at one neck pitch because the network SATURATES there (true 1.75 and 2.2 m arrive at the same network depth ~3.1, 2026-09-15 15:30) — softened the next day to a place fact, with the frame law reading +2.7 % over 2.5-6 m on a drive. So the honest statement is that the last metre before 3 m is worth a fifth of itself at worst and nothing is claimed past it
   - *On when:* raise it only with a wall-truth measurement at the new range on the current geometry, and raise Grid/RangeMax's camera half nowhere — it is the lidar's
   - *Off when:* lower it where the network is known to be worse: a dark room, a patterned floor, a head pitched far down (the saturation moves with the pitch)
+- **`scan_hz`** — number 0..30, default 5.0
+  - *What:* the cap on how often /depth_scan is PUBLISHED, in hertz; 0 publishes one fan per frame, which is what this topic did until 2026-09-22. The cap is on the publisher alone: every frame still goes through the network and the whole pipeline, every law is still fitted from it, and the depth image on /camera/depth is not thinned at all (0..30)
+  - *Default:* 5.0 — the consumers of this topic are the board's two costmaps, which read it at their own update_frequency — 5.0 local, 2.0 global (ros/params/nav2_params.yaml) — and pepin_bringup.depth_fusion, which uses it to CLEAR. This node publishes at the camera's rate, ~9 Hz, so roughly four of every nine fans crossed the zenoh routers to the board to be overwritten in the layer before it was next read. The stop reflex is bounded by the costmap tick and not by this publisher, so nothing about how fast the cart stops changes
+  - *On when:* raise it with the local costmap's own update_frequency, never above the camera's frame rate (a cap above the source publishes every frame and nothing more)
+  - *Off when:* 0 is the pre-2026-09-22 behaviour, one fan per frame: what a bench test on one machine (no routers in the path) may as well use, and the A/B for whether a mark the costmap failed to clear is the cap's fault
 
 #### `goal_server`
 
@@ -1516,6 +1530,11 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* off — OFF UNTIL IT IS TRIED, because nobody has watched RTAB-Map's own corrections with it. The behaviour is not new: the lidar tracker did exactly this while it owned map -> odom (pepin.watch.JumpClear, written for the camera-only return of 2026-09-16, where the pose lagged 1.4 m behind the cart and Nav2 spent 29 recoveries fighting marks placed at the poses before each correction). Under World R that edge is RTAB-Map's and nobody watches it at all. What is unmeasured is the other side of the trade: RTAB-Map corrects in centimetres at a loop closure, which the costmap absorbs, and the raytracing of the live scans re-clears a stranded mark within seconds anyway — so a clear per closure could cost a controller its picture of the room for no gain. The threshold and the gap are the tracker's measured ones, inherited unchanged
   - *On when:* when a drive is seen fighting a second copy of the room after a correction: recoveries at obstacles that are not there, the local costmap holding marks offset from the live scans by the size of the last jump
   - *Off when:* the shipped state, and back to it the moment a clear is seen to cost more than it buys — a controller replanning around a grid that keeps being emptied under it
+- **`pose_topic`** — bool, default on
+  - *What:* the pose this node reads out of TF is republished as /pose (geometry_msgs/PoseStamped in map, 5 Hz, stamped with the transform's own stamp), so the other nodes on this board can have the pose without a TF listener of their own. Inert where a tracker runs (there /tracker_pose is that topic already) and on a split stack, where the reader is on the other machine and reads the edge itself. Off, nothing is published and this node's listener goes back to being started on the first ask
+  - *Default:* on — a TF listener is a subscription to the whole /tf stream — RTAB-Map's map -> odom at 20 Hz plus the board's odom -> base_link at 50 Hz plus the statics — deserialised in Python whatever the reader wanted out of it. Two of them ran on a 4-core A53 to read one pose now and then: this node's, for `where`, the preflight and the jump watch (~22 % of a core), and pepin_bringup.run_recorder's 5 Hz read for the tape's `loc` rows (~34 %), on a board measured at 252 % with the real-time loops starving (2026-09-22). This node owns navigation and the jump watch, so its listener is the one that stays and the tape reads the topic instead (run_recorder's loc_from)
+  - *On when:* always where this node and the tape recorder share a machine: it is what lets every other node there read the pose for the price of a 5 Hz PoseStamped
+  - *Off when:* to put the two independent listeners back for a comparison — turn this off here and run_recorder's loc_from to tf, or the tape loses its pose rows
 
 #### `laptop_localizer`
 
@@ -1864,6 +1883,11 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* on — the tape was blind exactly where the failures were. On 2026-09-17 two legs piled up 78 and 90 recoveries in ~125 s with no path (ros/maps/rec/20260917_192935_goto.log, ..._201425_goto.log) and the tapes could not say why: they carry /plan and the LOCAL costmap, and the planner reads the GLOBAL one. The cart's own footprint was clear in every one of the 1740 taped local grids (scratch/footprint_in_costmap.py), so the answer was in the grid nobody recorded. Cost, measured on those tapes (scratch/costmap_rle_cost.py): the planner's grid is 239x215 = 51385 cells, 195 kB of raw JSON, and 16 kB run-length encoded over the four classes that decide whether the cart FITS (unknown / free / inflated / the 99-100 lethal band) — 12-fold, and the gradient it drops is cost, not feasibility. One grid per plan at the tapes' own 1.2 s plan cadence is 13 kB/s beside the 55 kB/s the scans already write, and one encode of 51k cells, 2.8 ms on the laptop's core. The status topics carry a message per transition and the graph's words arrive at 1 Hz
   - *On when:* always while Nav2 is the thing being debugged
   - *Off when:* on a long autonomy run where the tape must stay small, or to reproduce a tape recorded before 2026-09-18
+- **`loc_from`** — choice: pose_topic, tf, default pose_topic
+  - *What:* where the tape's `loc` rows come from where no tracker publishes one: pose_topic, the goal server's /pose (it parses /tf for navigation anyway and republishes what it reads); tf, this node's own TF listener at 0.2 s, which is what it ran until 2026-09-22. The rows are identical either way — same fields, same 5 Hz, source 'tf' in both, because both are that same edge. Inert where a tracker runs: there the rows come from /tracker_pose (one of: pose_topic, tf)
+  - *Default:* pose_topic — an rclpy TF listener deserialises the WHOLE /tf stream — RTAB-Map's map -> odom at 20 Hz, the board's odom -> base_link at 50 Hz, the statics — to read one pose five times a second, and it cost this node ~34 % of a core on a board measured at 252 % with the real-time loops starving (2026-09-22). The goal server owns navigation and the jump watch, so its listener is the one that stays; a 5 Hz PoseStamped costs this node what any other small topic costs it
+  - *On when:* wherever the goal server shares this machine (side all), which is where nav.launch.py sets it: one listener for the pose, and that node's pose_topic flag is the other half of the switch
+  - *Off when:* tf where this node must read the edge itself: a SPLIT stack, where the goal server is the laptop's and a tape whose pose rows crossed the WiFi is what this recorder is on the board to prevent (nav.launch.py passes it there), or a tape that has to be compared against one written before 2026-09-22. The listener is then started on the next tick and is NOT stopped again by switching back: that costs a restart
 
 #### `sensor_pack`
 
@@ -2039,10 +2063,50 @@ tracker still counted as always-on, adding laser odometry promised **427 %** of 
 replaces what it gave the EKF. The tracker is `sometimes` from that day (a mode, not the
 default); absent it is IDLE rather than MISSING, and running it is measured as before.
 
+## Building the image
+
+There are two ways to produce the board's image, `pepin-ros` (tagged `:latest` and `:zenoh`,
+which is what `ros/run.sh` asks for). Both read the same `ros/Dockerfile`; they differ only in
+which CPU compiles it.
+
+| | `ros/build-image.sh` (laptop) | `ros/build.sh` (board) |
+|---|---|---|
+| where | `docker buildx build --platform linux/arm64` on the Mac — native, no emulation | `docker build` on the Orange Pi |
+| cold build | 4-5 min (262 s measured, rf2o's layer 25 s of it at `-j18`) | 16-30 min (rf2o alone compiles at `-j1`) |
+| rebuild after a `pepin_bringup` change | seconds (the layers below are cached) | minutes |
+| needs the robot | no | yes, and the stack is stopped for the whole build |
+| gets the image to the board | `--ship`: `docker save` piped into the board's `docker load` | it is already there |
+
+Use the laptop path by default. Keep the board path for the case where the laptop cannot build
+(no Docker, no disk) or where only the board can reach the network the build needs.
+
+```bash
+ros/build-image.sh            # build only: linux/arm64 image in the laptop's Docker, board untouched
+ros/build-image.sh --ship     # build, then load it on the board (the stack must be stopped first)
+ros/build-image.sh --ship-only  # ship the image already built here
+```
+
+The image is about 1.0 GB on the wire and travels uncompressed: Docker Desktop's containerd
+image store already saves compressed layers, so a compressor takes 0.7 % off the tarball and
+costs the board a decompression (`PEPIN_SHIP_COMPRESS=zstd` turns one on for a daemon whose
+image store writes plain tars).
+
+Neither step restarts the robot: `docker load` under a driving cart is refused unless `--force`,
+and the restart (`ros/restart.sh board`) stays a separate, deliberate command. The image carries
+only what is baked in — code, params and maps are mounted from `/root/pepin-ros` and travel with
+`ros/sync.sh` as before.
+
+The rf2o layer's `-j1` is the board's RAM limit, not the package's: it is the `RF2O_JOBS` build
+argument, default 1 so an on-board `docker build` is safe without being told, and
+`ros/build-image.sh` passes the laptop's core count. The rest of the caching is Docker's own —
+an unchanged layer is reused, so a rebuild after a change to `pepin_bringup` does not recompile
+rf2o. `PEPIN_BUILD_CACHE=<dir>` additionally exports the build cache to a directory (this needs
+a `docker-container` builder, which the script creates as `pepin-arm64`).
+
 ## Build and run (on the board)
 
 ```bash
-# from the laptop: copy ros/ to the board and build the image (15-30 min the first time)
+# from the laptop: copy ros/ to the board and build the image there (15-30 min the first time)
 rsync -a --delete ros/ root@pepin.local:/root/pepin-ros/
 ssh root@pepin.local 'cd /root/pepin-ros && docker build -t pepin-ros .'
 # on the board: sensors + bridges (no Foxglove bridge here: the laptop serves it)
@@ -2082,7 +2146,8 @@ send a goal with the "Publish" panel on `/goal_pose` (`geometry_msgs/PoseStamped
 
 `board/pepin-ros.service` starts the sensors container (`robot.launch.py`) after the base and ToF
 servers; Nav2 (`nav.launch.py`) is started on demand inside it. Build or rebuild the image with
-`ros/build.sh` (syncs `ros/` and `src/pepin` to the board).
+`ros/build-image.sh --ship` on the laptop, or `ros/build.sh` on the board itself (see
+**Building the image**).
 
 ## Bring-up checklist (in this order, each step visible in Foxglove)
 
