@@ -788,6 +788,13 @@ class DepthFusion(Node):
 
     def __init__(self) -> None:
         super().__init__("depth_fusion")
+        # Callbacks can run BEFORE this constructor is done: TfLookup (node_kit) starts a spin
+        # thread for this node, and the pair/scan subscriptions below are live from the moment
+        # they exist. A frame that arrived in that window met a half-built node
+        # (AttributeError on _worker, 2026-09-22: the exception left rclpy's spin, the process
+        # lived on with no executor and the marks went silent). Until the last line of __init__
+        # every callback drops what it is handed.
+        self._up = False
         config = Path(str(self.declare_parameter("config", CONFIG).value))
         self._spec = GridSpec.load(config)
         self.declare_parameter("mode", "vision")
@@ -950,6 +957,7 @@ class DepthFusion(Node):
             f" {self._volume_frame}) and as the costmap's camera marks on {MARKS_TOPIC}"
             f" ({self._switches['marks_source']}); {self._frame_line()}"
         )
+        self._up = True
 
     @property
     def _volume_frame(self) -> str:
@@ -1226,6 +1234,8 @@ class DepthFusion(Node):
     def _on_pair(self, depth: Image, image: Image) -> None:
         """A depth frame with its picture, same stamp: the newest pair waits for the worker,
         an older one still waiting is dropped (the model wants the latest view, not a backlog)."""
+        if not self._up:
+            return  # the node is still being built (see __init__)
         self._tally.count("pairs")
         if self._worker.offer((depth, image)):
             self._tally.count("dropped")
@@ -1233,6 +1243,8 @@ class DepthFusion(Node):
     def _on_scan(self, msg: LaserScan) -> None:
         """A lidar revolution: straight to its worker, newest first (an older one still waiting
         is dropped — the volume wants the room as it is, not a backlog)."""
+        if not self._up:
+            return
         self._tally.count("scans_in")
         if self._scans.offer(msg):
             self._tally.count("scans_dropped")
