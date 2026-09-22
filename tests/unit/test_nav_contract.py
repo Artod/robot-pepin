@@ -601,6 +601,9 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
         "sigma_gate",
         "places_from_the_file",
         "start_on_a_known_pose",
+        # jump_clear joined on 2026-09-22, default off: RTAB-Map owns map -> odom now, and the
+        # clear of Nav2's local costmap on a step of that edge moved here from the lidar tracker.
+        "jump_clear",
     )
     assert all(flags.flag(name).live for name in flags.names)
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"
@@ -1750,7 +1753,11 @@ def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
     # when imu_lean says so), and a revolution taken too far from level is dropped and counted
     fusion = sf.tree(f"{NODES}/depth_fusion.py")
     assert "LeanGate" in sf.imported(fusion) and "self._gate.admits" in sf.calls(fusion)
-    assert "self._poser.base_in_map" in sf.calls(fusion), "the scan's pose is the poser's"
+    # The scan's pose is the poser's — of whichever frame the volume is painted in: one poser per
+    # frame (volume_frame), sharing one TF history and one lean, so the lean switch above reaches
+    # both and the paint path picks a frame instead of threading a frame name through every lookup.
+    assert "poser.base_in_map" in sf.calls(fusion), "the scan's pose is the poser's"
+    assert "self._poser_now" in sf.unparsed(fusion, ast.Attribute), "one poser per volume_frame"
     gate = load_table(REPO / NODES / "depth_fusion.py").flag("lean_gate_deg")
     assert gate.live and gate.default == 3.0 and gate.range == (0.0, 90.0)
     assert "leaned_out" in sf.strings(fusion), "the report line counts what the gate dropped"
@@ -2109,7 +2116,10 @@ def test_a_reset_empties_the_volume_and_nothing_falls_back_to_a_picture() -> Non
         "the volume is built in three places only: the placeholder __init__ holds until the"
         " starting state is known, the starting state's own, and the reset's"
     )
-    assert src.count("self._world = self._fresh_world()") == 2, "the reset and the self-heal"
+    assert src.count("self._world = self._fresh_world()") == 3, (
+        "the reset, the self-heal, and a change of volume_frame — voxels painted in the other"
+        " frame are a room drawn in coordinates nothing there shares, so they are dropped too"
+    )
     assert "self._fresh_world" in sf.calls(sf.tree(f"{NODES}/depth_fusion.py"))
 
 

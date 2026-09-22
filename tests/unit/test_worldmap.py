@@ -872,3 +872,32 @@ def test_a_newborn_box_is_centred_on_the_cart_and_not_on_the_origin() -> None:
     assert here.origin[1] == pytest.approx(2.5 - ny * box.voxel_m / 2)
     assert here.origin[0] < -9.4 < here.origin[0] + nx * box.voxel_m, "the cart is inside it"
     assert box.centred_on_start().origin == box.centred_on((0.0, 0.0)).origin
+
+
+def test_the_rolling_window_carries_every_channel_through_one_slide() -> None:
+    """A volume in the odometry frame is local memory and its box follows the cart. Every channel
+    moves through the SAME copy — the field, the lidar's own weight and the viewpoint count — so
+    the layer the camera must hand back is still the layer the lidar wrote, cell for cell; and
+    what does not move is everything about the content: the plane, the rows of the lidar's layer,
+    the stamp and the frame index, whose poses are still where those frames were taken."""
+    world = room()
+    before = (world.volume.weight.copy(), world.lidar_weight.copy(), world.views.copy())
+    plane, rows, stamp, frames = (
+        world.lidar_plane_m,
+        world.protected_rows,
+        world.stamp,
+        list(world.frames),
+    )
+    assert world.spec.centre_xy == pytest.approx((0.0, 0.0))
+
+    move = world.recentre((1.0, 0.0))
+    assert (move.di, move.dj) == (20, 0)
+    assert world.spec is world.volume.spec and world.spec.origin[0] == pytest.approx(-2.0)
+    for channel, was in zip(
+        (world.volume.weight, world.lidar_weight, world.views), before, strict=True
+    ):
+        assert np.array_equal(channel[:-20], was[20:]), "what stayed, at the metres it was painted"
+        assert not channel[-20:].any(), "and the new edge of the window is unobserved"
+    assert (world.lidar_plane_m, world.protected_rows) == (plane, rows), "a slide has no z in it"
+    assert world.stamp == stamp and world.frames == frames
+    assert world.recentre((1.02, 0.0)).nothing, "within half a voxel of the centre: nothing"
