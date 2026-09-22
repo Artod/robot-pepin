@@ -1211,12 +1211,16 @@ class DepthFusion(Node):
 
     # ---- inputs --------------------------------------------------------------------------
     def _on_info(self, msg: CameraInfo) -> None:
+        if not self._up:
+            return  # the node is still being built (see __init__)
         self._intr = Intrinsics.from_camera_info(msg.k, msg.width, msg.height)
 
     def _on_fit(self, msg: Float32) -> None:
         """The tracker's scan-to-map fit, and the moment it was heard: a topic that stops
         arriving leaves the last good number behind, and painting on that is what emptied the
         volume on 2026-09-15."""
+        if not self._up:
+            return  # the node is still being built (see __init__)
         self._fit = float(msg.data)
         self._fit_at = time.monotonic()
 
@@ -1224,6 +1228,8 @@ class DepthFusion(Node):
         """The tracker's post-fusion sigma as JSON (``sigma_xy`` metres, ``sigma_yaw``
         degrees). A message this node cannot read is counted and ignored — the fit gate stands
         on its own, and a malformed sigma may not stop the room being painted."""
+        if not self._up:
+            return  # the node is still being built (see __init__)
         try:
             self._sigma_xy_m = float(json.loads(msg.data)["sigma_xy"])
         except (ValueError, TypeError, KeyError):
@@ -1410,6 +1416,8 @@ class DepthFusion(Node):
         the OPTIMISED poses (rtabmap_msgs/msg/MapGraph.msg:11-12); ``map_to_odom`` in the same
         message is deliberately not read — it moves when the CART is found and not only the room.
         """
+        if not self._up:
+            return  # the node is still being built (see __init__)
         self._graphs += 1
         poses = {
             int(node): pose_from_pose_msg(pose)
@@ -1660,6 +1668,8 @@ class DepthFusion(Node):
         source and this node does not read it at all — except under ``marks_source`` frame,
         where it is relayed onto ``/depth_marks`` unchanged, which is exactly how the camera
         layer marked before the volume took the job over (CLAUDE.md rule 19)."""
+        if not self._up:
+            return  # the node is still being built (see __init__)
         self._tally.count("depth_scans")
         if str(self._switches["marks_source"]) != FRAME:
             return
