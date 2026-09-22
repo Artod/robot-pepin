@@ -10,6 +10,8 @@ nav.launch.py so there is exactly one. Arguments are those of the two files
   building — but without map_server and without the tracker: the map arrives from the laptop's
   RTAB-Map as ``/map`` and its correction as ``map -> odom``. It implies ``nav``, so the board
   needs one switch, not two that can disagree.
+- ``recorder``: ``jsonl`` (default) or ``bag`` — who writes a drive down (ros/README.md,
+  "Two recorders").
 - ``slam_toolbox``: the old lidar-only mapper (ros/mode.sh slam_toolbox), which builds a map to
   SAVE and cannot navigate on it. Never together with ``nav`` or ``slam``: two map -> odom
   publishers, and the reason this argument is not called ``slam`` any more.
@@ -73,6 +75,7 @@ def generate_launch_description() -> LaunchDescription:
         launch_arguments={
             "side": LaunchConfiguration("side"),
             "slam": LaunchConfiguration("slam"),
+            "recorder": LaunchConfiguration("recorder"),
         }.items(),
     )
     slam_toolbox = IncludeLaunchDescription(
@@ -91,6 +94,10 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("ekf", default_value="true"),
             DeclareLaunchArgument("tof", default_value="false"),
             DeclareLaunchArgument("neck", default_value="false"),
+            # Which recorder writes a drive: jsonl (the Python node, the default) or bag
+            # (`ros2 bag record` + ros/tools/bag_to_tape.py). The board carries it as
+            # PEPIN_RECORDER in /etc/default/pepin-ros.
+            DeclareLaunchArgument("recorder", default_value="jsonl"),
             robot,
             nav,
             slam_toolbox,

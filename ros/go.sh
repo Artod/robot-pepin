@@ -68,6 +68,13 @@ if [ -n "$RECORDING" ]; then
     ssh "root@$BOARD" "docker logs --since 15m pepin-ros 2>&1" > "$HERE/maps/rec/${STAMP}_board.log" 2>/dev/null
     cp "$REPLY_COPY" "$HERE/maps/rec/${STAMP}_reply.jsonl"  # every event the server sent, kept with the run
     rsync -aq "root@$BOARD:/root/pepin-ros${RECORDING}" "$HERE/maps/rec/" 2>/dev/null
+    # Under PEPIN_RECORDER=bag what came home is an MCAP BAG, not a tape: the board recorded the
+    # drive with `ros2 bag record` (pepin_bringup.bag_recorder) instead of deserialising every
+    # scan, and the tape every replay reads is made here (ros/README.md, "Two recorders").
+    case "$RECORDING" in
+        *.jsonl) ;;
+        *) pepin_bag_to_tape "$RECORDING" || true ;;
+    esac
     # The clip was captured on the board (goal_server, curl on the MJPEG stream): fetched with the
     # tape and wrapped into mkv here, from a local file — no network permission can break it.
     CLIP="$HERE/maps/rec/${STAMP}_cam.mjpeg"
