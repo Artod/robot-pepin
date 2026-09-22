@@ -121,7 +121,7 @@
         "cpu_percent": 90.0,
         "rss_mb": 121.0
       },
-      "note": "Measured 60 % / 80 MB standing still; a whole-map search is a burst well above that and short. 'sometimes' since 2026-09-22, when the board became odometry only and the map localiser a mode rather than the default: four A53 cores do not hold the tracker AND the laser odometry that replaces what it gave the EKF (90 % + 20 %), and 1.5 GB does not hold both either. Absent is IDLE now, not MISSING; running, it is measured against this budget exactly as before."
+      "note": "Measured 60 % / 80 MB standing still; a whole-map search is a burst well above that and short. 'sometimes' since 2026-09-22, when the board became odometry only and the map localiser a mode rather than the default: four A53 cores do not hold the tracker AND the laser odometry that replaces what it gave the EKF (90 % + 20 %), and 1.5 GB does not hold both either. Absent is IDLE now, not MISSING; running, it is measured against this budget exactly as before. Runs only under PEPIN_LOCALIZER=tracker (2026-09-22: RTAB-Map owns map -> odom by default, the tracker stays a startable mode)."
     },
     {
       "name": "run_recorder",
