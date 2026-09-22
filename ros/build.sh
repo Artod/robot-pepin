@@ -1,5 +1,8 @@
 #!/bin/bash
-# Sync ros/ and our Python library to the board and build the image there. Usage: ros/build.sh
+# Sync ros/ and our Python library to the board and build the image THERE (16-30 min: the board
+# compiles rf2o with one A53). The fast path is ros/build-image.sh, which cross-builds the same
+# image on the laptop in minutes and ships it; this one stays for when the laptop cannot build.
+# Usage: ros/build.sh
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command

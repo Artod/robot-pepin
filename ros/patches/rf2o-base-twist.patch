@@ -1,31 +1,36 @@
-diff -u -r a/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp b/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
+diff --git a/include/rf2o_laser_odometry/CLaserOdometry2D.hpp b/include/rf2o_laser_odometry/CLaserOdometry2D.hpp
+index cec6fb6..903e32a 100644
+--- a/include/rf2o_laser_odometry/CLaserOdometry2D.hpp
++++ b/include/rf2o_laser_odometry/CLaserOdometry2D.hpp
+@@ -135,7 +135,7 @@ public:
+   unsigned int iter_irls;
+   float g_mask[5];
+ 
+-  double lin_speed, ang_speed;
++  double lin_speed, lat_speed, ang_speed;  // pepin: lat_speed is the laser's own y step per second
+ 
+   //rclcpp::wall	m_runtime;
+ 
+diff --git a/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp b/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
+index 8a1e170..4819b1b 100644
 --- a/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
 +++ b/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
-@@ -1,5 +1,7 @@
- #include "rf2o_laser_odometry/CLaserOdometry2D.hpp"
- 
-+#include <cstdint>
-+
- #include <tf2/convert.h>
- #include <tf2/exceptions.h>
- #include <tf2_ros/transform_broadcaster.h>
-@@ -29,6 +31,12 @@
-   std::string         base_frame_id;
+@@ -30,6 +30,10 @@ public:
    std::string         odom_frame_id;
    std::string         init_pose_from_topic;
-+
-+  // pepin: the twist this node publishes, and what it claims to know about it.
-+  bool                base_frame_twist, previous_valid;
-+  double              twist_covariance_vx, twist_covariance_vy, twist_covariance_vyaw;
-+  double              previous_x, previous_y, previous_yaw;
-+  int64_t             previous_stamp_ns;
  
++  // pepin: the twist this node publishes, and what it claims to know about it.
++  bool                base_frame_twist;
++  double              twist_covariance_vx, twist_covariance_vy, twist_covariance_vyaw;
++
    sensor_msgs::msg::LaserScan                     last_scan;
    bool                                            GT_pose_initialized;
-diff -u -r a/src/CLaserOdometry2D.cpp b/src/CLaserOdometry2D.cpp
+   std::shared_ptr<tf2_ros::Buffer>                buffer_;
+diff --git a/src/CLaserOdometry2D.cpp b/src/CLaserOdometry2D.cpp
+index 210bc04..7dc86d0 100644
 --- a/src/CLaserOdometry2D.cpp
 +++ b/src/CLaserOdometry2D.cpp
-@@ -966,7 +966,9 @@
+@@ -966,7 +966,9 @@ void CLaserOdometry2D::PoseUpdate()
    kai_loc_old_(1) = -kai_abs_(0)*std::sin(phi) + kai_abs_(1)*std::cos(phi);
    kai_loc_old_(2) =  kai_abs_(2);
  
@@ -36,7 +41,7 @@ diff -u -r a/src/CLaserOdometry2D.cpp b/src/CLaserOdometry2D.cpp
                  laser_pose_.translation()(0),
                  laser_pose_.translation()(1),
                  rf2o::getYaw(laser_pose_.rotation()));
-@@ -974,7 +976,7 @@
+@@ -974,7 +976,7 @@ void CLaserOdometry2D::PoseUpdate()
    // Compose Transformations (robot odom)
    robot_pose_ = laser_pose_ * laser_pose_on_robot_inv_;
  
@@ -45,15 +50,20 @@ diff -u -r a/src/CLaserOdometry2D.cpp b/src/CLaserOdometry2D.cpp
                  robot_pose_.translation()(0),
                  robot_pose_.translation()(1),
                  rf2o::getYaw(robot_pose_.rotation()));
-diff -u -r a/src/CLaserOdometry2DNode.cpp b/src/CLaserOdometry2DNode.cpp
+@@ -986,6 +988,7 @@ void CLaserOdometry2D::PoseUpdate()
+   double time_inc_sec = (current_scan_time - last_odom_time).seconds();
+   last_odom_time = current_scan_time;
+   lin_speed = acu_trans(0,2) / time_inc_sec;
++  lat_speed = acu_trans(1,2) / time_inc_sec;  // pepin: the laser's own y step, for the twist in the robot's frame
+   //double lin_speed = sqrt( mrpt::math::square(robot_oldpose.x()-robot_pose.x()) + mrpt::math::square(robot_oldpose.y()-robot_pose.y()) )/time_inc_sec;
+ 
+   double ang_inc = rf2o::getYaw(robot_pose_.rotation()) -
+diff --git a/src/CLaserOdometry2DNode.cpp b/src/CLaserOdometry2DNode.cpp
+index 2206777..5dcdf9d 100644
 --- a/src/CLaserOdometry2DNode.cpp
 +++ b/src/CLaserOdometry2DNode.cpp
-@@ -17,9 +17,11 @@
+@@ -19,7 +19,7 @@
  
- #include "rf2o_laser_odometry/CLaserOdometry2DNode.hpp"
- 
-+#include <cmath>
-+
  using namespace rf2o;
  
 -CLaserOdometry2DNode::CLaserOdometry2DNode(): Node("CLaserOdometry2DNode")
@@ -61,7 +71,7 @@ diff -u -r a/src/CLaserOdometry2DNode.cpp b/src/CLaserOdometry2DNode.cpp
  {
    RCLCPP_INFO(get_logger(), "Initializing RF2O node...");
  
-@@ -39,6 +41,19 @@
+@@ -39,6 +39,16 @@ CLaserOdometry2DNode::CLaserOdometry2DNode(): Node("CLaserOdometry2DNode")
    this->get_parameter("init_pose_from_topic", init_pose_from_topic);
    this->declare_parameter<double>("freq", 10.0);
    this->get_parameter("freq", freq);
@@ -75,13 +85,28 @@ diff -u -r a/src/CLaserOdometry2DNode.cpp b/src/CLaserOdometry2DNode.cpp
 +  this->get_parameter("twist_covariance_vy", twist_covariance_vy);
 +  this->declare_parameter<double>("twist_covariance_vyaw", 0.0);
 +  this->get_parameter("twist_covariance_vyaw", twist_covariance_vyaw);
-+  previous_valid = false;
-+  previous_x = previous_y = previous_yaw = 0.0;
-+  previous_stamp_ns = 0;
  
    // Init Publishers and Subscribers
    //---------------------------------
-@@ -176,7 +191,10 @@
+@@ -98,7 +108,16 @@ void CLaserOdometry2DNode::LaserCallBack(const sensor_msgs::msg::LaserScan::Shar
+     else
+     {
+       // Initialize module on first scan (from laser params)
+-      setLaserPoseFromTf();
++      // pepin: not before the mount is known. Upstream initialised on the first scan whether
++      // or not base_frame_id -> laser was in TF yet, and a lookup that failed left the mount
++      // at identity for the node's whole life: every twist then stayed in the laser's frame.
++      if (!setLaserPoseFromTf())
++      {
++        RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
++                             "waiting for %s -> %s in TF before the first scan is used",
++                             base_frame_id.c_str(), last_scan.header.frame_id.c_str());
++        return;
++      }
+       rf2o_ref.init(last_scan, initial_robot_pose.pose.pose);
+       rf2o_ref.first_laser_scan = false;
+     }
+@@ -176,7 +195,10 @@ void CLaserOdometry2DNode::process()
    else
    {
      // This is a warning. We depend on laser scans, so no meaning running faster than scan freq.
@@ -93,45 +118,36 @@ diff -u -r a/src/CLaserOdometry2DNode.cpp b/src/CLaserOdometry2DNode.cpp
    }
  }
  
-@@ -220,9 +238,45 @@
+@@ -220,9 +242,35 @@ void CLaserOdometry2DNode::publish()
    odom.pose.pose.orientation = quaternion;
    //set the velocity
    odom.child_frame_id = base_frame_id;
 -  odom.twist.twist.linear.x = rf2o_ref.lin_speed;    //linear speed
 -  odom.twist.twist.linear.y = 0.0;
-+  // pepin: rf2o's lin_speed is the LASER's own x step per second (CLaserOdometry2D.cpp:
-+  // acu_trans(0,2) / dt), which is the robot's forward speed only while the laser is
-+  // mounted axis-aligned with base_link. base_frame_twist differences the robot pose this
-+  // node already publishes and rotates that step into base_frame_id instead.
+-  odom.twist.twist.angular.z = rf2o_ref.ang_speed;   //angular speed
++  // pepin: rf2o measures in the LASER's frame: lin_speed/lat_speed are the laser's own step
++  // per second and ang_speed its own turn (the pose it composes with the mount does not
++  // un-mirror a laser that hangs upside down: its 2-D yaw is estimated as if the laser were
++  // level, so robot_pose_'s yaw is the laser's). base_frame_twist rotates the twist into
++  // base_frame_id with the mount TF already looked up (laser_pose_on_robot_): a laser rolled
++  // 180 deg (config/lidar.json) keeps vx and flips vy and wz; a laser off the robot's centre
++  // also moves while the robot turns in place, which the cross product takes back out.
 +  double vx = rf2o_ref.lin_speed;
 +  double vy = 0.0;
-+  const double px = rf2o_ref.robot_pose_.translation()(0);
-+  const double py = rf2o_ref.robot_pose_.translation()(1);
-+  const double pyaw = rf2o::getYaw(rf2o_ref.robot_pose_.rotation());
-+  const int64_t stamp_ns = rf2o_ref.last_odom_time.nanoseconds();
++  double wz = rf2o_ref.ang_speed;
 +  if (base_frame_twist)
 +  {
-+    const double dt = previous_valid ? (stamp_ns - previous_stamp_ns) * 1e-9 : 0.0;
-+    if (dt > 0.0)
-+    {
-+      const double dx = px - previous_x;
-+      const double dy = py - previous_y;
-+      vx = ( dx * std::cos(previous_yaw) + dy * std::sin(previous_yaw)) / dt;
-+      vy = (-dx * std::sin(previous_yaw) + dy * std::cos(previous_yaw)) / dt;
-+    }
-+    else
-+    {
-+      vx = 0.0;  // the first scan pair has no interval: no speed is better than a wrong one
-+    }
++    const Eigen::Matrix3d R = rf2o_ref.laser_pose_on_robot_.rotation();
++    const Eigen::Vector3d t = rf2o_ref.laser_pose_on_robot_.translation();
++    const Eigen::Vector3d w = R * Eigen::Vector3d(0.0, 0.0, rf2o_ref.ang_speed);
++    const Eigen::Vector3d v = R * Eigen::Vector3d(rf2o_ref.lin_speed, rf2o_ref.lat_speed, 0.0) - w.cross(t);
++    vx = v(0);
++    vy = v(1);
++    wz = w(2);
 +  }
-+  previous_x = px;
-+  previous_y = py;
-+  previous_yaw = pyaw;
-+  previous_stamp_ns = stamp_ns;
-+  previous_valid = true;
 +  odom.twist.twist.linear.x = vx;                    //linear speed
 +  odom.twist.twist.linear.y = vy;
-   odom.twist.twist.angular.z = rf2o_ref.ang_speed;   //angular speed
++  odom.twist.twist.angular.z = wz;                   //angular speed
 +  // pepin: an unfilled covariance is a claim of perfect knowledge: robot_localization
 +  // replaces a zero variance with 1e-9 (ekf.cpp) and then trusts this source over every
 +  // other one it fuses. The diagonal is three parameters; 0.0 is upstream.
