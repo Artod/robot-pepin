@@ -32,8 +32,10 @@ def _the_tracker_stack() -> Iterator[None]:
 
 
 from pepin_bringup.goal_server import (  # noqa: E402
+    CLEAR_LOCAL_COSTMAP,
     CORRECTION_TOPIC,
     FLAGS,
+    JUMP_WATCH_HZ,
     TRACKER_WAIT_S,
     GoalServer,
 )
@@ -497,3 +499,71 @@ def test_a_name_is_never_answered_from_the_old_map_s_file(tmp_path) -> None:  # 
     ):  # fmt: skip
         old = GoalServer()
     assert old.places()["printer"]["x"] == -11.38
+
+
+# ---- the map -> odom jump watch (flag jump_clear) --------------------------------------------
+def jump_tick(node: Any) -> None:
+    """One turn of the node's 5 Hz jump watch, as the executor would run it."""
+    (tick,) = [cb for period, cb in node.timers if period == 1.0 / JUMP_WATCH_HZ]
+    tick()
+
+
+def corrected_by(node: Any, x: float, y: float = 0.0) -> None:
+    """Put ``map -> odom`` in the node's TF buffer: the correction alone, with the cart's own
+    motion (which lives in odom -> base_link) taken out of it."""
+    node._tf.buffer.transforms[("map", "odom")] = TransformStamped(
+        header=Header(stamp=ros_stubs.Time(sec=int(NOW)), frame_id="map"),
+        child_frame_id="odom",
+        transform=ros_stubs.Transform(
+            translation=Vector3(x=x, y=y), rotation=Quaternion(z=0.0, w=1.0)
+        ),
+    )
+
+
+def test_a_jump_of_map_to_odom_clears_nav2_s_local_costmap(tmp_path: Path) -> None:
+    """RTAB-Map owns map -> odom now, and when that edge STEPS the marks in Nav2's local costmap
+    were laid where the cart used to be — nothing else takes them back. The lidar tracker did this
+    while it owned the edge; the watch moved here with the edge (pepin.watch.JumpClear, unchanged).
+    A step past the threshold buys one clear, a centimetre buys none, and the first reading after
+    the flag goes on is a baseline and never a jump."""
+    node = server(tmp_path)
+    clear = node.service_clients[CLEAR_LOCAL_COSTMAP]
+    assert node._switches.on("jump_clear") is False, "it ships off: untested with RTAB-Map's own"
+    node._switches.set("jump_clear", True)
+
+    jump_tick(node)  # the listener starts on the first tick, and TF holds nothing yet
+    corrected_by(node, 0.0)
+    jump_tick(node)
+    assert clear.calls == [] and node._clears == 0, "the first transform is the baseline"
+
+    corrected_by(node, 0.02)  # a scan match's own centimetres: the costmap absorbs them
+    jump_tick(node)
+    assert clear.calls == [] and node._clears == 0
+
+    corrected_by(node, 0.42)  # a word that moved the pose 40 cm
+    jump_tick(node)
+    assert len(clear.calls) == 1 and node._clears == 1
+    line = node.logger.texts("info")[-1]
+    assert "map -> odom jumped 0.40 m: local costmap cleared" in line
+    assert "jump_clear=on" in line and "1 clears this run" in line
+
+    corrected_by(node, 1.42)  # a second jump within the gap: one clear, not two
+    jump_tick(node)
+    assert len(clear.calls) == 1, "emptying the grid costs its owner a rebuild from live scans"
+
+
+def test_the_jump_watch_reads_nothing_at_all_while_its_flag_is_off(tmp_path: Path) -> None:
+    """Default off, and off means nothing runs: no TF listener is started for it (a listener is a
+    subscription to /tf, sixty messages a second on the board) and no service call is made,
+    however far the edge steps."""
+    node = server(tmp_path)
+    for _ in range(5):
+        jump_tick(node)
+    assert node._tf is None, "no listener while nobody reads the edge"
+    assert node.service_clients[CLEAR_LOCAL_COSTMAP].calls == [] and node._clears == 0
+
+    node._switches.set("jump_clear", True)
+    jump_tick(node)
+    corrected_by(node, 5.0)  # a huge step, seen for the first time
+    jump_tick(node)
+    assert node.service_clients[CLEAR_LOCAL_COSTMAP].calls == [], "a baseline is not a jump"

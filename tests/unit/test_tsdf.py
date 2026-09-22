@@ -442,3 +442,77 @@ def test_a_seeded_box_is_snapped_to_the_saved_map_s_own_cell_lattice() -> None:
     assert snapped.origin[2] == spec.origin[2] and snapped.shape == spec.shape
     assert spec.aligned_to(served, 0.10) == spec, "another resolution: nothing can be aligned"
     assert snapped.aligned_to(served, 0.05) == snapped, "already on the lattice"
+
+
+# ---- the rolling window: a volume that is local memory follows the cart -----------------------
+def test_the_window_slides_by_whole_voxels_and_keeps_the_overlap_where_it_was() -> None:
+    """A volume painted in odom is LOCAL OBSTACLE MEMORY, so its box follows the cart: the slide
+    is a whole number of voxels (the lattice may never move), what stays keeps the very metres it
+    was painted at, and what leaves is gone — not carried, not resampled, forgotten."""
+    spec = _spec()
+    model = Tsdf(spec)
+    pose = _optical_pose(0.0, 0.0, 0.0)
+    model.integrate(_render_wall(pose, 2.0), None, INTR, pose)
+    before, sdf_before = model.weight.copy(), model.sdf.copy()
+    wall, _colours = model.surface(min_weight=1.0)
+    assert wall.shape[0] > 100
+
+    assert spec.centre_xy == pytest.approx((1.0, 0.0)), "where the cart stands now"
+    move = model.recentre((2.02, -0.51))  # not on the lattice: the slide rounds to whole voxels
+    assert (move.di, move.dj) == (20, -10) and not move.nothing
+    assert model.spec.origin == pytest.approx((-1.0 + 1.0, -3.0 - 0.5, -0.2))
+    assert model.spec.shape == spec.shape and model.spec.voxel_m == spec.voxel_m
+    assert np.array_equal(model.weight[:-20, 10:], before[20:, :-10]), "what stayed, where it was"
+    assert np.array_equal(model.sdf[:-20, 10:], sdf_before[20:, :-10])
+    assert not model.weight[-20:].any() and not model.weight[:, :10].any(), "the new edges"
+    assert (model.sdf[-20:] == 1.0).all(), "and unobserved is a whole truncation from a surface"
+    # the surface that survived is at the same map metres it was: the world did not move
+    after, _ = model.surface(min_weight=1.0)
+    kept = wall[(wall[:, 0] < model.spec.origin[0] + 80 * 0.05) & (wall[:, 1] > -3.5 + 0.5)]
+    assert after.shape[0] == pytest.approx(kept.shape[0], rel=0.05)
+    assert np.abs(after[:, 0] - 2.0).max() < 0.05, "the wall is still at x = 2.0 m"
+
+
+def test_a_window_that_jumps_clear_of_itself_keeps_nothing() -> None:
+    """A cart carried across the flat, or an odometry that teleported: the box and its old self do
+    not overlap at all, and the new window is simply empty rather than wrapping round."""
+    model = Tsdf(_spec())
+    model.weight[:] = 5.0
+    move = model.recentre((100.0, 100.0))
+    assert move.boxes(80, 120) is None
+    assert not model.weight.any() and (model.sdf == 1.0).all()
+    assert model.spec.shape == (80, 120, 20), "the grid is the same grid, elsewhere"
+
+
+def test_the_cart_in_the_middle_of_the_window_slides_nothing() -> None:
+    """The slide is asked for on every observation, so its no-op has to be free and exact: a cart
+    within half a voxel of the centre moves nothing at all, and the arrays are the same arrays."""
+    spec = GridSpec(origin=(-2.0, -2.0, -0.2), shape=(80, 80, 20))
+    model = Tsdf(spec)
+    weight = model.weight
+    assert model.recentre((0.0, 0.0)).nothing and model.weight is weight
+    assert model.recentre((0.02, -0.02)).nothing, "within half a voxel of the centre"
+    assert model.spec == spec
+    assert spec.off_centre_m((0.0, 3.0)) == pytest.approx(3.0)
+    assert spec.centre_xy == pytest.approx((0.0, 0.0))
+
+
+def test_what_one_slide_of_a_node_sized_window_costs() -> None:
+    """The window is slid on the paint path, under the model's lock, so its cost is a number this
+    robot has to know (CLAUDE.md rule 20). It is a copy of five channels and no arithmetic at all:
+    measured 0.3-0.9 ms on the fusion node's own 120x120x34 test grid and 4.7 ms on the live
+    280x250x34 one, against the 9-108 ms a graph correction's resample costs there
+    (scratch/volume_shift_cost.py). The bound below is loose on purpose — it is a regression
+    guard on a shared laptop, not the measurement — and the node prints the milliseconds of its
+    own last slide in the report line."""
+    import time
+
+    model = Tsdf(GridSpec(origin=(-3.0, -3.0, -0.15), shape=(120, 120, 34)))
+    model.weight[:] = 3.0
+    model.sdf[:] = 0.2
+    slides = []
+    for step in (0.5, 1.0, 1.5, 2.0, 2.5):
+        started = time.perf_counter()
+        model.recentre((step, 0.0))
+        slides.append((time.perf_counter() - started) * 1e3)
+    assert max(slides) < 50.0, f"one slide of the node's window: {max(slides):.1f} ms"

@@ -21,6 +21,12 @@ odom``), so when a pose graph optimises and that correction jumps, the whole mod
 rigid move away: :class:`PlanarShift` is that move and :meth:`Tsdf.shift` applies it, resampling
 the field through the same weighted average the fusion itself uses. The grid never moves — the
 content does.
+
+And the model can be a WINDOW instead of a room. A volume painted in the odometry frame is local
+obstacle memory: it follows the cart, so :meth:`Tsdf.recentre` slides the box by whole voxels
+(:class:`WindowShift`) and drops what leaves it. That is the opposite operation of the one above
+and costs a copy rather than a resample — nothing moves in the world, the box simply covers
+somewhere else.
 """
 
 from __future__ import annotations
@@ -130,8 +136,42 @@ class GridSpec:
         w: Floats = np.minimum(self.weight_cap, (self.weight_ref_m / np.maximum(depth, 1e-3)) ** 2)
         return w
 
+    @property
+    def centre_xy(self) -> tuple[float, float]:
+        """The middle of the box's x-y footprint, in the frame it is laid out in: what a rolling
+        window keeps the cart near (:class:`WindowShift`)."""
+        nx, ny, _nz = self.shape
+        return (self.origin[0] + nx * self.voxel_m / 2, self.origin[1] + ny * self.voxel_m / 2)
+
+    def off_centre_m(self, xy: tuple[float, float]) -> float:
+        """How far ``xy`` stands from :attr:`centre_xy`, metres — the question a rolling window
+        asks of the cart before every observation."""
+        cx, cy = self.centre_xy
+        return math.hypot(xy[0] - cx, xy[1] - cy)
+
+    def voxels_to_centre(self, xy: tuple[float, float]) -> tuple[int, int]:
+        """How many WHOLE voxels along x and y the box must slide for its footprint's centre to
+        land on ``xy``, as near as the lattice allows.
+
+        Whole voxels, so the lattice never moves: an integer slide is a copy of the overlap and
+        nothing else — no resampling, no quantisation, and every surviving voxel keeps the metres
+        it was painted at. A fractional slide would be :class:`PlanarShift`'s resample, which a
+        window that only changes what it covers has no reason to pay.
+        """
+        cx, cy = self.centre_xy
+        return (round((xy[0] - cx) / self.voxel_m), round((xy[1] - cy) / self.voxel_m))
+
+    def moved_by_voxels(self, di: int, dj: int) -> GridSpec:
+        """The same box slid by whole voxels along x and y: the origin moves, the lattice, the
+        shape and the height do not."""
+        x, y, z = self.origin
+        return dataclasses.replace(self, origin=(x + di * self.voxel_m, y + dj * self.voxel_m, z))
+
 
 BAND_HALF_Z_M = 0.125  # the fallback when config/fusion.json is unreadable or silent
+# How far the cart may stand from a rolling window's centre before the window is slid onto it —
+# the fallback when config/fusion.json is unreadable or silent (see :func:`window_recentre_m`).
+WINDOW_RECENTRE_M = 2.0
 
 
 def band_half_z_m(path: str | Path | None = None) -> float:
@@ -156,6 +196,32 @@ def band_half_z_m(path: str | Path | None = None) -> float:
             return float(json.load(f)["band_half_z_m"])
     except (OSError, ValueError, KeyError, TypeError):
         return BAND_HALF_Z_M
+
+
+def window_recentre_m(path: str | Path | None = None) -> float:
+    """How far the cart may travel from a rolling window's centre before the window is slid onto
+    it, metres, from ``window_recentre_m`` in ``config/fusion.json``.
+
+    It is a distance and not a fraction because what it must cover is a distance: the marks' fan
+    reaches 3.0 m (:data:`pepin.volume_scan.MARKS_RANGE_M`) and the camera integrates to
+    ``range_max_m``, so the window must still hold that much room around the cart at the moment
+    it is furthest off centre. On the shipped grid (250 voxels of 5 cm on the shorter side, a
+    half-extent of 6.25 m) the 2.0 m of config/fusion.json leaves at least 4.25 m of painted
+    memory in every direction, and at a drive's 0.2 m/s one slide is paid about every ten
+    seconds. :data:`WINDOW_RECENTRE_M` when the file is missing or does not name it.
+    """
+    if path is None:
+        from pepin.deployment import config_file
+
+        try:
+            path = config_file("fusion.json")
+        except FileNotFoundError:
+            return WINDOW_RECENTRE_M
+    try:
+        with open(path) as f:
+            return float(json.load(f)["window_recentre_m"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return WINDOW_RECENTRE_M
 
 
 @dataclass(frozen=True)
@@ -310,6 +376,62 @@ class ShiftedColumns:
         return taken
 
 
+@dataclass(frozen=True)
+class WindowShift:
+    """A rolling window's move: the whole voxels the box slides along x and y, and the copy that
+    carries it out.
+
+    A volume painted in ``odom`` is LOCAL OBSTACLE MEMORY, not a room, so its box follows the
+    cart and whatever leaves it is forgotten (the nvblox local mapper's arrangement; the room's
+    own geometry is the pose graph's). Painted in ``map`` and kept, the same volume accumulated
+    the walls of some twenty re-seatings of the tracker and put 300-650 lethal cells around the
+    cart that the lidar never saw (2026-09-21, scratch/nav2_hang/layer_blame.py).
+
+    NOTHING MOVES IN THE WORLD HERE. The box slides; every voxel that survives describes exactly
+    the metres it was painted at, and the slide costs one copy per channel instead of the 9-108 ms
+    :meth:`Tsdf.shift` pays to resample content that really has to move.
+    """
+
+    di: int
+    dj: int
+
+    @property
+    def nothing(self) -> bool:
+        """True when the box does not slide at all: the cart is still in the middle of it."""
+        return self.di == 0 and self.dj == 0
+
+    def text(self) -> str:
+        """The slide for a report line: voxels along x and y."""
+        return f"{self.di:+d}, {self.dj:+d} voxels"
+
+    def boxes(self, nx: int, ny: int) -> tuple[tuple[slice, slice], tuple[slice, slice]] | None:
+        """The overlap of a grid ``nx`` by ``ny`` columns with itself after the slide: which
+        columns survive and where they land; ``None`` when the box has jumped clear of itself
+        and nothing at all survives (a carried cart, a pose that teleported)."""
+        if abs(self.di) >= nx or abs(self.dj) >= ny:
+            return None
+        src = (
+            slice(max(self.di, 0), nx + min(self.di, 0)),
+            slice(max(self.dj, 0), ny + min(self.dj, 0)),
+        )
+        dst = (
+            slice(max(-self.di, 0), nx - max(self.di, 0)),
+            slice(max(-self.dj, 0), ny - max(self.dj, 0)),
+        )
+        return src, dst
+
+    def rolled[T: np.generic](self, field: npt.NDArray[T], empty: float = 0.0) -> npt.NDArray[T]:
+        """One channel of the grid after the slide: a fresh array of ``empty`` with the overlap
+        copied into it, so what left the window is gone and what stayed is untouched. Works on a
+        colour channel too — only the first two axes are indexed."""
+        out: npt.NDArray[T] = np.full_like(field, empty)
+        boxes = self.boxes(int(field.shape[0]), int(field.shape[1]))
+        if boxes is not None:
+            src, dst = boxes
+            out[dst] = field[src]
+        return out
+
+
 def backproject(
     depth: Array, intr: Intrinsics, stride: int = 1, range_max: float = math.inf
 ) -> Array:
@@ -369,6 +491,34 @@ class Tsdf:
         twin.spec = dataclasses.replace(self.spec, origin=(ox, oy, oz), shape=(nx, ny, nz))
         twin.sdf, twin.weight, twin.rgb = sdf, self.weight[box].copy(), self.rgb[box].copy()
         return twin
+
+    def recentre(self, xy: tuple[float, float]) -> WindowShift:
+        """Slide the box by whole voxels so its footprint is centred on ``xy`` — the cart —
+        keeping every voxel that stays inside and dropping the ones that leave; returns the move
+        (:attr:`WindowShift.nothing` when the cart is already in the middle of a voxel of it).
+
+        THE ROLLING WINDOW of a volume that is local obstacle memory (``volume_frame`` odom on
+        pepin_bringup.depth_fusion). Nothing is resampled and nothing is carried: the grid's
+        lattice is untouched, a surviving voxel keeps the metres it was painted at, and the ones
+        that fall off the trailing edge are forgotten because a local map is not a room. A voxel
+        the slide has brought in from outside starts as unobserved — weight zero, a whole
+        truncation from any surface — exactly as a newborn volume's does.
+
+        The cost is one copy per channel and no arithmetic: measured 0.3-0.9 ms on the fusion
+        node's 120x120x34 test grid and 4.7 ms on the live 280x250x34 one
+        (tests/unit/test_tsdf.py), against the 9-108 ms :meth:`shift` pays to resample.
+        """
+        move = WindowShift(*self.spec.voxels_to_centre(xy))
+        if move.nothing:
+            return move
+        weight = move.rolled(self.weight)
+        sdf = move.rolled(self.sdf)
+        sdf[weight == 0.0] = 1.0  # unobserved: a whole truncation from any surface
+        self.sdf, self.weight = sdf, weight
+        self.rgb = move.rolled(self.rgb)
+        self.colour_weight = move.rolled(self.colour_weight)
+        self.spec = self.spec.moved_by_voxels(move.di, move.dj)
+        return move
 
     def shift(self, shift: PlanarShift, law: str = NEAREST) -> ShiftedColumns:
         """Move everything in the model by a rigid planar ``shift`` — the volume follows the

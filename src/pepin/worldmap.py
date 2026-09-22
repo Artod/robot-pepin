@@ -15,7 +15,10 @@ A TSDF volume (:mod:`pepin.tsdf`) both sensors write into:
 * a horizontal band reads out as an occupancy grid (:class:`OccupancySlice`) for a picture, a
   map_server pair or an offline instrument — never for a matcher;
 * the whole thing snapshots to an ``.npz`` and loads back, so a room the cart has painted comes
-  back as it was left.
+  back as it was left — which is what a volume in the MAP frame is for. A volume painted in the
+  odometry frame is local obstacle memory instead: it has no snapshot at all, and
+  :meth:`WorldMap.recentre` slides its window onto the cart and forgets what leaves
+  (:class:`pepin.tsdf.WindowShift`, ``volume_frame`` on pepin_bringup.depth_fusion).
 
 THE VOLUME IS OPEN-LOOP, and that is the one hard rule here. It is painted at the pose the tracker
 gives, and no pose is ever estimated against it: a tracker that matches the slice it is painting
@@ -62,6 +65,7 @@ from pepin.tsdf import (
     ShiftedColumns,
     Tsdf,
     Uint8,
+    WindowShift,
 )
 
 if TYPE_CHECKING:
@@ -503,6 +507,26 @@ class WorldMap:
         self.frames = [
             (stamp, sensor, self._shifted_frame(shift, pose)) for stamp, sensor, pose in self.frames
         ]
+
+    def recentre(self, at: tuple[float, float]) -> WindowShift:
+        """Slide the window onto the cart at ``at`` (:meth:`pepin.tsdf.Tsdf.recentre`), carrying
+        the lidar's own weight channel and the viewpoint count through the very same copy, so the
+        layer the camera hands back is still the layer the lidar wrote, cell for cell. Returns the
+        move; nothing happens when the cart is already in the middle of the box.
+
+        THE VOLUME AS LOCAL MEMORY, which is what it is in the odometry frame: the box follows the
+        cart and what leaves it is forgotten. Nothing moves in the world — a surviving voxel keeps
+        the metres it was painted at — so what does NOT change is everything about the content: the
+        z rows of the lidar's layer (a slide has no z in it), the plane, the stamp, and the frame
+        index, whose poses are still where those frames were taken.
+        """
+        move = self.volume.recentre(at)
+        if move.nothing:
+            return move
+        self.spec = self.volume.spec
+        self.lidar_weight = move.rolled(self.lidar_weight)
+        self.views = move.rolled(self.views)
+        return move
 
     def _moved_claim(self, columns: ShiftedColumns, law: str = BLEND) -> Float32:
         """The lidar's weight channel after the move: its magnitude by the same weighted average

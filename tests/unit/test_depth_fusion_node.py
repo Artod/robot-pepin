@@ -76,11 +76,17 @@ def small_config(tmp_path: Path) -> Path:
 @pytest.fixture
 def node(tmp_path: Path) -> DepthFusion:
     """A fusion node on this checkout's configs, with the laser mount and a fresh map -> odom
-    edge in TF, its pose gate on and a tracker that has just reported a good fit."""
+    edge in TF, its pose gate on and a tracker that has just reported a good fit.
+
+    ``volume_frame`` map, which is where everything in this section lives: the pose gates, the
+    snapshot, the yaw seating and the graph's bend are the machinery of a volume that IS the room.
+    The shipped default is odom, whose own section is at the foot of this file.
+    """
     with ros_stubs.parameters(
         config=str(small_config(tmp_path)),
         lidar_config=str(REPO / "config" / "lidar.json"),
         world_path=str(tmp_path / "world.npz"),
+        volume_frame="map",
         resume_volume=False,
         snapshot_s=0.0,
         imu_lean=False,
@@ -185,6 +191,7 @@ def fusion_node(tmp_path: Path, **overrides: Any) -> DepthFusion:
     params: dict[str, Any] = {
         "config": str(small_config(tmp_path)),
         "lidar_config": str(REPO / "config" / "lidar.json"),
+        "volume_frame": "map",  # the room-sized volume: the frame every test below is about
         "resume_volume": False,
         "snapshot_s": 0.0,
         "imu_lean": False,
@@ -483,3 +490,169 @@ def test_follow_correction_off_leaves_the_voxels_where_they_are(node: DepthFusio
     assert node._follower.applied == 0
     node._report()
     assert "follow: off (the graph bends, the voxels stay)" in node.logger.texts("info")[-1]
+
+
+# ---- the volume in ODOM: local obstacle memory, a rolling window, no global pose at all -------
+def odom_node(tmp_path: Path, **overrides: Any) -> DepthFusion:
+    """A fusion node as the stack ships from 2026-09-22: ``volume_frame`` odom, the cart placed by
+    odom -> base_link, and NO map -> odom edge and no tracker fit anywhere in its TF — which is the
+    point of the frame, not an omission. The lidar mount is the checkout's."""
+    params: dict[str, Any] = {
+        "config": str(small_config(tmp_path)),
+        "lidar_config": str(REPO / "config" / "lidar.json"),
+        "world_path": f"{tmp_path}/flat_test.world.npz",
+        "imu_lean": False,
+    }
+    params.update(overrides)
+    with ros_stubs.parameters(**params):
+        node = DepthFusion()
+    buffer = node._tf.buffer
+    buffer.transforms[("base_link", "laser")] = edge("base_link", "laser", SCAN_S, z=0.383)
+    buffer.transforms[("odom", "base_link")] = edge("odom", "base_link", SCAN_S)
+    return node
+
+
+def at_odom(node: DepthFusion, x: float, y: float = 0.0) -> None:
+    """Stand the cart at (x, y) in the odometry frame: the one pose this volume knows about."""
+    where = node._tf.buffer.transforms[("odom", "base_link")].transform.translation
+    where.x, where.y = x, y
+
+
+def test_the_volume_in_odom_is_painted_by_the_odometry_and_by_nothing_else(tmp_path: Path) -> None:
+    """The default since 2026-09-22. No tracker has ever published a fit, no sigma exists and TF
+    holds no map -> odom edge at all — and the beams still paint the room, because the pose that
+    places them is odom -> base_link. The gates that ask whether a GLOBAL pose can be trusted have
+    nothing to judge here, and the report line says so instead of passing silently."""
+    node = odom_node(tmp_path)
+    assert node._odom_volume and node._poser_now is node._odom_poser
+    assert ("map", "odom") not in node._tf.buffer.transforms
+    node._on_scan_work(scan_msg())
+    assert painted(node) > 0.0, "the beams wrote the box at the odometry's pose"
+    counts = node._tally.take().counts
+    assert counts["revolutions"] == 1 and counts["untrusted"] == 0 and counts["low_fit"] == 0
+    assert marks(node).header.frame_id == "base_link", "the marks are the cart's fan either way"
+    # ...and the surface goes out in the frame it was painted in, never in map
+    node._publish_surface()
+    assert node.pubs["/fusion/surface"].sent[-1].header.frame_id == "odom"
+
+
+def test_a_step_of_map_to_odom_does_not_move_the_marks(tmp_path: Path) -> None:
+    """THE WHOLE POINT OF THE FRAME. A re-seating of the global pose is what poisoned the volume on
+    2026-09-21: painted in map, some twenty seatings each wrote their own copy of the walls and the
+    slice put 300-650 lethal cells around the cart. Here the tracker re-seats the cart by 2 m and
+    the graph bends under it — and the window does not move, nothing is refused, and the next
+    revolution goes into the very cells the last one did: one wall, not two."""
+    node = odom_node(tmp_path)
+    node._switches.set("min_weight", 0.5)
+    node._on_scan_work(scan_msg())
+    at_odom(node, 0.4)
+    node._on_scan_work(scan_msg(SCAN_S + 0.2))
+    before = np.array(marks(node).ranges)
+    spec, weight = node._world.spec, node._world.volume.weight.copy()
+    assert np.isfinite(before).any(), "the box is in the marks"
+
+    node._tf.buffer.transforms[("map", "odom")] = edge("map", "odom", SCAN_S)
+    node._tf.buffer.transforms[("map", "odom")].transform.translation.x = 2.0  # a 2 m re-seat
+    node.subs["/rtabmap/mapGraph"][1](graph_msg({9: (2.0, 0.40)}))  # ...and a bend under it
+    node._switches.set("view_gate", False)  # so the same place may speak again
+    node._on_scan_work(scan_msg(SCAN_S + 0.4))
+
+    assert node._world.spec == spec, "no correction slides the window; only the cart does"
+    assert node._follower.applied == 0 and node._tally.take().counts["follow_held"] == 0
+    after = np.array(marks(node).ranges)
+    common = np.isfinite(before) & np.isfinite(after)
+    assert common.sum() > 100
+    # Within a couple of voxels, which is what a repeat observation moves a zero crossing by; a
+    # volume that had heard the re-seating would have moved every bearing by the 2 m step.
+    np.testing.assert_allclose(after[common], before[common], atol=2 * node._spec.voxel_m)
+    assert float(np.nanmin(after)) == pytest.approx(float(np.nanmin(before)), abs=0.05)
+    assert int((node._world.volume.weight > 0.0).sum()) == int((weight > 0.0).sum())
+
+
+def test_the_window_slides_onto_the_cart_and_forgets_what_left_it(tmp_path: Path) -> None:
+    """The rolling window: past window_recentre_m from the centre the box is laid out around the
+    cart again, every voxel of the overlap keeps the metres it was painted at, and what fell off
+    the trailing edge is gone. A local map is not a room."""
+    node = odom_node(tmp_path)
+    node._on_scan_work(scan_msg())
+    before = node._world.volume.weight.copy()
+    lidar_before = node._world.lidar_weight.copy()
+    origin = node._world.spec.origin
+    assert node._world.spec.centre_xy == pytest.approx((0.0, 0.0))
+
+    out = node._window_recentre_m + 0.5  # 2.5 m out of a 6 m box: past the threshold
+    at_odom(node, out)
+    pose = node._poser_now.base_in_map(SCAN_S)
+    assert pose is not None
+    node._roll_window(pose)  # what the next observation does before it goes in
+
+    slid = round(out / node._world.spec.voxel_m)
+    assert node._world.spec.origin[0] == pytest.approx(origin[0] + slid * 0.05)
+    assert node._world.spec.origin[1:] == origin[1:], "a slide has no y and no z in it"
+    assert node._world.spec.centre_xy == pytest.approx((slid * 0.05, 0.0))
+    assert node._spec == node._world.spec, "the node's own grid follows the volume's"
+    assert np.array_equal(node._world.volume.weight[:-slid], before[slid:]), "what stayed, stayed"
+    assert np.array_equal(node._world.lidar_weight[:-slid], lidar_before[slid:])
+    assert not node._world.lidar_weight[-slid:].any(), "the new edge of the window is unpainted"
+    assert (node._world.volume.sdf[-slid:] == 1.0).all(), "a whole truncation from any surface"
+    assert node._recentre_ms > 0.0, "and the slide is timed into the report line"
+    assert node._tally.take().counts["recentres"] == 1
+    assert "what left it is forgotten" in node.logger.texts("info")[-1]
+
+    # ...and it happens by itself on the next observation, not because a test called it
+    at_odom(node, 2 * out)
+    node._on_scan_work(scan_msg(SCAN_S + 0.2))
+    assert node._world.spec.centre_xy[0] == pytest.approx(2 * out, abs=0.05)
+    assert node._spec == node._world.spec
+
+
+def test_a_volume_in_odom_reads_and_writes_no_snapshot(tmp_path: Path) -> None:
+    """A snapshot exists to be resumed, and the odometry frame of one run is not the odometry frame
+    of the next: it is born where the wheels were switched on. So the file is neither read nor
+    written, and the report line says so rather than leaving a stale file looking current."""
+    saved = in_room(tmp_path, snapshot_s=1.0)
+    saved._on_scan_work(scan_msg())
+    kept = Path(f"{tmp_path}/flat_test.world.npz").read_bytes()
+
+    node = odom_node(tmp_path, snapshot_s=1.0, resume_volume=True)
+    assert not node._world.lidar_weight.any(), "the file beside it is another frame's room"
+    node._on_scan_work(scan_msg())
+    node.close()  # ...and shutdown writes nothing either
+    assert Path(f"{tmp_path}/flat_test.world.npz").read_bytes() == kept
+    assert "no snapshot at all in odom" in node._snapshot_line(node._tally.take())
+
+
+def test_the_report_line_names_the_frame_and_the_paths_it_makes_inert(tmp_path: Path) -> None:
+    """``align=on`` in the flag state with the volume in odom would read as a yaw search that is
+    running. Every path the frame switches off is named in the line, beside where the window
+    stands and what its last slide cost — the numbers a drive is judged on without a debugger."""
+    node = odom_node(tmp_path)
+    node._on_scan_work(scan_msg())
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "the volume is local memory, in odom" in line and "rolling window centred on" in line
+    assert "re-centred on the cart past 2.0 m" in line and "last slide 0 ms" in line
+    assert "align, the paint gates (fit_gate, lidar_fit_gate, paint_sigma_m) and" in line
+    assert "follow_correction are inert here and no snapshot is read or written" in line
+    assert "follow: inert in odom" in line and "no gate in odom" in line
+    assert "volume_frame=odom" in line, "and the switch itself, as every flag is (rule 19)"
+
+
+def test_volume_frame_map_is_the_old_behaviour_one_flag_away(tmp_path: Path) -> None:
+    """CLAUDE.md rule 19, and the A/B of 2026-09-21 without a restart. A volume cannot be carried
+    between frames — its voxels are metres of one or metres of the other — so the switch empties it
+    and lays a new box under the cart; from there the map-frame machinery is back, gates and all."""
+    node = odom_node(tmp_path)
+    node._on_scan_work(scan_msg())
+    assert painted(node) > 0.0
+    node._tf.buffer.transforms[("map", "odom")] = edge("map", "odom", SCAN_S)
+    node._tf.buffer.transforms[("map", "base_link")] = edge("map", "base_link", SCAN_S)
+
+    assert node._switches.set("volume_frame", "map") == "odom"
+    assert not node._odom_volume and node._poser_now is node._poser
+    assert painted(node) == 0.0, "voxels painted in odom are not metres of map"
+    assert "the volume is emptied and born again under the cart" in node.logger.texts("warning")[-1]
+    # ...and the pose gate is a gate again: nobody has published a fit in this file at all
+    node._on_scan_work(scan_msg(SCAN_S + 0.2))
+    assert painted(node) == 0.0
+    assert node._tally.take().counts["untrusted"] == 1

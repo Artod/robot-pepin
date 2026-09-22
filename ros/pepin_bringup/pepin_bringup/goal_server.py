@@ -36,6 +36,13 @@ never time out either. The correction itself is the pulse (``/map_odom``, publis
 graphs too), so this node listens to it, refuses a goal when it has stopped and cuts a running
 drive when it stops mid-way: the SLAM analogue of the blind-drive watch, under the
 ``correction_watch`` flag.
+
+WHO WATCHES THE CORRECTION ITSELF. When ``map -> odom`` steps, the marks in Nav2's local costmap
+were laid where the cart used to be, and nothing else takes them back. The lidar tracker used to
+empty that grid on such a step while it owned the edge; RTAB-Map owns it now, so the watch sits
+here — a 5 Hz read of the edge into :class:`pepin.watch.JumpClear`, one asynchronous clear per
+jump, under the ``jump_clear`` flag, which ships OFF (nobody has yet watched RTAB-Map's own
+corrections with it).
 """
 
 from __future__ import annotations
@@ -55,6 +62,7 @@ from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from lifecycle_msgs.srv import ChangeState, GetState
 from nav2_msgs.action import NavigateToPose, Spin
+from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
@@ -88,6 +96,7 @@ from pepin.watch import (
     BlindDriveWatch,
     Correction,
     GoalGate,
+    JumpClear,
     Readiness,
     Sigma,
 )
@@ -107,7 +116,16 @@ BRINGUP_ROUND_S = 10.0  # a lifecycle query or transition that has not answered 
 
 MAP_FRAME = "map"
 BASE_FRAME = "base_link"
+ODOM_FRAME = "odom"
 CORRECTION_TOPIC = "/map_odom"  # the SLAM half's pulse; the board's slam_frame reads it too
+# Nav2's own service for emptying the grid the controller steers on, and the watch's rules over it
+# (pepin.watch.JumpClear). The relocalizer holds the same two names for the same call: it made it
+# while IT owned map -> odom, and under World R that edge is RTAB-Map's, so the call moved here to
+# the one node on the board that is awake between goals. Spelled out rather than imported from
+# that module: a node does not import another node.
+CLEAR_LOCAL_COSTMAP = "/local_costmap/clear_entirely_local_costmap"
+CLEAR_MIN_GAP_S = 1.0
+JUMP_WATCH_HZ = 5.0  # how often map -> odom is read for a step: twice Nav2's own control period
 TF_WAIT_S = 0.3  # how long a pose lookup waits for the edge: the drive thread asks, not a callback
 TF_FIRST_WAIT_S = 2.0  # ...and the first one waits for the listener's buffer to fill at all
 TRACKER_WAIT_S = 1.0  # the one probe for "is there a tracker at all" — its relocalise service
@@ -205,6 +223,31 @@ FLAGS = FlagSet(
         " it does not have",
         off_when="to put the 0.25 m start threshold back for a comparison, or where a drive must"
         " never begin on a pose looser than Nav2's own arrival tolerance",
+    ),
+    Flag(
+        "jump_clear",
+        False,
+        description="map -> odom is read from TF five times a second and, when it STEPS further"
+        f" than {JumpClear.clear_costmap_jump_m:.2f} m, Nav2's local costmap is emptied"
+        f' ("{CLEAR_LOCAL_COSTMAP}", asynchronously, at most once per {CLEAR_MIN_GAP_S:.0f} s):'
+        " the marks in that grid were laid where the cart used to be. The step in that edge is the"
+        " correction alone — the cart's own motion lives in odom -> base_link — whoever published"
+        " it. Off, nothing reads the edge and no listener is started for it",
+        why="OFF UNTIL IT IS TRIED, because nobody has watched RTAB-Map's own corrections with"
+        " it. The behaviour is not new: the lidar tracker did exactly this while it owned"
+        " map -> odom (pepin.watch.JumpClear, written for the camera-only return of 2026-09-16,"
+        " where the pose lagged 1.4 m behind the cart and Nav2 spent 29 recoveries fighting marks"
+        " placed at the poses before each correction). Under World R that edge is RTAB-Map's and"
+        " nobody watches it at all. What is unmeasured is the other side of the trade: RTAB-Map"
+        " corrects in centimetres at a loop closure, which the costmap absorbs, and the raytracing"
+        " of the live scans re-clears a stranded mark within seconds anyway — so a clear per"
+        " closure could cost a controller its picture of the room for no gain. The threshold and"
+        " the gap are the tracker's measured ones, inherited unchanged",
+        on_when="when a drive is seen fighting a second copy of the room after a correction:"
+        " recoveries at obstacles that are not there, the local costmap holding marks offset from"
+        " the live scans by the size of the last jump",
+        off_when="the shipped state, and back to it the moment a clear is seen to cost more than"
+        " it buys — a controller replanning around a grid that keeps being emptied under it",
     ),
 )
 
@@ -330,6 +373,7 @@ class GoalServer(Node):
         # Last, after every other declare_parameter: rclpy runs the switches' callback on
         # declarations too, and a name outside the table is refused there (node_kit.Switches).
         self._switches = Switches(self, FLAGS)
+        self._start_jump_watch()  # the map -> odom jump watch (flag jump_clear, default off)
         threading.Thread(target=self._serve, daemon=True).start()
         self.get_logger().info(
             f"goal server ready on port {self._port}; localizer {self._localizer}"
@@ -991,6 +1035,64 @@ class GoalServer(Node):
         self.get_logger().warning(f"still lost after the search: fit {self.fit:.2f}")
         self._send(connection, {"event": "error", "detail": f"still lost (fit {self.fit:.2f})"})
         return False
+
+    # ---- the map -> odom jump watch (flag jump_clear) -----------------------------------------
+    def _start_jump_watch(self) -> None:
+        """Wire the jump watch: the rules (:class:`pepin.watch.JumpClear`), a client of Nav2's
+        clearing service and a 5 Hz timer that reads ``map -> odom``.
+
+        The watch lives HERE because this node is the one on the board that is awake between goals
+        and already owns a TF path. It used to live in the lidar tracker, which published that edge
+        itself and could watch its own steps; RTAB-Map owns it now, and a correction nobody watches
+        leaves the local costmap holding a copy of the room offset by the jump."""
+        self._jumps = JumpClear(self._clear_local_costmap, min_gap_s=CLEAR_MIN_GAP_S)
+        self._clear_costmap = self.create_client(ClearEntireCostmap, CLEAR_LOCAL_COSTMAP)
+        self._clears = 0
+        self.create_timer(1.0 / JUMP_WATCH_HZ, self._watch_map_odom)
+
+    def _watch_map_odom(self) -> None:
+        """Five times a second: the newest ``map -> odom`` TF holds, into the watch.
+
+        Nothing at all happens while ``jump_clear`` is off — not even the TF listener is started,
+        which is the point of starting it here rather than in the constructor: a listener is a
+        subscription to ``/tf``, sixty messages a second on the board. The first reading after the
+        flag goes on is the watch's baseline and never a jump.
+
+        The edge is read from whatever is in the buffer, never waited for: this runs on the
+        executor thread, beside the socket's own callbacks. A missing edge is simply no reading.
+        """
+        if not self._switches.on("jump_clear"):
+            return
+        if self._tf is None:
+            self._tf = TfLookup(self)
+        transform = self._tf.transform(MAP_FRAME, ODOM_FRAME, None, 0.0)
+        if transform is None:
+            return
+        self._jumps.moved(
+            (
+                transform.transform.translation.x,
+                transform.transform.translation.y,
+                yaw_of(transform.transform.rotation),
+            ),
+            time.monotonic(),
+        )
+
+    def _clear_local_costmap(self, jump_m: float) -> None:
+        """Ask Nav2 to empty its local costmap because ``map -> odom`` has just stepped
+        ``jump_m``: the marks in that grid were laid where the cart used to be
+        (:class:`pepin.watch.JumpClear` decides when).
+
+        The call is asynchronous and its answer is never waited for — this runs on the executor
+        thread, which the socket handler and the drive both need — and it is the only line this
+        watch logs, so the flag's state and the count are in it."""
+        self._clears += 1
+        self._clear_costmap.call_async(ClearEntireCostmap.Request())
+        self.get_logger().info(
+            f"map -> odom jumped {jump_m:.2f} m: local costmap cleared, its marks were laid at the"
+            f" old pose ({self._clears} clears this run; jump_clear=on,"
+            f" jump {self._jumps.clear_costmap_jump_m:.2f} m, no oftener than"
+            f" {CLEAR_MIN_GAP_S:.0f} s)"
+        )
 
     def _pose_msg(self, x: float, y: float, yaw_deg: float) -> PoseStamped:
         """A goal pose in the map frame."""

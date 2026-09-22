@@ -13,9 +13,9 @@ rest stays out of the model). A frame whose best turn is the search's edge is re
 truth may lie beyond, and a turn to the bound would bake the remainder in. Frames are fused only
 while the tracker reports a fit the cart may drive on (``/localization_fit`` >=
 ``pepin.watch.DRIVE_FIT``): a lost tracker's pose would paint the room somewhere else.
-``/fusion/surface`` (PointCloud2, map frame, colours from the camera, stamped with the last
-fused frame — the board's clock) is the zero-crossing of the field, published beside RTAB-Map's
-cloud.
+``/fusion/surface`` (PointCloud2 in the frame the volume is painted in — ``volume_frame``, below —
+colours from the camera, stamped with the last fused frame, the board's clock) is the zero-crossing
+of the field, published beside RTAB-Map's cloud.
 
 THE VOLUME (:mod:`pepin.worldmap`). ``/scan`` is integrated into the same volume along the beams'
 own rays — carving free space, a surface at each return, on the lidar's own weight channel, which
@@ -109,7 +109,25 @@ observation that was just integrated. The costmap's camera layer MARKS from it a
 what is there. ``marks_source`` frame relays ``/depth_scan`` onto the same topic unchanged, which
 is the pre-2026-09-21 costmap without a restart. No floor-specific rule anywhere in this.
 
+AND SINCE 2026-09-22 THE VOLUME LIVES IN ``odom`` (``volume_frame``). Its job is LOCAL OBSTACLE
+MEMORY — the nvblox local mapper beside a pose graph, the pattern STVL follows — and local memory
+must not depend on global localisation at all. Painted in ``map`` and kept across a day it did the
+opposite: on 2026-09-21 the volume held the walls of some twenty re-seatings of the tracker at
+once, the yaw aligner sat at its +-4 deg bound refusing frames, and the slice put 300-650 lethal
+cells around the cart that the lidar had never seen — proved layer by layer against Nav2's own
+grids (scratch/nav2_hang/layer_blame.py), and gone the moment the file was set aside. So under
+``odom`` every frame and every revolution is placed by ``odom -> base_link`` and the camera's own
+edge, never through ``map -> odom``: no snapshot is read or written, the yaw alignment, the paint
+gates and the graph's correction are all inert (there is no global pose in the path to be wrong
+about), and the volume is a rolling window — past ``window_recentre_m`` (config/fusion.json) from
+the window's centre the box slides onto the cart and what leaves it is forgotten
+(:class:`pepin.tsdf.WindowShift`). ``/fusion/surface`` then carries ``odom`` as its frame;
+``/depth_marks`` is in ``base_link`` either way, because a fan of ranges about the cart never
+depended on the frame the volume was painted in. ``volume_frame`` map is the whole of the old
+behaviour, byte for byte.
+
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
+``volume_frame``,
 ``fit_gate``, ``lidar_fit_gate``, ``paint_sigma_m``, ``imu_lean``, ``lean_gate_deg``,
 ``lean_min_quality``, ``self_heal``, ``align``, ``min_weight``, ``marks_source``,
 ``marks_min_z``, ``surface_hz``,
@@ -142,7 +160,7 @@ from std_srvs.srv import Trigger
 
 from pepin.depth import Intrinsics, rotation_matrix
 from pepin.flags import Flag, FlagSet
-from pepin.frame_pose import BASE_FRAME, MAP_FRAME, FramePoser
+from pepin.frame_pose import BASE_FRAME, MAP_FRAME, ODOM_FRAME, FramePoser
 from pepin.graphbend import GraphBend
 from pepin.lean import LEAN_QUALITY_FLOOR, SCAN_LEAN_GATE_DEG, LeanGate
 from pepin.mounts import LASER_FRAME, load_lidar_mount
@@ -154,6 +172,7 @@ from pepin.tsdf import (
     align_yaw,
     backproject,
     band_half_z_m,
+    window_recentre_m,
 )
 from pepin.volume_scan import (
     MARKS_ANGLE_MIN,
@@ -240,6 +259,43 @@ FLAGS = FlagSet(
         on_when="whenever the fused surface or the volume's map is wanted",
         off_when="to freeze the model where it stands — a snapshot to save, a picture to read, a"
         " run where the camera is carried by hand",
+    ),
+    Flag(
+        "volume_frame",
+        ODOM_FRAME,
+        choices=(ODOM_FRAME, MAP_FRAME),
+        description="which frame the volume is painted in. odom: every frame and revolution is"
+        " placed by odom -> base_link (plus the camera's own edge) and nothing in the paint path"
+        " reads map -> odom at all — no snapshot is read or written, align, the paint gates"
+        " (fit_gate, lidar_fit_gate, paint_sigma_m) and follow_correction are inert, and the"
+        " volume is a rolling window that slides onto the cart past window_recentre_m of"
+        " config/fusion.json and forgets what leaves it. map: the room-sized model of before"
+        " 2026-09-22, resumed from and saved to world_path, seated by the yaw search, gated by the"
+        " tracker's fit and sigma and carried by the graph's bend. /fusion/surface carries this"
+        " frame's own name; /depth_marks is in base_link either way. CHANGING THIS EMPTIES THE"
+        " VOLUME: voxels painted in the other frame are a room drawn in coordinates nothing here"
+        " shares",
+        why="MEASURED 2026-09-21, and it is why this flag exists. The volume's job is LOCAL"
+        " OBSTACLE MEMORY (nvblox's local mapper beside a pose graph, STVL's pattern), and local"
+        " memory that depends on global localisation inherits every one of its mistakes. Painted"
+        " in map and kept, it accumulated the walls of some twenty re-seatings of the tracker in"
+        " one evening: the aligner sat at its +-4 deg bound (240 refusals), revolutions were"
+        " withheld at sigma 2.98 m while the slice kept publishing, and /depth_marks put 300-650"
+        " lethal cells around the cart that the lidar never saw — 199 of 219 outside the camera's"
+        " own 94 deg cone and 116 of them BEHIND the cart, measured layer by layer against Nav2's"
+        " own grids (scratch/nav2_hang/layer_blame.py). With the file set aside the same drive"
+        " marked 0 alien cells. In odom there is no global pose in the path to be wrong about: the"
+        " odometry pose is always the pose, which is why the gates that ask whether the tracker is"
+        " trustworthy have nothing to judge here and say so in the report line instead of"
+        " silently passing. What the window costs when it slides is a copy of the overlap: 0.3-0.9"
+        " ms measured on the node's 120x120x34 test grid and 4.7 ms on the live 280x250x34 one"
+        " (tests/unit/test_tsdf.py), timed into that same line",
+        on_when="odom, everywhere the cart drives: the costmap's camera marks then remember only"
+        " what this odometry run has seen around the cart, and a re-seating of the global pose"
+        " cannot move a single voxel of them",
+        off_when="map for a mapping run whose product is the painted room itself — a surface to"
+        " look at in Foxglove, a volume to resume tomorrow — and for the A/B of 2026-09-21, on a"
+        " cart nobody is driving",
     ),
     Flag(
         "fit_gate",
@@ -812,12 +868,28 @@ class DepthFusion(Node):
             use_gyro=self._switches.on("imu_lean"),
             on_unmounted=self._on_unmounted,
         )
+        history = TfHistory(self._tf, timeout_s=TF_WAIT_S)
         self._poser = FramePoser(
-            TfHistory(self._tf, timeout_s=TF_WAIT_S),
+            history,
             lean=self._lean,
             apply_lean=self._switches.on("imu_lean"),
             min_lean_quality=float(self._switches["lean_min_quality"]),
         )
+        # ...and the same questions asked of the ODOMETRY instead of the map: one poser per frame
+        # the volume can be painted in (``volume_frame``), sharing one TF history and one lean, so
+        # the paint path picks a frame rather than carrying a frame name through every lookup.
+        # Under odom nothing in that path touches map -> odom at all, which is the whole point.
+        self._odom_poser = FramePoser(
+            history,
+            map_frame=ODOM_FRAME,
+            lean=self._lean,
+            apply_lean=self._switches.on("imu_lean"),
+            min_lean_quality=float(self._switches["lean_min_quality"]),
+        )
+        # How far the cart may leave the window's centre before the box slides onto it, from the
+        # node's own config (pepin.tsdf.window_recentre_m); read only under volume_frame odom.
+        self._window_recentre_m = window_recentre_m(config)
+        self._recentre_ms = 0.0  # the last slide's cost, a level the report line reads
         self._read_plane(BAND_TF_WAIT_S)
         # The scan's own answer to the lean: a frame can be placed leaning, a revolution taken
         # too far from level can only be dropped (pepin.lean.LeanGate).
@@ -874,12 +946,29 @@ class DepthFusion(Node):
             f"fusion up: {nx}x{ny}x{nz} voxels of {self._spec.voxel_m * 100:.0f} cm from"
             f" {self._spec.origin}; {self._switches.state()}; {self._band_text()}; fused while"
             f" /localization_fit >= {DRIVE_FIT:.2f}; mode {self._mode}; nothing localises against"
-            f" this volume — it is painted open-loop and published as /fusion/surface and as the"
-            f" costmap's camera marks on {MARKS_TOPIC} ({self._switches['marks_source']});"
-            f" snapshot {self._world_path} (the frame of {self._database}); the volume follows the"
-            f" bend of the graph's own node poses on {GRAPH_TOPIC}, never the change in map -> odom"
-            " (which moves when the CART is found and not only when the room does)"
+            f" this volume — it is painted open-loop and published as /fusion/surface (frame"
+            f" {self._volume_frame}) and as the costmap's camera marks on {MARKS_TOPIC}"
+            f" ({self._switches['marks_source']}); {self._frame_line()}"
         )
+
+    @property
+    def _volume_frame(self) -> str:
+        """The frame the volume is painted in and ``/fusion/surface`` is published in: the
+        ``volume_frame`` flag, whose values are the frames' own names."""
+        return str(self._switches["volume_frame"])
+
+    @property
+    def _odom_volume(self) -> bool:
+        """Whether the volume is the rolling LOCAL window in ``odom`` (the default) rather than
+        the room-sized model in ``map``: the one question that decides which pose paints it,
+        whether it is snapshotted, and whether the map-frame gates mean anything at all."""
+        return self._volume_frame == ODOM_FRAME
+
+    @property
+    def _poser_now(self) -> FramePoser:
+        """The poser that places the next observation: the odometry's under ``volume_frame``
+        odom — where nothing in the paint path reads ``map -> odom`` — else the map's."""
+        return self._odom_poser if self._odom_volume else self._poser
 
     def _start_state(self) -> None:
         """What the volume starts as: the snapshot beside this graph database if there is one, else
@@ -894,6 +983,11 @@ class DepthFusion(Node):
 
         ``self._resumed_age_s`` is how old what was resumed was, so a volume two weeks stale is
         visible rather than assumed fresh.
+
+        UNDER ``volume_frame`` odom THERE IS ONLY ONE STATE: born empty, here, now. A snapshot is
+        a room saved in a frame somebody else's optimisation defines, and the odometry frame of
+        this run is not that frame — it is born wherever the wheels were switched on. Nothing is
+        read and nothing is written; the window fills from the sensors and slides with the cart.
         """
         self._resumed_age_s = math.inf
         # A NEWBORN IS CENTRED ON THE CART, not on the map's origin. The map frame is born under
@@ -901,11 +995,15 @@ class DepthFusion(Node):
         # frame somebody else made is outside a box laid out around the origin, and a volume that
         # does not contain the robot integrates the far wall and nothing else (2026-09-13: 239
         # revolutions, 2026-09-18: a kicked node on a box from -7.0).
-        here = self._tf.transform(MAP_FRAME, BASE_FRAME, timeout_s=TF_WAIT_S)
+        here = self._tf.transform(self._volume_frame, BASE_FRAME, timeout_s=TF_WAIT_S)
         if here is not None:
             at = (float(here.transform.translation.x), float(here.transform.translation.y))
             self._spec = self._spec.centred_on(at)
-        if self._switches.on("resume_volume") and self._world_path.exists():
+        if (
+            not self._odom_volume
+            and self._switches.on("resume_volume")
+            and self._world_path.exists()
+        ):
             try:
                 resumed = WorldMap.load(self._world_path, self._mount)
             except (ValueError, OSError, zipfile.BadZipFile, KeyError) as exc:
@@ -933,8 +1031,13 @@ class DepthFusion(Node):
                     )
                     return
         self._world = WorldMap(self._spec, self._mount)
+        born = (
+            f"no snapshot is read or written in {ODOM_FRAME}"
+            if self._odom_volume
+            else f"no snapshot at {self._world_path}"
+        )
         self.get_logger().info(
-            f"no snapshot at {self._world_path}: the volume is born empty under the cart on"
+            f"{born}: the volume is born empty under the cart in {self._volume_frame} on"
             f" {self._spec.shape} voxels from {self._spec.origin}"
         )
 
@@ -992,10 +1095,10 @@ class DepthFusion(Node):
         """A flag changed: ``imu_lean`` is the estimator's switch and the poser's — one name,
         one meaning, in every node that has it — ``lean_gate_deg`` the scan gate's,
         ``lean_min_quality`` the poser's floor under a lean, ``band_half_z`` rebuilds the height
-        band, the two rates retime their timer, ``snapshot_s`` its clock, and the rest are only
-        read where they are used."""
+        band, the two rates retime their timer, ``snapshot_s`` its clock, ``volume_frame`` empties
+        the volume, and the rest are only read where they are used."""
         if name == "imu_lean":
-            self._poser.apply_lean = bool(new)
+            self._poser.apply_lean = self._odom_poser.apply_lean = bool(new)
             self._lean.use_gyro = bool(new)
             return
         if name == "band_half_z":
@@ -1005,7 +1108,10 @@ class DepthFusion(Node):
             self._gate.gate_deg = float(new)
             return
         if name == "lean_min_quality":
-            self._poser.min_lean_quality = float(new)
+            self._poser.min_lean_quality = self._odom_poser.min_lean_quality = float(new)
+            return
+        if name == "volume_frame":
+            self._reframe(str(new))
             return
         if name == "snapshot_s":
             self._snapshots = SnapshotClock(float(new), self._snapshots.last_s)
@@ -1017,6 +1123,36 @@ class DepthFusion(Node):
             timer.timer_period_ns = int(self._period(float(new)) * 1e9)
         except (AttributeError, TypeError) as exc:  # an rclpy without a live period
             raise ValueError(f"{name} cannot change live: {exc}") from exc
+
+    def _reframe(self, frame: str) -> None:
+        """``volume_frame`` has just changed: empty the volume and lay a new box under the cart in
+        the frame that is now in force.
+
+        A VOLUME CANNOT BE CARRIED BETWEEN FRAMES. Its voxels are metres of ``map`` or metres of
+        ``odom``, and the two are related by a correction that is exactly what this flag exists to
+        keep out of the painting — so the old content is not moved, it is dropped, and the window
+        fills again from the sensors within seconds of driving. Everything that remembers where
+        the last paint happened goes with it: the view gate's last pose, the correction the
+        content was anchored in, the stamp of the last fused frame.
+        """
+        here = self._tf.transform(frame, BASE_FRAME, timeout_s=TF_WAIT_S)
+        at = (
+            (float(here.transform.translation.x), float(here.transform.translation.y))
+            if here is not None
+            else self._spec.centre_xy
+        )
+        with self._lock:
+            self._spec = self._spec.centred_on(at)
+            self._world = self._fresh_world()
+            self._last_stamp = None
+            self._follower = CorrectionFollower()
+            self._views = ViewGate(self._spec.voxel_m)
+        self._recentre_ms = 0.0
+        self.get_logger().warning(
+            f"volume_frame is {frame} now: the volume is emptied and born again under the cart"
+            f" ({at[0]:+.2f}, {at[1]:+.2f} in {frame}) — voxels painted in the other frame are a"
+            f" room drawn in coordinates nothing here shares; {self._frame_line()}"
+        )
 
     def _on_work_error(self, text: str) -> None:
         self.get_logger().error(f"fusion failed on a frame:\n{text}")
@@ -1125,13 +1261,17 @@ class DepthFusion(Node):
         assert self._laser is not None
         mount, yaw, mirrored = self._laser
         at = stamp_seconds(msg.header.stamp)
-        base = self._poser.base_in_map(at)
+        poser = self._poser_now
+        base = poser.base_in_map(at)
         if base is None:
             return  # counted by the TF failure handler
-        if not self._gate.admits(self._poser.lean_at(at)):
+        if not self._gate.admits(poser.lean_at(at)):
             self._tally.count("leaned_out")
             return
-        if self._switches.on("lidar_fit_gate"):
+        if self._switches.on("lidar_fit_gate") and not self._odom_volume:
+            # ...and in odom there is nothing for it to judge: the odometry pose IS the pose this
+            # volume is drawn in, and a tracker's fit says nothing about it (the report line says
+            # so rather than leaving the flag looking as though it were doing something).
             refusal = self._paint_refusal(at)
             if refusal is not None:
                 self._withhold("untrusted", refusal)
@@ -1141,12 +1281,16 @@ class DepthFusion(Node):
             # A VIEW IS EVIDENCE ONCE. The reach is this scan's own farthest return, so what
             # counts as "moved" is what moves one of ITS returns into another voxel.
             reach = float(np.nanmax(ranges)) if np.isfinite(ranges).any() else 0.0
-            yaw = math.atan2(float(base.rotation[1, 0]), float(base.rotation[0, 0]))
+            # ...and this is the CART's heading, which is not the mount's ``yaw`` above: writing it
+            # into that name turned every beam of the revolution by the cart's own heading a second
+            # time, through bearings_in_base, on every scan the gate admitted (the default).
+            heading = math.atan2(float(base.rotation[1, 0]), float(base.rotation[0, 0]))
             if not self._views.admits(
-                float(base.translation[0]), float(base.translation[1]), yaw, reach
+                float(base.translation[0]), float(base.translation[1]), heading, reach
             ):
                 self._tally.count("same_view")
                 return
+        self._roll_window(base)
         with self._tally.measure("scan"), self._lock:
             self._world.law = self._law()
             touched = self._world.integrate_scan(
@@ -1161,6 +1305,38 @@ class DepthFusion(Node):
         self._trust.painted(now)  # ...and the map on disk may be replaced by this one
         if self._snapshots.due(now) and self._switches["snapshot_s"] > 0.0:
             self._snapshot()
+
+    def _roll_window(self, base: RigidPose) -> None:
+        """Keep the rolling window on the cart, before the observation that found it there goes
+        in: past ``window_recentre_m`` from the window's centre the box slides onto the cart by
+        whole voxels, the overlap is kept where it stands and what left the window is forgotten
+        (:meth:`pepin.worldmap.WorldMap.recentre`).
+
+        ONLY IN ``odom``. A volume in ``map`` is the room and the room does not move with the
+        cart; a volume in ``odom`` is local obstacle memory, whose whole reason to exist is that it
+        holds what is around the cart NOW and inherits nothing from a global pose.
+
+        Called from both paint paths, under the model lock, and timed: the slide is one copy per
+        channel — measured 0.3-0.9 ms on the 120x120x34 test grid and 4.7 ms on the live
+        280x250x34 one (tests/unit/test_tsdf.py) against the 9-108 ms a graph correction's
+        resample costs — and the report line carries the last one.
+        """
+        if not self._odom_volume:
+            return
+        at = (float(base.translation[0]), float(base.translation[1]))
+        if self._spec.off_centre_m(at) <= self._window_recentre_m:
+            return
+        started = time.perf_counter()
+        with self._lock:
+            move = self._world.recentre(at)
+            self._spec = self._world.spec
+        self._recentre_ms = (time.perf_counter() - started) * 1e3
+        self._tally.count("recentres")
+        self.get_logger().info(
+            f"the cart left the window's centre: it slides {move.text()} onto"
+            f" ({at[0]:+.2f}, {at[1]:+.2f}) in {ODOM_FRAME}, what left it is forgotten"
+            f" ({self._recentre_ms:.0f} ms)"
+        )
 
     def _paint_refusal(self, at: float) -> str | None:
         """Why the tracker's pose may not be painted into the model at ``at``, or ``None`` when
@@ -1259,7 +1435,14 @@ class DepthFusion(Node):
         The whole of it — what is owed, the rate and the move — happens under the model lock,
         because both workers come through here and two of them that read the same debt would
         pay it twice.
+
+        IN ``odom`` THERE IS NOTHING TO FOLLOW. The graph optimises the room's expression in
+        ``map``; a volume painted through ``odom -> base_link`` was never expressed in it, so an
+        optimisation cannot make one of its voxels stale. The window follows the CART instead
+        (:meth:`_roll_window`).
         """
+        if self._odom_volume:
+            return True
         if not self._switches.on("follow_correction"):
             return True
         if not self._graphs:
@@ -1315,7 +1498,15 @@ class DepthFusion(Node):
 
         The lock is held for the write (half a second for a grid of noise, less for a real one),
         so a snapshot costs the camera a frame or two once every ``snapshot_s``.
+
+        NOTHING IS WRITTEN IN ``odom``. A snapshot exists to be resumed, and a rolling window
+        painted in the odometry frame of one run cannot be resumed by another: that frame is born
+        where the wheels were switched on, and the file would describe a room in coordinates the
+        next run never had. The counter says it once a window rather than silently doing nothing.
         """
+        if self._odom_volume:
+            self._tally.count("snapshot_skipped")
+            return
         refusal = self._trust.refusal(time.monotonic())
         if refusal is not None:
             self._tally.count("snapshot_refused")
@@ -1352,15 +1543,18 @@ class DepthFusion(Node):
         if msg.header.frame_id != self._poser.camera:
             self._tally.count("bad_frame")  # not the camera the poser places
             return
-        if self._switches.on("fit_gate"):
+        if self._switches.on("fit_gate") and not self._odom_volume:
+            # ...and in odom the gate has nothing to judge: the frame is placed by the odometry,
+            # which is the very frame the volume is drawn in (the report line says so).
             refusal = self._paint_refusal(stamp_seconds(msg.header.stamp))
             if refusal is not None:
                 self._withhold("low_fit", refusal)
                 return
         stamp = msg.header.stamp
         at = stamp_seconds(stamp)
-        camera = self._poser.camera_in_map(at)
-        base = self._poser.base_in_map(at) if camera is not None else None
+        poser = self._poser_now
+        camera = poser.camera_in_map(at)
+        base = poser.base_in_map(at) if camera is not None else None
         if camera is None or base is None:
             return
         depth = array_from_image(msg)
@@ -1373,12 +1567,17 @@ class DepthFusion(Node):
             rgb = None
         if not self._follow(stamp):
             return  # the model this frame would be seated on still owes the graph a move
-        if self._switches.on("align"):
+        if self._switches.on("align") and not self._odom_volume:
+            # ...and in odom the search is inert: it seats a frame against a model that has been
+            # accumulating the room, and a rolling local window is not that model — on 2026-09-21
+            # the aligner sat at its own +-4 deg bound refusing frames because the volume it was
+            # matching held four seatings of the same wall.
             with self._tally.measure("align"):
                 aligned = self._aligned(depth, intr, camera, base)
             if aligned is None:
                 return  # AT_BOUND: counted, not integrated
             camera = aligned
+        self._roll_window(base)
         with self._tally.measure("integrate"), self._lock:
             touched = self._world.integrate_depth(depth, rgb, intr, camera, stamp=at)
             self._last_stamp = stamp
@@ -1507,6 +1706,10 @@ class DepthFusion(Node):
         self._tally.count("marks")
 
     def _publish_surface(self) -> None:
+        """The model's surface as a cloud, in the frame the volume is painted in — ``odom`` for
+        the rolling window, ``map`` for the room (``volume_frame``). The frame is the volume's own
+        and never a fixed name: a window painted through the odometry and drawn in ``map`` would
+        be shown wherever the last correction happened to put it."""
         with self._lock:  # a copy under the lock (milliseconds), the crossing search outside it
             snapshot = self._world.volume.snapshot()
             stamp = self._last_stamp
@@ -1518,7 +1721,7 @@ class DepthFusion(Node):
                 points,
                 colours,
                 stamp if stamp is not None else self.get_clock().now().to_msg(),
-                "map",
+                self._volume_frame,
             )
         )
 
@@ -1540,10 +1743,35 @@ class DepthFusion(Node):
             f" align {w.ms_per('align', 'frames'):.0f} ms, {self._turns(w)};"
             f" refused: {self._refusals(w) or 'none'}; skipped: {skipped};"
             f" no image {c['no_image']}; surface {self._surface_points} points;"
-            f" {self._marks_line(w)};"
+            f" {self._marks_line(w)}; {self._frame_line(w)};"
             f" {self._band_text()}; {self._world_line(w)}; {self._follow_line(w)};"
             f" {self._lean.report()};"
             f" flags: {self._switches.state()}" + (f"; tf: {tf_text}" if tf_text else "")
+        )
+
+    def _frame_line(self, w: Window | None = None) -> str:
+        """The frame half of the report: which frame the volume is painted in and what that
+        decides — under ``odom`` where the rolling window stands, how far the cart may leave its
+        centre, what the last slide cost and which paths are inert because of it; under ``map``
+        the file it is saved to and the machinery that seats and carries it.
+
+        The inert paths are NAMED rather than left silent: ``align=on`` in the flag state with the
+        volume in ``odom`` would otherwise read as a search that is running.
+        """
+        if not self._odom_volume:
+            return (
+                f"frame: the volume is the room, in {MAP_FRAME} — snapshot {self._world_path} (the"
+                f" frame of {self._database}), seated by align, gated by the tracker's fit and"
+                f" sigma, carried by the graph's bend on {GRAPH_TOPIC}"
+            )
+        cx, cy = self._spec.centre_xy
+        slides = f", {int(w.counts['recentres'])} slides this window" if w is not None else ""
+        return (
+            f"frame: the volume is local memory, in {ODOM_FRAME} — a rolling window centred on"
+            f" ({cx:+.2f}, {cy:+.2f}), re-centred on the cart past {self._window_recentre_m:.1f} m"
+            f" (last slide {self._recentre_ms:.0f} ms{slides}); the odometry pose IS the pose, so"
+            " align, the paint gates (fit_gate, lidar_fit_gate, paint_sigma_m) and"
+            " follow_correction are inert here and no snapshot is read or written"
         )
 
     def _marks_line(self, w: Window) -> str:
@@ -1585,6 +1813,11 @@ class DepthFusion(Node):
         A volume two weeks stale and one that stopped being saved an hour ago look identical from
         the outside.
         """
+        if self._odom_volume:
+            return (
+                f"volume born this run; no snapshot at all in {ODOM_FRAME} — a window painted"
+                " through the odometry cannot be resumed by another run"
+            )
         age = self._snapshots.age_s(time.monotonic())
         resumed = (
             "born this run"
@@ -1606,6 +1839,11 @@ class DepthFusion(Node):
     def _withheld_line(self, w: Window) -> str:
         """What the pose gate kept out of the volume this period: how many revolutions were
         withheld, the last reason, and the sigma the tracker is publishing — or that nobody is."""
+        if self._odom_volume:
+            return (
+                f"lidar revolutions withheld: no gate in {ODOM_FRAME} (the odometry pose is the"
+                " pose; there is no tracker word in this frame to be wrong)"
+            )
         if not self._switches.on("lidar_fit_gate"):
             return "lidar revolutions withheld: gate off (every revolution is painted)"
         reason = w.notes.get("untrusted", "")
@@ -1620,6 +1858,12 @@ class DepthFusion(Node):
     def _follow_line(self, w: Window) -> str:
         """The graph half of the report: how far the graph has bent the room, how many times the
         volume has moved with it, the last move and what the resample cost."""
+        if self._odom_volume:
+            return (
+                f"follow: inert in {ODOM_FRAME} (the graph bends the room's expression in"
+                f" {MAP_FRAME}, and no voxel of this window is expressed in it); graph"
+                f" {self._bend.text()}"
+            )
         if not self._switches.on("follow_correction"):
             return f"follow: off (the graph bends, the voxels stay); graph {self._bend.text()}"
         if not self._graphs:
