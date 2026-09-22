@@ -57,6 +57,8 @@ RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
 #     then believes this source over the wheels AND the gyro. The diagonal is three parameters.
 #   - two RCLCPP_INFO per scan is 20 lines a second in the one log every restart check reads.
 # All three default to upstream's behaviour; ros/pepin_bringup/launch/robot.launch.py turns them on.
+# ONE compiler at a time: a -j4 build of this package (Eigen-heavy translation units) put the
+# 1.5 GB board into swap and off the network on 2026-09-22; the build stops the stack first anyway.
 ARG RF2O_COMMIT=b38c68e46387b98845ecbfeb6660292f967a00d3
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -67,7 +69,8 @@ RUN git clone https://github.com/MAPIRlab/rf2o_laser_odometry.git src/rf2o_laser
     && git -C src/rf2o_laser_odometry checkout --detach "$RF2O_COMMIT" \
     && patch -p1 -d src/rf2o_laser_odometry < /tmp/rf2o-base-twist.patch \
     && . /opt/ros/jazzy/setup.sh \
-    && colcon build --packages-select rf2o_laser_odometry \
+    && MAKEFLAGS=-j1 colcon build --packages-select rf2o_laser_odometry \
+        --executor sequential --parallel-workers 1 \
         --cmake-args -DCMAKE_BUILD_TYPE=Release \
     && rm -rf build log
 
