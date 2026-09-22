@@ -177,7 +177,7 @@ def test_every_node_that_reads_the_switch_declares_it_before_the_flags_kit() -> 
     for name in ("goal_server", "rtabmap_frame", "laptop_localizer", "run_recorder", "places"):
         source = (REPO / NODES / f"{name}.py").read_text()
         declared = source.index('declare_parameter("localizer"')
-        kit = source.index("Switches(self, FLAGS")
+        kit = source.index("Switches(self, ")  # FLAGS, or flags_for(...): the same table
         assert declared < kit, f"{name}: the plain parameter must come before the kit"
 
 

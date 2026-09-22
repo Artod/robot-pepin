@@ -434,6 +434,21 @@ FLAGS = FlagSet(
 )
 
 
+def flags_for(localizer: str) -> FlagSet:
+    """The node's flags with the defaults of its role. Under ``tracker`` :data:`FLAGS` as
+    declared. Under ``rtabmap`` the grid gate (``grid_needs_tie``) is OFF: the gate answered
+    "has this start recognised a node of the loaded map" for a board tracker that would otherwise
+    seat itself on a newborn grid — but under ``rtabmap`` RTAB-Map's own map -> odom is the proof
+    of its localisation, nothing on the board matches a grid, and the gate only kept Nav2's global
+    costmap without a map (2026-09-22: 187 grids withheld, the static layer at 0x0 bounds, until
+    the flag was flipped live)."""
+    if localizer != "rtabmap":
+        return FlagSet(*FLAGS)
+    return FlagSet(
+        *(replace(flag, default=False) if flag.name == "grid_needs_tie" else flag for flag in FLAGS)
+    )
+
+
 def _zero_stamp() -> Any:
     """A builtin_interfaces/Time at zero, for a message that carries no header at all."""
     from builtin_interfaces.msg import Time as TimeMsg
@@ -475,7 +490,7 @@ class RtabmapFrame(Node):
         # grid_needs_tie.
         self._localizer = str(self.declare_parameter("localizer", DEFAULT_LOCALIZER).value)
         self._to_the_board = self._localizer == "tracker"
-        self._switches = Switches(self, FLAGS)
+        self._switches = Switches(self, flags_for(self._localizer))
         self._slam = self._switches.on("slam")
         self._pose = RigidPose(np.eye(3), np.zeros(3))  # the SLAM correction, map -> odom
         self._belief: Pose2D | None = None  # what the board's tracker says, and when
