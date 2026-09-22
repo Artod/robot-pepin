@@ -1,5 +1,7 @@
 # robot_localization EKF: wheel odometry fused with the gyro — and, when the laptop publishes it,
-# with the camera's own visual odometry — in the plane.
+# with the camera's own visual odometry — in the plane. Since 2026-09-22 with the lidar's own
+# scan-to-scan odometry too (odom3, at the bottom): the board keeps ODOMETRY and no map localiser,
+# so the one witness that the room really moves past the cart has to arrive here as a measurement.
 #
 # Every number in this file that says "measured" was measured from the numbered tapes by
 # scratch/heading_sources.py (2026-09-15); each fused index carries the measurement that sizes
@@ -210,6 +212,69 @@ ekf_filter_node:
     odom2_differential: false
     odom2_relative: false
     odom2_queue_size: 5
+
+    # odom3: LASER ODOMETRY (2026-09-22). rf2o matching each LD19 scan against the one before it
+    # -- scan to scan, no map, no graph -- on the board, published as /odom_laser at 10 Hz
+    # (ros/pepin_bringup/launch/robot.launch.py, the node is built into the image from a pinned
+    # commit). It is here because the board keeps ODOMETRY and no map localiser: what the lidar
+    # tracker used to give this filter by implication -- a witness that the room is moving past
+    # the cart -- has to arrive as a measurement of its own, and it has to keep arriving when the
+    # WiFi dies, which the camera's odom1 does not.
+    #
+    # TWIST ONLY, AND THAT IS THE WHOLE SAFETY ARGUMENT. Indices 6 (vx) and 11 (vyaw), never a
+    # pose: rf2o integrates its own pose from its own first scan, and a pose fused here would
+    # fight the wheels' integration and drag odom -> base_link onto a second trajectory. A
+    # velocity has no origin to disagree about. `differential` is therefore not needed and not
+    # set -- that switch exists to turn a POSE into a velocity, and this source already is one.
+    odom3: odom_laser
+    odom3_config: [false, false, false,
+                   false, false, false,
+                   true,  false, false,
+                   false, false, true,
+                   false, false, false]
+    odom3_differential: false
+    odom3_relative: false
+    # rf2o's publisher is five deep (create_publisher(odom_topic, 5)) and RELIABLE; this is the
+    # matching depth, for the same reason the /vo block gives.
+    odom3_queue_size: 5
+    # WHAT IT WEIGHS, AND WHERE THE NUMBER COMES FROM. Not from rf2o: it publishes an EMPTY
+    # covariance matrix (checked in its source, CLaserOdometry2DNode.cpp's publish() sets the
+    # twist and nothing else), and an empty matrix is not "unknown" to robot_localization -- it
+    # raises any variance under 1e-9 to 1e-9 (robot_localization/src/ekf.cpp:145) and then
+    # believes this source over the wheels AND the gyro on every single sample. There is no
+    # per-source covariance override in this file (the /vo block above says so and it is still
+    # true), so the number is stamped where the message is born, exactly as the camera's is: the
+    # node is patched to take its twist covariance from three parameters
+    # (ros/patches/rf2o-base-twist.patch) and the launch passes
+    # pepin.deployment.LASER_ODOM_TWIST_VARIANCE.
+    #   vx   0.0009 (m/s)^2, sigma 3 cm/s -- the wheels' own 0.001 at half their rate, so one
+    #        scan match is worth about half a wheel sample per second. A real second opinion on
+    #        distance, which is what the 2026-09-16 carpet slip had none of, and not a
+    #        replacement for the wheels.
+    #   vyaw 0.0025 (rad/s)^2, sigma 0.05 rad/s -- about 3 % of the gyro's information per
+    #        second (0.0004 at 47 Hz). The gyro keeps the heading; this is the vote that
+    #        survives a dead MPU6050, like odom1's yaw.
+    #   vy   published by the node and NOT fused (index 7 false): the wheels' vy = 0 is a
+    #        kinematic truth of a differential-drive cart and a scan matcher's lateral estimate
+    #        is the noisiest of the three.
+    # NONE OF THE THREE IS MEASURED ON THIS CART. They are sized to be quiet on purpose. Nobody
+    # tightens them before a drive that compares /odom_laser's twist with /odom's and the gyro's
+    # over the same intervals, the way scratch/heading_sources.py did for the wheels.
+    #
+    # AND THE FIRST THING THAT DRIVE MUST CHECK IS THE SIGN. The LD19 hangs upside down (roll
+    # 180 deg) and yawed -87.5 deg (config/lidar.json), so the laser's own axes are not the
+    # cart's. Upstream's twist.linear.x is the LASER's x step per second, which for this mount
+    # is roughly the cart's SIDEWAYS motion; the patch publishes the robot pose's own step
+    # rotated into base_link instead (`base_frame_twist`, and `false` is upstream). Push the
+    # cart forward by hand: vx must be positive and near /odom's. Turn it left: vyaw must be
+    # positive and near the gyro's. If either sign is wrong, `ros/feature.sh laser_odom off` and
+    # the filter is what it was this morning -- not a line of this file has to change.
+    # 5 SIGMA, the same gate and the same arithmetic as odom0's: a scan matcher in a corridor
+    # with no features produces a number that is wrong and confident, and the innovation gate is
+    # what drops it. The pose threshold is declared with it and does nothing today (no pose
+    # index is fused) so that turning one on some day does not silently turn the gate off.
+    odom3_twist_rejection_threshold: 5.0
+    odom3_pose_rejection_threshold: 5.0
     # THE CAMERA'S COVARIANCE IS THE MESSAGE'S OWN, AND THERE IS NO OVERRIDE IN THIS FILE
     # (checked 2026-09-16). robot_localization has no per-source covariance parameter at all --
     # it reads pose.covariance off each PoseWithCovarianceStamped it takes -- so nothing here

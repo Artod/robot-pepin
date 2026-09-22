@@ -85,8 +85,9 @@ silence as good news. What is checked:
 | 1.11 | Nav2 is **active**, not merely running: the lifecycle manager got `planner_server connected with bond`, and the log carries zero `Range sensor layer can't transform` lines. A `planner_server` that activated and never bonded is wedged inside its global costmap's first update — tf2's `canTransform` costs a whole `transform_tolerance` per untransformable Range and the three ToF layers deliver 15 Hz each, so the backlog outgrows the drain and the update never ends (`scratch/nav2_hang/wedge_gain.py`; the fix was to stop feeding that plugin — the whiskers are `ObstacleLayer`s now, which drop what they cannot place). Goals are then accepted and nothing is planned. A board that runs no Nav2 is a `WARN`, never a failure. Since 2026-09-21 no costmap lists a `RangeSensorLayer` at all (the whiskers arrive as scan fans, `tof_bridge`'s `range_as`), so one of those lines now means the board is running a `nav2_params.yaml` older than this checkout — still worth a `FAIL` |
 | 1.13 | **who is correcting the pose**, under `PEPIN_LOCALIZER=rtabmap`: `map -> odom` is in TF and read where its publisher is — one rclpy node in the laptop's own container (`ros/tools/map_odom.py`), never on the board, whose /tf would cost it ~100 messages a second (CLAUDE.md rule 20). Two readings: the transform is **fresh** (re-broadcast at 20 Hz, so seconds of silence is a publisher that is gone) and it is **not the identity** (a localiser that has recognised nothing publishes `map == odom`, and every pose composed from it is simply the odometry's). The identity is a `WARN` while the laptop half is under 60 s old and a `FAIL` after that. Under `PEPIN_LOCALIZER=tracker` it is a `WARN` pointing at 1.2 |
 | 1.12 | no thread of the Nav2 container is pegged: `ps -L` over ssh, the busiest thread's cumulative CPU time over the process's own lifetime. `range_sensor_layer.cpp:362-369` clamps its cell bounds and then walks them as `unsigned`, so a cone that falls off the grid's left or bottom edge runs ~4e9 iterations under the costmap mutex and writes **no log line at all** — one thread at 100 %, "Pose Goes Off Grid", services timing out, zero plans (reproduced 2026-09-21 with `ros/thin.sh kick relocalizer`: tid 191, 415 s of CPU in 700 s). `FAIL` above 0.90, `WARN` above 0.50 (nobody has yet measured what a healthy container's busiest thread costs — tighten it once a few restarts have printed theirs), `WARN` when the board could not be read |
+| 1.14 | `/odom_laser` is flowing (the EKF's `odom3`), measured the same way. Skipped with a `WARN` when `PEPIN_LASER_ODOM=false` on the board |
 
-`ros/tools/coldstart_soak.sh [N]` is the acceptance test behind that check: N cold starts of the
+`ros/tools/coldstart_soak.sh [N]` is the acceptance test behind checks 1.11 and 1.12: N cold starts of the
 board half (10 by default), each timed from `Activating planner_server` to the bond, with the
 range-layer and `Invalid frame ID` counts beside it, one row per start and a non-zero exit unless
 every start passed. It restarts processes and reads logs — **the robot does not move**, and it
@@ -1991,14 +1992,15 @@ is the whole board.
 | process | what it is | why on the board | budget | owner |
 | --- | --- | --- | --- | --- |
 | `nav2_container` | Nav2 in one process: map server, planner, controller, behaviours, tree, smoother (nice 5) | real-time, wifi-loss | 120 % / 152 MB | `pepin-ros.service` -> `nav.launch.py` |
-| `relocalizer` | scan matching against the map, owns `map -> odom`, kidnap recovery | real-time, wifi-loss | 90 % / 121 MB | `pepin-ros.service` -> `nav.launch.py` |
+| `relocalizer` | scan matching against the map, owns `map -> odom`, kidnap recovery (`sometimes` since 2026-09-22: a mode, not the default) | real-time, wifi-loss | 90 % / 121 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `sensors_container` | LD19 driver, hull filter, base bridge, static sensor transforms (nice -10) | real-time, hardware-attached | 32 % / 90 MB | `pepin-ros.service` -> `robot.launch.py` |
 | `run_recorder` | every drive on disk: scans, odometry, pose, commands, camera | wifi-loss | 24 % / 93 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `tof_bridge` | the three VL53L1X ranges as ROS `Range` for the contact layer | real-time, hardware-attached | 20 % / 102 MB | `pepin-ros.service` -> `robot.launch.py` |
 | `zenoh_bridge` | the board's ROS graph over one TCP link to the laptop | real-time | 18 % / 78 MB | `pepin-bridge.service` |
 | `neck_state` | the neck's encoders, and `base_link -> camera_link` behind its flag | hardware-attached | 16 % / 99 MB | `pepin-ros.service` -> `robot.launch.py` |
 | `base_server` | wheels, odometry and the deadman next to the UART (TCP 3336) | real-time, wifi-loss, hardware-attached | 16 % / 27 MB | `pepin-base.service` |
-| `ekf_node` | wheels + gyro + the camera's odometry fused in the plane, owns `odom -> base_link`; runs on whichever of them are alive, the IMU included or not | real-time, wifi-loss | 14 % / 42 MB | `pepin-ros.service` -> `robot.launch.py` |
+| `ekf_node` | wheels + gyro + the camera's odometry + the lidar's scan-to-scan odometry fused in the plane, owns `odom -> base_link`; runs on whichever of them are alive, the IMU included or not | real-time, wifi-loss | 14 % / 42 MB | `pepin-ros.service` -> `robot.launch.py` |
+| `laser_odometry` | each LD19 scan matched against the one before it (rf2o, no map) as `/odom_laser` for the filter | real-time, wifi-loss | 30 % / 105 MB **(estimate, to measure)** | `pepin-ros.service` -> `robot.launch.py` |
 | `tof_server` | the ToF sensors on I2C as a TCP stream (3335) | real-time, hardware-attached | 13 % / 22 MB | `pepin-tof.service` |
 | `goal_server` | goals on a socket, with the places book of the map in use | wifi-loss | 10 % / 113 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `ros2_launch` | the launch process that started and respawns the ROS nodes | wifi-loss | 10 % / 105 MB | `pepin-ros.service` ExecStart |
@@ -2011,10 +2013,31 @@ is the whole board.
 | `reap_ros2_cli` | kills ros2 CLI tools older than 90 s, once a minute (`sometimes`) | real-time | 5 % / 10 MB | `pepin-reap.timer` |
 | `foxglove_bridge` | **not expected**: the websocket is being removed, the laptop reads the board through zenoh | - | 0 % | was a component of `sensors_container` |
 
-The entries that must always run promise **377 % of 400 %** — the whole board minus one busy
-core — and 1215 MB of the 1.5 GB. That is the budget, not the measurement: the same stack idling
-on 2026-09-14 measured 235 % and 850 MB. The gap is the +50 % headroom every entry carries, and
-it is the reason a new process needs a number before it needs a launch line.
+### Laser odometry on the board
+
+The board keeps odometry and no map localiser (2026-09-22), so the witness that the room really
+moves past the cart has to reach the filter as a measurement of its own: `rf2o_laser_odometry`
+matches each LD19 scan against the one before it — scan to scan, no map, no graph — and publishes
+`/odom_laser` at 10 Hz, which the EKF fuses as `odom3`, **twist only** (`vx`, `vyaw`;
+`ros/params/ekf.yaml` says why a pose would fight the wheels). It publishes no transform: the
+filter owns `odom -> base_link`. `ros/feature.sh laser_odom on|off` is the switch, on by default,
+and off is the stack of the day before — the wheels, the gyro and the camera untouched. There is
+no Jazzy apt package, so the node is built into the board image from a pinned commit of the
+MAPIRlab ROS 2 port with a three-hunk patch (`ros/patches/rf2o-base-twist.patch`): upstream
+publishes the twist in the *laser's* frame, an empty covariance, and two `INFO` lines per scan.
+Its budget is an **estimate** until the first census after it lands, and its numbers are sized to
+be quiet: the drive that measures them pushes the cart forward by hand (`/odom_laser`'s `vx` must
+be positive and near `/odom`'s) and turns it left (`vyaw` positive and near the gyro's), because
+the LD19 hangs upside down and yawed and a sign error here is the one failure that would matter.
+
+The entries that must always run promise **327 % of 400 %** and 1377 MB of the 1.5 GB. That is
+the budget, not the measurement: the same stack idling on 2026-09-14 measured 235 % and 850 MB.
+The gap is the +50 % headroom every entry carries, and it is the reason a new process needs a
+number before it needs a launch line — which is exactly what it caught on 2026-09-22: with the
+tracker still counted as always-on, adding laser odometry promised **427 %** of four cores and
+1498 MB of 1.5 GB. Four A53 cores do not hold a map localiser *and* the laser odometry that
+replaces what it gave the EKF. The tracker is `sometimes` from that day (a mode, not the
+default); absent it is IDLE rather than MISSING, and running it is measured as before.
 
 ## Build and run (on the board)
 

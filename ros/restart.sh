@@ -404,6 +404,21 @@ check_map_odom() {
         warn 1.13 "map -> odom: $(tail -1 <<<"$out" | cut -c1-160) — the laptop half is ${age} s old, under the ${MAP_ODOM_GRACE_S} s it is given to recognise the room"
     else
         fail 1.13 "map -> odom: $(tail -1 <<<"$out" | cut -c1-160) — past the ${MAP_ODOM_GRACE_S} s grace, so the pose is the odometry's and nothing has recognised this room (ros/laptop.sh logs vslam)"
+    # Laser odometry: asked for only when the board is configured to run it, and asked of the
+    # DATA rather than of a log line — rf2o prints nothing periodic, and a node that is alive but
+    # never publishing is exactly the failure this check exists for (it waits for its first scan
+    # pair, and with its own `init_pose_from_topic` left at upstream's default it waits for ever).
+    # Same measurement as /map and /vo above: one rclpy node inside the container for five
+    # seconds, never the ros2 CLI.
+    if ssh "root@$BOARD" "grep -q '^PEPIN_LASER_ODOM=false' /etc/default/pepin-ros" 2>/dev/null; then
+        warn 1.14 "laser odometry: off on this board (ros/feature.sh laser_odom on); the EKF runs without odom3"
+    else
+        out="$(board_rate /odom_laser)"
+        if [[ "$out" == *" Hz over "* ]]; then
+            pass 1.14 "laser odometry: /odom_laser ${out#*: } (the EKF's odom3)"
+        else
+            fail 1.14 "laser odometry: /odom_laser is not flowing: $(tail -1 <<<"$out" | cut -c1-140) (is rf2o in the image? ros/board.sh census; docker logs pepin-ros | grep -ai rf2o)"
+        fi
     fi
 }
 

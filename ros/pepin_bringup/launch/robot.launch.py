@@ -32,6 +32,11 @@ Arguments:
   own odom -> base_link. Only with ``base_bridge_cpp:=true`` — the Python bridge publishes that
   transform itself and two publishers of one edge fight. ``ekf:=false`` is the way back to the
   bridge's own transform with no filter in the chain.
+- ``laser_odom`` (default **true**): laser odometry (rf2o, in the image) matching each scan
+  against the one before it — no map, no graph — and publishing /odom_laser, which the EKF fuses
+  as a twist. It is a source of the filter, never its precondition: ``laser_odom:=false`` leaves
+  the wheels, the gyro and the camera exactly as they were. ``ros/feature.sh laser_odom on|off``
+  flips it; the node publishes NO transform (the EKF owns odom -> base_link).
 - ``neck`` (default false): the neck's encoders as /neck/state and, behind the node's live
   ``neck_tf`` switch, base_link -> camera_link from them (pepin_bringup.neck_state, a Python
   process, ~150 MB). The laptop's camera node must then keep its static edge off
@@ -47,7 +52,14 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
-from pepin.deployment import BASE_MAX_ANGULAR_RAD_S, BASE_MAX_LINEAR_M_S, bridge_admin_for
+from pepin.deployment import (
+    BASE_MAX_ANGULAR_RAD_S,
+    BASE_MAX_LINEAR_M_S,
+    LASER_ODOM_HZ,
+    LASER_ODOM_TOPIC,
+    LASER_ODOM_TWIST_VARIANCE,
+    bridge_admin_for,
+)
 from pepin.footprint import hull_box
 from pepin.mounts import Mounts
 
@@ -295,6 +307,45 @@ def generate_launch_description() -> LaunchDescription:
         prefix=_after_ghost("/tof_bridge"),
         **RESPAWN,
     )
+    # LASER ODOMETRY: the cart's own motion from consecutive scans, scan to scan and with no map
+    # (rf2o, built into the image from a pinned commit, ros/Dockerfile). It is the odometry input
+    # that a wheel spinning on carpet cannot fool and the board keeps when the WiFi goes, which is
+    # why it lives here; the EKF fuses its TWIST as odom3 (ros/params/ekf.yaml) and nothing else
+    # reads it. ``publish_tf`` is FALSE and must stay so: the filter owns odom -> base_link, and a
+    # second publisher of that edge is the oldest bug in this stack. ``init_pose_from_topic`` is
+    # emptied because upstream's default makes the node wait for /base_pose_ground_truth, a
+    # simulator topic nothing here publishes, before it processes a single scan.
+    laser_odom = Node(
+        package="rf2o_laser_odometry",
+        executable="rf2o_laser_odometry_node",
+        output="screen",
+        # Above Nav2 with the filter it feeds: a scan matched late is a velocity measured late.
+        # TWO names, because this one process holds two rclcpp nodes: the matcher itself is a
+        # Node too, which is also why no ``name=`` is passed here — that is a process-wide
+        # ``__node:=`` remap and it would give both of them the same name. The names are the
+        # patch's (ros/patches/rf2o-base-twist.patch renames the outer one); the parameters
+        # reach them through launch_ros's ``/**`` wildcard, which needs no name either.
+        prefix=f"nice -n -5 {_after_ghost('/laser_odometry', '/CLaserOdometry2D')}",
+        parameters=[
+            {
+                "laser_scan_topic": "/scan",
+                "odom_topic": f"/{LASER_ODOM_TOPIC}",
+                "base_frame_id": "base_link",
+                "odom_frame_id": "odom",
+                "publish_tf": False,
+                "init_pose_from_topic": "",
+                "freq": LASER_ODOM_HZ,
+                # Both patched in (see ros/Dockerfile): the twist in base_link instead of in the
+                # laser's own frame, and a covariance the filter can weigh.
+                "base_frame_twist": True,
+                "twist_covariance_vx": LASER_ODOM_TWIST_VARIANCE["vx"],
+                "twist_covariance_vy": LASER_ODOM_TWIST_VARIANCE["vy"],
+                "twist_covariance_vyaw": LASER_ODOM_TWIST_VARIANCE["vyaw"],
+            }
+        ],
+        condition=IfCondition(LaunchConfiguration("laser_odom")),
+        **RESPAWN,
+    )
     # The neck's encoders and the live camera transform (pepin_bringup.neck_state). As a module,
     # like the recorder: the image's console scripts are generated at build time and the sources
     # are mounted over them. Off by default until the switch-over is measured: the laptop's
@@ -316,11 +367,13 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
             DeclareLaunchArgument("imu", default_value="false"),
             DeclareLaunchArgument("ekf", default_value="true"),
+            DeclareLaunchArgument("laser_odom", default_value="true"),
             DeclareLaunchArgument("neck", default_value="false"),
             OpaqueFunction(function=sensors_container),
             base,
             ekf,
             tof,
+            laser_odom,
             neck,
         ]
     )

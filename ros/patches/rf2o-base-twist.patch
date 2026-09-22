@@ -1,0 +1,143 @@
+diff -u -r a/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp b/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
+--- a/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
++++ b/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
+@@ -1,5 +1,7 @@
+ #include "rf2o_laser_odometry/CLaserOdometry2D.hpp"
+ 
++#include <cstdint>
++
+ #include <tf2/convert.h>
+ #include <tf2/exceptions.h>
+ #include <tf2_ros/transform_broadcaster.h>
+@@ -29,6 +31,12 @@
+   std::string         base_frame_id;
+   std::string         odom_frame_id;
+   std::string         init_pose_from_topic;
++
++  // pepin: the twist this node publishes, and what it claims to know about it.
++  bool                base_frame_twist, previous_valid;
++  double              twist_covariance_vx, twist_covariance_vy, twist_covariance_vyaw;
++  double              previous_x, previous_y, previous_yaw;
++  int64_t             previous_stamp_ns;
+ 
+   sensor_msgs::msg::LaserScan                     last_scan;
+   bool                                            GT_pose_initialized;
+diff -u -r a/src/CLaserOdometry2D.cpp b/src/CLaserOdometry2D.cpp
+--- a/src/CLaserOdometry2D.cpp
++++ b/src/CLaserOdometry2D.cpp
+@@ -966,7 +966,9 @@
+   kai_loc_old_(1) = -kai_abs_(0)*std::sin(phi) + kai_abs_(1)*std::cos(phi);
+   kai_loc_old_(2) =  kai_abs_(2);
+ 
+-  RCLCPP_INFO(get_logger(), "Laser odom [x,y,yaw]=[%f %f %f]",
++  // pepin: DEBUG. Two INFO lines per scan is 20 lines a second in the board's container log,
++  // which is where every restart check reads the stack's state from.
++  RCLCPP_DEBUG(get_logger(), "Laser odom [x,y,yaw]=[%f %f %f]",
+                 laser_pose_.translation()(0),
+                 laser_pose_.translation()(1),
+                 rf2o::getYaw(laser_pose_.rotation()));
+@@ -974,7 +976,7 @@
+   // Compose Transformations (robot odom)
+   robot_pose_ = laser_pose_ * laser_pose_on_robot_inv_;
+ 
+-  RCLCPP_INFO(get_logger(), "Robot-base odom [x,y,yaw]=[%f %f %f]",
++  RCLCPP_DEBUG(get_logger(), "Robot-base odom [x,y,yaw]=[%f %f %f]",
+                 robot_pose_.translation()(0),
+                 robot_pose_.translation()(1),
+                 rf2o::getYaw(robot_pose_.rotation()));
+diff -u -r a/src/CLaserOdometry2DNode.cpp b/src/CLaserOdometry2DNode.cpp
+--- a/src/CLaserOdometry2DNode.cpp
++++ b/src/CLaserOdometry2DNode.cpp
+@@ -17,9 +17,11 @@
+ 
+ #include "rf2o_laser_odometry/CLaserOdometry2DNode.hpp"
+ 
++#include <cmath>
++
+ using namespace rf2o;
+ 
+-CLaserOdometry2DNode::CLaserOdometry2DNode(): Node("CLaserOdometry2DNode")
++CLaserOdometry2DNode::CLaserOdometry2DNode(): Node("laser_odometry")
+ {
+   RCLCPP_INFO(get_logger(), "Initializing RF2O node...");
+ 
+@@ -39,6 +41,19 @@
+   this->get_parameter("init_pose_from_topic", init_pose_from_topic);
+   this->declare_parameter<double>("freq", 10.0);
+   this->get_parameter("freq", freq);
++  // pepin: publish the twist in base_frame_id instead of in the laser's own frame.
++  this->declare_parameter<bool>("base_frame_twist", false);
++  this->get_parameter("base_frame_twist", base_frame_twist);
++  // pepin: the diagonal of twist.covariance. 0.0 (the default) is upstream's empty matrix.
++  this->declare_parameter<double>("twist_covariance_vx", 0.0);
++  this->get_parameter("twist_covariance_vx", twist_covariance_vx);
++  this->declare_parameter<double>("twist_covariance_vy", 0.0);
++  this->get_parameter("twist_covariance_vy", twist_covariance_vy);
++  this->declare_parameter<double>("twist_covariance_vyaw", 0.0);
++  this->get_parameter("twist_covariance_vyaw", twist_covariance_vyaw);
++  previous_valid = false;
++  previous_x = previous_y = previous_yaw = 0.0;
++  previous_stamp_ns = 0;
+ 
+   // Init Publishers and Subscribers
+   //---------------------------------
+@@ -176,7 +191,10 @@
+   else
+   {
+     // This is a warning. We depend on laser scans, so no meaning running faster than scan freq.
+-    RCLCPP_WARN(get_logger(), "Waiting for laser_scans....");
++    // pepin: once per 10 s. At freq >= the lidar's rate this fires on every loop that
++    // found no new scan, which on a 10 Hz LD19 is tens of lines a minute in the board's log.
++    RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 10000,
++                         "Waiting for laser_scans....");
+   }
+ }
+ 
+@@ -220,9 +238,45 @@
+   odom.pose.pose.orientation = quaternion;
+   //set the velocity
+   odom.child_frame_id = base_frame_id;
+-  odom.twist.twist.linear.x = rf2o_ref.lin_speed;    //linear speed
+-  odom.twist.twist.linear.y = 0.0;
++  // pepin: rf2o's lin_speed is the LASER's own x step per second (CLaserOdometry2D.cpp:
++  // acu_trans(0,2) / dt), which is the robot's forward speed only while the laser is
++  // mounted axis-aligned with base_link. base_frame_twist differences the robot pose this
++  // node already publishes and rotates that step into base_frame_id instead.
++  double vx = rf2o_ref.lin_speed;
++  double vy = 0.0;
++  const double px = rf2o_ref.robot_pose_.translation()(0);
++  const double py = rf2o_ref.robot_pose_.translation()(1);
++  const double pyaw = rf2o::getYaw(rf2o_ref.robot_pose_.rotation());
++  const int64_t stamp_ns = rf2o_ref.last_odom_time.nanoseconds();
++  if (base_frame_twist)
++  {
++    const double dt = previous_valid ? (stamp_ns - previous_stamp_ns) * 1e-9 : 0.0;
++    if (dt > 0.0)
++    {
++      const double dx = px - previous_x;
++      const double dy = py - previous_y;
++      vx = ( dx * std::cos(previous_yaw) + dy * std::sin(previous_yaw)) / dt;
++      vy = (-dx * std::sin(previous_yaw) + dy * std::cos(previous_yaw)) / dt;
++    }
++    else
++    {
++      vx = 0.0;  // the first scan pair has no interval: no speed is better than a wrong one
++    }
++  }
++  previous_x = px;
++  previous_y = py;
++  previous_yaw = pyaw;
++  previous_stamp_ns = stamp_ns;
++  previous_valid = true;
++  odom.twist.twist.linear.x = vx;                    //linear speed
++  odom.twist.twist.linear.y = vy;
+   odom.twist.twist.angular.z = rf2o_ref.ang_speed;   //angular speed
++  // pepin: an unfilled covariance is a claim of perfect knowledge: robot_localization
++  // replaces a zero variance with 1e-9 (ekf.cpp) and then trusts this source over every
++  // other one it fuses. The diagonal is three parameters; 0.0 is upstream.
++  odom.twist.covariance[0]  = twist_covariance_vx;
++  odom.twist.covariance[7]  = twist_covariance_vy;
++  odom.twist.covariance[35] = twist_covariance_vyaw;
+   //publish the message
+   odom_pub->publish(odom);
+ 

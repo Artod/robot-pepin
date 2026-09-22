@@ -40,6 +40,37 @@ RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
     && cp build/ldlidar_component/libldlidar.so install/ldlidar_component/lib/ \
     && rm -rf /var/lib/apt/lists/* build log
 
+# Laser odometry (RF2O): the cart's planar motion from consecutive scans, scan-to-scan and with
+# no map, for the EKF. There is NO apt package — `ros-jazzy-rf2o-laser-odometry` does not exist
+# in the Jazzy arm64 index (checked 2026-09-21 against packages.ros.org's noble/arm64 Packages
+# list: 8704 packages, no rf2o and no laser_scan_matcher either), so the MAPIRlab ROS 2 port is
+# built from source at a pinned commit. Pinned and not `-b ros2`: a moved branch would silently
+# rebuild this board for an hour with code nobody read. rosdep is not used on it — its
+# package.xml still lists ROS 1's `cmake_modules`, which has no Jazzy key — so its three real
+# system dependencies are installed by name; CMakeLists.txt asks for nothing else.
+#
+# The patch is three upstream defects, each of which would have cost a drive (ros/patches):
+#   - twist.linear.x is the LASER's own x step per second, which is the cart's forward speed
+#     only for a laser mounted axis-aligned with base_link; ours is yawed -87.5 deg and rolled
+#     180. Behind `base_frame_twist`, the node differences the robot pose it already publishes.
+#   - twist.covariance is left empty, and robot_localization turns a zero variance into 1e-9 and
+#     then believes this source over the wheels AND the gyro. The diagonal is three parameters.
+#   - two RCLCPP_INFO per scan is 20 lines a second in the one log every restart check reads.
+# All three default to upstream's behaviour; ros/pepin_bringup/launch/robot.launch.py turns them on.
+ARG RF2O_COMMIT=b38c68e46387b98845ecbfeb6660292f967a00d3
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        ros-jazzy-eigen3-cmake-module libeigen3-dev libboost-dev patch \
+    && rm -rf /var/lib/apt/lists/*
+COPY patches/rf2o-base-twist.patch /tmp/rf2o-base-twist.patch
+RUN git clone https://github.com/MAPIRlab/rf2o_laser_odometry.git src/rf2o_laser_odometry \
+    && git -C src/rf2o_laser_odometry checkout --detach "$RF2O_COMMIT" \
+    && patch -p1 -d src/rf2o_laser_odometry < /tmp/rf2o-base-twist.patch \
+    && . /opt/ros/jazzy/setup.sh \
+    && colcon build --packages-select rf2o_laser_odometry \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    && rm -rf build log
+
 # ROS 2 Jazzy's binaries link every node against LTTng-UST through tracetools, and lttng-ust
 # 2.13 takes 128 MB of resident memory per process the moment it is loaded, tracing or not.
 # Nine ROS processes on a 1.5 GB board put 1.1 GB of untouched tracing buffers into swap and

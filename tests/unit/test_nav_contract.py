@@ -2397,7 +2397,10 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
     robot = _launch_processes("robot.launch.py")
     # tof_bridge since 2026-09-21: it died once on the robot and stayed dead, and a near-field
     # sensor that silently never comes back is worse than one that was never on.
-    assert _respawning(robot) == {"neck_state", "tof_bridge"}
+    # ...and, since 2026-09-22, the lidar's own odometry: a third-party binary, respawned and
+    # ghost-waited like ours because the EKF reads its topic and a name left in the bridge by a
+    # crash takes the route with it when the lease expires.
+    assert _respawning(robot) == {"neck_state", "tof_bridge", "rf2o_laser_odometry_node"}
     for launch in (vslam, nav):
         for watch in ("ghost_wait", "bridge_watch"):
             assert "respawn" not in launch[watch], watch
@@ -2551,9 +2554,13 @@ def test_one_node_can_be_kicked_without_a_container_restart() -> None:
     # to a "pepin_bringup.<module>" command line, and neither is one.
     kickable = (_respawning(vslam) - {"foxglove_bridge", "rgbd_odometry"}) | {"goal_server"}
     assert known["laptop.sh"] == kickable
-    # Everything of ours the board respawns is kickable: the navigation half and the neck node
+    # Everything of OURS the board respawns is kickable: the navigation half and the neck node
     # of the sensor launch (a code change on the board is one kicked process, never a restart).
-    assert known["thin.sh"] == _respawning(nav) | _respawning(robot)
+    # rf2o's binary is not ours and not a "pepin_bringup.<module>" command line — it changes only
+    # when the image is rebuilt, so there is nothing to kick it for.
+    assert known["thin.sh"] == (_respawning(nav) | _respawning(robot)) - {
+        "rf2o_laser_odometry_node"
+    }
 
 
 def test_the_graphs_grid_is_the_one_map_and_the_tracker_is_the_one_owner_of_map_to_odom() -> None:
@@ -2801,7 +2808,9 @@ def test_the_filter_survives_a_dead_gyro_because_the_launch_never_gated_it_on_on
     assert "ekf_on = LaunchConfiguration('ekf').perform(context).lower() == 'true'" in sf.unparsed(
         robot, ast.Assign
     )
-    assert sf.dict_items(robot)["publish_tf"] == {"not ekf_on", "True"}, (
+    # False is the laser odometry's, and for the same reason from the other side: with the filter
+    # up exactly one node publishes odom -> base_link, and it is the filter.
+    assert sf.dict_items(robot)["publish_tf"] == {"not ekf_on", "True", "False"}, (
         "the C++ bridge follows the filter; the Python bridge, which has no filter, keeps it"
     )
     assert sf.dict_items(robot)["imu_enable"] == {"imu_on"}, "the gyro keeps its own switch"
@@ -2820,6 +2829,106 @@ def test_the_filter_survives_a_dead_gyro_because_the_launch_never_gated_it_on_on
         "ros__parameters"
     ]
     assert ekf_yaml["odom0_config"][11] is True, "the wheels carry the heading when the gyro dies"
+
+
+def test_the_laser_odometry_is_a_twist_the_filter_can_weigh_and_never_a_second_transform() -> None:
+    """The board keeps odometry and no map localiser (2026-09-22), so the lidar's own scan-to-scan
+    motion reaches the EKF as odom3. Three things make that safe, and each was a bug somewhere:
+
+    - TWIST ONLY. rf2o integrates a pose from its own first scan; fused as a pose it would drag
+      odom -> base_link onto a second trajectory beside the wheels' (the lesson odom0 learned on
+      2026-09-08). vx and vyaw are velocities and have no origin to disagree about.
+    - NO TRANSFORM. ``publish_tf`` false: the filter owns odom -> base_link, and two publishers
+      of one edge is the oldest failure in this stack.
+    - A COVARIANCE THE FILTER CAN WEIGH. Upstream publishes an empty matrix, and
+      robot_localization raises a zero variance to 1e-9 (ekf.cpp) and then believes the source
+      over the wheels and the gyro both. The number is stamped where the message is born, as the
+      camera's is — three parameters the patched node takes from the launch.
+
+    And it is a source of the filter, never its switch: one operator gesture, one env var, one
+    launch argument, and the way back is the stack of the day before.
+    """
+    from pepin.deployment import LASER_ODOM_HZ, LASER_ODOM_TOPIC, LASER_ODOM_TWIST_VARIANCE
+
+    ekf = yaml.safe_load((REPO / "ros/params/ekf.yaml").read_text())["ekf_filter_node"][
+        "ros__parameters"
+    ]
+    assert ekf["odom3"] == LASER_ODOM_TOPIC
+    assert ekf["odom3_config"][6] is True and ekf["odom3_config"][11] is True, "vx and vyaw"
+    assert not any(ekf["odom3_config"][:6]), "no pose: it would fight the wheels' integration"
+    assert ekf["odom3_config"][7] is False, "the wheels' vy = 0 is the kinematic truth, not this"
+    assert ekf["odom3_differential"] is False, "a velocity is already differential"
+    assert ekf["odom3_twist_rejection_threshold"] > 0, "a corridor makes it wrong and confident"
+    # The one file the wheels and the gyro live in is untouched by this source.
+    assert ekf["odom0"] == "odom" and ekf["imu0"] == "imu/data_raw"
+    robot = sf.tree(ROBOT_LAUNCH)
+    node = next(
+        c
+        for c in sf.calls_to(robot, "Node")
+        if ast.unparse(sf.keywords(c).get("package", ast.Constant(None))) == "'rf2o_laser_odometry'"
+    )
+    # Read as source, not as values: the point of half of these is that the launch spells no
+    # number of its own — every one of them comes from the one constant in pepin.deployment.
+    params = {
+        ast.literal_eval(key): ast.unparse(value)
+        for table in ast.walk(node)
+        if isinstance(table, ast.Dict)
+        for key, value in zip(table.keys, table.values, strict=True)
+    }
+    assert params["publish_tf"] == "False", "the EKF owns odom -> base_link"
+    assert params["laser_scan_topic"] == "'/scan'"
+    assert "LASER_ODOM_TOPIC" in params["odom_topic"], "one name, in pepin.deployment"
+    assert (params["base_frame_id"], params["odom_frame_id"]) == ("'base_link'", "'odom'")
+    assert params["freq"] == "LASER_ODOM_HZ"
+    assert 0 < LASER_ODOM_HZ <= 10.0, (
+        "the loop consumes the newest scan each turn: above the LD19's own 10 Hz it only finds"
+        " nothing to do, and below it it throws scans away"
+    )
+    assert params["init_pose_from_topic"] == "''", (
+        "upstream's default is /base_pose_ground_truth, a simulator topic nothing here publishes,"
+        " and the node processes no scan at all until one arrives on it"
+    )
+    # The patch's two switches, both at the values that make the message honest.
+    assert params["base_frame_twist"] == "True", (
+        "upstream's twist.linear.x is the LASER's own x step per second, and this lidar hangs"
+        " upside down and yawed -87.5 deg (config/lidar.json)"
+    )
+    for axis in ("vx", "vy", "vyaw"):
+        assert params[f"twist_covariance_{axis}"] == f"LASER_ODOM_TWIST_VARIANCE[{axis!r}]", axis
+        assert LASER_ODOM_TWIST_VARIANCE[axis] > 0, f"{axis}: 0 is 1e-9 to the filter, not unknown"
+    patch = (REPO / "ros/patches/rf2o-base-twist.patch").read_text()
+    dockerfile = (REPO / "ros/Dockerfile").read_text()
+    assert "rf2o-base-twist.patch" in dockerfile and "rf2o_laser_odometry" in dockerfile
+    assert "ARG RF2O_COMMIT=" in dockerfile and "checkout --detach" in dockerfile, (
+        "pinned by commit: a moved branch rebuilds this board for an hour with code nobody read"
+    )
+    for parameter in ("base_frame_twist", "twist_covariance_vx", "twist_covariance_vyaw"):
+        assert f'declare_parameter<bool>("{parameter}"' in patch or (
+            f'declare_parameter<double>("{parameter}"' in patch
+        ), f"the patch is what teaches rf2o {parameter}"
+    # On by default, and reachable end to end: one gesture, one env var, one argument.
+    argument = next(
+        c
+        for c in sf.calls_to(robot, "DeclareLaunchArgument")
+        if ast.unparse(c.args[0]) == "'laser_odom'"
+    )
+    assert ast.unparse(sf.keywords(argument)["default_value"]) == "'true'"
+    bringup = sf.tree("ros/pepin_bringup/launch/bringup.launch.py")
+    assert "LaunchConfiguration('laser_odom')" in sf.unparsed(bringup, ast.Call)
+    unit = (REPO / "board/pepin-ros.service").read_text()
+    assert "Environment=PEPIN_LASER_ODOM=true" in unit
+    assert "laser_odom:=${PEPIN_LASER_ODOM}" in unit
+    assert "laser_odom) VAR=PEPIN_LASER_ODOM ;;" in (REPO / "ros/feature.sh").read_text()
+    # Declared on the board with a budget before it is allowed to run there (CLAUDE.md rule 20).
+    entry = next(
+        p
+        for p in json.loads((REPO / "config/board_manifest.json").read_text())["processes"]
+        if p["name"] == "laser_odometry"
+    )
+    assert set(entry["on_board_because"]) == {"real-time", "wifi-loss"}
+    assert entry["budget"]["cpu_percent"] > 0 and entry["budget"]["rss_mb"] > 0
+    assert "TO MEASURE" in entry["note"], "an estimate says so until a census replaces it"
+    assert "/odom_laser" in (REPO / "ros/restart.sh").read_text(), "a restart asks whether it flows"
 
 
 def test_the_visual_odometry_reaches_the_ekf_without_being_able_to_move_the_odom_frame() -> None:

@@ -24,6 +24,10 @@ Environment=PEPIN_IMU=false
 # odom -> base_link; it does NOT need the IMU, only the C++ bridge. Off, the bridge publishes
 # that transform from the wheels alone and there is no /odometry/filtered for the relocalizer.
 Environment=PEPIN_EKF=true
+# The lidar's own scan-to-scan odometry (rf2o) as a twist for that filter, odom3 in the same file
+# (ros/feature.sh laser_odom on|off). A source, not a precondition: off, the filter runs on the
+# wheels, the gyro and the camera exactly as before. It publishes no transform.
+Environment=PEPIN_LASER_ODOM=true
 Environment=PEPIN_TOF=false
 # The neck's encoders and the live camera transform (ros/feature.sh neck on|off); the laptop's
 # SLAM must then start with ros/laptop.sh vslam --neck, or two nodes publish base_link -> camera_link.
@@ -50,7 +54,7 @@ ExecStartPre=-/bin/sh -c 'for i in $$(seq 1 90); do [ "$$(timedatectl show -p NT
 ExecStartPre=-/bin/sh -c 'mkdir -p /root/pepin-ros/logs && /usr/bin/docker logs pepin-ros > /root/pepin-ros/logs/$$(date +%%Y%%m%%d_%%H%%M%%S).log 2>&1'
 ExecStartPre=-/usr/bin/docker rm -f pepin-ros
 # run.sh mounts the code from /root/pepin-ros (see it): edits reach the robot via ros/sync.sh, no rebuild.
-ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} slam_toolbox:=${PEPIN_SLAM_TOOLBOX} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} ekf:=${PEPIN_EKF} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK} side:=${PEPIN_SIDE}
+ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} slam_toolbox:=${PEPIN_SLAM_TOOLBOX} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} ekf:=${PEPIN_EKF} laser_odom:=${PEPIN_LASER_ODOM} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK} side:=${PEPIN_SIDE}
 # ros2 launch needs more than 5 s to bring a dozen nodes down on this board; a SIGKILL (137)
 # after the grace period is still a normal stop, not a failure.
 # The container's stop signal is SIGINT (ros/run.sh, ros/Dockerfile), which the launch answers by
