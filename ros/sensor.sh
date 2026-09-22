@@ -231,6 +231,15 @@ refuse_if_navigating() {  # the lifecycle half never runs under a goal, nor unde
 
 apply_sources() {  # SENSOR on|off: the tracker's sources flag; prints what changed
     local sensor="$1" state="$2" have want
+    # NO TRACKER, NO SOURCES (PEPIN_LOCALIZER=rtabmap, ros/lib.sh): the board runs no
+    # scan-matching tracker, so there is no `sources` flag anywhere and the demo's tracker half
+    # simply does not exist in this stack. The costmap half below still applies, and this is not
+    # a failure — it is the arrangement. PEPIN_LOCALIZER=tracker is where the whole switch lives.
+    if ! pepin_localizer_is_tracker; then
+        echo "  no tracker in this stack (PEPIN_LOCALIZER=$PEPIN_LOCALIZER): the pose is RTAB-Map's"
+        echo "  and has no per-sensor sources; only the costmap layers below move"
+        return 0
+    fi
     have="$(tracker_sources)" || {
         # Two ways to get here and the operator must not have to guess which: the node is down,
         # or this build's tracker has no sources flag at all (it arrives with the fusion wiring)
@@ -501,7 +510,10 @@ status() {  # what the tracker matches on, what the costmaps take, and what each
     SIDE="$(board_side)"
     tracker="$(board_report "$TRACKER\\]: tracker:")"
     value="$(printf '%s' "$tracker" | sed -n 's/.*[ ,]sources=\([a-z,]*\).*/\1/p')"
-    if [ -z "$tracker" ]; then
+    if ! pepin_localizer_is_tracker; then
+        echo "tracker sources: none (PEPIN_LOCALIZER=$PEPIN_LOCALIZER: RTAB-Map on the laptop owns"
+        echo "                 map -> odom and no tracker runs on the board)"
+    elif [ -z "$tracker" ]; then
         echo "tracker sources: ? ($TRACKER printed no report in ${REPORT_WINDOW_S} s; ros/watch.sh)"
     elif [ -z "$value" ]; then
         echo "tracker sources: ? (its report line carries no sources= flag; ros/flags.sh list $TRACKER)"

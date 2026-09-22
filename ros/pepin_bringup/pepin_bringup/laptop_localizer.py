@@ -85,6 +85,7 @@ from std_msgs.msg import Float32, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer
 
+from pepin.deployment import DEFAULT_LOCALIZER
 from pepin.dynamic import StaticMask
 from pepin.flags import Flag, FlagSet
 from pepin.fusion import COVARIANCE_CHOICES, GATE, PEAK, odometry_covariance
@@ -551,6 +552,20 @@ class LaptopLocalizer(Node):
         super().__init__("laptop_localizer")
         self._scan_topic = str(self.declare_parameter("scan_topic", "/scan").value)
         self._odom_topic = str(self.declare_parameter("odom_topic", "/odometry/filtered").value)
+        # WHO OWNS map -> odom (PEPIN_LOCALIZER, pepin.deployment.localizer; the launch passes
+        # the resolved word). Declared BEFORE the switches, like every other plain parameter:
+        # rclpy runs their callback on declarations too and refuses a name outside the flags
+        # table (node_kit.Switches).
+        #   Under "tracker" this node is the board's second opinion — a whole-map candidate once
+        # a second, the camera's poses as measurements — and both go out. Under "rtabmap" there
+        # is no tracker to judge or fuse them: the searching and the matching still run (the
+        # report line is how the camera and the map are watched, and it costs this laptop alone),
+        # and the two board-bound topics are simply not spoken on. The report line counts what
+        # was withheld, so a silent channel is visible rather than merely absent.
+        self._to_the_board = (
+            str(self.declare_parameter("localizer", DEFAULT_LOCALIZER).value) == "tracker"
+        )
+        self._withheld = 0  # words this role kept at home, for the report line
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._tally = Tally(STAGES)
         self._localizer: Localizer | None = None
@@ -639,10 +654,15 @@ class LaptopLocalizer(Node):
         ).start()
         self.create_timer(TICK_S, self._tick)
         self.create_timer(30.0, self._report)
+        to_whom = (
+            f" -> {CANDIDATE_TOPIC}"
+            if self._to_the_board
+            else " (localizer rtabmap: watched and reported here, nothing sent — no tracker)"
+        )
         self.get_logger().info(
             f"laptop localizer up: the whole map searched every"
             f" {float(self._switches['watch_period_s']):.1f} s on {self._scan_topic}"
-            f" -> {CANDIDATE_TOPIC}; the camera matched at"
+            f"{to_whom}; the camera matched at"
             f" {float(self._switches['camera_match_hz']):.1f} Hz -> {MEASUREMENT_TOPIC};"
             f" the camera's own whole-map search"
             f" {'on' if self._switches.on('camera_search') else 'off'};"
@@ -1034,6 +1054,9 @@ class LaptopLocalizer(Node):
         remote = RemoteMeasurement.of(measured, self._map_id)
         self._sent = remote
         self._tally.count(f"sent_{source}")
+        if not self._to_the_board:  # no tracker fuses a pose measurement in this role
+            self._withheld += 1
+            return
         self._measurement_pub.publish(
             String(
                 data=remote.to_json(
@@ -1210,6 +1233,9 @@ class LaptopLocalizer(Node):
         verdict = CandidateVerdict.NOTHING if pose is None else judge(candidate, pose, self._fit)
         self._tally.count(f"cam_{verdict}")
         self._tally.count("cam_published")
+        if not self._to_the_board:  # no tracker judges a whole-map candidate in this role
+            self._withheld += 1
+            return
         self._pub.publish(
             String(data=candidate.to_json(verdict=str(verdict), matched_on=TRACKED_MAP_TOPIC))
         )
@@ -1256,9 +1282,14 @@ class LaptopLocalizer(Node):
         # is allowed to run at all (pepin.watchdog.camera_search_need): unknown_map means the
         # lidar cannot place itself here, and a second sensor's opinion is then worth its CPU.
         self._lidar_verdict = verdict
-        self._pub.publish(
-            String(data=candidate.to_json(verdict=str(verdict), search_ms=round(took_s * 1e3, 1)))
-        )
+        if self._to_the_board:
+            self._pub.publish(
+                String(
+                    data=candidate.to_json(verdict=str(verdict), search_ms=round(took_s * 1e3, 1))
+                )
+            )
+        else:  # no tracker judges a whole-map candidate in this role; the pose below is the view
+            self._withheld += 1
         sigma_x, sigma_y, sigma_yaw = measured.sigmas
         self._pose_pub.publish(
             pose_with_covariance(
@@ -1288,10 +1319,18 @@ class LaptopLocalizer(Node):
             f" found nothing {c['found_nothing']}, failed {c['failed']};"
             f" revolutions heard twice {c['repeat']}; {self._camera_line(w)};"
             f" {self._camera_search_line(w)};"
+            f" {self._role_line()};"
             f" ms median/max: {w.stages()}; flags: {self._switches.state()}"
         )
         if c["failed"]:
             self.get_logger().warning(f"the last failure: {w.notes.get('failure', '')}")
+
+    def _role_line(self) -> str:
+        """Whether this node's words leave the laptop at all (``PEPIN_LOCALIZER``), and how many
+        it has kept at home since it started where they do not."""
+        if self._to_the_board:
+            return "role tracker (candidates and measurements go to the board)"
+        return f"role rtabmap (no tracker to speak to; {self._withheld} words withheld)"
 
     def _camera_line(self, w: Any) -> str:
         """The camera half of the report: what each source sent and at what fit, what the

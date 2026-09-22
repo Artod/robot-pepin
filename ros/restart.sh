@@ -146,7 +146,14 @@ restart_board() {
     else
         ssh "root@$BOARD" "systemctl restart pepin-ros && sleep 8 && systemctl is-active pepin-ros"
     fi
-    wait_for "board" "$WAIT_BOARD_S" pepin-ros "relocalizer\]: tracker:" || true
+    # Which line says this half is back. Under PEPIN_LOCALIZER=tracker it is the tracker's first
+    # report; under rtabmap no tracker is launched at all, so the recorder — the one node of ours
+    # that runs on the board in every arrangement — is what is waited for instead.
+    if pepin_localizer_is_tracker; then
+        wait_for "board" "$WAIT_BOARD_S" pepin-ros "relocalizer\]: tracker:" || true
+    else
+        wait_for "board" "$WAIT_BOARD_S" pepin-ros "run recorder ready" || true
+    fi
     # A route's DDS endpoint is built when the route is created and only if the far bridge is
     # already announcing, so OF TWO BRIDGES THE ONE THAT STARTS LAST gets working routes. The
     # board's restart takes its bridge with it, which leaves the laptop's publications (/vo,
@@ -200,7 +207,12 @@ check_board() {
     fi
 
     line="$(board_last "$REPORT_WINDOW_S" "relocalizer\]: tracker:")"
-    if [ -z "$line" ]; then
+    if ! pepin_localizer_is_tracker; then
+        # One localiser (PEPIN_LOCALIZER=rtabmap): no tracker is launched here, so there is no
+        # report line, no sources and no adoption to judge. What replaces this check is 1.13
+        # below — whether the transform the laptop owns is arriving and has corrected anything.
+        warn 1.2 "tracker: none on this board (PEPIN_LOCALIZER=$PEPIN_LOCALIZER); the pose is RTAB-Map's, see 1.13"
+    elif [ -z "$line" ]; then
         fail 1.2 "tracker: no report line in ${REPORT_WINDOW_S} s (is the relocalizer up? ros/watch.sh)"
     else
         value="$(sed -n 's/.* sources=\([a-z,]*\).*/\1/p' <<<"$line")"
@@ -218,10 +230,25 @@ check_board() {
         fi
     fi
 
-    if out="$("$HERE/goto.sh" where 2>&1)"; then
-        pass 1.3 "pose: $(tr '\n' ' ' <<<"$out" | cut -c1-140)"
+    # WHERE THE CART THINKS IT IS. Two different questions by localiser, and the script asks the
+    # one that exists: the tracker's own /where_am_i service where a tracker runs, and the goal
+    # server's socket where none does — that answer is composed from TF (map -> base_link), which
+    # is the only way this pose can be read at all under rtabmap.
+    if pepin_localizer_is_tracker; then
+        if out="$("$HERE/goto.sh" where 2>&1)"; then
+            pass 1.3 "pose: $(tr '\n' ' ' <<<"$out" | cut -c1-140)"
+        else
+            fail 1.3 "pose: /where_am_i did not answer: $(tail -1 <<<"$out")"
+        fi
     else
-        fail 1.3 "pose: /where_am_i did not answer: $(tail -1 <<<"$out")"
+        out="$("$HERE/go.sh" where 2>&1 || true)"
+        if [[ "$out" != *'"event": "where"'* ]]; then
+            fail 1.3 "pose: the goal server did not answer 'where' on its socket: $(tail -1 <<<"$out" | cut -c1-140)"
+        elif [[ "$out" == *'"pose": "tf"'* ]]; then
+            pass 1.3 "pose: from TF, as this stack has it — $(tr '\n' ' ' <<<"$out" | cut -c1-160)"
+        else
+            fail 1.3 "pose: the goal server answers '$(sed -n 's/.*"pose": "\([a-z]*\)".*/\1/p' <<<"$out" | tail -1)', not 'tf' — nothing publishes map -> base_link (is ros/laptop.sh vslam up?)"
+        fi
     fi
 
     n="$(board_count "$ERROR_WINDOW_S" 'Failed to meet update rate')"
@@ -261,7 +288,12 @@ check_board() {
     # and the question is whether it is advertised at all: a tracker that has republished no map
     # leaves both costmaps without a static map and the planner with nothing to plan on.
     out="$(board_rate /map_tracked)"
-    if [[ "$out" == *"not advertised"* ]]; then
+    if ! pepin_localizer_is_tracker; then
+        # /map_tracked is the TRACKER's republication of the grid it adopted. With no tracker
+        # both costmaps read /map directly instead (ros/params/nav2_map_from_laptop.yaml, loaded
+        # by nav.launch.py under this switch), and /map is checked by the rate kit above.
+        warn "1.$n" "/map_tracked: n/a under PEPIN_LOCALIZER=$PEPIN_LOCALIZER (no tracker republishes a map; both static layers read /map, checked above)"
+    elif [[ "$out" == *"not advertised"* ]]; then
         fail "1.$n" "/map_tracked is not advertised on the board: the tracker republished no map, so neither costmap's static layer has one"
     else
         pass "1.$n" "/map_tracked advertised by the tracker: both static layers have their source (${out#*: })"
@@ -332,6 +364,45 @@ check_board() {
         warn 1.12 "nav2 threads: busiest thread ${line%% *} at $value of the container's lifetime (${line##* }) — high, but this board has never been measured at rest; watch it (ros/board.sh census)"
     else
         pass 1.12 "nav2 threads: busiest thread ${line%% *} at $value of the container's lifetime (${line##* }), none pegged"
+    fi
+
+    check_map_odom
+}
+
+# 1.13: WHO IS CORRECTING THE POSE, under PEPIN_LOCALIZER=rtabmap. The board cannot answer this
+# by itself: map -> odom is a TF edge and not a topic, and reading TF there means a /tf
+# subscription at ~100 messages a second on four A53 cores, which CLAUDE.md rule 20 keeps off it
+# (the board is measured through /proc and its nodes' own report lines, never the ROS CLI). So it
+# is read WHERE THE PUBLISHER IS — one rclpy node in the laptop's own container
+# (ros/tools/map_odom.py) — and the board's half of the same question is check 1.3, the goal
+# server's socket `where`, whose pose is composed from this very edge.
+#   Two readings, and both matter: FRESH (the transform is re-broadcast at 20 Hz, so seconds of
+# silence is a publisher that is gone) and NOT THE IDENTITY (a localiser that has recognised
+# nothing publishes map == odom, and every pose composed from it is simply the odometry's). The
+# identity is correct for the first seconds of a start and a fault after them, which is why it is
+# a WARN while the laptop half is young and a FAIL once it has had a minute to recognise the room.
+MAP_ODOM_GRACE_S=60
+check_map_odom() {
+    local out status=0 started age
+    if pepin_localizer_is_tracker; then
+        warn 1.13 "map -> odom: owned by the board's tracker in this stack (PEPIN_LOCALIZER=$PEPIN_LOCALIZER); 1.2 is its report line"
+        return 0
+    fi
+    if ! docker ps --format '{{.Names}}' | grep -qx pepin-vslam; then
+        fail 1.13 "map -> odom: pepin-vslam is not running, so nothing publishes it at all (ros/laptop.sh vslam)"
+        return 0
+    fi
+    out="$(docker exec pepin-vslam /pepin_entrypoint.sh timeout -s KILL 20 python3 /tools/map_odom.py 5 2>&1)" || status=$?
+    started="$(docker inspect -f '{{.State.StartedAt}}' pepin-vslam 2>/dev/null || true)"
+    age=$(( $(date +%s) - $(date -j -f '%Y-%m-%dT%H:%M:%S' "${started%%.*}" +%s 2>/dev/null || echo 0) ))
+    if [ "$status" -ge 2 ]; then
+        fail 1.13 "map -> odom: $(tail -1 <<<"$out" | cut -c1-160)"
+    elif [ "$status" -eq 0 ]; then
+        pass 1.13 "map -> odom: $(tail -1 <<<"$out" | cut -c1-160)"
+    elif [ "$age" -lt "$MAP_ODOM_GRACE_S" ] 2>/dev/null; then
+        warn 1.13 "map -> odom: $(tail -1 <<<"$out" | cut -c1-160) — the laptop half is ${age} s old, under the ${MAP_ODOM_GRACE_S} s it is given to recognise the room"
+    else
+        fail 1.13 "map -> odom: $(tail -1 <<<"$out" | cut -c1-160) — past the ${MAP_ODOM_GRACE_S} s grace, so the pose is the odometry's and nothing has recognised this room (ros/laptop.sh logs vslam)"
     fi
 }
 

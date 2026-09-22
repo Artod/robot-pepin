@@ -23,6 +23,12 @@ instead and judges the goal by how fresh that edge is (:class:`pepin.watch.GoalG
 ``tf_pose`` flag is that fallback: off, the node is the old one, which asked the tracker and
 refused every goal in SLAM mode with "the tracker is not up" (2026-09-13 14:05).
 
+SINCE 2026-09-22 THAT FALLBACK IS THE SHIPPED PATH. ``PEPIN_LOCALIZER=rtabmap`` (the ``localizer``
+parameter, from pepin.deployment.localizer) means the laptop's RTAB-Map owns ``map -> odom`` and no
+tracker runs anywhere: there is nobody to ask for a pose, no fit and no sigma, so ``where`` answers
+``"pose": "tf"`` with no ``fit`` in it and a goal is judged by how fresh ``map -> base_link`` is.
+``PEPIN_LOCALIZER=tracker`` is the stack described below, unchanged.
+
 WHAT SAYS THE SLAM HALF IS STILL THERE. Not that transform: slam_frame re-broadcasts the LAST
 correction at 10 Hz with a fresh stamp, so ``map -> base_link`` stays milliseconds old with the
 laptop shut down — the gate would pass and Nav2, whose costmaps read the same fresh edge, would
@@ -57,6 +63,7 @@ from std_srvs.srv import Trigger
 
 from pepin.deployment import (
     BOARD_NAV_NODES,
+    DEFAULT_LOCALIZER,
     HEARTBEAT_HZ,
     HEARTBEAT_TOPIC,
     next_transition,
@@ -310,11 +317,37 @@ class GoalServer(Node):
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
         self._lock = threading.Lock()
+        # WHO OWNS map -> odom in this stack (PEPIN_LOCALIZER, pepin.deployment.localizer; the
+        # launch passes the resolved word). "tracker": the board's relocalizer answers
+        # /where_am_i, publishes the fit and the sigma, and pepin_bringup.slam_frame is the one
+        # thing that could put a pulse on /map_odom — everything below is as it has always been.
+        # "rtabmap": there is no tracker to ask, and no /map_odom either, because the laptop's
+        # RTAB-Map broadcasts map -> odom straight into TF. So the pose is read from
+        # map -> base_link (the `tf_pose` path, which was written for exactly this) and the
+        # correction watch is not consulted: it would refuse every goal with "no SLAM correction
+        # has ever arrived" on a stack where no message-shaped correction exists to arrive.
+        self._localizer = str(self.declare_parameter("localizer", DEFAULT_LOCALIZER).value)
         # Last, after every other declare_parameter: rclpy runs the switches' callback on
         # declarations too, and a name outside the table is refused there (node_kit.Switches).
         self._switches = Switches(self, FLAGS)
         threading.Thread(target=self._serve, daemon=True).start()
-        self.get_logger().info(f"goal server ready on port {self._port}; {self._switches.state()}")
+        self.get_logger().info(
+            f"goal server ready on port {self._port}; localizer {self._localizer}"
+            f" ({self._pose_source_note()}); {self._switches.state()}"
+        )
+
+    def _pose_source_note(self) -> str:
+        """Where this node will look for the cart's pose, in one phrase for the report line."""
+        if self._localizer == "tracker":
+            return "the board's tracker answers /where_am_i, its fit and sigma gate a goal"
+        return "no tracker: map -> base_link from TF, no /map_odom pulse to watch"
+
+    def _watching_correction(self) -> bool:
+        """Whether the SLAM half's ``/map_odom`` pulse is evidence here at all: only where a
+        message-shaped correction exists, which is the ``tracker`` stack with
+        pepin_bringup.slam_frame. Under ``rtabmap`` RTAB-Map broadcasts the transform itself and
+        nothing publishes that topic, so a watch of it would refuse every goal."""
+        return self._switches.on("correction_watch") and self._localizer == "tracker"
 
     def _heartbeat(self) -> None:
         self._beat.publish(Header(stamp=self.get_clock().now().to_msg(), frame_id="laptop"))
@@ -517,13 +550,18 @@ class GoalServer(Node):
             # ...and how long ago the SLAM correction last landed, where one ever has: the one
             # reading that tells a live SLAM half from a dead one before a goal is sent.
             correction = self._correction().age_s
+            # The fit is the TRACKER's number and nobody else's. Printed beside a pose read from
+            # TF it is a standing 0.00 that reads as a lost robot (a stack with no tracker has no
+            # fit, it does not have a bad one), so where no tracker speaks the key is not there.
+            fit = {"fit": self.fit} if source == "tracker" else {}
             self._send(
                 connection,
                 {
                     "event": "where",
-                    "fit": self.fit,
+                    **fit,
                     "planner": self.planner,
                     "pose": source,
+                    "localizer": self._localizer,
                     **({} if correction is None else {"correction_s": round(correction, 2)}),
                     **pose,
                 },
@@ -632,8 +670,12 @@ class GoalServer(Node):
 
         The waiting probe is paid ONCE per process: afterwards the answer comes from the graph
         (``service_is_ready``) and from the fit, so a tracker that comes up late is still found,
-        while a stack that has none stops paying a second for every pose read.
+        while a stack that has none stops paying a second for every pose read. Under
+        ``PEPIN_LOCALIZER=rtabmap`` even that one second is not paid: the launch does not start a
+        tracker, so the answer is known before the first ask.
         """
+        if self._localizer != "tracker":
+            return False
         if self._fit_heard:
             return True
         if not self._tracker_probed:
@@ -653,7 +695,7 @@ class GoalServer(Node):
         )
         if self._switches.on("tf_pose") and not self._tracker_here():
             edge = self._tf_pose() if pose is None else pose
-            watched = self._correction() if self._switches.on("correction_watch") else None
+            watched = self._correction() if self._watching_correction() else None
             return self._gate.verdict(None, edge.get("age_s"), watched)
         return self._gate.verdict(self.fit, None, sigma=self._sigma())
 
@@ -790,7 +832,7 @@ class GoalServer(Node):
             # map -> odom from the last correction, so the costmaps keep a fresh map ->
             # base_link and nothing times out — the cart would follow its plan by dead reckoning
             # across a map that stopped growing. The correction's arrival is what stops it.
-            pulse = not ready.tracker and self._switches.on("correction_watch")
+            pulse = not ready.tracker and self._watching_correction()
             stopped_lost = False
             cut = ""
             while rclpy.ok() and not result_future.done():

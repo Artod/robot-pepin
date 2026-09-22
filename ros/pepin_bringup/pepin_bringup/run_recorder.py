@@ -35,6 +35,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profi
 from sensor_msgs.msg import Imu, LaserScan, Range
 from std_msgs.msg import String
 
+from pepin.deployment import DEFAULT_LOCALIZER
 from pepin.flags import Flag, FlagSet
 from pepin.mapcache import run_length_encode
 from pepin.mounts import Mounts
@@ -49,7 +50,7 @@ from pepin.runlink import (
 )
 from pepin.tape import RunTape, camera_clip_path, next_run_number
 from pepin_bringup.bridge_kick import BridgeKick
-from pepin_bringup.node_kit import Switches
+from pepin_bringup.node_kit import Switches, TfLookup
 
 # The live flags (CLAUDE.md rule 19); their state is printed in the node's ready line.
 FLAGS = FlagSet(
@@ -158,6 +159,10 @@ class RunRecorder:
     # 40% of a core on this board (measured 2026-09-08, load average 9 with the controller loop
     # down to 3 Hz), and a prelude does not need 10 Hz. During a run nothing is thinned.
     IDLE_PERIOD_S: ClassVar[dict[str, float]] = {"pose": 0.2, "loc": 0.2}
+    # How often map -> base_link is read into the tape where no tracker publishes a pose: the
+    # same 5 Hz the tracker's own records are thinned to above, so a tape looks the same either
+    # way and a replay does not have to know which stack wrote it.
+    LOC_TF_PERIOD_S: ClassVar[float] = 0.2
 
     def __init__(
         self,
@@ -166,6 +171,7 @@ class RunRecorder:
         tape: RunTape | None = None,
         fusion_records: Callable[[], bool] = lambda: True,
         planner_records: Callable[[], bool] = lambda: True,
+        loc_from_tf: bool = False,
     ) -> None:
         self._node = node
         self._fusion_records = fusion_records
@@ -188,6 +194,15 @@ class RunRecorder:
         node.create_subscription(Odometry, "/odom", self._on_odom, 20)
         node.create_subscription(PoseWithCovarianceStamped, "/tracker_pose", self._on_loc, 10)
         node.create_subscription(Twist, "/cmd_vel", self._on_cmd, 20)
+        # WHERE THE `loc` RECORDS COME FROM when no tracker runs (PEPIN_LOCALIZER=rtabmap):
+        # /tracker_pose has no publisher there, and a tape with no pose in it is a drive nobody
+        # can replay. The same edge every other consumer composes — the laptop's map -> odom over
+        # the transport with the board's own odom -> base_link — read here on a timer, because TF
+        # is a lookup and not a topic. Subscribed only in that role, so a stack with a tracker
+        # pays neither the timer nor the /tf subscription behind the listener.
+        self._tf = TfLookup(node) if loc_from_tf else None
+        if self._tf is not None:
+            node.create_timer(self.LOC_TF_PERIOD_S, self._loc_from_tf)
         # Only while a run is open: rclpy turns every LaserScan into Python objects BEFORE our
         # callback can decline it, and that deserialisation alone cost 38% of a core between
         # goals on this board (measured 2026-09-08, load average 8.4). A drive gets them from
@@ -514,10 +529,33 @@ class RunRecorder:
             {
                 "t": _stamp(msg.header),
                 "topic": "loc",
+                "source": "tracker",
                 "x": round(msg.pose.pose.position.x, 4),
                 "y": round(msg.pose.pose.position.y, 4),
                 "theta": round(_yaw(msg.pose.pose.orientation), 5),
                 "confidence": round(1.0 / (1.0 + cov[0] + cov[7] + cov[35]), 3),
+            }
+        )
+
+    def _loc_from_tf(self) -> None:
+        """The same record read from ``map -> base_link``, where no tracker publishes a pose.
+
+        No ``confidence``: TF carries no covariance, and a made-up number in a tape is worse
+        than a missing one — ``source`` says which of the two wrote the record.
+        """
+        if self._tf is None or not self._keep("loc"):
+            return
+        transform = self._tf.transform("map", "base_link", timeout_s=0.0)
+        if transform is None:
+            return
+        self._tape.add(
+            {
+                "t": _stamp(transform.header),
+                "topic": "loc",
+                "source": "tf",
+                "x": round(transform.transform.translation.x, 4),
+                "y": round(transform.transform.translation.y, 4),
+                "theta": round(_yaw(transform.transform.rotation), 5),
             }
         )
 
@@ -536,12 +574,19 @@ class RunRecorderNode(Node):
     def __init__(self) -> None:
         super().__init__("run_recorder")
         self._record_dir = Path(str(self.declare_parameter("record_dir", "/maps/rec").value))
+        # WHO OWNS map -> odom (PEPIN_LOCALIZER, pepin.deployment.localizer; the launch passes
+        # the resolved word). Declared BEFORE the switches: rclpy runs their callback on
+        # declarations too and refuses a name outside the flags table (node_kit.Switches).
+        # Under "rtabmap" nothing publishes /tracker_pose, so the tape's `loc` records are read
+        # from TF instead; under "tracker" the tape is exactly what it has always been.
+        self._localizer = str(self.declare_parameter("localizer", DEFAULT_LOCALIZER).value)
         self._switches = Switches(self, FLAGS)
         self._recorder = RunRecorder(
             self,
             self._record_dir,
             fusion_records=lambda: self._switches.on("fusion_records"),
             planner_records=lambda: self._switches.on("planner_records"),
+            loc_from_tf=self._localizer != "tracker",
         )
         # The laptop's one way to restart the board's zenoh bridge without an ssh key
         # (pepin_bringup.bridge_kick): this node hosts the handler because it is the only one
@@ -558,8 +603,10 @@ class RunRecorderNode(Node):
         self._status_pub = self.create_publisher(String, RUN_STATUS_TOPIC, latched)
         self.create_subscription(String, RUN_COMMAND_TOPIC, self._on_command, 10)
         self._say(RunStatus(IDLE))
+        loc_source = "/tracker_pose" if self._localizer == "tracker" else "TF map -> base_link"
         self.get_logger().info(
-            f"run recorder ready: tapes in {self._record_dir}; flags: {self._switches.state()}"
+            f"run recorder ready: tapes in {self._record_dir}; localizer {self._localizer}"
+            f" (loc from {loc_source}); flags: {self._switches.state()}"
         )
 
     def _say(self, status: RunStatus) -> None:

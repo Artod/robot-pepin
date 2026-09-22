@@ -76,13 +76,14 @@ silence as good news. What is checked:
 | # | board |
 |---|---|
 | 1.1 | `ros/board.sh census`: every process accounted for, every budget kept |
-| 1.2 | the tracker's report line is there, with its `sources=`, its `map_topic=`, its fit and the map id |
-| 1.3 | the pose: `ros/goto.sh where` answers |
+| 1.2 | the tracker's report line is there, with its `sources=`, its `map_topic=`, its fit and the map id. Under `PEPIN_LOCALIZER=rtabmap` no tracker is launched at all, so this is a `WARN` saying so and 1.13 asks the question that replaces it |
+| 1.3 | the pose: `ros/goto.sh where` answers (the tracker's own service). Under `PEPIN_LOCALIZER=rtabmap` it is `ros/go.sh where` instead — the goal server's socket, whose answer is composed from `map -> base_link` — and it must say `"pose": "tf"` |
 | 1.4 | no `Failed to meet update rate` in the last 60 s |
 | 1.5 | no `Extrapolation` / `out of map bounds` / `Off Grid` in the last 60 s |
 | 1.6, 1.7 | `/depth_scan` and `/vo` really reach the board (`ros/tools/topic_rate.py`, one 5 s measurement each — not `ros2 topic hz`, which costs ~4.5 s of A53 before it measures anything) |
 | 1.8 | `pepin-base` is active and no `torque on` is left standing in its journal |
 | 1.11 | Nav2 is **active**, not merely running: the lifecycle manager got `planner_server connected with bond`, and the log carries zero `Range sensor layer can't transform` lines. A `planner_server` that activated and never bonded is wedged inside its global costmap's first update — tf2's `canTransform` costs a whole `transform_tolerance` per untransformable Range and the three ToF layers deliver 15 Hz each, so the backlog outgrows the drain and the update never ends (`scratch/nav2_hang/wedge_gain.py`; the publisher's side of the fix is `tof_bridge`'s `dynamic_mounts` and `tf_gate`). Goals are then accepted and nothing is planned. A board that runs no Nav2 is a `WARN`, never a failure. Since 2026-09-21 no costmap lists a `RangeSensorLayer` at all (the whiskers arrive as scan fans, `tof_bridge`'s `range_as`), so one of those lines now means the board is running a `nav2_params.yaml` older than this checkout — still worth a `FAIL` |
+| 1.13 | **who is correcting the pose**, under `PEPIN_LOCALIZER=rtabmap`: `map -> odom` is in TF and read where its publisher is — one rclpy node in the laptop's own container (`ros/tools/map_odom.py`), never on the board, whose /tf would cost it ~100 messages a second (CLAUDE.md rule 20). Two readings: the transform is **fresh** (re-broadcast at 20 Hz, so seconds of silence is a publisher that is gone) and it is **not the identity** (a localiser that has recognised nothing publishes `map == odom`, and every pose composed from it is simply the odometry's). The identity is a `WARN` while the laptop half is under 60 s old and a `FAIL` after that. Under `PEPIN_LOCALIZER=tracker` it is a `WARN` pointing at 1.2 |
 | 1.12 | no thread of the Nav2 container is pegged: `ps -L` over ssh, the busiest thread's cumulative CPU time over the process's own lifetime. `range_sensor_layer.cpp:362-369` clamps its cell bounds and then walks them as `unsigned`, so a cone that falls off the grid's left or bottom edge runs ~4e9 iterations under the costmap mutex and writes **no log line at all** — one thread at 100 %, "Pose Goes Off Grid", services timing out, zero plans (reproduced 2026-09-21 with `ros/thin.sh kick relocalizer`: tid 191, 415 s of CPU in 700 s). `FAIL` above 0.90, `WARN` above 0.50 (nobody has yet measured what a healthy container's busiest thread costs — tighten it once a few restarts have printed theirs), `WARN` when the board could not be read |
 
 `ros/tools/coldstart_soak.sh [N]` is the acceptance test behind that check: N cold starts of the
@@ -107,6 +108,76 @@ refuses to begin while a navigation goal is running. The hang appeared on 4 of 7
 | # | flags |
 |---|---|
 | 3.x | every live flag of the restarted half is its `FLAGS` table default (`ros/flags.sh drift`). A difference is a `WARN`, not a failure: a flag set on purpose is legitimate, but a restart puts every flag back to its default, so this is where a switch you meant to keep shows up as gone. |
+
+## One localiser
+
+`PEPIN_LOCALIZER` says who owns `map -> odom`, and exactly one thing does.
+
+- **`rtabmap`** (the default since 2026-09-22) — RTAB-Map on the laptop publishes the transform
+  itself (`publish_tf`, re-broadcast at 20 Hz, stamped 0.1 s ahead against Nav2's own 0.3 s
+  tolerance). The board's lidar tracker (`pepin_bringup.relocalizer`) **does not start**, nothing
+  there publishes that edge, and both costmaps' static layer reads `/map` instead of the
+  `/map_tracked` the tracker used to republish (`ros/params/nav2_map_from_laptop.yaml`, one
+  overlay file loaded by `nav.launch.py` under this switch — `nav2_params.yaml` itself does not
+  move). RTAB-Map starts **localising** on a loaded database.
+- **`tracker`** — the stack that ran until then, byte for byte: the tracker owns the edge, fuses
+  the laptop's words into it, republishes the grid it adopted, and `rtabmap_frame`'s
+  `graph_memory` moves RTAB-Map's memory mode live on trust in that tracker's pose.
+
+**Why.** Two owners of the truth is a race, not a redundancy. On 2026-09-21/22 the tracker
+trusted its own whole-map search on a fragment grid (fit 0.96 on the wrong place), collapsed its
+sigma and gated RTAB-Map's correct words out; the pose jumped 3.4 m. What belongs on the board is
+**odometry** — wheels, gyro, visual odometry, laser odometry — because that is what must survive a
+WiFi loss and close a loop in milliseconds. `map -> odom` is a slow correction every consumer
+composes with `odom -> base_link`.
+
+**Why localising and not mapping.** A start in mapping mode opens a new session per restart, and
+the grid RTAB-Map publishes is the connected component of the *current node inside working
+memory* (`Rtabmap.cpp:3941/4111/5444`) — so seventeen sessions from one evening's restarts made
+the map the costmaps read change thirty times in 800 s. Localising writes nothing, so no restart
+can add a session. The price is that this role cannot extend a map; the memory settings that
+would let it are research the owner deferred, and `PEPIN_LOCALIZER=tracker` is where the live
+switching still lives.
+
+**It travels like `PEPIN_RMW`**: `ros/lib.sh` holds the shell default, `ros/run.sh` and
+`ros/laptop.sh` pass `-e PEPIN_LOCALIZER=` into every container, and the board reads it from
+`/etc/default/pepin-ros` through `board/pepin-ros.service`, so it survives a reboot.
+`pepin.deployment.localizer` is the same question from Python, and the launches ask it there.
+
+**One pairing is refused**, before a container starts: `PEPIN_LOCALIZER=rtabmap` needs
+`PEPIN_RMW=zenoh`. The cyclone `zenoh-bridge-ros2dds` sidecars carry `/tf` one way only
+(board → laptop), because a topic allowed as a publisher on both sides is looped back by each
+bridge until nothing crosses at all — and RTAB-Map's correction has to come back the other way.
+Under cyclone the way to give the graph the frame is the retired message path
+(`nav.launch.py slam:=true` with `pepin_bringup.slam_frame`, CLAUDE.md rule 19).
+
+**What the first seconds look like — UNVERIFIED.** Read from rtabmap_ros's sources rather than
+measured: `CoreWrapper` broadcasts `mapToOdom_`, which is initialised to the **identity** and
+replaced only when a localisation or a graph optimisation lands. So the expectation is that a
+start on a loaded database publishes `map == odom` — the pose is the odometry's — until RTAB-Map
+recognises a node, *not* the last saved correction. Nobody has watched this on the robot yet.
+Check 1.13 and the procedure below are where it gets measured.
+
+### Parked acceptance, 120 s
+
+With the cart parked where it can see the room, both halves up under `PEPIN_LOCALIZER=rtabmap`,
+and **no goal sent**:
+
+1. `ros/restart.sh both` — 1.13 must end green (`corrected`, stamped well under 2 s ago). Note
+   how long after the start it stopped saying `identity`: that is the answer to the paragraph
+   above, and it belongs in the journal.
+2. `docker exec pepin-vslam /pepin_entrypoint.sh python3 /tools/map_odom.py 5`, three times over
+   two minutes — the shift must not wander between readings on a cart that is not moving.
+3. `docker logs pepin-vslam | grep 'rtabmap frame:'` — **at most two** distinct map ids in the
+   window. More than that is the churning grid this switch exists to stop, and means the session
+   is not localising after all.
+4. `ros/go.sh where` — `"pose": "tf"`, no `fit` in the answer, and coordinates that match where
+   the cart really stands to a few centimetres.
+5. `ros/restart.sh board` alone, then Nav2: `planner_server connected with bond` and no
+   `Pose Goes Off Grid` — the board must come up and plan with the transform arriving from the
+   other machine.
+6. `ros/board.sh census` — the board's CPU against the same reading under `PEPIN_LOCALIZER=tracker`.
+   The tracker measured 60 % of a core standing still, so this is where that comes back.
 
 ## The zenoh bridge
 

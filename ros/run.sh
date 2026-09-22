@@ -43,6 +43,12 @@ if [ "${PEPIN_RMW:-zenoh}" = cyclone ]; then
     IMAGE="${PEPIN_IMAGE:-pepin-ros}"  # the image's own ENV is rmw_cyclonedds_cpp
     RMWENV="-e PEPIN_RMW=cyclone"
 fi
+# WHO OWNS map -> odom (ros/lib.sh has the whole story; the value comes from
+# /etc/default/pepin-ros through board/pepin-ros.service). Travels like PEPIN_RMW and is ALWAYS
+# passed in: the launches ask pepin.deployment.localizer, whose own default is rtabmap, so a
+# container that runs the board's tracker must be told it does. Under "rtabmap" nothing on this
+# board publishes map -> odom — it arrives over the transport from the laptop's RTAB-Map.
+LOCENV="-e PEPIN_LOCALIZER=${PEPIN_LOCALIZER:-rtabmap}"
 # shellcheck disable=SC2086
 # Not auto-removed: a stopped container keeps its log until the unit's ExecStartPre has saved it.
 # --stop-signal SIGINT beside the image's own STOPSIGNAL (ros/Dockerfile): SIGINT is what ros2
@@ -62,6 +68,6 @@ exec docker run $TTY \
     -v "$HERE/maps:/maps" \
     -v /run/pepin:/run/pepin \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-7}" \
-    $RMWENV \
+    $RMWENV $LOCENV \
     --name pepin-ros \
     "$IMAGE" "$@"

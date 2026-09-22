@@ -16,6 +16,25 @@ from pathlib import Path
 
 SIDES = ("all", "board", "laptop")
 
+# WHO OWNS map -> odom. One localiser, and this says which (decision of 2026-09-22).
+#
+# "rtabmap" (the default on this branch): RTAB-Map on the laptop publishes the transform itself
+# (vslam.launch.py's publish_tf), the board's lidar tracker (pepin_bringup.relocalizer) does not
+# start at all, and every consumer composes map -> odom with the board's own odom -> base_link.
+# "tracker" is the stack that ran until then, byte for byte: the relocalizer owns the edge, fuses
+# the laptop's words into it and republishes the grid it adopted as /map_tracked.
+#
+# WHY. Two owners of the truth is not a redundancy, it is a race: the tracker trusted its own
+# whole-map search on a fragment grid (fit 0.96 on the wrong place), collapsed its sigma and then
+# gated RTAB-Map's correct words out; the pose jumped 3.4 m (journal 2026-09-21/22, "split-brain").
+# Standard practice is the one the contract in relocalizer._send_map_odom's docstring already
+# writes down: whoever localises owns map -> odom, the FAST part is odometry on the board (wheels,
+# gyro, visual odometry, and laser odometry beside them), and map -> odom is a slow correction
+# every consumer composes with odom -> base_link.
+LOCALIZERS = ("rtabmap", "tracker")
+LOCALIZER_ENV = "PEPIN_LOCALIZER"
+DEFAULT_LOCALIZER = "rtabmap"
+
 # Nav2 lifecycle nodes by side. "all" is the union: one machine, as before the split.
 # In bring-up order: the tree last, because loading it needs the planner side's costmap service.
 BOARD_NAV_NODES = ("controller_server", "behavior_server", "velocity_smoother", "bt_navigator")
@@ -95,23 +114,24 @@ def nav_nodes(side: str) -> tuple[str, ...]:
     raise ValueError(f"side must be one of {SIDES}, not {side!r}")
 
 
-def runs_here(side: str, node: str, slam_frame: bool = False) -> bool:
+def runs_here(side: str, node: str, slam_frame: bool = False, localizer: str = "tracker") -> bool:
     """Whether a named piece runs on ``side``: Nav2 nodes, the map, the tracker, the goal server.
 
-    THE TRACKER ALWAYS RUNS (World R). It is the AMCL seat — 10 Hz, its own whole-map search for a
-    kidnap, and the one owner of ``map -> odom`` in every situation, whether the map is RTAB-Map's
-    live grid, the board's cache of it or a served file. There is no arrangement left in which the
-    board takes that edge from a message.
+    ``localizer`` is who owns ``map -> odom`` (:func:`localizer`, ``PEPIN_LOCALIZER``), and it
+    decides whether the board's lidar tracker runs at all: under ``"rtabmap"`` the laptop's graph
+    publishes that transform and the tracker does not start, under ``"tracker"`` — the default
+    here, so every caller that does not ask keeps the stack of before 2026-09-22 — the tracker is
+    the AMCL seat, with its own whole-map search for a kidnap and its cache of the grid.
 
-    ``slam_frame`` is the retired one, kept reachable and off by default (CLAUDE.md rule 19,
-    ros/nav.launch.py's ``slam`` argument): that node broadcasts ``map -> odom`` from the laptop's
-    correction instead, and it is the one case where the tracker stands down, because two
-    publishers of one edge fight.
+    ``slam_frame`` is the retired third arrangement, kept reachable and off by default (CLAUDE.md
+    rule 19, ros/nav.launch.py's ``slam`` argument): that node broadcasts ``map -> odom`` from the
+    laptop's correction as a MESSAGE, which is what the cyclone bridges can carry. Two publishers
+    of one edge fight, so at most one of the three ever runs.
     """
     if node in MAP_NODES:
         return side in ("all", "board")
     if node == "relocalizer":
-        return side in ("all", "board") and not slam_frame
+        return side in ("all", "board") and not slam_frame and localizer == "tracker"
     if node == "slam_frame":
         return side in ("all", "board") and slam_frame
     if node == "goal_server":  # it carries the laptop's heartbeat too
@@ -490,6 +510,43 @@ def rmw_is_zenoh(env: Mapping[str, str] | None = None) -> bool:
     with it (its exit is wired to ``Shutdown``).
     """
     return (env if env is not None else os.environ).get("PEPIN_RMW", "zenoh") == "zenoh"
+
+
+def localizer(env: Mapping[str, str] | None = None) -> str:
+    """Which half owns ``map -> odom``: ``"rtabmap"`` (the laptop's graph publishes it) or
+    ``"tracker"`` (the board's scan-matching relocalizer, the stack of before 2026-09-22).
+
+    ``PEPIN_LOCALIZER`` is the one switch (:data:`LOCALIZERS`), travelling into both containers
+    exactly as ``PEPIN_RMW`` does: ros/lib.sh holds the default for the shell, ros/run.sh and
+    ros/laptop.sh pass it in with ``-e``, and the board reads it from /etc/default/pepin-ros
+    through board/pepin-ros.service. A value that is neither is refused here rather than
+    silently read as one of them — a typo must not decide who owns a frame.
+    """
+    value = (env if env is not None else os.environ).get(LOCALIZER_ENV, "") or DEFAULT_LOCALIZER
+    if value not in LOCALIZERS:
+        raise ValueError(f"{LOCALIZER_ENV} is one of {LOCALIZERS}, not {value!r}")
+    return value
+
+
+def localizer_is_tracker(env: Mapping[str, str] | None = None) -> bool:
+    """Whether the board's lidar tracker owns ``map -> odom`` (and therefore runs at all)."""
+    return localizer(env) == "tracker"
+
+
+def localizer_transport_ok(name: str, env: Mapping[str, str] | None = None) -> bool:
+    """Whether localiser ``name`` can carry its correction over the transport in ``env``.
+
+    ``rtabmap`` needs ``/tf`` to cross the link in BOTH directions — the board's
+    ``odom -> base_link`` up to RTAB-Map, RTAB-Map's ``map -> odom`` down to the costmaps — and
+    the zenoh-bridge-ros2dds sidecars of ``PEPIN_RMW=cyclone`` cannot: a topic allowed as a
+    publisher on both sides is discovered by each bridge as a local publisher and looped back
+    until nothing crosses at all (scan and tf died that way on 2026-09-09), which is why
+    :data:`BOARD_PUBLISHES` owns ``tf`` alone and :func:`bridge_allow` is one-way by side. Under
+    rmw_zenoh there are no allow-lists and every topic crosses, so the pairing is free there.
+    The way to give the graph the frame under cyclone is the retired message path
+    (ros/nav.launch.py's ``slam`` argument and pepin_bringup.slam_frame, CLAUDE.md rule 19).
+    """
+    return name == "tracker" or rmw_is_zenoh(env)
 
 
 def bridge_admin_for(side: str) -> str:

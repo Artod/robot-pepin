@@ -77,6 +77,13 @@ if pepin_rmw_is_zenoh; then
     RMW_ENV=(-e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e PEPIN_RMW=zenoh -e ZENOH_ROUTER_CHECK_ATTEMPTS=0
              -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_session_override)")
 fi
+# WHO OWNS map -> odom, into every container here (ros/lib.sh has the whole story). Under
+# "rtabmap" this side's RTAB-Map publishes the transform and the words to the board's fusion stay
+# home; under "tracker" nothing here broadcasts a frame and the board's relocalizer owns it.
+RMW_ENV+=(-e "PEPIN_LOCALIZER=$PEPIN_LOCALIZER")
+# The one pairing that cannot work is refused BEFORE a container starts, not debugged on the
+# robot — and only where one is started, so `stop` and `logs` still work on a misconfigured shell.
+start_check() { pepin_localizer_check || exit 1; }
 # One zenoh router per machine, and this is the laptop's. It is started before any node here and
 # left alone afterwards: a node's connect retry is infinite, so containers may come and go under
 # it, and it is the only process on this side that talks to the board. Started idempotently —
@@ -182,6 +189,7 @@ case "${1:-start}" in
         # room and driving a known one are the same launch with a different file on disk — the launch
         # reads which it is and picks the memory mode itself — so this subcommand needs no mode, and
         # asks the board nothing.
+        start_check
         CAMERA_ONLY=false; FRESH=false; RESUME_VOLUME=true
         # The camera as a third odometry (rtabmap_odom's rgbd_odometry + pepin_bringup.visual_odometry):
         # on unless --no-vo. It costs this laptop a quarter of a core and the robot nothing at
@@ -241,7 +249,12 @@ case "${1:-start}" in
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} ${CAMERA_ENV[@]+"${CAMERA_ENV[@]}"} \
             "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null
-        echo "vslam up (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and the board's tracker adopts it; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
+        if pepin_localizer_is_tracker; then
+            OWNER="the board's tracker adopts it and owns map -> odom"
+        else
+            OWNER="RTAB-Map here owns map -> odom (PEPIN_LOCALIZER=rtabmap: no tracker on the board)"
+        fi
+        echo "vslam up (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and $OWNER; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
         # The desktop app's socket died with the old container, and a Foxglove client never
         # re-attaches by itself: its panels stay on screen, empty, bound to channel ids this new
         # bridge does not have. So the app is told to reconnect (ros/foxglove.sh reopen waits for
@@ -253,7 +266,7 @@ case "${1:-start}" in
             echo "foxglove: reopen off (PEPIN_FOXGLOVE_REOPEN=0); reconnect with: open '$("$HERE/foxglove.sh" url)'"
         fi
         exit 0 ;;
-    start) ;;
+    start) start_check ;;
     *) echo "usage: ros/laptop.sh [start | stop | logs [vslam] | vslam [--fresh] [--camera-only] [--neck] [--no-vo] | kick NODE]"; exit 2 ;;
 esac
 # Which half the board expects: on side=all (ros/thin.sh vision) the board drives by itself and

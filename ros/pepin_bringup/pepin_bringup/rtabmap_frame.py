@@ -93,6 +93,7 @@ from std_msgs.msg import Float32, String
 from std_srvs.srv import Empty
 from tf2_ros import TransformBroadcaster
 
+from pepin.deployment import DEFAULT_LOCALIZER
 from pepin.flags import Flag, FlagSet
 from pepin.fusion import (
     GATE,
@@ -458,6 +459,22 @@ class RtabmapFrame(Node):
 
     def __init__(self) -> None:
         super().__init__("rtabmap_frame")
+        # WHICH ROLE THIS NODE IS IN (PEPIN_LOCALIZER, pepin.deployment.localizer; the launch
+        # passes the resolved word). Declared BEFORE the switches: rclpy runs their callback on
+        # declarations too, and a name outside the flags table is refused there
+        # (node_kit.Switches).
+        #   "tracker": the graph is one voice among the board tracker's sources — a measurement
+        # per recognised update, a whole-map candidate where the fusion cannot act on one — and it
+        # moves RTAB-Map's memory mode live on trust in that tracker's pose.
+        #   "rtabmap": THIS half owns map -> odom and the board runs no tracker, so there is
+        # nobody to speak to: no measurement, no candidate, and the memory mode is pinned to
+        # localising (vslam.launch.py's rtabmap_memory says why — a restart in mapping mode opens
+        # a session per start and the published grid is the current node's component of working
+        # memory, which is how one evening's restarts moved the map thirty times). What this node
+        # still does is the relay that makes the map a map: /rtabmap/grid -> /map behind
+        # grid_needs_tie.
+        self._localizer = str(self.declare_parameter("localizer", DEFAULT_LOCALIZER).value)
+        self._to_the_board = self._localizer == "tracker"
         self._switches = Switches(self, FLAGS)
         self._slam = self._switches.on("slam")
         self._pose = RigidPose(np.eye(3), np.zeros(3))  # the SLAM correction, map -> odom
@@ -472,7 +489,11 @@ class RtabmapFrame(Node):
         # Whether the database may LEARN, decided by trust in the pose and not by a sensor's name
         # (pepin.graphmode.ModeRule). The hold is the seating's own freshness window: a verdict is
         # acted on once it has survived as long as the evidence it rests on takes to refresh.
-        self._mode = ModeRule(FIT_FRESH_S, str(self._switches["graph_memory"]), GRAPH)
+        # Who decides RTAB-Map's memory mode. Under "rtabmap" it is pinned to localising whatever
+        # the flag says — the trust rule reads the board tracker's seating, and there is no
+        # tracker — so the flag stays reachable and is simply not the authority in that role.
+        mode_rule = str(self._switches["graph_memory"]) if self._to_the_board else ALWAYS_LOCALISE
+        self._mode = ModeRule(FIT_FRESH_S, mode_rule, GRAPH)
         self._holder: str | None = None  # who /localization/sources says is holding the pose
         self._holder_at = -math.inf  # ...and when that report arrived, by our clock
         self._mode_pending: Any = None  # a switch the service has not answered yet
@@ -521,12 +542,14 @@ class RtabmapFrame(Node):
         self._correction = (
             self.create_publisher(TransformStamped, CORRECTION_TOPIC, 5) if self._slam else None
         )
+        # The two channels into the board's fusion. Not created in SLAM (the graph IS the map
+        # there) and not under "rtabmap" either: there is no tracker on the board to weigh a
+        # word, so a publisher here would be a topic nobody reads and a report line claiming a
+        # conversation that is not happening.
         self._measurement = (
-            None
-            if self._slam
-            else self.create_publisher(
-                String, MEASUREMENT_TOPIC, bridged_qos_profile(MEASUREMENT_TOPIC)
-            )
+            self.create_publisher(String, MEASUREMENT_TOPIC, bridged_qos_profile(MEASUREMENT_TOPIC))
+            if self._to_the_board and not self._slam
+            else None
         )
         # Depth 1, RELIABLE: the QoS both ends of this channel already ask for
         # (pepin_bringup.laptop_localizer's publisher, pepin_bringup.relocalizer's subscription).
@@ -534,13 +557,13 @@ class RtabmapFrame(Node):
         # publishers on one bridged topic must declare one QoS or the route's is decided by a
         # race (pepin.deployment.BRIDGED_QOS' reason, measured on /imu/data_raw 2026-09-13).
         self._candidate = (
-            None
-            if self._slam
-            else self.create_publisher(
+            self.create_publisher(
                 String,
                 CANDIDATE_TOPIC,
                 QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
             )
+            if self._to_the_board and not self._slam
+            else None
         )
         # The correction, and in SLAM only: it IS map -> odom there. Beside a known map nothing
         # here reads the graph's global frame at all.
@@ -595,15 +618,19 @@ class RtabmapFrame(Node):
             None if self._slam else self.create_client(Empty, f"{RTABMAP_NODE}/update_parameters")
         )
         self.create_timer(1.0 / RATE_HZ, self._publish)
-        where = (
-            f"map -> odom on {CORRECTION_TOPIC}, for the board"
-            if self._slam
-            else f"the graph's localisations on {MEASUREMENT_TOPIC}, in the one map frame"
-        )
+        if self._slam:
+            where = f"map -> odom on {CORRECTION_TOPIC}, for the board"
+        elif self._to_the_board:
+            where = f"the graph's localisations on {MEASUREMENT_TOPIC}, in the one map frame"
+        else:
+            where = (
+                f"{GRID_TOPIC} -> {MAP_TOPIC} and nothing else (localizer rtabmap: RTAB-Map owns"
+                " map -> odom, no tracker on the board fuses a word), memory pinned to localising"
+            )
         self.get_logger().info(
             f"rtabmap frame up: {where}; a word per RECOGNISED update ({INFO_TOPIC} names a node"
             f" and {LOCALIZATION_TOPIC} carries its stamp);"
-            f" flags: {self._switches.state(live_only=False)}"
+            f" localizer={self._localizer}; flags: {self._switches.state(live_only=False)}"
         )
         self.create_timer(30.0, self._report)
 
@@ -630,8 +657,19 @@ class RtabmapFrame(Node):
             f" rtabmap registration {self._strategy_text()};"
             f" map {self._map_id or 'unknown'}, {self._grids_relayed} grids relayed,"
             f" {self._grids_withheld} withheld ({self._tie_text()});"
+            f" role {self._role_text()};"
             f" flags: {self._switches.state(live_only=False)}"
         )
+
+    def _role_text(self) -> str:
+        """Which localiser arrangement this node is serving, for the report line: whether the
+        graph's words go to a tracker on the board, or this half owns the frame and the words
+        stay home."""
+        if self._slam:
+            return "slam (this node broadcasts map -> odom from the graph)"
+        if self._to_the_board:
+            return "tracker (the board owns map -> odom; measurements and candidates go to it)"
+        return "rtabmap (RTAB-Map owns map -> odom; no words leave this laptop)"
 
     def _strategy_text(self) -> str:
         """RTAB-Map's registration for a report line: which strategy is set and why, what the

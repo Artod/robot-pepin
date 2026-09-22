@@ -116,11 +116,12 @@
         "wifi-loss"
       ],
       "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn, ghost wait)",
+      "when": "sometimes",
       "budget": {
         "cpu_percent": 90.0,
         "rss_mb": 121.0
       },
-      "note": "Measured 60 % / 80 MB standing still; a whole-map search is a burst well above that and short. Second biggest consumer on the board."
+      "note": "Measured 60 % / 80 MB standing still; a whole-map search is a burst well above that and short. Second biggest consumer on the board. \"when\": sometimes since 2026-09-22: under PEPIN_LOCALIZER=rtabmap (the default) the laptop's RTAB-Map owns map -> odom and this process does not start at all, so its absence is IDLE and not a red census; under PEPIN_LOCALIZER=tracker it is the pose tracker described above and its budget is what it costs there."
     },
     {
       "name": "run_recorder",

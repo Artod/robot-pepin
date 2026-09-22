@@ -42,11 +42,26 @@ BOARD="${PEPIN_HOST:-10.0.0.187}"
 MAP=$(ssh "root@$BOARD" "grep -oE 'PEPIN_MAP=.*' /etc/default/pepin-ros" | cut -d= -f2)
 PLACES="/maps/$(basename "${MAP:-places}" .yaml).places.yaml"  # one book of places per map
 case "${1:-}" in
-  where) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/call.py /where_am_i"; exit ;;
+  # The tracker's own service, and only where a tracker runs: under PEPIN_LOCALIZER=rtabmap
+  # nothing serves /where_am_i and the pose lives in TF, which the goal server's socket already
+  # composes and answers on — so the question is forwarded there rather than timing out.
+  where)
+    if pepin_localizer_is_tracker; then
+      ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/call.py /where_am_i"
+    else
+      echo "no tracker under PEPIN_LOCALIZER=$PEPIN_LOCALIZER: asking the goal server instead (its pose comes from map -> base_link)"
+      "$(dirname "$0")/go.sh" where
+    fi
+    exit ;;
   # The header promised this for weeks while the case fell through to "drive to a place called
   # cancel" (2026-09-14 11:20: the cart went on butting a table for a minute after the "cancel").
   cancel) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh timeout 5 python3 /tools/goto_ros.py cancel"; exit ;;
-  relocalize) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/call.py /relocalize 90"; exit ;;
+  # A whole-map search is the TRACKER's recovery and has no counterpart in the other role: there
+  # RTAB-Map recognises the room by itself and a refusal must say so rather than hang on a service
+  # nobody serves.
+  relocalize)
+    pepin_localizer_is_tracker || { echo "no tracker under PEPIN_LOCALIZER=$PEPIN_LOCALIZER: RTAB-Map recognises the room by itself; drive the cart where it can see more of it"; exit 2; }
+    ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/call.py /relocalize 90"; exit ;;
   # A place lives in RTAB-Map's GRAPH now: the client asks the laptop's places node over the bridge
   # (/places/mark, answered on /places/marked) and the book is written on the LAPTOP, beside the
   # graph database it hangs on (ros/maps/rtabmap.places.json) — a node id means nothing without the

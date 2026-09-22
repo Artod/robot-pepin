@@ -1,0 +1,29 @@
+# Both costmaps' static layer reads /map instead of /map_tracked.
+#
+# Loaded ON TOP of nav2_params.yaml by ros/pepin_bringup/launch/nav.launch.py, and only under
+# PEPIN_LOCALIZER=rtabmap (pepin.deployment.localizer): there the board runs no lidar tracker, so
+# nobody publishes /map_tracked — the topic the file's own static layers read — and both costmaps
+# would come up with no static map at all, which is a planner that answers "outside bounds" to
+# every goal. /map is the same grid one hop earlier: RTAB-Map's, relayed onto that name by
+# pepin_bringup.rtabmap_frame behind its grid_needs_tie gate, latched and transient-local exactly
+# as /map_tracked was.
+#
+# It is a separate file so that ros/params/nav2_params.yaml stays the tracker's stack byte for
+# byte (CLAUDE.md rule 19): PEPIN_LOCALIZER=tracker loads this file not at all.
+#
+# The keys repeat the file's own path to each layer because a parameter overlay is merged by key,
+# not by section: only what is written here moves, everything else in nav2_params.yaml stands.
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      static_layer:
+        map_topic: /map
+        map_subscribe_transient_local: True
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      static_layer:
+        map_topic: /map
+        map_subscribe_transient_local: True

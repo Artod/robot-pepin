@@ -18,6 +18,17 @@ import ros_stubs
 
 ros_stubs.install()
 
+
+@pytest.fixture(autouse=True)
+def _the_tracker_stack() -> Iterator[None]:
+    """Every test in this file describes the arrangement where the BOARD'S TRACKER owns
+    ``map -> odom`` (``PEPIN_LOCALIZER=tracker``), which is what these nodes were written for and
+    what stays reachable. The other role — RTAB-Map on the laptop owning the frame, no tracker
+    anywhere — has its own file, tests/unit/test_one_localiser.py."""
+    with ros_stubs.parameters(localizer="tracker"):
+        yield
+
+
 from pepin_bringup.places import (  # noqa: E402
     FLAGS,
     GRAPH_TOPIC,

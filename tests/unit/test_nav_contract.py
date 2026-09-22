@@ -788,7 +788,9 @@ def test_the_camera_slam_lives_beside_the_tracker_never_over_it() -> None:
     says so."""
     vslam = sf.tree(VSLAM_LAUNCH)
     params = sf.dict_items(vslam)
-    assert params["publish_tf"] == {"False"}, "in no situation is RTAB-Map in a tf tree"
+    assert params["publish_tf"] == {"False", "True"}, (
+        "RTAB-Map is in the tf tree in exactly one situation: PEPIN_LOCALIZER=rtabmap"
+    )
     assert _rtabmap("RTABMAP")["map_frame_id"] == "map", "one frame, since 2026-09-19"
     rtabmap = sf.keywords(_node_named(vslam, "rtabmap"))
     assert ast.unparse(rtabmap["namespace"]) == "'rtabmap'", (
@@ -1994,8 +1996,12 @@ def test_rtabmap_is_told_one_table_reading_one_snapshot_topic_and_owns_no_transf
     assert table["subscribe_sensor_data"] is True
     for name in ("subscribe_depth", "subscribe_rgb", "subscribe_scan", "subscribe_odom"):
         assert table[name] is False, f"{name}: rtabmap turns it off anyway; say it out loud"
-    # No transform out of this launch, in any situation: neither the parameter nor a broadcaster.
-    assert sf.dict_items(vslam)["publish_tf"] == {"False"}
+    # WHO OWNS map -> odom, and it is one switch: the two values of publish_tf in this file are
+    # the tracker's (False, the node's own parameter) and the localiser's (True, in
+    # PUBLISH_MAP_TO_ODOM, merged by rtabmap_parameters only under PEPIN_LOCALIZER=rtabmap). Never
+    # a broadcaster of our own: the transform is RTAB-Map's own or it is nobody's here.
+    assert sf.dict_items(vslam)["publish_tf"] == {"False", "True"}
+    assert _rtabmap("PUBLISH_MAP_TO_ODOM")["publish_tf"] is True
     assert not {"TransformBroadcaster", "StaticTransformBroadcaster"} & sf.imported(vslam)
 
     # One literal topic name, written on both sides of the contract (read from the sources: this
@@ -2550,7 +2556,10 @@ def test_the_graphs_grid_is_the_one_map_and_the_tracker_is_the_one_owner_of_map_
     vslam = sf.tree(VSLAM_LAUNCH)
     table = _rtabmap("RTABMAP")
     assert table["odom_frame_id"] == "odom" and table["map_frame_id"] == "map"
-    assert sf.dict_items(vslam)["publish_tf"] == {"False"}, "in no situation, in either tree"
+    # One owner, named by PEPIN_LOCALIZER: publish_tf False is the tracker's stack (the board
+    # owns the edge), True comes from PUBLISH_MAP_TO_ODOM under localizer rtabmap. Both are in
+    # this file, and rtabmap_parameters picks one.
+    assert sf.dict_items(vslam)["publish_tf"] == {"False", "True"}
     # The grid IS the map — once it is assembled from the graph RTAB-Map LOADED. It leaves RTAB-Map
     # on its own topic and pepin_bringup.rtabmap_frame relays it onto /map (grid_needs_tie): before
     # the first recognition the grid is one scan where the odometry puts the cart, and a tracker
@@ -2608,7 +2617,10 @@ def test_the_graphs_grid_is_the_one_map_and_the_tracker_is_the_one_owner_of_map_
     nav = sf.tree(NAV_LAUNCH)
     calls = sf.unparsed(nav, ast.Call)
     assert "runs_here(side, 'map_server')" in calls, "a served pgm answers to its own argument"
-    assert "runs_here(side, 'relocalizer', slam_frame)" in calls
+    assert "runs_here(side, 'relocalizer', slam_frame, owner)" in calls, (
+        "the tracker answers to BOTH switches: the retired slam_frame argument and the localiser"
+    )
+    assert "localizer()" in calls, "and the launch resolves PEPIN_LOCALIZER once, at the top"
     assert "runs_here(side, 'slam_frame', slam_frame)" in calls
     assert "pepin_bringup.slam_frame" in sf.strings(nav)
     assert "_after_ghost(admin, '/slam_frame')" in calls

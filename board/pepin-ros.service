@@ -35,6 +35,12 @@ Environment=PEPIN_SIDE=all
 # /etc/default/pepin-ros so it survives a reboot; ros/run.sh turns it into the container's image
 # and environment.
 Environment=PEPIN_RMW=zenoh
+# WHO OWNS map -> odom. rtabmap (the default since 2026-09-22): the laptop's RTAB-Map publishes
+# that transform and the board's lidar tracker (pepin_bringup.relocalizer) does not start here at
+# all. tracker: the stack of before, where the relocalizer owns the edge and republishes the grid
+# it adopted as /map_tracked. Set in /etc/default/pepin-ros so it survives a reboot; ros/run.sh
+# turns it into the container's environment, and ros/lib.sh holds the same default for the shell.
+Environment=PEPIN_LOCALIZER=rtabmap
 # One container per boot; --rm so a stale one never blocks the name. The image is built by ros/build.sh.
 # No RTC on this board: it boots with yesterday's clock and NTP jumps it hours forward a minute
 # later; every "seconds since the last reading" check in Nav2 then sees stale data and the first

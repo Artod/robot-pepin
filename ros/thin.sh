@@ -14,6 +14,15 @@ BOARD="${PEPIN_HOST:-10.0.0.187}"
 # ros/laptop.sh kick goal_server). slam_frame is the retired owner of map -> odom and only runs
 # with PEPIN_SLAM=true (CLAUDE.md rule 19), but a kick still reaches it where it does.
 KICKABLE="relocalizer run_recorder goal_server neck_state slam_frame tof_bridge"
+# ...of which the relocalizer is launched only under PEPIN_LOCALIZER=tracker (ros/lib.sh): under
+# rtabmap the laptop's RTAB-Map owns map -> odom and no tracker process exists here, so a kick of
+# it is refused with that reason instead of the bare "no relocalizer process in pepin-ros".
+not_launched() {  # node name -> "" when it can be kicked, else why it cannot be
+    case "$1" in
+        relocalizer) pepin_localizer_is_tracker ||
+            echo "relocalizer is not launched under PEPIN_LOCALIZER=$PEPIN_LOCALIZER: RTAB-Map on the laptop owns map -> odom" ;;
+    esac
+}
 kick_line() {  # node name -> start-up line
     case "$1" in
         relocalizer) echo "relocalizer up: " ;;
@@ -67,6 +76,7 @@ case "${1:-}" in
         # plus the two-second pause. The tracker is gone for those seconds (no map -> odom):
         # kick it at rest, never mid-drive.
         NAME="${2:-}"; LINE="$(kick_line "$NAME")" || { echo "usage: ros/thin.sh kick <node>; nodes: $KICKABLE"; exit 2; }
+        WHY="$(not_launched "$NAME")"; [ -z "$WHY" ] || { echo "$WHY"; exit 2; }
         ssh "root@$BOARD" bash -s -- "$NAME" "$LINE" <<'EOF'
 set -u
 NAME=$1; LINE=$2; T0=$(date -u +%FT%TZ); MS0=$(date +%s%3N)
@@ -96,5 +106,5 @@ EOF
     *)
         # Printed, not judged: is-active exits non-zero for anything but "active" (3 while
         # activating), and this is a report.
-        ssh "root@$BOARD" "grep -oE 'PEPIN_(SIDE|BRIDGE|BRIDGE_CONFIG|NAV|SLAM|SLAM_TOOLBOX)=.*' /etc/default/pepin-ros | tr '\\n' ' '; echo; systemctl is-active pepin-ros pepin-bridge | tr '\\n' ' '; echo" ;;
+        ssh "root@$BOARD" "grep -oE 'PEPIN_(SIDE|BRIDGE|BRIDGE_CONFIG|NAV|SLAM|SLAM_TOOLBOX|LOCALIZER)=.*' /etc/default/pepin-ros | tr '\\n' ' '; echo; systemctl is-active pepin-ros pepin-bridge | tr '\\n' ' '; echo" ;;
 esac

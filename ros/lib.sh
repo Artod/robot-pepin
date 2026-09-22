@@ -45,6 +45,44 @@ PEPIN_STOP_TIMEOUT_S="${PEPIN_STOP_TIMEOUT_S:-30}"  # = pepin.deployment.CONTAIN
 # share a loopback, so its nodes are told to gossip-connect to routers only and reach each
 # other through the Mac's own router — which never sends that traffic over the WiFi.
 PEPIN_RMW="${PEPIN_RMW:-zenoh}"
+
+# WHO OWNS map -> odom, and it travels exactly as PEPIN_RMW does: this default for the shell,
+# `-e PEPIN_LOCALIZER=` into both containers (ros/run.sh, ros/laptop.sh), and
+# /etc/default/pepin-ros on the board (board/pepin-ros.service's EnvironmentFile) so it survives
+# a reboot. src/pepin/deployment.py's `localizer` is the same question asked from Python, and
+# the launches ask it there.
+#   rtabmap (the default since 2026-09-22): RTAB-Map on the laptop publishes the transform
+# itself and the board's lidar tracker does not start. tracker: the stack that ran until then,
+# byte for byte — the relocalizer owns the edge, fuses the laptop's words into it and
+# republishes the grid it adopted as /map_tracked for the costmaps.
+#   WHY the default moved: two owners of the truth is a race, not a redundancy. The tracker
+# trusted its own whole-map search on a fragment grid (fit 0.96 on the wrong place), collapsed
+# its sigma and gated RTAB-Map's correct words out; the pose jumped 3.4 m (journal 2026-09-21/22).
+# What stays on the board is ODOMETRY — wheels, gyro, visual odometry, laser odometry — which is
+# the part that must survive a WiFi loss and close a loop in milliseconds; map -> odom is a slow
+# correction every consumer composes with odom -> base_link.
+PEPIN_LOCALIZER="${PEPIN_LOCALIZER:-rtabmap}"
+pepin_localizer_is_tracker() { [ "$PEPIN_LOCALIZER" = tracker ]; }
+# The one pairing that cannot work, said out loud before a half is started rather than debugged
+# on the robot: under cyclone the two zenoh-bridge-ros2dds sidecars carry /tf one way only
+# (board -> laptop), because a topic allowed as a publisher on BOTH sides is looped back by each
+# bridge until nothing crosses at all (scan and tf died that way on 2026-09-09). RTAB-Map's
+# map -> odom would have to come back the other way. Under zenoh every topic crosses and the
+# pairing is free. Returns 1 so a caller can refuse; the way to give the graph the frame under
+# cyclone is the retired message path (ros/nav.launch.py slam:=true, pepin_bringup.slam_frame).
+pepin_localizer_check() {
+    case "$PEPIN_LOCALIZER" in
+        rtabmap | tracker) ;;
+        *) echo "PEPIN_LOCALIZER=$PEPIN_LOCALIZER: it is rtabmap or tracker"; return 1 ;;
+    esac
+    if [ "$PEPIN_LOCALIZER" = rtabmap ] && ! pepin_rmw_is_zenoh; then
+        echo "PEPIN_LOCALIZER=rtabmap needs PEPIN_RMW=zenoh: the cyclone bridges carry /tf one way"
+        echo "  only, so RTAB-Map's map -> odom cannot reach the board. Use PEPIN_LOCALIZER=tracker,"
+        echo "  or the retired message path (ros/nav.launch.py slam:=true)."
+        return 1
+    fi
+    return 0
+}
 PEPIN_ZROUTER_PORT="${PEPIN_ZROUTER_PORT:-7447}"
 PEPIN_ZROUTER_BOARD=pepin-zrouter          # the board's router container (host network)
 PEPIN_ZROUTER_LAPTOP=pepin-zrouter-laptop  # the laptop's router container (on pepin-net)

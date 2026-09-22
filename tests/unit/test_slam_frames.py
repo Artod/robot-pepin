@@ -8,6 +8,7 @@ topics a node opened, what it broadcast, and what it published.
 
 import json
 import math
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -18,6 +19,16 @@ from pepin.snapshot import SnapshotState
 from pepin.tsdf import RigidPose
 
 ros_stubs.install()
+
+
+@pytest.fixture(autouse=True)
+def _the_tracker_stack() -> Iterator[None]:
+    """Every test in this file describes the arrangement where the BOARD'S TRACKER owns
+    ``map -> odom`` (``PEPIN_LOCALIZER=tracker``), which is what these nodes were written for and
+    what stays reachable. The other role — RTAB-Map on the laptop owning the frame, no tracker
+    anywhere — has its own file, tests/unit/test_one_localiser.py."""
+    with ros_stubs.parameters(localizer="tracker"):
+        yield
 
 
 def _MapGraph(map_to_odom: Any, stamp: Any = None) -> Any:  # noqa: N802 — it stands for the type

@@ -61,6 +61,7 @@ from rtabmap_msgs.msg import MapGraph
 from rtabmap_msgs.srv import ListLabels, RemoveLabel, SetLabel
 from std_msgs.msg import String
 
+from pepin.deployment import DEFAULT_LOCALIZER
 from pepin.flags import Flag, FlagSet
 from pepin.odometry import Pose2D
 from pepin.places import (
@@ -75,9 +76,12 @@ from pepin.places import (
 )
 from pepin.watch import DRIVE_SIGMA_M
 from pepin_bringup.msgs import stamp_seconds, yaw_of
-from pepin_bringup.node_kit import Switches, spin_main
+from pepin_bringup.node_kit import Switches, TfLookup, spin_main
 
 RATE_HZ = 1.0  # the republish beat: /rtabmap/mapGraph itself comes about once a second
+MAP_FRAME = "map"
+BASE_FRAME = "base_link"
+CART_TF_PERIOD_S = 0.2  # 5 Hz, the rate the tracker published /tracker_pose at
 GRAPH_TOPIC = "/rtabmap/mapGraph"
 TRACKER_POSE_TOPIC = "/tracker_pose"
 # The graph database the places hang on, as the containers see it: the same literal
@@ -184,6 +188,16 @@ class Places(Node):
         # declares its startup parameters: a node id means nothing without it, so a SLAM session
         # writing its own file gets its own book and can never claim the known map's names.
         self._database = Path(str(self.declare_parameter("database", DATABASE).value))
+        # WHERE THE CART'S POSE COMES FROM (PEPIN_LOCALIZER, pepin.deployment.localizer).
+        # Declared before the flags, like every startup parameter here: rclpy runs the switches'
+        # callback on declarations too and refuses a name outside their table.
+        #   "tracker": the board's tracker publishes /tracker_pose with its own covariance, and a
+        # mark is measured from it and refused on its error bar. "rtabmap": nothing publishes that
+        # topic, so `ros/go.sh mark` would refuse for ever ("no pose on /tracker_pose for N s").
+        # The pose is then read from map -> base_link, the same edge every consumer composes —
+        # and with it the error bar is GONE, because TF carries no covariance, so the mark_sigma_m
+        # gate has nothing to read and a mark rests on the freshness of the transform alone.
+        self._localizer = str(self.declare_parameter("localizer", DEFAULT_LOCALIZER).value)
         self._switches = Switches(self, FLAGS)
         self._book = graph_places_path(self._database)
         self._places: dict[str, GraphPlace] = load_graph_places(self._book)
@@ -209,6 +223,12 @@ class Places(Node):
         self.create_subscription(
             PoseWithCovarianceStamped, TRACKER_POSE_TOPIC, self._on_cart, reliable
         )
+        # ...and its replacement where no tracker publishes one. On a timer because TF is a
+        # lookup, at the rate the tracker spoke at; created only in that role, so a stack with a
+        # tracker pays neither the timer nor the /tf subscription behind the listener.
+        self._tf: TfLookup | None = None if self._localizer == "tracker" else TfLookup(self)
+        if self._tf is not None:
+            self.create_timer(CART_TF_PERIOD_S, self._cart_from_tf)
         # NOT latched: a request redelivered to a node that restarted must not mark a second time.
         # The id guards that too, and belt and braces is right for something that writes a file.
         self.create_subscription(String, MARK_TOPIC, self._on_mark, reliable)
@@ -243,6 +263,23 @@ class Places(Node):
         self._cart = Pose2D(float(p.position.x), float(p.position.y), yaw_of(p.orientation))
         covariance = list(msg.pose.covariance)
         self._sigma_m = math.sqrt(max(max(covariance[0], covariance[7]), 0.0))
+        self._cart_at = self._now()
+
+    def _cart_from_tf(self) -> None:
+        """The cart's pose from ``map -> base_link``, where no tracker publishes one.
+
+        ``_sigma_m`` stays ``None``: TF carries no covariance and an invented error bar would
+        let ``mark_sigma_m`` pass a pose nobody measured. The refusal for a stale transform is
+        the same one the tracker's silence produces (:meth:`_refusal`).
+        """
+        if self._tf is None:
+            return
+        transform = self._tf.transform(MAP_FRAME, BASE_FRAME, timeout_s=0.0)
+        if transform is None:
+            return
+        t = transform.transform
+        self._cart = Pose2D(float(t.translation.x), float(t.translation.y), yaw_of(t.rotation))
+        self._sigma_m = None
         self._cart_at = self._now()
 
     def _now(self) -> float:
@@ -310,7 +347,8 @@ class Places(Node):
             )
         age = self._now() - self._cart_at
         if self._cart is None or age > BELIEF_FRESH_S:
-            return f"no pose on {TRACKER_POSE_TOPIC} for {age:.1f} s: the board is not talking"
+            heard = TRACKER_POSE_TOPIC if self._localizer == "tracker" else "map -> base_link"
+            return f"no pose on {heard} for {age:.1f} s: the board is not talking"
         limit = float(self._switches["mark_sigma_m"])
         if self._sigma_m is not None and self._sigma_m > limit:
             return (

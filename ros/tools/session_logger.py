@@ -43,11 +43,13 @@ import time
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Odometry, Path
+from pepin_bringup.node_kit import TfLookup
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
+from pepin.deployment import localizer
 from pepin.recording import scan_record_from_ros
 
 FSYNC_EVERY_S = 2.0
@@ -88,6 +90,14 @@ class SessionLogger(Node):
         self.create_subscription(LaserScan, "/ldlidar_node/scan", self._on_scan, qos)
         self.create_subscription(Odometry, "/odom", self._on_odom, 20)
         self.create_subscription(PoseWithCovarianceStamped, "/tracker_pose", self._on_amcl, 10)
+        # WHERE THE `loc` RECORDS COME FROM where no tracker runs (PEPIN_LOCALIZER=rtabmap):
+        # /tracker_pose has no publisher there, so the same pose is read from TF — the laptop's
+        # map -> odom composed with the board's odom -> base_link, which is what every consumer
+        # does in that arrangement — at the 5 Hz the tracker published at. The listener and its
+        # /tf subscription exist only in that role.
+        self._tf = None if localizer() == "tracker" else TfLookup(self)
+        if self._tf is not None:
+            self.create_timer(LOC_TF_PERIOD_S, self._loc_from_tf)
         self.create_subscription(Path, "/plan", self._on_plan, 5)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd, 20)
         # What the camera said and what the tracker did with it: two String topics this board
@@ -211,12 +221,41 @@ class SessionLogger(Node):
             {
                 "t": stamp,
                 "topic": "loc",
+                "source": "tracker",
                 "x": round(msg.pose.pose.position.x, 4),
                 "y": round(msg.pose.pose.position.y, 4),
                 "theta": round(theta, 5),
                 "confidence": round(1.0 / (1.0 + cov[0] + cov[7] + cov[35]), 3),
             }
         )
+
+    def _loc_from_tf(self) -> None:
+        """The same ``loc`` record read from ``map -> base_link``, where no tracker publishes a
+        pose. No ``confidence``: TF carries no covariance, and ``source`` says which wrote it."""
+        if self._tf is None:
+            return
+        transform = self._tf.transform("map", "base_link", timeout_s=0.0)
+        if transform is None:
+            return
+        stamp = transform.header.stamp
+        q = transform.transform.rotation
+        self.poses += 1
+        self._write(
+            {
+                "t": stamp.sec + stamp.nanosec * 1e-9,
+                "topic": "loc",
+                "source": "tf",
+                "x": round(transform.transform.translation.x, 4),
+                "y": round(transform.transform.translation.y, 4),
+                "theta": round(
+                    math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)),
+                    5,
+                ),
+            }
+        )
+
+
+LOC_TF_PERIOD_S = 0.2  # 5 Hz: the rate the tracker published /tracker_pose at
 
 
 MAX_SECONDS = 900.0  # a recording nobody stops is a bug, not a feature: two orphans wrote for

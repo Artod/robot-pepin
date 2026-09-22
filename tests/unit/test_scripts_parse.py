@@ -212,6 +212,11 @@ answer() {  # the canned reply of the board or the laptop, by what was asked of 
 }
 ssh() { log "ssh $*"; answer "$*"; }
 docker() { log "docker $*"; answer "$*"; }
+# The localiser switch, as ros/lib.sh holds it. FAKE_LOCALIZER drives it: the scripts under test
+# were written for the stack where the board's tracker owns map -> odom, so the fake defaults to
+# that and the rtabmap role is asked for explicitly.
+PEPIN_LOCALIZER="${FAKE_LOCALIZER:-tracker}"
+pepin_localizer_is_tracker() { [ "$PEPIN_LOCALIZER" = tracker ]; }
 """
 
 FAKE_FLAGS = r"""#!/bin/bash
@@ -577,6 +582,17 @@ VSLAM_LOG = "\n".join(
         "graph_trust=on",
     )
 )
+# What ros/tools/map_odom.py prints in the laptop's container once RTAB-Map has corrected the
+# pose, and what the goal server's socket answers where no tracker runs: the two readings checks
+# 1.13 and 1.3 are made of under PEPIN_LOCALIZER=rtabmap.
+MAP_ODOM_LINE = (
+    "map -> odom: (-0.412, +2.771) m, -27.8 deg, |shift| 2.801 m, stamped 0.05 s ago: corrected"
+)
+GO_WHERE_LINE = (
+    '{"event": "where", "planner": "hybrid", "pose": "tf", "localizer": "rtabmap",'
+    ' "x": -0.25, "y": 2.77, "yaw_deg": 3.0, "age_s": 0.05}'
+)
+
 FAKE_RESTART_LIB = r"""#!/bin/bash
 BOARD="${BOARD:-10.0.0.187}"
 log() { printf '%s\n' "$*" >> "$FAKE_LOG"; }
@@ -599,12 +615,22 @@ docker() {
     case "$*" in
         *inspect*) [ -n "${FAKE_VSLAM-x}" ] && printf '2026-09-14T19:00:00Z\n' || return 1 ;;
         *logs*vslam*) printf '%s\n' "${FAKE_VSLAM-$FAKE_VSLAM_DEFAULT}" ;;
+        *map_odom.py*)
+            printf '%s\n' "${FAKE_MAP_ODOM-$FAKE_MAP_ODOM_DEFAULT}"
+            [ -z "${FAKE_MAP_ODOM_BAD-}" ] || return "$FAKE_MAP_ODOM_BAD" ;;
+        *ps*--format*) printf '%s\n' "${FAKE_CONTAINERS-pepin-vslam}" ;;
         *"ps -eo"*) printf '%s\n' "${FAKE_PROCS-rtabmap
 rgbd_odometry
 python3}" ;;
     esac
     return 0
 }
+# The localiser switch, as ros/lib.sh holds it; restart.sh was written for the tracker stack, so
+# the fake defaults to it and the rtabmap role is asked for by name (FAKE_LOCALIZER=rtabmap).
+PEPIN_LOCALIZER="${FAKE_LOCALIZER:-tracker}"
+pepin_localizer_is_tracker() { [ "$PEPIN_LOCALIZER" = tracker ]; }
+# pepin_rmw_is_zenoh is deliberately NOT faked: the real ros/lib.sh has it, and leaving it
+# undefined here is how these tests exercise the bridge-era branches of the checks.
 """
 FAKE_SUB = """#!/bin/bash
 printf '%s %s\\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
@@ -613,6 +639,7 @@ case "$(basename "$0")$*" in
                     [ -z "${FAKE_CENSUS_RED-}" ] || exit 1 ;;
     goto.shwhere) printf '%s\\n' "${FAKE_WHERE-at (-11.32, 0.71) facing 132 deg, fit 0.66}"
                   [ -z "${FAKE_WHERE_DOWN-}" ] || exit 1 ;;
+    go.shwhere) printf '%s\\n' "${FAKE_GO_WHERE-$FAKE_GO_WHERE_DEFAULT}" ;;
     flags.shdrift*) printf '%s' "${FAKE_DRIFT-}" ;;
     foxglove.shcheck) printf '%s\n' "${FAKE_FOXGLOVE-foxglove: 17 checks, none failed}"
                       [ -z "${FAKE_FOXGLOVE_RED-}" ] || exit 1 ;;
@@ -629,7 +656,7 @@ def _restart(tmp_path, *args, **env):  # type: ignore[no-untyped-def]
     here = tmp_path / "ros"
     here.mkdir(exist_ok=True)
     (here / "lib.sh").write_text(FAKE_RESTART_LIB)
-    for name in ("sync.sh", "board.sh", "goto.sh", "laptop.sh", "flags.sh", "foxglove.sh"):
+    for name in ("sync.sh", "board.sh", "goto.sh", "go.sh", "laptop.sh", "flags.sh", "foxglove.sh"):
         (here / name).write_text(FAKE_SUB)
         (here / name).chmod(0o755)
     (here / "restart.sh").write_text((REPO / "ros/restart.sh").read_text())
@@ -651,6 +678,8 @@ def _restart(tmp_path, *args, **env):  # type: ignore[no-untyped-def]
             "PEPIN_RESTART_POLL_S": "0",
             "FAKE_TRACKER_DEFAULT": TRACKER_LINE,
             "FAKE_VSLAM_DEFAULT": VSLAM_LOG,
+            "FAKE_MAP_ODOM_DEFAULT": MAP_ODOM_LINE,
+            "FAKE_GO_WHERE_DEFAULT": GO_WHERE_LINE,
             **env,
         },
     )
@@ -875,6 +904,37 @@ def test_every_check_runs_even_when_the_first_ones_fail_and_the_run_goes_red(tmp
     assert "FAIL 2.1" in out and "DEAD ROUTES 2" in out
     assert "PASS 1.4" in out and "PASS 2.8" in out, "the checks after a failure still ran"
     assert "red: 3 of " in out
+
+
+def test_without_a_tracker_the_checks_move_to_the_edge_the_laptop_owns(tmp_path) -> None:
+    """PEPIN_LOCALIZER=rtabmap: no tracker is launched on the board, so its report line, its
+    /where_am_i and its /map_tracked are not evidence and must not fail the restart. What
+    replaces them is 1.13 — map -> odom read where its publisher is — and a 1.3 that asks the
+    goal server's socket, whose pose is composed from that very edge."""
+    code, out, sent = _restart(tmp_path, "both", FAKE_LOCALIZER="rtabmap", FAKE_TRACKER="")
+    assert code == 0, out
+    assert "WARN 1.2" in out and "none on this board" in out, "a missing tracker is not a failure"
+    assert "PASS 1.3" in out and '"pose": "tf"' in out
+    assert "WARN 1.13" not in out and "PASS 1.13" in out and "corrected" in out
+    assert "/map_tracked" in out and "WARN" in out
+    assert any("map_odom.py" in c for c in sent), "read in the laptop's container, not the board's"
+    assert not any("goto.sh where" in c for c in sent), "nothing asks the tracker's service"
+
+
+def test_a_pose_nobody_has_corrected_is_a_failure_once_the_grace_is_over(tmp_path) -> None:
+    """A localiser that has recognised nothing publishes map == odom, and every pose composed
+    from it is simply the odometry's. Correct for the first seconds of a start, a fault after —
+    the tool exits 1 for it and the script turns that into a red line naming the grace."""
+    code, out, _ = _restart(
+        tmp_path,
+        "board",
+        FAKE_LOCALIZER="rtabmap",
+        FAKE_MAP_ODOM="map -> odom: (+0.000, +0.000) m, +0.0 deg, |shift| 0.000 m,"
+        " stamped 0.04 s ago: identity (nothing has corrected the pose yet)",
+        FAKE_MAP_ODOM_BAD="1",
+    )
+    assert code == 1, out
+    assert "FAIL 1.13" in out and "identity" in out and "grace" in out
 
 
 def test_the_board_s_own_readerless_routes_fail_the_laptop_check(tmp_path) -> None:  # type: ignore[no-untyped-def]
