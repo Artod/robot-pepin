@@ -78,7 +78,7 @@
           "pointSize": 3,
           "colorField": "intensity",
           "colorMode": "flat",
-          "flatColor": "#ff9100"
+          "flatColor": "#4fc3f7"
         },
         "/depth_scan": {
           "visible": false,
@@ -87,10 +87,16 @@
           "flatColor": "#ff3b3b"
         },
         "/depth_marks": {
-          "visible": false,
-          "pointSize": 5,
+          "visible": true,
+          "pointSize": 4,
           "colorMode": "flat",
-          "flatColor": "#ffea00"
+          "flatColor": "#ff9100"
+        },
+        "/depth_free": {
+          "visible": true,
+          "pointSize": 2,
+          "colorMode": "flat",
+          "flatColor": "#00e5ff40"
         },
         "/contact_scan": {
           "visible": false,
@@ -98,21 +104,40 @@
           "colorMode": "flat",
           "flatColor": "#b388ff"
         },
+        "/tof/front/scan": {
+          "visible": true,
+          "pointSize": 4,
+          "colorMode": "flat",
+          "flatColor": "#e040fb"
+        },
+        "/tof/left/scan": {
+          "visible": true,
+          "pointSize": 4,
+          "colorMode": "flat",
+          "flatColor": "#e040fb"
+        },
+        "/tof/right/scan": {
+          "visible": true,
+          "pointSize": 4,
+          "colorMode": "flat",
+          "flatColor": "#e040fb"
+        },
         "/local_costmap/costmap": {
           "visible": true,
           "colorMode": "costmap",
-          "alpha": 0.35
+          "alpha": 0.45,
+          "frameLocked": true
         },
         "/marks_audit/phantoms": {
           "visible": true,
-          "pointSize": 7,
+          "pointSize": 6,
           "colorMode": "flat",
-          "flatColor": "#ff2020"
+          "flatColor": "#ff1744"
         },
         "/global_costmap/costmap": {
-          "visible": false,
+          "visible": true,
           "colorMode": "costmap",
-          "alpha": 0.35
+          "alpha": 0.2
         },
         "/local_costmap/published_footprint": {
           "visible": true,
@@ -207,6 +232,14 @@
       ],
       "minLogLevel": 2,
       "nameFilter": {}
+    },
+    "RawMessages!audit": {
+      "topicPath": "/marks_audit",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "expansion": "all"
     }
   },
   "globalVariables": {},
@@ -220,8 +253,13 @@
     "second": {
       "direction": "column",
       "first": "Image!head",
-      "second": "RosOut!log",
-      "splitPercentage": 55
+      "second": {
+        "direction": "column",
+        "first": "RawMessages!audit",
+        "second": "RosOut!log",
+        "splitPercentage": 40
+      },
+      "splitPercentage": 50
     },
     "splitPercentage": 70
   }

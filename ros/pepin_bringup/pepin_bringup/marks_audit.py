@@ -87,6 +87,8 @@ PHANTOM_RED = (255, 32, 32)
 # The node's flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration. Nothing is cached from them: every costmap reads them, so a change takes
 # the next one — which is the point, with the cart standing in front of the blob.
+PHANTOM_Z_M = 0.05  # the phantom cloud floats this high so Foxglove shows it above the grids
+
 FLAGS = FlagSet(
     Flag(
         "marks_audit",
@@ -341,7 +343,8 @@ class MarksAudit(Node):
         if not self._switches.on("phantom_cloud"):
             return
         xy = verdict.camera_only_xy
-        points = np.column_stack((xy, np.zeros(len(xy))))
+        # 5 cm up: at z = 0 the red cells hide under /map, the costmaps and the orange marks
+        points = np.column_stack((xy, np.full(len(xy), PHANTOM_Z_M)))
         colours = np.tile(np.array(PHANTOM_RED, dtype=np.uint8), (len(xy), 1))
         self._phantom_pub.publish(
             cloud_from_points(points, colours, msg.header.stamp, msg.header.frame_id)

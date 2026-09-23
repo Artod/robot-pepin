@@ -148,7 +148,7 @@ controller_server:
       lookahead_time: 2.5
       use_velocity_scaled_lookahead_dist: true
       rotate_to_heading_angular_vel: 0.5
-      transform_tolerance: 0.2
+      transform_tolerance: 1.0  # map -> odom crosses the WiFi: a 0.4-1.2 s stall (measured 2026-09-22) must not abort the follow (drive 0437: 3 of 4 aborts were this)
       min_approach_linear_velocity: 0.08
       approach_velocity_scaling_dist: 0.3  # brake later: the crawl to the goal felt endless
       # On. RPP checks the CURRENT pose first (isCollisionImminent): a footprint outline touching
@@ -207,7 +207,7 @@ controller_server:
       lookahead_time: 2.5
       use_velocity_scaled_lookahead_dist: true
       rotate_to_heading_angular_vel: 0.5
-      transform_tolerance: 0.2
+      transform_tolerance: 1.0  # map -> odom crosses the WiFi: a 0.4-1.2 s stall (measured 2026-09-22) must not abort the follow (drive 0437: 3 of 4 aborts were this)
       min_approach_linear_velocity: 0.08
       approach_velocity_scaling_dist: 0.3  # brake later: the crawl to the goal felt endless
       # On. RPP checks the CURRENT pose first (isCollisionImminent): a footprint outline touching

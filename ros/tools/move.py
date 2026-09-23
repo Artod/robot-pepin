@@ -169,6 +169,13 @@ if cone.scan is None:
 assert cone.scan is not None  # finish() above does not return
 laser_frame = cone.scan.header.frame_id
 try:
+    # A static edge is a one-shot transient-local sample; a fresh listener under rmw_zenoh can
+    # miss the first query (2026-09-23: the guard refused every turn after a board restart while
+    # the edge was there), so the lookup is retried for a few seconds before it counts as absent.
+    for _attempt in range(12):
+        if tf_buffer.can_transform("base_link", laser_frame, rclpy.time.Time()):
+            break
+        spin(0.5)
     edge = tf_buffer.lookup_transform("base_link", laser_frame, rclpy.time.Time())
     q = edge.transform.rotation
     cone.mount = (q.x, q.y, q.z, q.w)
