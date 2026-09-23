@@ -160,6 +160,12 @@ node.create_subscription(LaserScan, "/scan", on_scan, 10)
 tf_buffer = Buffer()
 tf_listener = TransformListener(tf_buffer, node)
 spin(ODOM_WAIT_S)
+# Discovery under rmw_zenoh on the board answers a fresh node in up to 10 s (interest timeouts,
+# 2026-09-23): keep listening until the odometry AND the scan are both heard, up to 20 s.
+for _extra in range(30):
+    if travel.heard and cone.scan is not None:
+        break
+    spin(0.5)
 if any(navigating.values()):
     finish(2, "refused: a navigation goal is running; ros/go.sh cancel first")
 if travel.heard == 0:
