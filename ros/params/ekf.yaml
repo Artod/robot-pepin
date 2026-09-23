@@ -227,13 +227,9 @@ ekf_filter_node:
     # velocity has no origin to disagree about. `differential` is therefore not needed and not
     # set -- that switch exists to turn a POSE into a velocity, and this source already is one.
     odom3: odom_laser
-    # vx OFF since 2026-09-23: measured on the robot (0.40 m reverse), rf2o's vx comes out with the
-    # sign of the wheels' opposite under every twist formulation tried, while its yaw rate matches
-    # the gyro (+54.1 vs +54.1 deg on a 60 deg turn). Until vx is understood only the yaw rate is
-    # fused; [true, false, false] on the third row is the way back.
     odom3_config: [false, false, false,
                    false, false, false,
-                   false, false, false,
+                   true,  false, false,
                    false, false, true,
                    false, false, false]
     odom3_differential: false

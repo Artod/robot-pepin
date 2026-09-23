@@ -69,7 +69,7 @@ index 210bc04..7dc86d0 100644
  
    double ang_inc = rf2o::getYaw(robot_pose_.rotation()) -
 diff --git a/src/CLaserOdometry2DNode.cpp b/src/CLaserOdometry2DNode.cpp
-index 2206777..4c3d1db 100644
+index 2206777..b9e88ee 100644
 --- a/src/CLaserOdometry2DNode.cpp
 +++ b/src/CLaserOdometry2DNode.cpp
 @@ -17,9 +17,11 @@
@@ -85,7 +85,7 @@ index 2206777..4c3d1db 100644
  {
    RCLCPP_INFO(get_logger(), "Initializing RF2O node...");
  
-@@ -39,6 +41,19 @@ CLaserOdometry2DNode::CLaserOdometry2DNode(): Node("CLaserOdometry2DNode")
+@@ -39,6 +41,25 @@ CLaserOdometry2DNode::CLaserOdometry2DNode(): Node("CLaserOdometry2DNode")
    this->get_parameter("init_pose_from_topic", init_pose_from_topic);
    this->declare_parameter<double>("freq", 10.0);
    this->get_parameter("freq", freq);
@@ -99,13 +99,19 @@ index 2206777..4c3d1db 100644
 +  this->get_parameter("twist_covariance_vy", twist_covariance_vy);
 +  this->declare_parameter<double>("twist_covariance_vyaw", 0.0);
 +  this->get_parameter("twist_covariance_vyaw", twist_covariance_vyaw);
++  // pepin: the sign of each published twist component, a LIVE parameter (+1 or -1): the only
++  // sign convention of this node that is trusted is the one measured on the robot against the
++  // wheels and the gyro (2026-09-23: vx opposite, yaw rate right), and a measured sign must
++  // be flippable in a second, not in a 20-minute image rebuild.
++  this->declare_parameter<double>("twist_sign_linear", 1.0);
++  this->declare_parameter<double>("twist_sign_angular", 1.0);
 +  previous_valid = false;
 +  previous_x = previous_y = previous_yaw = 0.0;
 +  previous_stamp_ns = 0;
  
    // Init Publishers and Subscribers
    //---------------------------------
-@@ -98,7 +113,16 @@ void CLaserOdometry2DNode::LaserCallBack(const sensor_msgs::msg::LaserScan::Shar
+@@ -98,7 +119,16 @@ void CLaserOdometry2DNode::LaserCallBack(const sensor_msgs::msg::LaserScan::Shar
      else
      {
        // Initialize module on first scan (from laser params)
@@ -123,7 +129,7 @@ index 2206777..4c3d1db 100644
        rf2o_ref.init(last_scan, initial_robot_pose.pose.pose);
        rf2o_ref.first_laser_scan = false;
      }
-@@ -176,7 +200,10 @@ void CLaserOdometry2DNode::process()
+@@ -176,7 +206,10 @@ void CLaserOdometry2DNode::process()
    else
    {
      // This is a warning. We depend on laser scans, so no meaning running faster than scan freq.
@@ -135,7 +141,7 @@ index 2206777..4c3d1db 100644
    }
  }
  
-@@ -220,9 +247,53 @@ void CLaserOdometry2DNode::publish()
+@@ -220,9 +253,55 @@ void CLaserOdometry2DNode::publish()
    odom.pose.pose.orientation = quaternion;
    //set the velocity
    odom.child_frame_id = base_frame_id;
@@ -180,9 +186,11 @@ index 2206777..4c3d1db 100644
 +  previous_yaw = pyaw;
 +  previous_stamp_ns = stamp_ns;
 +  previous_valid = true;
-+  odom.twist.twist.linear.x = vx;                    //linear speed
-+  odom.twist.twist.linear.y = vy;
-+  odom.twist.twist.angular.z = wz;                   //angular speed
++  const double sign_linear = this->get_parameter("twist_sign_linear").as_double();
++  const double sign_angular = this->get_parameter("twist_sign_angular").as_double();
++  odom.twist.twist.linear.x = sign_linear * vx;      //linear speed
++  odom.twist.twist.linear.y = sign_linear * vy;
++  odom.twist.twist.angular.z = sign_angular * wz;    //angular speed
 +  // pepin: an unfilled covariance is a claim of perfect knowledge: robot_localization
 +  // replaces a zero variance with 1e-9 (ekf.cpp) and then trusts this source over every
 +  // other one it fuses. The diagonal is three parameters; 0.0 is upstream.

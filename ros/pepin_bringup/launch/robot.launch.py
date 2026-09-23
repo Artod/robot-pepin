@@ -341,6 +341,12 @@ def generate_launch_description() -> LaunchDescription:
                 "twist_covariance_vx": LASER_ODOM_TWIST_VARIANCE["vx"],
                 "twist_covariance_vy": LASER_ODOM_TWIST_VARIANCE["vy"],
                 "twist_covariance_vyaw": LASER_ODOM_TWIST_VARIANCE["vyaw"],
+                # Measured on the robot 2026-09-23 against the wheels and the gyro (0.40 m
+                # reverse, 60 deg turn): the differenced pose's yaw rate carries the robot's sign,
+                # its forward speed the opposite. Live parameters: `ros2 param set /laser_odometry
+                # twist_sign_linear 1.0` is the way back.
+                "twist_sign_linear": -1.0,
+                "twist_sign_angular": 1.0,
             }
         ],
         condition=IfCondition(LaunchConfiguration("laser_odom")),
