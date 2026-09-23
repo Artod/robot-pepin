@@ -206,6 +206,14 @@ class CameraConfig:
     # was measured with (a module taped onto the old webcam) says its own offset here, and it
     # goes into ``camera_link -> camera_optical``. Empty: the lens is the link.
     eye: tuple[tuple[str, float], ...] = ()
+    # The ``net`` block: the learned stereo matcher this head may be run with, behind the depth
+    # node's live ``stereo_matcher`` flag. The numbers belong to the camera and not to the module
+    # that loads the network, so nothing is hand-patched into code (CLAUDE.md, the sensor's own
+    # properties). An empty ``net_weights`` means the flag cannot be turned on for this head.
+    net_weights: str = ""
+    net_iters: int = 7
+    net_device: str = "mps"
+    net_gate: bool = False
 
     @property
     def stereo(self) -> bool:
@@ -223,6 +231,7 @@ class CameraConfig:
         calibrated = bool(data.get("calibrated", False))
         block = data.get("intrinsics")
         rig = data.get("rig")
+        net = data.get("net", {})
         return cls(
             stream=str(data["stream"]),
             width=int(data["width"]),
@@ -243,6 +252,10 @@ class CameraConfig:
                 for key, value in data.get("eye", {}).items()
                 if isinstance(value, (int, float))
             ),
+            net_weights=str(net.get("weights", "")),
+            net_iters=int(net.get("iters", 7)),
+            net_device=str(net.get("device", "mps")),
+            net_gate=bool(net.get("gate", False)),
         )
 
     @classmethod

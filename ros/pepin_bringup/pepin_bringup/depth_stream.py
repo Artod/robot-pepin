@@ -64,6 +64,15 @@ see that module). ``fx`` and the baseline are read off the two ``camera_info`` m
 node never opens the calibration file. The picture, its stamp and its frame are the left eye's
 throughout, exactly as the mono path publishes them.
 
+WHICH ENGINE matches the two eyes is the live ``stereo_matcher`` flag in {sgbm, raft}, default
+``sgbm``. Both are built at start and the flag points the source at one of them, so an A/B costs
+no restart and nothing is rebuilt mid-drive. ``raft`` is RAFT-Stereo on the laptop's GPU, in the
+same native host process the mono network uses (:mod:`pepin.stereo_host`, ``ros/depth_host.sh
+stereo``): it turns the reflection phantoms SGBM paints on the parquet from 450 separate specks
+into 94 blobs and costs 89 ms a pair against 17, which is why the default waits for a live drive.
+A pair the host cannot answer goes to SGBM, and the report line counts it and says how long the
+host has been down.
+
 WHAT THE CORRECTION STAGES MEAN under a metric source. Until the head was calibrated every one
 of them stayed on (2026-09-20: nothing to measure against, so switching any off was a guess). With
 the checkerboard calibration of 2026-09-21 (epipolar 0.23 px; a printed board's span read to
@@ -100,7 +109,8 @@ the signature of a drifting gyro rather than of a tipping body) is treated as no
 The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): one per stage of
 the pipeline — ``edge_filter``, ``lidar_anchor``, ``floor_pairs``, ``wall_anchor``,
 ``parallax_anchor``, ``affine_law``, ``range_law``, ``frame_law``,
-``wall_correct``, ``floor_anchor`` — plus ``depth_backend``, ``scale_ceiling``, the largest
+``wall_correct``, ``floor_anchor`` — plus ``depth_backend``, ``stereo_matcher``,
+``scale_ceiling``, the largest
 1 / scale the law may be fitted to, ``law_slew``, how fast that law may move between fits,
 ``tf_dead_s``, how stale a TF edge may be before no frame waits for it, ``imu_lean``,
 ``lean_min_quality`` and ``scan_hz``, the cap on how often ``/depth_scan`` is published (5 Hz,
@@ -212,8 +222,13 @@ from pepin.frame_pose import FramePoser
 from pepin.lean import LEAN_QUALITY_FLOOR
 from pepin.parallax import MATCHERS, TRACK_SIGMA_MODELS, to_gray
 from pepin.stereo_depth import (
+    MATCHERS as STEREO_MATCHERS,
+)
+from pepin.stereo_depth import (
     Baseline,
+    DisparityMatcher,
     MatcherSettings,
+    RaftMatcher,
     StereoDepth,
     StereoMatcher,
     StereoUnavailableError,
@@ -560,6 +575,35 @@ FLAGS = FlagSet(
         " measure the container's own worst case (5.8 fps)",
         choices=MODES,
         env="PEPIN_DEPTH_BACKEND",
+    ),
+    Flag(
+        "stereo_matcher",
+        "sgbm",
+        description="which engine turns the two eyes into a disparity: sgbm (OpenCV's semi-global"
+        " block matcher, in this container) or raft (RAFT-Stereo on the laptop's GPU through the"
+        " same host the mono network uses, ros/depth_host.sh stereo). Both are built at start and"
+        " this picks which one answers the next pair, so an A/B needs no restart; a pair the host"
+        " cannot answer falls to sgbm and the report line counts it. Under depth_source: network"
+        " it does nothing",
+        why="sgbm until a live drive says otherwise. What raft buys was measured through THIS"
+        " path on 2026-09-22, on the 8 rectified pairs of scratch/stereo_net/frames/pairs.npz"
+        " (host_smoke.py, sgbm_vs_raft.py, phantom_where.py): the airborne phantom PIXELS the"
+        " lamp's reflection on the parquet puts 0.5-1.5 m up and under 2.5 m ahead fall only"
+        " 6651 -> 5265, and raft is the worse of the two on three of the eight pairs — but what a"
+        " costmap is told falls 450 separate specks -> 94 blobs (192 -> 37 of 50 px or more),"
+        " halves in the robot's own path (4486 -> 2566), and the floor comes back whole: 4.7x as"
+        " many points within 5 cm of the fitted plane. What it costs is measured too: 89.2 ms a"
+        " pair end to end through the host against SGBM's 16.8 here, so 11 fps against the"
+        " camera's 10 and the scan_hz cap's 5 — the whole budget, with the pose and the pipeline"
+        " still to pay for, and the routers not yet in the path. The drive settles it",
+        on_when="on the parquet, where SGBM's reflection phantoms are the thing marking the"
+        " costmap, and with ros/depth_host.sh stereo up — watch the report's ms a pair and the"
+        " published frames/s before trusting it",
+        off_when="whenever the frame rate matters more than the phantoms, when the host is not"
+        " running (it falls back by itself, but paying a round trip per pair to be refused is"
+        " not free), and as the A/B half of any claim about either engine",
+        choices=STEREO_MATCHERS,
+        env="PEPIN_STEREO_MATCHER",
     ),
     Flag(
         "scale_ceiling",
@@ -1813,6 +1857,13 @@ class DepthStream(Node):
         # show it.
         self._pair_wait_s = float(self.declare_parameter("stereo_pair_wait_s", PAIR_WAIT_S).value)
         self._stereo_reach_m = float(self.declare_parameter("stereo_reach_m", 0.0).value)
+        # How long a pair waits for the GPU host before it falls to SGBM. 2 s is the mono
+        # service's own timeout: the host answers a pair in 91 ms, so anything near this is the
+        # host gone rather than the host slow, and three of them in a row give it up until the
+        # next probe (pepin.stereo_depth.RaftMatcher).
+        self._stereo_host_timeout_s = float(
+            self.declare_parameter("stereo_host_timeout_s", 2.0).value
+        )
         self._stereo_matcher_settings = self._matcher_settings()
         self._switches = Switches(self, flags_for(source_name), on_change=self._on_switch)
         self._law.watching = bool(self._switches["law_watch"])
@@ -1849,9 +1900,20 @@ class DepthStream(Node):
         self._right: deque[tuple[tuple[int, int], Image]] = deque(maxlen=PAIR_BUFFER)
         self._right_ready = threading.Condition()
         self._stereo: StereoDepth | None = None
+        self._matchers: dict[str, DisparityMatcher] = {}
         if self._stereo_on:
+            # BOTH engines are built here and the live stereo_matcher flag picks which one answers
+            # the next pair: a matcher REBUILT mid-drive would change what the costmap is marked
+            # from, but choosing between two that already exist does not, so an A/B needs no
+            # restart. RaftMatcher holds nothing but an HTTP client until it is first called — the
+            # network itself lives in the host process — so 'sgbm' costs no torch and no load.
+            sgbm = StereoMatcher(self._stereo_matcher_settings)
+            self._matchers = {
+                "sgbm": sgbm,
+                "raft": RaftMatcher(depth_url, sgbm, timeout_s=self._stereo_host_timeout_s),
+            }
             self._stereo = StereoDepth(
-                matcher=StereoMatcher(self._stereo_matcher_settings),
+                matcher=self._matchers[str(self._switches["stereo_matcher"])],
                 reach=self._stereo_reach_m,
             )
             self.create_subscription(CameraInfo, RIGHT_INFO, self._on_right_info, reliable)
@@ -1895,7 +1957,9 @@ class DepthStream(Node):
         self.create_timer(30.0, self._report)
         if self._stereo is not None:
             self.get_logger().info(
-                f"raw depth from the stereo head ({self._stereo.matcher.settings.describe()}):"
+                f"raw depth from the stereo head, matcher"
+                f" {self._switches['stereo_matcher']} of {', '.join(self._matchers)}"
+                f" ({self._stereo.matcher.describe()}):"
                 f" {RIGHT_IMAGE} paired with /camera/image by exact stamp,"
                 f" {self._pair_wait_s * 1e3:.0f} ms of grace; fx and the baseline"
                 f" come from {RIGHT_INFO}"
@@ -1904,6 +1968,15 @@ class DepthStream(Node):
             "depth stream up: /camera/image -> /camera/depth, /depth_scan; camera pose from TF"
             f" (config/camera.json's pitch {math.degrees(pitch):.1f} deg while TF has no edge)"
         )
+
+    def _swap_matcher(self, name: str) -> None:
+        """The live ``stereo_matcher`` flag: point the stereo source at the OTHER engine, which
+        already exists. Nothing is loaded or rebuilt here, so the swap costs one attribute and
+        takes effect on the next pair. A mono node has no engines and this does nothing."""
+        if self._stereo is None or name not in self._matchers:
+            return
+        self._stereo.matcher = self._matchers[name]
+        self.get_logger().info(f"stereo matcher -> {name} ({self._stereo.matcher.describe()})")
 
     def _matcher_settings(self) -> MatcherSettings:
         """The stereo matcher's numbers as this launch set them: the module's measured defaults
@@ -1917,6 +1990,9 @@ class DepthStream(Node):
             block_size=int(self.declare_parameter("stereo_block_size", default.block_size).value),
             mode=str(self.declare_parameter("stereo_mode", default.mode).value),
             downscale=int(self.declare_parameter("stereo_downscale", default.downscale).value),
+            uniqueness_ratio=int(
+                self.declare_parameter("stereo_uniqueness_ratio", default.uniqueness_ratio).value
+            ),
             texture_threshold=float(
                 self.declare_parameter("stereo_texture_threshold", default.texture_threshold).value
             ),
@@ -1979,6 +2055,8 @@ class DepthStream(Node):
         poser's floor under a lean, a stage's flag switches that stage of the pipeline."""
         if name == "depth_backend":
             self._net.mode = str(new)
+        elif name == "stereo_matcher":
+            self._swap_matcher(str(new))
         elif name == "scale_ceiling":
             set_scale_ceiling(float(new))  # the next fit is bounded by it; the law in hand is not
         elif name == "law_watch":

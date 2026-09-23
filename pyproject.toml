@@ -38,6 +38,10 @@ packages = ["src/pepin"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests", "scripts"]
+# Vendored third-party source is not this project's code: it is upstream's, verbatim but for the
+# import rewrites its __init__ lists, and a diff against upstream is the only readable thing
+# about it. Reformatting it would destroy that.
+extend-exclude = ["src/pepin/vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "N", "RUF"]
@@ -60,6 +64,7 @@ python_version = "3.12"
 files = ["src/pepin", "ros/pepin_bringup/pepin_bringup", "ros/tools"]
 strict = true
 ignore_missing_imports = true
+exclude = ["^src/pepin/vendor/"]
 
 # The ROS nodes are glue over an untyped rclpy: check them for real mistakes (a field that no
 # longer exists, a wrong assignment) without demanding generics on every ROS type.
@@ -85,6 +90,14 @@ disallow_subclassing_any = false
 disallow_any_generics = false
 disallow_untyped_calls = false
 disallow_untyped_defs = false
+
+# Vendored upstream source (src/pepin/vendor): untyped by nature, excluded above, and skipped
+# on import too so a strict call into it is Any rather than an untyped-call error. Judging it
+# would mean editing it, and the point of vendoring is that it is not edited.
+[[tool.mypy.overrides]]
+module = "pepin.vendor.*"
+follow_imports = "skip"
+ignore_errors = true
 
 # transformers is the optional `depth` group: with it installed its untyped from_pretrained
 # needs a `type: ignore[no-untyped-call]`, without it the import is Any and the same comment

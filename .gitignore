@@ -43,3 +43,7 @@ ros/maps/world_*.npz
 ros/maps/*.world.npz
 ros/maps/*.world.pgm
 ros/maps/*.world.yaml
+
+# Model checkpoints: 40 MB of binary, fetched not committed (RAFT-Stereo's
+# download_models.sh; see src/pepin/vendor/raft_stereo/__init__.py)
+models/

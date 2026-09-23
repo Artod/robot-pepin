@@ -1361,6 +1361,38 @@ def test_a_left_picture_with_no_right_eye_of_its_stamp_is_dropped_and_counted(
     assert "source stereo: 128px/5px 3way" in line and "% valid" in line
 
 
+def test_both_matchers_are_built_at_start_and_the_flag_swaps_them_live(build: Build) -> None:
+    """Rule 19 on the stereo matcher: sgbm is the default, both engines exist from the start so
+    an A/B needs no restart, the live flag points the source at one of them and nothing is
+    rebuilt, and the report line says which engine marked the costmap."""
+    node, _net = build(depth_source="stereo", stereo_reach_m=10.0, lidar_anchor=False)
+    assert set(node._matchers) == {"sgbm", "raft"}
+    assert node._switches["stereo_matcher"] == "sgbm"
+    assert node._stereo is not None and node._stereo.matcher is node._matchers["sgbm"]
+    assert node._matchers["raft"].fallback is node._matchers["sgbm"], (  # type: ignore[union-attr]
+        "a pair the host loses goes to the very SGBM the flag would have used"
+    )
+
+    assert node.set_parameters([Param("stereo_matcher", "raft")])[0].successful
+    assert node._stereo.matcher is node._matchers["raft"], "the swap costs one attribute"
+    node._report()
+    assert "stereo_matcher=raft" in node.logger.texts("info")[-1]
+
+    refused = node.set_parameters([Param("stereo_matcher", "elas")])[0]
+    assert not refused.successful and "not one of sgbm, raft" in refused.reason
+    assert node._stereo.matcher is node._matchers["raft"], "a refused set changes nothing"
+    assert node.set_parameters([Param("stereo_matcher", "sgbm")])[0].successful
+    assert node._stereo.matcher is node._matchers["sgbm"]
+
+
+def test_a_mono_node_carries_no_matchers_and_the_flag_is_harmless(build: Build) -> None:
+    """The flag is in one table for every source. Under ``depth_source: network`` there is no
+    stereo source to point anywhere, and setting it must not kill the node."""
+    node, _net = build()
+    assert node._matchers == {} and node._stereo is None
+    assert node.set_parameters([Param("stereo_matcher", "raft")])[0].successful
+
+
 def test_a_frame_before_the_rig_describes_itself_is_lost_and_said_so(build: Build) -> None:
     """fx and the baseline arrive on camera_info. Until the RIGHT eye's has, the node cannot
     turn a disparity into a metre, and it says so rather than publishing a guess."""

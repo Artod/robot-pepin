@@ -20,8 +20,20 @@ calibrated rig live in :mod:`pepin.stereo`.
   needs to become metres, built from the two ``camera_info`` messages the stereo camera
   publishes — the node that consumes the eyes has those two numbers and not the remap tables a
   :class:`pepin.stereo.Rectifier` is built from.
+* :class:`RaftMatcher` is the second engine behind the same call: RAFT-Stereo, which runs on the
+  laptop's GPU in a native process (:mod:`pepin.stereo_host`) because Docker on macOS cannot see
+  Metal, and is reached over the loopback. On the glossy parquet it turns SGBM's 450 airborne
+  specks into 94 blobs and answers for 4.7x as much floor, for 89 ms a pair against 17 (that
+  module carries the whole table and where each number comes from). A pair the host cannot answer
+  falls to SGBM and is counted.
 * :class:`StereoDepth` is the source: pictures in, float32 metres out, NaN where unknown and
   NaN past :attr:`StereoDepth.reach`.
+
+WHICH ENGINE answers is the depth node's live ``stereo_matcher`` flag in {sgbm, raft}, default
+``sgbm`` until a live drive says otherwise (CLAUDE.md rule 19): both are built at start and the
+flag picks which one the next pair goes to, so an A/B needs no restart and nothing is rebuilt
+mid-drive. :func:`build_matcher` is the name-to-engine map, and the switch's state is in the
+node's report line.
 
 THE ERROR MODEL is why a reach exists. A disparity measured to ``sigma_d`` pixels gives a depth
 good to ``sigma_z = z^2 / (fx * B) * sigma_d``: the error grows with the SQUARE of the range, so
@@ -56,15 +68,21 @@ stay millisecond-fast.
 
 from __future__ import annotations
 
+import logging
 import math
+import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
 
 from pepin.stereo import MIN_DISPARITY_PX, Array
+from pepin.stereo_host import RemoteDisparity, StereoHostError
 from pepin.telemetry import LatencyTracker
+
+log = logging.getLogger("pepin.stereo_depth")
 
 DISP_SCALE = 16.0  # OpenCV's fixed point: the matcher answers in sixteenths of a pixel
 # How well a disparity is measured, in pixels. On rendered pairs the matcher's subpixel fit sits
@@ -75,6 +93,29 @@ DISP_SCALE = 16.0  # OpenCV's fixed point: the matcher answers in sixteenths of 
 DISPARITY_SIGMA_PX = 0.5
 DEPTH_SIGMA_M = 0.10  # the depth error at which this camera stops answering for its own depth
 MODES = ("sgbm", "hh", "hh4", "3way")
+MATCHERS = ("sgbm", "raft")  # which engine answers a pair; the node's stereo_matcher flag
+
+
+class DisparityMatcher(Protocol):
+    """What :class:`StereoDepth` needs of an engine: two rectified eyes in, a float32 disparity
+    image in pixels out (NaN where untrusted), how wide a disparity range it searches, and one
+    phrase about itself for the report line.
+
+    :class:`StereoMatcher` (OpenCV's SGBM) and :class:`RaftMatcher` (the network) are the two."""
+
+    def __call__(self, left: Array, right: Array) -> Array:
+        """The disparity of one pair, float32 pixels at the pictures' own size."""
+        ...
+
+    @property
+    def search_px(self) -> int:
+        """How many disparities this engine searches, in pixels of the full-size picture: what
+        the nearest measurable depth is derived from. 0 when it has not searched anything yet."""
+        ...
+
+    def describe(self) -> str:
+        """One phrase for a report line: what this engine is and its milliseconds."""
+        ...
 
 
 class StereoUnavailableError(RuntimeError):
@@ -190,10 +231,16 @@ class MatcherSettings:
     # stiff that the 8 px bar survives over 24.5 % of itself instead of 67.1 %.
     p1: int | None = None
     p2: int | None = None
-    # The margin the winning disparity must beat the runner-up by, in percent. 10 is OpenCV's own
-    # middle. 5 keeps 3.6 more points of the real frames and puts them on repeated texture
-    # (a radiator, a bookshelf); 15 throws away 4.0 points and gains nothing measurable.
-    uniqueness_ratio: int = 10
+    # The margin the winning disparity must beat the runner-up by, in percent. 10 was OpenCV's own
+    # middle and this rig's default until 2026-09-22. 25 since then, measured against the only
+    # truth the lidar cannot give: a hand-marked patch of BARE PARQUET in the cart's own corridor,
+    # where anything lifting to 0.5-1.5 m above the floor is false by construction
+    # (scratch/one_localiser/bare_floor_truth.py, uniqueness_verdict.py; 8 live pairs). Airborne
+    # pixels over that floor per frame: 1176 at 10, 719 at 15, 370 at 20, 234 at 25, 149 at 30,
+    # while the points on surfaces the LIDAR confirms keep 100 / 95 / 91 / 86 / 80 %. At 25 the
+    # phantoms fall 80 % for 14 % of the confirmed surface, at no cost in matcher time. What it
+    # costs is the floor's own pixels (66 % kept), which clear rather than mark.
+    uniqueness_ratio: int = 25
     # The left-right consistency check, in pixels: what makes the occlusion band NaN instead of
     # the background's disparity smeared across the foreground's shadow. Measured on a rendered
     # 1.0 -> 2.5 m step, only 8.3 % of the true 14 px band comes back with an answer. NOTE:
@@ -343,10 +390,148 @@ class StereoMatcher:
         out: Array = disparity
         return out
 
+    @property
+    def search_px(self) -> int:
+        """How many disparities this matcher searches, in pixels of the FULL-size picture: the
+        settings' own (possibly downscaled) search scaled back up."""
+        return self.settings.search_px * self.settings.downscale
+
     def describe(self) -> str:
         """The settings and the median/p95 milliseconds of the pairs seen so far."""
         total = self.timing["total"].summary()
         return f"{self.settings.describe()} {total.median_ms:.0f}/{total.p95_ms:.0f} ms"
+
+
+class RaftMatcher:
+    """RAFT-Stereo behind the same call as :class:`StereoMatcher`, run on the laptop's GPU by
+    :mod:`pepin.stereo_host` and reached over the loopback: two rectified eyes in, a float32
+    disparity image in pixels out.
+
+    NOTHING of the network is in this process. The node lives in a Linux container that cannot
+    see Metal, where the same forward pass is 3 fps at best; this class greys the two eyes, sends
+    them, and unpacks what comes back. It imports no torch and loads no checkpoint, so a node
+    whose ``stereo_matcher`` flag stays ``sgbm`` pays nothing for holding one.
+
+    WHEN THE HOST DOES NOT ANSWER the pair goes to ``fallback`` — the very SGBM object the flag
+    would otherwise have used, so its settings and its timings are the same ones — and is counted.
+    The shape is :class:`pepin.depth_service.Fallback`'s and for the same reason: after
+    ``failures`` pairs in a row the host is left alone rather than costing a timeout per pair, and
+    it is tried again on the first pair after every ``retry_s`` seconds. A costmap marked by SGBM
+    while the host was down is not a silent event: the report line says how many pairs fell and
+    for how long.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        fallback: DisparityMatcher,
+        timeout_s: float = 2.0,
+        failures: int = 3,
+        retry_s: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.host = RemoteDisparity(url, timeout_s=timeout_s)
+        self.fallback = fallback
+        self.timing = {"host": LatencyTracker("host"), "total": LatencyTracker("total")}
+        self._failures, self._retry_s, self._clock = failures, retry_s, clock
+        self._consecutive = 0
+        self._down_since: float | None = None
+        self._last_try = 0.0
+        self._width = 0  # the width of the last pair: what the network searched over
+        self.pairs = 0  # answered by the host
+        self.fell_back = 0  # answered by SGBM because the host could not
+        self.last_error = ""
+
+    @property
+    def on_host(self) -> bool:
+        """Whether the next pair is sent to the host at all, or the host is being left alone."""
+        if self._down_since is None:
+            return True
+        return self._clock() - self._last_try >= self._retry_s
+
+    @property
+    def search_px(self) -> int:
+        """The width of the last pair: the network refines a disparity over the WHOLE row rather
+        than searching a fixed window, so nothing but the picture bounds how near it can see."""
+        return self._width
+
+    def __call__(self, left: Array, right: Array) -> Array:
+        """The disparity of one pair through the host, or SGBM's when the host cannot answer."""
+        with self.timing["total"].measure():
+            grey_left, grey_right = _grey(left), _grey(right)
+            if grey_left.shape != grey_right.shape:
+                raise StereoUnavailableError(
+                    f"the eyes are {grey_left.shape} and {grey_right.shape}: not one rig"
+                )
+            self._width = int(grey_left.shape[1])
+            if self.on_host:
+                self._last_try = self._clock()
+                try:
+                    with self.timing["host"].measure():
+                        disparity = self.host(grey_left, grey_right)
+                except StereoHostError as exc:
+                    self._failed(exc)
+                else:
+                    if self._down_since is not None:
+                        log.info("the stereo host is back: pairs go to the network again")
+                    self._consecutive, self._down_since = 0, None
+                    self.pairs += 1
+                    return disparity
+            self.fell_back += 1
+        return self.fallback(grey_left, grey_right)
+
+    def _failed(self, exc: Exception) -> None:
+        """One failed pair: counted, and after ``failures`` in a row the host is given up on
+        until ``retry_s`` has passed — a timeout paid per pair would halve the frame rate."""
+        self.last_error = f"{exc}"[:120]
+        if self._down_since is not None:
+            return  # a probe that failed: the next one waits another retry_s
+        self._consecutive += 1
+        if self._consecutive >= self._failures:
+            self._down_since = self._clock()
+            log.warning(
+                "the stereo host gave up after %d pairs (%s): SGBM answers, the host is retried"
+                " every %.0f s",
+                self._consecutive,
+                self.last_error,
+                self._retry_s,
+            )
+
+    def describe(self) -> str:
+        """The host's checkpoint, the median/p95 ms a pair here, the host's own forward pass, and
+        what fell to SGBM — the three numbers that say whether 11 fps is being paid for."""
+        total = self.timing["total"].summary()
+        model = self.host.last_model or "no pair answered yet"
+        fell = ""
+        if self.fell_back:
+            down = self._down_since
+            since = "" if down is None else f", down {self._clock() - down:.0f} s"
+            fell = f", {self.fell_back} fell to sgbm ({self.last_error}{since})"
+        return (
+            f"raft {model} via {self.host.url}"
+            f" {total.median_ms:.0f}/{total.p95_ms:.0f} ms a pair"
+            f" (host {self.host.last_infer_ms:.0f} ms){fell}"
+        )
+
+
+def build_matcher(
+    name: str,
+    settings: MatcherSettings | None = None,
+    url: str = "",
+    timeout_s: float = 2.0,
+) -> DisparityMatcher:
+    """The engine ``name`` asks for: ``sgbm`` (OpenCV, the default everywhere until a live drive
+    says otherwise) or ``raft`` (the network on the host at ``url``, falling back to that same
+    SGBM). An unknown name raises rather than quietly falling back — a costmap marked from a
+    matcher nobody chose is the bug this prevents."""
+    if name not in MATCHERS:
+        raise ValueError(f"matcher must be one of {MATCHERS}, not {name!r}")
+    sgbm = StereoMatcher(settings)
+    if name == "sgbm":
+        return sgbm
+    if not url:
+        raise ValueError("the raft matcher needs the stereo host's URL")
+    return RaftMatcher(url, sgbm, timeout_s=timeout_s)
 
 
 def _grey(picture: Array) -> Array:
@@ -392,7 +577,7 @@ class StereoDepth:
     def __init__(
         self,
         geometry: DisparityToDepth | None = None,
-        matcher: StereoMatcher | None = None,
+        matcher: DisparityMatcher | None = None,
         reach: float = 0.0,
         valid_window: int = 512,
     ) -> None:
@@ -426,12 +611,12 @@ class StereoDepth:
 
     @property
     def near(self) -> float:
-        """The nearest depth the search reaches, metres; 0 while the geometry is unknown."""
+        """The nearest depth the matcher's search reaches, metres; 0 while the geometry is
+        unknown, and 0 for an engine that has not searched anything yet."""
         g = self._geometry
         if g is None:
             return 0.0
-        s = self.matcher.settings
-        return near_m(g.fx, g.baseline_m, s.search_px * s.downscale)
+        return near_m(g.fx, g.baseline_m, self.matcher.search_px)
 
     @property
     def valid_fraction(self) -> float:

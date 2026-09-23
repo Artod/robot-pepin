@@ -35,11 +35,17 @@ again: every later frame raises :class:`DepthModelError` at once, which the node
 fatal in ``local`` mode (the process ends, the launch respawns it — as loud as a model that
 failed in the constructor) and as a lost frame in ``auto`` (the service keeps being probed).
 :attr:`Fallback.status` is the phrase for the report line.
+
+THE SECOND MODEL. The same process also serves the stereo matcher, ``POST /disparity``, under the
+same lock and on the same port: see :mod:`pepin.stereo_host`, which owns that endpoint's codec,
+network and counters. One process because there is one GPU and the node runs one depth source at
+a time; each model is built on its first request, so the one nobody asks for costs nothing.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import http.client
 import http.server
 import json
@@ -53,6 +59,7 @@ import numpy as np
 import numpy.typing as npt
 
 from pepin.depth import Array
+from pepin.stereo_host import DISPARITY_PATH, PairError, RaftSettings, StereoModel
 from pepin.telemetry import LatencyTracker
 
 log = logging.getLogger("pepin.depth_service")
@@ -227,16 +234,27 @@ class DepthNet:
 
 # ---------------------------------------------------------------- the server
 class DepthServer(http.server.ThreadingHTTPServer):
-    """Serves ``POST /depth`` (a frame in, its depth out) and ``GET /health`` (the model, the
-    device, the counters and the per-stage latencies as JSON). Frames are inferred one at a
-    time under :attr:`lock`; the timing of every stage is tracked and reported every 30 s."""
+    """Serves ``POST /depth`` (a frame in, its depth out), ``POST /disparity`` (a rectified stereo
+    pair in, its disparity out, when a ``stereo`` model was handed in) and ``GET /health`` (the
+    models, their devices, the counters and the per-stage latencies as JSON).
+
+    Both models run one request at a time under :attr:`lock`: there is one GPU, and the node
+    drops on its side rather than queueing, so a queue here would only add latency. The timing of
+    every stage is tracked and reported every 30 s."""
 
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], net: Callable[..., Depth], name: str = "") -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        net: Callable[..., Depth],
+        name: str = "",
+        stereo: StereoModel | None = None,
+    ) -> None:
         super().__init__(address, DepthHandler)
         self.net = net
+        self.stereo = stereo
         self.name = name or getattr(net, "name", "?")
         self.device = str(getattr(net, "device", "?"))
         self.lock = threading.Lock()
@@ -245,6 +263,7 @@ class DepthServer(http.server.ThreadingHTTPServer):
         self.errors = 0
         self._since = time.monotonic()
         self._window_requests = 0
+        self._window_pairs = 0  # stereo pairs in this window: a stereo-only host still reports
         self._reporter = threading.Thread(target=self._report_loop, daemon=True)
 
     def answer(self, headers: Mapping[str, str], body: bytes) -> tuple[dict[str, str], bytes]:
@@ -277,8 +296,19 @@ class DepthServer(http.server.ThreadingHTTPServer):
         )
         return out_headers, out
 
+    def match(self, headers: Mapping[str, str], body: bytes) -> tuple[dict[str, str], bytes]:
+        """One rectified pair through the stereo matcher: the response headers and the float16
+        body. Under the same lock as a depth frame — one GPU, one model at a time."""
+        if self.stereo is None:
+            raise BadRequestError("this host serves no stereo matcher (ros/depth_host.sh stereo)")
+        with self.lock:
+            answer = self.stereo.answer(headers, body)
+        self._window_pairs += 1
+        return answer
+
     def health(self) -> dict[str, Any]:
-        """What ``/health`` says: model, device, counters, uptime and the latency summaries."""
+        """What ``/health`` says: model, device, counters, uptime and the latency summaries, plus
+        the ``stereo`` block of the second model when this host carries one."""
         return {
             "model": self.name,
             "device": self.device,
@@ -293,18 +323,21 @@ class DepthServer(http.server.ThreadingHTTPServer):
                 }
                 for stage, t in self.timing.items()
             },
+            "stereo": None if self.stereo is None else self.stereo.health(),
         }
 
     def report(self) -> str:
-        """One line with the window's rate and the per-stage median/p95 in ms."""
+        """One line with the window's rate and the per-stage median/p95 in ms, and the stereo
+        matcher's own clause when this host carries one."""
         stages = " ".join(
             f"{stage} {t.summary().median_ms:.0f}/{t.summary().p95_ms:.0f}"
             for stage, t in self.timing.items()
         )
+        stereo = f"; {self.stereo.report()}" if self.stereo is not None else ""
         return (
             f"depth service ({self.name.rsplit('/', 1)[-1]} on {self.device}):"
             f" {self._window_requests / REPORT_S:.1f} frames/s, {self.requests} served,"
-            f" {self.errors} refused, ms median/p95: {stages}"
+            f" {self.errors} refused, ms median/p95: {stages}{stereo}"
         )
 
     def serve(self) -> None:
@@ -315,9 +348,9 @@ class DepthServer(http.server.ThreadingHTTPServer):
     def _report_loop(self) -> None:
         while True:
             time.sleep(REPORT_S)
-            if self._window_requests:
+            if self._window_requests or self._window_pairs:
                 log.info(self.report())
-                self._window_requests = 0
+                self._window_requests = self._window_pairs = 0
 
 
 class DepthHandler(http.server.BaseHTTPRequestHandler):
@@ -335,7 +368,7 @@ class DepthHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path != "/health":
-            self._reply(404, "text/plain", {}, b"only /health and POST /depth\n")
+            self._reply(404, "text/plain", {}, b"only /health, POST /depth and POST /disparity\n")
             return
         body = json.dumps(self.depth_server.health()).encode()
         self._reply(200, "application/json", {}, body)
@@ -347,21 +380,34 @@ class DepthHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(400, "Content-Length is not a number")  # closes: the body is unknown
             return
         body = self.rfile.read(length) if length else b""
-        if self.path != "/depth":
-            self._reply(404, "text/plain", {}, b"only POST /depth\n")
+        server = self.depth_server
+        if self.path == "/depth":
+            work, thing = server.answer, "frame"
+        elif self.path == DISPARITY_PATH:
+            work, thing = server.match, "pair"
+        else:
+            self._reply(404, "text/plain", {}, b"only POST /depth and POST /disparity\n")
             return
         try:
-            headers, out = self.depth_server.answer(lower_keys(self.headers), body)
-        except BadRequestError as exc:
-            self.depth_server.errors += 1
+            headers, out = work(lower_keys(self.headers), body)
+        except (BadRequestError, PairError) as exc:
+            self._refused(thing)
             self._reply(400, "text/plain", {}, f"{exc}\n".encode())
             return
         except Exception as exc:  # the network itself failed: answer, do not drop the connection
-            self.depth_server.errors += 1
-            log.exception("the network failed on a frame")
+            self._refused(thing)
+            log.exception("the network failed on a %s", thing)
             self._reply(500, "text/plain", {}, f"{type(exc).__name__}: {exc}\n".encode())
             return
         self._reply(200, headers.pop("Content-Type"), headers, out)
+
+    def _refused(self, thing: str) -> None:
+        """Count a refusal against the model it was asked of, so /health blames the right one."""
+        server = self.depth_server
+        if thing == "pair" and server.stereo is not None:
+            server.stereo.errors += 1
+        else:
+            server.errors += 1
 
     def _reply(self, status: int, kind: str, extra: Mapping[str, str], body: bytes) -> None:
         self.send_response(status)
@@ -682,6 +728,36 @@ def bench(net: DepthNet, frames: list[Rgb], url: str | None) -> None:
         client.close()
 
 
+def _stereo_model(args: argparse.Namespace) -> StereoModel:
+    """The stereo matcher this launch serves: the active head's ``net`` block, with whatever the
+    command line overrode. Warmed here only when asked — otherwise the first pair builds it."""
+    from pepin.stereo_host import eye_from_config, settings_from_config
+
+    settings = replace_settings(settings_from_config(args.config), args)
+    model = StereoModel(settings, warm_size=eye_from_config(args.config))
+    if not settings.weights:
+        # A mono head names no checkpoint, and the node's stereo_matcher flag cannot be turned on
+        # for it. The endpoint still exists and refuses with this reason; it must not stop a host
+        # whose whole job today is the mono network.
+        log.info("no stereo matcher for this head: config/camera.json has no 'net' weights")
+        return model
+    if args.stereo_warm:
+        model.warm()
+    log.info("stereo matcher: %s (%s)", settings.describe(), settings.path())
+    return model
+
+
+def replace_settings(settings: RaftSettings, args: argparse.Namespace) -> RaftSettings:
+    """``settings`` with the command line's overrides applied; an option left out changes
+    nothing, so the config stays the one place the numbers live."""
+    overrides = {
+        "weights": args.stereo_weights,
+        "iters": args.stereo_iters,
+        "device": args.stereo_device,
+    }
+    return dataclasses.replace(settings, **{k: v for k, v in overrides.items() if v is not None})
+
+
 def main(argv: list[str] | None = None) -> None:
     """Serve the network (default), or ``--bench`` it and a running service on saved frames."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -696,6 +772,21 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--bench", type=int, metavar="N", help="time N frames instead of serving")
     parser.add_argument("--frames", help="a directory of images for --bench (else synthetic)")
     parser.add_argument("--url", help="with --bench: also time this running service")
+    parser.add_argument(
+        "--stereo",
+        action="store_true",
+        help="also serve POST /disparity (RAFT-Stereo); its checkpoint, iterations and device"
+        " come from the active head's 'net' block in config/camera.json unless overridden below",
+    )
+    parser.add_argument("--stereo-weights", help="the RAFT checkpoint, overriding the config")
+    parser.add_argument("--stereo-iters", type=int, help="RAFT iterations, overriding the config")
+    parser.add_argument("--stereo-device", help="mps or cpu for RAFT, overriding the config")
+    parser.add_argument(
+        "--stereo-warm",
+        action="store_true",
+        help="build RAFT at start instead of on its first pair (~1-2 s)",
+    )
+    parser.add_argument("--config", default="config/camera.json", help="the camera config to read")
     args = parser.parse_args(argv)
     from pepin.log import setup_logging
 
@@ -708,8 +799,14 @@ def main(argv: list[str] | None = None) -> None:
     if args.bench:
         bench(net, _bench_frames(args.frames, args.bench), args.url)
         return
-    server = DepthServer((args.host, args.port), net)
-    log.info("depth service on http://%s:%d (POST /depth, GET /health)", args.host, args.port)
+    stereo = _stereo_model(args) if args.stereo else None
+    server = DepthServer((args.host, args.port), net, stereo=stereo)
+    log.info(
+        "depth service on http://%s:%d (POST /depth%s, GET /health)",
+        args.host,
+        args.port,
+        ", POST /disparity" if stereo is not None else "",
+    )
     try:
         server.serve()
     except KeyboardInterrupt:

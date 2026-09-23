@@ -5,11 +5,20 @@
 # loopback, so the service is bound to 127.0.0.1 and nothing is open on the LAN). Usage:
 #   ros/depth_host.sh start [MODEL]   start (or restart) the service; MODEL small (default), base,
 #                                     large, or a Hugging Face id; PEPIN_DEPTH_MODEL sets the default
+#   ros/depth_host.sh stereo [MODEL]  the same, with the RAFT-Stereo matcher built at start too
+#                                     (POST /disparity); without it the endpoint still exists and
+#                                     the network is built on the first pair, ~2 s inside it
 #   ros/depth_host.sh stop
-#   ros/depth_host.sh status          the service's /health: model, device, frames, per-stage ms
+#   ros/depth_host.sh status          the service's /health: models, devices, frames, per-stage ms
 #   ros/depth_host.sh bench [N]       time N frames (default 30) through the network here and, when
 #                                     the service is up, through it (JPEG and raw); the frames come
 #                                     from scratch/_depth_bench/cam when that directory exists
+#
+# ONE PROCESS, TWO MODELS: the mono depth network (POST /depth) and RAFT-Stereo (POST /disparity),
+# one port, one inference lock — there is one GPU and the depth node runs one depth source at a
+# time, so the model nobody asks for is never built. The stereo matcher's checkpoint, iterations
+# and device come from the active head's "net" block in config/camera.json; the node's live
+# stereo_matcher flag (sgbm|raft) decides whether it is asked at all.
 # ros/laptop.sh vslam starts it wherever torch's Metal backend is available (PEPIN_DEPTH_HOST=0
 # keeps the network on the CPU in the container, =1 insists) and tells the node to use it; the
 # node's depth_backend flag switches live (ros/flags.sh). The weights come from the Hugging Face
@@ -35,7 +44,14 @@ h = json.load(sys.stdin)
 ms = " ".join("%s %.0f/%.0f" % (k, v["median"], v["p95"]) for k, v in h["ms"].items())
 print("%s on %s: %d frames served, %d refused, up %.0f s, ms median/p95: %s"
       % (h["model"].rsplit("/", 1)[-1], h["device"], h["requests"], h["errors"],
-         h["uptime_s"], ms))'
+         h["uptime_s"], ms))
+s = h.get("stereo")
+if s:
+    sms = " ".join("%s %.0f/%.0f" % (k, v["median"], v["p95"]) for k, v in s["ms"].items())
+    print("  stereo %s on %s (%s): %d pairs, %d refused, ms median/p95: %s"
+          % (s["model"], s["device"],
+             s["error"] or ("ready" if s["built"] else "built on the first pair"),
+             s["requests"], s["errors"], sms))'
 }
 cached() {  # is MODEL ($1) in the hub cache? (short names map to the metric-indoor ids)
     case "$1" in
@@ -58,27 +74,36 @@ stop_quiet() {
     pkill -f "pepin\.depth_service .*--port $PORT" 2>/dev/null || true
 }
 
+# Start the service with MODEL ($1) and, when $2 is "warm", RAFT built before the first pair.
+start_host() {
+    MODEL="$1"
+    stop_quiet
+    mkdir -p "$LOGDIR"
+    # A cached model never touches the network at start (the hub's HEAD checks would hang a
+    # start without internet); an uncached one is allowed to download itself once.
+    if cached "$MODEL"; then export HF_HUB_OFFLINE=1; else echo "depth host: $MODEL is not cached yet, fetching"; fi
+    STEREO=(--stereo)
+    [ "${2:-}" = warm ] && STEREO+=(--stereo-warm)
+    cd "$ROOT"
+    nohup uv run --group depth python -m pepin.depth_service --model "$MODEL" --port "$PORT" \
+        "${STEREO[@]}" --log-dir "$LOGDIR" >"$LOGDIR/depth_host.out" 2>&1 &
+    echo $! > "$PIDFILE"
+    for _ in $(seq 1 180); do  # Small loads in 2 s from cache, Large in 3 s, a download longer
+        if health >/dev/null 2>&1; then
+            echo "depth host up on $URL: $(health | summary)"
+            return 0
+        fi
+        running || { echo "depth host died at start: $LOGDIR/depth_host.out"; tail -5 "$LOGDIR/depth_host.out"; return 1; }
+        sleep 1
+    done
+    echo "depth host did not answer on $URL within 3 min: $LOGDIR/depth_host.out"; return 1
+}
+
 case "${1:-status}" in
     start)
-        MODEL="${2:-${PEPIN_DEPTH_MODEL:-small}}"
-        stop_quiet
-        mkdir -p "$LOGDIR"
-        # A cached model never touches the network at start (the hub's HEAD checks would hang a
-        # start without internet); an uncached one is allowed to download itself once.
-        if cached "$MODEL"; then export HF_HUB_OFFLINE=1; else echo "depth host: $MODEL is not cached yet, fetching"; fi
-        cd "$ROOT"
-        nohup uv run --group depth python -m pepin.depth_service --model "$MODEL" --port "$PORT" \
-            --log-dir "$LOGDIR" >"$LOGDIR/depth_host.out" 2>&1 &
-        echo $! > "$PIDFILE"
-        for _ in $(seq 1 180); do  # Small loads in 2 s from cache, Large in 3 s, a download longer
-            if health >/dev/null 2>&1; then
-                echo "depth host up on $URL: $(health | summary)"
-                exit 0
-            fi
-            running || { echo "depth host died at start: $LOGDIR/depth_host.out"; tail -5 "$LOGDIR/depth_host.out"; exit 1; }
-            sleep 1
-        done
-        echo "depth host did not answer on $URL within 3 min: $LOGDIR/depth_host.out"; exit 1 ;;
+        start_host "${2:-${PEPIN_DEPTH_MODEL:-small}}" ;;
+    stereo)
+        start_host "${2:-${PEPIN_DEPTH_MODEL:-small}}" warm ;;
     stop)
         if running; then stop_quiet; echo "depth host stopped"; else rm -f "$PIDFILE"; echo "depth host was not running"; fi ;;
     status)
@@ -92,5 +117,5 @@ case "${1:-status}" in
         cd "$ROOT"
         exec uv run --group depth python -m pepin.depth_service --model "$MODEL" --log-dir "$LOGDIR" "${ARGS[@]}" ;;
     *)
-        echo "usage: ros/depth_host.sh [start [MODEL] | stop | status | bench [N]]"; exit 2 ;;
+        echo "usage: ros/depth_host.sh [start [MODEL] | stereo [MODEL] | stop | status | bench [N]]"; exit 2 ;;
 esac
