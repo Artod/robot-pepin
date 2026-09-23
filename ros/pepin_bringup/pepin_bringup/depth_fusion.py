@@ -465,11 +465,13 @@ FLAGS = FlagSet(
     ),
     Flag(
         "min_weight",
-        2.0,
-        description="observations a voxel needs before it is shown in /fusion/surface, the one"
-        " thing this node publishes about the room",
-        why="inherited from the map slice, where it was measured: at min_weight 2 the lidar slice"
-        " holds 905 walls and at 6 it holds 817, the cells a single pass wrote falling out"
+        4.0,
+        description="observations a voxel needs before it is shown in /fusion/surface and read"
+        " out as /depth_marks, the two things this node publishes about the room",
+        why="4.0 since 2026-09-22 (Artem's call, half a second of frames): at 2 a herringbone"
+        " parquet's SGBM floor lift painted lethal cells 0.12-0.30 m past the bumper that lived"
+        " one or two frames and stopped the cart four times in 23 s (scratch/one_localiser/"
+        "tape_0430_lethal_source.py); the map slice measured 905 walls at 2 and 817 at 6"
         " (scratch/worldmap_from_tape.txt). For the cloud itself nothing was measured; it is the"
         " same number so the picture and the volume's own report agree",
         on_when="raise it to show only what several frames agree on",

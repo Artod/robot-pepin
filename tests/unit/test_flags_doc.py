@@ -84,8 +84,8 @@ def test_the_section_replaces_its_predecessor_or_is_inserted_before_the_build_no
 
 
 def test_a_parameter_dump_gives_the_current_values_and_nothing_else_does() -> None:
-    dump = "/depth_fusion:\n  ros__parameters:\n    align: false\n    min_weight: 2.0\n    x: a\n"
-    assert DOC.current_values(dump) == {"align": False, "min_weight": 2.0, "x": "a"}
+    dump = "/depth_fusion:\n  ros__parameters:\n    align: false\n    min_weight: 4.0\n    x: a\n"
+    assert DOC.current_values(dump) == {"align": False, "min_weight": 4.0, "x": "a"}
     assert DOC.current_values("") == {} and DOC.current_values("- 1\n- 2\n") == {}
     assert DOC.current_values("/a:\n  b: 1\n") == {} and DOC.current_values(": [\n") == {}
 
@@ -177,7 +177,7 @@ def test_the_nodes_of_one_side_and_the_flags_that_are_not_their_default(capsys: 
     code, _, err = _main(["nodes", "orbit"], capsys)
     assert code == 2 and err.startswith("orbit: no such side")
 
-    dump = "/depth_fusion:\n  ros__parameters:\n    align: false\n    min_weight: 2.0\n"
+    dump = "/depth_fusion:\n  ros__parameters:\n    align: false\n    min_weight: 4.0\n"
     code, out, _ = _main(["drift", "depth_fusion"], capsys, stdin=dump)
     assert code == 0 and out == "depth_fusion/align off (default on)\n"
     code, out, _ = _main(["drift", "depth_fusion"], capsys, stdin="")

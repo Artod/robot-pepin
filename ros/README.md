@@ -105,6 +105,7 @@ refuses to begin while a navigation goal is running. The hang appeared on 4 of 7
 | 2.7 | `rtabmap_frame` has an anchor (from file or learned) and `over N infos` with N > 0 — 0 means the graph's trust is deaf |
 | 2.8 | no `process has died` in the container since it started |
 | 2.9 | Foxglove: the bridge answers on `ws://localhost:8765` and advertises every topic the layout draws (`ros/foxglove.sh check`; its failing lines are indented under this one) |
+| 2.11 | **informational (`WARN`, never fails)**: `marks_audit`'s last line — the local costmap's lethal cells split into lidar-backed, camera-only and unexplained. There is no healthy value (a room with a table in it should show camera-only cells); it is printed so the split is in front of you before the first goal |
 
 | # | flags |
 |---|---|
@@ -179,6 +180,57 @@ and **no goal sent**:
    other machine.
 6. `ros/board.sh census` — the board's CPU against the same reading under `PEPIN_LOCALIZER=tracker`.
    The tracker measured 60 % of a core standing still, so this is where that comes back.
+
+## The zenoh routers (`PEPIN_RMW=zenoh`, the default)
+
+Under `rmw_zenoh_cpp` there is no bridge at all: one `rmw_zenohd` router per machine — the board's
+`pepin-zrouter` (a systemd unit, `board/pepin-zrouter.service`, `--network host`) and the laptop's
+`pepin-zrouter-laptop` (`ros/laptop.sh`'s `zrouter_up`) — joined by ONE TCP link that the laptop
+dials (`ros/lib.sh`'s `pepin_zenoh_router_override`). Every node is a zenoh peer of its own
+machine's router; only the router-to-router link crosses the WiFi.
+
+**The link is now allowed to stall without dying.** Measured on 2026-09-22: the board's radio
+(unisoc uwe5622, -35..-42 dBm on 5785 MHz) pings the laptop at 80-180 ms on average with spikes of
+0.4-1.2 s **with the whole stack stopped** — a driver/radio property, not our load. A ROS RELIABLE
+publication is pushed to zenoh as `CongestionControl::Block`, and the shipped router config gives
+such a push 5 s to find a free batch before it **closes the whole transport session**: `Unable to
+push non droppable network message to <zid>. Closing transport!`, 8-12 times a minute, each one
+followed by seconds of re-discovery with no `/tf`, no `/map` and no services. So both routers now
+start on `ros/zenoh/router.json5`, passed as `ZENOH_ROUTER_CONFIG_URI` (the variable
+`rmw_zenohd` itself reads; `ZENOH_CONFIG_OVERRIDE` is applied **on top** of it, which is why the
+laptop's `connect/endpoints` still lives there and one file serves both sides). Three values,
+all under `transport/link/tx`:
+
+| key | shipped | ours | what it does |
+| --- | --- | --- | --- |
+| `queue/congestion_control/block/wait_before_close` | 5 s | **20 s** | how long a RELIABLE push waits for a free batch before killing the session. This is the one that stops the closures; 4x the worst measured stall. A peer that is truly gone is still buried by the 60 s lease. |
+| `queue/congestion_control/drop/wait_before_drop` | 1 ms | **50 ms** | how long a BEST_EFFORT sample waits before being dropped. 50 ms is the period of the fastest thing that crosses, so a sample is never held past its own successor. |
+| `keep_alive` | 2 | **4** | keep-alives per `lease` (60 s, unchanged): every 15 s instead of 30, which is what zenoh's own note asks for on a link that loses packets. |
+
+The queue **depth** (`queue/size`, 2 batches = 128 kB per priority) is deliberately untouched:
+even zenoh's maximum of 16 is 1 MB, a few hundred milliseconds of this link, so it cannot hold a
+2 s stall — and it would cost the 1.5 GB board memory on every link its router holds. The file is
+a full copy of the image's `DEFAULT_RMW_ZENOH_ROUTER_CONFIG.json5` with every change marked
+`PEPIN`, because `ZENOH_ROUTER_CONFIG_URI` *replaces* the configuration instead of merging into
+it; its header has the one-line `diff` that shows our delta.
+
+**The way back is the variable, unset.** Neither starter needs a rebuild: on the laptop
+`PEPIN_ZROUTER_CONFIG= ros/laptop.sh vslam` starts the router on the shipped default, and on the
+board the unit mounts the file only when `/root/pepin-ros/zenoh/router.json5` exists (deleting it,
+or simply not syncing it, is the same switch). The file reaches the board through `ros/sync.sh`,
+which rsyncs the whole of `ros/` to `/root/pepin-ros/`.
+
+**The node SESSIONS keep the shipped default**, and on purpose. Their `wait_before_close` is
+already 60 s (`DEFAULT_RMW_ZENOH_SESSION_CONFIG.json5` raises it where the router's stayed low),
+and no session link crosses the WiFi: the board's nodes are peers over one loopback, the laptop's
+over `pepin-net`, and the radio hop belongs to the routers alone. If a measurement ever shows a
+session closing, the same file is passed to the containers as `ZENOH_SESSION_CONFIG_URI` — the
+mechanism is identical — but nothing has asked for it.
+
+**Deploying a change to `ros/zenoh/router.json5`**: `ros/sync.sh --no-restart`, then the routers
+in the clean order (journal 2026-09-13): laptop half down, laptop router down, board router, board
+stack, laptop router, laptop half. A router restarted under a live peer has produced a one-way
+link before.
 
 ## The zenoh bridge
 
@@ -423,6 +475,77 @@ finished while the robot is running is picked up without a restart, and the log 
 On a stereo rig the two mono flags are refused with their reason: `undistort`, because the stereo
 calibration is what rectifies here, and any `scale` but 1.0, because the eyes are published at
 the size their remap tables were built for, which is the size a disparity is in pixels of.
+
+### The two stereo matchers
+
+What turns the two eyes into a disparity is the depth node's live `stereo_matcher` flag. Both
+engines are built when the node starts, so an A/B is one `ros2 param set` and never a restart.
+
+| matcher | what it is | where it runs | ms a pair, 800x600 |
+| --- | --- | --- | --- |
+| `sgbm` (default) | OpenCV's semi-global block matcher, `pepin.stereo_depth.StereoMatcher` | in the depth node's own container | 17 |
+| `raft` | RAFT-Stereo, `raftstereo-realtime.pth`, 7 iterations | natively on the laptop's GPU, over HTTP | 89 |
+
+**Why the network is not in the container.** Docker on macOS cannot see Metal, and at the full
+size — the only size worth having, see below — the same forward pass on the container's CPU is
+about 3 fps. So RAFT runs where the GPU is, in the *same* native process that already serves the
+mono depth network: one port, `POST /disparity` beside `POST /depth`, one inference lock. Two
+processes would each hold a Metal context and race for the one GPU with nothing serialising them,
+and the node only ever runs one depth source, so the model nobody asks for is simply never built.
+The node sends two rectified grey eyes raw (the rectifier stays in the node; JPEG ringing is
+exactly the error a subpixel disparity cannot tell from a real shift) and gets float16 disparity
+back — 0.06 px of quantisation at the near end, an eighth of the half pixel the rig's reach is
+derived from.
+
+```bash
+ros/depth_host.sh stereo     # the host with RAFT built at start (~2 s), beside the mono network
+ros/depth_host.sh status     # both models: device, pairs served, per-stage ms
+ros/flags.sh set depth_stream stereo_matcher raft    # and back to sgbm; no restart either way
+```
+
+`ros/depth_host.sh start` serves `/disparity` too — RAFT is then built on the first pair, which
+costs that one pair ~2 s inside the lock. `stereo` is the verb that pays it up front.
+
+**What the switch buys and what it costs.** Measured through this path on 2026-09-22, on the 8
+rectified pairs of `scratch/stereo_net/frames/pairs.npz` — the parked robot, glossy herringbone
+parquet with the ceiling lamp's reflection in view:
+
+| | SGBM | RAFT realtime | script |
+| --- | --- | --- | --- |
+| airborne phantom pixels (0.5–1.5 m up, 0.15–2.5 m ahead, \|y\| < 0.6 m) | 6651 | 5265 | `host_smoke.py` |
+| blobs those form, whole picture | 450 | **94** | `phantom_where.py` |
+| of them, 50 px or more | 192 | **37** | `phantom_where.py` |
+| phantom pixels in the robot's own path (\|y\| < 0.35 m) | 4486 | **2566** | `phantom_where.py` |
+| points within 5 cm of the fitted floor | 204459 | **958432** | `host_smoke.py` |
+| ms a pair, end to end | 16.8 | 89.2 | `host_smoke.py` |
+
+The pixel count is not the argument — it falls by a fifth, and RAFT is the worse of the two on
+three of the eight pairs. What a costmap receives is: SGBM's airborne mass is 450 separate specks
+sprayed over the open parquet, RAFT's is 94 blobs against one bright doorway, and in the robot's
+own path the count halves. The floor is the other half of it — 4.7x as many points within 5 cm of
+the plane, so it comes back whole instead of in patches. Half size is disqualified, not cheap: the
+network's disparity is scaled back up and its error with it, to twelve times SGBM's phantom count.
+And 89 ms is 11 fps against a camera that delivers 10 and a `scan_hz` cap of 5 — the whole budget,
+with the pose and the correction pipeline still to pay for, and the zenoh routers not yet in the
+path. That is why the default stays `sgbm` until a live drive settles it.
+
+> An earlier note (`scratch/stereo_net/matcher_raft.patch`) gives this comparison as 31314 → 5338
+> phantoms and 274039 → 1009276 floor points. The RAFT half reproduces; **the SGBM half does
+> not** — that note's own script, run unchanged today, prints 6651 and 204459. Nothing from its
+> SGBM column is quoted here or in the code.
+
+**When the host does not answer**, the pair goes to the very SGBM object the flag would otherwise
+have used and is counted; after three failures in a row the host is left alone rather than costing
+a timeout per pair, and probed again every 30 s. The report line says how many pairs fell and for
+how long the host has been down — the same shape as `depth_backend: auto`.
+
+**The checkpoint** lives in `models/` at the repo root, which is gitignored (40 MB of binary):
+fetch it with RAFT-Stereo's own `download_models.sh`. Which file, how many iterations and which
+device are the head's own, in `config/camera.json`'s `net` block, because they are properties of
+the camera and not of the code that loads the network; an empty `weights` means this machine has
+no checkpoint and the flag cannot be turned on. The model's source is vendored under
+`src/pepin/vendor/raft_stereo/` (MIT, princeton-vl/RAFT-Stereo at 6e93ed2) — see that package's
+`__init__.py` for the three edits and nothing else.
 
 ## Camera calibration
 
@@ -770,6 +893,28 @@ was before, the board's own slow search and nothing else.
 - A re-seed while a goal is running is refused (`_navigating`); a re-seed while the cart is
   merely driving is allowed, which no drive has tried yet.
 
+## The marks audit: who painted the lethal cells, live
+
+`pepin_bringup.marks_audit` is the third laptop-side reader of the board's topics, beside the
+localizer and the graph's frame node, and it answers one question the operator used to need a tape
+for: of the lethal cells in the local costmap right now, how many are the lidar's and how many only
+the camera's. Once per published `/local_costmap/costmap` (1 Hz) it takes every lethal cell — ROS
+`100`, i.e. costmap `254`; `99`/`253` is the inflation's inscribed band and is judged only with
+`inscribed_counts` on — within `radius_m` of the cart, places `/scan` and the camera's
+`/depth_marks` fan into the grid's own frame through TF at each message's own stamp (the frame is
+read from `header.frame_id`, which became `odom` on 2026-09-22), and calls a cell **lidar-backed**
+when a return lands within `match_cells` of it, **camera-only** when only a camera beam does, and
+**unexplained** when neither can. A camera-only cell is a phantom *or* a real thing above the
+lidar's plane — a table top, a seat — and the node deliberately does not guess which; the operator
+is looking at the room. Out go `/marks_audit` (a `std_msgs/String` of JSON: `lethal`,
+`lidar_backed`, `camera_only`, `unexplained`, `nearest_camera_only_m`) for a Foxglove plot and
+`/marks_audit/phantoms` (a `sensor_msgs/PointCloud2`, red, in the grid's frame) for the 3D panel
+beside the costmap, plus a report line every 10 s: `marks audit: lethal 214 (lidar 97, camera-only
+106, unexplained 11), nearest camera-only 0.42 m`. It runs in the SLAM half by default
+(`marks_audit:=false` leaves it out; the `marks_audit` flag switches it off live) and costs the
+laptop a few milliseconds of numpy a second — brute-force distances over a 60x60 grid, no scipy in
+the image — and the board nothing at all.
+
 ## Feature flags
 
 Every behaviour that can be switched is a live parameter of the node that owns it, declared
@@ -837,7 +982,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `depth_fusion` | `lean_min_quality` | number 0..1 | 0.5 | yes | how much of the lean gravity must have voted for (pepin.lean's quality, printed beside the lean in this line) before a frame or a scan is placed by it: below it the lean is treated as unknown — the measurement is placed level and the scan gate admits it |
 | `depth_fusion` | `self_heal` | bool | off | yes | a streak of 30 frames refused at the alignment bound empties the model, so it re-seeds from the next frame instead of staying frozen until a human resets it |
 | `depth_fusion` | `align` | bool | on | yes | frame-to-model: a frame's lidar-height band is turned about the cart to fit the model before it is fused, and a frame whose best turn is the search's bound (+-4 deg) is refused |
-| `depth_fusion` | `min_weight` | number 0..100 | 2.0 | yes | observations a voxel needs before it is shown in /fusion/surface, the one thing this node publishes about the room |
+| `depth_fusion` | `min_weight` | number 0..100 | 4.0 | yes | observations a voxel needs before it is shown in /fusion/surface and read out as /depth_marks, the two things this node publishes about the room |
 | `depth_fusion` | `marks_source` | choice: volume, frame | volume | yes | where the camera's MARKS in the costmap come from (/depth_marks): volume, the accumulated model's own surface sliced around the cart at min_weight (pepin.volume_scan — the very surface /fusion/surface draws); frame, the latest /depth_scan relayed unchanged, which is what marked the costmap until 2026-09-21. Either way /depth_scan itself keeps CLEARING the layer: a single frame is the eyewitness of what is open now |
 | `depth_fusion` | `marks_min_z` | number 0..1 | 0.15 | yes | the floor of the height band /depth_marks reads the volume in, metres above the cart's own floor plane; the band's top is the volume's own camera band (config/fusion.json's camera_band_m) |
 | `depth_fusion` | `marks_hz` | number 0..30 | 5.0 | yes | the cap on how often /depth_marks is PUBLISHED, in hertz; 0 publishes every frame, which is what this topic did until 2026-09-22. Only the publication is thinned: every frame and every revolution is still fused into the volume, and a slice that is not published is not computed either (the gate is read before the crossing search) |
@@ -864,6 +1009,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `depth_stream` | `wall_correct` | bool | off | yes | after the law, the pixels the wall walk covered are set to the extruded plane's depth outright (the same walk as wall_anchor, applied instead of fitted) |
 | `depth_stream` | `floor_anchor` | bool | on | yes | pixels within centimetres of the floor plane snap to it in the published image (the scan is built before it); the plane leans with the cart, from the IMU's up vector |
 | `depth_stream` | `depth_backend` | choice: remote, local, auto | local (env PEPIN_DEPTH_BACKEND) | yes | where the network runs: local (the CPU model in this container), remote (the laptop's GPU service, ros/depth_host.sh), auto (the service while it answers, the CPU model while it does not) |
+| `depth_stream` | `stereo_matcher` | choice: sgbm, raft | sgbm (env PEPIN_STEREO_MATCHER) | yes | which engine turns the two eyes into a disparity: sgbm (OpenCV's semi-global block matcher, in this container) or raft (RAFT-Stereo on the laptop's GPU through the same host the mono network uses, ros/depth_host.sh stereo). Both are built at start and this picks which one answers the next pair, so an A/B needs no restart; a pair the host cannot answer falls to sgbm and the report line counts it. Under depth_source: network it does nothing |
 | `depth_stream` | `scale_ceiling` | number 0.5..20 | 5.0 | yes | the largest 1 / scale the law may be fitted to (the upper half of pepin.depth.A_BOUNDS); a law that lands on a bound prints AT BOUND |
 | `depth_stream` | `law_watch` | bool | off | yes | the affine law is fitted on the lidar's pairs and printed, and the depth is published exactly as the source measured it; no frame waits for a law |
 | `depth_stream` | `law_slew` | number 0..1 | 0.0 | yes | how fast the affine law may move, as the largest relative change of the published inverse depth over the pool's own depth range, per second; 0 applies every fit whole, as the node always did. A law still walking to its fit says so in the report line (slewing to a X b Y) |
@@ -931,6 +1077,11 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `laptop_localizer` | `camera_min_fit` | number 0..1 | 0.25 | yes | a camera match whose fit is below this is not sent: it is counted as low fit and the board never hears about it |
 | `laptop_localizer` | `covariance` | choice: peak, fit | peak | yes | how sure a camera measurement says it is: peak — the spread of that match's own score peak at the camera matcher's temperature (config/matcher.json); fit — the fit-scaled second moment of the whole surface, with the source's trust in it, that shipped before it. It is the number the board's information filter weighs the fan by |
 | `laptop_localizer` | `explained_vote` | bool | on | yes | returns the map cannot explain (a person, a moved chair) do not score a camera match: the same vote the board's tracker takes on its own scans (relocalizer's explained_vote), taken here, on the grid the camera is matched against |
+| `marks_audit` | `marks_audit` | bool | on | yes | the audit runs; off, the node keeps its subscriptions and computes, publishes and reports nothing |
+| `marks_audit` | `radius_m` | number 0.2..3 | 2.0 | yes | how far around the cart a lethal cell is judged, metres |
+| `marks_audit` | `match_cells` | number 0.5..5 | 1.5 | yes | how near a beam must land to a cell, in costmap cells, to account for it |
+| `marks_audit` | `inscribed_counts` | bool | off | yes | the inflation's 99 band (costmap 253, INSCRIBED_INFLATED_OBSTACLE) is judged as a mark too; off, only the 100s a sensor actually wrote |
+| `marks_audit` | `phantom_cloud` | bool | on | yes | the camera-only cells are published as red points on /marks_audit/phantoms; off, only the counts go out |
 | `neck_state` | `neck_tf` | bool | on | yes | base_link -> camera_link is published live from the neck's encoders; the laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes publish that edge |
 | `neck_state` | `tf_republish` | bool | on | yes | base_link -> camera_link is republished at tf_hz between polls, carrying the last measured angles with a fresh stamp; with it off the edge is published only when a reading arrives, i.e. at poll_hz |
 | `places` | `publish_places` | bool | on | yes | the resolved places are published on /places whenever the graph moves; off, the book is still kept and marked but nothing is published and every consumer falls back to the coordinates beside the map |
@@ -1144,9 +1295,9 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* on — every A/B favours it by a centimetre or two of local surface thickness — 14.0 cm off against 12.1 on after the scan-carry fix, 12.6 against 11.6 in the demo, with RTAB-Map's cloud on the same turns at 17.5-20.0 cm — and the score curve on live frames peaks where it should (0.498 at 0 deg against 0.150 at either +-4 bound). The win is small, and it was once entirely fake: before the carry fix 89 % of frames answered AT the bound with a 4.00 deg median turn
   - *On when:* on for a model that must stay thin enough to read a wall's face
   - *Off when:* where the pose is already better than the search can be (a graph's corrections in SLAM mode), or to prove that a thick surface is the pose's fault: off, no frame is turned and none is refused
-- **`min_weight`** — number 0..100, default 2.0
-  - *What:* observations a voxel needs before it is shown in /fusion/surface, the one thing this node publishes about the room (0..100)
-  - *Default:* 2.0 — inherited from the map slice, where it was measured: at min_weight 2 the lidar slice holds 905 walls and at 6 it holds 817, the cells a single pass wrote falling out (scratch/worldmap_from_tape.txt). For the cloud itself nothing was measured; it is the same number so the picture and the volume's own report agree
+- **`min_weight`** — number 0..100, default 4.0
+  - *What:* observations a voxel needs before it is shown in /fusion/surface and read out as /depth_marks, the two things this node publishes about the room (0..100)
+  - *Default:* 4.0 — 4.0 since 2026-09-22 (Artem's call, half a second of frames): at 2 a herringbone parquet's SGBM floor lift painted lethal cells 0.12-0.30 m past the bumper that lived one or two frames and stopped the cart four times in 23 s (scratch/one_localiser/tape_0430_lethal_source.py); the map slice measured 905 walls at 2 and 817 at 6 (scratch/worldmap_from_tape.txt). For the cloud itself nothing was measured; it is the same number so the picture and the volume's own report agree
   - *On when:* raise it to show only what several frames agree on
   - *Off when:* 0 shows every voxel ever touched, noise included — a look at what one pass sees; SINCE 2026-09-21 IT DOES CHANGE WHAT THE CART DRIVES ON: the same number decides what /depth_marks marks the camera layer with
 - **`marks_source`** — choice: volume, frame, default volume
@@ -1282,6 +1433,11 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* local — default by design, unmeasured as a choice: local is the value that needs nothing else running, and ros/laptop.sh exports PEPIN_DEPTH_BACKEND=auto whenever the laptop's Metal backend answers, so the field default is auto. What the choice is worth is measured: Depth Anything V2 Small is 20.6 ms a frame on MPS against 172-204 ms on the container's CPU, 26 ms end to end from the container through the JPEG service — 6.6x (scratch/depth_backend_bench.py), and on the robot the remote backend published 9.5 fps with 0 frames falling back to local
   - *On when:* remote while the GPU service is up and the frame rate matters; auto for a run that must survive the service dying mid-drive
   - *Off when:* local when the laptop's service is not there or is being restarted, or to measure the container's own worst case (5.8 fps)
+- **`stereo_matcher`** — choice: sgbm, raft, default sgbm
+  - *What:* which engine turns the two eyes into a disparity: sgbm (OpenCV's semi-global block matcher, in this container) or raft (RAFT-Stereo on the laptop's GPU through the same host the mono network uses, ros/depth_host.sh stereo). Both are built at start and this picks which one answers the next pair, so an A/B needs no restart; a pair the host cannot answer falls to sgbm and the report line counts it. Under depth_source: network it does nothing (one of: sgbm, raft) (PEPIN_STEREO_MATCHER overrides the default at start)
+  - *Default:* sgbm — sgbm until a live drive says otherwise. What raft buys was measured through THIS path on 2026-09-22, on the 8 rectified pairs of scratch/stereo_net/frames/pairs.npz (host_smoke.py, sgbm_vs_raft.py, phantom_where.py): the airborne phantom PIXELS the lamp's reflection on the parquet puts 0.5-1.5 m up and under 2.5 m ahead fall only 6651 -> 5265, and raft is the worse of the two on three of the eight pairs — but what a costmap is told falls 450 separate specks -> 94 blobs (192 -> 37 of 50 px or more), halves in the robot's own path (4486 -> 2566), and the floor comes back whole: 4.7x as many points within 5 cm of the fitted plane. What it costs is measured too: 89.2 ms a pair end to end through the host against SGBM's 16.8 here, so 11 fps against the camera's 10 and the scan_hz cap's 5 — the whole budget, with the pose and the pipeline still to pay for, and the routers not yet in the path. The drive settles it
+  - *On when:* on the parquet, where SGBM's reflection phantoms are the thing marking the costmap, and with ros/depth_host.sh stereo up — watch the report's ms a pair and the published frames/s before trusting it
+  - *Off when:* whenever the frame rate matters more than the phantoms, when the host is not running (it falls back by itself, but paying a round trip per pair to be refused is not free), and as the A/B half of any claim about either engine
 - **`scale_ceiling`** — number 0.5..20, default 5.0
   - *What:* the largest 1 / scale the law may be fitted to (the upper half of pepin.depth.A_BOUNDS); a law that lands on a bound prints AT BOUND (0.5..20)
   - *Default:* 5.0 — at 3.0 the law was a clipped constant once the lidar's plane was measured at its true 0.383 m — the fit saturated at a 3.00 with b pinned at -0.200 and stopped being a fit (scratch/lidar_height_fix_report.txt). Opened to 5.0 the same run fits a 2.80 in a, and the COLMAP control at 0.50-0.80 m reads 1.14 [0.90..1.24] against the clipped law's 1.32 [1.08..1.43]; the clipped law's tighter band against the beams (3.8 against 5.2 cm median) is luck, not fit. b still sits on its own bound, -0.200: the next one to question
@@ -1527,9 +1683,9 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Off when:* to put the 0.25 m start threshold back for a comparison, or where a drive must never begin on a pose looser than Nav2's own arrival tolerance
 - **`jump_clear`** — bool, default off
   - *What:* map -> odom is read from TF five times a second and, when it STEPS further than 0.10 m, Nav2's local costmap is emptied ("/local_costmap/clear_entirely_local_costmap", asynchronously, at most once per 1 s): the marks in that grid were laid where the cart used to be. The step in that edge is the correction alone — the cart's own motion lives in odom -> base_link — whoever published it. Off, nothing reads the edge and no listener is started for it
-  - *Default:* off — OFF UNTIL IT IS TRIED, because nobody has watched RTAB-Map's own corrections with it. The behaviour is not new: the lidar tracker did exactly this while it owned map -> odom (pepin.watch.JumpClear, written for the camera-only return of 2026-09-16, where the pose lagged 1.4 m behind the cart and Nav2 spent 29 recoveries fighting marks placed at the poses before each correction). Under World R that edge is RTAB-Map's and nobody watches it at all. What is unmeasured is the other side of the trade: RTAB-Map corrects in centimetres at a loop closure, which the costmap absorbs, and the raytracing of the live scans re-clears a stranded mark within seconds anyway — so a clear per closure could cost a controller its picture of the room for no gain. The threshold and the gap are the tracker's measured ones, inherited unchanged
-  - *On when:* when a drive is seen fighting a second copy of the room after a correction: recoveries at obstacles that are not there, the local costmap holding marks offset from the live scans by the size of the last jump
-  - *Off when:* the shipped state, and back to it the moment a clear is seen to cost more than it buys — a controller replanning around a grid that keeps being emptied under it
+  - *Default:* off — OFF, AND SINCE 2026-09-22 ITS PREMISE IS GONE: the local costmap is built in the ODOM frame (ros/params/nav2_params.yaml), and a step in map -> odom does not move a grid that is not drawn in map — the marks stay exactly where the cart saw them. A clear would now throw away good evidence for nothing. The flag stays because the frame is one word away from being map again, and there it is the right behaviour: the lidar tracker did exactly this while it owned map -> odom (pepin.watch.JumpClear, written for the camera-only return of 2026-09-16, where the pose lagged 1.4 m behind the cart and Nav2 spent 29 recoveries fighting marks placed at the poses before each correction). Even then the other side of the trade was unmeasured: RTAB-Map corrects in centimetres at a loop closure, which the costmap absorbs, and the raytracing of the live scans re-clears a stranded mark within seconds anyway. The threshold and the gap are the tracker's measured ones, inherited unchanged
+  - *On when:* only together with a local costmap put back into the map frame, and then when a drive is seen fighting a second copy of the room after a correction: recoveries at obstacles that are not there, the grid holding marks offset from the live scans by the size of the last jump
+  - *Off when:* the shipped state, and the only sane one while that costmap is in odom: a clear there costs a controller its picture of the room and buys nothing
 - **`pose_topic`** — bool, default on
   - *What:* the pose this node reads out of TF is republished as /pose (geometry_msgs/PoseStamped in map, 5 Hz, stamped with the transform's own stamp), so the other nodes on this board can have the pose without a TF listener of their own. Inert where a tracker runs (there /tracker_pose is that topic already) and on a split stack, where the reader is on the other machine and reads the edge itself. Off, nothing is published and this node's listener goes back to being started on the first ask
   - *Default:* on — a TF listener is a subscription to the whole /tf stream — RTAB-Map's map -> odom at 20 Hz plus the board's odom -> base_link at 50 Hz plus the statics — deserialised in Python whatever the reader wanted out of it. Two of them ran on a 4-core A53 to read one pose now and then: this node's, for `where`, the preflight and the jump watch (~22 % of a core), and pepin_bringup.run_recorder's 5 Hz read for the tape's `loc` rows (~34 %), on a board measured at 252 % with the real-time loops starving (2026-09-22). This node owns navigation and the jump watch, so its listener is the one that stays and the tape reads the topic instead (run_recorder's loc_from)
@@ -1623,6 +1779,34 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* on — it is the board's own switch and it followed the match here: until 2026-09-13 these two fans were matched inside Localizer.update_from, which builds the vote from the static mask whenever explained_vote is on, and moving the matching to this machine took the vote off them silently. Measured on the furnished room with a person standing in the fan (scratch/camera_vote_probe.py): with 10 to 18 of the 41 beams on his legs, he moves the measured pose by 2.2 cm median and 2.5 cm at worst without the vote, and by 0.3 cm with it — a systematic pull that grows with how much of the fan he fills, replaced by a slide of a few mm. The worst voted case is 3.8 cm, a thinned fan sliding inside its own plateau, and the fan's sigma there is 8-11 cm, so the fusion already discounts it. The fans' floors are on the roster (vote_min_points 20): a mask that would leave a fan too thin to fix a pose is dropped and the whole scan votes
   - *On when:* in a room with people and furniture that moves — the room this robot lives in
   - *Off when:* to measure what the vote costs or buys the camera (A/B against the board's lidar-only pose), or in an empty room where every return should count
+
+#### `marks_audit`
+
+- **`marks_audit`** — bool, default on
+  - *What:* the audit runs; off, the node keeps its subscriptions and computes, publishes and reports nothing
+  - *Default:* on — on, and the cost is bounded by the grid rather than estimated: the local costmap is 3 x 3 m at 5 cm published at 1 Hz (ros/params/nav2_params.yaml), so the very worst frame this can be handed is 3600 lethal cells against a 450-return revolution — 1.6 M distances of numpy once a second, on the laptop, while the board waits for none of it. It is on because the drive that needs the number is the drive nobody knew would go wrong: run 0431 took a tape and an hour of replay to say that 54-73 % of its near-ahead lethal cells had no lidar behind them
+  - *On when:* always, and especially on any drive where the camera layer is marking
+  - *Off when:* to take this laptop's last percent back for a profile of something else
+- **`radius_m`** — number 0.2..3, default 2.0
+  - *What:* how far around the cart a lethal cell is judged, metres (0.2..3)
+  - *Default:* 2.0 — 2.0 m is the lidar layer's own obstacle_max_range (ros/params/nav2_params.yaml): past it the lidar does not mark at all, so every cell out there would be unbacked by construction and the classification would say nothing. It is also about where the controller's collision checks bite
+  - *On when:* raise it to watch the camera's marks out to its own 2.5 m obstacle_max_range, knowing that the band between 2.0 and 2.5 m is camera-or-nothing by construction
+  - *Off when:* lower it to the cart's immediate surroundings when only the cells that block a recovery matter
+- **`match_cells`** — number 0.5..5, default 1.5
+  - *What:* how near a beam must land to a cell, in costmap cells, to account for it (0.5..5)
+  - *Default:* 1.5 — 1.5 cells is what the tape analysis used (scratch/one_localiser/tape_0431_phantoms.py, BACK_CELLS): at 5 cm that is 7.5 cm, which covers a cell's own half-diagonal (3.5 cm) plus the pose error between the scan's stamp and the grid's. Tighter blames the camera for the lidar's own marks; looser lets the lidar explain a phantom standing beside it
+  - *On when:* raise it when the two sensors are known to disagree in time (a laggy link) and the unexplained count is climbing with no obstacle to show for it
+  - *Off when:* lower it to see how tightly the lidar's returns really sit on its own marks
+- **`inscribed_counts`** — bool, default off
+  - *What:* the inflation's 99 band (costmap 253, INSCRIBED_INFLATED_OBSTACLE) is judged as a mark too; off, only the 100s a sensor actually wrote
+  - *Default:* off — off, which is the threshold the analysis this node reproduces used: 100 for the LOCAL grid's marks (scratch/one_localiser/tape_0431_phantoms.py, LETHAL = 100), with the 99 band reserved for the reduced GLOBAL grid, whose cells are classes and not costs. An inscribed cell (99, costmap 253) is the inflation layer's arithmetic around a mark (100, costmap 254) and not an observation, so asking which sensor painted it answers a question nobody asked while multiplying every count by the inflation's own area
+  - *On when:* to see the band the planners' footprint check really refuses — the cells that made Hybrid-A* call a start pose blocked
+  - *Off when:* whenever the question is which sensor SAW something
+- **`phantom_cloud`** — bool, default on
+  - *What:* the camera-only cells are published as red points on /marks_audit/phantoms; off, only the counts go out
+  - *Default:* on — on, and the bandwidth is bounded by the grid: the cloud can never hold more than the 3600 cells of a 3 x 3 m grid at 5 cm, 32 bytes each in the PCL layout (pepin_bringup.msgs.cloud_from_points), so 115 kB/s at the impossible worst and about 3 kB/s for the hundred cells a real frame has — and none of it crosses the radio, since both this node and Foxglove's bridge are on the laptop. The counts alone do not say WHERE the phantoms are, and where is what sends the operator to the right furniture
+  - *On when:* always, while looking at the 3D panel
+  - *Off when:* on a link already saturated by the surface cloud
 
 #### `neck_state`
 

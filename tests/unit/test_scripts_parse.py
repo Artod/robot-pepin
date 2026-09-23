@@ -580,6 +580,11 @@ VSLAM_LOG = "\n".join(
         "a node, 118 localisations heard, 0 words (0 sent, 0 refused by the gate, 0 candidates, 0 "
         "without odometry); last word (-11.32, +0.71, +132 deg); fit 1.00 (agrees); flags: "
         "graph_trust=on",
+        # Check 2.11 is INFORMATIONAL: there is no healthy split, so the line is printed as a WARN
+        # and the person decides whether a room with that many camera-only cells has furniture in
+        # it (pepin_bringup.marks_audit).
+        "[marks_audit-10] [INFO] [6.5] [marks_audit]: marks audit: lethal 214 (lidar 97, "
+        "camera-only 106, unexplained 11), nearest camera-only 0.42 m; 1.0 grids/s of 10 received",
     )
 )
 # What ros/tools/map_odom.py prints in the laptop's container once RTAB-Map has corrected the
@@ -856,6 +861,8 @@ def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_
         "3.1",
     ):
         assert f"PASS {number}" in out, out
+    # ...and the one line that is never a verdict: who painted the local costmap's lethal cells.
+    assert "WARN 2.11" in out and "camera-only 106" in out, out
     assert "green: " in out and "none failed" in out
 
 

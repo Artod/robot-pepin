@@ -437,7 +437,7 @@ def test_the_report_line_says_where_the_marks_came_from(node: DepthFusion) -> No
     node._on_scan_work(scan_msg())
     line = node._marks_line(node._tally.take())
     assert "marks: 1 from the volume" in line and "ms a slice" in line
-    assert "band 0.15-1.30 m within 3.0 m at min_weight 2" in line
+    assert "band 0.15-1.30 m within 3.0 m at min_weight 4" in line
     node._switches.set("marks_source", "frame")
     node.subs["/depth_scan"][1](scan_msg())
     relayed = node._marks_line(node._tally.take())

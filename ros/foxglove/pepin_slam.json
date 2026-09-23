@@ -103,6 +103,12 @@
           "colorMode": "costmap",
           "alpha": 0.35
         },
+        "/marks_audit/phantoms": {
+          "visible": true,
+          "pointSize": 7,
+          "colorMode": "flat",
+          "flatColor": "#ff2020"
+        },
         "/global_costmap/costmap": {
           "visible": false,
           "colorMode": "costmap",
