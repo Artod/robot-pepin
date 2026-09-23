@@ -10,10 +10,12 @@ BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"
 # The nodes a kick can reach on the board and the line each prints once up (the kick waits for
 # it): our own processes of nav.launch.py, and the neck node of robot.launch.py (ros/feature.sh
-# neck on). The goal server is here on side=all only (on side=board it lives on the laptop:
+# neck on). Only one of the two recorders runs (PEPIN_RECORDER, ros/feature.sh recorder
+# jsonl|bag); a kick of the other one finds nothing and says so. The goal server is here on
+# side=all only (on side=board it lives on the laptop:
 # ros/laptop.sh kick goal_server). slam_frame is the retired owner of map -> odom and only runs
 # with PEPIN_SLAM=true (CLAUDE.md rule 19), but a kick still reaches it where it does.
-KICKABLE="relocalizer run_recorder goal_server neck_state slam_frame tof_bridge"
+KICKABLE="relocalizer run_recorder bag_recorder goal_server neck_state slam_frame tof_bridge"
 # ...of which the relocalizer is launched only under PEPIN_LOCALIZER=tracker (ros/lib.sh): under
 # rtabmap the laptop's RTAB-Map owns map -> odom and no tracker process exists here, so a kick of
 # it is refused with that reason instead of the bare "no relocalizer process in pepin-ros".
@@ -27,6 +29,7 @@ kick_line() {  # node name -> start-up line
     case "$1" in
         relocalizer) echo "relocalizer up: " ;;
         run_recorder) echo "run recorder ready" ;;
+        bag_recorder) echo "bag recorder ready" ;;
         goal_server) echo "goal server ready on port" ;;
         neck_state) echo "neck state up: " ;;
         slam_frame) echo "slam frame up: " ;;

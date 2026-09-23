@@ -36,6 +36,11 @@
 # PEPIN_REC_CAMERA_SCANS=1 adds /depth_scan, /depth_marks and /contact_scan to the session
 # logger's tape.
 # PEPIN_GOTO_TAPE=off drives without asking the recorder for a numbered one.
+# With PEPIN_RECORDER=bag on the board (ros/feature.sh recorder bag) the same word opens an MCAP
+# BAG instead of a tape — `ros2 bag record` under pepin_bringup.bag_recorder, which costs the
+# board a copy of serialised bytes instead of 34-43 % of a core. This script fetches the bag and
+# turns it into the very same numbered tape here (ros/tools/bag_to_tape.py in pepin-vslam), so
+# nothing downstream changes; ros/README.md, "Two recorders".
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
@@ -108,13 +113,28 @@ finish() {  # everything recorded, always: scans, odometry, tracked pose, the go
     sleep 1
     rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$rec/" >> "$trace" 2>&1 || { sleep 2; rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$rec/" >> "$trace" 2>&1; }
     echo "fetched: $?" >> "$trace"
-    # The numbered tape the recorder opened for this goal, named in the log we just fetched: its
-    # jsonl comes home too (the clip stays on the board — this script films the drive itself).
+    # The numbered recording the recorder opened for this goal, named in the log we just fetched:
+    # it comes home too (the clip stays on the board — this script films the drive itself). Which
+    # recorder wrote it is read off the name and never asked of the board: the JSONL recorder
+    # opens a FILE ending in .jsonl, the bag recorder a DIRECTORY (`ros2 bag record -o`), and a
+    # bag is turned into the very same tape here, so the operator always ends with one
+    # ros/maps/rec/NNNN_*.jsonl whichever half wrote the drive.
     local taped
-    taped=$(grep -o 'taped /maps/rec/[^ ]*\.jsonl' "$rec/${STAMP}_goto.log" 2>/dev/null | tail -1 | cut -d' ' -f2 || true)
+    taped=$(grep -o 'taped /maps/rec/[^ ]*' "$rec/${STAMP}_goto.log" 2>/dev/null | tail -1 | cut -d' ' -f2 || true)
     if [ -n "$taped" ]; then
         rsync -aq "root@$BOARD:/root/pepin-ros$taped" "$rec/" >> "$trace" 2>&1 || true
-        echo "numbered tape: ros/maps/rec/$(basename "$taped")"
+        echo "fetched recording: $?" >> "$trace"
+        case "$taped" in
+            *.jsonl) echo "numbered tape: ros/maps/rec/$(basename "$taped")" ;;
+            *)
+                echo "numbered bag: ros/maps/rec/$(basename "$taped"); converting to a tape"
+                if pepin_bag_to_tape "$taped" >> "$trace" 2>&1; then
+                    echo "numbered tape: ros/maps/rec/$(basename "$taped").jsonl"
+                else
+                    echo "!! the bag is here but not converted: see $trace"
+                fi
+                ;;
+        esac
     elif [ -z "${PEPIN_SESSION_LOGGER:-}" ] && [ "${PEPIN_GOTO_TAPE:-on}" != off ]; then
         # The numbered tape is the only tape now: if the recorder never opened one, say so loudly
         # instead of leaving a drive with no record at all.

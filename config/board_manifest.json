@@ -138,6 +138,36 @@
       "note": "Measured 16 % / 62 MB while idle (subscribed, nothing driving)."
     },
     {
+      "name": "bag_recorder",
+      "match": "pepin_bringup\\.bag_recorder",
+      "role": "The other recorder (PEPIN_RECORDER=bag): a node with no subscription to any topic of a drive, which only starts and stops the `ros2 bag record` below on the goal's word and copies the camera clip beside the bag. Never runs together with run_recorder — the launch starts one of the two.",
+      "on_board_because": [
+        "wifi-loss"
+      ],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (recorder:=bag, respawn, ghost wait)",
+      "when": "sometimes",
+      "budget": {
+        "cpu_percent": 8.0,
+        "rss_mb": 60.0
+      },
+      "note": "AN ESTIMATE, not a measurement: an rclpy process that holds two String topics and a 1 Hz timer, taken from the other small rclpy nodes on this board. Measure it on the first bag drive and replace this number; the whole point of the switch is the comparison against run_recorder's 24 % / 93 MB."
+    },
+    {
+      "name": "bag_record",
+      "match": "ros2 bag record|rosbag2_transport",
+      "role": "rosbag2 writing one run's MCAP bag in /maps/rec: generic subscriptions, so the messages are copied as serialised bytes and nothing on this board deserialises a scan. Lives only while a drive does, started by bag_recorder.",
+      "on_board_because": [
+        "wifi-loss"
+      ],
+      "owner": "pepin_bringup.bag_recorder (a subprocess, one per run)",
+      "when": "sometimes",
+      "budget": {
+        "cpu_percent": 30.0,
+        "rss_mb": 120.0
+      },
+      "note": "AN ESTIMATE: a Python CLI process (~60 MB like every ros2 CLI here) plus rosbag2's writer cache and the serialised copies of a 55 kB/s scan stream. It should come out well under run_recorder's cost, and until a census during a bag drive says so this entry is a guess wide enough not to go red on the first try."
+    },
+    {
       "name": "tof_bridge",
       "match": "pepin_bringup/tof_bridge|pepin_bringup\\.tof_bridge",
       "role": "Publishes the three VL53L1X ranges from the ToF server as ROS Range messages for Nav2's contact layer.",

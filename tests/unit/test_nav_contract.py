@@ -766,7 +766,12 @@ def test_one_recorder_writes_a_drive_not_two() -> None:
         "measurement",
         "sources",
     } <= set(sf.strings(recorder)), "the tape carries what the session logger alone carried"
-    assert {"meas", "srcs"} <= set(sf.strings(recorder)), "under the names camera_error.py reads"
+    # The rows themselves are built in pepin.tape_rows, the one format the JSONL recorder and
+    # the bag converter (ros/tools/bag_to_tape.py) share, so the names may live in either file.
+    rows = sf.tree("src/pepin/tape_rows.py")
+    assert {"meas", "srcs"} <= set(sf.strings(recorder)) | set(sf.strings(rows)), (
+        "under the names camera_error.py reads"
+    )
     flags = load_table(REPO / NODES / "run_recorder.py")
     assert flags.flag("fusion_records").live and flags["fusion_records"] is True
     script = (REPO / "ros/goto.sh").read_text()
@@ -1565,7 +1570,7 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     feature = (REPO / "ros/feature.sh").read_text()
     assert "neck) VAR=PEPIN_NECK ;;" in feature
     assert (
-        "PEPIN_(CPP_BRIDGE|IMU|EKF|TOF|NECK|SIDE|BRIDGE|BRIDGE_CONFIG)"
+        "PEPIN_(CPP_BRIDGE|IMU|EKF|TOF|NECK|SIDE|BRIDGE|BRIDGE_CONFIG|RECORDER)"
         in (REPO / "ros/mode.sh").read_text()
     ), "a mode change must not wipe the bridge the board was told to run"
     laptop = (REPO / "ros/laptop.sh").read_text()
@@ -2412,7 +2417,16 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         "rgbd_odometry",
         "visual_odometry",
     }
-    assert _respawning(nav) == {"relocalizer", "run_recorder", "goal_server", "slam_frame"}
+    # Two recorders, one of which the launch starts (nav.launch.py's ``recorder`` argument, the
+    # board's PEPIN_RECORDER): the JSONL tape written here, or `ros2 bag record` under a node
+    # that subscribes to nothing. Both respawn, and a kick reaches whichever is running.
+    assert _respawning(nav) == {
+        "relocalizer",
+        "run_recorder",
+        "bag_recorder",
+        "goal_server",
+        "slam_frame",
+    }
     # The board's sensor launch runs one of our processes too: the neck node (ros/feature.sh
     # neck on). The drivers around it are ROS packages the container restarts with the launch.
     robot = _launch_processes("robot.launch.py")

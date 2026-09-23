@@ -12,6 +12,7 @@ A drive leaves two recordings, written by two processes with two clocks:
 | --- | --- | --- |
 | `<stamp>_goto.jsonl`, `_goto.log`, `_goto_cam.mkv`, `_goto_board.log` | `ros/goto.sh`, on the laptop | the laptop's local time |
 | `0249_<stamp>Z_<place>.jsonl`, `_cam.mjpeg` | `pepin_bringup.run_recorder`, in the board's container | **UTC**, marked by the `Z` |
+| `0249_<stamp>Z_<place>/` (an MCAP bag) and the `.jsonl` made from it | `ros2 bag record` under `pepin_bringup.bag_recorder` with `PEPIN_RECORDER=bag`, converted on the laptop by `ros/tools/bag_to_tape.py` | **UTC** too: the same stem, from the same container clock |
 
 The board's own shell is on local time; only the container it runs ROS in is on `Etc/UTC`, so
 `time.strftime` there is four or five hours ahead of everything a person reads beside it. A tape

@@ -34,6 +34,11 @@ Environment=PEPIN_TOF=false
 Environment=PEPIN_NECK=false
 # all: the whole stack here; board: the reflex half, with the planner and goal server on the laptop (ros/laptop.sh)
 Environment=PEPIN_SIDE=all
+# Who writes a drive down: jsonl = pepin_bringup.run_recorder (the numbered tape, written here,
+# 34-43 % of a core), bag = pepin_bringup.bag_recorder, which starts `ros2 bag record` (MCAP, no
+# compression) and deserialises nothing; ros/tools/bag_to_tape.py then makes the same tape on the
+# laptop. jsonl until the two are measured on this board.
+Environment=PEPIN_RECORDER=jsonl
 # cyclone (the default): CycloneDDS and the zenoh-bridge sidecar, exactly as before. zenoh:
 # rmw_zenoh_cpp against pepin-zrouter.service, and pepin-bridge.service stands down. Set in
 # /etc/default/pepin-ros so it survives a reboot; ros/run.sh turns it into the container's image
@@ -54,7 +59,7 @@ ExecStartPre=-/bin/sh -c 'for i in $$(seq 1 90); do [ "$$(timedatectl show -p NT
 ExecStartPre=-/bin/sh -c 'mkdir -p /root/pepin-ros/logs && /usr/bin/docker logs pepin-ros > /root/pepin-ros/logs/$$(date +%%Y%%m%%d_%%H%%M%%S).log 2>&1'
 ExecStartPre=-/usr/bin/docker rm -f pepin-ros
 # run.sh mounts the code from /root/pepin-ros (see it): edits reach the robot via ros/sync.sh, no rebuild.
-ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} slam_toolbox:=${PEPIN_SLAM_TOOLBOX} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} ekf:=${PEPIN_EKF} laser_odom:=${PEPIN_LASER_ODOM} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK} side:=${PEPIN_SIDE}
+ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} slam_toolbox:=${PEPIN_SLAM_TOOLBOX} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} ekf:=${PEPIN_EKF} laser_odom:=${PEPIN_LASER_ODOM} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK} side:=${PEPIN_SIDE} recorder:=${PEPIN_RECORDER}
 # ros2 launch needs more than 5 s to bring a dozen nodes down on this board; a SIGKILL (137)
 # after the grace period is still a normal stop, not a failure.
 # The container's stop signal is SIGINT (ros/run.sh, ros/Dockerfile), which the launch answers by
