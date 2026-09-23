@@ -87,6 +87,53 @@ PEPIN_ZROUTER_PORT="${PEPIN_ZROUTER_PORT:-7447}"
 PEPIN_ZROUTER_BOARD=pepin-zrouter          # the board's router container (host network)
 PEPIN_ZROUTER_LAPTOP=pepin-zrouter-laptop  # the laptop's router container (on pepin-net)
 pepin_rmw_is_zenoh() { [ "$PEPIN_RMW" = zenoh ]; }
+# This checkout's ros/, wherever the sourcing script lives (the container configs are under it).
+PEPIN_ROS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ONE CLOCK FOR THE ROBOT (src/pepin/timesync.py has the whole story): where the board takes its
+# time from. laptop (the default): this laptop serves its Docker VM's clock — the one every ROS
+# node here stamps with — from the pepin-chrony container on udp/123, and the board's chrony
+# prefers it over the internet pool (board/chrony.sh). pool: no server here, the board on the
+# pool alone. The board keeps its own copy of the variable in /etc/default/pepin-ros, written by
+# `ros/time.sh source laptop|pool`; `ros/time.sh uninstall` puts the board back on
+# systemd-timesyncd exactly as it ran before chrony.
+PEPIN_TIME_SOURCE="${PEPIN_TIME_SOURCE:-laptop}"
+PEPIN_TIMESERVER=pepin-chrony
+PEPIN_TIMESERVER_IMAGE=pepin-chrony:latest
+pepin_laptop_ip() {  # <board ip> -> this Mac's address on the interface that reaches the board
+    # What the board must dial for this laptop's time server: the route to the board names the
+    # interface, the interface its address. Nothing when the board is not routable from here.
+    local iface
+    iface="$(route -n get "$1" 2>/dev/null | awk '/interface:/ { print $2 }')"
+    [ -n "$iface" ] && ipconfig getifaddr "$iface"
+}
+# The laptop's time server, started idempotently beside the zenoh router (ros/laptop.sh) and left
+# alone afterwards, like the router: containers come and go, the board's clock should not change
+# source every time they do. Its image (ros/chrony/Dockerfile, alpine + chrony) is built on first
+# use. It never gates anything: a server that cannot start leaves the board on the pool, and the
+# restart check (1.15) says so.
+pepin_timeserver_up() {
+    [ "$PEPIN_TIME_SOURCE" = laptop ] || return 0
+    if docker ps --format '{{.Names}}' | grep -qx "$PEPIN_TIMESERVER"; then
+        echo "laptop time server already up ($PEPIN_TIMESERVER); left alone"; return 0
+    fi
+    if ! docker image inspect "$PEPIN_TIMESERVER_IMAGE" >/dev/null 2>&1; then
+        docker build -q -t "$PEPIN_TIMESERVER_IMAGE" "$PEPIN_ROS_DIR/chrony" >/dev/null || {
+            echo "laptop time server: the image did not build (ros/chrony); the board stays on the pool"
+            return 0
+        }
+    fi
+    pepin_remove_container "$PEPIN_TIMESERVER"
+    # No --cap-add SYS_TIME and chronyd -x: it serves the VM's clock and never sets it
+    # (ros/chrony/laptop.conf says why). udp/123 on every interface of the Mac: the board dials it.
+    docker run -d --name "$PEPIN_TIMESERVER" --restart unless-stopped -p 123:123/udp \
+        -v "$PEPIN_ROS_DIR/chrony/laptop.conf:/etc/chrony/chrony.conf:ro" \
+        "$PEPIN_TIMESERVER_IMAGE" >/dev/null || {
+        echo "laptop time server: did not start (is udp/123 taken on this Mac?); the board stays on the pool"
+        return 0
+    }
+    echo "laptop time server up: $PEPIN_TIMESERVER serves this Docker VM's clock on udp/123"
+}
 # What a node on the laptop is told: reach the laptop's router by container name, and listen on
 # the container's own address rather than on its loopback.
 #
