@@ -113,6 +113,26 @@ The topic goes out at ``marks_hz`` (5 Hz), which is the board's local costmap's 
 and a frame held back by the cap is still fused into the volume. The stop reflex is bounded by
 that costmap tick, never by this publisher.
 
+A PIXEL WITH NO DEPTH IS ALSO A MEASUREMENT (``no_depth_free``, 2026-09-22). Until then only a
+ray that MEASURED a surface moved any voxel, and the stereo depth is NaN past the rig's own reach
+(2.46 m), so anything standing in front of something farther than that was never carved by
+anything: an airborne cluster of 133 voxels at camera height sat unmoved for 60 s with 94 % of its
+pixels NaN, and the operator's face stayed in the volume after he walked away, while the same
+person at 2 m — a wall at 2.2 m behind him — cleared in about 3 s
+(scratch/one_localiser/black_voxels.py). So a depthless pixel now carves free space along its own
+ray out to the source's reach less a truncation, at ``no_depth_weight`` of what a measurement
+there weighs, because a NaN is also what a textureless wall looks like. The reach is measured off
+the frames (:class:`pepin.tsdf.ObservedReach`) and printed in the report line; the lidar's layer
+is protected from the carve exactly as it is from the camera's own marks. What the published
+depth CANNOT say is why a pixel is NaN — beyond the reach, the edge filter's flying pixels, a
+rectification margin and a refused match are one silence in a 32FC1 image — so the whole defence
+is the weight, and the measured cost is the camera band's own cells: 81 % of them kept over a
+minute, 3 of the 99 lost being cells the lidar's returns mark occupied
+(scratch/one_localiser/volume_ab.py). A count of AIRBORNE points does not fall on a volume built
+from empty in one minute — carving makes more voxels KNOWN, and a zero crossing needs two known
+neighbours, so the cloud grows by about a tenth — which is why the phantom is painted and timed
+instead of counted.
+
 AND SINCE 2026-09-22 THE VOLUME LIVES IN ``odom`` (``volume_frame``). Its job is LOCAL OBSTACLE
 MEMORY — the nvblox local mapper beside a pose graph, the pattern STVL follows — and local memory
 must not depend on global localisation at all. Painted in ``map`` and kept across a day it did the
@@ -134,8 +154,9 @@ The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``e
 ``volume_frame``,
 ``fit_gate``, ``lidar_fit_gate``, ``paint_sigma_m``, ``imu_lean``, ``lean_gate_deg``,
 ``lean_min_quality``, ``self_heal``, ``align``, ``min_weight``, ``marks_source``,
-``marks_min_z``, ``marks_hz``, ``surface_hz``,
-``band_half_z``, ``lidar_layer``, ``no_return_free``, ``view_gate``, ``snapshot_s``,
+``marks_min_z``, ``marks_hz``, ``marks_clear``, ``surface_hz``,
+``band_half_z``, ``lidar_layer``, ``no_return_free``, ``no_depth_free``, ``no_depth_weight``,
+``no_depth_reach_m``, ``colour_fallback``, ``view_gate``, ``snapshot_s``,
 ``resume_volume``, ``follow_correction``, ``follow_correction_min_m``,
 ``follow_correction_min_deg``, ``follow_correction_min_s``, ``follow_correction_law``; their
 state is printed in every report line, beside the band itself and the source of the plane it is
@@ -171,7 +192,9 @@ from pepin.mounts import LASER_FRAME, load_lidar_mount
 from pepin.tsdf import (
     YAW_SEARCH,
     AlignReason,
+    DepthLaw,
     GridSpec,
+    ObservedReach,
     RigidPose,
     align_yaw,
     backproject,
@@ -186,6 +209,8 @@ from pepin.volume_scan import (
     MARKS_STEP,
     MarksLaw,
     empty_marks,
+    fan_counts,
+    free_ranges,
     marks_ranges,
     marks_window,
 )
@@ -236,6 +261,12 @@ SCAN_TOPIC = "/scan"
 # ros/params/nav2_params.yaml.
 DEPTH_SCAN_TOPIC = "/depth_scan"
 MARKS_TOPIC = "/depth_marks"
+# ...and, behind ``marks_clear``, the same fan's third word: how far each bearing is KNOWN OPEN
+# (pepin.volume_scan.free_ranges). A separate topic and a CLEARING-ONLY source in the same layer,
+# because a LaserScan cannot carry "clear to here" and "nothing here" on one range: Nav2's
+# ObstacleLayer marks at the end of every finite range it is given, so one source that cleared a
+# ray at 1.2 m would plant a lethal cell at 1.2 m — at the frontier of knowledge.
+FREE_TOPIC = "/depth_free"
 VOLUME = "volume"  # what marks_source chooses between: the model's surface...
 FRAME = "frame"  # ...or the single frame's own fan, relayed
 # RTAB-Map's optimised graph: the node ids and their poses in ``map``, which is the only signal
@@ -547,6 +578,35 @@ FLAGS = FlagSet(
         range=(0.0, 30.0),
     ),
     Flag(
+        "marks_clear",
+        False,
+        description="the fan also says where the volume is KNOWN OPEN: a second, clearing-only"
+        f" scan on {FREE_TOPIC} carrying, per bearing, the range of the last column the volume"
+        " has observed FREE before the first column it has not (pepin.volume_scan.free_ranges)."
+        " A bearing the volume cannot vouch for stays NaN, which clears nothing. Off, the topic"
+        " is silent and the camera layer clears from the single frame alone, as it has since"
+        " 2026-09-21",
+        why="OFF, because the measurement that would justify it says it would do almost nothing."
+        " The case FOR it is real: the fan marks over the whole turn while /depth_scan clears"
+        " only the head's forward 83 deg, so on run 0434's turn unbacked lethal cells were born"
+        " at 109/s against 27/s standing, 52 % of them BEHIND the cart where nothing can ever"
+        " raytrace them away, and the count climbed 24 -> 904 in 38 s"
+        " (scratch/one_localiser/tape_0434_turn.py). But a clearing ray stops at the first column"
+        " that is not open, and on the parked cart of 2026-09-23 the volume held an occupied"
+        " column on 717 of 720 bearings: where the camera's own frame shares a bearing with a"
+        " mark it AGREES with it within 0.20 m 96 % of the time and sees past it 3 %"
+        " (scratch/one_localiser/live_fan_vs_lidar.py), and on the saved room volume the walk"
+        " could vouch for 87 bearings of 720. The marks are not stale memory the volume has"
+        " already carved — they are what the volume currently holds, and clearing cannot remove"
+        " what the model still believes",
+        on_when="after the near marks themselves are answered: with the volume no longer holding"
+        " a shell at 0.5-0.75 m on every bearing, the walk reaches past it and this is what stops"
+        " the ratchet behind the cart. Turn it on together with the yaml's depth_free source and"
+        " watch 'clear' in the report line rise off its floor",
+        off_when="as shipped, and whenever a cell must not be erased by the camera's own memory:"
+        " silent topic, and the layer clears from /depth_scan as it did before",
+    ),
+    Flag(
         "surface_hz",
         1.0,
         description="how often /fusion/surface is published (the crossing search costs a fraction"
@@ -611,6 +671,99 @@ FLAGS = FlagSet(
         " viewpoints; nothing on this robot does today",
         off_when="leave it off: an open door stays unknown, which a planner may be told to cross"
         " (allow_unknown) rather than being told a lie",
+    ),
+    Flag(
+        "no_depth_free",
+        True,
+        description="a camera pixel with NO depth carves free space along its own ray, from"
+        " 0.20 m out to the source's own reach less one truncation, at no_depth_weight of what a"
+        " measurement at that range weighs; off, a NaN pixel touches nothing at all, which is"
+        " what this node did until 2026-09-22",
+        why="THE PHANTOMS THAT NEVER DECAYED. Only a ray that MEASURED something moved any voxel"
+        " (pepin.tsdf.Tsdf.integrate), and the stereo depth is cut at the rig's own reach"
+        " (2.46 m, pepin.stereo_depth), so anything standing in front of something farther than"
+        " that had NaN at every one of its pixels and could never be carved. Measured on the live"
+        " volume (scratch/one_localiser/black_voxels.py, 2026-09-22): an airborne cluster of 133"
+        " voxels at camera height, 94 % of its pixels NaN, 0 % ever seen free, not one voxel"
+        " rewritten in 60 s; the operator's face 175 voxels, all 175 at the same millimetre a"
+        " minute later; the same person at 2 m with a wall behind him cleared in about 3 s. AND"
+        " THE A/B, 60 s of live frames replayed into two volumes off the robot"
+        " (scratch/one_localiser/volume_ab.py: 374 frames, 297 revolutions, the cart parked): a"
+        " saturated obstacle painted 0.4 m ahead is 90 % gone in 18 frames, 2.8 s, with the carve"
+        " and NEVER without it (94 of its 330 voxels still a surface after the whole minute), and"
+        " max_weight 20 alone changes nothing about that — which is the mechanism, nothing ever"
+        " touches those voxels. The cost on the same minute: the camera band keeps 81 % of its"
+        " occupied cells (99 lost, 41 new), and 3 of the 99 lost are cells the lidar's own"
+        " returns mark occupied. It costs this node 2.6 ms a frame on the live grid and the live"
+        " 800x600 image, 10.1 -> 12.7 ms, writing 37628 voxels instead of 8705"
+        " (scratch/one_localiser/carve_cost.py) — the laptop's, where every camera feature lives",
+        on_when="on: it is the only thing that carves a phantom whose background lies beyond the"
+        " rig's reach, and the lidar's own layer is protected from it by lidar_layer",
+        off_when="off to reproduce the pre-2026-09-22 volume exactly, or if a textureless near"
+        " wall (a matcher refusal, not an empty ray) is ever seen to be eaten out of the surface"
+        " — the marks audit counts what the camera holds that the lidar does not. The published"
+        " depth cannot say WHY a pixel is NaN (beyond the reach, the edge filter's flying pixels,"
+        " a rectification margin, a refused match all read the same), so the weight is the whole"
+        " of the defence and no_depth_weight is where to turn it down",
+    ),
+    Flag(
+        "no_depth_weight",
+        0.5,
+        description="what a depthless ray's carve weighs, as a share of what a measurement AT"
+        " the source's reach weighs (0.67 at the stereo rig's own 2.44 m, so 0.34 by default);"
+        " 0 carves nothing, 1 makes a NaN as convincing as a measurement",
+        why="a NaN is not evidence of emptiness: the matcher refuses a textureless wall, a"
+        " rectification margin and an over-exposed window with the same silence, and at full"
+        " weight those rays would eat a real surface. Half of the weakest honest reading of the"
+        " ray is 0.34, which at max_weight 20 clears a saturated phantom in 17 frames by the"
+        " integration law and 18 measured (2.8 s at the tape's 6.4 fps,"
+        " scratch/one_localiser/volume_ab.py) while a measured surface re-marks itself at"
+        " 1.0-4.0 a frame",
+        on_when="raise it toward 1 where phantoms outlive their 3 s and the walls are all"
+        " lidar-backed anyway",
+        off_when="lower it where a near wall the matcher cannot texture is seen to thin; 0 is"
+        " no_depth_free off",
+        range=(0.0, 2.0),
+    ),
+    Flag(
+        "no_depth_reach_m",
+        0.0,
+        description="the reach a depthless ray carves to, metres, when it must be stated; 0 (the"
+        " default) MEASURES it from the frames themselves — the largest finite depth seen in the"
+        " last 60 — and the report line prints what it found",
+        why="the reach is the SOURCE's, and nothing publishes it: depth_stream's"
+        " depth_reach_m is a looser gate (3.0 m) than the stereo rig itself (2.46 m by its own"
+        " error model, DEPTH_SIGMA_M), and carving to 3.0 m would carve through half a metre the"
+        " camera never looked at. The published depth is NaN above the reach by construction, so"
+        " the largest finite metre in a frame cannot exceed it and equals it whenever anything far"
+        " is in view: 2.54 m over the 374 taped frames of 2026-09-22"
+        " (scratch/one_localiser/volume_ab.py), which is the number the carve used",
+        on_when="state it to pin the carve where a measurement says it belongs — another rig,"
+        " or a source whose far pixels are all NaN for another reason",
+        off_when="0 leaves it measured, which is what follows a rig change by itself",
+        range=(0.0, 12.0),
+    ),
+    Flag(
+        "colour_fallback",
+        True,
+        description="a surface point whose nearer voxel was never painted by a camera takes the"
+        " OTHER neighbour's colour on /fusion/surface; off, it keeps the black that means"
+        " 'no camera ever wrote here', which is what the cloud showed until 2026-09-22",
+        why="the lidar writes field and weight but no colour (a beam has no colour to give), and"
+        " the readout takes the colour of the neighbour nearer the surface — for a beam's own"
+        " return always the uncoloured one: 1532 pure-black points on the live volume, 100 % of"
+        " them in the lidar's own height band and every one a real wall"
+        " (scratch/one_localiser/depth_nan_why.py). AND THE FALLBACK IS A SMALL FIX, measured:"
+        " on the taped minute of 2026-09-22 painted with every revolution (21777 lidar voxels,"
+        " 5682 surface points) it recovers 16 of 987 black points, 1.6 %"
+        " (scratch/one_localiser/volume_ab.py). The other 971 are crossings NEITHER of whose"
+        " voxels a camera ever painted — the camera's own surface sits in other voxels than the"
+        " beams' — so their black is the truth about them, and the only way to colour them would"
+        " be to invent a colour no camera saw. That is why the scan path still writes none",
+        on_when="on: it costs nothing at the readout, and every colour it hands out is one the"
+        " camera really wrote into that voxel",
+        off_when="off to see exactly which points only the lidar holds — the black IS that"
+        " measurement, and it is how the 1532 were found",
     ),
     Flag(
         "snapshot_s",
@@ -868,6 +1021,10 @@ class DepthFusion(Node):
         # The costmap's camera MARKS: the volume's surface around the cart, one range per
         # bearing, published at the rate the volume is integrated (:meth:`_publish_marks`).
         self._marks_pub = self.create_publisher(LaserScan, MARKS_TOPIC, reliable)
+        # ...and, under marks_clear, the same fan's clearing half: how far each bearing is known
+        # open. A topic of its own because one LaserScan cannot say "clear to here" without also
+        # marking there (see FREE_TOPIC). Silent while the flag is off.
+        self._free_pub = self.create_publisher(LaserScan, FREE_TOPIC, reliable)
         self._marks_at = 0.0  # monotonic seconds of the last published fan: the marks_hz cap
         # ...and the frame the marks used to come from, so the old behaviour is one live flag
         # away (marks_source frame relays this message unchanged). Local to the laptop: the
@@ -938,8 +1095,15 @@ class DepthFusion(Node):
         self._world = WorldMap(self._spec, self._mount)
         self._last_stamp: Any = None  # the last fused frame's header stamp, the board's clock
         self._bound_streak = 0  # consecutive frames refused at the bound (self-healing)
+        # How far the depth SOURCE answers, measured off its own frames: what a depthless ray may
+        # carve to (no_depth_free), and not the publisher's looser gate (:class:`ObservedReach`).
+        self._reach = ObservedReach()
         self._surface_points = 0
-        self._marks_bearings = 0  # bearings the last slice of the volume filled: a report level
+        # The last fan in three numbers — bearings that MARK, bearings that CLEAR, bearings that
+        # say nothing — report levels, not tallies: what one slice held, not how many went out.
+        self._marks_bearings = 0
+        self._marks_clearing = 0
+        self._marks_silent = 0
         self._worker = Worker(self._on_work, name="fusion", on_error=self._on_work_error).start()
         # The scan has its own worker: integrating a revolution takes milliseconds, but it waits
         # for the lock a camera frame holds, and the executor thread must not wait with it.
@@ -1416,6 +1580,43 @@ class DepthFusion(Node):
         them, rebuilt per scan so a flag set mid-run takes effect on the next revolution."""
         return LidarLaw(no_return_free=self._switches.on("no_return_free"))
 
+    def _depth_law(self) -> DepthLaw:
+        """How a depth frame writes into the volume right now — what a pixel with NO depth may
+        carve (:class:`pepin.tsdf.DepthLaw`) — rebuilt per frame so a flag set mid-run takes
+        effect on the next one.
+
+        The reach is the source's own: ``no_depth_reach_m`` when somebody has stated it, and
+        otherwise the one measured off the frames (:class:`pepin.tsdf.ObservedReach`), never the
+        publisher's looser ``depth_reach_m`` gate.
+        """
+        stated = float(self._switches["no_depth_reach_m"])
+        return DepthLaw(
+            no_depth_free=self._switches.on("no_depth_free"),
+            no_depth_weight=float(self._switches["no_depth_weight"]),
+            reach_m=stated if stated > 0.0 else self._reach.m,
+        )
+
+    def _carve_line(self) -> str:
+        """The depthless-ray half of the report: how far a NaN pixel carves, what it weighs and
+        where the reach came from — or that nothing carves, and why."""
+        law = self._depth_law()
+        stated = float(self._switches["no_depth_reach_m"])
+        source = (
+            f"stated {stated:.2f} m"
+            if stated > 0.0
+            else f"measured {self._reach.m:.2f} m over {self._reach.frames} frames"
+        )
+        if not law.no_depth_free:
+            return f"carve: off, a pixel with no depth touches nothing (reach {source})"
+        to = law.carve_to_m(self._spec.truncation_m)
+        if to <= 0.0:
+            return f"carve: on but idle — no reach yet ({source}), so nothing is carved"
+        weight = law.no_depth_weight * float(self._spec.observation_weight(np.array(to)))
+        return (
+            f"carve: a pixel with no depth carves to {to:.2f} m (reach {source}) at weight"
+            f" {weight:.2f}, {law.no_depth_weight:g} of a measurement there"
+        )
+
     def _lookup_laser(self, frame: str) -> bool:
         """The static base_link <- laser transform: the beams' angle domain (the sensor hangs
         upside down, so its angles run clockwise) and the mount the rays start from. The height
@@ -1626,8 +1827,11 @@ class DepthFusion(Node):
                 return  # AT_BOUND: counted, not integrated
             camera = aligned
         self._roll_window(base)
+        self._reach.saw(depth)  # the source's own reach, measured off the frames themselves
         with self._tally.measure("integrate"), self._lock:
-            touched = self._world.integrate_depth(depth, rgb, intr, camera, stamp=at)
+            touched = self._world.integrate_depth(
+                depth, rgb, intr, camera, stamp=at, law=self._depth_law()
+            )
             self._last_stamp = stamp
         self._tally.count("frames")
         self._tally.count("voxels", touched)
@@ -1746,8 +1950,11 @@ class DepthFusion(Node):
         neighbourhood is copied under the model lock and read outside it; both halves are timed
         into the report line's ``ms a slice``.
 
-        A bearing with no surface in the band is NaN: this topic never clears and never says a
-        thing about free space. The clearing is ``/depth_scan``'s, in the same costmap layer.
+        A bearing with no surface in the band is NaN: ``/depth_marks`` never clears and never says
+        a thing about free space. Under ``marks_clear`` the same walk also goes out on
+        ``/depth_free`` — the range each bearing is KNOWN OPEN to — as a clearing-only source of
+        the same layer; off (as shipped) that topic is silent and the clearing is ``/depth_scan``'s
+        alone. The free walk is inside the same measured stage, so its cost shows in "ms a slice".
 
         ``marks_hz`` caps the RATE of this topic (5 Hz, the local costmap's own
         ``update_frequency``): the frame that is not published is still fused, and the slice it
@@ -1766,20 +1973,25 @@ class DepthFusion(Node):
             # worker must not queue behind it.
             with self._lock:
                 window = marks_window(self._world.volume, base, law)
-            ranges = empty_marks(law) if window is None else marks_ranges(window, base, law)
-        self._marks_bearings = int(np.count_nonzero(np.isfinite(ranges)))
+            clears = bool(self._switches["marks_clear"])
+            if window is None:
+                ranges = free = empty_marks(law)
+            else:
+                ranges = marks_ranges(window, base, law)
+                free = free_ranges(window, base, law) if clears else empty_marks(law)
+        self._marks_bearings, self._marks_clearing, self._marks_silent = fan_counts(ranges, free)
+        reach = law.range_m + self._spec.voxel_m  # a consumer drops a range AT range_max
         self._marks_pub.publish(
             scan_from_ranges(
-                ranges,
-                MARKS_ANGLE_MIN,
-                MARKS_STEP,
-                stamp,
-                BASE_FRAME,
-                MARKS_MIN_RANGE_M,
-                # a hair above the fan's own reach: a consumer drops a range AT range_max
-                law.range_m + self._spec.voxel_m,
+                ranges, MARKS_ANGLE_MIN, MARKS_STEP, stamp, BASE_FRAME, MARKS_MIN_RANGE_M, reach
             )
         )
+        if clears:
+            self._free_pub.publish(
+                scan_from_ranges(
+                    free, MARKS_ANGLE_MIN, MARKS_STEP, stamp, BASE_FRAME, MARKS_MIN_RANGE_M, reach
+                )
+            )
         self._tally.count("marks")
 
     def _publish_surface(self) -> None:
@@ -1790,7 +2002,9 @@ class DepthFusion(Node):
         with self._lock:  # a copy under the lock (milliseconds), the crossing search outside it
             snapshot = self._world.volume.snapshot()
             stamp = self._last_stamp
-        points, colours = snapshot.surface(self._switches["min_weight"])
+        points, colours = snapshot.surface(
+            self._switches["min_weight"], colour_fallback=self._switches.on("colour_fallback")
+        )
         self._surface_points = int(points.shape[0])  # a level the report reads, not a tally
         # the board's clock: the surface is as old as the last frame in it, not as new as now
         self._pub.publish(
@@ -1821,7 +2035,8 @@ class DepthFusion(Node):
             f" refused: {self._refusals(w) or 'none'}; skipped: {skipped};"
             f" no image {c['no_image']}; surface {self._surface_points} points;"
             f" {self._marks_line(w)}; {self._frame_line(w)};"
-            f" {self._band_text()}; {self._world_line(w)}; {self._follow_line(w)};"
+            f" {self._band_text()}; {self._carve_line()}; {self._world_line(w)};"
+            f" {self._follow_line(w)};"
             f" {self._lean.report()};"
             f" flags: {self._switches.state()}" + (f"; tf: {tf_text}" if tf_text else "")
         )
@@ -1868,7 +2083,20 @@ class DepthFusion(Node):
             f" {w.ms_per('marks', 'marks'):.1f} ms a slice){self._cap_text(w)},"
             f" {self._marks_bearings} bearings of"
             f" {round(2 * math.pi / MARKS_STEP)} filled, band {law.band_m[0]:.2f}-"
-            f"{law.band_m[1]:.2f} m within {law.range_m:.1f} m at min_weight {law.min_weight:g}"
+            f"{law.band_m[1]:.2f} m within {law.range_m:.1f} m at min_weight {law.min_weight:g};"
+            f" {self._clear_text()}"
+        )
+
+    def _clear_text(self) -> str:
+        """The clearing half of the fan in the report line: how many bearings of the last slice
+        marked, how many cleared and how many said nothing — the three numbers ``marks_clear`` is
+        judged by, and the reason it ships off (a ray stops at the first column that is not open,
+        and the volume's own marks are what stand in the way)."""
+        if not bool(self._switches["marks_clear"]):
+            return f"marks_clear off: {FREE_TOPIC} silent, the layer clears from the frame alone"
+        return (
+            f"clearing on {FREE_TOPIC}: {self._marks_bearings} bearings mark,"
+            f" {self._marks_clearing} clear, {self._marks_silent} say nothing"
         )
 
     def _cap_text(self, w: Window) -> str:

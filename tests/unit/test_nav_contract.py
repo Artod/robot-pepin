@@ -1334,12 +1334,25 @@ def test_the_camera_layer_clears_from_a_frame_and_marks_from_the_volume() -> Non
     topic = ast.literal_eval(sf.assignments(node)["MARKS_TOPIC"])
     assert topic == "/depth_marks"
     assert "marks_ranges" in sf.calls(node) and "/depth_scan" in sf.strings(node)
+    assert ast.literal_eval(sf.assignments(node)["FREE_TOPIC"]) == "/depth_free"
+    assert "free_ranges" in sf.calls(node), "the clearing half comes from the same walk"
     flags = load_table(REPO / NODES / "depth_fusion.py")
     assert flags["marks_source"] == "volume", "the volume marks by default"
+    # OFF as shipped, and the measurement says why: on the parked cart of 2026-09-23 the volume
+    # held an occupied column on 717 of 720 bearings, and where the camera's own frame shared a
+    # bearing with a mark it agreed within 0.20 m 96 % of the time (3 % saw past it) — a clearing
+    # ray stops at the first column that is not open, so there was almost nothing for it to erase
+    # (scratch/one_localiser/live_fan_vs_lidar.py).
+    assert flags["marks_clear"] is False, "measured first, defaulted after"
+    assert flags.flag("marks_clear").live, "an A/B without a restart, as every flag here"
     assert flags.flag("marks_source").choices == ("volume", "frame"), "the old way, live"
     for costmap in ("local_costmap", "global_costmap"):
         layer = _p(costmap)["camera_layer"]
-        assert layer["observation_sources"].split() == ["depth_scan", "depth_marks"], costmap
+        assert layer["observation_sources"].split() == [
+            "depth_scan",
+            "depth_marks",
+            "depth_free",
+        ], costmap
         frame, volume = layer["depth_scan"], layer["depth_marks"]
         assert frame["marking"] is False and frame["clearing"] is True, costmap
         assert volume["topic"] == topic and volume["data_type"] == "LaserScan"
@@ -1354,6 +1367,19 @@ def test_the_camera_layer_clears_from_a_frame_and_marks_from_the_volume() -> Non
         # One window for the two words of one camera, and inside the fan's own reach: a mark the
         # layer would have to discard is a mark nobody sees.
         assert volume["obstacle_max_range"] == frame["obstacle_max_range"] < MARKS_RANGE_M
+        # THE THIRD SOURCE, and the reason it is a source of its own: a LaserScan cannot say
+        # "clear to here" without also marking there — Nav2's ObstacleLayer marks at the END of
+        # every finite range and clears up to it — so a single source that cleared a ray at 1.2 m
+        # would plant a lethal cell at the frontier of knowledge, which is the defect it exists to
+        # cure. Clearing only, never marking, and silent until depth_fusion's `marks_clear` is on.
+        open_to = layer["depth_free"]
+        assert open_to["topic"] == "/depth_free" and open_to["data_type"] == "LaserScan"
+        assert open_to["marking"] is False and open_to["clearing"] is True, costmap
+        assert open_to["obstacle_max_range"] == 0.0, "nothing may ever mark from this one"
+        assert open_to["raytrace_max_range"] == MARKS_RANGE_M, "the fan's own reach, no further"
+        assert open_to["inf_is_valid"] is False, "unknown must stay unknown"
+        assert open_to["sensor_frame"] == "base_link"
+        assert open_to["expected_update_rate"] == 0.0, "a silent source may not stall a costmap"
 
 
 def test_the_floor_s_edge_is_a_node_of_the_kit_and_crosses_the_bridge() -> None:

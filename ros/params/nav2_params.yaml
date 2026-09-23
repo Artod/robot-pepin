@@ -546,7 +546,7 @@ local_costmap:
         # ray, sliced around the cart by pepin_bringup.depth_fusion into /depth_marks. Frames
         # clear, the model marks (the nvblox arrangement), and `ros/flags.sh set depth_fusion
         # marks_source frame` puts the old behaviour back live.
-        observation_sources: depth_scan depth_marks
+        observation_sources: depth_scan depth_marks depth_free
         depth_scan:
           # The camera's depth folded onto the plane (pepin_bringup.depth_stream on the laptop):
           # what stands 8 cm to 1.3 m above the floor — table tops, seats, a hand — three times a
@@ -584,6 +584,35 @@ local_costmap:
           # A bearing the volume holds nothing at is NaN, never inf: this topic cannot clear, so
           # an inf would become a point at range_max and MARK a lethal ring there (the contact
           # layer's lesson). NaN rays neither mark nor clear, whatever this says.
+          inf_is_valid: False
+        depth_free:
+          # THE FAN'S THIRD WORD, and it is SILENT UNLESS depth_fusion's `marks_clear` is on
+          # (`ros/flags.sh set depth_fusion marks_clear true`; off as shipped). Where /depth_marks
+          # says what the volume HOLDS, this says how far each bearing is KNOWN OPEN — the last
+          # column the volume observed free before the first it did not (pepin.volume_scan's
+          # free_ranges) — so the camera's own memory can erase the camera's own stale marks
+          # behind the cart, which /depth_scan's forward 83 degrees can never reach. A SOURCE OF
+          # ITS OWN and not a flag on the one above, because a LaserScan cannot carry both words:
+          # Nav2 marks at the END of every finite range and clears up to it, so one source that
+          # cleared a ray at 1.2 m would plant a lethal cell at 1.2 m — at the frontier of
+          # knowledge, which is the defect being cured. A NaN bearing clears nothing: unknown
+          # stays unknown.
+          topic: /depth_free
+          observation_persistence: 1.0
+          data_type: "LaserScan"
+          sensor_frame: base_link
+          expected_update_rate: 0.0
+          marking: False
+          clearing: True
+          # The fan's own reach (pepin.volume_scan.MARKS_RANGE_M), so a ray may clear as far as
+          # the volume was read; it never clears past the range the fan itself published.
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          # Zero, not the layer's default: this source never marks, and a marking range of zero
+          # means nothing can mark from it even if `marking` above is ever flipped by mistake.
+          obstacle_max_range: 0.0
+          # inf would clear to range_max on every bearing the volume knows nothing about, which
+          # is the one thing this source must never do.
           inf_is_valid: False
       contact_layer:
         # Where the floor ENDS, read off the same depth frames (pepin.contact, published by
@@ -732,7 +761,7 @@ global_costmap:
         # grid does not roll, so a phantom from one frame stays until something raytraces through
         # it. Single frames clear, the accumulated volume marks (/depth_marks,
         # pepin_bringup.depth_fusion).
-        observation_sources: depth_scan depth_marks
+        observation_sources: depth_scan depth_marks depth_free
         depth_scan:
           topic: /depth_scan
           observation_persistence: 1.0
@@ -755,6 +784,21 @@ global_costmap:
           obstacle_max_range: 2.5
           # NaN for "the volume holds nothing here", never inf: with clearing off an inf would
           # mark a lethal ring at range_max.
+          inf_is_valid: False
+        depth_free:
+          # The volume's own clearing, see the local costmap's copy above: silent unless
+          # depth_fusion's `marks_clear` is on, and it matters MORE here, because this grid does
+          # not roll — a stale camera mark stays until something raytraces through it.
+          topic: /depth_free
+          observation_persistence: 1.0
+          data_type: "LaserScan"
+          sensor_frame: base_link
+          expected_update_rate: 0.0
+          marking: False
+          clearing: True
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 0.0  # this source never marks
           inf_is_valid: False
       contact_layer:
         # Where the floor ENDS, read off the same depth frames (pepin.contact, published by

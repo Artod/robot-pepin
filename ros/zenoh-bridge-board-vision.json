@@ -6,7 +6,7 @@
           "^/(amcl_path|global_costmap/costmap|goal_pose|imu/data_raw|local_costmap/costmap|local_costmap/published_footprint|local_plan|localization/sigma|localization/sources|localization_fit|map_tracked|neck/state|odom|odometry/filtered|pepin/run_status|places/mark|plan|scan|tf|tf_static|tof/front|tof/left|tof/right|tracker_pose)$"
         ],
         "subscribers": [
-          "^/(bridge/kick|contact_scan|depth_marks|depth_scan|localization/candidate|localization/graph_measurement|localization/measurement|map|map_odom|places|places/marked|rtabmap/info|rtabmap/mapGraph|rtabmap/mapPath|vo)$"
+          "^/(bridge/kick|contact_scan|depth_free|depth_marks|depth_scan|localization/candidate|localization/graph_measurement|localization/measurement|map|map_odom|places|places/marked|rtabmap/info|rtabmap/mapGraph|rtabmap/mapPath|vo)$"
         ],
         "service_servers": [
           "^$"

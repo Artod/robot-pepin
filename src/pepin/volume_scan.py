@@ -15,10 +15,25 @@ table top that ten frames agree on is a surface. This module reads THAT — the 
 so a mark in the costmap and a point in Foxglove can never disagree — over a horizontal band
 around the cart, and answers the nearest one per half-degree of bearing.
 
-It says nothing about free space. A bearing with no surface in the band comes back NaN, which a
-costmap neither marks nor clears: CLEARING stays with the single frames (``/depth_scan``), which
-is where it belongs — a frame is an eyewitness of what is open right now, and the volume
-remembers what was there rather than what is.
+AND SINCE 2026-09-22 IT ALSO SAYS WHERE IT IS OPEN (:func:`free_ranges`). The fan used to mark
+only: a bearing with no surface came back NaN, which a costmap neither marks nor clears, and the
+sole clearing source was the single frame's own ``/depth_scan`` — the head's forward 83 degrees.
+A fan that marks over the whole turn and clears over a sixth of it is a ratchet: measured on the
+turn of run 0434 (scratch/one_localiser/tape_0434_turn.py), unbacked lethal cells were born at
+109/s while the cart turned against 27/s standing, 52 % of them BEHIND the cart where nothing
+could ever raytrace them away, 76 % still lethal three seconds later, and the count climbed from
+24 to 904 in 38 s until Nav2 cleared the whole costmap. So the same walk that finds the mark also
+reports how far the volume is KNOWN OPEN along that bearing, and that answer goes out as a
+clearing fan of its own (``/depth_free``).
+
+The two answers are separate topics because a LaserScan cannot carry them on one: Nav2's
+ObstacleLayer marks at the END of every finite range it is given and clears up to it, so a single
+source that clears a ray at 1.2 m also plants a lethal cell at 1.2 m — at the FRONTIER OF
+KNOWLEDGE, which is the very defect being cured. A marking-only fan and a clearing-only fan in
+one layer say the two things without either inventing the other.
+
+A bearing the volume has not observed stays NaN in both, and NaN is the one word for "unknown":
+the ray is not clear, and unknown must stay unknown.
 """
 
 from __future__ import annotations
@@ -27,9 +42,11 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+import numpy.typing as npt
 
 from pepin.depth import SCAN_MIN_Z_M, SCAN_STEP
 from pepin.tsdf import Array, GridSpec, RigidPose, Tsdf
+from pepin.worldmap import SliceLaw
 
 # The fan: the whole turn, on /depth_scan's own half-degree grid. The whole turn because the
 # volume remembers what is BEHIND the head's current view — a table the cart has driven past is
@@ -50,6 +67,18 @@ MARKS_MIN_RANGE_M = 0.05
 # volume's own (that same camera_band_m), because the volume is what is being read.
 MARKS_MIN_Z_M = SCAN_MIN_Z_M
 MARKS_MAX_Z_M = 1.30
+# How open a column must be before the clearing fan may cross it: :class:`pepin.worldmap.SliceLaw`
+# — the ONE place this project decides when a column of the volume is occupied, free or unknown,
+# and the same law the map slice is drawn by. Half a truncation from anything is free; within half
+# a voxel of a crossing is a surface; in between is the surface's halo, which is neither.
+MARKS_FREE_ABOVE = SliceLaw().free_above
+# The cart's own footprint, in metres: the volume can never observe the voxels the robot stands
+# in (the camera's near range starts well past them) and a ray that had to begin on known-free
+# ground would therefore never begin at all. Samples nearer than this are crossed unless the
+# volume holds a SURFACE there — a cell nobody can see is not a cell anybody may be blocked by.
+# It changes nothing about what is erased: Nav2 raytraces from the sensor's origin, so a ray
+# published at all clears from the cart outward whatever this is.
+MARKS_FREE_SKIP_M = 0.30
 
 
 @dataclass(frozen=True)
@@ -69,11 +98,19 @@ class MarksLaw:
     band_m: tuple[float, float] = (MARKS_MIN_Z_M, MARKS_MAX_Z_M)
     range_m: float = MARKS_RANGE_M
     step: float = MARKS_STEP
+    free_above: float = MARKS_FREE_ABOVE
+    free_skip_m: float = MARKS_FREE_SKIP_M
 
     @property
     def bins(self) -> int:
         """How many bearings the fan has: the whole turn at :attr:`step`."""
         return round(2 * math.pi / self.step)
+
+    def column_law(self) -> SliceLaw:
+        """When a column of the volume counts as occupied, free or unknown for this fan: the
+        project's own :class:`pepin.worldmap.SliceLaw`, carrying this fan's ``min_weight`` so the
+        marks, the clearing and the map slice can never disagree about what a surface is."""
+        return SliceLaw(min_weight=self.min_weight, free_above=self.free_above)
 
 
 def marks_box(
@@ -164,3 +201,98 @@ def marks_ranges(volume: Tsdf, base_in_map: RigidPose, law: MarksLaw | None = No
     first = np.flatnonzero(np.r_[True, index[1:] != index[:-1]])
     ranges[index[first]] = near[first]
     return ranges
+
+
+def band_columns(
+    volume: Tsdf, box: tuple[slice, slice, slice], band: tuple[float, float], law: MarksLaw
+) -> tuple[npt.NDArray[np.bool_], npt.NDArray[np.bool_]] | None:
+    """The height band of ``box`` squashed onto the floor as two masks over its x-y footprint —
+    (occupied, open) — by :meth:`MarksLaw.column_law`; ``None`` when the band misses the grid.
+
+    This is :meth:`pepin.worldmap.WorldMap.slice` on one neighbourhood instead of the whole room,
+    and deliberately the same three words: a column is OCCUPIED when some voxel of it sits within
+    half a voxel of the zero crossing, OPEN when the nearest thing in it is at least half a
+    truncation away, and neither in the halo around a surface or where nothing was observed. The
+    band is cut on the grid's own z lattice exactly as the slice cuts it, so a column here and a
+    cell of the map slice are the same column.
+    """
+    s = volume.spec
+    nz = s.shape[2]
+    lo = max(0, math.floor((band[0] - s.origin[2]) / s.voxel_m))
+    hi = min(nz, math.ceil((band[1] - s.origin[2]) / s.voxel_m))
+    hi = max(hi, lo + 1) if lo < nz else nz
+    if lo >= hi:
+        return None
+    sel = (box[0], box[1], slice(lo, hi))
+    known = volume.weight[sel] >= law.min_weight
+    sdf = volume.sdf[sel]
+    nearest = np.where(known, sdf, np.inf).min(axis=2)  # how open the column is
+    crossing = np.where(known, np.abs(sdf), np.inf).min(axis=2)  # how near a surface it is
+    column = law.column_law()
+    occupied = crossing <= column.occupied_t(s)
+    free = np.isfinite(nearest) & (nearest >= column.free_above) & ~occupied
+    return occupied, free
+
+
+def free_ranges(volume: Tsdf, base_in_map: RigidPose, law: MarksLaw | None = None) -> Array:
+    """How far each bearing of the fan is KNOWN OPEN, in base_link metres: the range of the last
+    column the volume has observed as free before the first column it has not, NaN where the
+    volume cannot vouch for even the first step.
+
+    THE CLEARING HALF of the fan (``/depth_free``), and it is a walk and not a sort: the ray is
+    stepped outward half a voxel at a time over :func:`band_columns`, and it ends at the first
+    column that is not open — a surface, the halo in front of one, a column nobody has looked
+    into, or the edge of the volume. What is returned is the last OPEN sample before that end, so
+    the answer is always a range the model itself observed free, never the reach it was asked
+    for. A bearing whose very first column stops the ray answers NaN, and NaN clears nothing:
+    beyond what the volume knows, the costmap must keep what it has.
+
+    A bearing that also MARKS (:func:`marks_ranges`) gets an answer here too, one column short of
+    its surface: the space in front of a wall the volume painted was carved by the very rays that
+    painted it, and clearing it is how the camera's own stale marks die.
+    """
+    law = law if law is not None else MarksLaw()
+    free: Array = np.full(law.bins, np.nan)
+    x0, y0, z0 = (float(v) for v in base_in_map.translation)
+    band = (z0 + law.band_m[0], z0 + law.band_m[1])
+    box = marks_box(volume.spec, (x0, y0), band, law.range_m)
+    if box is None:
+        return free
+    columns = band_columns(volume, box, band, law)
+    if columns is None:
+        return free
+    occupied, open_ = columns
+    s = volume.spec
+    step_m = 0.5 * s.voxel_m  # half a voxel: no column of the ray can be stepped over
+    samples = max(1, math.floor(law.range_m / step_m))
+    along = (np.arange(samples) + 1) * step_m
+    yaw = math.atan2(float(base_in_map.rotation[1, 0]), float(base_in_map.rotation[0, 0]))
+    angle = yaw + MARKS_ANGLE_MIN + law.step * np.arange(law.bins)
+    xs = x0 + np.cos(angle)[:, None] * along[None, :]
+    ys = y0 + np.sin(angle)[:, None] * along[None, :]
+    i0, j0 = box[0].indices(s.shape[0])[0], box[1].indices(s.shape[1])[0]
+    ii = np.floor((xs - s.origin[0]) / s.voxel_m).astype(int) - i0
+    jj = np.floor((ys - s.origin[1]) / s.voxel_m).astype(int) - j0
+    nx, ny = occupied.shape
+    inside = (ii >= 0) & (ii < nx) & (jj >= 0) & (jj < ny)
+    ci, cj = np.clip(ii, 0, nx - 1), np.clip(jj, 0, ny - 1)
+    is_open = inside & open_[ci, cj]
+    is_wall = inside & occupied[ci, cj]
+    # the cart's own footprint: unobservable, so not a reason to withhold a ray — but a SURFACE
+    # there still ends it
+    near = along <= law.free_skip_m
+    blocked = ~(is_open | (near[None, :] & ~is_wall))
+    ends_at = np.where(blocked.any(axis=1), blocked.argmax(axis=1), samples)
+    seen = is_open & (np.arange(samples)[None, :] < ends_at[:, None])
+    vouched = seen.any(axis=1)
+    last = samples - 1 - np.argmax(seen[:, ::-1], axis=1)
+    free[vouched] = along[last[vouched]]
+    free[free < MARKS_MIN_RANGE_M] = np.nan  # a ray of no length is not a ray
+    return free
+
+
+def fan_counts(marks: Array, free: Array) -> tuple[int, int, int]:
+    """One fan in three numbers — how many bearings MARK, how many CLEAR and how many say
+    nothing at all — for a node's report line."""
+    marked, cleared = np.isfinite(marks), np.isfinite(free)
+    return int(marked.sum()), int(cleared.sum()), int((~marked & ~cleared).sum())

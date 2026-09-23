@@ -321,7 +321,9 @@ def test_the_volume_reaches_no_matcher_and_no_planner(tmp_path: Path) -> None:
     node = in_room(tmp_path)
     node._on_scan_work(scan_msg())
     assert node._world.lidar_weight.any(), "painted, all the same"
-    assert set(node.pubs) == {"/fusion/surface", "/depth_marks"}
+    # ...and, behind marks_clear (off as shipped), the clearing half of the same fan: how far
+    # each bearing is KNOWN OPEN. Still an answer about obstacles, still nothing to seat a pose on.
+    assert set(node.pubs) == {"/fusion/surface", "/depth_marks", "/depth_free"}
     assert [name for name, _period in node.timers] or True
     line = node._world_line(node._tally.take())
     assert "1 revolutions" in line and "lidar slice" in line and "camera band" in line
@@ -718,3 +720,39 @@ def test_volume_frame_map_is_the_old_behaviour_one_flag_away(tmp_path: Path) -> 
     node._on_scan_work(scan_msg(SCAN_S + 0.2))
     assert painted(node) == 0.0
     assert node._tally.take().counts["untrusted"] == 1
+
+
+def test_marks_clear_is_off_and_the_clearing_topic_is_silent(node: DepthFusion) -> None:
+    """AS SHIPPED, and it is a measurement and not a preference: on the parked cart of 2026-09-23
+    the volume held an occupied column on 717 of 720 bearings, and where the camera's own frame
+    shared a bearing with a mark it agreed within 0.20 m 96 % of the time — a clearing ray stops
+    at the first column that is not open, so there was next to nothing for it to erase
+    (scratch/one_localiser/live_fan_vs_lidar.py). Off, /depth_free carries nothing at all and the
+    camera layer clears from the single frame exactly as it has since 2026-09-21."""
+    node._switches.set("min_weight", 0.5)
+    node._on_scan_work(scan_msg())
+    assert not node.pubs["/depth_free"].sent, "the flag is off: the topic is silent"
+    assert node.pubs["/depth_marks"].sent, "and the marks go out as they always did"
+    assert "marks_clear off" in node._marks_line(node._tally.take())
+
+
+def test_marks_clear_on_answers_how_far_each_bearing_is_known_open(node: DepthFusion) -> None:
+    """On, the same walk publishes a second, clearing-only fan: a range per bearing the volume has
+    observed FREE up to, never past the surface it also marks there, and NaN where it has looked
+    at nothing. The marks are untouched — which is what makes this a switch on the publisher."""
+    node._switches.set("min_weight", 0.5)
+    node._on_scan_work(scan_msg())
+    before = np.array(marks(node).ranges)
+    assert node._switches.set("marks_clear", True) is False
+    at_map(node, 0.4)
+    node._on_scan_work(scan_msg(SCAN_S + 0.2))
+    fan = node.pubs["/depth_free"].sent[-1]
+    open_to = np.array(fan.ranges)
+    assert open_to.size == before.size and fan.header.frame_id == "base_link"
+    assert fan.angle_min == pytest.approx(-math.pi) and fan.range_max > 3.0
+    assert np.isfinite(open_to).any(), "the beams carved free space and it is offered for clearing"
+    marked = np.array(marks(node).ranges)
+    both = np.isfinite(marked) & np.isfinite(open_to)
+    assert both.any() and np.all(open_to[both] < marked[both]), "cleared up to the wall, not past"
+    line = node._marks_line(node._tally.take())
+    assert "clearing on /depth_free" in line and "clear" in line and "say nothing" in line

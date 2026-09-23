@@ -58,6 +58,7 @@ from pepin.tsdf import (
     BLEND,
     NEAREST,
     Array,
+    DepthLaw,
     Float32,
     GridSpec,
     PlanarShift,
@@ -367,10 +368,15 @@ class WorldMap:
         mount: PlanarMount | None = None,
         law: LidarLaw | None = None,
         protect_lidar_layer: bool = True,
+        depth_law: DepthLaw | None = None,
     ) -> None:
         self.spec = spec
         self.mount = mount if mount is not None else PlanarMount()
         self.law = law if law is not None else LidarLaw()
+        # the camera's half of the writing law, beside the lidar's: what a pixel with no depth
+        # may carve (:class:`pepin.tsdf.DepthLaw`). A caller with a live reach passes its own
+        # per frame; this is the fallback, and its default writes nothing, as before.
+        self.depth_law = depth_law if depth_law is not None else DepthLaw()
         self.protect_lidar_layer = protect_lidar_layer
         self.volume = Tsdf(spec)
         self.lidar_weight: Float32 = np.zeros(spec.shape, dtype=np.float32)
@@ -421,6 +427,16 @@ class WorldMap:
         the reach and marks nothing, which is how an open door stays open. Every sample is
         written on the lidar's weight channel, at its own height and one voxel either side, and
         one scan speaks at most once about a voxel however many of its beams cross it.
+
+        NO COLOUR IS WRITTEN HERE, and that is deliberate: colour is the camera's word about a
+        surface and a beam has none, so ``volume.rgb`` and its colour weight are left exactly as
+        they were. What that costs is a readout rule, not a measurement — a wall only the lidar
+        holds is a crossing between two voxels neither of which a camera painted, and
+        :meth:`pepin.tsdf.Tsdf.surface` used to hand out its black (1532 pure-black points on the
+        live volume of 2026-09-22, all of them real walls in this layer, measured in
+        scratch/one_localiser/depth_nan_why.py). The readout's ``colour_fallback`` takes the
+        other neighbour's colour where the nearer one has none; painting a neutral grey in here
+        instead was refused, because it would claim a camera saw what it never looked at.
         """
         mount = mount if mount is not None else self.mount
         if self._layer_rows(pose_base_in_map, mount) is None:
@@ -450,6 +466,7 @@ class WorldMap:
         intr: Intrinsics,
         pose: RigidPose,
         stamp: float | None = None,
+        law: DepthLaw | None = None,
     ) -> int:
         """Fuse one depth frame the way :meth:`pepin.tsdf.Tsdf.integrate` does, then hand the
         lidar's layer back to the lidar: inside that layer the voxels the lidar has spoken for
@@ -458,16 +475,24 @@ class WorldMap:
         The layer is the rows the lidar's *plane* sweeps (:meth:`_widen_rows`), never the rows a
         leaning beam happened to climb into: a beam that tips into the camera's band writes there
         like any other observation, and the camera may write over it on the next frame. Only the
-        layer the cart drives by is defended, and only where the lidar actually spoke."""
+        layer the cart drives by is defended, and only where the lidar actually spoke.
+
+        ``law`` is the camera's own writing law (:class:`pepin.tsdf.DepthLaw`) — what a pixel
+        with NO depth may carve — and it carries the SOURCE's reach, which changes with the rig
+        and is therefore passed per frame rather than stored here; ``None`` is
+        :attr:`depth_law`, and its default is the old behaviour where a NaN pixel writes
+        nothing. The protection above is exactly what keeps the new carving honest: a depthless
+        ray may not touch the layer the beams own."""
+        law = law if law is not None else self.depth_law
         rows = self._rows if self.protect_lidar_layer else None
         if rows is None:
-            touched = self.volume.integrate(depth, rgb, intr, pose)
+            touched = self.volume.integrate(depth, rgb, intr, pose, law)
             self._note(stamp, CAMERA, pose)
             return touched
         lo, hi = rows
         keep_sdf = self.volume.sdf[:, :, lo:hi].copy()
         keep_weight = self.volume.weight[:, :, lo:hi].copy()
-        touched = self.volume.integrate(depth, rgb, intr, pose)
+        touched = self.volume.integrate(depth, rgb, intr, pose, law)
         owned = self.lidar_weight[:, :, lo:hi] > 0.0
         np.copyto(self.volume.sdf[:, :, lo:hi], keep_sdf, where=owned)
         np.copyto(self.volume.weight[:, :, lo:hi], keep_weight, where=owned)

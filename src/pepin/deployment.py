@@ -320,6 +320,10 @@ LAPTOP_PUBLISHES = (
     # around the cart (pepin_bringup.depth_fusion, pepin.volume_scan). The frame above clears,
     # the model marks — one stereo frame's blobs were 100-300 lethal cells the lidar never saw.
     "depth_marks",
+    # ...and the clearing half of that same fan, behind depth_fusion's `marks_clear` (off as
+    # shipped, so the route normally carries nothing): how far each bearing is KNOWN OPEN, for the
+    # camera layer's own clearing source. A fan is 720 floats, capped at marks_hz 5: ~15 kB/s.
+    "depth_free",
     "contact_scan",  # the same depth read at the floor: where bodies touch it (pepin.contact)
     VO_TOPIC,  # the camera's own odometry, gated here, fused by the board's EKF as odom1
     BRIDGE_KICK_TOPIC,  # "restart your bridge after mine": the watch's last repair, not a drive
@@ -388,6 +392,7 @@ VISION_LAPTOP_PUBLISHES = (
     "rtabmap/info",
     "depth_scan",
     "depth_marks",  # see LAPTOP_PUBLISHES: the volume's marks for the board's camera layer
+    "depth_free",  # ...and its clearing half, silent unless depth_fusion's marks_clear is on
     "contact_scan",
     # The laptop's whole-map watchdog (pepin_bringup.laptop_localizer) proposing a place to the
     # board's tracker, once a second, as JSON. Vision mode only: this is where the laptop sees
@@ -872,6 +877,9 @@ ON_DEMAND_TOPICS: frozenset[str] = frozenset(
         # state of a healthy link, and /depth_scan keeps flowing beside it: a watch that judged
         # this silence would restart a healthy bridge exactly as the map's did on 2026-09-13.
         "/depth_marks",
+        # ...and its clearing half, which is silent by default: `marks_clear` ships off, so this
+        # route normally carries nothing at all and its silence is the shipped arrangement.
+        "/depth_free",
         f"/{BRIDGE_KICK_TOPIC}",  # one message per repair, and none at all on a healthy link
     }
 )

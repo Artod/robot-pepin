@@ -1,6 +1,7 @@
 """The fused model: one wall from many frames, sharper from near, and the frame that turns
 itself to fit the model before it is let in."""
 
+import dataclasses
 import math
 from pathlib import Path
 
@@ -12,7 +13,9 @@ from pepin.tsdf import (
     ALIGN_MIN_GAIN,
     Alignment,
     AlignReason,
+    DepthLaw,
     GridSpec,
+    ObservedReach,
     RigidPose,
     Tsdf,
     align_yaw,
@@ -25,6 +28,12 @@ RANGE_M = 4.0
 
 def _spec() -> GridSpec:
     return GridSpec(origin=(-1.0, -3.0, -0.2), shape=(80, 120, 20), range_max_m=RANGE_M)
+
+
+def _carve_spec() -> GridSpec:
+    """The same grid at the live config's max_weight (config/fusion.json, 20.0 since
+    2026-09-22): how fast the volume forgets is what a carving test measures."""
+    return dataclasses.replace(_spec(), max_weight=20.0)
 
 
 def _optical_pose(x: float, y: float, yaw: float, z: float = 0.6) -> RigidPose:
@@ -316,7 +325,12 @@ def test_the_snapshot_carries_what_the_surface_reads() -> None:
     model.integrate(_render_wall(pose, 2.5), None, INTR, pose)
     points, _ = twin.surface(min_weight=1.0)
     assert np.abs(points[:, 0] - 2.0).max() < 0.03  # the twin kept the first wall
-    assert not hasattr(twin, "colour_weight")  # only what surface() needs is copied
+    # the colour's own weight travels with the colour since 2026-09-22: surface()'s
+    # colour_fallback asks it which neighbour a camera ever painted, and a twin without it
+    # would answer for the whole published cloud
+    assert twin.colour_weight.shape == model.colour_weight.shape
+    assert twin.colour_weight is not model.colour_weight
+    assert twin.surface(min_weight=1.0, colour_fallback=True)[0].shape == points.shape
 
 
 def test_the_grid_config_is_the_one_the_node_loads() -> None:
@@ -516,3 +530,138 @@ def test_what_one_slide_of_a_node_sized_window_costs() -> None:
         model.recentre((step, 0.0))
         slides.append((time.perf_counter() - started) * 1e3)
     assert max(slides) < 50.0, f"one slide of the node's window: {max(slides):.1f} ms"
+
+
+def test_a_pixel_with_no_depth_carves_its_ray_only_when_the_law_says_so() -> None:
+    """THE PHANTOM THAT NEVER DECAYED (2026-09-22). A NaN pixel used to touch nothing, so a
+    surface standing in front of something beyond the rig's reach — where the published depth is
+    NaN by construction — could never be carved by anything. With ``no_depth_free`` the depthless
+    ray carves free space to ``reach - truncation`` and the surface goes; with the law off not one
+    voxel moves, and beyond the carve the field is untouched either way."""
+    model = Tsdf(_carve_spec())
+    pose = _optical_pose(0.0, 0.0, 0.0)
+    for _ in range(20):  # a face at 1 m, with nothing the rig can reach behind it
+        model.integrate(_render_wall(pose, 1.0), None, INTR, pose)
+    before_sdf, before_weight = model.sdf.copy(), model.weight.copy()
+    blind = np.full((INTR.height, INTR.width), np.nan)  # every pixel silent
+    off = DepthLaw(no_depth_free=False, reach_m=2.46)
+    assert model.integrate(blind, None, INTR, pose, off) == 0
+    assert np.array_equal(model.sdf, before_sdf) and np.array_equal(model.weight, before_weight)
+
+    on = DepthLaw(no_depth_free=True, no_depth_weight=0.5, reach_m=2.46)
+    assert on.carve_to_m(model.spec.truncation_m) == pytest.approx(2.36)
+    face = np.abs(model.surface(min_weight=1.0)[0][:, 0] - 1.0) < 0.05
+    assert face.sum() > 50, "the phantom is in the volume to start with"
+    # at max_weight 20 and the carve's own 0.36 a saturated voxel needs ln(2)/ln(1 + 0.36/20)
+    # = 39 frames to cross zero: 6.1 s of the node's 6.4 fps, and 60 leaves room for the rims
+    for _ in range(60):
+        assert model.integrate(blind, None, INTR, pose, on) > 0
+    points, _ = model.surface(min_weight=1.0)
+    ahead = points[(np.abs(points[:, 1]) < 0.3) & (points[:, 0] > 0.3) & (points[:, 0] < 2.3)]
+    assert ahead.shape[0] == 0, "the depthless rays carved the phantom out of their own cone"
+    carved = model.weight > before_weight
+    assert carved.any(), "the carve is written on the voxels' own weight"
+
+
+def test_a_depthless_ray_carves_no_further_than_the_source_answers() -> None:
+    """The carve stops a truncation short of the source's reach: a surface standing AT the reach
+    keeps its halo, and a voxel behind it — which no pixel of this rig ever measured — is not
+    touched at all. A reach nobody knows (0) carves nothing, which is what an unmeasured source
+    must do."""
+    model = Tsdf(_carve_spec())
+    pose = _optical_pose(0.0, 0.0, 0.0)
+    for _ in range(20):
+        model.integrate(_render_wall(pose, 2.8), None, INTR, pose)
+    before = model.weight.copy()
+    blind = np.full((INTR.height, INTR.width), np.nan)
+    assert model.integrate(blind, None, INTR, pose, DepthLaw(True, 0.5, 0.0)) == 0
+    assert np.array_equal(model.weight, before), "no reach, no carve"
+    for _ in range(60):
+        model.integrate(blind, None, INTR, pose, DepthLaw(True, 0.5, 2.46))
+    grew = np.argwhere(model.weight > before)
+    reached = (grew[:, 0] + 0.5) * model.spec.voxel_m + model.spec.origin[0]
+    assert reached.max() < 2.36 + model.spec.voxel_m, "nothing past reach - truncation was touched"
+    wall = np.abs(model.surface(min_weight=1.0)[0][:, 0] - 2.8) < 0.05
+    assert wall.sum() > 50, "the wall beyond the carve is exactly where it was"
+
+
+def test_the_surface_takes_a_colour_the_camera_wrote_rather_than_the_lidar_s_black() -> None:
+    """The lidar writes field and weight but never a colour, and the readout takes the neighbour
+    NEARER the surface — for a beam's own return always the uncoloured one, which is why 1532
+    points of the live volume were pure black (2026-09-22). With ``colour_fallback`` the point
+    takes the other neighbour's colour when the nearer one was never painted; a crossing between
+    two voxels neither camera ever saw stays black, because that is the truth about it."""
+    model = Tsdf(_spec())
+    # two crossings along x: the nearer voxel uncoloured (the lidar's), the farther one painted
+    model.weight[10:12, 10, 10] = 5.0
+    model.sdf[10, 10, 10], model.sdf[11, 10, 10] = -0.1, 0.9  # the crossing sits near voxel 10
+    model.rgb[11, 10, 10] = (10, 200, 30)
+    model.colour_weight[11, 10, 10] = 2.0
+    model.weight[20:22, 10, 10] = 5.0  # a second one nobody ever coloured
+    model.sdf[20, 10, 10], model.sdf[21, 10, 10] = -0.1, 0.9
+
+    plain, colours = model.surface(min_weight=1.0)
+    assert colours.shape[0] == 2 and not colours.any(), "the old readout: both black"
+    points, colours = model.surface(min_weight=1.0, colour_fallback=True)
+    order = np.argsort(points[:, 0])
+    assert tuple(colours[order[0]]) == (10, 200, 30), "the colour a camera did write"
+    assert tuple(colours[order[1]]) == (0, 0, 0), "no camera ever painted either neighbour"
+    assert plain.shape == points.shape, "a readout rule: the same points, the same places"
+
+
+def test_the_source_s_own_reach_is_measured_off_its_frames() -> None:
+    """Nothing on the wire carries the reach — the publisher's gate is 3.0 m and the stereo rig
+    2.46 — and the depth is NaN above it by construction, so the largest finite metre in the last
+    frames IS the reach, and can only ever under-state it."""
+    reach = ObservedReach(frames=3)
+    assert reach.m == 0.0 and reach.frames == 0, "nothing measured yet: carve nothing"
+    assert reach.saw(np.array([[np.nan, 1.2], [2.46, np.nan]])) == pytest.approx(2.46)
+    reach.saw(np.full((2, 2), np.nan))
+    assert reach.m == pytest.approx(2.46), "a blind frame does not lower the reach"
+    for _ in range(3):
+        reach.saw(np.array([[1.0, 1.1], [1.2, 1.3]]))
+    assert reach.m == pytest.approx(1.3) and reach.frames == 3, "the window forgets"
+    assert DepthLaw(no_depth_free=True, reach_m=0.0).carve_to_m(0.1) == 0.0
+    assert DepthLaw(no_depth_free=False, reach_m=2.46).carve_to_m(0.1) == 0.0
+    # a ray that weighs nothing says nothing — and must never reach the weighted average, where
+    # a voxel nobody has observed would divide zero by zero
+    assert DepthLaw(no_depth_free=True, no_depth_weight=0.0, reach_m=2.46).carve_to_m(0.1) == 0.0
+    model = Tsdf(_carve_spec())
+    pose = _optical_pose(0.0, 0.0, 0.0)
+    blind = np.full((INTR.height, INTR.width), np.nan)
+    assert model.integrate(blind, None, INTR, pose, DepthLaw(True, 0.0, 2.46)) == 0
+    assert np.isfinite(model.sdf).all() and not model.weight.any()
+
+
+def test_a_nan_column_carves_its_own_rays_and_leaves_the_wall_beside_it() -> None:
+    """The carve is a RAY, not a region: one band of columns goes silent while the rest of the
+    frame still measures the wall, and only the wall behind those pixels is carved away. With
+    the flag off the same frames change nothing at all."""
+    band = slice(INTR.width // 2 - 10, INTR.width // 2 + 10)  # the pixels that go silent
+    pose = _optical_pose(0.0, 0.0, 0.0)
+    wall = _render_wall(pose, 1.0)
+    holed = wall.copy()
+    holed[:, band] = np.nan
+
+    def wall_points(model: Tsdf) -> tuple[int, int]:
+        """(points of the wall behind the silent band, points of the wall beside it)."""
+        points, _ = model.surface(min_weight=1.0)
+        at_wall = points[np.abs(points[:, 0] - 1.0) < 0.06]
+        # the band's rays at 1 m: (10 px / fx) * 1 m either side of the optical axis
+        inside = np.abs(at_wall[:, 1]) < 10.0 / INTR.fx
+        return int(inside.sum()), int((~inside).sum())
+
+    for law in (DepthLaw(), DepthLaw(True, 0.5, 2.46)):
+        model = Tsdf(_carve_spec())
+        for _ in range(20):
+            model.integrate(wall, None, INTR, pose, law)
+        behind, beside = wall_points(model)
+        assert behind > 10 and beside > 50, "the whole wall is in the volume to start with"
+        for _ in range(60):
+            model.integrate(holed, None, INTR, pose, law)
+        after_behind, after_beside = wall_points(model)
+        if law.no_depth_free:
+            assert after_behind == 0, "the silent rays carved the wall behind them away"
+        else:
+            assert after_behind == behind, "a NaN pixel touches nothing with the law off"
+        assert after_beside >= beside * 0.9, "the wall beside the band is measured and stays"

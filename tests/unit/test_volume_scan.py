@@ -5,6 +5,12 @@ constant depth image is exactly that plane), and the cart reads it back over the
 is checked is what the costmap depends on: the range and the bearing of a real surface under a
 moved and turned cart, silence where the model holds nothing, the band, and the one case this
 topic exists for — a false observation that later frames look through marks nothing.
+
+The second half of the file is the fan's CLEARING answer (``free_ranges``, ``/depth_free`` behind
+depth_fusion's ``marks_clear``): how far the same walk says the volume is known open, that it
+stops at the wall rather than through it, that a bearing nobody looked along is never cleared —
+and that the marking fan comes out of the same window bit for bit as it always did, which is what
+makes the flag a switch on the publisher and nothing else.
 """
 
 from __future__ import annotations
@@ -20,6 +26,8 @@ from pepin.volume_scan import (
     MARKS_BINS,
     MarksLaw,
     empty_marks,
+    fan_counts,
+    free_ranges,
     marks_box,
     marks_ranges,
     marks_window,
@@ -216,3 +224,90 @@ def test_the_marks_are_the_surface_fusion_publishes_and_nothing_else() -> None:
         float(np.hypot(kept[:, 0], kept[:, 1]).min()), abs=1e-9
     )
     assert np.nanmax(ranges) <= float(np.hypot(kept[:, 0], kept[:, 1]).max()) + 1e-9
+
+
+# ---- the clearing half: where the volume says it is OPEN -----------------------------------
+
+
+def free(volume: Tsdf, at: RigidPose, law: MarksLaw | None = None) -> np.ndarray:
+    """The fan's free ranges, with this file's default law."""
+    return free_ranges(volume, at, law if law is not None else MarksLaw())
+
+
+def test_a_bearing_with_a_wall_clears_up_to_it_and_not_past_it() -> None:
+    """THE POINT OF THE CLEARING HALF. The volume holds the wall at 2 m and the free space the
+    camera's rays carved on the way to it; the fan must offer that free space for raytracing and
+    stop there, or a costmap would erase the wall it has just been told about.
+
+    One voxel of slack on either side: the walk ends at the last column it saw OPEN, and the
+    column in front of a surface is the surface's own halo, which is not open (SliceLaw)."""
+    volume = painted()
+    marks, open_to = marks_ranges(volume, base()), free(volume, base())
+    ahead = at_deg(marks, 0.0)
+    assert ahead == pytest.approx(WALL_X, abs=0.05)
+    reach = at_deg(open_to, 0.0)
+    assert WALL_X - 0.30 <= reach < ahead, "clear up to the wall, never through it"
+    # ...and where the camera never looked, the volume vouches for nothing: NaN clears nothing.
+    assert math.isnan(at_deg(open_to, 90.0)) and math.isnan(at_deg(open_to, 180.0))
+
+
+def test_an_open_bearing_answers_how_far_the_volume_looked() -> None:
+    """A bearing with free voxels and no surface is the case the marks fan has no word for: it
+    answers "free to X", X being the last column the camera carved, and the ray may be cleared
+    exactly that far. A wall only 1 m away moves X with it."""
+    near = Tsdf(spec())
+    for _ in range(4):  # a wall at 1.0 m: the carved run is shorter and so is the answer
+        near.integrate(np.full((INTR.height, INTR.width), 1.0), None, INTR, optical())
+    far_law = MarksLaw(range_m=3.0)
+    assert at_deg(free(near, base(), far_law), 0.0) == pytest.approx(1.0, abs=0.3)
+    assert at_deg(free(painted(), base(), far_law), 0.0) == pytest.approx(WALL_X, abs=0.3)
+    # the fan's own reach caps it: a volume carved to 2 m read out to 1 m says at most 1 m
+    short = free(painted(), base(), MarksLaw(range_m=1.0))
+    assert np.nanmax(short) <= 1.0 + 1e-9
+
+
+def test_a_bearing_nobody_looked_along_is_never_cleared() -> None:
+    """Unknown must stay unknown: a costmap that cleared it would forget a cell no camera has
+    contradicted. A cart outside its own volume says nothing at all on every bearing."""
+    volume = painted()
+    outside = free(volume, base(40.0, 0.0))
+    assert not np.isfinite(outside).any() and outside.size == MARKS_BINS
+    # ...and a band the volume holds nothing in is the same silence
+    above = free(volume, base(), MarksLaw(band_m=(1.20, 1.30)))
+    assert not np.isfinite(above).any()
+
+
+def test_the_criterion_is_the_volume_s_own_and_a_weak_voxel_vouches_for_nothing() -> None:
+    """The clearing carries the same ``min_weight`` the marks do (one criterion, three answers):
+    a single frame's carved space is not agreement, and at the shipped weight it clears nothing.
+    Lowering the criterion shows the very space that one frame did carve."""
+    once = painted(frames=1)
+    assert not np.isfinite(free(once, base())).any(), "one frame from 2 m weighs 1.0"
+    lowered = free(once, base(), MarksLaw(min_weight=0.5))
+    assert at_deg(lowered, 0.0) == pytest.approx(WALL_X, abs=0.3)
+
+
+def test_the_marks_fan_is_bit_for_bit_what_it_always_was() -> None:
+    """CLAUDE.md rule 19's other half: the clearing is a SECOND answer beside the marks, never a
+    change to them. The two are computed from the same window and the marking fan must come out
+    of it identical, bin for bin, to the one the costmap has been marking from since
+    2026-09-21 — which is what lets ``marks_clear`` be a live switch on the publisher alone."""
+    volume = painted(frames=5, blob_first=True)
+    pose = base(0.2, -0.1, math.radians(15.0))
+    before = marks_ranges(volume, pose)
+    free(volume, pose)  # the clearing walk touches nothing
+    np.testing.assert_array_equal(marks_ranges(volume, pose), before)
+    counted = fan_counts(before, free(volume, pose))
+    assert counted[0] == int(np.isfinite(before).sum())
+    assert sum(counted) >= MARKS_BINS, "every bearing marks, clears, or says nothing"
+
+
+def test_the_window_clears_what_the_whole_volume_clears() -> None:
+    """The node reads the fan out of a copy of the cart's neighbourhood taken under the model's
+    lock; the clearing half must survive that copy exactly as the marks do, or the costmap and
+    the model would be two different rooms."""
+    volume = painted()
+    pose = base(0.3, -0.2, math.radians(20.0))
+    window = marks_window(volume, pose)
+    assert window is not None
+    np.testing.assert_array_equal(free(window, pose), free(volume, pose))

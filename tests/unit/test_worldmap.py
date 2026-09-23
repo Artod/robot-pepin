@@ -8,6 +8,7 @@ stack reads it as (a ROS message, the tracker's log-odds grid, a map_server pair
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import math
 from collections.abc import Callable
@@ -19,7 +20,7 @@ import pytest
 from pepin.depth import Intrinsics
 from pepin.lean import Lean
 from pepin.mapping import grid_from_pgm
-from pepin.tsdf import GridSpec, RigidPose
+from pepin.tsdf import DepthLaw, GridSpec, RigidPose
 from pepin.worldmap import (
     FREE,
     OCCUPIED,
@@ -445,6 +446,39 @@ def test_the_matchers_band_holds_only_cells_many_frames_agree_on() -> None:
     for _ in range(4):  # six frames in all: 24, over the threshold
         world.integrate_depth(flat_depth(intr, 1.0), None, intr, pose, stamp=200.0)
     assert wall_at(world.camera_band_slice(SliceLaw(min_weight=20.0)), 1.0, 0.0)
+
+
+def test_a_depthless_ray_carves_the_cameras_band_and_never_the_lidars_layer() -> None:
+    """``no_depth_free`` lets a pixel with NO depth carve its own ray, which is the only thing
+    that can clear a phantom standing in front of something beyond the rig's reach (2026-09-22).
+    It reaches the camera's band through this method, and the layer the beams own is defended
+    from it exactly as it is from a measured frame: a NaN is not evidence against a return."""
+    # config/fusion.json's own max_weight since 2026-09-22: how fast the volume forgets is what
+    # a carving test measures, and at 20 a saturated voxel needs ln(2)/ln(1 + 0.36/20) = 39
+    # carving frames to cross zero and about twice that to leave the occupied band behind it
+    world = WorldMap(dataclasses.replace(spec(), max_weight=20.0), mount())
+    intr, table = looking_ahead(0.8)
+    for _ in range(6):  # a tabletop at 1 m in the camera's own band
+        world.integrate_depth(flat_depth(intr, 1.0), None, intr, table, stamp=200.0)
+    assert wall_at(world.camera_band_slice(), 1.0, 0.0)
+    blind = np.full((intr.height, intr.width), np.nan)
+    carve = DepthLaw(no_depth_free=True, no_depth_weight=0.5, reach_m=2.46)
+
+    assert world.integrate_depth(blind, None, intr, table, law=DepthLaw()) == 0, "off: nothing"
+    assert wall_at(world.camera_band_slice(), 1.0, 0.0)
+    for _ in range(80):
+        assert world.integrate_depth(blind, None, intr, table, law=carve) > 0
+    assert not wall_at(world.camera_band_slice(), 1.0, 0.0), "the phantom is carved away"
+
+    layer = room()
+    owned = layer.lidar_weight > 0.0  # the cells the beams actually spoke for
+    before_sdf, before_weight = layer.volume.sdf[owned].copy(), layer.volume.weight[owned].copy()
+    intr, at_plane = looking_ahead(PLANE_M)
+    for _ in range(80):
+        layer.integrate_depth(blind, None, intr, at_plane, law=carve)
+    assert np.array_equal(layer.volume.sdf[owned], before_sdf), "the beams keep their field"
+    assert np.array_equal(layer.volume.weight[owned], before_weight)
+    assert wall_at(layer.lidar_slice(), ROOM_M, 0.0), "and the wall they found is still marked"
 
 
 def test_the_camera_may_fill_the_layer_where_the_lidar_never_spoke() -> None:

@@ -432,6 +432,97 @@ class WindowShift:
         return out
 
 
+@dataclass(frozen=True)
+class DepthLaw:
+    """How a depth frame writes into the volume — and, since 2026-09-22, what a pixel with NO
+    depth is allowed to say (``no_depth_free``, the camera's own ``LidarLaw.no_return_free``).
+
+    Until then a NaN pixel touched nothing at all: :meth:`Tsdf.integrate` only moved the voxels
+    whose pixel carried a finite depth, so a voxel could only ever be carved by a ray that
+    MEASURED something behind it. On a stereo rig cut at its own reach that leaves a hole in the
+    law. The published depth is NaN past the rig's reach (2.46 m on the MMlove rig,
+    ``pepin.stereo_depth``), so a person standing at 0.4 m with an open corridor behind him has
+    NaN at every one of his pixels the moment he leaves — nothing carves him, and he stays for
+    ever. Measured on the live volume of 2026-09-22 (scratch/one_localiser/black_voxels.py): an
+    airborne cluster of 133 voxels, 94 % of its pixels NaN, 0 % ever seen free, not one voxel
+    rewritten in 60 s; the operator's face 175 voxels, all 175 at the same millimetre a minute
+    later. The same person at 2 m, with a wall at 2.2 m behind him, cleared in about 3 s.
+
+    So ``no_depth_free`` lets a NaN pixel carve free space along its own ray, from
+    :data:`pepin.depth.NEAR_M` out to ``reach_m - truncation``: as far as the rig answers for,
+    stopping a truncation short so a surface standing AT the reach is not rubbed out by the very
+    rays that could not measure it. ``reach_m`` is the source's own reach and nothing else — the
+    node measures it from the frames (the largest finite depth they carry), because
+    ``depth_reach_m`` on the publisher is a looser gate (3.0 m) than the rig itself (2.46 m by
+    its error model, 2.54 m measured off the published frames) and carving to 3.0 m would carve
+    through half a metre the camera never looked at.
+
+    ``no_depth_weight`` is why this is not as loud as a measurement. A NaN is not evidence of
+    emptiness: the matcher also refuses a near textureless wall, a rectification margin and an
+    over-exposed window, and carving those at full weight would eat a real surface. A carving
+    ray therefore weighs ``no_depth_weight`` of what a measurement AT THE REACH weighs
+    (``GridSpec.observation_weight(reach)``: 0.67 at the stereo rig's 2.44 m, so 0.34 at the
+    default 0.5) — the weakest honest reading of the ray, not the (ref/z)^2 a near voxel would
+    claim. At ``max_weight`` 20 that clears a saturated phantom in 17 frames by the integration
+    law and 18 on the taped frames of 2026-09-22 (2.8 s at 6.4 fps,
+    scratch/one_localiser/volume_ab.py, against NEVER at the old law). It writes 37628 voxels a
+    frame instead of 8705 and costs 10.1 -> 12.7 ms on the live grid
+    (scratch/one_localiser/carve_cost.py), and it leaves a wall the lidar also holds untouched
+    (that layer is protected in :meth:`pepin.worldmap.WorldMap.integrate_depth`).
+    """
+
+    no_depth_free: bool = False  # a pixel with no depth carves its ray, or touches nothing
+    no_depth_weight: float = 0.5  # of what a measurement at the reach weighs
+    reach_m: float = 0.0  # the source's own reach, metres; 0: unknown, so nothing is carved
+
+    def carve_to_m(self, truncation_m: float) -> float:
+        """How far down a depthless ray free space may be written, metres: the source's reach
+        less one truncation (a surface standing at the reach keeps its halo), and 0 — carve
+        nothing — while no reach is known, the flag is off, or the weight is 0 (a ray that
+        weighs nothing says nothing, and it must not reach the average as a zero divisor)."""
+        if not self.no_depth_free or self.reach_m <= 0.0 or self.no_depth_weight <= 0.0:
+            return 0.0
+        return max(0.0, self.reach_m - truncation_m)
+
+
+class ObservedReach:
+    """How far the depth source actually answers, metres, measured from the frames themselves.
+
+    Nothing on the wire carries it. The publisher's own gate is looser than the rig (3.0 m
+    against the stereo rig's 2.46 m, ``pepin_bringup.depth_stream``'s ``depth_reach_m`` against
+    :meth:`pepin.stereo_depth.StereoDepth.reach`), and a law that carved to the gate would carve
+    through half a metre nobody measured. But the depth is NaN above the reach BY CONSTRUCTION,
+    so the largest finite metre in a frame can never exceed the reach and equals it whenever
+    anything far is in view: the running maximum over the last ``frames`` frames is the reach,
+    and it can only ever under-state it, which carves less rather than more.
+
+    One ``nanmax`` per frame, 0.3 ms on the live 800x600 image.
+    """
+
+    def __init__(self, frames: int = 60) -> None:
+        self._seen: list[float] = []
+        self._keep = frames
+
+    def saw(self, depth: Array | Float32) -> float:
+        """Take one frame's largest finite depth into the window; returns the reach so far."""
+        d = np.asarray(depth)
+        finite = np.isfinite(d)
+        self._seen.append(float(d[finite].max()) if bool(finite.any()) else 0.0)
+        if len(self._seen) > self._keep:
+            del self._seen[: len(self._seen) - self._keep]
+        return self.m
+
+    @property
+    def m(self) -> float:
+        """The reach the window has seen, metres; 0 while no frame has carried a depth."""
+        return max(self._seen) if self._seen else 0.0
+
+    @property
+    def frames(self) -> int:
+        """How many frames the answer rests on."""
+        return len(self._seen)
+
+
 def backproject(
     depth: Array, intr: Intrinsics, stride: int = 1, range_max: float = math.inf
 ) -> Array:
@@ -467,6 +558,9 @@ class Tsdf:
         twin = Tsdf.__new__(Tsdf)
         twin.spec = self.spec
         twin.sdf, twin.weight, twin.rgb = self.sdf.copy(), self.weight.copy(), self.rgb.copy()
+        # the colour's own weight travels with the colour: it is what says a voxel was never
+        # painted by a camera at all (:meth:`surface`, ``colour_fallback``)
+        twin.colour_weight = self.colour_weight.copy()
         return twin
 
     def window(self, box: tuple[slice, slice, slice]) -> Tsdf:
@@ -490,6 +584,7 @@ class Tsdf:
         nx, ny, nz = sdf.shape
         twin.spec = dataclasses.replace(self.spec, origin=(ox, oy, oz), shape=(nx, ny, nz))
         twin.sdf, twin.weight, twin.rgb = sdf, self.weight[box].copy(), self.rgb[box].copy()
+        twin.colour_weight = self.colour_weight[box].copy()
         return twin
 
     def recentre(self, xy: tuple[float, float]) -> WindowShift:
@@ -624,10 +719,19 @@ class Tsdf:
         rgb: Uint8 | None,
         intr: Intrinsics,
         pose: RigidPose,
+        law: DepthLaw | None = None,
     ) -> int:
         """Fuse one depth frame (metres, optical frame) taken from ``pose`` (map <- optical);
         returns how many voxels were updated. Colour goes only into voxels within the
-        truncation of the surface, never into the free space a ray crosses on its way."""
+        truncation of the surface, never into the free space a ray crosses on its way.
+
+        ``law`` is what a pixel with NO depth may say (:class:`DepthLaw`). Off — the default,
+        and everything this method did until 2026-09-22 — a NaN pixel touches nothing, and only
+        a ray that measured a surface moves any voxel. On, a NaN pixel carves free space along
+        its own ray out to ``law.carve_to_m``, at ``law.no_depth_weight`` of what a measurement
+        at that range weighs: the fix for a phantom standing in front of something the rig
+        cannot reach, which no ray could ever carve.
+        """
         s = self.spec
         box = self._frustum_box(intr, pose)
         if box is None:
@@ -650,14 +754,37 @@ class Tsdf:
             return 0
         d = np.full(centres.shape[0], np.nan, dtype=np.float32)
         d[seen] = np.asarray(depth, dtype=np.float32)[vi[seen], ui[seen]]
-        measured = np.isfinite(d) & (d > NEAR_M) & (d <= s.range_max_m)
+        finite = np.isfinite(d)
+        measured = finite & (d > NEAR_M) & (d <= s.range_max_m)
         sdf = d - z  # positive: the voxel is between the camera and the surface
         touch = measured & (sdf > -s.truncation_m)
-        if not np.any(touch):
+        # A pixel with NO depth: its ray is free space as far as the source answers for it, at a
+        # weight that says so (:class:`DepthLaw`). The two masks are disjoint by construction —
+        # a voxel reads one pixel, and that pixel either measured something or did not.
+        depth_law = law if law is not None else DepthLaw()
+        carve_to = depth_law.carve_to_m(s.truncation_m)
+        carving = carve_to > NEAR_M
+        carve = (
+            seen & ~finite & (z > NEAR_M) & (z <= carve_to)
+            if carving
+            else np.zeros(centres.shape[0], dtype=bool)
+        )
+        written = touch | carve
+        if not np.any(written):
             return 0
-        t = np.minimum(1.0, sdf[touch] / s.truncation_m).astype(np.float32)
-        w_obs = s.observation_weight(d[touch]).astype(np.float32)
-        flat = np.flatnonzero(touch)
+        flat = np.flatnonzero(written)
+        told = touch[flat]  # this voxel's pixel measured a surface, rather than saying nothing
+        t = np.ones(flat.size, dtype=np.float32)  # a carved voxel: a whole truncation from any
+        t[told] = np.minimum(1.0, sdf[flat][told] / s.truncation_m)  # surface, i.e. free space
+        # the weakest honest reading of a depthless ray: what a measurement AT the reach weighs,
+        # reduced (:class:`DepthLaw`), because a NaN is also what a textureless wall looks like
+        w_free = np.float32(
+            depth_law.no_depth_weight * float(s.observation_weight(np.array(carve_to)))
+            if carving
+            else 0.0
+        )
+        w_obs = np.full(flat.size, w_free, dtype=np.float32)
+        w_obs[told] = s.observation_weight(d[flat][told]).astype(np.float32)
         shape = (box[0].stop - box[0].start, box[1].stop - box[1].start, box[2].stop - box[2].start)
         ix, iy, iz = np.unravel_index(flat, shape)
         ix, iy, iz = ix + box[0].start, iy + box[1].start, iz + box[2].start
@@ -670,7 +797,7 @@ class Tsdf:
             if np.any(near):
                 self._blend_colour(
                     (ix[near], iy[near], iz[near]),
-                    np.asarray(rgb)[vi[touch][near], ui[touch][near]],
+                    np.asarray(rgb)[vi[flat][near], ui[flat][near]],
                     w_obs[near],
                 )
         return int(flat.size)
@@ -689,11 +816,33 @@ class Tsdf:
 
     # ---- readout -------------------------------------------------------------------------
     def surface(
-        self, min_weight: float = 2.0, box: tuple[slice, slice, slice] | None = None
+        self,
+        min_weight: float = 2.0,
+        box: tuple[slice, slice, slice] | None = None,
+        colour_fallback: bool = False,
     ) -> tuple[Array, Uint8]:
         """Points where the field crosses zero between two weighted neighbours, interpolated
         to the crossing along each axis: the model's surface as (n, 3) map points and colours
         (each point's colour from the neighbour nearer the surface, the smaller |sdf|).
+
+        ``colour_fallback`` is the LIDAR'S OWN LAYER, drawn in the camera's colours rather than
+        in black. The lidar writes the field and the weight of the voxels its beams cross
+        (:meth:`pepin.worldmap.WorldMap.integrate_scan`) and no colour at all — colour is the
+        camera's word — so a wall the beams put in the volume is a crossing between two voxels
+        of which the nearer one may never have been painted, and the rule above then reads its
+        black. On the live volume of 2026-09-22 that was 1532 pure-black points, every one of
+        them a real wall in the lidar's own height band (scratch/one_localiser/depth_nan_why.py).
+        With the fallback on, a point whose nearer neighbour carries no colour weight takes the
+        OTHER neighbour's colour, and only if that one has none either does it stay black. The
+        alternative — writing a neutral grey on the scan path — was refused: it would put a
+        colour in the volume that no camera ever saw, and a voxel the camera has genuinely never
+        looked at must read as exactly that. Off is the old behaviour, black and all.
+
+        IT IS A SMALL FIX, and the measurement says why: on the taped minute of 2026-09-22
+        (scratch/one_localiser/volume_ab.py) it recovers 16 of 987 black points. The other 971
+        are crossings NEITHER of whose voxels a camera has painted — the camera's own surface
+        lands in different voxels from the beams' — so nothing but an invented colour could
+        light them up.
 
         ``box`` is a sub-box of the grid (voxel index slices) to search instead of the whole of
         it — the same test on fewer voxels, for a caller that needs the surface AROUND THE CART
@@ -715,6 +864,7 @@ class Tsdf:
         # on the live volume, scratch/marks_slice_cost.py) at a third of the time, which is what
         # lets /depth_marks take this readout twenty times a second.
         positive, negative = field > 0.0, field < 0.0
+        painted = self.colour_weight[sel] > 0.0 if colour_fallback else None
         for axis in range(3):
             a = [slice(None)] * 3
             b = [slice(None)] * 3
@@ -735,7 +885,13 @@ class Tsdf:
             pts.append((idx + corner + 0.5) * s.voxel_m + np.array(s.origin))
             ib = ia.copy()
             ib[:, axis] += 1
-            nearer = np.where((np.abs(vb) < np.abs(va))[:, None], ib, ia)
+            takes_b = np.abs(vb) < np.abs(va)
+            if painted is not None:
+                # the nearer voxel was never painted by a camera (colour weight 0) but the other
+                # one was: take the colour that exists rather than the black that means nothing
+                ca, cb = painted[tuple(a)][cross], painted[tuple(b)][cross]
+                takes_b = np.where(ca == cb, takes_b, cb)
+            nearer = np.where(takes_b[:, None], ib, ia)
             cols.append(rgb[nearer[:, 0], nearer[:, 1], nearer[:, 2]])
         if not pts:
             return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.uint8)

@@ -31,7 +31,9 @@ def main() -> None:
     future = client.call_async(request)
     rclpy.spin_until_future_complete(node, future, timeout_sec=120.0)
     result = future.result()
-    print(f"{manager}: {command} -> {'success' if result and result.success else 'FAILED or timed out'}")
+    print(
+        f"{manager}: {command} -> {'success' if result and result.success else 'FAILED or timed out'}"
+    )
     sys.exit(0 if result and result.success else 1)
 
 
