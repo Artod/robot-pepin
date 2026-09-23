@@ -335,7 +335,10 @@ controller_server:
       CostCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 2.0  # 3.81 (the Nav2 default) weighed our wide inflation into a crawl
+        # 3.81 (the Nav2 default) weighed our wide inflation into a crawl; 2.0 still kept the
+        # cart shy of furniture it may pass at contact (Artem, 2026-09-23: "nothing here is glass").
+        # Collision itself is untouched: collision_cost still drops any sample that touches.
+        cost_weight: 1.0
         critical_cost: 300.0
         # The true rectangle, not a disc: base_link sits at the front edge, so a disc of the
         # circumscribed radius (0.407 m) would be a cart twice its size.
@@ -343,7 +346,7 @@ controller_server:
         collision_cost: 1000000.0
         # Within this of the goal the preference for open space is dropped (collision still
         # counts): the marks stand against furniture and the cart must reach them.
-        near_goal_distance: 0.5
+        near_goal_distance: 1.0
         trajectory_point_step: 2
       PathAlignCritic:
         enabled: true
