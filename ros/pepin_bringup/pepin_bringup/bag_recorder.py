@@ -60,7 +60,18 @@ from pepin_bringup.camera_clip import CameraClip
 # against, and only this topic, recorded while the cart moves, separates the two: a return that
 # travels with the cart is the cart. bag_to_tape skips it; it is read from the bag directly.
 RAW_SCAN_TOPIC = "/ldlidar_node/scan"
-BAG_TOPICS: tuple[str, ...] = (*sorted(TOPIC_RECORDS), "/tf", "/tf_static", RAW_SCAN_TOPIC)
+# ...and what the CAMERA told the costmaps: the fused volume's 720-bearing marking fan and its
+# clearing fan (pepin_bringup.depth_fusion). The tape keeps only the merged costmap, so a lethal
+# cell with no lidar return beside it could not be pinned on a camera voxel after the fact (the
+# "hill" on the carpet at the base, tape 0458). bag_to_tape skips them too.
+CAMERA_MARK_TOPICS = ("/depth_marks", "/depth_free")
+BAG_TOPICS: tuple[str, ...] = (
+    *sorted(TOPIC_RECORDS),
+    "/tf",
+    "/tf_static",
+    RAW_SCAN_TOPIC,
+    *CAMERA_MARK_TOPICS,
+)
 # MCAP, no compression: the storage rosbag2 ships with in Jazzy, read by rosbag2_py on the laptop
 # and by every MCAP tool. Compression would cost this board's cores exactly what we are taking
 # off them.

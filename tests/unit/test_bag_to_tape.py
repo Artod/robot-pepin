@@ -297,6 +297,7 @@ def test_the_bag_records_every_topic_the_jsonl_recorder_subscribes_to(tmp_path: 
     assert set(node.subs) <= set(BAG_TOPICS), set(node.subs) - set(BAG_TOPICS)
     assert {"/tf", "/tf_static", "/odom_laser"} <= set(BAG_TOPICS)
     assert "/ldlidar_node/scan" in BAG_TOPICS, "the unfiltered lidar, for the cart's self-mask"
+    assert {"/depth_marks", "/depth_free"} <= set(BAG_TOPICS), "what the camera told the costmaps"
 
 
 def test_the_record_command_names_the_bag_the_storage_and_the_hidden_topics() -> None:
