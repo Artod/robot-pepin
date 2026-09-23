@@ -285,6 +285,21 @@
       }
     },
     {
+      "name": "chronyd",
+      "match": "(^|/)chronyd( |$)",
+      "role": "The board's clock (board/chrony.sh, installed with `ros/time.sh install`): follows the laptop's time server — the Docker VM's clock, which every laptop ROS node stamps with — and keeps the internet pool as its fallback and its vote. Replaces systemd-timesyncd; `ros/time.sh uninstall` puts that back.",
+      "on_board_because": [
+        "wifi-loss"
+      ],
+      "owner": "chrony.service (Debian's package, /etc/chrony/chrony.conf = board/chrony/chrony.conf)",
+      "when": "sometimes",
+      "budget": {
+        "cpu_percent": 1.0,
+        "rss_mb": 8.0
+      },
+      "note": "A GUESS until the first census after the install: one small C daemon, one 48-byte UDP exchange with the laptop every 4-16 s and with each pool server every 1-17 min. `sometimes` because it exists only after `ros/time.sh install` (the board runs systemd-timesyncd until then, below the unlisted threshold). It stays on the board because the board's own clock must keep going when the WiFi and the laptop are gone: it free-runs on the frequency it learned."
+    },
+    {
       "name": "base_server",
       "match": "pepin\\.base_server",
       "role": "The wheels next to the UART: speed commands, odometry ticks and the deadman, on TCP 3336. The last thing between a runaway and a stopped cart.",
