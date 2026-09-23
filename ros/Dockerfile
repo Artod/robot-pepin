@@ -6,6 +6,12 @@
 FROM ros:jazzy-ros-base@sha256:2589a8fba5257307857890173c069852c2abf913a0be7970f172478baecb09e4
 
 ENV DEBIAN_FRONTEND=noninteractive
+# ros2bag + the MCAP storage plugin are here on purpose, named rather than assumed: they are how a
+# drive is recorded under PEPIN_RECORDER=bag (pepin_bringup.bag_recorder starts `ros2 bag record`,
+# and the board then copies serialised bytes instead of deserialising every scan), and how the
+# laptop image — which is built FROM this one — reads that bag back into a tape
+# (ros/tools/bag_to_tape.py needs rosbag2_py). ros_base carries rosbag2 itself; the CLI verb and
+# the storage plugin are separate packages and an image without them fails at the first goal.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-navigation2 \
@@ -17,6 +23,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ros-jazzy-tf2-tools \
         ros-jazzy-rqt-graph \
         python3-colcon-common-extensions \
+        ros-jazzy-ros2bag \
+        ros-jazzy-rosbag2-storage-mcap \
         git build-essential \
     && rm -rf /var/lib/apt/lists/*
 

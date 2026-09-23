@@ -29,7 +29,6 @@ puts the old listener back.
 from __future__ import annotations
 
 import math
-import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -46,7 +45,6 @@ from std_msgs.msg import String
 
 from pepin.deployment import DEFAULT_LOCALIZER
 from pepin.flags import Flag, FlagSet
-from pepin.mapcache import run_length_encode
 from pepin.mounts import Mounts
 from pepin.recording import imu_record, scan_record_from_ros
 from pepin.runlink import (
@@ -57,8 +55,32 @@ from pepin.runlink import (
     RunStatus,
     parse_command,
 )
-from pepin.tape import RunTape, camera_clip_path, next_run_number
+from pepin.tape import RunTape, next_run_number
+from pepin.tape_rows import (
+    FREE,
+    INFLATED,
+    LETHAL_BAND,
+    RLE,
+    UNKNOWN,
+    cmd_row,
+    costmap_row,
+    ekf_row,
+    feasibility_classes,
+    gcostmap_row,
+    laser_odom_row,
+    loc_row,
+    loc_row_from_pose,
+    loc_row_from_transform,
+    meas_row,
+    nav_row,
+    plan_row,
+    pose_row,
+    srcs_row,
+    stamp,
+    tof_row,
+)
 from pepin_bringup.bridge_kick import BridgeKick
+from pepin_bringup.camera_clip import CameraClip
 from pepin_bringup.node_kit import Switches, TfLookup
 
 # WHERE THE POSE COMES FROM where no tracker publishes one (the ``loc_from`` flag). The topic is
@@ -159,41 +181,21 @@ FLAGS = FlagSet(
     ),
 )
 
-# How a taped grid's cells are encoded: :func:`pepin.mapcache.run_length_encode`, the one
-# implementation, shared with the map the relocalizer persists — a costmap and a saved map compress
-# the same way and a reader of either needs one decoder.
-RLE = "rle"
-# The four values a feasibility question needs, and the only ones the global grid is taped with:
-# Nav2's own unknown and free, everything inflated between them, and the 99-100 band that stops a
-# footprint. The gradient in between is what a cost function reads, and it is also what makes a
-# costmap incompressible — the local grids of 2026-09-17 shrink 1.5-fold raw and 8.6-fold reduced
-# (scratch/costmap_rle_cost.py). A record says which it is (``classes``), so no reader guesses.
-UNKNOWN, FREE, INFLATED, LETHAL_BAND = -1, 0, 1, 99
-
-
-def feasibility_classes(cells: list[int]) -> list[int]:
-    """One costmap's cells reduced to the four values that decide whether the cart fits
-    (:data:`UNKNOWN`, :data:`FREE`, :data:`INFLATED`, :data:`LETHAL_BAND`)."""
-    return [
-        UNKNOWN
-        if value < 0
-        else (FREE if value == 0 else (LETHAL_BAND if value >= 99 else INFLATED))
-        for value in cells
-    ]
-
-
-def _yaw(orientation: object) -> float:
-    """Yaw in radians from a quaternion message."""
-    q = orientation
-    x, y, z, w = (getattr(q, name) for name in ("x", "y", "z", "w"))
-    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-
-
-def _stamp(header: object) -> float:
-    """The message's own time in seconds; wall time when it carries none."""
-    stamp = getattr(header, "stamp", None)
-    seconds = stamp.sec + stamp.nanosec * 1e-9 if stamp else 0.0
-    return seconds if seconds > 0 else time.time()
+# The tape's format — the rows, their rounding, the costmap's encoding and the four feasibility
+# classes — lives in :mod:`pepin.tape_rows`, so the offline converter of a rosbag
+# (ros/tools/bag_to_tape.py) writes byte-for-byte the same lines this node writes. The names are
+# re-exported here because the readers of the tape import them from the recorder.
+__all__ = [
+    "FREE",
+    "INFLATED",
+    "LETHAL_BAND",
+    "RLE",
+    "UNKNOWN",
+    "RunRecorder",
+    "RunRecorderNode",
+    "feasibility_classes",
+    "main",
+]
 
 
 class RunRecorder:
@@ -388,7 +390,7 @@ class RunRecorder:
             return
         self._tape.add(
             scan_record_from_ros(
-                _stamp(msg.header),
+                stamp(msg.header, time.time()),
                 msg.angle_min,
                 msg.angle_increment,
                 list(msg.ranges),
@@ -402,47 +404,22 @@ class RunRecorder:
         )
 
     def _on_odom(self, msg: Odometry) -> None:
+        """The wheels' own odometry: where the cart thinks it is, before any map."""
         if not self._keep("pose"):
             return
-        self._tape.add(
-            {
-                "t": _stamp(msg.header),
-                "topic": "pose",
-                "x": round(msg.pose.pose.position.x, 4),
-                "y": round(msg.pose.pose.position.y, 4),
-                "theta": round(_yaw(msg.pose.pose.orientation), 5),
-            }
-        )
+        self._tape.add(pose_row(msg, time.time()))
 
     def _on_laser_odom(self, msg: Odometry) -> None:
         """The laser scan-matcher's twist in base_link (rf2o, /odom_laser), stamped by the scan."""
         if not self._keep("laser_odom"):
             return
-        self._tape.add(
-            {
-                "t": _stamp(msg.header),
-                "topic": "laser_odom",
-                "vx": round(msg.twist.twist.linear.x, 4),
-                "vy": round(msg.twist.twist.linear.y, 4),
-                "wz": round(msg.twist.twist.angular.z, 4),
-            }
-        )
+        self._tape.add(laser_odom_row(msg, time.time()))
 
     def _on_ekf(self, msg: Odometry) -> None:
         """The fused odometry (odom -> base_link) the tracker pairs scans with, pose and rates."""
         if not self._keep("ekf"):
             return
-        self._tape.add(
-            {
-                "t": _stamp(msg.header),
-                "topic": "ekf",
-                "x": round(msg.pose.pose.position.x, 4),
-                "y": round(msg.pose.pose.position.y, 4),
-                "theta": round(_yaw(msg.pose.pose.orientation), 5),
-                "vx": round(msg.twist.twist.linear.x, 4),
-                "wz": round(msg.twist.twist.angular.z, 4),
-            }
-        )
+        self._tape.add(ekf_row(msg, time.time()))
 
     def _on_imu(self, msg: Imu) -> None:
         """The gyro's rates and the accelerometer, raw and in base_link: the heading truth the
@@ -452,7 +429,8 @@ class RunRecorder:
         if not self._keep("imu"):
             return
         w, a = msg.angular_velocity, msg.linear_acceleration
-        self._tape.add(imu_record(_stamp(msg.header), (w.x, w.y, w.z), (a.x, a.y, a.z)))
+        t = stamp(msg.header, time.time())
+        self._tape.add(imu_record(t, (w.x, w.y, w.z), (a.x, a.y, a.z)))
 
     def _on_plan(self, msg: PathMsg) -> None:
         """Nav2's global plan as a polyline (at most 200 points), so a replay can draw it.
@@ -463,17 +441,7 @@ class RunRecorder:
         if not self._keep("plan"):
             return
         self._plan_seq += 1
-        step = max(1, len(msg.poses) // 200)
-        self._tape.add(
-            {
-                "t": _stamp(msg.header),
-                "topic": "plan",
-                "points": [
-                    [round(p.pose.position.x, 3), round(p.pose.position.y, 3)]
-                    for p in msg.poses[::step]
-                ],
-            }
-        )
+        self._tape.add(plan_row(msg, time.time()))
 
     def _on_costmap(self, msg: OccupancyGrid) -> None:
         """The local costmap as the controller sees it (1 Hz, 3x3 m at 5 cm: about 14 kB/s).
@@ -485,33 +453,13 @@ class RunRecorder:
         """
         if not self._keep("costmap"):
             return
-        info = msg.info
-        self._tape.add(
-            {
-                "t": _stamp(msg.header),
-                "topic": "costmap",
-                "frame": msg.header.frame_id,
-                "origin": [round(info.origin.position.x, 3), round(info.origin.position.y, 3)],
-                "resolution": round(info.resolution, 3),
-                "width": int(info.width),
-                "height": int(info.height),
-                "data": list(msg.data),
-            }
-        )
+        self._tape.add(costmap_row(msg, time.time()))
 
     def _on_tof(self, sensor: str, msg: Range) -> None:
         """One ToF reading and its ceiling: a beam at max range means the sensor saw nothing."""
         if not self._keep("tof"):
             return
-        self._tape.add(
-            {
-                "t": _stamp(msg.header),
-                "topic": "tof",
-                "sensor": sensor,
-                "range": round(float(msg.range), 3),
-                "max": round(float(msg.max_range), 3),
-            }
-        )
+        self._tape.add(tof_row(sensor, msg, time.time()))
 
     def _on_global_costmap(self, msg: OccupancyGrid) -> None:
         """The grid the PLANNER plans on, at most one record per new plan.
@@ -527,21 +475,7 @@ class RunRecorder:
         if self._plan_seq == self._gcostmap_seq:
             return
         self._gcostmap_seq = self._plan_seq
-        info = msg.info
-        self._tape.add(
-            {
-                "t": _stamp(msg.header),
-                "topic": "gcostmap",
-                "origin": [round(info.origin.position.x, 3), round(info.origin.position.y, 3)],
-                "resolution": round(info.resolution, 3),
-                "width": int(info.width),
-                "height": int(info.height),
-                "encoding": RLE,
-                "classes": [UNKNOWN, FREE, INFLATED, LETHAL_BAND],
-                "plan": self._plan_seq,
-                "data": run_length_encode(feasibility_classes(list(msg.data))),
-            }
-        )
+        self._tape.add(gcostmap_row(msg, time.time(), self._plan_seq))
 
     def _on_action_status(self, action: str, msg: Any) -> None:
         """What became of Nav2's own actions — the planner's, the controller's, the whole drive's.
@@ -553,14 +487,7 @@ class RunRecorder:
         """
         if not self._keep("nav") or not self._planner_records():
             return
-        self._tape.add(
-            {
-                "t": time.time(),
-                "topic": "nav",
-                "action": action,
-                "status": [int(s.status) for s in msg.status_list],
-            }
-        )
+        self._tape.add(nav_row(action, msg, time.time()))
 
     def _on_measurement(self, msg: String) -> None:
         """One pose the laptop measured out of a camera scan OR out of the pose graph, kept
@@ -571,7 +498,7 @@ class RunRecorder:
         age could not be read off a tape for the one source a camera-only drive runs on)."""
         if not self._fusion_records():
             return
-        self._tape.add({"t": time.time(), "topic": "meas", "json": msg.data})
+        self._tape.add(meas_row(msg.data, time.time()))
 
     def _on_sources(self, msg: String) -> None:
         """The tracker's own account of one update (Localizer.sources_report), verbatim: who
@@ -579,56 +506,25 @@ class RunRecorder:
         self-check ratio."""
         if not self._fusion_records():
             return
-        self._tape.add({"t": time.time(), "topic": "srcs", "json": msg.data})
+        self._tape.add(srcs_row(msg.data, time.time()))
 
     def _on_cmd(self, msg: Twist) -> None:
         """What the controller asked the wheels for: the only record of the command side."""
-        self._tape.add(
-            {
-                "t": time.time(),
-                "topic": "cmd",
-                "linear": round(msg.linear.x, 4),
-                "angular": round(msg.angular.z, 4),
-            }
-        )
+        self._tape.add(cmd_row(msg, time.time()))
 
     def _on_loc(self, msg: PoseWithCovarianceStamped) -> None:
         """The tracker's belief in the map frame; covariance trace as a stand-in confidence."""
         if not self._keep("loc"):
             return
-        cov = msg.pose.covariance
-        self._tape.add(
-            {
-                "t": _stamp(msg.header),
-                "topic": "loc",
-                "source": "tracker",
-                "x": round(msg.pose.pose.position.x, 4),
-                "y": round(msg.pose.pose.position.y, 4),
-                "theta": round(_yaw(msg.pose.pose.orientation), 5),
-                "confidence": round(1.0 / (1.0 + cov[0] + cov[7] + cov[35]), 3),
-            }
-        )
+        self._tape.add(loc_row(msg, time.time()))
 
     def _on_pose(self, msg: PoseStamped) -> None:
         """The goal server's republished ``map -> base_link`` (``/pose``, 5 Hz): the tape's
         `loc` row where no tracker publishes one and ``loc_from`` is ``pose_topic``.
-
-        ``source`` stays ``tf`` and the row keeps its fields: this IS that edge, one hop later,
-        and a replay must not have to know which node deserialised it. No ``confidence``, for
-        the same reason as below — the transform carries no covariance.
         """
         if self._loc_from() != POSE_TOPIC_SOURCE or not self._keep("loc"):
             return
-        self._tape.add(
-            {
-                "t": _stamp(msg.header),
-                "topic": "loc",
-                "source": TF_SOURCE,
-                "x": round(msg.pose.position.x, 4),
-                "y": round(msg.pose.position.y, 4),
-                "theta": round(_yaw(msg.pose.orientation), 5),
-            }
-        )
+        self._tape.add(loc_row_from_pose(msg, time.time()))
 
     def _loc_from_tf(self) -> None:
         """The same record read from ``map -> base_link`` by this node's own TF listener: the
@@ -639,9 +535,6 @@ class RunRecorder:
         nothing is subscribed while the pose arrives as a topic. Built HERE because a
         subscription may only be created on the thread that spins the executor, which is where
         this timer runs.
-
-        No ``confidence``: TF carries no covariance, and a made-up number in a tape is worse
-        than a missing one.
         """
         if self._loc_from() != TF_SOURCE or not self._keep("loc"):
             return
@@ -650,19 +543,7 @@ class RunRecorder:
         transform = self._tf.transform("map", "base_link", timeout_s=0.0)
         if transform is None:
             return
-        self._tape.add(
-            {
-                "t": _stamp(transform.header),
-                "topic": "loc",
-                "source": TF_SOURCE,
-                "x": round(transform.transform.translation.x, 4),
-                "y": round(transform.transform.translation.y, 4),
-                "theta": round(_yaw(transform.transform.rotation), 5),
-            }
-        )
-
-
-CAMERA_STREAM = "http://127.0.0.1:8080/stream"  # ustreamer on the board's host network
+        self._tape.add(loc_row_from_transform(transform, time.time()))
 
 
 class RunRecorderNode(Node):
@@ -696,8 +577,7 @@ class RunRecorderNode(Node):
         # of ours that runs on the board in every mode, and the handler is three lines and a
         # file write.
         self._kick = BridgeKick(self, enabled=lambda: self._switches.on("bridge_kick"))
-        self._camera: subprocess.Popen[bytes] | None = None  # curl copying the stream
-        self._camera_clip: Path | None = None
+        self._clip = CameraClip(self.get_logger())  # curl copying the head camera's stream
         latched = QoSProfile(
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -732,7 +612,7 @@ class RunRecorderNode(Node):
             if self._recorder.recording:
                 self.stop()
             path = self._recorder.start(name)
-            self._start_camera(path)
+            self._clip.start(path)
             self.get_logger().info(f"run {self._recorder.number}: recording {path}")
             self._say(RunStatus(RECORDING, self._recorder.number, str(path), name))
         else:
@@ -742,42 +622,10 @@ class RunRecorderNode(Node):
         """Close the tape (flushed and synced) and the clip; harmless when no run is open."""
         was = self._recorder.recording
         self._recorder.stop()
-        self._stop_camera()
+        self._clip.stop()
         if was:
             self.get_logger().info(f"run {self._recorder.number}: closed")
         self._say(RunStatus(IDLE, self._recorder.number, None, None))
-
-    def _start_camera(self, tape: Path) -> None:
-        """Copy the camera's MJPEG stream next to the tape: no laptop in the loop.
-
-        curl writes the stream as-is (a few percent of a core); the laptop converts after.
-        """
-        self._stop_camera()
-        clip = camera_clip_path(tape)
-        self._camera_clip = clip
-        try:
-            self._camera = subprocess.Popen(
-                ["curl", "-s", "-m", "1800", CAMERA_STREAM, "-o", str(clip)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError as exc:
-            self._camera = None
-            self.get_logger().warning(f"camera clip not started: {exc}")
-
-    def _stop_camera(self) -> None:
-        """End the clip; a stream that was never reachable leaves an empty file, removed here."""
-        proc, self._camera = self._camera, None
-        if proc is None:
-            return
-        proc.terminate()
-        try:
-            proc.wait(timeout=3.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        clip, self._camera_clip = self._camera_clip, None
-        if clip is not None and clip.exists() and clip.stat().st_size == 0:
-            clip.unlink()
 
 
 def main() -> None:

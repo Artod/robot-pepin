@@ -71,6 +71,7 @@ exclude = ["^src/pepin/vendor/"]
 [[tool.mypy.overrides]]
 module = [
     "pepin_bringup.*",
+    "bag_to_tape",
     "base_bridge",
     "bench_global_search",
     "call",

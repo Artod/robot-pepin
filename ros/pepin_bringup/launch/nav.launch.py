@@ -227,34 +227,55 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             )
         )
     if runs_here(side, "run_recorder"):
+        # WHICH RECORDER WRITES THIS DRIVE (the ``recorder`` argument, the board's
+        # PEPIN_RECORDER). ``jsonl`` is pepin_bringup.run_recorder, which subscribes to every
+        # topic and writes the numbered tape itself: 34-43 % of a core for the deserialisation,
+        # the TF buffer and json.dumps of 450 floats ten times a second. ``bag`` is
+        # pepin_bringup.bag_recorder, a node with no subscription to any of those topics that
+        # starts and stops `ros2 bag record` (MCAP, no compression) on the same word — the board
+        # then copies serialised bytes, and ros/tools/bag_to_tape.py makes the tape on the
+        # laptop. Default jsonl until the two are measured on the robot (CLAUDE.md rule 19: a
+        # default flips on a measurement, not on a design).
+        #
         # As a module, like link_watch: the image's console scripts are generated at build time
         # and the sources are mounted over them, so a new executable would need a rebuild.
-        actions.append(
-            ExecuteProcess(
-                cmd=[
-                    "python3",
-                    "-m",
-                    "pepin_bringup.run_recorder",
-                    "--ros-args",
-                    # Where the tape's `loc` records come from: the tracker's /tracker_pose under
-                    # "tracker", map -> base_link under "rtabmap", where no tracker publishes a
-                    # pose at all and a tape without one is a drive nobody can replay.
-                    "-p",
-                    f"localizer:={owner}",
-                    # ...and by which of the two readers of that edge (the `loc_from` flag). The
-                    # goal server parses /tf here anyway and republishes what it reads on /pose,
-                    # so this node needs no listener of its own — but only where that node is on
-                    # THIS machine. On a split stack it is the laptop's, and a tape that lost its
-                    # pose rows with the WiFi is the one thing this recorder is on the board to
-                    # prevent, so there it reads the edge itself.
-                    "-p",
-                    f"loc_from:={'pose_topic' if runs_here(side, 'goal_server') else 'tf'}",
-                ],
-                output="screen",
-                prefix=_after_ghost(admin, "/run_recorder"),
-                **RESPAWN,
+        if LaunchConfiguration("recorder").perform(context) == "bag":
+            actions.append(
+                ExecuteProcess(
+                    cmd=["python3", "-m", "pepin_bringup.bag_recorder"],
+                    output="screen",
+                    prefix=_after_ghost(admin, "/bag_recorder"),
+                    **RESPAWN,
+                )
             )
-        )
+        else:
+            actions.append(
+                ExecuteProcess(
+                    cmd=[
+                        "python3",
+                        "-m",
+                        "pepin_bringup.run_recorder",
+                        "--ros-args",
+                        # Where the tape's `loc` records come from: the tracker's /tracker_pose
+                        # under "tracker", map -> base_link under "rtabmap", where no tracker
+                        # publishes a pose at all and a tape without one is a drive nobody can
+                        # replay.
+                        "-p",
+                        f"localizer:={owner}",
+                        # ...and by which of the two readers of that edge (the `loc_from` flag).
+                        # The goal server parses /tf here anyway and republishes what it reads on
+                        # /pose, so this node needs no listener of its own — but only where that
+                        # node is on THIS machine. On a split stack it is the laptop's, and a tape
+                        # that lost its pose rows with the WiFi is the one thing this recorder is
+                        # on the board to prevent, so there it reads the edge itself.
+                        "-p",
+                        f"loc_from:={'pose_topic' if runs_here(side, 'goal_server') else 'tf'}",
+                    ],
+                    output="screen",
+                    prefix=_after_ghost(admin, "/run_recorder"),
+                    **RESPAWN,
+                )
+            )
     if runs_here(side, "goal_server"):
         # Waits for orders on a socket so a goal costs a socket write, not a client boot.
         # Its places book follows the map in use: /maps/flat3.yaml -> /maps/flat3.places.yaml.
@@ -341,6 +362,10 @@ def generate_launch_description() -> LaunchDescription:
             # it wrote itself) is the only map. true serves `map` through map_server again, which is
             # what the FIRST boot of an unmapped room needs.
             DeclareLaunchArgument("map_server", default_value="false", choices=["true", "false"]),
+            # jsonl: the Python recorder writes the numbered tape on the board. bag: `ros2 bag
+            # record` writes an MCAP bag instead and ros/tools/bag_to_tape.py makes the tape from
+            # it on the laptop (ros/README.md, "Two recorders").
+            DeclareLaunchArgument("recorder", default_value="jsonl", choices=["jsonl", "bag"]),
             DeclareLaunchArgument("board", default_value="10.0.0.187"),
             DeclareLaunchArgument("bridge_admin", default_value=""),  # empty: by side
             OpaqueFunction(function=_describe),

@@ -118,6 +118,33 @@ pepin_zenoh_session_override() {
 pepin_zenoh_router_override() {  # <board ip>
     printf 'connect/endpoints=["tcp/%s:%s"]' "$1" "$PEPIN_ZROUTER_PORT"
 }
+# WHO WRITES A DRIVE DOWN on the board (board/pepin-ros.service's PEPIN_RECORDER, flipped with
+# `ros/feature.sh recorder jsonl|bag`): jsonl is pepin_bringup.run_recorder, the numbered JSONL
+# tape written on the board itself (34-43 % of a core: rclpy deserialisation, the TF buffer and
+# json.dumps of 450 floats ten times a second); bag is pepin_bringup.bag_recorder, which only
+# starts and stops `ros2 bag record` (MCAP, no compression) and subscribes to nothing, so the
+# board copies serialised bytes and the laptop makes the tape afterwards. The scripts here do not
+# have to be told which one runs — the board names the file it opened, and a bag is a DIRECTORY
+# without the .jsonl suffix — so this is only the default for anything that must ask beforehand.
+PEPIN_RECORDER="${PEPIN_RECORDER:-jsonl}"
+PEPIN_VSLAM_CONTAINER="${PEPIN_VSLAM_CONTAINER:-pepin-vslam}"
+
+# One run's bag turned into the tape every analysis script reads (ros/tools/bag_to_tape.py). It
+# runs in the laptop's ROS container, because rosbag2_py and rclpy's deserialisation live there
+# and never on the Mac itself; with that container down, the command to run later is printed
+# instead of a drive's cleanup failing.
+pepin_bag_to_tape() {  # <bag directory under ros/maps/rec>
+    local name convert
+    name="$(basename "$1")"
+    convert="/pepin_entrypoint.sh python3 /tools/bag_to_tape.py /maps/rec/$name --force"
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$PEPIN_VSLAM_CONTAINER"; then
+        echo "!! $PEPIN_VSLAM_CONTAINER is down, so the bag is not converted yet. Later:"
+        echo "   docker exec $PEPIN_VSLAM_CONTAINER $convert"
+        return 1
+    fi
+    docker exec "$PEPIN_VSLAM_CONTAINER" $convert
+}
+
 pepin_stop_container() {  # NAME...: stop gently, leave the stopped container (a unit keeps its log)
     [ "$#" -gt 0 ] || return 0
     docker stop -t "$PEPIN_STOP_TIMEOUT_S" "$@" >/dev/null 2>&1 || true

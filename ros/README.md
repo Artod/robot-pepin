@@ -2192,6 +2192,52 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *On when:* raise it towards 9 only on a board that is measurably keeping its 20 Hz with Nav2 running, and read the EKF's update-rate warnings after
   - *Off when:* lower it further if the EKF still misses its rate
 
+## Two recorders
+
+Every drive is written down, and there are two ways to do it. Which one runs is
+`PEPIN_RECORDER` on the board (`board/pepin-ros.service`, the `recorder` argument of
+`nav.launch.py`); the operator flips it with one command and never touches the analysis side,
+because both roads end in the same file — `ros/maps/rec/NNNN_<utc>Z_<goal>.jsonl`.
+
+| | `PEPIN_RECORDER=jsonl` (default) | `PEPIN_RECORDER=bag` |
+| --- | --- | --- |
+| who writes | `pepin_bringup.run_recorder`, on the board | `ros2 bag record` (MCAP, no compression), started by `pepin_bringup.bag_recorder` |
+| board cost | 34-43 % of a core: rclpy deserialises 450 floats 10x/s, the TF buffer runs, `json.dumps` writes | an estimated 8 % for the node plus rosbag2's copy of serialised bytes — nothing deserialises a message |
+| what lands there | the tape itself, plus the camera clip | `NNNN_<utc>Z_<goal>/` (MCAP) plus the camera clip |
+| the tape | already written | made on the laptop by `ros/tools/bag_to_tape.py`, which `ros/goto.sh` runs for you |
+| prelude | the 15 s before the goal are on the tape (`pepin.tape.RunTape`) | none: the bag begins when the goal's word does |
+
+Both recorders answer the same protocol (`pepin.runlink`): the goal server — on the board or on
+the laptop — publishes `{"cmd": "start", "name": ...}` on `pepin/run` and reads the run's number
+and path back from the latched `pepin/run_status`, so `ros/go.sh` and `ros/goto.sh` are unchanged.
+The bag records every topic the JSONL recorder subscribes to (`pepin.tape_rows.TOPIC_RECORDS`)
+plus `/tf`, `/tf_static` and `/odom_laser`, with `--include-hidden-topics` for Nav2's action
+status topics and a QoS override for the two latched ones
+([`ros/params/rosbag_qos.yaml`](params/rosbag_qos.yaml)).
+
+```bash
+ros/feature.sh recorder bag      # the board restarts the stack; a drive now writes an MCAP bag
+ros/feature.sh recorder jsonl    # back to the tape written on the board
+ros/goto.sh home                 # either way: "numbered tape: ros/maps/rec/0251_...jsonl"
+# by hand, if a bag was fetched without its conversion (the laptop's ROS container):
+docker exec pepin-vslam /pepin_entrypoint.sh python3 /tools/bag_to_tape.py /maps/rec/0251_... --force
+```
+
+The converter rebuilds every record from the same functions the live recorder uses
+(`pepin.tape_rows`), so a converted tape is byte-identical in everything but the two things it
+cannot be: the records with no stamp of their own (`cmd`, `nav`, `meas`, `srcs`) are dated by the
+bag's receive time, and there is no prelude. `tests/unit/test_bag_to_tape.py` feeds both paths
+the same messages and compares the rows. The `loc` records come from `/tracker_pose` when the bag
+holds one and are composed from `/tf` (`map -> odom` times `odom -> base_link`) at 5 Hz when it
+does not, which is what the recorder does on a stack whose localiser publishes no pose.
+
+**The default stays `jsonl` until the two are measured on the board** (CLAUDE.md rule 19): the
+bag's manifest entries in [`config/board_manifest.json`](../config/board_manifest.json) are
+estimates, marked as such, and a census during a bag drive is what replaces them. The image must
+carry `ros-jazzy-ros2bag` and `ros-jazzy-rosbag2-storage-mcap` ([`ros/Dockerfile`](Dockerfile));
+an image built before they were added logs `ros2 bag record` as not found at the first goal and
+the drive goes on unrecorded.
+
 ## What runs on the board
 
 Four A53 cores and 1.5 GB. Everything the board is allowed to run is declared once, with a
@@ -2246,6 +2292,8 @@ is the whole board.
 | `ustreamer` | the overview camera as MJPEG on 8080 — frames copied, never decoded | hardware-attached | 3 % / 19 MB | `pepin-camera.service` |
 | `docker` | dockerd, containerd and one supervisor per container | wifi-loss | 3 % / 225 MB | `docker.service`, `containerd.service` |
 | `session_logger` | the per-drive jsonl recorder (`sometimes`) | wifi-loss | 25 % / 90 MB | `ros/goto.sh`, `ros/tour.sh`, `ros/teleop.sh` |
+| `bag_record` | `ros2 bag record` writing one run's MCAP bag, `PEPIN_RECORDER=bag` only (`sometimes`, an estimate) | wifi-loss | 30 % / 120 MB | `pepin_bringup.bag_recorder` (a subprocess per run) |
+| `bag_recorder` | the node that starts and stops it and subscribes to nothing, `PEPIN_RECORDER=bag` only (`sometimes`, an estimate) | wifi-loss | 8 % / 60 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `slam_frame` | the laptop's correction as `map -> odom`, SLAM mode only (`sometimes`) | real-time | 20 % / 90 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `link_watch` | stops the cart when the laptop half goes away, `side=board` only (`sometimes`) | real-time, wifi-loss | 15 % / 90 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `reap_ros2_cli` | kills ros2 CLI tools older than 90 s, once a minute (`sometimes`) | real-time | 5 % / 10 MB | `pepin-reap.timer` |

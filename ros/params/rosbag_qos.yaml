@@ -1,0 +1,17 @@
+# QoS `ros2 bag record` must ask for on the latched topics of a drive
+# (pepin_bringup.bag_recorder, --qos-profile-overrides-path).
+#
+# rosbag2 adapts its subscription to the publishers it finds, and for everything that streams
+# that is right. It is wrong for a topic published ONCE and then never again: a volatile
+# subscription created when the goal's word arrives hears nothing at all of it. Two such topics
+# are on a run's list, and both carry the frame a replay is drawn in.
+/global_costmap/costmap:
+  history: keep_last
+  depth: 1
+  reliability: reliable
+  durability: transient_local
+/tf_static:
+  history: keep_last
+  depth: 100
+  reliability: reliable
+  durability: transient_local
