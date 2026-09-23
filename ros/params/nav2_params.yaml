@@ -262,17 +262,24 @@ controller_server:
       #    and a recovery, so the cart manoeuvres out of a tight spot itself;
       #  - it may reverse (vx_min), and a Reeds-Shepp cusp of the Hybrid plan is followed in the
       #    plan's own direction (PathAngleCritic mode 2, use_path_orientations, path inversion).
-      # The cost: time_steps x batch_size states per cycle on the board's A53 cores. The numbers
-      # below are sized for it (the Nav2 defaults are 56 x 1000 at 20 Hz): 30 steps of 0.1 s
-      # (a 3 s horizon = 0.9 m at the cap) x 500 samples at the controller's 10 Hz.
+      # The cost: time_steps x batch_size states per cycle on the board's A53 cores (the Nav2
+      # defaults are 56 x 1000 at 20 Hz).
+      # SPEED (2026-09-23, tape 0453): 30 steps x 500 samples crawled the whole leg (commanded
+      # |v| median 0.04 m/s against RPP's 0.14-0.30 on the same day). A sample that touches a
+      # lethal cell anywhere in its horizon costs collision_cost and drops out, and at 0.3 m/s a
+      # 3 s horizon reaches 0.9 m — in a furnished flat the fast samples reach furniture and the
+      # survivors' average is a crawl. A 2 s horizon (0.6 m at the cap) keeps the fast samples
+      # alive; 750 samples for the same 15 000 states a cycle; wider noise so full speed and
+      # sharp turns are sampled at all; a lower temperature so the average follows the best
+      # samples instead of all of them.
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 30
+      time_steps: 20
       model_dt: 0.1  # = 1 / controller_frequency: the model steps as the controller does
-      batch_size: 500
+      batch_size: 750
       iteration_count: 1
-      vx_std: 0.2
+      vx_std: 0.3
       vy_std: 0.2
-      wz_std: 0.4
+      wz_std: 0.6
       # The base's caps, the velocity smoother's: forward 0.30, reverse half of it, 0.6 rad/s.
       vx_max: 0.30
       vx_min: -0.15
@@ -281,7 +288,7 @@ controller_server:
       ax_max: 0.5  # the smoother's max_accel / max_decel, so a sampled sequence is one it passes
       ax_min: -1.5
       az_max: 1.0
-      temperature: 0.3
+      temperature: 0.2
       gamma: 0.015
       motion_model: "DiffDrive"
       visualize: false  # the trajectory markers cost the board a serialisation per cycle
@@ -323,7 +330,7 @@ controller_server:
       CostCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 3.81
+        cost_weight: 2.0  # 3.81 (the Nav2 default) weighed our wide inflation into a crawl
         critical_cost: 300.0
         # The true rectangle, not a disc: base_link sits at the front edge, so a disc of the
         # circumscribed radius (0.407 m) would be a cart twice its size.
@@ -345,7 +352,7 @@ controller_server:
       PathFollowCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 5.0
+        cost_weight: 10.0  # the pull along the plan, doubled: progress, not caution, sets the pace
         offset_from_furthest: 5
         threshold_to_consider: 1.4
       PathAngleCritic:
