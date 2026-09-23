@@ -1,7 +1,8 @@
 """Print one message from a topic, as a flat dict of its numeric fields: the ``ros2 topic echo``
 that costs the board one rclpy node instead of the CLI's seconds of discovery.
 
-    docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/peek.py /odometry/filtered nav_msgs/msg/Odometry [seconds]
+    docker exec pepin-ros /pepin_entrypoint.sh \
+        python3 /tools/peek.py /odometry/filtered nav_msgs/msg/Odometry [seconds]
 """
 
 from __future__ import annotations

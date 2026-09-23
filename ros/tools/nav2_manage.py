@@ -1,6 +1,7 @@
 """Ask Nav2's lifecycle manager to bring its nodes up (or down) without restarting the stack.
 
-    docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/nav2_manage.py startup|shutdown|reset [manager]
+    docker exec pepin-ros /pepin_entrypoint.sh \
+        python3 /tools/nav2_manage.py startup|shutdown|reset [manager]
 
 The manager's own bringup at launch can abort when map -> odom is not yet in TF (RTAB-Map on the
 laptop localises a minute after the board is up); this re-runs it once the frame exists.
@@ -31,9 +32,8 @@ def main() -> None:
     future = client.call_async(request)
     rclpy.spin_until_future_complete(node, future, timeout_sec=120.0)
     result = future.result()
-    print(
-        f"{manager}: {command} -> {'success' if result and result.success else 'FAILED or timed out'}"
-    )
+    outcome = "success" if result and result.success else "FAILED or timed out"
+    print(f"{manager}: {command} -> {outcome}")
     sys.exit(0 if result and result.success else 1)
 
 
