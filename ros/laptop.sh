@@ -95,16 +95,27 @@ zrouter_up() {
         echo "laptop zenoh router already up ($PEPIN_ZROUTER_LAPTOP); left alone"; return 0
     fi
     pepin_remove_container "$PEPIN_ZROUTER_LAPTOP"  # the one gentle way to stop a container here
+    # The same config file the board's router gets (ros/zenoh/router.json5, one file for both:
+    # the only thing that differs between the two routers is who dials whom, and that is the
+    # ZENOH_CONFIG_OVERRIDE below, which rmw_zenoh applies ON TOP of the file). It buys the tx
+    # queue enough patience to sit out a 1-2 s WiFi stall instead of closing the session.
+    # PEPIN_ZROUTER_CONFIG=  (empty) starts this router on the shipped rmw_zenoh default.
+    ZCONFIG=()
+    if [ -n "${PEPIN_ZROUTER_CONFIG-$HERE/zenoh/router.json5}" ]; then
+        ZCONFIG=(-v "${PEPIN_ZROUTER_CONFIG:-$HERE/zenoh/router.json5}:/zenoh/router.json5:ro"
+                 -e ZENOH_ROUTER_CONFIG_URI=/zenoh/router.json5)
+    fi
     docker run -d --name "$PEPIN_ZROUTER_LAPTOP" --network "$NET" --restart unless-stopped \
         -e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-7}" \
         -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_router_override "$BOARD")" \
+        ${ZCONFIG[@]+"${ZCONFIG[@]}"} \
         "$(image)" /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd >/dev/null
     echo "laptop zenoh router up: $PEPIN_ZROUTER_LAPTOP, dialling tcp/$BOARD:$PEPIN_ZROUTER_PORT"
 }
 # The nodes a kick can reach here, the container each lives in and the line it prints once up
 # (the kick waits for that line): the Python modules of vslam.launch.py, and the goal server of
 # the navigation half (it runs here on side=board only; on side=all: ros/thin.sh kick goal_server).
-KICKABLE="camera_stream depth_stream contact_scan depth_fusion laptop_localizer rtabmap_frame sensor_pack places visual_odometry goal_server"
+KICKABLE="camera_stream depth_stream contact_scan depth_fusion laptop_localizer rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server"
 kick_target() {  # node name -> "container|start-up line"
     case "$1" in
         camera_stream) echo "pepin-vslam|camera stream from " ;;
@@ -115,6 +126,7 @@ kick_target() {  # node name -> "container|start-up line"
         rtabmap_frame) echo "pepin-vslam|rtabmap frame up: " ;;
         sensor_pack) echo "pepin-vslam|sensor pack up" ;;
         places) echo "pepin-vslam|places up: " ;;
+        marks_audit) echo "pepin-vslam|marks audit up: " ;;
         visual_odometry) echo "pepin-vslam|visual odometry up: " ;;
         goal_server) echo "pepin-laptop|goal server ready on port" ;;
         *) return 1 ;;

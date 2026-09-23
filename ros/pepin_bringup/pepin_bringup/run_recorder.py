@@ -479,6 +479,9 @@ class RunRecorder:
         """The local costmap as the controller sees it (1 Hz, 3x3 m at 5 cm: about 14 kB/s).
 
         Costs are the ROS 0-100 scale plus -1 for unknown; 99-100 is the lethal/inscribed band.
+        The ``frame`` its origin is measured in is taped WITH it: this grid was in ``map`` until
+        2026-09-22 and is in ``odom`` since (ros/params/nav2_params.yaml), so a reader that
+        overlays these cells on the room has to be told which, and no tape has to be dated.
         """
         if not self._keep("costmap"):
             return
@@ -487,6 +490,7 @@ class RunRecorder:
             {
                 "t": _stamp(msg.header),
                 "topic": "costmap",
+                "frame": msg.header.frame_id,
                 "origin": [round(info.origin.position.x, 3), round(info.origin.position.y, 3)],
                 "resolution": round(info.resolution, 3),
                 "width": int(info.width),

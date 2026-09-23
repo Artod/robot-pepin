@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 import ros_stubs
 import source_facts as sf
+import yaml
 
 from pepin.deployment import (
     DEFAULT_LOCALIZER,
@@ -112,15 +113,25 @@ def _table(name: str) -> dict[str, object]:
 
 
 def test_the_laptop_publishes_the_transform_only_in_the_role_that_owns_it() -> None:
-    """One boolean and two delays, merged by rtabmap_parameters and nowhere else; the tf
-    tolerance must stay under Nav2's own transform_tolerance or a costmap reads the future."""
+    """One boolean and two delays, merged by rtabmap_parameters and nowhere else. The tf tolerance
+    is how far AHEAD each broadcast is stamped, i.e. how long the last correction may stand as
+    current on the far side of the radio: 0.5 s since 2026-09-22, because the board's WiFi stalls
+    0.4-1.2 s and a 0.1 s stamp went stale inside one spike. Its consumers' own waits are the
+    other half of the budget and are held here beside it."""
     overlay = _table("PUBLISH_MAP_TO_ODOM")
     assert overlay["publish_tf"] is True
     assert overlay["tf_delay"] == 0.05, "20 Hz, the rate the tracker published this edge at"
     tolerance = float(str(overlay["tf_tolerance"]))
-    nav2 = (REPO / "ros/params/nav2_params.yaml").read_text()
-    assert tolerance < 0.3 and "transform_tolerance: 0.3" in nav2, (
-        "a broadcast stamped further ahead than Nav2 allows is a costmap reading the future"
+    assert tolerance == 0.5, "one measured WiFi stall, with margin"
+    nav2 = yaml.safe_load((REPO / "ros/params/nav2_params.yaml").read_text())
+    assert nav2["global_costmap"]["global_costmap"]["ros__parameters"]["transform_tolerance"] >= (
+        tolerance
+    ), "the grid that still spans this edge waits at least as long as the stamp promises"
+    assert nav2["bt_navigator"]["ros__parameters"]["transform_tolerance"] >= tolerance, (
+        "the tree's map -> base_link is the last lookup on the board that crosses the WiFi"
+    )
+    assert nav2["local_costmap"]["local_costmap"]["ros__parameters"]["global_frame"] == "odom", (
+        "and the controller's own grid stopped crossing it altogether"
     )
     base = _table("RTABMAP")
     assert base["map_frame_id"] == "map" and base["odom_frame_id"] == "odom"
@@ -390,6 +401,40 @@ class _FakeTf:
                 ),
             ),
         )
+
+
+def test_both_zenoh_routers_start_on_the_same_patient_transport_config() -> None:
+    """The one link that crosses the WiFi is router to router, and the shipped router config ends
+    the session after 5 s of a blocked RELIABLE push: 8-12 closures a minute on 2026-09-22's radio,
+    each costing both machines a re-discovery of everything. ``ros/zenoh/router.json5`` is a FULL
+    copy of the image's default — ``ZENOH_ROUTER_CONFIG_URI`` REPLACES the configuration instead of
+    merging into it, so a fragment would silently drop every ROS setting — and one file serves both
+    routers because the only difference between them (who dials whom) rides in
+    ``ZENOH_CONFIG_OVERRIDE``, which rmw_zenoh applies on top."""
+    config = (REPO / "ros/zenoh/router.json5").read_text()
+    assert 'mode: "router"' in config and '"tcp/[::]:7447"' in config, "a copy, not a fragment"
+    assert "lease: 60000," in config, "...and the ROS tuning in it is untouched"
+    assert "wait_before_close: 20000000," in config, "20 s: four times the worst measured stall"
+    assert "wait_before_drop: 50000," in config, "50 ms: the period of the fastest thing crossing"
+    assert "keep_alive: 4," in config, "four per lease, as a lossy link wants"
+    assert "control: 2," in config, "the queue DEPTH is deliberately untouched; the file says why"
+    assert "connect:" in config and '"<proto>/<address>"' in config, (
+        "no endpoint of either machine is written into the shared file"
+    )
+    unit = (REPO / "board/pepin-zrouter.service").read_text()
+    assert "-v /root/pepin-ros/zenoh/router.json5:/zenoh/router.json5:ro" in unit, (
+        "mounted from the path ros/sync.sh rsyncs ros/ to"
+    )
+    assert "ZENOH_ROUTER_CONFIG_URI=/zenoh/router.json5" in unit
+    assert "if [ -f /root/pepin-ros/zenoh/router.json5 ]" in unit, (
+        "a board that has not been synced yet starts on the shipped default, it does not fail:"
+        " docker would have made a DIRECTORY of a missing mount source"
+    )
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert "-e ZENOH_ROUTER_CONFIG_URI=/zenoh/router.json5" in laptop
+    assert "${PEPIN_ZROUTER_CONFIG:-$HERE/zenoh/router.json5}:/zenoh/router.json5:ro" in laptop
+    assert "PEPIN_ZROUTER_CONFIG" in laptop, "empty = the shipped default, without a rebuild"
+    assert "zenoh" not in (REPO / "ros/sync.sh").read_text(), "nothing excludes it from a deploy"
 
 
 def _pose_msg(x: float, y: float, yaw_deg: float, at_s: float = 0.0) -> Any:

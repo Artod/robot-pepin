@@ -75,10 +75,22 @@ def _p(node: str) -> dict:  # type: ignore[type-arg]
     return block["ros__parameters"]  # type: ignore[no-any-return]
 
 
-def test_progress_and_manoeuvres_are_judged_against_the_map_not_the_wheels() -> None:
-    # 2026-09-06: a slipping wheel fed odom a metre of motion; Nav2 saw progress for 58 s.
-    assert _p("local_costmap")["global_frame"] == "map"
-    assert _p("behavior_server")["local_frame"] == "map"
+def test_the_controller_runs_in_a_frame_that_does_not_cross_the_wifi() -> None:
+    """Both of these read ``map`` from 2026-09-06 (a slipping wheel fed odom a metre of motion and
+    Nav2 saw progress for 58 s) until 2026-09-22, when ``map -> odom`` became the laptop's and the
+    board's radio spikes (0.4-1.2 s) started leaving the controller's costmap without its own
+    frame. The slip is answered inside odom now — rf2o is the EKF's odom3 — and the two values
+    must stay EQUAL: the behaviours build their poses in ``local_frame`` and hand them to a
+    collision checker that reads them as cells of the local costmap."""
+    assert _p("local_costmap")["global_frame"] == "odom"
+    assert _p("behavior_server")["local_frame"] == _p("local_costmap")["global_frame"]
+    assert "odom3: odom_laser" in (REPO / "ros/params/ekf.yaml").read_text(), (
+        "what makes odom trustworthy on carpet: the lidar's own scan-to-scan twist in the filter"
+    )
+    # The planner's grid and the plans themselves have not moved.
+    assert _p("global_costmap")["global_frame"] == "map"
+    assert _p("behavior_server")["global_frame"] == "map"
+    assert _p("bt_navigator")["global_frame"] == "map"
 
 
 def test_stuck_is_declared_within_seconds_and_short_goals_stay_reachable() -> None:
@@ -987,6 +999,7 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
         "/rtabmap/rtabmap",
         "/rtabmap_frame",
         "/places",
+        "/marks_audit",
         "/foxglove_bridge",
         "/rgbd_odometry",
         "/visual_odometry",
@@ -2388,6 +2401,10 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         # The room's vocabulary: its book is on disk beside the database, so a restart loses
         # nothing but the moment before the first graph arrives.
         "places",
+        # Who painted the costmap's lethal cells (2026-09-22): it holds nothing across a restart
+        # — the next grid is one second away — and a drive nobody was auditing is a drive to
+        # repeat, so it comes back by itself like everything else here.
+        "marks_audit",
         "foxglove_bridge",
         # The camera as a third odometry: rtabmap's node and ours. Neither carries state the
         # way RTAB-Map's graph does — rgbd_odometry's is the last frame, and a restart of it is

@@ -55,6 +55,11 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_link
     odom_topic: /odom
+    # 0.5 s where Nav2's default is 0.1 (2026-09-22): with the local costmap in odom this tree is
+    # the last thing on the board that looks map up (map -> base_link, for its distance and goal
+    # conditions), and the wait must cover the same WiFi stall RTAB-Map's tf_tolerance stamps
+    # ahead for (0.5 s, ros/pepin_bringup/launch/vslam.launch.py). Delete the line for the default.
+    transform_tolerance: 0.5
     # A four-core A53 under Nav2 answers action requests in hundreds of ms, not 20:
     # with the defaults the first goal died with 'Timed out while waiting for action server'.
     bt_loop_duration: 50
@@ -250,11 +255,23 @@ local_costmap:
       update_frequency: 5.0  # the stop reflex's slowest link: a mark waits for this tick
       publish_frequency: 1.0
       transform_tolerance: 0.3  # a sensor stamped 'now' waits at most this long for odom->base_link
-      # map, not odom: the progress checker judges movement in this frame, and a wheel slipping on
-      # the carpet feeds odom a whole metre of motion while the robot stands still (58 s of
-      # spinning with zero failures on 2026-09-06). The scan-matching tracker corrects smoothly
-      # at 6-10 Hz, so a map-frame window does not jump the way it would under AMCL.
-      global_frame: map
+      # odom, not map (2026-09-22): the controller must not depend on a frame that crosses the
+      # WiFi. Under PEPIN_LOCALIZER=rtabmap the laptop's graph owns map -> odom and the board
+      # receives it over a radio (uwe5622) whose ping averages 80-180 ms with spikes of
+      # 0.4-1.2 s even with the stack stopped, so every spike left this grid without its own
+      # frame: the costmap failed to activate, its message filters dropped the observations they
+      # could not place, goal_server answered "pose none" and goto's preflight refused. In odom
+      # every transform this grid needs — odom -> base_link from the board's own EKF, and the
+      # sensors' statics — is published on the board itself and cannot be late.
+      # HISTORY, and why it was map until today: the progress checker judges movement in this
+      # frame, and a wheel slipping on the carpet fed odom a whole metre of fake motion while the
+      # robot stood still (58 s of spinning with zero failures on 2026-09-06); the scan-matching
+      # tracker corrected smoothly at 6-10 Hz, so a map-frame window did not jump the way it
+      # would under AMCL. That argument is now answered INSIDE odom: the laser odometry rf2o is
+      # the EKF's odom3 (ros/params/ekf.yaml, /odom_laser at 10 Hz), and a cart spinning its
+      # wheels against a wall reads zero motion from the lidar, so odom no longer advances on a
+      # slip. The way back is this one word.
+      global_frame: odom
       robot_base_frame: base_link
       rolling_window: true
       width: 3
@@ -1071,9 +1088,17 @@ behavior_server:
       plugin: "nav2_behaviors::Wait"
     assisted_teleop:
       plugin: "nav2_behaviors::AssistedTeleop"
-    # map, not odom: BackUp/DriveOnHeading measure their distance in this frame; in odom a slipping
-    # wheel 'completed' every manoeuvre without the robot moving (58 recoveries, 2026-09-07 12:18).
-    local_frame: map
+    # odom, not map (2026-09-22): this frame must be the LOCAL costmap's global_frame. The
+    # behaviours build their projected poses in local_frame and hand them straight to a collision
+    # checker fed by /local_costmap/costmap_raw, which reads them as cells of that grid — two
+    # different frames check the wrong cells — and that costmap is in odom now (see local_costmap
+    # above for the WiFi reason). global_frame stays map: the global costmap and the plans have
+    # not moved.
+    # HISTORY: it was map because BackUp/DriveOnHeading measure their distance in this frame and
+    # in odom a slipping wheel 'completed' every manoeuvre without the robot moving (58
+    # recoveries, 2026-09-07 12:18). Same answer as the costmap's: rf2o (ekf.yaml odom3) holds
+    # odom still while the wheels spin.
+    local_frame: odom
     global_frame: map
     robot_base_frame: base_link
     transform_tolerance: 0.1

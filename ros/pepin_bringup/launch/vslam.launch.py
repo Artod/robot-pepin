@@ -407,11 +407,27 @@ TF_ODOMETRY_VARIANCE = {
 # to change to feed it). What changes is one boolean, and the tracker on the board stands down.
 #
 # The two delays are said out loud rather than left to rtabmap_slam's defaults, because they are
-# what the board's costmaps live on: ``tf_delay`` 0.05 is the 20 Hz the re-broadcast runs at —
-# the same rate the relocalizer published this edge at, so no consumer's expectation moves — and
-# ``tf_tolerance`` 0.1 is how far into the future each broadcast is stamped, which must stay under
-# Nav2's own ``transform_tolerance`` (0.3 s in ros/params/nav2_params.yaml) or a costmap reads a
-# transform that has not happened yet.
+# what the board's consumers of this edge live on: ``tf_delay`` 0.05 is the 20 Hz the re-broadcast
+# runs at — the same rate the relocalizer published this edge at, so no consumer's expectation
+# moves — and ``tf_tolerance`` is how far into the future each broadcast is stamped, which is how
+# long the last correction is allowed to stand as current on the far side of the WiFi.
+#
+# 0.5 s since 2026-09-22, and it was 0.1 s (measured: the board's radio, uwe5622 at -35..-42 dBm,
+# pings 80-180 ms with spikes of 0.4-1.2 s even with the stack stopped). A broadcast stamped
+# 0.1 s ahead is stale the moment a spike is longer than that, and a tf2 lookup at "now" then
+# extrapolates past the newest sample and throws — which is what took the board's costmaps and
+# goal_server's pose out several times a minute. 0.5 s covers the measured spike with margin.
+# What it costs is honestly a lie of 0.5 s: the correction is held constant for that long instead
+# of failing. It is the right lie for THIS edge and no other — map -> odom is a slow correction
+# in centimetres at a loop closure, while the cart's own motion lives in odom -> base_link, which
+# is published on the board at 50 Hz and never crosses a radio. The way back is this one number.
+#
+# The consumers' side of the same budget (ros/params/nav2_params.yaml): the global costmap's
+# ``transform_tolerance`` is 1.0 s, twice this and unchanged; ``bt_navigator`` was raised from
+# Nav2's 0.1 to 0.5 for the one map -> base_link lookup left on the board; the LOCAL costmap
+# (0.3 s) and RPP (0.2 s) no longer span this edge at all, because that costmap moved to the
+# odom frame on the same day — a 0.2 s blocking wait inside a 10 Hz control loop is a starved
+# controller, not patience.
 #
 # UNVERIFIED, and it decides what the first seconds after a start look like: what
 # rtabmap_ros's CoreWrapper broadcasts BEFORE its first localisation on a loaded database. From
@@ -425,7 +441,7 @@ TF_ODOMETRY_VARIANCE = {
 PUBLISH_MAP_TO_ODOM = {
     "publish_tf": True,
     "tf_delay": 0.05,  # 20 Hz, the rate the board's relocalizer published this edge at
-    "tf_tolerance": 0.1,  # ...and how far ahead each broadcast is stamped; Nav2 allows 0.3 s
+    "tf_tolerance": 0.5,  # ...and how far ahead each broadcast is stamped: one WiFi stall
 }
 TF_DELAY_S = float(PUBLISH_MAP_TO_ODOM["tf_delay"])  # for the report line, from the table itself
 
@@ -733,6 +749,18 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         prefix=_after_ghost("/places"),
         **RESPAWN,
     )
+    # Who painted the lethal cells the controller refuses to drive through
+    # (pepin_bringup.marks_audit): every published local costmap's hard cells split into
+    # lidar-backed, camera-only and unexplained, once a second, as a number the operator reads
+    # DURING a drive instead of off a tape an hour later (run 0431). Read-only and laptop-side by
+    # construction — it consumes the camera's own fan and the board never waits for it.
+    audit = ExecuteProcess(
+        cmd=["python3", "-m", "pepin_bringup.marks_audit"],
+        output="screen",
+        prefix=_after_ghost("/marks_audit"),
+        condition=IfCondition(LaunchConfiguration("marks_audit")),
+        **RESPAWN,
+    )
     frame = ExecuteProcess(
         cmd=[
             "python3",
@@ -1008,6 +1036,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                     rtabmap,
                     frame,
                     places,
+                    audit,
                     foxglove,
                     rgbd_odometry,
                     vo,
@@ -1054,6 +1083,12 @@ def generate_launch_description() -> LaunchDescription:
             # rest and costs only this laptop (0.25 core); what it costs the ROBOT is still
             # nothing until visual_odometry's vo_publish flag is turned on.
             DeclareLaunchArgument("vo", default_value="true"),
+            # The live phantom count (pepin_bringup.marks_audit): who painted each lethal cell of
+            # the local costmap, once a second. On by default — it only reads, it costs this
+            # laptop a few milliseconds a second, and the drive it is needed on is the drive
+            # nobody knew would go wrong. marks_audit:=false leaves the node out entirely; the
+            # node's own `marks_audit` flag switches it off live without a restart.
+            DeclareLaunchArgument("marks_audit", default_value="true"),
             DeclareLaunchArgument("database", default_value=""),  # empty: DATABASE
             DeclareLaunchArgument("bridge_admin", default_value="http://pepin-zenoh:8000"),
             DeclareLaunchArgument("static_camera_tf", default_value="true"),

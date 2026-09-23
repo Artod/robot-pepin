@@ -251,21 +251,24 @@ FLAGS = FlagSet(
         " the marks in that grid were laid where the cart used to be. The step in that edge is the"
         " correction alone — the cart's own motion lives in odom -> base_link — whoever published"
         " it. Off, nothing reads the edge and no listener is started for it",
-        why="OFF UNTIL IT IS TRIED, because nobody has watched RTAB-Map's own corrections with"
-        " it. The behaviour is not new: the lidar tracker did exactly this while it owned"
-        " map -> odom (pepin.watch.JumpClear, written for the camera-only return of 2026-09-16,"
-        " where the pose lagged 1.4 m behind the cart and Nav2 spent 29 recoveries fighting marks"
-        " placed at the poses before each correction). Under World R that edge is RTAB-Map's and"
-        " nobody watches it at all. What is unmeasured is the other side of the trade: RTAB-Map"
-        " corrects in centimetres at a loop closure, which the costmap absorbs, and the raytracing"
-        " of the live scans re-clears a stranded mark within seconds anyway — so a clear per"
-        " closure could cost a controller its picture of the room for no gain. The threshold and"
-        " the gap are the tracker's measured ones, inherited unchanged",
-        on_when="when a drive is seen fighting a second copy of the room after a correction:"
-        " recoveries at obstacles that are not there, the local costmap holding marks offset from"
-        " the live scans by the size of the last jump",
-        off_when="the shipped state, and back to it the moment a clear is seen to cost more than"
-        " it buys — a controller replanning around a grid that keeps being emptied under it",
+        why="OFF, AND SINCE 2026-09-22 ITS PREMISE IS GONE: the local costmap is built in the"
+        " ODOM frame (ros/params/nav2_params.yaml), and a step in map -> odom does not move a"
+        " grid that is not drawn in map — the marks stay exactly where the cart saw them. A clear"
+        " would now throw away good evidence for nothing. The flag stays because the frame is one"
+        " word away from being map again, and there it is the right behaviour: the lidar tracker"
+        " did exactly this while it owned map -> odom (pepin.watch.JumpClear, written for the"
+        " camera-only return of 2026-09-16, where the pose lagged 1.4 m behind the cart and Nav2"
+        " spent 29 recoveries fighting marks placed at the poses before each correction). Even"
+        " then the other side of the trade was unmeasured: RTAB-Map corrects in centimetres at a"
+        " loop closure, which the costmap absorbs, and the raytracing of the live scans re-clears"
+        " a stranded mark within seconds anyway. The threshold and the gap are the tracker's"
+        " measured ones, inherited unchanged",
+        on_when="only together with a local costmap put back into the map frame, and then when a"
+        " drive is seen fighting a second copy of the room after a correction: recoveries at"
+        " obstacles that are not there, the grid holding marks offset from the live scans by the"
+        " size of the last jump",
+        off_when="the shipped state, and the only sane one while that costmap is in odom: a clear"
+        " there costs a controller its picture of the room and buys nothing",
     ),
     Flag(
         "pose_topic",
