@@ -968,12 +968,25 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 # TRIPLE_SUBSCRIPTIONS and are read only there.
                 "topic_queue_size": 10,
                 "wait_for_transform": 0.5,
-                # The grid carries the CURRENT frame's cells, not only the keyframes': with this
-                # false MapsManager drops pose 0 from what it assembles (MapsManager.cpp:473-476)
-                # and the grid moves only when a node lands. True is one re-render per processed
-                # frame — at Rtabmap/DetectionRate 1.0, one a second — which is what the board's
-                # tracker throttles with its own map_refresh_s.
-                "map_always_update": True,
+                # The grid is the DATABASE's nodes and nothing else (false since 2026-09-23; true
+                # is the way back). With true, every processed frame's scan is handed to the grid
+                # as "pose 0" at map->odom * odom (rtabmap_ros 0.22.1 CoreWrapper.cpp:2349-2360)
+                # and painted into it (rtabmap 0.22.1 GlobalMap.cpp:146-150, id -1). A temporary
+                # scan owns no cells, nothing ever erases it, and OccupancyGrid::assemble only
+                # EXTENDS the bounds (OccupancyGrid.cpp:188-195, 386-394); the grid is cleared
+                # only when a node's pose moves over GridGlobal/UpdateError (GlobalMap.cpp:108-132),
+                # which a localising session with fixed node poses never does. So every vantage
+                # point of a session stayed in /map: 255x219 -> 364x372 on one drive, and under a
+                # stale map->odom that scan landed far outside the flat (4340x4937, 2026-09-22)
+                # and was saved into Admin.opt_map at shutdown. False drops pose 0 before assembly
+                # (rtabmap_util MapsManager.cpp:473-476): /map changes only when the set of nodes
+                # does, and live obstacles reach Nav2 through the costmaps' own sensor layers.
+                "map_always_update": False,
+                # Never start from Admin.opt_map (CoreWrapper.cpp:631-639): it is rewritten at every
+                # shutdown (CoreWrapper.cpp:985-994), nothing turns that off, and twice it carried a
+                # grid painted through a stale map -> odom (217 x 247 m on 2026-09-22). The 169 node
+                # grids rebuild in seconds at start; True is the way back.
+                "use_saved_map": False,
                 **rtabmap_parameters(neighbor_refining, memory, packing, owner),
             }
         ],
