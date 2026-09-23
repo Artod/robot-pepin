@@ -368,6 +368,24 @@ check_board() {
     fi
 
     check_map_odom
+    check_clock
+}
+
+# 1.15: ONE CLOCK — the board's clock minus the one every laptop ROS node stamps with (the Docker
+# VM's), measured over NTP from the board to the laptop's time server (ros/time.sh offset, which
+# pipes src/pepin/timesync.py into the board's python3: one short process and eight 48-byte
+# exchanges, no ROS). INFORMATION ONLY: a PASS or a WARN, never a FAIL and never a drive gate —
+# the number is there so that a transform that "would require extrapolation" can be read against
+# it. Not measured (a WARN) when the laptop runs no server (PEPIN_TIME_SOURCE=pool) or the board
+# cannot reach it.
+check_clock() {
+    local out status=0
+    out="$("$HERE/time.sh" offset 2>&1)" || status=$?
+    case "$status" in
+        0) pass 1.15 "clock: $(tail -1 <<<"$out")" ;;
+        1) warn 1.15 "clock: $(tail -1 <<<"$out") — stamps from the two machines disagree by that much (ros/time.sh status)" ;;
+        *) warn 1.15 "clock: not measured — $(tail -1 <<<"$out" | cut -c1-160) (PEPIN_TIME_SOURCE=$PEPIN_TIME_SOURCE; ros/time.sh server, ros/time.sh status)" ;;
+    esac
 }
 
 # 1.13: WHO IS CORRECTING THE POSE, under PEPIN_LOCALIZER=rtabmap. The board cannot answer this
