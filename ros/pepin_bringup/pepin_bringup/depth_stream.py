@@ -578,14 +578,18 @@ FLAGS = FlagSet(
     ),
     Flag(
         "stereo_matcher",
-        "sgbm",
+        "raft",
         description="which engine turns the two eyes into a disparity: sgbm (OpenCV's semi-global"
         " block matcher, in this container) or raft (RAFT-Stereo on the laptop's GPU through the"
         " same host the mono network uses, ros/depth_host.sh stereo). Both are built at start and"
         " this picks which one answers the next pair, so an A/B needs no restart; a pair the host"
         " cannot answer falls to sgbm and the report line counts it. Under depth_source: network"
         " it does nothing",
-        why="sgbm until a live drive says otherwise. What raft buys was measured through THIS"
+        why="raft since 2026-09-23, when the drive settled it: six legs of that day (three with"
+        " the lidar, three camera-only) all ran on raft at 101-111 ms a pair, 5.8 published"
+        " frames/s, 71 % of the pixels valid, and reached every mark; a restart that fell back"
+        " to the old sgbm default was a silent change of the sensor under the next test. What"
+        " raft buys was measured before that through THIS"
         " path on 2026-09-22, on the 8 rectified pairs of scratch/stereo_net/frames/pairs.npz"
         " (host_smoke.py, sgbm_vs_raft.py, phantom_where.py): the airborne phantom PIXELS the"
         " lamp's reflection on the parquet puts 0.5-1.5 m up and under 2.5 m ahead fall only"
