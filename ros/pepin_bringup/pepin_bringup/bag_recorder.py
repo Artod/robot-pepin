@@ -54,7 +54,13 @@ from pepin_bringup.camera_clip import CameraClip
 # What a run is made of, on the wire: every topic the JSONL recorder subscribes to, plus the two
 # the ``loc`` records are composed from where no tracker publishes a pose (/tf, /tf_static). The
 # list is TOPIC_RECORDS' own, so a topic added to the tape is recorded here without a second edit.
-BAG_TOPICS: tuple[str, ...] = (*sorted(TOPIC_RECORDS), "/tf", "/tf_static")
+# One topic the tape has no row for: the lidar as it left the driver, before the hull filter cut
+# the cart AND its 8 cm contact band out of it (robot.launch.py). The band hides the cart's own
+# posts and cables (up to 6.5 cm past the hull, 2026-09-08) together with whatever it stands
+# against, and only this topic, recorded while the cart moves, separates the two: a return that
+# travels with the cart is the cart. bag_to_tape skips it; it is read from the bag directly.
+RAW_SCAN_TOPIC = "/ldlidar_node/scan"
+BAG_TOPICS: tuple[str, ...] = (*sorted(TOPIC_RECORDS), "/tf", "/tf_static", RAW_SCAN_TOPIC)
 # MCAP, no compression: the storage rosbag2 ships with in Jazzy, read by rosbag2_py on the laptop
 # and by every MCAP tool. Compression would cost this board's cores exactly what we are taking
 # off them.
