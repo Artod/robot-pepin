@@ -176,7 +176,7 @@ controller_server:
       # must equal the local inflation layer's and the distance must not exceed its radius; on the defaults (3.0 / 0.6) it was
       # mis-reading its own clearance and crawling near walls for no reason.
       inflation_cost_scaling_factor: 5.0
-      cost_scaling_dist: 0.40
+      cost_scaling_dist: 0.20  # 0.40 halved the speed 20 cm from furniture; the collision check is separate (2026-09-23)
       regulated_linear_scaling_min_radius: 0.6
       regulated_linear_scaling_min_speed: 0.06
       use_rotate_to_heading: true
@@ -235,7 +235,7 @@ controller_server:
       # must equal the local inflation layer's and the distance must not exceed its radius; on the defaults (3.0 / 0.6) it was
       # mis-reading its own clearance and crawling near walls for no reason.
       inflation_cost_scaling_factor: 5.0
-      cost_scaling_dist: 0.40
+      cost_scaling_dist: 0.20  # 0.40 halved the speed 20 cm from furniture; the collision check is separate (2026-09-23)
       regulated_linear_scaling_min_radius: 0.6
       regulated_linear_scaling_min_speed: 0.06
       use_rotate_to_heading: false
@@ -310,7 +310,7 @@ controller_server:
       # must equal the local inflation layer's and the distance must not exceed its radius; on the defaults (3.0 / 0.6) it was
       # mis-reading its own clearance and crawling near walls for no reason.
       inflation_cost_scaling_factor: 5.0
-      cost_scaling_dist: 0.40
+      cost_scaling_dist: 0.20  # 0.40 halved the speed 20 cm from furniture; the collision check is separate (2026-09-23)
       regulated_linear_scaling_min_radius: 0.6
       regulated_linear_scaling_min_speed: 0.06
       use_rotate_to_heading: false
@@ -1134,7 +1134,9 @@ global_costmap:
         # 0.55 / 2.0: the pair the drives were tuned on. A wider radius (0.70 / 1.5) painted the
         # whole passage and made the planner indifferent inside it; the berth around a person
         # comes from the planners' cost weights (cost_factor, cost_travel_multiplier) instead.
-        cost_scaling_factor: 2.0
+        # 5.0, the local layer's (2026-09-23): at 2.0 the cost stayed high half a metre from any
+        # furniture, so the planner hunted troughs across the flat; now it falls off at the furniture.
+        cost_scaling_factor: 5.0
         inflation_radius: 0.55
       # False: the map is 239x215 cells, so publishing it whole at 0.5 Hz spends 50 kB/s on a
       # board whose control loop already drops to 3 Hz. Turn it on when a refused plan needs
