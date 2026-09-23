@@ -6,7 +6,7 @@
           "^/(imu/data_raw|local_costmap/costmap|localization/sigma|localization/sources|localization_fit|map_tracked|neck/state|odom|odometry/filtered|pepin/run_status|places/mark|scan|tf|tf_static|tof/front|tof/left|tof/right|tracker_pose)$"
         ],
         "subscribers": [
-          "^/(bridge/kick|contact_scan|controller_selector|depth_free|depth_marks|depth_scan|laptop/heartbeat|map|pepin/run|places|places/marked|plan|planner_selector|rtabmap/info|rtabmap/mapGraph|rtabmap/mapPath|vo)$"
+          "^/(bridge/kick|contact_scan|controller_selector|depth_free|depth_marks|depth_scan|goal_checker_selector|laptop/heartbeat|map|pepin/run|places|places/marked|plan|planner_selector|rtabmap/info|rtabmap/mapGraph|rtabmap/mapPath|vo)$"
         ],
         "service_servers": [
           "^/(behavior_server/change_state|behavior_server/get_state|bt_navigator/change_state|bt_navigator/get_state|controller_server/change_state|controller_server/get_state|relocalize|velocity_smoother/change_state|velocity_smoother/get_state|where_am_i)$"

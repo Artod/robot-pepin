@@ -410,7 +410,7 @@ def test_two_controllers_and_only_the_footprint_planner_may_plan_a_reverse() -> 
     """FollowPath never reverses and may pivot; FollowPathRS follows the cusps of a Hybrid-A*
     plan and, as RPP demands, gives up rotate-to-heading for it. The lattice stays forward-only."""
     cs = _p("controller_server")
-    assert cs["controller_plugins"] == ["FollowPath", "FollowPathRS"]
+    assert cs["controller_plugins"] == ["FollowPath", "FollowPathRS", "FollowPathMPPI"]
     assert cs["FollowPath"].get("allow_reversing", False) is False
     assert cs["FollowPathRS"]["allow_reversing"] is True
     assert cs["FollowPathRS"]["use_rotate_to_heading"] is False
@@ -428,6 +428,36 @@ def test_two_controllers_and_only_the_footprint_planner_may_plan_a_reverse() -> 
         "the reversing twin drifted from FollowPath (no YAML anchors: rcl cannot parse them)"
     )
     assert _p("planner_server")["Lattice"]["allow_reverse_expansion"] is False
+
+
+def test_mppi_follows_every_planner_within_the_base_caps_and_is_held_to_the_heading() -> None:
+    """MPPI (the goal server's `controller` flag) samples only commands the velocity smoother
+    passes, steps its model at the controller's own period, checks the true rectangle, rides out
+    the same WiFi stall as the RPP pair, and ends the drive on the yaw-checking goal checker."""
+    import ast
+
+    cs = _p("controller_server")
+    m = cs["FollowPathMPPI"]
+    assert m["plugin"] == "nav2_mppi_controller::MPPIController"
+    assert m["motion_model"] == "DiffDrive"
+    vs = _p("velocity_smoother")
+    assert m["vx_max"] == vs["max_velocity"][0]
+    assert m["vx_min"] == vs["min_velocity"][0]
+    assert m["wz_max"] == vs["max_velocity"][2]
+    assert m["ax_max"] == vs["max_accel"][0] and m["ax_min"] == vs["max_decel"][0]
+    assert m["model_dt"] == pytest.approx(1.0 / cs["controller_frequency"])
+    assert m["CostCritic"]["consider_footprint"] is True
+    assert m["transform_tolerance"] == cs["FollowPath"]["transform_tolerance"]
+    assert m["visualize"] is False
+    src = (REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text()
+    followers = next(
+        ast.literal_eval(n.value)
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "FOLLOWERS"
+    )
+    controller, checker = followers["mppi"]
+    assert controller in cs["controller_plugins"]
+    assert checker in cs["goal_checker_plugins"] and cs[checker]["yaw_goal_tolerance"] <= 0.20
 
 
 def test_every_planner_the_goal_server_offers_exists_with_its_controller() -> None:
@@ -620,6 +650,9 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
         # so it republishes what it reads as /pose and the board keeps ONE TF listener
         # (run_recorder's loc_from flag is the reader's half of it).
         "pose_topic",
+        # controller joined on 2026-09-23, default mppi: what follows the plan, and the goal
+        # checker that ends the drive with it.
+        "controller",
     )
     assert all(flags.flag(name).live for name in flags.names)
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"
@@ -1436,8 +1469,16 @@ def test_the_drive_ends_on_position_and_the_goal_server_turns_to_the_heading() -
     assert xy_only["xy_goal_tolerance"] == controller["general_goal_checker"]["xy_goal_tolerance"]
     assert xy_only["yaw_goal_tolerance"] >= 3.14
     tree = ET.parse(REPO / "ros/params/pepin_nav_to_pose.xml")
-    assert any(n.get("goal_checker_id") == "xy_only_goal_checker" for n in tree.iter("FollowPath"))
+    # The checker is picked with the controller; the tree's own default is the RPP pair's.
+    selector = next(tree.iter("GoalCheckerSelector"))
+    assert selector.get("default_goal_checker") == "xy_only_goal_checker"
+    assert selector.get("topic_name") == "goal_checker_selector"
+    assert all(
+        n.get("goal_checker_id") == selector.get("selected_goal_checker")
+        for n in tree.iter("FollowPath")
+    )
     server = sf.tree(f"{NODES}/goal_server.py")
+    assert ast.literal_eval(sf.assignments(server)["RPP_GOAL_CHECKER"]) == "xy_only_goal_checker"
     assert "ActionClient(self, Spin, 'spin')" in sf.unparsed(server, ast.Call)
     assert "self._pivot_to" in sf.calls(server)
     # The pivot stops where the general checker would have called the heading met.

@@ -102,7 +102,10 @@ controller_server:
     # premise that RPP cannot both reverse and turn in place; that is false in nav2 1.3.12
     # (shouldRotateToPath adds pi when reversing). The shim then re-aimed the cart at every fresh
     # plan, and with no reversing left in the plans there is nothing for it to do.
-    controller_plugins: ["FollowPath", "FollowPathRS"]
+    # FollowPathMPPI (2026-09-23): the Nav2 default controller, the goal server's `controller`
+    # flag picks it over the two RPPs for every planner. It turns to the goal's heading itself,
+    # so it runs with the yaw-checking general_goal_checker (the tree's GoalCheckerSelector).
+    controller_plugins: ["FollowPath", "FollowPathRS", "FollowPathMPPI"]
     use_realtime_priority: false
 
     # Progress checker parameters
@@ -244,6 +247,115 @@ controller_server:
       rotate_to_heading_min_angle: 1.2
       max_angular_accel: 1.0  # what the velocity smoother allows; braking harder overshoots the heading
       max_robot_pose_search_dist: 10.0
+
+    FollowPathMPPI:
+      # Model Predictive Path Integral, the Nav2 default controller since Iron. Every cycle it
+      # samples batch_size noisy velocity sequences over time_steps x model_dt, rolls the cart's
+      # diff-drive model along each, scores them with the critics below against the local
+      # costmap and the plan, and drives the cost-weighted average. What it changes here, against
+      # the RPP pair above (drives of 2026-09-23: every leg stopped 12-60 deg short of the mark's
+      # heading, 5-9 recoveries per leg):
+      #  - the heading at the goal is its own job (GoalAngleCritic within 0.5 m of the goal) and
+      #    the tree checks it (general_goal_checker, 0.20 rad), where the RPP pair ends on
+      #    position alone and goto_ros.py never pivots;
+      #  - one arc refused by a mark is one sampled trajectory lost, not a controller failure
+      #    and a recovery, so the cart manoeuvres out of a tight spot itself;
+      #  - it may reverse (vx_min), and a Reeds-Shepp cusp of the Hybrid plan is followed in the
+      #    plan's own direction (PathAngleCritic mode 2, use_path_orientations, path inversion).
+      # The cost: time_steps x batch_size states per cycle on the board's A53 cores. The numbers
+      # below are sized for it (the Nav2 defaults are 56 x 1000 at 20 Hz): 30 steps of 0.1 s
+      # (a 3 s horizon = 0.9 m at the cap) x 500 samples at the controller's 10 Hz.
+      plugin: "nav2_mppi_controller::MPPIController"
+      time_steps: 30
+      model_dt: 0.1  # = 1 / controller_frequency: the model steps as the controller does
+      batch_size: 500
+      iteration_count: 1
+      vx_std: 0.2
+      vy_std: 0.2
+      wz_std: 0.4
+      # The base's caps, the velocity smoother's: forward 0.30, reverse half of it, 0.6 rad/s.
+      vx_max: 0.30
+      vx_min: -0.15
+      vy_max: 0.0
+      wz_max: 0.6
+      ax_max: 0.5  # the smoother's max_accel / max_decel, so a sampled sequence is one it passes
+      ax_min: -1.5
+      az_max: 1.0
+      temperature: 0.3
+      gamma: 0.015
+      motion_model: "DiffDrive"
+      visualize: false  # the trajectory markers cost the board a serialisation per cycle
+      regenerate_noises: false
+      retry_attempt_limit: 1
+      reset_period: 1.0
+      # map -> odom crosses the WiFi (the RPP pair's 1.0 s, same reason: drive 0437).
+      transform_tolerance: 1.0
+      prune_distance: 1.2  # the plan it scores is cut this far ahead: 4 s at the cap
+      max_robot_pose_search_dist: 10.0
+      # A Reeds-Shepp plan reverses out of a dock through a cusp: prune the plan at the cusp so
+      # the cart reaches it before it drives the other way (MPPI's own feasible-planner mode).
+      enforce_path_inversion: true
+      inversion_xy_tolerance: 0.2
+      inversion_yaw_tolerance: 0.4
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.81
+        critical_cost: 300.0
+        # The true rectangle, not a disc: base_link sits at the front edge, so a disc of the
+        # circumscribed radius (0.407 m) would be a cart twice its size.
+        consider_footprint: true
+        collision_cost: 1000000.0
+        # Within this of the goal the preference for open space is dropped (collision still
+        # counts): the marks stand against furniture and the cart must reach them.
+        near_goal_distance: 0.5
+        trajectory_point_step: 2
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: true  # a feasible (Hybrid) plan's headings are the cart's own
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+        mode: 2  # follow the plan's own direction, reverse segments included
 
 
 local_costmap:

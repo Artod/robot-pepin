@@ -293,6 +293,26 @@ FLAGS = FlagSet(
         off_when="to put the two independent listeners back for a comparison — turn this off"
         " here and run_recorder's loc_from to tf, or the tape loses its pose rows",
     ),
+    Flag(
+        "controller",
+        "mppi",
+        choices=("mppi", "rpp"),
+        description="what follows the plan: mppi is Nav2's MPPI controller for every planner,"
+        " held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own"
+        " Regulated Pure Pursuit from PLANNERS, ending on position alone as before 2026-09-23."
+        " Published latched on controller_selector and goal_checker_selector, so a change is"
+        " read by the behaviour tree at its next tick",
+        why="the six legs of 2026-09-23 all stopped 12-60 deg short of the mark's heading:"
+        " the reversing RPP cannot rotate in place, the tree ended the drive on position"
+        " (xy_only_goal_checker), and the pivot that finishes the heading lives here in"
+        " _pivot_to, which drives sent through goto_ros.py never reach. Each leg also ran 5-9"
+        " recoveries, which is what an RPP answers a refused arc with; MPPI samples another"
+        " trajectory instead",
+        on_when="mppi by default, and whenever the heading at the mark matters",
+        off_when="rpp for an A/B against the RPP drives of before, or if MPPI's cycle does not"
+        " fit the board's control period (the controller server's 'Control loop missed its"
+        " desired rate')",
+    ),
 )
 
 PLANNERS = {
@@ -302,6 +322,13 @@ PLANNERS = {
     "smac": ("Smac2D", "FollowPath"),
     "hybrid": ("Hybrid", "FollowPathRS"),  # footprint-aware; the reversing RPP
 }
+# WHAT FOLLOWS THE PLAN, and the goal checker that ends the drive with it (flag `controller`).
+# "rpp" is the catalogue above: each planner's own Regulated Pure Pursuit, ending on position
+# alone — the heading is this node's pivot after the drive (_pivot_to), a path goto_ros.py never
+# took. "mppi" is one controller for every planner, and it turns to the heading itself, so the
+# tree holds it to the heading as well.
+RPP_GOAL_CHECKER = "xy_only_goal_checker"
+FOLLOWERS = {"mppi": ("FollowPathMPPI", "general_goal_checker")}
 
 
 class GoalServer(Node):
@@ -363,15 +390,14 @@ class GoalServer(Node):
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._planner_pick = self.create_publisher(String, "planner_selector", latched)
         self._controller_pick = self.create_publisher(String, "controller_selector", latched)
+        self._checker_pick = self.create_publisher(String, "goal_checker_selector", latched)
         # Remembered across restarts: a container that comes back with a different planner than
         # the one being tested makes every comparison a lie.
         # Under maps/rec, which sync.sh excludes: kept in maps/ the file was deleted by the very
         # next deploy (rsync --delete), so every restart silently went back to the default planner
         # and a drive was credited to a planner that never ran.
         self._planner_path = self._record_dir / ".planner"
-        self.planner = "navfn"
-        with contextlib.suppress(OSError):
-            self.pick_planner(self._planner_path.read_text().strip())
+        self.planner = "navfn"  # the saved pick is published once the switches exist (below)
         self._goal_handle: Any = None
         self._driving = (
             False  # from before send_goal until the drive is finally over: cancel() clears it
@@ -423,7 +449,14 @@ class GoalServer(Node):
         self._localizer = str(self.declare_parameter("localizer", DEFAULT_LOCALIZER).value)
         # Last, after every other declare_parameter: rclpy runs the switches' callback on
         # declarations too, and a name outside the table is refused there (node_kit.Switches).
-        self._switches = Switches(self, FLAGS)
+        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
+        # The saved planner (the default where none was saved), with the follower the
+        # `controller` flag names for it: after the switches, because the pick reads that flag,
+        # and always, because the tree's own defaults are the RPP pair's.
+        saved = ""
+        with contextlib.suppress(OSError):
+            saved = self._planner_path.read_text().strip()
+        self.pick_planner(saved or self.planner)
         self._start_jump_watch()  # the map -> odom jump watch (flag jump_clear, default off)
         self._start_pose_topic()  # /pose, the board's one pose topic (flag pose_topic)
         threading.Thread(target=self._serve, daemon=True).start()
@@ -816,18 +849,31 @@ class GoalServer(Node):
         return {"event": "marked", "name": name, **places[name]}
 
     def pick_planner(self, name: str) -> dict[str, Any]:
-        """Choose the planner and the controller that can follow it; both, or neither."""
+        """Choose the planner, the controller that follows it (flag ``controller``) and the goal
+        checker that ends the drive with that controller; all three, or none."""
         pair = PLANNERS.get(name.lower())
         if pair is None:
             return {"event": "error", "detail": f"planner must be one of {sorted(PLANNERS)}"}
-        planner, controller = pair
+        planner, rpp = pair
+        controller, checker = FOLLOWERS.get(self._switches["controller"], (rpp, RPP_GOAL_CHECKER))
         self._planner_pick.publish(String(data=planner))
         self._controller_pick.publish(String(data=controller))
+        self._checker_pick.publish(String(data=checker))
         self.planner = name.lower()
         with contextlib.suppress(OSError):
             self._planner_path.write_text(f"{self.planner}\n")
-        self.get_logger().info(f"planner {planner} with controller {controller}")
-        return {"event": "planner", "planner": planner, "controller": controller}
+        self.get_logger().info(f"planner {planner} with controller {controller} ({checker})")
+        return {
+            "event": "planner",
+            "planner": planner,
+            "controller": controller,
+            "goal_checker": checker,
+        }
+
+    def _on_switch(self, name: str, old: Any, new: Any) -> None:
+        """A live flag changed: a new ``controller`` re-publishes the pick with its follower."""
+        if name == "controller" and new != old:
+            self.pick_planner(self.planner)
 
     def cancel(self) -> bool:
         """Stop the running drive, if any; True when there was one.

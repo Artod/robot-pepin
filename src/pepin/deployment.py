@@ -306,6 +306,7 @@ LAPTOP_PUBLISHES = (
     HEARTBEAT_TOPIC,
     "planner_selector",
     "controller_selector",
+    "goal_checker_selector",  # the goal checker that goes with the controller (goal_server)
     # THE MAP (World R): RTAB-Map's loop-closed occupancy grid, remapped onto /map by the laptop's
     # launch, latched, re-rendered whenever its graph changes. It is the one map there is — the
     # board's tracker matches on it, adopts it under pepin.mapping.MapChoice's gate and republishes
