@@ -5,7 +5,7 @@ Runs inside the container (rclpy + nav2_simple_commander):
 
     goto_ros.py X Y [YAW_DEG]     drive to map coordinates and print feedback until done
     goto_ros.py home              drive to the map origin, facing +x (the marked start spot)
-    goto_ros.py seed X Y [YAW]    tell AMCL where the robot was put down by hand
+    goto_ros.py seed X Y [YAW]    tell the localiser (tracker or RTAB-Map) where the robot stands
     goto_ros.py cancel            cancel the current navigation task
     goto_ros.py mark NAME         remember where the robot stands now as place NAME
     goto_ros.py NAME              drive to a remembered place
@@ -49,7 +49,7 @@ from typing import Any
 
 import rclpy
 from action_msgs.srv import CancelGoal
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -112,6 +112,8 @@ CERTAINTY_WAIT_S = 3.0
 # shell timeout of 5, and the second navigator was never asked at all.
 CANCEL_CONFIRM_S = 3.0
 NAV_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
+# Where RTAB-Map (the node /rtabmap/rtabmap) takes an operator's pose in localisation mode.
+RTABMAP_INITIAL_POSE = "/rtabmap/initialpose"
 # How long the latched /places is given to land before the file beside the map answers instead. A
 # latched publisher delivers as soon as the two endpoints match, so this covers discovery over the
 # bridge and nothing else: the same 2 s every other "has the route come up" wait here uses, and a
@@ -784,9 +786,27 @@ def main() -> None:
         if args[0] == "seed":
             x, y = float(args[1]), float(args[2])
             yaw = float(args[3]) if len(args) > 3 else 0.0
-            nav.setInitialPose(pose(nav, x, y, yaw))
-            time.sleep(1.0)
-            print(f"AMCL seeded at ({x:.2f}, {y:.2f}) yaw {yaw:.0f} deg")
+            seed = pose(nav, x, y, yaw)
+            nav.setInitialPose(seed)  # /initialpose: the board's tracker, where one runs
+            # ...and RTAB-Map, which listens in its own namespace. Under PEPIN_LOCALIZER=rtabmap it
+            # owns map -> odom and nothing else hears /initialpose: on 2026-09-23 a restart with
+            # the cart at the bookshelf left it "at home" (0 places recognised in 198 updates)
+            # and the only cure at hand was a full restart. Sent a few times over ~3 s: a fresh
+            # publisher is matched over the transport in seconds, and a repeated seed is harmless.
+            rtab = PoseWithCovarianceStamped()
+            rtab.header = seed.header
+            rtab.pose.pose = seed.pose
+            rtab.pose.covariance[0] = rtab.pose.covariance[7] = 0.05**2
+            rtab.pose.covariance[35] = math.radians(5.0) ** 2
+            to_rtabmap = nav.create_publisher(PoseWithCovarianceStamped, RTABMAP_INITIAL_POSE, 1)
+            for _ in range(6):
+                rtab.header.stamp = nav.get_clock().now().to_msg()
+                to_rtabmap.publish(rtab)
+                time.sleep(0.5)
+            print(
+                f"seeded at ({x:.2f}, {y:.2f}) yaw {yaw:.0f} deg: /initialpose (tracker) and"
+                f" {RTABMAP_INITIAL_POSE} (RTAB-Map)"
+            )
             return
         name = None
         # The graph's own book first, the file beside the map second (:class:`Vocabulary`): a
