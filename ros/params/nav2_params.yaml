@@ -105,7 +105,9 @@ controller_server:
     # FollowPathMPPI (2026-09-23): the Nav2 default controller, the goal server's `controller`
     # flag picks it over the two RPPs for every planner. It turns to the goal's heading itself,
     # so it runs with the yaw-checking general_goal_checker (the tree's GoalCheckerSelector).
-    controller_plugins: ["FollowPath", "FollowPathRS", "FollowPathMPPI"]
+    # FollowPathShim (2026-09-23): FollowPathRS inside Nav2's RotationShimController, which turns
+    # the cart to the mark's heading once it is inside the goal tolerance (flag value rpp_shim).
+    controller_plugins: ["FollowPath", "FollowPathRS", "FollowPathMPPI", "FollowPathShim"]
     use_realtime_priority: false
 
     # Progress checker parameters
@@ -200,6 +202,81 @@ controller_server:
       # Regulated Pure Pursuit: a fraction of MPPI's CPU on the board's A53 cores, and a
       # differential-drive cart at 0.15 m/s does not need model-predictive sampling.
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      # The base's own cap (config/base.json); every tape until 2026-09-09 sat at the old 0.20
+      # cap while the wheels had never been asked for more. The smoother below carries the same
+      # number; the contract test keeps the two equal and under the base's.
+      desired_linear_vel: 0.30
+      lookahead_dist: 0.55
+      min_lookahead_dist: 0.40
+      max_lookahead_dist: 0.80  # lookahead_time x desired_linear_vel, else the scaling is clipped
+      lookahead_time: 2.5
+      use_velocity_scaled_lookahead_dist: true
+      rotate_to_heading_angular_vel: 0.5
+      transform_tolerance: 1.0  # map -> odom crosses the WiFi: a 0.4-1.2 s stall (measured 2026-09-22) must not abort the follow (drive 0437: 3 of 4 aborts were this)
+      min_approach_linear_velocity: 0.08
+      approach_velocity_scaling_dist: 0.3  # brake later: the crawl to the goal felt endless
+      # On. RPP checks the CURRENT pose first (isCollisionImminent): a footprint outline touching
+      # one lethal cell refuses every command, including driving away — parked bumper-to-printer,
+      # one pivot later the corner's cell held the printer and the cart was refused for 231 s
+      # (run 0087). Switching the check off cured that and drove the cart into a person standing
+      # in its path (runs 0090-0091): the planner replans at 1-2 Hz and the cost regulation only
+      # crawls, neither stops. So the check stays, and the deadlock is removed at its source: the
+      # lidar hull filter and the ToF min_range hide the 8 cm contact band around the hull
+      # (pepin.footprint.CONTACT_BAND_M), so what the cart is parked against never lands in the
+      # outline's own cells, while anything further is still a wall.
+      use_collision_detection: true
+      # 0.45 m of look-ahead at 0.30 m/s (capped at the carrot). At 0.9 s the refusal came only
+      # 0.20 m before a person who appeared at 0.51 m; the cart stopped 0.14 m short (run 0142).
+      max_allowed_time_to_collision_up_to_carrot: 1.5
+      use_regulated_linear_velocity_scaling: true
+      use_fixed_curvature_lookahead: false
+      use_cost_regulated_linear_velocity_scaling: true
+      # RPP recomputes the distance to an obstacle from the cost it reads, so the scaling factor
+      # must equal the local inflation layer's and the distance must not exceed its radius; on the defaults (3.0 / 0.6) it was
+      # mis-reading its own clearance and crawling near walls for no reason.
+      inflation_cost_scaling_factor: 5.0
+      cost_scaling_dist: 0.40
+      regulated_linear_scaling_min_radius: 0.6
+      regulated_linear_scaling_min_speed: 0.06
+      use_rotate_to_heading: false
+      # Pivoting is the expensive move for this cart: base_link sits 0.30 m ahead of the rear
+      # corners, so turning in place sweeps 0.407 m while driving an arc sweeps barely more than
+      # the hull. RPP forward-simulates a pivot in fixed 7.03 deg steps (2 sin(res/2 / R) / w),
+      # so 0.6 rad/s checked 21.1 deg = 0.365 m of clearance and was refused 44 times beside a
+      # printer standing 0.35 m away; 0.5 rad/s checks 14.1 deg = 0.340 m. Raising the threshold
+      # to 1.2 rad means anything under 69 deg is driven out as an arc instead of pivoted on the
+      # spot — which is what a person does in a tight corner.
+      rotate_to_heading_min_angle: 1.2
+      max_angular_accel: 1.0  # what the velocity smoother allows; braking harder overshoots the heading
+      max_robot_pose_search_dist: 10.0
+
+    FollowPathShim:
+      # The reversing RPP of FollowPathRS inside Nav2's RotationShimController (2026-09-23): the
+      # RPP drives, and once the cart is inside the goal checker's xy tolerance the shim takes
+      # the wheels back and turns it IN PLACE to the mark's heading (rotate_to_goal_heading),
+      # checked for collision like any rotation. That is the heading the RPP pair never gave
+      # (tape 0457: 7 cm but 29 deg short), without a pivot of our own. The shim's other job —
+      # turning the cart towards the path before it starts — stays off (angular_dist_threshold
+      # past pi): a Hybrid plan may begin with a reverse cusp, and turning to face it would spin
+      # the cart round. Everything below the shim's own keys is FollowPathRS verbatim (rcl knows
+      # no YAML anchors; the contract test keeps the copies equal).
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      rotate_to_goal_heading: true
+      angular_dist_threshold: 3.2  # > pi: never turn to the path at the start
+      forward_sampling_distance: 0.5
+      simulate_ahead_time: 1.0
+      # rotate_to_heading_angular_vel (0.5) and max_angular_accel (1.0) are shared with the RPP
+      # below, which declares them: the shim's turn is RPP's pivot speed.
+      # The same RPP with reversing allowed: the Hybrid-A* plan leaves a docked start with a
+      # short reverse arc (a cusp in the path) and RPP drives it only with allow_reversing.
+      # RPP refuses rotate_to_heading together with reversing, and a footprint-planned path
+      # starts along the heading anyway, so the pivots go with it. A verbatim copy of the
+      # block above except for those two keys: rcl's YAML parser knows no anchors, and the
+      # controller server died on one (the contract test keeps the copies equal).
+      allow_reversing: true
+      # Regulated Pure Pursuit: a fraction of MPPI's CPU on the board's A53 cores, and a
+      # differential-drive cart at 0.15 m/s does not need model-predictive sampling.
       # The base's own cap (config/base.json); every tape until 2026-09-09 sat at the old 0.20
       # cap while the wheels had never been asked for more. The smoother below carries the same
       # number; the contract test keeps the two equal and under the base's.

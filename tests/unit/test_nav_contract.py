@@ -410,7 +410,12 @@ def test_two_controllers_and_only_the_footprint_planner_may_plan_a_reverse() -> 
     """FollowPath never reverses and may pivot; FollowPathRS follows the cusps of a Hybrid-A*
     plan and, as RPP demands, gives up rotate-to-heading for it. The lattice stays forward-only."""
     cs = _p("controller_server")
-    assert cs["controller_plugins"] == ["FollowPath", "FollowPathRS", "FollowPathMPPI"]
+    assert cs["controller_plugins"] == [
+        "FollowPath",
+        "FollowPathRS",
+        "FollowPathMPPI",
+        "FollowPathShim",
+    ]
     assert cs["FollowPath"].get("allow_reversing", False) is False
     assert cs["FollowPathRS"]["allow_reversing"] is True
     assert cs["FollowPathRS"]["use_rotate_to_heading"] is False
@@ -458,6 +463,30 @@ def test_mppi_follows_every_planner_within_the_base_caps_and_is_held_to_the_head
     controller, checker = followers["mppi"]
     assert controller in cs["controller_plugins"]
     assert checker in cs["goal_checker_plugins"] and cs[checker]["yaw_goal_tolerance"] <= 0.20
+
+
+def test_the_shim_wraps_the_reversing_rpp_and_turns_only_at_the_goal() -> None:
+    """FollowPathShim is FollowPathRS verbatim inside Nav2's RotationShimController: it turns the
+    cart to the mark's heading once inside the goal tolerance, never to the path at the start
+    (a Hybrid plan may begin with a reverse cusp), and ends on the yaw-checking goal checker."""
+    import ast
+
+    cs = _p("controller_server")
+    shim, rs = cs["FollowPathShim"], cs["FollowPathRS"]
+    assert shim["plugin"] == "nav2_rotation_shim_controller::RotationShimController"
+    assert shim["primary_controller"] == rs["plugin"]
+    assert shim["rotate_to_goal_heading"] is True
+    assert shim["angular_dist_threshold"] > math.pi
+    assert {k: v for k, v in shim.items() if k in rs and k != "plugin"} == {
+        k: v for k, v in rs.items() if k != "plugin"
+    }, "the shim's RPP drifted from FollowPathRS (no YAML anchors: rcl cannot parse them)"
+    src = (REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text()
+    followers = next(
+        ast.literal_eval(n.value)
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "FOLLOWERS"
+    )
+    assert followers["rpp_shim"] == ("FollowPathShim", "general_goal_checker")
 
 
 def test_every_planner_the_goal_server_offers_exists_with_its_controller() -> None:

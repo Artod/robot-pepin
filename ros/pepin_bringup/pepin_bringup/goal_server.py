@@ -296,10 +296,12 @@ FLAGS = FlagSet(
     Flag(
         "controller",
         "mppi",
-        choices=("mppi", "rpp"),
+        choices=("mppi", "rpp", "rpp_shim"),
         description="what follows the plan: mppi is Nav2's MPPI controller for every planner,"
         " held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own"
-        " Regulated Pure Pursuit from PLANNERS, ending on position alone as before 2026-09-23."
+        " Regulated Pure Pursuit from PLANNERS, ending on position alone as before 2026-09-23;"
+        " rpp_shim is the reversing RPP inside Nav2's RotationShimController, which turns the cart"
+        " to the mark's heading in place once it is inside the goal tolerance."
         " Published latched on controller_selector and goal_checker_selector, so a change is"
         " read by the behaviour tree at its next tick",
         why="the six legs of 2026-09-23 all stopped 12-60 deg short of the mark's heading:"
@@ -328,7 +330,12 @@ PLANNERS = {
 # took. "mppi" is one controller for every planner, and it turns to the heading itself, so the
 # tree holds it to the heading as well.
 RPP_GOAL_CHECKER = "xy_only_goal_checker"
-FOLLOWERS = {"mppi": ("FollowPathMPPI", "general_goal_checker")}
+FOLLOWERS = {
+    "mppi": ("FollowPathMPPI", "general_goal_checker"),
+    # The reversing RPP inside Nav2's RotationShimController: RPP's pace, and the shim turns the
+    # cart in place to the mark's heading once it is inside the goal tolerance.
+    "rpp_shim": ("FollowPathShim", "general_goal_checker"),
+}
 
 
 class GoalServer(Node):
