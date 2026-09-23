@@ -321,7 +321,12 @@ controller_server:
         enabled: true
         cost_power: 1
         cost_weight: 3.0
-        threshold_to_consider: 0.5
+        # 0.15, not the default 0.5 (tape 0454): held to the mark's heading from half a metre
+        # out, the cart arrived 10-21 cm off to the SIDE and could not turn to fix it — a
+        # differential drive corrects a lateral miss only by leaving the heading — so it
+        # shuttled forward and back for 50 s. Now position first, the heading in the last 15 cm
+        # (the goal checker is stateful: once inside 0.10 m only the heading is left).
+        threshold_to_consider: 0.15
       PreferForwardCritic:
         enabled: true
         cost_power: 1
