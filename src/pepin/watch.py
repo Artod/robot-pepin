@@ -596,7 +596,7 @@ class PoseSpread:
 class Readiness:
     """Whether a goal may start now, whether a tracker is there at all, and why not when it may
     not — the phrase the operator reads on a refusal, and which rule (:data:`BY_SIGMA`,
-    :data:`BY_FIT`, :data:`BY_TF`) reached it."""
+    :data:`BY_FIT`, :data:`BY_TF`, :data:`BY_PLACEMENT`) reached it."""
 
     ready: bool
     tracker: bool  # a tracker publishes a fit here: what arms the blind-drive watch
