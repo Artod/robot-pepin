@@ -30,10 +30,32 @@ _matcher: Any = None
 _min_conf = DEFAULT_MIN_CONF
 
 
+def import_torch() -> Any:
+    """torch, loaded so that ITS OWN BLAS answers its matrix products inside RTAB-Map.
+
+    RTAB-Map's process has already loaded the system's reference libblas.so.3 (through its own
+    dependencies) when the embedded interpreter first imports torch, and the dynamic linker binds
+    libtorch_cpu's sgemm_ and friends to that first definition in the global scope: measured in
+    pepin-laptop:xfeat, LighterGlue took 1.5 s a pair inside RTAB-Map against 0.4 s standalone,
+    XFeat's convolutions (no BLAS) the same in both. RTLD_DEEPBIND puts torch's own dependency
+    chain ahead of the global scope for the libraries this import opens. Elsewhere (a plain
+    interpreter, macOS without the flag) it changes nothing. Kept in both adapters because RTAB-Map
+    loads each by its own path and either may come first.
+    """
+    if "torch" in sys.modules:
+        return sys.modules["torch"]
+    flags = sys.getdlopenflags()
+    sys.setdlopenflags(flags | getattr(os, "RTLD_DEEPBIND", 0))
+    try:
+        import torch
+    finally:
+        sys.setdlopenflags(flags)
+    return torch
+
+
 def load_lighterglue(xfeat_dir: str = XFEAT_DIR) -> Any:
     """LighterGlue on the CPU with the weights of the checkout at ``xfeat_dir``; the model."""
-    import torch
-
+    torch = import_torch()
     if xfeat_dir not in sys.path:
         sys.path.insert(0, xfeat_dir)
     from modules.lighterglue import LighterGlue
