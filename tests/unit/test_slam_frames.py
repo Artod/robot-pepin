@@ -904,9 +904,27 @@ def test_the_scan_coming_back_takes_orb_back_with_icp(
     assert back["RGBD/LoopClosureReextractFeatures"] == "false"
     node._report()
     assert (
-        "visual features orb (xfeat asked, sent with the visual strategy only)"
+        "visual features orb (xfeat asked, sent with the visual strategy only and only while"
         in (node.logger.texts("info")[-1])
     )
+
+
+def test_a_visual_strategy_that_maps_carries_orb(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Re-extraction strips the nodes it WRITES of their descriptors and 3D (Memory.cpp:6126): a
+    database that is being taught keeps being taught the way it was built."""
+    _adapters(monkeypatch, tmp_path, present=True)
+    with ros_stubs.parameters(graph_memory="map"):
+        node = rtabmap_frame.RtabmapFrame()
+    tuner, _ = _tuner_ready(node)
+    _go_visual(node)
+    strategy_sets = [s for s in _sent(tuner) if "Reg/Strategy" in s]
+    assert strategy_sets[-1]["Reg/Strategy"] == "0"
+    assert strategy_sets[-1]["Vis/FeatureType"] == "8"
+    assert strategy_sets[-1]["RGBD/LoopClosureReextractFeatures"] == "false"
+    node._report()
+    assert "only while localising" in node.logger.texts("info")[-1]
 
 
 def test_the_memory_never_maps_before_this_start_is_tied_to_the_loaded_map() -> None:

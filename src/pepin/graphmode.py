@@ -199,10 +199,13 @@ REGISTRATION_PARAMETERS = {
 # not count as a guess at :1012). The ORB words stay the vocabulary that FINDS the node (Kp/*,
 # untouched); XFeat only decides whether it is really there, and where.
 #
-# ONLY WITH THE VISUAL STRATEGY, because the same flag changes what a NEW node stores: with it on,
-# createSignature keeps no word descriptors and no 3D (Memory.cpp:6126), and a node mapped that way
-# could later be registered by re-extraction only. The strategy that maps is ICP (the lidar teaches
-# the database), and under it the set is always ORB's — the launch table's own values.
+# ONLY WITH THE VISUAL STRATEGY AND ONLY WHILE LOCALISING, because the same flag changes what a
+# NEW node stores: with it on, createSignature keeps no word descriptors and no 3D
+# (Memory.cpp:6126), and a node mapped that way could later be registered by re-extraction only.
+# The strategy that maps is ICP (the lidar teaches the database), and under it the set is always
+# ORB's — the launch table's own values; a visual strategy that is also MAPPING (graph_memory map,
+# or one day a holder that is not the graph) gets ORB's too, so the database is never written
+# differently from how it was built.
 FEATURES_ORB, FEATURES_XFEAT = "orb", "xfeat"
 # Where the image built by ros/Dockerfile.xfeat puts the two adapters RTAB-Map loads by path. An
 # image without them (the apt build, no Python in RTAB-Map) cannot run the xfeat set at all.
@@ -227,11 +230,14 @@ PNP_REPROJ_PX = 2.0
 PNP_REPROJ_RANGE_PX = (1.0, 4.0)
 
 
-def visual_parameters(strategy: str, features: str, pnp_reproj_px: float) -> dict[str, str]:
+def visual_parameters(
+    strategy: str, features: str, pnp_reproj_px: float, mapping: bool = False
+) -> dict[str, str]:
     """The feature set and PnP gate RTAB-Map's visual registration should run under
-    ``strategy``, as the strings rtabmap wants: ``features`` under the visual strategy, ORB's set
-    under ICP whatever the flag says (the module comment above says why)."""
-    chosen = features if strategy == STRATEGY_VIS else FEATURES_ORB
+    ``strategy``, as the strings rtabmap wants: ``features`` under the visual strategy while the
+    database only localises, ORB's set under ICP or while mapping whatever the flag says (the
+    module comment above says why)."""
+    chosen = features if (strategy == STRATEGY_VIS and not mapping) else FEATURES_ORB
     if chosen not in FEATURE_PARAMETERS:
         raise ValueError(f"unknown feature set {chosen!r}; sets: {sorted(FEATURE_PARAMETERS)}")
     return {**FEATURE_PARAMETERS[chosen], "Vis/PnPReprojError": f"{pnp_reproj_px:g}"}

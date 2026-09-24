@@ -119,6 +119,7 @@ from pepin.graphmode import (
     BY_TRUST,
     FEATURES_ORB,
     FEATURES_XFEAT,
+    MAPPING,
     PNP_REPROJ_PX,
     PNP_REPROJ_RANGE_PX,
     SHARP_SIGMA_DEG,
@@ -592,6 +593,9 @@ class RtabmapFrame(Node):
         # this image can run xfeat at all — the two adapters RTAB-Map loads by path are here or not.
         self._xfeat_here = all(Path(p).is_file() for p in (XFEAT_DETECTOR_PATH, XFEAT_MATCHER_PATH))
         self._visual_sent = visual_parameters(STRATEGY_ICP, FEATURES_ORB, PNP_REPROJ_PX)
+        # The Reg/Strategy that went out with it: a switch the parameter path could not take leaves
+        # RTAB-Map on the old one, and its features must stay the old one's (ORB under ICP).
+        self._strategy_sent = STRATEGY_ICP
         # THE TWO HALVES OF ONE UPDATE. The node a /rtabmap/info named and that message's stamp;
         # RTAB-Map's own localisation, its stamp and the planar 3x3 it measured. A word is made when
         # the two carry the same stamp, once (`_spent`): an update recognised nothing is silence.
@@ -1348,20 +1352,21 @@ class RtabmapFrame(Node):
                 state.carries(LIDAR) if (state is not None and fresh) else None,
                 state.kind if state is not None else "",
             )
-        visual = self._visual_wanted()
         if verdict is not None:
+            visual = self._visual_wanted(verdict.strategy)
             # One set for the strategy and its features: the pipeline RTAB-Map re-creates on a new
             # Reg/Strategy is built from the accumulated map, so it is born with the right ones.
             if not self._set_parameters({**verdict.parameters, **visual}):
                 self._strategy_failed += 1
                 return
-            self._visual_sent = visual
+            self._visual_sent, self._strategy_sent = visual, verdict.strategy
             self.get_logger().info(
                 f"rtabmap registration: {verdict.text()} -> Reg/Strategy {verdict.strategy},"
                 f" {self._visual_text()} (set on {RTABMAP_NODE} and re-read through"
                 f" {RTABMAP_NODE}/update_parameters)"
             )
             return
+        visual = self._visual_wanted(self._strategy_sent)
         if visual != self._visual_sent and self._path_up() and self._set_parameters(visual):
             # A flag moved, or a switch above went out without its features: the strategy in
             # force is kept, only the visual set is re-sent (RegistrationVis re-reads it and
@@ -1379,12 +1384,15 @@ class RtabmapFrame(Node):
         asked = str(self._switches["visual_features"])
         return asked if (asked != FEATURES_XFEAT or self._xfeat_here) else FEATURES_ORB
 
-    def _visual_wanted(self) -> dict[str, str]:
-        """The visual parameters RTAB-Map should hold under the strategy in force
-        (:func:`pepin.graphmode.visual_parameters`): the flags' set under the visual strategy,
-        ORB's under ICP."""
+    def _visual_wanted(self, strategy: str) -> dict[str, str]:
+        """The visual parameters RTAB-Map should hold under ``strategy``
+        (:func:`pepin.graphmode.visual_parameters`): the flags' set under the visual strategy while
+        the database only localises, ORB's under ICP or while it maps."""
         return visual_parameters(
-            self._strategy.strategy, self._features(), float(self._switches["pnp_reproj_px"])
+            strategy,
+            self._features(),
+            float(self._switches["pnp_reproj_px"]),
+            mapping=self._mode.mode == MAPPING,
         )
 
     def _visual_text(self) -> str:
@@ -1397,7 +1405,7 @@ class RtabmapFrame(Node):
         if asked == FEATURES_XFEAT and not self._xfeat_here:
             why = f" (xfeat asked, but this image has no {XFEAT_DETECTOR_PATH})"
         elif asked != features:
-            why = f" ({asked} asked, sent with the visual strategy only)"
+            why = f" ({asked} asked, sent with the visual strategy only and only while localising)"
         return f"visual features {features}{why}, PnP {sent.get('Vis/PnPReprojError', '?')} px"
 
     # ---- outputs -------------------------------------------------------------------------
