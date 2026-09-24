@@ -3381,9 +3381,12 @@ def test_the_lidar_and_the_base_die_apart_and_each_comes_back() -> None:
     assert (
         "base_parts.append" in base_block and f"components.append(\n            {bridge}" not in src
     )
-    split = src[src.index("containers = [") : src.index("return containers")]
-    assert 'name="lidar_container"' in split and 'name="base_container"' in split
-    assert split.count("**RESPAWN") == 2
+    split = src[src.index("    containers = respawned_container(") : src.index("return containers")]
+    assert '"lidar_container"' in split and '"base_container"' in split
+    # A respawn restores the nodes too: they are loaded on every start of the process, not once.
+    helper = src[src.index("def respawned_container(") : src.index("def sensors_container(")]
+    assert "**RESPAWN" in helper and "composable_node_descriptions=[]" in helper
+    assert "OnProcessStart(" in helper and "LoadComposableNodes(" in helper
     names = {
         p["name"]
         for p in json.loads((REPO / "config/board_manifest.json").read_text())["processes"]

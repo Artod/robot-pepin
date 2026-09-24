@@ -46,10 +46,16 @@ Arguments:
 import math
 
 from launch import Condition, LaunchContext, LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    OpaqueFunction,
+    RegisterEventHandler,
+)
 from launch.conditions import IfCondition, UnlessCondition
+from launch.event_handlers import OnProcessStart
 from launch.substitutions import LaunchConfiguration, PythonExpression
-from launch_ros.actions import ComposableNodeContainer, Node
+from launch_ros.actions import ComposableNodeContainer, LoadComposableNodes, Node
 from launch_ros.descriptions import ComposableNode
 
 from pepin.deployment import (
@@ -102,6 +108,33 @@ def quaternion(roll: float, pitch: float, yaw: float) -> tuple[float, float, flo
         cr * cp * sy - sr * sp * cy,
         cr * cp * cy + sr * sp * sy,
     )
+
+
+def respawned_container(name: str, parts: list, prefix: str) -> list:  # type: ignore[type-arg]
+    """A component container that comes back WITH its nodes: the process is respawned 2 s after it
+    dies, and its components are loaded by a handler of every start of that process rather than
+    by the container action itself. launch_ros loads a container's ``composable_node_descriptions``
+    once, at the first start: measured on 2026-09-24, a respawned lidar_container came back empty
+    (no driver, no /scan, rf2o silent) — a respawn that restores nothing."""
+    container = ComposableNodeContainer(
+        name=name,
+        namespace="",
+        package="rclcpp_components",
+        executable="component_container_isolated",
+        output="screen",
+        prefix=prefix,
+        composable_node_descriptions=[],
+        **RESPAWN,
+    )
+    load = RegisterEventHandler(
+        OnProcessStart(
+            target_action=container,
+            on_start=[
+                LoadComposableNodes(target_container=container, composable_node_descriptions=parts)
+            ],
+        )
+    )
+    return [container, load]
 
 
 def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
@@ -264,31 +297,10 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
             composable_node_descriptions=components + base_parts,
         )
         return [container]
-    containers = [
-        ComposableNodeContainer(
-            name="lidar_container",
-            namespace="",
-            package="rclcpp_components",
-            executable="component_container_isolated",
-            output="screen",
-            prefix="nice -n -10",  # sensing first: a starved driver ships scans seconds late
-            composable_node_descriptions=components,
-            **RESPAWN,
-        )
-    ]
+    # sensing first: a starved driver ships scans seconds late; the wheels and the gyro alike
+    containers = respawned_container("lidar_container", components, "nice -n -10")
     if base_parts:
-        containers.append(
-            ComposableNodeContainer(
-                name="base_container",
-                namespace="",
-                package="rclcpp_components",
-                executable="component_container_isolated",
-                output="screen",
-                prefix="nice -n -10",  # the wheels and the gyro at the sensors' priority
-                composable_node_descriptions=base_parts,
-                **RESPAWN,
-            )
-        )
+        containers += respawned_container("base_container", base_parts, "nice -n -10")
     return containers
 
 
