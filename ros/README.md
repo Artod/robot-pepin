@@ -105,8 +105,8 @@ refuses to begin while a navigation goal is running. The hang appeared on 4 of 7
 | 2.7 | `rtabmap_frame` has an anchor (from file or learned) and `over N infos` with N > 0 — 0 means the graph's trust is deaf |
 | 2.8 | no `process has died` in the container since it started |
 | 2.9 | Foxglove: the bridge answers on `ws://localhost:8765` and advertises every topic the layout draws (`ros/foxglove.sh check`; its failing lines are indented under this one) |
-| 2.12 | `pepin-vslam` carries the XFeat adapters (`/opt/xfeat/rtabmap_xfeat.py`), so `rtabmap_frame`'s `visual_features` default can run; on any other image the visual registration is ORB's. Passes on such an image only under `PEPIN_XFEAT=0`, which says ORB is meant (see "XFeat image") |
 | 2.11 | **informational (`WARN`, never fails)**: `marks_audit`'s last line — the local costmap's lethal cells split into lidar-backed, camera-only and unexplained. There is no healthy value (a room with a table in it should show camera-only cells); it is printed so the split is in front of you before the first goal |
+| 2.12 | `pepin-vslam` carries the XFeat adapters (`/opt/xfeat/rtabmap_xfeat.py`), so `rtabmap_frame`'s `visual_features` default can run; on any other image the visual registration is ORB's. Passes on such an image only under `PEPIN_XFEAT=0`, which says ORB is meant (see "The XFeat image") |
 
 | # | flags |
 |---|---|
@@ -2389,6 +2389,53 @@ argument, default 1 so an on-board `docker build` is safe without being told, an
 an unchanged layer is reused, so a rebuild after a change to `pepin_bringup` does not recompile
 rf2o. `PEPIN_BUILD_CACHE=<dir>` additionally exports the build cache to a directory (this needs
 a `docker-container` builder, which the script creates as `pepin-arm64`).
+
+## The XFeat image
+
+`pepin-laptop:xfeat` is the laptop image with RTAB-Map able to run `rtabmap_frame`'s
+`visual_features` default: XFeat keypoints matched by LighterGlue in the visual registration.
+It is `pepin-laptop:zenoh` plus RTAB-Map 0.22.1 and the rtabmap_ros packages that link it,
+rebuilt from their pinned upstream commits with Python (the apt build has none, and
+`Vis/FeatureType 15` / `Vis/CorNNType 6` are compiled out of it), XFeat and LighterGlue at a pinned
+commit with their weights inside, and the two adapters RTAB-Map loads by path in `/opt/xfeat`
+(`ros/xfeat/`). Everything runs on the CPU; a registration costs 0.67-0.70 s inside RTAB-Map.
+
+**Build.** `ros/laptop-build.sh xfeat` — about an hour (`ros/Dockerfile.xfeat`,
+`ros/xfeat/build_rtabmap.sh`). The Docker VM also runs the live stack, and on 2026-09-24 nine
+parallel compiles filled its 16 GB and the OOM killer took the stack's processes instead of the
+compilers. So the build runs 2 jobs per phase (`PEPIN_CORE_JOBS`, `PEPIN_ROS_JOBS`) and is cancelled
+once more than 75 % of the VM's memory is in use (`PEPIN_BUILD_MAX_USED_PCT`); `PEPIN_XFEAT_BASE`
+names another base. It fails, rather than producing a different RTAB-Map, when the rebuilt core
+lacks an optional library the apt one had (GTSAM, g2o, libpointmatcher and octomap decide defaults
+the launch table does not name, such as `Optimizer/Strategy` and `Icp/Strategy`), or when a second
+core is left anywhere under `/opt/ros/jazzy`.
+
+**Run.** `ros/laptop.sh vslam` (and so `ros/restart.sh laptop`) starts `pepin-vslam` on
+`pepin-laptop:xfeat` whenever that image exists and was built on the current laptop image. Its
+layers must begin with that image's layers, so a laptop image rebuilt since is not traded for an
+older one. Otherwise the usual image runs, `visual_features` falls back to ORB, and the script says
+so on stderr. Restart check 2.12 fails a camera half without the adapters.
+
+| setting | image | visual registration |
+|---|---|---|
+| unset | `pepin-laptop:xfeat` if built on the current base, else the base with a stderr line | xfeat, else ORB |
+| `PEPIN_XFEAT=0` | the base (`pepin-laptop:zenoh`), the rollback | ORB, and check 2.12 passes |
+| `PEPIN_XFEAT=1` | `pepin-laptop:xfeat`, or the command refuses | xfeat |
+| `PEPIN_IMAGE=<tag>` | that tag, whatever the above | xfeat if the tag carries `/opt/xfeat` |
+
+Inside the running node the switch is live (`visual_features orb`, `pnp_reproj_px`), with no
+restart. The image tags kept for a rollback are `pepin-laptop:zenoh` (stock RTAB-Map) and
+`pepin-laptop:xfeat-refblas`. `xfeat-refblas` is the xfeat image from before the adapters imported
+torch with `RTLD_DEEPBIND`: there torch's matrix products bind to the reference BLAS RTAB-Map loads
+first, and a registration costs 1.70 s instead of 0.67 s (`PEPIN_IMAGE=pepin-laptop:xfeat-refblas
+ros/laptop.sh vslam`).
+
+**Known broken in this image.** The GUI parts were not rebuilt, because this build leaves out Qt:
+`rtabmap_viz`, `librtabmap_rviz_plugins.so`, and the `rtabmap` / `rtabmap-databaseViewer`
+desktop tools. They still link apt's `librtabmap_gui` 0.22.1, which was compiled against the core's
+old class layout (Python support adds a member to `rtabmap::Rtabmap`), so they must not be run
+from this image. Nothing in `vslam.launch.py` starts them; Foxglove is the window. Open a database
+with the tools of `pepin-laptop:zenoh`.
 
 ## Build and run (on the board)
 
