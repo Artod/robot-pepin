@@ -789,6 +789,126 @@ def test_a_parameter_path_that_is_not_up_is_counted_and_retried() -> None:
     assert "switches the parameter path could not take" in node.logger.texts("info")[-1]
 
 
+# ---- the visual registration's features ---------------------------------------------------------
+def _sent(tuner: Any) -> list[dict[str, str]]:
+    """Every parameter set that went out, in order, as name -> the STRING rtabmap reads back."""
+    return [{p.name: p.value.string_value for p in request.parameters} for request in tuner.calls]
+
+
+def _adapters(monkeypatch: pytest.MonkeyPatch, where: Any, present: bool) -> None:
+    """The image: the two adapters RTAB-Map loads by path are there (pepin-laptop:xfeat) or not."""
+    for name in ("XFEAT_DETECTOR_PATH", "XFEAT_MATCHER_PATH"):
+        path = where / f"{name}.py"
+        if present:
+            path.write_text("")
+        monkeypatch.setattr(rtabmap_frame, name, str(path))
+
+
+def _go_visual(node: Any) -> None:
+    """Camera-only snapshots for as long as the change has to hold: the rule switches to visual."""
+    for seconds in (10.0, 10.6):
+        node.clock.seconds = seconds
+        _snapshots(node, ("camera",), "camera-only")
+        node.timers[0][1]()
+
+
+def test_the_visual_strategy_goes_out_with_the_xfeat_set_in_the_xfeat_image(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """ONE set, strategy and features together: the pipeline RTAB-Map re-creates on a new
+    Reg/Strategy is built from the accumulated map, so it must be born with its features."""
+    _adapters(monkeypatch, tmp_path, present=True)
+    node = rtabmap_frame.RtabmapFrame()
+    tuner, _ = _tuner_ready(node)
+    _go_visual(node)
+    sets = _sent(tuner)
+    assert len(sets) == 1
+    assert {k: sets[0][k] for k in ("Reg/Strategy", "Vis/FeatureType", "Vis/CorNNType")} == {
+        "Reg/Strategy": "0",
+        "Vis/FeatureType": "15",
+        "Vis/CorNNType": "6",
+    }
+    assert sets[0]["RGBD/LoopClosureReextractFeatures"] == "true", "the database is only read"
+    assert sets[0]["Vis/PnPReprojError"] == "2"
+    assert "visual features xfeat, PnP 2 px" in node.logger.texts("info")[-1]
+
+
+def test_without_the_adapters_the_visual_strategy_keeps_orb_and_says_why(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The apt image has no Python in RTAB-Map: asking it for type 15 would silently give GFTT/ORB
+    under another name. The flag stays xfeat; what goes out is ORB, and the report says so."""
+    _adapters(monkeypatch, tmp_path, present=False)
+    node = rtabmap_frame.RtabmapFrame()
+    tuner, _ = _tuner_ready(node)
+    _go_visual(node)
+    sets = _sent(tuner)
+    assert sets[0]["Reg/Strategy"] == "0" and sets[0]["Vis/FeatureType"] == "8"
+    assert sets[0]["RGBD/LoopClosureReextractFeatures"] == "false"
+    node._report()
+    assert "xfeat asked, but this image has no" in node.logger.texts("info")[-1]
+
+
+def test_a_flag_moved_under_the_visual_strategy_re_sends_the_features_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The features ride the pipeline's own parseParameters (RegistrationVis rebuilds its
+    detectors) while the strategy stays: Reg/Strategy is not sent again."""
+    _adapters(monkeypatch, tmp_path, present=True)
+    node = rtabmap_frame.RtabmapFrame()
+    tuner, _ = _tuner_ready(node)
+    _go_visual(node)
+    node._switches.set("visual_features", "orb")
+    node.timers[0][1]()
+    node._switches.set("pnp_reproj_px", 4.0)
+    node.timers[0][1]()
+    node.timers[0][1]()  # nothing moved: nothing goes out
+    sets = _sent(tuner)
+    assert len(sets) == 3
+    assert "Reg/Strategy" not in sets[1] and "Reg/Strategy" not in sets[2]
+    assert sets[1]["Vis/FeatureType"] == "8" and sets[1]["Vis/PnPReprojError"] == "2"
+    assert sets[2]["Vis/FeatureType"] == "8" and sets[2]["Vis/PnPReprojError"] == "4"
+
+
+def test_under_icp_the_feature_flag_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Under ICP the set is ORB's, which is the launch table's: agreeing with it costs nothing."""
+    _adapters(monkeypatch, tmp_path, present=True)
+    node = rtabmap_frame.RtabmapFrame()
+    tuner, _ = _tuner_ready(node)
+    for seconds in (10.0, 11.0):
+        node.clock.seconds = seconds
+        _snapshots(node, ("camera", "lidar"), "full")
+        node.timers[0][1]()
+    node._switches.set("visual_features", "orb")
+    node.timers[0][1]()
+    assert not tuner.calls
+
+
+def test_the_scan_coming_back_takes_orb_back_with_icp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """ICP is the strategy that maps, and a node mapped under re-extraction keeps no descriptors
+    and no 3D (Memory.cpp:6126): ORB's set comes back in the same set as Reg/Strategy 1."""
+    _adapters(monkeypatch, tmp_path, present=True)
+    node = rtabmap_frame.RtabmapFrame()
+    tuner, _ = _tuner_ready(node)
+    _go_visual(node)
+    for seconds in (11.0, 11.6):
+        node.clock.seconds = seconds
+        _snapshots(node, ("camera", "lidar"), "full")
+        node.timers[0][1]()
+    back = _sent(tuner)[-1]
+    assert back["Reg/Strategy"] == "1" and back["Vis/FeatureType"] == "8"
+    assert back["RGBD/LoopClosureReextractFeatures"] == "false"
+    node._report()
+    assert (
+        "visual features orb (xfeat asked, sent with the visual strategy only)"
+        in (node.logger.texts("info")[-1])
+    )
+
+
 def test_the_memory_never_maps_before_this_start_is_tied_to_the_loaded_map() -> None:
     """A switch to mapping before RTAB-Map has recognised one node of the database it LOADED opens
     a new map in the odometry's frame, unlinked to the old one (live 2026-09-19: 2 nodes in the
