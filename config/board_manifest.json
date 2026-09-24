@@ -102,7 +102,7 @@
     {
       "name": "base_container",
       "match": "component_container_isolated .*__node:=base_container",
-      "role": "The base in a process of its own at high priority, respawned 2 s after it dies: the wheel bridge (cmd_vel in, odom and the IMU's yaw rate out, the gyro's zero re-measured at rest) and the IMU's static mount.",
+      "role": "The base in a process of its own at high priority, respawned 2 s after it dies: the wheel bridge (cmd_vel in, odom and the IMU's yaw rate out, the gyro's zero re-measured at rest, a zero-velocity update for the EKF while the cart is certainly still) and the IMU's static mount.",
       "on_board_because": [
         "real-time",
         "hardware-attached"
@@ -111,7 +111,7 @@
       "components": [
         {
           "name": "base_bridge",
-          "role": "wheel speeds and odometry over TCP 3336, /cmd_vel in, /odom out, and the MPU6050's yaw rate as imu/data_raw whose zero is re-measured from the rest the wheels witness (C++ build when base_bridge_cpp:=true, else its own Python process)"
+          "role": "wheel speeds and odometry over TCP 3336, /cmd_vel in, /odom out, the MPU6050's yaw rate as imu/data_raw whose zero is re-measured from the rest the wheels witness, and /zupt (the EKF's odom2, a zero twist at 10 Hz) while that rest, no fresh cmd_vel and a quiet gyro agree (C++ build when base_bridge_cpp:=true, else its own Python process, which has no gyro and no /zupt)"
         },
         {
           "name": "base_to_imu",

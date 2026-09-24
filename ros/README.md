@@ -135,6 +135,15 @@ sigma and gated RTAB-Map's correct words out; the pose jumped 3.4 m. What belong
 WiFi loss and close a loop in milliseconds. `map -> odom` is a slow correction every consumer
 composes with `odom -> base_link`.
 
+**What the tracker took with it.** It was also the only publisher of the EKF's zero-velocity
+input (`/zupt`, `odom2` in `ros/params/ekf.yaml`), so under `rtabmap` a parked cart's filter heard
+nothing but its sources' own drift and its heading followed rf2o's +1.5 deg/min at rest: ~5 deg an
+hour (2026-09-24). The C++ base bridge now publishes that input itself, in either mode, while its
+own rest witness says the cart is certainly still — wheels at rest past `imu_bias_s`, no fresh
+`/cmd_vel`, the gyro quiet — and nothing otherwise (`base_bridge` `zupt_publish`, live, default on;
+`ros/pepin_base_cpp/README.md`). Under `tracker` the slip watch's update remains beside it; the two
+never speak at once, and both say zero.
+
 **Why localising and not mapping.** A start in mapping mode opens a new session per restart, and
 the grid RTAB-Map publishes is the connected component of the *current node inside working
 memory* (`Rtabmap.cpp:3941/4111/5444`) — so seventeen sessions from one evening's restarts made

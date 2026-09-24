@@ -10,6 +10,7 @@ The base bridge in C++: `/cmd_vel` down to the board's base server, its state st
 - `include/pepin_base_cpp/mpu6050.hpp` — the IMU on an i2c-dev bus, SI units, no ROS.
 - `include/pepin_base_cpp/twist_from_pose.hpp` — the twist the wheels measured, off two poses.
 - `include/pepin_base_cpp/gyro_bias.hpp` — the gyro's zero, and the wheels' word on rest.
+- `include/pepin_base_cpp/zupt.hpp` — when the cart is certainly still, for the EKF's /zupt.
 - `src/base_bridge.cpp` — the node: /odom, TF, the /cmd_vel sink, the 5 Hz resend, `main`.
 
 ## IMU
@@ -45,6 +46,31 @@ zero-mean walk (~0.35 deg over 40 min against the +27 measured). A longer `imu_b
 error in force at any one moment, which is what a drive inherits (0.21 deg/min at 5 s, 0.02 at 10);
 the parked walk stays ~0.35 deg either way, the sqrt trade.
 
+## Zero-velocity update
+
+`zupt_publish` (live, default true), `zupt_gyro_quiet_rad_s` (live, 0.005), `zupt_rate_hz` (10, read
+at start): while the cart is certainly standing still the node publishes `zupt`, a
+nav_msgs/Odometry with a twist of exactly zero (frame `odom`, child `base_link`) — the EKF's
+`odom2`, which fuses its vx, vy and vyaw (`ros/params/ekf.yaml`) — and nothing at all otherwise.
+Parked on its charger on 2026-09-24 the EKF's heading crept ~5 deg an hour, pulled by rf2o's
++1.5 deg/min at rest while the bias-tracked gyro read -0.001; that input had been silent since the
+lidar tracker, its only publisher, stopped starting.
+
+Certainly still is three witnesses at once (`ZuptGate`, the twin of `pepin.zupt`): the wheels have
+witnessed rest for `imu_bias_s` — the same rest the gyro's bias tracker trusts — no non-zero
+`/cmd_vel` is younger than `cmd_timeout_s`, and the bias-corrected yaw rate has stayed under
+`zupt_gyro_quiet_rad_s` for `imu_bias_s`, so a cart turned by hand on still wheels is not frozen.
+No gyro reading (IMU off, no bias block yet) means no update. Each witness is read fresh every
+tick, so the first moving sample stops it within one period. The claim is 1e-6 on the three
+velocities, 400x under the gyro's 4e-4; `zupt.hpp` has the reasons for that number, for the 0.29
+deg/s threshold (7.9 sigma of the parked chip's per-sample noise) and for the rate. The report
+line names `zupt_publish=on|off` and says `zupt publishing for N s, M sent` or `zupt silent
+(reason)`; a line is logged every time the update starts or stops. `zupt_publish:=false` is what
+this node did before: nothing on `zupt`. The Python bridge has no gyro and no update.
+
+Board cost: one 10 Hz Odometry message while parked, a 10 Hz timer and two atomic stores per IMU
+sample; no new process, no new thread.
+
 ## Build and switch
 
 `ros/Dockerfile` apt-installs `nlohmann-json3-dev` and colcon-builds this package next to
@@ -62,11 +88,15 @@ No ament test target: the board image is not built on a laptop, so these run by 
   `tests/unit/test_gyro.py::test_gyro_bias_contract_the_cpp_bridge_mirrors`, replayed against
   `gyro_bias.hpp`. One stand-alone `main()`, no ROS and no gtest; its own header comment has the
   `c++` line, and `scratch/syntax_check_base_bridge.sh` runs it beside a type-check of the node.
+- `test/zupt_contract.cpp` — the table of `tests/unit/test_zupt.py::test_zupt_contract_the_cpp_bridge_mirrors`,
+  replayed against `zupt.hpp` the same way (`tests/unit/test_zupt.py` also holds that the C++ file
+  carries exactly that table, and the header the same verdict words and defaults).
 - `test/protocol_samples.json` — lines from the running Python stack
   (`scratch/gen_protocol_samples.py`). A gtest would assert: `encode_twist`/`encode_stop` reproduce
   every `requests[].line` byte for byte, `parse_state` yields `states[].parsed` and nothing for
   `not_states[]`, `LineReader` the `reader[].objects`.
 
 The Python twins are the reference for both header classes with a contract test
-(`pepin.odometry.TwistFromPose`, `pepin.gyro.GyroBiasTracker`, `pepin.gyro.RestWitness`): the maths
+(`pepin.odometry.TwistFromPose`, `pepin.gyro.GyroBiasTracker`, `pepin.gyro.RestWitness`,
+`pepin.zupt.ZuptGate`): the maths
 changes in `src/pepin/` and `tests/unit/` first, and the header follows.
