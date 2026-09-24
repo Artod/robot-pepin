@@ -204,7 +204,7 @@ all under `transport/link/tx`:
 
 | key | shipped | ours | what it does |
 | --- | --- | --- | --- |
-| `queue/congestion_control/block/wait_before_close` | 5 s | **20 s** | how long a RELIABLE push waits for a free batch before killing the session. This is the one that stops the closures; 4x the worst measured stall. A peer that is truly gone is still buried by the 60 s lease. |
+| `queue/congestion_control/block/wait_before_close` | 5 s | **20 s** | how long a RELIABLE push waits for a free batch before killing the session. This is the one that stops the closures; 4x the worst measured stall. A peer that is truly gone is buried by the close it triggers — provided the router has an RX worker free to run that close (see "A frozen peer" below). |
 | `queue/congestion_control/drop/wait_before_drop` | 1 ms | **50 ms** | how long a BEST_EFFORT sample waits before being dropped. 50 ms is the period of the fastest thing that crosses, so a sample is never held past its own successor. |
 | `keep_alive` | 2 | **4** | keep-alives per `lease` (60 s, unchanged): every 15 s instead of 30, which is what zenoh's own note asks for on a link that loses packets. |
 
@@ -245,6 +245,35 @@ router re-creation used to take the laptop router's and `pepin-vslam`'s logs wit
 own receive stamps are kept on purpose: after a Mac wake the VM clock's step is visible in them.
 The unit change reaches the board by `scp board/pepin-zrouter.service root@<board>:/etc/systemd/system/`
 and `systemctl daemon-reload`; it takes effect at the router's next restart.
+
+**A frozen peer, and the 2026-09-23 wake** (`PEPIN_ZROUTER_RX_WORKERS`, `PEPIN_ZROUTER_LOG`). The
+Mac idle-slept at 20:31Z with the stack up and woke three times for maintenance before the user
+woke it at 21:27Z. Each sleep, the board router logged `Unable to push non droppable network
+message to <laptop router>. Closing transport!` every 20 s for ~7 min, and the board's own nodes'
+sessions timed out on their router; after each dark wake the link was back within seconds, after
+the user wake it never came back (0 board samples reached the laptop router, all 89 board topics
+left the laptop's graph 13 s after the wake and none returned in 28 min, while the camera's own
+TCP connection through the same Docker VM kept delivering; `scratch/link_autopsy/wake_nonrecovery.py`).
+The clock was not the cause: the dark wakes carried data under a 898-s VM lag. Neither router
+wrote a line after the wake, so which end refused the new session is not in the saved logs.
+What IS established, from zenoh 2687c51's source and reproduced in statics
+(`scratch/link_autopsy/wedge_repro.py`: two routers, four RELIABLE publishers, the far router
+`docker pause`d): a session's RX task routes its messages on zenoh's RX runtime, a push to a peer
+that stopped reading waits `wait_before_close` (20 s) *on that worker* holding the priority
+queue's mutex, and the `close()` that the failure schedules is spawned on the same runtime. With
+zenoh's default of 2 RX workers both sat in 20-s pushes and the close started only when something
+else broke the loop — 620 s after the first closure in one run (33 closures, the publishers' own
+sessions dropped 24 times: the board router's log of that night line for line), 130 s in another
+(at the thaw; 7 closures, 4 drops). With 8 workers the close started 9 ms after the first closure,
+the dead transport was gone 35 s later and no local session dropped; 16 behaved the same (2 ms,
+2 closures, recovery 0.3 s after the thaw) at 21 threads and 6.4 MB against 7 and 5.7 MB. So
+both routers now run `ZENOH_RUNTIME=(rx: (worker_threads: 16))` (`PEPIN_ZROUTER_RX_WORKERS=2` is
+zenoh's default and the old behaviour), and both log the transport lifecycle and the connector at
+debug (`PEPIN_ZROUTER_LOG`; `info` is the old level): the next wake names the refusing end in one
+line, at 19-28 lines a router per statics freeze-and-thaw. Not fixed and not claimed: the non-recovery
+itself was not reproduced in statics (every thaw there recovered within 7 s, including one 25 s
+after the last closure, as the user wake was), so a Mac wake with the stack up stays a case to
+watch — the heal that worked on the night is the clean-order router restart above.
 
 ## One clock (`PEPIN_TIME_SOURCE`, chrony)
 

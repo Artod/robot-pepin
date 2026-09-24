@@ -23,6 +23,13 @@ Environment=PEPIN_ZIMAGE=pepin-ros:zenoh
 # debug. The same string as ros/lib.sh's PEPIN_ZROUTER_LOG (a test holds them equal); no
 # per-message module is in it. PEPIN_ZROUTER_LOG=info in /etc/default/pepin-ros is the old level.
 # Cost on the board: a few log lines per session event, no CPU to speak of (rule 20).
+# ZENOH_RUNTIME's RX workers (zenoh's default 2; PEPIN_ZROUTER_RX_WORKERS=2 is the old behaviour):
+# while the laptop was asleep this router's two RX threads sat in 20-s pushes to it, the
+# "Closing transport!" they scheduled ran on the same two threads and never started, and the
+# stack's own sessions timed out on the router — 2026-09-23, reproduced in statics with the
+# default and gone with 8 workers (ros/lib.sh's PEPIN_ZROUTER_RX_WORKERS has the numbers). Cost:
+# idle threads park, one stack each; the census after the deploy is the measurement (rule 20).
+Environment=PEPIN_ZROUTER_RX_WORKERS=16
 Environment=PEPIN_ZROUTER_LOG=info,zenoh::net::runtime::orchestrator=debug,zenoh_transport::unicast::manager=debug,zenoh_transport::unicast::establishment=debug,zenoh_transport::unicast::universal::link=debug,zenoh_transport::unicast::universal::transport=debug
 # The previous router's log first, the way pepin-ros.service keeps Nav2's: the container is not
 # auto-removed (no --rm below), so its log outlives a stop, a crash or a reboot until this line
@@ -47,7 +54,7 @@ ExecStartPre=-/usr/bin/docker rm -f pepin-zrouter
 # DIRECTORY at it and the router would refuse to start on a board that has not been synced yet.
 # Delete the mount, or the file, and rmw_zenohd reads its shipped default again — that is the way
 # back (CLAUDE.md rule 19), and it needs no rebuild.
-ExecStart=/bin/sh -c '[ "$PEPIN_RMW" = zenoh ] || exec sleep infinity; if [ -f /root/pepin-ros/zenoh/router.json5 ]; then exec /usr/bin/docker run --name pepin-zrouter --network host -e RUST_LOG=$PEPIN_ZROUTER_LOG -v /root/pepin-ros/zenoh/router.json5:/zenoh/router.json5:ro -e ZENOH_ROUTER_CONFIG_URI=/zenoh/router.json5 $PEPIN_ZIMAGE /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd; fi; echo "pepin-zrouter: no /root/pepin-ros/zenoh/router.json5 (ros/sync.sh), starting on the shipped rmw_zenoh default" >&2; exec /usr/bin/docker run --name pepin-zrouter --network host -e RUST_LOG=$PEPIN_ZROUTER_LOG $PEPIN_ZIMAGE /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd'
+ExecStart=/bin/sh -c '[ "$PEPIN_RMW" = zenoh ] || exec sleep infinity; if [ -f /root/pepin-ros/zenoh/router.json5 ]; then exec /usr/bin/docker run --name pepin-zrouter --network host -e RUST_LOG=$PEPIN_ZROUTER_LOG -e "ZENOH_RUNTIME=(rx: (worker_threads: $PEPIN_ZROUTER_RX_WORKERS))" -v /root/pepin-ros/zenoh/router.json5:/zenoh/router.json5:ro -e ZENOH_ROUTER_CONFIG_URI=/zenoh/router.json5 $PEPIN_ZIMAGE /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd; fi; echo "pepin-zrouter: no /root/pepin-ros/zenoh/router.json5 (ros/sync.sh), starting on the shipped rmw_zenoh default" >&2; exec /usr/bin/docker run --name pepin-zrouter --network host -e RUST_LOG=$PEPIN_ZROUTER_LOG -e "ZENOH_RUNTIME=(rx: (worker_threads: $PEPIN_ZROUTER_RX_WORKERS))" $PEPIN_ZIMAGE /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd'
 # `docker run` returns as soon as the container exists, not when rmw_zenohd is ACCEPTING on
 # 7447 — so Before=pepin-ros.service orders the two starts and nothing more, and the stack's
 # nodes come up against a router that is still binding. Zenoh sessions then form raggedly, and

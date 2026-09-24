@@ -106,9 +106,12 @@ zrouter_up() {
                  -e ZENOH_ROUTER_CONFIG_URI=/zenoh/router.json5)
     fi
     # RUST_LOG: the transport lifecycle and the re-dials at debug (ros/lib.sh's PEPIN_ZROUTER_LOG).
+    # ZENOH_RUNTIME: enough RX workers that a frozen board cannot starve this router's own
+    # sessions and its close of the dead link (ros/lib.sh's PEPIN_ZROUTER_RX_WORKERS says why).
     docker run -d --name "$PEPIN_ZROUTER_LAPTOP" --network "$NET" --restart unless-stopped \
         -e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-7}" \
         -e "RUST_LOG=$PEPIN_ZROUTER_LOG" \
+        -e "ZENOH_RUNTIME=(rx: (worker_threads: $PEPIN_ZROUTER_RX_WORKERS))" \
         -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_router_override "$BOARD")" \
         ${ZCONFIG[@]+"${ZCONFIG[@]}"} \
         "$(image)" /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd >/dev/null

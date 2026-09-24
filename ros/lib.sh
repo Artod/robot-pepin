@@ -97,6 +97,20 @@ PEPIN_ZROUTER_LAPTOP=pepin-zrouter-laptop  # the laptop's router container (on p
 # board's unit carries the same string (a test keeps the two equal); /etc/default/pepin-ros
 # overrides it there.
 PEPIN_ZROUTER_LOG="${PEPIN_ZROUTER_LOG:-info,zenoh::net::runtime::orchestrator=debug,zenoh_transport::unicast::manager=debug,zenoh_transport::unicast::establishment=debug,zenoh_transport::unicast::universal::link=debug,zenoh_transport::unicast::universal::transport=debug}"
+# How many threads each router's zenoh RX runtime has (ZENOH_RUNTIME; zenoh's default is 2, and
+# PEPIN_ZROUTER_RX_WORKERS=2 is exactly the old behaviour). WHY, measured in statics on 2026-09-23
+# (scratch/link_autopsy/wedge_repro.py, two routers and four RELIABLE publishers, the far router
+# frozen as the Mac's sleep froze the laptop): every session's RX task routes its messages on this
+# runtime, and a push to a peer that stopped reading waits wait_before_close (20 s here) ON the
+# worker; the "Closing transport!" it then schedules runs on the SAME runtime. With 2 workers
+# both sat in 20-s pushes for 10.7 min — 33 closures, the close never started, the publishers'
+# own sessions dropped 24 times — which is the board router's 2026-09-23 log line for line
+# (x23-27 closures a sleep, its nodes' sessions timing out on it). With 8 the close started 9 ms
+# after the first closure, the dead transport was gone 35 s later and no local session dropped.
+# 16 because a router here serves about ten sessions (the board: 9 on its loopback, the laptop:
+# the vslam container's ~15 nodes) and each one can hold a worker while the far side is frozen.
+# Idle workers park: no CPU, a thread stack each (rule 20; measured in the same script).
+PEPIN_ZROUTER_RX_WORKERS="${PEPIN_ZROUTER_RX_WORKERS:-16}"
 pepin_rmw_is_zenoh() { [ "$PEPIN_RMW" = zenoh ]; }
 # This checkout's ros/, wherever the sourcing script lives (the container configs are under it).
 PEPIN_ROS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -671,6 +671,24 @@ def test_both_routers_log_the_transport_lifecycle_and_nothing_per_message() -> N
     assert '-e "RUST_LOG=$PEPIN_ZROUTER_LOG"' in laptop.split("zrouter_up() {")[1].split("\n}")[0]
 
 
+def test_both_routers_have_rx_workers_to_spare_for_a_frozen_peer() -> None:
+    """2026-09-23: with zenoh's two RX workers blocked in 20-s pushes to the sleeping laptop, the
+    board router's close of that link never ran and its own nodes' sessions timed out on it.
+    Both routers get the same, larger RX runtime; 2 is the old behaviour, one variable away."""
+    import re
+
+    lib = (REPO / "ros/lib.sh").read_text()
+    shell = re.search(r'PEPIN_ZROUTER_RX_WORKERS="\$\{PEPIN_ZROUTER_RX_WORKERS:-(\d+)\}"', lib)
+    unit = (REPO / "board/pepin-zrouter.service").read_text()
+    board = re.search(r"^Environment=PEPIN_ZROUTER_RX_WORKERS=(\d+)$", unit, re.M)
+    assert shell and board and shell.group(1) == board.group(1), "one number for both routers"
+    assert int(board.group(1)) > 10, "more than the sessions either router serves (9 and ~15)"
+    runtime = '-e "ZENOH_RUNTIME=(rx: (worker_threads: $PEPIN_ZROUTER_RX_WORKERS))"'
+    runs = [ln for ln in unit.splitlines() if ln.startswith("ExecStart=")]
+    assert runs[0].count(runtime) == 2, "both docker run bodies"
+    assert runtime in (REPO / "ros/laptop.sh").read_text().split("zrouter_up() {")[1]
+
+
 def test_the_board_router_keeps_its_log_across_a_restart_like_the_stack_does() -> None:
     """Under `docker run --rm` the board router's log of the 2026-09-23 wake (the 20-s closures
     to the sleeping laptop) went with its first restart. The container now outlives its process,
