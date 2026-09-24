@@ -164,10 +164,11 @@ def _directives(path: str) -> list[str]:
     return [ln.split("#")[0].strip() for ln in text.splitlines() if ln.split("#")[0].strip()]
 
 
-def test_the_board_steps_only_in_chronyd_s_first_updates_and_never_trusts_the_laptop() -> None:
+def test_the_board_follows_the_laptop_s_clock_and_slews_it_slowly() -> None:
     """A step only in the first three updates after chronyd starts (normally the boot, before the
-    stack's wait ends), a slew afterwards; and a laptop minutes off after a Mac wake must be
-    outvoted by the pool, not followed."""
+    stack's wait ends), a slew afterwards; the laptop TRUSTED — the pool outvoted it once the VM's
+    clock had drifted 272 ms from UTC (2026-09-24), splitting the robot's one clock — and the slew
+    capped so a laptop minutes off after a Mac wake moves the board by tens of ms, not seconds."""
     lines = _directives("board/chrony/chrony.conf")
     assert "makestep 1 3" in lines, "step within the first three updates only"
     assert "sourcedir /etc/chrony/sources.d" in lines, "the switch is a reload, not a restart"
@@ -175,7 +176,8 @@ def test_the_board_steps_only_in_chronyd_s_first_updates_and_never_trusts_the_la
     assert not any(ln.startswith("server ") for ln in lines), "the laptop lives in sources.d"
     installer = (REPO / "board/chrony.sh").read_text()
     server = next(ln for ln in installer.splitlines() if ln.startswith("server $2"))
-    assert " prefer" in server and "trust" not in server, server
+    assert " prefer trust" in server, server
+    assert "maxslewrate 2000" in lines, "a Mac wake's minutes-off samples are followed slowly"
 
 
 def test_the_board_installer_keeps_its_way_back_and_takes_all_of_ours_on_uninstall() -> None:

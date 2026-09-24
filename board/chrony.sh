@@ -59,10 +59,11 @@ write_sources() {  # SOURCE [HOST]: the laptop's server line (laptop), or no fil
     cat > "$LAPTOP_SOURCES.new" <<EOF
 # Written by board/chrony.sh for PEPIN_TIME_SOURCE=laptop: the laptop's time server (ros/laptop.sh's
 # pepin-chrony container), which serves the Docker VM's clock — the one every ROS node there stamps
-# with. prefer: followed whenever it agrees with the pool; never trust, so a laptop clock that is
-# minutes off after a Mac wake is outvoted. Every 4-16 s over the LAN; a round trip over 0.5 s (this
-# radio's stalls) is not a sample.
-server $2 iburst minpoll 2 maxpoll 4 maxdelay 0.5 prefer
+# with. prefer trust: always the one followed while it answers — the pool voted it out when the
+# VM's clock had drifted 272 ms from UTC (2026-09-24), which is exactly the clock the laptop's
+# nodes stamp with; a Mac wake's minutes-off samples are bounded by chrony.conf's maxslewrate.
+# Every 4-16 s over the LAN; a round trip over 0.5 s (this radio's stalls) is not a sample.
+server $2 iburst minpoll 2 maxpoll 4 maxdelay 0.5 prefer trust
 EOF
     mv "$LAPTOP_SOURCES.new" "$LAPTOP_SOURCES"
 }
