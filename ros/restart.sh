@@ -376,15 +376,27 @@ check_board() {
 # pipes src/pepin/timesync.py into the board's python3: one short process and eight 48-byte
 # exchanges, no ROS). INFORMATION ONLY: a PASS or a WARN, never a FAIL and never a drive gate —
 # the number is there so that a transform that "would require extrapolation" can be read against
-# it. Not measured (a WARN) when the laptop runs no server (PEPIN_TIME_SOURCE=pool) or the board
-# cannot reach it.
+# it. Under PEPIN_TIME_SOURCE=pool (the default until the chrony deploy) with no server here there
+# is nothing to measure and that IS the configuration: a PASS that says so, not a WARN on every
+# restart that teaches the eye to skip WARN lines. A WARN is left for what needs a look — over
+# the threshold, a server that should run and does not, a board that cannot reach it (not
+# measured), and a switch value that is neither laptop nor pool.
 check_clock() {
-    local out status=0
+    local out status=0 source="${PEPIN_TIME_SOURCE:-pool}"
+    case "$source" in
+        laptop | pool) ;;
+        *) warn 1.15 "clock: PEPIN_TIME_SOURCE=$source is neither laptop nor pool (ros/lib.sh)"; return 0 ;;
+    esac
     out="$("$HERE/time.sh" offset 2>&1)" || status=$?
     case "$status" in
         0) pass 1.15 "clock: $(tail -1 <<<"$out")" ;;
         1) warn 1.15 "clock: $(tail -1 <<<"$out") — stamps from the two machines disagree by that much (ros/time.sh status)" ;;
-        *) warn 1.15 "clock: not measured — $(tail -1 <<<"$out" | cut -c1-160) (PEPIN_TIME_SOURCE=${PEPIN_TIME_SOURCE-unset}; ros/time.sh server, ros/time.sh status)" ;;
+        3) if [ "$source" = pool ]; then
+               pass 1.15 "clock: not measured, as configured — PEPIN_TIME_SOURCE=pool and no time server here, the board on the internet pool alone"
+           else
+               warn 1.15 "clock: not measured — PEPIN_TIME_SOURCE=laptop and no time server runs here (ros/time.sh server)"
+           fi ;;
+        *) warn 1.15 "clock: not measured — $(tail -1 <<<"$out" | cut -c1-160) (PEPIN_TIME_SOURCE=$source; ros/time.sh server, ros/time.sh status)" ;;
     esac
 }
 

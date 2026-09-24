@@ -13,8 +13,8 @@
 #                                server to match
 #   ros/time.sh point            re-point the board at this laptop's current address (DHCP moved it)
 #   ros/time.sh offset           the board's clock minus the laptop's, one line; exit 0 within
-#                                PEPIN_CLOCK_WARN_MS (100), 1 over, 2 not measured. ros/restart.sh's
-#                                check 1.15
+#                                PEPIN_CLOCK_WARN_MS (100), 1 over, 2 not measured, 3 no time
+#                                server on this laptop. ros/restart.sh's check 1.15
 #   ros/time.sh status           the board's chronyc tracking and sources, and this server's
 #   ros/time.sh server [stop]    this laptop's server alone (ros/laptop.sh starts it with the router)
 #
@@ -64,11 +64,12 @@ case "${1:-}" in
         # The board is the NTP client and this laptop's server the reference, so the number is
         # exactly "board minus the clock the laptop's ROS nodes stamp with". The measurement is
         # src/pepin/timesync.py, piped into the board's own python3: nothing to install there.
-        # No server running here is "not measured" at once, not eight 1-s timeouts on the board
-        # (ros/restart.sh asks this on every restart, deployed or not).
+        # No server running here is answered at once, not after eight 1-s timeouts on the board
+        # (ros/restart.sh asks this on every restart, deployed or not), and with its own exit
+        # code: under PEPIN_TIME_SOURCE=pool it is the configuration, not a fault.
         if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$PEPIN_TIMESERVER"; then
             echo "no time server on this laptop ($PEPIN_TIMESERVER is not running: ros/time.sh server)"
-            exit 2
+            exit 3
         fi
         IP="$(laptop_ip)" || exit 2
         ssh "root@$BOARD" "python3 - $IP --warn-ms ${PEPIN_CLOCK_WARN_MS:-100}" \

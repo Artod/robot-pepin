@@ -86,7 +86,7 @@ silence as good news. What is checked:
 | 1.13 | **who is correcting the pose**, under `PEPIN_LOCALIZER=rtabmap`: `map -> odom` is in TF and read where its publisher is — one rclpy node in the laptop's own container (`ros/tools/map_odom.py`), never on the board, whose /tf would cost it ~100 messages a second (CLAUDE.md rule 20). Two readings: the transform is **fresh** (re-broadcast at 20 Hz, so seconds of silence is a publisher that is gone) and it is **not the identity** (a localiser that has recognised nothing publishes `map == odom`, and every pose composed from it is simply the odometry's). The identity is a `WARN` while the laptop half is under 60 s old and a `FAIL` after that. Under `PEPIN_LOCALIZER=tracker` it is a `WARN` pointing at 1.2 |
 | 1.12 | no thread of the Nav2 container is pegged: `ps -L` over ssh, the busiest thread's cumulative CPU time over the process's own lifetime. `range_sensor_layer.cpp:362-369` clamps its cell bounds and then walks them as `unsigned`, so a cone that falls off the grid's left or bottom edge runs ~4e9 iterations under the costmap mutex and writes **no log line at all** — one thread at 100 %, "Pose Goes Off Grid", services timing out, zero plans (reproduced 2026-09-21 with `ros/thin.sh kick relocalizer`: tid 191, 415 s of CPU in 700 s). `FAIL` above 0.90, `WARN` above 0.50 (nobody has yet measured what a healthy container's busiest thread costs — tighten it once a few restarts have printed theirs), `WARN` when the board could not be read |
 | 1.14 | `/odom_laser` is flowing (the EKF's `odom3`), measured the same way. Skipped with a `WARN` when `PEPIN_LASER_ODOM=false` on the board |
-| 1.15 | **informational (`PASS`/`WARN`, never fails, never a drive gate)**: the board's clock minus the laptop's — the Docker VM's, which every laptop ROS node stamps with — over NTP from the board to the laptop's time server (`ros/time.sh offset`: `src/pepin/timesync.py` piped into the board's `python3`, best of eight round trips). `WARN` over `PEPIN_CLOCK_WARN_MS` (100 ms), and `WARN` "not measured" when the laptop runs no server (`PEPIN_TIME_SOURCE=pool`) or the board cannot reach it. See "One clock" below |
+| 1.15 | **informational (`PASS`/`WARN`, never fails, never a drive gate)**: the board's clock minus the laptop's — the Docker VM's, which every laptop ROS node stamps with — over NTP from the board to the laptop's time server (`ros/time.sh offset`: `src/pepin/timesync.py` piped into the board's `python3`, best of eight round trips). `WARN` over `PEPIN_CLOCK_WARN_MS` (100 ms), `WARN` "not measured" when the board cannot reach the server or `PEPIN_TIME_SOURCE=laptop` and no server runs here, `WARN` on a value that is neither `laptop` nor `pool`. Under `PEPIN_TIME_SOURCE=pool` (the default) with no server here it is a `PASS` "not measured, as configured": that is the configuration, not a fault. See "One clock" below |
 
 `ros/tools/coldstart_soak.sh [N]` is the acceptance test behind checks 1.11 and 1.12: N cold starts of the
 board half (10 by default), each timed from `Activating planner_server` to the bond, with the
@@ -331,8 +331,10 @@ its default is `pool` — what the board runs today under systemd-timesyncd — 
 below has measured the laptop source on the robot, and then it flips to `laptop` in `ros/lib.sh`
 and `src/pepin/timesync.py` together. `ros/time.sh uninstall` puts the board on
 systemd-timesyncd exactly as before (the package's `.deb` is kept at install, so it works with
-apt offline; our sources file and the Debian config backup go with chrony). Check 1.15 says "not
-measured" at once while no server runs here, so an undeployed laptop costs a restart nothing.
+apt offline; our sources file and the Debian config backup go with chrony). Check 1.15 answers at
+once while no server runs here (`PASS` "not measured, as configured" under `pool`), so an
+undeployed laptop costs a restart nothing. A value that is neither `laptop` nor `pool` is refused
+by `ros/laptop.sh` before a half starts (`ros/lib.sh`'s `pepin_time_source_check`).
 
 **Deploy (not done yet; a parked robot, the owner's go):**
 

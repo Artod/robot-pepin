@@ -913,6 +913,37 @@ def test_every_check_runs_even_when_the_first_ones_fail_and_the_run_goes_red(tmp
     assert "red: 3 of " in out
 
 
+@pytest.mark.slow
+def test_the_clock_check_passes_the_default_and_warns_where_a_look_is_needed(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Check 1.15 is information. Under PEPIN_TIME_SOURCE=pool (the default until the chrony
+    deploy) with no time server here there is nothing to measure and that is the configuration:
+    a PASS that says so, not a WARN on every restart. A server that should run and does not, a
+    difference over the threshold and a switch value that is neither stay WARNs; none fails."""
+    here = tmp_path / "ros"
+    here.mkdir()
+    (here / "time.sh").write_text(
+        "#!/bin/bash\n"
+        'printf "%s\\n" "${FAKE_TIME_LINE-no time server on this laptop}"\n'
+        'exit "${FAKE_TIME_EXIT-3}"\n'
+    )
+    (here / "time.sh").chmod(0o755)
+
+    code, out, _ = _restart(tmp_path, "board", PEPIN_TIME_SOURCE="")
+    assert code == 0, out
+    assert "PASS 1.15 clock: not measured, as configured" in out, out
+    assert "WARN 1.15" not in out
+    code, out, _ = _restart(tmp_path, "board", PEPIN_TIME_SOURCE="laptop")
+    assert code == 0 and "WARN 1.15 clock: not measured — PEPIN_TIME_SOURCE=laptop" in out, out
+    code, out, _ = _restart(tmp_path, "board", PEPIN_TIME_SOURCE="laptpo")
+    assert code == 0 and "WARN 1.15 clock: PEPIN_TIME_SOURCE=laptpo is neither" in out, out
+    over = "board - laptop -250.0 ms (the board is behind); over 100 ms"
+    code, out, _ = _restart(tmp_path, "board", FAKE_TIME_EXIT="1", FAKE_TIME_LINE=over)
+    assert code == 0 and f"WARN 1.15 clock: {over}" in out, out
+    within = "board - laptop +21.0 ms (the board is ahead), round trip 6 ms"
+    code, out, _ = _restart(tmp_path, "board", FAKE_TIME_EXIT="0", FAKE_TIME_LINE=within)
+    assert code == 0 and f"PASS 1.15 clock: {within}" in out, out
+
+
 def test_without_a_tracker_the_checks_move_to_the_edge_the_laptop_owns(tmp_path) -> None:
     """PEPIN_LOCALIZER=rtabmap: no tracker is launched on the board, so its report line, its
     /where_am_i and its /map_tracked are not evidence and must not fail the restart. What
