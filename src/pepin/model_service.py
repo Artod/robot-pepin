@@ -45,6 +45,8 @@ import http.server
 import io
 import json
 import logging
+import socket
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -339,6 +341,7 @@ class ModelServer(http.server.ThreadingHTTPServer):
         self.stats = {m.name: ModelStats() for m in models}
         self.caches = {m.name: AnswerCache(m.cache_size) for m in models}
         self.locks = {m.device: threading.Lock() for m in models}
+        self.clients_gone = 0  # answers a client did not wait for (its timeout, a dropped link)
         self._since = time.monotonic()
         self._reporter = threading.Thread(target=self._report_loop, daemon=True)
 
@@ -385,6 +388,7 @@ class ModelServer(http.server.ThreadingHTTPServer):
         return {
             "service": self.service,
             "uptime_s": round(time.monotonic() - self._since, 1),
+            "clients_gone": self.clients_gone,
             "models": {
                 name: {
                     "tag": model.tag,
@@ -418,6 +422,17 @@ class ModelServer(http.server.ThreadingHTTPServer):
         """Serve until interrupted, with a report line every minute in which a request came."""
         self._reporter.start()
         self.serve_forever()
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """A client that left before its answer (it timed out: a GPU model's first answer after
+        a long idle) is counted in ``/health`` and logged at debug — socketserver would print a
+        BrokenPipe traceback to the job's output for each one; anything else is logged whole."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            self.clients_gone += 1
+            log.debug("a client left before its answer: %s", type(exc).__name__)
+            return
+        log.exception("a request from %s failed outside its model", client_address)
 
     def _report_loop(self) -> None:
         while True:
@@ -485,6 +500,21 @@ class ModelHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def port_taken(host: str, port: int) -> str | None:
+    """Why a server could not bind ``host:port`` now (another process listens there), or
+    ``None`` when it could: asked BEFORE a service loads its models, so a port conflict costs a
+    second and not a load of torch per launchd restart."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as ModelServer binds
+        probe.bind((host, port))
+    except OSError as exc:
+        return f"{host}:{port} is taken ({exc.strerror or exc})"
+    finally:
+        probe.close()
+    return None
+
+
 # ---------------------------------------------------------------- the client
 def split_url(url: str) -> tuple[str, int]:
     """``http://host:port`` as (host, port); :class:`ValueError` for anything else."""
@@ -492,6 +522,17 @@ def split_url(url: str) -> tuple[str, int]:
         raise ValueError(f"a model service URL starts with http://, not {url!r}")
     host, _, port = url[len("http://") :].rstrip("/").partition(":")
     return host, int(port) if port else 80
+
+
+# What a kept-alive connection the peer has closed raises on its next use: a reset or a broken
+# pipe on the send, or no status line at all on the read (http.client.RemoteDisconnected is both a
+# ConnectionResetError and a BadStatusLine). A timeout is NOT one of them: that is a slow service.
+STALE_CONNECTION = (
+    ConnectionResetError,
+    BrokenPipeError,
+    ConnectionAbortedError,
+    http.client.BadStatusLine,
+)
 
 
 class RemoteModel:
@@ -504,8 +545,10 @@ class RemoteModel:
     means it is there and slow — measured 2026-09-24, a GPU model's first inference after two
     seconds idle takes 200-460 ms instead of 50 (scratch/models/place_parity.py's service) — so
     only ``timeouts`` of them in a row back off; one alone costs its own call. An HTTP error means
-    the service refused this one request, and costs nothing more. Thread-safe: calls on one client
-    take turns on its one keep-alive connection."""
+    the service refused this one request, and costs nothing more. A kept-alive connection the
+    service dropped since the last call (it restarted, the laptop slept) fails at once on reuse
+    and is retried ONCE on a fresh connection before anything counts: the service may be there.
+    Thread-safe: calls on one client take turns on its one keep-alive connection."""
 
     def __init__(
         self,
@@ -530,6 +573,7 @@ class RemoteModel:
         self.ok = 0
         self.failed = 0
         self.skipped = 0
+        self.retried = 0  # calls sent again on a fresh connection after a stale kept-alive one
         self.last_error = ""
         self.last_model = ""  # the X-Model tag of the last answer
         self.round_trip = LatencyTracker(self.endpoint)
@@ -554,11 +598,17 @@ class RemoteModel:
                 return None
             timeout = self.timeout_s if timeout_s is None else float(timeout_s)
             t0 = time.perf_counter()
+            reused = self._conn is not None and self._conn.sock is not None
             try:
-                conn = self._connection(timeout)
-                conn.request("POST", self.endpoint, body=body, headers=dict(headers))
-                response = conn.getresponse()
-                data = response.read()
+                try:
+                    response, data = self._exchange(timeout, headers, body)
+                except STALE_CONNECTION:
+                    left = timeout - (time.perf_counter() - t0)
+                    if not reused or left <= 0.0:
+                        raise
+                    self._drop()  # the service dropped the kept-alive link: once more, fresh
+                    self.retried += 1
+                    response, data = self._exchange(left, headers, body)
             except (OSError, http.client.HTTPException) as exc:
                 self._drop()  # a late answer must not be read as the next call's
                 slow = isinstance(exc, TimeoutError)
@@ -575,6 +625,16 @@ class RemoteModel:
             reply = lower_keys(dict(response.getheaders()))
             self.last_model = reply.get("x-model", self.last_model)
             return reply, data
+
+    def _exchange(
+        self, timeout: float, headers: Mapping[str, str], body: bytes
+    ) -> tuple[http.client.HTTPResponse, bytes]:
+        """One POST on the kept-alive connection (opened when there is none): the response
+        and its body."""
+        conn = self._connection(timeout)
+        conn.request("POST", self.endpoint, body=body, headers=dict(headers))
+        response = conn.getresponse()
+        return response, response.read()
 
     def health(self, timeout_s: float = 2.0) -> dict[str, Any] | None:
         """The service's ``/health`` as a dict, or ``None``; on a connection of its own, so a
@@ -597,6 +657,8 @@ class RemoteModel:
         """For a report line: ``ok 118, failed 2 (last: ...), skipped 5, rt 12/30 ms``."""
         rt = self.round_trip.summary()
         text = f"ok {self.ok}, failed {self.failed}, skipped {self.skipped}"
+        if self.retried:
+            text += f", {self.retried} retried on a fresh connection"
         if self.failed:
             text += f" (last: {self.last_error})"
         if self.down:

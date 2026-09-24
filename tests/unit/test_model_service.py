@@ -321,3 +321,107 @@ def test_a_periodic_line_is_due_once_a_period() -> None:
     assert not minute.due()
     clock.now += 2
     assert minute.due()
+
+
+# ---------------------------------------------------------------- a service that went away and back
+class OneAnswerPerConnection:
+    """A raw HTTP/1.1 server that answers ONE request per connection and then closes it — what a
+    kept-alive client sees of a service process that was restarted between two of its calls."""
+
+    def __init__(self) -> None:
+        import socket
+
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(4)
+        self.url = f"http://127.0.0.1:{self.sock.getsockname()[1]}"
+        self.connections = 0
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self.connections += 1
+            with conn:
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                head, _, body = data.partition(b"\r\n\r\n")
+                length = next(
+                    (
+                        int(line.split(b":")[1])
+                        for line in head.split(b"\r\n")
+                        if line.lower().startswith(b"content-length")
+                    ),
+                    0,
+                )
+                while len(body) < length:
+                    body += conn.recv(65536)
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+                    + f"Content-Length: {len(body)}\r\n\r\n".encode()
+                    + body
+                )
+
+    def close(self) -> None:
+        self.sock.close()
+
+
+def test_a_dropped_kept_alive_connection_is_tried_once_more_fresh_and_nothing_backs_off() -> None:
+    """After a launchd restart the client's pooled connection is dead: its next call used to fail
+    at once and back the endpoint off for 10 s (null descriptors, local fallbacks) although the
+    service was already back. One retry on a fresh connection, and the call succeeds."""
+    server = OneAnswerPerConnection()
+    try:
+        client = RemoteModel(server.url, "echo", timeout_s=1.0)
+        for n in range(1, 4):
+            answer = client.call({}, f"call {n}".encode())
+            assert answer is not None and answer[1] == f"call {n}".encode(), client.status()
+        assert client.failed == 0 and not client.down
+        assert client.retried == 2 and server.connections == 3
+        assert "2 retried on a fresh connection" in client.status()
+    finally:
+        server.close()
+
+
+def test_a_client_that_left_is_counted_not_printed(
+    served: Any, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A client that timed out leaves the server writing into a closed socket: socketserver
+    printed a BrokenPipe traceback into the job's output for each one. Now one count in /health;
+    anything else is still logged whole."""
+    server, _url = served(Doubler())
+    for gone in (BrokenPipeError(), ConnectionResetError()):
+        try:
+            raise gone
+        except OSError:
+            server.handle_error(None, ("127.0.0.1", 1))
+    assert server.health()["clients_gone"] == 2
+    assert capsys.readouterr().err == "", "no traceback on the job's output"
+    try:
+        raise RuntimeError("a handler bug")
+    except RuntimeError:
+        server.handle_error(None, ("127.0.0.1", 1))
+    assert "a handler bug" in caplog.text and server.health()["clients_gone"] == 2
+
+
+def test_a_taken_port_is_named_before_any_model_loads() -> None:
+    import socket
+
+    from pepin.model_service import port_taken
+
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    try:
+        assert f"127.0.0.1:{port} is taken" in str(port_taken("127.0.0.1", port))
+    finally:
+        holder.close()
+    assert port_taken("127.0.0.1", port) is None
