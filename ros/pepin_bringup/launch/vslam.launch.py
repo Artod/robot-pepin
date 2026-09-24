@@ -238,6 +238,19 @@ RTABMAP = {
     # links made RGBD/OptimizeMaxError reject 87 closures on the first real drive.
     "RGBD/NeighborLinkRefining": "false",
     "Rtabmap/DetectionRate": "1.0",
+    # HOW A LOCALISATION IS CONFIRMED (RTAB-Map 0.22.1, Rtabmap.cpp:2141-2162 and 3650-3775). A
+    # first good localisation is only DELAYED ("waiting for another one to be more accurate") and
+    # kept in the odometry cache of RGBD/MaxOdomCacheSize updates; a second one inside that window
+    # accepts both. While the cache holds no localisation the hypothesis only has to reach
+    # RGBD/AggressiveLoopThr (0.05); once it holds the delayed one, Rtabmap/LoopThr (0.11) again.
+    # Parked under the evening lamps against this daylight database the ORB words' hypotheses read
+    # 0.05-0.07 (2026-09-24 05:10Z): XFeat registered with 83-118 inliers once every 11 updates —
+    # the first try past the aggressive threshold, delayed, no second try under 0.11, the cache
+    # rolled over at 10 and the threshold dropped again — 0 of 244 updates accepted
+    # (scratch/link_autopsy/localisation_cadence.py). Both are RTAB-Map's own defaults, said out
+    # loud so the confirmation can be set live (CoreWrapper.cpp:362-379).
+    "Rtabmap/LoopThr": "0.11",
+    "RGBD/MaxOdomCacheSize": "10",
     # appearance: GFTT/ORB words, a few hundred per image
     "Kp/DetectorStrategy": "8",
     "Kp/MaxFeatures": "400",
