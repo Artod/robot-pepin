@@ -414,6 +414,17 @@ ever landed; the board logs the silence when it starts (`nothing on /map_odom fo
 keeps broadcasting the edge all the same, because Nav2 there must not lose its global frame to a
 wireless hiccup. Off: `ros/flags.sh set goal_server correction_watch false`.
 
+**A fresh edge is not a placed start either.** Under `PEPIN_LOCALIZER=rtabmap` RTAB-Map
+publishes `map -> odom` from the moment it starts, at the pose it saved at its last shutdown. The
+laptop's `rtabmap_frame` says on `/localization/placement` (latched) whether this start has
+recognised a node of the loaded map or been seeded (`ros/goto.sh seed X Y YAW`), and both goal
+paths — the goal server and `ros/tools/goto_ros.py` — refuse until it has, or when nothing is
+heard at all. A board deployed with this check needs a `pepin-vslam` that publishes the word, so
+`ros/laptop.sh vslam` goes in the same step as the board's deploy, and the `rtabmap frame` report
+line must show `start ...` before the first goal. The switch back works with the laptop's node
+down or older, because it lives on the goal server and goto_ros reads it from there:
+`ros/flags.sh set goal_server start_needs_placement false`.
+
 Two things this mode needs that are **not** the operator's to remember:
 
 - **The camera's costmap layers stay off for driving.** They marked within 2 cm of the hull and
@@ -1066,6 +1077,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `goal_server` | `jump_clear` | bool | off | yes | map -> odom is read from TF five times a second and, when it STEPS further than 0.10 m, Nav2's local costmap is emptied ("/local_costmap/clear_entirely_local_costmap", asynchronously, at most once per 1 s): the marks in that grid were laid where the cart used to be. The step in that edge is the correction alone — the cart's own motion lives in odom -> base_link — whoever published it. Off, nothing reads the edge and no listener is started for it |
 | `goal_server` | `pose_topic` | bool | on | yes | the pose this node reads out of TF is republished as /pose (geometry_msgs/PoseStamped in map, 5 Hz, stamped with the transform's own stamp), so the other nodes on this board can have the pose without a TF listener of their own. Inert where a tracker runs (there /tracker_pose is that topic already) and on a split stack, where the reader is on the other machine and reads the edge itself. Off, nothing is published and this node's listener goes back to being started on the first ask |
 | `goal_server` | `controller` | choice: mppi, rpp, rpp_shim | rpp_shim | yes | what follows the plan: mppi is Nav2's MPPI controller for every planner, held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own Regulated Pure Pursuit from PLANNERS, ending on position alone as before 2026-09-23; rpp_shim is the reversing RPP inside Nav2's RotationShimController, which turns the cart to the mark's heading in place once it is inside the goal tolerance. Published latched on controller_selector and goal_checker_selector, so a change is read by the behaviour tree at its next tick |
+| `goal_server` | `start_needs_placement` | bool | on | yes | under PEPIN_LOCALIZER=rtabmap a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for this same flag before its own preflight. Off, a fresh map -> base_link is enough, as before 2026-09-23 |
 | `laptop_localizer` | `tf_belief` | bool | on | yes | when /tracker_pose has been silent for a second, the pose a camera scan is matched around is looked up from TF (map -> base_link at that scan's stamp) instead of carried from the last /tracker_pose; off, a silent board means no camera measurements at all |
 | `laptop_localizer` | `global_watch` | bool | on | yes | run the whole-map search once every watch_period_s and publish what it finds on /localization/candidate; off, this half of the node is a subscriber that costs nothing and the board is back to searching for itself only once it is already lost |
 | `laptop_localizer` | `watch_period_s` | number 0.2..60 | 1.0 | yes | seconds between searches |
@@ -1728,6 +1740,11 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* rpp_shim — the six legs of 2026-09-23 all stopped 12-60 deg short of the mark's heading: the reversing RPP cannot rotate in place, the tree ended the drive on position (xy_only_goal_checker), and the pivot that finishes the heading lives here in _pivot_to, which drives sent through goto_ros.py never reach. Each leg also ran 5-9 recoveries, which is what an RPP answers a refused arc with; MPPI samples another trajectory instead
   - *On when:* rpp_shim by default since the evening of 2026-09-23 (six legs: 21-33 s, 6-11 recoveries, 4-10 cm and 2-5 deg at the mark; MPPI on the same board crawled at a median 0.06 m/s); mppi where its sampling is wanted, rpp for the position-only drives of before
   - *Off when:* rpp for an A/B against the RPP drives of before, or if MPPI's cycle does not fit the board's control period (the controller server's 'Control loop missed its desired rate')
+- **`start_needs_placement`** — bool, default on
+  - *What:* under PEPIN_LOCALIZER=rtabmap a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for this same flag before its own preflight. Off, a fresh map -> base_link is enough, as before 2026-09-23
+  - *Default:* on — on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the pose it SAVED at its last shutdown, and a fresh transform was taken for a localisation — 'at home' at the bookshelf with 0 of 198 updates recognised, then 76 cm off inside the table. The laptop's flag of the same name only changes what rtabmap_frame SAYS: it cannot lift a refusal of silence, from a node that is down, respawning or running code from before the word existed. This one is the board-side switch the refusal itself answers to
+  - *On when:* always under PEPIN_LOCALIZER=rtabmap: a pose nobody has vouched for since RTAB-Map's start is not a pose to drive on
+  - *Off when:* when the word cannot come and the cart is known to stand where RTAB-Map's pose says: pepin-vslam down or started before this build (ros/laptop.sh vslam restarts it on the checkout), or a dark room with no seed at hand
 
 #### `laptop_localizer`
 
@@ -2090,7 +2107,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *What:* what goes out on /localization/placement (latched) says this start of RTAB-Map is PLACED only once an update has recognised a node of the database it loaded, or an operator's seed (/rtabmap/initialpose) has been heard since its first update — or it loaded an empty database, whose start pose is the map's origin. The board's goal clients (ros/tools/goto_ros.py, pepin_bringup.goal_server) refuse a goal under PEPIN_LOCALIZER=rtabmap until then, saying to seed or to let the camera see a mapped place. Off, every start counts as placed: RTAB-Map's pose is taken as it is
   - *Default:* on — on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the pose it SAVED at its last shutdown, before recognising anything, and the preflight took that fresh transform for a localisation — the cart was 'at home' while standing at the bookshelf (0 recognised a node in 130-198 updates, hypothesis 0.07), and after the next restart 76 cm off, inside the table, where Hybrid refused 'Start occupied' and the recoveries ran 93 times in 81 s (the journal, 19:05 and 20:57). It is the startup-zero trap a third time
   - *On when:* always under PEPIN_LOCALIZER=rtabmap: a pose nobody has vouched for since the start is not a pose to drive on
-  - *Off when:* to drive on the saved start pose anyway — a cart known to stand exactly where RTAB-Map last shut down, with the camera unable to recognise anything (darkness) and no seed at hand
+  - *Off when:* to drive on the saved start pose anyway — a cart known to stand exactly where RTAB-Map last shut down, with the camera unable to recognise anything (darkness) and no seed at hand. A refusal of SILENCE (this node down, respawning, or older than this flag) is lifted by the goal server's flag of the same name, which both goal clients obey
 
 #### `run_recorder`
 

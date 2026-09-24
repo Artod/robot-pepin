@@ -153,11 +153,15 @@ BY_PLACEMENT = "placement"
 # recognised a node of the database it LOADED and hears the operator's seeds, and says on this
 # latched topic whether the present start has been PLACED (:class:`Placement`).
 PLACEMENT_TOPIC = "/localization/placement"
+# The switch back (rule 19), on the board's side of the word: the goal server's flag, which
+# ros/tools/goto_ros.py reads too, so it lifts a refusal of silence as well as of "not placed".
+PLACEMENT_SWITCH = (
+    "ros/flags.sh set goal_server start_needs_placement false takes the pose as it is"
+)
 PLACEMENT_REMEDY = (
     "the pose is the one RTAB-Map saved at its last shutdown, not a localisation. Either seed it"
     " where the cart stands (ros/goto.sh seed X Y YAW) or move the cart where the camera sees a"
-    " mapped place until RTAB-Map recognises one, then send the goal again"
-    " (ros/flags.sh set rtabmap_frame start_needs_placement false takes the pose as it is)"
+    f" mapped place until RTAB-Map recognises one, then send the goal again ({PLACEMENT_SWITCH})"
 )
 
 AGREE_M = 0.5  # two fixes this close...
@@ -1352,20 +1356,31 @@ class Preflight:
         )
 
     @staticmethod
-    def placement(placement: Placement | None) -> Check:
+    def placement(placement: Placement | None, asked: bool = True) -> Check:
         """Where RTAB-Map owns ``map -> odom``: has this start of RTAB-Map been PLACED — a node of
         the loaded map recognised, or an operator's seed — or is its pose still the one it saved
         at its last shutdown (:data:`PLACEMENT_TOPIC`)? ``None`` is nothing heard at all, which
         says nothing either way and is refused the same, with where to look. A refusal always
-        says what to do: seed, or let the camera see a mapped place."""
+        says what to do: seed, or let the camera see a mapped place. ``asked`` is the goal
+        server's flag ``start_needs_placement``; off, this passes whatever was heard."""
+        if not asked:
+            return Check(
+                "placed",
+                True,
+                "not asked (goal_server start_needs_placement is off): RTAB-Map's pose is taken"
+                " as it is, "
+                + (f"nothing on {PLACEMENT_TOPIC}" if placement is None else placement.how()),
+            )
         if placement is None:
             return Check(
                 "placed",
                 False,
                 f"nothing on {PLACEMENT_TOPIC}: rtabmap_frame (the laptop's pepin-vslam) is not"
                 " saying whether RTAB-Map has placed the cart since its start, so the pose may"
-                " be the one it saved at its last shutdown. Is the laptop's half up (docker logs"
-                " pepin-vslam | grep 'rtabmap frame')?",
+                " be the one it saved at its last shutdown. Either the node is down or"
+                " respawning (docker logs pepin-vslam | grep 'rtabmap frame'), or it runs code"
+                " from before this word existed, which ros/laptop.sh vslam restarts on the"
+                f" checkout. {PLACEMENT_SWITCH}",
             )
         if placement.placed:
             return Check("placed", True, placement.how())

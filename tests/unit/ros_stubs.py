@@ -229,6 +229,14 @@ class SetParameters:
     Response = _msg("SetParameters_Response", results=list)
 
 
+class GetParameters:
+    """rcl_interfaces/GetParameters: names in, one ParameterValue each back (type 0, NOT_SET,
+    for a name the node never declared)."""
+
+    Request = _msg("GetParameters_Request", names=list)
+    Response = _msg("GetParameters_Response", values=list)
+
+
 class SetLabel:
     """rtabmap_msgs/SetLabel, field for field as SetLabel.srv:3-4 lists them — and the response is
     EMPTY, so success and failure look the same to a caller (rtabmap_msgs/srv/SetLabel.srv). Node
@@ -659,6 +667,7 @@ class Node:
         self.subs: dict[str, tuple[Any, Any]] = {}  # topic -> (message type, callback)
         self.services: dict[str, tuple[Any, Any]] = {}  # name -> (service type, callback)
         self.service_clients: dict[str, Client] = {}  # name -> the client this node created
+        self.destroyed_clients: list[str] = []  # the names of the clients it destroyed
         self.timers: list[tuple[float, Any]] = []
         self.parameter_callbacks: list[Any] = []
         self.clock = Clock()
@@ -701,6 +710,10 @@ class Node:
         """A client of someone else's service; not ready until a test says the service is there."""
         self.service_clients[name] = Client(srv_type, name)
         return self.service_clients[name]
+
+    def destroy_client(self, client: Client) -> None:
+        """Forget a client, as rclpy does; the test keeps what it asked in ``destroyed_clients``."""
+        self.destroyed_clients.append(client.srv_name)
 
     def create_timer(self, period_s: float, callback: Any) -> Timer:
         self.timers.append((period_s, callback))
@@ -746,6 +759,12 @@ class Rclpy(types.ModuleType):
         self.log.append("spin")
         if self.on_spin is not None:
             self.on_spin()
+
+    def spin_until_future_complete(
+        self, node: Any, future: Any, timeout_sec: float | None = None
+    ) -> None:
+        """A stub future is finished when it is made: nothing to spin."""
+        self.log.append("spin_until_future_complete")
 
     def try_shutdown(self) -> None:
         self.log.append("try_shutdown")
@@ -798,7 +817,9 @@ def install() -> Any:
             Parameter=ParameterMsg,
             ParameterValue=ParameterValueMsg,
         ),
-        "rcl_interfaces.srv": _module("rcl_interfaces.srv", SetParameters=SetParameters),
+        "rcl_interfaces.srv": _module(
+            "rcl_interfaces.srv", SetParameters=SetParameters, GetParameters=GetParameters
+        ),
         "builtin_interfaces": _module("builtin_interfaces"),
         "builtin_interfaces.msg": _module(
             "builtin_interfaces.msg", Time=Time, Duration=DurationMsg

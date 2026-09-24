@@ -321,6 +321,28 @@ FLAGS = FlagSet(
         " fit the board's control period (the controller server's 'Control loop missed its"
         " desired rate')",
     ),
+    Flag(
+        "start_needs_placement",
+        True,
+        description="under PEPIN_LOCALIZER=rtabmap a goal or a mark waits for the laptop's word"
+        f" on {PLACEMENT_TOPIC} (pepin_bringup.rtabmap_frame, latched) that this start of"
+        " RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and"
+        " nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for"
+        " this same flag before its own preflight. Off, a fresh map -> base_link is enough, as"
+        " before 2026-09-23",
+        why="on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the"
+        " pose it SAVED at its last shutdown, and a fresh transform was taken for a localisation"
+        " — 'at home' at the bookshelf with 0 of 198 updates recognised, then 76 cm off inside"
+        " the table. The laptop's flag of the same name only changes what rtabmap_frame SAYS:"
+        " it cannot lift a refusal of silence, from a node that is down, respawning or running"
+        " code from before the word existed. This one is the board-side switch the refusal"
+        " itself answers to",
+        on_when="always under PEPIN_LOCALIZER=rtabmap: a pose nobody has vouched for since"
+        " RTAB-Map's start is not a pose to drive on",
+        off_when="when the word cannot come and the cart is known to stand where RTAB-Map's pose"
+        " says: pepin-vslam down or started before this build (ros/laptop.sh vslam restarts it"
+        " on the checkout), or a dark room with no seed at hand",
+    ),
 )
 
 PLANNERS = {
@@ -402,7 +424,7 @@ class GoalServer(Node):
         # WHETHER RTAB-MAP'S START IS PLACED (pepin.watch.Placement, from the laptop's
         # rtabmap_frame, latched): under PEPIN_LOCALIZER=rtabmap a fresh map -> base_link is not
         # a pose until this start of RTAB-Map has recognised the loaded map or been seeded.
-        # None until heard, which _ready refuses as "nobody said".
+        # None until heard, which _ready refuses as "nobody said" (flag start_needs_placement).
         self._placement: Placement | None = None
         self.create_subscription(
             String,
@@ -849,9 +871,10 @@ class GoalServer(Node):
         """May a goal start now (:class:`pepin.watch.GoalGate`): the tracker's sigma where it
         publishes one and its fit where it does not; where no tracker runs, the age of
         map -> base_link AND the age of the SLAM correction, which is the only one of the two a
-        dead laptop stops. ``pose`` is a reading already taken by the caller (mark's), so the
-        edge is not looked up twice. The gate is kept in step with its live flag here rather
-        than at the switch, so one reading and one rule answer every caller."""
+        dead laptop stops; under ``rtabmap`` also whether this start of RTAB-Map is placed
+        (flag ``start_needs_placement``). ``pose`` is a reading already taken by the caller
+        (mark's), so the edge is not looked up twice. The gate is kept in step with its live flag
+        here rather than at the switch, so one reading and one rule answer every caller."""
         self._gate = replace(
             self._gate, start_on_a_known_pose=self._switches.on("start_on_a_known_pose")
         )
@@ -860,7 +883,9 @@ class GoalServer(Node):
             watched = self._correction() if self._watching_correction() else None
             ready = self._gate.verdict(None, edge.get("age_s"), watched)
             if ready.ready and self._localizer == "rtabmap":
-                placed = Preflight.placement(self._placement)
+                placed = Preflight.placement(
+                    self._placement, asked=self._switches.on("start_needs_placement")
+                )
                 if not placed.ok:
                     return Readiness(False, tracker=False, rule=BY_PLACEMENT, reason=placed.detail)
             return ready

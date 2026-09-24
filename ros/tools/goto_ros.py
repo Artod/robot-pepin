@@ -120,6 +120,14 @@ CANCEL_CONFIRM_S = 3.0
 NAV_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
 # Where RTAB-Map (the node /rtabmap/rtabmap) takes an operator's pose in localisation mode.
 RTABMAP_INITIAL_POSE = "/rtabmap/initialpose"
+# THE GOAL SERVER'S SWITCH FOR THE PLACEMENT REFUSAL, obeyed here too: one
+# `ros/flags.sh set goal_server start_needs_placement false` lifts it for both goal paths, even
+# with the laptop's rtabmap_frame down or on code that never publishes the word. Read from the
+# goal server's parameter service (wherever the board's side runs it); a goal server that does not
+# answer within the wait, or holds no such flag (a build from before it), leaves the default, on.
+GOAL_SERVER = "/goal_server"
+PLACEMENT_FLAG = "start_needs_placement"
+FLAG_WAIT_S = 2.0
 # How long the latched /places is given to land before the file beside the map answers instead. A
 # latched publisher delivers as soon as the two endpoints match, so this covers discovery over the
 # bridge and nothing else: the same 2 s every other "has the route come up" wait here uses, and a
@@ -628,6 +636,30 @@ def placement_now(nav: BasicNavigator, wait_s: float = CERTAINTY_WAIT_S) -> Plac
     return heard[-1] if heard else None
 
 
+def goal_server_flag(nav: BasicNavigator, name: str, wait_s: float = FLAG_WAIT_S) -> bool | None:
+    """The goal server's live bool flag ``name`` as it holds it now (its GetParameters service);
+    ``None`` when the goal server does not answer within ``wait_s`` or holds no such bool flag,
+    and the caller keeps the flag's table default."""
+    from rcl_interfaces.msg import ParameterType
+    from rcl_interfaces.srv import GetParameters
+
+    client = nav.create_client(GetParameters, f"{GOAL_SERVER}/get_parameters")
+    try:
+        if not client.wait_for_service(timeout_sec=wait_s):
+            return None
+        request = GetParameters.Request()
+        request.names = [name]
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(nav, future, timeout_sec=wait_s)
+        answer = future.result()
+    finally:
+        nav.destroy_client(client)
+    values = list(getattr(answer, "values", None) or [])
+    if len(values) != 1 or values[0].type != ParameterType.PARAMETER_BOOL:
+        return None  # not answered, or not declared there (PARAMETER_NOT_SET)
+    return bool(values[0].bool_value)
+
+
 def tracker_here(nav: BasicNavigator, timeout_s: float = TRACKER_PATIENCE_S) -> bool:
     """Whether the board runs the scan-matching tracker (``/where_am_i`` answers within
     ``timeout_s``). False in online SLAM: there is no saved map to match a scan against, so
@@ -680,7 +712,8 @@ def ensure_localized(nav: BasicNavigator, certainty: Certainty) -> str | None:
     Under ``PEPIN_LOCALIZER=rtabmap`` a fresh frame is not enough: RTAB-Map publishes one from
     the moment it starts, at the pose it saved at its last shutdown, so this start must also be
     PLACED — recognised or seeded (:meth:`pepin.watch.Preflight.placement`; 2026-09-23, the cart
-    "at home" at the bookshelf, then 76 cm off inside the table).
+    "at home" at the bookshelf, then 76 cm off inside the table) — unless the goal server's flag
+    ``start_needs_placement`` is off (:func:`goal_server_flag`).
     """
     if tracker_here(nav):
         if preflight(nav, certainty):
@@ -714,7 +747,8 @@ def ensure_localized(nav: BasicNavigator, certainty: Certainty) -> str | None:
             " owns map -> odom, no tracker on the board)",
             flush=True,
         )
-        placed = Preflight.placement(placement_now(nav))
+        asked = goal_server_flag(nav, PLACEMENT_FLAG)
+        placed = Preflight.placement(placement_now(nav), asked=asked is not False)
         print(placed.line(), flush=True)
         return None if placed.ok else ""
     if age > MAP_FRAME_FRESH_S:

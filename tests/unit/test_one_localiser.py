@@ -269,6 +269,27 @@ def test_a_goal_is_refused_on_rtabmap_s_saved_start_pose_until_it_is_placed() ->
     assert not stale.ready and stale.rule != BY_PLACEMENT, "a stale frame is refused first"
 
 
+def test_the_goal_server_s_own_switch_lifts_a_refusal_of_silence() -> None:
+    """Rule 19 on the board's side of the word: with the laptop's rtabmap_frame down, respawning
+    or on code from before the word, nothing arrives and the laptop's flag cannot be set. The goal
+    server's flag of the same name is the switch the refusal answers to, and the refusal says
+    so; a mark is judged by the same rule."""
+    from pepin.watch import BY_PLACEMENT
+
+    node = _goal_server()
+    node._tf = _FakeTf(x=0.0, y=0.0, yaw_deg=0.0, age_s=0.05)
+    silent = node._ready()
+    assert not silent.ready and silent.rule == BY_PLACEMENT
+    assert "ros/flags.sh set goal_server start_needs_placement false" in silent.reason
+    assert "ros/laptop.sh vslam" in silent.reason, "an old pepin-vslam is named, not only dead"
+    assert node.mark("desk")["event"] == "error", "a mark waits for the same word"
+    assert node._switches.set("start_needs_placement", False) is True
+    assert node._ready().ready, "off: the fresh frame is enough, as before 2026-09-23"
+    _placed(node, updates=198, recognised=0)
+    assert node._ready().ready, "and a word of not placed is not asked either"
+    assert "start_needs_placement=off" in node._switches.state()
+
+
 def _rtabmap_update(frame: Any, ref_id: int, matched: int = 0) -> None:
     """One /rtabmap/info: the node this update CREATED and the older node it recognised."""
     from pepin_bringup import rtabmap_frame
@@ -361,7 +382,50 @@ def test_goto_s_seed_topic_is_the_one_rtabmap_frame_hears() -> None:
 
     goto = (REPO / "ros/tools/goto_ros.py").read_text()
     assert f'RTABMAP_INITIAL_POSE = "{rtabmap_frame.RTABMAP_INITIAL_POSE}"' in goto
-    assert "Preflight.placement(placement_now(nav))" in goto, "the preflight asks it"
+    assert "Preflight.placement(placement_now(nav), asked=asked is not False)" in goto, (
+        "the preflight asks it, under the goal server's switch"
+    )
+
+
+class _AskingNav(ros_stubs.Node):
+    """goto's navigator as far as a parameter question goes: every client it makes is answered
+    with ``response`` (``None``: nobody serves it)."""
+
+    def __init__(self, response: Any) -> None:
+        super().__init__("goto")
+        self.response = response
+
+    def create_client(self, srv_type: Any, name: str) -> Any:
+        client = super().create_client(srv_type, name)
+        client.ready = self.response is not None
+        client.response = self.response
+        return client
+
+
+def test_goto_obeys_the_goal_server_s_placement_switch() -> None:
+    """goto_ros reads the goal server's live flag through its parameter service: off lifts the
+    refusal on this path too; a goal server that does not answer, or has no such flag (an older
+    build: NOT_SET), leaves the default on. The client is destroyed whatever the answer."""
+    from pepin_bringup import goal_server
+    from rcl_interfaces.msg import ParameterType, ParameterValue  # the stubs'
+    from test_goto_interrupt import load_goto
+
+    goto = load_goto()
+    assert goto.PLACEMENT_FLAG in goal_server.FLAGS.names, "the flag goto asks for exists there"
+    service = f"{goto.GOAL_SERVER}/get_parameters"
+
+    def held(value: bool) -> Any:
+        return ros_stubs.GetParameters.Response(
+            values=[ParameterValue(type=ParameterType.PARAMETER_BOOL, bool_value=value)]
+        )
+
+    older = ros_stubs.GetParameters.Response(values=[ParameterValue(type=0)])
+    for response, heard in ((None, None), (held(False), False), (held(True), True), (older, None)):
+        nav = _AskingNav(response)
+        assert goto.goal_server_flag(nav, goto.PLACEMENT_FLAG) is heard
+        assert nav.destroyed_clients == [service], "no client is left behind"
+        if response is not None:
+            assert nav.service_clients[service].calls[0].names == [goto.PLACEMENT_FLAG]
 
 
 def _loc_rows(recorder: Any) -> list[dict[str, Any]]:

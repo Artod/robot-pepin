@@ -456,7 +456,8 @@ FLAGS = FlagSet(
         " start is not a pose to drive on",
         off_when="to drive on the saved start pose anyway — a cart known to stand exactly where"
         " RTAB-Map last shut down, with the camera unable to recognise anything (darkness) and no"
-        " seed at hand",
+        " seed at hand. A refusal of SILENCE (this node down, respawning, or older than this flag)"
+        " is lifted by the goal server's flag of the same name, which both goal clients obey",
     ),
 )
 

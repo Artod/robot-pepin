@@ -686,6 +686,10 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
         # controller joined on 2026-09-23, default mppi: what follows the plan, and the goal
         # checker that ends the drive with it.
         "controller",
+        # start_needs_placement the same night, default on: under PEPIN_LOCALIZER=rtabmap a goal
+        # waits for the laptop's word that RTAB-Map's start is placed; this is the board-side
+        # switch back, which goto_ros obeys too.
+        "start_needs_placement",
     )
     assert all(flags.flag(name).live for name in flags.names)
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"

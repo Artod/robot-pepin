@@ -816,6 +816,16 @@ def test_nothing_heard_is_refused_and_the_flag_off_is_the_old_behaviour() -> Non
     assert "start_needs_placement is off" in off.how()
 
 
+def test_the_goal_server_s_switch_off_passes_even_silence_and_says_so() -> None:
+    """The board-side switch (goal_server start_needs_placement): off, nothing heard and not
+    placed both pass — the one way back when the laptop's node cannot say anything — and the
+    line says it was not asked."""
+    for heard in (None, Placement(198, 0, 0, loaded=True)):
+        check = Preflight.placement(heard, asked=False)
+        assert check.ok and "goal_server start_needs_placement is off" in check.detail
+    assert "0 of 198 updates" in Preflight.placement(Placement(198, 0, 0, True), asked=False).detail
+
+
 def test_the_placement_travels_as_json_and_a_garbled_one_is_nobody_saying() -> None:
     for sent in (
         Placement(198, 0, 0, True),
