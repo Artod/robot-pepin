@@ -21,6 +21,10 @@ import pytest
 import source_facts as sf
 
 from pepin.graphmode import (
+    CONFIRM_AGGRESSIVE,
+    CONFIRM_PARAMETERS,
+    CONFIRM_SINGLE,
+    CONFIRM_STOCK,
     FEATURE_PARAMETERS,
     FEATURES_ORB,
     FEATURES_XFEAT,
@@ -62,13 +66,43 @@ def test_the_visual_strategy_carries_the_flag_s_feature_set() -> None:
         "Vis/CorNNType": "6",
         "RGBD/LoopClosureReextractFeatures": "true",
         "Vis/PnPReprojError": "2",
+        "Rtabmap/LoopThr": "0.11",
+        "RGBD/MaxOdomCacheSize": "10",
     }
     assert visual_parameters(STRATEGY_VIS, FEATURES_ORB, 4.0) == {
         "Vis/FeatureType": "8",
         "Vis/CorNNType": "1",
         "RGBD/LoopClosureReextractFeatures": "false",
         "Vis/PnPReprojError": "4",
+        "Rtabmap/LoopThr": "0.11",
+        "RGBD/MaxOdomCacheSize": "10",
     }
+
+
+def test_the_confirmation_travels_with_the_visual_strategy_while_localising() -> None:
+    """Parked under the lamps the second, confirming try never reached Rtabmap/LoopThr 0.11 and
+    0 of 244 updates were accepted: aggressive keeps it at 0.05, single accepts the first."""
+    aggressive = visual_parameters(STRATEGY_VIS, FEATURES_XFEAT, 2.0, confirm=CONFIRM_AGGRESSIVE)
+    assert (aggressive["Rtabmap/LoopThr"], aggressive["RGBD/MaxOdomCacheSize"]) == ("0.05", "10")
+    single = visual_parameters(STRATEGY_VIS, FEATURES_XFEAT, 2.0, confirm=CONFIRM_SINGLE)
+    assert (single["Rtabmap/LoopThr"], single["RGBD/MaxOdomCacheSize"]) == ("0.11", "0")
+    for confirm in CONFIRM_PARAMETERS:
+        # ICP's weak hypotheses are not tried from the identity guess, and a mapping database
+        # keeps RTAB-Map's own rule
+        assert visual_parameters(STRATEGY_ICP, FEATURES_XFEAT, 2.0, confirm=confirm) == (
+            visual_parameters(STRATEGY_ICP, FEATURES_ORB, 2.0)
+        )
+        mapping = visual_parameters(STRATEGY_VIS, FEATURES_XFEAT, 2.0, True, confirm)
+        assert mapping.items() >= CONFIRM_PARAMETERS[CONFIRM_STOCK].items()
+    with pytest.raises(ValueError):
+        visual_parameters(STRATEGY_VIS, FEATURES_XFEAT, 2.0, confirm="trust")
+
+
+def test_the_stock_confirmation_is_the_launch_table_s() -> None:
+    """The start values must be the table's, or the first set would change them unasked."""
+    table = _rtabmap_table()
+    for name, value in CONFIRM_PARAMETERS[CONFIRM_STOCK].items():
+        assert table[name] == value, name
 
 
 def test_icp_always_carries_orb_whatever_the_flag_says() -> None:
@@ -101,7 +135,8 @@ def test_every_name_a_live_set_may_carry_is_in_the_launch_table() -> None:
     for strategy in REGISTRATION_PARAMETERS:
         names |= set(REGISTRATION_PARAMETERS[strategy])
         for features in FEATURE_PARAMETERS:
-            names |= set(visual_parameters(strategy, features, PNP_REPROJ_PX))
+            for confirm in CONFIRM_PARAMETERS:
+                names |= set(visual_parameters(strategy, features, PNP_REPROJ_PX, False, confirm))
     assert names <= set(table), sorted(names - set(table))
 
 

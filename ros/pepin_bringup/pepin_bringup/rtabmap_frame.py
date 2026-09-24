@@ -117,6 +117,8 @@ from pepin.graphmode import (
     ALWAYS_LOCALISE,
     ALWAYS_MAP,
     BY_TRUST,
+    CONFIRM_AGGRESSIVE,
+    CONFIRM_PARAMETERS,
     FEATURES_ORB,
     FEATURES_XFEAT,
     MAPPING,
@@ -465,6 +467,31 @@ FLAGS = FlagSet(
         " and the words that do come sit close to the truth",
         off_when="back to 2 the moment a 4 px word is seen far from where the cart stands: a wider"
         " gate admits more wrong matches as inliers",
+    ),
+    Flag(
+        "visual_confirm",
+        CONFIRM_AGGRESSIVE,
+        choices=tuple(CONFIRM_PARAMETERS),
+        description="how RTAB-Map CONFIRMS a localisation while the camera registers alone:"
+        " RTAB-Map 0.22 delays a first good localisation into its odometry cache and accepts it"
+        " only with a second one inside RGBD/MaxOdomCacheSize updates, and that second try has to"
+        " reach Rtabmap/LoopThr. rtabmap: its stock 0.11 and 10. aggressive: Rtabmap/LoopThr 0.05,"
+        " the threshold the first try already used, so the second comes on the next update; the"
+        " confirmation stays. single: RGBD/MaxOdomCacheSize 0, the first good localisation is"
+        " accepted. Sent with the visual strategy while the database localises and changed live;"
+        " under ICP and while it maps, always rtabmap",
+        why="measured 2026-09-24 parked at the base under the evening lamps, camera only, xfeat"
+        " (scratch/link_autopsy/confirm_ab.sh, 240 s each): rtabmap accepted 0 of 244 updates —"
+        " XFeat registered with 83-118 inliers once every 11 updates, the night's ORB hypotheses"
+        " (0.05-0.07) never reach 0.11 for the confirming try and the cache rolls the first one"
+        " out (scratch/link_autopsy/localisation_cadence.py); aggressive accepted 41 of 42 and"
+        " single 44 of 44, all within 7 cm of the seed and within 1.2 deg of the yaw at which the"
+        " lidar's scan fits the map (scratch/link_autopsy/lidar_yaw_truth.py). aggressive keeps"
+        " RTAB-Map's own two-localisation rule",
+        on_when="aggressive whenever the camera has to localise alone in other light than the"
+        " database's; single if a drive shows aggressive still waiting between localisations",
+        off_when="rtabmap to reproduce RTAB-Map's stock confirmation, or if the extra registrations"
+        " (one per update with a hypothesis over 0.05) cost the laptop more than it can spare",
     ),
     Flag(
         "word_at_picture_time",
@@ -1516,6 +1543,7 @@ class RtabmapFrame(Node):
             self._features(),
             float(self._switches["pnp_reproj_px"]),
             mapping=self._mode.mode == MAPPING,
+            confirm=str(self._switches["visual_confirm"]),
         )
 
     def _visual_text(self) -> str:
@@ -1529,7 +1557,16 @@ class RtabmapFrame(Node):
             why = f" (xfeat asked, but this image has no {XFEAT_DETECTOR_PATH})"
         elif asked != features:
             why = f" ({asked} asked, sent with the visual strategy only and only while localising)"
-        return f"visual features {features}{why}, PnP {sent.get('Vis/PnPReprojError', '?')} px"
+        confirm = next(
+            (name for name, table in CONFIRM_PARAMETERS.items() if table.items() <= sent.items()),
+            "?",
+        )
+        asked_confirm = str(self._switches["visual_confirm"])
+        confirm_why = "" if asked_confirm == confirm else f" ({asked_confirm} asked, visual only)"
+        return (
+            f"visual features {features}{why}, PnP {sent.get('Vis/PnPReprojError', '?')} px,"
+            f" confirm {confirm}{confirm_why}"
+        )
 
     # ---- outputs -------------------------------------------------------------------------
     @staticmethod

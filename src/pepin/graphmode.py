@@ -86,6 +86,10 @@ __all__ = [
     "ALWAYS_LOCALISE",
     "ALWAYS_MAP",
     "BY_TRUST",
+    "CONFIRM_AGGRESSIVE",
+    "CONFIRM_PARAMETERS",
+    "CONFIRM_SINGLE",
+    "CONFIRM_STOCK",
     "FEATURES_ORB",
     "FEATURES_XFEAT",
     "FEATURE_PARAMETERS",
@@ -229,18 +233,54 @@ FEATURE_PARAMETERS = {
 PNP_REPROJ_PX = 2.0
 PNP_REPROJ_RANGE_PX = (1.0, 4.0)
 
+# HOW A LOCALISATION IS CONFIRMED — the fourth thing that travels with the visual strategy while
+# localising. RTAB-Map 0.22.1 does not accept a first good localisation: it DELAYS it into the
+# odometry cache (RGBD/MaxOdomCacheSize updates, Rtabmap.cpp:3650/3772) and accepts both once a
+# second one lands inside that window. The first try only has to reach RGBD/AggressiveLoopThr
+# (0.05) while the cache holds no localisation; the second must reach Rtabmap/LoopThr (0.11)
+# (:2141-2162). Against a daylight database under the evening lamps the ORB words' hypotheses read
+# 0.05-0.07, so the second try never comes: parked at the base, XFeat registered with 83-118
+# inliers once every 11 updates — the cache's 10 plus the retry — and 0 of 244 updates were
+# accepted (2026-09-24, scratch/link_autopsy/localisation_cadence.py; the same on the replay of
+# run 0466: 21 of 22 registered, 0 accepted). Two ways out, both RTAB-Map's own parameters:
+# ``aggressive`` keeps the second try at the aggressive threshold (the confirmation stays), and
+# ``single`` sets the cache to 0 (the first good localisation is accepted; RGBD/OptimizeMaxError
+# is already 0 while localising, so the cache's deformation check was not running anyway).
+# Measured live at the base (scratch/link_autopsy/confirm_ab.sh, 240 s each): aggressive 41 of 42
+# updates accepted, single 44 of 44, all within 7 cm of the seed and within 1.2 deg of the yaw at
+# which the lidar's scan fits the map (scratch/link_autopsy/lidar_yaw_truth.py). Under ICP, and
+# while the database maps, the set is always the stock one: the lidar's hypotheses reach 0.11 and
+# its ICP from the identity guess is not a registration to try on every weak hypothesis.
+CONFIRM_STOCK, CONFIRM_AGGRESSIVE, CONFIRM_SINGLE = "rtabmap", "aggressive", "single"
+CONFIRM_PARAMETERS = {
+    CONFIRM_STOCK: {"Rtabmap/LoopThr": "0.11", "RGBD/MaxOdomCacheSize": "10"},
+    CONFIRM_AGGRESSIVE: {"Rtabmap/LoopThr": "0.05", "RGBD/MaxOdomCacheSize": "10"},
+    CONFIRM_SINGLE: {"Rtabmap/LoopThr": "0.11", "RGBD/MaxOdomCacheSize": "0"},
+}
+
 
 def visual_parameters(
-    strategy: str, features: str, pnp_reproj_px: float, mapping: bool = False
+    strategy: str,
+    features: str,
+    pnp_reproj_px: float,
+    mapping: bool = False,
+    confirm: str = CONFIRM_STOCK,
 ) -> dict[str, str]:
-    """The feature set and PnP gate RTAB-Map's visual registration should run under
-    ``strategy``, as the strings rtabmap wants: ``features`` under the visual strategy while the
-    database only localises, ORB's set under ICP or while mapping whatever the flag says (the
-    module comment above says why)."""
-    chosen = features if (strategy == STRATEGY_VIS and not mapping) else FEATURES_ORB
+    """The feature set, PnP gate and localisation confirmation RTAB-Map's registration should run
+    under ``strategy``, as the strings rtabmap wants: ``features`` and ``confirm`` under the visual
+    strategy while the database only localises, ORB's set and the stock confirmation under ICP or
+    while mapping whatever the flags say (the module comments above say why)."""
+    visual = strategy == STRATEGY_VIS and not mapping
+    chosen = features if visual else FEATURES_ORB
     if chosen not in FEATURE_PARAMETERS:
         raise ValueError(f"unknown feature set {chosen!r}; sets: {sorted(FEATURE_PARAMETERS)}")
-    return {**FEATURE_PARAMETERS[chosen], "Vis/PnPReprojError": f"{pnp_reproj_px:g}"}
+    if confirm not in CONFIRM_PARAMETERS:
+        raise ValueError(f"unknown confirmation {confirm!r}; sets: {sorted(CONFIRM_PARAMETERS)}")
+    return {
+        **FEATURE_PARAMETERS[chosen],
+        "Vis/PnPReprojError": f"{pnp_reproj_px:g}",
+        **CONFIRM_PARAMETERS[confirm if visual else CONFIRM_STOCK],
+    }
 
 
 # What a seating must be worth for the database to be taught from it. The peak's own covariance is
