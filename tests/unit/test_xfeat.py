@@ -176,6 +176,44 @@ def test_the_launch_points_rtabmap_at_the_adapters_the_image_carries() -> None:
     assert "COPY xfeat/rtabmap_xfeat.py xfeat/rtabmap_lighterglue.py /opt/xfeat/" in dockerfile
 
 
+def _features_kept(tmp_path: Path, apt: list[str], new: list[str]) -> tuple[int, str]:
+    """ros/xfeat/build_rtabmap.sh's features_kept on two Version.h excerpts: (status, stderr)."""
+    import subprocess
+
+    (tmp_path / "apt").write_text("".join(f"#define RTABMAP_{d}\n" for d in apt))
+    (tmp_path / "new").write_text("".join(f"#define RTABMAP_{d}\n" for d in new))
+    script = ADAPTERS / "build_rtabmap.sh"
+    run = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"eval \"$(sed -n '/^features_kept() {{/,/^}}/p' '{script}')\";"
+            f" features_kept '{tmp_path / 'apt'}' '{tmp_path / 'new'}'",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return run.returncode, run.stderr
+
+
+def test_the_rebuilt_core_must_keep_every_optional_library_the_apt_build_had(
+    tmp_path: Path,
+) -> None:
+    """Optimizer/Strategy and Icp/Strategy are compile-time defaults the launch table does not name
+    (GTSAM -> 2, libpointmatcher -> 1): a library the rebuild missed would change the lidar's path
+    without a word. The image that exists passes (scratch/xfeat_critic/params_diff.sh: the same 19
+    defines plus RTABMAP_PYTHON, all 498 parameter defaults identical)."""
+    apt = ["TORO", "G2O", "GTSAM", "POINTMATCHER", "OCTOMAP", "OPENNI2"]
+    assert _features_kept(tmp_path, apt, [*apt, "PYTHON"]) == (0, "")
+    status, why = _features_kept(tmp_path, apt, [d for d in apt if d != "GTSAM"] + ["PYTHON"])
+    assert status == 1 and "RTABMAP_GTSAM" in why
+    status, why = _features_kept(tmp_path, apt, apt)
+    assert status == 1 and "no RTABMAP_PYTHON" in why
+    status, why = _features_kept(tmp_path, ["TORO"], ["TORO", "PYTHON"])
+    assert status == 1 and "no RTABMAP_GTSAM" in why, "the floor holds whatever apt's header had"
+
+
 # ---- the adapters' arrays -----------------------------------------------------------------------
 def test_the_detector_answers_in_the_layout_rtabmap_reads() -> None:
     """PyDetector.cpp asserts N x 3 float keypoints and N x dim float descriptors and reads both

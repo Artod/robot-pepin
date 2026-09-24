@@ -1,0 +1,26 @@
+{
+  "frame": "each place is the cart's pose in the frame of its labelled graph node: dx, dy in metres, dtheta_deg counter-clockwise",
+  "places": {
+    "bookshelf": {
+      "dtheta_deg": -0.14780513185475472,
+      "dx": 0.019797055001284536,
+      "dy": -0.003420587949086562,
+      "marked_at": 1790018886.2877612,
+      "node": 364
+    },
+    "home": {
+      "dtheta_deg": 0.1760369737278606,
+      "dx": 0.03516632239766615,
+      "dy": 0.001293193301532436,
+      "marked_at": 1790019242.7741113,
+      "node": 661
+    },
+    "printer": {
+      "dtheta_deg": 2.1004497633645776,
+      "dx": -0.007813434626208857,
+      "dy": -0.0036449045945475267,
+      "marked_at": 1790019064.1887293,
+      "node": 512
+    }
+  }
+}

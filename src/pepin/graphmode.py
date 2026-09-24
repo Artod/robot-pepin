@@ -49,6 +49,11 @@ and read back with ``as_string()`` at :3112), and the name must be one the LAUNC
 (CoreWrapper.cpp:362-379), so a parameter never named in the launch table accepts ``ros2 param
 set`` and is then never looked at. ``Reg/Strategy`` is in that table
 (ros/pepin_bringup/launch/vslam.launch.py), which is what makes this switch possible at all.
+rtabmap_slam ALSO applies every change it hears on its own ``/parameter_events`` as it arrives
+(CoreWrapper.cpp:907-970, the same launch-table filter): a ``set_parameters`` request of five names
+lands as five notifications and five ``parseParameters``, a ``set_parameters_atomically`` request
+as one (measured 2026-09-24, scratch/xfeat_critic/atomic_set.sh) — so a set that must land whole
+goes atomically (``atomic_parameter_sets`` in pepin_bringup.rtabmap_frame).
 
 THE MEMORY. RTAB-Map has two memories. In MAPPING mode every update may become a node in the
 database; in LOCALISATION mode nothing is written and the graph only recognises what it already
@@ -387,10 +392,14 @@ class ModeRule:
         self._wanted: ModeVerdict | None = None  # ...and the one the rule has been asking for
         self._since = 0.0  # since when, on the caller's clock
         self._switches = 0
+        # What _applied was before the verdict update() last returned, for withdraw(); a list so
+        # "nothing to hand back" (empty) differs from "the mode before was unknown" ([None]).
+        self._before: list[bool | None] = []
 
     @property
     def mode(self) -> str:
-        """The mode this rule has asked for, or ``unknown`` before it has asked for anything."""
+        """The mode this rule has asked for and the caller did not hand back (:meth:`withdraw`) —
+        the one RTAB-Map was told — or ``unknown`` before anything went out."""
         return "unknown" if self._applied is None else (MAPPING if self._applied else LOCALISING)
 
     @property
@@ -427,22 +436,33 @@ class ModeRule:
 
         A verdict is returned only when it differs from the mode already asked for AND has been the
         answer for :attr:`hold_s` without a break — except the very first one, which is the initial
-        mode and is asked for at once. Returning it counts a switch and records it as applied, so a
-        caller whose service call fails must ask again by feeding the rule the next instant.
+        mode and is asked for at once. Returning it counts a switch and records it as applied; a
+        caller whose call did not go out hands it back with :meth:`withdraw`, and the next instant
+        with the same evidence returns it again.
         """
         verdict = self.verdict(refusal, holder, seating)
         if self._wanted is None or verdict.mapping != self._wanted.mapping:
             self._since = now
         self._wanted = verdict
-        if self._applied is None:
-            self._applied = verdict.mapping
-            self._switches += 1
-            return verdict
-        if verdict.mapping == self._applied or now - self._since < self.hold_s:
+        self._before = []
+        if self._applied is not None and (
+            verdict.mapping == self._applied or now - self._since < self.hold_s
+        ):
             return None
+        self._before = [self._applied]
         self._applied = verdict.mapping
         self._switches += 1
         return verdict
+
+    def withdraw(self) -> None:
+        """Hand back the verdict :meth:`update` has just returned, because the switch did not go
+        out (the service was busy or not up): the rule's mode is again the one RTAB-Map still has,
+        the switch is not counted, and the hold already served is not served twice — the next
+        :meth:`update` with the same evidence returns the verdict at once."""
+        if not self._before:
+            raise RuntimeError("withdraw() without a verdict just returned by update()")
+        self._applied = self._before.pop()
+        self._switches -= 1
 
     def text(self) -> str:
         """The mode, who decided it and why, for a report line: ``localising (the pose is held by
@@ -515,10 +535,12 @@ class StrategyRule:
         self._wanted: StrategyVerdict | None = None
         self._since = 0.0
         self._switches = 0
+        self._before: list[str] = []  # the strategy before the verdict just returned (withdraw)
 
     @property
     def strategy(self) -> str:
-        """``Reg/Strategy``'s value as this rule last asked for it."""
+        """``Reg/Strategy``'s value as this rule last asked for it and the caller did not hand back
+        (:meth:`withdraw`): the strategy RTAB-Map was sent."""
         return self._applied
 
     @property
@@ -539,8 +561,10 @@ class StrategyRule:
         ``scan`` ``None`` is "the packer has not said" — no snapshot state has arrived, or the one
         that did is older than its own refresh — and then nothing is asked for: an absent report is
         not evidence that the lidar is gone, and rebuilding the pipeline on silence is how a node
-        that merely lost its state topic would stop linking scans.
+        that merely lost its state topic would stop linking scans. A verdict returned is recorded
+        as applied; a caller whose set did not go out hands it back with :meth:`withdraw`.
         """
+        self._before = []
         if scan is None:
             self._wanted = None
             self._since = now
@@ -551,9 +575,19 @@ class StrategyRule:
         self._wanted = verdict
         if verdict.strategy == self._applied or now - self._since < hold_s:
             return None
+        self._before = [self._applied]
         self._applied = verdict.strategy
         self._switches += 1
         return verdict
+
+    def withdraw(self) -> None:
+        """Hand back the verdict :meth:`update` has just returned, because its parameter set did
+        not go out: :attr:`strategy` is again the one RTAB-Map still runs, the switch is not
+        counted, and the next :meth:`update` with the same evidence asks for it again at once."""
+        if not self._before:
+            raise RuntimeError("withdraw() without a verdict just returned by update()")
+        self._applied = self._before.pop()
+        self._switches -= 1
 
     def text(self) -> str:
         """The strategy, why it is that, and what is being asked for, for a report line:

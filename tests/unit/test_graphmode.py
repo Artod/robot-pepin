@@ -6,6 +6,8 @@ way: a reading and a clock in, the verdict to act on out."""
 
 import math
 
+import pytest
+
 from pepin.graphmode import (
     ALWAYS_LOCALISE,
     ALWAYS_MAP,
@@ -81,6 +83,33 @@ def test_the_mode_is_asked_for_once_and_then_only_when_it_has_held() -> None:
     assert rule.mode == "localising" and "2 switches" in rule.text()
 
 
+def test_a_switch_that_did_not_go_out_is_handed_back_and_asked_for_again() -> None:
+    """A busy or absent mode service used to drop a switch for good: the rule had recorded it as
+    applied and never asked again, while the visual features that follow the mode believed it.
+    Handed back, the rule's mode is the one RTAB-Map still has and the next instant asks again —
+    without serving the hold a second time."""
+    rule = ModeRule(hold_s=2.0)
+    first = rule.update(0.0, None, "graph")
+    assert first is not None and first.mapping is False
+    rule.withdraw()
+    assert rule.mode == "unknown" and rule.switches == 0, "the initial mode did not go out"
+    again = rule.update(0.1, None, "graph")
+    assert again is not None and again.mapping is False and rule.mode == "localising"
+
+    assert rule.update(1.0, None, "lidar") is None, "the hold starts"
+    switched = rule.update(3.1, None, "lidar")
+    assert switched is not None and switched.mapping is True
+    rule.withdraw()
+    assert rule.mode == "localising" and rule.switches == 1
+    assert "asking mapping" in rule.text(), "the report says what it is still asking for"
+    retried = rule.update(3.2, None, "lidar")
+    assert retried is not None and retried.mapping is True, "at once: the hold was served"
+    assert rule.mode == "mapping" and rule.switches == 2
+    assert rule.update(3.3, None, "lidar") is None, "and once it went out, once"
+    with pytest.raises(RuntimeError):
+        rule.withdraw()
+
+
 def test_the_mode_can_be_pinned_either_way() -> None:
     """CLAUDE.md rule 19: the old behaviour stays reachable. "map" is the arrangement of before
     2026-09-18; "localise" freezes a database for a session."""
@@ -149,6 +178,24 @@ def test_a_change_is_acted_on_only_once_it_has_held_for_the_evidences_own_refres
     assert verdict is not None and verdict.strategy == STRATEGY_VIS
     assert rule.strategy == STRATEGY_VIS and rule.switches == 1
     assert rule.update(now=3.0, hold_s=1.0, scan=False, kind="camera-only") is None, "once"
+
+
+def test_a_strategy_switch_the_parameter_path_could_not_take_is_asked_for_again() -> None:
+    """Handed back, :attr:`StrategyRule.strategy` stays what RTAB-Map runs and the next instant
+    asks again: a camera-only session whose first switch met a parameter path that was not up
+    used to stay on ICP for the rest of the session."""
+    rule = StrategyRule(STRATEGY_ICP)
+    rule.update(now=0.0, hold_s=1.0, scan=False, kind="camera-only")
+    verdict = rule.update(now=1.1, hold_s=1.0, scan=False, kind="camera-only")
+    assert verdict is not None and verdict.strategy == STRATEGY_VIS
+    rule.withdraw()
+    assert rule.strategy == STRATEGY_ICP and rule.switches == 0
+    again = rule.update(now=1.2, hold_s=1.0, scan=False, kind="camera-only")
+    assert again is not None and again.strategy == STRATEGY_VIS
+    assert rule.strategy == STRATEGY_VIS and rule.switches == 1
+    with pytest.raises(RuntimeError):
+        rule.update(now=1.3, hold_s=1.0, scan=False, kind="camera-only")
+        rule.withdraw()
 
 
 def test_a_source_that_stutters_for_one_snapshot_cannot_rebuild_the_pipeline() -> None:

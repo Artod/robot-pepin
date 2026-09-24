@@ -585,7 +585,7 @@ def test_the_mode_follows_trust_in_the_pose_and_not_a_sensor_s_name() -> None:
     assert len(mapping.calls) == 1, "the initial mode is asked for at once"
     assert node._mode.mode == "mapping"
     # ...and the parameters the mode needs travel with it, as strings
-    tuned = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters"]
+    tuned = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters_atomically"]
     assert [p.name for p in tuned.calls[-1].parameters] == [
         "RGBD/LinearUpdate",
         "RGBD/AngularUpdate",
@@ -680,7 +680,7 @@ def _snapshots(node: Any, carrying: tuple[str, ...], kind: str, refresh_s: float
 
 def _tuner_ready(node: Any) -> tuple[Any, Any]:
     """RTAB-Map's parameter path, up: the set and the re-read it needs to be honoured at all."""
-    tuner = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters"]
+    tuner = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters_atomically"]
     reread = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/update_parameters"]
     tuner.ready = reread.ready = True
     return tuner, reread
@@ -775,24 +775,118 @@ def test_the_switch_is_a_flag_and_off_it_only_reports() -> None:
 
 
 def test_a_parameter_path_that_is_not_up_is_counted_and_retried() -> None:
-    """A switch the path could not take must not be forgotten: the rule asked for it, so the
-    report line has to say the pipeline is not what it thinks."""
+    """A switch the path could not take must not be forgotten: it is counted once, the report says
+    the pipeline is still the old one, and the moment the path is up the switch goes out — a
+    camera-only session whose first switch met a path that was not up used to stay on ICP."""
     node = rtabmap_frame.RtabmapFrame()
-    node.clock.seconds = 10.0
-    _snapshots(node, ("camera",), "camera-only")
-    node.timers[0][1]()
-    node.clock.seconds = 10.6
-    _snapshots(node, ("camera",), "camera-only")
-    node.timers[0][1]()
-    assert node._strategy_failed == 1
+    for seconds in (10.0, 10.6, 10.7, 10.8):
+        node.clock.seconds = seconds
+        _snapshots(node, ("camera",), "camera-only")
+        node.timers[0][1]()
+    assert node._strategy_failed == 1, "once per switch held back, not once per tick"
+    assert node._strategy.strategy == rtabmap_frame.STRATEGY_ICP, "what RTAB-Map still runs"
     node._report()
-    assert "switches the parameter path could not take" in node.logger.texts("info")[-1]
+    report = node.logger.texts("info")[-1]
+    assert "switches the parameter path could not take" in report
+    assert "asking visual" in report
+    tuner, reread = _tuner_ready(node)
+    node.clock.seconds = 10.9
+    _snapshots(node, ("camera",), "camera-only")
+    node.timers[0][1]()
+    assert _strategies(tuner) == ["0"] and reread.calls, "retried the tick the path came up"
+    assert node._strategy.strategy == "0"
+
+
+def test_a_half_up_parameter_path_is_sent_nothing() -> None:
+    """The set and its re-read go out together or not at all: a set whose re-read could not follow
+    was counted as failed and then sent again whole on the retry."""
+    node = rtabmap_frame.RtabmapFrame()
+    tuner = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters_atomically"]
+    tuner.ready = True  # update_parameters is not up
+    _go_visual(node)
+    assert not tuner.calls and node._strategy_failed == 1
+
+
+def test_a_mode_switch_the_service_could_not_take_is_asked_for_again() -> None:
+    """The rule used to record a switch as applied when it returned it, so a switch dropped
+    because the service was not up (or the last one unanswered) was never asked again — and the
+    visual features that follow the mode believed a mode RTAB-Map had never been told."""
+    with ros_stubs.parameters(graph_memory="localise"):
+        node = rtabmap_frame.RtabmapFrame()
+    localising = node.service_clients[rtabmap_frame.LOCALISATION_SERVICE]
+    for seconds in (1.0, 1.1, 1.2):
+        node.clock.seconds = seconds
+        node.timers[0][1]()
+    assert not localising.calls and node._mode.mode == "unknown"
+    assert node._mode_failed == 1, "once per switch held back, not once per tick"
+    node._report()
+    assert (
+        f"held back: {rtabmap_frame.LOCALISATION_SERVICE} is not up"
+        in (node.logger.texts("info")[-1])
+    )
+    _ready(node)
+    node.timers[0][1]()
+    assert len(localising.calls) == 1 and node._mode.mode == "localising"
+    node.timers[0][1]()
+    assert len(localising.calls) == 1, "and once it went out, once"
+    assert node._mode_held is None and node._mode_failed == 1
 
 
 # ---- the visual registration's features ---------------------------------------------------------
 def _sent(tuner: Any) -> list[dict[str, str]]:
-    """Every parameter set that went out, in order, as name -> the STRING rtabmap reads back."""
-    return [{p.name: p.value.string_value for p in request.parameters} for request in tuner.calls]
+    """Every parameter set that carried the visual features, in order, as name -> the STRING
+    rtabmap reads back (the memory mode's own pair, RGBD/Linear/AngularUpdate, is left out)."""
+    sets = [{p.name: p.value.string_value for p in request.parameters} for request in tuner.calls]
+    return [values for values in sets if "Vis/FeatureType" in values]
+
+
+def _localising(node: Any) -> None:
+    """Every service up and one tick: the rule's first verdict (localise, this start not yet tied
+    to the loaded map) goes out and is answered, so RTAB-Map is LOCALISING for certain."""
+    _ready(node)
+    node.clock.seconds = 1.0
+    node.timers[0][1]()
+    assert node._mode.mode == "localising" and node._database_only_read()
+
+
+class _Unanswered:
+    """A service call whose response has not arrived: rclpy's future, not done yet."""
+
+    def __init__(self) -> None:
+        self.answered = False
+        self.callbacks: list[Any] = []
+
+    def done(self) -> bool:
+        return self.answered
+
+    def add_done_callback(self, callback: Any) -> None:
+        self.callbacks.append(callback)
+
+    def answer(self) -> None:
+        self.answered = True
+        for callback in self.callbacks:
+            callback(self)
+
+
+def _journal(node: Any) -> list[tuple[str, Any]]:
+    """Every service call the node makes from now on, across all its clients, in the order made."""
+    calls: list[tuple[str, Any]] = []
+    for client in node.service_clients.values():
+
+        def call(request: Any, client: Any = client, original: Any = client.call_async) -> Any:
+            calls.append((client.srv_name, request))
+            return original(request)
+
+        client.call_async = call
+    return calls
+
+
+def _reextract(request: Any) -> str | None:
+    """RGBD/LoopClosureReextractFeatures as a set carries it, or ``None`` for another call."""
+    for parameter in getattr(request, "parameters", []):
+        if parameter.name == "RGBD/LoopClosureReextractFeatures":
+            return str(parameter.value.string_value)
+    return None
 
 
 def _adapters(monkeypatch: pytest.MonkeyPatch, where: Any, present: bool) -> None:
@@ -819,6 +913,7 @@ def test_the_visual_strategy_goes_out_with_the_xfeat_set_in_the_xfeat_image(
     Reg/Strategy is built from the accumulated map, so it must be born with its features."""
     _adapters(monkeypatch, tmp_path, present=True)
     node = rtabmap_frame.RtabmapFrame()
+    _localising(node)
     tuner, _ = _tuner_ready(node)
     _go_visual(node)
     sets = _sent(tuner)
@@ -856,6 +951,7 @@ def test_a_flag_moved_under_the_visual_strategy_re_sends_the_features_alone(
     detectors) while the strategy stays: Reg/Strategy is not sent again."""
     _adapters(monkeypatch, tmp_path, present=True)
     node = rtabmap_frame.RtabmapFrame()
+    _localising(node)
     tuner, _ = _tuner_ready(node)
     _go_visual(node)
     node._switches.set("visual_features", "orb")
@@ -893,8 +989,10 @@ def test_the_scan_coming_back_takes_orb_back_with_icp(
     and no 3D (Memory.cpp:6126): ORB's set comes back in the same set as Reg/Strategy 1."""
     _adapters(monkeypatch, tmp_path, present=True)
     node = rtabmap_frame.RtabmapFrame()
+    _localising(node)
     tuner, _ = _tuner_ready(node)
     _go_visual(node)
+    assert _sent(tuner)[-1]["Vis/FeatureType"] == "15"
     for seconds in (11.0, 11.6):
         node.clock.seconds = seconds
         _snapshots(node, ("camera", "lidar"), "full")
@@ -917,14 +1015,135 @@ def test_a_visual_strategy_that_maps_carries_orb(
     _adapters(monkeypatch, tmp_path, present=True)
     with ros_stubs.parameters(graph_memory="map"):
         node = rtabmap_frame.RtabmapFrame()
+    _ready(node)  # the mapping switch goes out, so RTAB-Map IS mapping
     tuner, _ = _tuner_ready(node)
     _go_visual(node)
+    assert node._mode.mode == "mapping"
     strategy_sets = [s for s in _sent(tuner) if "Reg/Strategy" in s]
     assert strategy_sets[-1]["Reg/Strategy"] == "0"
     assert strategy_sets[-1]["Vis/FeatureType"] == "8"
     assert strategy_sets[-1]["RGBD/LoopClosureReextractFeatures"] == "false"
     node._report()
     assert "only while localising" in node.logger.texts("info")[-1]
+
+
+def test_an_unknown_or_unanswered_mode_keeps_orb_and_xfeat_follows_the_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The xfeat set is in force only while RTAB-Map is LOCALISING for certain: before this node
+    has told it anything, and while the localisation call is unanswered, what goes out with the
+    visual strategy is ORB's — and xfeat follows on the tick the answer is in."""
+    _adapters(monkeypatch, tmp_path, present=True)
+    node = rtabmap_frame.RtabmapFrame()
+    tuner, _ = _tuner_ready(node)  # the parameter path is up, the mode services are not
+    _go_visual(node)
+    assert node._mode.mode == "unknown"
+    assert _sent(tuner)[-1]["Vis/FeatureType"] == "8", "nobody has told RTAB-Map to localise"
+
+    localisation = node.service_clients[rtabmap_frame.LOCALISATION_SERVICE]
+    pending = _Unanswered()
+    localisation.ready = True
+    localisation.call_async = lambda request: (localisation.calls.append(request), pending)[1]
+    node.timers[0][1]()
+    assert len(localisation.calls) == 1 and node._mode.mode == "localising"
+    node.timers[0][1]()
+    assert _sent(tuner)[-1]["Vis/FeatureType"] == "8", "told, but not answered yet"
+    pending.answer()
+    node.timers[0][1]()
+    assert _sent(tuner)[-1]["Vis/FeatureType"] == "15"
+    assert _sent(tuner)[-1]["RGBD/LoopClosureReextractFeatures"] == "true"
+
+
+def test_a_flip_to_mapping_takes_the_xfeat_set_out_of_force_before_the_mapping_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The tracker role, memory by trust, camera-only snapshots (Reg/Strategy 0, xfeat in force)
+    and then a lidar-held sharp pose: the database may learn. A node it WRITES under re-extraction
+    keeps no descriptors and no 3D (Memory.cpp:6126), so ORB's set — re-extraction off — must be
+    set AND re-read before the mapping call goes out; sent after it (as it was), RTAB-Map could
+    run a mapping update in between. And on the way back, xfeat only after the localisation."""
+    _adapters(monkeypatch, tmp_path, present=True)
+    node = rtabmap_frame.RtabmapFrame()
+    node._tied = True  # this start has recognised a node of the map it loaded
+    _ready(node)
+    _map(node)
+    journal = _journal(node)
+    for step in range(12):  # the graph holds the pose: localise; the snapshots carry no scan
+        node.clock.seconds = step * 0.1
+        _sources(node, holder="graph")
+        _snapshots(node, ("camera",), "camera-only")
+        node.timers[0][1]()
+    assert node._strategy.strategy == "0" and node._mode.mode == "localising"
+    assert [_reextract(r) for _, r in journal if _reextract(r)] == ["true"], "xfeat in force"
+
+    for step in range(12, 50):  # the lidar takes the pose, sharp and fresh, past the mode's hold
+        _fit(node, 0.7, at=step * 0.1)
+        _belief(node, 1.0, 2.0)
+        _sources(node, holder="lidar")
+        _snapshots(node, ("camera",), "camera-only")
+        node.timers[0][1]()
+    assert node._mode.mode == "mapping" and node._strategy.strategy == "0"
+    names = [name for name, _ in journal]
+    mapping_at = names.index(rtabmap_frame.MAPPING_SERVICE)
+    orb_at = max(i for i, (_, r) in enumerate(journal[:mapping_at]) if _reextract(r) == "false")
+    assert _reextract(journal[orb_at][1]) == "false"
+    assert f"{rtabmap_frame.RTABMAP_NODE}/update_parameters" in names[orb_at:mapping_at], (
+        "and RTAB-Map re-read it before the mapping call"
+    )
+    assert not [r for _, r in journal[mapping_at:] if _reextract(r) == "true"], (
+        "no xfeat set while mapping"
+    )
+    node._report()
+    assert "held back" not in node.logger.texts("info")[-1], "the wait lasted one tick"
+
+    for step in range(50, 90):  # the graph holds the pose again: back to localising
+        _fit(node, 0.7, at=step * 0.1)
+        _belief(node, 1.0, 2.0)
+        _sources(node, holder="graph")
+        _snapshots(node, ("camera",), "camera-only")
+        node.timers[0][1]()
+    names = [name for name, _ in journal]
+    localising_at = names.index(rtabmap_frame.LOCALISATION_SERVICE)
+    xfeat_at = [i for i, (_, r) in enumerate(journal) if _reextract(r) == "true"][-1]
+    assert xfeat_at > localising_at, "xfeat only once the database is only read again"
+
+
+def test_a_set_lands_whole_and_one_parameter_at_a_time_is_a_flag_away(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """rtabmap_slam applies each /parameter_events notification as it arrives: a set_parameters
+    request of five names landed as five parseParameters, Reg/Strategy first, re-extraction
+    fourth (scratch/xfeat_critic/atomic_set.sh). Atomically it lands as one. The old request is a
+    flag away, and there re-extraction is ordered so it is never on beside another set's values."""
+    _adapters(monkeypatch, tmp_path, present=True)
+    node = rtabmap_frame.RtabmapFrame()
+    _localising(node)
+    atomic, _ = _tuner_ready(node)
+    one_by_one = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters"]
+    one_by_one.ready = True
+    _go_visual(node)
+    assert _sent(atomic)[-1]["Vis/FeatureType"] == "15" and not one_by_one.calls
+    node._switches.set("atomic_parameter_sets", False)
+    for seconds in (11.0, 11.6):  # the scan comes back: ICP with ORB's set
+        node.clock.seconds = seconds
+        _snapshots(node, ("camera", "lidar"), "full")
+        node.timers[0][1]()
+    (back,) = one_by_one.calls
+    names = [p.name for p in back.parameters]
+    assert names[0] == "RGBD/LoopClosureReextractFeatures", "off first, before Reg/Strategy 1"
+    assert [p.value.string_value for p in back.parameters][:1] == ["false"]
+    assert "Reg/Strategy" in names[1:]
+    node._report()
+    assert "atomic_parameter_sets" in node.logger.texts("info")[-1]
+
+
+def test_re_extraction_is_ordered_off_first_and_on_last() -> None:
+    order = rtabmap_frame.reextract_ordered
+    on = order({"Reg/Strategy": "0", "RGBD/LoopClosureReextractFeatures": "true", "Vis/X": "1"})
+    assert list(on) == ["Reg/Strategy", "Vis/X", "RGBD/LoopClosureReextractFeatures"]
+    off = order({"Reg/Strategy": "1", "Vis/X": "8", "RGBD/LoopClosureReextractFeatures": "false"})
+    assert list(off) == ["RGBD/LoopClosureReextractFeatures", "Reg/Strategy", "Vis/X"]
+    assert order({"RGBD/LinearUpdate": "0"}) == {"RGBD/LinearUpdate": "0"}
 
 
 def test_the_memory_never_maps_before_this_start_is_tied_to_the_loaded_map() -> None:

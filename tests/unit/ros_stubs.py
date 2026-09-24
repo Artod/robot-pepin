@@ -237,6 +237,14 @@ class GetParameters:
     Response = _msg("GetParameters_Response", values=list)
 
 
+class SetParametersAtomically:
+    """rcl_interfaces/SetParametersAtomically: a list of parameters in, ONE result back — all of
+    them set or none."""
+
+    Request = _msg("SetParametersAtomically_Request", parameters=list)
+    Response = _msg("SetParametersAtomically_Response", result=SetParametersResult)
+
+
 class SetLabel:
     """rtabmap_msgs/SetLabel, field for field as SetLabel.srv:3-4 lists them — and the response is
     EMPTY, so success and failure look the same to a caller (rtabmap_msgs/srv/SetLabel.srv). Node
@@ -824,7 +832,10 @@ def install() -> Any:
             ParameterValue=ParameterValueMsg,
         ),
         "rcl_interfaces.srv": _module(
-            "rcl_interfaces.srv", SetParameters=SetParameters, GetParameters=GetParameters
+            "rcl_interfaces.srv",
+            SetParameters=SetParameters,
+            GetParameters=GetParameters,
+            SetParametersAtomically=SetParametersAtomically,
         ),
         "builtin_interfaces": _module("builtin_interfaces"),
         "builtin_interfaces.msg": _module(

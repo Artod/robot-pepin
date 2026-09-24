@@ -70,8 +70,10 @@ THE VISUAL REGISTRATION'S FEATURES travel with the strategy on the same path, ch
 operator flags rather than by the snapshots: ``visual_features`` (``xfeat`` — XFeat keypoints
 matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure time — or
 ``orb``, the database's own words) and ``pnp_reproj_px`` (``Vis/PnPReprojError``). Under ICP the set
-is always ORB's, because the same re-extraction switch changes what a NEW node stores
-(:func:`pepin.graphmode.visual_parameters` has the file:line). ``xfeat`` needs the image that
+is always ORB's, and so it is unless RTAB-Map is LOCALISING for certain (told so, the call answered,
+no switch to mapping waiting), because the same re-extraction switch changes what a NEW node stores
+(:func:`pepin.graphmode.visual_parameters` has the file:line); a switch to mapping goes out only
+once ORB's set is in force and re-read. ``xfeat`` needs the image that
 carries the Python adapters (ros/Dockerfile.xfeat); in any other image this node sends ORB's set and
 the report line says why.
 
@@ -87,7 +89,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -95,7 +97,7 @@ import numpy as np
 from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
 from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import SetParameters, SetParametersAtomically
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rtabmap_msgs.msg import Info, MapGraph
@@ -121,7 +123,7 @@ from pepin.graphmode import (
     CONFIRM_PARAMETERS,
     FEATURES_ORB,
     FEATURES_XFEAT,
-    MAPPING,
+    LOCALISING,
     PNP_REPROJ_PX,
     PNP_REPROJ_RANGE_PX,
     PROXIMITY_STOCK,
@@ -131,6 +133,7 @@ from pepin.graphmode import (
     XFEAT_DETECTOR_PATH,
     XFEAT_MATCHER_PATH,
     ModeRule,
+    ModeVerdict,
     StrategyRule,
     describe_sigma,
     seating_refusal,
@@ -411,6 +414,31 @@ FLAGS = FlagSet(
         " if a live switch is ever seen to cost RTAB-Map its working memory",
     ),
     Flag(
+        "atomic_parameter_sets",
+        True,
+        description="a parameter set this node hands RTAB-Map (a strategy with its visual"
+        " features, a visual set alone, a memory mode's pair) goes as ONE"
+        f" {RTABMAP_NODE}/set_parameters_atomically request, which rtabmap_slam applies as one"
+        " /parameter_events notification and one parseParameters. Off, it goes as one"
+        " set_parameters request, which rclcpp applies one parameter at a time — each its own"
+        " event and its own parseParameters — with RGBD/LoopClosureReextractFeatures ordered"
+        " first when it turns off and last when it turns on",
+        why="on, measured 2026-09-24 in a throwaway container of pepin-laptop:xfeat"
+        " (scratch/xfeat_critic/atomic_set.sh: the node on an empty database, its own ROS domain,"
+        " no network). rtabmap_slam applies every parameter event it hears on its own node"
+        " (CoreWrapper.cpp:907-970). Five parameters in one SetParameters request (Reg/Strategy 0"
+        " and the xfeat set) arrived as 5 events and 5 parseParameters over 61 ms, Reg/Strategy"
+        " first and re-extraction fourth, with 49 ms after Vis/FeatureType 15 alone while its"
+        " detector was built; the same five in one SetParametersAtomically request arrived as 1"
+        " event and 1 parseParameters. One by one, leaving xfeat for ICP passes through ICP with"
+        " re-extraction still on, and every intermediate state is a registration nobody chose",
+        on_when="always: every parameter this node sets is declared by rtabmap_slam"
+        " (CoreWrapper.cpp:362-364), so an atomic set is refused only as a whole",
+        off_when="to reproduce the behaviour before 2026-09-24, or if RTAB-Map's node is ever seen"
+        " to refuse an atomic set (one unknown name fails the WHOLE request, where set_parameters"
+        " fails that parameter alone)",
+    ),
+    Flag(
         "visual_features",
         FEATURES_XFEAT,
         choices=(FEATURES_ORB, FEATURES_XFEAT),
@@ -419,32 +447,42 @@ FLAGS = FlagSet(
         " matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure"
         " time (Vis/FeatureType 15, Vis/CorNNType 6, RGBD/LoopClosureReextractFeatures true);"
         " the database is only read. orb: the database's own GFTT/ORB words, the launch table's"
-        " values. Sent with the strategy and changed live; under ICP, and while the database"
-        " maps, the set is always orb. xfeat"
+        " values. Sent with the strategy and changed live; under ICP, and unless RTAB-Map is"
+        " certainly localising (told so and answered, no switch to mapping waiting), the set is"
+        " always orb, and a switch to mapping waits until orb's set is in force. xfeat"
         f" needs the pepin-laptop:xfeat image ({XFEAT_DETECTOR_PATH}); in another image this"
         " node sends orb and the report line says why",
-        why="xfeat, measured 2026-09-23 offline (scratch/xfeat/xfeat_bench.py; evening clips of"
-        " runs 0455-0465 against the daylight database, the lidar-held pose as truth, PnP as"
-        " RTAB-Map runs it: Vis/Iterations 300, 2 px, 20 inliers). 219 evening frames with a"
-        " lidar-held truth, the 3 nearest database nodes each: ORB recognised 10 (5 %), xfeat 167"
-        " (76 %); of the recognitions judged while turning slowly, xfeat was within 0.30 m and 10"
-        " deg of the truth 127 times and off 6 times, median error 0.11 m / 2.2 deg, p90 0.22 m /"
-        " 6.9 deg. Four of the six are node 492 (and 493 beside it), 0.8-1.0 m / 13-22 deg off"
-        " with 41-46 inliers: the rocking chair in its daylight picture stood elsewhere in the"
-        " evening, so the matches on it agree on a wrong place — while that frame's other nodes"
-        " (568, 569) put it 0.1 m from the truth and 492 itself places its daylight neighbours"
-        " within 4 cm / 1.7 deg (scratch/xfeat/node_consistency.py). The camera-only run 0466"
-        " against the nodes RTAB-Map itself proposed: ORB 0 of 270 frames, xfeat 261; the 93 of"
-        " them with an EKF sample within 0.3 s give a map -> odom within 4.0 cm / 0.45 deg of a"
-        " running median (p90 7.2 cm / 1.3 deg), none off by 0.30 m or 10 deg"
+        why="xfeat, measured 2026-09-24 in RTAB-Map's OWN registration: RegistrationVis of"
+        " pepin-laptop:xfeat on evening frames of runs 0455-0465, each against the daylight"
+        " database's node nearest the lidar-held truth (scratch/xfeat/probe/probe_report.py;"
+        " Vis/Iterations 300, 2 px, 20 inliers; judged while turning slower than 0.35 rad/s, right"
+        " within 0.30 m and 10 deg). Of 219 frames ORB recognised 7 (3 %), xfeat 197 (90 %): 139"
+        " right and 18 wrong — 11.5 % of the 157 judged — median error 0.12 m / 3.1 deg, p90 0.30"
+        " m / 9.2 deg (scratch/xfeat_critic/rtabmap_own_figures.py). On the camera-only run 0466,"
+        " against the nodes RTAB-Map itself proposed, ORB recognised 0 of 136 frames and xfeat"
+        " 133. The whole node replaying 0455-0465 with the stock table"
+        " (scratch/xfeat/rtabmap_replay.py, replay_summary.py) accepted 27 of 425 updates — 8"
+        " loop closures, 19 proximity links — and 19 of the 21 judged were right; the 2 wrong are"
+        " loop closures on node 641 (the bookshelf), all five of whose accepts sit at 0.24-0.31 m"
+        " / 7-11 deg. In the rtabmap role an accepted wrong registration moves map -> odom"
+        " (RGBD/OptimizeMaxError 0 there: the graph's error rejects nothing), so the 11.5 % is"
+        " the number to watch on a drive. Secondary, the Python emulation over the 3 nearest"
+        " nodes (scratch/xfeat/xfeat_bench.py): ORB 10 (5 %), xfeat 167 (76 %), 6 of 133 judged"
+        " wrong, four of them node 492/493 where the daylight picture's rocking chair had moved"
+        " by the evening (scratch/xfeat/node_consistency.py); on 0466 its 93 recognitions with"
+        " an EKF sample gave a map -> odom within 4.0 cm / 0.45 deg of a running median"
         " (scratch/xfeat/bench_analyse.py)",
         on_when="xfeat whenever the camera has to localise alone on a map built in other light —"
         " the evening, lamps on, a daylight database",
         off_when="orb to reproduce RTAB-Map's stock registration (0 of 630 camera-only updates"
-        " accepted on 2026-09-23 evening), in an image without the adapters, or if the laptop's"
-        " CPU cannot spare a registration's cost: two XFeat detections and one LighterGlue match,"
-        " 75 + 75 + 167 ms median on the Mac's CPU in the benchmark, per loop-closure or"
-        " proximity candidate",
+        " accepted on 2026-09-23 evening), in an image without the adapters, when a drive shows"
+        " the wrong recognitions (map -> odom jumping by 0.3 m or 10 deg on one word), or if the"
+        " laptop's CPU cannot spare a registration: 0.67-0.70 s median inside RTAB-Map on the"
+        " Docker VM once torch is imported with RTLD_DEEPBIND, 1.70 s before"
+        " (scratch/xfeat/data/probe/out/probe_xfeat_2px_300_6_*.csv), per loop-closure or"
+        " proximity candidate; in the stock-table replay, run before that fix, an update that"
+        " registered took 2.5 s median, p90 5.1 s. The benchmark's 75 + 75 + 167 ms is the"
+        " Python adapters alone, not what RTAB-Map pays",
     ),
     Flag(
         "pnp_reproj_px",
@@ -454,16 +492,19 @@ FLAGS = FlagSet(
         " its match in the current picture and still count as an inlier of the visual"
         " registration (20 inliers accept it, Vis/MinInliers). Sent with the strategy's"
         " parameters and changed live",
-        why="2, RTAB-Map's own default (Parameters.h:684), and measured against 4 on the same"
-        " 219 evening frames (scratch/xfeat/xfeat_bench.py, xfeat, Vis/Iterations 300): 4 px"
-        " recognises 209 (95 %) where 2 px recognises 167 (76 %), but judged against the lidar's"
-        " truth 22 of its 168 recognitions are off by 0.30 m or 10 deg against 6 of 133 at 2 px,"
-        " and its error is wider (p90 0.31 m / 9.4 deg against 0.22 m / 6.9 deg). A wrong word"
-        " moves map -> odom when RTAB-Map owns it, so the tighter gate is the default. Against"
-        " WRONG nodes — 336 evening frames paired with nodes 2.5 m away or looking elsewhere,"
-        " what a mistaken proposal of the words would hand the registration — 2 px let none"
-        " through (the most any reached was 19 inliers) and 4 px let 5 (1.5 %) through with 20-31"
-        " (scratch/xfeat/impostors.py)",
+        why="2, RTAB-Map's own default (Parameters.h:684), and measured against 4 in RTAB-Map's"
+        " own registration on the same 219 evening frames (scratch/xfeat/probe/probe_report.py,"
+        " xfeat, Vis/Iterations 300, the node nearest the truth): 4 px recognises 207 (95 %)"
+        " where 2 px recognises 197 (90 %), but judged against the lidar's truth 29 of its 167"
+        " recognitions are off by 0.30 m or 10 deg (17.4 %) against 18 of 157 (11.5 %) at 2 px,"
+        " and its error is wider (p90 0.36 m / 11.4 deg against 0.30 m / 9.2 deg) — the 10 extra"
+        " recognitions bring 11 extra wrong ones (scratch/xfeat_critic/rtabmap_own_figures.py)."
+        " A wrong word moves map -> odom when RTAB-Map owns it, so the tighter gate is the"
+        " default. The Python emulation agrees (scratch/xfeat/xfeat_bench.py: 209 against 167"
+        " recognised, 22 of 168 against 6 of 133 wrong), and against WRONG nodes — 336 evening"
+        " frames paired with nodes 2.5 m away or looking elsewhere — it let none through at 2 px"
+        " (at most 19 inliers) and 5 (1.5 %) at 4 px (scratch/xfeat/impostors.py; emulation only,"
+        " not rerun inside RTAB-Map)",
         on_when="2 by default; 4 when the recognitions a camera-only drive needs do not come at 2"
         " and the words that do come sit close to the truth",
         off_when="back to 2 the moment a 4 px word is seen far from where the cart stands: a wider"
@@ -600,6 +641,17 @@ def flags_for(localizer: str) -> FlagSet:
     )
 
 
+def reextract_ordered(values: dict[str, str]) -> dict[str, str]:
+    """The same set, ordered for a request rclcpp applies one parameter at a time:
+    ``RGBD/LoopClosureReextractFeatures`` FIRST when it turns off and LAST when it turns on, so no
+    intermediate state has re-extraction on beside another strategy's or feature set's values."""
+    key = "RGBD/LoopClosureReextractFeatures"
+    if key not in values:
+        return dict(values)
+    rest = {name: value for name, value in values.items() if name != key}
+    return {**rest, key: values[key]} if values[key] == "true" else {key: values[key], **rest}
+
+
 def _zero_stamp() -> Any:
     """A builtin_interfaces/Time at zero, for a message that carries no header at all."""
     from builtin_interfaces.msg import Time as TimeMsg
@@ -618,6 +670,16 @@ def _matched_id(msg: Info) -> int:
     loop = int(getattr(msg, "loop_closure_id", 0) or 0)
     proximity = int(getattr(msg, "proximity_detection_id", 0) or 0)
     return loop or proximity
+
+
+@dataclass(frozen=True)
+class HeldSwitch:
+    """A memory-mode switch the rule asked for that has not gone out yet: to which mode, why, and
+    whether the SERVICE held it back (busy, not up) rather than this node's own ordering."""
+
+    mapping: bool
+    why: str
+    refused: bool
 
 
 class RtabmapFrame(Node):
@@ -663,22 +725,26 @@ class RtabmapFrame(Node):
         self._holder: str | None = None  # who /localization/sources says is holding the pose
         self._holder_at = -math.inf  # ...and when that report arrived, by our clock
         self._mode_pending: Any = None  # a switch the service has not answered yet
-        self._mode_failed = 0  # switches the service refused or never answered
+        self._mode_failed = 0  # switches that could not go out when the rule asked for them...
+        self._mode_held: HeldSwitch | None = None  # ...and the one asked for now, held back
         # ...and the other live switch: which registration RTAB-Map runs, decided by what the
         # snapshots carry (pepin.graphmode.StrategyRule). It starts at the strategy the launch table
         # set, so the rule asks for nothing until it has a reason to.
         self._strategy = StrategyRule(STRATEGY_ICP)
         self._snapshots: SnapshotState | None = None  # the last state sensor_pack published...
         self._snapshots_at = -math.inf  # ...and when it reached us, by our clock
-        self._strategy_failed = 0  # strategy switches the parameter path could not take
+        self._strategy_failed = 0  # strategy switches the parameter path could not take...
+        self._strategy_held = False  # ...and whether the one asked for now is waiting for it
         # ...and what the visual registration matches with (visual_features, pnp_reproj_px): the
         # set last sent to RTAB-Map, starting as the launch table's own (ORB, 2 px), and whether
         # this image can run xfeat at all — the two adapters RTAB-Map loads by path are here or not.
         self._xfeat_here = all(Path(p).is_file() for p in (XFEAT_DETECTOR_PATH, XFEAT_MATCHER_PATH))
         self._visual_sent = visual_parameters(STRATEGY_ICP, FEATURES_ORB, PNP_REPROJ_PX)
-        # The Reg/Strategy that went out with it: a switch the parameter path could not take leaves
-        # RTAB-Map on the old one, and its features must stay the old one's (ORB under ICP).
-        self._strategy_sent = STRATEGY_ICP
+        # Whether RTAB-Map has READ the last set: every set counted, and the set the last re-read
+        # was sent after (a re-read goes out only once its set is answered) with its future.
+        self._sets_sent = 0
+        self._reread_after = 0
+        self._reread_pending: Any = None
         # THE TWO HALVES OF ONE UPDATE. The node a /rtabmap/info named and that message's stamp;
         # RTAB-Map's own localisation, its stamp and the planar 3x3 it measured. A word is made when
         # the two carry the same stamp, once (`_spent`): an update recognised nothing is silence.
@@ -798,7 +864,16 @@ class RtabmapFrame(Node):
                 False: self.create_client(Empty, LOCALISATION_SERVICE),
             }
         )
+        # The two ways to hand RTAB-Map a set (atomic_parameter_sets): all of it in one
+        # notification, or one parameter at a time as before.
         self._tuner = (
+            None
+            if self._slam
+            else self.create_client(
+                SetParametersAtomically, f"{RTABMAP_NODE}/set_parameters_atomically"
+            )
+        )
+        self._tuner_one_by_one = (
             None
             if self._slam
             else self.create_client(SetParameters, f"{RTABMAP_NODE}/set_parameters")
@@ -880,12 +955,16 @@ class RtabmapFrame(Node):
         )
 
     def _mode_text(self) -> str:
-        """RTAB-Map's memory mode for a report line: the rule's own verdict, and the switches the
-        service would not take."""
-        return self._mode.text() + (
-            f", {self._mode_failed} switches the service could not take"
-            if self._mode_failed
-            else ""
+        """RTAB-Map's memory mode for a report line: the rule's own verdict, the switches that
+        could not go out when asked for, and why the one asked for now is held back."""
+        return (
+            self._mode.text()
+            + (
+                f", {self._mode_failed} switches the service could not take"
+                if self._mode_failed
+                else ""
+            )
+            + (f", held back: {self._mode_held.why}" if self._mode_held else "")
         )
 
     def _agreement_text(self) -> str:
@@ -1444,19 +1523,56 @@ class RtabmapFrame(Node):
             describe_sigma(self._belief_sigma),
         )
         if verdict is None:
+            self._mode_held = None
             return
+        wait = self._features_first(verdict)
+        refused = None if wait is not None else self._send_mode(verdict)
+        why = wait or refused
+        if why is None:
+            self._mode_held = None
+            return
+        # NOT SENT, SO NOT APPLIED: the rule takes the switch back and asks again next tick.
+        # Recorded as applied, it was never asked again, and the visual set that follows the mode
+        # (_visual_wanted) believed a mode RTAB-Map had never been told.
+        self._mode.withdraw()
+        if refused is not None and (self._mode_held is None or not self._mode_held.refused):
+            self._mode_failed += 1  # once per switch the service held back, not once per tick
+        self._mode_held = HeldSwitch(verdict.mapping, why, refused is not None)
+
+    def _features_first(self, verdict: ModeVerdict) -> str | None:
+        """Why a switch to MAPPING must wait for the visual set, or ``None`` when it may go out.
+
+        ORB'S SET FIRST, AND ANSWERED. With RGBD/LoopClosureReextractFeatures on, a node the
+        database WRITES keeps no descriptors and no 3D (Memory.cpp:6126), so the xfeat set must be
+        out of force before RTAB-Map maps a single update. Sent after the mapping call, it arrived
+        on a later tick while RTAB-Map's executor could run a sensor update in between (a mapping
+        update with re-extraction on). So the switch waits here: the held mapping verdict makes
+        :meth:`_visual_wanted` ORB's, :meth:`_decide_strategy` sends that set this same tick, and
+        the switch goes out once RTAB-Map has re-read it — the re-read is sent only after the set
+        was answered and runs in the group the mode services run in (CoreWrapper.cpp:665-676).
+        """
+        if not verdict.mapping:
+            return None
+        if self._visual_sent != self._visual_wanted(self._strategy.strategy):
+            return "ORB's visual set goes to RTAB-Map first"
+        if not self._settled():
+            return "RTAB-Map has not re-read its visual set yet"
+        return None
+
+    def _send_mode(self, verdict: ModeVerdict) -> str | None:
+        """Send one memory-mode switch and the parameters that travel with it; ``None`` when it
+        went out, otherwise why it could not (the last switch unanswered, the service not up)."""
         if self._mode_pending is not None and not self._mode_pending.done():
-            self._mode_failed += 1
-            return
+            return "the last switch is unanswered"
         client = self._modes[verdict.mapping]
         if not client.service_is_ready():
-            self._mode_failed += 1
-            return
+            return f"{client.srv_name} is not up"
         self._mode_pending = client.call_async(Empty.Request())
         self._retune(verdict.mapping)
         # rclpy names a client's service ``srv_name``; a fake with ``.name`` let this line crash
         # the node on its first live switch (2026-09-18).
         self.get_logger().info(f"rtabmap memory: {verdict.text()} ({client.srv_name})")
+        return None
 
     def _retune(self, mapping: bool) -> None:
         """Set the parameters the new mode needs and have RTAB-Map re-read them.
@@ -1470,22 +1586,28 @@ class RtabmapFrame(Node):
         self._set_parameters(MODE_PARAMETERS[mapping])
 
     def _set_parameters(self, values: dict[str, str]) -> bool:
-        """Set these RTAB-Map parameters on its node and have it re-read them; whether the pair of
-        calls went out at all.
+        """Set these RTAB-Map parameters on its node and have it re-read them; whether the set
+        went out at all (its re-read follows its answer).
 
-        THE ONLY PATH RTAB-MAP HONOURS, and every part of it is necessary. The values are STRINGS
-        because rtabmap declares every one of its parameters as one and reads it back with
-        ``as_string()``; ``update_parameters`` is what copies them into rtabmap's own map and hands
-        the whole map to ``Rtabmap::parseParameters``, so a set alone changes nothing (there is no
-        on-set callback on that node at all); and a name the LAUNCH table never overrode is accepted
-        by the set and then never looked at, which is why the two parameter tables here
-        (:data:`MODE_PARAMETERS`, :data:`pepin.graphmode.REGISTRATION_PARAMETERS`) name only
-        parameters that table already carries. The file:line for all of it is in
-        :mod:`pepin.graphmode`.
+        WHAT RTAB-MAP HONOURS. The values are STRINGS because rtabmap declares every one of its
+        parameters as one and reads it back with ``as_string()``, and a name the LAUNCH table
+        never overrode is accepted by the set and then never looked at, which is why the two
+        parameter tables here (:data:`MODE_PARAMETERS`,
+        :data:`pepin.graphmode.REGISTRATION_PARAMETERS`) name only parameters that table already
+        carries. A set is applied TWICE on RTAB-Map's side: rtabmap_slam hears its own
+        /parameter_events and hands every change to ``Rtabmap::parseParameters`` as it arrives
+        (CoreWrapper.cpp:907-970) — one event per parameter for a set_parameters request, one for
+        the whole set atomically (``atomic_parameter_sets``) — and ``update_parameters`` re-reads
+        the whole map synchronously, in the group the mode services run in, which is what
+        :meth:`_settled` waits for. The file:line for the rest is in :mod:`pepin.graphmode`.
         """
-        if self._tuner is None or not self._tuner.service_is_ready():
-            return False
-        request = SetParameters.Request()
+        atomic = self._switches.on("atomic_parameter_sets")
+        tuner = self._tuner if atomic else self._tuner_one_by_one
+        if tuner is None or self._reread is None or not self._path_up():
+            return False  # both calls or neither: a half-sent set is retried whole
+        if not atomic:
+            values = reextract_ordered(values)
+        request = (SetParametersAtomically if atomic else SetParameters).Request()
         request.parameters = [
             Parameter(
                 name=name,
@@ -1493,11 +1615,27 @@ class RtabmapFrame(Node):
             )
             for name, value in values.items()
         ]
-        self._tuner.call_async(request)
-        if self._reread is None or not self._reread.service_is_ready():
-            return False
-        self._reread.call_async(Empty.Request())
+        self._sets_sent += 1
+        serial = self._sets_sent
+        # The re-read goes out when the set is ANSWERED, not beside it: the two are different
+        # callback groups on RTAB-Map's side (the node's parameter services, CoreWrapper's
+        # processing group), so a re-read sent beside the set could run first and re-read the old
+        # values. Answered after the set, it has run parseParameters on the new ones.
+        tuner.call_async(request).add_done_callback(lambda _: self._reread_once(serial))
         return True
+
+    def _reread_once(self, serial: int) -> None:
+        """Have RTAB-Map re-read its parameters now that set number ``serial`` is answered."""
+        if self._reread is None or not self._reread.service_is_ready():
+            return
+        self._reread_pending = self._reread.call_async(Empty.Request())
+        self._reread_after = serial
+
+    def _settled(self) -> bool:
+        """Whether RTAB-Map has READ every set this node sent: the last one was answered, the
+        re-read sent after it was answered too (nothing sent yet: the launch table's values)."""
+        answered = self._reread_pending is None or self._reread_pending.done()
+        return self._reread_after == self._sets_sent and answered
 
     # ---- RTAB-Map's registration ----------------------------------------------------------
     def _decide_strategy(self) -> None:
@@ -1521,32 +1659,45 @@ class RtabmapFrame(Node):
                 state.carries(LIDAR) if (state is not None and fresh) else None,
                 state.kind if state is not None else "",
             )
-        if verdict is not None:
+        if verdict is None:
+            self._strategy_held = False
+        else:
             visual = self._visual_wanted(verdict.strategy)
-            # One set for the strategy and its features: the pipeline RTAB-Map re-creates on a new
-            # Reg/Strategy is built from the accumulated map, so it is born with the right ones.
+            # One set for the strategy and its features, applied as one (atomic_parameter_sets):
+            # the pipeline RTAB-Map re-creates on a new Reg/Strategy is built from the accumulated
+            # map, so it is born with the right ones and no update runs between the two halves.
             if not self._set_parameters({**verdict.parameters, **visual}):
-                self._strategy_failed += 1
+                # Not sent, so not applied: the rule takes it back and asks again next tick, and
+                # the strategy the features follow stays the one RTAB-Map still runs.
+                self._strategy.withdraw()
+                if not self._strategy_held:
+                    self._strategy_failed += 1  # once per switch held back, not once per tick
+                self._strategy_held = True
                 return
-            self._visual_sent, self._strategy_sent = visual, verdict.strategy
+            self._strategy_held = False
+            self._visual_sent = visual
             self.get_logger().info(
                 f"rtabmap registration: {verdict.text()} -> Reg/Strategy {verdict.strategy},"
                 f" {self._visual_text()} (set on {RTABMAP_NODE} and re-read through"
                 f" {RTABMAP_NODE}/update_parameters)"
             )
             return
-        visual = self._visual_wanted(self._strategy_sent)
-        if visual != self._visual_sent and self._path_up() and self._set_parameters(visual):
-            # A flag moved, or a switch above went out without its features: the strategy in
-            # force is kept, only the visual set is re-sent (RegistrationVis re-reads it and
+        visual = self._visual_wanted(self._strategy.strategy)
+        if visual != self._visual_sent and self._set_parameters(visual):
+            # A flag moved, or the memory mode did: the strategy in force is kept, only the
+            # visual set is re-sent (RegistrationVis re-reads it and
             # rebuilds its detectors, RegistrationVis.cpp:290-293).
             self._visual_sent = visual
             self.get_logger().info(f"rtabmap registration: {self._visual_text()}")
 
     def _path_up(self) -> bool:
-        """Whether both halves of RTAB-Map's parameter path answer: the set and the re-read.
-        Asked before a re-send retried every tick, so a half-up path is not sent a set a second."""
-        return all(c is not None and c.service_is_ready() for c in (self._tuner, self._reread))
+        """Whether both halves of RTAB-Map's parameter path answer: the set (the service
+        ``atomic_parameter_sets`` picks) and the re-read. Asked before every set, so a half-up path
+        is sent nothing rather than half a set."""
+        tuner = (
+            self._tuner if self._switches.on("atomic_parameter_sets") else self._tuner_one_by_one
+        )
+        return all(c is not None and c.service_is_ready() for c in (tuner, self._reread))
 
     def _features(self) -> str:
         """The feature set the flag asks for, if this image can run it; ``orb`` otherwise."""
@@ -1556,15 +1707,26 @@ class RtabmapFrame(Node):
     def _visual_wanted(self, strategy: str) -> dict[str, str]:
         """The visual parameters RTAB-Map should hold under ``strategy``
         (:func:`pepin.graphmode.visual_parameters`): the flags' set under the visual strategy while
-        the database only localises, ORB's under ICP or while it maps."""
+        the database is certainly only read (:meth:`_database_only_read`), ORB's otherwise."""
         return visual_parameters(
             strategy,
             self._features(),
             float(self._switches["pnp_reproj_px"]),
-            mapping=self._mode.mode == MAPPING,
+            mapping=not self._database_only_read(),
             confirm=str(self._switches["visual_confirm"]),
             proximity=self._switches.on("visual_proximity"),
         )
+
+    def _database_only_read(self) -> bool:
+        """Whether RTAB-Map is LOCALISING for certain: this node told it so, the call is answered
+        (the mode services run in the group the re-read does, CoreWrapper.cpp:675-676), and no
+        switch to mapping is waiting. The only state the xfeat set may be in force in — an unknown
+        mode, an unanswered switch or a mapping one on its way all read as mapping, because a node
+        the database WRITES under re-extraction keeps no descriptors and no 3D (Memory.cpp:6126)."""
+        if self._mode_held is not None and self._mode_held.mapping:
+            return False
+        answered = self._mode_pending is None or self._mode_pending.done()
+        return self._mode.mode == LOCALISING and answered
 
     def _visual_text(self) -> str:
         """The visual registration for a report line: ``visual features xfeat, PnP 2 px`` — and

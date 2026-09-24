@@ -7,7 +7,10 @@
 # What changes against the base image, and nothing else:
 # * RTAB-Map 0.22.1 and the rtabmap_ros packages that link it, rebuilt from their upstream tags
 #   with Python support (ros/xfeat/build_rtabmap.sh says why the wrapper comes along, and why the
-#   core is the 0.22.1 tag rather than the jazzy branch the apt package was cut from);
+#   core is the 0.22.1 tag rather than the jazzy branch the apt package was cut from). The build
+#   fails if the new core lacks an optional library the apt one had (features_kept there): GTSAM
+#   and libpointmatcher decide Optimizer/Strategy and Icp/Strategy, which the launch table does
+#   not name;
 # * XFeat and LighterGlue at a pinned commit, their weights inside the image (the repository
 #   carries both), kornia pinned — nothing is fetched when a container starts;
 # * the two adapters RTAB-Map loads by path (PyDetector/Path, PyMatcher/Path): ros/xfeat/*.py.
