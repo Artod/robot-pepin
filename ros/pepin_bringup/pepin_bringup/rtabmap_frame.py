@@ -412,7 +412,8 @@ FLAGS = FlagSet(
         " matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure"
         " time (Vis/FeatureType 15, Vis/CorNNType 6, RGBD/LoopClosureReextractFeatures true);"
         " the database is only read. orb: the database's own GFTT/ORB words, the launch table's"
-        " values. Sent with the strategy and changed live; under ICP the set is always orb. xfeat"
+        " values. Sent with the strategy and changed live; under ICP, and while the database"
+        " maps, the set is always orb. xfeat"
         f" needs the pepin-laptop:xfeat image ({XFEAT_DETECTOR_PATH}); in another image this"
         " node sends orb and the report line says why",
         why="xfeat, measured 2026-09-23 offline (scratch/xfeat/xfeat_bench.py; evening clips of"
