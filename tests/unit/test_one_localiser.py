@@ -290,6 +290,24 @@ def test_the_goal_server_s_own_switch_lifts_a_refusal_of_silence() -> None:
     assert "start_needs_placement=off" in node._switches.state()
 
 
+def test_a_placed_word_does_not_outlive_the_node_that_said_it() -> None:
+    """The laptop's vslam restarting: the old rtabmap_frame's latched "placed" must not stand for
+    the new start of RTAB-Map, whose map -> odom is fresh at its saved pose before the new node
+    has said anything. No publisher left is nobody saying; the new node's word is heard afresh."""
+    from pepin.watch import BY_PLACEMENT, PLACEMENT_TOPIC
+
+    node = _goal_server()
+    node._tf = _FakeTf(x=0.0, y=0.0, yaw_deg=0.0, age_s=0.05)
+    _placed(node)
+    assert node._ready().ready
+    node.publisher_counts[PLACEMENT_TOPIC] = 0
+    gone = node._ready()
+    assert not gone.ready and gone.rule == BY_PLACEMENT and "nothing on" in gone.reason
+    node.publisher_counts[PLACEMENT_TOPIC] = 1
+    _placed(node, updates=1, recognised=0)
+    assert not node._ready().ready, "the new start's own word: not placed yet"
+
+
 def _rtabmap_update(frame: Any, ref_id: int, matched: int = 0) -> None:
     """One /rtabmap/info: the node this update CREATED and the older node it recognised."""
     from pepin_bringup import rtabmap_frame

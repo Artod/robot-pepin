@@ -761,6 +761,15 @@ class GoalServer(Node):
         if heard is not None:
             self._placement = heard
 
+    def _placement_standing(self) -> Placement | None:
+        """rtabmap_frame's last word while an rtabmap_frame is there to stand behind it; ``None``
+        with no publisher left on the topic. A latched word outlives its node here: the laptop's
+        vslam restarting would otherwise leave the OLD start's "placed" in force until the new
+        node's first word, over a map -> odom already fresh at the new start's saved pose."""
+        if self.count_publishers(PLACEMENT_TOPIC) == 0:
+            return None
+        return self._placement
+
     def _on_places(self, msg: String) -> None:
         """The graph's book, as the places node last published it."""
         self._graph_places = {
@@ -884,7 +893,7 @@ class GoalServer(Node):
             ready = self._gate.verdict(None, edge.get("age_s"), watched)
             if ready.ready and self._localizer == "rtabmap":
                 placed = Preflight.placement(
-                    self._placement, asked=self._switches.on("start_needs_placement")
+                    self._placement_standing(), asked=self._switches.on("start_needs_placement")
                 )
                 if not placed.ok:
                     return Readiness(False, tracker=False, rule=BY_PLACEMENT, reason=placed.detail)

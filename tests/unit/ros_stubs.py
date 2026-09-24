@@ -668,6 +668,7 @@ class Node:
         self.services: dict[str, tuple[Any, Any]] = {}  # name -> (service type, callback)
         self.service_clients: dict[str, Client] = {}  # name -> the client this node created
         self.destroyed_clients: list[str] = []  # the names of the clients it destroyed
+        self.publisher_counts: dict[str, int] = {}  # topic -> publishers, where not one
         self.timers: list[tuple[float, Any]] = []
         self.parameter_callbacks: list[Any] = []
         self.clock = Clock()
@@ -718,6 +719,11 @@ class Node:
     def create_timer(self, period_s: float, callback: Any) -> Timer:
         self.timers.append((period_s, callback))
         return Timer(period_s, callback)
+
+    def count_publishers(self, topic: str) -> int:
+        """How many publishers the graph shows on ``topic``: one, unless a test set
+        ``publisher_counts`` (0 is a node on the other end gone)."""
+        return self.publisher_counts.get(topic, 1)
 
     def get_clock(self) -> Clock:
         return self.clock
