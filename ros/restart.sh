@@ -596,6 +596,33 @@ check_laptop() {
         fail 2.12 "vslam image: ${value:-unknown} has no xfeat adapters — visual_features falls back to orb (ros/laptop-build.sh xfeat; PEPIN_XFEAT=0 if ORB is meant)"
     fi
 
+    # 2.13: the localisation service on this laptop's GPU (ros/models.sh, launchd): RTAB-Map's
+    # XFeat / LighterGlue adapters and sensor_pack's place descriptors call it. It must answer
+    # /health with its three models, none of them failed to build. Down, the adapters compute in
+    # RTAB-Map's own process (registration_backend auto, 0.67 s a registration on the VM's CPU)
+    # and every snapshot carries the null place descriptor — slower and blind to places, never
+    # broken — so that is a WARN; under registration_backend service it is a FAIL, because then a
+    # registration the service does not answer finds no features at all.
+    line="$(last '\]: rtabmap frame: ')"
+    value="$(sed -n 's/.*registration_backend=\([a-z]*\).*/\1/p' <<<"$line")"
+    local health models_line
+    health="$(curl -s -m 3 "http://127.0.0.1:${PEPIN_MODELS_PORT:-8791}/health" || true)"
+    models_line="$(python3 -c '
+import json, sys
+h = json.loads(sys.stdin.read())
+names = ("xfeat", "match", "place")
+bad = [n for n in names if n not in h["models"] or h["models"][n]["tag"].startswith("failed")]
+print(("BAD " if bad else "OK ") + "; ".join(
+    "%s %s on %s, %d served, %d refused" % (n, m["tag"], m["device"], m["requests"], m["errors"])
+    for n, m in h["models"].items()))' <<<"$health" 2>/dev/null || true)"
+    if [[ "$models_line" == OK* ]]; then
+        pass 2.13 "localization service: ${models_line#OK }"
+    elif [ "${value:-auto}" = service ]; then
+        fail 2.13 "localization service ${models_line:-not answering on :${PEPIN_MODELS_PORT:-8791}} under registration_backend service: RTAB-Map's registrations find no features (ros/models.sh status; ros/flags.sh set rtabmap_frame registration_backend auto)"
+    else
+        warn 2.13 "localization service ${models_line:-not answering on :${PEPIN_MODELS_PORT:-8791}}: the adapters compute in RTAB-Map's process (${value:-auto}) and the snapshots carry null place descriptors (ros/models.sh install localization)"
+    fi
+
     # 2.11 is INFORMATIONAL and never fails a restart: who painted the lethal cells of the local
     # costmap right now (pepin_bringup.marks_audit). There is no healthy value — a room with a
     # table in it SHOULD show camera-only cells — so this prints the split and leaves the verdict

@@ -33,6 +33,11 @@
 #                            and tells the node to use it, when torch's Metal backend is there;
 #                            PEPIN_DEPTH_HOST=0 keeps the network on the CPU in the container,
 #                            PEPIN_DEPTH_HOST=1 insists on the service (it falls back to the CPU)
+#   ros/laptop.sh vslam      tells the container where the localisation models are
+#                            (PEPIN_MODELS_URL: XFeat, LighterGlue, place descriptors; launchd runs
+#                            them, ros/models.sh), mounts the checkout's two RTAB-Map adapters over
+#                            the xfeat image's (PEPIN_ADAPTERS_MOUNT=0: the image's), and hands it
+#                            the database's place-descriptor census (ros/tools/place_backfill.py)
 # Only `start` talks to the board (its side and its map); stop, logs, vslam and kick never do.
 # Prerequisites: the image built here (ros/laptop-build.sh) and the board on side=board
 # (ros/thin.sh on). A Docker container on macOS lives behind the VM's NAT, so DDS discovery
@@ -306,12 +311,44 @@ case "${1:-start}" in
         fi
         DEPTH_ENV=()
         if depth_host_wanted; then
-            "$HERE/depth_host.sh" start
+            "$HERE/depth_host.sh" start  # a host under launchd (ros/models.sh) is only asked
             DEPTH_ENV=(-e PEPIN_DEPTH_BACKEND=auto -e "PEPIN_DEPTH_URL=http://host.docker.internal:${PEPIN_DEPTH_PORT:-8790}")
         else
             echo "depth network on the CPU in the container (PEPIN_DEPTH_HOST=1 for the GPU service)"
         fi
+        # THE LOCALISATION MODELS on this laptop's GPU (ros/models.sh, launchd): RTAB-Map's XFeat /
+        # LighterGlue adapters and sensor_pack's place descriptors call it at PEPIN_MODELS_URL. It
+        # is never started from here — launchd owns it — only asked: down, the adapters compute in
+        # RTAB-Map's process (registration_backend auto) and the snapshots carry null descriptors.
+        MODELS_ENV=(-e "PEPIN_MODELS_URL=http://host.docker.internal:${PEPIN_MODELS_PORT:-8791}")
+        "$HERE/models.sh" status localization \
+            || echo "localization service down (ros/models.sh install localization): the adapters compute locally"
+        # THE ADAPTERS FROM THE CHECKOUT, not the image: the two files RTAB-Map loads by path are
+        # mounted over the image's copies, so an adapter change needs a vslam restart and no
+        # rebuild (RTAB-Map imports them once, so a restart is needed either way). The files and
+        # not ros/xfeat as a whole: the directory would hide the image's XFeat checkout
+        # (/opt/xfeat/accelerated_features), whose weights the local fallback loads. Only onto the
+        # xfeat image — mounted into another, they would make rtabmap_frame believe RTAB-Map can
+        # run Python. PEPIN_ADAPTERS_MOUNT=0 runs the adapters baked into the image.
+        ADAPTER_MOUNTS=()
+        if [ "$VSLAM_IMAGE" = pepin-laptop:xfeat ] && [ "${PEPIN_ADAPTERS_MOUNT:-1}" != 0 ]; then
+            ADAPTER_MOUNTS=(-v "$HERE/xfeat/rtabmap_xfeat.py:/opt/xfeat/rtabmap_xfeat.py:ro"
+                            -v "$HERE/xfeat/rtabmap_lighterglue.py:/opt/xfeat/rtabmap_lighterglue.py:ro")
+        fi
+        # THE DATABASE'S CENSUS, taken now, while no RTAB-Map holds the file: how many nodes carry
+        # a place descriptor, of which length and weights (ros/tools/place_backfill.py). The
+        # container gets it as PEPIN_PLACE_CENSUS, and rtabmap_frame compares places by
+        # descriptor only when it says every node carries exactly one (a node without one
+        # compared with one that has one aborts RTAB-Map). No census: the words, and it says why.
+        CENSUS_ENV=()
+        # The census line goes to the terminal (stderr), its JSON to the container (stdout).
+        if CENSUS="$(cd "$HERE/.." && uv run python ros/tools/place_backfill.py --check --json ros/maps/rtabmap.db)" && [ -n "$CENSUS" ]; then
+            CENSUS_ENV=(-e "PEPIN_PLACE_CENSUS=$CENSUS")
+        else
+            echo "no census of ros/maps/rtabmap.db (ros/tools/place_backfill.py --check): place recognition stays on the words"
+        fi
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
+            ${ADAPTER_MOUNTS[@]+"${ADAPTER_MOUNTS[@]}"} "${MODELS_ENV[@]}" ${CENSUS_ENV[@]+"${CENSUS_ENV[@]}"} \
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} ${CAMERA_ENV[@]+"${CAMERA_ENV[@]}"} \
             "$VSLAM_IMAGE" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null

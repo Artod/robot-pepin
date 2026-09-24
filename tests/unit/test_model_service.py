@@ -191,7 +191,7 @@ def test_a_request_goes_through_and_health_names_every_model(served: Any) -> Non
 
 def test_the_gpu_lock_serialises_two_models_on_one_device(served: Any) -> None:
     """Measured by wall time: four 40 ms inferences on one device cannot finish in under 160 ms,
-    while the same four split over two devices finish in about half of that."""
+    while the same four split over two devices overlap and finish sooner."""
     one = [Doubler(name=n, device="mps", sleep_s=0.04) for n in ("a", "b")]
     two = [
         Doubler(name="c", device="mps", sleep_s=0.04),
@@ -211,8 +211,9 @@ def test_the_gpu_lock_serialises_two_models_on_one_device(served: Any) -> None:
             thread.join()
         return time.perf_counter() - t0
 
-    assert run(one) >= 0.16
-    assert run(two) < 0.155
+    serial = run(one)
+    assert serial >= 0.16, "the lock's own guarantee: never two inferences on one device at once"
+    assert run(two) < serial - 0.03, "two devices overlap (loose: a loaded machine slows both)"
 
 
 def test_an_answer_named_by_a_cache_key_is_served_again_without_the_network(served: Any) -> None:
@@ -249,22 +250,37 @@ class Clock:
         return self.now
 
 
-def test_a_slow_service_is_a_timeout_and_then_left_alone_until_the_retry(served: Any) -> None:
+def test_a_slow_service_costs_its_timeouts_and_three_in_a_row_back_off(served: Any) -> None:
     model = Doubler(sleep_s=0.3)
     _server, url = served(model)
     clock = Clock()
-    client = RemoteModel(url, "double", timeout_s=0.05, retry_s=10.0, clock=clock)
-    t0 = time.perf_counter()
-    assert _ask(client, np.ones(1)) is None
-    assert time.perf_counter() - t0 < 0.25 and client.down
+    client = RemoteModel(url, "double", timeout_s=0.05, retry_s=10.0, clock=clock, timeouts=3)
+    for n in range(1, 4):
+        t0 = time.perf_counter()
+        assert _ask(client, np.ones(1)) is None
+        assert time.perf_counter() - t0 < 0.25
+        assert client.down == (n == 3), "one slow answer is not a dead service; three are"
     t0 = time.perf_counter()
     assert _ask(client, np.ones(1)) is None  # skipped: no timeout paid
     assert time.perf_counter() - t0 < 0.01 and client.skipped == 1
     model.sleep_s = 0.0
-    time.sleep(0.3)  # the first request's inference finishes on the server
+    time.sleep(0.95)  # the three late inferences finish on the server
     clock.now += 10.0
     assert np.array_equal(_ask(client, np.ones(1)), np.full(1, 2.0))  # tried again, and it works
-    assert not client.down and "ok 1, failed 1, skipped 1" in client.status()
+    assert not client.down and "ok 1, failed 3, skipped 1" in client.status()
+
+
+def test_a_timeout_between_answers_does_not_count_towards_the_back_off(served: Any) -> None:
+    model = Doubler()
+    _server, url = served(model)
+    client = RemoteModel(url, "double", timeout_s=0.05, timeouts=2)
+    for _ in range(3):
+        model.sleep_s = 0.2
+        assert _ask(client, np.ones(1)) is None
+        model.sleep_s = 0.0
+        time.sleep(0.25)
+        assert _ask(client, np.ones(1)) is not None, "an answer resets the count"
+    assert not client.down
 
 
 def test_no_service_at_all_is_none_quickly_and_backs_off() -> None:

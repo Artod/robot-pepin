@@ -498,11 +498,14 @@ class RemoteModel:
     """One endpoint of a model service as a client that never raises.
 
     :meth:`call` answers the response's headers and body, or ``None`` for ANY failure: no
-    service, a timeout, an HTTP error, a broken connection. A CONNECTION-level failure (refused,
-    timed out, reset) means the service is not there, and the next ``retry_s`` seconds of calls
-    answer ``None`` at once without touching the network (``skipped``); the first call after that
-    tries again. An HTTP error means the service is there and refused this one request, and costs
-    nothing more. Thread-safe: calls on one client take turns on its one keep-alive connection."""
+    service, a timeout, an HTTP error, a broken connection. A REFUSED or broken connection means
+    the service is not there, and the next ``retry_s`` seconds of calls answer ``None`` at once
+    without touching the network (``skipped``); the first call after that tries again. A TIMEOUT
+    means it is there and slow — measured 2026-09-24, a GPU model's first inference after two
+    seconds idle takes 200-460 ms instead of 50 (scratch/models/place_parity.py's service) — so
+    only ``timeouts`` of them in a row back off; one alone costs its own call. An HTTP error means
+    the service refused this one request, and costs nothing more. Thread-safe: calls on one client
+    take turns on its one keep-alive connection."""
 
     def __init__(
         self,
@@ -511,6 +514,7 @@ class RemoteModel:
         timeout_s: float = 1.0,
         retry_s: float = 10.0,
         clock: Callable[[], float] = time.monotonic,
+        timeouts: int = 3,
     ) -> None:
         self.url = url.rstrip("/")
         self.endpoint = "/" + endpoint.strip("/")
@@ -521,6 +525,8 @@ class RemoteModel:
         self._conn: http.client.HTTPConnection | None = None
         self._lock = threading.Lock()
         self._down_until = -float("inf")
+        self._timeouts_allowed = max(1, int(timeouts))
+        self._timeouts = 0  # timeouts in a row
         self.ok = 0
         self.failed = 0
         self.skipped = 0
@@ -554,9 +560,13 @@ class RemoteModel:
                 response = conn.getresponse()
                 data = response.read()
             except (OSError, http.client.HTTPException) as exc:
-                self._drop()
-                self._failed(f"{type(exc).__name__}: {exc}", back_off=True)
+                self._drop()  # a late answer must not be read as the next call's
+                slow = isinstance(exc, TimeoutError)
+                self._timeouts = self._timeouts + 1 if slow else 0
+                back_off = not slow or self._timeouts >= self._timeouts_allowed
+                self._failed(f"{type(exc).__name__}: {exc}", back_off=back_off)
                 return None
+            self._timeouts = 0
             if response.status != 200:
                 self._failed(f"{response.status}: {data[:160].decode(errors='replace').strip()}")
                 return None

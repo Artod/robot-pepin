@@ -10,6 +10,7 @@
 #                                     the network is built on the first pair, ~2 s inside it
 #   ros/depth_host.sh stop
 #   ros/depth_host.sh status          the service's /health: models, devices, frames, per-stage ms
+#   (a host installed under launchd by ros/models.sh install depth is left alone by start and stop)
 #   ros/depth_host.sh bench [N]       time N frames (default 30) through the network here and, when
 #                                     the service is up, through it (JPEG and raw); the frames come
 #                                     from scratch/_depth_bench/cam when that directory exists
@@ -34,6 +35,9 @@ LOGDIR="$ROOT/logs"
 HUB="${HF_HOME:-$HOME/.cache/huggingface}/hub"
 
 health() { curl -s -m 3 "$URL/health"; }
+# A depth host under launchd (ros/models.sh install depth) is launchd's: this script's start would
+# fight it for the port and its stop would be undone by KeepAlive, so both leave it alone.
+launchd_owned() { launchctl print "gui/$(id -u)/com.pepin.models.depth" >/dev/null 2>&1; }
 running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 # The /health JSON as one line. %-formatting, not f-strings: the script is single-quoted for the
 # shell, so the quotes an f-string needs around its dict keys cannot be escaped inside it.
@@ -100,11 +104,15 @@ start_host() {
 }
 
 case "${1:-status}" in
-    start)
-        start_host "${2:-${PEPIN_DEPTH_MODEL:-small}}" ;;
-    stereo)
-        start_host "${2:-${PEPIN_DEPTH_MODEL:-small}}" warm ;;
+    start | stereo)
+        if launchd_owned; then
+            if H="$(health)"; then echo "depth host under launchd, left alone: $(echo "$H" | summary)"; exit 0; fi
+            echo "depth host under launchd is not answering on $URL: ros/models.sh status depth"; exit 1
+        fi
+        if [ "$1" = stereo ]; then start_host "${2:-${PEPIN_DEPTH_MODEL:-small}}" warm
+        else start_host "${2:-${PEPIN_DEPTH_MODEL:-small}}"; fi ;;
     stop)
+        if launchd_owned; then echo "depth host under launchd, left running (ros/models.sh stop depth)"; exit 0; fi
         if running; then stop_quiet; echo "depth host stopped"; else rm -f "$PIDFILE"; echo "depth host was not running"; fi ;;
     status)
         if H="$(health)"; then echo "$H" | summary; else echo "depth host is not answering on $URL (ros/depth_host.sh start)"; exit 1; fi ;;
