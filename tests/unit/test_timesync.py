@@ -134,11 +134,12 @@ def _shell_time_source(value: str | None) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_the_time_source_switch_defaults_to_the_old_clock_and_refuses_a_typo() -> None:
-    """pool is what the board runs under systemd-timesyncd; laptop becomes the default only once
-    the chrony deploy is measured on the robot (CLAUDE.md rule 19). The shell is what decides,
-    so the shell refuses a value that is neither: ``laptpo`` must not read as pool, silently."""
-    assert DEFAULT_TIME_SOURCE == "pool" and TIME_SOURCES == ("laptop", "pool")
+def test_the_time_source_switch_defaults_to_the_laptop_and_refuses_a_typo() -> None:
+    """laptop is the default since the chrony deploy was measured on the robot (2026-09-24: -0.2
+    ms, against +21 ms on systemd-timesyncd); pool stays one switch away (CLAUDE.md rule 19). The
+    shell is what decides, so the shell refuses a value that is neither: ``laptpo`` must not read
+    as either, silently."""
+    assert DEFAULT_TIME_SOURCE == "laptop" and TIME_SOURCES == ("laptop", "pool")
     assert _shell_time_source(None).stdout.strip() == DEFAULT_TIME_SOURCE
     assert _shell_time_source("").stdout.strip() == DEFAULT_TIME_SOURCE, "empty is unset"
     for value in TIME_SOURCES:

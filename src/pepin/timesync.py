@@ -33,15 +33,16 @@ _FRACTION = 2**32
 # WHERE THE BOARD TAKES ITS TIME FROM (CLAUDE.md rule 19: the old way stays one word away).
 # "laptop": the laptop's time server first, the internet pool as the fallback — one time base for
 # both machines' stamps. "pool": the internet pool alone, the references the board had under
-# systemd-timesyncd (the daemon itself comes back with `ros/time.sh uninstall`). "pool" is the
-# default until the chrony deploy has been measured on the robot; the deploy flips it here and in
-# ros/lib.sh together. What DECIDES is the shell: ros/lib.sh (does the laptop start its server;
+# systemd-timesyncd (the daemon itself comes back with `ros/time.sh uninstall`). "laptop" is the
+# default since the deploy was measured on the robot (2026-09-24: board minus laptop -0.2 ms, round
+# trip 6 ms, against +21 ms under systemd-timesyncd); it is flipped here and in ros/lib.sh
+# together. What DECIDES is the shell: ros/lib.sh (does the laptop start its server;
 # pepin_time_source_check refuses any other value) and the board's /etc/default/pepin-ros
 # (board/chrony.sh writes the board's sources from it, and its `install` writes "laptop" there
 # explicitly). These constants are the contract the tests hold those scripts to.
 TIME_SOURCES = ("laptop", "pool")
 TIME_SOURCE_ENV = "PEPIN_TIME_SOURCE"
-DEFAULT_TIME_SOURCE = "pool"
+DEFAULT_TIME_SOURCE = "laptop"
 
 # How far apart the two clocks may be before the restart check says so. A tenth of a second is
 # the order of the stack's transform tolerances (0.1-0.5 s) and about twice what one NTP exchange

@@ -130,14 +130,15 @@ PEPIN_ROS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ONE CLOCK FOR THE ROBOT (src/pepin/timesync.py has the whole story): where the board takes its
 # time from. laptop: this laptop serves its Docker VM's clock — the one every ROS node here stamps
 # with — from the pepin-chrony container on udp/123, and the board's chrony prefers it over the
-# internet pool (board/chrony.sh). pool: no server here, the board on the pool alone — what it has
-# under systemd-timesyncd, so it is the DEFAULT until the chrony deploy has been measured on the
-# robot (CLAUDE.md rule 19; ros/README.md "One clock" flips it). Here the variable only decides
+# internet pool (board/chrony.sh) — the DEFAULT since the deploy of 2026-09-24: chrony selected
+# the laptop (`*`) and the board minus the laptop read -0.2 ms (round trip 6 ms) where
+# systemd-timesyncd had left +20.7..+21.1 ms. pool: no server here, the board on the pool alone
+# (CLAUDE.md rule 19: `ros/time.sh source pool` flips the board live). Here the variable only decides
 # whether ros/laptop.sh (re)starts the server: once `ros/time.sh install` has started it, it
 # stays up (--restart unless-stopped) whatever a later shell says. The board keeps its own copy
 # in /etc/default/pepin-ros, written by `ros/time.sh source laptop|pool`; `ros/time.sh uninstall`
 # puts the board back on systemd-timesyncd exactly as it ran before chrony.
-PEPIN_TIME_SOURCE="${PEPIN_TIME_SOURCE:-pool}"
+PEPIN_TIME_SOURCE="${PEPIN_TIME_SOURCE:-laptop}"
 # The switch's value, refused rather than guessed: a typo (`laptpo`) would otherwise read as pool
 # and leave the board without the clock it was meant to follow, silently. ros/laptop.sh asks it
 # before a half starts; board/chrony.sh and `ros/time.sh source` refuse their own arguments.
