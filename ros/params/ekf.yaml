@@ -201,20 +201,23 @@ ekf_filter_node:
     # sources said over 120 s: the bias-tracked gyro -0.001 deg/min, the wheels 0, the camera's VO
     # -0.57, rf2o +1.5 at a variance of 2.5e-3 (scratch/link_autopsy/rest_yaw_sources.py) -- and
     # this input was silent, because its one publisher was the tracker's slip watch below, which
-    # does not start under PEPIN_LOCALIZER=rtabmap. The bridge now publishes at 10 Hz
-    # (zupt_rate_hz) for as long as its ZuptGate holds: the wheels' rest witnessed past
-    # imu_bias_s (the same rest the gyro's bias tracker trusts), no non-zero /cmd_vel younger
-    # than cmd_timeout_s, and the bias-corrected gyro under zupt_gyro_quiet_rad_s (0.29 deg/s:
-    # 7.9 sigma of the parked chip's noise), so a cart turned by hand on still wheels is not
-    # frozen by its own update. The first moving sample of any witness stops it within one
-    # period. vx, vy and vyaw at 1e-6, 400x under the gyro's 4e-4 (zupt.hpp says why that number).
-    # Off, live: ``ros2 param set /base_bridge zupt_publish false``; the filter is then what it
-    # was before.
+    # does not start under PEPIN_LOCALIZER=rtabmap. The bridge now publishes at zupt_rate_hz
+    # (10) for as long as its ZuptGate holds: the wheels' rest witnessed for zupt_settle_s
+    # (default imu_bias_s, the rest the gyro's bias tracker trusts), no non-zero /cmd_vel younger
+    # than zupt_cmd_hold_s (default cmd_timeout_s), and the bias-corrected gyro under
+    # zupt_gyro_quiet_rad_s (0.29 deg/s: 7.9 sigma of the parked chip's noise), so a cart turned
+    # by hand on still wheels is not frozen by its own update. The first moving sample of any
+    # witness stops it within one period. vx and vy at zupt_var_linear, vyaw at zupt_var_yaw,
+    # both 1e-6: 400x under the gyro's 4e-4 (zupt.hpp says why that number).
+    # EVERY ONE OF THOSE IS A LIVE PARAMETER of /base_bridge, range-checked and in force at the
+    # next tick (ros/README.md, "The base bridge's zero-velocity update"): this file needs no
+    # edit to tune it. Off: ``ros2 param set /base_bridge zupt_publish false``; the filter is
+    # then what it was before.
     # NOT YET MEASURED ON THE ROBOT. The yaw half of this file, fed the sources' rest means
-    # (scratch/zupt_variance_sim.py), gives the rf2o pull cut 13x at 10 Hz (median over phases),
-    # but at 10 Hz the update is phase-locked to rf2o's scans and the cut ranges from none to
-    # full with the phase; at 50 Hz it is 12x at every phase. Read the parked creep with the
-    # switch on and off before believing either number; zupt_rate_hz is the lever after that.
+    # (scratch/zupt/zupt_variance_sim.py), gives the rf2o pull cut 13x at 10 Hz (median over
+    # phases), but at 10 Hz the update is phase-locked to rf2o's scans and the cut ranges from
+    # none to full with the phase; at 50 Hz it is 12x at every phase. Read the parked creep with
+    # the switch on and off before believing either number; zupt_rate_hz is the lever after that.
     #
     # ON A SLIP (2026-09-16): pepin_bringup.relocalizer, the lidar tracker (PEPIN_LOCALIZER=
     # tracker). A slip is not noise and not silence -- the wheels report metres the cart never
