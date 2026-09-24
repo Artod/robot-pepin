@@ -452,7 +452,11 @@ FLAGS = FlagSet(
         " recognises 209 (95 %) where 2 px recognises 167 (76 %), but judged against the lidar's"
         " truth 22 of its 168 recognitions are off by 0.30 m or 10 deg against 6 of 133 at 2 px,"
         " and its error is wider (p90 0.31 m / 9.4 deg against 0.22 m / 6.9 deg). A wrong word"
-        " moves map -> odom when RTAB-Map owns it, so the tighter gate is the default",
+        " moves map -> odom when RTAB-Map owns it, so the tighter gate is the default. Against"
+        " WRONG nodes — 336 evening frames paired with nodes 2.5 m away or looking elsewhere,"
+        " what a mistaken proposal of the words would hand the registration — 2 px let none"
+        " through (the most any reached was 19 inliers) and 4 px let 5 (1.5 %) through with 20-31"
+        " (scratch/xfeat/impostors.py)",
         on_when="2 by default; 4 when the recognitions a camera-only drive needs do not come at 2"
         " and the words that do come sit close to the truth",
         off_when="back to 2 the moment a 4 px word is seen far from where the cart stands: a wider"
