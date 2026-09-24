@@ -207,12 +207,12 @@ def test_a_missing_or_broken_file_is_the_environment_s_defaults(
     monkeypatch.setenv("PEPIN_REGISTRATION_BACKEND", "local")
     monkeypatch.setenv("PEPIN_XFEAT_TOP_K", "1024")
     switch = RegistrationSwitch(tmp_path / "none.json")
-    assert switch.settings() == RegistrationSettings("local", 0.5, 1024)
+    assert switch.settings() == RegistrationSettings("local", 1.0, 1024)
     (tmp_path / "bad.json").write_text("{not json")
     assert RegistrationSwitch(tmp_path / "bad.json").settings().backend == "local"
     (tmp_path / "odd.json").write_text(json.dumps({"backend": "gpu", "timeout_s": -1, "top_k": 9}))
     odd = RegistrationSwitch(tmp_path / "odd.json").settings()
-    assert odd == RegistrationSettings("local", 0.5, 9), "only the values it can use"
+    assert odd == RegistrationSettings("local", 1.0, 9), "only the values it can use"
 
 
 def test_the_file_is_written_whole_and_only_when_it_changes(tmp_path: Path) -> None:

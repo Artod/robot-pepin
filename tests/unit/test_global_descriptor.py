@@ -99,3 +99,39 @@ def test_the_census_refuses_every_way_the_invariant_breaks() -> None:
     assert "described by ['boq@1']" in str(good.refusal(tag="boq@2"))
     empty = Census(0, 0, 0, {})
     assert empty.refusal("boq@1", 12288) is None, "an empty database takes any descriptor"
+
+
+def test_the_census_travels_as_one_json_line_and_a_bad_one_is_none() -> None:
+    census = Census(169, 0, 0, {("boq@1", 12288): 147, (NULL_TAG, 12288): 22})
+    assert Census.from_json(census.to_json()) == census
+    assert Census.from_json("") is None and Census.from_json('{"nodes": 1}') is None
+
+
+def test_the_descriptor_likelihood_is_sent_only_when_nothing_can_abort_rtabmap() -> None:
+    from pepin.global_descriptor import (
+        DESCRIPTOR_PARAMETERS,
+        WORDS_PARAMETERS,
+        SnapshotPlace,
+        recognition_parameters,
+    )
+
+    good = Census(3, 0, 0, {("boq@1", 8): 2, (NULL_TAG, 8): 1})
+    place = SnapshotPlace(True, "service", 8, "boq@1")
+    assert recognition_parameters("descriptor", place, good, True) == (
+        DESCRIPTOR_PARAMETERS,
+        "descriptor (3 nodes: 2 boq@1/8, 1 null/8)",
+    )
+    assert DESCRIPTOR_PARAMETERS == {
+        "Kp/TfIdfLikelihoodUsed": "false",
+        "Rtabmap/VirtualPlaceLikelihoodRatio": "1",
+    }
+    for args, why in (
+        ((place, good, False), "rtabmap-keep-global-descriptors.patch"),
+        ((None, good, True), "sensor_pack has not said"),
+        ((SnapshotPlace(False, "service", 0), good, True), "carry no descriptor"),
+        ((place, None, True), "no census"),
+        ((SnapshotPlace(True, "service", 16), good, True), "the snapshots' 16"),
+    ):
+        wanted, said = recognition_parameters("descriptor", *args)  # type: ignore[arg-type]
+        assert wanted == WORDS_PARAMETERS and why in said, said
+    assert recognition_parameters("words", place, good, True) == (WORDS_PARAMETERS, "words")

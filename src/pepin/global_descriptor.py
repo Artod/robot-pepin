@@ -36,10 +36,11 @@ which is how a database census tells which weights described each node.
 
 from __future__ import annotations
 
+import json
 import struct
 import zlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import numpy as np
 import numpy.typing as npt
@@ -188,3 +189,124 @@ class Census:
         if self.repeated:
             extra += f", {self.repeated} with more than one"
         return f"{self.nodes} nodes: {kinds or 'no descriptors'}{extra}"
+
+    def to_json(self) -> str:
+        """The census as one JSON line (``PEPIN_PLACE_CENSUS``, ``place_backfill.py --json``)."""
+        kinds = [[tag, dim, count] for (tag, dim), count in sorted(self.kinds.items())]
+        return json.dumps(
+            {
+                "nodes": self.nodes,
+                "missing": self.missing,
+                "repeated": self.repeated,
+                "kinds": kinds,
+            }
+        )
+
+    @classmethod
+    def from_json(cls, text: str) -> Census | None:
+        """A census from :meth:`to_json`'s line, or ``None`` when it is not one."""
+        try:
+            data = json.loads(text)
+            kinds = {(str(tag), int(dim)): int(count) for tag, dim, count in data["kinds"]}
+            return cls(int(data["nodes"]), int(data["missing"]), int(data["repeated"]), kinds)
+        except (TypeError, ValueError, KeyError):
+            return None
+
+
+# ---------------------------------------------------------------- what the snapshots carry
+PLACE_TOPIC = "/sensor_pack/place"
+PLACE_WORDS, PLACE_DESCRIPTOR = "words", "descriptor"
+TFIDF = "Kp/TfIdfLikelihoodUsed"
+# HOW THE LIKELIHOODS BECOME A HYPOTHESIS (Rtabmap::adjustLikelihood, Rtabmap.cpp:5303-5372). With
+# the ratio 0 (RTAB-Map's default) a node above mean + stddev scores (value - stddev) / mean and
+# the "no place" hypothesis mean / stddev + 1. The words' TF-IDF scores are sparse (most nodes
+# share no word, score 0 and are left out of the mean), so that works; a descriptor scores EVERY
+# node, all of them in (cos + 1) / 2 ~ 0.5-0.75, so the mean is large, the deviation small, and
+# "no place" wins every time: the replay's highest hypothesis read 0.01 under it
+# (scratch/models/replay_place.py). The ratio 1 scores (value - mean) / stddev and "no place"
+# stddev / (max - mean) + 1 — a z-score, which is what a dense similarity needs.
+VIRTUAL_PLACE_RATIO = "Rtabmap/VirtualPlaceLikelihoodRatio"
+WORDS_PARAMETERS = {TFIDF: "true", VIRTUAL_PLACE_RATIO: "0"}
+DESCRIPTOR_PARAMETERS = {TFIDF: "false", VIRTUAL_PLACE_RATIO: "1"}
+# RTAB-Map 0.22.1 DROPS a node's descriptor the first time it registers against it: when the node's
+# picture or scan is not in memory, Memory::computeTransform replaces the node's whole sensor data
+# with the Data table's (Memory.cpp:2896-2909, getNodeData -> DBDriver::loadNodeDataQuery, which
+# never reads the GlobalDescriptor table), and the next likelihood's compareTo against that node
+# aborts (Signature.cpp:252). Measured 2026-09-24: the replay's first rejected loop closure on node
+# 353, then "Signature.cpp:252::compareTo() Condition ... not met!" on the next update. Every
+# database node is such a node (they are loaded without their data), so the descriptor likelihood
+# needs RTAB-Map built with ros/patches/rtabmap-keep-global-descriptors.patch; the image build
+# leaves this marker when it applied it (ros/xfeat/build_rtabmap.sh).
+KEEPS_DESCRIPTORS_MARKER = "/opt/rtabmap_patches/keep-global-descriptors"
+
+
+def rtabmap_keeps_descriptors(marker: str = KEEPS_DESCRIPTORS_MARKER) -> bool:
+    """Whether the RTAB-Map in this container was built with the patch that keeps a node's
+    descriptor across the reload of its data (its marker file exists)."""
+    import os
+
+    return os.path.exists(marker)
+
+
+@dataclass(frozen=True)
+class SnapshotPlace:
+    """What pepin_bringup.sensor_pack attaches to its snapshots, said latched on
+    :data:`PLACE_TOPIC` for rtabmap_frame: whether every snapshot carries one descriptor at all
+    (``attached``), where a camera snapshot's comes from (``service``, or ``null`` when that is
+    switched off), the length every one of them has, and the tag of the last one the service
+    described (empty until it has)."""
+
+    attached: bool
+    source: str
+    dim: int
+    tag: str = ""
+
+    def to_json(self) -> str:
+        """One JSON object for a std_msgs/String."""
+        return json.dumps(asdict(self), sort_keys=True)
+
+    @classmethod
+    def from_json(cls, text: str) -> SnapshotPlace | None:
+        """The state from :meth:`to_json`'s text, or ``None`` when it is not one."""
+        try:
+            data = json.loads(text)
+            return cls(
+                bool(data["attached"]), str(data["source"]), int(data["dim"]), str(data["tag"])
+            )
+        except (TypeError, ValueError, KeyError):
+            return None
+
+
+def recognition_parameters(
+    asked: str,
+    snapshots: SnapshotPlace | None,
+    census: Census | None,
+    rtabmap_keeps: bool,
+) -> tuple[dict[str, str], str]:
+    """The likelihood RTAB-Map should score places by, as the parameters it reads
+    (:data:`WORDS_PARAMETERS`: the words' TF-IDF; :data:`DESCRIPTOR_PARAMETERS`: the descriptors'
+    dot product, as z-scores), and the phrase that says why. ``descriptor`` is honoured only when
+    comparing by descriptor cannot abort RTAB-Map: this RTAB-Map keeps a node's descriptor when it
+    reloads the node's data (``rtabmap_keeps``, the patch's marker), the snapshots carry one each
+    (``snapshots``), and the census of the database taken before RTAB-Map opened it says every
+    node carries exactly one of the same length (and, once the service has answered, from the
+    same weights). Anything less is the words, and the phrase names what is missing."""
+    words = dict(WORDS_PARAMETERS)
+    if asked != PLACE_DESCRIPTOR:
+        return words, PLACE_WORDS
+    if not rtabmap_keeps:
+        return words, (
+            "words (descriptor asked; this RTAB-Map drops a node's descriptor when it reloads the"
+            " node's data for a registration and would abort at the next comparison:"
+            " ros/patches/rtabmap-keep-global-descriptors.patch, ros/laptop-build.sh xfeat)"
+        )
+    if snapshots is None:
+        return words, "words (descriptor asked; sensor_pack has not said what its snapshots carry)"
+    if not snapshots.attached:
+        return words, "words (descriptor asked; the snapshots carry no descriptor)"
+    if census is None:
+        return words, "words (descriptor asked; no census of the database at this start)"
+    refusal = census.refusal(snapshots.tag or None, snapshots.dim)
+    if refusal is not None:
+        return words, f"words (descriptor asked; {refusal}: ros/tools/place_backfill.py)"
+    return dict(DESCRIPTOR_PARAMETERS), f"descriptor ({census.text()})"

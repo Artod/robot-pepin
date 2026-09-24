@@ -262,6 +262,17 @@ RTABMAP = {
     # appearance: GFTT/ORB words, a few hundred per image
     "Kp/DetectorStrategy": "8",
     "Kp/MaxFeatures": "400",
+    # HOW A PLACE IS FOUND: the words' TF-IDF (true, RTAB-Map's own default, Parameters.h) or the
+    # dot product of the nodes' global descriptors (false: Memory::computeLikelihood ->
+    # Signature::compareTo), which pepin_bringup.sensor_pack attaches to every snapshot.
+    # rtabmap_frame's place_recognition flag sets it live, and only when the descriptors cannot
+    # abort RTAB-Map (pepin.global_descriptor.recognition_parameters). Said out loud because a live
+    # set is only seen for a name this table overrides (CoreWrapper.cpp:362-379).
+    "Kp/TfIdfLikelihoodUsed": "true",
+    # ...and how the likelihoods become a hypothesis: 0, RTAB-Map's default, fits the words' sparse
+    # scores; the descriptor's dense ones need 1 (pepin.global_descriptor.VIRTUAL_PLACE_RATIO says
+    # why), and it travels with place_recognition the same way.
+    "Rtabmap/VirtualPlaceLikelihoodRatio": "0",
     # WHICH FEATURES THE VISUAL REGISTRATION MATCHES (pepin.graphmode.FEATURE_PARAMETERS): the
     # START values are ORB's — RTAB-Map's own defaults, Vis/FeatureType 8, Vis/CorNNType 1, no
     # re-extraction, Vis/PnPReprojError 2 — said out loud because rtabmap_frame's

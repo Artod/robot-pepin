@@ -119,10 +119,10 @@ class RegistrationSettings:
     """What RTAB-Map's XFeat and LighterGlue adapters do on each call: where they compute
     (``service``, ``local`` or ``auto``), how long they wait for the service, and XFeat's
     keypoint cap. The defaults are the environment's (``PEPIN_REGISTRATION_BACKEND``,
-    ``PEPIN_REGISTRATION_TIMEOUT_S``, ``PEPIN_XFEAT_TOP_K``), else auto, 0.5 s and 2048."""
+    ``PEPIN_REGISTRATION_TIMEOUT_S``, ``PEPIN_XFEAT_TOP_K``), else auto, 1.0 s and 2048."""
 
     backend: str = "auto"
-    timeout_s: float = 0.5
+    timeout_s: float = 1.0
     top_k: int = 2048
 
     @classmethod

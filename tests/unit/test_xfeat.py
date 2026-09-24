@@ -156,6 +156,26 @@ def test_every_name_a_live_set_may_carry_is_in_the_launch_table() -> None:
     assert names <= set(table), sorted(names - set(table))
 
 
+def test_the_place_likelihood_rtabmap_frame_sets_live_is_in_the_launch_table_at_the_words() -> None:
+    """place_recognition sets Kp/TfIdfLikelihoodUsed and Rtabmap/VirtualPlaceLikelihoodRatio live:
+    seen only because the table names them (CoreWrapper.cpp:362-379), and the node starts
+    believing the words — the table's values."""
+    from pepin.global_descriptor import (
+        DESCRIPTOR_PARAMETERS,
+        WORDS_PARAMETERS,
+        recognition_parameters,
+    )
+
+    table = _rtabmap_table()
+    assert WORDS_PARAMETERS == {
+        "Kp/TfIdfLikelihoodUsed": "true",
+        "Rtabmap/VirtualPlaceLikelihoodRatio": "0",
+    }
+    assert {name: table[name] for name in WORDS_PARAMETERS} == WORDS_PARAMETERS
+    assert set(DESCRIPTOR_PARAMETERS) == set(WORDS_PARAMETERS)
+    assert recognition_parameters("words", None, None, True)[0] == WORDS_PARAMETERS
+
+
 def test_the_launch_starts_from_the_set_the_node_believes_is_in_force() -> None:
     """rtabmap_frame re-sends a visual set only when it differs from the last one it believes
     RTAB-Map holds, and it starts believing ORB under ICP at the default gate: that must be the
@@ -261,22 +281,29 @@ def test_a_side_with_no_keypoints_is_no_pairs_without_touching_the_model() -> No
 
 
 # ---- the models, where the pinned checkout is ----------------------------------------------------
-XFEAT_DIR = Path(os.environ.get("PEPIN_XFEAT_DIR", "/opt/xfeat/accelerated_features"))
+XFEAT_DIR = Path(
+    os.environ.get(
+        "PEPIN_XFEAT_DIR", "/Users/artem/robots/pepin/scratch/xfeat/data/accelerated_features"
+    )
+)
 
 
 @pytest.mark.slow
 @pytest.mark.skipif(not (XFEAT_DIR / "weights" / "xfeat.pt").is_file(), reason="no XFeat checkout")
 def test_the_adapters_match_a_picture_to_itself_shifted() -> None:
     """The image build runs the same check (ros/Dockerfile.xfeat's last step): tiles, and the
-    same tiles 12 px to the left, must match on the shift through RTAB-Map's own two calls."""
-    xfeat = _adapter("rtabmap_xfeat")
+    same tiles 12 px to the left, must match on the shift through the one implementation the
+    adapters and the service share (pepin.xfeat_models) and the matcher adapter's own pairs."""
+    pytest.importorskip("kornia")
+    import pepin.xfeat_models as xm
+
     glue = _adapter("rtabmap_lighterglue")
     rng = np.random.default_rng(0)
     big = (np.kron(rng.random((62, 82)), np.ones((10, 10))) * 255).astype(np.uint8)
-    model = xfeat.load_xfeat(str(XFEAT_DIR))
-    a_pts, a_desc = xfeat.features(model, big[:600, :800])
-    b_pts, b_desc = xfeat.features(model, big[:600, 12:812])
-    matcher = glue.load_lighterglue(str(XFEAT_DIR))
+    model = xm.load_xfeat(str(XFEAT_DIR))
+    a_pts, a_desc = xm.features(model, big[:600, :800])
+    b_pts, b_desc = xm.features(model, big[:600, 12:812])
+    matcher = xm.load_lighterglue(str(XFEAT_DIR))
     found = glue.pairs(matcher, b_pts[:, :2], a_pts[:, :2], b_desc, a_desc, 800, 600)
     shift = a_pts[found[:, 1], 0] - b_pts[found[:, 0], 0]
     assert int(np.sum(np.abs(shift - 12.0) < 2.0)) > 50

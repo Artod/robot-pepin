@@ -34,7 +34,51 @@ from pepin_bringup.sensor_pack import (  # noqa: E402
     xy_cloud,
 )
 
+from pepin.global_descriptor import (  # noqa: E402
+    NULL_TAG,
+    PLACE_TOPIC,
+    PlaceDescriptor,
+    SnapshotPlace,
+)
 from pepin.snapshot import LIVE_PERIODS, PAIR_PERIODS, SnapshotState  # noqa: E402
+
+DIM = 12288  # config/models.json's place model, boq_dinov2
+TAG = "boq_dinov2@feedbeef"
+
+
+class FakePlaces:
+    """The localisation service's client as the node uses it: ``place`` answers a unit vector of
+    the configured length (or nothing, when ``down``), and remembers what it was asked."""
+
+    url = "http://fake:8791"
+
+    def __init__(self) -> None:
+        self.down = False
+        self.length = DIM
+        self.asked: list[tuple[Any, str, float]] = []
+        self.remotes = {"place": self}
+
+    def place(self, rgb: Any, encoding: str, timeout_s: float) -> tuple[Any, str] | None:
+        import numpy as np
+
+        self.asked.append((rgb, encoding, timeout_s))
+        if self.down:
+            return None
+        vector = np.zeros(self.length, dtype=np.float32)
+        vector[int(rgb[0, 0, 0]) % self.length] = 1.0  # which picture: its first red byte
+        return vector, TAG
+
+    def status(self) -> str:
+        return "ok"
+
+
+@pytest.fixture(autouse=True)
+def _inline_places() -> Iterator[None]:
+    """The descriptors are handled on the packer's thread here, so a test sees what went out."""
+    SensorPack.PLACE_THREAD = False
+    yield
+    SensorPack.PLACE_THREAD = True
+
 
 # The board's clock, at an epoch second whose nanoseconds a double cannot hold: at 1.758e9 the
 # step of a float is 238 ns, so a stamp that survives this round trip bit for bit was carried as a
@@ -119,6 +163,7 @@ def build() -> Iterator[Build]:
     def make(optics: bool = True, tf: bool = True, **params: Any) -> SensorPack:
         with ros_stubs.parameters(**params):
             node = SensorPack()
+        node._places = FakePlaces()  # type: ignore[assignment]
         made.append(node)
         if tf:
             node._tf.buffer.transforms[("base_link", "camera_optical")] = _edge()
@@ -164,7 +209,7 @@ def _warm(node: SensorPack) -> None:
 def test_the_node_reads_four_topics_and_writes_one(build: Build) -> None:
     node = build()
     assert set(node.subs) == {"/camera/image", "/camera/depth", "/camera/camera_info", "/scan"}
-    assert set(node.pubs) == {"/rtabmap/sensor_data", "/sensor_pack/state"}
+    assert set(node.pubs) == {"/rtabmap/sensor_data", "/sensor_pack/state", "/sensor_pack/place"}
     assert (IMAGE_TOPIC, DEPTH_TOPIC, CAMERA_INFO_TOPIC, SCAN_TOPIC) == (
         "/camera/image",
         "/camera/depth",
@@ -504,7 +549,7 @@ def test_the_retry_is_a_flag_and_off_it_drops_the_member_at_once(build: Build) -
 
 
 # ---- the flags -------------------------------------------------------------------------------
-def test_the_flags_are_the_five_the_report_line_prints(build: Build) -> None:
+def test_the_flags_are_the_eight_the_report_line_prints(build: Build) -> None:
     node = build()
     assert [flag.name for flag in FLAGS] == [
         "sensor_pack",
@@ -512,7 +557,13 @@ def test_the_flags_are_the_five_the_report_line_prints(build: Build) -> None:
         "pack_hz",
         "pair_periods",
         "tf_retry",
+        "global_descriptor",
+        "place_descriptor",
+        "place_timeout_s",
     ]
+    assert FLAGS["global_descriptor"] is True and not FLAGS.flag("global_descriptor").live
+    assert FLAGS.flag("global_descriptor").env == "PEPIN_GLOBAL_DESCRIPTOR"
+    assert FLAGS["place_descriptor"] is True and FLAGS["place_timeout_s"] == 0.5
     assert FLAGS["tf_retry"] is True
     assert FLAGS["sensor_pack"] is True
     assert FLAGS["sources"] == ("camera", "lidar")
@@ -592,3 +643,96 @@ def test_a_scan_that_describes_no_revolution_is_refused_with_rtabmap_s_own_reaso
         assert "angle_increment 0.0" in node.logger.texts("error")[-1]
     finally:
         node.close()
+
+
+# ---- one place descriptor on every snapshot ---------------------------------------------------
+def descriptors(msg: Any) -> list[PlaceDescriptor]:
+    """The snapshot's descriptors, read back from rtabmap_msgs' bytes; every one is type 1."""
+    assert all(d.type == 1 for d in msg.global_descriptors), "type 1: the PyDescriptor"
+    return [PlaceDescriptor.from_blobs(d.info, d.data) for d in msg.global_descriptors]
+
+
+def place_state(node: SensorPack) -> SnapshotPlace:
+    heard = SnapshotPlace.from_json(node.pubs[PLACE_TOPIC].sent[-1].data)
+    assert heard is not None
+    return heard
+
+
+def test_every_snapshot_carries_exactly_one_descriptor_of_the_configured_length(
+    build: Build,
+) -> None:
+    """RTAB-Map aborts on a node with a descriptor against one without (Signature.cpp:252): a
+    camera snapshot carries the service's vector, a lidar-only one the null descriptor, every one
+    of the same length, and the camera's is asked with its own picture as JPEG."""
+    node = build(pack_hz=15.0)
+    _warm(node)
+    for i in range(7):  # the camera falls silent after 0.25: these become lidar-only snapshots
+        scan(node, 0.40 + 0.1 * i)
+    out = sent(node)
+    assert out, "snapshots went out"
+    kinds = {"camera": 0, "null": 0}
+    for msg in out:
+        [d] = descriptors(msg)
+        assert d.dim == DIM
+        if msg.left_camera_info:
+            assert d.tag == TAG and abs(float((d.vector**2).sum()) - 1.0) < 1e-6
+            kinds["camera"] += 1
+        else:
+            assert d.is_null and d.tag == NULL_TAG and not d.vector.any()
+            kinds["null"] += 1
+    assert kinds["camera"] >= 1 and kinds["null"] >= 1, kinds
+    rgb, encoding, timeout = node._places.asked[0]  # type: ignore[attr-defined]
+    assert rgb.shape == (HEIGHT, WIDTH, 3) and encoding == "jpeg" and 0 < timeout <= 0.5
+    assert place_state(node) == SnapshotPlace(True, "service", DIM, ""), "no vector at the start"
+    node._publish_state()  # the once-a-second timer: the tag of the weights, once there is one
+    assert place_state(node) == SnapshotPlace(True, "service", DIM, TAG)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert f"place descriptors {kinds['camera']} described" in line and "no picture" in line
+
+
+def test_a_picture_the_service_does_not_describe_gets_the_null_descriptor(build: Build) -> None:
+    node = build(pack_hz=15.0)
+    node._places.down = True  # type: ignore[attr-defined]
+    _warm(node)
+    camera = [m for m in sent(node) if m.left_camera_info]
+    assert camera, "a camera snapshot went out"
+    for msg in camera:
+        [d] = descriptors(msg)
+        assert d.is_null and d.dim == DIM
+    node._report()
+    assert "no answer" in node.logger.texts("info")[-1]
+
+
+def test_a_vector_of_another_length_is_never_attached(build: Build) -> None:
+    """A service reconfigured to another model answers vectors of another length; attached, the
+    next comparison would abort RTAB-Map. Null instead, and the report says what came."""
+    node = build(pack_hz=15.0)
+    node._places.length = 16384  # type: ignore[attr-defined]
+    _warm(node)
+    for msg in sent(node):
+        [d] = descriptors(msg)
+        assert d.is_null and d.dim == DIM
+    node._report()
+    assert "answered 16384 from boq_dinov2@feedbeef, not 12288" in node.logger.texts("info")[-1]
+
+
+def test_place_descriptor_off_keeps_one_null_descriptor_on_every_snapshot(build: Build) -> None:
+    node = build(pack_hz=15.0, place_descriptor=False)
+    _warm(node)
+    assert sent(node) and node._places.asked == []  # type: ignore[attr-defined]
+    for msg in sent(node):
+        [d] = descriptors(msg)
+        assert d.is_null
+    assert place_state(node).source == "null" and place_state(node).attached
+    node._switches.set("place_descriptor", True)
+    assert place_state(node).source == "service", "said at once, latched"
+
+
+def test_global_descriptor_off_is_the_snapshot_of_before(build: Build) -> None:
+    node = build(pack_hz=15.0, global_descriptor=False)
+    _warm(node)
+    assert sent(node) and all(msg.global_descriptors == [] for msg in sent(node))
+    assert place_state(node) == SnapshotPlace(False, "service", 0, "")
+    with pytest.raises(ValueError):
+        node._switches.set("global_descriptor", True)  # not live: the invariant would break
