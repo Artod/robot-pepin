@@ -99,16 +99,20 @@ from pepin.runlink import (
     stop_command,
 )
 from pepin.watch import (
+    BY_PLACEMENT,
     CORRECTION_FRESH_S,
     DRIVE_FIT,
     DRIVE_SIGMA_M,
     LOST_SIGMA_M,
+    PLACEMENT_TOPIC,
     SIGMA_TOPIC,
     TF_FRESH_S,
     BlindDriveWatch,
     Correction,
     GoalGate,
     JumpClear,
+    Placement,
+    Preflight,
     Readiness,
     Sigma,
 )
@@ -393,6 +397,17 @@ class GoalServer(Node):
             String,
             PLACES_TOPIC,
             self._on_places,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        # WHETHER RTAB-MAP'S START IS PLACED (pepin.watch.Placement, from the laptop's
+        # rtabmap_frame, latched): under PEPIN_LOCALIZER=rtabmap a fresh map -> base_link is not
+        # a pose until this start of RTAB-Map has recognised the loaded map or been seeded.
+        # None until heard, which _ready refuses as "nobody said".
+        self._placement: Placement | None = None
+        self.create_subscription(
+            String,
+            PLACEMENT_TOPIC,
+            self._on_placement,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
         # Latched: the behaviour tree reads its selector once, whenever it next ticks.
@@ -717,6 +732,13 @@ class GoalServer(Node):
         else:
             self._send(connection, {"event": "error", "detail": f"unknown command {command!r}"})
 
+    def _on_placement(self, msg: String) -> None:
+        """rtabmap_frame's word on what RTAB-Map's present start rests on; a message that does
+        not parse leaves the last one standing."""
+        heard = Placement.from_json(msg.data)
+        if heard is not None:
+            self._placement = heard
+
     def _on_places(self, msg: String) -> None:
         """The graph's book, as the places node last published it."""
         self._graph_places = {
@@ -836,7 +858,12 @@ class GoalServer(Node):
         if self._switches.on("tf_pose") and not self._tracker_here():
             edge = self._tf_pose() if pose is None else pose
             watched = self._correction() if self._watching_correction() else None
-            return self._gate.verdict(None, edge.get("age_s"), watched)
+            ready = self._gate.verdict(None, edge.get("age_s"), watched)
+            if ready.ready and self._localizer == "rtabmap":
+                placed = Preflight.placement(self._placement)
+                if not placed.ok:
+                    return Readiness(False, tracker=False, rule=BY_PLACEMENT, reason=placed.detail)
+            return ready
         return self._gate.verdict(self.fit, None, sigma=self._sigma())
 
     def mark(self, name: str) -> dict[str, Any]:

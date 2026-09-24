@@ -218,6 +218,17 @@ def test_the_goal_server_answers_where_from_tf_with_no_fit_in_it() -> None:
     assert goal_server  # the module is the thing under test, not a fixture
 
 
+def _placed(node: Any, **fields: Any) -> None:
+    """rtabmap_frame's latched word reaching the goal server: this start of RTAB-Map is placed
+    (one recognition of the loaded map) unless ``fields`` say otherwise."""
+    from pepin.watch import PLACEMENT_TOPIC, Placement
+
+    word = {"updates": 40, "recognised": 1, "seeds": 0, "loaded": True, **fields}
+    node.subs[PLACEMENT_TOPIC][1](
+        ros_stubs.String(data=Placement(**word).to_json(0.0))  # type: ignore[arg-type]
+    )
+
+
 def test_a_goal_starts_without_a_tracker_and_without_a_map_odom_pulse() -> None:
     """``correction_watch`` exists for the RETIRED message path (pepin_bringup.slam_frame on
     /map_odom). Under this switch RTAB-Map broadcasts the transform itself and nothing publishes
@@ -225,12 +236,132 @@ def test_a_goal_starts_without_a_tracker_and_without_a_map_odom_pulse() -> None:
     arrived" — on a stack where no message-shaped correction exists to arrive."""
     node = _goal_server()
     node._tf = _FakeTf(x=1.0, y=2.0, yaw_deg=0.0, age_s=0.05)
+    _placed(node)
     assert node._switches.on("correction_watch"), "the flag itself is untouched"
     assert not node._watching_correction(), "...and not the authority in this role"
     ready = node._ready()
     assert ready.ready, ready.reason
     assert not ready.tracker
     assert not node._tracker_here(), "and the one-second probe for it is not paid at all"
+
+
+def test_a_goal_is_refused_on_rtabmap_s_saved_start_pose_until_it_is_placed() -> None:
+    """2026-09-23: after a restart map -> base_link was milliseconds fresh and the cart "at home"
+    at the bookshelf — RTAB-Map's SAVED start pose, 0 of 198 updates recognised. The goal server
+    refuses that with what to do, and starts the goal once a recognition or a seed has placed
+    this start; nothing heard at all is refused too, never read as placed."""
+    from pepin.watch import BY_PLACEMENT
+
+    node = _goal_server()
+    node._tf = _FakeTf(x=0.0, y=0.0, yaw_deg=0.0, age_s=0.05)
+    silent = node._ready()
+    assert not silent.ready and silent.rule == BY_PLACEMENT and "nothing on" in silent.reason
+    _placed(node, updates=198, recognised=0)
+    saved = node._ready()
+    assert not saved.ready and saved.rule == BY_PLACEMENT
+    assert "0 of 198 updates" in saved.reason and "ros/goto.sh seed" in saved.reason
+    _placed(node, updates=199, recognised=0, seeds=1)
+    assert node._ready().ready, "the operator's seed places it"
+    _placed(node, updates=198, recognised=0, required=False)
+    assert node._ready().ready, "the laptop's flag off: the pose is taken as it is"
+    node._tf = _FakeTf(x=0.0, y=0.0, yaw_deg=0.0, age_s=5.0)
+    stale = node._ready()
+    assert not stale.ready and stale.rule != BY_PLACEMENT, "a stale frame is refused first"
+
+
+def _rtabmap_update(frame: Any, ref_id: int, matched: int = 0) -> None:
+    """One /rtabmap/info: the node this update CREATED and the older node it recognised."""
+    from pepin_bringup import rtabmap_frame
+
+    frame.subs[rtabmap_frame.INFO_TOPIC][1](
+        ros_stubs.Info(ref_id=ref_id, loop_closure_id=matched, header=ros_stubs.Header())
+    )
+
+
+def _placement_said(frame: Any) -> Any:
+    """The last placement rtabmap_frame published (latched), as the board reads it."""
+    from pepin.watch import PLACEMENT_TOPIC, Placement
+
+    frame._publish()
+    return Placement.from_json(frame.pubs[PLACEMENT_TOPIC].sent[-1].data)
+
+
+def test_rtabmap_frame_says_a_start_is_placed_by_a_recognition_of_the_loaded_map() -> None:
+    """The count behind "0 recognised a node" in the report line, latched for the board: an
+    update of this start that names an OLDER node than its own first one recognised the loaded
+    map; one naming a node of its own does not."""
+    from pepin_bringup import rtabmap_frame
+
+    from pepin.watch import PLACEMENT_TOPIC
+
+    frame = rtabmap_frame.RtabmapFrame()
+    latched = frame.pubs[rtabmap_frame.MAP_TOPIC].qos
+    assert frame.pubs[PLACEMENT_TOPIC].qos is latched, "latched, as the map is"
+    assert _placement_said(frame).loaded is None, "no update yet: nothing is placed"
+    _rtabmap_update(frame, 5600)
+    _rtabmap_update(frame, 5601, matched=5600)  # its own node: not the loaded map
+    said = _placement_said(frame)
+    assert not said.placed and said.updates == 2 and said.recognised == 0 and said.loaded
+    _rtabmap_update(frame, 5602, matched=5046)
+    assert _placement_said(frame).placed
+    sent = len(frame.pubs[PLACEMENT_TOPIC].sent)
+    frame._publish()
+    assert len(frame.pubs[PLACEMENT_TOPIC].sent) == sent, "published on a change only"
+    frame._report()
+    assert "start placed: 1 of 3 updates" in frame.logger.texts("info")[-1]
+
+
+def test_a_seed_places_the_start_but_not_one_sent_before_rtabmap_runs() -> None:
+    from geometry_msgs.msg import PoseWithCovarianceStamped
+    from pepin_bringup import rtabmap_frame
+
+    frame = rtabmap_frame.RtabmapFrame()
+    seed = frame.subs[rtabmap_frame.RTABMAP_INITIAL_POSE][1]
+    seed(PoseWithCovarianceStamped())
+    _rtabmap_update(frame, 5600)
+    assert not _placement_said(frame).placed, "sent into a start that had not begun"
+    seed(PoseWithCovarianceStamped())
+    said = _placement_said(frame)
+    assert said.placed and said.seeds == 1
+
+
+def test_an_rtabmap_restart_under_a_running_frame_node_unplaces_the_start() -> None:
+    """The numbering going back down is RTAB-Map restarted with this node still up: the old
+    start's tie, recognitions and seeds say nothing about the new one, which is back at its
+    saved pose."""
+    from pepin_bringup import rtabmap_frame
+
+    frame = rtabmap_frame.RtabmapFrame()
+    _rtabmap_update(frame, 5600)
+    _rtabmap_update(frame, 5601, matched=5046)
+    assert _placement_said(frame).placed and frame._tied
+    _rtabmap_update(frame, 5600)  # the same database loaded again: numbering starts over
+    said = _placement_said(frame)
+    assert not said.placed and said.updates == 1 and not frame._tied
+    assert frame._restarts == 1
+    assert "RTAB-Map restarted" in " ".join(frame.logger.texts("warning"))
+
+
+def test_an_empty_database_is_placed_and_the_flag_off_places_everything() -> None:
+    from pepin_bringup import rtabmap_frame
+
+    frame = rtabmap_frame.RtabmapFrame()
+    _rtabmap_update(frame, 1)
+    assert _placement_said(frame).placed, "its start pose is its own map's origin"
+    other = rtabmap_frame.RtabmapFrame()
+    _rtabmap_update(other, 5600)
+    assert not _placement_said(other).placed
+    assert other._switches.set("start_needs_placement", False) is True
+    said = _placement_said(other)
+    assert said.placed and not said.required, "live: republished on the flip"
+
+
+def test_goto_s_seed_topic_is_the_one_rtabmap_frame_hears() -> None:
+    from pepin_bringup import rtabmap_frame
+
+    goto = (REPO / "ros/tools/goto_ros.py").read_text()
+    assert f'RTABMAP_INITIAL_POSE = "{rtabmap_frame.RTABMAP_INITIAL_POSE}"' in goto
+    assert "Preflight.placement(placement_now(nav))" in goto, "the preflight asks it"
 
 
 def _loc_rows(recorder: Any) -> list[dict[str, Any]]:

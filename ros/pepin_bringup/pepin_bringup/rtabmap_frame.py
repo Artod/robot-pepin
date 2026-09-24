@@ -128,7 +128,7 @@ from pepin.odometry import Pose2D
 from pepin.snapshot import SnapshotState
 from pepin.sources import GRAPH, LIDAR
 from pepin.tsdf import RigidPose
-from pepin.watch import SIGMA_TOPIC, Preflight, Sigma, source_words
+from pepin.watch import PLACEMENT_TOPIC, SIGMA_TOPIC, Placement, Preflight, Sigma, source_words
 from pepin.watchdog import GlobalCandidate, same_place
 from pepin_bringup.msgs import (
     map_id,
@@ -158,6 +158,10 @@ CANDIDATE_TOPIC = "/localization/candidate"
 # matched, which is the one thing that says this update is a localisation and not odometry — and
 # the statistics beside it, read for the report line alone (how close the last hypothesis came).
 INFO_TOPIC = "/rtabmap/info"
+# Where an operator tells RTAB-Map where the cart stands (ros/tools/goto_ros.py seed publishes
+# it; RTAB-Map takes it in localisation mode). Heard here too: a seed since this start is one
+# of the two things that PLACE it (start_needs_placement, pepin.watch.Placement).
+RTABMAP_INITIAL_POSE = "/rtabmap/initialpose"
 # Where RTAB-Map says the cart is IN THE DATABASE IT LOADED, with its own covariance. This is the
 # one number in the stack that is a localisation rather than an integration: /rtabmap/mapGraph
 # carries the correction relative to the CURRENT SESSION, which starts at zero on every restart
@@ -431,6 +435,29 @@ FLAGS = FlagSet(
         off_when="to reproduce the self-matching tracker of 2026-09-19, or to watch the raw grid"
         " reach the board while debugging the bridge",
     ),
+    Flag(
+        "start_needs_placement",
+        True,
+        description=f"what goes out on {PLACEMENT_TOPIC} (latched) says this start of RTAB-Map"
+        " is PLACED only once an update has recognised a node of the database it loaded, or an"
+        f" operator's seed ({RTABMAP_INITIAL_POSE}) has been heard since its first update — or it"
+        " loaded an empty database, whose start pose is the map's origin. The board's goal"
+        " clients (ros/tools/goto_ros.py, pepin_bringup.goal_server) refuse a goal under"
+        " PEPIN_LOCALIZER=rtabmap until then, saying to seed or to let the camera see a mapped"
+        " place. Off, every start counts as placed: RTAB-Map's pose is taken as it is",
+        why="on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the pose"
+        " it SAVED at its last shutdown, before recognising anything, and the preflight took that"
+        " fresh transform for a localisation — the cart was 'at home' while standing at the"
+        " bookshelf (0 recognised a node in 130-198 updates, hypothesis 0.07), and after the next"
+        " restart 76 cm off, inside the table, where Hybrid refused 'Start occupied' and the"
+        " recoveries ran 93 times in 81 s (the journal, 19:05 and 20:57). It is the startup-zero"
+        " trap a third time",
+        on_when="always under PEPIN_LOCALIZER=rtabmap: a pose nobody has vouched for since the"
+        " start is not a pose to drive on",
+        off_when="to drive on the saved start pose anyway — a cart known to stand exactly where"
+        " RTAB-Map last shut down, with the camera unable to recognise anything (darkness) and no"
+        " seed at hand",
+    ),
 )
 
 
@@ -531,6 +558,16 @@ class RtabmapFrame(Node):
         self._first_ref: int | None = None  # the first node id this start created
         self._tied = False  # whether this start has recognised a node of the loaded database
         self._tied_stamp = 0.0  # the stamp of the update that tied it: older grids are not the map
+        # WHAT THIS START OF RTAB-MAP IS PLACED BY (start_needs_placement): its updates, how many
+        # recognised a node of the loaded database, and the operator seeds heard since its first
+        # update. A start is RTAB-Map's, not this node's: numbering that goes back DOWN is
+        # RTAB-Map restarted under a node that kept running, and all of it starts again.
+        self._last_ref = 0
+        self._start_updates = 0
+        self._start_recognised = 0
+        self._start_seeds = 0
+        self._restarts = 0  # RTAB-Map restarts seen under this node
+        self._placement_said: str | None = None  # the last placement published, sans stamp
         self._grids_relayed = 0
         self._grids_withheld = 0
         self._localizations = 0  # localisations heard
@@ -588,6 +625,7 @@ class RtabmapFrame(Node):
             PoseWithCovarianceStamped, LOCALIZATION_TOPIC, self._on_localization, 5
         )
         self.create_subscription(Info, INFO_TOPIC, self._on_info, 5)
+        self.create_subscription(PoseWithCovarianceStamped, RTABMAP_INITIAL_POSE, self._on_seed, 5)
         latched = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -604,6 +642,9 @@ class RtabmapFrame(Node):
         # subscription is also what keeps RTAB-Map assembling a grid at all: it builds one only
         # while somebody listens (MapsManager's subscription-count gate).
         self._map_pub = self.create_publisher(OccupancyGridMsg, MAP_TOPIC, latched)
+        # Whether this start is placed, latched: a goal client is a fresh process on the board
+        # and reads it once, in its first callback, as it reads /places.
+        self._placement_pub = self.create_publisher(String, PLACEMENT_TOPIC, latched)
         self.create_subscription(OccupancyGridMsg, GRID_TOPIC, self._on_grid, latched)
         self.create_subscription(
             PoseWithCovarianceStamped, TRACKER_POSE_TOPIC, self._on_tracker_pose, 5
@@ -672,6 +713,9 @@ class RtabmapFrame(Node):
             f" rtabmap registration {self._strategy_text()};"
             f" map {self._map_id or 'unknown'}, {self._grids_relayed} grids relayed,"
             f" {self._grids_withheld} withheld ({self._tie_text()});"
+            f" start {self._placement().how()}"
+            + (f", {self._restarts} RTAB-Map restarts seen" if self._restarts else "")
+            + ";"
             f" role {self._role_text()};"
             f" flags: {self._switches.state(live_only=False)}"
         )
@@ -806,20 +850,80 @@ class RtabmapFrame(Node):
         if hypothesis is not None:
             self._hypothesis = float(hypothesis)
         ref = int(getattr(msg, "ref_id", 0))
+        if 0 < ref < self._last_ref:
+            self._new_start(ref)
+        if ref > 0:
+            self._last_ref = ref
         if ref > 0 and self._first_ref is None:
             # the first node this start made: everything older is the loaded map
             self._first_ref = ref
+        if self._first_ref is not None:
+            self._start_updates += 1
         matched = _matched_id(msg)
         if matched <= 0:
             return
         stamp = stamp_seconds(getattr(getattr(msg, "header", None), "stamp", None) or _zero_stamp())
-        if self._first_ref is not None and matched < self._first_ref and not self._tied:
-            # this start has recognised a node of the map it LOADED; grids from here on are
-            # assembled from the whole graph
-            self._tied, self._tied_stamp = True, stamp
+        if self._first_ref is not None and matched < self._first_ref:
+            self._start_recognised += 1
+            if not self._tied:
+                # this start has recognised a node of the map it LOADED; grids from here on are
+                # assembled from the whole graph
+                self._tied, self._tied_stamp = True, stamp
         self._named += 1
         self._matched = (matched, stamp)
         self._try_word()
+
+    def _new_start(self, ref: int) -> None:
+        """RTAB-Map restarted under this node: its numbering went back down to ``ref`` (within a
+        start every update's node id is one more than the last; a restart numbers on from the
+        database's last saved node). Everything that said "this start" is about the old one: the
+        first node, the tie to the loaded map, the placement's counts and seeds."""
+        self._restarts += 1
+        self.get_logger().warning(
+            f"rtabmap frame: RTAB-Map restarted (node ids went from {self._last_ref} back to"
+            f" {ref}): this start is not tied to the loaded map and not placed until it recognises"
+            " a node or is seeded"
+        )
+        self._first_ref = None
+        self._tied, self._tied_stamp = False, 0.0
+        self._start_updates = self._start_recognised = self._start_seeds = 0
+
+    def _on_seed(self, _msg: PoseWithCovarianceStamped) -> None:
+        """An operator told RTAB-Map where the cart stands (ros/tools/goto_ros.py seed): counted
+        once this start has made an update — RTAB-Map is up to take it — and never before, so a
+        seed sent into a restart does not place the start that follows it."""
+        if self._first_ref is None:
+            self.get_logger().warning(
+                f"rtabmap frame: a seed on {RTABMAP_INITIAL_POSE} before RTAB-Map's first update"
+                " of this start: not counted, seed again once it runs"
+            )
+            return
+        self._start_seeds += 1
+        self.get_logger().info(
+            f"rtabmap frame: operator seed {self._start_seeds} since RTAB-Map's start: placed"
+        )
+
+    def _placement(self) -> Placement:
+        """What this start of RTAB-Map rests on (:class:`pepin.watch.Placement`)."""
+        loaded = (
+            None if self._first_ref is None else self._first_ref != FIRST_ID_OF_AN_EMPTY_DATABASE
+        )
+        return Placement(
+            self._start_updates,
+            self._start_recognised,
+            self._start_seeds,
+            loaded,
+            required=self._switches.on("start_needs_placement"),
+        )
+
+    def _say_placement(self) -> None:
+        """Publish the placement (latched) whenever it changed, the flag included."""
+        placement = self._placement()
+        said = placement.to_json(0.0)
+        if said == self._placement_said:
+            return
+        self._placement_said = said
+        self._placement_pub.publish(String(data=placement.to_json(self._now())))
 
     def _on_localization(self, msg: PoseWithCovarianceStamped) -> None:
         """RTAB-Map placing itself in the database it loaded: the cart's pose in the ONE map frame,
@@ -1300,7 +1404,9 @@ class RtabmapFrame(Node):
     def _publish(self) -> None:
         """At :data:`RATE_HZ`: RTAB-Map's memory mode, and in SLAM the correction as a message to
         the board (held between graphs, because it does not move until the graph does). Beside a
-        known map there is no transform to publish — the graph's map frame IS ``map``."""
+        known map there is no transform to publish — the graph's map frame IS ``map``. The
+        placement goes out here too, when it changed."""
+        self._say_placement()
         self._decide_mode()
         self._decide_strategy()
         if self._correction is None:
