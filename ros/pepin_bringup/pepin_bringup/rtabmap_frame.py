@@ -89,6 +89,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -115,12 +117,27 @@ from pepin.fusion import (
     PoseMeasurement,
     disagreement,
 )
+from pepin.global_descriptor import (
+    CENSUS_ENV,
+    DESCRIPTOR_PARAMETERS,
+    MAX_NULL_SHARE,
+    PLACE_DESCRIPTOR,
+    PLACE_TOPIC,
+    PLACE_WORDS,
+    RECENT_CAMERA_SNAPSHOTS,
+    TFIDF,
+    Census,
+    SnapshotPlace,
+    recognition_parameters,
+    rtabmap_keeps_descriptors,
+)
 from pepin.graphmode import (
     ALWAYS_LOCALISE,
     ALWAYS_MAP,
     BY_TRUST,
     CONFIRM_AGGRESSIVE,
     CONFIRM_PARAMETERS,
+    CONFIRM_STOCK,
     FEATURES_ORB,
     FEATURES_XFEAT,
     LOCALISING,
@@ -140,6 +157,14 @@ from pepin.graphmode import (
     visual_parameters,
 )
 from pepin.graphtrust import HIGHEST_HYPOTHESIS, Agreement, stat
+from pepin.live_settings import (
+    BACKENDS,
+    REGISTRATION_FILE,
+    LiveFile,
+    RegistrationSettings,
+    StatusBoard,
+    registration_file,
+)
 from pepin.measurements import (
     GRAPH_FLOOR_XY_M,
     GRAPH_FLOOR_YAW_DEG,
@@ -259,6 +284,9 @@ UPDATE_MAX_SKEW_S = 0.5
 # old when its localisation arrives and /tf crosses the bridge in well under 0.1 s, so the edge is
 # almost always there already; the wait covers the youngest words and no more.
 WORD_TF_WAIT_S = 0.2
+# How old the adapters' counters (pepin.live_settings' status file) may be for the report line to
+# print them as current: they write once a minute while RTAB-Map registers.
+REGISTRATION_STATUS_FRESH_S = 180.0
 
 FLAGS = FlagSet(
     Flag(
@@ -558,6 +586,119 @@ FLAGS = FlagSet(
         " under a camera-only drive",
     ),
     Flag(
+        "registration_backend",
+        "auto",
+        choices=BACKENDS,
+        env="PEPIN_REGISTRATION_BACKEND",
+        description="where RTAB-Map's XFeat keypoints and LighterGlue matches are computed (the"
+        " xfeat visual features): service — the localisation service on the laptop's GPU"
+        " (pepin.localization_service, PEPIN_MODELS_URL), no features when it does not answer;"
+        " local — in RTAB-Map's own process on the Docker VM's CPU, as before 2026-09-24; auto —"
+        " the service, and a call it does not answer computed locally. Written to"
+        f" {REGISTRATION_FILE}, which RTAB-Map's adapters read on every call (one stat): live,"
+        " no restart of RTAB-Map",
+        why="auto, measured 2026-09-24 in RTAB-Map itself against the NIGHT branch's in-process"
+        " adapters under the same conditions (scratch/models/backend_control.sh and .py: the"
+        " replay of camera-only run 0466, words at LoopThr 0.05, four runs back to back, the live"
+        " stack beside them): the registration of a localised update took 571 ms median through"
+        " the service against 1896 and 2326 ms for the night's adapters in the runs before and"
+        " after it (3.3-4.1x), 2428 ms for this branch's local fallback (the night's path, within"
+        " that drift), 18 localised updates of 20 in each — one run, no truth, so a speed, not a"
+        " recognition result; the 0.67 s of 2026-09-23 was a quieter laptop. From inside a"
+        " container XFeat answers an 800x600 picture in 41 ms, a node picture already seen in 1.5"
+        " ms, LighterGlue a pair in 129 ms (scratch/models/endpoint_bench.py). auto keeps the old"
+        " path as the answer to a service that is down",
+        on_when="service to measure the service alone (a registration it cannot answer then finds"
+        " no features, which shows as no recognition), auto always otherwise",
+        off_when="local to reproduce the registration of before 2026-09-24, or when the laptop's"
+        " GPU is wanted elsewhere",
+    ),
+    Flag(
+        "registration_timeout_s",
+        RegistrationSettings.timeout_s,
+        range=(0.05, 5.0),
+        description="how long RTAB-Map's adapters wait for one answer of the localisation service"
+        " before it counts as none (auto then computes it locally, and the service is left alone"
+        " for 10 s)",
+        why="1.0, measured 2026-09-24 from inside a container: the slowest endpoint, /match,"
+        " answers in about 105 ms median and 120 ms p90 with 2048 keypoints a side"
+        " (scratch/models/endpoint_bench.py), but a GPU model's first answer after two seconds"
+        " idle takes 200-460 ms, and 1.5 s after minutes (scratch/models/gpu_idle_probe.py: the"
+        " laptop swaps), which is how RTAB-Map's registrations arrive — in bursts. One slow answer"
+        " costs its call a local computation (auto); three in a row leave the service alone for"
+        " 10 s",
+        on_when="raise it when the adapters' line counts fallbacks while the service is healthy",
+        off_when="lower it when a sick service makes registrations late",
+    ),
+    Flag(
+        "xfeat_top_k",
+        RegistrationSettings.top_k,
+        range=(256, 8192),
+        description="the most XFeat keypoints a picture keeps, best score first, wherever XFeat"
+        " runs; RTAB-Map applies no cap of its own to a Python detector",
+        why="2048, the cap the offline benchmark measured the evening recognitions with"
+        " (scratch/xfeat/xfeat_bench.py); XFeat's own examples use 2048-4096",
+        on_when="raise it where a scene is sparse and registrations fail on too few inliers",
+        off_when="lower it when LighterGlue's time per pair (quadratic in the keypoints) is too"
+        " much for the laptop",
+    ),
+    Flag(
+        "place_recognition",
+        PLACE_WORDS,
+        choices=(PLACE_WORDS, PLACE_DESCRIPTOR),
+        description="how RTAB-Map finds WHICH database node a picture is (its likelihood, before"
+        " any registration): words — the ORB bag of words' TF-IDF (Kp/TfIdfLikelihoodUsed true,"
+        " Rtabmap/VirtualPlaceLikelihoodRatio 0, RTAB-Map's defaults); descriptor — the dot"
+        " product of the nodes' learned place descriptors as z-scores (false and 1; rtabmap"
+        " Memory::computeLikelihood -> Signature::compareTo, Rtabmap::adjustLikelihood), which"
+        " sensor_pack attaches to every snapshot. descriptor is sent ONLY when it cannot abort"
+        " RTAB-Map: its core carries ros/patches/rtabmap-keep-global-descriptors.patch (the"
+        " marker /opt/rtabmap_patches/keep-global-descriptors), the snapshots carry one each"
+        f" ({PLACE_TOPIC}) and the database's census at this start ({CENSUS_ENV}, taken by the"
+        " launch before RTAB-Map opens the file) says every node carries exactly one of the same"
+        " length — and only while the camera snapshots are described (descriptor_null_share);"
+        " otherwise the words, and the report line says why. Live",
+        why="words until a drive has shown the descriptor on the robot (a default flips after a"
+        " drive). Measured 2026-09-24 in RTAB-Map itself on the replay of the evening runs"
+        " against the backfilled daylight database (scratch/models/replay_place.py,"
+        " replay_matrix.sh, matrix_report.py; xfeat, 2 px, proximity on, a lidar-only snapshot"
+        " every fourth). Words at the stock Rtabmap/LoopThr 0.11: hypotheses 0.05-0.09, 0 camera"
+        " updates localised on 0457, 0460 and the camera-only 0466; words at 0.05 (visual_confirm"
+        " aggressive, this node's default): 9 of 23 (9 of 9 judged right), 3 of 17 (0 of 1) and 53"
+        " of 55. Descriptor with the ratio 1 at 0.11: hypotheses 0.42-0.88 (median), 16 of 23 (15"
+        " of 15 right), 14 of 17 (11 of 11) and 54 of 55; at 0.05 two of 0460's eleven judged were"
+        " WRONG — so the descriptor goes with visual_confirm rtabmap, and the report line says so"
+        " when it does not. Judged counts are 16 or fewer a run and 0466 has no truth. With the"
+        " ratio 0 the descriptor's hypotheses read 0.01 and nothing localised. The retrieval"
+        " behind it: BoQ-DINOv2 R@1 0.986 on 219 evening frames (scratch/models/place_parity.py)."
+        " Without the patch RTAB-Map 0.22.1 aborted at the first comparison after a registration"
+        " (Signature.cpp:252), which is why the patch is a gate",
+        on_when="descriptor on a backfilled database (ros/tools/place_backfill.py) and a patched"
+        " core, together with visual_confirm rtabmap: the descriptor's hypotheses reach 0.11 by"
+        " themselves, and aggressive's 0.05 let the two wrong ones of 0460 through",
+        off_when="words to reproduce RTAB-Map's stock place recognition, or when a drive shows the"
+        " descriptor naming the wrong node; an unpatched core, a database not backfilled,"
+        " snapshots without descriptors or a service that is not describing keep the words by"
+        " themselves",
+    ),
+    Flag(
+        "descriptor_null_share",
+        MAX_NULL_SHARE,
+        range=(0.0, 1.0),
+        description="place_recognition descriptor falls back to the words while more than this"
+        f" share of the last {RECENT_CAMERA_SNAPSHOTS} camera snapshots carried the null"
+        " descriptor (the localisation service down, late or answering nonsense), and goes back"
+        " once they are described again; 1.0 never falls back",
+        why=f"{MAX_NULL_SHARE}: a snapshot whose descriptor is null scores 0.5 against EVERY node"
+        " (pepin.global_descriptor), Rtabmap::adjustLikelihood's z-scores are then all zero and no"
+        " hypothesis forms — descriptor mode goes blind where the words would still recognise the"
+        f" place. Half of {RECENT_CAMERA_SNAPSHOTS} at a snapshot a second: a service that dies"
+        " costs at most five blind updates, and one late answer never flips the likelihood",
+        on_when="lower it to fall back sooner",
+        off_when="1.0 to keep the descriptor whatever the service does (a measurement of the"
+        " descriptor alone)",
+    ),
+    Flag(
         "word_at_picture_time",
         True,
         description="a graph word is stamped with the moment its PICTURE was taken — the"
@@ -749,6 +890,19 @@ class RtabmapFrame(Node):
         self._sets_sent = 0
         self._reread_after = 0
         self._reread_pending: Any = None
+        # WHERE RTAB-MAP'S PYTHON ADAPTERS COMPUTE (registration_backend and its two numbers):
+        # written for them to read on every call, and their counters read back for the report.
+        self._registration_file = LiveFile(registration_file())
+        self._registration_status = StatusBoard()
+        # HOW RTAB-MAP FINDS WHICH NODE A PICTURE IS (place_recognition): what the snapshots
+        # carry, the census of the database at this start, and the likelihood last sent. None
+        # at first: the first decision is ALWAYS sent, because this node may be a respawn beside
+        # an RTAB-Map still holding the descriptor likelihood an earlier incarnation sent.
+        self._place: SnapshotPlace | None = None
+        self._census = Census.from_json(os.environ.get(CENSUS_ENV, ""))
+        self._rtabmap_keeps = rtabmap_keeps_descriptors()  # the image's patch marker
+        self._recognition_sent: dict[str, str] | None = None
+        self._recognition_why = PLACE_WORDS
         # THE TWO HALVES OF ONE UPDATE. The node a /rtabmap/info named and that message's stamp;
         # RTAB-Map's own localisation, its stamp and the planar 3x3 it measured. A word is made when
         # the two carry the same stamp, once (`_spent`): an update recognised nothing is silence.
@@ -858,6 +1012,7 @@ class RtabmapFrame(Node):
         # Latched, matching sensor_pack's own publisher: this node may start after it, and the
         # present state must not have to wait for the next change to arrive.
         self.create_subscription(String, SNAPSHOT_STATE_TOPIC, self._on_snapshots, latched)
+        self.create_subscription(String, PLACE_TOPIC, self._on_place, latched)
         # The mode services: this node owns the switch beside a known map, and touches neither in
         # SLAM, where the database IS the map being built.
         self._modes = (
@@ -923,6 +1078,8 @@ class RtabmapFrame(Node):
             f" last word {word}; fit {self._trust_now():.2f} ({self._agreement_text()});"
             f" hypothesis {self._hypothesis:.2f}; rtabmap memory {self._mode_text()};"
             f" rtabmap registration {self._strategy_text()};"
+            f" adapters ({self._switches['registration_backend']}) {self._registration_text()};"
+            f" place recognition {self._recognition_why};"
             f" map {self._map_id or 'unknown'}, {self._grids_relayed} grids relayed,"
             f" {self._grids_withheld} withheld ({self._tie_text()});"
             f" start {self._placement().how()}"
@@ -1206,6 +1363,14 @@ class RtabmapFrame(Node):
         if state is None:
             return
         self._snapshots, self._snapshots_at = state, self._now()
+
+    def _on_place(self, msg: String) -> None:
+        """What sensor_pack attaches to its snapshots (one descriptor each or none, their length,
+        the weights of the last vector): the half of the place-recognition rule the database's
+        census cannot answer. A message that does not parse is ignored."""
+        place = SnapshotPlace.from_json(msg.data)
+        if place is not None:
+            self._place = place
 
     # ---- the word ------------------------------------------------------------------------
     def _try_word(self) -> None:
@@ -1755,6 +1920,70 @@ class RtabmapFrame(Node):
             f" confirm {confirm}{confirm_why}, proximity {proximity}"
         )
 
+    # ---- where the adapters compute, and how places are found --------------------------------
+    def _write_registration(self) -> None:
+        """Hand RTAB-Map's adapters the registration flags (pepin.live_settings), when they
+        changed; a write that fails is retried on the next tick."""
+        settings = RegistrationSettings(
+            backend=str(self._switches["registration_backend"]),
+            timeout_s=float(self._switches["registration_timeout_s"]),
+            top_k=int(self._switches["xfeat_top_k"]),
+        )
+        try:
+            self._registration_file.write_if_changed(settings.to_json())
+        except OSError as exc:
+            self.get_logger().error(
+                f"cannot write {self._registration_file.path} for RTAB-Map's adapters: {exc}",
+                throttle_duration_sec=60,
+            )
+
+    def _registration_text(self) -> str:
+        """The adapters' own counters for the report line: per adapter the backend they read and
+        where their answers came from, or why there is nothing to say."""
+        blocks = self._registration_status.read()
+        now = time.time()
+        parts = []
+        for name in ("xfeat", "match"):
+            block = blocks.get(name)
+            if not isinstance(block, dict):
+                continue
+            age = now - float(block.get("at", 0.0))
+            stale = f", {age:.0f} s old" if age > REGISTRATION_STATUS_FRESH_S else ""
+            error = f", last error {block['last_error']}" if block.get("last_error") else ""
+            parts.append(
+                f"{name} {block.get('backend', '?')}: service {block.get('service', 0)}, local"
+                f" {block.get('local', 0)}, fallback {block.get('fallback', 0)}, failed"
+                f" {block.get('failed', 0)}, {block.get('round_trip_ms', 0)} ms{stale}{error}"
+            )
+        return "; ".join(parts) if parts else "the adapters have not reported (no xfeat call yet)"
+
+    def _decide_recognition(self) -> None:
+        """Send RTAB-Map the likelihood place_recognition asks for, when it is safe
+        (pepin.global_descriptor.recognition_parameters) and differs from the last one sent;
+        through the same parameter path as the registration sets, retried while it is down."""
+        if self._tuner is None:
+            return
+        wanted, why = recognition_parameters(
+            str(self._switches["place_recognition"]),
+            self._place,
+            self._census,
+            self._rtabmap_keeps,
+            float(self._switches["descriptor_null_share"]),
+        )
+        if wanted == DESCRIPTOR_PARAMETERS and self._switches["visual_confirm"] != CONFIRM_STOCK:
+            why += (
+                f"; visual_confirm {self._switches['visual_confirm']}: with the descriptor its"
+                " lower LoopThr let 2 of 11 wrong localisations through on 0460 (visual_confirm"
+                " rtabmap)"
+            )
+        self._recognition_why = why
+        if wanted == self._recognition_sent or not self._set_parameters(wanted):
+            return
+        self._recognition_sent = wanted
+        self.get_logger().info(
+            f"rtabmap place recognition: {why} ({TFIDF} {wanted[TFIDF]}, set on {RTABMAP_NODE})"
+        )
+
     # ---- outputs -------------------------------------------------------------------------
     @staticmethod
     def _planar(transform: TransformStamped | None) -> Pose2D | None:
@@ -1777,6 +2006,8 @@ class RtabmapFrame(Node):
         self._say_placement()
         self._decide_mode()
         self._decide_strategy()
+        self._decide_recognition()
+        self._write_registration()
         if self._correction is None:
             return
         parent, child = SLAM_FRAMES

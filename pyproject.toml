@@ -26,6 +26,13 @@ macos = [
 depth = [
     "transformers>=4.50",
 ]
+# The localisation models on the laptop's GPU (pepin.localization_service, ros/models.sh): XFeat
+# and LighterGlue (LighterGlue runs on kornia's LightGlue, pinned to the version the
+# pepin-laptop:xfeat image carries, ros/Dockerfile.xfeat) and BoQ from torch.hub's cache; torch and
+# torchvision come with the base install.
+localization = [
+    "kornia==0.8.3",
+]
 
 [build-system]
 requires = ["hatchling"]

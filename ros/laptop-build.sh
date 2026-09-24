@@ -17,6 +17,10 @@ if [ "${1:-}" = xfeat ]; then
         docker run --rm --memory 64m --network none --entrypoint awk "$BASE" \
             '/MemTotal/ {t = $2} /MemAvailable/ {a = $2} END {print int(100 * (t - a) / t)}' /proc/meminfo
     }
+    # The adapters import the library (pepin.xfeat_models), so the build context carries the
+    # current one, as ros/build-image.sh's does for the base image.
+    mkdir -p "$HERE/pepin_src/pepin"
+    rsync -a --delete --exclude '__pycache__' "$HERE/../src/pepin/" "$HERE/pepin_src/pepin/"
     docker build -f "$HERE/Dockerfile.xfeat" -t pepin-laptop:xfeat --build-arg "BASE=$BASE" \
         ${PEPIN_CORE_JOBS:+--build-arg "CORE_JOBS=$PEPIN_CORE_JOBS"} \
         ${PEPIN_ROS_JOBS:+--build-arg "ROS_JOBS=$PEPIN_ROS_JOBS"} "$HERE" &

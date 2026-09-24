@@ -33,6 +33,13 @@
 #                            and tells the node to use it, when torch's Metal backend is there;
 #                            PEPIN_DEPTH_HOST=0 keeps the network on the CPU in the container,
 #                            PEPIN_DEPTH_HOST=1 insists on the service (it falls back to the CPU)
+#   ros/laptop.sh vslam      starts the localisation models when they are installed
+#                            (ros/models.sh: XFeat, LighterGlue, place descriptors, a launchd job
+#                            loaded on demand), tells the container where they are
+#                            (PEPIN_MODELS_URL), mounts the checkout's two RTAB-Map adapters over
+#                            the xfeat image's (PEPIN_ADAPTERS_MOUNT=0: the image's) and passes
+#                            PEPIN_GLOBAL_DESCRIPTOR / PEPIN_REGISTRATION_BACKEND through when set;
+#                            stop stops the models again
 # Only `start` talks to the board (its side and its map); stop, logs, vslam and kick never do.
 # Prerequisites: the image built here (ros/laptop-build.sh) and the board on side=board
 # (ros/thin.sh on). A Docker container on macOS lives behind the VM's NAT, so DDS discovery
@@ -211,6 +218,9 @@ case "${1:-start}" in
         pepin_remove_container pepin-laptop pepin-vslam pepin-zenoh
         if pepin_rmw_is_zenoh; then pepin_remove_container "$PEPIN_ZROUTER_LAPTOP"; fi
         [ "${PEPIN_DEPTH_HOST:-}" = 0 ] || "$HERE/depth_host.sh" stop
+        # The localisation models leave with the session, as the depth host does: ~1 GB of this
+        # laptop's memory that nothing else uses (ros/models.sh start localization brings them).
+        if "$HERE/models.sh" installed localization; then "$HERE/models.sh" stop localization; fi
         echo "laptop side stopped"; exit 0 ;;
     logs)
         exec docker logs -f "pepin-${2:-laptop}" ;;
@@ -306,12 +316,48 @@ case "${1:-start}" in
         fi
         DEPTH_ENV=()
         if depth_host_wanted; then
-            "$HERE/depth_host.sh" start
+            "$HERE/depth_host.sh" start  # an installed launchd job is started by ros/models.sh
             DEPTH_ENV=(-e PEPIN_DEPTH_BACKEND=auto -e "PEPIN_DEPTH_URL=http://host.docker.internal:${PEPIN_DEPTH_PORT:-8790}")
         else
             echo "depth network on the CPU in the container (PEPIN_DEPTH_HOST=1 for the GPU service)"
         fi
+        # THE LOCALISATION MODELS on this laptop's GPU (ros/models.sh): RTAB-Map's XFeat / LighterGlue
+        # adapters and sensor_pack's place descriptors call it at PEPIN_MODELS_URL. Started here
+        # when installed (a launchd job loaded on demand, restarted by launchd if it dies, stopped
+        # by `stop`) and waited for, so RTAB-Map's first registrations find it rather than loading
+        # torch into its own process. Down or not installed: the adapters compute in RTAB-Map's
+        # process (registration_backend auto) and the snapshots carry null descriptors.
+        MODELS_ENV=(-e "PEPIN_MODELS_URL=http://host.docker.internal:${PEPIN_MODELS_PORT:-8791}")
+        if "$HERE/models.sh" installed localization; then
+            "$HERE/models.sh" start localization \
+                || echo "localization service not answering (ros/models.sh logs localization): the adapters compute locally"
+        else
+            echo "localization service not installed (ros/models.sh install localization): the adapters compute locally"
+        fi
+        # Two flags read at start from the environment, passed through when this shell sets them:
+        # sensor_pack's global_descriptor (auto|on|off; the launch reads it too) and rtabmap_frame's
+        # registration_backend (service|local|auto; live afterwards through ros/flags.sh).
+        FLAG_ENV=()
+        for var in PEPIN_GLOBAL_DESCRIPTOR PEPIN_REGISTRATION_BACKEND; do
+            if [ -n "${!var:-}" ]; then FLAG_ENV+=(-e "$var=${!var}"); echo "$var=${!var}"; fi
+        done
+        # THE ADAPTERS FROM THE CHECKOUT, not the image: the two files RTAB-Map loads by path are
+        # mounted over the image's copies, so an adapter change needs a vslam restart and no
+        # rebuild (RTAB-Map imports them once, so a restart is needed either way). The files and
+        # not ros/xfeat as a whole: the directory would hide the image's XFeat checkout
+        # (/opt/xfeat/accelerated_features), whose weights the local fallback loads. Only onto the
+        # xfeat image — mounted into another, they would make rtabmap_frame believe RTAB-Map can
+        # run Python. PEPIN_ADAPTERS_MOUNT=0 runs the adapters baked into the image.
+        ADAPTER_MOUNTS=()
+        if [ "$VSLAM_IMAGE" = pepin-laptop:xfeat ] && [ "${PEPIN_ADAPTERS_MOUNT:-1}" != 0 ]; then
+            ADAPTER_MOUNTS=(-v "$HERE/xfeat/rtabmap_xfeat.py:/opt/xfeat/rtabmap_xfeat.py:ro"
+                            -v "$HERE/xfeat/rtabmap_lighterglue.py:/opt/xfeat/rtabmap_lighterglue.py:ro")
+        fi
+        # The database's place-descriptor census is taken INSIDE the container by the launch, on
+        # every start, of the file RTAB-Map is given (vslam.launch.py census_env): a census taken
+        # here once would outlive a restart of the container after the file changed.
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
+            ${ADAPTER_MOUNTS[@]+"${ADAPTER_MOUNTS[@]}"} "${MODELS_ENV[@]}" ${FLAG_ENV[@]+"${FLAG_ENV[@]}"} \
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} ${CAMERA_ENV[@]+"${CAMERA_ENV[@]}"} \
             "$VSLAM_IMAGE" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null

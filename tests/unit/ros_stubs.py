@@ -18,7 +18,9 @@ absence of the tracker in SLAM mode is written down.
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
+import tempfile
 import types
 from collections.abc import Iterator
 from pathlib import Path
@@ -119,6 +121,11 @@ Imu = _msg(
 # ARRAY beside them, and the laser scan with its own four fields. The fields this node never
 # writes (the compressed halves, the features, the grid, the IMU, the GPS, the landmarks) are
 # left out on purpose: a node that started writing one would fail here as it would on the robot.
+# The one exception is global_descriptors, which it writes since 2026-09-24: an array of
+# rtabmap_msgs/GlobalDescriptor, field for field as GlobalDescriptor.msg in the laptop image — the
+# header, the type (1 is the PyDescriptor, the one type Signature::compareTo reads) and the two
+# rtabmap::compressData blobs.
+GlobalDescriptor = _msg("GlobalDescriptor", header=Header, type=0, info=bytes, data=bytes)
 SensorData = _msg(
     "SensorData",
     header=Header,
@@ -132,6 +139,7 @@ SensorData = _msg(
     laser_scan_max_range=0.0,
     laser_scan_format=0,
     laser_scan_local_transform=Transform,
+    global_descriptors=list,
 )
 # rtabmap_msgs/MapGraph as the laptop's nodes read it, field for field as
 # /opt/ros/jazzy/share/rtabmap_msgs/msg/MapGraph.msg lists them: the map -> odom transform, the node
@@ -799,6 +807,11 @@ def install() -> Any:
     fake ``rclpy`` module (its ``on_spin`` and ``log`` drive :func:`spin_main` tests)."""
     if "rclpy" in sys.modules and isinstance(sys.modules["rclpy"], Rclpy):
         return sys.modules["rclpy"]
+    # The files rtabmap_frame hands RTAB-Map's adapters (pepin.live_settings) go to a directory of
+    # this test run, never to the machine's /tmp/pepin.
+    scratch = tempfile.mkdtemp(prefix="pepin_stubs_")
+    os.environ.setdefault("PEPIN_REGISTRATION_FILE", os.path.join(scratch, "registration.json"))
+    os.environ.setdefault("PEPIN_REGISTRATION_STATUS", os.path.join(scratch, "status.json"))
     rclpy = Rclpy()
     modules = {
         "rclpy": rclpy,
@@ -873,6 +886,7 @@ def install() -> Any:
         "rtabmap_msgs.msg": _module(
             "rtabmap_msgs.msg",
             SensorData=SensorData,
+            GlobalDescriptor=GlobalDescriptor,
             MapGraph=MapGraph,
             Info=Info,
             Link=Link_,

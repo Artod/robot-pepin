@@ -255,6 +255,12 @@ def _ready(node: Any) -> None:
         client.ready = True
 
 
+def _besides_recognition(calls: list[Any]) -> list[Any]:
+    """The parameter sets other than place_recognition's likelihood, which rtabmap_frame sends
+    once at every start whatever the table says (a respawn may sit beside a descriptor RTAB-Map)."""
+    return [c for c in calls if not any(p.name == "Kp/TfIdfLikelihoodUsed" for p in c.parameters)]
+
+
 # ---- the laptop: the graph's word, in the ONE map frame ---------------------------------------
 def test_on_a_known_map_the_laptop_broadcasts_no_transform_at_all() -> None:
     """RTAB-Map's optimised map frame IS ``map``, so there is no second frame to tie: the anchor,
@@ -586,11 +592,12 @@ def test_the_mode_follows_trust_in_the_pose_and_not_a_sensor_s_name() -> None:
     assert node._mode.mode == "mapping"
     # ...and the parameters the mode needs travel with it, as strings
     tuned = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters_atomically"]
-    assert [p.name for p in tuned.calls[-1].parameters] == [
+    mode_set = _besides_recognition(tuned.calls)[-1]
+    assert [p.name for p in mode_set.parameters] == [
         "RGBD/LinearUpdate",
         "RGBD/AngularUpdate",
     ]
-    assert [p.value.string_value for p in tuned.calls[-1].parameters] == ["0.05", "0.05"]
+    assert [p.value.string_value for p in mode_set.parameters] == ["0.05", "0.05"]
 
     # the lidar is still matching, but the graph's own words now hold the pose: the pupil is not
     # the teacher, whatever the seating is worth
@@ -979,7 +986,7 @@ def test_under_icp_the_feature_flag_sends_nothing(
         node.timers[0][1]()
     node._switches.set("visual_features", "orb")
     node.timers[0][1]()
-    assert not tuner.calls
+    assert not _besides_recognition(tuner.calls)
 
 
 def test_the_scan_coming_back_takes_orb_back_with_icp(
