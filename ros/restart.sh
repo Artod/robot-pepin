@@ -384,7 +384,7 @@ check_clock() {
     case "$status" in
         0) pass 1.15 "clock: $(tail -1 <<<"$out")" ;;
         1) warn 1.15 "clock: $(tail -1 <<<"$out") — stamps from the two machines disagree by that much (ros/time.sh status)" ;;
-        *) warn 1.15 "clock: not measured — $(tail -1 <<<"$out" | cut -c1-160) (PEPIN_TIME_SOURCE=$PEPIN_TIME_SOURCE; ros/time.sh server, ros/time.sh status)" ;;
+        *) warn 1.15 "clock: not measured — $(tail -1 <<<"$out" | cut -c1-160) (PEPIN_TIME_SOURCE=${PEPIN_TIME_SOURCE-unset}; ros/time.sh server, ros/time.sh status)" ;;
     esac
 }
 
