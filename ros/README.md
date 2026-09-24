@@ -287,8 +287,15 @@ robot runs on one time base:
   `PEPIN_TIME_SOURCE=laptop`), `--restart unless-stopped`, left running across `ros/laptop.sh stop`.
   Measured in statics on 2026-09-23: the image builds in 12 s, chronyd 4.5 answers from the first
   second (stratum 10, leap normal, 1 MB of memory), 8 of 8 SNTP exchanges at a 1 ms round trip both
-  on `127.0.0.1` and on the Mac's LAN address through Docker Desktop 29.5.3's port publishing (no
-  sudo; the macOS firewall is off), and the VM's clock read 15 ms behind the Mac's;
+  on `127.0.0.1` and on the Mac's own LAN address — both stay inside the Mac, neither is the WiFi —
+  through Docker Desktop 4.79's port publishing (Docker Engine 29.5.3; no sudo; the macOS firewall
+  is off), and the VM's clock read 15 ms behind the Mac's. The path the design rests on, the board
+  to the Mac's `udp/123` over the WiFi, measured on 2026-09-24 04:00Z with a throwaway server of the
+  same image and `laptop.conf` (on the board `python3 - 10.0.0.167 < src/pepin/timesync.py`, which
+  changes nothing there): 8 of 8 answers in each of three runs, best round trip 5-6 ms, board minus
+  laptop +20.7 to +21.1 ms with the board still on systemd-timesyncd. chronyd logged all 32 queries
+  (the Mac's 8, the board's 24) as coming from one address, 151.101.138.132, neither the Mac's nor
+  the board's: the port proxy rewrites the source, which is why `laptop.conf` allows any;
 - **the board follows it**: chrony instead of systemd-timesyncd (`board/chrony.sh`,
   `board/chrony/chrony.conf`), the laptop as a `prefer` source polled every 4-16 s, the internet
   pool (the servers timesyncd used) beside it — the fallback when the laptop is away and a vote
