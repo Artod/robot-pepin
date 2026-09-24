@@ -17,6 +17,7 @@ node does; a node composes these and keeps its own logic.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 import traceback
@@ -675,15 +676,22 @@ def spin_main(factory: Callable[[], Any], args: list[str] | None = None) -> None
     the launch sends at shutdown and ``ros/laptop.sh kick`` sends by hand.
 
     rclpy's handler shuts the context down and the spin ends with ``KeyboardInterrupt`` or
-    ``ExternalShutdownException`` (whichever lands first); both are the normal end. The loud
-    end is a :class:`Fatal`: ``SystemExit`` with the reason, exit code 1, through the same
+    ``ExternalShutdownException`` (whichever lands first); both are the normal end. So is ANY
+    exception that finds the context already down: the handler shuts it from a thread of its
+    own, and when that lands between the executor's check and its wait set the spin raises
+    rcl's "failed to initialize wait set: the given context is not valid" instead — measured
+    with the real rclpy (scratch/bag_recorder_sigint.sh: 1 of 16 SIGINTs, exit code 1 before
+    this), and a SIGINT during the constructor fails the node's creation the same way. One line
+    on stderr names it; with the context still up the exception is real and propagates. The
+    loud end is a :class:`Fatal`: ``SystemExit`` with the reason, exit code 1, through the same
     order. Then, in this order: the node's ``close()`` if it has one (its worker threads and
     TF listener are stopped and JOINED), ``destroy_node`` (the DDS participant is disposed, so
     the bridge forgets the name at once and the respawn meets no ghost), and the context's
-    shutdown. The join is the fix for the depth node's SIGABRT: a daemon thread still inside
-    the network's C++ when the interpreter finalised was ended with ``pthread_exit``, which
-    unwinds through ``noexcept`` frames into ``std::terminate`` ("terminate called without an
-    active exception", CPython 3.12, gh-87135). A joined thread has no frames to unwind.
+    shutdown (:func:`end_context`, race-proof too). The join is the fix for the depth node's
+    SIGABRT: a daemon thread still inside the network's C++ when the interpreter finalised was
+    ended with ``pthread_exit``, which unwinds through ``noexcept`` frames into
+    ``std::terminate`` ("terminate called without an active exception", CPython 3.12,
+    gh-87135). A joined thread has no frames to unwind.
     """
     rclpy.init(args=args)
     node: Any = None
@@ -692,10 +700,37 @@ def spin_main(factory: Callable[[], Any], args: list[str] | None = None) -> None
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except Exception as exc:
+        if rclpy.ok():
+            raise
+        print(
+            f"{type(exc).__name__} after the context was shut down, taken as the normal end"
+            f" (SIGINT's handler got there first): {exc}",
+            file=sys.stderr,
+        )
     finally:
         if node is not None:
             close = getattr(node, "close", None)
             if close is not None:
                 close()
             node.destroy_node()
+        end_context()
+
+
+def end_context() -> None:
+    """Shut rclpy's default context down unless something already has.
+
+    rclpy's SIGINT handler shuts the context down TOO, from a thread of its own, so between a
+    check that finds the context up and the shutdown that check guards, the handler can get there
+    first — rclpy's own ``try_shutdown`` included, whose check and shutdown are two calls the
+    handler does not wait for. The bag recorder died on exactly that on 2026-09-23 ("failed to
+    shutdown: rcl_shutdown already called on the given context", exit code 1 in the launch's
+    log, after ``if rclpy.ok(): rclpy.shutdown()``). A shutdown that fails with the context down
+    afterwards IS that race, and the job is done; one that fails with the context still up is a
+    real failure and is raised.
+    """
+    try:
         rclpy.try_shutdown()
+    except Exception:
+        if rclpy.ok():
+            raise
