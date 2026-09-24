@@ -19,19 +19,36 @@
 # (PEPIN_SIDE=board) puts them in the laptop's pepin-laptop, which ros/laptop.sh starts in that
 # mode only; a whole board runs them in pepin-ros. Until 2026-09-23 this script always exec'd
 # into pepin-laptop, a container that does not exist on a whole board. PEPIN_BOARD_SIDE set by
-# the caller skips the read.
+# the caller skips the read. A board that does not answer falls back to the mode ros/laptop.sh
+# last recorded in ros/.mode (split or vision; PEPIN_MODE_FILE names another file), and with none
+# recorded the call is refused. Silence used to be read as a whole board (to 2026-09-23): a split
+# stack with the board down lost the laptop's goal server and planner from every sweep.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BOARD="${PEPIN_HOST:-10.0.0.187}"
+MODE_FILE="${PEPIN_MODE_FILE:-$HERE/.mode}"
 . "$HERE/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
 usage() { echo "usage: ros/flags.sh [list [NODE] | drift [NODE|board|laptop] | flag NODE FLAG | get NODE FLAG | set NODE FLAG VALUE]"; exit 2; }
 doc() { (cd "$HERE/.." && uv run -q python ros/tools/flags_doc.py "$@"); }
 board() { ssh "root@$BOARD" "$@"; }  # the one path to the board
-know_side() {  # PEPIN_BOARD_SIDE for flags_doc: the board's PEPIN_SIDE, empty on a whole board
-    # (and when the board does not answer: then only the laptop's nodes can be reached anyway)
+know_side() {  # PEPIN_BOARD_SIDE for flags_doc: the board's PEPIN_SIDE, empty on a whole board.
+    # A board that does not answer is not a whole board: in the split the goal server and the
+    # planner are the laptop's and reachable without it. The mode ros/laptop.sh last recorded
+    # (ros/.mode: split or vision) answers instead, and with none recorded this refuses.
+    local mode
     if [ -z "${PEPIN_BOARD_SIDE+set}" ]; then
-        PEPIN_BOARD_SIDE="$(board "grep -oE '^PEPIN_SIDE=[a-z]*' /etc/default/pepin-ros | cut -d= -f2" \
-            2>/dev/null || true)"
+        if ! PEPIN_BOARD_SIDE="$(board "grep -oE '^PEPIN_SIDE=[a-z]*' /etc/default/pepin-ros | cut -d= -f2" \
+            2>/dev/null)"; then
+            mode="$(cat "$MODE_FILE" 2>/dev/null || true)"
+            case "$mode" in
+                split) PEPIN_BOARD_SIDE=board ;;
+                vision) PEPIN_BOARD_SIDE="" ;;
+                *) echo "flags.sh: cannot read the board's side (root@$BOARD:/etc/default/pepin-ros)" \
+                       "and $MODE_FILE records no mode: is the board up? (ros/laptop.sh start writes it)" >&2
+                   exit 1 ;;
+            esac
+            echo "flags.sh: the board does not answer; its side taken from $MODE_FILE ($mode)" >&2
+        fi
     fi
     export PEPIN_BOARD_SIDE
 }

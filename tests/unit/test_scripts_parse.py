@@ -1075,6 +1075,7 @@ def test_the_board_s_containers_answer_sigint_and_the_unit_waits_for_them() -> N
 # so the one on PATH answers). What is under test is WHICH CONTAINER a node is reached in.
 FAKE_HOST = r"""#!/bin/bash
 printf '%s %s\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
+if [ "$(basename "$0")" = ssh ] && [ -n "${FAKE_SSH_DOWN:-}" ]; then exit 255; fi
 case "$*" in *PEPIN_SIDE*) printf '%s\n' "${FAKE_SIDE:-}" ;; esac
 exit 0
 """
@@ -1133,3 +1134,27 @@ def test_flags_sh_reaches_the_goal_server_where_the_board_s_side_runs_it(tmp_pat
     assert code == 0, out
     assert not [c for c in calls if "PEPIN_SIDE" in c], "a side handed over is not asked again"
     assert [c for c in calls if c.startswith("docker exec pepin-vslam") and "param get" in c]
+
+
+@pytest.mark.slow
+def test_flags_sh_does_not_read_a_silent_board_as_a_whole_one(tmp_path: Path) -> None:
+    """A board that does not answer used to be read as a whole board, so on a split stack
+    `drift laptop` (ros/restart.sh's flag check) silently lost the goal server and the planner,
+    which run on the laptop there. The mode ros/laptop.sh recorded answers instead; with none
+    recorded the call is refused with the reason, not guessed."""
+    mode = tmp_path / "mode"
+    mode.write_text("split\n")
+    down = {"FAKE_SSH_DOWN": "1", "PEPIN_MODE_FILE": str(mode)}
+    code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "tf_pose", **down)
+    assert code == 0, out
+    assert "taken from" in out and "(split)" in out, "the fallback says so"
+    assert [c for c in calls if c.startswith("docker exec pepin-laptop") and "param get" in c]
+
+    code, out, calls = _flags_sh(tmp_path, "drift", "laptop", **down)
+    dumped = " ".join(c for c in calls if "param dump" in c)
+    assert "/goal_server" in dumped, calls
+
+    nowhere = {**down, "PEPIN_MODE_FILE": str(tmp_path / "none")}
+    code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "tf_pose", **nowhere)
+    assert code == 1 and "cannot read the board's side" in out, out
+    assert not [c for c in calls if "param get" in c], "nothing is sent to a guessed container"
