@@ -1963,17 +1963,16 @@ def test_the_board_bridge_publishes_the_rest_zupt_the_ekf_fuses_behind_a_live_sw
     PEPIN_LOCALIZER=rtabmap nothing published it (its one publisher was the tracker's slip
     watch). The C++ bridge now does, from its own rest witness -- so the three ends of the wire
     are held together here: the bridge advertises `zupt` as an Odometry built by pepin.zupt's
-    twin, the switch is declared on (CLAUDE.md rule 19), read every tick and named in the report
-    line, and the EKF's odom2 reads that topic as vx, vy and vyaw, which is exactly what the
-    covariance claims."""
+    twin, the switch is declared on (CLAUDE.md rule 19) and named in the report line, and the
+    EKF's odom2 reads that topic as vx, vy and vyaw, which is exactly what the covariance
+    claims."""
     cpp = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
     assert 'create_publisher<nav_msgs::msg::Odometry>("zupt", 5)' in cpp
     assert '#include "pepin_base_cpp/zupt.hpp"' in cpp
     assert 'declare_parameter<bool>("zupt_publish", true)' in cpp, "on by default"
-    assert 'get_parameter("zupt_publish").as_bool()' in cpp, "read per tick, not once"
     assert '" zupt_publish="' in cpp, "the report line names the switch"
-    assert 'get_parameter("zupt_gyro_quiet_rad_s").as_double()' in cpp, "the threshold is live"
-    assert "rest_zupt_twist_covariance()" in cpp and "zupt_gate_.judge(" in cpp
+    assert "rest_zupt_twist_covariance(zupt_var_linear_.load(), zupt_var_yaw_.load())" in cpp
+    assert "gate.judge(now_s, rest_evidence(now_s))" in cpp
     ekf = yaml.safe_load((REPO / "ros/params/ekf.yaml").read_text())
     params = ekf["ekf_filter_node"]["ros__parameters"]
     assert params["odom2"] == "zupt"
@@ -1984,6 +1983,49 @@ def test_the_board_bridge_publishes_the_rest_zupt_the_ekf_fuses_behind_a_live_sw
 
     claimed = [i for i in range(6) if rest_zupt_twist_covariance()[i * 6 + i] == REST_ZUPT_VARIANCE]
     assert [6 + i for i in claimed] == [6, 7, 11], "the covariance claims what odom2 fuses"
+
+
+def test_every_zupt_tunable_of_the_bridge_is_a_live_range_checked_parameter() -> None:
+    """Heading drift has many causes, and Artem tunes them on the robot, never in C++: every
+    number that decides the zero-velocity update is a parameter of /base_bridge, set live with
+    `ros2 param set` and in force at the next tick. Held here: each is declared through the one
+    helper that range-checks a launch value, with the default pepin.zupt names (the two windows
+    borrowing imu_bias_s and cmd_timeout_s without moving them); a set is refused outside
+    pepin.zupt.ZUPT_RANGES by the on-set callback and applied by the post-set one, which re-times
+    the timer for a new rate; nothing is looked up per tick; the status line prints every value
+    in force; and ros/README.md documents each with its default and range."""
+    from pepin.zupt import ZUPT_RANGES
+
+    cpp = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
+    declared = dict(re.findall(r'declare_zupt_number\(\s*"(zupt_\w+)",\s*(.+?),\n', cpp))
+    assert declared == {
+        "zupt_gyro_quiet_rad_s": "kGyroQuietRadS",
+        "zupt_rate_hz": "kZuptHz",
+        "zupt_var_linear": "kRestZuptVariance",
+        "zupt_var_yaw": "kRestZuptVariance",
+        "zupt_settle_s": 'zupt_clamped(*zupt_range("zupt_settle_s"), imu_bias_s_)',
+        "zupt_cmd_hold_s": 'zupt_clamped(*zupt_range("zupt_cmd_hold_s"), cmd_timeout_s_)',
+    }, declared
+    assert set(declared) == set(ZUPT_RANGES), "every live number has a range, every range a number"
+    assert "descriptor.dynamic_typing = true" in cpp, "`ros2 param set ... 50` is not refused"
+    assert "add_on_set_parameters_callback(" in cpp and "return check_zupt_settings(" in cpp
+    assert "add_post_set_parameters_callback(" in cpp and "apply_zupt_settings(parameters)" in cpp
+    for name in ZUPT_RANGES:
+        assert f'if (name == "{name}") {{return &' in cpp, f"{name}: applied live"
+    assert "if (slot == &zupt_hz_) {\n        start_zupt_timer();" in cpp, "a new rate re-times"
+    assert 'get_parameter("zupt_' not in cpp, "no parameter lookup per tick"
+    settings = cpp[cpp.index("std::string zupt_settings() const") :]
+    settings = settings[: settings.index("return line;")]
+    for field in ("zupt_hz_", "zupt_var_linear_", "zupt_var_yaw_", "zupt_settle_s_"):
+        assert f"{field}.load()" in settings, f"the status line prints {field}"
+    assert "zupt_cmd_hold_s_.load()" in settings and "gyro_quiet_rad_s_.load()" in settings
+    readme = (REPO / "ros/README.md").read_text()
+    section = readme[readme.index("## The base bridge's zero-velocity update") :]
+    section = section[: section.index("\n## ", 5)]
+    for name in (*ZUPT_RANGES, "zupt_publish"):
+        assert f"| `{name}` |" in section, f"ros/README.md documents {name}"
+    assert "ros2 param set /base_bridge zupt_rate_hz 50" in section
+    assert "ros2 param set /base_bridge zupt_var_yaw 1.0e-4" in section
 
 
 def test_every_flag_says_why_its_default_is_what_it_is_and_when_to_move_it() -> None:

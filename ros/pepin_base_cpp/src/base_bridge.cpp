@@ -43,17 +43,21 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <tf2_ros/transform_broadcaster.h>
@@ -151,21 +155,46 @@ public:
     twist_measured_ = twist_source != "commanded";
     // THE ZERO-VELOCITY UPDATE (CLAUDE.md rule 19; zupt.hpp has the measurements). On, /zupt
     // carries a twist of exactly zero -- ekf.yaml's odom2 fuses its vx, vy and vyaw -- for as long
-    // as the cart CERTAINLY stands still: the wheels have witnessed rest for `imu_bias_s` (the
-    // rest the gyro's bias tracker trusts), no non-zero /cmd_vel is younger than `cmd_timeout_s`,
-    // and the bias-corrected gyro has stayed under `zupt_gyro_quiet_rad_s`; nothing at all
-    // otherwise. Off is what this node did before 2026-09-24: nothing on /zupt, and the parked
-    // EKF's heading followed its sources' drift at ~5 deg/hour. Read every tick, so
-    // `ros2 param set /base_bridge zupt_publish false` compares the two without a restart.
-    declare_parameter<bool>("zupt_publish", true);
-    // A bias-corrected yaw rate at or above this is a turn, and a turn stops the update like a
-    // wheel's move: 0.005 rad/s is 7.9 sigma of the parked chip's per-sample noise and 2.1x the
-    // largest parked deviation measured, and a slow hand turn is 31x over it (zupt.hpp). Live.
-    gyro_quiet_rad_s_ = declare_parameter<double>("zupt_gyro_quiet_rad_s", kGyroQuietRadS);
-    // Read at start, like `resend_hz`: the slip watch's 10 Hz. zupt.hpp's kZuptHz says why the
-    // rate is the lever worth measuring next (phase-locked to rf2o at 10 Hz).
-    zupt_hz_ = declare_parameter<double>("zupt_rate_hz", kZuptHz);
-    zupt_gate_ = ZuptGate(imu_bias_s_, cmd_timeout_s_, kStateGapMaxS);
+    // as the cart CERTAINLY stands still: the wheels have witnessed rest for `zupt_settle_s`, no
+    // non-zero /cmd_vel is younger than `zupt_cmd_hold_s`, and the bias-corrected gyro has stayed
+    // under `zupt_gyro_quiet_rad_s`; nothing at all otherwise. Off is what this node did before
+    // 2026-09-24: nothing on /zupt, and the parked EKF's heading followed its sources' drift at
+    // ~5 deg/hour.
+    // EVERY ONE OF ITS SETTINGS IS LIVE -- heading drift has many causes and each is tuned on the
+    // robot, never in C++: `ros2 param set /base_bridge <name> <value>` is checked against the
+    // setting's range (zupt.hpp's kZuptRanges; a refusal is logged and handed back to the caller,
+    // the value in force stays), and an accepted value is in force at the next tick -- the rate
+    // re-times the timer at once. A set-parameters callback stores each value in an atomic that
+    // the timer and the 50 Hz IMU loop read (check_zupt_settings, apply_zupt_settings): no
+    // parameter lookup per tick. The status line prints every one of them.
+    zupt_publish_ = declare_parameter<bool>("zupt_publish", true);
+    gyro_quiet_rad_s_ = declare_zupt_number(
+      "zupt_gyro_quiet_rad_s", kGyroQuietRadS,
+      "a bias-corrected yaw rate at or above this is a turn and stops the update like a wheel's "
+      "move, rad/s (0.005: 7.9 sigma of the parked chip's noise, 2.1x its largest parked "
+      "deviation; a slow hand turn is 31x over it)");
+    zupt_hz_ = declare_zupt_number(
+      "zupt_rate_hz", kZuptHz,
+      "how often the update is published while the cart is at rest, Hz (10: the slip watch's; at "
+      "10 it is phase-locked to rf2o's scans, zupt.hpp's kZuptHz)");
+    zupt_var_linear_ = declare_zupt_number(
+      "zupt_var_linear", kRestZuptVariance,
+      "the variance the update claims on vx and vy, (m/s)^2 (1e-6: 1 mm/s)");
+    zupt_var_yaw_ = declare_zupt_number(
+      "zupt_var_yaw", kRestZuptVariance,
+      "the variance the update claims on vyaw, (rad/s)^2 (1e-6: 1 mrad/s, 400x under the "
+      "gyro's 4e-4)");
+    // The two windows default to the numbers they were borrowed from, which stay exactly what they
+    // were for their own users: imu_bias_s is still the bias tracker's settle window and block,
+    // cmd_timeout_s still the age at which a command is dropped and one stop sent.
+    zupt_settle_s_ = declare_zupt_number(
+      "zupt_settle_s", zupt_clamped(*zupt_range("zupt_settle_s"), imu_bias_s_),
+      "seconds of witnessed rest before the update, and the hold after a gyro turn (default: "
+      "imu_bias_s, the window the gyro's bias tracker waits; that one is not moved by this)");
+    zupt_cmd_hold_s_ = declare_zupt_number(
+      "zupt_cmd_hold_s", zupt_clamped(*zupt_range("zupt_cmd_hold_s"), cmd_timeout_s_),
+      "seconds a non-zero /cmd_vel holds the update off (default: cmd_timeout_s, the age up to "
+      "which the bridge keeps re-sending a command)");
 
     pose_covariance_ = odometry_pose_covariance();
     twist_covariance_ = odometry_twist_covariance();
@@ -194,7 +223,16 @@ public:
     link_->start();
     status_timer_ = create_wall_timer(period(1.0 / kStatusHz), [this] {log_link_status();});
     resend_timer_ = create_wall_timer(period(1.0 / resend_hz), [this] {resend_command();});
-    zupt_timer_ = create_wall_timer(period(1.0 / zupt_hz_), [this] {publish_zupt();});
+    start_zupt_timer();
+    // Registered last, after every parameter is declared: a declaration must not run them.
+    zupt_check_ = add_on_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & parameters) {
+        return check_zupt_settings(parameters);
+      });
+    zupt_apply_ = add_post_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & parameters) {
+        apply_zupt_settings(parameters);
+      });
 
     if (imu_enable) {
       start_imu();
@@ -396,24 +434,41 @@ private:
            (zupt_publish_ ? "on" : "off");
   }
 
-  /// The zero-velocity update as a report line prints it: publishing or why not, and the count.
+  /// The zero-velocity update as a report line prints it: publishing or why not, the count, and
+  /// every live setting in force.
   ///
-  /// ``zupt publishing for 312 s, 3121 sent`` on a parked cart; ``zupt silent (settling after the
-  /// last motion), 3121 sent`` just after a leg; ``zupt off`` under ``zupt_publish false``.
+  /// ``zupt publishing for 312 s, 3121 sent [rate 10 Hz, var 1e-06 xy 1e-06 yaw, settle 2 s, cmd
+  /// hold 0.5 s, gyro quiet 0.005 rad/s]`` on a parked cart; ``zupt silent (settling after the last
+  /// motion), ...`` just after a leg; ``zupt off, ...`` under ``zupt_publish false``.
   std::string zupt_state() const
   {
-    char line[160];
+    char line[320];
+    const std::string settings = zupt_settings();
     if (!zupt_publish_) {
-      std::snprintf(line, sizeof(line), "zupt off, %ld sent", zupt_sent_.load());
+      std::snprintf(
+        line, sizeof(line), "zupt off, %ld sent [%s]", zupt_sent_.load(), settings.c_str());
     } else if (zupt_publishing_) {
       std::snprintf(
-        line, sizeof(line), "zupt publishing for %.0f s, %ld sent",
-        monotonic_s() - zupt_since_.load(), zupt_sent_.load());
+        line, sizeof(line), "zupt publishing for %.0f s, %ld sent [%s]",
+        monotonic_s() - zupt_since_.load(), zupt_sent_.load(), settings.c_str());
     } else {
       std::snprintf(
-        line, sizeof(line), "zupt silent (%s), %ld sent",
-        describe(static_cast<ZuptVerdict>(zupt_verdict_.load())), zupt_sent_.load());
+        line, sizeof(line), "zupt silent (%s), %ld sent [%s]",
+        describe(static_cast<ZuptVerdict>(zupt_verdict_.load())), zupt_sent_.load(),
+        settings.c_str());
     }
+    return line;
+  }
+
+  /// The live zero-velocity settings in force, as the status line prints them.
+  std::string zupt_settings() const
+  {
+    char line[192];
+    std::snprintf(
+      line, sizeof(line),
+      "rate %g Hz, var %g xy %g yaw, settle %g s, cmd hold %g s, gyro quiet %g rad/s",
+      zupt_hz_.load(), zupt_var_linear_.load(), zupt_var_yaw_.load(), zupt_settle_s_.load(),
+      zupt_cmd_hold_s_.load(), gyro_quiet_rad_s_.load());
     return line;
   }
 
@@ -421,16 +476,15 @@ private:
   /// the cart is at rest and `zupt_publish` is on, and nothing at all otherwise.
   ///
   /// Every witness is read fresh each tick from the thread that owns it (the wheels' reader, the
-  /// IMU loop, the /cmd_vel callback), so the first sample of motion any of them sees stops the
-  /// update at the next tick: within one period. Covariances in zupt.hpp; the stamp is the ROS
-  /// clock's now, like /odom's.
+  /// IMU loop, the /cmd_vel callback), and so is every live setting, so the first sample of motion
+  /// any witness sees, and any `ros2 param set`, is in force at the next tick. The stamp is the
+  /// ROS clock's now, like /odom's.
   void publish_zupt()
   {
-    const bool enabled = get_parameter("zupt_publish").as_bool();
-    zupt_publish_ = enabled;
-    gyro_quiet_rad_s_ = get_parameter("zupt_gyro_quiet_rad_s").as_double();
+    const bool enabled = zupt_publish_.load();
     const double now_s = monotonic_s();
-    const ZuptVerdict verdict = zupt_gate_.judge(now_s, rest_evidence(now_s));
+    const ZuptGate gate(zupt_settle_s_.load(), zupt_cmd_hold_s_.load(), kStateGapMaxS);
+    const ZuptVerdict verdict = gate.judge(now_s, rest_evidence(now_s));
     zupt_verdict_ = static_cast<int>(verdict);
     const bool publish = enabled && verdict == ZuptVerdict::kAtRest;
     if (publish != zupt_publishing_) {
@@ -444,7 +498,9 @@ private:
     message.header.frame_id = odom_frame_;
     message.child_frame_id = base_frame_;
     message.pose.covariance = zupt_pose_covariance_;  // no pose is claimed: odom2 fuses none
-    message.twist.covariance = zupt_twist_covariance_;  // the twist itself is zero as built
+    // The twist itself is zero as built; only its claim is live.
+    message.twist.covariance =
+      rest_zupt_twist_covariance(zupt_var_linear_.load(), zupt_var_yaw_.load());
     zupt_publisher_->publish(message);
     ++zupt_sent_;
   }
@@ -469,13 +525,152 @@ private:
       zupt_since_ = now;
       zupt_publishing_ = true;
       RCLCPP_INFO(
-        get_logger(), "zupt: the cart is at rest, /zupt publishing at %.0f Hz", zupt_hz_);
+        get_logger(), "zupt: the cart is at rest, /zupt publishing [%s]", zupt_settings().c_str());
       return;
     }
     zupt_publishing_ = false;
     RCLCPP_INFO(
       get_logger(), "zupt: stopped after %.1f s at rest (%s)", now - zupt_since_.load(),
       zupt_publish_ ? describe(verdict) : "zupt_publish off");
+  }
+
+  /// (Re)start the zero-velocity timer at the rate in force, cancelling the one it replaces.
+  void start_zupt_timer()
+  {
+    if (zupt_timer_) {
+      zupt_timer_->cancel();
+    }
+    zupt_timer_ = create_wall_timer(period(1.0 / zupt_hz_.load()), [this] {publish_zupt();});
+  }
+
+  /// A parameter's value as a number: a double as it is, an integer widened, a string that is
+  /// wholly one finite number parsed, anything else nothing.
+  ///
+  /// The last two are how people type: `ros2 param set ... 50` arrives as an integer, and
+  /// `ros2 param set ... 1e-4` as a STRING -- the CLI reads its value as YAML 1.1, where a float
+  /// needs a dot (1.0e-4). Refusing either would make the obvious command fail on the robot.
+  static std::optional<double> number_of(const rclcpp::Parameter & parameter)
+  {
+    switch (parameter.get_type()) {
+      case rclcpp::ParameterType::PARAMETER_DOUBLE:
+        return parameter.as_double();
+      case rclcpp::ParameterType::PARAMETER_INTEGER:
+        return static_cast<double>(parameter.as_int());
+      case rclcpp::ParameterType::PARAMETER_STRING: {
+        const std::string text = parameter.as_string();
+        char * end = nullptr;
+        const double value = std::strtod(text.c_str(), &end);
+        const bool whole = !text.empty() && end == text.c_str() + text.size();
+        return whole && std::isfinite(value) ? std::optional<double>(value) : std::nullopt;
+      }
+      default:
+        return std::nullopt;
+    }
+  }
+
+  /// Declare one live zero-velocity number and return the value in force: the launch's when it is
+  /// a number inside its range (zupt.hpp's kZuptRanges), else `fallback`, with a warning -- a typo
+  /// in a launch file must not keep the base from starting. Typed dynamically, so an integer is
+  /// taken as the number it is instead of refused as the wrong type.
+  double declare_zupt_number(const std::string & name, double fallback, const char * what)
+  {
+    const ZuptRange & range = *zupt_range(name);
+    rcl_interfaces::msg::ParameterDescriptor descriptor;
+    descriptor.description = what;
+    char limits[96];
+    std::snprintf(
+      limits, sizeof(limits), "live; %g..%g, a value outside is refused", range.low, range.high);
+    descriptor.additional_constraints = limits;
+    descriptor.dynamic_typing = true;
+    const auto value = number_of(
+      rclcpp::Parameter(name, declare_parameter(name, rclcpp::ParameterValue(fallback), descriptor)));
+    if (value.has_value() && zupt_in_range(range, *value)) {
+      return *value;
+    }
+    RCLCPP_WARN(
+      get_logger(), "zupt: %s from the launch refused, outside [%g, %g]; %g in force",
+      name.c_str(), range.low, range.high, fallback);
+    set_parameter(rclcpp::Parameter(name, fallback));
+    return fallback;
+  }
+
+  /// The atomic that holds the live zero-velocity number `name`, or nullptr for any other name.
+  std::atomic<double> * zupt_setting(const std::string & name)
+  {
+    if (name == "zupt_rate_hz") {return &zupt_hz_;}
+    if (name == "zupt_var_linear") {return &zupt_var_linear_;}
+    if (name == "zupt_var_yaw") {return &zupt_var_yaw_;}
+    if (name == "zupt_settle_s") {return &zupt_settle_s_;}
+    if (name == "zupt_cmd_hold_s") {return &zupt_cmd_hold_s_;}
+    if (name == "zupt_gyro_quiet_rad_s") {return &gyro_quiet_rad_s_;}
+    return nullptr;
+  }
+
+  /// Parameter service, before a set: refuse a zero-velocity number that is not a number or lies
+  /// outside its range, with the reason logged and handed back to `ros2 param set` -- the whole
+  /// set is refused and the values in force stay. Every other parameter of the node passes.
+  rcl_interfaces::msg::SetParametersResult check_zupt_settings(
+    const std::vector<rclcpp::Parameter> & parameters)
+  {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+    for (const auto & parameter : parameters) {
+      const ZuptRange * range = zupt_range(parameter.get_name());
+      if (range == nullptr) {
+        continue;
+      }
+      const auto value = number_of(parameter);
+      if (value.has_value() && zupt_in_range(*range, *value)) {
+        continue;
+      }
+      char given[64];
+      if (value.has_value()) {
+        std::snprintf(given, sizeof(given), "%g", *value);  // 1e-12, not rclcpp's "0.000000"
+      } else {
+        std::snprintf(given, sizeof(given), "%s", parameter.value_to_string().c_str());
+      }
+      char reason[192];
+      std::snprintf(
+        reason, sizeof(reason), "%s %s refused: a number in [%g, %g] is required",
+        range->name, given, range->low, range->high);
+      RCLCPP_WARN(
+        get_logger(), "zupt: %s; %g stays in force", reason,
+        zupt_setting(parameter.get_name())->load());
+      result.successful = false;
+      result.reason = reason;
+      return result;
+    }
+    return result;
+  }
+
+  /// Parameter service, after a set was accepted: put each zero-velocity setting in force for the
+  /// next tick, say so once per change, and re-time the timer when the rate moved.
+  void apply_zupt_settings(const std::vector<rclcpp::Parameter> & parameters)
+  {
+    for (const auto & parameter : parameters) {
+      const std::string & name = parameter.get_name();
+      if (name == "zupt_publish") {
+        const bool on = parameter.as_bool();
+        if (zupt_publish_.exchange(on) != on) {
+          RCLCPP_INFO(get_logger(), "zupt: zupt_publish %s", on ? "on" : "off");
+        }
+        continue;
+      }
+      std::atomic<double> * slot = zupt_setting(name);
+      const auto value = number_of(parameter);
+      if (slot == nullptr || !value.has_value()) {
+        continue;
+      }
+      const double before = slot->exchange(*value);
+      if (before == *value) {
+        continue;
+      }
+      RCLCPP_INFO(
+        get_logger(), "zupt: %s %g -> %g, in force at the next tick", name.c_str(), before, *value);
+      if (slot == &zupt_hz_) {
+        start_zupt_timer();
+      }
+    }
   }
 
   /// The gyro's zero as a report line prints it: the bias, the rest blocks behind it, its age.
@@ -759,9 +954,14 @@ private:
   std::atomic<double> gyro_at_{0.0};
   std::atomic<double> gyro_turn_at_{0.0};
   std::atomic<double> gyro_quiet_rad_s_{kGyroQuietRadS};
-  // ...the rule and the rate, fixed at start...
-  ZuptGate zupt_gate_;
-  double zupt_hz_ = kZuptHz;
+  // ...the live settings, written by apply_zupt_settings and read by the timer each tick...
+  std::atomic<double> zupt_hz_{kZuptHz};
+  std::atomic<double> zupt_var_linear_{kRestZuptVariance};
+  std::atomic<double> zupt_var_yaw_{kRestZuptVariance};
+  std::atomic<double> zupt_settle_s_{0.0};
+  std::atomic<double> zupt_cmd_hold_s_{0.0};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr zupt_check_;
+  rclcpp::node_interfaces::PostSetParametersCallbackHandle::SharedPtr zupt_apply_;
   // ...and what the update did, for the report line and the start/stop lines.
   std::atomic<bool> zupt_publish_{true};
   std::atomic<bool> zupt_publishing_{false};
@@ -771,7 +971,6 @@ private:
   const std::array<double, 36> zupt_pose_covariance_ = diagonal(
     {kUnclaimedVariance, kUnclaimedVariance, kUnclaimedVariance, kUnclaimedVariance,
       kUnclaimedVariance, kUnclaimedVariance});
-  const std::array<double, 36> zupt_twist_covariance_ = rest_zupt_twist_covariance();
 
   std::mutex mutex_;  // guards the command the resend timer repeats
   std::optional<std::pair<double, double>> command_;

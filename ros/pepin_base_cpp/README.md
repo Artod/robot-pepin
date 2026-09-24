@@ -48,28 +48,36 @@ the parked walk stays ~0.35 deg either way, the sqrt trade.
 
 ## Zero-velocity update
 
-`zupt_publish` (live, default true), `zupt_gyro_quiet_rad_s` (live, 0.005), `zupt_rate_hz` (10, read
-at start): while the cart is certainly standing still the node publishes `zupt`, a
-nav_msgs/Odometry with a twist of exactly zero (frame `odom`, child `base_link`) — the EKF's
-`odom2`, which fuses its vx, vy and vyaw (`ros/params/ekf.yaml`) — and nothing at all otherwise.
-Parked on its charger on 2026-09-24 the EKF's heading crept ~5 deg an hour, pulled by rf2o's
-+1.5 deg/min at rest while the bias-tracked gyro read -0.001; that input had been silent since the
-lidar tracker, its only publisher, stopped starting.
+While the cart is certainly standing still the node publishes `zupt`, a nav_msgs/Odometry with a
+twist of exactly zero (frame `odom`, child `base_link`) — the EKF's `odom2`, which fuses its vx, vy
+and vyaw (`ros/params/ekf.yaml`) — and nothing at all otherwise. Parked on its charger on
+2026-09-24 the EKF's heading crept ~5 deg an hour, pulled by rf2o's +1.5 deg/min at rest while the
+bias-tracked gyro read -0.001; that input had been silent since the lidar tracker, its only
+publisher, stopped starting.
 
 Certainly still is three witnesses at once (`ZuptGate`, the twin of `pepin.zupt`): the wheels have
-witnessed rest for `imu_bias_s` — the same rest the gyro's bias tracker trusts — no non-zero
-`/cmd_vel` is younger than `cmd_timeout_s`, and the bias-corrected yaw rate has stayed under
-`zupt_gyro_quiet_rad_s` for `imu_bias_s`, so a cart turned by hand on still wheels is not frozen.
-No gyro reading (IMU off, no bias block yet) means no update. Each witness is read fresh every
-tick, so the first moving sample stops it within one period. The claim is 1e-6 on the three
-velocities, 400x under the gyro's 4e-4; `zupt.hpp` has the reasons for that number, for the 0.29
-deg/s threshold (7.9 sigma of the parked chip's per-sample noise) and for the rate. The report
-line names `zupt_publish=on|off` and says `zupt publishing for N s, M sent` or `zupt silent
-(reason)`; a line is logged every time the update starts or stops. `zupt_publish:=false` is what
-this node did before: nothing on `zupt`. The Python bridge has no gyro and no update.
+witnessed rest for `zupt_settle_s` (default `imu_bias_s`, the rest the gyro's bias tracker
+trusts), no non-zero `/cmd_vel` is younger than `zupt_cmd_hold_s` (default `cmd_timeout_s`), and
+the bias-corrected yaw rate has stayed under `zupt_gyro_quiet_rad_s` for that same window, so a
+cart turned by hand on still wheels is not frozen. No gyro reading (IMU off, no bias block yet)
+means no update. Each witness is read fresh every tick, so the first moving sample stops it
+within one period.
 
-Board cost: one 10 Hz Odometry message while parked, a 10 Hz timer and two atomic stores per IMU
-sample; no new process, no new thread.
+Every tunable is a live parameter — `zupt_publish`, `zupt_rate_hz`, `zupt_var_linear`,
+`zupt_var_yaw`, `zupt_settle_s`, `zupt_cmd_hold_s`, `zupt_gyro_quiet_rad_s` — set with
+`ros2 param set /base_bridge ...` and in force at the next tick; a new rate re-times the timer at
+once. An on-set callback refuses a value outside its range (`zupt.hpp`'s `kZuptRanges`, logged
+and returned to the caller) and a post-set callback stores the accepted one in an atomic, so the
+timer and the 50 Hz IMU loop look nothing up per tick. The two windows borrow their defaults
+without moving the parameters they come from. The table, the ranges and the lines to try are in
+`ros/README.md` ("The base bridge's zero-velocity update"); the reasons for every default are in
+`zupt.hpp`. The report line names `zupt_publish=on|off`, and the zupt state ends the link-up and
+minute lines with every setting in force: `zupt publishing for N s, M sent [rate 10 Hz, var 1e-06
+xy 1e-06 yaw, settle 2 s, cmd hold 0.5 s, gyro quiet 0.005 rad/s]`. The Python bridge has no gyro
+and no update.
+
+Board cost: one Odometry message per tick while parked (10 Hz by default, 100 at most), a timer
+at that rate and two atomic stores per IMU sample; no new process, no new thread.
 
 ## Build and switch
 
