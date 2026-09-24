@@ -233,6 +233,19 @@ in the clean order (journal 2026-09-13): laptop half down, laptop router down, b
 stack, laptop router, laptop half. A router restarted under a live peer has produced a one-way
 link before.
 
+**Every container's log outlives its restart** (`PEPIN_LOG_ARCHIVE`, `on` by default, `off` keeps
+nothing as before). On the board, `pepin-ros` and `pepin-zrouter` are started without `--rm`, and
+each unit's next start copies the previous container's log to `/root/pepin-ros/logs/`
+(`<local time>.log` for the stack, `zrouter_<local time>.log` for the router, `docker logs -t`;
+`ros/sync.sh` never deletes `logs/`); the router's output does not reach the journal. On the
+laptop every removal goes through `ros/lib.sh`'s `pepin_remove_container`, which stops the
+container, copies `docker logs -t` to `logs/containers/<UTC>_<name>.log` in this checkout
+(`PEPIN_LOG_DIR`), and only then removes it — `ros/laptop.sh stop`, a `vslam` restart and a
+router re-creation used to take the laptop router's and `pepin-vslam`'s logs with them. Docker's
+own receive stamps are kept on purpose: after a Mac wake the VM clock's step is visible in them.
+The unit change reaches the board by `scp board/pepin-zrouter.service root@<board>:/etc/systemd/system/`
+and `systemctl daemon-reload`; it takes effect at the router's next restart.
+
 ## One clock (`PEPIN_TIME_SOURCE`, chrony)
 
 Every ROS stamp on the laptop is the **Docker VM's** clock (all its containers share one kernel);

@@ -637,3 +637,114 @@ def test_the_bridge_config_drops_reliable_blocking_and_caps_what_crosses_the_wif
     assert [c for c in caps if re.compile(c).search("/tf")] == ["^/tf$"]
     assert pub_max_frequencies(("/tf",)) == pub_max_frequencies(("tf",)) == ["^/tf$=20"]
     assert pub_max_frequencies(("depth_scan",)) == [], "a topic with no cap gets no entry"
+
+
+def _unit_command(unit: str, prefix: str, marker: str) -> str:
+    """The shell text of the one ``prefix`` line of a board unit that contains ``marker``, with
+    systemd's own escapes undone (``$$`` and ``%%``) — what /bin/sh is actually handed."""
+    text = (REPO / "board" / unit).read_text()
+    line = next(ln for ln in text.splitlines() if ln.startswith(prefix) and marker in ln)
+    return line.split("-c '", 1)[1].rsplit("'", 1)[0].replace("$$", "$").replace("%%", "%")
+
+
+def test_the_board_router_keeps_its_log_across_a_restart_like_the_stack_does() -> None:
+    """Under `docker run --rm` the board router's log of the 2026-09-23 wake (the 20-s closures
+    to the sleeping laptop) went with its first restart. The container now outlives its process,
+    and the next start copies the log before it removes the name."""
+    unit = (REPO / "board/pepin-zrouter.service").read_text()
+    runs = [ln for ln in unit.splitlines() if ln.startswith("ExecStart=")]
+    assert runs and all("docker run --rm" not in ln for ln in runs), "the log must outlive it"
+    pre = [ln for ln in unit.splitlines() if ln.startswith("ExecStartPre=")]
+    archive = next(i for i, ln in enumerate(pre) if "docker logs -t pepin-zrouter" in ln)
+    remove = next(i for i, ln in enumerate(pre) if "docker rm -f pepin-zrouter" in ln)
+    assert archive < remove, "copied before the name is removed"
+    assert pre[archive].startswith("ExecStartPre=-"), "a failed copy never blocks the router"
+    stack = (REPO / "board/pepin-ros.service").read_text()
+    assert "docker logs pepin-ros > /root/pepin-ros/logs/" in stack, "the same directory"
+
+
+@pytest.mark.slow
+def test_the_board_router_archive_line_does_what_it_says(tmp_path: Path) -> None:
+    """The unit's archive command run by /bin/sh against a fake docker: a log file for a
+    container that exists, nothing for one that does not, nothing when switched off."""
+    import os
+    import subprocess
+
+    fake = tmp_path / "docker"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'case "$1 $2" in\n'
+        '  "container inspect") [ -f "$FAKE_EXISTS" ] ;;\n'
+        '  "logs -t") echo "2026-09-23T21:26:52Z Unable to push"; echo "err line" >&2 ;;\n'
+        "  *) exit 3 ;;\n"
+        "esac\n"
+    )
+    fake.chmod(0o755)
+    logs = tmp_path / "logs"
+    cmd = (
+        _unit_command("pepin-zrouter.service", "ExecStartPre=", "docker logs")
+        .replace("/usr/bin/docker", str(fake))
+        .replace("/root/pepin-ros/logs", str(logs))
+    )
+    exists = tmp_path / "exists"
+
+    def run(archive: str | None) -> None:
+        env = {"PATH": os.environ["PATH"], "FAKE_EXISTS": str(exists)}
+        if archive is not None:
+            env["PEPIN_LOG_ARCHIVE"] = archive
+        subprocess.run(["/bin/sh", "-c", cmd], env=env, check=True, timeout=10)
+
+    run(None)
+    assert not logs.exists(), "no container, no file (a first boot)"
+    exists.touch()
+    run("off")
+    assert not logs.exists(), "switched off: nothing kept, as before"
+    run(None)
+    (saved,) = logs.glob("zrouter_*.log")
+    assert saved.read_text() == "2026-09-23T21:26:52Z Unable to push\nerr line\n"
+
+
+@pytest.mark.slow
+def test_every_laptop_container_removal_keeps_the_log_first(tmp_path: Path) -> None:
+    """ros/lib.sh's pepin_remove_container is the one way a container leaves this laptop
+    (test_scripts_parse holds that); it must stop, copy the log, and only then remove."""
+    import os
+    import subprocess
+
+    calls = tmp_path / "calls"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "docker"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{calls}"\n'
+        'case "$1 $2" in\n'
+        '  "container inspect") [ "$3" = alive ] ;;\n'
+        '  "logs -t") echo "vslam line for $3" ;;\n'
+        "esac\n"
+    )
+    fake.chmod(0o755)
+    out = tmp_path / "archive"
+    script = "source ros/lib.sh && pepin_remove_container alive gone"
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        "PEPIN_LOG_DIR": str(out),
+        "PEPIN_STOP_TIMEOUT_S": "1",
+    }
+    result = subprocess.run(
+        ["bash", "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=20
+    )
+    assert result.returncode == 0, result.stderr
+    (saved,) = out.glob("*_alive.log")
+    assert saved.read_text() == "vslam line for alive\n"
+    assert not list(out.glob("*_gone.log")), "a container that is not there leaves no file"
+    order = calls.read_text().splitlines()
+    stop = next(i for i, c in enumerate(order) if c.startswith("stop"))
+    copy = next(i for i, c in enumerate(order) if c.startswith("logs -t alive"))
+    remove = next(i for i, c in enumerate(order) if c.startswith("rm -f"))
+    assert stop < copy < remove, order
+    env["PEPIN_LOG_ARCHIVE"] = "off"
+    env["PEPIN_LOG_DIR"] = str(tmp_path / "archive_off")
+    subprocess.run(["bash", "-c", script], cwd=REPO, env=env, check=True, timeout=20)
+    assert not (tmp_path / "archive_off").exists(), "PEPIN_LOG_ARCHIVE=off keeps nothing"

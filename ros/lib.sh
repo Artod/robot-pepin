@@ -199,8 +199,29 @@ pepin_stop_container() {  # NAME...: stop gently, leave the stopped container (a
     [ "$#" -gt 0 ] || return 0
     docker stop -t "$PEPIN_STOP_TIMEOUT_S" "$@" >/dev/null 2>&1 || true
 }
-pepin_remove_container() {  # NAME...: stop gently, then remove — a container about to be replaced
+# A container's log dies with the container: `docker rm` took the laptop router's and
+# pepin-vslam's with every `ros/laptop.sh stop` and every vslam restart, and the 2026-09-23
+# wake autopsy had only what someone happened to save before the restart. So every removal here
+# first copies the whole log, with docker's own receive stamps (-t: the VM clock, whose steps
+# after a Mac wake are themselves evidence), to PEPIN_LOG_DIR as <UTC stamp>_<name>.log — the
+# board keeps pepin-ros's and pepin-zrouter's the same way under /root/pepin-ros/logs.
+# PEPIN_LOG_ARCHIVE=off is the old behaviour (nothing kept). logs/ is gitignored.
+PEPIN_LOG_ARCHIVE="${PEPIN_LOG_ARCHIVE:-on}"
+PEPIN_LOG_DIR="${PEPIN_LOG_DIR:-$(cd "$PEPIN_ROS_DIR/.." && pwd)/logs/containers}"
+pepin_archive_log() {  # NAME...: each existing container's whole log to PEPIN_LOG_DIR; never fails
+    [ "$PEPIN_LOG_ARCHIVE" != off ] || return 0
+    local name file
+    for name in "$@"; do
+        docker container inspect "$name" >/dev/null 2>&1 || continue
+        mkdir -p "$PEPIN_LOG_DIR" 2>/dev/null || return 0
+        file="$PEPIN_LOG_DIR/$(date -u +%Y%m%dT%H%M%SZ)_$name.log"
+        docker logs -t "$name" >"$file" 2>&1 || echo "log of $name not archived ($file)" >&2
+    done
+    return 0
+}
+pepin_remove_container() {  # NAME...: stop gently, keep the log, then remove — about to be replaced
     pepin_stop_container "$@"
+    pepin_archive_log "$@"
     docker rm -f "$@" >/dev/null 2>&1 || true
 }
 
