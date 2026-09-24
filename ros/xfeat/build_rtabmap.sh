@@ -39,6 +39,27 @@ ROS_JOBS="${ROS_JOBS:-2}"
 SRC=/opt/src
 PREFIX=/opt/ros/jazzy
 
+features_kept() {  # APT NEW: every optional library the apt core was built with, the new one has
+    # Two files of `#define RTABMAP_*` lines (Version.h). Whatever the launch table does not name
+    # takes the core's compile-time default, and some defaults follow what CMake FOUND —
+    # Optimizer/Strategy 2 needs GTSAM, Icp/Strategy 1 libpointmatcher — so a library this build
+    # missed would change the lidar's registration and the graph's optimiser without a word. Every
+    # feature apt's header defines must be defined by the new one (it adds RTABMAP_PYTHON), and
+    # the four the lidar path and the grid lean on are asked for by name whatever apt had.
+    local missing feature
+    missing="$(comm -23 <(sort -u "$1") <(sort -u "$2"))"
+    if [ -n "$missing" ]; then
+        echo "the rebuilt core lacks what the apt build had: $missing" >&2
+        return 1
+    fi
+    for feature in GTSAM G2O POINTMATCHER OCTOMAP PYTHON; do
+        if ! grep -qx "#define RTABMAP_$feature" "$2"; then
+            echo "the rebuilt core has no RTABMAP_$feature" >&2
+            return 1
+        fi
+    done
+}
+
 fetch() {  # repository ref sha dir: a shallow clone of one tag, refused unless it is that commit
     git clone -q --depth 1 --branch "$2" "$1" "$4"
     local got
@@ -71,14 +92,19 @@ case "$PHASE" in
             -DWITH_PYTHON=ON -DWITH_QT=OFF -DWITH_OPENNI=OFF \
             -DBUILD_APP=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TOOLS=ON
         nice -n 19 cmake --build "$SRC/rtabmap/build" -j "$CORE_JOBS"
+        # What the apt core was built with, read before the install overwrites its header.
+        VERSION_H="$PREFIX/include/rtabmap-0.22/rtabmap/core/Version.h"
+        grep '^#define RTABMAP_' "$VERSION_H" > /tmp/apt_defines
         # apt's CMake package files go first: an install only overwrites, and apt's
         # RTABMap_guiTargets.cmake left beside the new RTABMapConfig.cmake (built without Qt)
         # makes every find_package(RTABMap) fail on its "if( EQUAL 6)" (measured).
         rm -rf "${PREFIX:?}/$LIBDIR/rtabmap-0.22"
         cmake --install "$SRC/rtabmap/build"
-        # Fail fast, here and not an hour later in the wrappers: the headers say Python, the ONE
-        # core library carries it, and no second core sits anywhere else under /opt/ros/jazzy.
-        grep -q '^#define RTABMAP_PYTHON' "$PREFIX/include/rtabmap-0.22/rtabmap/core/Version.h"
+        # Fail fast, here and not an hour later in the wrappers: the headers say Python and every
+        # optional library apt's did (features_kept), the ONE core library carries Python, and no
+        # second core sits anywhere else under /opt/ros/jazzy.
+        grep '^#define RTABMAP_' "$VERSION_H" > /tmp/new_defines
+        features_kept /tmp/apt_defines /tmp/new_defines
         # (Each check reads its command's whole output from a file: grep -q under pipefail stops
         # reading at the first match and the writer dies of SIGPIPE — exit 141 on a success.)
         readelf -Ws --dyn-syms "$PREFIX/$LIBDIR/librtabmap_core.so.0.22.1" > /tmp/core_symbols
