@@ -24,6 +24,13 @@ lidar-only node its perfect match, and after ``Rtabmap::adjustLikelihood`` (Rtab
 the Bayes filter would propose one of them. Nothing in RTAB-Map normalises a descriptor or asserts
 its norm.
 
+A VECTOR IS A UNIT VECTOR OR THE NULL ONE, and nothing else ever leaves this module:
+``compareTo`` also asserts ``(a . b + 1) / 2 >= 0`` (Signature.cpp:263), which a NaN fails (NaN
+compares false) and a vector longer than one can fail, and a NaN stored in the database would fail
+it against every node for ever. :class:`PlaceDescriptor` refuses anything but a finite vector
+within :data:`UNIT_TOLERANCE` of unit length (made exactly unit) or the zero vector under the null
+tag; :func:`unit_or_none` is the same test for a vector that may be replaced by the null one.
+
 THE BYTES are ``rtabmap::compressData`` (corelib/src/Compression.cpp:208-237): the matrix's raw
 bytes through zlib's ``compress``, then three native int32 — rows, cols and the OpenCV type — which
 is what ``rtabmap_conversions::globalDescriptorFromROS`` uncompresses from
@@ -32,6 +39,12 @@ is what ``rtabmap_conversions::globalDescriptorFromROS`` uncompresses from
 blobs (DBDriverSqlite3.cpp:3556-3610 reads, :6811-6860 writes). The vector is a 1 x D ``CV_32FC1``;
 the info is the model's tag as a 1 x N ``CV_8UC1`` string — ``null`` for the null descriptor —
 which is how a database census tells which weights described each node.
+
+A KNOWN LIMIT: RTAB-Map computes the likelihood only for a frame with ORB words
+(Rtabmap.cpp:1971 asks ``!signature->isBadSignature()``, and Signature.cpp:341 calls a node with
+no words bad), so a picture too dark for GFTT/ORB to find a corner gets no place recognition by
+descriptor either, and the words are still extracted for every frame. The descriptor replaces the
+words' SCORE, not the words themselves.
 """
 
 from __future__ import annotations
@@ -41,6 +54,7 @@ import struct
 import zlib
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
@@ -54,6 +68,10 @@ CV_32FC1 = 5
 NULL_TAG = "null"
 _TRAILER = struct.Struct("<iii")  # rows, cols, type (native int32; little-endian on both ends)
 _DTYPES = {CV_8UC1: np.uint8, CV_32FC1: np.float32}
+# How far from unit length a place vector may be and still count as one (then made exactly unit):
+# BoQ's float32 L2 normalisation lands within 1e-6; anything further is a model that did not
+# normalise, or worse.
+UNIT_TOLERANCE = 1e-3
 
 Vector = npt.NDArray[np.float32]
 
@@ -95,18 +113,45 @@ def null_vector(dim: int) -> Vector:
 
 
 def normalised(vector: npt.ArrayLike) -> Vector:
-    """``vector`` as float32 with unit length (the zero vector stays zero)."""
+    """``vector`` as float32 with unit length (the zero vector stays zero; a vector with a NaN or
+    an infinity comes back with them, which :func:`unit_or_none` then refuses)."""
     v = np.asarray(vector, dtype=np.float32).reshape(-1)
-    norm = float(np.linalg.norm(v))
+    norm = float(np.linalg.norm(v.astype(np.float64)))
     return v if norm == 0.0 else np.ascontiguousarray(v / norm, dtype=np.float32)
+
+
+def unit_or_none(vector: npt.ArrayLike) -> Vector | None:
+    """``vector`` as a float32 row of exactly unit length when it is finite, not empty and within
+    :data:`UNIT_TOLERANCE` of unit length; ``None`` otherwise (it must not reach RTAB-Map)."""
+    v = np.asarray(vector, dtype=np.float32).reshape(-1)
+    if v.size == 0 or not bool(np.all(np.isfinite(v))):
+        return None
+    norm = float(np.linalg.norm(v.astype(np.float64)))
+    if abs(norm - 1.0) > UNIT_TOLERANCE:
+        return None
+    return np.ascontiguousarray(v / np.float32(norm), dtype=np.float32)
 
 
 @dataclass(frozen=True)
 class PlaceDescriptor:
-    """One node's descriptor: which model said it (``tag``, or ``null``) and the vector."""
+    """One node's descriptor: which model said it (``tag``, or ``null``) and the vector — a unit
+    vector under a model's tag, the zero vector under the null tag, and nothing else (a
+    :class:`ValueError` names what is wrong)."""
 
     tag: str
     vector: Vector
+
+    def __post_init__(self) -> None:
+        if self.tag == NULL_TAG:
+            v = np.ascontiguousarray(np.asarray(self.vector, dtype=np.float32).reshape(-1))
+            if v.size == 0 or np.any(v != 0.0):
+                raise ValueError("the null descriptor is a non-empty zero vector")
+        else:
+            unit = unit_or_none(self.vector)
+            if unit is None:
+                raise ValueError(f"{self.tag}: not a finite unit vector (RTAB-Map would abort)")
+            v = unit
+        object.__setattr__(self, "vector", v)
 
     @property
     def dim(self) -> int:
@@ -213,6 +258,67 @@ class Census:
             return None
 
 
+# THE DATABASE'S CENSUS AT A START, as rtabmap_frame reads it: :meth:`Census.to_json`'s line in this
+# variable, set by vslam.launch.py from :func:`database_census` of the very file RTAB-Map is given,
+# before RTAB-Map opens it (a reader beside a writing RTAB-Map could make its commit fail and abort
+# it) — on EVERY start of the launch, so a container restarted after the file was swapped counts
+# again. Fixed for that RTAB-Map's life, as the database's nodes are: every node it adds after the
+# census comes from sensor_pack with its one descriptor, and RTAB-Map is not respawned.
+CENSUS_ENV = "PEPIN_PLACE_CENSUS"
+UNREADABLE = "unreadable"  # the tag a census gives a descriptor whose bytes it cannot read
+
+
+def database_census(path: str | Path) -> Census:
+    """What an RTAB-Map database's nodes carry: every ``Node`` id against its ``GlobalDescriptor``
+    rows, each row's (tag, length) read from its info and from the LAST 12 BYTES of its data (the
+    trailer: ``substr`` in sqlite, so a 48 KB vector never crosses into Python). Every row counts,
+    whatever its type — compareTo's size check does (Signature.cpp:252) — and a row of another
+    type is tagged ``type N: ...``. Read-only; a database that is not there is zero nodes (an
+    empty room takes any descriptor). NEVER beside a running RTAB-Map on the same file: it sets no
+    sqlite busy timeout, so a reader's lock during its commit fails its assertion and aborts it —
+    the vslam launch takes this census before RTAB-Map starts, and ros/tools/place_backfill.py
+    --check reads a copy of a database a container holds. ``sqlite3.Error`` when it is no
+    database."""
+    import sqlite3
+
+    path = Path(path)
+    if not path.exists():
+        return Census(0, 0, 0, {})
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        ids = [int(r[0]) for r in db.execute("SELECT id FROM Node")]
+        rows: dict[int, list[tuple[str, int]]] = {}
+        table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='GlobalDescriptor'"
+        ).fetchone()
+        if table is not None:
+            for node_id, kind, info, trailer in db.execute(
+                "SELECT node_id, type, info, substr(data, -12) FROM GlobalDescriptor"
+            ):
+                try:
+                    tag = uncompress_mat(info).tobytes().decode(errors="replace") if info else ""
+                    rows_, cols, _cv = mat_shape(bytes(trailer or b""))
+                    length = rows_ * cols
+                except (ValueError, zlib.error):
+                    tag, length = UNREADABLE, 0
+                if int(kind) != TYPE_PY_DESCRIPTOR:
+                    tag = f"type {int(kind)}: {tag}"
+                rows.setdefault(int(node_id), []).append((tag, length))
+    finally:
+        db.close()
+    kinds: dict[tuple[str, int], int] = {}
+    missing = repeated = 0
+    for node_id in ids:
+        found = rows.get(node_id, [])
+        if not found:
+            missing += 1
+        elif len(found) > 1:
+            repeated += 1
+        else:
+            kinds[found[0]] = kinds.get(found[0], 0) + 1
+    return Census(len(ids), missing, repeated, kinds)
+
+
 # ---------------------------------------------------------------- what the snapshots carry
 PLACE_TOPIC = "/sensor_pack/place"
 PLACE_WORDS, PLACE_DESCRIPTOR = "words", "descriptor"
@@ -233,12 +339,15 @@ DESCRIPTOR_PARAMETERS = {TFIDF: "false", VIRTUAL_PLACE_RATIO: "1"}
 # RTAB-Map 0.22.1 DROPS a node's descriptor the first time it registers against it: when the node's
 # picture or scan is not in memory, Memory::computeTransform replaces the node's whole sensor data
 # with the Data table's (Memory.cpp:2896-2909, getNodeData -> DBDriver::loadNodeDataQuery, which
-# never reads the GlobalDescriptor table), and the next likelihood's compareTo against that node
-# aborts (Signature.cpp:252). Measured 2026-09-24: the replay's first rejected loop closure on node
-# 353, then "Signature.cpp:252::compareTo() Condition ... not met!" on the next update. Every
-# database node is such a node (they are loaded without their data), so the descriptor likelihood
-# needs RTAB-Map built with ros/patches/rtabmap-keep-global-descriptors.patch; the image build
-# leaves this marker when it applied it (ros/xfeat/build_rtabmap.sh).
+# never reads the GlobalDescriptor table), and the next compareTo against that node aborts
+# (Signature.cpp:252). Measured 2026-09-24: the replay's first rejected loop closure on node 353,
+# then "Signature.cpp:252::compareTo() Condition ... not met!" on the next update. Every database
+# node is such a node (they are loaded without their data), and so is every node of this session
+# once it is saved (Memory::saveLocationData clears its data, Memory.cpp:2763) — which mapping's
+# rehearsal can make the LAST node (rehearsalMerge, Memory.cpp:3958) and compare with the next
+# one, whatever the likelihood. So NOTHING may carry a descriptor on RTAB-Map built without
+# ros/patches/rtabmap-keep-global-descriptors.patch; ros/xfeat/patch_rtabmap.sh leaves this marker
+# when the image carries it (the patch's file name without its ``rtabmap-``).
 KEEPS_DESCRIPTORS_MARKER = "/opt/rtabmap_patches/keep-global-descriptors"
 
 
@@ -250,18 +359,57 @@ def rtabmap_keeps_descriptors(marker: str = KEEPS_DESCRIPTORS_MARKER) -> bool:
     return os.path.exists(marker)
 
 
+# WHETHER THE SNAPSHOTS CARRY DESCRIPTORS AT ALL: pepin_bringup.sensor_pack's global_descriptor
+# (not live), which the vslam launch reads too, to set the rehearsal threshold that fits them.
+# ``auto`` attaches exactly when this RTAB-Map keeps them (:func:`rtabmap_keeps_descriptors`),
+# ``on`` always (a control against an unpatched core — it can abort RTAB-Map), ``off`` never.
+GLOBAL_DESCRIPTOR_ENV = "PEPIN_GLOBAL_DESCRIPTOR"
+ATTACH_AUTO, ATTACH_ON, ATTACH_OFF = "auto", "on", "off"
+ATTACH_CHOICES = (ATTACH_AUTO, ATTACH_ON, ATTACH_OFF)
+
+
+def global_descriptor_setting(environ: Mapping[str, str]) -> str:
+    """The global_descriptor setting a node started in ``environ`` holds, read exactly as the
+    flag reads its variable (one of :data:`ATTACH_CHOICES`, :data:`ATTACH_AUTO` when unset);
+    :class:`ValueError` for any other word, as the node itself would refuse it."""
+    value = environ.get(GLOBAL_DESCRIPTOR_ENV, ATTACH_AUTO)
+    if value not in ATTACH_CHOICES:
+        raise ValueError(
+            f"{GLOBAL_DESCRIPTOR_ENV}: {value!r} is not one of {', '.join(ATTACH_CHOICES)}"
+        )
+    return value
+
+
+def descriptors_attached(setting: str, rtabmap_keeps: bool) -> bool:
+    """Whether the snapshots carry one descriptor each under global_descriptor ``setting``."""
+    return setting == ATTACH_ON or (setting == ATTACH_AUTO and rtabmap_keeps)
+
+
+# HOW MANY OF THE LAST CAMERA SNAPSHOTS a SnapshotPlace counts, and the share of them that may have
+# carried the null descriptor before the descriptor likelihood is taken away: a query node whose
+# descriptor is null scores 0.5 against EVERY node, Rtabmap::adjustLikelihood's z-scores are then
+# all zero, and no hypothesis forms — the words would still have recognised the place. Ten at one
+# snapshot a second is ten seconds: a service that went down costs at most five blind updates.
+RECENT_CAMERA_SNAPSHOTS = 10
+MAX_NULL_SHARE = 0.5
+
+
 @dataclass(frozen=True)
 class SnapshotPlace:
     """What pepin_bringup.sensor_pack attaches to its snapshots, said latched on
     :data:`PLACE_TOPIC` for rtabmap_frame: whether every snapshot carries one descriptor at all
     (``attached``), where a camera snapshot's comes from (``service``, or ``null`` when that is
-    switched off), the length every one of them has, and the tag of the last one the service
-    described (empty until it has)."""
+    switched off), the length every one of them has, the tag of the last one the service
+    described (empty until it has), and of the last ``recent`` camera snapshots how many went out
+    with the null descriptor (``recent_null``: the service did not answer, answered late, or
+    answered something that is not a unit vector)."""
 
     attached: bool
     source: str
     dim: int
     tag: str = ""
+    recent: int = 0
+    recent_null: int = 0
 
     def to_json(self) -> str:
         """One JSON object for a std_msgs/String."""
@@ -273,9 +421,14 @@ class SnapshotPlace:
         try:
             data = json.loads(text)
             return cls(
-                bool(data["attached"]), str(data["source"]), int(data["dim"]), str(data["tag"])
+                bool(data["attached"]),
+                str(data["source"]),
+                int(data["dim"]),
+                str(data["tag"]),
+                int(data.get("recent", 0)),
+                int(data.get("recent_null", 0)),
             )
-        except (TypeError, ValueError, KeyError):
+        except (TypeError, ValueError, KeyError, AttributeError):
             return None
 
 
@@ -284,15 +437,18 @@ def recognition_parameters(
     snapshots: SnapshotPlace | None,
     census: Census | None,
     rtabmap_keeps: bool,
+    max_null_share: float = MAX_NULL_SHARE,
 ) -> tuple[dict[str, str], str]:
     """The likelihood RTAB-Map should score places by, as the parameters it reads
     (:data:`WORDS_PARAMETERS`: the words' TF-IDF; :data:`DESCRIPTOR_PARAMETERS`: the descriptors'
     dot product, as z-scores), and the phrase that says why. ``descriptor`` is honoured only when
-    comparing by descriptor cannot abort RTAB-Map: this RTAB-Map keeps a node's descriptor when it
-    reloads the node's data (``rtabmap_keeps``, the patch's marker), the snapshots carry one each
-    (``snapshots``), and the census of the database taken before RTAB-Map opened it says every
-    node carries exactly one of the same length (and, once the service has answered, from the
-    same weights). Anything less is the words, and the phrase names what is missing."""
+    comparing by descriptor cannot abort RTAB-Map — this RTAB-Map keeps a node's descriptor when
+    it reloads the node's data (``rtabmap_keeps``, the patch's marker), the snapshots carry one
+    each (``snapshots``), and the census of the database taken before RTAB-Map opened it says
+    every node carries exactly one of the same length (and, once the service has answered, from
+    the same weights) — and only while it can SEE: the camera snapshots' descriptors come from
+    the service (not switched off) and no more than ``max_null_share`` of the recent ones were
+    the null descriptor. Anything less is the words, and the phrase names what is missing."""
     words = dict(WORDS_PARAMETERS)
     if asked != PLACE_DESCRIPTOR:
         return words, PLACE_WORDS
@@ -311,4 +467,15 @@ def recognition_parameters(
     refusal = census.refusal(snapshots.tag or None, snapshots.dim)
     if refusal is not None:
         return words, f"words (descriptor asked; {refusal}: ros/tools/place_backfill.py)"
+    if snapshots.source != "service":
+        return words, (
+            "words (descriptor asked; sensor_pack's place_descriptor is off, so every snapshot"
+            " carries the null descriptor and no place would score above another)"
+        )
+    if snapshots.recent and snapshots.recent_null > max_null_share * snapshots.recent:
+        return words, (
+            f"words (descriptor asked; {snapshots.recent_null} of the last {snapshots.recent}"
+            " camera snapshots carried the null descriptor: the localisation service is not"
+            " describing them — ros/models.sh status localization)"
+        )
     return dict(DESCRIPTOR_PARAMETERS), f"descriptor ({census.text()})"

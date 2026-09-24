@@ -126,11 +126,42 @@ def test_a_re_run_replaces_and_a_failure_writes_nothing(database: Path) -> None:
         tool.backfill(database, lambda _rgb: (np.ones(3, np.float32), TAG), DIM, lambda _l: None)
 
 
+def test_a_vector_rtabmap_would_abort_on_is_never_stored(database: Path) -> None:
+    """One NaN in the database fails compareTo's UASSERT_MSG(dotProd >= 0) against that node at
+    every comparison for ever: the backfill stops and writes nothing."""
+    tool = _tool()
+    tool.backfill(database, describe, DIM, progress=lambda _line: None)
+    before = {k: [d.tag for d in v] for k, v in _rows(database).items()}
+    for bad in (np.full(DIM, np.nan, np.float32), np.full(DIM, 3.0, np.float32)):
+        with pytest.raises(RuntimeError, match="no finite unit vector"):
+            tool.backfill(database, lambda _rgb, b=bad: (b, TAG), DIM, lambda _l: None)
+    assert {k: [d.tag for d in v] for k, v in _rows(database).items()} == before
+
+
+def test_check_of_a_held_database_reads_a_copy(
+    database: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """RTAB-Map sets no sqlite busy timeout: a reader's lock during its commit aborts it. The
+    census of a database a container holds is taken of a copy, and says so."""
+    tool = _tool()
+    tool.backfill(database, describe, DIM, progress=lambda _line: None)
+    monkeypatch.setattr(tool, "holders", lambda _path: ["pepin-vslam"])
+    opened: list[str] = []
+    real = tool.database_census
+    monkeypatch.setattr(
+        tool, "database_census", lambda path: opened.append(str(path)) or real(path)
+    )
+    assert tool.main(["--check", "--json", str(database)]) == 0
+    out, err = capsys.readouterr()
+    assert json.loads(out)["nodes"] == 5 and "read from a copy: pepin-vslam hold it" in err
+    assert opened and opened[0] != str(database), "never the held file itself"
+
+
 def test_the_census_sees_every_way_the_invariant_breaks(database: Path) -> None:
     tool = _tool()
     tool.backfill(database, describe, DIM, progress=lambda _line: None)
     db = sqlite3.connect(database)
-    info, data = PlaceDescriptor(TAG, np.ones(4, np.float32)).blobs()
+    info, data = PlaceDescriptor(TAG, np.full(4, 0.5, np.float32)).blobs()
     db.execute("INSERT INTO GlobalDescriptor VALUES (2, 1, ?, ?)", (info, data))
     db.execute("DELETE FROM GlobalDescriptor WHERE node_id = 4")
     db.commit()

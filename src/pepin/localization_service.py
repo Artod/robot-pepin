@@ -49,6 +49,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from pepin.global_descriptor import unit_or_none
 from pepin.model_service import (
     BadRequestError,
     ModelServer,
@@ -60,6 +61,7 @@ from pepin.model_service import (
     encode_arrays,
     encode_image,
     lower_keys,
+    port_taken,
 )
 
 log = logging.getLogger("pepin.localization_service")
@@ -323,7 +325,9 @@ class PlaceModel:
     def infer(self, inputs: npt.NDArray[np.uint8]) -> Float:
         from pepin.place_models import describe
 
-        vector: Float = describe(self._model, inputs, self._spec.size, self.device)
+        vector = unit_or_none(describe(self._model, inputs, self._spec.size, self.device))
+        if vector is None:  # a NaN would abort RTAB-Map at its next comparison: answer 500
+            raise ValueError(f"{self.tag} gave no finite unit vector for this picture")
         return vector
 
     def encode(self, outputs: Float) -> Response:
@@ -463,17 +467,19 @@ class LocalizationClient:
     def place(
         self, rgb: npt.ArrayLike, encoding: str = "jpeg", timeout_s: float | None = None
     ) -> tuple[Float, str] | None:
-        """(the unit-length place vector, the tag of the weights that said it), or ``None``."""
+        """(the unit-length place vector, the tag of the weights that said it), or ``None`` —
+        also for an answer that is not a finite unit vector."""
         headers, body = encode_image(np.asarray(rgb, dtype=np.uint8), encoding, quality=90)
         remote = self.remotes[PLACE]
         arrays = self._arrays(PLACE, remote.call(headers, body, timeout_s))
         if arrays is None:
             return None
         vector = arrays.get("vector")
-        if vector is None or vector.ndim != 1 or vector.size == 0 or not remote.last_model:
+        unit = None if vector is None or vector.ndim != 1 else unit_or_none(vector)
+        if unit is None or not remote.last_model:  # never a NaN or a non-unit vector onward
             self._malformed(PLACE, arrays)
             return None
-        return np.ascontiguousarray(vector, dtype=np.float32), remote.last_model
+        return unit, remote.last_model
 
     def health(self) -> dict[str, Any] | None:
         """The service's ``/health``, or ``None``."""
@@ -513,6 +519,13 @@ def main(argv: list[str] | None = None) -> None:
 
     setup_logging("localization_service", log_dir=args.log_dir)
     config = load_config(args.config)
+    port = args.port or config.port
+    # The port first, the models second: under launchd a job whose port is taken would otherwise
+    # load ~2 GB of models before failing to bind, once per restart.
+    taken = port_taken(args.host, port)
+    if taken is not None:
+        log.error("localization service not started: %s", taken)
+        raise SystemExit(2)
     xfeat_dir = (
         args.xfeat_dir
         or os.environ.get("PEPIN_XFEAT_DIR")
@@ -520,7 +533,6 @@ def main(argv: list[str] | None = None) -> None:
     )
     t0 = time.perf_counter()
     models = build_models(config, xfeat_dir)
-    port = args.port or config.port
     server = ModelServer((args.host, port), models, name="localization service")
     log.info(
         "localization service on http://%s:%d in %.1f s: %s (GET /health)",

@@ -21,7 +21,16 @@ from pepin.place_models import (
     place_spec,
     preprocess,
 )
-from pepin.place_stamp import LATE, NO_PICTURE, OFF, PlaceStamper, rgb_of
+from pepin.place_stamp import (
+    ERROR,
+    FAILED,
+    LATE,
+    NO_PICTURE,
+    NOT_UNIT,
+    OFF,
+    PlaceStamper,
+    rgb_of,
+)
 
 
 def test_the_two_models_and_their_measured_inputs() -> None:
@@ -116,3 +125,89 @@ def test_a_snapshot_that_waited_its_budget_is_not_asked_for() -> None:
     msg: dict[str, Any] = {}
     stamper.submit(msg, lambda: np.zeros((1, 1, 3), dtype=np.uint8), True, 0.5)
     assert msg["d"].is_null and stamper.nulls[LATE] == 1 and asked == []
+
+
+def _unit(n: int) -> np.ndarray:
+    v = np.zeros(n, dtype=np.float32)
+    v[0] = 1.0
+    return v
+
+
+def test_nothing_one_snapshot_raises_stops_the_worker() -> None:
+    """One exception on the worker used to kill it: every later snapshot then waited in the queue
+    for ever and RTAB-Map received nothing. Now that snapshot goes out with the null descriptor,
+    counted, and the next ones as before — on the threaded path the node runs."""
+    out: list[tuple[int, str]] = []
+    errors: list[str] = []
+    calls = {"n": 0}
+
+    def describe(_rgb: Any, _t: float) -> tuple[np.ndarray, str]:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ValueError("a picture that does not decode")
+        return _unit(4), "m@1"
+
+    def picture(i: int) -> Any:
+        def build() -> np.ndarray:
+            if i == 3:
+                raise ValueError("a buffer shorter than its header says")
+            return np.zeros((2, 2, 3), dtype=np.uint8)
+
+        return build
+
+    def publish(msg: dict[str, Any]) -> None:
+        if msg["i"] == 4:
+            raise RuntimeError("the context is shutting down")
+        out.append((msg["i"], msg["d"].tag))
+
+    stamper = PlaceStamper(
+        4, describe, lambda m, d: m.update(d=d), publish, threaded=True, on_error=errors.append
+    )
+    for i in range(7):
+        stamper.submit({"i": i}, picture(i), True, 5.0)
+    stamper.close(5.0)
+    assert stamper._thread is not None and not stamper._thread.is_alive(), "drained and ended"
+    assert out == [(0, "m@1"), (1, "null"), (2, "m@1"), (3, "null"), (5, "m@1"), (6, "m@1")]
+    assert stamper.nulls[ERROR] == 2 and stamper.unpublished == 1 and len(errors) == 3
+    assert "NOT PUBLISHED" in stamper.line() and "shutting down" in stamper.line()
+
+
+def test_an_answer_that_is_not_a_finite_unit_vector_goes_out_null() -> None:
+    """One NaN aborts RTAB-Map (UASSERT_MSG(dotProd >= 0), Signature.cpp:263)."""
+    answers = [np.full(4, np.nan, np.float32), np.full(4, 2.0, np.float32), _unit(4)]
+    msgs: list[dict[str, Any]] = [{} for _ in answers]
+    stamper = PlaceStamper(
+        4,
+        lambda _rgb, _t: (answers.pop(0), "m@1"),
+        lambda m, d: m.update(d=d),
+        lambda m: None,
+        threaded=False,
+    )
+    for msg in msgs:
+        stamper.submit(msg, lambda: np.zeros((1, 1, 3), dtype=np.uint8), True, 1.0)
+    assert [m["d"].is_null for m in msgs] == [True, True, False]
+    assert stamper.nulls[NOT_UNIT] == 2 and stamper.described == 1
+
+
+def test_the_recent_window_counts_only_pictures_the_service_was_asked_about() -> None:
+    """rtabmap_frame takes the descriptor likelihood away while too many of the recent camera
+    snapshots were not described; a lidar-only snapshot or the service switched off says nothing
+    about the service, and the window holds the last ten."""
+    down = {"now": True}
+    stamper = PlaceStamper(
+        4,
+        lambda _rgb, _t: None if down["now"] else (_unit(4), "m@1"),
+        lambda m, d: None,
+        lambda m: None,
+        threaded=False,
+    )
+    rgb = np.zeros((1, 1, 3), dtype=np.uint8)
+    for _ in range(3):
+        stamper.submit({}, lambda: rgb, True, 1.0)  # the service down: no answer
+    stamper.submit({}, None, True, 1.0)  # lidar-only
+    stamper.submit({}, lambda: rgb, False, 1.0)  # place_descriptor off
+    assert stamper.recent() == (3, 3) and stamper.nulls[FAILED] == 3
+    down["now"] = False
+    for _ in range(9):
+        stamper.submit({}, lambda: rgb, True, 1.0)
+    assert stamper.recent() == (10, 1), "the last ten: one failure left in the window"

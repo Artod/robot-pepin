@@ -16,14 +16,26 @@ the answer or the null descriptor, and publishes. One worker, one queue: the sna
 the order they were packed. A snapshot that has already waited ``timeout_s`` in the queue (the
 service slow, the worker behind) is not asked for at all and goes out with the null descriptor,
 so the queue drains at the packer's rate whatever the service does.
+
+NOTHING STOPS THE WORKER. A failure anywhere in one snapshot — its picture that does not decode, a
+describe that raises, an answer that is not a finite unit vector — sends THAT snapshot out with the
+null descriptor and is counted; a publish that raises is counted and the next snapshot goes on. A
+dead worker would be worse than any of them: every later snapshot would wait in the queue for ever
+and RTAB-Map would receive nothing at all.
+
+WHAT THE LAST CAMERA SNAPSHOTS GOT (:meth:`PlaceStamper.recent`): how many of the last
+:data:`pepin.global_descriptor.RECENT_CAMERA_SNAPSHOTS` pictures went out with the null descriptor,
+which rtabmap_frame reads to take the descriptor likelihood away while the service is not
+describing (a null query scores every node alike and no place would be recognised).
 """
 
 from __future__ import annotations
 
+import contextlib
 import queue
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -31,7 +43,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from pepin.global_descriptor import PlaceDescriptor
+from pepin.global_descriptor import RECENT_CAMERA_SNAPSHOTS, PlaceDescriptor, unit_or_none
 from pepin.telemetry import LatencyTracker
 
 Picture = npt.NDArray[np.uint8]
@@ -43,6 +55,11 @@ OFF = "switched off"
 LATE = "late"
 FAILED = "no answer"
 WRONG_LENGTH = "wrong length"
+NOT_UNIT = "not a unit vector"
+ERROR = "error"
+# Which of them mean the service did not describe a picture it was asked for (the window counts
+# these; a snapshot without a picture, or with the service switched off, says nothing about it).
+UNDESCRIBED = (LATE, FAILED, WRONG_LENGTH, NOT_UNIT, ERROR)
 
 
 @dataclass
@@ -69,16 +86,22 @@ class PlaceStamper:
         publish: Callable[[Any], None],
         threaded: bool = True,
         clock: Callable[[], float] = time.monotonic,
+        on_error: Callable[[str], None] | None = None,
     ) -> None:
         self.dim = int(dim)
         self._describe, self._attach, self._publish = describe, attach, publish
         self._clock = clock
+        self._on_error = on_error
         self._lock = threading.Lock()
         self.described = 0
         self.nulls: Counter[str] = Counter()
+        self.unpublished = 0  # snapshots whose attach or publish raised
+        self.last_error = ""
         self.tag = ""  # the weights of the last vector the service answered
         self.wrong_length = ""  # what the service answered when its length was not ``dim``
         self.ask_ms = LatencyTracker("place")
+        # True per recent camera snapshot the service was asked for and did NOT describe
+        self._recent: deque[bool] = deque(maxlen=RECENT_CAMERA_SNAPSHOTS)
         self._queue: queue.Queue[_Job | None] | None = None
         self._thread: threading.Thread | None = None
         if threaded:
@@ -114,16 +137,27 @@ class PlaceStamper:
         self._queue.put(None)
         self._thread.join(timeout_s)
 
+    def recent(self) -> tuple[int, int]:
+        """(camera snapshots the service was asked about lately, how many of them it did not
+        describe) over the last :data:`RECENT_CAMERA_SNAPSHOTS`."""
+        with self._lock:
+            return len(self._recent), sum(self._recent)
+
     def line(self) -> str:
         """For a report line: ``58 described (55/80 ms), null: 2 no picture, 1 late``."""
         with self._lock:
             nulls = ", ".join(f"{n} {why}" for why, n in sorted(self.nulls.items()))
             described = self.described
+            unpublished, last_error = self.unpublished, self.last_error
         s = self.ask_ms.summary()
         text = f"{described} described ({s.median_ms:.0f}/{s.p95_ms:.0f} ms)"
         text += f", null: {nulls}" if nulls else ", no null"
         if self.wrong_length:
             text += f" (the service answered {self.wrong_length}, not {self.dim})"
+        if unpublished:
+            text += f", {unpublished} NOT PUBLISHED"
+        if last_error:
+            text += f" (last error: {last_error})"
         return text
 
     def _run(self) -> None:
@@ -138,19 +172,43 @@ class PlaceStamper:
                 continue
             if closing:
                 job.ask = False
-            self._handle(job)
+            try:
+                self._handle(job)
+            except Exception as exc:  # the last guard: _handle catches its own
+                self._error("the worker", exc)
             if closing and self._queue.empty():
                 return
 
     def _handle(self, job: _Job) -> None:
-        descriptor, why = self._descriptor(job)
+        """One snapshot: its descriptor (the null one on any failure), then attach and publish."""
+        try:
+            descriptor, why = self._descriptor(job)
+        except Exception as exc:  # a picture that does not decode, a describe that raises
+            self._error("describing a snapshot", exc)
+            descriptor, why = PlaceDescriptor.null(self.dim), ERROR
         with self._lock:
             if why is None:
                 self.described += 1
             else:
                 self.nulls[why] += 1
-        self._attach(job.msg, descriptor)
-        self._publish(job.msg)
+            if job.ask and job.picture is not None and why != NO_PICTURE:
+                self._recent.append(why in UNDESCRIBED)
+        try:
+            self._attach(job.msg, descriptor)
+            self._publish(job.msg)
+        except Exception as exc:
+            with self._lock:
+                self.unpublished += 1
+            self._error("publishing a snapshot", exc)
+
+    def _error(self, what: str, exc: BaseException) -> None:
+        """Remember and hand on one failure; the worker carries on."""
+        text = f"{what}: {type(exc).__name__}: {exc}"[:200]
+        with self._lock:
+            self.last_error = text
+        if self._on_error is not None:
+            with contextlib.suppress(Exception):  # a failing logger must not stop the worker
+                self._on_error(text)
 
     def _descriptor(self, job: _Job) -> tuple[PlaceDescriptor, str | None]:
         """The descriptor this job gets, and why it is the null one (``None``: it is not)."""
@@ -174,8 +232,11 @@ class PlaceStamper:
         if vector.size != self.dim:
             self.wrong_length = f"{vector.size} from {tag}"
             return null, WRONG_LENGTH
+        unit = unit_or_none(vector)
+        if unit is None:  # a NaN, an infinity or a length far from one: RTAB-Map would abort
+            return null, NOT_UNIT
         self.tag = tag
-        return PlaceDescriptor(tag, np.ascontiguousarray(vector, dtype=np.float32)), None
+        return PlaceDescriptor(tag, unit), None
 
 
 def rgb_of(image: Any) -> Picture | None:

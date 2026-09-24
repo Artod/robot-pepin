@@ -18,14 +18,21 @@ picture is ``Data.image``, the JPEG RTAB-Map stored.
 SAFELY. A database a running RTAB-Map holds is refused (a running container that mounts its
 directory, or a journal beside it: a writer mid-transaction); a timestamped copy is made before
 the first write (``<db>.backup-YYYYmmdd_HHMMSS``); all descriptors are replaced in ONE transaction,
-so a failure leaves the database as it was; a re-run replaces what the last one wrote.
+so a failure leaves the database as it was; a re-run replaces what the last one wrote; a vector
+that is not a finite unit vector is refused, never stored (one NaN in the database would abort
+RTAB-Map at every comparison with that node). ``--check`` of a database a container holds reads a
+COPY: RTAB-Map sets no sqlite busy timeout, so even a reader's lock during its commit aborts it.
+The pictures are read one node at a time, so a database of tens of thousands of nodes is never in
+memory at once.
 
 Usage (the laptop, from the repository, the service running — ros/models.sh):
     uv run python ros/tools/place_backfill.py ros/maps/rtabmap.db       write every node's
     uv run python ros/tools/place_backfill.py --check DB               the census: nodes, how
                                                                         many carry one, tags
     uv run python ros/tools/place_backfill.py --check --json DB        the census as one JSON line
-                                                                        on stdout (ros/laptop.sh)
+                                                                        on stdout
+The vslam launch takes the same census itself (pepin.global_descriptor.database_census) of the file
+RTAB-Map is given, on every start, before RTAB-Map opens it.
 ``--url`` names the service (default PEPIN_MODELS_URL, else http://127.0.0.1:8791). A missing
 database's census is zero nodes: an empty room takes any descriptor.
 """
@@ -39,6 +46,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -51,8 +59,8 @@ from pepin.global_descriptor import (
     TYPE_PY_DESCRIPTOR,
     Census,
     PlaceDescriptor,
-    mat_shape,
-    uncompress_mat,
+    database_census,
+    unit_or_none,
 )
 
 HOST_URL = "http://127.0.0.1:8791"  # the service as the laptop itself sees it
@@ -64,47 +72,24 @@ class RefusedError(RuntimeError):
 
 
 def census(path: Path) -> Census:
-    """What the database's nodes carry: every Node id against its GlobalDescriptor rows, each
-    descriptor's (tag, length) read from its info and its data blob's trailer. Read-only."""
-    if not path.exists():
-        return Census(0, 0, 0, {})
-    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    try:
-        ids = [int(r[0]) for r in db.execute("SELECT id FROM Node")]
-        rows: dict[int, list[tuple[str, int]]] = {}
-        if _has_table(db, "GlobalDescriptor"):
-            for node_id, kind, info, data in db.execute(
-                "SELECT node_id, type, info, data FROM GlobalDescriptor"
-            ):
-                # Every row counts, whatever its type: compareTo's size check does
-                # (Signature.cpp:252), and only type 1 is ever compared.
-                tag = uncompress_mat(info).tobytes().decode(errors="replace") if info else ""
-                if int(kind) != TYPE_PY_DESCRIPTOR:
-                    tag = f"type {int(kind)}: {tag}"
-                rows.setdefault(int(node_id), []).append((tag, _length(data)))
-    finally:
-        db.close()
-    kinds: Counter[tuple[str, int]] = Counter()
-    missing = repeated = 0
-    for node_id in ids:
-        found = rows.get(node_id, [])
-        if not found:
-            missing += 1
-        elif len(found) > 1:
-            repeated += 1
-        else:
-            kinds[found[0]] += 1
-    return Census(len(ids), missing, repeated, dict(kinds))
+    """What the database's nodes carry (pepin.global_descriptor.database_census). Read-only, and
+    only on a database no running RTAB-Map holds: the caller copies a held one first
+    (:func:`census_of_copy`)."""
+    return database_census(path)
 
 
-def _length(data: bytes) -> int:
-    rows, cols, _kind = mat_shape(data)
-    return rows * cols
-
-
-def _has_table(db: sqlite3.Connection, name: str) -> bool:
-    row = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,))
-    return row.fetchone() is not None
+def census_of_copy(path: Path) -> Census:
+    """The census of a COPY of the database (and of its journal, when there is one): plain file
+    reads take no sqlite lock, so the RTAB-Map writing the original can never fail a commit on
+    them. A copy taken mid-transaction may be a moment old or torn; the census then says so or
+    fails, and RTAB-Map is untouched either way."""
+    with tempfile.TemporaryDirectory(prefix="place_census_") as tmp:
+        copy = Path(tmp) / path.name
+        shutil.copy2(path, copy)
+        journal = Path(f"{path}-journal")
+        if journal.exists():
+            shutil.copy2(journal, Path(f"{copy}-journal"))
+        return database_census(copy)
 
 
 def holders(path: Path) -> list[str]:
@@ -176,17 +161,19 @@ def backfill(
 ) -> Counter[str]:
     """Replace every node's descriptors with exactly one: its picture's place vector, or the null
     descriptor of length ``dim``. One transaction; any failure rolls all of it back. Counts of
-    ``described`` and of each null's reason."""
+    ``described`` and of each null's reason. A picture the service does not describe, or
+    describes with anything but a finite unit vector of length ``dim``, stops it: nothing is
+    written."""
     counts: Counter[str] = Counter()
     db = sqlite3.connect(str(path), isolation_level=None)
     try:
         db.execute("BEGIN IMMEDIATE")
         ids = [int(r[0]) for r in db.execute("SELECT id FROM Node ORDER BY id")]
-        images = dict(db.execute("SELECT id, image FROM Data"))
         db.execute("DELETE FROM GlobalDescriptor")
         tags: set[str] = set()
         for i, node_id in enumerate(ids, start=1):
-            rgb = picture(images.get(node_id))
+            row = db.execute("SELECT image FROM Data WHERE id = ?", (node_id,)).fetchone()
+            rgb = picture(row[0] if row is not None else None)
             descriptor = PlaceDescriptor.null(dim)
             if rgb is None:
                 counts["null: no picture"] += 1
@@ -199,7 +186,12 @@ def backfill(
                     raise RuntimeError(
                         f"node {node_id}: {vector.size} values from {tag}, not {dim}"
                     )
-                descriptor = PlaceDescriptor(tag, np.asarray(vector, dtype=np.float32))
+                unit = unit_or_none(vector)
+                if unit is None:
+                    raise RuntimeError(
+                        f"node {node_id}: {tag} answered no finite unit vector; nothing written"
+                    )
+                descriptor = PlaceDescriptor(tag, unit)
                 tags.add(tag)
                 counts["described"] += 1
             info, data = descriptor.blobs()
@@ -249,9 +241,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     path: Path = args.database
     if args.check:
-        found = census(path)
+        held = holders(path) if path.is_file() else []
+        found = census_of_copy(path) if held else census(path)
+        read = f" (read from a copy: {', '.join(held)} hold it)" if held else ""
         print(
-            f"{path}: {found.text()}; {found.refusal() or 'every node carries one'}",
+            f"{path}{read}: {found.text()}; {found.refusal() or 'every node carries one'}",
             file=sys.stderr,
         )
         if args.json:
