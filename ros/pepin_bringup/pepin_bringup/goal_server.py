@@ -295,7 +295,7 @@ FLAGS = FlagSet(
     ),
     Flag(
         "controller",
-        "mppi",
+        "rpp_shim",
         choices=("mppi", "rpp", "rpp_shim"),
         description="what follows the plan: mppi is Nav2's MPPI controller for every planner,"
         " held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own"
@@ -310,7 +310,9 @@ FLAGS = FlagSet(
         " _pivot_to, which drives sent through goto_ros.py never reach. Each leg also ran 5-9"
         " recoveries, which is what an RPP answers a refused arc with; MPPI samples another"
         " trajectory instead",
-        on_when="mppi by default, and whenever the heading at the mark matters",
+        on_when="rpp_shim by default since the evening of 2026-09-23 (six legs: 21-33 s, 6-11"
+        " recoveries, 4-10 cm and 2-5 deg at the mark; MPPI on the same board crawled at a median"
+        " 0.06 m/s); mppi where its sampling is wanted, rpp for the position-only drives of before",
         off_when="rpp for an A/B against the RPP drives of before, or if MPPI's cycle does not"
         " fit the board's control period (the controller server's 'Control loop missed its"
         " desired rate')",

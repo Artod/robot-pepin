@@ -336,9 +336,9 @@ def test_the_planners_buy_a_berth_with_cost_not_with_walls() -> None:
     the front edge of a 55 cm cart) and passed a person's shins at 6 cm (2026-09-09). A wall-sized
     band would strand every docked start, so the berth is cost: expensive to cross, still
     crossable when there is no other way. nav2's NavFn has no cost weight, so Smac2D carries it.
-    The global costmap follows a moving person at 2 Hz. Its inflation falls off as steeply as the
-    local one or more since 2026-09-23 (10.0, was 2.0): the drives run on Hybrid-A*, which checks the whole
-    footprint, and the shallow 2.0 kept half a metre around every piece of furniture expensive,
+    The global costmap follows a moving person at 2 Hz. Its inflation falls off steeply since
+    2026-09-23 (10.0, was 2.0): the drives run on Hybrid-A*, which checks the whole footprint,
+    and the shallow 2.0 kept half a metre around every piece of furniture expensive,
     so its plans hunted troughs across the flat (Artem's call); the point planners' berth is
     narrower for it."""
     assert _p("planner_server")["Smac2D"]["cost_travel_multiplier"] >= 5.0
