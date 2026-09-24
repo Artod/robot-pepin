@@ -544,12 +544,16 @@ FLAGS = FlagSet(
         " update. Sent with the visual strategy while the database localises and changed live;"
         " under ICP and while it maps, always on (the lidar's proximity links are cheap and most"
         " of the graph's)",
-        why="on, RTAB-Map's own default, until a camera-only drive has measured off: parked at the"
-        " base on 2026-09-24 a localised update cost 1.77 s median with it on, almost all of it"
-        " the proximity registrations; on the replay of run 0466 off took an update from 5.3 s to"
-        " 0.55 s (reference BLAS) and still accepted 50 of 55",
-        on_when="while its cost fits the laptop: every update then localises, and a hypothesis the"
-        " words miss is still caught by the pose",
+        why="on, measured 2026-09-24. RTAB-Map in pepin-laptop:xfeat on the evening drives with"
+        " the lidar-held truth (runs 0455-0465, 425 updates, LoopThr 0.05, scratch/xfeat/"
+        "REPORT_replay.txt): on accepted 213 (50 %), 51 wrong at 0.25 m / 5 deg, median 0.12 m /"
+        " 3.0 deg, p90 0.30 m / 8.6 deg, 775 / 1877 ms an update; off accepted 160 (38 %), the same"
+        " 51 wrong, median 0.10 m / 3.9 deg, p90 0.31 m / 11.0 deg, 551 / 826 ms, and a cluster of"
+        " parked accepts 49-57 deg off in 0458. Parked at the base on: 137 accepted in 300 s"
+        " within +0.2..+0.8 deg of the lidar's yaw; off: the accepts walked together to 93 deg"
+        " (+3.4) within minutes, each node pulling its own bias",
+        on_when="always while its cost fits the laptop: every update then localises, a hypothesis"
+        " the words miss is still caught by the pose, and the per-node biases average out",
         off_when="when the camera's localisations arrive seconds late, or the laptop's CPU is short"
         " under a camera-only drive",
     ),
