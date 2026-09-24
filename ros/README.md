@@ -266,14 +266,25 @@ else broke the loop — 620 s after the first closure in one run (33 closures, t
 sessions dropped 24 times: the board router's log of that night line for line), 130 s in another
 (at the thaw; 7 closures, 4 drops). With 8 workers the close started 9 ms after the first closure,
 the dead transport was gone 35 s later and no local session dropped; 16 behaved the same (2 ms,
-2 closures, recovery 0.3 s after the thaw) at 21 threads and 6.4 MB against 7 and 5.7 MB. So
-both routers now run `ZENOH_RUNTIME=(rx: (worker_threads: 16))` (`PEPIN_ZROUTER_RX_WORKERS=2` is
-zenoh's default and the old behaviour), and both log the transport lifecycle and the connector at
+2 closures, recovery 0.3 s after the thaw) at 21 threads and 6.4 MB against 7 and 5.7 MB. The
+count is set by the sessions: each one pushing toward the frozen peer holds a worker and the close
+needs one more — four publishers wedged 4 workers (the close only at the thaw, 4 drops) and not
+5, 6 or 32 (`scratch/link_autopsy/wedge_threshold.py`; one run per count). So each router runs
+more RX workers than the sessions its census counted (2026-09-24, TCP sessions on 7447): the
+board's `ZENOH_RUNTIME=(rx: (worker_threads: 16))` for its 10 nodes and the laptop's link, the
+laptop's 32 for `pepin-vslam`'s 14 sessions, the link, and `pepin-laptop`'s nodes and the tools on
+top (`PEPIN_ZROUTER_RX_WORKERS=2` is zenoh's default and the old behaviour), and both log the
+transport lifecycle and the connector at
 debug (`PEPIN_ZROUTER_LOG`; `info` is the old level): the next wake names the refusing end in one
 line, at 19-28 lines a router per statics freeze-and-thaw. Not fixed and not claimed: the non-recovery
 itself was not reproduced in statics (every thaw there recovered within 7 s, including one 25 s
 after the last closure, as the user wake was), so a Mac wake with the stack up stays a case to
-watch — the heal that worked on the night is the clean-order router restart above.
+watch — the heal that worked on the night is the clean-order router restart above. **When each
+side takes it:** the laptop router at its next re-creation (`ros/laptop.sh stop`, then `start` or
+`vslam`; a running router is left alone), the board's once `board/pepin-zrouter.service` is
+copied (above) and the router restarted. In between the two routers run different worker counts
+and log levels, which is safe — a router's workers guard only its own sessions — but a wake then
+is logged at debug on the laptop's side only.
 
 ## One clock (`PEPIN_TIME_SOURCE`, chrony)
 

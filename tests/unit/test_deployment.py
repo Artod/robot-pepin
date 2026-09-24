@@ -671,18 +671,31 @@ def test_both_routers_log_the_transport_lifecycle_and_nothing_per_message() -> N
     assert '-e "RUST_LOG=$PEPIN_ZROUTER_LOG"' in laptop.split("zrouter_up() {")[1].split("\n}")[0]
 
 
-def test_both_routers_have_rx_workers_to_spare_for_a_frozen_peer() -> None:
+# Transports each router served on 2026-09-24 04:00Z (established TCP sessions on 7447): the
+# board's 10 nodes on the loopback and the laptop's router; the laptop router's 14 sessions of
+# pepin-vslam alone and its link to the board — pepin-laptop's nodes, the goal and flag tools and
+# `docker exec` probes come on top of that one, about ten more.
+BOARD_ROUTER_TRANSPORTS = 11
+LAPTOP_ROUTER_TRANSPORTS = 15
+LAPTOP_ROUTER_UNCOUNTED = 10
+
+
+def test_both_routers_have_more_rx_workers_than_the_sessions_they_serve() -> None:
     """2026-09-23: with zenoh's two RX workers blocked in 20-s pushes to the sleeping laptop, the
-    board router's close of that link never ran and its own nodes' sessions timed out on it.
-    Both routers get the same, larger RX runtime; 2 is the old behaviour, one variable away."""
+    board router's close of that link never ran and its own nodes' sessions timed out on it. Each
+    session pushing toward a frozen peer holds one worker and the close needs one more (4
+    publishers wedged 4 workers and not 5, scratch/link_autopsy/wedge_threshold.py), so each
+    router gets more workers than its census; 2 is the old behaviour, one variable away."""
     import re
 
     lib = (REPO / "ros/lib.sh").read_text()
     shell = re.search(r'PEPIN_ZROUTER_RX_WORKERS="\$\{PEPIN_ZROUTER_RX_WORKERS:-(\d+)\}"', lib)
     unit = (REPO / "board/pepin-zrouter.service").read_text()
     board = re.search(r"^Environment=PEPIN_ZROUTER_RX_WORKERS=(\d+)$", unit, re.M)
-    assert shell and board and shell.group(1) == board.group(1), "one number for both routers"
-    assert int(board.group(1)) > 10, "more than the sessions either router serves (9 and ~15)"
+    assert shell and board
+    assert int(board.group(1)) > BOARD_ROUTER_TRANSPORTS + 1, "the board's census, with room"
+    laptop_peak = LAPTOP_ROUTER_TRANSPORTS + LAPTOP_ROUTER_UNCOUNTED
+    assert int(shell.group(1)) > laptop_peak + 1, "the laptop's census and what it missed"
     runtime = '-e "ZENOH_RUNTIME=(rx: (worker_threads: $PEPIN_ZROUTER_RX_WORKERS))"'
     runs = [ln for ln in unit.splitlines() if ln.startswith("ExecStart=")]
     assert runs[0].count(runtime) == 2, "both docker run bodies"

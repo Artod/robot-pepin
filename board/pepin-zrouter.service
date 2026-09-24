@@ -27,8 +27,11 @@ Environment=PEPIN_ZIMAGE=pepin-ros:zenoh
 # while the laptop was asleep this router's two RX threads sat in 20-s pushes to it, the
 # "Closing transport!" they scheduled ran on the same two threads and never started, and the
 # stack's own sessions timed out on the router — 2026-09-23, reproduced in statics with the
-# default and gone with 8 workers (ros/lib.sh's PEPIN_ZROUTER_RX_WORKERS has the numbers). Cost:
-# idle threads park, one stack each; the census after the deploy is the measurement (rule 20).
+# default and gone with 8 workers (ros/lib.sh's PEPIN_ZROUTER_RX_WORKERS has the numbers). A
+# router needs more workers than the sessions that push to the frozen peer (4 publishers wedged 4
+# workers, not 5); this one serves 11 (census 2026-09-24: 10 nodes on the loopback and the
+# laptop's router), so 16 — the laptop's router, with more sessions, runs 32. Cost: idle threads
+# park, one stack each; the census after the deploy is the measurement (rule 20).
 Environment=PEPIN_ZROUTER_RX_WORKERS=16
 Environment=PEPIN_ZROUTER_LOG=info,zenoh::net::runtime::orchestrator=debug,zenoh_transport::unicast::manager=debug,zenoh_transport::unicast::establishment=debug,zenoh_transport::unicast::universal::link=debug,zenoh_transport::unicast::universal::transport=debug
 # The previous router's log first, the way pepin-ros.service keeps Nav2's: the container is not

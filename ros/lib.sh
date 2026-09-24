@@ -107,10 +107,22 @@ PEPIN_ZROUTER_LOG="${PEPIN_ZROUTER_LOG:-info,zenoh::net::runtime::orchestrator=d
 # own sessions dropped 24 times — which is the board router's 2026-09-23 log line for line
 # (x23-27 closures a sleep, its nodes' sessions timing out on it). With 8 the close started 9 ms
 # after the first closure, the dead transport was gone 35 s later and no local session dropped.
-# 16 because a router here serves about ten sessions (the board: 9 on its loopback, the laptop:
-# the vslam container's ~15 nodes) and each one can hold a worker while the far side is frozen.
-# Idle workers park: no CPU, a thread stack each (rule 20; measured in the same script).
-PEPIN_ZROUTER_RX_WORKERS="${PEPIN_ZROUTER_RX_WORKERS:-16}"
+# HOW MANY is set by the sessions, not by a round number: each session that pushes toward the
+# frozen peer holds one worker (in its 20-s push, or on the queue's mutex behind it) and the
+# close needs one more. Four publishers wedged 4 workers (the close ran only at the thaw, 4
+# closures, 4 session drops) and not 5, 6 or 32 (the close within 1 ms, 2 closures, 0 drops;
+# scratch/link_autopsy/wedge_threshold.py, 2026-09-24) — ONE run per worker count (n=1), as for
+# 8 and 16 above. So a router gets more workers than the sessions it serves, with room. Census
+# 2026-09-24 04:00Z (established TCP sessions on 7447): THIS laptop's router 14 with pepin-vslam
+# alone, plus its link to the board, with pepin-laptop's nodes, the goal and flag tools and every
+# `docker exec` probe on top — so 32 here; the board's router 10 and the laptop's link, so 16 in
+# its unit (board/pepin-zrouter.service). Idle workers park: no CPU, a thread and its stack each
+# (32 workers: 37 threads and 7.1 MB against 7 and 5.7 MB with 2).
+# The laptop router takes this and PEPIN_ZROUTER_LOG at its next re-creation (ros/laptop.sh stop,
+# then start or vslam; zrouter_up leaves a running router alone), the board's only once its unit
+# is copied and the router restarted (ros/README.md). The two may run different values in
+# between, which is safe: a router's workers guard its own sessions only.
+PEPIN_ZROUTER_RX_WORKERS="${PEPIN_ZROUTER_RX_WORKERS:-32}"
 pepin_rmw_is_zenoh() { [ "$PEPIN_RMW" = zenoh ]; }
 # This checkout's ros/, wherever the sourcing script lives (the container configs are under it).
 PEPIN_ROS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
