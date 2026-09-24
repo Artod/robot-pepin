@@ -42,8 +42,9 @@ from launch.actions import (
 from launch.event_handlers import OnProcessExit
 from launch.launch_context import LaunchContext
 from launch.substitutions import LaunchConfiguration, PythonExpression
-from launch_ros.actions import ComposableNodeContainer, Node
+from launch_ros.actions import Node
 from launch_ros.descriptions import ComposableNode
+from pepin_bringup.launch_kit import respawned_container
 
 from pepin.deployment import (
     CONTAINER_STOP_TIMEOUT_S,
@@ -87,11 +88,11 @@ def _after_ghost(admin: str, *names: str) -> str:
     return f"python3 -m pepin_bringup.ghost_wait {admin} {' '.join(names)} --"
 
 
-def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
+def nav_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
+    """The Nav2 nodes this side composes, described anew on every call (a respawned container
+    loads fresh ones, see pepin_bringup.launch_kit): the servers of pepin.deployment.nav_nodes,
+    map_server when ``map_server:=true`` asks for it, and this side's lifecycle manager."""
     side = LaunchConfiguration("side").perform(context)
-    # The retired frame owner (CLAUDE.md rule 19): the tracker stands down and
-    # pepin_bringup.slam_frame broadcasts map -> odom from the laptop's correction instead.
-    slam_frame = LaunchConfiguration("slam").perform(context).lower() == "true"
     # A pgm served by map_server is no longer part of the running loop: the relocalizer republishes
     # the map it tracks on (pepin_bringup.relocalizer.TRACKED_MAP_TOPIC) and both costmaps' static
     # layers read THAT (ros/params/nav2_params.yaml), and the board's own cold-boot map is the cache
@@ -99,18 +100,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # default in a known room and `map_server:=true` is what brings the file back — the very first
     # boot of a room nobody has ever mapped, or a session that must start from a frozen pgm.
     map_server = LaunchConfiguration("map_server").perform(context).lower() == "true"
-    # Who owns map -> odom (PEPIN_LOCALIZER, pepin.deployment.localizer): "tracker" launches the
-    # relocalizer here as before, "rtabmap" launches none and the transform arrives from the
-    # laptop's RTAB-Map over the transport, with both costmaps reading /map instead of the map
-    # that tracker would have republished.
-    owner = localizer()
-    admin = LaunchConfiguration("bridge_admin").perform(context) or bridge_admin_for(side)
     params = LaunchConfiguration("params_file")
-    # What every process of this launch is given: the params file, and under "rtabmap" the one
-    # overlay that moves the static layers off the tracker's topic (MAP_FROM_LAPTOP_PARAMS).
-    process_params: list = [params]  # type: ignore[type-arg]
-    if owner == "rtabmap":
-        process_params.append(MAP_FROM_LAPTOP_PARAMS)
     map_file = LaunchConfiguration("map")
     to_smoother = [("cmd_vel", "cmd_vel_nav")]
     catalogue = {
@@ -175,29 +165,46 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             parameters=[{"autostart": autostart_for(side), "node_names": list(nav_nodes(side))}],
         )
     )
-    container = ComposableNodeContainer(
-        name=f"nav2_container_{side}" if side != "all" else "nav2_container",
-        namespace="",
-        package="rclcpp_components",
-        executable="component_container_isolated",
-        output="screen",
+    return nodes
+
+
+def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
+    side = LaunchConfiguration("side").perform(context)
+    # The retired frame owner (CLAUDE.md rule 19): the tracker stands down and
+    # pepin_bringup.slam_frame broadcasts map -> odom from the laptop's correction instead.
+    slam_frame = LaunchConfiguration("slam").perform(context).lower() == "true"
+    # Who owns map -> odom (PEPIN_LOCALIZER, pepin.deployment.localizer): "tracker" launches the
+    # relocalizer here as before, "rtabmap" launches none and the transform arrives from the
+    # laptop's RTAB-Map over the transport, with both costmaps reading /map instead of the map
+    # that tracker would have republished.
+    owner = localizer()
+    admin = LaunchConfiguration("bridge_admin").perform(context) or bridge_admin_for(side)
+    params = LaunchConfiguration("params_file")
+    # What every process of this launch is given: the params file, and under "rtabmap" the one
+    # overlay that moves the static layers off the tracker's topic (MAP_FROM_LAPTOP_PARAMS).
+    process_params: list = [params]  # type: ignore[type-arg]
+    if owner == "rtabmap":
+        process_params.append(MAP_FROM_LAPTOP_PARAMS)
+    # A crash of one Nav2 node takes the whole container with it (SIGABRT at a goal, 2026-09-10
+    # 16:06: the board drove nothing until a stack restart). Respawned, the container is back in
+    # seconds WITH its nodes, described anew for that start (pepin_bringup.launch_kit: a reload
+    # of the first start's descriptions would lose the controller's cmd_vel -> cmd_vel_nav remap
+    # and drive the wheels past the velocity smoother), and the laptop's bring-up activates the
+    # board's nodes again (goal_server, pepin.deployment.next_transition).
+    container, load = respawned_container(
+        f"nav2_container_{side}" if side != "all" else "nav2_container",
+        nav_parts,
         # Planning yields to the sensor nodes (nice -10) under load; the ghost wait keeps the
         # niceness through its exec.
-        prefix=f"nice -n 5 {_after_ghost(admin, *nav_container_nodes(side))}",
-        # A crash of one Nav2 node takes the whole container with it (SIGABRT at a goal,
-        # 2026-09-10 16:06: the board drove nothing until a stack restart). Respawned, the
-        # container is back in seconds and the laptop's bring-up activates its nodes again.
-        respawn=True,
-        respawn_delay=2.0,
+        f"nice -n 5 {_after_ghost(admin, *nav_container_nodes(side))}",
         # The whole params file goes to the container process as well: the costmaps are
         # sub-nodes (/local_costmap/local_costmap) created inside controller/planner and
         # only see parameters given to the process, not the ones given to their parents.
         # Which is also the only place MAP_FROM_LAPTOP_PARAMS can reach them from.
         parameters=process_params,
-        composable_node_descriptions=nodes,
     )
     # The ROS nodes; the watches below are plain processes and start at once.
-    actions: list = [container]  # type: ignore[type-arg]
+    actions: list = [container, load]  # type: ignore[type-arg]
     if runs_here(side, "slam_frame", slam_frame):
         # The RETIRED owner of map -> odom, off by default: the laptop's RTAB-Map correction
         # broadcast here (pepin_bringup.slam_frame), because /tf crosses the bridge board -> laptop
