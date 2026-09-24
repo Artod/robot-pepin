@@ -128,6 +128,7 @@ from pepin.graphmode import (
     XFEAT_DETECTOR_PATH,
     XFEAT_MATCHER_PATH,
     ModeRule,
+    ModeVerdict,
     StrategyRule,
     describe_sigma,
     seating_refusal,
@@ -589,22 +590,21 @@ class RtabmapFrame(Node):
         self._holder: str | None = None  # who /localization/sources says is holding the pose
         self._holder_at = -math.inf  # ...and when that report arrived, by our clock
         self._mode_pending: Any = None  # a switch the service has not answered yet
-        self._mode_failed = 0  # switches the service refused or never answered
+        self._mode_failed = 0  # switches that could not go out when the rule asked for them...
+        self._mode_held: str | None = None  # ...and why the one asked for now is held back
         # ...and the other live switch: which registration RTAB-Map runs, decided by what the
         # snapshots carry (pepin.graphmode.StrategyRule). It starts at the strategy the launch table
         # set, so the rule asks for nothing until it has a reason to.
         self._strategy = StrategyRule(STRATEGY_ICP)
         self._snapshots: SnapshotState | None = None  # the last state sensor_pack published...
         self._snapshots_at = -math.inf  # ...and when it reached us, by our clock
-        self._strategy_failed = 0  # strategy switches the parameter path could not take
+        self._strategy_failed = 0  # strategy switches the parameter path could not take...
+        self._strategy_held = False  # ...and whether the one asked for now is waiting for it
         # ...and what the visual registration matches with (visual_features, pnp_reproj_px): the
         # set last sent to RTAB-Map, starting as the launch table's own (ORB, 2 px), and whether
         # this image can run xfeat at all — the two adapters RTAB-Map loads by path are here or not.
         self._xfeat_here = all(Path(p).is_file() for p in (XFEAT_DETECTOR_PATH, XFEAT_MATCHER_PATH))
         self._visual_sent = visual_parameters(STRATEGY_ICP, FEATURES_ORB, PNP_REPROJ_PX)
-        # The Reg/Strategy that went out with it: a switch the parameter path could not take leaves
-        # RTAB-Map on the old one, and its features must stay the old one's (ORB under ICP).
-        self._strategy_sent = STRATEGY_ICP
         # THE TWO HALVES OF ONE UPDATE. The node a /rtabmap/info named and that message's stamp;
         # RTAB-Map's own localisation, its stamp and the planar 3x3 it measured. A word is made when
         # the two carry the same stamp, once (`_spent`): an update recognised nothing is silence.
@@ -788,12 +788,16 @@ class RtabmapFrame(Node):
         )
 
     def _mode_text(self) -> str:
-        """RTAB-Map's memory mode for a report line: the rule's own verdict, and the switches the
-        service would not take."""
-        return self._mode.text() + (
-            f", {self._mode_failed} switches the service could not take"
-            if self._mode_failed
-            else ""
+        """RTAB-Map's memory mode for a report line: the rule's own verdict, the switches that
+        could not go out when asked for, and why the one asked for now is held back."""
+        return (
+            self._mode.text()
+            + (
+                f", {self._mode_failed} switches the service could not take"
+                if self._mode_failed
+                else ""
+            )
+            + (f", held back: {self._mode_held}" if self._mode_held else "")
         )
 
     def _agreement_text(self) -> str:
@@ -1284,19 +1288,34 @@ class RtabmapFrame(Node):
             describe_sigma(self._belief_sigma),
         )
         if verdict is None:
+            self._mode_held = None
             return
+        held = self._send_mode(verdict)
+        if held is not None:
+            # NOT SENT, SO NOT APPLIED: the rule takes the switch back and asks again next tick.
+            # Recorded as applied, it was never asked again, and the visual set that follows the
+            # mode (_visual_wanted) believed a mode RTAB-Map had never been told.
+            self._mode.withdraw()
+            if self._mode_held is None:
+                self._mode_failed += 1  # once per switch held back, not once per tick
+            self._mode_held = held
+            return
+        self._mode_held = None
+
+    def _send_mode(self, verdict: ModeVerdict) -> str | None:
+        """Send one memory-mode switch and the parameters that travel with it; ``None`` when it
+        went out, otherwise why it could not (the last switch unanswered, the service not up)."""
         if self._mode_pending is not None and not self._mode_pending.done():
-            self._mode_failed += 1
-            return
+            return "the last switch is unanswered"
         client = self._modes[verdict.mapping]
         if not client.service_is_ready():
-            self._mode_failed += 1
-            return
+            return f"{client.srv_name} is not up"
         self._mode_pending = client.call_async(Empty.Request())
         self._retune(verdict.mapping)
         # rclpy names a client's service ``srv_name``; a fake with ``.name`` let this line crash
         # the node on its first live switch (2026-09-18).
         self.get_logger().info(f"rtabmap memory: {verdict.text()} ({client.srv_name})")
+        return None
 
     def _retune(self, mapping: bool) -> None:
         """Set the parameters the new mode needs and have RTAB-Map re-read them.
@@ -1323,8 +1342,8 @@ class RtabmapFrame(Node):
         parameters that table already carries. The file:line for all of it is in
         :mod:`pepin.graphmode`.
         """
-        if self._tuner is None or not self._tuner.service_is_ready():
-            return False
+        if self._tuner is None or self._reread is None or not self._path_up():
+            return False  # both calls or neither: a half-sent set is retried whole
         request = SetParameters.Request()
         request.parameters = [
             Parameter(
@@ -1334,8 +1353,6 @@ class RtabmapFrame(Node):
             for name, value in values.items()
         ]
         self._tuner.call_async(request)
-        if self._reread is None or not self._reread.service_is_ready():
-            return False
         self._reread.call_async(Empty.Request())
         return True
 
@@ -1361,31 +1378,39 @@ class RtabmapFrame(Node):
                 state.carries(LIDAR) if (state is not None and fresh) else None,
                 state.kind if state is not None else "",
             )
-        if verdict is not None:
+        if verdict is None:
+            self._strategy_held = False
+        else:
             visual = self._visual_wanted(verdict.strategy)
             # One set for the strategy and its features: the pipeline RTAB-Map re-creates on a new
             # Reg/Strategy is built from the accumulated map, so it is born with the right ones.
             if not self._set_parameters({**verdict.parameters, **visual}):
-                self._strategy_failed += 1
+                # Not sent, so not applied: the rule takes it back and asks again next tick, and
+                # the strategy the features follow stays the one RTAB-Map still runs.
+                self._strategy.withdraw()
+                if not self._strategy_held:
+                    self._strategy_failed += 1  # once per switch held back, not once per tick
+                self._strategy_held = True
                 return
-            self._visual_sent, self._strategy_sent = visual, verdict.strategy
+            self._strategy_held = False
+            self._visual_sent = visual
             self.get_logger().info(
                 f"rtabmap registration: {verdict.text()} -> Reg/Strategy {verdict.strategy},"
                 f" {self._visual_text()} (set on {RTABMAP_NODE} and re-read through"
                 f" {RTABMAP_NODE}/update_parameters)"
             )
             return
-        visual = self._visual_wanted(self._strategy_sent)
-        if visual != self._visual_sent and self._path_up() and self._set_parameters(visual):
-            # A flag moved, or a switch above went out without its features: the strategy in
-            # force is kept, only the visual set is re-sent (RegistrationVis re-reads it and
+        visual = self._visual_wanted(self._strategy.strategy)
+        if visual != self._visual_sent and self._set_parameters(visual):
+            # A flag moved, or the memory mode did: the strategy in force is kept, only the
+            # visual set is re-sent (RegistrationVis re-reads it and
             # rebuilds its detectors, RegistrationVis.cpp:290-293).
             self._visual_sent = visual
             self.get_logger().info(f"rtabmap registration: {self._visual_text()}")
 
     def _path_up(self) -> bool:
         """Whether both halves of RTAB-Map's parameter path answer: the set and the re-read.
-        Asked before a re-send retried every tick, so a half-up path is not sent a set a second."""
+        Asked before every set, so a half-up path is sent nothing rather than half a set."""
         return all(c is not None and c.service_is_ready() for c in (self._tuner, self._reread))
 
     def _features(self) -> str:

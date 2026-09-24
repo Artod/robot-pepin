@@ -775,18 +775,61 @@ def test_the_switch_is_a_flag_and_off_it_only_reports() -> None:
 
 
 def test_a_parameter_path_that_is_not_up_is_counted_and_retried() -> None:
-    """A switch the path could not take must not be forgotten: the rule asked for it, so the
-    report line has to say the pipeline is not what it thinks."""
+    """A switch the path could not take must not be forgotten: it is counted once, the report says
+    the pipeline is still the old one, and the moment the path is up the switch goes out — a
+    camera-only session whose first switch met a path that was not up used to stay on ICP."""
     node = rtabmap_frame.RtabmapFrame()
-    node.clock.seconds = 10.0
-    _snapshots(node, ("camera",), "camera-only")
-    node.timers[0][1]()
-    node.clock.seconds = 10.6
-    _snapshots(node, ("camera",), "camera-only")
-    node.timers[0][1]()
-    assert node._strategy_failed == 1
+    for seconds in (10.0, 10.6, 10.7, 10.8):
+        node.clock.seconds = seconds
+        _snapshots(node, ("camera",), "camera-only")
+        node.timers[0][1]()
+    assert node._strategy_failed == 1, "once per switch held back, not once per tick"
+    assert node._strategy.strategy == rtabmap_frame.STRATEGY_ICP, "what RTAB-Map still runs"
     node._report()
-    assert "switches the parameter path could not take" in node.logger.texts("info")[-1]
+    report = node.logger.texts("info")[-1]
+    assert "switches the parameter path could not take" in report
+    assert "asking visual" in report
+    tuner, reread = _tuner_ready(node)
+    node.clock.seconds = 10.9
+    _snapshots(node, ("camera",), "camera-only")
+    node.timers[0][1]()
+    assert _strategies(tuner) == ["0"] and reread.calls, "retried the tick the path came up"
+    assert node._strategy.strategy == "0"
+
+
+def test_a_half_up_parameter_path_is_sent_nothing() -> None:
+    """The set and its re-read go out together or not at all: a set whose re-read could not follow
+    was counted as failed and then sent again whole on the retry."""
+    node = rtabmap_frame.RtabmapFrame()
+    tuner = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters"]
+    tuner.ready = True  # update_parameters is not up
+    _go_visual(node)
+    assert not tuner.calls and node._strategy_failed == 1
+
+
+def test_a_mode_switch_the_service_could_not_take_is_asked_for_again() -> None:
+    """The rule used to record a switch as applied when it returned it, so a switch dropped
+    because the service was not up (or the last one unanswered) was never asked again — and the
+    visual features that follow the mode believed a mode RTAB-Map had never been told."""
+    with ros_stubs.parameters(graph_memory="localise"):
+        node = rtabmap_frame.RtabmapFrame()
+    localising = node.service_clients[rtabmap_frame.LOCALISATION_SERVICE]
+    for seconds in (1.0, 1.1, 1.2):
+        node.clock.seconds = seconds
+        node.timers[0][1]()
+    assert not localising.calls and node._mode.mode == "unknown"
+    assert node._mode_failed == 1, "once per switch held back, not once per tick"
+    node._report()
+    assert (
+        f"held back: {rtabmap_frame.LOCALISATION_SERVICE} is not up"
+        in (node.logger.texts("info")[-1])
+    )
+    _ready(node)
+    node.timers[0][1]()
+    assert len(localising.calls) == 1 and node._mode.mode == "localising"
+    node.timers[0][1]()
+    assert len(localising.calls) == 1, "and once it went out, once"
+    assert node._mode_held is None and node._mode_failed == 1
 
 
 # ---- the visual registration's features ---------------------------------------------------------
@@ -917,8 +960,10 @@ def test_a_visual_strategy_that_maps_carries_orb(
     _adapters(monkeypatch, tmp_path, present=True)
     with ros_stubs.parameters(graph_memory="map"):
         node = rtabmap_frame.RtabmapFrame()
+    _ready(node)  # the mapping switch goes out, so RTAB-Map IS mapping
     tuner, _ = _tuner_ready(node)
     _go_visual(node)
+    assert node._mode.mode == "mapping"
     strategy_sets = [s for s in _sent(tuner) if "Reg/Strategy" in s]
     assert strategy_sets[-1]["Reg/Strategy"] == "0"
     assert strategy_sets[-1]["Vis/FeatureType"] == "8"
