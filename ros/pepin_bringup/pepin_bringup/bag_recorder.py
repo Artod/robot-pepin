@@ -65,12 +65,20 @@ RAW_SCAN_TOPIC = "/ldlidar_node/scan"
 # cell with no lidar return beside it could not be pinned on a camera voxel after the fact (the
 # "hill" on the carpet at the base, tape 0458). bag_to_tape skips them too.
 CAMERA_MARK_TOPICS = ("/depth_marks", "/depth_free")
+# ...and every odometry the board's EKF fuses (ros/params/ekf.yaml) that the tape has no row for.
+# The tape keeps the wheels' own /odom (odom0, published raw by the base bridge), the lidar's
+# /odom_laser (odom3), the gyro (imu0) and the filter's output — but not the camera's visual
+# odometry (/vo, odom1: pepin_bringup.visual_odometry on the laptop, the gated rgbd_odometry) nor
+# the zero-velocity update (/zupt, odom2, the tracker's), so a fused pose that went wrong could not
+# be taken apart into what each source said while it happened. bag_to_tape skips them.
+ODOMETRY_TOPICS = ("/vo", "/zupt")
 BAG_TOPICS: tuple[str, ...] = (
     *sorted(TOPIC_RECORDS),
     "/tf",
     "/tf_static",
     RAW_SCAN_TOPIC,
     *CAMERA_MARK_TOPICS,
+    *ODOMETRY_TOPICS,
 )
 # MCAP, no compression: the storage rosbag2 ships with in Jazzy, read by rosbag2_py on the laptop
 # and by every MCAP tool. Compression would cost this board's cores exactly what we are taking
