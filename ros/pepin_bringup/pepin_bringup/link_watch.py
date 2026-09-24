@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import time
 
-import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from action_msgs.srv import CancelGoal
 from rclpy.client import Client
@@ -23,6 +22,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Header
 
 from pepin.deployment import BOARD_ACTIONS, HEARTBEAT_TOPIC, LinkWatch
+from pepin_bringup.node_kit import spin_main
 
 
 class LinkWatchNode(Node):
@@ -80,16 +80,7 @@ class LinkWatchNode(Node):
 
 
 def main() -> None:
-    rclpy.init()
-    node = LinkWatchNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    spin_main(LinkWatchNode)  # node_kit: the same way out as every node, kill -USR2 for stacks
 
 
 if __name__ == "__main__":
