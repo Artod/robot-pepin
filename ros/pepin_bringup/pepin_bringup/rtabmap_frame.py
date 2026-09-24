@@ -599,12 +599,13 @@ FLAGS = FlagSet(
         " the service, and a call it does not answer computed locally. Written to"
         f" {REGISTRATION_FILE}, which RTAB-Map's adapters read on every call (one stat): live,"
         " no restart of RTAB-Map",
-        why="auto, measured 2026-09-24 (scratch/models/endpoint_bench.py, from inside a"
-        " container): XFeat answers an 800x600 picture in 21 ms on MPS alone and about 40 ms"
-        " beside RAFT-Stereo, a node's stored picture already seen in about 1 ms (the service's"
-        " cache), LighterGlue a pair in about 105 ms, where RTAB-Map's own registration took"
-        " 0.67 s on the VM's CPU; auto keeps the old path as the answer to a service that is"
-        " down, at one timeout per 10 s while it is",
+        why="auto, measured 2026-09-24 in RTAB-Map itself (scratch/models/replay_matrix.sh,"
+        " the replay of camera-only run 0466, words at LoopThr 0.05): a registration took 454 ms"
+        " through the service against 1879 ms in RTAB-Map's own process on the VM's CPU, the"
+        " update 492 ms against 1900 ms median, and 33 against 32 updates localised; from inside"
+        " a container XFeat answers an 800x600 picture in 41 ms, a node picture already seen in"
+        " 1.5 ms, LighterGlue a pair in 129 ms (scratch/models/endpoint_bench.py). auto keeps"
+        " the old path as the answer to a service that is down",
         on_when="service to measure the service alone (a registration it cannot answer then finds"
         " no features, which shows as no recognition), auto always otherwise",
         off_when="local to reproduce the registration of before 2026-09-24, or when the laptop's"
@@ -641,24 +642,37 @@ FLAGS = FlagSet(
     ),
     Flag(
         "place_recognition",
-        PLACE_WORDS,
+        PLACE_DESCRIPTOR,
         choices=(PLACE_WORDS, PLACE_DESCRIPTOR),
         description="how RTAB-Map finds WHICH database node a picture is (its likelihood, before"
         " any registration): words — the ORB bag of words' TF-IDF (Kp/TfIdfLikelihoodUsed true,"
-        " RTAB-Map's default); descriptor — the dot product of the nodes' learned place"
-        " descriptors (false; rtabmap Memory::computeLikelihood -> Signature::compareTo), which"
+        " Rtabmap/VirtualPlaceLikelihoodRatio 0, RTAB-Map's defaults); descriptor — the dot"
+        " product of the nodes' learned place descriptors as z-scores (false and 1; rtabmap"
+        " Memory::computeLikelihood -> Signature::compareTo, Rtabmap::adjustLikelihood), which"
         " sensor_pack attaches to every snapshot. descriptor is sent ONLY when it cannot abort"
-        f" RTAB-Map: the snapshots carry one each ({PLACE_TOPIC}) and the database's census at"
-        f" this start ({CENSUS_ENV}) says every node carries exactly one of the same length;"
-        " otherwise the words, and the report line says why. Live",
-        why="words for now: the descriptor is the measured better retrieval — BoQ-DINOv2 R@1"
-        " 0.986 on 219 evening frames against the daylight database, where the ORB words'"
-        " hypotheses read 0.05-0.07 (scratch/models/place_parity.py) — but RTAB-Map's own"
-        " hypothesis under it is the replay's to measure (scratch/models/replay_place.py)",
-        on_when="descriptor on a backfilled database (ros/tools/place_backfill.py) whenever the"
-        " camera must recognise a place in other light than the database's",
-        off_when="words to reproduce RTAB-Map's stock place recognition, or while the database has"
-        " not been backfilled (the census refuses the descriptor then anyway)",
+        " RTAB-Map: its core carries ros/patches/rtabmap-keep-global-descriptors.patch (the"
+        " marker /opt/rtabmap_patches/keep-global-descriptors), the snapshots carry one each"
+        f" ({PLACE_TOPIC}) and the database's census at this start ({CENSUS_ENV}) says every node"
+        " carries exactly one of the same length; otherwise the words, and the report line says"
+        " why. Live",
+        why="descriptor, measured 2026-09-24 in RTAB-Map itself: the replay of the evening runs"
+        " against the backfilled daylight database (scratch/models/replay_place.py,"
+        " replay_matrix.sh, matrix_report.py; xfeat, 2 px, proximity on, a lidar-only snapshot"
+        " every fourth). Words at the stock Rtabmap/LoopThr 0.11: hypotheses 0.05-0.09, 0 camera"
+        " updates localised on 0457, 0460 and the camera-only 0466; words at 0.05: 9 of 23 (9 of 9"
+        " judged right), 3 of 17 (0 of 1) and 53 of 55. Descriptor with the ratio 1 at 0.11:"
+        " hypotheses 0.42-0.88 (median), 16 of 23 (15 of 15 right), 14 of 17 (11 of 11) and 54"
+        " of 55; at 0.05 two of 0460's eleven judged were wrong. With the ratio 0 the"
+        " descriptor's hypotheses read 0.01 and nothing localised. The retrieval behind it:"
+        " BoQ-DINOv2 R@1 0.986 on 219 evening frames (scratch/models/place_parity.py). Without"
+        " the patch RTAB-Map 0.22.1 aborted at the first comparison after a registration"
+        " (Signature.cpp:252), which is why the patch is a gate",
+        on_when="descriptor on a backfilled database (ros/tools/place_backfill.py) and a patched"
+        " core, and then visual_confirm rtabmap: the descriptor's hypotheses reach 0.11 by"
+        " themselves, and aggressive's 0.05 let the two wrong ones of 0460 through",
+        off_when="words to reproduce RTAB-Map's stock place recognition, or when a drive shows the"
+        " descriptor naming the wrong node; an unpatched core, a database not backfilled or"
+        " snapshots without descriptors keep the words by themselves",
     ),
     Flag(
         "word_at_picture_time",

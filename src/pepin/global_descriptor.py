@@ -222,9 +222,11 @@ TFIDF = "Kp/TfIdfLikelihoodUsed"
 # the "no place" hypothesis mean / stddev + 1. The words' TF-IDF scores are sparse (most nodes
 # share no word, score 0 and are left out of the mean), so that works; a descriptor scores EVERY
 # node, all of them in (cos + 1) / 2 ~ 0.5-0.75, so the mean is large, the deviation small, and
-# "no place" wins every time: the replay's highest hypothesis read 0.01 under it
-# (scratch/models/replay_place.py). The ratio 1 scores (value - mean) / stddev and "no place"
-# stddev / (max - mean) + 1 — a z-score, which is what a dense similarity needs.
+# "no place" wins every time. The ratio 1 scores (value - mean) / stddev and "no place"
+# stddev / (max - mean) + 1 — a z-score, which is what a dense similarity needs. Measured
+# 2026-09-24 on the replay of the evening runs (scratch/models/matrix_report.py): ratio 0, the
+# highest hypothesis 0.009-0.011 and not one of 95 camera updates localised; ratio 1, medians
+# 0.42 / 0.58-0.63 / 0.88 on runs 0457 / 0460 / 0466 and 16 of 23, 14 of 17, 54 of 55 localised.
 VIRTUAL_PLACE_RATIO = "Rtabmap/VirtualPlaceLikelihoodRatio"
 WORDS_PARAMETERS = {TFIDF: "true", VIRTUAL_PLACE_RATIO: "0"}
 DESCRIPTOR_PARAMETERS = {TFIDF: "false", VIRTUAL_PLACE_RATIO: "1"}

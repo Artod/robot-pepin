@@ -15,10 +15,11 @@ THREE ENDPOINTS, one process, one failure domain (the depth network is the other
   vector out, its length in ``X-Dim`` and the weights that said it in ``X-Model``.
 
 WHERE EACH RUNS is config/models.json (``device`` per model), because it is a measurement, not a
-belief: XFeat 21 ms on MPS against 64 ms on the CPU per 800x600 picture, LighterGlue about as fast
-on the CPU as on MPS (and 4x slower on MPS in the first bench), BoQ-DINOv2 42 ms on MPS against
-143 ms on the CPU (scratch/models/endpoint_bench.py has the numbers through the service). Models on
-one device take turns under that device's lock (:class:`pepin.model_service.ModelServer`).
+belief (scratch/models/endpoint_bench.py, through the service, 800x600, 2026-09-24): XFeat 46 ms
+median, 54 ms p90 on the CPU against 41-81 ms median and up to 241 ms p90 on MPS, which the depth
+host's RAFT-Stereo keeps 80 % busy — so the CPU; LighterGlue 109-129 ms on the CPU against 518 ms
+on MPS; BoQ-DINOv2 57 ms on MPS against 167 ms on the CPU. Models on one device take turns under
+that device's lock (:class:`pepin.model_service.ModelServer`).
 
 A MODEL THAT FAILS TO BUILD does not take the process down: its endpoint answers 500 with the
 reason and ``/health`` names it (the tag reads ``failed: ...``), while the other two serve. A
@@ -83,7 +84,7 @@ def models_url() -> str:
 class XFeatConfig:
     """XFeat's device, its default keypoint cap and how many answers the LRU keeps."""
 
-    device: str = "mps"
+    device: str = "cpu"
     top_k: int = 2048
     cache: int = 64
 

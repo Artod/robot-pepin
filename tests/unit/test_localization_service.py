@@ -39,14 +39,14 @@ REPO = Path(__file__).resolve().parents[2]
 def test_the_shipped_config_names_every_model_on_a_measured_device() -> None:
     config = load_config(REPO / "config/models.json")
     assert config.port == 8791
-    assert (config.xfeat.device, config.match.device, config.place.device) == ("mps", "cpu", "mps")
+    assert (config.xfeat.device, config.match.device, config.place.device) == ("cpu", "cpu", "mps")
     assert config.xfeat.top_k == 2048 and config.match.min_conf == 0.1
     assert config.place.model == "boq_dinov2" and place_dim(config) == 12288
 
 
 def test_the_config_ignores_comments_defaults_the_rest_and_refuses_typos() -> None:
     config = LocalizationConfig.from_json({"_note": "x", "xfeat": {"_note": "y", "cache": 8}})
-    assert config.xfeat.cache == 8 and config.xfeat.device == "mps" and config.port == 8791
+    assert config.xfeat.cache == 8 and config.xfeat.device == "cpu" and config.port == 8791
     with pytest.raises(ValueError, match=r"models\.json"):
         LocalizationConfig.from_json({"xfeat": {"devise": "cpu"}})
 
