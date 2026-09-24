@@ -117,7 +117,7 @@ from pepin.watch import (
     Sigma,
 )
 from pepin_bringup.msgs import stamp_seconds, yaw_of
-from pepin_bringup.node_kit import Switches, TfLookup
+from pepin_bringup.node_kit import Switches, TfLookup, spin_main
 
 PORT = 3337
 GOOD_FIT = DRIVE_FIT  # below this the robot is told to find itself before it drives (pepin.watch)
@@ -672,6 +672,10 @@ class GoalServer(Node):
         path = Path(str(self._runs.recording))
         self.get_logger().info(f"run {self._runs.run}: recording {path}")
         return path
+
+    def close(self) -> None:
+        """Before the node goes (node_kit.spin_main's order): close a tape still open."""
+        self.stop_recording()
 
     def stop_recording(self) -> None:
         """Close the run's tape (the recorder flushes and syncs it); harmless when none is open."""
@@ -1338,17 +1342,10 @@ class GoalServer(Node):
 
 
 def main() -> None:
-    rclpy.init()
-    node = GoalServer()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.stop_recording()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    # Through node_kit.spin_main like the other nodes: close() (the tape) first, then the TF
+    # listener's non-daemon thread — with its own spin this node never exited on SIGINT — and
+    # kill -USR2 prints its stacks (its main thread burns 43-46 % of an A53 core, 2026-09-24).
+    spin_main(GoalServer)
 
 
 if __name__ == "__main__":
