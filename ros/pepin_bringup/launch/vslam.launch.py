@@ -251,6 +251,14 @@ RTABMAP = {
     # loud so the confirmation can be set live (CoreWrapper.cpp:362-379).
     "Rtabmap/LoopThr": "0.11",
     "RGBD/MaxOdomCacheSize": "10",
+    # What the cache does with the confirmed localisations: RTAB-Map's default adjusts the stored
+    # localisation constraints to the optimised cache poses after every optimisation. Measured
+    # parked, camera only, xfeat, aggressive, proximity on, the lidar fitting the map at 89.6 deg
+    # (2026-09-24, scratch/link_autopsy/smoothing_ab.sh, 300 s each): on, 137 accepted within
+    # +0.2..+0.8 deg of the lidar, slope -0.07 deg/min; off, 142 within -4.6..+2.4 deg. The walk to
+    # 93 deg seen before it was proximity OFF (loop closures alone, each node its own bias), not
+    # this. Said out loud so it can be set live.
+    "RGBD/LocalizationSmoothing": "true",
     # appearance: GFTT/ORB words, a few hundred per image
     "Kp/DetectorStrategy": "8",
     "Kp/MaxFeatures": "400",
