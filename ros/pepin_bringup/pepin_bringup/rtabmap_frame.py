@@ -597,13 +597,17 @@ FLAGS = FlagSet(
         " the service, and a call it does not answer computed locally. Written to"
         f" {REGISTRATION_FILE}, which RTAB-Map's adapters read on every call (one stat): live,"
         " no restart of RTAB-Map",
-        why="auto, measured 2026-09-24 in RTAB-Map itself (scratch/models/replay_matrix.sh,"
-        " the replay of camera-only run 0466, words at LoopThr 0.05): a registration took 454 ms"
-        " through the service against 1879 ms in RTAB-Map's own process on the VM's CPU, the"
-        " update 492 ms against 1900 ms median, and 33 against 32 updates localised; from inside"
-        " a container XFeat answers an 800x600 picture in 41 ms, a node picture already seen in"
-        " 1.5 ms, LighterGlue a pair in 129 ms (scratch/models/endpoint_bench.py). auto keeps"
-        " the old path as the answer to a service that is down",
+        why="auto, measured 2026-09-24 in RTAB-Map itself against the NIGHT branch's in-process"
+        " adapters under the same conditions (scratch/models/backend_control.sh and .py: the"
+        " replay of camera-only run 0466, words at LoopThr 0.05, four runs back to back, the live"
+        " stack beside them): the registration of a localised update took 571 ms median through"
+        " the service against 1896 and 2326 ms for the night's adapters in the runs before and"
+        " after it (3.3-4.1x), 2428 ms for this branch's local fallback (the night's path, within"
+        " that drift), 18 localised updates of 20 in each — one run, no truth, so a speed, not a"
+        " recognition result; the 0.67 s of 2026-09-23 was a quieter laptop. From inside a"
+        " container XFeat answers an 800x600 picture in 41 ms, a node picture already seen in 1.5"
+        " ms, LighterGlue a pair in 129 ms (scratch/models/endpoint_bench.py). auto keeps the old"
+        " path as the answer to a service that is down",
         on_when="service to measure the service alone (a registration it cannot answer then finds"
         " no features, which shows as no recognition), auto always otherwise",
         off_when="local to reproduce the registration of before 2026-09-24, or when the laptop's"

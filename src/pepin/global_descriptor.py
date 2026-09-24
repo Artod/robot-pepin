@@ -271,7 +271,9 @@ UNREADABLE = "unreadable"  # the tag a census gives a descriptor whose bytes it 
 def database_census(path: str | Path) -> Census:
     """What an RTAB-Map database's nodes carry: every ``Node`` id against its ``GlobalDescriptor``
     rows, each row's (tag, length) read from its info and from the LAST 12 BYTES of its data (the
-    trailer: ``substr`` in sqlite, so a 48 KB vector never crosses into Python). Every row counts,
+    trailer, cut by sqlite's ``substr``: a 48 KB vector never crosses into Python, though sqlite
+    still reads it from disk — 169 nodes 16 ms, 2000 synthetic ones 92 MB 31 ms warm,
+    scratch/models/census_timing.py). Every row counts,
     whatever its type — compareTo's size check does (Signature.cpp:252) — and a row of another
     type is tagged ``type N: ...``. Read-only; a database that is not there is zero nodes (an
     empty room takes any descriptor). NEVER beside a running RTAB-Map on the same file: it sets no
