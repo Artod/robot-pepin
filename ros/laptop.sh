@@ -83,7 +83,7 @@ fi
 RMW_ENV+=(-e "PEPIN_LOCALIZER=$PEPIN_LOCALIZER")
 # The one pairing that cannot work is refused BEFORE a container starts, not debugged on the
 # robot — and only where one is started, so `stop` and `logs` still work on a misconfigured shell.
-start_check() { pepin_localizer_check || exit 1; }
+start_check() { pepin_localizer_check || exit 1; pepin_time_source_check || exit 1; }
 # One zenoh router per machine, and this is the laptop's. It is started before any node here and
 # left alone afterwards: a node's connect retry is infinite, so containers may come and go under
 # it, and it is the only process on this side that talks to the board. Started idempotently —
@@ -105,8 +105,13 @@ zrouter_up() {
         ZCONFIG=(-v "${PEPIN_ZROUTER_CONFIG:-$HERE/zenoh/router.json5}:/zenoh/router.json5:ro"
                  -e ZENOH_ROUTER_CONFIG_URI=/zenoh/router.json5)
     fi
+    # RUST_LOG: the transport lifecycle and the re-dials at debug (ros/lib.sh's PEPIN_ZROUTER_LOG).
+    # ZENOH_RUNTIME: enough RX workers that a frozen board cannot starve this router's own
+    # sessions and its close of the dead link (ros/lib.sh's PEPIN_ZROUTER_RX_WORKERS says why).
     docker run -d --name "$PEPIN_ZROUTER_LAPTOP" --network "$NET" --restart unless-stopped \
         -e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-7}" \
+        -e "RUST_LOG=$PEPIN_ZROUTER_LOG" \
+        -e "ZENOH_RUNTIME=(rx: (worker_threads: $PEPIN_ZROUTER_RX_WORKERS))" \
         -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_router_override "$BOARD")" \
         ${ZCONFIG[@]+"${ZCONFIG[@]}"} \
         "$(image)" /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd >/dev/null
@@ -155,7 +160,10 @@ MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/pyth
 case "${1:-start}" in
     stop)
         # The router is this side's own, so a stop takes it too — but only under zenoh, so that
-        # a stop under cyclone touches exactly the three containers it always has.
+        # a stop under cyclone touches exactly the three containers it always has. The time
+        # server (pepin-chrony) is left running: it is the board's clock, not a part of this
+        # half, and a board that lost it would change source at every stop (ros/time.sh server
+        # stop takes it down on purpose).
         pepin_remove_container pepin-laptop pepin-vslam pepin-zenoh
         if pepin_rmw_is_zenoh; then pepin_remove_container "$PEPIN_ZROUTER_LAPTOP"; fi
         [ "${PEPIN_DEPTH_HOST:-}" = 0 ] || "$HERE/depth_host.sh" stop
@@ -235,6 +243,7 @@ case "${1:-start}" in
         fi
         pepin_remove_container pepin-vslam
         zrouter_up  # under zenoh this half has no bridge to wait for, only its own router
+        pepin_timeserver_up  # the clock the board follows (ros/lib.sh; PEPIN_TIME_SOURCE=pool: none)
         # The depth network on the laptop's GPU (ros/depth_host.sh): 20 ms a frame on Metal
         # against 170 ms on the CPU in the container (2026-09-11), so it is on wherever it can
         # run (depth_host_wanted). The node reads PEPIN_DEPTH_BACKEND (auto: the service, the
@@ -304,6 +313,7 @@ fi
 printf '%s\n' "$MODE" > "$HERE/.mode"
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 pepin_remove_container pepin-laptop pepin-zenoh
+pepin_timeserver_up  # the clock the board follows, under either transport (ros/lib.sh)
 if pepin_rmw_is_zenoh; then
     # No bridge on either side: this half's nodes are peers of this machine's router, and that
     # router holds the one link to the board's. So none of the bridge choreography below applies

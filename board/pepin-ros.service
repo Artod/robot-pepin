@@ -54,6 +54,13 @@ Environment=PEPIN_LOCALIZER=rtabmap
 # No RTC on this board: it boots with yesterday's clock and NTP jumps it hours forward a minute
 # later; every "seconds since the last reading" check in Nav2 then sees stale data and the first
 # goal dies (2026-09-07 11:45). Wait for the sync, but never forever: an offline robot still starts.
+# The wait asks the KERNEL, not a daemon, so it holds for systemd-timesyncd and for chrony alike
+# (board/chrony.sh): timedated's NTPSynchronized is `adjtimex().maxerror < 16 s` (systemd 257,
+# timedated.c ntp_synced, which ignores STA_UNSYNC on purpose), and chronyd writes its real
+# error bound there at every clock update and 16 s while it is unsynchronised
+# (sys_timex.c set_sync_status). Under chrony's `makestep 1 3` the step can come only in the
+# first three updates after chronyd starts, so a stack that waited for the first one starts after
+# the jump; one that gave up waiting (no network within 90 s) still takes it later, under it.
 ExecStartPre=-/bin/sh -c 'for i in $$(seq 1 90); do [ "$$(timedatectl show -p NTPSynchronized --value)" = yes ] && exit 0; sleep 1; done; echo "clock not synced after 90 s, starting anyway"'
 # The previous container's log is the only record of what Nav2 did; keep it before the rm.
 ExecStartPre=-/bin/sh -c 'mkdir -p /root/pepin-ros/logs && /usr/bin/docker logs pepin-ros > /root/pepin-ros/logs/$$(date +%%Y%%m%%d_%%H%%M%%S).log 2>&1'

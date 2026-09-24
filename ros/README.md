@@ -86,6 +86,7 @@ silence as good news. What is checked:
 | 1.13 | **who is correcting the pose**, under `PEPIN_LOCALIZER=rtabmap`: `map -> odom` is in TF and read where its publisher is — one rclpy node in the laptop's own container (`ros/tools/map_odom.py`), never on the board, whose /tf would cost it ~100 messages a second (CLAUDE.md rule 20). Two readings: the transform is **fresh** (re-broadcast at 20 Hz, so seconds of silence is a publisher that is gone) and it is **not the identity** (a localiser that has recognised nothing publishes `map == odom`, and every pose composed from it is simply the odometry's). The identity is a `WARN` while the laptop half is under 60 s old and a `FAIL` after that. Under `PEPIN_LOCALIZER=tracker` it is a `WARN` pointing at 1.2 |
 | 1.12 | no thread of the Nav2 container is pegged: `ps -L` over ssh, the busiest thread's cumulative CPU time over the process's own lifetime. `range_sensor_layer.cpp:362-369` clamps its cell bounds and then walks them as `unsigned`, so a cone that falls off the grid's left or bottom edge runs ~4e9 iterations under the costmap mutex and writes **no log line at all** — one thread at 100 %, "Pose Goes Off Grid", services timing out, zero plans (reproduced 2026-09-21 with `ros/thin.sh kick relocalizer`: tid 191, 415 s of CPU in 700 s). `FAIL` above 0.90, `WARN` above 0.50 (nobody has yet measured what a healthy container's busiest thread costs — tighten it once a few restarts have printed theirs), `WARN` when the board could not be read |
 | 1.14 | `/odom_laser` is flowing (the EKF's `odom3`), measured the same way. Skipped with a `WARN` when `PEPIN_LASER_ODOM=false` on the board |
+| 1.15 | **informational (`PASS`/`WARN`, never fails, never a drive gate)**: the board's clock minus the laptop's — the Docker VM's, which every laptop ROS node stamps with — over NTP from the board to the laptop's time server (`ros/time.sh offset`: `src/pepin/timesync.py` piped into the board's `python3`, best of eight round trips). `WARN` over `PEPIN_CLOCK_WARN_MS` (100 ms), `WARN` "not measured" when the board cannot reach the server or `PEPIN_TIME_SOURCE=laptop` and no server runs here, `WARN` on a value that is neither `laptop` nor `pool`. Under `PEPIN_TIME_SOURCE=pool` (the default) with no server here it is a `PASS` "not measured, as configured": that is the configuration, not a fault. See "One clock" below |
 
 `ros/tools/coldstart_soak.sh [N]` is the acceptance test behind checks 1.11 and 1.12: N cold starts of the
 board half (10 by default), each timed from `Activating planner_server` to the bond, with the
@@ -203,7 +204,7 @@ all under `transport/link/tx`:
 
 | key | shipped | ours | what it does |
 | --- | --- | --- | --- |
-| `queue/congestion_control/block/wait_before_close` | 5 s | **20 s** | how long a RELIABLE push waits for a free batch before killing the session. This is the one that stops the closures; 4x the worst measured stall. A peer that is truly gone is still buried by the 60 s lease. |
+| `queue/congestion_control/block/wait_before_close` | 5 s | **20 s** | how long a RELIABLE push waits for a free batch before killing the session. This is the one that stops the closures; 4x the worst measured stall. A peer that is truly gone is buried by the close it triggers — provided the router has an RX worker free to run that close (see "A frozen peer" below). |
 | `queue/congestion_control/drop/wait_before_drop` | 1 ms | **50 ms** | how long a BEST_EFFORT sample waits before being dropped. 50 ms is the period of the fastest thing that crosses, so a sample is never held past its own successor. |
 | `keep_alive` | 2 | **4** | keep-alives per `lease` (60 s, unchanged): every 15 s instead of 30, which is what zenoh's own note asks for on a link that loses packets. |
 
@@ -231,6 +232,145 @@ mechanism is identical — but nothing has asked for it.
 in the clean order (journal 2026-09-13): laptop half down, laptop router down, board router, board
 stack, laptop router, laptop half. A router restarted under a live peer has produced a one-way
 link before.
+
+**Every container's log outlives its restart** (`PEPIN_LOG_ARCHIVE`, `on` by default, `off` keeps
+nothing as before). On the board, `pepin-ros` and `pepin-zrouter` are started without `--rm`, and
+each unit's next start copies the previous container's log to `/root/pepin-ros/logs/`
+(`<local time>.log` for the stack, `zrouter_<local time>.log` for the router, `docker logs -t`;
+`ros/sync.sh` never deletes `logs/`); the router's output does not reach the journal. On the
+laptop every removal goes through `ros/lib.sh`'s `pepin_remove_container`, which stops the
+container, copies `docker logs -t` to `logs/containers/<UTC>_<name>.log` in this checkout
+(`PEPIN_LOG_DIR`), and only then removes it — `ros/laptop.sh stop`, a `vslam` restart and a
+router re-creation used to take the laptop router's and `pepin-vslam`'s logs with them. Docker's
+own receive stamps are kept on purpose: after a Mac wake the VM clock's step is visible in them.
+The unit change reaches the board by `scp board/pepin-zrouter.service root@<board>:/etc/systemd/system/`
+and `systemctl daemon-reload`; it takes effect at the router's next restart.
+
+**A frozen peer, and the 2026-09-23 wake** (`PEPIN_ZROUTER_RX_WORKERS`, `PEPIN_ZROUTER_LOG`). The
+Mac idle-slept at 20:31Z with the stack up and woke three times for maintenance before the user
+woke it at 21:27Z. Each sleep, the board router logged `Unable to push non droppable network
+message to <laptop router>. Closing transport!` every 20 s for ~7 min, and the board's own nodes'
+sessions timed out on their router; after each dark wake the link was back within seconds, after
+the user wake it never came back (0 board samples reached the laptop router, all 89 board topics
+left the laptop's graph 13 s after the wake and none returned in 28 min, while the camera's own
+TCP connection through the same Docker VM kept delivering; `scratch/link_autopsy/wake_nonrecovery.py`).
+The clock was not the cause: the dark wakes carried data under a 898-s VM lag. Neither router
+wrote a line after the wake, so which end refused the new session is not in the saved logs.
+What IS established, from zenoh 2687c51's source and reproduced in statics
+(`scratch/link_autopsy/wedge_repro.py`: two routers, four RELIABLE publishers, the far router
+`docker pause`d): a session's RX task routes its messages on zenoh's RX runtime, a push to a peer
+that stopped reading waits `wait_before_close` (20 s) *on that worker* holding the priority
+queue's mutex, and the `close()` that the failure schedules is spawned on the same runtime. With
+zenoh's default of 2 RX workers both sat in 20-s pushes and the close started only when something
+else broke the loop — 620 s after the first closure in one run (33 closures, the publishers' own
+sessions dropped 24 times: the board router's log of that night line for line), 130 s in another
+(at the thaw; 7 closures, 4 drops). With 8 workers the close started 9 ms after the first closure,
+the dead transport was gone 35 s later and no local session dropped; 16 behaved the same (2 ms,
+2 closures, recovery 0.3 s after the thaw) at 21 threads and 6.4 MB against 7 and 5.7 MB. The
+count is set by the sessions: each one pushing toward the frozen peer holds a worker and the close
+needs one more — four publishers wedged 4 workers (the close only at the thaw, 4 drops) and not
+5, 6 or 32 (`scratch/link_autopsy/wedge_threshold.py`; one run per count). So each router runs
+more RX workers than the sessions its census counted (2026-09-24, TCP sessions on 7447): the
+board's `ZENOH_RUNTIME=(rx: (worker_threads: 16))` for its 10 nodes and the laptop's link, the
+laptop's 32 for `pepin-vslam`'s 14 sessions, the link, and `pepin-laptop`'s nodes and the tools on
+top (`PEPIN_ZROUTER_RX_WORKERS=2` is zenoh's default and the old behaviour), and both log the
+transport lifecycle and the connector at
+debug (`PEPIN_ZROUTER_LOG`; `info` is the old level): the next wake names the refusing end in one
+line, at 19-28 lines a router per statics freeze-and-thaw. Not fixed and not claimed: the non-recovery
+itself was not reproduced in statics (every thaw there recovered within 7 s, including one 25 s
+after the last closure, as the user wake was), so a Mac wake with the stack up stays a case to
+watch — the heal that worked on the night is the clean-order router restart above. **When each
+side takes it:** the laptop router at its next re-creation (`ros/laptop.sh stop`, then `start` or
+`vslam`; a running router is left alone), the board's once `board/pepin-zrouter.service` is
+copied (above) and the router restarted. In between the two routers run different worker counts
+and log levels, which is safe — a router's workers guard only its own sessions — but a wake then
+is logged at debug on the laptop's side only.
+
+## One clock (`PEPIN_TIME_SOURCE`, chrony)
+
+Every ROS stamp on the laptop is the **Docker VM's** clock (all its containers share one kernel);
+every stamp on the board is the board's. Scans, transforms and maps cross between the two, so the
+robot runs on one time base:
+
+- **the laptop serves its VM's clock**: the `pepin-chrony` container (`ros/chrony/`: alpine,
+  `chronyd -d -x`, no sources, `local stratum 10`), published on `udp/123`, started by
+  `ros/time.sh install|server` (and idempotently by `ros/laptop.sh` beside the zenoh router under
+  `PEPIN_TIME_SOURCE=laptop`), `--restart unless-stopped`, left running across `ros/laptop.sh stop`.
+  Measured in statics on 2026-09-23: the image builds in 12 s, chronyd 4.5 answers from the first
+  second (stratum 10, leap normal, 1 MB of memory), 8 of 8 SNTP exchanges at a 1 ms round trip both
+  on `127.0.0.1` and on the Mac's own LAN address — both stay inside the Mac, neither is the WiFi —
+  through Docker Desktop 4.79's port publishing (Docker Engine 29.5.3; no sudo; the macOS firewall
+  is off), and the VM's clock read 15 ms behind the Mac's. The path the design rests on, the board
+  to the Mac's `udp/123` over the WiFi, measured on 2026-09-24 04:00Z with a throwaway server of the
+  same image and `laptop.conf` (on the board `python3 - 10.0.0.167 < src/pepin/timesync.py`, which
+  changes nothing there): 8 of 8 answers in each of three runs, best round trip 5-6 ms, board minus
+  laptop +20.7 to +21.1 ms with the board still on systemd-timesyncd. chronyd logged all 32 queries
+  (the Mac's 8, the board's 24) as coming from one address, 151.101.138.132, neither the Mac's nor
+  the board's: the port proxy rewrites the source, which is why `laptop.conf` allows any;
+- **the board follows it**: chrony instead of systemd-timesyncd (`board/chrony.sh`,
+  `board/chrony/chrony.conf`), the laptop as a `prefer` source polled every 4-16 s, the internet
+  pool (the servers timesyncd used) beside it — the fallback when the laptop is away and a vote
+  against a laptop clock that is wrong. `makestep 1 3`: the clock is stepped only within the
+  first three updates after chronyd starts (normally the boot, before `pepin-ros`'s wait ends) and
+  slewed afterwards; a board that syncs only after that 90-s wait, or a chronyd restart (an apt
+  upgrade, a re-run of `ros/time.sh install`), can still step it once under a running stack;
+- **the board learns the laptop's address from the laptop**: `ros/time.sh` asks this Mac for the
+  address of the interface that routes to the board (`ros/lib.sh`'s `pepin_laptop_ip`) and writes
+  it to the board's `/etc/default/pepin-ros` (`PEPIN_LAPTOP_HOST`) and to
+  `/etc/chrony/sources.d/pepin-laptop.sources`. Nothing on the board ever had the laptop's address
+  before (the laptop dials the board, never the reverse); if DHCP moves the Mac, `ros/time.sh
+  point` re-points it and check 1.15 says "not measured" until then.
+
+**Why the laptop's server does not discipline the VM clock** (no `CAP_SYS_TIME`). The VM's clock
+stops while the Mac sleeps and resumes where it stopped, minutes behind, and Docker Desktop steps
+it back to the Mac's clock by itself 10-26 s after each wake (measured 2026-09-23 on four wakes:
++26, +10, +22, +19 s). Through three 15-minute-lag windows that day the link and RTAB-Map kept
+working (data under replaced zenoh timestamps, RTAB-Map at `delay=-898 s`); what left the link
+dead after the fourth wake was the router-to-router zenoh session, not the clock
+(`scratch/link_autopsy/wake_chain.py`). A second agent stepping the one kernel clock every
+container shares would race Docker's resync and could step every laptop node's time backwards.
+The window is the board's to survive instead: a laptop sample minutes off is a falseticker
+against the pool's three servers, and `prefer` (never `trust`) lets the vote win. What it costs:
+with the internet down AND the Mac just awake, the board has only the laptop to believe for those
+seconds (`maxupdateskew 100` still keeps a source with a jumping frequency estimate from moving
+the clock).
+
+**The boot wait holds under chrony unchanged.** `board/pepin-ros.service` waits up to 90 s for
+`NTPSynchronized`, which timedated reads from the kernel (`adjtimex().maxerror < 16 s`, systemd
+257); chronyd writes its real error bound there at every update and 16 s while unsynchronised, and
+its first update after boot is the `makestep` step itself. That holds when the sync comes within
+the 90 s: a board with no network at boot starts the stack anyway and takes the step later, under
+it — no worse than systemd-timesyncd, which steps at any update over 0.4 s.
+
+**The switch** (CLAUDE.md rule 19): `ros/time.sh source pool` puts the board on the pool alone —
+live, a `chronyc reload sources`, no restart and no step — and `ros/time.sh source laptop` is the
+way back. On the laptop the variable only decides whether `ros/laptop.sh` (re)starts the server;
+its default is `pool` — what the board runs today under systemd-timesyncd — until the deploy
+below has measured the laptop source on the robot, and then it flips to `laptop` in `ros/lib.sh`
+and `src/pepin/timesync.py` together. `ros/time.sh uninstall` puts the board on
+systemd-timesyncd exactly as before (the package's `.deb` is kept at install, so it works with
+apt offline; our sources file and the Debian config backup go with chrony). Check 1.15 answers at
+once while no server runs here (`PASS` "not measured, as configured" under `pool`), so an
+undeployed laptop costs a restart nothing. A value that is neither `laptop` nor `pool` is refused
+by `ros/laptop.sh` before a half starts (`ros/lib.sh`'s `pepin_time_source_check`).
+
+**Deploy (not done yet; a parked robot, the owner's go):**
+
+1. `ros/time.sh install` — builds the `pepin-chrony` image on first use (alpine from Docker Hub),
+   starts the server, copies `board/chrony.sh` and its config to the board and runs `install`
+   there: `apt-get install chrony` (about a minute of the board's CPU; Debian removes
+   systemd-timesyncd with it), our `chrony.conf`, the laptop's source, `systemctl restart chrony`.
+   No sudo on the Mac; root on the board through the existing key. The stack is not restarted.
+   The clock is adjusted once by up to the current board-laptop difference (a step only if it
+   exceeds 1 s, which it has not since the boot waits); do it parked.
+2. `ros/time.sh status` — the laptop's source marked `*` (selected), the pool `+`/`-`.
+3. `ros/time.sh offset` — under 100 ms; then `ros/board.sh census` for chronyd's real cost
+   (`config/board_manifest.json` carries a guess).
+4. With the offset measured: `PEPIN_TIME_SOURCE` defaults to `laptop` in `ros/lib.sh` and
+   `DEFAULT_TIME_SOURCE` in `src/pepin/timesync.py` (and its test), one commit with the numbers.
+5. Not verified from the laptop alone (the board is the client): that the board's chrony selects
+   the laptop (`*` in `ros/time.sh status`) and that `timedatectl show -p NTPSynchronized` reads
+   `yes` under chrony within the first minute after a reboot — the boot wait's premise.
 
 ## The zenoh bridge
 
