@@ -18,6 +18,7 @@ import ros_stubs
 
 ros_stubs.install()
 
+from pepin_bringup import sensor_pack  # noqa: E402
 from pepin_bringup.sensor_pack import (  # noqa: E402
     CAMERA_INFO_TOPIC,
     DEPTH_TOPIC,
@@ -78,6 +79,13 @@ def _inline_places() -> Iterator[None]:
     SensorPack.PLACE_THREAD = False
     yield
     SensorPack.PLACE_THREAD = True
+
+
+@pytest.fixture
+def patched_core(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This image's RTAB-Map keeps a node's descriptor across a reload (the patch's marker), so
+    global_descriptor auto attaches them — the image the descriptors are meant for."""
+    monkeypatch.setattr(sensor_pack, "rtabmap_keeps_descriptors", lambda: True)
 
 
 # The board's clock, at an epoch second whose nanoseconds a double cannot hold: at 1.758e9 the
@@ -561,7 +569,8 @@ def test_the_flags_are_the_eight_the_report_line_prints(build: Build) -> None:
         "place_descriptor",
         "place_timeout_s",
     ]
-    assert FLAGS["global_descriptor"] is True and not FLAGS.flag("global_descriptor").live
+    assert FLAGS["global_descriptor"] == "auto" and not FLAGS.flag("global_descriptor").live
+    assert FLAGS.flag("global_descriptor").choices == ("auto", "on", "off")
     assert FLAGS.flag("global_descriptor").env == "PEPIN_GLOBAL_DESCRIPTOR"
     assert FLAGS["place_descriptor"] is True and FLAGS["place_timeout_s"] == 0.5
     assert FLAGS["tf_retry"] is True
@@ -660,6 +669,7 @@ def place_state(node: SensorPack) -> SnapshotPlace:
 
 def test_every_snapshot_carries_exactly_one_descriptor_of_the_configured_length(
     build: Build,
+    patched_core: None,
 ) -> None:
     """RTAB-Map aborts on a node with a descriptor against one without (Signature.cpp:252): a
     camera snapshot carries the service's vector, a lidar-only one the null descriptor, every one
@@ -685,13 +695,17 @@ def test_every_snapshot_carries_exactly_one_descriptor_of_the_configured_length(
     assert rgb.shape == (HEIGHT, WIDTH, 3) and encoding == "jpeg" and 0 < timeout <= 0.5
     assert place_state(node) == SnapshotPlace(True, "service", DIM, ""), "no vector at the start"
     node._publish_state()  # the once-a-second timer: the tag of the weights, once there is one
-    assert place_state(node) == SnapshotPlace(True, "service", DIM, TAG)
+    assert place_state(node) == SnapshotPlace(True, "service", DIM, TAG, kinds["camera"], 0), (
+        "and how many recent camera snapshots were asked about, none of them left null"
+    )
     node._report()
     line = node.logger.texts("info")[-1]
     assert f"place descriptors {kinds['camera']} described" in line and "no picture" in line
 
 
-def test_a_picture_the_service_does_not_describe_gets_the_null_descriptor(build: Build) -> None:
+def test_a_picture_the_service_does_not_describe_gets_the_null_descriptor(
+    build: Build, patched_core: None
+) -> None:
     node = build(pack_hz=15.0)
     node._places.down = True  # type: ignore[attr-defined]
     _warm(node)
@@ -704,7 +718,7 @@ def test_a_picture_the_service_does_not_describe_gets_the_null_descriptor(build:
     assert "no answer" in node.logger.texts("info")[-1]
 
 
-def test_a_vector_of_another_length_is_never_attached(build: Build) -> None:
+def test_a_vector_of_another_length_is_never_attached(build: Build, patched_core: None) -> None:
     """A service reconfigured to another model answers vectors of another length; attached, the
     next comparison would abort RTAB-Map. Null instead, and the report says what came."""
     node = build(pack_hz=15.0)
@@ -717,7 +731,9 @@ def test_a_vector_of_another_length_is_never_attached(build: Build) -> None:
     assert "answered 16384 from boq_dinov2@feedbeef, not 12288" in node.logger.texts("info")[-1]
 
 
-def test_place_descriptor_off_keeps_one_null_descriptor_on_every_snapshot(build: Build) -> None:
+def test_place_descriptor_off_keeps_one_null_descriptor_on_every_snapshot(
+    build: Build, patched_core: None
+) -> None:
     node = build(pack_hz=15.0, place_descriptor=False)
     _warm(node)
     assert sent(node) and node._places.asked == []  # type: ignore[attr-defined]
@@ -729,10 +745,75 @@ def test_place_descriptor_off_keeps_one_null_descriptor_on_every_snapshot(build:
     assert place_state(node).source == "service", "said at once, latched"
 
 
-def test_global_descriptor_off_is_the_snapshot_of_before(build: Build) -> None:
-    node = build(pack_hz=15.0, global_descriptor=False)
+def test_global_descriptor_off_is_the_snapshot_of_before(build: Build, patched_core: None) -> None:
+    node = build(pack_hz=15.0, global_descriptor="off")
     _warm(node)
     assert sent(node) and all(msg.global_descriptors == [] for msg in sent(node))
     assert place_state(node) == SnapshotPlace(False, "service", 0, "")
     with pytest.raises(ValueError):
-        node._switches.set("global_descriptor", True)  # not live: the invariant would break
+        node._switches.set("global_descriptor", "on")  # not live: the invariant would break
+
+
+def test_auto_on_an_unpatched_core_attaches_nothing(build: Build) -> None:
+    """The unpatched 0.22.1 drops a node's descriptor when it reloads the node's data, and
+    mapping's rehearsal can then compare it with a node that has one and abort, words or not.
+    auto (the default) follows the core: nothing is attached there, and the line says why."""
+    assert not sensor_pack.rtabmap_keeps_descriptors(), "no marker on this machine"
+    node = build(pack_hz=15.0)
+    _warm(node)
+    assert sent(node) and all(msg.global_descriptors == [] for msg in sent(node))
+    assert not place_state(node).attached
+    node._report()
+    assert "global_descriptor auto; this RTAB-Map drops them" in node.logger.texts("info")[-1]
+    forced = build(pack_hz=15.0, global_descriptor="on")  # the control run, and only that
+    _warm(forced)
+    assert all(len(msg.global_descriptors) == 1 for msg in sent(forced))
+
+
+def test_the_env_variable_and_the_launch_read_global_descriptor_alike(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vslam.launch.py decides the rehearsal threshold from the same setting the node holds:
+    pepin.global_descriptor.global_descriptor_setting must read the variable as the flag does."""
+    from pepin.global_descriptor import (
+        ATTACH_AUTO,
+        GLOBAL_DESCRIPTOR_ENV,
+        global_descriptor_setting,
+    )
+
+    flag = FLAGS.flag("global_descriptor")
+    assert flag.env == GLOBAL_DESCRIPTOR_ENV and flag.default == ATTACH_AUTO
+    for value in ("auto", "on", "off", "0", "true", "", "AUTO"):
+        environ = {GLOBAL_DESCRIPTOR_ENV: value}
+        try:
+            node_reads = FLAGS.defaults(environ)["global_descriptor"]
+        except ValueError:
+            node_reads = None
+        try:
+            launch_reads = global_descriptor_setting(environ)
+        except ValueError:
+            launch_reads = None
+        assert node_reads == launch_reads, value
+
+
+def test_the_live_threaded_path_survives_a_raising_service(
+    build: Build, patched_core: None
+) -> None:
+    """The node's own path — the stamper's worker thread — with a service client that raises:
+    every snapshot still goes out, with the null descriptor, and the error is logged."""
+    SensorPack.PLACE_THREAD = True
+    node = build(pack_hz=15.0)
+
+    def boom(*_args: Any, **_kwargs: Any) -> None:
+        raise ConnectionError("the client itself fell over")
+
+    node._places.place = boom  # type: ignore[method-assign]
+    _warm(node)
+    stamper = node._stamper
+    assert stamper is not None and stamper._thread is not None
+    stamper.close(5.0)
+    assert not stamper._thread.is_alive()
+    camera = [m for m in sent(node) if m.left_camera_info]
+    assert camera and all(descriptors(m)[0].is_null for m in camera)
+    assert stamper.nulls["error"] == len(camera)
+    assert any("the client itself fell over" in t for t in node.logger.texts("error"))

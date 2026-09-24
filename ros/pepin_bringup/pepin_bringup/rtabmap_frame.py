@@ -118,11 +118,14 @@ from pepin.fusion import (
     disagreement,
 )
 from pepin.global_descriptor import (
+    CENSUS_ENV,
+    DESCRIPTOR_PARAMETERS,
+    MAX_NULL_SHARE,
     PLACE_DESCRIPTOR,
     PLACE_TOPIC,
     PLACE_WORDS,
+    RECENT_CAMERA_SNAPSHOTS,
     TFIDF,
-    WORDS_PARAMETERS,
     Census,
     SnapshotPlace,
     recognition_parameters,
@@ -134,6 +137,7 @@ from pepin.graphmode import (
     BY_TRUST,
     CONFIRM_AGGRESSIVE,
     CONFIRM_PARAMETERS,
+    CONFIRM_STOCK,
     FEATURES_ORB,
     FEATURES_XFEAT,
     LOCALISING,
@@ -280,12 +284,6 @@ UPDATE_MAX_SKEW_S = 0.5
 # old when its localisation arrives and /tf crosses the bridge in well under 0.1 s, so the edge is
 # almost always there already; the wait covers the youngest words and no more.
 WORD_TF_WAIT_S = 0.2
-# THE DATABASE'S CENSUS AT THIS START: what its nodes carry (pepin.global_descriptor.Census as one
-# JSON line), taken by ros/laptop.sh vslam with ros/tools/place_backfill.py --check --json BEFORE
-# this container started, i.e. before RTAB-Map opened the file (a reader beside a writing RTAB-Map
-# could make its commit fail). Fixed for the container's life, as the database's nodes are: every
-# node RTAB-Map adds after the census comes from sensor_pack with its one descriptor.
-CENSUS_ENV = "PEPIN_PLACE_CENSUS"
 # How old the adapters' counters (pepin.live_settings' status file) may be for the report line to
 # print them as current: they write once a minute while RTAB-Map registers.
 REGISTRATION_STATUS_FRESH_S = 180.0
@@ -642,7 +640,7 @@ FLAGS = FlagSet(
     ),
     Flag(
         "place_recognition",
-        PLACE_DESCRIPTOR,
+        PLACE_WORDS,
         choices=(PLACE_WORDS, PLACE_DESCRIPTOR),
         description="how RTAB-Map finds WHICH database node a picture is (its likelihood, before"
         " any registration): words — the ORB bag of words' TF-IDF (Kp/TfIdfLikelihoodUsed true,"
@@ -652,27 +650,49 @@ FLAGS = FlagSet(
         " sensor_pack attaches to every snapshot. descriptor is sent ONLY when it cannot abort"
         " RTAB-Map: its core carries ros/patches/rtabmap-keep-global-descriptors.patch (the"
         " marker /opt/rtabmap_patches/keep-global-descriptors), the snapshots carry one each"
-        f" ({PLACE_TOPIC}) and the database's census at this start ({CENSUS_ENV}) says every node"
-        " carries exactly one of the same length; otherwise the words, and the report line says"
-        " why. Live",
-        why="descriptor, measured 2026-09-24 in RTAB-Map itself: the replay of the evening runs"
+        f" ({PLACE_TOPIC}) and the database's census at this start ({CENSUS_ENV}, taken by the"
+        " launch before RTAB-Map opens the file) says every node carries exactly one of the same"
+        " length — and only while the camera snapshots are described (descriptor_null_share);"
+        " otherwise the words, and the report line says why. Live",
+        why="words until a drive has shown the descriptor on the robot (a default flips after a"
+        " drive). Measured 2026-09-24 in RTAB-Map itself on the replay of the evening runs"
         " against the backfilled daylight database (scratch/models/replay_place.py,"
         " replay_matrix.sh, matrix_report.py; xfeat, 2 px, proximity on, a lidar-only snapshot"
         " every fourth). Words at the stock Rtabmap/LoopThr 0.11: hypotheses 0.05-0.09, 0 camera"
-        " updates localised on 0457, 0460 and the camera-only 0466; words at 0.05: 9 of 23 (9 of 9"
-        " judged right), 3 of 17 (0 of 1) and 53 of 55. Descriptor with the ratio 1 at 0.11:"
-        " hypotheses 0.42-0.88 (median), 16 of 23 (15 of 15 right), 14 of 17 (11 of 11) and 54"
-        " of 55; at 0.05 two of 0460's eleven judged were wrong. With the ratio 0 the"
-        " descriptor's hypotheses read 0.01 and nothing localised. The retrieval behind it:"
-        " BoQ-DINOv2 R@1 0.986 on 219 evening frames (scratch/models/place_parity.py). Without"
-        " the patch RTAB-Map 0.22.1 aborted at the first comparison after a registration"
+        " updates localised on 0457, 0460 and the camera-only 0466; words at 0.05 (visual_confirm"
+        " aggressive, this node's default): 9 of 23 (9 of 9 judged right), 3 of 17 (0 of 1) and 53"
+        " of 55. Descriptor with the ratio 1 at 0.11: hypotheses 0.42-0.88 (median), 16 of 23 (15"
+        " of 15 right), 14 of 17 (11 of 11) and 54 of 55; at 0.05 two of 0460's eleven judged were"
+        " WRONG — so the descriptor goes with visual_confirm rtabmap, and the report line says so"
+        " when it does not. Judged counts are 16 or fewer a run and 0466 has no truth. With the"
+        " ratio 0 the descriptor's hypotheses read 0.01 and nothing localised. The retrieval"
+        " behind it: BoQ-DINOv2 R@1 0.986 on 219 evening frames (scratch/models/place_parity.py)."
+        " Without the patch RTAB-Map 0.22.1 aborted at the first comparison after a registration"
         " (Signature.cpp:252), which is why the patch is a gate",
         on_when="descriptor on a backfilled database (ros/tools/place_backfill.py) and a patched"
-        " core, and then visual_confirm rtabmap: the descriptor's hypotheses reach 0.11 by"
+        " core, together with visual_confirm rtabmap: the descriptor's hypotheses reach 0.11 by"
         " themselves, and aggressive's 0.05 let the two wrong ones of 0460 through",
         off_when="words to reproduce RTAB-Map's stock place recognition, or when a drive shows the"
-        " descriptor naming the wrong node; an unpatched core, a database not backfilled or"
-        " snapshots without descriptors keep the words by themselves",
+        " descriptor naming the wrong node; an unpatched core, a database not backfilled,"
+        " snapshots without descriptors or a service that is not describing keep the words by"
+        " themselves",
+    ),
+    Flag(
+        "descriptor_null_share",
+        MAX_NULL_SHARE,
+        range=(0.0, 1.0),
+        description="place_recognition descriptor falls back to the words while more than this"
+        f" share of the last {RECENT_CAMERA_SNAPSHOTS} camera snapshots carried the null"
+        " descriptor (the localisation service down, late or answering nonsense), and goes back"
+        " once they are described again; 1.0 never falls back",
+        why=f"{MAX_NULL_SHARE}: a snapshot whose descriptor is null scores 0.5 against EVERY node"
+        " (pepin.global_descriptor), Rtabmap::adjustLikelihood's z-scores are then all zero and no"
+        " hypothesis forms — descriptor mode goes blind where the words would still recognise the"
+        f" place. Half of {RECENT_CAMERA_SNAPSHOTS} at a snapshot a second: a service that dies"
+        " costs at most five blind updates, and one late answer never flips the likelihood",
+        on_when="lower it to fall back sooner",
+        off_when="1.0 to keep the descriptor whatever the service does (a measurement of the"
+        " descriptor alone)",
     ),
     Flag(
         "word_at_picture_time",
@@ -871,12 +891,13 @@ class RtabmapFrame(Node):
         self._registration_file = LiveFile(registration_file())
         self._registration_status = StatusBoard()
         # HOW RTAB-MAP FINDS WHICH NODE A PICTURE IS (place_recognition): what the snapshots
-        # carry, the census of the database at this start, and the likelihood last sent — the
-        # launch table's words (Kp/TfIdfLikelihoodUsed true) until something else is sent.
+        # carry, the census of the database at this start, and the likelihood last sent. None
+        # at first: the first decision is ALWAYS sent, because this node may be a respawn beside
+        # an RTAB-Map still holding the descriptor likelihood an earlier incarnation sent.
         self._place: SnapshotPlace | None = None
         self._census = Census.from_json(os.environ.get(CENSUS_ENV, ""))
         self._rtabmap_keeps = rtabmap_keeps_descriptors()  # the image's patch marker
-        self._recognition_sent = dict(WORDS_PARAMETERS)
+        self._recognition_sent: dict[str, str] | None = None
         self._recognition_why = PLACE_WORDS
         # THE TWO HALVES OF ONE UPDATE. The node a /rtabmap/info named and that message's stamp;
         # RTAB-Map's own localisation, its stamp and the planar 3x3 it measured. A word is made when
@@ -1943,7 +1964,14 @@ class RtabmapFrame(Node):
             self._place,
             self._census,
             self._rtabmap_keeps,
+            float(self._switches["descriptor_null_share"]),
         )
+        if wanted == DESCRIPTOR_PARAMETERS and self._switches["visual_confirm"] != CONFIRM_STOCK:
+            why += (
+                f"; visual_confirm {self._switches['visual_confirm']}: with the descriptor its"
+                " lower LoopThr let 2 of 11 wrong localisations through on 0460 (visual_confirm"
+                " rtabmap)"
+            )
         self._recognition_why = why
         if wanted == self._recognition_sent or not self._set_parameters(wanted):
             return

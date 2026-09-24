@@ -79,6 +79,7 @@ names it).
 """
 
 import json
+import os
 from pathlib import Path
 
 from launch import LaunchContext, LaunchDescription
@@ -103,6 +104,13 @@ from pepin.deployment import (
     laptop_launch_nodes,
     localizer,
     rmw_is_zenoh,
+)
+from pepin.global_descriptor import (
+    CENSUS_ENV,
+    database_census,
+    descriptors_attached,
+    global_descriptor_setting,
+    rtabmap_keeps_descriptors,
 )
 
 # How long a node of this launch is given to end on SIGINT before the launch escalates to
@@ -436,6 +444,19 @@ LOCALIZE = {
     "RGBD/OptimizeMaxError": "0",
 }
 
+# REHEARSAL ON THE DESCRIPTOR'S SCALE, whenever the snapshots carry place descriptors
+# (sensor_pack's global_descriptor; pepin.global_descriptor.descriptors_attached). Memory::rehearsal
+# compares each new node with the last one while MAPPING (Memory.cpp:3784-3834) by
+# Signature::compareTo, which reads the descriptors whenever both carry one: (a . b + 1) / 2, never
+# under ~0.57 for two BoQ vectors and exactly 0.5 against a null one — so the table's 0.30, a ratio
+# of shared ORB words, would call every pair the same place (a merge at rest, a transfer of weight
+# while moving), a camera node against a lidar-only one included (0 before: no words). Measured on
+# the backfilled daylight database (scratch/models/rehearsal_calibration.py, 2026-09-24): of 121
+# consecutive camera pairs the words at 0.30 called 11 the same place (9.1 %); the descriptor
+# scores them 0.57-0.98 (median 0.82) and reaches the same share at 0.925. 0.92 calls 14, and a
+# null pair (0.5) never.
+DESCRIPTOR_REHEARSAL = {"Mem/RehearsalSimilarity": "0.92"}
+
 # RTAB-Map reads its odometry from TF here (odom_frame_id above), and TF carries no covariance,
 # so rtabmap_slam gives every odometry link a constant one from these two — which is what the
 # neighbour links above are worth once ICP no longer overwrites them. 0.001 m2 is 3.2 cm per
@@ -641,6 +662,7 @@ def rtabmap_parameters(
     memory: str = "trust",
     sensor_pack: bool = True,
     localizer_name: str = "tracker",
+    descriptors: bool = False,
 ) -> dict[str, object]:
     """Everything RTAB-Map is told, for every situation: :data:`RTABMAP` under the odometry links'
     covariance, and at most two overlays that are not modes.
@@ -658,7 +680,11 @@ def rtabmap_parameters(
 
     ``localizer_name`` is who owns ``map -> odom`` (``PEPIN_LOCALIZER``): ``"rtabmap"`` adds
     :data:`PUBLISH_MAP_TO_ODOM` and this node broadcasts the transform, ``"tracker"`` leaves
-    ``publish_tf`` false as it has always been, because two publishers of one edge fight."""
+    ``publish_tf`` false as it has always been, because two publishers of one edge fight.
+
+    ``descriptors`` is whether the snapshots carry place descriptors (sensor_pack's
+    global_descriptor on this core): :data:`DESCRIPTOR_REHEARSAL` then puts the rehearsal's
+    threshold on the descriptor's scale."""
     table: dict[str, object] = dict(RTABMAP)
     table.update(TF_ODOMETRY_VARIANCE)
     if localizer_name == "rtabmap":
@@ -669,7 +695,32 @@ def rtabmap_parameters(
         table.update(LOCALIZE)
     if not sensor_pack:
         table.update(TRIPLE_SUBSCRIPTIONS)
+    elif descriptors:
+        table.update(DESCRIPTOR_REHEARSAL)
     return table
+
+
+def place_descriptors(packing: bool) -> bool:
+    """Whether this start's snapshots carry place descriptors: sensor_pack runs (``packing``) and
+    its global_descriptor, read from this environment exactly as the node reads it, attaches them
+    on this image's RTAB-Map (pepin.global_descriptor.descriptors_attached)."""
+    return packing and descriptors_attached(
+        global_descriptor_setting(os.environ), rtabmap_keeps_descriptors()
+    )
+
+
+def census_env(database: str) -> tuple[dict[str, str], str]:
+    """rtabmap_frame's :data:`pepin.global_descriptor.CENSUS_ENV` from a census of ``database``
+    taken NOW — every start of this launch, before RTAB-Map opens the file — and the phrase for
+    the launch's report. An unreadable database is no census (rtabmap_frame keeps the words)."""
+    try:
+        census = database_census(database)
+    except Exception as exc:  # sqlite3.Error, OSError: whatever it is, no census
+        return {}, f"no census of {database} ({type(exc).__name__}: {exc}): the words"
+    why = census.refusal()
+    return {CENSUS_ENV: census.to_json()}, (
+        f"census of {database}: {census.text()}; {why or 'every node carries one'}"
+    )
 
 
 def _flag(context: LaunchContext, name: str) -> bool:
@@ -810,7 +861,13 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         condition=IfCondition(LaunchConfiguration("marks_audit")),
         **RESPAWN,
     )
+    # THE DATABASE'S PLACE-DESCRIPTOR CENSUS, taken here on every start of this launch of the very
+    # file RTAB-Map is given, before RTAB-Map opens it: rtabmap_frame compares places by
+    # descriptor only when it says every node carries exactly one (a node without one compared
+    # with one that has one aborts RTAB-Map, which is not respawned).
+    census, census_note = census_env(database)
     frame = ExecuteProcess(
+        additional_env=census,
         cmd=[
             "python3",
             "-m",
@@ -1036,7 +1093,9 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 # grid painted through a stale map -> odom (217 x 247 m on 2026-09-22). The 169 node
                 # grids rebuild in seconds at start; True is the way back.
                 "use_saved_map": False,
-                **rtabmap_parameters(neighbor_refining, memory, packing, owner),
+                **rtabmap_parameters(
+                    neighbor_refining, memory, packing, owner, place_descriptors(packing)
+                ),
             }
         ],
         remappings=remappings,
@@ -1082,6 +1141,14 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         f" neighbor_refining={'on' if neighbor_refining else 'off'} (off: the neighbour links"
         " carry the odometry's own covariance, so a loop closure has somewhere to go);" + vo_note
     )
+    # What the snapshots carry for place recognition, and what the database carries.
+    descriptors = (
+        "the snapshots carry place descriptors (rehearsal"
+        f" {DESCRIPTOR_REHEARSAL['Mem/RehearsalSimilarity']})"
+        if place_descriptors(packing)
+        else "the snapshots carry no place descriptor (sensor_pack's global_descriptor)"
+    )
+    report += f"; {descriptors}; {census_note}"
     return [
         LogInfo(msg=report),
         ghost_wait,

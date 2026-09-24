@@ -90,16 +90,22 @@ def test_the_adapters_counters_are_in_the_report_line() -> None:
     node._report()
     line = node.logger.texts("info")[-1]
     assert "adapters (auto) xfeat auto: service 118, local 0, fallback 2, failed 0, 41.0 ms" in line
-    assert "registration_backend=auto" in line and "place_recognition=descriptor" in line
+    assert "registration_backend=auto" in line and "place_recognition=words" in line
+    assert "descriptor_null_share=0.5" in line
 
 
 # ---- how a place is found ---------------------------------------------------------------------
-def test_words_is_the_launch_table_s_and_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_first_decision_is_always_sent_then_only_a_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """This node may be a respawn beside an RTAB-Map still holding the descriptor likelihood an
+    earlier incarnation sent: the words are SENT once at start, not assumed, then only changes."""
     node = _node(UNIFORM, monkeypatch)
-    node._switches.set("place_recognition", "words")
     _say(node, SnapshotPlace(True, "service", DIM, TAG))
     _tick(node)
-    assert _likelihoods(node) == [] and node._recognition_why == "words"
+    assert _likelihoods(node) == ["true"] and node._recognition_why == "words"
+    _tick(node)
+    assert _likelihoods(node) == ["true"], "sent once, not every tick"
 
 
 def test_descriptor_goes_out_only_when_every_node_carries_one(
@@ -107,23 +113,61 @@ def test_descriptor_goes_out_only_when_every_node_carries_one(
 ) -> None:
     node = _node(UNIFORM, monkeypatch)
     node._switches.set("place_recognition", "descriptor")
+    node._switches.set("visual_confirm", "rtabmap")
     _tick(node)
-    assert _likelihoods(node) == [], "sensor_pack has not said what its snapshots carry"
+    assert _likelihoods(node) == ["true"], "sensor_pack has not said what its snapshots carry"
     assert "sensor_pack has not said" in node._recognition_why
     _say(node, SnapshotPlace(True, "service", DIM, TAG))
     _tick(node)
-    assert _likelihoods(node) == ["false"]
+    assert _likelihoods(node) == ["true", "false"]
     assert node._recognition_why.startswith("descriptor (169 nodes: 147 boq_dinov2@d72ee0ce/12288")
     _tick(node)
-    assert _likelihoods(node) == ["false"], "sent once, not every tick"
+    assert _likelihoods(node) == ["true", "false"], "sent once, not every tick"
     _say(node, SnapshotPlace(False, "service", 0, ""))  # the snapshots stopped carrying one
     _tick(node)
-    assert _likelihoods(node) == ["false", "true"], "the words back at once"
+    assert _likelihoods(node) == ["true", "false", "true"], "the words back at once"
     node._report()
     assert (
         "place recognition words (descriptor asked; the snapshots carry no descriptor)"
         in (node.logger.texts("info")[-1])
     )
+
+
+def test_a_service_that_stops_describing_hands_the_places_back_to_the_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A null query scores every node alike and no hypothesis forms: descriptor mode would go
+    blind while the service is down, where the words still recognise the place."""
+    node = _node(UNIFORM, monkeypatch)
+    node._switches.set("place_recognition", "descriptor")
+    node._switches.set("visual_confirm", "rtabmap")
+    _say(node, SnapshotPlace(True, "service", DIM, TAG, recent=10, recent_null=1))
+    _tick(node)
+    assert _likelihoods(node)[-1] == "false"
+    _say(node, SnapshotPlace(True, "service", DIM, TAG, recent=10, recent_null=7))
+    _tick(node)
+    assert _likelihoods(node)[-1] == "true"
+    assert "7 of the last 10 camera snapshots carried the null descriptor" in (
+        node._recognition_why
+    )
+    node._switches.set("descriptor_null_share", 1.0)  # live: the descriptor whatever happens
+    _tick(node)
+    assert _likelihoods(node)[-1] == "false"
+    _say(node, SnapshotPlace(True, "null", DIM, TAG))  # place_descriptor off on sensor_pack
+    _tick(node)
+    assert _likelihoods(node)[-1] == "true" and "place_descriptor is off" in node._recognition_why
+
+
+def test_the_descriptor_under_aggressive_confirm_says_what_it_measured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node = _node(UNIFORM, monkeypatch)
+    node._switches.set("place_recognition", "descriptor")
+    _say(node, SnapshotPlace(True, "service", DIM, TAG))
+    _tick(node)
+    assert _likelihoods(node) == ["false"], "sent: the confirm is a separate choice"
+    assert "visual_confirm aggressive" in node._recognition_why
+    assert "2 of 11 wrong localisations" in node._recognition_why
 
 
 def test_an_unpatched_rtabmap_keeps_the_words(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -134,7 +178,7 @@ def test_an_unpatched_rtabmap_keeps_the_words(monkeypatch: pytest.MonkeyPatch) -
     node._switches.set("place_recognition", "descriptor")
     _say(node, SnapshotPlace(True, "service", DIM, TAG))
     _tick(node)
-    assert _likelihoods(node) == []
+    assert _likelihoods(node) == ["true"]
     assert "rtabmap-keep-global-descriptors.patch" in node._recognition_why
     assert rtabmap_frame.RtabmapFrame()._rtabmap_keeps is False, "no marker on this machine"
 
@@ -155,7 +199,7 @@ def test_a_database_that_could_abort_rtabmap_keeps_the_words(
     node._switches.set("place_recognition", "descriptor")
     _say(node, SnapshotPlace(True, "service", DIM, TAG))
     _tick(node)
-    assert _likelihoods(node) == [] and why in node._recognition_why
+    assert _likelihoods(node) == ["true"] and why in node._recognition_why
 
 
 def test_the_new_flags_are_declared_with_their_kinds() -> None:
@@ -164,7 +208,8 @@ def test_the_new_flags_are_declared_with_their_kinds() -> None:
     assert flags.flag("registration_backend").env == "PEPIN_REGISTRATION_BACKEND"
     assert flags["registration_timeout_s"] == 1.0 and flags["xfeat_top_k"] == 2048
     assert flags.flag("place_recognition").choices == ("words", "descriptor")
-    assert flags["place_recognition"] == "descriptor", (
-        "measured; the gates keep the words where unsafe"
-    )
-    assert all(flags.flag(n).live for n in ("registration_backend", "place_recognition"))
+    assert flags["place_recognition"] == "words", "a default flips after a drive, not before"
+    assert flags["descriptor_null_share"] == 0.5
+    assert flags.flag("descriptor_null_share").range == (0.0, 1.0)
+    names = ("registration_backend", "place_recognition", "descriptor_null_share")
+    assert all(flags.flag(n).live for n in names)

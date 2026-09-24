@@ -127,7 +127,11 @@ one whose picture the service did not describe within ``place_timeout_s``, the N
 (pepin.global_descriptor: zeros, which RTAB-Map scores as neither like nor unlike anything). The
 service is asked on a worker thread and the snapshots leave in the order they were packed
 (pepin.place_stamp), so the packer never waits for it. What the snapshots carry is said latched on
-:data:`PLACE_TOPIC` for rtabmap_frame, which compares by descriptor only while it is true.
+:data:`PLACE_TOPIC` for rtabmap_frame, which compares by descriptor only while it is true and
+while the recent camera snapshots were described. ``global_descriptor auto`` (the default)
+attaches descriptors only on an RTAB-Map built with the patch that keeps them across a reload of a
+node's data: the unpatched core would drop one and abort at the next comparison, even under the
+words (mapping's rehearsal compares nodes too).
 
 THE REPORT LINE says what went into the last snapshot, every source's measured cadence and the
 counts of full, lidar-only and camera-only snapshots, and the place descriptors (described, null
@@ -152,7 +156,17 @@ from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, PointFiel
 from std_msgs.msg import String
 
 from pepin.flags import Flag, FlagSet
-from pepin.global_descriptor import PLACE_TOPIC, PlaceDescriptor, SnapshotPlace, to_ros
+from pepin.global_descriptor import (
+    ATTACH_AUTO,
+    ATTACH_CHOICES,
+    GLOBAL_DESCRIPTOR_ENV,
+    PLACE_TOPIC,
+    PlaceDescriptor,
+    SnapshotPlace,
+    descriptors_attached,
+    rtabmap_keeps_descriptors,
+    to_ros,
+)
 from pepin.localization_service import LocalizationClient, place_dim
 from pepin.place_models import DEFAULT_PLACE_MODEL, place_spec
 from pepin.place_stamp import PlaceStamper, rgb_of
@@ -293,25 +307,31 @@ FLAGS = FlagSet(
     ),
     Flag(
         "global_descriptor",
-        True,
-        env="PEPIN_GLOBAL_DESCRIPTOR",
+        ATTACH_AUTO,
+        choices=ATTACH_CHOICES,
+        env=GLOBAL_DESCRIPTOR_ENV,
         live=False,
-        description="every snapshot carries exactly one rtabmap_msgs/GlobalDescriptor (type 1): the"
-        " place vector of its picture (place_descriptor), or the null descriptor (zeros) when it"
-        f" has no picture or no vector came in place_timeout_s; said latched on {PLACE_TOPIC}."
-        " Off, no snapshot carries one, as before 2026-09-24",
-        why="on, because RTAB-Map compares two nodes' descriptors only when BOTH carry one and"
-        " ABORTS on a node with one against a node without (UASSERT, rtabmap"
-        " Signature.cpp:252): once the database's nodes carry descriptors"
-        " (ros/tools/place_backfill.py), every new node must too, and rtabmap_frame's"
-        " place_recognition descriptor needs it. Not live for the same reason: switched mid-run,"
-        " the next node would differ from the last. Harmless under the words (the TF-IDF"
-        " likelihood never compares descriptors; only mapping's rehearsal does, and it compares"
-        " new nodes with new nodes, which all carry one)",
-        on_when="always, and above all before place_recognition descriptor: the census"
-        " rtabmap_frame reads refuses the descriptor otherwise",
-        off_when="only against a database WITHOUT descriptors, to reproduce the snapshots of before"
-        " 2026-09-24 (PEPIN_GLOBAL_DESCRIPTOR=0 ros/laptop.sh vslam); never against a backfilled"
+        description="whether every snapshot carries exactly one rtabmap_msgs/GlobalDescriptor"
+        " (type 1): the place vector of its picture (place_descriptor), or the null descriptor"
+        " (zeros) when it has no picture or no vector came in place_timeout_s; said latched on"
+        f" {PLACE_TOPIC}. auto: exactly when this image's RTAB-Map keeps a node's descriptor"
+        " across the reload of its data (the marker /opt/rtabmap_patches/keep-global-descriptors,"
+        " ros/xfeat/patch_rtabmap.sh); on: always; off: never, the snapshots of before 2026-09-24",
+        why="auto, because a descriptor is safe only on the patched core. RTAB-Map compares two"
+        " nodes' descriptors only when BOTH carry one and ABORTS on a node with one against a node"
+        " without (UASSERT, rtabmap Signature.cpp:252), and the unpatched 0.22.1 drops a node's"
+        " descriptor whenever it reloads the node's data for a registration (Memory.cpp:2902,"
+        " 2908) — also under the words, because mapping's rehearsal compares the last node with"
+        " the next (Memory.cpp:3784-3834), and a rehearsal merge at rest makes the last node a"
+        " saved one, whose data is reloaded (Memory.cpp:2763, 3958): the core aborts and RTAB-Map"
+        " is not respawned. Not live: switched mid-run, the next node would differ from the last."
+        " With descriptors on board the launch raises Mem/RehearsalSimilarity to 0.92"
+        " (DESCRIPTOR_REHEARSAL in vslam.launch.py: the descriptor's scale, measured)",
+        on_when="on only for a control against an unpatched core (it can abort RTAB-Map); auto"
+        " otherwise — before place_recognition descriptor, whose gate refuses a core without the"
+        " patch and a database whose census is not whole",
+        off_when="off against a database WITHOUT descriptors to reproduce the snapshots of before"
+        " 2026-09-24 (PEPIN_GLOBAL_DESCRIPTOR=off ros/laptop.sh vslam); never against a backfilled"
         " database while RTAB-Map maps",
     ),
     Flag(
@@ -497,13 +517,19 @@ class SensorPack(Node):
         self._place_said: str | None = None
         self._places = LocalizationClient(timeout_s=float(self._switches["place_timeout_s"]))
         self._stamper: PlaceStamper | None = None
-        if self._switches.on("global_descriptor"):
+        # auto follows the core: descriptors only where RTAB-Map keeps them (see the flag's why)
+        self._rtabmap_keeps = rtabmap_keeps_descriptors()
+        if descriptors_attached(str(self._switches["global_descriptor"]), self._rtabmap_keeps):
             self._stamper = PlaceStamper(
                 configured_place_dim(),
                 lambda rgb, timeout: self._places.place(rgb, "jpeg", timeout),
                 self._attach_descriptor,
                 self._pub.publish,
                 threaded=self.PLACE_THREAD,
+                on_error=lambda text: self.get_logger().error(
+                    f"place descriptor: {text} (the snapshot went out with the null descriptor)",
+                    throttle_duration_sec=30,
+                ),
             )
         self._say_place()
         self.create_subscription(CameraInfo, CAMERA_INFO_TOPIC, self._on_info, reliable)
@@ -763,14 +789,18 @@ class SensorPack(Node):
 
     def _say_place(self) -> None:
         """What the snapshots carry, latched on :data:`PLACE_TOPIC` whenever it changes: whether
-        each carries a descriptor, where a camera snapshot's comes from, their length and the
-        weights of the last vector the service answered."""
+        each carries a descriptor, where a camera snapshot's comes from, their length, the
+        weights of the last vector the service answered, and how many of the last camera
+        snapshots went out with the null descriptor (rtabmap_frame's words fallback)."""
         stamper = self._stamper
+        recent, recent_null = stamper.recent() if stamper is not None else (0, 0)
         state = SnapshotPlace(
             attached=stamper is not None,
             source="service" if self._switches.on("place_descriptor") else "null",
             dim=stamper.dim if stamper is not None else 0,
             tag=stamper.tag if stamper is not None else "",
+            recent=recent,
+            recent_null=recent_null,
         )
         text = state.to_json()
         if text != self._place_said:
@@ -780,7 +810,9 @@ class SensorPack(Node):
     def _place_text(self) -> str:
         """The report line's clause: the descriptors described and the nulls, and the service."""
         if self._stamper is None:
-            return "place descriptors off (global_descriptor)"
+            setting = self._switches["global_descriptor"]
+            core = "keeps them" if self._rtabmap_keeps else "drops them on a reload: unpatched"
+            return f"place descriptors off (global_descriptor {setting}; this RTAB-Map {core})"
         remote = self._places.remotes["place"]
         return (
             f"place descriptors {self._stamper.line()}, {self._stamper.waiting} waiting;"

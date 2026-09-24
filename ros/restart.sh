@@ -600,11 +600,13 @@ check_laptop() {
     # XFeat / LighterGlue adapters and sensor_pack's place descriptors call it. It must answer
     # /health with its three models, none of them failed to build. Down, the adapters compute in
     # RTAB-Map's own process (registration_backend auto, 0.67 s a registration on the VM's CPU)
-    # and every snapshot carries the null place descriptor — slower and blind to places, never
-    # broken — so that is a WARN; under registration_backend service it is a FAIL, because then a
-    # registration the service does not answer finds no features at all.
+    # and every snapshot carries the null place descriptor, so place_recognition descriptor falls
+    # back to the words (descriptor_null_share) — slower, never broken — so that is a WARN, said
+    # loudly under place_recognition descriptor; under registration_backend service it is a
+    # FAIL, because then a registration the service does not answer finds no features at all.
     line="$(last '\]: rtabmap frame: ')"
     value="$(sed -n 's/.*registration_backend=\([a-z]*\).*/\1/p' <<<"$line")"
+    recognition="$(sed -n 's/.*place_recognition=\([a-z]*\).*/\1/p' <<<"$line")"
     local health models_line
     health="$(curl -s -m 3 "http://127.0.0.1:${PEPIN_MODELS_PORT:-8791}/health" || true)"
     models_line="$(python3 -c '
@@ -619,8 +621,10 @@ print(("BAD " if bad else "OK ") + "; ".join(
         pass 2.13 "localization service: ${models_line#OK }"
     elif [ "${value:-auto}" = service ]; then
         fail 2.13 "localization service ${models_line:-not answering on :${PEPIN_MODELS_PORT:-8791}} under registration_backend service: RTAB-Map's registrations find no features (ros/models.sh status; ros/flags.sh set rtabmap_frame registration_backend auto)"
+    elif [ "$recognition" = descriptor ]; then
+        warn 2.13 "localization service ${models_line:-not answering on :${PEPIN_MODELS_PORT:-8791}} UNDER place_recognition descriptor: the snapshots carry null place descriptors, so RTAB-Map recognises places by the WORDS until it answers again, and the adapters compute in RTAB-Map's process (${value:-auto}) (ros/models.sh start localization)"
     else
-        warn 2.13 "localization service ${models_line:-not answering on :${PEPIN_MODELS_PORT:-8791}}: the adapters compute in RTAB-Map's process (${value:-auto}) and the snapshots carry null place descriptors (ros/models.sh install localization)"
+        warn 2.13 "localization service ${models_line:-not answering on :${PEPIN_MODELS_PORT:-8791}}: the adapters compute in RTAB-Map's process (${value:-auto}) and the snapshots carry null place descriptors (ros/models.sh start localization)"
     fi
 
     # 2.11 is INFORMATIONAL and never fails a restart: who painted the lethal cells of the local
