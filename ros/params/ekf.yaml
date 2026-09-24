@@ -192,17 +192,49 @@ ekf_filter_node:
     odom1_queue_size: 10
     odom1_pose_rejection_threshold: 3.0
 
-    # odom2: the zero-velocity update. A slip is not noise and not silence -- the wheels report
-    # metres the cart never travelled, and taking their voice away is not enough, because a
-    # filter with no measurement COASTS: it keeps the velocity it last believed and integrates
-    # it forward. Measured 2026-09-16 on wheels held in the air: muting them cut the invented
-    # motion from 54 cm to 30, and no amount of muting takes it lower. What stops it is the
-    # oldest trick in inertial navigation: while a detector says the vehicle stands still, feed
-    # the filter a pseudo-measurement of ZERO velocity. pepin_bringup.relocalizer publishes one
-    # at 10 Hz for exactly as long as pepin.slip.PictureSlip holds its verdict (the wheels claim
-    # speed, the camera's own odometry sees the picture standing) and nothing at all otherwise,
-    # so with the slip_watch flag off this input is silent and the filter is what it was.
-    # Velocities, not a pose: x, y and yaw rate, each with a 1 cm/s-class sigma in the message.
+    # odom2: the zero-velocity update, /zupt -- a twist of exactly zero, told to the filter only
+    # while something KNOWS the cart is not moving, and nothing at all otherwise. Two publishers,
+    # never speaking at once, and both say the same thing: zero.
+    #
+    # AT REST (2026-09-24): the base bridge (pepin_base_cpp, include/.../zupt.hpp). Parked on its
+    # charger the filter's heading crept ~0.08 deg/min, ~5 deg an hour, while its yaw-rate
+    # sources said over 120 s: the bias-tracked gyro -0.001 deg/min, the wheels 0, the camera's VO
+    # -0.57, rf2o +1.5 at a variance of 2.5e-3 (scratch/link_autopsy/rest_yaw_sources.py) -- and
+    # this input was silent, because its one publisher was the tracker's slip watch below, which
+    # does not start under PEPIN_LOCALIZER=rtabmap. The bridge now publishes at zupt_rate_hz
+    # (10) for as long as its ZuptGate holds: the wheels' rest witnessed for zupt_settle_s
+    # (default imu_bias_s, the rest the gyro's bias tracker trusts), no non-zero /cmd_vel younger
+    # than zupt_cmd_hold_s (default cmd_timeout_s), and the bias-corrected gyro under
+    # zupt_gyro_quiet_rad_s (0.29 deg/s: 7.9 sigma of the parked chip's noise), so a cart turned
+    # by hand on still wheels is not frozen by its own update. The first moving sample of any
+    # witness stops it within one period. vx and vy at zupt_var_linear, vyaw at zupt_var_yaw,
+    # both 1e-6: 400x under the gyro's 4e-4 (zupt.hpp says why that number).
+    # EVERY ONE OF THOSE IS A LIVE PARAMETER of /base_bridge, range-checked and in force at the
+    # next tick (ros/README.md, "The base bridge's zero-velocity update"): this file needs no
+    # edit to tune it. Off: ``ros2 param set /base_bridge zupt_publish false``; the filter is
+    # then what it was before.
+    # NOT YET MEASURED ON THE ROBOT. The yaw half of this file, fed the sources' rest means
+    # (scratch/zupt/zupt_variance_sim.py), gives the rf2o pull cut 13x at 10 Hz (median over
+    # phases), but at 10 Hz the update is phase-locked to rf2o's scans and the cut ranges from
+    # none to full with the phase; at 50 Hz it is 12x at every phase. Read the parked creep with
+    # the switch on and off before believing either number; zupt_rate_hz is the lever after that.
+    #
+    # ON A SLIP (2026-09-16): pepin_bringup.relocalizer, the lidar tracker (PEPIN_LOCALIZER=
+    # tracker). A slip is not noise and not silence -- the wheels report metres the cart never
+    # travelled, and taking their voice away is not enough, because a filter with no measurement
+    # COASTS: it keeps the velocity it last believed and integrates it forward. Measured
+    # 2026-09-16 on wheels held in the air: muting them cut the invented motion from 54 cm to 30,
+    # and no amount of muting takes it lower. What stops it is the oldest trick in inertial
+    # navigation: while a detector says the vehicle stands still, feed the filter a
+    # pseudo-measurement of ZERO velocity. The relocalizer publishes one at 10 Hz for exactly as
+    # long as pepin.slip.PictureSlip holds its verdict (the wheels claim speed, the camera's own
+    # odometry sees the picture standing) and nothing at all otherwise, so with the slip_watch
+    # flag off it is silent.
+    # WHY THE TWO NEVER OVERLAP: the slip watch mutes the wheels at their source (base_bridge's
+    # odom_publish), and a muted /odom takes the bridge's rest witness with it -- silence is not
+    # rest -- so while the slip watch speaks the bridge's update is silent.
+    # Velocities, not a pose: x, y and yaw rate. The slip watch's sigmas are 1 cm/s and
+    # 0.02 rad/s (pepin.slip.ZUPT_SIGMA_*), the bridge's 1 mm/s and 1 mrad/s.
     odom2: zupt
     odom2_config: [false, false, false,
                    false, false, false,

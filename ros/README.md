@@ -135,6 +135,15 @@ sigma and gated RTAB-Map's correct words out; the pose jumped 3.4 m. What belong
 WiFi loss and close a loop in milliseconds. `map -> odom` is a slow correction every consumer
 composes with `odom -> base_link`.
 
+**What the tracker took with it.** It was also the only publisher of the EKF's zero-velocity
+input (`/zupt`, `odom2` in `ros/params/ekf.yaml`), so under `rtabmap` a parked cart's filter heard
+nothing but its sources' own drift and its heading followed rf2o's +1.5 deg/min at rest: ~5 deg an
+hour (2026-09-24). The C++ base bridge now publishes that input itself, in either mode, while its
+own rest witness says the cart is certainly still — wheels at rest past `imu_bias_s`, no fresh
+`/cmd_vel`, the gyro quiet — and nothing otherwise (`base_bridge` `zupt_publish`, live, default on;
+every setting of it live too, "The base bridge's zero-velocity update" below). Under `tracker` the
+slip watch's update remains beside it; the two never speak at once, and both say zero.
+
 **Why localising and not mapping.** A start in mapping mode opens a new session per restart, and
 the grid RTAB-Map publishes is the connected component of the *current node inside working
 memory* (`Rtabmap.cpp:3941/4111/5444`) — so seventeen sessions from one evening's restarts made
@@ -2391,6 +2400,66 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* 10.0 — 10 Hz (no cap in practice, rtabmap answers ~9.5/s) since 2026-09-14 13:40: with vy observable in ekf.yaml and origin resets refused, the board's EKF took the full rate with 0 misses at rest and 2 in 3 min of driving. The 3 Hz of the morning was chosen while the EKF state was running away: 3 Hz because the board could not carry nine. With /vo flowing at ~9 poses/s the EKF logged 'Failed to meet update rate' continuously — 56-94 ms of every 50 ms period at its 20 Hz — and Nav2's container sat at 200 % CPU (2026-09-14). The distance is the same distance: the published pose is absolute (vo_continuous), so the filter differences whatever two messages reached it and a skipped one only lengthens the gap. What changes is the weight — robot_localization's differential path multiplies the summed pose covariance BY the gap, so a longer gap is a wider velocity sigma: at 3 Hz the shipped 7 cm sigma becomes 5.7 cm/s against 3.2 cm/s at 9.4 Hz, which is a third opinion that costs the board three updates a second instead of nine
   - *On when:* raise it towards 9 only on a board that is measurably keeping its 20 Hz with Nav2 running, and read the EKF's update-rate warnings after
   - *Off when:* lower it further if the EKF still misses its rate
+
+## The base bridge's zero-velocity update
+
+The C++ base bridge's own switches, beside `imu_publish` and `odom_publish` above; they live here
+because the table above is generated from the Python nodes, and the Python bridge has no gyro and
+no update. While the cart is certainly standing still the bridge publishes `/zupt` — a twist of
+exactly zero, the EKF's `odom2` (vx, vy, vyaw; `ros/params/ekf.yaml`) — and nothing otherwise.
+Certainly still is three witnesses at once: the wheels at rest for `zupt_settle_s`, no non-zero
+`/cmd_vel` younger than `zupt_cmd_hold_s`, and the bias-corrected gyro under
+`zupt_gyro_quiet_rad_s` for that same window. The first moving sample of any of them stops the
+update within one period. Why it exists: parked, the EKF's heading crept ~5 deg an hour, pulled
+by rf2o's +1.5 deg/min at rest while the gyro read -0.001 (2026-09-24).
+
+**Every tunable is live.** `ros2 param set /base_bridge <name> <value>` takes effect at the next
+tick, with no restart and no rebuild; a new `zupt_rate_hz` re-times the timer at once. A value
+outside its range, or not a number, is refused: `ros2 param set` prints the reason, the bridge
+logs it as a warning, and the value in force stays. The CLI's own quirks are absorbed: `50`
+arrives as an integer and `1e-4` as a string (YAML 1.1 wants `1.0e-4`), and both are taken as the
+numbers they are. The same range check applies to a value given in a launch file, which falls
+back to the default with a warning instead of stopping the base.
+
+| name | default | range | what it does |
+| --- | --- | --- | --- |
+| `zupt_publish` | true | bool | the update at all; false is the bridge before 2026-09-24: nothing on `/zupt` |
+| `zupt_rate_hz` | 10 | 1..100 Hz | how often the update is published while the cart is at rest |
+| `zupt_var_linear` | 1e-6 | 1e-9..1 (m/s)^2 | the variance claimed on vx and vy |
+| `zupt_var_yaw` | 1e-6 | 1e-9..1 (rad/s)^2 | the variance claimed on vyaw (the gyro's is 4e-4, rf2o's 2.5e-3) |
+| `zupt_settle_s` | `imu_bias_s` (2.0) | 0..60 s | witnessed rest before the update, and the hold after a gyro turn; the bias tracker's own window stays `imu_bias_s` |
+| `zupt_cmd_hold_s` | `cmd_timeout_s` (0.5) | 0..10 s | how long a non-zero `/cmd_vel` holds the update off; the command's own timeout is not moved |
+| `zupt_gyro_quiet_rad_s` | 0.005 | 1e-4..0.5 rad/s | a bias-corrected yaw rate at or above this is a turn (0.005 = 0.29 deg/s, 7.9 sigma of the parked chip's noise) |
+
+The reasons for each default and each range are in
+`ros/pepin_base_cpp/include/pepin_base_cpp/zupt.hpp` (and its Python reference, `pepin.zupt`).
+Two numbers stay fixed, because they are structural: the variance on the three velocities the
+update does not claim (1e6: `odom2` fuses none of them, so the EKF never reads it), and how old
+the newest gyro sample may be (1 s, the same gap that ends the wheels' witness; at 50 Hz a sample
+is that old only after ~50 failed reads in a row).
+
+**What the bridge says.** Each change is one log line (`zupt: zupt_rate_hz 10 -> 50, in force at
+the next tick`), each refusal a warning with its reason, and each start or stop of the update a
+line with the reason it stopped. The link-up line and the once-a-minute gyro line end with the
+update's state and every setting in force:
+
+    zupt publishing for 312 s, 3121 sent [rate 10 Hz, var 1e-06 xy 1e-06 yaw, settle 2 s,
+    cmd hold 0.5 s, gyro quiet 0.005 rad/s]
+
+**Parked A/B, one variable at a time** (read the heading creep between each, e.g.
+`scratch/link_autopsy/rest_yaw_sources.py`; the simulation in `scratch/zupt/zupt_variance_sim.py`
+says the rate matters more than the variance past 1e-5):
+
+```bash
+ros2 param set /base_bridge zupt_publish false        # the filter as it was: the baseline creep
+ros2 param set /base_bridge zupt_publish true
+ros2 param set /base_bridge zupt_rate_hz 10.0         # the default, phase-locked to rf2o's scans
+ros2 param set /base_bridge zupt_rate_hz 50           # every gyro sample's worth
+ros2 param set /base_bridge zupt_var_yaw 1.0e-6       # the default claim on vyaw
+ros2 param set /base_bridge zupt_var_yaw 1.0e-4       # a hundred times looser
+ros2 param set /base_bridge zupt_var_linear 1.0e-4    # ...and on vx, vy
+ros2 param get /base_bridge zupt_rate_hz              # what is in force
+```
 
 ## Two recorders
 

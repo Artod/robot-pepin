@@ -71,8 +71,9 @@ CAMERA_MARK_TOPICS = ("/depth_marks", "/depth_free")
 # The tape keeps the wheels' own /odom (odom0, published raw by the base bridge), the lidar's
 # /odom_laser (odom3), the gyro (imu0) and the filter's output — but not the camera's visual
 # odometry (/vo, odom1: pepin_bringup.visual_odometry on the laptop, the gated rgbd_odometry) nor
-# the zero-velocity update (/zupt, odom2, the tracker's), so a fused pose that went wrong could not
-# be taken apart into what each source said while it happened. bag_to_tape skips them.
+# the zero-velocity update (/zupt, odom2: the base bridge's at rest, the tracker's on a slip), so a
+# fused pose that went wrong could not be taken apart into what each source said while it happened.
+# bag_to_tape skips them.
 ODOMETRY_TOPICS = ("/vo", "/zupt")
 BAG_TOPICS: tuple[str, ...] = (
     *sorted(TOPIC_RECORDS),
