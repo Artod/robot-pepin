@@ -97,6 +97,7 @@ __all__ = [
     "MAPPING",
     "PNP_REPROJ_PX",
     "PNP_REPROJ_RANGE_PX",
+    "PROXIMITY_STOCK",
     "REGISTRATION_PARAMETERS",
     "SHARP_SIGMA_DEG",
     "SHARP_SIGMA_M",
@@ -259,17 +260,32 @@ CONFIRM_PARAMETERS = {
 }
 
 
+# WHICH NODES A LOCALISED CAMERA REGISTERS AGAINST — the fifth thing that travels with the visual
+# strategy while localising. With RGBD/ProximityBySpace true (the launch table's, and the lidar's
+# path to most of this graph's links) a localised cart ALSO registers every update against the
+# nodes near its pose; under ICP that is a few milliseconds of scan matching, under the visual
+# strategy it is an XFeat re-extraction and a LighterGlue match per candidate. Measured
+# 2026-09-24: parked at the base, a localised update cost a median 5.0-5.2 s on the reference
+# BLAS and 1.77 s after RTLD_DEEPBIND, almost all of it Timing/Proximity_by_space_visual; on the
+# replay of camera-only run 0466 (LoopThr 0.05) turning it off took an update from 5.3 s to
+# 0.55 s and still accepted 50 of 55, map -> odom within 0.6 cm / 0.12 deg of its running median.
+# Off, only the words' own hypothesis is registered (one per update at most).
+PROXIMITY_STOCK = True
+
+
 def visual_parameters(
     strategy: str,
     features: str,
     pnp_reproj_px: float,
     mapping: bool = False,
     confirm: str = CONFIRM_STOCK,
+    proximity: bool = PROXIMITY_STOCK,
 ) -> dict[str, str]:
-    """The feature set, PnP gate and localisation confirmation RTAB-Map's registration should run
-    under ``strategy``, as the strings rtabmap wants: ``features`` and ``confirm`` under the visual
-    strategy while the database only localises, ORB's set and the stock confirmation under ICP or
-    while mapping whatever the flags say (the module comments above say why)."""
+    """The feature set, PnP gate, localisation confirmation and proximity search RTAB-Map's
+    registration should run under ``strategy``, as the strings rtabmap wants: the flags' values
+    under the visual strategy while the database only localises, ORB's set and the stock
+    confirmation and proximity under ICP or while mapping whatever the flags say (the module
+    comments above say why)."""
     visual = strategy == STRATEGY_VIS and not mapping
     chosen = features if visual else FEATURES_ORB
     if chosen not in FEATURE_PARAMETERS:
@@ -280,6 +296,7 @@ def visual_parameters(
         **FEATURE_PARAMETERS[chosen],
         "Vis/PnPReprojError": f"{pnp_reproj_px:g}",
         **CONFIRM_PARAMETERS[confirm if visual else CONFIRM_STOCK],
+        "RGBD/ProximityBySpace": "true" if (proximity if visual else PROXIMITY_STOCK) else "false",
     }
 
 

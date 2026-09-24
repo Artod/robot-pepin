@@ -30,6 +30,7 @@ from pepin.graphmode import (
     FEATURES_XFEAT,
     PNP_REPROJ_PX,
     PNP_REPROJ_RANGE_PX,
+    PROXIMITY_STOCK,
     REGISTRATION_PARAMETERS,
     STRATEGY_ICP,
     STRATEGY_VIS,
@@ -68,6 +69,7 @@ def test_the_visual_strategy_carries_the_flag_s_feature_set() -> None:
         "Vis/PnPReprojError": "2",
         "Rtabmap/LoopThr": "0.11",
         "RGBD/MaxOdomCacheSize": "10",
+        "RGBD/ProximityBySpace": "true",
     }
     assert visual_parameters(STRATEGY_VIS, FEATURES_ORB, 4.0) == {
         "Vis/FeatureType": "8",
@@ -76,6 +78,7 @@ def test_the_visual_strategy_carries_the_flag_s_feature_set() -> None:
         "Vis/PnPReprojError": "4",
         "Rtabmap/LoopThr": "0.11",
         "RGBD/MaxOdomCacheSize": "10",
+        "RGBD/ProximityBySpace": "true",
     }
 
 
@@ -103,6 +106,19 @@ def test_the_stock_confirmation_is_the_launch_table_s() -> None:
     table = _rtabmap_table()
     for name, value in CONFIRM_PARAMETERS[CONFIRM_STOCK].items():
         assert table[name] == value, name
+    assert table["RGBD/ProximityBySpace"] == ("true" if PROXIMITY_STOCK else "false")
+
+
+def test_the_proximity_search_is_switched_off_only_for_a_localising_camera() -> None:
+    """A localised camera's proximity registrations are XFeat matches (1.77 s an update parked
+    at the base); the lidar's are a few ms of ICP and most of the graph's links."""
+    off = visual_parameters(STRATEGY_VIS, FEATURES_XFEAT, 2.0, proximity=False)
+    assert off["RGBD/ProximityBySpace"] == "false"
+    assert visual_parameters(STRATEGY_ICP, FEATURES_XFEAT, 2.0, proximity=False)[
+        "RGBD/ProximityBySpace"
+    ] == ("true")
+    mapping = visual_parameters(STRATEGY_VIS, FEATURES_XFEAT, 2.0, True, proximity=False)
+    assert mapping["RGBD/ProximityBySpace"] == "true"
 
 
 def test_icp_always_carries_orb_whatever_the_flag_says() -> None:

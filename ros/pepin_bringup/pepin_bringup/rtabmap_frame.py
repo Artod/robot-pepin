@@ -124,6 +124,7 @@ from pepin.graphmode import (
     MAPPING,
     PNP_REPROJ_PX,
     PNP_REPROJ_RANGE_PX,
+    PROXIMITY_STOCK,
     SHARP_SIGMA_DEG,
     SHARP_SIGMA_M,
     STRATEGY_ICP,
@@ -492,6 +493,24 @@ FLAGS = FlagSet(
         " database's; single if a drive shows aggressive still waiting between localisations",
         off_when="rtabmap to reproduce RTAB-Map's stock confirmation, or if the extra registrations"
         " (one per update with a hypothesis over 0.05) cost the laptop more than it can spare",
+    ),
+    Flag(
+        "visual_proximity",
+        PROXIMITY_STOCK,
+        description="whether a localised camera also registers every update against the database"
+        " nodes near its pose (RGBD/ProximityBySpace), each an XFeat re-extraction and a"
+        " LighterGlue match; off, only the words' own hypothesis is registered, one at most per"
+        " update. Sent with the visual strategy while the database localises and changed live;"
+        " under ICP and while it maps, always on (the lidar's proximity links are cheap and most"
+        " of the graph's)",
+        why="on, RTAB-Map's own default, until a camera-only drive has measured off: parked at the"
+        " base on 2026-09-24 a localised update cost 1.77 s median with it on, almost all of it"
+        " the proximity registrations; on the replay of run 0466 off took an update from 5.3 s to"
+        " 0.55 s (reference BLAS) and still accepted 50 of 55",
+        on_when="while its cost fits the laptop: every update then localises, and a hypothesis the"
+        " words miss is still caught by the pose",
+        off_when="when the camera's localisations arrive seconds late, or the laptop's CPU is short"
+        " under a camera-only drive",
     ),
     Flag(
         "word_at_picture_time",
@@ -1544,6 +1563,7 @@ class RtabmapFrame(Node):
             float(self._switches["pnp_reproj_px"]),
             mapping=self._mode.mode == MAPPING,
             confirm=str(self._switches["visual_confirm"]),
+            proximity=self._switches.on("visual_proximity"),
         )
 
     def _visual_text(self) -> str:
@@ -1563,9 +1583,10 @@ class RtabmapFrame(Node):
         )
         asked_confirm = str(self._switches["visual_confirm"])
         confirm_why = "" if asked_confirm == confirm else f" ({asked_confirm} asked, visual only)"
+        proximity = "on" if sent.get("RGBD/ProximityBySpace", "true") == "true" else "off"
         return (
             f"visual features {features}{why}, PnP {sent.get('Vis/PnPReprojError', '?')} px,"
-            f" confirm {confirm}{confirm_why}"
+            f" confirm {confirm}{confirm_why}, proximity {proximity}"
         )
 
     # ---- outputs -------------------------------------------------------------------------
