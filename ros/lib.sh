@@ -86,6 +86,17 @@ pepin_localizer_check() {
 PEPIN_ZROUTER_PORT="${PEPIN_ZROUTER_PORT:-7447}"
 PEPIN_ZROUTER_BOARD=pepin-zrouter          # the board's router container (host network)
 PEPIN_ZROUTER_LAPTOP=pepin-zrouter-laptop  # the laptop's router container (on pepin-net)
+# What the two routers log, as their RUST_LOG (rmw_zenohd reads it; unset, it logs at info). On
+# 2026-09-23 the router-to-router session never came back after a Mac wake and BOTH routers said
+# nothing for 28 minutes: zenoh logs the laptop's re-dials ("Try to connect", "Unable to connect
+# to configured peer ... Retry in"), the handshakes the board refuses, a transport opened or closed
+# and a link that expired only at DEBUG. So the transport lifecycle and the connector are at
+# debug, and everything else stays at info — the per-message modules (rx, tx, the routing) are
+# not in the list, so the volume is a few lines per session event, measured in
+# scratch/link_autopsy/wedge_repro.py. PEPIN_ZROUTER_LOG=info is exactly the old level. The
+# board's unit carries the same string (a test keeps the two equal); /etc/default/pepin-ros
+# overrides it there.
+PEPIN_ZROUTER_LOG="${PEPIN_ZROUTER_LOG:-info,zenoh::net::runtime::orchestrator=debug,zenoh_transport::unicast::manager=debug,zenoh_transport::unicast::establishment=debug,zenoh_transport::unicast::universal::link=debug,zenoh_transport::unicast::universal::transport=debug}"
 pepin_rmw_is_zenoh() { [ "$PEPIN_RMW" = zenoh ]; }
 # This checkout's ros/, wherever the sourcing script lives (the container configs are under it).
 PEPIN_ROS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

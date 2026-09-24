@@ -647,6 +647,30 @@ def _unit_command(unit: str, prefix: str, marker: str) -> str:
     return line.split("-c '", 1)[1].rsplit("'", 1)[0].replace("$$", "$").replace("%%", "%")
 
 
+def test_both_routers_log_the_transport_lifecycle_and_nothing_per_message() -> None:
+    """2026-09-23: after a Mac wake the router-to-router session stayed dead for 28 minutes and
+    neither router wrote a line, because zenoh logs re-dials, refused handshakes and expired links
+    only at debug. Both routers get the same RUST_LOG, and it names no per-message module."""
+    import re
+
+    lib = (REPO / "ros/lib.sh").read_text()
+    shell = re.search(r'PEPIN_ZROUTER_LOG="\$\{PEPIN_ZROUTER_LOG:-([^}]+)\}"', lib)
+    assert shell, "ros/lib.sh defines the laptop router's filter"
+    unit = (REPO / "board/pepin-zrouter.service").read_text()
+    board = re.search(r"^Environment=PEPIN_ZROUTER_LOG=(\S+)$", unit, re.M)
+    assert board and board.group(1) == shell.group(1), "one filter for both routers"
+    directives = shell.group(1).split(",")
+    assert directives[0] == "info", "everything else at the level rmw_zenohd always had"
+    assert "zenoh::net::runtime::orchestrator=debug" in directives, "the laptop's re-dials"
+    assert "zenoh_transport::unicast::establishment=debug" in directives, "refused handshakes"
+    for noisy in ("universal::rx", "universal::tx", "routing", "pipeline", "=trace"):
+        assert not any(noisy in d for d in directives), f"{noisy}: a line per message"
+    runs = [ln for ln in unit.splitlines() if ln.startswith("ExecStart=")]
+    assert runs[0].count("-e RUST_LOG=$PEPIN_ZROUTER_LOG") == 2, "both docker run bodies"
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert '-e "RUST_LOG=$PEPIN_ZROUTER_LOG"' in laptop.split("zrouter_up() {")[1].split("\n}")[0]
+
+
 def test_the_board_router_keeps_its_log_across_a_restart_like_the_stack_does() -> None:
     """Under `docker run --rm` the board router's log of the 2026-09-23 wake (the 20-s closures
     to the sleeping laptop) went with its first restart. The container now outlives its process,
