@@ -85,14 +85,15 @@ sys.exit(code)
 
 
 def _run(tmp_path: Path, refuse: dict[str, int] | None = None, dead: str = "") -> dict[str, Any]:
-    """tof_init.sh on a fresh boot (all three awake at 0x29, both XSHUT lines high); returns the
-    bus afterwards, the script's output and its log file."""
+    """tof_init.sh on a fresh boot (all three awake at 0x29, both XSHUT lines high; ``dead`` names
+    the sensors that are gone, space-separated); returns the bus afterwards, the script's output,
+    its lines and its log file."""
     sim = tmp_path / "sim"
     bin_dir = tmp_path / "bin"
     sim.mkdir()
     bin_dir.mkdir()
     sensors = [
-        {"name": name, "line": line, "addr": 0x29, "dead": name == dead}
+        {"name": name, "line": line, "addr": 0x29, "dead": name in dead.split()}
         for name, line in (("pc9", None), ("pc5", 69), ("pc6", 70))
     ]
     (sim / "state.json").write_text(json.dumps({"sensors": sensors, "refuse": refuse or {}}))
@@ -122,6 +123,7 @@ def _run(tmp_path: Path, refuse: dict[str, int] | None = None, dead: str = "") -
     return {
         "code": run.returncode,
         "out": run.stdout + run.stderr,
+        "lines": (run.stdout + run.stderr).splitlines(),
         "addr": {s["name"]: s["addr"] for s in state["sensors"]},
         "log": log.read_text() if log.exists() else "",
         "readdr": [c for c in state["calls"] if " w3@" in c],
@@ -138,7 +140,7 @@ def test_a_clean_boot_is_addressed_once_verified_and_logged(tmp_path: Path) -> N
     got = _run(tmp_path)
     assert got["code"] == 0, got["out"]
     assert got["addr"] == {"pc9": 0x30, "pc5": 0x31, "pc6": 0x32}
-    assert "attempt 1/3: all three answer" in got["out"]
+    assert "tof_init: attempt 1/3: all three answer" in got["lines"]
     assert "0x30 OK" in got["out"] and "MISSING" not in got["out"]
     assert (
         got["log"]
@@ -156,8 +158,8 @@ def test_a_sensor_that_missed_its_address_is_retried_until_all_three_answer(
     holds both XSHUT lines low (both back to 0x29) and addresses them afresh."""
     got = _run(tmp_path, refuse={"31": 1})
     assert got["code"] == 0, got["out"]
-    assert "attempt 1/3: silent at 0x31" in got["out"]
-    assert "attempt 2/3: all three answer" in got["out"]
+    assert "tof_init: attempt 1/3: silent at 0x31" in got["lines"]
+    assert "tof_init: attempt 2/3: all three answer" in got["lines"]
     assert got["addr"] == {"pc9": 0x30, "pc5": 0x31, "pc6": 0x32}
     assert "after 2 attempt(s)" in got["log"]
 
@@ -171,7 +173,7 @@ def test_the_always_on_sensor_is_taken_back_from_where_a_shared_write_left_it(
     takes it from 0x31 while the other two are held in reset, since 0x30 is empty."""
     got = _run(tmp_path, refuse={"30": 1})
     assert got["code"] == 0, got["out"]
-    assert "attempt 1/3: silent at 0x30" in got["out"]
+    assert "tof_init: attempt 1/3: silent at 0x30" in got["lines"]
     assert "i2ctransfer -y 2 w3@0x31 0x00 0x01 0x30" in got["readdr"]
     assert got["addr"] == {"pc9": 0x30, "pc5": 0x31, "pc6": 0x32}
     assert "after 2 attempt(s)" in got["log"]
@@ -186,7 +188,19 @@ def test_a_sensor_that_is_gone_ends_in_a_logged_failure_and_leaves_the_others_up
     sensors that answer."""
     got = _run(tmp_path, dead="pc6")
     assert got["code"] == 0, got["out"]
-    assert "attempt 3/3: silent at 0x32" in got["out"]
+    assert "tof_init: attempt 3/3: silent at 0x32" in got["lines"]
     assert "0x32 MISSING" in got["out"] and "0x31 OK" in got["out"]
     assert "FAILED after 3 attempts: silent at 0x32" in got["log"]
     assert got["addr"]["pc9"] == 0x30 and got["addr"]["pc5"] == 0x31
+
+
+@pytest.mark.slow
+def test_two_silent_sensors_are_named_one_address_each(tmp_path: Path) -> None:
+    """The attempt line lists every silent address once, "0x30 0x32" — it read "0x30 0x3230 32"
+    until the message was built before the echo — and so does the line the log file keeps."""
+    got = _run(tmp_path, dead="pc9 pc6")
+    assert got["code"] == 0, got["out"]
+    assert "tof_init: attempt 1/3: silent at 0x30 0x32" in got["lines"]
+    assert "tof_init: attempt 3/3: silent at 0x30 0x32" in got["lines"]
+    assert "FAILED after 3 attempts: silent at 0x30 0x32 (0x29" in got["log"]
+    assert got["addr"]["pc5"] == 0x31, "the one that answers is addressed all the same"

@@ -102,7 +102,9 @@ while [ -n "$silent" ] && [ "$attempt" -lt "$ATTEMPTS" ]; do
   sequence
   silent=""
   for a in $TARGETS; do answers "$a" || silent="${silent:+$silent }$a"; done
-  echo "tof_init: attempt $attempt/$ATTEMPTS: ${silent:+silent at 0x${silent// / 0x}}${silent:-all three answer}"
+  msg="all three answer"
+  [ -z "$silent" ] || msg="silent at 0x${silent// / 0x}"
+  echo "tof_init: attempt $attempt/$ATTEMPTS: $msg"
 done
 
 echo "ToF bus state:"
