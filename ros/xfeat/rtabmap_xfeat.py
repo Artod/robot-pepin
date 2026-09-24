@@ -1,15 +1,26 @@
-"""RTAB-Map's Python feature detector: XFeat keypoints with their 64-float descriptors.
+"""RTAB-Map's Python feature detector: XFeat keypoints with their 64-float descriptors, computed by
+the localisation service on the laptop's GPU, or here in RTAB-Map's own process when it cannot.
 
 RTAB-Map loads this file by path (``Vis/FeatureType 15``, ``PyDetector/Path``) into the Python
 interpreter it embeds, calls :func:`init` once and then :func:`detect` with a grey 8-bit picture,
 and takes back two float32 arrays: the keypoints as N x 3 rows of (x, y, score) and the
 descriptors as N x 64 (rtabmap/corelib/src/python/PyDetector.cpp). The score becomes the
 keypoint's response. RTAB-Map applies no feature cap of its own to a Python detector
-(Features2d.cpp skips ``limitKeypoints`` for it), so :data:`TOP_K` here is the cap.
+(Features2d.cpp skips ``limitKeypoints`` for it), so the ``top_k`` in force here is the cap.
 
-XFeat is verlab/accelerated_features (Apache-2.0), vendored into the image at a pinned commit
-(ros/Dockerfile.xfeat); its weights ship in that checkout. Torch is imported in :func:`init`, not
-at import time, so the conversion below is testable without it.
+WHERE IT IS COMPUTED is a live switch (pepin.live_settings, owned by rtabmap_frame's
+``registration_backend`` flag and read on every call with one ``stat``): ``service`` — the
+localisation service (``POST /xfeat``, pepin.localization_service; ``PEPIN_MODELS_URL``) or no
+keypoints at all; ``local`` — XFeat here, on the Docker VM's CPU, as before 2026-09-24; ``auto``
+(the default) — the service, and XFeat here for a call it does not answer. The service answers
+the same arrays (pepin.xfeat_models is the one implementation both sides run), in 21-40 ms on
+the GPU where this process took about 70 ms on the VM's CPU, and a node's stored picture it has
+seen before costs it nothing (its LRU). The local model is built on the FIRST call that needs it
+— torch is never imported while the service answers — and a service that does not answer is left
+alone for 10 s at a time, so a dead service costs one timeout per 10 s, not one per call.
+
+The counters (service / local / fallback / failed) go to RTAB-Map's log and to
+pepin.live_settings' status file at most once a minute; rtabmap_frame prints them.
 """
 
 from __future__ import annotations
@@ -21,105 +32,101 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-# Where the vendored checkout lives (the image sets PEPIN_XFEAT_DIR; the offline benchmark points
-# it at its own clone of the same commit).
-XFEAT_DIR = os.environ.get("PEPIN_XFEAT_DIR", "/opt/xfeat/accelerated_features")
-# Keypoints kept a picture, best score first: the cap the offline benchmark measured with
-# (scratch/xfeat/xfeat_bench.py), XFeat's own examples use 2048-4096.
-TOP_K = int(os.environ.get("PEPIN_XFEAT_TOP_K", "2048"))
-# Torch's intra-op threads in RTAB-Map's process. The laptop container shares its cores with the
-# depth network and the rest of the stack; the benchmark's timing in the image is at this value.
+try:  # the laptop image puts the library on PYTHONPATH; RTAB-Map's interpreter may not see it
+    import pepin  # noqa: F401
+except ImportError:  # pragma: no cover - depends on the interpreter RTAB-Map embeds
+    sys.path.insert(0, os.environ.get("PEPIN_SRC", "/ws/pepin_src"))
+
+from pepin import xfeat_models
+from pepin.live_settings import RegistrationSettings, RegistrationSwitch, StatusBoard
+from pepin.localization_service import LocalizationClient
+from pepin.model_service import EveryMinute, ServiceOrLocal
+from pepin.xfeat_models import DESCRIPTOR_DIM, TOP_K, XFEAT_DIR, rtabmap_arrays
+
+__all__ = ["DESCRIPTOR_DIM", "TOP_K", "XFEAT_DIR", "detect", "init", "rtabmap_arrays"]
+
+# Torch's intra-op threads for the LOCAL model in RTAB-Map's process: the container shares its
+# cores with the rest of the stack; the benchmark's timing in the image is at this value.
 THREADS = int(os.environ.get("PEPIN_XFEAT_THREADS", "4"))
-DESCRIPTOR_DIM = 64
+NAME = "rtabmap_xfeat"
 
-_model: Any = None
+Features = tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]
+Job = tuple[npt.NDArray[np.uint8], RegistrationSettings]
 
-
-def import_torch() -> Any:
-    """torch, loaded so that ITS OWN BLAS answers its matrix products inside RTAB-Map.
-
-    RTAB-Map's process has already loaded the system's reference libblas.so.3 (through its own
-    dependencies) when the embedded interpreter first imports torch, and the dynamic linker binds
-    libtorch_cpu's sgemm_ and friends to that first definition in the global scope: measured in
-    pepin-laptop:xfeat, LighterGlue took 1.5 s a pair inside RTAB-Map against 0.4 s standalone,
-    XFeat's convolutions (no BLAS) the same in both. RTLD_DEEPBIND puts torch's own dependency
-    chain ahead of the global scope for the libraries this import opens. Elsewhere (a plain
-    interpreter, macOS without the flag) it changes nothing. Kept in both adapters because RTAB-Map
-    loads each by its own path and either may come first.
-    """
-    if "torch" in sys.modules:
-        return sys.modules["torch"]
-    flags = sys.getdlopenflags()
-    sys.setdlopenflags(flags | getattr(os, "RTLD_DEEPBIND", 0))
-    try:
-        import torch
-    finally:
-        sys.setdlopenflags(flags)
-    return torch
+_local: Any = None
+_client: LocalizationClient | None = None
+_switch: ServiceOrLocal[Job, Features] | None = None
+_settings = RegistrationSwitch()
+_status = StatusBoard()
+_minute = EveryMinute()
 
 
-def load_xfeat(xfeat_dir: str = XFEAT_DIR, top_k: int = TOP_K, threads: int = THREADS) -> Any:
-    """XFeat on the CPU with the weights of the checkout at ``xfeat_dir``; returns the model."""
-    torch = import_torch()
-    if xfeat_dir not in sys.path:
-        sys.path.insert(0, xfeat_dir)
-    from modules.xfeat import XFeat
-
-    torch.set_grad_enabled(False)
-    if threads > 0:
-        torch.set_num_threads(threads)
-    return XFeat(weights=os.path.join(xfeat_dir, "weights", "xfeat.pt"), top_k=top_k)
+def _remote(job: Job) -> Features | None:
+    assert _client is not None
+    image, settings = job
+    return _client.xfeat(image, settings.top_k, settings.timeout_s)
 
 
-def rtabmap_arrays(
-    keypoints: npt.ArrayLike, scores: npt.ArrayLike, descriptors: npt.ArrayLike
-) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
-    """XFeat's output as RTAB-Map reads it: contiguous float32 N x 3 (x, y, score) and N x 64.
-
-    RTAB-Map reads both buffers row by row with no strides, so a transposed or non-float32 array
-    would be misread silently; an empty result is (0, 3) and (0, 64).
-    """
-    xy = np.asarray(keypoints, dtype=np.float32).reshape(-1, 2)
-    score = np.asarray(scores, dtype=np.float32).reshape(-1, 1)
-    desc = np.asarray(descriptors, dtype=np.float32).reshape(-1, DESCRIPTOR_DIM)
-    if not (len(xy) == len(score) == len(desc)):
-        raise ValueError(f"{len(xy)} keypoints, {len(score)} scores, {len(desc)} descriptors")
-    return np.ascontiguousarray(np.hstack([xy, score])), np.ascontiguousarray(desc)
-
-
-def features(
-    model: Any, image: npt.ArrayLike, top_k: int = TOP_K
-) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
-    """Keypoints and descriptors of one grey picture (H x W, uint8), as :func:`rtabmap_arrays`."""
-    out = model.detectAndCompute(np.asarray(image), top_k=top_k)[0]
-    return rtabmap_arrays(
-        out["keypoints"].cpu().numpy(),
-        out["scores"].cpu().numpy(),
-        out["descriptors"].cpu().numpy(),
-    )
+def _here(job: Job) -> Features:
+    global _local
+    image, settings = job
+    if _local is None:
+        _local = xfeat_models.load_xfeat(XFEAT_DIR, top_k=settings.top_k, threads=THREADS)
+    return xfeat_models.features(_local, image, settings.top_k)
 
 
 def init(cuda: int) -> None:
-    """RTAB-Map's first call: load the model. ``cuda`` is ignored — the container has no GPU."""
-    global _model
-    _model = load_xfeat()
+    """RTAB-Map's first call: the service's client and the switch. No model is loaded here — the
+    local one is built by the first call that needs it. ``cuda`` is ignored (no GPU in Docker)."""
+    global _client, _switch
+    _client = LocalizationClient()
+    _switch = ServiceOrLocal[Job, Features](_remote, _here, lambda _job: xfeat_models.no_features())
 
 
-def detect(image: npt.ArrayLike) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
+def detect(image: npt.ArrayLike) -> Features:
     """RTAB-Map's call per picture: (N x 3 keypoints, N x 64 descriptors), float32."""
-    if _model is None:
+    if _switch is None:
         init(0)
-    return features(_model, image)
+    assert _switch is not None and _client is not None
+    settings = _settings.settings()
+    picture = np.ascontiguousarray(np.asarray(image, dtype=np.uint8))
+    answer = _switch((picture, settings), settings.backend)
+    if _minute.due():
+        _report(settings)
+    return answer
+
+
+def _report(settings: RegistrationSettings) -> None:
+    assert _switch is not None and _client is not None
+    remote = _client.remotes["xfeat"]
+    print(
+        f"{NAME}: backend {settings.backend}, top_k {settings.top_k}; {_switch.line()};"
+        f" service {_client.url}: {remote.status()}",
+        file=sys.stderr,
+        flush=True,
+    )
+    _status.publish(
+        "xfeat",
+        {
+            "backend": settings.backend,
+            "service": _switch.service,
+            "local": _switch.local,
+            "fallback": _switch.fallback,
+            "failed": _switch.failed,
+            "skipped": remote.skipped,
+            "last_error": remote.last_error or _switch.last_error,
+            "round_trip_ms": round(remote.round_trip.summary().median_ms, 1),
+        },
+    )
 
 
 if __name__ == "__main__":
     # The image build's check: the model loads and answers on a picture of random tiles, whose
-    # corners are what a detector finds.
+    # corners are what a detector finds — here, whatever the service does (local only).
     rng = np.random.default_rng(0)
-    picture = (np.kron(rng.random((60, 80)), np.ones((10, 10))) * 255).astype(np.uint8)
-    init(0)
-    points, descriptors = detect(picture)
+    tiles = (np.kron(rng.random((60, 80)), np.ones((10, 10))) * 255).astype(np.uint8)
+    points, descriptors = _here((tiles, RegistrationSettings.defaults()))
     assert points.dtype == np.float32 and points.shape[1] == 3, points.shape
     assert descriptors.shape == (len(points), DESCRIPTOR_DIM), descriptors.shape
     assert len(points) > 100, len(points)
-    print(f"rtabmap_xfeat: {len(points)} keypoints, top_k {TOP_K}, threads {THREADS}")
+    print(f"{NAME}: {len(points)} keypoints, top_k {TOP_K}, threads {THREADS}")
