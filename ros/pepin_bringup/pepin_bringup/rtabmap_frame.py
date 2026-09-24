@@ -70,8 +70,10 @@ THE VISUAL REGISTRATION'S FEATURES travel with the strategy on the same path, ch
 operator flags rather than by the snapshots: ``visual_features`` (``xfeat`` — XFeat keypoints
 matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure time — or
 ``orb``, the database's own words) and ``pnp_reproj_px`` (``Vis/PnPReprojError``). Under ICP the set
-is always ORB's, because the same re-extraction switch changes what a NEW node stores
-(:func:`pepin.graphmode.visual_parameters` has the file:line). ``xfeat`` needs the image that
+is always ORB's, and so it is unless RTAB-Map is LOCALISING for certain (told so, the call answered,
+no switch to mapping waiting), because the same re-extraction switch changes what a NEW node stores
+(:func:`pepin.graphmode.visual_parameters` has the file:line); a switch to mapping goes out only
+once ORB's set is in force and re-read. ``xfeat`` needs the image that
 carries the Python adapters (ros/Dockerfile.xfeat); in any other image this node sends ORB's set and
 the report line says why.
 
@@ -87,7 +89,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -119,7 +121,7 @@ from pepin.graphmode import (
     BY_TRUST,
     FEATURES_ORB,
     FEATURES_XFEAT,
-    MAPPING,
+    LOCALISING,
     PNP_REPROJ_PX,
     PNP_REPROJ_RANGE_PX,
     SHARP_SIGMA_DEG,
@@ -413,8 +415,9 @@ FLAGS = FlagSet(
         " matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure"
         " time (Vis/FeatureType 15, Vis/CorNNType 6, RGBD/LoopClosureReextractFeatures true);"
         " the database is only read. orb: the database's own GFTT/ORB words, the launch table's"
-        " values. Sent with the strategy and changed live; under ICP, and while the database"
-        " maps, the set is always orb. xfeat"
+        " values. Sent with the strategy and changed live; under ICP, and unless RTAB-Map is"
+        " certainly localising (told so and answered, no switch to mapping waiting), the set is"
+        " always orb, and a switch to mapping waits until orb's set is in force. xfeat"
         f" needs the pepin-laptop:xfeat image ({XFEAT_DETECTOR_PATH}); in another image this"
         " node sends orb and the report line says why",
         why="xfeat, measured 2026-09-23 offline (scratch/xfeat/xfeat_bench.py; evening clips of"
@@ -547,6 +550,16 @@ def _matched_id(msg: Info) -> int:
     return loop or proximity
 
 
+@dataclass(frozen=True)
+class HeldSwitch:
+    """A memory-mode switch the rule asked for that has not gone out yet: to which mode, why, and
+    whether the SERVICE held it back (busy, not up) rather than this node's own ordering."""
+
+    mapping: bool
+    why: str
+    refused: bool
+
+
 class RtabmapFrame(Node):
     """Publishes the graph's localisation as a measurement, and owns RTAB-Map's memory mode."""
 
@@ -591,7 +604,7 @@ class RtabmapFrame(Node):
         self._holder_at = -math.inf  # ...and when that report arrived, by our clock
         self._mode_pending: Any = None  # a switch the service has not answered yet
         self._mode_failed = 0  # switches that could not go out when the rule asked for them...
-        self._mode_held: str | None = None  # ...and why the one asked for now is held back
+        self._mode_held: HeldSwitch | None = None  # ...and the one asked for now, held back
         # ...and the other live switch: which registration RTAB-Map runs, decided by what the
         # snapshots carry (pepin.graphmode.StrategyRule). It starts at the strategy the launch table
         # set, so the rule asks for nothing until it has a reason to.
@@ -605,6 +618,11 @@ class RtabmapFrame(Node):
         # this image can run xfeat at all — the two adapters RTAB-Map loads by path are here or not.
         self._xfeat_here = all(Path(p).is_file() for p in (XFEAT_DETECTOR_PATH, XFEAT_MATCHER_PATH))
         self._visual_sent = visual_parameters(STRATEGY_ICP, FEATURES_ORB, PNP_REPROJ_PX)
+        # Whether RTAB-Map has READ the last set: every set counted, and the set the last re-read
+        # was sent after (a re-read goes out only once its set is answered) with its future.
+        self._sets_sent = 0
+        self._reread_after = 0
+        self._reread_pending: Any = None
         # THE TWO HALVES OF ONE UPDATE. The node a /rtabmap/info named and that message's stamp;
         # RTAB-Map's own localisation, its stamp and the planar 3x3 it measured. A word is made when
         # the two carry the same stamp, once (`_spent`): an update recognised nothing is silence.
@@ -797,7 +815,7 @@ class RtabmapFrame(Node):
                 if self._mode_failed
                 else ""
             )
-            + (f", held back: {self._mode_held}" if self._mode_held else "")
+            + (f", held back: {self._mode_held.why}" if self._mode_held else "")
         )
 
     def _agreement_text(self) -> str:
@@ -1290,17 +1308,39 @@ class RtabmapFrame(Node):
         if verdict is None:
             self._mode_held = None
             return
-        held = self._send_mode(verdict)
-        if held is not None:
-            # NOT SENT, SO NOT APPLIED: the rule takes the switch back and asks again next tick.
-            # Recorded as applied, it was never asked again, and the visual set that follows the
-            # mode (_visual_wanted) believed a mode RTAB-Map had never been told.
-            self._mode.withdraw()
-            if self._mode_held is None:
-                self._mode_failed += 1  # once per switch held back, not once per tick
-            self._mode_held = held
+        wait = self._features_first(verdict)
+        refused = None if wait is not None else self._send_mode(verdict)
+        why = wait or refused
+        if why is None:
+            self._mode_held = None
             return
-        self._mode_held = None
+        # NOT SENT, SO NOT APPLIED: the rule takes the switch back and asks again next tick.
+        # Recorded as applied, it was never asked again, and the visual set that follows the mode
+        # (_visual_wanted) believed a mode RTAB-Map had never been told.
+        self._mode.withdraw()
+        if refused is not None and (self._mode_held is None or not self._mode_held.refused):
+            self._mode_failed += 1  # once per switch the service held back, not once per tick
+        self._mode_held = HeldSwitch(verdict.mapping, why, refused is not None)
+
+    def _features_first(self, verdict: ModeVerdict) -> str | None:
+        """Why a switch to MAPPING must wait for the visual set, or ``None`` when it may go out.
+
+        ORB'S SET FIRST, AND ANSWERED. With RGBD/LoopClosureReextractFeatures on, a node the
+        database WRITES keeps no descriptors and no 3D (Memory.cpp:6126), so the xfeat set must be
+        out of force before RTAB-Map maps a single update. Sent after the mapping call, it arrived
+        on a later tick while RTAB-Map's executor could run a sensor update in between (a mapping
+        update with re-extraction on). So the switch waits here: the held mapping verdict makes
+        :meth:`_visual_wanted` ORB's, :meth:`_decide_strategy` sends that set this same tick, and
+        the switch goes out once RTAB-Map has re-read it — the re-read is sent only after the set
+        was answered and runs in the group the mode services run in (CoreWrapper.cpp:665-676).
+        """
+        if not verdict.mapping:
+            return None
+        if self._visual_sent != self._visual_wanted(self._strategy.strategy):
+            return "ORB's visual set goes to RTAB-Map first"
+        if not self._settled():
+            return "RTAB-Map has not re-read its visual set yet"
+        return None
 
     def _send_mode(self, verdict: ModeVerdict) -> str | None:
         """Send one memory-mode switch and the parameters that travel with it; ``None`` when it
@@ -1352,9 +1392,27 @@ class RtabmapFrame(Node):
             )
             for name, value in values.items()
         ]
-        self._tuner.call_async(request)
-        self._reread.call_async(Empty.Request())
+        self._sets_sent += 1
+        serial = self._sets_sent
+        # The re-read goes out when the set is ANSWERED, not beside it: the two are different
+        # callback groups on RTAB-Map's side (the node's parameter services, CoreWrapper's
+        # processing group), so a re-read sent beside the set could run first and re-read the old
+        # values. Answered after the set, it has run parseParameters on the new ones.
+        self._tuner.call_async(request).add_done_callback(lambda _: self._reread_once(serial))
         return True
+
+    def _reread_once(self, serial: int) -> None:
+        """Have RTAB-Map re-read its parameters now that set number ``serial`` is answered."""
+        if self._reread is None or not self._reread.service_is_ready():
+            return
+        self._reread_pending = self._reread.call_async(Empty.Request())
+        self._reread_after = serial
+
+    def _settled(self) -> bool:
+        """Whether RTAB-Map has READ every set this node sent: the last one was answered, the
+        re-read sent after it was answered too (nothing sent yet: the launch table's values)."""
+        answered = self._reread_pending is None or self._reread_pending.done()
+        return self._reread_after == self._sets_sent and answered
 
     # ---- RTAB-Map's registration ----------------------------------------------------------
     def _decide_strategy(self) -> None:
@@ -1421,13 +1479,24 @@ class RtabmapFrame(Node):
     def _visual_wanted(self, strategy: str) -> dict[str, str]:
         """The visual parameters RTAB-Map should hold under ``strategy``
         (:func:`pepin.graphmode.visual_parameters`): the flags' set under the visual strategy while
-        the database only localises, ORB's under ICP or while it maps."""
+        the database is certainly only read (:meth:`_database_only_read`), ORB's otherwise."""
         return visual_parameters(
             strategy,
             self._features(),
             float(self._switches["pnp_reproj_px"]),
-            mapping=self._mode.mode == MAPPING,
+            mapping=not self._database_only_read(),
         )
+
+    def _database_only_read(self) -> bool:
+        """Whether RTAB-Map is LOCALISING for certain: this node told it so, the call is answered
+        (the mode services run in the group the re-read does, CoreWrapper.cpp:675-676), and no
+        switch to mapping is waiting. The only state the xfeat set may be in force in — an unknown
+        mode, an unanswered switch or a mapping one on its way all read as mapping, because a node
+        the database WRITES under re-extraction keeps no descriptors and no 3D (Memory.cpp:6126)."""
+        if self._mode_held is not None and self._mode_held.mapping:
+            return False
+        answered = self._mode_pending is None or self._mode_pending.done()
+        return self._mode.mode == LOCALISING and answered
 
     def _visual_text(self) -> str:
         """The visual registration for a report line: ``visual features xfeat, PnP 2 px`` — and
