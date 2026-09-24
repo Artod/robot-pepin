@@ -1134,9 +1134,10 @@ global_costmap:
         # 0.55 / 2.0: the pair the drives were tuned on. A wider radius (0.70 / 1.5) painted the
         # whole passage and made the planner indifferent inside it; the berth around a person
         # comes from the planners' cost weights (cost_factor, cost_travel_multiplier) instead.
-        # 5.0, the local layer's (2026-09-23): at 2.0 the cost stayed high half a metre from any
-        # furniture, so the planner hunted troughs across the flat; now it falls off at the furniture.
-        cost_scaling_factor: 5.0
+        # 10.0 (2026-09-23, Artem's A/B after 5.0): at 2.0 the cost stayed high half a metre from
+        # any furniture and the planner hunted troughs across the flat; at 10 it is 64 at 20 cm and
+        # 3 at 50 cm, so plans run along the furniture and the footprint check alone keeps them off it.
+        cost_scaling_factor: 10.0
         inflation_radius: 0.55
       # False: the map is 239x215 cells, so publishing it whole at 0.5 Hz spends 50 kB/s on a
       # board whose control loop already drops to 3 Hz. Turn it on when a refused plan needs
