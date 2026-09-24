@@ -96,11 +96,12 @@ board_hot_thread() {  # -> "TID SHARE COMM" for the busiest thread of the board'
             awk "\$3 > 0 { printf \"%s %.2f %s\n\", \$1, \$2 / \$3, \$4 }" |
             sort -k2 -rn | head -1' 2>/dev/null || true
 }
-board_rate() {  # TOPIC -> one line: is it reaching the board, and how fast.
+board_rate() {  # TOPIC [latched] -> one line: is it reaching the board, and how fast.
     # ros/tools/topic_rate.py, not `ros2 topic hz`: the CLI costs ~4.5 s of start-up on four A53
     # cores before it measures anything, the tool is one rclpy node and answers in one line.
+    # `latched` asks for the held copy of a topic published once per change instead of a rate.
     ssh "root@$BOARD" \
-        "docker exec pepin-ros /pepin_entrypoint.sh timeout -s KILL 15 python3 /tools/topic_rate.py $1 5" \
+        "docker exec pepin-ros /pepin_entrypoint.sh timeout -s KILL 15 python3 /tools/topic_rate.py $1 5 ${2:-}" \
         2>&1 || true
 }
 # Both read the tracker's own "map ... (id <size>@<origin>, N adopted, ..." from its report line,
@@ -270,11 +271,15 @@ check_board() {
     fi
 
     n=6
-    # /map first: it is THE map (World R), RTAB-Map's grid republished at its detection rate (1 Hz,
-    # map_always_update) and routed here for the tracker. Then the camera's other two words.
+    # /map first: it is THE map (World R), RTAB-Map's grid, LATCHED — republished when it changes,
+    # and while RTAB-Map localises that is once a start (2026-09-24: "1 grids relayed" in a whole
+    # start, while the board's static layer held it), so it is asked for its held copy, not a
+    # rate. Then the camera's other two words, which do have one.
     for value in /map /depth_scan /vo; do
-        out="$(board_rate "$value")"
-        if [[ "$out" == *" Hz over "* ]]; then
+        mode=""
+        [ "$value" = /map ] && mode=latched
+        out="$(board_rate "$value" $mode)"
+        if [[ "$out" == *" Hz over "* || "$out" == *"latched copy received"* ]]; then
             pass "1.$n" "$value reaches the board: ${out#*: }"
         else
             fail "1.$n" "$value does not reach the board: $(tail -1 <<<"$out" | cut -c1-140) (the laptop half and the bridge)"
@@ -527,7 +532,11 @@ check_laptop() {
 
     line="$(last '\]: laptop localizer: ')"
     value="$(sed -n 's/.*tracker fit \([0-9.]*\).*/\1/p' <<<"$line")"
-    if [ -z "$line" ]; then
+    if ! pepin_localizer_is_tracker; then
+        # The belief it listens for is the board tracker's /tracker_pose, and under this switch no
+        # tracker runs: silence is the design, not a broken bridge (1.2 says the same of the board).
+        warn 2.5 "laptop localizer: n/a under PEPIN_LOCALIZER=$PEPIN_LOCALIZER (no tracker publishes the belief it listens for)"
+    elif [ -z "$line" ]; then
         fail 2.5 "laptop localizer: no report line (ros/laptop.sh logs vslam)"
     elif ! over "$value" 0; then
         fail 2.5 "laptop localizer: it hears no belief from the board (tracker fit ${value:-none}) — /tracker_pose is not crossing the bridge"

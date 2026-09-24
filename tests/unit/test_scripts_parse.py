@@ -981,6 +981,22 @@ def test_without_a_tracker_the_checks_move_to_the_edge_the_laptop_owns(tmp_path)
     assert "/map_tracked" in out and "WARN" in out
     assert any("map_odom.py" in c for c in sent), "read in the laptop's container, not the board's"
     assert not any("goto.sh where" in c for c in sent), "nothing asks the tracker's service"
+    # the laptop localizer listens for the tracker's belief: silent by design here, not a fault
+    assert "WARN 2.5  laptop localizer: n/a under PEPIN_LOCALIZER=rtabmap" in out, out
+
+
+def test_the_map_is_asked_for_its_latched_copy_not_a_rate(tmp_path) -> None:
+    """RTAB-Map's /map is latched and, while it localises, published once a start: five seconds
+    of counting found 0 messages on a board whose static layer held the grid (2026-09-24)."""
+    code, out, sent = _restart(
+        tmp_path, "board", FAKE_RATE="/map: latched copy received (a latched topic has no rate)"
+    )
+    assert "PASS 1.6  /map reaches the board: latched copy received" in out, out
+    asked = [c for c in sent if "topic_rate.py" in c]
+    assert any("topic_rate.py /map 5 latched" in c for c in asked), asked
+    assert any("topic_rate.py /vo 5 " in c + " " and "latched" not in c for c in asked), asked
+    code, out, _ = _restart(tmp_path, "board", FAKE_RATE="/map: no latched copy in 5 s")
+    assert code == 1 and "FAIL 1.6  /map does not reach the board: /map: no latched copy" in out
 
 
 def test_a_pose_nobody_has_corrected_is_a_failure_once_the_grace_is_over(tmp_path) -> None:
