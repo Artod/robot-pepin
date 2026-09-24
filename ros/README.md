@@ -105,6 +105,7 @@ refuses to begin while a navigation goal is running. The hang appeared on 4 of 7
 | 2.7 | `rtabmap_frame` has an anchor (from file or learned) and `over N infos` with N > 0 — 0 means the graph's trust is deaf |
 | 2.8 | no `process has died` in the container since it started |
 | 2.9 | Foxglove: the bridge answers on `ws://localhost:8765` and advertises every topic the layout draws (`ros/foxglove.sh check`; its failing lines are indented under this one) |
+| 2.12 | `pepin-vslam` carries the XFeat adapters (`/opt/xfeat/rtabmap_xfeat.py`), so `rtabmap_frame`'s `visual_features` default can run; on any other image the visual registration is ORB's. Passes on such an image only under `PEPIN_XFEAT=0`, which says ORB is meant (see "XFeat image") |
 | 2.11 | **informational (`WARN`, never fails)**: `marks_audit`'s last line — the local costmap's lethal cells split into lidar-backed, camera-only and unexplained. There is no healthy value (a room with a table in it should show camera-only cells); it is printed so the split is in front of you before the first goal |
 
 | # | flags |

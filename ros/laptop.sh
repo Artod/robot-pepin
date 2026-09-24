@@ -18,11 +18,14 @@
 #   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
 #                            neck on): the camera node here keeps its static edge off
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
-#   PEPIN_XFEAT=1 ros/laptop.sh vslam   the camera mapping container on pepin-laptop:xfeat
+#   ros/laptop.sh vslam      runs the camera mapping container on pepin-laptop:xfeat whenever that
+#                            image exists and was built on the laptop image below
 #                            (ros/laptop-build.sh xfeat): RTAB-Map built with Python, so
-#                            rtabmap_frame's visual_features flag can run XFeat + LighterGlue in the
-#                            visual registration; unset, the image is the usual one and that flag
-#                            falls back to ORB by itself
+#                            rtabmap_frame's visual_features default (xfeat) can run XFeat +
+#                            LighterGlue in the visual registration. Without it the usual image
+#                            runs, that flag falls back to ORB, and this says so on stderr.
+#                            PEPIN_XFEAT=0 is the rollback (the usual image, ORB only);
+#                            PEPIN_XFEAT=1 refuses to start without an up-to-date xfeat image
 #   PEPIN_CAMERA=overview ros/laptop.sh vslam   run the OTHER camera rig for one container:
 #                            config/camera.json's "active" is the standing answer (see the
 #                            "Camera rigs" section of ros/README.md), this overrides it
@@ -73,15 +76,41 @@ image() {
     if pepin_rmw_is_zenoh; then echo pepin-laptop:zenoh; return; fi
     docker image inspect pepin-laptop:latest >/dev/null 2>&1 && echo pepin-laptop || echo pepin-ros
 }
-# The camera mapping container's image: the one above, or pepin-laptop:xfeat under PEPIN_XFEAT=1
-# (refused when that image was never built, rather than quietly running the other one).
+# The camera mapping container's image. pepin-laptop:xfeat BY DEFAULT — rtabmap_frame's
+# visual_features defaults to xfeat, which only that image can run, and a restart that forgot an
+# environment variable used to bring RTAB-Map up on ORB with nothing but a clause in a report line
+# to say so (ORB accepted 0 of 630 camera-only updates on 2026-09-23). Only an xfeat image BUILT ON
+# the image above counts: an image built from another carries its layers first, so a laptop image
+# rebuilt since is not silently traded for an older one. PEPIN_XFEAT=0 is the rollback (the image
+# above, ORB only); PEPIN_XFEAT=1 refuses to start without an up-to-date xfeat image; PEPIN_IMAGE
+# (an explicit image) wins over both. ros/restart.sh's check 2.12 reads which image came up.
 vslam_image() {
-    if [ "${PEPIN_XFEAT:-0}" != 1 ]; then image; return; fi
-    if ! docker image inspect pepin-laptop:xfeat >/dev/null 2>&1; then
-        echo "PEPIN_XFEAT=1 but there is no pepin-laptop:xfeat image: ros/laptop-build.sh xfeat" >&2
+    local base why=""
+    base="$(image)"
+    if [ -n "${PEPIN_IMAGE:-}" ] || [ "${PEPIN_XFEAT:-}" = 0 ]; then echo "$base"; return; fi
+    if [ -n "${PEPIN_XFEAT:-}" ] && [ "$PEPIN_XFEAT" != 1 ]; then
+        echo "PEPIN_XFEAT=$PEPIN_XFEAT: 0 (the usual image), 1 (xfeat or nothing) or unset" >&2
         return 1
     fi
-    echo pepin-laptop:xfeat
+    if ! docker image inspect pepin-laptop:xfeat >/dev/null 2>&1; then
+        why="there is no pepin-laptop:xfeat image"
+    elif ! xfeat_built_on "$base"; then
+        why="pepin-laptop:xfeat was not built on $base (rebuilt since?)"
+    fi
+    if [ -z "$why" ]; then echo pepin-laptop:xfeat; return; fi
+    if [ "${PEPIN_XFEAT:-}" = 1 ]; then
+        echo "PEPIN_XFEAT=1 but $why: ros/laptop-build.sh xfeat" >&2
+        return 1
+    fi
+    echo "laptop: $why — vslam runs $base and visual_features falls back to orb" \
+        "(ros/laptop-build.sh xfeat, about an hour; PEPIN_XFEAT=0 says this is meant)" >&2
+    echo "$base"
+}
+xfeat_built_on() {  # BASE: whether pepin-laptop:xfeat's layers begin with BASE's (built FROM it)
+    local base_layers xfeat_layers
+    base_layers="$(docker image inspect -f '{{join .RootFS.Layers " "}}' "$1" 2>/dev/null)" || return 1
+    xfeat_layers="$(docker image inspect -f '{{join .RootFS.Layers " "}}' pepin-laptop:xfeat 2>/dev/null)" || return 1
+    [ -n "$base_layers" ] && [ "${xfeat_layers#"$base_layers"}" != "$xfeat_layers" ]
 }
 # The middleware flags every node container here is given. Under cyclone this is the one flag
 # it has always had; under zenoh it is the session (a peer of THIS machine's router) plus

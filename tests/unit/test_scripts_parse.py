@@ -618,6 +618,8 @@ ssh() {
 docker() {
     log "docker $*"
     case "$*" in
+        *Config.Image*pepin-vslam*) printf '%s\n' "${FAKE_VSLAM_IMAGE-pepin-laptop:xfeat}" ;;
+        *"test -f /opt/xfeat/"*) [ -z "${FAKE_NO_XFEAT-}" ] || return 1 ;;
         *inspect*) [ -n "${FAKE_VSLAM-x}" ] && printf '2026-09-14T19:00:00Z\n' || return 1 ;;
         *logs*vslam*) printf '%s\n' "${FAKE_VSLAM-$FAKE_VSLAM_DEFAULT}" ;;
         *map_odom.py*)
@@ -992,6 +994,23 @@ def test_a_thin_report_line_fails_the_node_it_belongs_to_not_the_run(tmp_path) -
     assert "FAIL 2.2" in out and "1.2 frames/s" in out
     assert "FAIL 2.3" in out and "14 refused at bound" in out
     assert "FAIL 2.10" in out and "0 updates" in out
+
+
+def test_a_camera_half_that_cannot_run_xfeat_fails_unless_orb_is_meant(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """visual_features defaults to xfeat and only an image with the Python adapters can run it; a
+    restart on any other image used to register with ORB (0 of 630 camera-only updates accepted
+    on 2026-09-23) with nothing but a clause in a report line to say so. PEPIN_XFEAT=0 says ORB
+    is meant, and then the same image passes."""
+    code, out, _ = _restart(tmp_path, "laptop", PEPIN_XFEAT="")
+    assert code == 0, out
+    assert "PASS 2.12" in out and "pepin-laptop:xfeat carries the xfeat adapters" in out
+    stock = {"FAKE_NO_XFEAT": "1", "FAKE_VSLAM_IMAGE": "pepin-laptop:zenoh"}
+    code, out, _ = _restart(tmp_path, "laptop", PEPIN_XFEAT="", **stock)
+    assert code == 1, out
+    assert "FAIL 2.12" in out and "pepin-laptop:zenoh has no xfeat adapters" in out
+    code, out, _ = _restart(tmp_path, "laptop", PEPIN_XFEAT="0", **stock)
+    assert code == 0, out
+    assert "PASS 2.12" in out and "ORB is meant" in out
 
 
 def test_a_flag_off_its_default_is_seen_but_never_fails_the_run(tmp_path) -> None:  # type: ignore[no-untyped-def]

@@ -542,6 +542,21 @@ check_laptop() {
         pass 2.10 "rtabmap frame: $n updates from RTAB-Map, ${value:-0} localisations heard"
     fi
 
+    # 2.12: whether the camera half can run the visual registration's default features.
+    # rtabmap_frame's visual_features defaults to xfeat, which needs the Python adapters only
+    # pepin-laptop:xfeat carries (ros/laptop.sh picks that image when it exists); in any other
+    # image RTAB-Map quietly registers with ORB, which accepted 0 of 630 camera-only updates on
+    # 2026-09-23. The adapter itself is asked for, as rtabmap_frame asks, so a rollback image that
+    # carries it passes too. PEPIN_XFEAT=0 says ORB is meant.
+    value="$(docker inspect -f '{{.Config.Image}}' pepin-vslam 2>/dev/null || true)"
+    if docker exec pepin-vslam test -f /opt/xfeat/rtabmap_xfeat.py >/dev/null 2>&1; then
+        pass 2.12 "vslam image: ${value:-unknown} carries the xfeat adapters"
+    elif [ "${PEPIN_XFEAT:-}" = 0 ]; then
+        pass 2.12 "vslam image: ${value:-unknown}, no xfeat adapters — PEPIN_XFEAT=0, ORB is meant"
+    else
+        fail 2.12 "vslam image: ${value:-unknown} has no xfeat adapters — visual_features falls back to orb (ros/laptop-build.sh xfeat; PEPIN_XFEAT=0 if ORB is meant)"
+    fi
+
     # 2.11 is INFORMATIONAL and never fails a restart: who painted the lethal cells of the local
     # costmap right now (pepin_bringup.marks_audit). There is no healthy value — a room with a
     # table in it SHOULD show camera-only cells — so this prints the split and leaves the verdict
