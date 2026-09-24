@@ -240,8 +240,13 @@ every stamp on the board is the board's. Scans, transforms and maps cross betwee
 robot runs on one time base:
 
 - **the laptop serves its VM's clock**: the `pepin-chrony` container (`ros/chrony/`: alpine,
-  `chronyd -d -x`, no sources, `local stratum 10`), published on `udp/123`, started idempotently by
-  `ros/laptop.sh` beside the zenoh router and left running across `ros/laptop.sh stop`;
+  `chronyd -d -x`, no sources, `local stratum 10`), published on `udp/123`, started by
+  `ros/time.sh install|server` (and idempotently by `ros/laptop.sh` beside the zenoh router under
+  `PEPIN_TIME_SOURCE=laptop`), `--restart unless-stopped`, left running across `ros/laptop.sh stop`.
+  Measured in statics on 2026-09-23: the image builds in 12 s, chronyd 4.5 answers from the first
+  second (stratum 10, leap normal, 1 MB of memory), 8 of 8 SNTP exchanges at a 1 ms round trip both
+  on `127.0.0.1` and on the Mac's LAN address through Docker Desktop 29.5.3's port publishing (no
+  sudo; the macOS firewall is off), and the VM's clock read 15 ms behind the Mac's;
 - **the board follows it**: chrony instead of systemd-timesyncd (`board/chrony.sh`,
   `board/chrony/chrony.conf`), the laptop as a `prefer` source polled every 4-16 s, the internet
   pool (the servers timesyncd used) beside it — the fallback when the laptop is away and a vote
@@ -274,10 +279,14 @@ the clock).
 its first update after boot is the `makestep` step itself.
 
 **The switch** (CLAUDE.md rule 19): `ros/time.sh source pool` puts the board on the pool alone —
-live, a `chronyc reload sources`, no restart and no step — and `PEPIN_TIME_SOURCE=pool` in the
-laptop's shell stops `ros/laptop.sh` from starting the server; `ros/time.sh source laptop` is the
-way back. `ros/time.sh uninstall` puts the board on systemd-timesyncd exactly as before (the
-package's `.deb` is kept at install, so it works with apt offline).
+live, a `chronyc reload sources`, no restart and no step — and `ros/time.sh source laptop` is the
+way back. On the laptop the variable only decides whether `ros/laptop.sh` (re)starts the server;
+its default is `pool` — what the board runs today under systemd-timesyncd — until the deploy
+below has measured the laptop source on the robot, and then it flips to `laptop` in `ros/lib.sh`
+and `src/pepin/timesync.py` together. `ros/time.sh uninstall` puts the board on
+systemd-timesyncd exactly as before (the package's `.deb` is kept at install, so it works with
+apt offline; our sources file and the Debian config backup go with chrony). Check 1.15 says "not
+measured" at once while no server runs here, so an undeployed laptop costs a restart nothing.
 
 **Deploy (not done yet; a parked robot, the owner's go):**
 
@@ -291,6 +300,11 @@ package's `.deb` is kept at install, so it works with apt offline).
 2. `ros/time.sh status` — the laptop's source marked `*` (selected), the pool `+`/`-`.
 3. `ros/time.sh offset` — under 100 ms; then `ros/board.sh census` for chronyd's real cost
    (`config/board_manifest.json` carries a guess).
+4. With the offset measured: `PEPIN_TIME_SOURCE` defaults to `laptop` in `ros/lib.sh` and
+   `DEFAULT_TIME_SOURCE` in `src/pepin/timesync.py` (and its test), one commit with the numbers.
+5. Not verified from the laptop alone (the board is the client): that the board's chrony selects
+   the laptop (`*` in `ros/time.sh status`) and that `timedatectl show -p NTPSynchronized` reads
+   `yes` under chrony within the first minute after a reboot — the boot wait's premise.
 
 ## The zenoh bridge
 

@@ -91,13 +91,16 @@ pepin_rmw_is_zenoh() { [ "$PEPIN_RMW" = zenoh ]; }
 PEPIN_ROS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ONE CLOCK FOR THE ROBOT (src/pepin/timesync.py has the whole story): where the board takes its
-# time from. laptop (the default): this laptop serves its Docker VM's clock — the one every ROS
-# node here stamps with — from the pepin-chrony container on udp/123, and the board's chrony
-# prefers it over the internet pool (board/chrony.sh). pool: no server here, the board on the
-# pool alone. The board keeps its own copy of the variable in /etc/default/pepin-ros, written by
-# `ros/time.sh source laptop|pool`; `ros/time.sh uninstall` puts the board back on
-# systemd-timesyncd exactly as it ran before chrony.
-PEPIN_TIME_SOURCE="${PEPIN_TIME_SOURCE:-laptop}"
+# time from. laptop: this laptop serves its Docker VM's clock — the one every ROS node here stamps
+# with — from the pepin-chrony container on udp/123, and the board's chrony prefers it over the
+# internet pool (board/chrony.sh). pool: no server here, the board on the pool alone — what it has
+# under systemd-timesyncd, so it is the DEFAULT until the chrony deploy has been measured on the
+# robot (CLAUDE.md rule 19; ros/README.md "One clock" flips it). Here the variable only decides
+# whether ros/laptop.sh (re)starts the server: once `ros/time.sh install` has started it, it
+# stays up (--restart unless-stopped) whatever a later shell says. The board keeps its own copy
+# in /etc/default/pepin-ros, written by `ros/time.sh source laptop|pool`; `ros/time.sh uninstall`
+# puts the board back on systemd-timesyncd exactly as it ran before chrony.
+PEPIN_TIME_SOURCE="${PEPIN_TIME_SOURCE:-pool}"
 PEPIN_TIMESERVER=pepin-chrony
 PEPIN_TIMESERVER_IMAGE=pepin-chrony:latest
 pepin_laptop_ip() {  # <board ip> -> this Mac's address on the interface that reaches the board

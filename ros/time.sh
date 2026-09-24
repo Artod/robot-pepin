@@ -64,6 +64,12 @@ case "${1:-}" in
         # The board is the NTP client and this laptop's server the reference, so the number is
         # exactly "board minus the clock the laptop's ROS nodes stamp with". The measurement is
         # src/pepin/timesync.py, piped into the board's own python3: nothing to install there.
+        # No server running here is "not measured" at once, not eight 1-s timeouts on the board
+        # (ros/restart.sh asks this on every restart, deployed or not).
+        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$PEPIN_TIMESERVER"; then
+            echo "no time server on this laptop ($PEPIN_TIMESERVER is not running: ros/time.sh server)"
+            exit 2
+        fi
         IP="$(laptop_ip)" || exit 2
         ssh "root@$BOARD" "python3 - $IP --warn-ms ${PEPIN_CLOCK_WARN_MS:-100}" \
             < "$HERE/../src/pepin/timesync.py"

@@ -122,6 +122,9 @@ do_uninstall() {
     # chrony out first (purge works offline: it only removes), then timesyncd back — from apt, or
     # from the .deb kept at install when apt cannot reach its mirror.
     systemctl disable --now chrony >/dev/null 2>&1 || true
+    # Our own files under /etc/chrony first: dpkg purges only what the package owns, and a
+    # leftover sources file or backup would keep the directory, and a later chrony, pointed at us.
+    rm -f "$LAPTOP_SOURCES" "$LAPTOP_SOURCES.new" /etc/chrony/chrony.conf.debian
     apt-get purge -y chrony || die "apt-get purge chrony failed; chrony is stopped, nothing else changed"
     if ! apt-get install -y systemd-timesyncd; then
         deb=$(ls "$KEEP"/systemd-timesyncd_*.deb 2>/dev/null | tail -1)

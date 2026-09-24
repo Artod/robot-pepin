@@ -32,14 +32,16 @@ NTP_UNIX_OFFSET_S = 2_208_988_800
 _FRACTION = 2**32
 
 # WHERE THE BOARD TAKES ITS TIME FROM (CLAUDE.md rule 19: the old way stays one word away).
-# "laptop" (the default): the laptop's time server first, the internet pool as the fallback —
-# one time base for both machines' stamps. "pool": the internet pool alone, the references the
-# board had under systemd-timesyncd (the daemon itself comes back with `ros/time.sh uninstall`).
-# The same variable in ros/lib.sh (does the laptop start its server) and in the board's
-# /etc/default/pepin-ros (board/chrony.sh writes the board's sources from it).
+# "laptop": the laptop's time server first, the internet pool as the fallback — one time base for
+# both machines' stamps. "pool": the internet pool alone, the references the board had under
+# systemd-timesyncd (the daemon itself comes back with `ros/time.sh uninstall`). "pool" is the
+# default until the chrony deploy has been measured on the robot; the deploy flips it here and in
+# ros/lib.sh together. The same variable in ros/lib.sh (does the laptop start its server) and in
+# the board's /etc/default/pepin-ros (board/chrony.sh writes the board's sources from it, and its
+# `install` writes "laptop" there explicitly).
 TIME_SOURCES = ("laptop", "pool")
 TIME_SOURCE_ENV = "PEPIN_TIME_SOURCE"
-DEFAULT_TIME_SOURCE = "laptop"
+DEFAULT_TIME_SOURCE = "pool"
 
 # How far apart the two clocks may be before the restart check says so. A tenth of a second is
 # the order of the stack's transform tolerances (0.1-0.5 s) and about twice what one NTP exchange
