@@ -585,7 +585,7 @@ def test_the_mode_follows_trust_in_the_pose_and_not_a_sensor_s_name() -> None:
     assert len(mapping.calls) == 1, "the initial mode is asked for at once"
     assert node._mode.mode == "mapping"
     # ...and the parameters the mode needs travel with it, as strings
-    tuned = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters"]
+    tuned = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters_atomically"]
     assert [p.name for p in tuned.calls[-1].parameters] == [
         "RGBD/LinearUpdate",
         "RGBD/AngularUpdate",
@@ -680,7 +680,7 @@ def _snapshots(node: Any, carrying: tuple[str, ...], kind: str, refresh_s: float
 
 def _tuner_ready(node: Any) -> tuple[Any, Any]:
     """RTAB-Map's parameter path, up: the set and the re-read it needs to be honoured at all."""
-    tuner = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters"]
+    tuner = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters_atomically"]
     reread = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/update_parameters"]
     tuner.ready = reread.ready = True
     return tuner, reread
@@ -801,7 +801,7 @@ def test_a_half_up_parameter_path_is_sent_nothing() -> None:
     """The set and its re-read go out together or not at all: a set whose re-read could not follow
     was counted as failed and then sent again whole on the retry."""
     node = rtabmap_frame.RtabmapFrame()
-    tuner = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters"]
+    tuner = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters_atomically"]
     tuner.ready = True  # update_parameters is not up
     _go_visual(node)
     assert not tuner.calls and node._strategy_failed == 1
@@ -1106,6 +1106,44 @@ def test_a_flip_to_mapping_takes_the_xfeat_set_out_of_force_before_the_mapping_c
     localising_at = names.index(rtabmap_frame.LOCALISATION_SERVICE)
     xfeat_at = [i for i, (_, r) in enumerate(journal) if _reextract(r) == "true"][-1]
     assert xfeat_at > localising_at, "xfeat only once the database is only read again"
+
+
+def test_a_set_lands_whole_and_one_parameter_at_a_time_is_a_flag_away(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """rtabmap_slam applies each /parameter_events notification as it arrives: a set_parameters
+    request of five names landed as five parseParameters, Reg/Strategy first, re-extraction
+    fourth (scratch/xfeat_critic/atomic_set.sh). Atomically it lands as one. The old request is a
+    flag away, and there re-extraction is ordered so it is never on beside another set's values."""
+    _adapters(monkeypatch, tmp_path, present=True)
+    node = rtabmap_frame.RtabmapFrame()
+    _localising(node)
+    atomic, _ = _tuner_ready(node)
+    one_by_one = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters"]
+    one_by_one.ready = True
+    _go_visual(node)
+    assert _sent(atomic)[-1]["Vis/FeatureType"] == "15" and not one_by_one.calls
+    node._switches.set("atomic_parameter_sets", False)
+    for seconds in (11.0, 11.6):  # the scan comes back: ICP with ORB's set
+        node.clock.seconds = seconds
+        _snapshots(node, ("camera", "lidar"), "full")
+        node.timers[0][1]()
+    (back,) = one_by_one.calls
+    names = [p.name for p in back.parameters]
+    assert names[0] == "RGBD/LoopClosureReextractFeatures", "off first, before Reg/Strategy 1"
+    assert [p.value.string_value for p in back.parameters][:1] == ["false"]
+    assert "Reg/Strategy" in names[1:]
+    node._report()
+    assert "atomic_parameter_sets" in node.logger.texts("info")[-1]
+
+
+def test_re_extraction_is_ordered_off_first_and_on_last() -> None:
+    order = rtabmap_frame.reextract_ordered
+    on = order({"Reg/Strategy": "0", "RGBD/LoopClosureReextractFeatures": "true", "Vis/X": "1"})
+    assert list(on) == ["Reg/Strategy", "Vis/X", "RGBD/LoopClosureReextractFeatures"]
+    off = order({"Reg/Strategy": "1", "Vis/X": "8", "RGBD/LoopClosureReextractFeatures": "false"})
+    assert list(off) == ["RGBD/LoopClosureReextractFeatures", "Reg/Strategy", "Vis/X"]
+    assert order({"RGBD/LinearUpdate": "0"}) == {"RGBD/LinearUpdate": "0"}
 
 
 def test_the_memory_never_maps_before_this_start_is_tied_to_the_loaded_map() -> None:

@@ -49,6 +49,11 @@ and read back with ``as_string()`` at :3112), and the name must be one the LAUNC
 (CoreWrapper.cpp:362-379), so a parameter never named in the launch table accepts ``ros2 param
 set`` and is then never looked at. ``Reg/Strategy`` is in that table
 (ros/pepin_bringup/launch/vslam.launch.py), which is what makes this switch possible at all.
+rtabmap_slam ALSO applies every change it hears on its own ``/parameter_events`` as it arrives
+(CoreWrapper.cpp:907-970, the same launch-table filter): a ``set_parameters`` request of five names
+lands as five notifications and five ``parseParameters``, a ``set_parameters_atomically`` request
+as one (measured 2026-09-24, scratch/xfeat_critic/atomic_set.sh) — so a set that must land whole
+goes atomically (``atomic_parameter_sets`` in pepin_bringup.rtabmap_frame).
 
 THE MEMORY. RTAB-Map has two memories. In MAPPING mode every update may become a node in the
 database; in LOCALISATION mode nothing is written and the graph only recognises what it already

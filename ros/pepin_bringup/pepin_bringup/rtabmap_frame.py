@@ -97,7 +97,7 @@ import numpy as np
 from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
 from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import SetParameters, SetParametersAtomically
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rtabmap_msgs.msg import Info, MapGraph
@@ -407,6 +407,31 @@ FLAGS = FlagSet(
         " if a live switch is ever seen to cost RTAB-Map its working memory",
     ),
     Flag(
+        "atomic_parameter_sets",
+        True,
+        description="a parameter set this node hands RTAB-Map (a strategy with its visual"
+        " features, a visual set alone, a memory mode's pair) goes as ONE"
+        f" {RTABMAP_NODE}/set_parameters_atomically request, which rtabmap_slam applies as one"
+        " /parameter_events notification and one parseParameters. Off, it goes as one"
+        " set_parameters request, which rclcpp applies one parameter at a time — each its own"
+        " event and its own parseParameters — with RGBD/LoopClosureReextractFeatures ordered"
+        " first when it turns off and last when it turns on",
+        why="on, measured 2026-09-24 in a throwaway container of pepin-laptop:xfeat"
+        " (scratch/xfeat_critic/atomic_set.sh: the node on an empty database, its own ROS domain,"
+        " no network). rtabmap_slam applies every parameter event it hears on its own node"
+        " (CoreWrapper.cpp:907-970). Five parameters in one SetParameters request (Reg/Strategy 0"
+        " and the xfeat set) arrived as 5 events and 5 parseParameters over 61 ms, Reg/Strategy"
+        " first and re-extraction fourth, with 49 ms after Vis/FeatureType 15 alone while its"
+        " detector was built; the same five in one SetParametersAtomically request arrived as 1"
+        " event and 1 parseParameters. One by one, leaving xfeat for ICP passes through ICP with"
+        " re-extraction still on, and every intermediate state is a registration nobody chose",
+        on_when="always: every parameter this node sets is declared by rtabmap_slam"
+        " (CoreWrapper.cpp:362-364), so an atomic set is refused only as a whole",
+        off_when="to reproduce the behaviour before 2026-09-24, or if RTAB-Map's node is ever seen"
+        " to refuse an atomic set (one unknown name fails the WHOLE request, where set_parameters"
+        " fails that parameter alone)",
+    ),
+    Flag(
         "visual_features",
         FEATURES_XFEAT,
         choices=(FEATURES_ORB, FEATURES_XFEAT),
@@ -528,6 +553,17 @@ def flags_for(localizer: str) -> FlagSet:
     return FlagSet(
         *(replace(flag, default=False) if flag.name == "grid_needs_tie" else flag for flag in FLAGS)
     )
+
+
+def reextract_ordered(values: dict[str, str]) -> dict[str, str]:
+    """The same set, ordered for a request rclcpp applies one parameter at a time:
+    ``RGBD/LoopClosureReextractFeatures`` FIRST when it turns off and LAST when it turns on, so no
+    intermediate state has re-extraction on beside another strategy's or feature set's values."""
+    key = "RGBD/LoopClosureReextractFeatures"
+    if key not in values:
+        return dict(values)
+    rest = {name: value for name, value in values.items() if name != key}
+    return {**rest, key: values[key]} if values[key] == "true" else {key: values[key], **rest}
 
 
 def _zero_stamp() -> Any:
@@ -727,7 +763,16 @@ class RtabmapFrame(Node):
                 False: self.create_client(Empty, LOCALISATION_SERVICE),
             }
         )
+        # The two ways to hand RTAB-Map a set (atomic_parameter_sets): all of it in one
+        # notification, or one parameter at a time as before.
         self._tuner = (
+            None
+            if self._slam
+            else self.create_client(
+                SetParametersAtomically, f"{RTABMAP_NODE}/set_parameters_atomically"
+            )
+        )
+        self._tuner_one_by_one = (
             None
             if self._slam
             else self.create_client(SetParameters, f"{RTABMAP_NODE}/set_parameters")
@@ -1369,22 +1414,28 @@ class RtabmapFrame(Node):
         self._set_parameters(MODE_PARAMETERS[mapping])
 
     def _set_parameters(self, values: dict[str, str]) -> bool:
-        """Set these RTAB-Map parameters on its node and have it re-read them; whether the pair of
-        calls went out at all.
+        """Set these RTAB-Map parameters on its node and have it re-read them; whether the set
+        went out at all (its re-read follows its answer).
 
-        THE ONLY PATH RTAB-MAP HONOURS, and every part of it is necessary. The values are STRINGS
-        because rtabmap declares every one of its parameters as one and reads it back with
-        ``as_string()``; ``update_parameters`` is what copies them into rtabmap's own map and hands
-        the whole map to ``Rtabmap::parseParameters``, so a set alone changes nothing (there is no
-        on-set callback on that node at all); and a name the LAUNCH table never overrode is accepted
-        by the set and then never looked at, which is why the two parameter tables here
-        (:data:`MODE_PARAMETERS`, :data:`pepin.graphmode.REGISTRATION_PARAMETERS`) name only
-        parameters that table already carries. The file:line for all of it is in
-        :mod:`pepin.graphmode`.
+        WHAT RTAB-MAP HONOURS. The values are STRINGS because rtabmap declares every one of its
+        parameters as one and reads it back with ``as_string()``, and a name the LAUNCH table
+        never overrode is accepted by the set and then never looked at, which is why the two
+        parameter tables here (:data:`MODE_PARAMETERS`,
+        :data:`pepin.graphmode.REGISTRATION_PARAMETERS`) name only parameters that table already
+        carries. A set is applied TWICE on RTAB-Map's side: rtabmap_slam hears its own
+        /parameter_events and hands every change to ``Rtabmap::parseParameters`` as it arrives
+        (CoreWrapper.cpp:907-970) — one event per parameter for a set_parameters request, one for
+        the whole set atomically (``atomic_parameter_sets``) — and ``update_parameters`` re-reads
+        the whole map synchronously, in the group the mode services run in, which is what
+        :meth:`_settled` waits for. The file:line for the rest is in :mod:`pepin.graphmode`.
         """
-        if self._tuner is None or self._reread is None or not self._path_up():
+        atomic = self._switches.on("atomic_parameter_sets")
+        tuner = self._tuner if atomic else self._tuner_one_by_one
+        if tuner is None or self._reread is None or not self._path_up():
             return False  # both calls or neither: a half-sent set is retried whole
-        request = SetParameters.Request()
+        if not atomic:
+            values = reextract_ordered(values)
+        request = (SetParametersAtomically if atomic else SetParameters).Request()
         request.parameters = [
             Parameter(
                 name=name,
@@ -1398,7 +1449,7 @@ class RtabmapFrame(Node):
         # callback groups on RTAB-Map's side (the node's parameter services, CoreWrapper's
         # processing group), so a re-read sent beside the set could run first and re-read the old
         # values. Answered after the set, it has run parseParameters on the new ones.
-        self._tuner.call_async(request).add_done_callback(lambda _: self._reread_once(serial))
+        tuner.call_async(request).add_done_callback(lambda _: self._reread_once(serial))
         return True
 
     def _reread_once(self, serial: int) -> None:
@@ -1440,8 +1491,9 @@ class RtabmapFrame(Node):
             self._strategy_held = False
         else:
             visual = self._visual_wanted(verdict.strategy)
-            # One set for the strategy and its features: the pipeline RTAB-Map re-creates on a new
-            # Reg/Strategy is built from the accumulated map, so it is born with the right ones.
+            # One set for the strategy and its features, applied as one (atomic_parameter_sets):
+            # the pipeline RTAB-Map re-creates on a new Reg/Strategy is built from the accumulated
+            # map, so it is born with the right ones and no update runs between the two halves.
             if not self._set_parameters({**verdict.parameters, **visual}):
                 # Not sent, so not applied: the rule takes it back and asks again next tick, and
                 # the strategy the features follow stays the one RTAB-Map still runs.
@@ -1467,9 +1519,13 @@ class RtabmapFrame(Node):
             self.get_logger().info(f"rtabmap registration: {self._visual_text()}")
 
     def _path_up(self) -> bool:
-        """Whether both halves of RTAB-Map's parameter path answer: the set and the re-read.
-        Asked before every set, so a half-up path is sent nothing rather than half a set."""
-        return all(c is not None and c.service_is_ready() for c in (self._tuner, self._reread))
+        """Whether both halves of RTAB-Map's parameter path answer: the set (the service
+        ``atomic_parameter_sets`` picks) and the re-read. Asked before every set, so a half-up path
+        is sent nothing rather than half a set."""
+        tuner = (
+            self._tuner if self._switches.on("atomic_parameter_sets") else self._tuner_one_by_one
+        )
+        return all(c is not None and c.service_is_ready() for c in (tuner, self._reread))
 
     def _features(self) -> str:
         """The feature set the flag asks for, if this image can run it; ``orb`` otherwise."""
