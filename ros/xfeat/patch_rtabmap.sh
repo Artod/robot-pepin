@@ -14,6 +14,22 @@
 # leaves /opt/rtabmap_patches/<name>, which is how the nodes know at run time what this RTAB-Map
 # carries (pepin.global_descriptor.KEEPS_DESCRIPTORS_MARKER).
 set -euo pipefail
+
+defines_identical() {  # INSTALLED BUILT: the two Version.h files define the same RTABMAP_* set
+    # The patched library replaces the installed one under headers and wrapper binaries built
+    # against the INSTALLED configuration (build_rtabmap.sh core), so the features CMake found this
+    # time must be exactly those: a library that lost g2o, GTSAM or libpointmatcher would change
+    # Optimizer/Strategy and Icp/Strategy's compile-time defaults without a word, and one that
+    # gained a feature changes class layouts the wrappers were not built for.
+    local differ
+    differ="$(diff <(grep '^#define RTABMAP_' "$1" | sort -u) <(grep '^#define RTABMAP_' "$2" | sort -u) || true)"
+    if [ -n "$differ" ]; then
+        echo "the patched core's features differ from the installed core's (< installed, > patched):" >&2
+        echo "$differ" >&2
+        return 1
+    fi
+}
+
 RTABMAP_REF="${RTABMAP_REF:-0.22.1}"
 RTABMAP_SHA="${RTABMAP_SHA:-df6300e0ba3e90058f90b09c4d646279366d3516}"
 CORE_JOBS="${CORE_JOBS:-2}"
@@ -42,6 +58,11 @@ cmake -S "$SRC/rtabmap" -B "$SRC/rtabmap/build" \
     -DWITH_PYTHON=ON -DWITH_QT=OFF -DWITH_OPENNI=OFF \
     -DBUILD_APP=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TOOLS=ON
 nice -n 19 cmake --build "$SRC/rtabmap/build" --target rtabmap_core -j "$CORE_JOBS"
+# The same features as the core it replaces (defines_identical), checked BEFORE the swap: the
+# configure step writes Version.h into the build tree (CMakeLists.txt:1133), the install put the
+# running core's under $PREFIX/include.
+defines_identical "$PREFIX/include/rtabmap-0.22/rtabmap/core/Version.h" \
+    "$SRC/rtabmap/build/corelib/src/include/rtabmap/core/Version.h"
 BUILT="$(find "$SRC/rtabmap/build" -name 'librtabmap_core.so.0.22.1' | head -1)"
 cp "$BUILT" "$PREFIX/$LIBDIR/librtabmap_core.so.0.22.1"
 # Still the Python core (grep -q reads a file: under pipefail it would kill the writer, exit 141).

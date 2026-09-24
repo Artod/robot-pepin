@@ -108,7 +108,7 @@ refuses to begin while a navigation goal is running. The hang appeared on 4 of 7
 | 2.9 | Foxglove: the bridge answers on `ws://localhost:8765` and advertises every topic the layout draws (`ros/foxglove.sh check`; its failing lines are indented under this one) |
 | 2.11 | **informational (`WARN`, never fails)**: `marks_audit`'s last line — the local costmap's lethal cells split into lidar-backed, camera-only and unexplained. There is no healthy value (a room with a table in it should show camera-only cells); it is printed so the split is in front of you before the first goal |
 | 2.12 | `pepin-vslam` carries the XFeat adapters (`/opt/xfeat/rtabmap_xfeat.py`), so `rtabmap_frame`'s `visual_features` default can run; on any other image the visual registration is ORB's. Passes on such an image only under `PEPIN_XFEAT=0`, which says ORB is meant (see "The XFeat image") |
-| 2.13 | the localisation service answers `/health` on `:8791` with `xfeat`, `match` and `place`, none of them `failed: ...` (see "The model services"). Down is a `WARN` (RTAB-Map's adapters compute in its own process and the snapshots carry null place descriptors), and a `FAIL` only under `registration_backend service`, where a registration it does not answer finds no features |
+| 2.13 | the localisation service answers `/health` on `:8791` with `xfeat`, `match` and `place`, none of them `failed: ...` (see "The model services"). Down is a `WARN` (RTAB-Map's adapters compute in its own process and the snapshots carry null place descriptors), said loudly under `place_recognition descriptor`, which is then back on the words until the service describes again, and a `FAIL` only under `registration_backend service`, where a registration it does not answer finds no features |
 
 | # | flags |
 |---|---|
@@ -1294,7 +1294,8 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `rtabmap_frame` | `registration_backend` | choice: service, local, auto | auto (env PEPIN_REGISTRATION_BACKEND) | yes | where RTAB-Map's XFeat keypoints and LighterGlue matches are computed (the xfeat visual features): service — the localisation service on the laptop's GPU (pepin.localization_service, PEPIN_MODELS_URL), no features when it does not answer; local — in RTAB-Map's own process on the Docker VM's CPU, as before 2026-09-24; auto — the service, and a call it does not answer computed locally. Written to /tmp/pepin/registration.json, which RTAB-Map's adapters read on every call (one stat): live, no restart of RTAB-Map |
 | `rtabmap_frame` | `registration_timeout_s` | number 0.05..5 | 1.0 | yes | how long RTAB-Map's adapters wait for one answer of the localisation service before it counts as none (auto then computes it locally, and the service is left alone for 10 s) |
 | `rtabmap_frame` | `xfeat_top_k` | integer 256..8192 | 2048 | yes | the most XFeat keypoints a picture keeps, best score first, wherever XFeat runs; RTAB-Map applies no cap of its own to a Python detector |
-| `rtabmap_frame` | `place_recognition` | choice: words, descriptor | descriptor | yes | how RTAB-Map finds WHICH database node a picture is (its likelihood, before any registration): words — the ORB bag of words' TF-IDF (Kp/TfIdfLikelihoodUsed true, Rtabmap/VirtualPlaceLikelihoodRatio 0, RTAB-Map's defaults); descriptor — the dot product of the nodes' learned place descriptors as z-scores (false and 1; rtabmap Memory::computeLikelihood -> Signature::compareTo, Rtabmap::adjustLikelihood), which sensor_pack attaches to every snapshot. descriptor is sent ONLY when it cannot abort RTAB-Map: its core carries ros/patches/rtabmap-keep-global-descriptors.patch (the marker /opt/rtabmap_patches/keep-global-descriptors), the snapshots carry one each (/sensor_pack/place) and the database's census at this start (PEPIN_PLACE_CENSUS) says every node carries exactly one of the same length; otherwise the words, and the report line says why. Live |
+| `rtabmap_frame` | `place_recognition` | choice: words, descriptor | words | yes | how RTAB-Map finds WHICH database node a picture is (its likelihood, before any registration): words — the ORB bag of words' TF-IDF (Kp/TfIdfLikelihoodUsed true, Rtabmap/VirtualPlaceLikelihoodRatio 0, RTAB-Map's defaults); descriptor — the dot product of the nodes' learned place descriptors as z-scores (false and 1; rtabmap Memory::computeLikelihood -> Signature::compareTo, Rtabmap::adjustLikelihood), which sensor_pack attaches to every snapshot. descriptor is sent ONLY when it cannot abort RTAB-Map: its core carries ros/patches/rtabmap-keep-global-descriptors.patch (the marker /opt/rtabmap_patches/keep-global-descriptors), the snapshots carry one each (/sensor_pack/place) and the database's census at this start (PEPIN_PLACE_CENSUS, taken by the launch before RTAB-Map opens the file) says every node carries exactly one of the same length — and only while the camera snapshots are described (descriptor_null_share); otherwise the words, and the report line says why. Live |
+| `rtabmap_frame` | `descriptor_null_share` | number 0..1 | 0.5 | yes | place_recognition descriptor falls back to the words while more than this share of the last 10 camera snapshots carried the null descriptor (the localisation service down, late or answering nonsense), and goes back once they are described again; 1.0 never falls back |
 | `rtabmap_frame` | `word_at_picture_time` | bool | on | yes | a graph word is stamped with the moment its PICTURE was taken — the localisation's own stamp, the board's clock under the snapshots — and odom -> base_link is looked up at that moment; the board carries the word to its update over its odometry (relocalizer carry_stale_words). Off, the word is stamped with the newest odom -> base_link stamp heard, as it was until 2026-09-19 |
 | `rtabmap_frame` | `grid_needs_tie` | bool | on | yes | RTAB-Map's grid (/rtabmap/grid) is relayed onto /map — the one map the board's tracker adopts — only once this start has recognised a node of the database it LOADED (or loaded none), and only grids stamped after that recognition. Until then the board keeps the map it cached. Off, every grid is relayed as it comes |
 | `rtabmap_frame` | `start_needs_placement` | bool | on | yes | what goes out on /localization/placement (latched) says this start of RTAB-Map is PLACED only once an update has recognised a node of the database it loaded, or an operator's seed (/rtabmap/initialpose) has been heard since its first update — or it loaded an empty database, whose start pose is the map's origin. The board's goal clients (ros/tools/goto_ros.py, pepin_bringup.goal_server) refuse a goal under PEPIN_LOCALIZER=rtabmap until then, saying to seed or to let the camera see a mapped place. Off, every start counts as placed: RTAB-Map's pose is taken as it is |
@@ -1307,7 +1308,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `sensor_pack` | `pack_hz` | number 0.1..15 | 1.0 | yes | at most this many snapshots a second of SENSOR time (the stamps' own clock, not this laptop's) |
 | `sensor_pack` | `pair_periods` | number 0.5..10 | 1.5 | yes | how many of its OWN measured periods a source's message may be from the snapshot's stamp and still be paired with it (pepin.snapshot) |
 | `sensor_pack` | `tf_retry` | bool | on | yes | a member whose transform TF cannot answer for yet does not cost the snapshot: the moment is put back and offered again on the next arrival, until it has left that member's own pairing patience (pair_periods of its measured period). Off, the member is dropped at once and the snapshot goes out without it — the behaviour of before 2026-09-19 |
-| `sensor_pack` | `global_descriptor` | bool | on (env PEPIN_GLOBAL_DESCRIPTOR) | at start | every snapshot carries exactly one rtabmap_msgs/GlobalDescriptor (type 1): the place vector of its picture (place_descriptor), or the null descriptor (zeros) when it has no picture or no vector came in place_timeout_s; said latched on /sensor_pack/place. Off, no snapshot carries one, as before 2026-09-24 |
+| `sensor_pack` | `global_descriptor` | choice: auto, on, off | auto (env PEPIN_GLOBAL_DESCRIPTOR) | at start | whether every snapshot carries exactly one rtabmap_msgs/GlobalDescriptor (type 1): the place vector of its picture (place_descriptor), or the null descriptor (zeros) when it has no picture or no vector came in place_timeout_s; said latched on /sensor_pack/place. auto: exactly when this image's RTAB-Map keeps a node's descriptor across the reload of its data (the marker /opt/rtabmap_patches/keep-global-descriptors, ros/xfeat/patch_rtabmap.sh); on: always; off: never, the snapshots of before 2026-09-24 |
 | `sensor_pack` | `place_descriptor` | bool | on | yes | a camera snapshot's descriptor is the localisation service's /place vector of its picture (pepin.localization_service, BoQ on the laptop's GPU); off, every snapshot carries the null descriptor and the service is not asked |
 | `sensor_pack` | `place_timeout_s` | number 0.05..0.95 | 0.5 | yes | the most a snapshot waits for its place vector, from the moment it is packed — its wait in the worker's queue included — before it goes out with the null descriptor |
 | `tof_bridge` | `range_as` | choice: scan, range | scan | yes | what Nav2 is fed with: scan also publishes each cone on /tof/<name>/scan as a small LaserScan fan for an ObstacleLayer; range publishes nothing there, which is the node before 2026-09-21 and needs the three RangeSensorLayer blocks back in the local costmap's plugins list. The sensor_msgs/Range topics are published either way |
@@ -2287,11 +2288,16 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* 2048 — 2048, the cap the offline benchmark measured the evening recognitions with (scratch/xfeat/xfeat_bench.py); XFeat's own examples use 2048-4096
   - *On when:* raise it where a scene is sparse and registrations fail on too few inliers
   - *Off when:* lower it when LighterGlue's time per pair (quadratic in the keypoints) is too much for the laptop
-- **`place_recognition`** — choice: words, descriptor, default descriptor
-  - *What:* how RTAB-Map finds WHICH database node a picture is (its likelihood, before any registration): words — the ORB bag of words' TF-IDF (Kp/TfIdfLikelihoodUsed true, Rtabmap/VirtualPlaceLikelihoodRatio 0, RTAB-Map's defaults); descriptor — the dot product of the nodes' learned place descriptors as z-scores (false and 1; rtabmap Memory::computeLikelihood -> Signature::compareTo, Rtabmap::adjustLikelihood), which sensor_pack attaches to every snapshot. descriptor is sent ONLY when it cannot abort RTAB-Map: its core carries ros/patches/rtabmap-keep-global-descriptors.patch (the marker /opt/rtabmap_patches/keep-global-descriptors), the snapshots carry one each (/sensor_pack/place) and the database's census at this start (PEPIN_PLACE_CENSUS) says every node carries exactly one of the same length; otherwise the words, and the report line says why. Live (one of: words, descriptor)
-  - *Default:* descriptor — descriptor, measured 2026-09-24 in RTAB-Map itself: the replay of the evening runs against the backfilled daylight database (scratch/models/replay_place.py, replay_matrix.sh, matrix_report.py; xfeat, 2 px, proximity on, a lidar-only snapshot every fourth). Words at the stock Rtabmap/LoopThr 0.11: hypotheses 0.05-0.09, 0 camera updates localised on 0457, 0460 and the camera-only 0466; words at 0.05: 9 of 23 (9 of 9 judged right), 3 of 17 (0 of 1) and 53 of 55. Descriptor with the ratio 1 at 0.11: hypotheses 0.42-0.88 (median), 16 of 23 (15 of 15 right), 14 of 17 (11 of 11) and 54 of 55; at 0.05 two of 0460's eleven judged were wrong. With the ratio 0 the descriptor's hypotheses read 0.01 and nothing localised. The retrieval behind it: BoQ-DINOv2 R@1 0.986 on 219 evening frames (scratch/models/place_parity.py). Without the patch RTAB-Map 0.22.1 aborted at the first comparison after a registration (Signature.cpp:252), which is why the patch is a gate
-  - *On when:* descriptor on a backfilled database (ros/tools/place_backfill.py) and a patched core, and then visual_confirm rtabmap: the descriptor's hypotheses reach 0.11 by themselves, and aggressive's 0.05 let the two wrong ones of 0460 through
-  - *Off when:* words to reproduce RTAB-Map's stock place recognition, or when a drive shows the descriptor naming the wrong node; an unpatched core, a database not backfilled or snapshots without descriptors keep the words by themselves
+- **`place_recognition`** — choice: words, descriptor, default words
+  - *What:* how RTAB-Map finds WHICH database node a picture is (its likelihood, before any registration): words — the ORB bag of words' TF-IDF (Kp/TfIdfLikelihoodUsed true, Rtabmap/VirtualPlaceLikelihoodRatio 0, RTAB-Map's defaults); descriptor — the dot product of the nodes' learned place descriptors as z-scores (false and 1; rtabmap Memory::computeLikelihood -> Signature::compareTo, Rtabmap::adjustLikelihood), which sensor_pack attaches to every snapshot. descriptor is sent ONLY when it cannot abort RTAB-Map: its core carries ros/patches/rtabmap-keep-global-descriptors.patch (the marker /opt/rtabmap_patches/keep-global-descriptors), the snapshots carry one each (/sensor_pack/place) and the database's census at this start (PEPIN_PLACE_CENSUS, taken by the launch before RTAB-Map opens the file) says every node carries exactly one of the same length — and only while the camera snapshots are described (descriptor_null_share); otherwise the words, and the report line says why. Live (one of: words, descriptor)
+  - *Default:* words — words until a drive has shown the descriptor on the robot (a default flips after a drive). Measured 2026-09-24 in RTAB-Map itself on the replay of the evening runs against the backfilled daylight database (scratch/models/replay_place.py, replay_matrix.sh, matrix_report.py; xfeat, 2 px, proximity on, a lidar-only snapshot every fourth). Words at the stock Rtabmap/LoopThr 0.11: hypotheses 0.05-0.09, 0 camera updates localised on 0457, 0460 and the camera-only 0466; words at 0.05 (visual_confirm aggressive, this node's default): 9 of 23 (9 of 9 judged right), 3 of 17 (0 of 1) and 53 of 55. Descriptor with the ratio 1 at 0.11: hypotheses 0.42-0.88 (median), 16 of 23 (15 of 15 right), 14 of 17 (11 of 11) and 54 of 55; at 0.05 two of 0460's eleven judged were WRONG — so the descriptor goes with visual_confirm rtabmap, and the report line says so when it does not. Judged counts are 16 or fewer a run and 0466 has no truth. With the ratio 0 the descriptor's hypotheses read 0.01 and nothing localised. The retrieval behind it: BoQ-DINOv2 R@1 0.986 on 219 evening frames (scratch/models/place_parity.py). Without the patch RTAB-Map 0.22.1 aborted at the first comparison after a registration (Signature.cpp:252), which is why the patch is a gate
+  - *On when:* descriptor on a backfilled database (ros/tools/place_backfill.py) and a patched core, together with visual_confirm rtabmap: the descriptor's hypotheses reach 0.11 by themselves, and aggressive's 0.05 let the two wrong ones of 0460 through
+  - *Off when:* words to reproduce RTAB-Map's stock place recognition, or when a drive shows the descriptor naming the wrong node; an unpatched core, a database not backfilled, snapshots without descriptors or a service that is not describing keep the words by themselves
+- **`descriptor_null_share`** — number 0..1, default 0.5
+  - *What:* place_recognition descriptor falls back to the words while more than this share of the last 10 camera snapshots carried the null descriptor (the localisation service down, late or answering nonsense), and goes back once they are described again; 1.0 never falls back (0..1)
+  - *Default:* 0.5 — 0.5: a snapshot whose descriptor is null scores 0.5 against EVERY node (pepin.global_descriptor), Rtabmap::adjustLikelihood's z-scores are then all zero and no hypothesis forms — descriptor mode goes blind where the words would still recognise the place. Half of 10 at a snapshot a second: a service that dies costs at most five blind updates, and one late answer never flips the likelihood
+  - *On when:* lower it to fall back sooner
+  - *Off when:* 1.0 to keep the descriptor whatever the service does (a measurement of the descriptor alone)
 - **`word_at_picture_time`** — bool, default on
   - *What:* a graph word is stamped with the moment its PICTURE was taken — the localisation's own stamp, the board's clock under the snapshots — and odom -> base_link is looked up at that moment; the board carries the word to its update over its odometry (relocalizer carry_stale_words). Off, the word is stamped with the newest odom -> base_link stamp heard, as it was until 2026-09-19
   - *Default:* on — on, measured 2026-09-19. A localisation is published 0.13-1.35 s after its picture (median 0.93 s, scratch/word_stamp_vs_board_now.py: the depth network and RTAB-Map's update), on the board's clock. Stamped 'now', every word taken in a turn was behind the truth by the turn rate times that age: tape 0388 -30.4 and -35.5 deg at +22 and +26 deg/s, tape 0386 nine of nine turning words with the sign of minus the turn rate (+20 deg at -25 deg/s ... -24 deg at +22 deg/s) and under 2 deg on the straights (scratch/tape_0388_word_stamp_latency.py). The camera's own stamp is good to 0.05 s against the gyro (scratch/camera_stamp_vs_gyro_lag.py), so the age is this pipeline's and nothing else's. The fusion took the -30 deg word (sigma 8 deg on both sides of the gate) and camera-only tape 0388 drove 0.5-0.7 m off its pose into a mapped obstacle
@@ -2358,11 +2364,11 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* on — about 5 % of camera frames answered 'base_link<-camera_optical: Lookup would require extrapolation into the future' and became lidar-only snapshots (measured live 2026-09-18): the neck's dynamic edge is published on the board and arrives over the bridge tens of milliseconds behind the frame it belongs to. The old answer was a 0.2 s BLOCKING wait inside the subscription callback, which both stalled the executor on every late frame — no picture, no depth and no revolution read while it waited — and still dropped those 5 %. A retry costs nothing and waits longer: arrivals come eighteen a second, so the patience is spent on the bridge rather than on this thread. The bound is the pairing bound itself and not a new number (176 ms for the camera at 8.5 Hz)
   - *On when:* always: a camera frame is the only thing in a snapshot that can recognise a place, and it is the one whose transform is late
   - *Off when:* to measure what the retry is worth — the report line's 'tf waits' against its 'frames TF could not place' is the same comparison with it on
-- **`global_descriptor`** — bool, default on, not live
-  - *What:* every snapshot carries exactly one rtabmap_msgs/GlobalDescriptor (type 1): the place vector of its picture (place_descriptor), or the null descriptor (zeros) when it has no picture or no vector came in place_timeout_s; said latched on /sensor_pack/place. Off, no snapshot carries one, as before 2026-09-24 (PEPIN_GLOBAL_DESCRIPTOR overrides the default at start) (not live: set at the next start)
-  - *Default:* on — on, because RTAB-Map compares two nodes' descriptors only when BOTH carry one and ABORTS on a node with one against a node without (UASSERT, rtabmap Signature.cpp:252): once the database's nodes carry descriptors (ros/tools/place_backfill.py), every new node must too, and rtabmap_frame's place_recognition descriptor needs it. Not live for the same reason: switched mid-run, the next node would differ from the last. Harmless under the words (the TF-IDF likelihood never compares descriptors; only mapping's rehearsal does, and it compares new nodes with new nodes, which all carry one)
-  - *On when:* always, and above all before place_recognition descriptor: the census rtabmap_frame reads refuses the descriptor otherwise
-  - *Off when:* only against a database WITHOUT descriptors, to reproduce the snapshots of before 2026-09-24 (PEPIN_GLOBAL_DESCRIPTOR=0 ros/laptop.sh vslam); never against a backfilled database while RTAB-Map maps
+- **`global_descriptor`** — choice: auto, on, off, default auto, not live
+  - *What:* whether every snapshot carries exactly one rtabmap_msgs/GlobalDescriptor (type 1): the place vector of its picture (place_descriptor), or the null descriptor (zeros) when it has no picture or no vector came in place_timeout_s; said latched on /sensor_pack/place. auto: exactly when this image's RTAB-Map keeps a node's descriptor across the reload of its data (the marker /opt/rtabmap_patches/keep-global-descriptors, ros/xfeat/patch_rtabmap.sh); on: always; off: never, the snapshots of before 2026-09-24 (one of: auto, on, off) (PEPIN_GLOBAL_DESCRIPTOR overrides the default at start) (not live: set at the next start)
+  - *Default:* auto — auto, because a descriptor is safe only on the patched core. RTAB-Map compares two nodes' descriptors only when BOTH carry one and ABORTS on a node with one against a node without (UASSERT, rtabmap Signature.cpp:252), and the unpatched 0.22.1 drops a node's descriptor whenever it reloads the node's data for a registration (Memory.cpp:2902, 2908) — also under the words, because mapping's rehearsal compares the last node with the next (Memory.cpp:3784-3834), and a rehearsal merge at rest makes the last node a saved one, whose data is reloaded (Memory.cpp:2763, 3958): the core aborts and RTAB-Map is not respawned. Not live: switched mid-run, the next node would differ from the last. With descriptors on board the launch raises Mem/RehearsalSimilarity to 0.92 (DESCRIPTOR_REHEARSAL in vslam.launch.py: the descriptor's scale, measured)
+  - *On when:* on only for a control against an unpatched core (it can abort RTAB-Map); auto otherwise — before place_recognition descriptor, whose gate refuses a core without the patch and a database whose census is not whole
+  - *Off when:* off against a database WITHOUT descriptors to reproduce the snapshots of before 2026-09-24 (PEPIN_GLOBAL_DESCRIPTOR=off ros/laptop.sh vslam); never against a backfilled database while RTAB-Map maps
 - **`place_descriptor`** — bool, default on
   - *What:* a camera snapshot's descriptor is the localisation service's /place vector of its picture (pepin.localization_service, BoQ on the laptop's GPU); off, every snapshot carries the null descriptor and the service is not asked
   - *Default:* on — on, measured 2026-09-24: through the service the fixed set (scratch/vpr, 147 daylight nodes, 219 evening frames of runs 0455-0465) recognises evening R@1 0.986, R@3 1.000 against the daylight gallery, JPEG as sent here the same as lossless (scratch/models/place_parity.py), where the ORB words' hypotheses read 0.05-0.07 under the evening lamps. The call costs this node nothing: it runs on a worker thread
@@ -2668,21 +2674,36 @@ hanging never takes the other with it — which the containers reach as
 | `depth` | `pepin.depth_service` | 8790 | the depth network, RAFT-Stereo (as `ros/depth_host.sh`) |
 | `localization` | `pepin.localization_service` | 8791 | XFeat (`/xfeat`, cpu), LighterGlue (`/match`, cpu), BoQ-DINOv2 place descriptors (`/place`, mps) |
 
-Both are launchd LaunchAgents (RunAtLoad, KeepAlive), run from the repository's uv environment:
+Both are launchd jobs run from the repository's uv environment, loaded ON DEMAND: their plists
+live in `~/Library/Application Support/pepin/launchd` (`PEPIN_LAUNCHD_DIR`), not in
+`~/Library/LaunchAgents`, so nothing loads them at login — together they hold about 2 GB of
+models. While a job is loaded launchd starts it and restarts it when it dies (KeepAlive,
+`ThrottleInterval` 30 s, `ProcessType Standard`); `ros/laptop.sh vslam` starts both (as it started
+the depth host before) and `ros/laptop.sh stop` stops them.
 
 | command | what it does |
 |---|---|
-| `ros/models.sh install [depth\|localization\|all]` | write the job's plist to `~/Library/LaunchAgents` and load it; waits for `/health` |
+| `ros/models.sh install [depth\|localization\|all]` | write the job's plist and start it; waits for `/health` |
+| `ros/models.sh start\|stop [...]` | load the job and wait for `/health` / unload it: the process ends and stays down until the next start |
+| `ros/models.sh restart [...]` | kill it and let launchd start it again |
 | `ros/models.sh status [...]` | launchd's word and each `/health` as one line: every model's tag (its weights' hash), device, requests and ms |
-| `ros/models.sh stop\|start\|restart [...]` | unload, load, kill-and-restart (a killed job launchd restarts, so `stop` unloads) |
-| `ros/models.sh logs [depth\|localization]` | follow `logs/models_<job>.out` |
+| `ros/models.sh installed depth\|localization` | exit 0 when the job is installed (what `laptop.sh` and `depth_host.sh` ask) |
+| `ros/models.sh logs [depth\|localization]` | follow `logs/models_<job>.out` (moved to `.out.1` past 10 MB at a start) |
 | `ros/models.sh plist [...]` | print the plist `install` would write |
 | `ros/models.sh fetch-xfeat` | clone XFeat at the commit the image pins into `models/accelerated_features` |
-| `ros/models.sh uninstall [...]` | unload and remove |
+| `ros/models.sh uninstall [...]` | stop and remove |
 
-`ros/depth_host.sh` keeps working for a depth host not under launchd, and leaves one that is alone.
+The localization job takes an XFeat checkout only at the commit `ros/Dockerfile.xfeat` pins
+(`ARG XFEAT_SHA`, read from its git HEAD or a copy's `COMMIT` file), because `auto` registration
+mixes the service's features with the image's local fallback (`PEPIN_XFEAT_UNPINNED=1` takes
+another anyway). The service checks its port before it loads a model, so a job whose port is taken
+exits in a second instead of reloading torch every restart. `ros/depth_host.sh` keeps working for
+a depth host not installed here, and hands an installed one to `ros/models.sh start|stop depth`.
 A model that fails to build does not take its process down: its endpoint answers 500 with the
-reason and `/health` names it (`failed: ...`); restart check 2.13 reads it.
+reason and `/health` names it (`failed: ...`); restart check 2.13 reads it. A place vector that is
+not a finite unit vector is a 500 too (one NaN aborts RTAB-Map). A client whose kept-alive
+connection the service dropped (a restart, a sleep) is sent once more on a fresh connection before
+anything counts as down.
 
 **Measured through the service** (2026-09-24, 800x600 pictures, beside the live stack, whose depth
 host keeps the GPU 80 % busy with RAFT-Stereo; `scratch/models/endpoint_bench.py`,
@@ -2711,17 +2732,32 @@ global descriptors instead of its ORB words (`rtabmap_frame`'s `place_recognitio
 compares two nodes' descriptors only when both carry one: a node with one against a node without
 ABORTS it (`Signature.cpp:252`). So every node carries exactly one:
 
-1. `sensor_pack` attaches one to every snapshot (`global_descriptor`): the service's `/place`
-   vector for a camera snapshot, the null descriptor (zeros, which RTAB-Map scores as neither like
-   nor unlike anything) for a lidar-only one or a picture the service did not describe in
-   `place_timeout_s`;
+1. `sensor_pack` attaches one to every snapshot (`global_descriptor`, `auto`: only on an RTAB-Map
+   built with the patch below — the unpatched core aborts even under the words, because mapping's
+   rehearsal compares nodes too): the service's `/place` vector for a camera snapshot, the null
+   descriptor (zeros, which RTAB-Map scores as neither like nor unlike anything) for a lidar-only
+   one, a picture the service did not describe in `place_timeout_s`, or any failure on the way
+   (a worker that raised is never a worker that stopped);
 2. `ros/tools/place_backfill.py ros/maps/rtabmap.db` writes one into every node the database
    already holds (the service up, the vslam stopped; a timestamped backup first, one transaction,
-   a re-run replaces), and `--check` prints the census;
-3. `ros/laptop.sh vslam` takes that census before the container starts and hands it over as
-   `PEPIN_PLACE_CENSUS`; `rtabmap_frame` sends the descriptor likelihood only when the census, the
-   snapshots and the RTAB-Map build all say nothing can abort it, and the words otherwise, with
-   the reason in its report line.
+   a re-run replaces, a vector that is not a finite unit vector refused), and `--check` prints the
+   census (of a copy, when a container holds the file);
+3. `vslam.launch.py` takes that census itself on EVERY start, of the file RTAB-Map is given and
+   before RTAB-Map opens it, and hands it to `rtabmap_frame` as `PEPIN_PLACE_CENSUS`;
+   `rtabmap_frame` sends the descriptor likelihood only when the census, the snapshots and the
+   RTAB-Map build all say nothing can abort it, and only while the recent camera snapshots were
+   described (`descriptor_null_share`: a null query scores every node alike, so a service that is
+   down hands the places back to the words); the words otherwise, with the reason in its report
+   line. `place_recognition` stays `words` by default until a drive has shown the descriptor.
+4. With descriptors on board the launch raises `Mem/RehearsalSimilarity` from 0.30 to 0.92: mapping's
+   rehearsal compares consecutive nodes by descriptor whenever both carry one, on a scale where
+   no two BoQ vectors score under ~0.57 and a null one scores 0.5; 0.92 calls as many of 121
+   consecutive daylight pairs the same place as the words did at 0.30
+   (`scratch/models/rehearsal_calibration.py`).
+
+A known limit: RTAB-Map scores places only for a frame with ORB words (`Rtabmap.cpp:1971`), so a
+frame too dark for a single GFTT corner is not recognised by descriptor either; the descriptor
+replaces the words' score, not the words.
 
 RTAB-Map 0.22.1 itself drops a node's descriptor the first time it registers against it (it
 reloads the node's data from the database without the descriptor table, `Memory.cpp:2896-2909`)
