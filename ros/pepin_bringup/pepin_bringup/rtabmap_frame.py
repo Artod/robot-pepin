@@ -562,7 +562,8 @@ class RtabmapFrame(Node):
         # WHAT THIS START OF RTAB-MAP IS PLACED BY (start_needs_placement): its updates, how many
         # recognised a node of the loaded database, and the operator seeds heard since its first
         # update. A start is RTAB-Map's, not this node's: numbering that goes back DOWN is
-        # RTAB-Map restarted under a node that kept running, and all of it starts again.
+        # RTAB-Map restarted under a node that kept running, and all of it starts again — the tie
+        # above too, under rtabmap only (_new_start).
         self._last_ref = 0
         self._start_updates = 0
         self._start_recognised = 0
@@ -877,16 +878,24 @@ class RtabmapFrame(Node):
     def _new_start(self, ref: int) -> None:
         """RTAB-Map restarted under this node: its numbering went back down to ``ref`` (within a
         start every update's node id is one more than the last; a restart numbers on from the
-        database's last saved node). Everything that said "this start" is about the old one: the
-        first node, the tie to the loaded map, the placement's counts and seeds."""
+        database's last saved node). That is certain only while RTAB-Map LOCALISES, which saves
+        no node: a start that mapped saved its nodes, the next numbers upward and is not seen.
+
+        The placement's first node, counts and seeds are the old start's and start again. The
+        tie to the loaded map starts again under ``rtabmap`` only: under ``tracker`` it gates the
+        grid (``grid_needs_tie``) and the switch to mapping (``graph_memory`` trust), which kept
+        the old start's tie before this detection existed, and still do."""
         self._restarts += 1
+        untie = self._localizer == "rtabmap"
         self.get_logger().warning(
             f"rtabmap frame: RTAB-Map restarted (node ids went from {self._last_ref} back to"
-            f" {ref}): this start is not tied to the loaded map and not placed until it recognises"
-            " a node or is seeded"
+            f" {ref}): this start is"
+            + (" not tied to the loaded map and" if untie else "")
+            + " not placed until it recognises a node or is seeded"
         )
         self._first_ref = None
-        self._tied, self._tied_stamp = False, 0.0
+        if untie:
+            self._tied, self._tied_stamp = False, 0.0
         self._start_updates = self._start_recognised = self._start_seeds = 0
 
     def _on_seed(self, _msg: PoseWithCovarianceStamped) -> None:

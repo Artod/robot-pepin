@@ -381,6 +381,23 @@ def test_an_rtabmap_restart_under_a_running_frame_node_unplaces_the_start() -> N
     assert "RTAB-Map restarted" in " ".join(frame.logger.texts("warning"))
 
 
+def test_under_the_tracker_a_restart_unplaces_the_start_but_keeps_the_grid_s_tie() -> None:
+    """Under ``tracker`` the tie gates the grid onto /map and the switch to mapping; it was kept
+    across an RTAB-Map restart before the restart was detected at all, and it still is. Only the
+    placement, which that role does not consume, starts again."""
+    from pepin_bringup import rtabmap_frame
+
+    with ros_stubs.parameters(localizer="tracker"):
+        frame = rtabmap_frame.RtabmapFrame()
+    _rtabmap_update(frame, 5600)
+    _rtabmap_update(frame, 5601, matched=5046)
+    assert frame._tied
+    _rtabmap_update(frame, 5600)
+    assert frame._restarts == 1 and not _placement_said(frame).placed
+    assert frame._tied, "the tracker role's tie is as it was before the detection"
+    assert "not tied" not in " ".join(frame.logger.texts("warning"))
+
+
 def test_an_empty_database_is_placed_and_the_flag_off_places_everything() -> None:
     from pepin_bringup import rtabmap_frame
 
