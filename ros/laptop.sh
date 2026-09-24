@@ -18,6 +18,11 @@
 #   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
 #                            neck on): the camera node here keeps its static edge off
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
+#   PEPIN_XFEAT=1 ros/laptop.sh vslam   the camera mapping container on pepin-laptop:xfeat
+#                            (ros/laptop-build.sh xfeat): RTAB-Map built with Python, so
+#                            rtabmap_frame's visual_features flag can run XFeat + LighterGlue in the
+#                            visual registration; unset, the image is the usual one and that flag
+#                            falls back to ORB by itself
 #   PEPIN_CAMERA=overview ros/laptop.sh vslam   run the OTHER camera rig for one container:
 #                            config/camera.json's "active" is the standing answer (see the
 #                            "Camera rigs" section of ros/README.md), this overrides it
@@ -67,6 +72,16 @@ image() {
     if [ -n "${PEPIN_IMAGE:-}" ]; then echo "$PEPIN_IMAGE"; return; fi
     if pepin_rmw_is_zenoh; then echo pepin-laptop:zenoh; return; fi
     docker image inspect pepin-laptop:latest >/dev/null 2>&1 && echo pepin-laptop || echo pepin-ros
+}
+# The camera mapping container's image: the one above, or pepin-laptop:xfeat under PEPIN_XFEAT=1
+# (refused when that image was never built, rather than quietly running the other one).
+vslam_image() {
+    if [ "${PEPIN_XFEAT:-0}" != 1 ]; then image; return; fi
+    if ! docker image inspect pepin-laptop:xfeat >/dev/null 2>&1; then
+        echo "PEPIN_XFEAT=1 but there is no pepin-laptop:xfeat image: ros/laptop-build.sh xfeat" >&2
+        return 1
+    fi
+    echo pepin-laptop:xfeat
 }
 # The middleware flags every node container here is given. Under cyclone this is the one flag
 # it has always had; under zenoh it is the session (a peer of THIS machine's router) plus
@@ -233,6 +248,7 @@ case "${1:-start}" in
             echo "               the volume is born empty under the cart; the existing"
             echo "               ros/maps/*.world.npz are left untouched until it saves"
         fi
+        VSLAM_IMAGE="$(vslam_image)" || exit 2
         pepin_remove_container pepin-vslam
         zrouter_up  # under zenoh this half has no bridge to wait for, only its own router
         # The depth network on the laptop's GPU (ros/depth_host.sh): 20 ms a frame on Metal
@@ -259,14 +275,14 @@ case "${1:-start}" in
         fi
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} ${CAMERA_ENV[@]+"${CAMERA_ENV[@]}"} \
-            "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
+            "$VSLAM_IMAGE" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null
         if pepin_localizer_is_tracker; then
             OWNER="the board's tracker adopts it and owns map -> odom"
         else
             OWNER="RTAB-Map here owns map -> odom (PEPIN_LOCALIZER=rtabmap: no tracker on the board)"
         fi
-        echo "vslam up (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and $OWNER; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
+        echo "vslam up on $VSLAM_IMAGE (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and $OWNER; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
         # The desktop app's socket died with the old container, and a Foxglove client never
         # re-attaches by itself: its panels stay on screen, empty, bound to channel ids this new
         # bridge does not have. So the app is told to reconnect (ros/foxglove.sh reopen waits for
