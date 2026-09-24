@@ -143,9 +143,10 @@ def _directives(path: str) -> list[str]:
     return [ln.split("#")[0].strip() for ln in text.splitlines() if ln.split("#")[0].strip()]
 
 
-def test_the_board_steps_only_at_boot_and_never_trusts_the_laptop_blindly() -> None:
-    """A running stack must never see its clock jump, and a laptop minutes off after a Mac wake
-    must be outvoted by the pool, not followed."""
+def test_the_board_steps_only_in_chronyd_s_first_updates_and_never_trusts_the_laptop() -> None:
+    """A step only in the first three updates after chronyd starts (normally the boot, before the
+    stack's wait ends), a slew afterwards; and a laptop minutes off after a Mac wake must be
+    outvoted by the pool, not followed."""
     lines = _directives("board/chrony/chrony.conf")
     assert "makestep 1 3" in lines, "step within the first three updates only"
     assert "sourcedir /etc/chrony/sources.d" in lines, "the switch is a reload, not a restart"

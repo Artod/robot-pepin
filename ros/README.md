@@ -292,8 +292,10 @@ robot runs on one time base:
 - **the board follows it**: chrony instead of systemd-timesyncd (`board/chrony.sh`,
   `board/chrony/chrony.conf`), the laptop as a `prefer` source polled every 4-16 s, the internet
   pool (the servers timesyncd used) beside it — the fallback when the laptop is away and a vote
-  against a laptop clock that is wrong. `makestep 1 3`: the clock is stepped at boot only and
-  slewed afterwards, so a running stack never sees time jump;
+  against a laptop clock that is wrong. `makestep 1 3`: the clock is stepped only within the
+  first three updates after chronyd starts (normally the boot, before `pepin-ros`'s wait ends) and
+  slewed afterwards; a board that syncs only after that 90-s wait, or a chronyd restart (an apt
+  upgrade, a re-run of `ros/time.sh install`), can still step it once under a running stack;
 - **the board learns the laptop's address from the laptop**: `ros/time.sh` asks this Mac for the
   address of the interface that routes to the board (`ros/lib.sh`'s `pepin_laptop_ip`) and writes
   it to the board's `/etc/default/pepin-ros` (`PEPIN_LAPTOP_HOST`) and to
@@ -318,7 +320,9 @@ the clock).
 **The boot wait holds under chrony unchanged.** `board/pepin-ros.service` waits up to 90 s for
 `NTPSynchronized`, which timedated reads from the kernel (`adjtimex().maxerror < 16 s`, systemd
 257); chronyd writes its real error bound there at every update and 16 s while unsynchronised, and
-its first update after boot is the `makestep` step itself.
+its first update after boot is the `makestep` step itself. That holds when the sync comes within
+the 90 s: a board with no network at boot starts the stack anyway and takes the step later, under
+it — no worse than systemd-timesyncd, which steps at any update over 0.4 s.
 
 **The switch** (CLAUDE.md rule 19): `ros/time.sh source pool` puts the board on the pool alone —
 live, a `chronyc reload sources`, no restart and no step — and `ros/time.sh source laptop` is the
