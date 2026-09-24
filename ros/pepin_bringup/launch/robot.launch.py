@@ -1,11 +1,13 @@
 """Sensors and bridges in as few processes as the board can afford.
 
-One component container (high CPU priority) holds the LD19 driver, the hull
-box filter that turns its scan into /scan, the static base_link->laser
-transform, the lifecycle manager that activates the driver, and — only when it is
-asked for — the Foxglove bridge. A separate Python process runs ``base_bridge``
-(odometry, TF, /cmd_vel to the wheels). Every extra ROS process costs ~140 MB on
-this 1.5 GB board, so composition is not a nicety here.
+Two component containers (high CPU priority, each respawned with fresh nodes when it
+dies: pepin_bringup.launch_kit): the lidar's holds the LD19 driver, the hull box filter that
+turns its scan into /scan, the static base_link->laser transform, the lifecycle manager that
+activates the driver, and — only when it is asked for — the Foxglove bridge; the base's holds
+the C++ base bridge and the IMU's mount (``sensor_split``; off, the one process of before).
+Without the C++ bridge a separate Python process runs ``base_bridge`` (odometry, TF, /cmd_vel to
+the wheels). Every extra ROS process costs ~140 MB on this 1.5 GB board, so composition is not a
+nicety here.
 
 The sensor mounts are not arguments: base_link -> laser comes from config/lidar.json (the LD19
 hangs upside down, roll pi, yaw -87.5 deg: the calibration's one home) and base_link -> imu_link
@@ -51,6 +53,7 @@ from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
+from pepin_bringup.launch_kit import respawned_container
 
 from pepin.deployment import (
     BASE_MAX_ANGULAR_RAD_S,
@@ -104,12 +107,12 @@ def quaternion(roll: float, pitch: float, yaw: float) -> tuple[float, float, flo
     )
 
 
-def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
-    """Build the container once the launch arguments have values."""
+def lidar_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
+    """The lidar's nodes, described anew on every call (a respawn loads fresh ones, see
+    pepin_bringup.launch_kit): the LD19 driver, the hull filter that makes /scan of its scan,
+    base_link -> laser, the driver's lifecycle manager and, when asked for, the board's Foxglove."""
     laser_x, laser_y, laser_z, laser_roll, laser_pitch, laser_yaw = LASER
     qx, qy, qz, qw = quaternion(laser_roll, laser_pitch, laser_yaw)
-    imu_x, imu_y, imu_z, imu_roll, imu_pitch, imu_yaw = IMU
-    ix, iy, iz, iw = quaternion(imu_roll, imu_pitch, imu_yaw)
     debug = LaunchConfiguration("lidar_debug").perform(context).lower() == "true"
     port = int(LaunchConfiguration("foxglove_port").perform(context))
     components = [
@@ -182,8 +185,29 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
             parameters=[{"autostart": True, "node_names": ["ldlidar_node"], "bond_timeout": 0.0}],
         ),
     ]
-    if LaunchConfiguration("imu").perform(context).lower() == "true":
+    # Opt-in: the laptop's bridge (vslam.launch.py) already serves Foxglove and reaches these
+    # topics through zenoh. Two bridges make this board serialise every topic twice.
+    if LaunchConfiguration("foxglove").perform(context).lower() == "true":
         components.append(
+            ComposableNode(
+                package="foxglove_bridge",
+                plugin="foxglove_bridge::FoxgloveBridge",
+                name="foxglove_bridge",
+                parameters=[{"port": port, "send_buffer_limit": 10000000}],
+            )
+        )
+    return components
+
+
+def base_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
+    """The base's own nodes, described anew on every call: the IMU's mount and the C++ base
+    bridge (wheels, IMU, the gyro-bias tracker), each only when its argument asks for it. Kept
+    apart from the lidar's so a sensor that dies cannot take the actuator down with it."""
+    imu_x, imu_y, imu_z, imu_roll, imu_pitch, imu_yaw = IMU
+    ix, iy, iz, iw = quaternion(imu_roll, imu_pitch, imu_yaw)
+    parts: list = []  # type: ignore[type-arg]
+    if LaunchConfiguration("imu").perform(context).lower() == "true":
+        parts.append(
             ComposableNode(
                 package="tf2_ros",
                 plugin="tf2_ros::StaticTransformBroadcasterNode",
@@ -206,7 +230,7 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
     if LaunchConfiguration("base_bridge_cpp").perform(context).lower() == "true":
         imu_on = LaunchConfiguration("imu").perform(context).lower() == "true"
         ekf_on = LaunchConfiguration("ekf").perform(context).lower() == "true"
-        components.append(
+        parts.append(
             ComposableNode(
                 package="pepin_base_cpp",
                 plugin="pepin::BaseBridge",
@@ -226,27 +250,41 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 ],
             )
         )
-    # Opt-in: the laptop's bridge (vslam.launch.py) already serves Foxglove and reaches these
-    # topics through zenoh. Two bridges make this board serialise every topic twice.
-    if LaunchConfiguration("foxglove").perform(context).lower() == "true":
-        components.append(
-            ComposableNode(
-                package="foxglove_bridge",
-                plugin="foxglove_bridge::FoxgloveBridge",
-                name="foxglove_bridge",
-                parameters=[{"port": port, "send_buffer_limit": 10000000}],
-            )
+    return parts
+
+
+def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
+    """The sensing containers once the launch arguments have values: the lidar's and the base's,
+    each respawned with fresh nodes (``sensor_split``, default), or the one shared process of
+    before."""
+    # TWO FAILURE DOMAINS (sensor_split, 2026-09-24). Until then the lidar driver, its filter AND
+    # the base bridge shared one process, and at 00:11Z on 2026-09-24 the LD19 driver aborted on
+    # a deactivate ("*** bit out of range 0 - FD_SETSIZE on fd_set ***", exit -6: a select() on a
+    # descriptor its own close had just invalidated) and took the wheels, the IMU and the gyro's
+    # bias tracker down with it, unrespawned: the EKF coasted on the camera alone for hours and the
+    # 'camera-only' leg that followed had no base to drive. A dead lidar is exactly the failure a
+    # camera-only cart must ride out, so the lidar gets a process of its own and the base another,
+    # and each comes back by itself two seconds after it dies (RESPAWN). The rest of the stack
+    # already degrades on its own: RTAB-Map's registration follows what the snapshots carry
+    # (pepin.graphmode), the costmaps' lidar layer goes quiet, the EKF loses rf2o and keeps the
+    # wheels, the gyro and the camera. Off, the one process of before (no respawn).
+    split = LaunchConfiguration("sensor_split").perform(context).lower() == "true"
+    if not split:
+        container = ComposableNodeContainer(
+            name="sensors_container",
+            namespace="",
+            package="rclcpp_components",
+            executable="component_container_isolated",
+            output="screen",
+            prefix="nice -n -10",  # sensing first: a starved driver ships scans seconds late
+            composable_node_descriptions=lidar_parts(context) + base_parts(context),
         )
-    container = ComposableNodeContainer(
-        name="sensors_container",
-        namespace="",
-        package="rclcpp_components",
-        executable="component_container_isolated",
-        output="screen",
-        prefix="nice -n -10",  # sensing first: a starved driver ships scans seconds late
-        composable_node_descriptions=components,
-    )
-    return [container]
+        return [container]
+    # sensing first: a starved driver ships scans seconds late; the wheels and the gyro alike
+    containers = respawned_container("lidar_container", lidar_parts, "nice -n -10")
+    if base_parts(context):
+        containers += respawned_container("base_container", base_parts, "nice -n -10")
+    return containers
 
 
 def base_bridge(
@@ -375,6 +413,9 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("ekf", default_value="true"),
             DeclareLaunchArgument("laser_odom", default_value="true"),
             DeclareLaunchArgument("neck", default_value="false"),
+            # The lidar and the base in two respawned processes (see sensors_container); false is
+            # the single sensors_container of before.
+            DeclareLaunchArgument("sensor_split", default_value="true"),
             OpaqueFunction(function=sensors_container),
             base,
             ekf,

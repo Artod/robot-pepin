@@ -339,7 +339,13 @@ def test_lidar_off_leaves_the_driver_alone_and_hard_off_deactivates_it(tmp_path)
     assert f"{BOARD} ros2 param set {LOCAL} lidar_layer.enabled false" in soft
 
     _, out, hard = _sensor(
-        tmp_path, "lidar", "off", "--hard", FAKE_SOURCES="lidar,depth,contact", FAKE_LAYERS="true"
+        tmp_path,
+        "lidar",
+        "off",
+        "--hard",
+        FAKE_SOURCES="lidar,depth,contact",
+        FAKE_LAYERS="true",
+        **HARD,
     )
     assert f"{BOARD} ros2 lifecycle set /ldlidar_node deactivate" in hard
     assert "/ldlidar_node active -> inactive" in out
@@ -375,6 +381,24 @@ def test_hard_is_refused_on_an_on_instead_of_stopping_the_driver_it_just_switche
     assert code == 2 and "lidar on|off | lidar off --hard" in out, out
 
 
+# The deactivate that aborts the LD19 driver is refused by default since 2026-09-24; the tests of
+# its guards run the old path knowingly.
+HARD = {"PEPIN_LIDAR_HARD": "allow"}
+
+
+def test_hard_off_is_refused_by_default_before_anything_is_sent(  # type: ignore[no-untyped-def]
+    tmp_path,
+) -> None:
+    """Deactivating the LD19 driver aborts its whole process (2026-09-24: in the shared sensors
+    container it took the wheels and the IMU down for hours), so --hard refuses with the reason
+    and the two ways that work, and touches nothing."""
+    code, out, sent = _sensor(tmp_path, "lidar", "off", "--hard", FAKE_LAYERS="true")
+    assert code == 2, out
+    assert "refused: --hard deactivates the LD19 driver" in out
+    assert "sources=camera" in out and "lidar_container" in out
+    assert not [c for c in sent if "lifecycle set" in c or "param set" in c], sent
+
+
 def test_the_lifecycle_half_is_refused_under_a_running_goal_and_under_a_blind_guard(  # type: ignore[no-untyped-def]
     tmp_path,
 ) -> None:
@@ -384,18 +408,18 @@ def test_the_lifecycle_half_is_refused_under_a_running_goal_and_under_a_blind_gu
     get refuses too: a guard that cannot see does not wave through."""
     goal = "navigate_to_pose=yes navigate_through_poses=no"
     code, out, sent = _sensor(
-        tmp_path, "lidar", "off", "--hard", FAKE_GOALS=goal, FAKE_LAYERS="true"
+        tmp_path, "lidar", "off", "--hard", FAKE_GOALS=goal, FAKE_LAYERS="true", **HARD
     )
     assert code == 1
     assert "refused: a navigation goal is running (navigate_to_pose" in out
     assert not [c for c in sent if "param set" in c or c.startswith("flags set")], sent
 
-    code, out, sent = _sensor(tmp_path, "lidar", "off", "--hard", FAKE_DRIVER="none")
+    code, out, sent = _sensor(tmp_path, "lidar", "off", "--hard", FAKE_DRIVER="none", **HARD)
     assert code == 1 and "did not answer a lifecycle get" in out
     assert not [c for c in sent if "param set" in c], sent
 
     # A pass that answered "no" for both actions is the only way through.
-    code, out, sent = _sensor(tmp_path, "lidar", "off", "--hard", FAKE_LAYERS="true")
+    code, out, sent = _sensor(tmp_path, "lidar", "off", "--hard", FAKE_LAYERS="true", **HARD)
     assert code == 0, out
     assert f"{BOARD} ros2 lifecycle set /ldlidar_node deactivate" in sent
 
@@ -410,13 +434,13 @@ def test_a_guard_that_could_not_see_refuses_instead_of_reading_it_as_no_goal(  #
     own `?`, and a pass that printed nothing at all."""
     for goals in ("navigate_to_pose=? navigate_through_poses=no", "", "bogus output"):
         code, out, sent = _sensor(
-            tmp_path, "lidar", "off", "--hard", FAKE_GOALS=goals, FAKE_LAYERS="true"
+            tmp_path, "lidar", "off", "--hard", FAKE_GOALS=goals, FAKE_LAYERS="true", **HARD
         )
         assert code == 1, (goals, out)
         assert "the guard could not read /navigate_to_pose/_action/status" in out, goals
         assert not [c for c in sent if "param set" in c or "lifecycle set" in c], (goals, sent)
     # the pass is one rclpy node piped in from the laptop, not a ros2 CLI call per action
-    _, _, sent = _sensor(tmp_path, "lidar", "off", "--hard", FAKE_LAYERS="true")
+    _, _, sent = _sensor(tmp_path, "lidar", "off", "--hard", FAKE_LAYERS="true", **HARD)
     assert not [c for c in sent if "topic echo" in c], sent
     piped = [c for c in sent if "python3 -" in c]
     assert len(piped) == 1 and "navigate_to_pose navigate_through_poses" in piped[0], sent

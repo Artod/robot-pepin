@@ -67,14 +67,14 @@
       "note": "Measured 80 % / 101 MB with a goal running nothing — this is the idle cost of a stack that is merely alive. The single biggest consumer on the board and the reason nice 5 exists: the sensors must not wait for the planner."
     },
     {
-      "name": "sensors_container",
-      "match": "component_container_isolated .*__node:=sensors_container",
-      "role": "The sensing half in one process at high priority: the lidar driver, the hull filter that makes /scan, the wheel bridge and the static sensor transforms.",
+      "name": "lidar_container",
+      "match": "component_container_isolated .*__node:=lidar_container",
+      "role": "The lidar in a process of its own at high priority, respawned 2 s after it dies: the LD19 driver, the hull filter that makes /scan, its static mount and the lifecycle manager that activates the driver. A lidar that dies must not take the base with it (sensor_split, 2026-09-24).",
       "on_board_because": [
         "real-time",
         "hardware-attached"
       ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (ComposableNodeContainer, nice -10)",
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (ComposableNodeContainer, nice -10, respawn; sensor_split:=true)",
       "components": [
         {
           "name": "ldlidar_node",
@@ -85,16 +85,8 @@
           "role": "cuts the cart's own hull out of the scan and republishes /scan"
         },
         {
-          "name": "base_bridge",
-          "role": "wheel speeds and odometry over TCP 3336, /cmd_vel in, /odom out, and the MPU6050's yaw rate as imu/data_raw whose zero is re-measured from the rest the wheels witness (C++ build when base_bridge_cpp:=true, else its own Python process)"
-        },
-        {
           "name": "base_to_laser",
           "role": "static base_link -> laser from config/lidar.json"
-        },
-        {
-          "name": "base_to_imu",
-          "role": "static base_link -> imu_link from config/imu.json (imu:=true only)"
         },
         {
           "name": "lifecycle_manager_sensors",
@@ -102,10 +94,35 @@
         }
       ],
       "budget": {
-        "cpu_percent": 32.0,
-        "rss_mb": 90.0
+        "cpu_percent": 22.0,
+        "rss_mb": 70.0
       },
-      "note": "Measured 21 % / 60 MB. ps sees the container, never the components: a component's own cost can only be read from the node's rate, not from this table."
+      "note": "TO MEASURE: split from sensors_container (measured 21 % / 60 MB for everything) on 2026-09-24; each process carries its own zenoh session (~40 MB)."
+    },
+    {
+      "name": "base_container",
+      "match": "component_container_isolated .*__node:=base_container",
+      "role": "The base in a process of its own at high priority, respawned 2 s after it dies: the wheel bridge (cmd_vel in, odom and the IMU's yaw rate out, the gyro's zero re-measured at rest) and the IMU's static mount.",
+      "on_board_because": [
+        "real-time",
+        "hardware-attached"
+      ],
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (ComposableNodeContainer, nice -10, respawn; sensor_split:=true)",
+      "components": [
+        {
+          "name": "base_bridge",
+          "role": "wheel speeds and odometry over TCP 3336, /cmd_vel in, /odom out, and the MPU6050's yaw rate as imu/data_raw whose zero is re-measured from the rest the wheels witness (C++ build when base_bridge_cpp:=true, else its own Python process)"
+        },
+        {
+          "name": "base_to_imu",
+          "role": "static base_link -> imu_link from config/imu.json (imu:=true only)"
+        }
+      ],
+      "budget": {
+        "cpu_percent": 15.0,
+        "rss_mb": 60.0
+      },
+      "note": "TO MEASURE: split from sensors_container on 2026-09-24; each process carries its own zenoh session (~40 MB)."
     },
     {
       "name": "relocalizer",

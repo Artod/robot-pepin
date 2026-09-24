@@ -1078,8 +1078,8 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
     nav = sf.tree(NAV_LAUNCH)
     composed = {ast.unparse(sf.keywords(c)["name"]) for c in sf.calls_to(nav, "ComposableNode")}
     assert "f'lifecycle_manager_navigation_{side}'" in composed
-    container = sf.keywords(sf.calls_to(nav, "ComposableNodeContainer")[0])
-    assert ast.unparse(container["name"]).startswith("f'nav2_container_{side}' if side != 'all'")
+    container = sf.calls_to(nav, "respawned_container")[0]
+    assert ast.unparse(container.args[0]).startswith("f'nav2_container_{side}' if side != 'all'")
     laptop = (REPO / "ros/laptop.sh").read_text()
     # The stop itself is ros/lib.sh's now (one way to stop a container, one window); what this
     # contract still owns is that nothing here removes a container without stopping it first.
@@ -1113,9 +1113,9 @@ def test_every_respawned_node_waits_for_its_own_ghost_first() -> None:
             if keywords.get("respawn") is True:
                 assert "_after_ghost(" in str(keywords.get("prefix")), (name, node)
     nav = sf.tree(NAV_LAUNCH)
-    container = sf.keywords(sf.calls_to(nav, "ComposableNodeContainer")[0])
+    container = sf.calls_to(nav, "respawned_container")[0]
     assert (
-        ast.unparse(container["prefix"])
+        ast.unparse(container.args[2])
         == "f'nice -n 5 {_after_ghost(admin, *nav_container_nodes(side))}'"
     )
     by_side = [
@@ -2425,10 +2425,16 @@ def test_the_board_image_carries_no_lttng_tracer() -> None:
 
 
 def test_a_crashed_navigation_container_comes_back_by_itself() -> None:
+    """Respawned WITH its nodes, described anew for every start by a factory
+    (pepin_bringup.launch_kit, behaviour in test_launch_kit): a reload of the first start's
+    descriptions loses the controller's cmd_vel -> cmd_vel_nav remap."""
     nav = sf.tree(NAV_LAUNCH)
-    container = sf.keywords(sf.calls_to(nav, "ComposableNodeContainer")[0])
-    assert ast.literal_eval(container["respawn"]) is True
-    assert 0.0 < float(ast.literal_eval(container["respawn_delay"])) <= 5.0
+    assert not sf.calls_to(nav, "ComposableNodeContainer"), "only through respawned_container"
+    container = sf.calls_to(nav, "respawned_container")[0]
+    assert ast.unparse(container.args[1]) == "nav_parts"
+    assert ast.unparse(sf.keywords(container)["parameters"]) == "process_params"
+    parts = next(n for n in nav.body if isinstance(n, ast.FunctionDef) and n.name == "nav_parts")
+    assert sf.calls_to(parts, "ComposableNode"), "the descriptions are built inside the factory"
 
 
 def _launch_processes(name: str) -> dict[str, dict[str, object]]:
@@ -3363,3 +3369,30 @@ def test_the_camera_rig_decides_who_measures_the_depth() -> None:
     assert 'return "stereo" if CameraConfig.load(config_file("camera.json"), rig).stereo' in launch
     config = json.loads((REPO / "config/camera.json").read_text())
     assert "rig" in config["stereo"] and "rig" not in config["overview"]
+
+
+def test_the_lidar_and_the_base_die_apart_and_each_comes_back() -> None:
+    """A dead lidar is the failure a camera-only cart must ride out, so it must not take the
+    wheels with it: on 2026-09-24 the LD19 driver aborted on a deactivate and, sharing one
+    process with the base bridge, left the cart with no wheels, no IMU and no gyro-bias tracker
+    for hours. Two processes, each respawned; the shared one of before is sensor_split:=false;
+    and the deactivate that aborts the driver (sensor.sh --hard) is refused with the reason."""
+    src = (REPO / "ros/pepin_bringup/launch/robot.launch.py").read_text()
+    assert 'DeclareLaunchArgument("sensor_split", default_value="true")' in src
+    lidar_block = src[src.index("def lidar_parts(") : src.index("def base_parts(")]
+    assert 'name="ldlidar_node"' in lidar_block and 'name="scan_filter"' in lidar_block
+    base_block = src[src.index("def base_parts(") : src.index("def sensors_container(")]
+    assert 'package="pepin_base_cpp"' in base_block and 'name="base_to_imu"' in base_block
+    assert 'package="pepin_base_cpp"' not in lidar_block
+    # A respawn restores the nodes, wired: each start loads descriptions its factory built anew
+    # (pepin_bringup.launch_kit; the generator trap is held in test_launch_kit).
+    split = src[src.index("    containers = respawned_container(") : src.index("return containers")]
+    assert 'respawned_container("lidar_container", lidar_parts,' in split
+    assert 'respawned_container("base_container", base_parts,' in split
+    assert "def respawned_container(" not in src, "one helper, pepin_bringup.launch_kit"
+    names = {
+        p["name"]
+        for p in json.loads((REPO / "config/board_manifest.json").read_text())["processes"]
+    }
+    assert {"lidar_container", "base_container"} <= names and "sensors_container" not in names
+    assert "refused: --hard" in (REPO / "ros/sensor.sh").read_text()
