@@ -66,6 +66,15 @@ after which Memory re-creates the pipeline (the file:line is in :mod:`pepin.grap
 this a camera-only cart cannot localise at all — measured on 2026-09-18, a minute of camera-only
 snapshots under ICP formed not one metric link.
 
+THE VISUAL REGISTRATION'S FEATURES travel with the strategy on the same path, chosen by two
+operator flags rather than by the snapshots: ``visual_features`` (``xfeat`` — XFeat keypoints
+matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure time — or
+``orb``, the database's own words) and ``pnp_reproj_px`` (``Vis/PnPReprojError``). Under ICP the set
+is always ORB's, because the same re-extraction switch changes what a NEW node stores
+(:func:`pepin.graphmode.visual_parameters` has the file:line). ``xfeat`` needs the image that
+carries the Python adapters (ros/Dockerfile.xfeat); in any other image this node sends ORB's set and
+the report line says why.
+
 In online SLAM (``slam`` on, ros/laptop.sh vslam --slam) RTAB-Map IS the map and its correction is
 literally ``map -> odom`` — but it must become a transform ON THE BOARD, where Nav2 and the
 reflexes look it up, and ``/tf`` crosses the bridge board -> laptop only (a topic allowed as a
@@ -79,6 +88,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -107,13 +117,21 @@ from pepin.graphmode import (
     ALWAYS_LOCALISE,
     ALWAYS_MAP,
     BY_TRUST,
+    FEATURES_ORB,
+    FEATURES_XFEAT,
+    MAPPING,
+    PNP_REPROJ_PX,
+    PNP_REPROJ_RANGE_PX,
     SHARP_SIGMA_DEG,
     SHARP_SIGMA_M,
     STRATEGY_ICP,
+    XFEAT_DETECTOR_PATH,
+    XFEAT_MATCHER_PATH,
     ModeRule,
     StrategyRule,
     describe_sigma,
     seating_refusal,
+    visual_parameters,
 )
 from pepin.graphtrust import HIGHEST_HYPOTHESIS, Agreement, stat
 from pepin.measurements import (
@@ -390,6 +408,65 @@ FLAGS = FlagSet(
         " if a live switch is ever seen to cost RTAB-Map its working memory",
     ),
     Flag(
+        "visual_features",
+        FEATURES_XFEAT,
+        choices=(FEATURES_ORB, FEATURES_XFEAT),
+        description="which features RTAB-Map's VISUAL registration (Reg/Strategy 0, the camera-only"
+        " strategy) matches when it checks a node the words recognised. xfeat: XFeat keypoints"
+        " matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure"
+        " time (Vis/FeatureType 15, Vis/CorNNType 6, RGBD/LoopClosureReextractFeatures true);"
+        " the database is only read. orb: the database's own GFTT/ORB words, the launch table's"
+        " values. Sent with the strategy and changed live; under ICP, and while the database"
+        " maps, the set is always orb. xfeat"
+        f" needs the pepin-laptop:xfeat image ({XFEAT_DETECTOR_PATH}); in another image this"
+        " node sends orb and the report line says why",
+        why="xfeat, measured 2026-09-23 offline (scratch/xfeat/xfeat_bench.py; evening clips of"
+        " runs 0455-0465 against the daylight database, the lidar-held pose as truth, PnP as"
+        " RTAB-Map runs it: Vis/Iterations 300, 2 px, 20 inliers). 219 evening frames with a"
+        " lidar-held truth, the 3 nearest database nodes each: ORB recognised 10 (5 %), xfeat 167"
+        " (76 %); of the recognitions judged while turning slowly, xfeat was within 0.30 m and 10"
+        " deg of the truth 127 times and off 6 times, median error 0.11 m / 2.2 deg, p90 0.22 m /"
+        " 6.9 deg. Four of the six are node 492 (and 493 beside it), 0.8-1.0 m / 13-22 deg off"
+        " with 41-46 inliers: the rocking chair in its daylight picture stood elsewhere in the"
+        " evening, so the matches on it agree on a wrong place — while that frame's other nodes"
+        " (568, 569) put it 0.1 m from the truth and 492 itself places its daylight neighbours"
+        " within 4 cm / 1.7 deg (scratch/xfeat/node_consistency.py). The camera-only run 0466"
+        " against the nodes RTAB-Map itself proposed: ORB 0 of 270 frames, xfeat 261; the 93 of"
+        " them with an EKF sample within 0.3 s give a map -> odom within 4.0 cm / 0.45 deg of a"
+        " running median (p90 7.2 cm / 1.3 deg), none off by 0.30 m or 10 deg"
+        " (scratch/xfeat/bench_analyse.py)",
+        on_when="xfeat whenever the camera has to localise alone on a map built in other light —"
+        " the evening, lamps on, a daylight database",
+        off_when="orb to reproduce RTAB-Map's stock registration (0 of 630 camera-only updates"
+        " accepted on 2026-09-23 evening), in an image without the adapters, or if the laptop's"
+        " CPU cannot spare a registration's cost: two XFeat detections and one LighterGlue match,"
+        " 75 + 75 + 167 ms median on the Mac's CPU in the benchmark, per loop-closure or"
+        " proximity candidate",
+    ),
+    Flag(
+        "pnp_reproj_px",
+        PNP_REPROJ_PX,
+        range=PNP_REPROJ_RANGE_PX,
+        description="Vis/PnPReprojError: how far, in pixels, a database point may reproject from"
+        " its match in the current picture and still count as an inlier of the visual"
+        " registration (20 inliers accept it, Vis/MinInliers). Sent with the strategy's"
+        " parameters and changed live",
+        why="2, RTAB-Map's own default (Parameters.h:684), and measured against 4 on the same"
+        " 219 evening frames (scratch/xfeat/xfeat_bench.py, xfeat, Vis/Iterations 300): 4 px"
+        " recognises 209 (95 %) where 2 px recognises 167 (76 %), but judged against the lidar's"
+        " truth 22 of its 168 recognitions are off by 0.30 m or 10 deg against 6 of 133 at 2 px,"
+        " and its error is wider (p90 0.31 m / 9.4 deg against 0.22 m / 6.9 deg). A wrong word"
+        " moves map -> odom when RTAB-Map owns it, so the tighter gate is the default. Against"
+        " WRONG nodes — 336 evening frames paired with nodes 2.5 m away or looking elsewhere,"
+        " what a mistaken proposal of the words would hand the registration — 2 px let none"
+        " through (the most any reached was 19 inliers) and 4 px let 5 (1.5 %) through with 20-31"
+        " (scratch/xfeat/impostors.py)",
+        on_when="2 by default; 4 when the recognitions a camera-only drive needs do not come at 2"
+        " and the words that do come sit close to the truth",
+        off_when="back to 2 the moment a 4 px word is seen far from where the cart stands: a wider"
+        " gate admits more wrong matches as inliers",
+    ),
+    Flag(
         "word_at_picture_time",
         True,
         description="a graph word is stamped with the moment its PICTURE was taken — the"
@@ -548,6 +625,14 @@ class RtabmapFrame(Node):
         self._snapshots: SnapshotState | None = None  # the last state sensor_pack published...
         self._snapshots_at = -math.inf  # ...and when it reached us, by our clock
         self._strategy_failed = 0  # strategy switches the parameter path could not take
+        # ...and what the visual registration matches with (visual_features, pnp_reproj_px): the
+        # set last sent to RTAB-Map, starting as the launch table's own (ORB, 2 px), and whether
+        # this image can run xfeat at all — the two adapters RTAB-Map loads by path are here or not.
+        self._xfeat_here = all(Path(p).is_file() for p in (XFEAT_DETECTOR_PATH, XFEAT_MATCHER_PATH))
+        self._visual_sent = visual_parameters(STRATEGY_ICP, FEATURES_ORB, PNP_REPROJ_PX)
+        # The Reg/Strategy that went out with it: a switch the parameter path could not take leaves
+        # RTAB-Map on the old one, and its features must stay the old one's (ORB under ICP).
+        self._strategy_sent = STRATEGY_ICP
         # THE TWO HALVES OF ONE UPDATE. The node a /rtabmap/info named and that message's stamp;
         # RTAB-Map's own localisation, its stamp and the planar 3x3 it measured. A word is made when
         # the two carry the same stamp, once (`_spent`): an update recognised nothing is silence.
@@ -742,7 +827,7 @@ class RtabmapFrame(Node):
             age = self._now() - self._snapshots_at
             stale = " STALE" if age > state.refresh_s else ""
             said = f"snapshots {state.text()}, {age:.1f} s ago{stale}"
-        return f"{self._strategy.text()}; {said}" + (
+        return f"{self._strategy.text()}; {self._visual_text()}; {said}" + (
             f", {self._strategy_failed} switches the parameter path could not take"
             if self._strategy_failed
             else ""
@@ -1370,32 +1455,81 @@ class RtabmapFrame(Node):
 
     # ---- RTAB-Map's registration ----------------------------------------------------------
     def _decide_strategy(self) -> None:
-        """Ask RTAB-Map for the registration the snapshots need, on a change that has held.
+        """Ask RTAB-Map for the registration the snapshots need, on a change that has held, with
+        the visual features the flags choose; and re-send those features alone when a flag moves.
 
         The rule is :class:`pepin.graphmode.StrategyRule` and the hold is the one the STATE carries
         — how long the packer itself takes to change its mind about a source — so nothing here is a
         number. A state older than its own refresh is no evidence at all and the strategy in force
         stays: sensor_pack having gone quiet is not the lidar having gone away.
         """
-        if self._tuner is None or not self._switches.on("registration_follows_snapshots"):
+        if self._tuner is None:
             return
-        state = self._snapshots
-        fresh = state is not None and self._now() - self._snapshots_at <= state.refresh_s
-        verdict = self._strategy.update(
-            self._now(),
-            state.refresh_s if state is not None else 0.0,
-            state.carries(LIDAR) if (state is not None and fresh) else None,
-            state.kind if state is not None else "",
+        verdict = None
+        if self._switches.on("registration_follows_snapshots"):
+            state = self._snapshots
+            fresh = state is not None and self._now() - self._snapshots_at <= state.refresh_s
+            verdict = self._strategy.update(
+                self._now(),
+                state.refresh_s if state is not None else 0.0,
+                state.carries(LIDAR) if (state is not None and fresh) else None,
+                state.kind if state is not None else "",
+            )
+        if verdict is not None:
+            visual = self._visual_wanted(verdict.strategy)
+            # One set for the strategy and its features: the pipeline RTAB-Map re-creates on a new
+            # Reg/Strategy is built from the accumulated map, so it is born with the right ones.
+            if not self._set_parameters({**verdict.parameters, **visual}):
+                self._strategy_failed += 1
+                return
+            self._visual_sent, self._strategy_sent = visual, verdict.strategy
+            self.get_logger().info(
+                f"rtabmap registration: {verdict.text()} -> Reg/Strategy {verdict.strategy},"
+                f" {self._visual_text()} (set on {RTABMAP_NODE} and re-read through"
+                f" {RTABMAP_NODE}/update_parameters)"
+            )
+            return
+        visual = self._visual_wanted(self._strategy_sent)
+        if visual != self._visual_sent and self._path_up() and self._set_parameters(visual):
+            # A flag moved, or a switch above went out without its features: the strategy in
+            # force is kept, only the visual set is re-sent (RegistrationVis re-reads it and
+            # rebuilds its detectors, RegistrationVis.cpp:290-293).
+            self._visual_sent = visual
+            self.get_logger().info(f"rtabmap registration: {self._visual_text()}")
+
+    def _path_up(self) -> bool:
+        """Whether both halves of RTAB-Map's parameter path answer: the set and the re-read.
+        Asked before a re-send retried every tick, so a half-up path is not sent a set a second."""
+        return all(c is not None and c.service_is_ready() for c in (self._tuner, self._reread))
+
+    def _features(self) -> str:
+        """The feature set the flag asks for, if this image can run it; ``orb`` otherwise."""
+        asked = str(self._switches["visual_features"])
+        return asked if (asked != FEATURES_XFEAT or self._xfeat_here) else FEATURES_ORB
+
+    def _visual_wanted(self, strategy: str) -> dict[str, str]:
+        """The visual parameters RTAB-Map should hold under ``strategy``
+        (:func:`pepin.graphmode.visual_parameters`): the flags' set under the visual strategy while
+        the database only localises, ORB's under ICP or while it maps."""
+        return visual_parameters(
+            strategy,
+            self._features(),
+            float(self._switches["pnp_reproj_px"]),
+            mapping=self._mode.mode == MAPPING,
         )
-        if verdict is None:
-            return
-        if not self._set_parameters(verdict.parameters):
-            self._strategy_failed += 1
-            return
-        self.get_logger().info(
-            f"rtabmap registration: {verdict.text()} -> Reg/Strategy {verdict.strategy}"
-            f" (set on {RTABMAP_NODE} and re-read through {RTABMAP_NODE}/update_parameters)"
-        )
+
+    def _visual_text(self) -> str:
+        """The visual registration for a report line: ``visual features xfeat, PnP 2 px`` — and
+        when the flag's set is not what went out, why (``xfeat asked, no /opt/xfeat/... here``)."""
+        sent = self._visual_sent
+        features = FEATURES_XFEAT if sent.get("Vis/FeatureType") == "15" else FEATURES_ORB
+        asked = str(self._switches["visual_features"])
+        why = ""
+        if asked == FEATURES_XFEAT and not self._xfeat_here:
+            why = f" (xfeat asked, but this image has no {XFEAT_DETECTOR_PATH})"
+        elif asked != features:
+            why = f" ({asked} asked, sent with the visual strategy only and only while localising)"
+        return f"visual features {features}{why}, PnP {sent.get('Vis/PnPReprojError', '?')} px"
 
     # ---- outputs -------------------------------------------------------------------------
     @staticmethod

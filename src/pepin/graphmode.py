@@ -38,13 +38,16 @@ rtabmap's parameter map from the node's ROS parameters and hands the WHOLE map t
 to ``Memory::parseParameters`` (Rtabmap.cpp:719,751); there the strategy of the pipeline in hand is
 INFERRED from what it requires (Memory.cpp:700-715) and, when the new value differs, the pipeline
 object is deleted and re-created from the accumulated map (Memory.cpp:721-731). The stale path is
-the ``else`` at :744-746, which calls ``Registration::parseParameters`` — and that re-reads only
-``Reg/RepeatOnce`` and ``Reg/Force3DoF`` (Registration.cpp:79-88), so it could never change a
-strategy. TWO CONDITIONS carry the whole thing: the value must be set as a STRING (every rtabmap
-parameter is declared as one, CoreWrapper.cpp:364, and read back with ``as_string()`` at :3112), and
-the name must be one the LAUNCH already overrode — ``uInsert(parameters_, ...)`` fires only for keys
-present in the overrides (CoreWrapper.cpp:362-379), so a parameter never named in the launch table
-accepts ``ros2 param set`` and is then never looked at. ``Reg/Strategy`` is in that table
+the ``else`` at :744-746, which calls the pipeline's own ``parseParameters`` — whose base part
+re-reads only ``Reg/RepeatOnce`` and ``Reg/Force3DoF`` (Registration.cpp:79-88), so it could never
+change a strategy; a RegistrationVis re-reads its ``Vis/*`` there too and rebuilds its detectors
+(the method is virtual, RegistrationVis.cpp:125-293), which is the path the visual feature set of
+:func:`visual_parameters` rides while the strategy stays. TWO CONDITIONS carry the whole thing: the
+value must be set as a STRING (every rtabmap parameter is declared as one, CoreWrapper.cpp:364,
+and read back with ``as_string()`` at :3112), and the name must be one the LAUNCH already overrode
+— ``uInsert(parameters_, ...)`` fires only for keys present in the overrides
+(CoreWrapper.cpp:362-379), so a parameter never named in the launch table accepts ``ros2 param
+set`` and is then never looked at. ``Reg/Strategy`` is in that table
 (ros/pepin_bringup/launch/vslam.launch.py), which is what makes this switch possible at all.
 
 THE MEMORY. RTAB-Map has two memories. In MAPPING mode every update may become a node in the
@@ -83,13 +86,20 @@ __all__ = [
     "ALWAYS_LOCALISE",
     "ALWAYS_MAP",
     "BY_TRUST",
+    "FEATURES_ORB",
+    "FEATURES_XFEAT",
+    "FEATURE_PARAMETERS",
     "LOCALISING",
     "MAPPING",
+    "PNP_REPROJ_PX",
+    "PNP_REPROJ_RANGE_PX",
     "REGISTRATION_PARAMETERS",
     "SHARP_SIGMA_DEG",
     "SHARP_SIGMA_M",
     "STRATEGY_ICP",
     "STRATEGY_VIS",
+    "XFEAT_DETECTOR_PATH",
+    "XFEAT_MATCHER_PATH",
     "ModeRule",
     "ModeVerdict",
     "StrategyRule",
@@ -97,6 +107,7 @@ __all__ = [
     "describe_sigma",
     "registration_verdict",
     "seating_refusal",
+    "visual_parameters",
 ]
 
 # ``Reg/Strategy``'s own values, as Parameters.h:677 names them ("0=Vis, 1=Icp, 2=VisIcp"). 2 is
@@ -170,6 +181,67 @@ REGISTRATION_PARAMETERS = {
         "RGBD/NeighborLinkRefining": "false",
     },
 }
+
+# WHICH FEATURES THE VISUAL REGISTRATION MATCHES — the third thing that travels with the strategy,
+# chosen by an operator's flag and not by the snapshots. The database's words are GFTT/ORB
+# (Kp/DetectorStrategy 8), and against them an evening picture registers with 0-11 PnP inliers
+# where RTAB-Map asks for 20: the day map against the lamps, measured 2026-09-23
+# (scratch/link_autopsy/feature_ab.py, 630 camera-only updates, 0 recognitions). XFeat keypoints
+# matched by LighterGlue register the same day/evening pairs (scratch/xfeat/xfeat_bench.py).
+#
+# THE DATABASE IS NOT RE-PROCESSED. RGBD/LoopClosureReextractFeatures makes
+# Memory::computeTransform load both nodes' stored picture and depth (getNodeData, a read,
+# rtabmap/core/Memory.cpp:2902) and drop their stored words (:2950), so RegistrationVis detects
+# afresh with its OWN detector — Vis/FeatureType 15, the Python detector
+# (ros/xfeat/rtabmap_xfeat.py) — and matches with its own matcher — Vis/CorNNType 6, the Python
+# matcher (ros/xfeat/rtabmap_lighterglue.py), which is the path of a loop closure's identity guess
+# (RegistrationVis.cpp:1381-1411; Rtabmap.cpp:3057 passes the identity, which RegistrationVis does
+# not count as a guess at :1012). The ORB words stay the vocabulary that FINDS the node (Kp/*,
+# untouched); XFeat only decides whether it is really there, and where.
+#
+# ONLY WITH THE VISUAL STRATEGY AND ONLY WHILE LOCALISING, because the same flag changes what a
+# NEW node stores: with it on, createSignature keeps no word descriptors and no 3D
+# (Memory.cpp:6126), and a node mapped that way could later be registered by re-extraction only.
+# The strategy that maps is ICP (the lidar teaches the database), and under it the set is always
+# ORB's — the launch table's own values; a visual strategy that is also MAPPING (graph_memory map,
+# or one day a holder that is not the graph) gets ORB's too, so the database is never written
+# differently from how it was built.
+FEATURES_ORB, FEATURES_XFEAT = "orb", "xfeat"
+# Where the image built by ros/Dockerfile.xfeat puts the two adapters RTAB-Map loads by path. An
+# image without them (the apt build, no Python in RTAB-Map) cannot run the xfeat set at all.
+XFEAT_DETECTOR_PATH = "/opt/xfeat/rtabmap_xfeat.py"
+XFEAT_MATCHER_PATH = "/opt/xfeat/rtabmap_lighterglue.py"
+FEATURE_PARAMETERS = {
+    FEATURES_ORB: {
+        "Vis/FeatureType": "8",  # GFTT/ORB, RTAB-Map's default and the database's own words
+        "Vis/CorNNType": "1",  # FLANN kd-tree with NNDR, RTAB-Map's default
+        "RGBD/LoopClosureReextractFeatures": "false",
+    },
+    FEATURES_XFEAT: {
+        "Vis/FeatureType": "15",  # PyDetector
+        "Vis/CorNNType": "6",  # PyMatcher
+        "RGBD/LoopClosureReextractFeatures": "true",
+    },
+}
+# Vis/PnPReprojError, RTAB-Map's default (Parameters.h:684), and the widest the flag allows: a
+# day-built depth seen from an evening frame lands its 3D points a pixel or two off, and 4 px
+# roughly doubles the inliers (scratch/xfeat/xfeat_bench.py has both gates side by side).
+PNP_REPROJ_PX = 2.0
+PNP_REPROJ_RANGE_PX = (1.0, 4.0)
+
+
+def visual_parameters(
+    strategy: str, features: str, pnp_reproj_px: float, mapping: bool = False
+) -> dict[str, str]:
+    """The feature set and PnP gate RTAB-Map's visual registration should run under
+    ``strategy``, as the strings rtabmap wants: ``features`` under the visual strategy while the
+    database only localises, ORB's set under ICP or while mapping whatever the flag says (the
+    module comment above says why)."""
+    chosen = features if (strategy == STRATEGY_VIS and not mapping) else FEATURES_ORB
+    if chosen not in FEATURE_PARAMETERS:
+        raise ValueError(f"unknown feature set {chosen!r}; sets: {sorted(FEATURE_PARAMETERS)}")
+    return {**FEATURE_PARAMETERS[chosen], "Vis/PnPReprojError": f"{pnp_reproj_px:g}"}
+
 
 # What a seating must be worth for the database to be taught from it. The peak's own covariance is
 # the error bar (/tracker_pose, covariance=peak, NEES-calibrated), so the test waits for a seating

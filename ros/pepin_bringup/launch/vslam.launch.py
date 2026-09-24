@@ -241,6 +241,23 @@ RTABMAP = {
     # appearance: GFTT/ORB words, a few hundred per image
     "Kp/DetectorStrategy": "8",
     "Kp/MaxFeatures": "400",
+    # WHICH FEATURES THE VISUAL REGISTRATION MATCHES (pepin.graphmode.FEATURE_PARAMETERS): the
+    # START values are ORB's — RTAB-Map's own defaults, Vis/FeatureType 8, Vis/CorNNType 1, no
+    # re-extraction, Vis/PnPReprojError 2 — said out loud because rtabmap_frame's
+    # ``visual_features`` and ``pnp_reproj_px`` flags change them live with the visual strategy,
+    # and a live set is only seen for a name this table overrides (CoreWrapper.cpp:362-379).
+    "Vis/FeatureType": "8",
+    "Vis/CorNNType": "1",
+    "RGBD/LoopClosureReextractFeatures": "false",
+    "Vis/PnPReprojError": "2",
+    # The xfeat set's two Python adapters (ros/xfeat, baked into pepin-laptop:xfeat by
+    # ros/Dockerfile.xfeat; pepin.graphmode.XFEAT_DETECTOR_PATH / XFEAT_MATCHER_PATH) and
+    # LighterGlue's confidence floor, 0.1 as in XFeat's own match_lighterglue and the offline
+    # benchmark (RTAB-Map's default 0.2 is SuperGlue's). Read only while Vis/FeatureType is 15 and
+    # Vis/CorNNType 6; in an image without the adapters nothing reads them.
+    "PyDetector/Path": "/opt/xfeat/rtabmap_xfeat.py",
+    "PyMatcher/Path": "/opt/xfeat/rtabmap_lighterglue.py",
+    "PyMatcher/Threshold": "0.1",
     # ONE FRAME ACROSS SESSIONS. Without this, every time the memory goes (back) to mapping beside
     # a loaded database RTAB-Map opens a NEW map rooted at the odometry's pose, unlinked to the old
     # one until some later closure: /rtabmap/mapGraph then carries that one new node, the grid is
