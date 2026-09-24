@@ -15,26 +15,41 @@
 # exec) or the board's pepin-ros (ssh, then docker exec). The ros2 CLI runs inside that
 # container, on the node's own DDS domain. A change lives until the node restarts; a default
 # changes in the table.
+# WHERE THE PLANNER AND THE GOAL SERVER RUN is the board's PEPIN_SIDE, read once per call: split
+# (PEPIN_SIDE=board) puts them in the laptop's pepin-laptop, which ros/laptop.sh starts in that
+# mode only; a whole board runs them in pepin-ros. Until 2026-09-23 this script always exec'd
+# into pepin-laptop, a container that does not exist on a whole board. PEPIN_BOARD_SIDE set by
+# the caller skips the read.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$HERE/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
 usage() { echo "usage: ros/flags.sh [list [NODE] | drift [NODE|board|laptop] | flag NODE FLAG | get NODE FLAG | set NODE FLAG VALUE]"; exit 2; }
 doc() { (cd "$HERE/.." && uv run -q python ros/tools/flags_doc.py "$@"); }
-ros2_in() {  # NODE ros2 ...: the ros2 CLI inside the container NODE runs in
+board() { ssh "root@$BOARD" "$@"; }  # the one path to the board
+know_side() {  # PEPIN_BOARD_SIDE for flags_doc: the board's PEPIN_SIDE, empty on a whole board
+    # (and when the board does not answer: then only the laptop's nodes can be reached anyway)
+    if [ -z "${PEPIN_BOARD_SIDE+set}" ]; then
+        PEPIN_BOARD_SIDE="$(board "grep -oE '^PEPIN_SIDE=[a-z]*' /etc/default/pepin-ros | cut -d= -f2" \
+            2>/dev/null || true)"
+    fi
+    export PEPIN_BOARD_SIDE
+}
+ros2_in() {  # NODE ros2 ...: the ros2 CLI inside the container NODE runs in (know_side first)
     local node="$1" where side container; shift
     where="$(doc where "$node")" || exit 2
     read -r side container <<<"$where"
     if [ "$side" = laptop ]; then
         docker exec "$container" /pepin_entrypoint.sh "$@"
     else
-        ssh "root@$BOARD" "docker exec $container /pepin_entrypoint.sh $(printf '%q ' "$@")"
+        board "docker exec $container /pepin_entrypoint.sh $(printf '%q ' "$@")"
     fi
 }
 case "${1:-list}" in
     list)
         [ $# -le 2 ] || usage
         if [ -n "${2:-}" ]; then NODES="$(doc where "$2" >/dev/null && echo "$2")" || exit 2; else NODES="$(doc nodes)"; fi
+        know_side
         for node in $NODES; do
             # one dump per node (a parameter get is a second of discovery each): the values;
             # the kinds and the descriptions come from the table
@@ -46,6 +61,8 @@ case "${1:-list}" in
         # a line here is a switch someone moved — the one thing a restart silently throws away
         # (2026-09-14: a live flag lost at a node restart went unnoticed for an hour).
         [ $# -le 2 ] || usage
+        case "${2:-}" in board | laptop | "") ;; *) doc where "$2" >/dev/null || exit 2 ;; esac
+        know_side
         case "${2:-}" in
             "") NODES="$(doc nodes)" ;;
             board | laptop) NODES="$(doc nodes "$2")" ;;
@@ -61,10 +78,12 @@ case "${1:-list}" in
     get)
         [ $# -eq 3 ] || usage
         doc flag "$2" "$3" >/dev/null || exit 2
+        know_side
         ros2_in "$2" ros2 param get "/$2" "$3" ;;
     set)
         [ $# -eq 4 ] || usage
         LITERAL="$(doc value "$2" "$3" "$4")" || exit 2  # the flag's own check, with the reason
+        know_side
         ros2_in "$2" ros2 param set "/$2" "$3" "$LITERAL" ;;
     *) usage ;;
 esac

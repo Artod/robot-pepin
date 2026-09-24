@@ -1068,3 +1068,68 @@ def test_the_board_s_containers_answer_sigint_and_the_unit_waits_for_them() -> N
     assert re.search(r"^KillMode=mixed", unit, re.M), (
         "the nodes are docker's children, not this cgroup's"
     )
+
+
+# ros/flags.sh itself, whole: the real script and the real flags_doc, with `ssh` and `docker` as
+# executables on PATH that log what they were asked (ros/lib.sh's ssh wrapper calls `command ssh`,
+# so the one on PATH answers). What is under test is WHICH CONTAINER a node is reached in.
+FAKE_HOST = r"""#!/bin/bash
+printf '%s %s\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
+case "$*" in *PEPIN_SIDE*) printf '%s\n' "${FAKE_SIDE:-}" ;; esac
+exit 0
+"""
+
+
+def _flags_sh(tmp_path: Path, *args: str, **env: str) -> tuple[int, str, list[str]]:
+    """Run the real ros/flags.sh against fake ssh/docker; returns (status, output, calls)."""
+    import os
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name in ("ssh", "docker"):
+        (bin_dir / name).write_text(FAKE_HOST)
+        (bin_dir / name).chmod(0o755)
+    log = tmp_path / "log"
+    log.write_text("")
+    base = {k: v for k, v in os.environ.items() if k != "PEPIN_BOARD_SIDE"}
+    run = subprocess.run(
+        ["bash", str(REPO / "ros/flags.sh"), *args],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={
+            **base,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "PEPIN_HOST": "127.0.0.1",
+            "FAKE_LOG": str(log),
+            **env,
+        },
+    )
+    calls = [line for line in log.read_text().splitlines() if line.strip()]
+    return run.returncode, run.stdout + run.stderr, calls
+
+
+@pytest.mark.slow
+def test_flags_sh_reaches_the_goal_server_where_the_board_s_side_runs_it(tmp_path: Path) -> None:
+    """On a whole board (no PEPIN_SIDE line: ros/thin.sh vision, the stack of 2026-09-23) the goal
+    server runs in the board's pepin-ros, and `set` used to exec into pepin-laptop, which only
+    the split starts ("No such container"). The side is read from the board once, then the
+    parameter goes where the node is; a split still reaches pepin-laptop; the camera nodes are
+    pepin-vslam's either way."""
+    code, out, calls = _flags_sh(tmp_path, "set", "goal_server", "tf_pose", "true", FAKE_SIDE="")
+    assert code == 0, out
+    assert any("PEPIN_SIDE" in c for c in calls), "the board's side is asked"
+    sets = [c for c in calls if "param set /goal_server tf_pose true" in c]
+    assert len(sets) == 1 and sets[0].startswith("ssh ") and "docker exec pepin-ros" in sets[0]
+    assert not [c for c in calls if "pepin-laptop" in c], calls
+
+    code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "tf_pose", FAKE_SIDE="board")
+    assert code == 0, out
+    assert [c for c in calls if c.startswith("docker exec pepin-laptop") and "param get" in c]
+
+    code, out, calls = _flags_sh(
+        tmp_path, "get", "depth_fusion", "align", PEPIN_BOARD_SIDE="", FAKE_SIDE="board"
+    )
+    assert code == 0, out
+    assert not [c for c in calls if "PEPIN_SIDE" in c], "a side handed over is not asked again"
+    assert [c for c in calls if c.startswith("docker exec pepin-vslam") and "param get" in c]
