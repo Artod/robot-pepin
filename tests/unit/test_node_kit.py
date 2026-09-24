@@ -14,6 +14,7 @@ RCLPY = ros_stubs.install()
 
 from pepin_bringup import node_kit  # noqa: E402
 from pepin_bringup.node_kit import (  # noqa: E402
+    STACK_DUMP_SIGNAL,
     Fatal,
     Switches,
     Tally,
@@ -470,6 +471,30 @@ def test_the_main_leaves_in_order_on_either_way_the_spin_ends(end: type[BaseExce
         RCLPY.on_spin = None
     assert RCLPY.log == ["init", "spin", "try_shutdown"]
     assert nodes[0].closed and nodes[0].destroyed
+
+
+def test_the_main_listens_for_a_stack_dump_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """kill -USR2 prints every thread's stack and the node carries on: the board has no gdb and
+    no py-spy, and goal_server's main thread burns 43-46 % of a core with no callback to blame."""
+    import faulthandler
+
+    registered: list[tuple[Any, bool]] = []
+    monkeypatch.setattr(
+        faulthandler,
+        "register",
+        lambda signum, all_threads=True, chain=False: registered.append((signum, all_threads)),
+    )
+    RCLPY.log.clear()
+
+    def end_spin() -> None:
+        raise KeyboardInterrupt()
+
+    RCLPY.on_spin = end_spin
+    try:
+        spin_main(FakeNode)
+    finally:
+        RCLPY.on_spin = None
+    assert registered == [(STACK_DUMP_SIGNAL, True)]
 
 
 def test_a_node_without_a_close_of_its_own_still_stops_its_tf_listener() -> None:

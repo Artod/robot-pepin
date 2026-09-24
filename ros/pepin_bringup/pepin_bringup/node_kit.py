@@ -16,7 +16,9 @@ node does; a node composes these and keeps its own logic.
 
 from __future__ import annotations
 
+import faulthandler
 import os
+import signal
 import sys
 import threading
 import time
@@ -24,7 +26,7 @@ import traceback
 import weakref
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -689,6 +691,9 @@ def spin_main(factory: Callable[[], Any], args: list[str] | None = None) -> None
     """A node's ``main``: init, build the node, spin, and leave cleanly on SIGINT — the signal
     the launch sends at shutdown and ``ros/laptop.sh kick`` sends by hand.
 
+    ``kill -USR2`` prints every thread's stack to stderr and changes nothing
+    (:func:`listen_for_stack_dumps`).
+
     rclpy's handler shuts the context down and the spin ends with ``KeyboardInterrupt`` or
     ``ExternalShutdownException`` (whichever lands first); both are the normal end. So is ANY
     exception that finds the context already down: the handler shuts it from a thread of its
@@ -710,6 +715,7 @@ def spin_main(factory: Callable[[], Any], args: list[str] | None = None) -> None
     gh-87135). A joined thread has no frames to unwind.
     """
     rclpy.init(args=args)
+    listen_for_stack_dumps()
     node: Any = None
     try:
         node = factory()
@@ -732,6 +738,23 @@ def spin_main(factory: Callable[[], Any], args: list[str] | None = None) -> None
             close_open_lookups()
             node.destroy_node()
         end_context()
+
+
+# The signal that prints every thread's Python stack to the node's stderr (the launch log): a
+# sampling profiler with nothing to install. The board's container has no gdb and no py-spy, and
+# goal_server burnt 43-46 % of an A53 core in its main thread with no callback to blame
+# (2026-09-23/24); `kill -USR2 <pid>` a few times shows where that thread is.
+STACK_DUMP_SIGNAL = signal.SIGUSR2
+
+
+def listen_for_stack_dumps() -> None:
+    """Make :data:`STACK_DUMP_SIGNAL` print every thread's stack to stderr and carry on (the
+    process keeps running; without this the signal would end it). Where stderr has no file
+    descriptor (a test's captured stream) or the platform has no such signal, nothing is
+    registered and the node runs as before."""
+    # io.UnsupportedOperation (a stream with no fileno) is both an OSError and a ValueError
+    with suppress(OSError, ValueError, RuntimeError):
+        faulthandler.register(STACK_DUMP_SIGNAL, all_threads=True, chain=False)
 
 
 def close_open_lookups() -> int:
