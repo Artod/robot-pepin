@@ -449,6 +449,16 @@ def test_the_listener_s_thread_is_stopped_and_joined_on_close() -> None:
     assert listener.executor.shut_down and listener.dedicated_listener_thread.joined
 
 
+def test_the_listener_spins_a_node_of_its_own_not_ours(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Handed OUR node, tf2_ros adds all of it to the listener's executor and every /tf message
+    wakes our executor too: goal_server's 43-46 % of a core at rest. node=None makes tf2_ros
+    build the listener a node of its own; PEPIN_TF_LISTENER_NODE=shared is the way back."""
+    ours = FakeNode()
+    assert TfLookup(ours)._listener.node is None  # type: ignore[union-attr]
+    monkeypatch.setattr("pepin_bringup.node_kit.TF_LISTENER_NODE", "shared")
+    assert TfLookup(ours)._listener.node is ours  # type: ignore[union-attr]
+
+
 # ---- spin_main -----------------------------------------------------------------------------
 @pytest.mark.parametrize("end", [KeyboardInterrupt, ros_stubs.ExternalShutdownException])
 def test_the_main_leaves_in_order_on_either_way_the_spin_ends(end: type[BaseException]) -> None:

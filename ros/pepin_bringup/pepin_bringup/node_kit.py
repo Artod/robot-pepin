@@ -385,6 +385,18 @@ def tf_failure_kind(exc: BaseException) -> str:
     return type(exc).__name__.removesuffix("Exception") or "Unknown"
 
 
+# WHERE A TfLookup's LISTENER LIVES. tf2_ros's TransformListener(buffer, node, spin_thread=True)
+# puts the /tf subscription on OUR node, in a reentrant group, and adds OUR WHOLE NODE to its own
+# executor (transform_listener.py:96-114): every /tf message (tens a second: the EKF, RTAB-Map's
+# map -> odom, the neck) then wakes both executors, and the main one rebuilds its wait set in
+# Python each time — goal_server burnt 43-46 % of an A53 core at rest, 14 of 30 stack samples in
+# rclpy's wait-set and take machinery and none in its own code (2026-09-24,
+# scratch/link_autopsy/goal_server_profile.sh). It also ran our node's callbacks on the
+# listener's thread before its constructor had finished (depth_fusion, 2026-09-18). "own" (the
+# default) hands tf2_ros node=None: the listener makes a node of its own and spins only that;
+# PEPIN_TF_LISTENER_NODE=shared is the way back.
+TF_LISTENER_NODE = os.environ.get("PEPIN_TF_LISTENER_NODE", "own")
+
 # Every TfLookup whose listener thread is still running. tf2_ros starts that thread NON-daemon
 # (transform_listener.py:114, ``Thread(target=run_func)``), so a node that never closes its lookup
 # leaves the interpreter waiting on it forever after SIGINT: on 2026-09-24 `ros/laptop.sh kick
@@ -407,8 +419,12 @@ class TfLookup:
         on_failure: Callable[[str, str], None] | None = None,
     ) -> None:
         self.buffer = buffer if buffer is not None else Buffer()
+        listener_node = None if TF_LISTENER_NODE == "own" else node
+        self._owns_listener_node = listener_node is None
         self._listener = (
-            None if buffer is not None else TransformListener(self.buffer, node, spin_thread=True)
+            None
+            if buffer is not None
+            else TransformListener(self.buffer, listener_node, spin_thread=True)
         )
         self._on_failure = on_failure
         if self._listener is not None:
@@ -464,6 +480,9 @@ class TfLookup:
             return
         listener.executor.shutdown()
         listener.dedicated_listener_thread.join(timeout=STOP_PATIENCE_S)
+        own = getattr(listener, "node", None) if self._owns_listener_node else None
+        if own is not None:
+            own.destroy_node()  # the node tf2_ros made for the listener (TF_LISTENER_NODE own)
 
     def _call(self, lookup: Callable[[], Any], what: str) -> Any | None:
         try:
