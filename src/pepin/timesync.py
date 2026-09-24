@@ -17,12 +17,11 @@ there for the robot's restart check (``ros/restart.sh``, check 1.15) to ask the 
 from __future__ import annotations
 
 import argparse
-import os
 import socket
 import struct
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 NTP_PORT = 123
@@ -36,9 +35,10 @@ _FRACTION = 2**32
 # both machines' stamps. "pool": the internet pool alone, the references the board had under
 # systemd-timesyncd (the daemon itself comes back with `ros/time.sh uninstall`). "pool" is the
 # default until the chrony deploy has been measured on the robot; the deploy flips it here and in
-# ros/lib.sh together. The same variable in ros/lib.sh (does the laptop start its server) and in
-# the board's /etc/default/pepin-ros (board/chrony.sh writes the board's sources from it, and its
-# `install` writes "laptop" there explicitly).
+# ros/lib.sh together. What DECIDES is the shell: ros/lib.sh (does the laptop start its server;
+# pepin_time_source_check refuses any other value) and the board's /etc/default/pepin-ros
+# (board/chrony.sh writes the board's sources from it, and its `install` writes "laptop" there
+# explicitly). These constants are the contract the tests hold those scripts to.
 TIME_SOURCES = ("laptop", "pool")
 TIME_SOURCE_ENV = "PEPIN_TIME_SOURCE"
 DEFAULT_TIME_SOURCE = "pool"
@@ -55,17 +55,6 @@ TIMEOUT_S = 1.0
 EXIT_WITHIN = 0
 EXIT_OVER = 1
 EXIT_UNMEASURED = 2
-
-
-def time_source(env: Mapping[str, str] | None = None) -> str:
-    """Where the board takes its time from: ``"laptop"`` or ``"pool"`` (:data:`TIME_SOURCES`).
-
-    Unset or empty is the default. Anything else is refused rather than read as one of the two —
-    a typo must not decide which clock the robot runs on."""
-    value = (env if env is not None else os.environ).get(TIME_SOURCE_ENV, "") or DEFAULT_TIME_SOURCE
-    if value not in TIME_SOURCES:
-        raise ValueError(f"{TIME_SOURCE_ENV} is one of {TIME_SOURCES}, not {value!r}")
-    return value
 
 
 def to_ntp(unix_s: float) -> int:

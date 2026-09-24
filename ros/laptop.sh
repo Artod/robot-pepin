@@ -83,7 +83,7 @@ fi
 RMW_ENV+=(-e "PEPIN_LOCALIZER=$PEPIN_LOCALIZER")
 # The one pairing that cannot work is refused BEFORE a container starts, not debugged on the
 # robot — and only where one is started, so `stop` and `logs` still work on a misconfigured shell.
-start_check() { pepin_localizer_check || exit 1; }
+start_check() { pepin_localizer_check || exit 1; pepin_time_source_check || exit 1; }
 # One zenoh router per machine, and this is the laptop's. It is started before any node here and
 # left alone afterwards: a node's connect retry is infinite, so containers may come and go under
 # it, and it is the only process on this side that talks to the board. Started idempotently —

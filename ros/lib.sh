@@ -126,6 +126,15 @@ PEPIN_ROS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # in /etc/default/pepin-ros, written by `ros/time.sh source laptop|pool`; `ros/time.sh uninstall`
 # puts the board back on systemd-timesyncd exactly as it ran before chrony.
 PEPIN_TIME_SOURCE="${PEPIN_TIME_SOURCE:-pool}"
+# The switch's value, refused rather than guessed: a typo (`laptpo`) would otherwise read as pool
+# and leave the board without the clock it was meant to follow, silently. ros/laptop.sh asks it
+# before a half starts; board/chrony.sh and `ros/time.sh source` refuse their own arguments.
+pepin_time_source_check() {
+    case "$PEPIN_TIME_SOURCE" in
+        laptop | pool) return 0 ;;
+        *) echo "PEPIN_TIME_SOURCE=$PEPIN_TIME_SOURCE: it is laptop or pool"; return 1 ;;
+    esac
+}
 PEPIN_TIMESERVER=pepin-chrony
 PEPIN_TIMESERVER_IMAGE=pepin-chrony:latest
 pepin_laptop_ip() {  # <board ip> -> this Mac's address on the interface that reaches the board

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import os
 import struct
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,8 @@ from pepin.timesync import (
     EXIT_UNMEASURED,
     EXIT_WITHIN,
     PACKET_BYTES,
+    TIME_SOURCE_ENV,
+    TIME_SOURCES,
     Reply,
     Sample,
     best,
@@ -23,7 +27,6 @@ from pepin.timesync import (
     parse,
     request,
     sample,
-    time_source,
     to_ntp,
     verdict,
 )
@@ -120,14 +123,31 @@ def test_no_answer_at_all_is_unmeasured_not_zero(monkeypatch: pytest.MonkeyPatch
     assert main(["10.0.0.167", "--samples", "2"]) == EXIT_UNMEASURED
 
 
-def test_the_time_source_switch_defaults_to_the_old_clock_until_measured() -> None:
+def _shell_time_source(value: str | None) -> subprocess.CompletedProcess[str]:
+    """ros/lib.sh sourced with PEPIN_TIME_SOURCE=``value`` (None: unset), then its check."""
+    env = {k: v for k, v in os.environ.items() if k != TIME_SOURCE_ENV}
+    if value is not None:
+        env[TIME_SOURCE_ENV] = value
+    script = 'source ros/lib.sh && pepin_time_source_check && echo "$PEPIN_TIME_SOURCE"'
+    return subprocess.run(
+        ["bash", "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=10
+    )
+
+
+def test_the_time_source_switch_defaults_to_the_old_clock_and_refuses_a_typo() -> None:
     """pool is what the board runs under systemd-timesyncd; laptop becomes the default only once
-    the chrony deploy is measured on the robot (CLAUDE.md rule 19). A typo is refused."""
-    assert time_source({}) == DEFAULT_TIME_SOURCE == "pool"
-    assert time_source({"PEPIN_TIME_SOURCE": ""}) == "pool"
-    assert time_source({"PEPIN_TIME_SOURCE": "laptop"}) == "laptop"
-    with pytest.raises(ValueError):
-        time_source({"PEPIN_TIME_SOURCE": "laptpo"})
+    the chrony deploy is measured on the robot (CLAUDE.md rule 19). The shell is what decides,
+    so the shell refuses a value that is neither: ``laptpo`` must not read as pool, silently."""
+    assert DEFAULT_TIME_SOURCE == "pool" and TIME_SOURCES == ("laptop", "pool")
+    assert _shell_time_source(None).stdout.strip() == DEFAULT_TIME_SOURCE
+    assert _shell_time_source("").stdout.strip() == DEFAULT_TIME_SOURCE, "empty is unset"
+    for value in TIME_SOURCES:
+        assert _shell_time_source(value).stdout.strip() == value
+    typo = _shell_time_source("laptpo")
+    assert typo.returncode == 1 and "it is laptop or pool" in typo.stdout, typo
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    start_check = next(ln for ln in laptop.splitlines() if ln.startswith("start_check()"))
+    assert "pepin_time_source_check || exit 1" in start_check, "asked before a half starts"
 
 
 def test_the_shell_and_the_module_default_to_the_same_clock() -> None:
