@@ -1,0 +1,24 @@
+{
+  "_note": "The learned models that run on the laptop's own GPU, beside the containers (pepin.localization_service, ros/models.sh). Docker on macOS has no GPU, so a network in a container runs on the Docker VM's CPU. 'device' is per model and is a measurement: scratch/models/endpoint_bench.py (2026-09-24) timed each endpoint through the service on both devices.",
+  "localization": {
+    "_note": "One process, one failure domain: XFeat, LighterGlue and the place model. The depth network is the other process (ros/depth_host.sh, port 8790).",
+    "port": 8791,
+    "cpu_threads": 4,
+    "xfeat": {
+      "_note": "mps: 21 ms against 64 ms on the CPU for an 800x600 picture (the service's own infer time, scratch/models/endpoint_bench.py). cache: the answers kept by the picture's bytes, because RTAB-Map re-extracts the same stored node pictures on every registration.",
+      "device": "mps",
+      "top_k": 2048,
+      "cache": 64
+    },
+    "match": {
+      "_note": "cpu: LighterGlue is no faster on MPS (the first bench had it 4x slower there), and the CPU keeps it off the lock the GPU models share. min_conf 0.1 is XFeat's own match_lighterglue floor.",
+      "device": "cpu",
+      "min_conf": 0.1
+    },
+    "place": {
+      "_note": "boq_dinov2: R@1 0.99 evening against the daylight database, 42 ms on MPS (scratch/vpr). boq_r50 is the alternative (R@1 0.98, 24 ms). A change of model changes every vector's length and meaning: the database's descriptors must be written again (ros/tools/place_backfill.py) before RTAB-Map compares by descriptor.",
+      "model": "boq_dinov2",
+      "device": "mps"
+    }
+  }
+}
