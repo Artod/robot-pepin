@@ -1072,14 +1072,20 @@ def lingering_nodes(admin_json: str, names: tuple[str, ...]) -> set[str]:
     return set(names) & seen
 
 
-def node_host(node: str) -> tuple[str, str]:
-    """Where a node's process lives in the split stack, as ``(side, container)``: the laptop's
-    SLAM container for the camera nodes, its navigation container for the planner and the goal
-    server, the board's ``pepin-ros`` for everything else (the sensors, the tracker, the
-    reflexes) — what ros/flags.sh execs into to reach the node's parameters."""
+def node_host(node: str, split: bool = False) -> tuple[str, str]:
+    """Where a node's process lives, as ``(side, container)``: what ros/flags.sh execs into to
+    reach the node's parameters.
+
+    The camera nodes are always in the laptop's SLAM container (``pepin-vslam``). The planner and
+    the goal server follow the board's ``PEPIN_SIDE``: ``split`` (``PEPIN_SIDE=board``) puts them
+    in the laptop's navigation container (``pepin-laptop``), which ros/laptop.sh starts in that
+    mode ONLY; a whole board (no ``PEPIN_SIDE`` line, ros/thin.sh vision) runs them itself, and
+    there is no ``pepin-laptop`` to exec into (2026-09-23: ``ros/flags.sh set goal_server ...``
+    failed on "No such container"). Everything else — the sensors, the reflexes, the tracker —
+    is the board's ``pepin-ros``."""
     name = f"/{node.lstrip('/')}"
     if name in laptop_launch_nodes("slam"):
         return "laptop", "pepin-vslam"
-    if name in laptop_launch_nodes("nav"):
+    if split and name in laptop_launch_nodes("nav"):
         return "laptop", "pepin-laptop"
     return "board", "pepin-ros"

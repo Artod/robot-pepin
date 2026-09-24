@@ -78,8 +78,7 @@ class FakeTape:
             raise RuntimeError("publisher's context is invalid")
 
 
-@pytest.fixture(scope="module")
-def goto() -> Any:
+def load_goto() -> Any:
     """ros/tools/goto_ros.py imported by path, with the two modules it needs faked."""
     sys.modules.setdefault("nav2_simple_commander", types.ModuleType("nav2_simple_commander"))
     navigator = types.ModuleType("nav2_simple_commander.robot_navigator")
@@ -112,6 +111,12 @@ def goto() -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(scope="module")
+def goto() -> Any:
+    """The goto client as a module (:func:`load_goto`)."""
+    return load_goto()
 
 
 def test_the_cancel_goes_out_before_the_note_and_the_tape(goto: Any) -> None:

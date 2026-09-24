@@ -99,16 +99,20 @@ from pepin.runlink import (
     stop_command,
 )
 from pepin.watch import (
+    BY_PLACEMENT,
     CORRECTION_FRESH_S,
     DRIVE_FIT,
     DRIVE_SIGMA_M,
     LOST_SIGMA_M,
+    PLACEMENT_TOPIC,
     SIGMA_TOPIC,
     TF_FRESH_S,
     BlindDriveWatch,
     Correction,
     GoalGate,
     JumpClear,
+    Placement,
+    Preflight,
     Readiness,
     Sigma,
 )
@@ -317,6 +321,28 @@ FLAGS = FlagSet(
         " fit the board's control period (the controller server's 'Control loop missed its"
         " desired rate')",
     ),
+    Flag(
+        "start_needs_placement",
+        True,
+        description="under PEPIN_LOCALIZER=rtabmap a goal or a mark waits for the laptop's word"
+        f" on {PLACEMENT_TOPIC} (pepin_bringup.rtabmap_frame, latched) that this start of"
+        " RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and"
+        " nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for"
+        " this same flag before its own preflight. Off, a fresh map -> base_link is enough, as"
+        " before 2026-09-23",
+        why="on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the"
+        " pose it SAVED at its last shutdown, and a fresh transform was taken for a localisation"
+        " — 'at home' at the bookshelf with 0 of 198 updates recognised, then 76 cm off inside"
+        " the table. The laptop's flag of the same name only changes what rtabmap_frame SAYS:"
+        " it cannot lift a refusal of silence, from a node that is down, respawning or running"
+        " code from before the word existed. This one is the board-side switch the refusal"
+        " itself answers to",
+        on_when="always under PEPIN_LOCALIZER=rtabmap: a pose nobody has vouched for since"
+        " RTAB-Map's start is not a pose to drive on",
+        off_when="when the word cannot come and the cart is known to stand where RTAB-Map's pose"
+        " says: pepin-vslam down or started before this build (ros/laptop.sh vslam restarts it"
+        " on the checkout), or a dark room with no seed at hand",
+    ),
 )
 
 PLANNERS = {
@@ -393,6 +419,17 @@ class GoalServer(Node):
             String,
             PLACES_TOPIC,
             self._on_places,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        # WHETHER RTAB-MAP'S START IS PLACED (pepin.watch.Placement, from the laptop's
+        # rtabmap_frame, latched): under PEPIN_LOCALIZER=rtabmap a fresh map -> base_link is not
+        # a pose until this start of RTAB-Map has recognised the loaded map or been seeded.
+        # None until heard, which _ready refuses as "nobody said" (flag start_needs_placement).
+        self._placement: Placement | None = None
+        self.create_subscription(
+            String,
+            PLACEMENT_TOPIC,
+            self._on_placement,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
         # Latched: the behaviour tree reads its selector once, whenever it next ticks.
@@ -717,6 +754,22 @@ class GoalServer(Node):
         else:
             self._send(connection, {"event": "error", "detail": f"unknown command {command!r}"})
 
+    def _on_placement(self, msg: String) -> None:
+        """rtabmap_frame's word on what RTAB-Map's present start rests on; a message that does
+        not parse leaves the last one standing."""
+        heard = Placement.from_json(msg.data)
+        if heard is not None:
+            self._placement = heard
+
+    def _placement_standing(self) -> Placement | None:
+        """rtabmap_frame's last word while an rtabmap_frame is there to stand behind it; ``None``
+        with no publisher left on the topic. A latched word outlives its node here: the laptop's
+        vslam restarting would otherwise leave the OLD start's "placed" in force until the new
+        node's first word, over a map -> odom already fresh at the new start's saved pose."""
+        if self.count_publishers(PLACEMENT_TOPIC) == 0:
+            return None
+        return self._placement
+
     def _on_places(self, msg: String) -> None:
         """The graph's book, as the places node last published it."""
         self._graph_places = {
@@ -827,16 +880,24 @@ class GoalServer(Node):
         """May a goal start now (:class:`pepin.watch.GoalGate`): the tracker's sigma where it
         publishes one and its fit where it does not; where no tracker runs, the age of
         map -> base_link AND the age of the SLAM correction, which is the only one of the two a
-        dead laptop stops. ``pose`` is a reading already taken by the caller (mark's), so the
-        edge is not looked up twice. The gate is kept in step with its live flag here rather
-        than at the switch, so one reading and one rule answer every caller."""
+        dead laptop stops; under ``rtabmap`` also whether this start of RTAB-Map is placed
+        (flag ``start_needs_placement``). ``pose`` is a reading already taken by the caller
+        (mark's), so the edge is not looked up twice. The gate is kept in step with its live flag
+        here rather than at the switch, so one reading and one rule answer every caller."""
         self._gate = replace(
             self._gate, start_on_a_known_pose=self._switches.on("start_on_a_known_pose")
         )
         if self._switches.on("tf_pose") and not self._tracker_here():
             edge = self._tf_pose() if pose is None else pose
             watched = self._correction() if self._watching_correction() else None
-            return self._gate.verdict(None, edge.get("age_s"), watched)
+            ready = self._gate.verdict(None, edge.get("age_s"), watched)
+            if ready.ready and self._localizer == "rtabmap":
+                placed = Preflight.placement(
+                    self._placement_standing(), asked=self._switches.on("start_needs_placement")
+                )
+                if not placed.ok:
+                    return Readiness(False, tracker=False, rule=BY_PLACEMENT, reason=placed.detail)
+            return ready
         return self._gate.verdict(self.fit, None, sigma=self._sigma())
 
     def mark(self, name: str) -> dict[str, Any]:

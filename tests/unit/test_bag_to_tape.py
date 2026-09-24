@@ -300,6 +300,32 @@ def test_the_bag_records_every_topic_the_jsonl_recorder_subscribes_to(tmp_path: 
     assert {"/depth_marks", "/depth_free"} <= set(BAG_TOPICS), "what the camera told the costmaps"
 
 
+def test_the_bag_records_every_odometry_the_ekf_fuses() -> None:
+    """A fused pose that went wrong is taken apart into what each source said: every input the
+    board's EKF names in ros/params/ekf.yaml (odomN, imuN, poseN, twistN) is a topic of the bag —
+    the wheels' raw /odom, the camera's /vo, the zero-velocity /zupt, the lidar's /odom_laser, the
+    gyro — beside the filter's own /odometry/filtered."""
+    import re
+
+    import yaml
+
+    params = yaml.safe_load((REPO / "ros/params/ekf.yaml").read_text())["ekf_filter_node"][
+        "ros__parameters"
+    ]
+    inputs = {
+        "/" + str(value).lstrip("/")
+        for key, value in params.items()
+        if re.fullmatch(r"(odom|imu|pose|twist)\d+", key)
+    }
+    assert {"/odom", "/vo", "/zupt", "/odom_laser", "/imu/data_raw"} <= inputs, inputs
+    assert inputs <= set(BAG_TOPICS), inputs - set(BAG_TOPICS)
+    assert "/odometry/filtered" in BAG_TOPICS
+    assert "/vo/raw" not in BAG_TOPICS, "the laptop's ungated VO stays off the WiFi"
+    builder = TOOL.TapeBuilder()
+    for topic in ("/vo", "/zupt"):
+        assert builder.feed(topic, Odometry(), 1000.0) == [], "the tape has no row for it"
+
+
 def test_the_record_command_names_the_bag_the_storage_and_the_hidden_topics() -> None:
     """Nav2's action status topics are hidden ones (a token starting with an underscore), and
     without the flag `ros2 bag record` drops exactly the records that say why a goal failed."""

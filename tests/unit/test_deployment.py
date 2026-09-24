@@ -273,16 +273,20 @@ def test_a_launch_waits_until_the_bridge_has_forgotten_its_ghost() -> None:
 
 def test_a_node_s_flags_are_reached_where_its_process_lives() -> None:
     """ros/flags.sh execs into the container a node runs in: the laptop's SLAM container for
-    the camera nodes, its navigation container for the planner and the goal server, the board's
-    for the tracker, the sensors and anything it does not know."""
+    the camera nodes, its navigation container for the planner and the goal server when the
+    stack is split, the board's for them on a whole board and for the tracker, the sensors and
+    anything it does not know — pepin-laptop exists only in the split (ros/laptop.sh)."""
     from pepin.deployment import node_host
 
-    assert node_host("depth_stream") == ("laptop", "pepin-vslam")
-    assert node_host("/depth_fusion") == ("laptop", "pepin-vslam")
-    assert node_host("goal_server") == ("laptop", "pepin-laptop")
-    assert node_host("planner_server") == ("laptop", "pepin-laptop")
-    assert node_host("relocalizer") == ("board", "pepin-ros")
-    assert node_host("neck_state") == ("board", "pepin-ros")
+    for split in (False, True):
+        assert node_host("depth_stream", split=split) == ("laptop", "pepin-vslam")
+        assert node_host("/depth_fusion", split=split) == ("laptop", "pepin-vslam")
+        assert node_host("relocalizer", split=split) == ("board", "pepin-ros")
+        assert node_host("neck_state", split=split) == ("board", "pepin-ros")
+    assert node_host("goal_server", split=True) == ("laptop", "pepin-laptop")
+    assert node_host("planner_server", split=True) == ("laptop", "pepin-laptop")
+    assert node_host("goal_server") == ("board", "pepin-ros"), "a whole board, the default"
+    assert node_host("planner_server") == ("board", "pepin-ros")
 
 
 def test_the_split_keeps_the_plan_on_the_laptop_and_vision_moves_it_to_the_board() -> None:

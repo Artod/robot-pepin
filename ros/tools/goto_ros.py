@@ -34,7 +34,10 @@ drive with the reading behind it (:class:`pepin.watch.Preflight`): has any sourc
 tracker at all, is the pose sure enough to drive on (the fusion's own sigma —
 /localization/sigma — not the lidar's fit, which is 0.00 on a camera-only drive), and, where no
 lidar is holding the pose, does RTAB-Map's graph recognise the room and agree with the tracker
-about the place in it.
+about the place in it. Where RTAB-Map owns map -> odom (PEPIN_LOCALIZER=rtabmap) no tracker runs,
+and the question is whether this start of RTAB-Map has been PLACED — a node of the loaded map
+recognised, or an operator's seed — rather than still publishing the pose it saved at its last
+shutdown (:meth:`pepin.watch.Preflight.placement`, latched on /localization/placement).
 """
 
 import contextlib
@@ -58,6 +61,7 @@ from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
+from pepin.deployment import localizer
 from pepin.places import (
     MARK_TOPIC,
     MARKED_TOPIC,
@@ -77,9 +81,11 @@ from pepin.watch import (
     ADMIT_FIT,
     BLIND_FIT,
     DRIVE_SIGMA_M,
+    PLACEMENT_TOPIC,
     SIGMA_MEDIAN_S,
     SIGMA_TOPIC,
     BlindDriveWatch,
+    Placement,
     Preflight,
     Sigma,
     SigmaWindow,
@@ -114,6 +120,14 @@ CANCEL_CONFIRM_S = 3.0
 NAV_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
 # Where RTAB-Map (the node /rtabmap/rtabmap) takes an operator's pose in localisation mode.
 RTABMAP_INITIAL_POSE = "/rtabmap/initialpose"
+# THE GOAL SERVER'S SWITCH FOR THE PLACEMENT REFUSAL, obeyed here too: one
+# `ros/flags.sh set goal_server start_needs_placement false` lifts it for both goal paths, even
+# with the laptop's rtabmap_frame down or on code that never publishes the word. Read from the
+# goal server's parameter service (wherever the board's side runs it); a goal server that does not
+# answer within the wait, or holds no such flag (a build from before it), leaves the default, on.
+GOAL_SERVER = "/goal_server"
+PLACEMENT_FLAG = "start_needs_placement"
+FLAG_WAIT_S = 2.0
 # How long the latched /places is given to land before the file beside the map answers instead. A
 # latched publisher delivers as soon as the two endpoints match, so this covers discovery over the
 # bridge and nothing else: the same 2 s every other "has the route come up" wait here uses, and a
@@ -603,6 +617,49 @@ def mark_place(nav: BasicNavigator, path: Path, name: str, certainty: Certainty)
     )
 
 
+def placement_now(nav: BasicNavigator, wait_s: float = CERTAINTY_WAIT_S) -> Placement | None:
+    """What this start of RTAB-Map is placed by, as pepin_bringup.rtabmap_frame says it on the
+    latched :data:`pepin.watch.PLACEMENT_TOPIC`; ``None`` when nothing arrived within ``wait_s``
+    or it did not parse. Latched, so the laptop's last word is in the first callback once the two
+    ends have matched over the transport — the wait covers that and nothing else."""
+    heard: list[Placement | None] = []
+    latched = QoSProfile(
+        depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE
+    )
+    subscription = nav.create_subscription(
+        String, PLACEMENT_TOPIC, lambda msg: heard.append(Placement.from_json(msg.data)), latched
+    )
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline and not heard:
+        rclpy.spin_once(nav, timeout_sec=0.1)
+    nav.destroy_subscription(subscription)
+    return heard[-1] if heard else None
+
+
+def goal_server_flag(nav: BasicNavigator, name: str, wait_s: float = FLAG_WAIT_S) -> bool | None:
+    """The goal server's live bool flag ``name`` as it holds it now (its GetParameters service);
+    ``None`` when the goal server does not answer within ``wait_s`` or holds no such bool flag,
+    and the caller keeps the flag's table default."""
+    from rcl_interfaces.msg import ParameterType
+    from rcl_interfaces.srv import GetParameters
+
+    client = nav.create_client(GetParameters, f"{GOAL_SERVER}/get_parameters")
+    try:
+        if not client.wait_for_service(timeout_sec=wait_s):
+            return None
+        request = GetParameters.Request()
+        request.names = [name]
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(nav, future, timeout_sec=wait_s)
+        answer = future.result()
+    finally:
+        nav.destroy_client(client)
+    values = list(getattr(answer, "values", None) or [])
+    if len(values) != 1 or values[0].type != ParameterType.PARAMETER_BOOL:
+        return None  # not answered, or not declared there (PARAMETER_NOT_SET)
+    return bool(values[0].bool_value)
+
+
 def tracker_here(nav: BasicNavigator, timeout_s: float = TRACKER_PATIENCE_S) -> bool:
     """Whether the board runs the scan-matching tracker (``/where_am_i`` answers within
     ``timeout_s``). False in online SLAM: there is no saved map to match a scan against, so
@@ -638,44 +695,75 @@ def map_frame_age_s(nav: BasicNavigator, wait_s: float = 5.0) -> float | None:
     return age
 
 
-def ensure_localized(nav: BasicNavigator, certainty: Certainty) -> bool:
-    """The preflight: may this goal be sent at all.
+def ensure_localized(nav: BasicNavigator, certainty: Certainty) -> str | None:
+    """The preflight: may this goal be sent at all. ``None`` when it may; otherwise the hint to
+    print under the refusal (empty when the refusing line already says what to do).
 
     Where a tracker runs, three checks are printed and any failure refuses the drive
     (:func:`preflight`). The old rule this replaces read ``/localization_fit`` alone — the
     LIDAR's scan-to-map fit — and so refused every camera-only drive out of hand, because
     nothing there scores a scan against the map and the number is 0.00 by construction.
 
-    In online SLAM there is no tracker at all: the map is being built on the laptop, so
-    ``/where_am_i`` and ``/relocalize`` do not exist and this check used to refuse every goal of
-    the mode after ten seconds of waiting for two absent services ("fit nan: searching the whole
-    map first..." then "not localized", 2026-09-14 20:03 and 20:04). What is judged there
-    instead is the map frame's own freshness — see :func:`map_frame_age_s`; a drive whose
-    correction then goes stale is cut by the goal server's own watch (pepin.watch).
+    Where no tracker runs, the map frame's own freshness is judged (:func:`map_frame_age_s`).
+    In online SLAM that is all there is: ``/where_am_i`` and ``/relocalize`` do not exist, and
+    this check used to refuse every goal of the mode after ten seconds of waiting for two absent
+    services ("fit nan: searching the whole map first..." then "not localized", 2026-09-14 20:03
+    and 20:04); a drive whose correction then goes stale is cut by the goal server's own watch.
+    Under ``PEPIN_LOCALIZER=rtabmap`` a fresh frame is not enough: RTAB-Map publishes one from
+    the moment it starts, at the pose it saved at its last shutdown, so this start must also be
+    PLACED — recognised or seeded (:meth:`pepin.watch.Preflight.placement`; 2026-09-23, the cart
+    "at home" at the bookshelf, then 76 cm off inside the table) — unless the goal server's flag
+    ``start_needs_placement`` is off (:func:`goal_server_flag`).
     """
-    if not tracker_here(nav):
-        age = map_frame_age_s(nav)
-        if age is None:
-            print(
-                "no /where_am_i and no map -> base_link: neither the tracker (a known map) nor"
-                " the SLAM frame (ros/thin.sh slam) is up on the board",
-                flush=True,
-            )
-            return False
-        if age > MAP_FRAME_FRESH_S:
-            print(
-                f"online SLAM: map -> base_link is {age:.1f} s old (over {MAP_FRAME_FRESH_S:.1f}"
-                " s): the board's slam_frame is not broadcasting",
-                flush=True,
-            )
-            return False
+    if tracker_here(nav):
+        if preflight(nav, certainty):
+            return None
+        return "Stand the cart still and run ros/goto.sh relocalize, or ros/goto.sh where."
+    owner = localizer()
+    age = map_frame_age_s(nav)
+    if age is None:
         print(
-            f"preflight slam      ok       online SLAM, map -> base_link {age * 1e3:.0f} ms old"
-            " (no tracker here: nothing matches a scan against a map still being built)",
+            "no /where_am_i and no map -> base_link: neither the tracker (a known map) nor"
+            + (
+                " RTAB-Map's map -> odom (ros/laptop.sh vslam)"
+                if owner == "rtabmap"
+                else " the SLAM frame (ros/thin.sh slam)"
+            )
+            + " is up",
             flush=True,
         )
-        return True
-    return preflight(nav, certainty)
+        return ""
+    if owner == "rtabmap":
+        if age > MAP_FRAME_FRESH_S:
+            print(
+                f"preflight frame     REFUSED  map -> base_link is {age:.1f} s old (over"
+                f" {MAP_FRAME_FRESH_S:.1f} s): RTAB-Map's map -> odom or the board's odometry"
+                " is not arriving",
+                flush=True,
+            )
+            return ""
+        print(
+            f"preflight frame     ok       map -> base_link {age * 1e3:.0f} ms old (RTAB-Map"
+            " owns map -> odom, no tracker on the board)",
+            flush=True,
+        )
+        asked = goal_server_flag(nav, PLACEMENT_FLAG)
+        placed = Preflight.placement(placement_now(nav), asked=asked is not False)
+        print(placed.line(), flush=True)
+        return None if placed.ok else ""
+    if age > MAP_FRAME_FRESH_S:
+        print(
+            f"online SLAM: map -> base_link is {age:.1f} s old (over {MAP_FRAME_FRESH_S:.1f}"
+            " s): the board's slam_frame is not broadcasting",
+            flush=True,
+        )
+        return ""
+    print(
+        f"preflight slam      ok       online SLAM, map -> base_link {age * 1e3:.0f} ms old"
+        " (no tracker here: nothing matches a scan against a map still being built)",
+        flush=True,
+    )
+    return None
 
 
 def describe(x: float, y: float, yaw_deg: float, home: dict[str, float] | None = None) -> str:
@@ -807,6 +895,12 @@ def main() -> None:
                 f"seeded at ({x:.2f}, {y:.2f}) yaw {yaw:.0f} deg: /initialpose (tracker) and"
                 f" {RTABMAP_INITIAL_POSE} (RTAB-Map)"
             )
+            if localizer() == "rtabmap":  # the seed is what places this start: say whether it did
+                heard = placement_now(nav)
+                print(
+                    "RTAB-Map's start, as rtabmap_frame says it: "
+                    + (heard.how() if heard else f"nothing on {PLACEMENT_TOPIC}")
+                )
             return
         name = None
         # The graph's own book first, the file beside the map second (:class:`Vocabulary`): a
@@ -850,11 +944,9 @@ def main() -> None:
         print(describe(x, y, yaw, home), flush=True)
         checked = time.monotonic()
         certainty = Certainty(nav)
-        if not ensure_localized(nav, certainty):
-            print(
-                "not driving: the preflight refused above."
-                " Stand the cart still and run ros/goto.sh relocalize, or ros/goto.sh where."
-            )
+        refused = ensure_localized(nav, certainty)
+        if refused is not None:
+            print("not driving: the preflight refused above." + (f" {refused}" if refused else ""))
             sys.exit(1)
         print(
             f"startup: localization checked in {time.monotonic() - checked:.1f} s, "

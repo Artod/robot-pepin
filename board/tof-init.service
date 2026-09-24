@@ -9,6 +9,11 @@ Before=pepin-tof.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# The script checks that 0x30, 0x31 and 0x32 answer and runs the XSHUT sequence again when one
+# does not (about 3 s an attempt). Its outcome is also appended to /var/log/tof_init.log: the
+# journal is rotated by the stack's own logging within hours. It exits 0 on a partial result so
+# that pepin-tof (Requires= this unit) still streams the sensors that answer.
+Environment=TOF_INIT_ATTEMPTS=3
 ExecStart=/usr/local/bin/tof_init.sh
 
 [Install]

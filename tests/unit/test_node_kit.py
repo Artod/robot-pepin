@@ -518,6 +518,85 @@ def test_the_worker_is_joined_before_the_node_is_destroyed_or_the_context_shut_d
     assert not nodes[0].worker.alive, "a daemon thread left running is the abort"
 
 
+def test_the_context_shut_down_by_the_signal_handler_first_is_a_clean_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rclpy's SIGINT handler shuts the context down from its own thread, so it can land between
+    the check and the shutdown: rcl answers "rcl_shutdown already called on the given context"
+    (the bag recorder, 2026-09-23, exit code 1). With the context down afterwards that is the
+    race and the exit is clean; with it still up the failure is real and is raised."""
+    state = {"up": True}
+
+    def raced() -> None:
+        state["up"] = False  # the handler's thread got there first...
+        raise RuntimeError(
+            "failed to shutdown: rcl_shutdown already called on the given context"
+        )  # ...and rcl says so to the second caller
+
+    monkeypatch.setattr(RCLPY, "try_shutdown", raced)
+    monkeypatch.setattr(RCLPY, "ok", lambda: state["up"])
+    node_kit.end_context()  # quiet
+
+    def refused() -> None:
+        raise RuntimeError("rcl_shutdown failed for another reason")
+
+    state["up"] = True
+    monkeypatch.setattr(RCLPY, "try_shutdown", refused)
+    with pytest.raises(RuntimeError, match="another reason"):
+        node_kit.end_context()
+
+    nodes: list[FakeNode] = []
+
+    def factory() -> FakeNode:
+        nodes.append(FakeNode())
+        return nodes[-1]
+
+    def interrupted() -> None:
+        raise KeyboardInterrupt
+
+    state["up"] = True
+    monkeypatch.setattr(RCLPY, "try_shutdown", raced)
+    RCLPY.on_spin = interrupted
+    try:
+        spin_main(factory)  # the whole way out, with the race in it: no exception
+    finally:
+        RCLPY.on_spin = None
+    assert nodes[0].closed and nodes[0].destroyed
+
+
+@pytest.mark.parametrize("up", [False, True])
+def test_the_spin_ending_on_a_dead_context_is_the_normal_end_and_a_live_one_is_not(
+    up: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The handler's shutdown can also land between the executor's check and its wait set: the
+    spin then raises rcl's "failed to initialize wait set: the given context is not valid", not
+    KeyboardInterrupt (the real rclpy, scratch/bag_recorder_sigint.sh: 1 in 16). With the
+    context down that is the normal end, named in one line; with it up it is a real failure.
+    Either way the node is closed and destroyed first."""
+    nodes: list[FakeNode] = []
+
+    def factory() -> FakeNode:
+        nodes.append(FakeNode())
+        return nodes[-1]
+
+    def wait_set_on_a_dead_context() -> None:
+        raise RuntimeError("failed to initialize wait set: the given context is not valid")
+
+    monkeypatch.setattr(RCLPY, "ok", lambda: up)
+    RCLPY.on_spin = wait_set_on_a_dead_context
+    try:
+        if up:
+            with pytest.raises(RuntimeError, match="wait set"):
+                spin_main(factory)
+        else:
+            spin_main(factory)
+    finally:
+        RCLPY.on_spin = None
+    assert nodes[0].closed and nodes[0].destroyed
+    said = capsys.readouterr().err
+    assert ("taken as the normal end" in said) is not up
+
+
 def test_a_worker_thread_ends_the_node_through_fatal_with_an_exit_code_in_order() -> None:
     """A thread cannot raise into rclpy.spin, and shutdown() from it is the normal end (code 0,
     "finished cleanly" in the launch's log): the reason is left in Fatal and its timer raises
