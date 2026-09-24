@@ -157,6 +157,37 @@ def test_statuses_cover_ok_over_missing_idle_and_forbidden() -> None:
     assert by_name["foxglove_bridge"].status == IDLE  # not expected, not there: fine
 
 
+def test_stand_ins_satisfy_their_group_and_are_promised_once() -> None:
+    """The launch starts ONE of the two recorders (PEPIN_RECORDER): the one not running is IDLE
+    while the other runs, both are MISSING when neither does, and the promise counts the group
+    once, at its dearest member (2026-09-24: run_recorder MISSING under recorder=bag kept the
+    census red on a healthy board)."""
+
+    def recorder(name: str, match: str, cpu: float) -> Entry:
+        return Entry(
+            name=name,
+            match=match,
+            role="the drive's recorder",
+            owner="pepin-ros.service",
+            budget=Budget(cpu_percent=cpu, rss_mb=100.0),
+            group="recorder",
+        )
+
+    manifest = Manifest(
+        entries=(
+            recorder("run_recorder", r"pepin_bringup\.run_recorder", 24.0),
+            recorder("bag_recorder", r"pepin_bringup\.bag_recorder", 8.0),
+        )
+    )
+    bag = "  500  1 0 1.0 90000 01:00 python3 -m pepin_bringup.bag_recorder\n"
+    header = PS_DUMP.splitlines()[0] + "\n"
+    by_name = {m.entry.name: m.status for m in take_census(manifest, header + bag, LOAD).measured}
+    assert by_name == {"run_recorder": IDLE, "bag_recorder": OK}
+    by_name = {m.entry.name: m.status for m in take_census(manifest, header, LOAD).measured}
+    assert by_name == {"run_recorder": MISSING, "bag_recorder": MISSING}
+    assert manifest.promised_cpu_percent == 24.0 and manifest.promised_rss_mb == 100.0
+
+
 def test_a_forbidden_process_that_runs_is_red() -> None:
     dump = (
         PS_DUMP + "  333  1 0 5.0 20000 01:00 /opt/ros/jazzy/lib/foxglove_bridge/foxglove_bridge\n"

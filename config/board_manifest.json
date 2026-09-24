@@ -95,9 +95,9 @@
       ],
       "budget": {
         "cpu_percent": 22.0,
-        "rss_mb": 70.0
+        "rss_mb": 85.0
       },
-      "note": "TO MEASURE: split from sensors_container (measured 21 % / 60 MB for everything) on 2026-09-24; each process carries its own zenoh session (~40 MB)."
+      "note": "Measured 12-13 % / 62-75 MB on 2026-09-24 (the respawn tests of that night included); split from sensors_container (21 % / 60 MB for everything). Each process carries its own zenoh session (~40 MB)."
     },
     {
       "name": "base_container",
@@ -122,7 +122,7 @@
         "cpu_percent": 15.0,
         "rss_mb": 60.0
       },
-      "note": "TO MEASURE: split from sensors_container on 2026-09-24; each process carries its own zenoh session (~40 MB)."
+      "note": "Measured 5-6 % / 43-54 MB on 2026-09-24; split from sensors_container. Each process carries its own zenoh session (~40 MB)."
     },
     {
       "name": "relocalizer",
@@ -152,7 +152,8 @@
         "cpu_percent": 24.0,
         "rss_mb": 93.0
       },
-      "note": "Measured 16 % / 62 MB while idle (subscribed, nothing driving)."
+      "note": "Measured 16 % / 62 MB while idle (subscribed, nothing driving). Group 'recorder' with bag_recorder: the one not started is IDLE while the other runs.",
+      "group": "recorder"
     },
     {
       "name": "bag_recorder",
@@ -162,12 +163,12 @@
         "wifi-loss"
       ],
       "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (recorder:=bag, respawn, ghost wait)",
-      "when": "sometimes",
       "budget": {
         "cpu_percent": 8.0,
-        "rss_mb": 60.0
+        "rss_mb": 100.0
       },
-      "note": "AN ESTIMATE, not a measurement: an rclpy process that holds two String topics and a 1 Hz timer, taken from the other small rclpy nodes on this board. Measure it on the first bag drive and replace this number; the whole point of the switch is the comparison against run_recorder's 24 % / 93 MB."
+      "note": "Measured 0.5-7 % / 78-93 MB idle on 2026-09-24 (the estimate before it was 8 % / 60 MB). Group 'recorder' with run_recorder: the launch starts one of the two, the census wants one.",
+      "group": "recorder"
     },
     {
       "name": "bag_record",
@@ -252,10 +253,10 @@
       ],
       "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn, ghost wait)",
       "budget": {
-        "cpu_percent": 10.0,
-        "rss_mb": 113.0
+        "cpu_percent": 30.0,
+        "rss_mb": 120.0
       },
-      "note": "Measured 7 % / 76 MB. Moves to the laptop when side=laptop."
+      "note": "Measured 27-29 % / 93-112 MB at rest on 2026-09-24 once its TF listener spins a node of its own (45 % before: /tf woke its main executor, node_kit TF_LISTENER_NODE); the listener's own thread is 17 % of it. The goal_server breakup (.claude/tasks) is where the rest goes. Moves to the laptop when side=laptop."
     },
     {
       "name": "ros2_launch",
@@ -388,6 +389,20 @@
         "rss_mb": 225.0
       },
       "note": "Measured ~1 % total and ~150 MB across dockerd, containerd, two shims and the pepin-ros `docker run`. Memory, not CPU, is what it costs us."
+    },
+    {
+      "name": "journald",
+      "match": "(^|/)systemd-journald( |$)",
+      "role": "The host's journal: every unit's output and the kernel's messages, written to the SD card (the board's services log through it; the containers' own logs stay in docker's files).",
+      "on_board_because": [
+        "os"
+      ],
+      "owner": "systemd-journald.service (the OS)",
+      "budget": {
+        "cpu_percent": 3.0,
+        "rss_mb": 20.0
+      },
+      "note": "Measured 1.4-2 % / 9 MB on 2026-09-24, over the 1 % an unlisted process may cost, so every census that night was red on it; listed so that a journal that starts to churn shows as OVER instead of as noise."
     },
     {
       "name": "reap_ros2_cli",
