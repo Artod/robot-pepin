@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import traceback
+import weakref
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -382,6 +383,15 @@ def tf_failure_kind(exc: BaseException) -> str:
     return type(exc).__name__.removesuffix("Exception") or "Unknown"
 
 
+# Every TfLookup whose listener thread is still running. tf2_ros starts that thread NON-daemon
+# (transform_listener.py:114, ``Thread(target=run_func)``), so a node that never closes its lookup
+# leaves the interpreter waiting on it forever after SIGINT: on 2026-09-24 `ros/laptop.sh kick
+# rtabmap_frame` ended the spin (the report lines stopped) and the process never exited until a
+# SIGTERM — and five nodes carry a TfLookup with no close() of their own. spin_main closes what
+# is still open here, after the node's own close().
+_OPEN_LOOKUPS: weakref.WeakSet[TfLookup] = weakref.WeakSet()
+
+
 class TfLookup:
     """A TF buffer, fed by a listener on its own thread unless a buffer is handed in, and
     lookups that answer ``None`` instead of raising: the failure goes to ``on_failure`` as
@@ -399,6 +409,8 @@ class TfLookup:
             None if buffer is not None else TransformListener(self.buffer, node, spin_thread=True)
         )
         self._on_failure = on_failure
+        if self._listener is not None:
+            _OPEN_LOOKUPS.add(self)
 
     def transform(
         self, target: str, source: str, stamp: Any = None, timeout_s: float = 0.0
@@ -442,7 +454,9 @@ class TfLookup:
         return None if transform is None else pose_from_transform(transform)
 
     def close(self) -> None:
-        """Stop the listener's thread, before the node is destroyed under it."""
+        """Stop the listener's thread, before the node is destroyed under it; a second call does
+        nothing."""
+        _OPEN_LOOKUPS.discard(self)
         listener = self._listener
         if listener is None or getattr(listener, "executor", None) is None:
             return
@@ -685,7 +699,9 @@ def spin_main(factory: Callable[[], Any], args: list[str] | None = None) -> None
     on stderr names it; with the context still up the exception is real and propagates. The
     loud end is a :class:`Fatal`: ``SystemExit`` with the reason, exit code 1, through the same
     order. Then, in this order: the node's ``close()`` if it has one (its worker threads and
-    TF listener are stopped and JOINED), ``destroy_node`` (the DDS participant is disposed, so
+    TF listener are stopped and JOINED), every :class:`TfLookup` still open
+    (:func:`close_open_lookups`: tf2_ros's listener thread is not a daemon, and a node with no
+    close of its own never exited), ``destroy_node`` (the DDS participant is disposed, so
     the bridge forgets the name at once and the respawn meets no ghost), and the context's
     shutdown (:func:`end_context`, race-proof too). The join is the fix for the depth node's
     SIGABRT: a daemon thread still inside the network's C++ when the interpreter finalised was
@@ -713,8 +729,18 @@ def spin_main(factory: Callable[[], Any], args: list[str] | None = None) -> None
             close = getattr(node, "close", None)
             if close is not None:
                 close()
+            close_open_lookups()
             node.destroy_node()
         end_context()
+
+
+def close_open_lookups() -> int:
+    """Close every :class:`TfLookup` whose listener thread still runs; how many there were. The
+    thread is not a daemon, so one left open keeps the process alive after its spin has ended."""
+    lookups = list(_OPEN_LOOKUPS)
+    for lookup in lookups:
+        lookup.close()
+    return len(lookups)
 
 
 def end_context() -> None:

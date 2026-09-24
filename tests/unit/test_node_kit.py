@@ -20,6 +20,7 @@ from pepin_bringup.node_kit import (  # noqa: E402
     TfHistory,
     TfLookup,
     Worker,
+    close_open_lookups,
     descriptor,
     spin_main,
 )
@@ -469,6 +470,42 @@ def test_the_main_leaves_in_order_on_either_way_the_spin_ends(end: type[BaseExce
         RCLPY.on_spin = None
     assert RCLPY.log == ["init", "spin", "try_shutdown"]
     assert nodes[0].closed and nodes[0].destroyed
+
+
+def test_a_node_without_a_close_of_its_own_still_stops_its_tf_listener() -> None:
+    """tf2_ros's listener thread is not a daemon: rtabmap_frame, which holds a TfLookup and has
+    no close(), ended its spin on `ros/laptop.sh kick` and never exited (2026-09-24). The main
+    closes every lookup still open, before the node is destroyed."""
+    RCLPY.log.clear()
+    made: list[Any] = []
+
+    class Bare:
+        """A node with a TF lookup and nothing to close of its own."""
+
+        def __init__(self) -> None:
+            self.tf = TfLookup(FakeNode())
+            self.destroyed_with_listener_running = False
+
+        def destroy_node(self) -> None:
+            listener = self.tf._listener
+            self.destroyed_with_listener_running = not listener.executor.shut_down
+
+    def factory() -> Bare:
+        made.append(Bare())
+        return made[-1]
+
+    def end_spin() -> None:
+        raise KeyboardInterrupt()
+
+    RCLPY.on_spin = end_spin
+    try:
+        spin_main(factory)
+    finally:
+        RCLPY.on_spin = None
+    listener: Any = made[0].tf._listener
+    assert listener.executor.shut_down and listener.dedicated_listener_thread.joined
+    assert not made[0].destroyed_with_listener_running
+    assert close_open_lookups() == 0, "nothing left open after the main"
 
 
 def test_the_worker_is_joined_before_the_node_is_destroyed_or_the_context_shut_down() -> None:
