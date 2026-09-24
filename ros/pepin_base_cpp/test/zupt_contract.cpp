@@ -2,9 +2,10 @@
 //
 // The contract of tests/unit/test_zupt.py::test_zupt_contract_the_cpp_bridge_mirrors, replayed row
 // for row against zupt.hpp, verdict words included. Like gyro_bias_contract.cpp it is a
-// stand-alone main() with no ROS and no gtest, because the package has no ament test target:
+// stand-alone main() with no ROS and no gtest, because the package has no ament test target. One
+// command (no line continuation here: GCC's -Wcomment reads a backslash as one):
 //
-//     c++ -std=c++17 -Wall -Wextra -Wpedantic -O2 -I ros/pepin_base_cpp/include \
+//     c++ -std=c++17 -Wall -Wextra -Wpedantic -O2 -I ros/pepin_base_cpp/include
 //         ros/pepin_base_cpp/test/zupt_contract.cpp -o /tmp/zupt_contract && /tmp/zupt_contract
 //
 // It prints one line per row and exits non-zero on any disagreement. Python is the reference: a

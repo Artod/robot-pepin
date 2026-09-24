@@ -30,6 +30,11 @@
 // The gyro's ZERO is re-measured for as long as the node lives, from the rest the WHEELS witness:
 // the chip's bias moves with temperature, and a zero taken once at boot turned RTAB-Map's map
 // +27 deg in 40 min under a parked cart. See gyro_bias.hpp, witness_rest() and read_imu().
+//
+// And while the cart CERTAINLY stands still — the wheels' rest past the same settle window, no
+// fresh command, the gyro quiet — the node tells the EKF so: a zero twist on /zupt, the filter's
+// odom2, which otherwise hears nothing at rest but its sources' own drift (rf2o +1.5 deg/min on a
+// parked cart, 2026-09-24). See zupt.hpp and publish_zupt().
 
 #include <algorithm>
 #include <array>
@@ -58,6 +63,7 @@
 #include "pepin_base_cpp/mpu6050.hpp"
 #include "pepin_base_cpp/protocol.hpp"
 #include "pepin_base_cpp/twist_from_pose.hpp"
+#include "pepin_base_cpp/zupt.hpp"
 
 namespace pepin
 {
@@ -143,11 +149,31 @@ public:
     // ``ros2 param set /base_bridge odom_twist_source commanded``.
     const auto twist_source = declare_parameter<std::string>("odom_twist_source", "measured");
     twist_measured_ = twist_source != "commanded";
+    // THE ZERO-VELOCITY UPDATE (CLAUDE.md rule 19; zupt.hpp has the measurements). On, /zupt
+    // carries a twist of exactly zero -- ekf.yaml's odom2 fuses its vx, vy and vyaw -- for as long
+    // as the cart CERTAINLY stands still: the wheels have witnessed rest for `imu_bias_s` (the
+    // rest the gyro's bias tracker trusts), no non-zero /cmd_vel is younger than `cmd_timeout_s`,
+    // and the bias-corrected gyro has stayed under `zupt_gyro_quiet_rad_s`; nothing at all
+    // otherwise. Off is what this node did before 2026-09-24: nothing on /zupt, and the parked
+    // EKF's heading followed its sources' drift at ~5 deg/hour. Read every tick, so
+    // `ros2 param set /base_bridge zupt_publish false` compares the two without a restart.
+    declare_parameter<bool>("zupt_publish", true);
+    // A bias-corrected yaw rate at or above this is a turn, and a turn stops the update like a
+    // wheel's move: 0.005 rad/s is 7.9 sigma of the parked chip's per-sample noise and 2.1x the
+    // largest parked deviation measured, and a slow hand turn is 31x over it (zupt.hpp). Live.
+    gyro_quiet_rad_s_ = declare_parameter<double>("zupt_gyro_quiet_rad_s", kGyroQuietRadS);
+    // Read at start, like `resend_hz`: the slip watch's 10 Hz. zupt.hpp's kZuptHz says why the
+    // rate is the lever worth measuring next (phase-locked to rf2o at 10 Hz).
+    zupt_hz_ = declare_parameter<double>("zupt_rate_hz", kZuptHz);
+    zupt_gate_ = ZuptGate(imu_bias_s_, cmd_timeout_s_, kStateGapMaxS);
 
     pose_covariance_ = odometry_pose_covariance();
     twist_covariance_ = odometry_twist_covariance();
 
     odom_publisher_ = create_publisher<nav_msgs::msg::Odometry>("odom", 10);
+    // Five deep, RELIABLE: what the EKF subscribes with (odom2_queue_size), and what the slip
+    // watch's publisher on the same topic uses.
+    zupt_publisher_ = create_publisher<nav_msgs::msg::Odometry>("zupt", 5);
     tf_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     twist_subscription_ = create_subscription<geometry_msgs::msg::Twist>(
       "cmd_vel", 10,
@@ -168,6 +194,7 @@ public:
     link_->start();
     status_timer_ = create_wall_timer(period(1.0 / kStatusHz), [this] {log_link_status();});
     resend_timer_ = create_wall_timer(period(1.0 / resend_hz), [this] {resend_command();});
+    zupt_timer_ = create_wall_timer(period(1.0 / zupt_hz_), [this] {publish_zupt();});
 
     if (imu_enable) {
       start_imu();
@@ -308,7 +335,8 @@ private:
     still_since_.store(0.0);
   }
 
-  /// IMU thread: the time since which the WHEELS have witnessed rest, or 0 when they have not.
+  /// Any thread (the IMU loop, the zero-velocity timer): the time since which the WHEELS have
+  /// witnessed rest, or 0 when they have not.
   double still_witness(double now) const
   {
     return rest_witnessed(still_since_.load(), witness_at_.load(), now, kStateGapMaxS);
@@ -319,6 +347,9 @@ private:
   {
     v = std::max(-max_linear_, std::min(max_linear_, v));
     w = std::max(-max_angular_, std::min(max_angular_, w));
+    if (v != 0.0 || w != 0.0) {
+      command_moving_at_.store(monotonic_s());  // the zero-velocity update stops on the intent
+    }
     {
       const std::lock_guard<std::mutex> guard(mutex_);
       command_ = std::make_pair(v, w);
@@ -361,7 +392,90 @@ private:
   {
     return std::string("imu_publish=") + (imu_publish_ ? "on" : "off") + " odom_publish=" +
            (odom_publish_ ? "on" : "off") + " imu_bias_tracking=" +
-           (imu_bias_tracking_ ? "on" : "off");
+           (imu_bias_tracking_ ? "on" : "off") + " zupt_publish=" +
+           (zupt_publish_ ? "on" : "off");
+  }
+
+  /// The zero-velocity update as a report line prints it: publishing or why not, and the count.
+  ///
+  /// ``zupt publishing for 312 s, 3121 sent`` on a parked cart; ``zupt silent (settling after the
+  /// last motion), 3121 sent`` just after a leg; ``zupt off`` under ``zupt_publish false``.
+  std::string zupt_state() const
+  {
+    char line[160];
+    if (!zupt_publish_) {
+      std::snprintf(line, sizeof(line), "zupt off, %ld sent", zupt_sent_.load());
+    } else if (zupt_publishing_) {
+      std::snprintf(
+        line, sizeof(line), "zupt publishing for %.0f s, %ld sent",
+        monotonic_s() - zupt_since_.load(), zupt_sent_.load());
+    } else {
+      std::snprintf(
+        line, sizeof(line), "zupt silent (%s), %ld sent",
+        describe(static_cast<ZuptVerdict>(zupt_verdict_.load())), zupt_sent_.load());
+    }
+    return line;
+  }
+
+  /// Executor: one tick of the zero-velocity update -- a zero twist on /zupt while ZuptGate says
+  /// the cart is at rest and `zupt_publish` is on, and nothing at all otherwise.
+  ///
+  /// Every witness is read fresh each tick from the thread that owns it (the wheels' reader, the
+  /// IMU loop, the /cmd_vel callback), so the first sample of motion any of them sees stops the
+  /// update at the next tick: within one period. Covariances in zupt.hpp; the stamp is the ROS
+  /// clock's now, like /odom's.
+  void publish_zupt()
+  {
+    const bool enabled = get_parameter("zupt_publish").as_bool();
+    zupt_publish_ = enabled;
+    gyro_quiet_rad_s_ = get_parameter("zupt_gyro_quiet_rad_s").as_double();
+    const double now_s = monotonic_s();
+    const ZuptVerdict verdict = zupt_gate_.judge(now_s, rest_evidence(now_s));
+    zupt_verdict_ = static_cast<int>(verdict);
+    const bool publish = enabled && verdict == ZuptVerdict::kAtRest;
+    if (publish != zupt_publishing_) {
+      note_zupt_change(publish, verdict, now_s);
+    }
+    if (!publish) {
+      return;
+    }
+    nav_msgs::msg::Odometry message;
+    message.header.stamp = now();
+    message.header.frame_id = odom_frame_;
+    message.child_frame_id = base_frame_;
+    message.pose.covariance = zupt_pose_covariance_;  // no pose is claimed: odom2 fuses none
+    message.twist.covariance = zupt_twist_covariance_;  // the twist itself is zero as built
+    zupt_publisher_->publish(message);
+    ++zupt_sent_;
+  }
+
+  /// Every witness's last word for ZuptGate: the wheels' rest, the last non-zero command, the
+  /// gyro's last sample and last turn. `gyro_at` is read before `gyro_turn_at`, the reverse of
+  /// the order witness_gyro() writes them, so a sample seen here is never seen without its turn.
+  RestEvidence rest_evidence(double now) const
+  {
+    RestEvidence evidence;
+    evidence.still_since = still_witness(now);
+    evidence.command_at = command_moving_at_.load();
+    evidence.gyro_at = gyro_at_.load();
+    evidence.gyro_turn_at = gyro_turn_at_.load();
+    return evidence;
+  }
+
+  /// Say it once whenever the update starts or stops, with the reason it stopped.
+  void note_zupt_change(bool publishing, ZuptVerdict verdict, double now)
+  {
+    if (publishing) {
+      zupt_since_ = now;
+      zupt_publishing_ = true;
+      RCLCPP_INFO(
+        get_logger(), "zupt: the cart is at rest, /zupt publishing at %.0f Hz", zupt_hz_);
+      return;
+    }
+    zupt_publishing_ = false;
+    RCLCPP_INFO(
+      get_logger(), "zupt: stopped after %.1f s at rest (%s)", now - zupt_since_.load(),
+      zupt_publish_ ? describe(verdict) : "zupt_publish off");
   }
 
   /// The gyro's zero as a report line prints it: the bias, the rest blocks behind it, its age.
@@ -396,7 +510,9 @@ private:
   void log_link_status()
   {
     if (imu_publisher_) {
-      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 60000, "%s", gyro_bias_state().c_str());
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 60000, "%s; %s", gyro_bias_state().c_str(),
+        zupt_state().c_str());
     }
     const auto change = link_->take_status_change();
     if (!change.has_value()) {
@@ -404,9 +520,9 @@ private:
     }
     if (change->first) {
       RCLCPP_INFO(
-        get_logger(), "%s; odom twist: %s, %s; %s", change->second.c_str(),
+        get_logger(), "%s; odom twist: %s, %s; %s; %s", change->second.c_str(),
         twist_measured_ ? "measured" : "commanded", switch_state().c_str(),
-        gyro_bias_state().c_str());
+        gyro_bias_state().c_str(), zupt_state().c_str());
     } else {
       RCLCPP_WARN(get_logger(), "%s", change->second.c_str());
     }
@@ -514,8 +630,30 @@ private:
         }
         continue;
       }
-      publish_imu(*sample, gyro_bias_.bias());
+      const GyroBias bias = gyro_bias_.bias();
+      witness_gyro(t, base_yaw_rate(*sample, bias));
+      publish_imu(*sample, bias);
     }
+  }
+
+  /// The bias-corrected yaw rate in base_link, rad/s counter-clockwise: what imu0 index 11 reads.
+  double base_yaw_rate(const ImuSample & sample, const GyroBias & bias) const
+  {
+    double gyro[3];
+    to_base_axes(imu_up_axis_, sample.gyro_x - bias.x, sample.gyro_y - bias.y,
+      sample.gyro_z - bias.z, gyro);
+    return gyro[2];
+  }
+
+  /// IMU thread: the gyro's word for the zero-velocity update -- when the last bias-corrected
+  /// sample arrived, and when the last one was a turn (zupt.hpp's gyro_turning). The chip is the
+  /// witness, not the message: `imu_publish` off mutes /imu/data_raw and leaves this untouched.
+  void witness_gyro(double t, double yaw_rate)
+  {
+    if (gyro_turning(yaw_rate, gyro_quiet_rad_s_.load())) {
+      gyro_turn_at_.store(t);  // first: a reader that sees this sample's time sees its turn
+    }
+    gyro_at_.store(t);
   }
 
   /// One conversion as sensor_msgs/Imu, gyro bias removed, no orientation claimed.
@@ -613,18 +751,42 @@ private:
   std::atomic<long> bias_block_samples_{0};
   std::atomic<double> bias_at_{0.0};
 
+  // THE ZERO-VELOCITY UPDATE'S WITNESSES (publish_zupt, zupt.hpp), each written by the thread that
+  // owns it and read by the zupt timer, 0 = never: the last non-zero command (the /cmd_vel
+  // callbacks), the gyro's last sample and its last turn (the IMU thread), and the quiet
+  // threshold, which the timer copies from its parameter for the IMU thread to judge by.
+  std::atomic<double> command_moving_at_{0.0};
+  std::atomic<double> gyro_at_{0.0};
+  std::atomic<double> gyro_turn_at_{0.0};
+  std::atomic<double> gyro_quiet_rad_s_{kGyroQuietRadS};
+  // ...the rule and the rate, fixed at start...
+  ZuptGate zupt_gate_;
+  double zupt_hz_ = kZuptHz;
+  // ...and what the update did, for the report line and the start/stop lines.
+  std::atomic<bool> zupt_publish_{true};
+  std::atomic<bool> zupt_publishing_{false};
+  std::atomic<int> zupt_verdict_{static_cast<int>(ZuptVerdict::kNoRest)};
+  std::atomic<long> zupt_sent_{0};
+  std::atomic<double> zupt_since_{0.0};
+  const std::array<double, 36> zupt_pose_covariance_ = diagonal(
+    {kUnclaimedVariance, kUnclaimedVariance, kUnclaimedVariance, kUnclaimedVariance,
+      kUnclaimedVariance, kUnclaimedVariance});
+  const std::array<double, 36> zupt_twist_covariance_ = rest_zupt_twist_covariance();
+
   std::mutex mutex_;  // guards the command the resend timer repeats
   std::optional<std::pair<double, double>> command_;
   std::chrono::steady_clock::time_point command_at_{};
   bool stop_sent_ = true;
 
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr zupt_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_publisher_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr twist_subscription_;
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr twist_stamped_subscription_;
   rclcpp::TimerBase::SharedPtr status_timer_;
   rclcpp::TimerBase::SharedPtr resend_timer_;
+  rclcpp::TimerBase::SharedPtr zupt_timer_;
 
   Mpu6050 imu_;  // opened only when imu_enable; ~BaseBridge joins the thread before these die
   std::atomic<bool> imu_running_{false};

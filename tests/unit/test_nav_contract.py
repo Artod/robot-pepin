@@ -1958,6 +1958,34 @@ def test_a_sensor_is_muted_where_it_is_published_and_both_bridges_know_the_same_
     assert node_host("base_bridge") == ("board", "pepin-ros")
 
 
+def test_the_board_bridge_publishes_the_rest_zupt_the_ekf_fuses_behind_a_live_switch() -> None:
+    """Parked on 2026-09-24 the EKF's heading crept ~5 deg/hour: odom2 fused /zupt, but under
+    PEPIN_LOCALIZER=rtabmap nothing published it (its one publisher was the tracker's slip
+    watch). The C++ bridge now does, from its own rest witness -- so the three ends of the wire
+    are held together here: the bridge advertises `zupt` as an Odometry built by pepin.zupt's
+    twin, the switch is declared on (CLAUDE.md rule 19), read every tick and named in the report
+    line, and the EKF's odom2 reads that topic as vx, vy and vyaw, which is exactly what the
+    covariance claims."""
+    cpp = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
+    assert 'create_publisher<nav_msgs::msg::Odometry>("zupt", 5)' in cpp
+    assert '#include "pepin_base_cpp/zupt.hpp"' in cpp
+    assert 'declare_parameter<bool>("zupt_publish", true)' in cpp, "on by default"
+    assert 'get_parameter("zupt_publish").as_bool()' in cpp, "read per tick, not once"
+    assert '" zupt_publish="' in cpp, "the report line names the switch"
+    assert 'get_parameter("zupt_gyro_quiet_rad_s").as_double()' in cpp, "the threshold is live"
+    assert "rest_zupt_twist_covariance()" in cpp and "zupt_gate_.judge(" in cpp
+    ekf = yaml.safe_load((REPO / "ros/params/ekf.yaml").read_text())
+    params = ekf["ekf_filter_node"]["ros__parameters"]
+    assert params["odom2"] == "zupt"
+    fused = [i for i, on in enumerate(params["odom2_config"]) if on]
+    assert fused == [6, 7, 11], "vx, vy, vyaw: the three indices the update claims"
+    assert params["odom2_differential"] is False
+    from pepin.zupt import REST_ZUPT_VARIANCE, rest_zupt_twist_covariance
+
+    claimed = [i for i in range(6) if rest_zupt_twist_covariance()[i * 6 + i] == REST_ZUPT_VARIANCE]
+    assert [6 + i for i in claimed] == [6, 7, 11], "the covariance claims what odom2 fuses"
+
+
 def test_every_flag_says_why_its_default_is_what_it_is_and_when_to_move_it() -> None:
     """A switch nobody can argue with is a switch nobody dares touch: every flag carries the
     measured reason for its default — with the numbers and the file they were measured in — or
