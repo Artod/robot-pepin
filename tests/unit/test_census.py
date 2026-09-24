@@ -30,11 +30,14 @@ from pepin.census import (
 )
 
 # A trimmed real dump from the board (2026-09-14 12:40 EDT), plus a kernel thread, the census's
-# own ps, a zombie and an intruder that no manifest entry claims.
+# own ps, a zombie and an intruder that no manifest entry claims. Since sensor_split (2026-09-24)
+# its one sensors_container line is the two containers it became, at the old total's cost split
+# (not yet a real dump of the split board: replace these two lines with the next census).
 PS_DUMP = """    PID    PPID  NI %CPU   RSS     ELAPSED COMMAND
  122778  122777   0  400  3556       00:00 ps -eo pid,ppid,ni,pcpu,rss,etime,args --sort=-pcpu
  122289  122098   5 79.9 101652      02:22 /opt/ros/jazzy/lib/rclcpp_components/component_container_isolated --ros-args -r __node:=nav2_container -r __ns:=/
- 122285  122098 -10 21.1 59872       02:22 /opt/ros/jazzy/lib/rclcpp_components/component_container_isolated --ros-args -r __node:=sensors_container -r __ns:=/
+ 122285  122098 -10 12.1 45000       02:22 /opt/ros/jazzy/lib/rclcpp_components/component_container_isolated --ros-args -r __node:=lidar_container -r __ns:=/
+ 122286  122098 -10  9.0 44000       02:22 /opt/ros/jazzy/lib/rclcpp_components/component_container_isolated --ros-args -r __node:=base_container -r __ns:=/
    9098       1   0 10.3 17852  1-01:38:33 /opt/pepin/bin/python -m pepin.base_server --config /opt/pepin/config/base.json
     464       2 -20  1.3     0  1-03:31:58 [SPRDWL_TX_QUEUE]
  122900  122098   0 44.0 40000       00:30 /usr/bin/python3 /opt/ros/jazzy/bin/ros2 topic hz /scan
@@ -55,11 +58,18 @@ MANIFEST = Manifest(
             components=(("controller_server", "the 8 Hz loop"),),
         ),
         Entry(
-            name="sensors_container",
-            match="component_container_isolated .*__node:=sensors_container",
-            role="the sensing half",
+            name="lidar_container",
+            match="component_container_isolated .*__node:=lidar_container",
+            role="the lidar half of the sensing",
             owner="pepin-ros.service",
-            budget=Budget(cpu_percent=32.0, rss_mb=40.0),  # deliberately under the measured 58 MB
+            budget=Budget(cpu_percent=32.0, rss_mb=40.0),  # deliberately under the dump's 44 MB
+        ),
+        Entry(
+            name="base_container",
+            match="component_container_isolated .*__node:=base_container",
+            role="the base half of the sensing",
+            owner="pepin-ros.service",
+            budget=Budget(cpu_percent=15.0, rss_mb=60.0),
         ),
         Entry(
             name="base_server",
@@ -114,7 +124,7 @@ def test_parse_elapsed_reads_every_ps_shape() -> None:
 
 def test_parse_ps_reads_fields_and_skips_the_header() -> None:
     processes = parse_ps(PS_DUMP)
-    assert len(processes) == 7
+    assert len(processes) == 8  # the sensing is two containers since sensor_split
     nav = next(p for p in processes if "nav2_container" in p.args)
     assert (nav.pid, nav.ppid, nav.nice) == (122289, 122098, 5)
     assert nav.cpu_percent == 79.9
@@ -140,7 +150,7 @@ def test_parse_load_reads_proc_and_uptime() -> None:
 def test_statuses_cover_ok_over_missing_idle_and_forbidden() -> None:
     by_name = {m.entry.name: m for m in census().measured}
     assert by_name["nav2_container"].status == OK  # 80 % of a 120 % budget
-    assert by_name["sensors_container"].status == OVER  # 58 MB of a 40 MB budget
+    assert by_name["lidar_container"].status == OVER  # 44 MB of a 40 MB budget
     assert by_name["base_server"].status == OK
     assert by_name["tof_bridge"].status == MISSING  # expected always, not in the dump
     assert by_name["session_logger"].status == IDLE  # only during a drive
@@ -192,14 +202,14 @@ def test_one_process_belongs_to_the_first_matching_entry_only() -> None:
     report = take_census(manifest, PS_DUMP, LOAD)
     nav, rest = report.measured
     assert [p.pid for p in nav.processes] == [122289]
-    assert [p.pid for p in rest.processes] == [122285]
+    assert [p.pid for p in rest.processes] == [122285, 122286]  # the lidar and the base containers
 
 
 def test_the_verdict_is_green_only_when_everything_fits() -> None:
     assert not census().green
     roomy = replace(MANIFEST.entries[1], budget=Budget(cpu_percent=32.0, rss_mb=90.0))
     clean = Manifest(
-        entries=(MANIFEST.entries[0], roomy, MANIFEST.entries[2]),
+        entries=(MANIFEST.entries[0], roomy, MANIFEST.entries[2], MANIFEST.entries[3]),
         ignore=(*MANIFEST.ignore, ("ros2 topic hz", "the stray tool, for this test")),
     )
     report = take_census(clean, PS_DUMP, LOAD)
@@ -212,9 +222,9 @@ def test_the_table_carries_the_numbers_and_the_findings() -> None:
     text = format_census(census())
     assert "nav2_container" in text and "79.9" in text
     assert "VERDICT: red" in text
-    assert "sensors_container OVER" in text and "tof_bridge MISSING" in text
+    assert "lidar_container OVER" in text and "tof_bridge MISSING" in text
     assert "load 7.30" in text and "on 4 cores" in text
-    assert "the manifest promises 188 %" in text  # 120 + 32 + 16 + 20, the always-on entries
+    assert "the manifest promises 203 %" in text  # 120 + 32 + 15 + 16 + 20, the always-on entries
     assert "start-up averages" not in text  # the youngest expected process is 142 s old
 
 
@@ -229,7 +239,7 @@ def test_json_is_the_same_verdict_as_the_table() -> None:
     assert data["load"]["cores"] == 4
     assert data["zombies"] == 1
     statuses = {p["name"]: p["status"] for p in data["processes"]}
-    assert statuses["sensors_container"] == OVER
+    assert statuses["lidar_container"] == OVER
     assert data["unlisted"][0]["pid"] == 122900
     json.dumps(data)  # a tool must be able to read it
 
@@ -245,7 +255,14 @@ def test_the_manifest_table_says_why_each_process_is_on_the_board() -> None:
 def test_the_shipped_manifest_parses_and_covers_the_stack() -> None:
     manifest = load_manifest()
     names = {e.name for e in manifest.entries}
-    assert {"nav2_container", "sensors_container", "relocalizer", "base_server", "docker"} <= names
+    assert {
+        "nav2_container",
+        "lidar_container",
+        "base_container",
+        "relocalizer",
+        "base_server",
+        "docker",
+    } <= names
     assert manifest.cores == 4
     for entry in manifest.entries:
         assert entry.role and entry.owner, entry.name
@@ -260,7 +277,8 @@ def test_the_shipped_manifest_matches_a_real_dump() -> None:
     report = take_census(load_manifest(), PS_DUMP, LOAD)
     by_name = {m.entry.name: m for m in report.measured}
     assert by_name["nav2_container"].status == OK
-    assert by_name["sensors_container"].status == OK
+    assert by_name["lidar_container"].status == OK
+    assert by_name["base_container"].status == OK
     assert by_name["base_server"].status == OK
     assert [p.pid for p in report.unlisted] == [122900]  # the stray ros2 CLI tool, nothing else
 

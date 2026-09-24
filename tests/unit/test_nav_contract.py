@@ -3363,3 +3363,30 @@ def test_the_camera_rig_decides_who_measures_the_depth() -> None:
     assert 'return "stereo" if CameraConfig.load(config_file("camera.json"), rig).stereo' in launch
     config = json.loads((REPO / "config/camera.json").read_text())
     assert "rig" in config["stereo"] and "rig" not in config["overview"]
+
+
+def test_the_lidar_and_the_base_die_apart_and_each_comes_back() -> None:
+    """A dead lidar is the failure a camera-only cart must ride out, so it must not take the
+    wheels with it: on 2026-09-24 the LD19 driver aborted on a deactivate and, sharing one
+    process with the base bridge, left the cart with no wheels, no IMU and no gyro-bias tracker
+    for hours. Two processes, each respawned; the shared one of before is sensor_split:=false;
+    and the deactivate that aborts the driver (sensor.sh --hard) is refused with the reason."""
+    src = (REPO / "ros/pepin_bringup/launch/robot.launch.py").read_text()
+    assert 'DeclareLaunchArgument("sensor_split", default_value="true")' in src
+    lidar_block = src[src.index("components = [") : src.index("base_parts: list")]
+    assert 'name="ldlidar_node"' in lidar_block and 'name="scan_filter"' in lidar_block
+    base_block = src[src.index("base_parts: list") : src.index("split = LaunchConfiguration")]
+    assert 'package="pepin_base_cpp"' in base_block and 'name="base_to_imu"' in base_block
+    bridge = 'ComposableNode(\n                package="pepin_base_cpp"'
+    assert (
+        "base_parts.append" in base_block and f"components.append(\n            {bridge}" not in src
+    )
+    split = src[src.index("containers = [") : src.index("return containers")]
+    assert 'name="lidar_container"' in split and 'name="base_container"' in split
+    assert split.count("**RESPAWN") == 2
+    names = {
+        p["name"]
+        for p in json.loads((REPO / "config/board_manifest.json").read_text())["processes"]
+    }
+    assert {"lidar_container", "base_container"} <= names and "sensors_container" not in names
+    assert "refused: --hard" in (REPO / "ros/sensor.sh").read_text()
