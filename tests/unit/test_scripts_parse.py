@@ -1248,3 +1248,127 @@ def test_flags_sh_does_not_read_a_silent_board_as_a_whole_one(tmp_path: Path) ->
     code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "tf_pose", **nowhere)
     assert code == 1 and "cannot read the board's side" in out, out
     assert not [c for c in calls if "param get" in c], "nothing is sent to a guessed container"
+
+
+# ---- ros/camera_grid.sh: the camera grid A/B, against the same kind of fakes ------------------
+FAKE_GRID_LIB = r"""#!/bin/bash
+BOARD="${BOARD:-${PEPIN_HOST:-10.0.0.187}}"
+log() { printf '%s\n' "$*" >> "$FAKE_LOG"; }
+answer() {
+    case "$1" in
+        *PEPIN_SIDE*) printf '%s\n' "${FAKE_SIDE:-}" ;;
+        *"topic echo"*)
+            for topic in ${FAKE_GRIDS-/camera_grid /camera_grid_map}; do
+                case "$1" in *" $topic "*) printf 'width: 120\nheight: 120\n' ;; esac
+            done ;;
+        *"param dump"*)
+            printf '%s\n' "${1##* }:" "  ros__parameters:"
+            printf '    camera_layer:\n      enabled: %s\n' "${FAKE_CAMERA:-true}"
+            [ "${FAKE_GRID:-false}" = none ] || \
+                printf '    camera_grid_layer:\n      enabled: %s\n' "${FAKE_GRID:-false}"
+            printf '    inflation_layer:\n      enabled: true\n' ;;
+        *logs*) printf '%s %s\n' "[depth_fusion]: fusion: 9 frames; grid: 90 on /camera_grid" \
+            "(3.0/s, 3.1 ms), 320 occupied cells, x; /camera_grid_map on y; flags: z" ;;
+    esac
+    return 0
+}
+ssh() { log "ssh $*"; answer "$*"; }
+docker() { log "docker $*"; answer "$*"; }
+"""
+
+
+def _grid(tmp_path, *args, **env):  # type: ignore[no-untyped-def]
+    """Run ros/camera_grid.sh against the fakes; returns (exit status, output, commands sent)."""
+    import os
+
+    here = tmp_path / "ros"
+    here.mkdir(exist_ok=True)
+    for name, text in (("lib.sh", FAKE_GRID_LIB), ("flags.sh", FAKE_FLAGS)):
+        (here / name).write_text(text)
+        (here / name).chmod(0o755)
+    (here / "camera_grid.sh").write_text((REPO / "ros/camera_grid.sh").read_text())
+    log = tmp_path / "log"
+    log.write_text("")
+    run = subprocess.run(
+        ["bash", str(here / "camera_grid.sh"), *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "FAKE_LOG": str(log), **env},
+    )
+    sent = [line.strip() for line in log.read_text().splitlines() if line.strip()]
+    return run.returncode, run.stdout + run.stderr, sent
+
+
+def _sets(sent: list[str]) -> list[str]:
+    """The parameter sets and flag sets, in the order they were sent."""
+    return [c for c in sent if "param set" in c or c.startswith("flags set")]
+
+
+def test_camera_grid_sh_parses_and_never_drives() -> None:
+    result = subprocess.run(
+        ["bash", "-n", str(REPO / "ros/camera_grid.sh")], capture_output=True, text=True, timeout=20
+    )
+    assert result.returncode == 0, result.stderr
+    code = "\n".join(
+        line
+        for line in (REPO / "ros/camera_grid.sh").read_text().splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert "cmd_vel" not in code and "docker restart" not in code and "systemctl" not in code
+
+
+def test_camera_grid_on_starts_the_grids_first_then_swaps_each_costmap_s_layers(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The publisher first, then per costmap — once its grid is read back from the topic — the
+    grid layer on BEFORE camera_layer goes off. The split puts the global costmap on the laptop."""
+    code, out, sent = _grid(tmp_path, "on", FAKE_SIDE="board")
+    assert code == 0, out
+    assert _sets(sent) == [
+        "flags set depth_fusion grid_out true",
+        f"{BOARD} ros2 param set {LOCAL} camera_grid_layer.enabled true",
+        f"{BOARD} ros2 param set {LOCAL} camera_layer.enabled false",
+        f"{LAPTOP} ros2 param set {GLOBAL} camera_grid_layer.enabled true",
+        f"{LAPTOP} ros2 param set {GLOBAL} camera_layer.enabled false",
+    ]
+    echoes = [c for c in sent if "topic echo" in c]
+    assert any("/camera_grid " in c for c in echoes)
+    assert any("/camera_grid_map " in c for c in echoes)
+    assert all("pepin-vslam" in c and "transient_local" in c for c in echoes)
+
+
+def test_a_grid_that_never_came_leaves_that_costmap_on_camera_layer(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """No map yet: /camera_grid_map is silent, and a StaticLayer enabled without its first grid
+    would never be current — so the global costmap is not touched and the exit says so."""
+    code, out, sent = _grid(tmp_path, "on", FAKE_SIDE="board", FAKE_GRIDS="/camera_grid")
+    assert code == 1
+    assert "no grid on /camera_grid_map" in out and "keeps camera_layer" in out
+    assert not [c for c in _sets(sent) if GLOBAL in c]
+    assert f"{BOARD} ros2 param set {LOCAL} camera_layer.enabled false" in sent
+
+
+def test_a_nav2_without_the_layer_keeps_camera_layer(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Nav2 still on the old nav2_params.yaml has no camera_grid_layer: camera_layer stays on."""
+    code, out, sent = _grid(tmp_path, "on", FAKE_SIDE="", FAKE_GRID="none")
+    assert code == 1 and "restart it" in out
+    assert not [c for c in sent if "camera_layer.enabled false" in c]
+
+
+def test_camera_grid_off_brings_camera_layer_back_first_and_the_flag_last(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    code, out, sent = _grid(tmp_path, "off", FAKE_SIDE="", FAKE_CAMERA="false", FAKE_GRID="true")
+    assert code == 0, out
+    assert _sets(sent) == [
+        f"{BOARD} ros2 param set {LOCAL} camera_layer.enabled true",
+        f"{BOARD} ros2 param set {LOCAL} camera_grid_layer.enabled false",
+        f"{BOARD} ros2 param set {GLOBAL} camera_layer.enabled true",
+        f"{BOARD} ros2 param set {GLOBAL} camera_grid_layer.enabled false",
+        "flags set depth_fusion grid_out false",
+    ]
+
+
+def test_camera_grid_status_reads_the_flag_the_layers_and_the_report(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    code, out, sent = _grid(tmp_path, "status", FAKE_SIDE="board", FAKE_GRID="true")
+    assert code == 0, out
+    assert "depth_fusion grid_out: True" in out
+    assert f"costmap {LOCAL}:  camera_layer=on  camera_grid_layer=on" in out
+    assert "last report: grid: 90 on /camera_grid" in out
+    assert not _sets(sent), "status sets nothing"

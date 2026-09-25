@@ -1077,6 +1077,61 @@ beside the costmap, plus a report line every 10 s: `marks audit: lethal 214 (lid
 laptop a few milliseconds of numpy a second — brute-force distances over a 60x60 grid, no scipy in
 the image — and the board nothing at all.
 
+## Camera grid A/B (2026-09-24)
+
+Today the camera reaches Nav2 as the `/depth_marks` fan, and each costmap's `camera_layer` (an
+`ObstacleLayer`) accumulates it into a grid of its own: the global one is smeared by every
+`map -> odom` jump and both are wiped by the behaviour tree's clears (scratch/costmap_split). The
+alternative, behind switches that all ship off: `depth_fusion`'s `grid_out` publishes the volume's
+CURRENT occupied columns — the same column rule as the fan — and a `camera_grid_layer`
+(`nav2_costmap_2d::StaticLayer`) in each costmap only draws the latest grid (`pepin.camera_grid`).
+
+| topic | type | frame | what |
+|---|---|---|---|
+| `/camera_grid` | `nav_msgs/OccupancyGrid` | the volume's (`odom`) | a 6 m square about the cart at 5 cm (`grid_size_m`, `grid_resolution_m`), corner snapped to 0.5 m; 100 occupied, 0 otherwise; latched, at most `grid_hz` (3 Hz), stamped with the observation; ~14.5 kB, ~43 kB/s to the board |
+| `/camera_grid_map` | `nav_msgs/OccupancyGrid` | `map` | EMPTY, on exactly the lattice of `grid_map_topic` (`/map` under `PEPIN_LOCALIZER=rtabmap`, `/map_tracked` under `tracker`); latched, once per map geometry; nothing until that map is heard |
+| `/camera_grid_map_updates` | `map_msgs/OccupancyGridUpdate` | `map` | the same cells drawn through this laptop's `map -> odom` at the grid's stamp, one rectangle covering the last window and this one, at `grid_hz`; held 1 s after a new geometry |
+
+Nav2 must load the new `nav2_params.yaml` once (the plugin list changed): restart the Nav2 halves.
+After that the A/B is live and reversible:
+
+```bash
+ros/camera_grid.sh on       # grid_out, then per costmap: camera_grid_layer on, camera_layer off
+ros/camera_grid.sh status   # the flag, both costmaps' two layers, the fusion's last "grid:" report
+ros/camera_grid.sh off      # camera_layer on, camera_grid_layer off, then grid_out off
+```
+
+By hand, the same switches (the global costmap is the laptop's `pepin-laptop` under the split,
+`PEPIN_SIDE=board`, and the board's `pepin-ros` otherwise):
+
+```bash
+ros/flags.sh set depth_fusion grid_out true
+ssh root@10.0.0.187 docker exec pepin-ros /pepin_entrypoint.sh ros2 param set /local_costmap/local_costmap camera_grid_layer.enabled true
+ssh root@10.0.0.187 docker exec pepin-ros /pepin_entrypoint.sh ros2 param set /local_costmap/local_costmap camera_layer.enabled false
+docker exec pepin-laptop /pepin_entrypoint.sh ros2 param set /global_costmap/global_costmap camera_grid_layer.enabled true
+docker exec pepin-laptop /pepin_entrypoint.sh ros2 param set /global_costmap/global_costmap camera_layer.enabled false
+```
+
+and back with the four `enabled` values swapped and `grid_out false`. What guards what:
+
+- **A layer enabled before its first grid is never current**, and the controller and the planner
+  then answer "Costmap timed out waiting for update". `camera_grid.sh on` enables a layer only
+  after reading its latched grid back from the topic, and leaves `camera_layer` on where it could
+  not. A disabled layer, or one whose topic is silent, never blocks activation.
+- **The last grid stays when the laptop dies** (a StaticLayer has no timeout, and the tree's
+  `ClearEntireCostmap` resets a StaticLayer without erasing its cells). A clean stop of
+  `depth_fusion` and `grid_out false` both publish empty grids first; after a crash or a lost link
+  the board-side switch is the way out: `ros2 param set /local_costmap/local_costmap
+  camera_grid_layer.enabled false` on `pepin-ros`.
+- **The global costmap resizes for a map of another geometry**, dropping every layer's marks. The
+  map grid copies `grid_map_topic`'s origin, size and resolution exactly (Nav2's own 1e-5
+  tolerance), so it resizes nothing the map itself does not. An update is always inside the
+  geometry it was drawn for; the one unguarded case is an update already in flight when the map
+  SHRINKS — switch the grid off before swapping databases.
+- `use_maximum: True` on both costmaps is what lets the grid's zeros leave the other layers alone;
+  for the global `static_layer` it is a no-op (first plugin, `track_unknown_space: false`), which a
+  contract test holds.
+
 ## Feature flags
 
 Every behaviour that can be switched is a live parameter of the node that owns it, declared
