@@ -567,3 +567,92 @@ def test_the_jump_watch_reads_nothing_at_all_while_its_flag_is_off(tmp_path: Pat
     corrected_by(node, 5.0)  # a huge step, seen for the first time
     jump_tick(node)
     assert node.service_clients[CLEAR_LOCAL_COSTMAP].calls == [], "a baseline is not a jump"
+
+
+# ---- a cancel means every goal on the board (flag cancel_every_goal) ----------------------------
+
+CANCEL_SERVICES = {
+    "navigate_to_pose": "/navigate_to_pose/_action/cancel_goal",
+    "navigate_through_poses": "/navigate_through_poses/_action/cancel_goal",
+}
+
+
+def navigators_up(node: Any, **answers: Any) -> None:
+    """Both navigators' cancel services exist; ``answers[action]`` is what each says."""
+    for action, name in CANCEL_SERVICES.items():
+        client = node.service_clients[name]
+        client.ready = True
+        client.response = answers.get(action)
+
+
+def test_a_cancel_reaches_every_goal_on_both_navigators_whoever_sent_it(tmp_path: Path) -> None:
+    """ros/goto.sh's drives are goto_ros.py's goals, which this node never sent: the cancel asks
+    both action servers for EVERY goal (an empty request, a zero id) and answers in the words
+    goto_ros.py prints, so the laptop's pepin.goal_link shows the operator the same line."""
+    from pepin.goal_link import cancel_line
+
+    assert FLAGS.flag("cancel_every_goal").default is True
+    assert FLAGS.flag("cancel_every_goal").live
+    node = server(tmp_path)
+    navigators_up(
+        node,
+        navigate_to_pose=ros_stubs.CancelGoal.Response(return_code=0, goals_canceling=[1]),
+        navigate_through_poses=ros_stubs.CancelGoal.Response(return_code=2, goals_canceling=[]),
+    )
+    wire = Wire()
+    node._handle({"cmd": "cancel"}, wire)
+    [answer] = wire.events()
+    assert answer["event"] == "cancelled" and answer["had_goal"] is False
+    assert cancel_line(answer) == (
+        "cancel — navigate_to_pose: accepted, 1 cancelling;"
+        " navigate_through_poses: no such goal, 0 cancelling"
+    )
+    for name in CANCEL_SERVICES.values():
+        assert len(node.service_clients[name].calls) == 1, name
+
+
+def test_this_node_s_own_goal_is_one_of_every_goal_and_is_cancelled_once(tmp_path: Path) -> None:
+    """A second request for a goal already put into canceling is rejected by the navigator, and
+    the operator would read 'rejected' for a drive that is stopping: the handle is let go, the
+    navigators' cancel is the one that stops it, and no resume can send it again."""
+    node = server(tmp_path)
+    navigators_up(
+        node, navigate_to_pose=ros_stubs.CancelGoal.Response(return_code=0, goals_canceling=[1])
+    )
+    own = Handle(ticks=5)
+    node._goal_handle, node._driving = own, True
+    wire = Wire()
+    node._handle({"cmd": "cancel"}, wire)
+    [answer] = wire.events()
+    assert answer["had_goal"] is True
+    assert answer["navigators"]["navigate_to_pose"] == {"outcome": "accepted", "cancelling": 1}
+    assert own.cancelled == 0 and node._goal_handle is None and not node._driving
+
+
+def test_a_navigator_that_is_not_up_or_does_not_answer_is_said_so(tmp_path: Path) -> None:
+    node = server(tmp_path)
+    navigators_up(node)  # both there, neither answers (the stub's future holds None)
+    node.service_clients[CANCEL_SERVICES["navigate_through_poses"]].ready = False
+    said = node.cancel_every_goal()
+    assert said == {
+        "navigate_to_pose": {"outcome": "NOT confirmed in 3 s — use ros/stop.sh"},
+        "navigate_through_poses": {"outcome": "no server answered"},
+    }
+    waited = node.service_clients[CANCEL_SERVICES["navigate_through_poses"]].waits
+    assert waited and max(waited) <= 1.5, "an absent navigator costs half its share, not more"
+
+
+def test_the_flag_off_cancels_only_this_node_s_own_goal(tmp_path: Path) -> None:
+    """CLAUDE.md rule 19: the old cancel stays one flag away; its answer names no navigators,
+    which is how the laptop's client knows to fall back to goto_ros.py."""
+    node = server(tmp_path)
+    navigators_up(node)
+    own = Handle(ticks=5)
+    node._goal_handle, node._driving = own, True
+    node._switches.set("cancel_every_goal", False)
+    wire = Wire()
+    node._handle({"cmd": "cancel"}, wire)
+    assert wire.events() == [{"event": "cancelled", "had_goal": True}]
+    assert own.cancelled == 1
+    assert all(node.service_clients[name].calls == [] for name in CANCEL_SERVICES.values())
+    assert "cancel_every_goal=off" in node._switches.state()

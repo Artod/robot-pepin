@@ -690,6 +690,9 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
         # waits for the laptop's word that RTAB-Map's start is placed; this is the board-side
         # switch back, which goto_ros obeys too.
         "start_needs_placement",
+        # cancel_every_goal on 2026-09-25, default on: a cancel on the socket reaches every goal
+        # on both navigators, goto_ros.py's included, so goto.sh cancels without a new process.
+        "cancel_every_goal",
     )
     assert all(flags.flag(name).live for name in flags.names)
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"
