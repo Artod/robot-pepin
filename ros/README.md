@@ -1077,6 +1077,62 @@ beside the costmap, plus a report line every 10 s: `marks audit: lethal 214 (lid
 laptop a few milliseconds of numpy a second — brute-force distances over a 60x60 grid, no scipy in
 the image — and the board nothing at all.
 
+## Camera grid A/B (2026-09-24)
+
+Today the camera reaches Nav2 as the `/depth_marks` fan, and each costmap's `camera_layer` (an
+`ObstacleLayer`) accumulates it into a grid of its own: the global one is smeared by every
+`map -> odom` jump and both are wiped by the behaviour tree's clears (scratch/costmap_split). The
+alternative, behind switches that all ship off: `depth_fusion`'s `grid_out` publishes the volume's
+CURRENT occupied columns — the same column rule as the fan — and a `camera_grid_layer`
+(`nav2_costmap_2d::StaticLayer`) in each costmap only draws the latest grid (`pepin.camera_grid`).
+
+| topic | type | frame | what |
+|---|---|---|---|
+| `/camera_grid` | `nav_msgs/OccupancyGrid` | the volume's (`odom`) | a 6 m square about the cart at 5 cm (`grid_size_m`, `grid_resolution_m`), corner snapped to 0.5 m; 100 occupied, 0 otherwise; latched, at most `grid_hz` (3 Hz), stamped with the observation; ~14.5 kB, ~43 kB/s to the board |
+| `/camera_grid_map` | `nav_msgs/OccupancyGrid` | `map` | EMPTY, on exactly the lattice of `grid_map_topic` (`/map` under `PEPIN_LOCALIZER=rtabmap`, `/map_tracked` under `tracker`); latched, once per map geometry; nothing until that map is heard |
+| `/camera_grid_map_updates` | `map_msgs/OccupancyGridUpdate` | `map` | the same cells drawn through this laptop's `map -> odom` at the grid's stamp, one rectangle covering the last window and this one, at `grid_hz`; held 1 s after a new geometry |
+
+Nav2 must load the new `nav2_params.yaml` once (the plugin list changed): restart the Nav2 halves.
+After that the A/B is live and reversible:
+
+```bash
+ros/camera_grid.sh on       # grid_out, then per costmap: camera_grid_layer on, camera_layer off
+ros/camera_grid.sh status   # the flag, both costmaps' two layers, the fusion's last "grid:" report
+ros/camera_grid.sh off      # camera_layer on, camera_grid_layer off, then grid_out off
+```
+
+By hand, the same switches (the global costmap is the laptop's `pepin-laptop` under the split,
+`PEPIN_SIDE=board`, and the board's `pepin-ros` otherwise):
+
+```bash
+ros/flags.sh set depth_fusion grid_out true
+ssh root@10.0.0.187 docker exec pepin-ros /pepin_entrypoint.sh ros2 param set /local_costmap/local_costmap camera_grid_layer.enabled true
+ssh root@10.0.0.187 docker exec pepin-ros /pepin_entrypoint.sh ros2 param set /local_costmap/local_costmap camera_layer.enabled false
+docker exec pepin-laptop /pepin_entrypoint.sh ros2 param set /global_costmap/global_costmap camera_grid_layer.enabled true
+docker exec pepin-laptop /pepin_entrypoint.sh ros2 param set /global_costmap/global_costmap camera_layer.enabled false
+```
+
+and back with the four `enabled` values swapped and `grid_out false`. What guards what:
+
+- **A layer enabled before its first grid is never current**, and the controller and the planner
+  then answer "Costmap timed out waiting for update". `camera_grid.sh on` enables a layer only
+  after reading its latched grid back from the topic, and leaves `camera_layer` on where it could
+  not. A disabled layer, or one whose topic is silent, never blocks activation.
+- **The last grid stays when the fusion stops** — killed, kicked, crashed or cut off by the link
+  (a StaticLayer has no timeout, the tree's `ClearEntireCostmap` resets a StaticLayer without
+  erasing its cells, and after a SIGINT rclpy can no longer publish). Only `grid_out false` (so
+  `camera_grid.sh off`) sends empty grids first. With the laptop gone the board-side switch is
+  the way out: `ros2 param set /local_costmap/local_costmap camera_grid_layer.enabled false` on
+  `pepin-ros`. The cells stay where they were in `odom`; what is lost is their clearing.
+- **The global costmap resizes for a map of another geometry**, dropping every layer's marks. The
+  map grid copies `grid_map_topic`'s origin, size and resolution exactly (Nav2's own 1e-5
+  tolerance), so it resizes nothing the map itself does not. An update is always inside the
+  geometry it was drawn for; the one unguarded case is an update already in flight when the map
+  SHRINKS — switch the grid off before swapping databases.
+- `use_maximum: True` on both costmaps is what lets the grid's zeros leave the other layers alone;
+  for the global `static_layer` it is a no-op (first plugin, `track_unknown_space: false`), which a
+  contract test holds.
+
 ## Feature flags
 
 Every behaviour that can be switched is a live parameter of the node that owns it, declared
@@ -1150,6 +1206,10 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `depth_fusion` | `marks_min_z` | number 0..1 | 0.15 | yes | the floor of the height band /depth_marks reads the volume in, metres above the cart's own floor plane; the band's top is the volume's own camera band (config/fusion.json's camera_band_m) |
 | `depth_fusion` | `marks_hz` | number 0..30 | 5.0 | yes | the cap on how often /depth_marks is PUBLISHED, in hertz; 0 publishes every frame, which is what this topic did until 2026-09-22. Only the publication is thinned: every frame and every revolution is still fused into the volume, and a slice that is not published is not computed either (the gate is read before the crossing search) |
 | `depth_fusion` | `marks_clear` | bool | off | yes | the fan also says where the volume is KNOWN OPEN: a second, clearing-only scan on /depth_free carrying, per bearing, the range of the last column the volume has observed FREE before the first column it has not (pepin.volume_scan.free_ranges). A bearing the volume cannot vouch for stays NaN, which clears nothing. Off, the topic is silent and the camera layer clears from the single frame alone, as it has since 2026-09-21 |
+| `depth_fusion` | `grid_out` | bool | off | yes | publish the volume's current occupied columns (the /depth_marks rule) as grids the costmaps' camera_grid_layer only draws: /camera_grid, a square about the cart in the volume's frame, and /camera_grid_map with its _updates on the lattice of grid_map_topic; off, all three are silent |
+| `depth_fusion` | `grid_hz` | number 0.5..10 | 3.0 | yes | the cap on how often the camera grids are published, hertz |
+| `depth_fusion` | `grid_size_m` | number 1..20 | 6.0 | yes | the side of /camera_grid's square about the cart, metres |
+| `depth_fusion` | `grid_resolution_m` | number 0.02..0.5 | 0.05 | yes | the cell of /camera_grid, metres; /camera_grid_map always takes the map's |
 | `depth_fusion` | `surface_hz` | number 0.1..10 | 1.0 | yes | how often /fusion/surface is published (the crossing search costs a fraction of a second) |
 | `depth_fusion` | `band_half_z` | number 0.02..0.5 | 0.125 | yes | half the height band around the lidar's plane a frame is seated on, metres (config/fusion.json's band_half_z_m is the default); the band's centre is the plane the published base_link -> laser edge names, and both are printed in the report line |
 | `depth_fusion` | `lidar_layer` | bool | on | yes | /scan is integrated into the volume at the lidar's plane (rays carve free space, returns mark a surface); off, the volume is the camera's alone, as it was |
@@ -1510,6 +1570,26 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* off — OFF, because the measurement that would justify it says it would do almost nothing. The case FOR it is real: the fan marks over the whole turn while /depth_scan clears only the head's forward 83 deg, so on run 0434's turn unbacked lethal cells were born at 109/s against 27/s standing, 52 % of them BEHIND the cart where nothing can ever raytrace them away, and the count climbed 24 -> 904 in 38 s (scratch/one_localiser/tape_0434_turn.py). But a clearing ray stops at the first column that is not open, and on the parked cart of 2026-09-23 the volume held an occupied column on 717 of 720 bearings: where the camera's own frame shares a bearing with a mark it AGREES with it within 0.20 m 96 % of the time and sees past it 3 % (scratch/one_localiser/live_fan_vs_lidar.py), and on the saved room volume the walk could vouch for 87 bearings of 720. The marks are not stale memory the volume has already carved — they are what the volume currently holds, and clearing cannot remove what the model still believes
   - *On when:* after the near marks themselves are answered: with the volume no longer holding a shell at 0.5-0.75 m on every bearing, the walk reaches past it and this is what stops the ratchet behind the cart. Turn it on together with the yaml's depth_free source and watch 'clear' in the report line rise off its floor
   - *Off when:* as shipped, and whenever a cell must not be erased by the camera's own memory: silent topic, and the layer clears from /depth_scan as it did before
+- **`grid_out`** — bool, default off
+  - *What:* publish the volume's current occupied columns (the /depth_marks rule) as grids the costmaps' camera_grid_layer only draws: /camera_grid, a square about the cart in the volume's frame, and /camera_grid_map with its _updates on the lattice of grid_map_topic; off, all three are silent
+  - *Default:* off — off until a drive has measured it: the nvblox pattern against camera_layer's own copies of the memory, smeared by map -> odom jumps and wiped by the tree's clears (journal 2026-09-24, scratch/costmap_split)
+  - *On when:* with camera_grid_layer on and camera_layer off in both costmaps: ros/camera_grid.sh on
+  - *Off when:* ros/camera_grid.sh off, back to /depth_marks alone; turning it off publishes one empty grid on each topic so a layer left on holds nothing stale
+- **`grid_hz`** — number 0.5..10, default 3.0
+  - *What:* the cap on how often the camera grids are published, hertz (0.5..10)
+  - *Default:* 3.0 — between the costmaps' update_frequency 2.0 (global) and 5.0 (local); one tick costs the paint worker 3.3 ms on the live 280x250x34 grid (a marks slice 2.9), 10 ms/s and 43 kB/s of /camera_grid to the board at 3 Hz (scratch/camera_grid/grid_cost.py, journal 2026-09-24)
+  - *On when:* raise it toward 5 if a camera obstacle reaches the local costmap too late
+  - *Off when:* lower it if the grids cost the link or the costmaps too much
+- **`grid_size_m`** — number 1..20, default 6.0
+  - *What:* the side of /camera_grid's square about the cart, metres (1..20)
+  - *Default:* 6.0 — default by design: twice the fan's 3 m reach, so the local costmap's 3 m window always sits inside it (journal 2026-09-24)
+  - *On when:* raise it with the local costmap's own window
+  - *Off when:* lower it to save the link: the cells grow with its square
+- **`grid_resolution_m`** — number 0.02..0.5, default 0.05
+  - *What:* the cell of /camera_grid, metres; /camera_grid_map always takes the map's (0.02..0.5)
+  - *Default:* 0.05 — default by design: the volume's own voxel and the costmaps' own cell (journal 2026-09-24)
+  - *On when:* coarser only to save the link
+  - *Off when:* finer than the voxel draws no more detail
 - **`surface_hz`** — number 0.1..10, default 1.0
   - *What:* how often /fusion/surface is published (the crossing search costs a fraction of a second) (0.1..10)
   - *Default:* 1.0 — default by design, unmeasured; what is measured is the cost it protects — the surface build took 45 ms a second and stalled the node's executor until it was moved onto a snapshot taken outside the model lock

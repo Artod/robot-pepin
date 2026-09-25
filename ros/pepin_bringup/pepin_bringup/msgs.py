@@ -11,7 +11,7 @@ ends of a topic agree by construction, and a test can check both against tiny fa
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
@@ -27,6 +27,9 @@ from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.mounts import Mount
 from pepin.tsdf import RigidPose
 from pepin.worldmap import OccupancyGridFields
+
+if TYPE_CHECKING:
+    from pepin.camera_grid import GridUpdateFields, MapGeometry
 
 Array = npt.NDArray[np.float64]
 
@@ -310,6 +313,34 @@ def occupancy_grid(fields: OccupancyGridFields, stamp: Any, frame_id: str) -> An
     msg.info.origin.orientation.w = 1.0
     msg.data = fields.as_list()
     return msg
+
+
+def grid_update(fields: GridUpdateFields, stamp: Any, frame_id: str) -> Any:
+    """A rectangle of a grid as a ``map_msgs/OccupancyGridUpdate``: what Nav2's StaticLayer
+    reads on ``<map_topic>_updates`` (its frame must be the full grid's). map_msgs is imported
+    here, not at the top: only the node that publishes one needs it."""
+    from map_msgs.msg import OccupancyGridUpdate
+
+    msg = OccupancyGridUpdate()
+    msg.header = header(stamp, frame_id)
+    msg.x, msg.y = int(fields.x), int(fields.y)
+    msg.width, msg.height = int(fields.width), int(fields.height)
+    msg.data = fields.as_list()
+    return msg
+
+
+def map_geometry(msg: Any) -> MapGeometry:
+    """The lattice of a ``nav_msgs/OccupancyGrid`` (its orientation ignored, as Nav2 does)."""
+    from pepin.camera_grid import MapGeometry
+
+    info = msg.info
+    return MapGeometry(
+        resolution_m=float(info.resolution),
+        width=int(info.width),
+        height=int(info.height),
+        origin_x=float(info.origin.position.x),
+        origin_y=float(info.origin.position.y),
+    )
 
 
 # ---- point clouds --------------------------------------------------------------------------

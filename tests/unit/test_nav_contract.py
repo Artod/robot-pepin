@@ -242,6 +242,35 @@ def test_a_whisker_never_erases_what_the_lidar_or_the_camera_saw() -> None:
     assert plugins.index("camera_layer") < plugins.index(tof[0])
 
 
+def test_the_camera_grid_layer_ships_off_in_both_costmaps_and_draws_by_maximum() -> None:
+    """The camera grid (2026-09-24): a StaticLayer in each costmap that only DRAWS the volume's
+    current columns (depth_fusion's grid_out). Off as shipped, just before inflation, on its own
+    topics, the global one with Nav2's updates. use_maximum is costmap-wide and the static_layer
+    reads it too, which changes nothing only while that layer is the FIRST of a costmap that does
+    not track unknown space (it writes into a master reset to 0 and max(0, c) is c) — both held
+    here, and the laptop's overlay moves neither."""
+    for costmap, topic, updates in (
+        ("local_costmap", "/camera_grid", False),
+        ("global_costmap", "/camera_grid_map", True),
+    ):
+        params = _p(costmap)
+        layer, plugins = params["camera_grid_layer"], params["plugins"]
+        assert layer["plugin"] == "nav2_costmap_2d::StaticLayer", costmap
+        assert layer["enabled"] is False, f"{costmap}: off until a drive has measured it"
+        assert layer["map_topic"] == topic and layer["map_subscribe_transient_local"] is True
+        assert layer["subscribe_to_updates"] is updates, costmap
+        assert plugins.index("camera_grid_layer") == plugins.index("inflation_layer") - 1
+        assert plugins[-1] == "inflation_layer"
+        assert params["use_maximum"] is True, f"{costmap}: FREE cells must not erase other marks"
+        assert params.get("track_unknown_space", False) is False, costmap
+    assert _p("global_costmap")["plugins"][0] == "static_layer"
+    assert "static_layer" not in _p("local_costmap")["plugins"]
+    overlay = yaml.safe_load((REPO / "ros/params/nav2_map_from_laptop.yaml").read_text())
+    for costmap in ("local_costmap", "global_costmap"):
+        moved = overlay[costmap][costmap]["ros__parameters"]
+        assert set(moved) == {"static_layer"}, moved
+
+
 def test_the_tof_whiskers_serve_the_local_costmap_only() -> None:
     """2026-09-21: the ToF are short whiskers for the controller's map. In the global costmap
     they bought a room-scale plan nothing and were the worst amplifier of the RangeSensorLayer
@@ -1728,9 +1757,15 @@ def test_the_volume_is_open_loop_and_no_slice_of_it_is_published() -> None:
     assert "self._world.integrate_scan" in calls and "self._world.integrate_depth" in calls
     assert "self._world.save" in calls
     topics = {s for s in sf.strings(node) if s == "/map" or s.startswith("/map_")}
-    assert topics == set(), f"the volume reaches no matcher and no planner: {topics}"
-    assert "occupancy_grid" not in sf.imported(node), "no grid leaves this node at all"
+    # /map is READ, for its lattice alone (grid_map_topic): nothing goes out on a map's name.
+    assert topics == {"/map"}, f"the volume reaches no matcher: {topics}"
+    assert sf.assignments(node)["MAP_TOPIC"] == "'/map'"
     flags = load_table(REPO / NODES / "depth_fusion.py")
+    # The one grid that does leave (grid_out, 2026-09-24) is an obstacle picture the costmaps'
+    # camera_grid_layer draws, never a map anything seats a pose on: its own names, off as shipped.
+    assert sf.assignments(node)["GRID_TOPIC"] == "'/camera_grid'"
+    assert sf.assignments(node)["GRID_MAP_TOPIC"] == "'/camera_grid_map'"
+    assert not flags.flag("grid_out").default, "the camera grids ship off"
     assert {"map_source", "map_hz", "lidar_map", "camera_map", "map_identity"}.isdisjoint(
         set(flags.names)
     ), "the flags that published the volume went with the publication"
@@ -2657,6 +2692,8 @@ def test_the_laptop_image_provides_what_the_laptop_nodes_import() -> None:
         "cv_bridge": ("ros-jazzy-cv-bridge",),
         # navigation2 depends on message_filters (nav2_costmap_2d): the base image carries it
         "message_filters": ("ros-jazzy-message-filters", "ros-jazzy-navigation2"),
+        # ...and on map_msgs (StaticLayer's OccupancyGridUpdate): depth_fusion's camera grids
+        "map_msgs": ("ros-jazzy-map-msgs", "ros-jazzy-navigation2"),
     }
     ros_core = {
         "rclpy", "tf2_ros", "std_msgs", "sensor_msgs", "geometry_msgs", "nav_msgs", "std_srvs",

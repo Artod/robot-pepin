@@ -162,6 +162,30 @@ def marks_window(volume: Tsdf, base_in_map: RigidPose, law: MarksLaw | None = No
     return None if box is None else volume.window(box)
 
 
+def band_surface(
+    volume: Tsdf,
+    base_in_map: RigidPose,
+    law: MarksLaw,
+    box: tuple[slice, slice, slice] | None = None,
+) -> Array:
+    """The volume's surface points that stand in the fan's height band and are not the cart's
+    own centre, (n, 3) map metres: THE column rule of the camera's costmap words — the fan of
+    :func:`marks_ranges` and the grids of :mod:`pepin.camera_grid` read exactly these points.
+
+    ``box`` limits the crossing search (the whole ``volume`` when ``None``, e.g. a twin that
+    :meth:`pepin.tsdf.Tsdf.window` already cut to size).
+    """
+    x0, y0, z0 = (float(v) for v in base_in_map.translation)
+    band = (z0 + law.band_m[0], z0 + law.band_m[1])
+    points, _colours = volume.surface(law.min_weight, box)
+    if points.shape[0] == 0:
+        return points
+    rng = np.hypot(points[:, 0] - x0, points[:, 1] - y0)
+    z = points[:, 2]
+    keep = (z >= band[0]) & (z <= band[1]) & (rng >= MARKS_MIN_RANGE_M)
+    return points[keep]
+
+
 def marks_ranges(volume: Tsdf, base_in_map: RigidPose, law: MarksLaw | None = None) -> Array:
     """The volume's surface around the cart as one range per bearing, in base_link: the nearest
     surface point standing in the band, metres, NaN where the model holds none.
@@ -172,8 +196,9 @@ def marks_ranges(volume: Tsdf, base_in_map: RigidPose, law: MarksLaw | None = No
     body leans, and the height band is measured from the cart's own floor plane.
 
     Vectorised over the box (:func:`marks_box`): the crossings are found once, filtered by band
-    and range, and the nearest per bearing is taken by one sort. ``volume`` may be the whole
-    model or the twin :func:`marks_window` copied out of it — the answer is the same fan.
+    (:func:`band_surface`) and range, and the nearest per bearing is taken by one sort.
+    ``volume`` may be the whole model or the twin :func:`marks_window` copied out of it — the
+    answer is the same fan.
     """
     law = law if law is not None else MarksLaw()
     bins = law.bins
@@ -183,12 +208,12 @@ def marks_ranges(volume: Tsdf, base_in_map: RigidPose, law: MarksLaw | None = No
     box = marks_box(volume.spec, (x0, y0), band, law.range_m)
     if box is None:
         return ranges
-    points, _colours = volume.surface(law.min_weight, box)
+    points = band_surface(volume, base_in_map, law, box)
     if points.shape[0] == 0:
         return ranges
-    dx, dy, z = points[:, 0] - x0, points[:, 1] - y0, points[:, 2]
+    dx, dy = points[:, 0] - x0, points[:, 1] - y0
     rng = np.hypot(dx, dy)
-    keep = (z >= band[0]) & (z <= band[1]) & (rng <= law.range_m) & (rng >= MARKS_MIN_RANGE_M)
+    keep = rng <= law.range_m
     if not np.any(keep):
         return ranges
     yaw = math.atan2(float(base_in_map.rotation[1, 0]), float(base_in_map.rotation[0, 0]))

@@ -323,7 +323,15 @@ def test_the_volume_reaches_no_matcher_and_no_planner(tmp_path: Path) -> None:
     assert node._world.lidar_weight.any(), "painted, all the same"
     # ...and, behind marks_clear (off as shipped), the clearing half of the same fan: how far
     # each bearing is KNOWN OPEN. Still an answer about obstacles, still nothing to seat a pose on.
-    assert set(node.pubs) == {"/fusion/surface", "/depth_marks", "/depth_free"}
+    # ...and, behind grid_out (off as shipped), the same columns as grids the costmaps only draw.
+    assert set(node.pubs) == {
+        "/fusion/surface",
+        "/depth_marks",
+        "/depth_free",
+        "/camera_grid",
+        "/camera_grid_map",
+        "/camera_grid_map_updates",
+    }
     assert [name for name, _period in node.timers] or True
     line = node._world_line(node._tally.take())
     assert "1 revolutions" in line and "lidar slice" in line and "camera band" in line
@@ -756,3 +764,194 @@ def test_marks_clear_on_answers_how_far_each_bearing_is_known_open(node: DepthFu
     assert both.any() and np.all(open_to[both] < marked[both]), "cleared up to the wall, not past"
     line = node._marks_line(node._tally.take())
     assert "clearing on /depth_free" in line and "clear" in line and "say nothing" in line
+
+
+# ---- the camera grids: what the costmaps only draw (grid_out, 2026-09-24) -------------------
+def grid_node(tmp_path: Path, **overrides: Any) -> DepthFusion:
+    """The shipped odom volume with ``grid_out`` on and a low ``min_weight``, so two revolutions
+    are a surface (as in the marks tests above)."""
+    node = odom_node(tmp_path, grid_out=True, **overrides)
+    node._switches.set("min_weight", 0.5)
+    return node
+
+
+def grid_tick(node: DepthFusion, x: float, t: float) -> None:
+    """One revolution from (x, 0) in odom with the grid_hz clock let through (the cap has its
+    own test): a new place, so the view gate integrates it and the grids go out."""
+    at_odom(node, x)
+    node._grid_at = -math.inf
+    node._on_scan_work(scan_msg(t))
+
+
+def map_msg(width: int = 200, height: int = 160, x: float = -5.0, y: float = -4.0) -> Any:
+    """RTAB-Map's /map as far as its lattice goes: 5 cm cells from (x, y)."""
+    msg = ros_stubs.OccupancyGrid()
+    msg.info.resolution, msg.info.width, msg.info.height = 0.05, width, height
+    msg.info.origin.position.x, msg.info.origin.position.y = x, y
+    return msg
+
+
+def cells(msg: Any) -> set[tuple[int, int]]:
+    """The (row, column) of every occupied cell of a grid or an update message."""
+    width = msg.info.width if hasattr(msg, "info") else msg.width
+    return {divmod(i, width) for i, v in enumerate(msg.data) if v == 100}
+
+
+def test_grid_out_is_off_and_the_three_grid_topics_are_silent(node: DepthFusion) -> None:
+    """As shipped the costmaps' camera_grid_layer is off and nothing feeds it: the marks go out
+    exactly as before and the grids say nothing at all."""
+    node._on_scan_work(scan_msg())
+    assert node.pubs["/depth_marks"].sent
+    for topic in ("/camera_grid", "/camera_grid_map", "/camera_grid_map_updates"):
+        assert not node.pubs[topic].sent, topic
+    assert "grid: off" in node._grid_line(node._tally.take())
+
+
+def test_the_grid_holds_the_volume_s_columns_where_the_marks_do(tmp_path: Path) -> None:
+    """/camera_grid: the square about the cart in the volume's frame, latched, on the
+    observation's own stamp, 0 and 100 only — and every bearing the fan marks ends in one of its
+    occupied cells, because both read the same column rule (volume_scan.band_surface)."""
+    node = grid_node(tmp_path)
+    grid_tick(node, 0.0, SCAN_S)
+    grid_tick(node, 0.4, SCAN_S + 0.2)
+    out = node.pubs["/camera_grid"].sent[-1]
+    assert node.pubs["/camera_grid"].qos.rest["durability"] == "transient_local"
+    assert out.header.frame_id == "odom"
+    assert (out.header.stamp.sec, out.header.stamp.nanosec) == (int(SCAN_S), 200_000_000)
+    assert (out.info.width, out.info.height, out.info.resolution) == (120, 120, 0.05)
+    assert set(out.data) == {0, 100}
+    ox, oy = out.info.origin.position.x, out.info.origin.position.y
+    centres = np.array([(ox + (c + 0.5) * 0.05, oy + (r + 0.5) * 0.05) for r, c in cells(out)])
+    to_wall = np.minimum(np.abs(np.abs(centres[:, 0]) - 2.0), np.abs(np.abs(centres[:, 1]) - 2.0))
+    assert np.all(to_wall <= 0.1), "only the box's walls, one voxel either side"
+    ranges = np.array(marks(node).ranges)
+    bearings = -math.pi + math.radians(0.5) * np.arange(ranges.size)
+    hit = np.isfinite(ranges)
+    assert hit.sum() > 100
+    ends = np.c_[0.4 + ranges[hit] * np.cos(bearings[hit]), ranges[hit] * np.sin(bearings[hit])]
+    near = np.array([np.min(np.hypot(*(centres - end).T)) for end in ends])
+    assert np.all(near <= 0.08), "every mark of the fan is a cell of the grid"
+    assert node._tally.take().counts["grids"] == 2
+
+
+def test_the_map_grid_copies_the_map_s_lattice_and_draws_through_map_to_odom(
+    tmp_path: Path,
+) -> None:
+    """/camera_grid_map: nothing until the map is heard; then ONE full grid with exactly its
+    geometry (empty, latched), and after the settle an update carrying the same cells moved by
+    map <- odom — here a 1 m shift, 20 cells of the map's own lattice."""
+    node = grid_node(tmp_path)
+    grid_tick(node, 0.0, SCAN_S)
+    assert not node.pubs["/camera_grid_map"].sent and not node.pubs["/camera_grid_map_updates"].sent
+    assert node._tally.take().counts["grid_map_no_map"] == 1
+    assert "no /map yet" in node._grid_line(node._tally.take())
+
+    node.subs["/map"][1](map_msg())
+    full = node.pubs["/camera_grid_map"].sent[-1]
+    assert full.header.frame_id == "map"
+    assert (full.info.width, full.info.height, full.info.resolution) == (200, 160, 0.05)
+    assert (full.info.origin.position.x, full.info.origin.position.y) == (-5.0, -4.0)
+    assert not any(full.data), "the latched grid is empty: a late layer gets no stale cell"
+    assert node.pubs["/camera_grid_map"].qos.rest["durability"] == "transient_local"
+
+    grid_tick(node, 0.4, SCAN_S + 0.2)  # a new full grid is settling: no update yet
+    assert not node.pubs["/camera_grid_map_updates"].sent
+    assert node._tally.take().counts["grid_map_settling"] == 1
+
+    node._canvas_at = -math.inf
+    node._tf.buffer.transforms[("map", "odom")] = edge("map", "odom", SCAN_S)
+    node._tf.buffer.transforms[("map", "odom")].transform.translation.x = 1.0
+    grid_tick(node, 0.8, SCAN_S + 0.4)
+    update = node.pubs["/camera_grid_map_updates"].sent[-1]
+    assert update.header.frame_id == "map"
+    grid = node.pubs["/camera_grid"].sent[-1]
+    gx = round((grid.info.origin.position.x + 1.0 + 5.0) / 0.05)
+    gy = round((grid.info.origin.position.y + 4.0) / 0.05)
+    assert (update.x, update.y) == (gx, gy), "the rectangle is the window's own, shifted"
+    assert (update.width, update.height) == (120, 120)
+    moved = {(r + gy - update.y, c + gx - update.x) for r, c in cells(grid)}
+    assert cells(update) == moved, "the same cells, 1 m along the map's x"
+
+
+def test_a_new_map_geometry_restarts_the_canvas_and_the_same_one_is_nothing(
+    tmp_path: Path,
+) -> None:
+    """RTAB-Map re-renders /map with every graph change. The same lattice again changes nothing;
+    a grown one gets its own empty full grid — a grid of another geometry would make the global
+    costmap resize itself and drop every layer's marks."""
+    node = grid_node(tmp_path)
+    node.subs["/map"][1](map_msg())
+    node.subs["/map"][1](map_msg())
+    assert len(node.pubs["/camera_grid_map"].sent) == 1
+    first = node._canvas
+    node.subs["/map"][1](map_msg(width=260, x=-8.0))
+    assert len(node.pubs["/camera_grid_map"].sent) == 2 and node._canvas is not first
+    assert node.pubs["/camera_grid_map"].sent[-1].info.width == 260
+
+
+def test_grid_out_off_leaves_an_empty_grid_behind_and_on_starts_the_map_again(
+    tmp_path: Path,
+) -> None:
+    """A layer left on after the flag goes off must draw nothing stale: the last square goes out
+    empty on /camera_grid and the last map window as an empty update. On again, the known map
+    geometry gets a fresh full grid at once."""
+    node = grid_node(tmp_path)
+    node.subs["/map"][1](map_msg())
+    node._canvas_at = -math.inf
+    node._tf.buffer.transforms[("map", "odom")] = edge("map", "odom", SCAN_S)
+    grid_tick(node, 0.0, SCAN_S)
+    grid_tick(node, 0.4, SCAN_S + 0.2)
+    last = node.pubs["/camera_grid"].sent[-1]
+    drawn = node.pubs["/camera_grid_map_updates"].sent[-1]
+    assert cells(last) and cells(drawn)
+
+    node._switches.set("grid_out", False)
+    empty = node.pubs["/camera_grid"].sent[-1]
+    assert empty.info.origin.position.x == last.info.origin.position.x and not any(empty.data)
+    cleared = node.pubs["/camera_grid_map_updates"].sent[-1]
+    # the last window alone (the last update also spanned the one before it)
+    assert (cleared.width, cleared.height) == (120, 120)
+    assert drawn.x <= cleared.x and cleared.x + cleared.width <= drawn.x + drawn.width
+    assert drawn.y <= cleared.y and cleared.y + cleared.height <= drawn.y + drawn.height
+    assert not any(cleared.data)
+    grid_tick(node, 0.8, SCAN_S + 0.4)
+    assert node.pubs["/camera_grid"].sent[-1] is empty, "off: nothing more"
+
+    fulls = len(node.pubs["/camera_grid_map"].sent)
+    node._switches.set("grid_out", True)
+    assert len(node.pubs["/camera_grid_map"].sent) == fulls + 1
+
+
+def test_without_map_to_odom_the_map_grid_waits_and_the_odom_grid_does_not(
+    tmp_path: Path,
+) -> None:
+    """The local costmap's grid needs no global pose at all; the map grid needs this laptop's
+    map -> odom at the grid's stamp and holds the tick without it, counted."""
+    node = grid_node(tmp_path)
+    node.subs["/map"][1](map_msg())
+    node._canvas_at = -math.inf
+    grid_tick(node, 0.0, SCAN_S)
+    assert node.pubs["/camera_grid"].sent and not node.pubs["/camera_grid_map_updates"].sent
+    assert node._tally.take().counts["grid_map_no_tf"] == 1
+
+
+def test_the_grid_hz_cap_thins_the_grids_and_not_the_volume(tmp_path: Path) -> None:
+    node = grid_node(tmp_path)
+    grid_tick(node, 0.0, SCAN_S)
+    at_odom(node, 0.4)
+    node._on_scan_work(scan_msg(SCAN_S + 0.2))  # within 1 / grid_hz of the last grid
+    assert len(node.pubs["/camera_grid"].sent) == 1
+    assert node._tally.take().counts["revolutions"] == 2
+
+
+def test_the_report_line_says_what_the_grids_carried(tmp_path: Path) -> None:
+    node = grid_node(tmp_path)
+    node.subs["/map"][1](map_msg())
+    node._canvas_at = -math.inf
+    node._tf.buffer.transforms[("map", "odom")] = edge("map", "odom", SCAN_S)
+    grid_tick(node, 0.0, SCAN_S)
+    grid_tick(node, 0.4, SCAN_S + 0.2)
+    line = node._grid_line(node._tally.take())
+    assert line.startswith("grid: 2 on /camera_grid") and "occupied cells" in line
+    assert "6.0 m at 5 cm" in line and "in odom" in line
+    assert "/camera_grid_map on 200x160 at 5 cm from (-5.00, -4.00): 2 updates" in line

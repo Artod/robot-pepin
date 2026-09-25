@@ -154,7 +154,8 @@ The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``e
 ``volume_frame``,
 ``fit_gate``, ``lidar_fit_gate``, ``paint_sigma_m``, ``imu_lean``, ``lean_gate_deg``,
 ``lean_min_quality``, ``self_heal``, ``align``, ``min_weight``, ``marks_source``,
-``marks_min_z``, ``marks_hz``, ``marks_clear``, ``surface_hz``,
+``marks_min_z``, ``marks_hz``, ``marks_clear``, ``grid_out``, ``grid_hz``, ``grid_size_m``,
+``grid_resolution_m``, ``surface_hz``,
 ``band_half_z``, ``lidar_layer``, ``no_return_free``, ``no_depth_free``, ``no_depth_weight``,
 ``no_depth_reach_m``, ``colour_fallback``, ``view_gate``, ``snapshot_s``,
 ``resume_volume``, ``follow_correction``, ``follow_correction_min_m``,
@@ -162,6 +163,14 @@ The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``e
 state is printed in every report line, beside the band itself and the source of the plane it is
 centred on.
 ``/fusion/reset`` (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
+
+THE CAMERA GRIDS (``grid_out``, off as shipped, 2026-09-24). ``/depth_marks`` is accumulated by
+each costmap's camera_layer into a grid of its own — two more copies of this memory, the global
+one smeared by every ``map -> odom`` jump and both wiped by the tree's clears
+(scratch/costmap_split). Under ``grid_out`` the same columns go out as grids the costmaps only
+DRAW (a StaticLayer each, ``camera_grid_layer``): ``/camera_grid`` about the cart in the volume's
+frame and ``/camera_grid_map`` (+ ``_updates``) on the lattice of ``grid_map_topic``
+(:mod:`pepin.camera_grid`); ros/camera_grid.sh flips the node and the layers together.
 """
 
 from __future__ import annotations
@@ -175,14 +184,26 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from map_msgs.msg import OccupancyGridUpdate
 from message_filters import Subscriber, TimeSynchronizer
+from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rtabmap_msgs.msg import MapGraph
 from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
+from pepin.camera_grid import (
+    GRID_RESOLUTION_M,
+    GRID_SIZE_M,
+    OCCUPIED,
+    GridWindow,
+    MapCanvas,
+    MapGeometry,
+    grid_volume,
+    to_map_xy,
+)
 from pepin.depth import Intrinsics, rotation_matrix
 from pepin.flags import Flag, FlagSet
 from pepin.frame_pose import BASE_FRAME, MAP_FRAME, ODOM_FRAME, FramePoser
@@ -208,6 +229,7 @@ from pepin.volume_scan import (
     MARKS_RANGE_M,
     MARKS_STEP,
     MarksLaw,
+    band_surface,
     empty_marks,
     fan_counts,
     free_ranges,
@@ -229,6 +251,9 @@ from pepin.worldmap import (
 from pepin_bringup.msgs import (
     array_from_image,
     cloud_from_points,
+    grid_update,
+    map_geometry,
+    occupancy_grid,
     rpy_from_transform,
     scan_arrays,
     scan_from_ranges,
@@ -267,6 +292,18 @@ MARKS_TOPIC = "/depth_marks"
 # ObstacleLayer marks at the end of every finite range it is given, so one source that cleared a
 # ray at 1.2 m would plant a lethal cell at 1.2 m — at the frontier of knowledge.
 FREE_TOPIC = "/depth_free"
+# THE CAMERA GRIDS (``grid_out``, 2026-09-24): the same surface as grids that the costmaps'
+# camera_grid_layer (a StaticLayer, ros/params/nav2_params.yaml) only DRAWS, so Nav2 keeps no copy
+# of the memory of its own (pepin.camera_grid). /camera_grid is a square about the cart in the
+# volume's frame, for the rolling local costmap; /camera_grid_map is the same cells on the lattice
+# of the map the global costmap's static layer reads (``grid_map_topic``), with Nav2's own
+# ``<map_topic>_updates`` beside it.
+GRID_TOPIC = "/camera_grid"
+GRID_MAP_TOPIC = "/camera_grid_map"
+GRID_UPDATES_TOPIC = GRID_MAP_TOPIC + "_updates"
+MAP_TOPIC = "/map"  # the global static layer's map under PEPIN_LOCALIZER=rtabmap
+GRID_TF_WAIT_S = 0.05  # map <- odom at the grid's stamp: a paint worker waits no longer
+GEOMETRY_SETTLE_S = 1.0  # a new full grid reaches the layer before any update in its geometry
 VOLUME = "volume"  # what marks_source chooses between: the model's surface...
 FRAME = "frame"  # ...or the single frame's own fan, relayed
 # RTAB-Map's optimised graph: the node ids and their poses in ``map``, which is the only signal
@@ -280,7 +317,7 @@ PAIR_QUEUE = 40  # depth arrives a fraction of a second after its image; pair by
 BAND_STRIDE = 3
 BAND_MIN_POINTS = 50  # a frame with fewer points in the band is not worth a yaw search
 AT_BOUND_STREAK = 30  # ~3 s of frames refused at the search's bound: the model no longer fits
-STAGES = ("align", "integrate", "scan", "marks")
+STAGES = ("align", "integrate", "scan", "marks", "grid", "grid_map")
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration; their state is printed in every report line.
@@ -605,6 +642,53 @@ FLAGS = FlagSet(
         " watch 'clear' in the report line rise off its floor",
         off_when="as shipped, and whenever a cell must not be erased by the camera's own memory:"
         " silent topic, and the layer clears from /depth_scan as it did before",
+    ),
+    Flag(
+        "grid_out",
+        False,
+        description="publish the volume's current occupied columns (the /depth_marks rule) as"
+        " grids the costmaps' camera_grid_layer only draws: /camera_grid, a square about the cart"
+        " in the volume's frame, and /camera_grid_map with its _updates on the lattice of"
+        " grid_map_topic; off, all three are silent",
+        why="off until a drive has measured it: the nvblox pattern against camera_layer's own"
+        " copies of the memory, smeared by map -> odom jumps and wiped by the tree's clears"
+        " (journal 2026-09-24, scratch/costmap_split)",
+        on_when="with camera_grid_layer on and camera_layer off in both costmaps:"
+        " ros/camera_grid.sh on",
+        off_when="ros/camera_grid.sh off, back to /depth_marks alone; turning it off publishes"
+        " one empty grid on each topic so a layer left on holds nothing stale",
+    ),
+    Flag(
+        "grid_hz",
+        3.0,
+        description="the cap on how often the camera grids are published, hertz",
+        why="between the costmaps' update_frequency 2.0 (global) and 5.0 (local); one tick costs"
+        " the paint worker 3.3 ms on the live 280x250x34 grid (a marks slice 2.9), 10 ms/s and"
+        " 43 kB/s of /camera_grid to the board at 3 Hz (scratch/camera_grid/grid_cost.py,"
+        " journal 2026-09-24)",
+        on_when="raise it toward 5 if a camera obstacle reaches the local costmap too late",
+        off_when="lower it if the grids cost the link or the costmaps too much",
+        range=(0.5, 10.0),
+    ),
+    Flag(
+        "grid_size_m",
+        GRID_SIZE_M,
+        description="the side of /camera_grid's square about the cart, metres",
+        why="default by design: twice the fan's 3 m reach, so the local costmap's 3 m window"
+        " always sits inside it (journal 2026-09-24)",
+        on_when="raise it with the local costmap's own window",
+        off_when="lower it to save the link: the cells grow with its square",
+        range=(1.0, 20.0),
+    ),
+    Flag(
+        "grid_resolution_m",
+        GRID_RESOLUTION_M,
+        description="the cell of /camera_grid, metres; /camera_grid_map always takes the map's",
+        why="default by design: the volume's own voxel and the costmaps' own cell"
+        " (journal 2026-09-24)",
+        on_when="coarser only to save the link",
+        off_when="finer than the voxel draws no more detail",
+        range=(0.02, 0.5),
     ),
     Flag(
         "surface_hz",
@@ -1014,6 +1098,9 @@ class DepthFusion(Node):
         self._mount = PlanarMount.from_config(
             str(self.declare_parameter("lidar_config", LIDAR_CONFIG).value)
         )
+        # The map whose lattice /camera_grid_map copies: the one the global costmap's static layer
+        # reads (/map under PEPIN_LOCALIZER=rtabmap, /map_tracked under tracker; the launch says).
+        self._grid_map_topic = str(self.declare_parameter("grid_map_topic", MAP_TOPIC).value)
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._tally = Tally(STAGES)
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
@@ -1026,6 +1113,26 @@ class DepthFusion(Node):
         # marking there (see FREE_TOPIC). Silent while the flag is off.
         self._free_pub = self.create_publisher(LaserScan, FREE_TOPIC, reliable)
         self._marks_at = 0.0  # monotonic seconds of the last published fan: the marks_hz cap
+        # ...and, under grid_out, the same surface as grids the costmaps only draw (GRID_TOPIC):
+        # latched like any map, so a layer that starts later gets the last one. The updates are
+        # volatile: Nav2 subscribes to them with the system default QoS.
+        latched = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._grid_pub = self.create_publisher(OccupancyGrid, GRID_TOPIC, latched)
+        self._grid_map_pub = self.create_publisher(OccupancyGrid, GRID_MAP_TOPIC, latched)
+        self._grid_update_pub = self.create_publisher(
+            OccupancyGridUpdate, GRID_UPDATES_TOPIC, reliable
+        )
+        self._grid_lock = threading.Lock()  # the grid clock, the window, the canvas, the geometry
+        self._grid_at = 0.0  # monotonic seconds of the last published grid: the grid_hz cap
+        self._grid_window: GridWindow | None = None  # the square /camera_grid last carried
+        self._grid_cells = 0  # occupied cells in that grid, a level the report line reads
+        self._geometry: MapGeometry | None = None  # grid_map_topic's lattice, once heard
+        self._canvas: MapCanvas | None = None  # the map grid being drawn while grid_out is on
+        self._canvas_at = -math.inf  # when its full grid went out (GEOMETRY_SETTLE_S)
         # ...and the frame the marks used to come from, so the old behaviour is one live flag
         # away (marks_source frame relays this message unchanged). Local to the laptop: the
         # depth stream publishes it here, and only the OUTPUT of this node crosses to the board.
@@ -1140,6 +1247,9 @@ class DepthFusion(Node):
             self._period(self._switches["surface_hz"]), self._publish_surface
         )
         self.create_timer(30.0, self._report)
+        # Last, because a latched map is delivered the moment this exists and its callback needs
+        # the grid state above (a message dropped before _up would never be sent again).
+        self.create_subscription(OccupancyGrid, self._grid_map_topic, self._on_map, latched)
         nx, ny, nz = self._spec.shape
         self.get_logger().info(
             f"fusion up: {nx}x{ny}x{nz} voxels of {self._spec.voxel_m * 100:.0f} cm from"
@@ -1247,6 +1357,14 @@ class DepthFusion(Node):
         if not self._worker.stop():
             self.get_logger().warning("the fusion worker did not finish its frame; leaving anyway")
         self._scans.stop()
+        # Best effort, and never at the snapshot's expense: after a SIGINT rclpy has already shut
+        # the context and nothing can be published, so a stopped fusion leaves its last grid in
+        # a layer that is still on (ros/README.md, "Camera grid A/B"); on a loud exit with the
+        # context up the layers get empty grids.
+        try:
+            self._clear_grids()
+        except Exception as exc:  # rclpy's invalid-context error, whatever its class
+            self.get_logger().info(f"the camera grids were not cleared at exit: {exc}")
         self._snapshot()
         self._tf.close()
 
@@ -1296,7 +1414,8 @@ class DepthFusion(Node):
         one meaning, in every node that has it — ``lean_gate_deg`` the scan gate's,
         ``lean_min_quality`` the poser's floor under a lean, ``band_half_z`` rebuilds the height
         band, the two rates retime their timer, ``snapshot_s`` its clock, ``volume_frame`` empties
-        the volume, and the rest are only read where they are used."""
+        the volume, ``grid_out`` starts the map grid or clears both grids, and the rest are only
+        read where they are used."""
         if name == "imu_lean":
             self._poser.apply_lean = self._odom_poser.apply_lean = bool(new)
             self._lean.use_gyro = bool(new)
@@ -1312,6 +1431,14 @@ class DepthFusion(Node):
             return
         if name == "volume_frame":
             self._reframe(str(new))
+            return
+        if name == "grid_out":
+            if new:
+                with self._grid_lock:
+                    if self._geometry is not None:
+                        self._start_canvas()
+            else:
+                self._clear_grids()
             return
         if name == "snapshot_s":
             self._snapshots = SnapshotClock(float(new), self._snapshots.last_s)
@@ -1511,6 +1638,7 @@ class DepthFusion(Node):
         # ...and the costmap hears what the volume holds now, at the pose this revolution was
         # painted by and on its own stamp.
         self._publish_marks(base, msg.header.stamp)
+        self._publish_grid(base, msg.header.stamp)
         now = time.monotonic()
         self._trust.painted(now)  # ...and the map on disk may be replaced by this one
         if self._snapshots.due(now) and self._switches["snapshot_s"] > 0.0:
@@ -1836,6 +1964,7 @@ class DepthFusion(Node):
         self._tally.count("frames")
         self._tally.count("voxels", touched)
         self._publish_marks(base, stamp)  # the camera's own turn to move the marks
+        self._publish_grid(base, stamp)
         now = time.monotonic()
         self._trust.painted(now)  # ...and the map on disk may be replaced by this one
         # The camera's own clock on the snapshot as well as the lidar's: a camera-only run (the
@@ -1994,6 +2123,126 @@ class DepthFusion(Node):
             )
         self._tally.count("marks")
 
+    # ---- the camera grids (grid_out) -------------------------------------------------------
+    def _grid_due(self) -> bool:
+        """Whether the camera grids may go out now (``grid_hz``); the clock moves on when so."""
+        now = time.monotonic()
+        with self._grid_lock:
+            if now - self._grid_at < 1.0 / float(self._switches["grid_hz"]):
+                return False
+            self._grid_at = now
+            return True
+
+    def _publish_grid(self, base: RigidPose, stamp: Any) -> None:
+        """Under ``grid_out``: the volume's occupied columns about the cart as ``/camera_grid``
+        (volume frame, the observation's stamp) and, through ``map <- volume``, as an update of
+        ``/camera_grid_map``. Called from both paint paths, thinned by ``grid_hz``; the column
+        rule is the fan's (:func:`pepin.volume_scan.band_surface`), the neighbourhood copied under
+        the model lock and read outside it, as the marks are."""
+        if not self._switches.on("grid_out") or not self._grid_due():
+            return
+        law = self._marks_law()
+        with self._tally.measure("grid"):
+            window = GridWindow.around(
+                (float(base.translation[0]), float(base.translation[1])),
+                size_m=float(self._switches["grid_size_m"]),
+                resolution_m=float(self._switches["grid_resolution_m"]),
+                lattice=(self._spec.origin[0], self._spec.origin[1]),
+            )
+            with self._lock:
+                twin = grid_volume(self._world.volume, window, base, law)
+            points = band_surface(twin, base, law) if twin is not None else np.zeros((0, 3))
+            values = window.draw(points)
+        self._grid_cells = int(np.count_nonzero(values == OCCUPIED))
+        with self._grid_lock:
+            self._grid_window = window
+            self._grid_pub.publish(occupancy_grid(window.fields(values), stamp, self._volume_frame))
+        self._tally.count("grids")
+        self._publish_grid_map(window, points, stamp)
+
+    def _map_from_volume(self, stamp: Any) -> RigidPose | None:
+        """``map <- volume frame`` at ``stamp``: identity for a volume painted in ``map``, else
+        this laptop's own TF (``None`` when it has no answer within ``GRID_TF_WAIT_S``)."""
+        if self._volume_frame == MAP_FRAME:
+            return RigidPose(np.eye(3), np.zeros(3))
+        return self._tf.pose(MAP_FRAME, self._volume_frame, stamp, timeout_s=GRID_TF_WAIT_S)
+
+    def _publish_grid_map(self, window: GridWindow, points: Any, stamp: Any) -> None:
+        """The same cells on the map's lattice as ONE update of ``/camera_grid_map`` that erases
+        the last window and draws this one (:class:`pepin.camera_grid.MapCanvas`). Nothing while
+        the map is unknown, while a new full grid settles or without the transform, each counted.
+
+        Published under the grid lock: an update drawn on a canvas a new geometry has replaced
+        must never reach the layer after that geometry's full grid.
+        """
+        with self._grid_lock:
+            canvas = self._canvas
+            settling = time.monotonic() - self._canvas_at < GEOMETRY_SETTLE_S
+        if canvas is None:
+            self._tally.count("grid_map_no_map")
+            return
+        if settling:
+            self._tally.count("grid_map_settling")
+            return
+        to_map = self._map_from_volume(stamp)
+        if to_map is None:
+            self._tally.count("grid_map_no_tf")
+            return
+        with self._tally.measure("grid_map"), self._grid_lock:
+            if self._canvas is not canvas:
+                return  # a new geometry arrived meanwhile and its full grid is already out
+            rect = canvas.draw(to_map_xy(points, to_map), to_map_xy(window.corners(), to_map))
+            if rect is None:
+                self._tally.count("grid_map_off_map")
+                return
+            self._grid_update_pub.publish(grid_update(canvas.update(rect), stamp, MAP_FRAME))
+        self._tally.count("grid_map_updates")
+
+    def _on_map(self, msg: OccupancyGrid) -> None:
+        """``grid_map_topic``: its lattice is the one ``/camera_grid_map`` must have EXACTLY — a
+        grid of any other geometry makes the global costmap resize itself and drop every layer's
+        marks. A new geometry starts a new canvas under ``grid_out``; the same one is nothing."""
+        geometry = map_geometry(msg)
+        with self._grid_lock:
+            if self._geometry is not None and self._geometry.same_as(geometry):
+                return
+            self._geometry = geometry
+            if self._switches.on("grid_out"):
+                self._start_canvas()
+
+    def _start_canvas(self) -> None:
+        """(Under the grid lock.) A fresh canvas on the map's geometry and its full grid, EMPTY
+        and latched: a layer that joins later gets no stale cell from it, and the next update
+        (after ``GEOMETRY_SETTLE_S``) draws the window whole."""
+        assert self._geometry is not None
+        self._canvas = MapCanvas(self._geometry)
+        self._canvas_at = time.monotonic()
+        now = self.get_clock().now().to_msg()
+        self._grid_map_pub.publish(occupancy_grid(self._canvas.full(), now, MAP_FRAME))
+        self._tally.count("grid_maps")
+        self.get_logger().info(
+            f"{GRID_MAP_TOPIC}: a full grid on {self._grid_map_topic}'s"
+            f" {self._geometry.text()}; updates on {GRID_UPDATES_TOPIC} from now on"
+        )
+
+    def _clear_grids(self) -> None:
+        """One empty grid wherever a layer may still be drawing ours — the last window on
+        ``/camera_grid``, the last map window as an update — and the canvas dropped: what
+        ``grid_out`` off leaves behind is nothing."""
+        now = self.get_clock().now().to_msg()
+        with self._grid_lock:
+            window, self._grid_window = self._grid_window, None
+            canvas, self._canvas = self._canvas, None
+            if window is not None:
+                empty = np.zeros((window.cells, window.cells), dtype=np.int8)
+                self._grid_pub.publish(
+                    occupancy_grid(window.fields(empty), now, self._volume_frame)
+                )
+            rect = canvas.forget() if canvas is not None else None
+            if canvas is not None and rect is not None:
+                self._grid_update_pub.publish(grid_update(canvas.update(rect), now, MAP_FRAME))
+        self._grid_cells = 0
+
     def _publish_surface(self) -> None:
         """The model's surface as a cloud, in the frame the volume is painted in — ``odom`` for
         the rolling window, ``map`` for the room (``volume_frame``). The frame is the volume's own
@@ -2034,7 +2283,7 @@ class DepthFusion(Node):
             f" align {w.ms_per('align', 'frames'):.0f} ms, {self._turns(w)};"
             f" refused: {self._refusals(w) or 'none'}; skipped: {skipped};"
             f" no image {c['no_image']}; surface {self._surface_points} points;"
-            f" {self._marks_line(w)}; {self._frame_line(w)};"
+            f" {self._marks_line(w)}; {self._grid_line(w)}; {self._frame_line(w)};"
             f" {self._band_text()}; {self._carve_line()}; {self._world_line(w)};"
             f" {self._follow_line(w)};"
             f" {self._lean.report()};"
@@ -2085,6 +2334,36 @@ class DepthFusion(Node):
             f" {round(2 * math.pi / MARKS_STEP)} filled, band {law.band_m[0]:.2f}-"
             f"{law.band_m[1]:.2f} m within {law.range_m:.1f} m at min_weight {law.min_weight:g};"
             f" {self._clear_text()}"
+        )
+
+    def _grid_line(self, w: Window) -> str:
+        """The camera grids' half of the report: how many went out and what one cost, how many
+        cells the last one held and where its square stands, and the map grid's geometry, updates
+        and the ticks it held back (a settling geometry, no transform, off the map)."""
+        if not self._switches.on("grid_out"):
+            return f"grid: off ({GRID_TOPIC} and {GRID_MAP_TOPIC} silent)"
+        c = w.counts
+        with self._grid_lock:
+            window, geometry = self._grid_window, self._geometry
+        where = (
+            f"{window.size_m:.1f} m at {window.resolution_m * 100:.0f} cm from"
+            f" ({window.origin[0]:+.2f}, {window.origin[1]:+.2f}) in {self._volume_frame}"
+            if window is not None
+            else "no window yet"
+        )
+        if geometry is None:
+            on_map = f"no {self._grid_map_topic} yet, {GRID_MAP_TOPIC} silent"
+        else:
+            on_map = (
+                f"{GRID_MAP_TOPIC} on {geometry.text()}: {int(c['grid_map_updates'])} updates"
+                f" ({w.ms_per('grid_map', 'grid_map_updates'):.1f} ms), {int(c['grid_maps'])}"
+                f" full; held: settling {int(c['grid_map_settling'])}, no tf"
+                f" {int(c['grid_map_no_tf'])}, off the map {int(c['grid_map_off_map'])}"
+            )
+        return (
+            f"grid: {int(c['grids'])} on {GRID_TOPIC} ({w.rate('grids'):.1f}/s,"
+            f" {w.ms_per('grid', 'grids'):.1f} ms), {self._grid_cells} occupied cells, {where};"
+            f" {on_map}"
         )
 
     def _clear_text(self) -> str:

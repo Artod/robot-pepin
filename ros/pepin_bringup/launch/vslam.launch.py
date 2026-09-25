@@ -980,6 +980,11 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             # snapshot yet. --fresh passes this false, which is the whole of "an unknown room".
             "-p",
             f"resume_volume:={'true' if resume_volume else 'false'}",
+            # /camera_grid_map copies the lattice of the map the global costmap's static layer
+            # reads: /map_tracked under the tracker (nav2_params.yaml), /map under rtabmap
+            # (nav2_map_from_laptop.yaml). Read only under the node's grid_out flag.
+            "-p",
+            f"grid_map_topic:={'/map_tracked' if owner == 'tracker' else '/map'}",
         ],
         output="screen",
         prefix=_after_ghost("/depth_fusion"),
