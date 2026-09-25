@@ -492,7 +492,12 @@ local_costmap:
       footprint_padding: 0.0
       resolution: 0.05
       footprint: "[[0.0625, 0.275], [0.0625, -0.275], [-0.30, -0.275], [-0.30, 0.275]]"
-      plugins: ["lidar_layer", "camera_layer", "contact_layer", "tof_front_scan_layer", "tof_left_scan_layer", "tof_right_scan_layer", "inflation_layer"]
+      plugins: ["lidar_layer", "camera_layer", "contact_layer", "tof_front_scan_layer", "tof_left_scan_layer", "tof_right_scan_layer", "camera_grid_layer", "inflation_layer"]
+      # THE CAMERA GRID writes by maximum (camera_grid_layer below): a StaticLayer reads this
+      # costmap-level switch, and without it the grid's FREE cells would overwrite what the lidar
+      # and the whiskers marked. No other StaticLayer is listed in this costmap, so nothing else
+      # reads it (Jazzy static_layer.cpp: only StaticLayer::getParameters asks for use_maximum).
+      use_maximum: True
       # The three VL53L1X at bumper height (tof_bridge): they see the rocking chair's rails, a box
       # on the floor, a carpet roll — everything under the lidar plane.
       # ONE LAYER PER SENSOR, on purpose: a single layer fed by all three shares one grid, so the
@@ -821,6 +826,22 @@ local_costmap:
           # inf would clear to range_max on every bearing the volume knows nothing about, which
           # is the one thing this source must never do.
           inf_is_valid: False
+      # THE CAMERA GRID (2026-09-24), OFF as shipped: the volume's CURRENT occupied columns as a
+      # grid this layer only DRAWS (pepin_bringup.depth_fusion's grid_out, pepin.camera_grid) —
+      # the nvblox arrangement, where camera_layer above accumulates /depth_marks into a copy of
+      # its own that the tree's clears wipe (scratch/costmap_split). /camera_grid is a 6 m square
+      # about the cart in odom, latched, ~3 Hz; the rolling window reads the cells under it and
+      # combines them by maximum (use_maximum above). A disabled layer or a silent topic costs
+      # nothing and never blocks activation; ENABLED BEFORE ITS FIRST GRID it is not current and
+      # the controller times out, so ros/camera_grid.sh turns grid_out on first and waits for it.
+      # A grid is kept until the next one, a dead laptop's last one included: the way out is
+      # `ros2 param set /local_costmap/local_costmap camera_grid_layer.enabled false` (board-side).
+      camera_grid_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        enabled: False
+        map_topic: /camera_grid
+        map_subscribe_transient_local: True
+        subscribe_to_updates: False
       contact_layer:
         # Where the floor ENDS, read off the same depth frames (pepin.contact, published by
         # pepin_bringup.contact_scan): the feet of chairs, a low box, a plinth — what neither the
@@ -917,7 +938,15 @@ global_costmap:
       # the local costmap runs now (tof_*_scan_layer there), never as a RangeSensorLayer: this
       # grid does not roll, so the unbounded loop of range_sensor_layer.cpp:362-369 fires here
       # every time the pose jumps off the edge of a map that is bigger than the window.
-      plugins: ["static_layer", "lidar_layer", "camera_layer", "contact_layer", "inflation_layer"]
+      plugins: ["static_layer", "lidar_layer", "camera_layer", "contact_layer", "camera_grid_layer", "inflation_layer"]
+      # THE CAMERA GRID writes by maximum (camera_grid_layer below), and this is the one line of
+      # it that touches the static_layer: a StaticLayer reads this costmap-level switch. It
+      # changes nothing for the static_layer — it is the FIRST plugin, so it writes into a master
+      # just reset to FREE (track_unknown_space false: LayeredCostmap's default value 0), and its
+      # own cells are never NO_INFORMATION (interpretValue maps unknown to FREE here), so max(0, c)
+      # IS c, cell for cell, and updateWithMax writes what updateWithTrueOverwrite wrote
+      # (costmap_layer.cpp, layered_costmap.cpp, Jazzy). A contract test holds both premises.
+      use_maximum: True
       # ONE LAYER PER SENSOR, like the three ToF below and for the same reason: separate layers
       # cannot erase each other's evidence, and each is switched on its own while the robot runs
       # (`ros2 param set /global_costmap/global_costmap camera_layer.enabled true`) — which is how a
@@ -1007,6 +1036,19 @@ global_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 0.0  # this source never marks
           inf_is_valid: False
+      # THE CAMERA GRID (2026-09-24), OFF as shipped — see the local costmap's copy. Here it reads
+      # /camera_grid_map: the same cells drawn by the laptop on the lattice of the map the
+      # static_layer reads (origin, size and resolution EXACTLY, so this layer never resizes the
+      # costmap), through its own map -> odom at the grid's stamp, and redrawn whole at every tick
+      # through /camera_grid_map_updates — a jump of map -> odom moves the cells with the next
+      # update instead of smearing old marks, and the tree's clears (ClearEntireCostmap resets a
+      # StaticLayer without touching its cells) cannot wipe what the volume still holds.
+      camera_grid_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        enabled: False
+        map_topic: /camera_grid_map
+        map_subscribe_transient_local: True
+        subscribe_to_updates: True
       contact_layer:
         # Where the floor ENDS, read off the same depth frames (pepin.contact, published by
         # pepin_bringup.contact_scan): the feet of chairs, a low box, a plinth — what neither the

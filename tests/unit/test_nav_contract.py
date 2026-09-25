@@ -242,6 +242,35 @@ def test_a_whisker_never_erases_what_the_lidar_or_the_camera_saw() -> None:
     assert plugins.index("camera_layer") < plugins.index(tof[0])
 
 
+def test_the_camera_grid_layer_ships_off_in_both_costmaps_and_draws_by_maximum() -> None:
+    """The camera grid (2026-09-24): a StaticLayer in each costmap that only DRAWS the volume's
+    current columns (depth_fusion's grid_out). Off as shipped, just before inflation, on its own
+    topics, the global one with Nav2's updates. use_maximum is costmap-wide and the static_layer
+    reads it too, which changes nothing only while that layer is the FIRST of a costmap that does
+    not track unknown space (it writes into a master reset to 0 and max(0, c) is c) — both held
+    here, and the laptop's overlay moves neither."""
+    for costmap, topic, updates in (
+        ("local_costmap", "/camera_grid", False),
+        ("global_costmap", "/camera_grid_map", True),
+    ):
+        params = _p(costmap)
+        layer, plugins = params["camera_grid_layer"], params["plugins"]
+        assert layer["plugin"] == "nav2_costmap_2d::StaticLayer", costmap
+        assert layer["enabled"] is False, f"{costmap}: off until a drive has measured it"
+        assert layer["map_topic"] == topic and layer["map_subscribe_transient_local"] is True
+        assert layer["subscribe_to_updates"] is updates, costmap
+        assert plugins.index("camera_grid_layer") == plugins.index("inflation_layer") - 1
+        assert plugins[-1] == "inflation_layer"
+        assert params["use_maximum"] is True, f"{costmap}: FREE cells must not erase other marks"
+        assert params.get("track_unknown_space", False) is False, costmap
+    assert _p("global_costmap")["plugins"][0] == "static_layer"
+    assert "static_layer" not in _p("local_costmap")["plugins"]
+    overlay = yaml.safe_load((REPO / "ros/params/nav2_map_from_laptop.yaml").read_text())
+    for costmap in ("local_costmap", "global_costmap"):
+        moved = overlay[costmap][costmap]["ros__parameters"]
+        assert set(moved) == {"static_layer"}, moved
+
+
 def test_the_tof_whiskers_serve_the_local_costmap_only() -> None:
     """2026-09-21: the ToF are short whiskers for the controller's map. In the global costmap
     they bought a room-scale plan nothing and were the worst amplifier of the RangeSensorLayer
