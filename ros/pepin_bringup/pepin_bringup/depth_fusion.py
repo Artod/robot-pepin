@@ -1357,7 +1357,14 @@ class DepthFusion(Node):
         if not self._worker.stop():
             self.get_logger().warning("the fusion worker did not finish its frame; leaving anyway")
         self._scans.stop()
-        self._clear_grids()  # a clean stop leaves no camera cell in a layer that is still on
+        # Best effort, and never at the snapshot's expense: after a SIGINT rclpy has already shut
+        # the context and nothing can be published, so a stopped fusion leaves its last grid in
+        # a layer that is still on (ros/README.md, "Camera grid A/B"); on a loud exit with the
+        # context up the layers get empty grids.
+        try:
+            self._clear_grids()
+        except Exception as exc:  # rclpy's invalid-context error, whatever its class
+            self.get_logger().info(f"the camera grids were not cleared at exit: {exc}")
         self._snapshot()
         self._tf.close()
 
@@ -2221,7 +2228,7 @@ class DepthFusion(Node):
     def _clear_grids(self) -> None:
         """One empty grid wherever a layer may still be drawing ours — the last window on
         ``/camera_grid``, the last map window as an update — and the canvas dropped: what
-        ``grid_out`` off and a clean stop leave behind is nothing."""
+        ``grid_out`` off leaves behind is nothing."""
         now = self.get_clock().now().to_msg()
         with self._grid_lock:
             window, self._grid_window = self._grid_window, None

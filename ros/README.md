@@ -1118,11 +1118,12 @@ and back with the four `enabled` values swapped and `grid_out false`. What guard
   then answer "Costmap timed out waiting for update". `camera_grid.sh on` enables a layer only
   after reading its latched grid back from the topic, and leaves `camera_layer` on where it could
   not. A disabled layer, or one whose topic is silent, never blocks activation.
-- **The last grid stays when the laptop dies** (a StaticLayer has no timeout, and the tree's
-  `ClearEntireCostmap` resets a StaticLayer without erasing its cells). A clean stop of
-  `depth_fusion` and `grid_out false` both publish empty grids first; after a crash or a lost link
-  the board-side switch is the way out: `ros2 param set /local_costmap/local_costmap
-  camera_grid_layer.enabled false` on `pepin-ros`.
+- **The last grid stays when the fusion stops** — killed, kicked, crashed or cut off by the link
+  (a StaticLayer has no timeout, the tree's `ClearEntireCostmap` resets a StaticLayer without
+  erasing its cells, and after a SIGINT rclpy can no longer publish). Only `grid_out false` (so
+  `camera_grid.sh off`) sends empty grids first. With the laptop gone the board-side switch is
+  the way out: `ros2 param set /local_costmap/local_costmap camera_grid_layer.enabled false` on
+  `pepin-ros`. The cells stay where they were in `odom`; what is lost is their clearing.
 - **The global costmap resizes for a map of another geometry**, dropping every layer's marks. The
   map grid copies `grid_map_topic`'s origin, size and resolution exactly (Nav2's own 1e-5
   tolerance), so it resizes nothing the map itself does not. An update is always inside the
