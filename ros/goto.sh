@@ -44,6 +44,28 @@
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
+# PEPIN_GOAL_TCP: what talks to the board's goal server over its socket (port 3337, from this
+# laptop, src/pepin/goal_link.py) instead of starting a ROS process on the board. Every such
+# process is a new zenoh session, and each stalled ALL laptop -> board delivery for 2.6-3.1 s
+# about 1.5 s after it started, then again when it exited (journal 2026-09-25) — a cancel did
+# that in the middle of the drive it was stopping.
+#   1 (default)  cancel and where; the goal itself still starts goto_ros.py on the board
+#   goal         cancel, where AND the goal (no preflight lines, the goal server's own gate)
+#   0            the old path for everything
+# A goal server that does not answer, whose cancel reaches only its own goal (a build before its
+# flag cancel_every_goal) or whose cancel no navigator confirmed sends the command down the old
+# path, with a warning: a dead goal server never leaves the operator without a cancel.
+GOAL_TCP="${PEPIN_GOAL_TCP:-1}"
+GOAL_PORT="${PEPIN_GOAL_PORT:-3337}"  # = pepin_bringup.goal_server.PORT
+goal_link() { PYTHONPATH="$(dirname "$0")/../src" python3 -m pepin.goal_link --host "$BOARD" --port "$GOAL_PORT" "$@"; }
+if [ "$GOAL_TCP" != 0 ]; then
+    case "${1:-}" in
+        cancel | where)
+            if goal_link "$1"; then exit 0; fi
+            echo "!! the goal server did not do it (above): the old path, a ROS process on the board"
+            ;;
+    esac
+fi
 MAP=$(ssh "root@$BOARD" "grep -oE 'PEPIN_MAP=.*' /etc/default/pepin-ros" | cut -d= -f2)
 PLACES="/maps/$(basename "${MAP:-places}" .yaml).places.yaml"  # one book of places per map
 case "${1:-}" in
@@ -88,6 +110,10 @@ LOG="/maps/rec/${STAMP}_goto.log"   # goto_ros' own words, kept on the board nex
 INTERRUPTED=0
 FINISHED=0
 TAILPID=""   # the ssh streaming the goal's log: a signal must not wait for it (see the tail below)
+# The goal through the goal server's socket (PEPIN_GOAL_TCP=goal): its log is written HERE, and
+# nothing of this drive runs on the board but the server itself. A seed is goto_ros.py's alone.
+TCP_GOAL=0
+if [ "$GOAL_TCP" = goal ] && [ "${1:-}" != seed ]; then TCP_GOAL=1; fi
 trap 'INTERRUPTED=1' INT
 finish() {  # everything recorded, always: scans, odometry, tracked pose, the goal's own log, the board log
     set +e  # nothing here may end the cleanup: a dead ffmpeg (the board rebooted mid-run, 2026-09-14)
@@ -99,7 +125,11 @@ finish() {  # everything recorded, always: scans, odometry, tracked pose, the go
     watch_stop
     if [ "$INTERRUPTED" = 1 ]; then
         echo; echo "Ctrl-C: cancelling the navigation task on the board..."
-        "$(dirname "$0")/stop.sh"
+        # Over the goal server's socket first when the goal went that way; the hard stop when
+        # the socket cannot confirm the cancel.
+        if [ "$TCP_GOAL" = 1 ] && goal_link cancel; then :; else "$(dirname "$0")/stop.sh"; fi
+    elif [ "$TCP_GOAL" = 1 ]; then
+        :  # no process of this drive on the board to look for; pepin.goal_link said how it ended
     elif ssh "root@$BOARD" "docker exec pepin-ros pgrep -f '^python3 /tools/goto_ros.py' >/dev/null" 2>/dev/null; then
         echo; echo "!! the link to the board dropped but the drive goes on there; ros/stop.sh stops it, ros/watch.sh shows it"
     fi
@@ -110,9 +140,13 @@ finish() {  # everything recorded, always: scans, odometry, tracked pose, the go
     mkdir -p "$rec"
     ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f 'session_logger.py $REC'" >> "$trace" 2>&1 || true; echo "logger stopped: $?" >> "$trace"  # no logger to stop is the normal case now: pkill's 1 must not end finish under set -e
     ssh "root@$BOARD" "docker logs --since 10m pepin-ros 2>&1" > "$rec/${STAMP}_goto_board.log" 2>> "$trace"; echo "board log: $? $(wc -c < "$rec/${STAMP}_goto_board.log") bytes" >> "$trace"
-    sleep 1
-    rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$rec/" >> "$trace" 2>&1 || { sleep 2; rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$rec/" >> "$trace" 2>&1; }
-    echo "fetched: $?" >> "$trace"
+    if [ "$TCP_GOAL" = 1 ]; then
+        echo "fetched: nothing, the goal's log was written here" >> "$trace"
+    else
+        sleep 1
+        rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$rec/" >> "$trace" 2>&1 || { sleep 2; rsync -aq "root@$BOARD:/root/pepin-ros/maps/rec/${STAMP}_goto.*" "$rec/" >> "$trace" 2>&1; }
+        echo "fetched: $?" >> "$trace"
+    fi
     # The numbered recording the recorder opened for this goal, named in the log we just fetched:
     # it comes home too (the clip stays on the board — this script films the drive itself). Which
     # recorder wrote it is read off the name and never asked of the board: the JSONL recorder
@@ -167,6 +201,19 @@ if [ "${PEPIN_GOTO_TAPE:-on}" = off ]; then TAPE_FLAG="--no-tape"; fi
 # to write — or when it is asked for by name.
 if [ -n "$TAPE_FLAG" ] || [ -n "${PEPIN_SESSION_LOGGER:-}" ]; then
     ssh "root@$BOARD" "docker exec -d pepin-ros /pepin_entrypoint.sh python3 /tools/session_logger.py $REC $MAX_REC_S $REC_FLAGS"
+fi
+if [ "$TCP_GOAL" = 1 ]; then
+    # The goal server's socket: goto_ros.py's lines (taped ..., t+ ..., result: ...) rendered by
+    # pepin.goal_link into this run's log HERE, where finish reads the tape's name. The server
+    # tapes every goal itself, so PEPIN_GOTO_TAPE=off has no counterpart on this path. Started
+    # as a plain command, not through the function, so TAILPID is the client and not a subshell.
+    if [ -n "$TAPE_FLAG" ]; then echo "!! PEPIN_GOTO_TAPE=off: the goal server tapes every goal anyway"; fi
+    PYTHONPATH="$(dirname "$0")/../src" python3 -m pepin.goal_link --host "$BOARD" --port "$GOAL_PORT" --log "$(dirname "$0")$LOG" go "$@" &
+    TAILPID=$!
+    echo "laptop: the goal was sent at $(date +%H:%M:%S) through the goal server's socket"
+    watch_start
+    wait "$TAILPID" 2>/dev/null || true
+    exit 0
 fi
 ssh "root@$BOARD" "touch /root/pepin-ros$LOG; docker exec -d -e PYTHONUNBUFFERED=1 pepin-ros /pepin_entrypoint.sh sh -c 'python3 /tools/goto_ros.py --places $PLACES $TAPE_FLAG $* > $LOG 2>&1; echo GOTO_EXIT=\$? >> $LOG'"
 echo "laptop: the goal was sent at $(date +%H:%M:%S.%2N)"

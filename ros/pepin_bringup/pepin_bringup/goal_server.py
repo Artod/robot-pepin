@@ -15,6 +15,12 @@ and answers with one JSON line per event: accepted, feedback, arrival, done. It 
 run's recording: it starts one when a goal starts and closes it when the goal ends, so a
 recording can no longer outlive its run.
 
+A CANCEL MEANS EVERY GOAL ON THE BOARD, not only this node's own (flag ``cancel_every_goal``):
+both navigators' cancel services are asked with a zero goal id, exactly as ``goto_ros.py cancel``
+asks them, so a drive ``ros/goto.sh`` started through goto_ros.py is stopped from here too — by a
+socket write from the laptop (pepin.goal_link) instead of a fresh ROS process on the board, whose
+new zenoh session stalls every laptop -> board stream for about three seconds.
+
 WHERE THE POSE COMES FROM. On a saved map the scan-matching tracker is the answer to both "where
 am I" and "may I drive": it serves ``/where_am_i`` and publishes ``/localization_fit``. In online
 SLAM that node does not run at all — RTAB-Map owns the pose on the laptop and the board's
@@ -69,6 +75,7 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
+from action_msgs.srv import CancelGoal
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from lifecycle_msgs.srv import ChangeState, GetState
@@ -89,6 +96,7 @@ from pepin.deployment import (
     runs_here,
 )
 from pepin.flags import Flag, FlagSet
+from pepin.goal_link import CANCEL_CONFIRM_S, NAV_ACTIONS, cancel_outcome
 from pepin.places import PLACES_TOPIC, heading_residual_deg, places_from_json
 from pepin.runlink import (
     RUN_COMMAND_TOPIC,
@@ -343,6 +351,24 @@ FLAGS = FlagSet(
         " says: pepin-vslam down or started before this build (ros/laptop.sh vslam restarts it"
         " on the checkout), or a dark room with no seed at hand",
     ),
+    Flag(
+        "cancel_every_goal",
+        True,
+        description="a cancel on the socket also asks both navigators' own cancel services"
+        f" ({' and '.join(NAV_ACTIONS)}, <action>/_action/cancel_goal) for EVERY goal — a zero"
+        " goal id, whoever sent it — and answers what each said (``navigators``); off, it"
+        " cancels only the goal this node sent, as before 2026-09-25",
+        why="ros/goto.sh drives through ros/tools/goto_ros.py, a goal this node never sent, so"
+        " this cancel reached nothing, and goto.sh's own cancel started goto_ros.py on the board"
+        " mid-drive: a new ROS process is a new zenoh session, and each one stalled all laptop ->"
+        " board delivery for 2.6-3.1 s about 1.5 s after it started (34 of 39 cases, journal"
+        " 2026-09-25). Asked from this long-lived node the same cancel costs a socket write;"
+        f" one {CANCEL_CONFIRM_S:.0f} s deadline is shared by both navigators, as in goto_ros.py",
+        on_when="always: the operator's cancel means every goal on the board, whichever client"
+        " sent it",
+        off_when="to put the old answer back for a comparison — pepin.goal_link then finds no"
+        " navigators in the answer and ros/goto.sh cancel falls back to goto_ros.py",
+    ),
 )
 
 PLANNERS = {
@@ -385,6 +411,12 @@ class GoalServer(Node):
         self._spin = ActionClient(self, Spin, "spin")
         self._relocalize = self.create_client(Trigger, "relocalize")
         self._where = self.create_client(Trigger, "where_am_i")
+        # Every goal on either navigator, whoever sent it (flag cancel_every_goal): the action
+        # servers' own cancel services, made once here so a cancel never waits for discovery.
+        self._cancel_clients = {
+            action: self.create_client(CancelGoal, f"/{action}/_action/cancel_goal")
+            for action in NAV_ACTIONS
+        }
         self.fit = 0.0
         self._fit_heard = False  # a tracker has spoken here at least once
         self._tracker_probed = False  # ...or its service was waited for, once (_tracker_here)
@@ -752,7 +784,14 @@ class GoalServer(Node):
         elif command == "planner":
             self._send(connection, self.pick_planner(str(request.get("name", ""))))
         elif command == "cancel":
-            self._send(connection, {"event": "cancelled", "had_goal": self.cancel()})
+            # Under cancel_every_goal this node's own goal is one of "every": its handle is only
+            # let go here, so the navigators' answer counts it once instead of rejecting a goal
+            # a second request had already put into canceling.
+            every = self._switches.on("cancel_every_goal")
+            answer: dict[str, Any] = {"event": "cancelled", "had_goal": self.cancel(send=not every)}
+            if every:
+                answer["navigators"] = self.cancel_every_goal()
+            self._send(connection, answer)
         elif command == "go":
             self._go(request, connection)
         else:
@@ -949,19 +988,56 @@ class GoalServer(Node):
         if name == "controller" and new != old:
             self.pick_planner(self.planner)
 
-    def cancel(self) -> bool:
+    def cancel(self, send: bool = True) -> bool:
         """Stop the running drive, if any; True when there was one.
 
         Clears ``_driving`` as well as the handle: during the lost -> relocalise -> resume window
         there is no handle to cancel, and the flag is what stops the resume from re-sending the
-        goal the operator just cancelled.
+        goal the operator just cancelled. ``send=False`` lets the handle go without cancelling
+        it: the caller cancels every goal on the navigator itself (:meth:`cancel_every_goal`).
         """
         with self._lock:
             handle, self._goal_handle = self._goal_handle, None
             was_driving, self._driving = self._driving, False
-        if handle is not None:
+        if handle is not None and send:
             handle.cancel_goal_async()
         return was_driving
+
+    def cancel_every_goal(self) -> dict[str, dict[str, Any]]:
+        """Cancel every goal on both navigators, whoever sent it; what each said, per action.
+
+        A zero goal id and stamp in ``CancelGoal`` means all goals (goto_ros.py's ``cancel_all``,
+        asked from here). Both requests go out before either answer is awaited, and one
+        :data:`CANCEL_CONFIRM_S` deadline covers the whole cancel. Each entry is ``outcome`` in
+        goto_ros.py's words, plus ``cancelling`` (how many goals) when the navigator answered.
+        """
+        deadline = time.monotonic() + CANCEL_CONFIRM_S
+        said: dict[str, dict[str, Any]] = {}
+        pending: dict[str, Any] = {}
+        for index, (action, client) in enumerate(self._cancel_clients.items()):
+            share = max(deadline - time.monotonic(), 0.0) / (len(self._cancel_clients) - index)
+            if not client.service_is_ready() and not client.wait_for_service(
+                timeout_sec=share / 2.0
+            ):
+                said[action] = {"outcome": "no server answered"}
+                continue
+            pending[action] = client.call_async(CancelGoal.Request())
+        for action, future in pending.items():
+            answer = self._wait(future, max(deadline - time.monotonic(), 0.0))
+            if answer is None:
+                said[action] = {
+                    "outcome": f"NOT confirmed in {CANCEL_CONFIRM_S:.0f} s — use ros/stop.sh"
+                }
+                continue
+            said[action] = {
+                "outcome": cancel_outcome(int(answer.return_code)),
+                "cancelling": len(answer.goals_canceling),
+            }
+        self.get_logger().info(
+            "cancel every goal: "
+            + "; ".join(f"{action} {said[action]['outcome']}" for action in self._cancel_clients)
+        )
+        return {action: said[action] for action in self._cancel_clients}
 
     def _go(
         self,

@@ -214,6 +214,13 @@ class Trigger:
     Response = _msg("Trigger_Response", success=False, message="")
 
 
+class CancelGoal:
+    """action_msgs/CancelGoal: an empty request is every goal; the answer a code and the goals."""
+
+    Request = _msg("CancelGoal_Request")
+    Response = _msg("CancelGoal_Response", return_code=0, goals_canceling=list)
+
+
 class Empty:
     """std_srvs/Empty: nothing in and nothing out, which is the whole of RTAB-Map's two set_mode
     services and of its ``update_parameters``."""
@@ -905,6 +912,7 @@ def install() -> Any:
         "action_msgs.msg": _module(
             "action_msgs.msg", GoalStatus=GoalStatus, GoalStatusArray=GoalStatusArray
         ),
+        "action_msgs.srv": _module("action_msgs.srv", CancelGoal=CancelGoal),
         "std_srvs": _module("std_srvs"),
         "std_srvs.srv": _module("std_srvs.srv", Trigger=Trigger, Empty=Empty),
         "tf2_msgs": _module("tf2_msgs"),
