@@ -41,8 +41,8 @@ def test_each_arrow_latches_its_twist(key: str, twist: Twist) -> None:
 
 
 def test_speeds_are_the_max_and_the_parking_min() -> None:
-    assert apply_key(DriveState(), UP).twist == Twist(0.15, 0.0)
-    assert apply_key(DriveState(), LEFT).twist == Twist(0.0, 0.5)
+    assert apply_key(DriveState(), UP).twist == Twist(0.30, 0.0)
+    assert apply_key(DriveState(), LEFT).twist == Twist(0.0, 1.0)
     assert apply_key(DriveState(), S_UP).twist == Twist(0.04, 0.0)
     assert apply_key(DriveState(), S_LEFT).twist == Twist(0.0, 0.15)
 

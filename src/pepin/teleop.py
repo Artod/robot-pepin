@@ -23,8 +23,8 @@ from typing import Any
 
 from pepin.kinematics import Twist
 
-FAST_LINEAR_M_S = 0.15  # the base bridge caps forward speed here anyway
-FAST_ANGULAR_RAD_S = 0.5
+FAST_LINEAR_M_S = 0.30  # config/base.json max_speed_m_s: the base clips anything above
+FAST_ANGULAR_RAD_S = 1.0  # config/base.json max_yaw_rate_rad_s
 SLOW_LINEAR_M_S = 0.04  # Shift: aiming and parking
 SLOW_ANGULAR_RAD_S = 0.15
 
