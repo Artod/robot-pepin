@@ -94,6 +94,12 @@ DISPARITY_SIGMA_PX = 0.5
 DEPTH_SIGMA_M = 0.10  # the depth error at which this camera stops answering for its own depth
 MODES = ("sgbm", "hh", "hh4", "3way")
 MATCHERS = ("sgbm", "raft")  # which engine answers a pair; the node's stereo_matcher flag
+# A rectified eye's "no data": pure black regions that touch the picture's border and are at least
+# this many pixels — the fold mask's corners (pepin.stereo.fold_free), never a dark object in the
+# middle of a room. Grown by NO_DATA_GROW_PX before the depth is cut, because a matcher's receptive
+# field reads a few pixels across the black edge (journal 2026-09-24, the corner 'crack').
+NO_DATA_MIN_PX = 20
+NO_DATA_GROW_PX = 6
 
 
 class DisparityMatcher(Protocol):
@@ -563,6 +569,58 @@ def _textureless(grey: Array, threshold: float, window: int) -> Array | None:
     return out
 
 
+def no_data(picture: Array) -> Array:
+    """Pixels of a rectified eye that carry no picture: border-touching pure-black regions of at
+    least :data:`NO_DATA_MIN_PX`, grown by :data:`NO_DATA_GROW_PX`. Boolean, the picture's size."""
+    import cv2
+
+    black: Array = (picture == 0) if picture.ndim == 2 else np.all(picture == 0, axis=2)
+    if not black.any():
+        return black
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        black.astype(np.uint8), connectivity=8
+    )
+    h, w = black.shape
+    keep = np.zeros(count, dtype=bool)
+    for k in range(1, count):
+        x, y, bw, bh, area = stats[k]
+        keep[k] = area >= NO_DATA_MIN_PX and (x == 0 or y == 0 or x + bw == w or y + bh == h)
+    out: Array = keep[labels]
+    if out.any() and NO_DATA_GROW_PX > 0:
+        size = 2 * NO_DATA_GROW_PX + 1
+        out = cv2.dilate(out.astype(np.uint8), np.ones((size, size), np.uint8)).astype(bool)
+    return out
+
+
+def cut_no_data(depth: Array, disparity: Array, left: Array, right: Array) -> int:
+    """NaN wherever the left pixel has no picture or its partner in the right eye (x - disparity,
+    same row) has none; the depth is changed in place. Returns how many pixels were cut."""
+    left_none, right_none = no_data(left), no_data(right)
+    if not (left_none.any() or right_none.any()):
+        return 0
+    if left_none.shape != depth.shape:  # a matcher that answers at another size
+        import cv2
+
+        size = (depth.shape[1], depth.shape[0])
+        left_none = cv2.resize(
+            left_none.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST
+        ).astype(bool)
+        right_none = cv2.resize(
+            right_none.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST
+        ).astype(bool)
+    cut = left_none.copy()
+    if right_none.any():
+        rows, cols = np.nonzero(np.isfinite(depth) & ~left_none)
+        partner = np.clip(
+            np.rint(cols - disparity[rows, cols]).astype(np.int64), 0, depth.shape[1] - 1
+        )
+        hit = right_none[rows, partner]
+        cut[rows[hit], cols[hit]] = True
+    cut &= np.isfinite(depth)
+    depth[cut] = np.nan
+    return int(np.count_nonzero(cut))
+
+
 class StereoDepth:
     """The stereo head as a raw depth source: a left eye and a right eye of the SAME moment, both
     rectified, in — a float32 depth image in metres out, NaN where the match failed and NaN past
@@ -587,6 +645,7 @@ class StereoDepth:
         self._reach = float(reach)
         self._geometry: DisparityToDepth | None = None
         self.frames = 0
+        self.no_data_cut = 0  # pixels of depth cut because an eye had no picture there
         if geometry is not None:
             self.geometry = geometry
 
@@ -631,6 +690,9 @@ class StereoDepth:
         with self.timing["total"].measure():
             disparity = self.matcher(left, right)
             depth = geometry.depth_m(disparity)
+            self.no_data_cut += cut_no_data(
+                depth, np.asarray(disparity, dtype=np.float32), left, right
+            )
             if self._reach > 0.0:
                 depth[depth > np.float32(self._reach)] = np.nan
             self.frames += 1
@@ -642,5 +704,6 @@ class StereoDepth:
         answered for, and the near and far end of what this rig measures."""
         return (
             f"{self.matcher.describe()}, {self.valid_fraction * 100:.0f}% valid,"
-            f" {self.near:.2f}-{self._reach:.2f} m"
+            f" {self.near:.2f}-{self._reach:.2f} m,"
+            f" {self.no_data_cut} px cut where an eye had no picture"
         )

@@ -1,5 +1,214 @@
 {
   "configById": {
+    "3D!planner": {
+      "cameraState": {
+        "perspective": false,
+        "distance": 8,
+        "phi": 0.001,
+        "thetaOffset": 0,
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followTf": "base_link",
+      "followMode": "follow-position",
+      "scene": {
+        "enableStats": false,
+        "backgroundColor": "#1b1b1b"
+      },
+      "transforms": {
+        "frame:map": {
+          "visible": true
+        },
+        "frame:odom": {
+          "visible": true
+        },
+        "frame:base_link": {
+          "visible": true
+        },
+        "frame:camera_link": {
+          "visible": false
+        },
+        "frame:laser": {
+          "visible": false
+        }
+      },
+      "topics": {
+        "/scan": {
+          "visible": true,
+          "pointSize": 3,
+          "colorField": "intensity",
+          "colorMode": "flat",
+          "flatColor": "#4fc3f7"
+        },
+        "/local_costmap/published_footprint": {
+          "visible": true,
+          "lineWidth": 0.03,
+          "color": "#2979ff"
+        },
+        "/global_costmap/costmap_live": {
+          "visible": true,
+          "colorMode": "costmap",
+          "alpha": 0.9
+        },
+        "/plan": {
+          "visible": true,
+          "color": "#00e676"
+        }
+      },
+      "layers": {
+        "grid": {
+          "visible": true,
+          "frameId": "map",
+          "layerId": "foxglove.Grid",
+          "size": 20,
+          "divisions": 20,
+          "lineWidth": 1,
+          "color": "#404040",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "order": 1
+        }
+      },
+      "publish": {
+        "type": "pose",
+        "poseTopic": "/goal_pose",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose"
+      },
+      "foxglovePanelTitle": "PLANNER \u2014 global costmap, live"
+    },
+    "3D!controller": {
+      "cameraState": {
+        "perspective": false,
+        "distance": 8,
+        "phi": 0.001,
+        "thetaOffset": 0,
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followTf": "base_link",
+      "followMode": "follow-position",
+      "scene": {
+        "enableStats": false,
+        "backgroundColor": "#1b1b1b"
+      },
+      "transforms": {
+        "frame:map": {
+          "visible": true
+        },
+        "frame:odom": {
+          "visible": true
+        },
+        "frame:base_link": {
+          "visible": true
+        },
+        "frame:camera_link": {
+          "visible": false
+        },
+        "frame:laser": {
+          "visible": false
+        }
+      },
+      "topics": {
+        "/scan": {
+          "visible": true,
+          "pointSize": 3,
+          "colorField": "intensity",
+          "colorMode": "flat",
+          "flatColor": "#4fc3f7"
+        },
+        "/local_costmap/published_footprint": {
+          "visible": true,
+          "lineWidth": 0.03,
+          "color": "#2979ff"
+        },
+        "/local_costmap/costmap": {
+          "visible": true,
+          "colorMode": "costmap",
+          "alpha": 0.9,
+          "frameLocked": true
+        },
+        "/plan": {
+          "visible": true,
+          "color": "#00e676"
+        },
+        "/local_plan": {
+          "visible": true,
+          "color": "#ffea00"
+        }
+      },
+      "layers": {
+        "grid": {
+          "visible": true,
+          "frameId": "map",
+          "layerId": "foxglove.Grid",
+          "size": 20,
+          "divisions": 20,
+          "lineWidth": 1,
+          "color": "#404040",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "order": 1
+        }
+      },
+      "publish": {
+        "type": "pose",
+        "poseTopic": "/goal_pose",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose"
+      },
+      "foxglovePanelTitle": "CONTROLLER \u2014 local costmap"
+    },
     "3D!slam": {
       "cameraState": {
         "perspective": true,
@@ -223,9 +432,10 @@
         "poseTopic": "/goal_pose",
         "pointTopic": "/clicked_point",
         "poseEstimateTopic": "/initialpose"
-      }
+      },
+      "foxglovePanelTitle": "SLAM \u2014 voxels, maps, everything"
     },
-    "Image!head": {
+    "Image!left": {
       "cameraState": {
         "distance": 20,
         "perspective": false,
@@ -257,25 +467,69 @@
       "transforms": {},
       "topics": {}
     },
-    "RosOut!log": {
-      "searchTerms": [
-        "rtabmap",
-        "rtabmap_frame",
-        "slam_frame",
-        "planner_server",
-        "controller_server",
-        "bt_navigator"
-      ],
-      "minLogLevel": 2,
-      "nameFilter": {}
+    "Image!right": {
+      "cameraState": {
+        "distance": 20,
+        "perspective": false,
+        "phi": 60,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 45,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "imageMode": {
+        "imageTopic": "/camera/right/image"
+      },
+      "transforms": {},
+      "topics": {}
     },
-    "RawMessages!audit": {
-      "topicPath": "/marks_audit",
-      "diffEnabled": false,
-      "diffMethod": "custom",
-      "diffTopicPath": "",
-      "showFullMessageForDiff": false,
-      "expansion": "all"
+    "Image!depth": {
+      "cameraState": {
+        "distance": 20,
+        "perspective": false,
+        "phi": 60,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 45,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "imageMode": {
+        "imageTopic": "/camera/depth"
+      },
+      "transforms": {},
+      "topics": {}
     }
   },
   "globalVariables": {},
@@ -284,19 +538,29 @@
     "speed": 1
   },
   "layout": {
-    "direction": "row",
-    "first": "3D!slam",
-    "second": {
-      "direction": "column",
-      "first": "Image!head",
+    "first": {
+      "first": "3D!planner",
       "second": {
-        "direction": "column",
-        "first": "RawMessages!audit",
-        "second": "RosOut!log",
-        "splitPercentage": 40
+        "first": "3D!controller",
+        "second": "3D!slam",
+        "direction": "row",
+        "splitPercentage": 50
       },
-      "splitPercentage": 50
+      "direction": "row",
+      "splitPercentage": 33.3
     },
-    "splitPercentage": 70
+    "second": {
+      "first": "Image!left",
+      "second": {
+        "first": "Image!right",
+        "second": "Image!depth",
+        "direction": "column",
+        "splitPercentage": 50
+      },
+      "direction": "column",
+      "splitPercentage": 33.3
+    },
+    "direction": "row",
+    "splitPercentage": 75
   }
 }

@@ -151,6 +151,18 @@ FLAGS = FlagSet(
         " straight lines",
     ),
     Flag(
+        "fold_mask",
+        True,
+        description="stereo: rectified pixels past a fold of the calibration's undistortion map"
+        " (the lens corners the board never reached) go out black, as no data, and the depth there"
+        " is cut; off publishes the mirrored corners as before",
+        why="measured 2026-09-24 (scratch/stereo/fold_check.py): the left eye's map folds back in"
+        " both bottom corners, 0.4 % of the picture, the 'crack' Artem saw, and camera phantoms"
+        " lined up along it",
+        on_when="always on a stereo head calibrated without the corners",
+        off_when="a calibration that covers the corners (fold_check.py finds no fold)",
+    ),
+    Flag(
         "static_camera_tf",
         True,
         description="base_link -> camera_link is broadcast from here; it goes off (ros/laptop.sh"
@@ -334,7 +346,9 @@ class CameraStream(Node):
         try:
             mtime = file.stat().st_mtime
             calibration = StereoCalibration.load(file)
-            rectifier = Rectifier.from_calibration(calibration)
+            rectifier = Rectifier.from_calibration(
+                calibration, mask_folds=self._switches.on("fold_mask")
+            )
         except FileNotFoundError:
             self._calibration_mtime, self._calibration_source = None, f"no {file.name} yet"
             return None
@@ -512,6 +526,10 @@ class CameraStream(Node):
         ``static_camera_tf`` never reaches here — it is declared ``live=False`` and the kit
         refuses the change with that reason, because the transforms went out at start and a
         static one cannot be withdrawn."""
+        if name == "fold_mask":
+            self._calibration_mtime = None  # the next calibration check rebuilds the tables
+            self._calibration_checked = 0.0
+            return
         if name == "scale":
             if float(new) <= 0.0:
                 raise ValueError("scale is a fraction of the camera's picture, not zero")

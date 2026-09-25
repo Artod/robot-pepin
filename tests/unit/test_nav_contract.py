@@ -3069,7 +3069,8 @@ def test_the_laser_odometry_is_a_twist_the_filter_can_weigh_and_never_a_second_t
         "ros__parameters"
     ]
     assert ekf["odom3"] == LASER_ODOM_TOPIC
-    assert ekf["odom3_config"][6] is True and ekf["odom3_config"][11] is True, "vx and vyaw"
+    assert ekf["odom3_config"][6] is True, "vx: the lidar's witness of distance"
+    assert ekf["odom3_config"][11] is False, "vyaw: +4.3 deg/min at rest, the parked heading creep"
     assert not any(ekf["odom3_config"][:6]), "no pose: it would fight the wheels' integration"
     assert ekf["odom3_config"][7] is False, "the wheels' vy = 0 is the kinematic truth, not this"
     assert ekf["odom3_differential"] is False, "a velocity is already differential"

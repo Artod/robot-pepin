@@ -261,3 +261,34 @@ def test_every_pair_is_timed_and_the_valid_share_is_kept_for_the_report(planes: 
     assert 0.5 < depth.valid_fraction < 1.0
     words = depth.describe()
     assert "128px/5px 3way" in words and "% valid" in words and "0.18-" in words
+
+
+def test_no_data_is_the_black_corner_not_a_dark_spot_inside() -> None:
+    """A border-touching black corner is no data (grown by the margin); a black blob in the
+    middle of the picture is a dark object and stays."""
+    from pepin.stereo_depth import NO_DATA_GROW_PX, no_data
+
+    picture = np.full((60, 80, 3), 30, dtype=np.uint8)
+    picture[50:, :10] = 0
+    picture[20:28, 30:38] = 0
+    none = no_data(picture)
+    assert none[55, 5] and none[55, 10 + NO_DATA_GROW_PX - 1]
+    assert not none[24, 34]
+
+
+def test_cut_no_data_cuts_the_left_corner_and_the_right_partner() -> None:
+    """Depth goes NaN on the left eye's black corner and where the right partner (x - d) is
+    black."""
+    from pepin.stereo_depth import cut_no_data
+
+    left = np.full((60, 80), 30, dtype=np.uint8)
+    right = left.copy()
+    left[50:, :10] = 0
+    right[:30, 70:] = 0
+    depth = np.ones((60, 80), dtype=np.float32)
+    disparity = np.full((60, 80), 5.0, dtype=np.float32)
+    cut = cut_no_data(depth, disparity, left, right)
+    assert cut > 0
+    assert np.isnan(depth[55, 5])
+    assert np.isnan(depth[10, 78])  # its partner at x 73 is in the right eye's black corner
+    assert depth[30, 40] == 1.0

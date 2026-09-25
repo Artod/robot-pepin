@@ -60,7 +60,7 @@ case "${1:-}" in
     exit ;;
   # The header promised this for weeks while the case fell through to "drive to a place called
   # cancel" (2026-09-14 11:20: the cart went on butting a table for a minute after the "cancel").
-  cancel) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh timeout 5 python3 /tools/goto_ros.py cancel"; exit ;;
+  cancel) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh timeout 25 python3 /tools/goto_ros.py cancel"; exit ;;
   # A whole-map search is the TRACKER's recovery and has no counterpart in the other role: there
   # RTAB-Map recognises the room by itself and a refusal must say so rather than hang on a service
   # nobody serves.

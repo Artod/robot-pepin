@@ -202,6 +202,13 @@ RTABMAP = {
     # default 0 — which DISABLES one-to-many proximity detection, the path most of this graph's
     # proximity links come from. Same value the wrapper used to insert, so the graph is unchanged.
     "RGBD/ProximityPathMaxNeighbors": "10",
+    # RTAB-Map's own defaults, named so they can be set live (CoreWrapper sees only the table's
+    # names): the parked A/B of 2026-09-25 against the node-to-node yaw flicker of the
+    # descriptor's localisations (scratch/pose_jumps/, journal 2026-09-25).
+    "RGBD/ProximityGlobalScanMap": "false",
+    "RGBD/MaxLoopClosureDistance": "0.0",
+    "RGBD/ProximityOdomGuess": "false",
+    "RGBD/ProximityMergedScanCovFactor": "100.0",
     # A node with NO PICTURE — which is what a lidar-only snapshot makes — is a "bad signature":
     # isBadSignature() is exactly "no visual words" (rtabmap/core/Signature.cpp:341-344). This
     # false is what KEEPS it: Memory::cleanup() moves the last signature to the trash only when
@@ -912,6 +919,16 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 "send_buffer_limit": 100_000_000,
                 "topic_whitelist": [".*"],
                 "max_qos_depth": 25,
+                # No parameter capabilities: with them the bridge opens a parameter client to
+                # every node it ever sees and never closes it (877 of the graph's 1960 entities
+                # on 2026-09-25, half of them to dead nodes), and every new session must learn
+                # them all. PEPIN_FOXGLOVE_PARAMETERS=1 brings the Parameters panel back.
+                "capabilities": ["clientPublish", "services", "connectionGraph", "assets"]
+                + (
+                    ["parameters", "parametersSubscribe"]
+                    if os.environ.get("PEPIN_FOXGLOVE_PARAMETERS") == "1"
+                    else []
+                ),
             }
         ],
         prefix=_after_ghost("/foxglove_bridge"),

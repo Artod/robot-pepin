@@ -162,7 +162,7 @@ def _image(stamp: Any) -> Any:
         width=WIDTH,
         encoding="bgr8",
         step=WIDTH * 3,
-        data=bytes(WIDTH * HEIGHT * 3),
+        data=bytes([128]) * (WIDTH * HEIGHT * 3),  # grey: pure black is an eye's 'no data'
     )
 
 
@@ -1215,7 +1215,7 @@ def _right_image(stamp: Any) -> Any:
         width=WIDTH,
         encoding="mono8",
         step=WIDTH,
-        data=bytes(WIDTH * HEIGHT),
+        data=bytes([128]) * (WIDTH * HEIGHT),  # grey: pure black is an eye's 'no data'
     )
 
 

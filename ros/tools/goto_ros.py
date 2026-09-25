@@ -132,7 +132,9 @@ FLAG_WAIT_S = 2.0
 # latched publisher delivers as soon as the two endpoints match, so this covers discovery over the
 # bridge and nothing else: the same 2 s every other "has the route come up" wait here uses, and a
 # drive must not pay more than that for a vocabulary that may simply not exist in this room.
-PLACES_WAIT_S = 2.0
+# 10 s since 2026-09-24: 2 s missed the latched book under load and the drive went to another map's
+# shelf (Vocabulary.resolve now refuses instead of falling back to the file).
+PLACES_WAIT_S = 10.0
 # ...and how long a MARK is given to be answered. Longer, because it is the whole round trip: the
 # request over the bridge, three of RTAB-Map's own services on the laptop, a file written, and the
 # answer back. The same patience the recorder gets, for the same reason — it answers over a bridge.
@@ -506,6 +508,17 @@ class Vocabulary:
     def resolve(self, name: str) -> tuple[float, float, float] | None:
         """``(x, y, yaw_deg)`` for a name — from the graph if it can answer, else from the file —
         or ``None`` when neither knows it. Says which book answered, every time."""
+        if not self._heard:
+            # The file beside the map was written for a FROZEN map in another frame: on 2026-09-24
+            # a 2 s miss of the latched book sent the cart to (-10.06, -0.43), flat3_straight's
+            # shelf. No answer from the graph is a refusal, never a silent fallback.
+            print(
+                f"!! no answer on {PLACES_TOPIC} within {PLACES_WAIT_S:.0f} s: refusing"
+                f" {name!r} rather than fall back to {self._path} (a frozen map's"
+                " coordinates); run the goal again",
+                flush=True,
+            )
+            return None
         place = self._graph.get(name)
         if place is not None:
             print(
