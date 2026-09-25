@@ -132,7 +132,8 @@ def run(driver: Driver, robot: Robot, keys: KeyReader, viewer: Viewer) -> Status
     status: Status | None = None
     while True:
         tick = time.monotonic()
-        action = KEY_BINDINGS.get(keys.read() or "")
+        key = keys.read() or ""
+        action = "quit" if key == "q" else KEY_BINDINGS.get(key)  # Q is this script's own
         if action == "quit":
             driver.cancel()
             return status

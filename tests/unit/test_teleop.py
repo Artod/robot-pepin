@@ -1,54 +1,91 @@
+from collections.abc import Callable, Iterator
+
 import pytest
 
 from pepin.kinematics import Twist
-from pepin.teleop import DriveState, apply_key
+from pepin.teleop import (
+    FAST_ANGULAR_RAD_S,
+    FAST_LINEAR_M_S,
+    SLOW_ANGULAR_RAD_S,
+    SLOW_LINEAR_M_S,
+    DriveState,
+    apply_key,
+    read_key,
+)
+
+UP, DOWN, RIGHT, LEFT = "\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D"
+S_UP, S_DOWN, S_RIGHT, S_LEFT = "\x1b[1;2A", "\x1b[1;2B", "\x1b[1;2C", "\x1b[1;2D"
 
 
-def test_forward_and_left_accumulate_in_steps() -> None:
-    s = DriveState(linear_step=0.1, angular_step=0.5)
-    s = apply_key(apply_key(s, "w"), "w")
-    s = apply_key(s, "\x1b[D")
-    assert s.twist == Twist(pytest.approx(0.2), pytest.approx(0.5))
+def chars(text: str) -> Callable[[float], str | None]:
+    """A fake terminal: hands out ``text`` one character per call, then None."""
+    it: Iterator[str] = iter(text)
+    return lambda _timeout_s: next(it, None)
 
 
-def test_space_stops_and_q_quits_stopped() -> None:
-    s = apply_key(DriveState(), "w")
-    assert apply_key(s, " ").twist == Twist(0.0, 0.0)
-    q = apply_key(s, "q")
-    assert q.quit and q.twist == Twist(0.0, 0.0)
+@pytest.mark.parametrize(
+    ("key", "twist"),
+    [
+        (UP, Twist(FAST_LINEAR_M_S, 0.0)),
+        (DOWN, Twist(-FAST_LINEAR_M_S, 0.0)),
+        (LEFT, Twist(0.0, FAST_ANGULAR_RAD_S)),
+        (RIGHT, Twist(0.0, -FAST_ANGULAR_RAD_S)),
+        (S_UP, Twist(SLOW_LINEAR_M_S, 0.0)),
+        (S_DOWN, Twist(-SLOW_LINEAR_M_S, 0.0)),
+        (S_LEFT, Twist(0.0, SLOW_ANGULAR_RAD_S)),
+        (S_RIGHT, Twist(0.0, -SLOW_ANGULAR_RAD_S)),
+    ],
+)
+def test_each_arrow_latches_its_twist(key: str, twist: Twist) -> None:
+    assert apply_key(DriveState(), key).twist == twist
 
 
-def test_forward_while_turning_cancels_the_turn() -> None:
-    s = apply_key(DriveState(linear_step=0.1, angular_step=0.5), "a")
-    s = apply_key(s, "w")
-    assert s.twist == Twist(pytest.approx(0.1), 0.0)
+def test_speeds_are_the_max_and_the_parking_min() -> None:
+    assert apply_key(DriveState(), UP).twist == Twist(0.30, 0.0)
+    assert apply_key(DriveState(), LEFT).twist == Twist(0.0, 1.0)
+    assert apply_key(DriveState(), S_UP).twist == Twist(0.04, 0.0)
+    assert apply_key(DriveState(), S_LEFT).twist == Twist(0.0, 0.15)
 
 
-def test_backward_while_turning_cancels_the_turn() -> None:
-    s = apply_key(DriveState(linear_step=0.1, angular_step=0.5), "\x1b[C")
-    s = apply_key(s, "\x1b[B")
-    assert s.twist == Twist(pytest.approx(-0.1), 0.0)
+def test_a_key_replaces_the_latched_command_and_repeats_do_not_accumulate() -> None:
+    s = apply_key(apply_key(DriveState(), UP), UP)
+    assert s.twist == Twist(FAST_LINEAR_M_S, 0.0)
+    assert apply_key(s, LEFT).twist == Twist(0.0, FAST_ANGULAR_RAD_S)
 
 
-def test_turning_while_moving_keeps_the_linear_speed() -> None:
-    s = apply_key(DriveState(linear_step=0.1, angular_step=0.5), "w")
-    s = apply_key(s, "d")
-    assert s.twist == Twist(pytest.approx(0.1), pytest.approx(-0.5))
+def test_space_stops() -> None:
+    assert apply_key(apply_key(DriveState(), UP), " ").twist == Twist(0.0, 0.0)
 
 
-def test_unknown_keys_are_ignored() -> None:
-    s = DriveState()
-    assert apply_key(s, "x") == s
+@pytest.mark.parametrize("key", ["x", "q", "w", "ц", "k", "\x1b", "\x1b[1;5A", "\n"])
+def test_other_keys_change_nothing(key: str) -> None:
+    s = apply_key(DriveState(), UP)
+    assert apply_key(s, key) == s
 
 
-def test_russian_layout_drives_the_same_keys() -> None:
-    latin = apply_key(apply_key(DriveState(), "w"), "a")
-    cyrillic = apply_key(apply_key(DriveState(), "ц"), "ф")
-    assert cyrillic.twist == latin.twist
-    assert apply_key(DriveState(), "й").quit
+@pytest.mark.parametrize("seq", [UP, DOWN, LEFT, RIGHT, S_UP, S_DOWN, S_LEFT, S_RIGHT])
+def test_read_key_assembles_whole_arrow_sequences(seq: str) -> None:
+    assert read_key(chars(seq)) == seq
 
 
-def test_key_reader_without_a_terminal_reads_nothing_and_raises_nothing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_read_key_splits_consecutive_keys() -> None:
+    source = chars(S_UP + " " + LEFT + "x")
+    assert [read_key(source) for _ in range(5)] == [S_UP, " ", LEFT, "x", None]
+
+
+def test_read_key_plain_lone_escape_and_nothing_pending() -> None:
+    assert read_key(chars(" ")) == " "
+    assert read_key(chars("\x1b")) == "\x1b"
+    assert read_key(chars("")) is None
+
+
+def test_read_key_bounds_a_runaway_sequence() -> None:
+    assert read_key(chars("\x1b[" + "1" * 50)) == "\x1b[111111"
+
+
+def test_key_reader_without_a_terminal_reads_nothing_and_raises_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import os
     import sys
 

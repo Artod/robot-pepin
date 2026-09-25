@@ -30,6 +30,7 @@ setup(
             "run_recorder = pepin_bringup.run_recorder:main",
             "bag_recorder = pepin_bringup.bag_recorder:main",
             "slam_frame = pepin_bringup.slam_frame:main",
+            "teleop_keys = pepin_bringup.teleop_keys:main",
         ],
     },
 )
