@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Drive the base from the keyboard while recording odometry and lidar, with a live view.
 
-Keys: W/S change forward speed and straighten out, A/D change turn rate,
-space stops, Q quits, Ctrl-C stops cleanly. The hardware is one
+Keys: arrows latch driving or turning in place at full speed, Shift+arrows
+slow, space stops, Q quits, Ctrl-C stops cleanly. The hardware is one
 :class:`pepin.robot.Robot`: the board owns the wheels (its deadman stops the
 cart if our messages stop), this loop sends the wanted twist twenty times a
 second and reads what the feeds saw. Forward motion needs a lidar scan younger
@@ -176,7 +176,7 @@ def main() -> None:
             viewer = Viewer(enabled=not args.no_viz, grid=grid)
             guard = FootprintGuard(config.footprint)
             reflex = Reflex(ReflexConfig())  # teleop: a stale ToF does not hold a human's command
-            print("W/S speed  A/D turn  space stop  Q quit  Ctrl-C stop")
+            print("arrows drive, Shift+arrows slow, space stop, Q quit, Ctrl-C stop")
             with SessionRecorder("data/sessions", args.name) as rec, KeyReader() as keys:
                 rec.note(f"session {args.name} start")
                 t0 = time.monotonic()
@@ -187,9 +187,11 @@ def main() -> None:
                 last_reason = ""
                 link_warned = 0.0
                 latest_scan: LaserScan | None = None
-                while not state.quit:
+                while True:
                     tick = time.monotonic()
                     key = keys.read()
+                    if key == "q":  # this script's own quit key: the shared mapping has none
+                        break
                     if key is not None:
                         state = apply_key(state, key)
                     obs = robot.observe(tick)
