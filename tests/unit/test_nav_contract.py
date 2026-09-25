@@ -1725,9 +1725,15 @@ def test_the_volume_is_open_loop_and_no_slice_of_it_is_published() -> None:
     assert "self._world.integrate_scan" in calls and "self._world.integrate_depth" in calls
     assert "self._world.save" in calls
     topics = {s for s in sf.strings(node) if s == "/map" or s.startswith("/map_")}
-    assert topics == set(), f"the volume reaches no matcher and no planner: {topics}"
-    assert "occupancy_grid" not in sf.imported(node), "no grid leaves this node at all"
+    # /map is READ, for its lattice alone (grid_map_topic): nothing goes out on a map's name.
+    assert topics == {"/map"}, f"the volume reaches no matcher: {topics}"
+    assert sf.assignments(node)["MAP_TOPIC"] == "'/map'"
     flags = load_table(REPO / NODES / "depth_fusion.py")
+    # The one grid that does leave (grid_out, 2026-09-24) is an obstacle picture the costmaps'
+    # camera_grid_layer draws, never a map anything seats a pose on: its own names, off as shipped.
+    assert sf.assignments(node)["GRID_TOPIC"] == "'/camera_grid'"
+    assert sf.assignments(node)["GRID_MAP_TOPIC"] == "'/camera_grid_map'"
+    assert not flags.flag("grid_out").default, "the camera grids ship off"
     assert {"map_source", "map_hz", "lidar_map", "camera_map", "map_identity"}.isdisjoint(
         set(flags.names)
     ), "the flags that published the volume went with the publication"
@@ -2654,6 +2660,8 @@ def test_the_laptop_image_provides_what_the_laptop_nodes_import() -> None:
         "cv_bridge": ("ros-jazzy-cv-bridge",),
         # navigation2 depends on message_filters (nav2_costmap_2d): the base image carries it
         "message_filters": ("ros-jazzy-message-filters", "ros-jazzy-navigation2"),
+        # ...and on map_msgs (StaticLayer's OccupancyGridUpdate): depth_fusion's camera grids
+        "map_msgs": ("ros-jazzy-map-msgs", "ros-jazzy-navigation2"),
     }
     ros_core = {
         "rclpy", "tf2_ros", "std_msgs", "sensor_msgs", "geometry_msgs", "nav_msgs", "std_srvs",

@@ -195,6 +195,11 @@ PoseArray = _msg("PoseArray", header=Header, poses=list)
 Path_ = _msg("Path", header=Header, poses=list)
 MapMetaData = _msg("MapMetaData", resolution=0.0, width=0, height=0, origin=Pose)
 OccupancyGrid = _msg("OccupancyGrid", header=Header, info=MapMetaData, data=list)
+# map_msgs/OccupancyGridUpdate: a rectangle of a grid, what Nav2's StaticLayer reads on
+# <map_topic>_updates (pepin_bringup.depth_fusion's /camera_grid_map_updates).
+OccupancyGridUpdate = _msg(
+    "OccupancyGridUpdate", header=Header, x=0, y=0, width=0, height=0, data=list
+)
 Bool = _msg("Bool", data=False)
 Float32 = _msg("Float32", data=0.0)
 String = _msg("String", data="")
@@ -878,6 +883,8 @@ def install() -> Any:
             Twist=Twist,
             TwistStamped=TwistStamped,
         ),
+        "map_msgs": _module("map_msgs"),
+        "map_msgs.msg": _module("map_msgs.msg", OccupancyGridUpdate=OccupancyGridUpdate),
         "nav_msgs": _module("nav_msgs"),
         "nav_msgs.msg": _module(
             "nav_msgs.msg", OccupancyGrid=OccupancyGrid, Odometry=Odometry, Path=Path_
