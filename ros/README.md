@@ -85,7 +85,7 @@ silence as good news. What is checked:
 | 1.13 | **who is correcting the pose**: `map -> odom` is in TF and read where its publisher is — one rclpy node in the laptop's own container (`ros/tools/map_odom.py`), never on the board, whose /tf would cost it ~100 messages a second (CLAUDE.md rule 20). Two readings: the transform is **fresh** (re-broadcast at 20 Hz, so seconds of silence is a publisher that is gone) and it is **not the identity** (a localiser that has recognised nothing publishes `map == odom`, and every pose composed from it is simply the odometry's). The identity is a `WARN` while the laptop half is under 60 s old and a `FAIL` after that |
 | 1.12 | no thread of the Nav2 container is pegged: `ps -L` over ssh, the busiest thread's cumulative CPU time over the process's own lifetime. `range_sensor_layer.cpp:362-369` clamps its cell bounds and then walks them as `unsigned`, so a cone that falls off the grid's left or bottom edge runs ~4e9 iterations under the costmap mutex and writes **no log line at all** — one thread at 100 %, "Pose Goes Off Grid", services timing out, zero plans (reproduced 2026-09-21 with a kick of the board's old tracker: tid 191, 415 s of CPU in 700 s). `FAIL` above 0.90, `WARN` above 0.50 (nobody has yet measured what a healthy container's busiest thread costs — tighten it once a few restarts have printed theirs), `WARN` when the board could not be read |
 | 1.14 | `/odom_laser` is flowing (the EKF's `odom3`), measured the same way. Skipped with a `WARN` when `PEPIN_LASER_ODOM=false` on the board |
-| 1.15 | **informational (`PASS`/`WARN`, never fails, never a drive gate)**: the board's clock minus the laptop's — the Docker VM's, which every laptop ROS node stamps with — over NTP from the board to the laptop's time server (`ros/time.sh offset`: `src/pepin/timesync.py` piped into the board's `python3`, best of eight round trips). `WARN` over `PEPIN_CLOCK_WARN_MS` (100 ms), `WARN` "not measured" when the board cannot reach the server or `PEPIN_TIME_SOURCE=laptop` and no server runs here, `WARN` on a value that is neither `laptop` nor `pool`. Under `PEPIN_TIME_SOURCE=pool` (the default) with no server here it is a `PASS` "not measured, as configured": that is the configuration, not a fault. See "One clock" below |
+| 1.15 | **informational (`PASS`/`WARN`, never fails, never a drive gate)**: the board's clock minus the laptop's — the Docker VM's, which every laptop ROS node stamps with — over NTP from the board to the laptop's time server (`ros/time.sh offset`: `scripts/timesync.py` piped into the board's `python3`, best of eight round trips). `WARN` over `PEPIN_CLOCK_WARN_MS` (100 ms), `WARN` "not measured" when the board cannot reach the server or `PEPIN_TIME_SOURCE=laptop` and no server runs here, `WARN` on a value that is neither `laptop` nor `pool`. Under `PEPIN_TIME_SOURCE=pool` (the default) with no server here it is a `PASS` "not measured, as configured": that is the configuration, not a fault. See "One clock" below |
 
 `ros/tools/coldstart_soak.sh [N]` is the acceptance test behind checks 1.11 and 1.12: N cold starts of the
 board half (10 by default), each timed from `Activating planner_server` to the bond, with the
@@ -291,7 +291,7 @@ robot runs on one time base:
   through Docker Desktop 4.79's port publishing (Docker Engine 29.5.3; no sudo; the macOS firewall
   is off), and the VM's clock read 15 ms behind the Mac's. The path the design rests on, the board
   to the Mac's `udp/123` over the WiFi, measured on 2026-09-24 04:00Z with a throwaway server of the
-  same image and `laptop.conf` (on the board `python3 - 10.0.0.167 < src/pepin/timesync.py`, which
+  same image and `laptop.conf` (on the board `python3 - 10.0.0.167 < scripts/timesync.py`, which
   changes nothing there): 8 of 8 answers in each of three runs, best round trip 5-6 ms, board minus
   laptop +20.7 to +21.1 ms with the board still on systemd-timesyncd. chronyd logged all 32 queries
   (the Mac's 8, the board's 24) as coming from one address, 151.101.138.132, neither the Mac's nor
@@ -336,7 +336,7 @@ live, a `chronyc reload sources`, no restart and no step — and `ros/time.sh so
 way back. On the laptop the variable only decides whether `ros/laptop.sh` (re)starts the server;
 its default is `pool` — what the board runs today under systemd-timesyncd — until the deploy
 below has measured the laptop source on the robot, and then it flips to `laptop` in `ros/lib.sh`
-and `src/pepin/timesync.py` together. `ros/time.sh uninstall` puts the board on
+and `scripts/timesync.py` together. `ros/time.sh uninstall` puts the board on
 systemd-timesyncd exactly as before (the package's `.deb` is kept at install, so it works with
 apt offline; our sources file and the Debian config backup go with chrony). Check 1.15 answers at
 once while no server runs here (`PASS` "not measured, as configured" under `pool`), so an
@@ -356,7 +356,7 @@ by `ros/laptop.sh` before a half starts (`ros/lib.sh`'s `pepin_time_source_check
 3. `ros/time.sh offset` — under 100 ms; then `ros/board.sh census` for chronyd's real cost
    (`config/board_manifest.json` carries a guess).
 4. With the offset measured: `PEPIN_TIME_SOURCE` defaults to `laptop` in `ros/lib.sh` and
-   `DEFAULT_TIME_SOURCE` in `src/pepin/timesync.py` (and its test), one commit with the numbers.
+   `DEFAULT_TIME_SOURCE` in `scripts/timesync.py` (and its test), one commit with the numbers.
 5. Not verified from the laptop alone (the board is the client): that the board's chrony selects
    the laptop (`*` in `ros/time.sh status`) and that `timedatectl show -p NTPSynchronized` reads
    `yes` under chrony within the first minute after a reboot — the boot wait's premise.
@@ -1129,7 +1129,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Off when:* off to reproduce a costmap from before this gate
 - **`scan_honours_pan`** — bool, default on
   - *What:* fold /depth_scan onto the floor through the neck's pan: the fan's bearings turn with the head and its angular window turns with them, so angle_min comes out at pan - 40 deg instead of -40. The pan is the yaw of the same base_link <- camera_optical edge the volume path reads (camera_tf_latest); with no such edge the config mount's straight-ahead yaw stands in, and the report line's config counter says for how many frames. Off: the fan is projected as if the head looked along the cart's x, whatever the encoders say
-  - *Default:* on — the fan carried no pan at all until 2026-09-15, and the report line said so ('head panned N frames (projected as if not)'). At rest that is not nothing: the pan reference measured that day (config/neck.json pan_note, pepin.extrinsics.pan_from_bearings, six windows in four scenes) puts the resting head +0.79 deg left of the cart's x, which is 4 cm of bearing error at 3 m — under PAN_NOTICE_RAD, so the old fan did not even count it. A head panned on purpose puts the whole fan in the wrong place: 20 deg of neck is 20 deg of costmap, one metre sideways at 3 m
+  - *Default:* on — the fan carried no pan at all until 2026-09-15, and the report line said so ('head panned N frames (projected as if not)'). At rest that is not nothing: the pan reference measured that day (config/neck.json pan_note, scripts/extrinsics.py's pan_from_bearings, six windows in four scenes) puts the resting head +0.79 deg left of the cart's x, which is 4 cm of bearing error at 3 m — under PAN_NOTICE_RAD, so the old fan did not even count it. A head panned on purpose puts the whole fan in the wrong place: 20 deg of neck is 20 deg of costmap, one metre sideways at 3 m
   - *On when:* always once the neck's edge is in TF — a scan whose bearings are the cart's is what Nav2's obstacle layer assumes it is being handed
   - *Off when:* to reproduce a costmap from before 2026-09-15, or to read a fan against a measurement taken while the projection ignored the pan (the yaw-offset probes of config/neck.json's pan_note were)
 - **`depth_reach`** — bool, default on

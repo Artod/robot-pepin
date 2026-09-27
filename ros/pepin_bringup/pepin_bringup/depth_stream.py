@@ -424,9 +424,9 @@ FLAGS = FlagSet(
         why="the fan carried no pan at all until 2026-09-15, and the report line said so ('head"
         " panned N frames (projected as if not)'). At rest that is not nothing: the pan"
         " reference measured that day (config/neck.json pan_note,"
-        " pepin.extrinsics.pan_from_bearings, six windows in four scenes) puts the resting head"
-        " +0.79 deg left of the cart's x, which is 4 cm of bearing error at 3 m — under"
-        " PAN_NOTICE_RAD, so the old fan did not even count it. A head panned on purpose puts"
+        " scripts/extrinsics.py's pan_from_bearings, six windows in four scenes) puts the"
+        " resting head +0.79 deg left of the cart's x, which is 4 cm of bearing error at 3 m —"
+        " under PAN_NOTICE_RAD, so the old fan did not even count it. A head panned on purpose puts"
         " the whole fan in the wrong place: 20 deg of neck is 20 deg of costmap, one metre"
         " sideways at 3 m",
         on_when="always once the neck's edge is in TF — a scan whose bearings are the cart's is"

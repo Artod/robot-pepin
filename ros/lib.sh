@@ -79,7 +79,7 @@ PEPIN_ZROUTER_RX_WORKERS="${PEPIN_ZROUTER_RX_WORKERS:-32}"
 # This checkout's ros/, wherever the sourcing script lives (the container configs are under it).
 PEPIN_ROS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ONE CLOCK FOR THE ROBOT (src/pepin/timesync.py has the whole story): where the board takes its
+# ONE CLOCK FOR THE ROBOT (scripts/timesync.py has the whole story): where the board takes its
 # time from. laptop: this laptop serves its Docker VM's clock — the one every ROS node here stamps
 # with — from the pepin-chrony container on udp/123, and the board's chrony prefers it over the
 # internet pool (board/chrony.sh) — the DEFAULT since the deploy of 2026-09-24: chrony selected

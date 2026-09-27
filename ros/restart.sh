@@ -298,7 +298,7 @@ check_board() {
 
 # 1.15: ONE CLOCK — the board's clock minus the one every laptop ROS node stamps with (the Docker
 # VM's), measured over NTP from the board to the laptop's time server (ros/time.sh offset, which
-# pipes src/pepin/timesync.py into the board's python3: one short process and eight 48-byte
+# pipes scripts/timesync.py into the board's python3: one short process and eight 48-byte
 # exchanges, no ROS). INFORMATION ONLY: a PASS or a WARN, never a FAIL and never a drive gate —
 # the number is there so that a transform that "would require extrapolation" can be read against
 # it. Under PEPIN_TIME_SOURCE=pool (the default until the chrony deploy) with no server here there

@@ -63,7 +63,7 @@ case "${1:-}" in
     offset)
         # The board is the NTP client and this laptop's server the reference, so the number is
         # exactly "board minus the clock the laptop's ROS nodes stamp with". The measurement is
-        # src/pepin/timesync.py, piped into the board's own python3: nothing to install there.
+        # scripts/timesync.py, piped into the board's own python3: nothing to install there.
         # No server running here is answered at once, not after eight 1-s timeouts on the board
         # (ros/restart.sh asks this on every restart, deployed or not), and with its own exit
         # code: under PEPIN_TIME_SOURCE=pool it is the configuration, not a fault.
@@ -73,7 +73,7 @@ case "${1:-}" in
         fi
         IP="$(laptop_ip)" || exit 2
         ssh "root@$BOARD" "python3 - $IP --warn-ms ${PEPIN_CLOCK_WARN_MS:-100}" \
-            < "$HERE/../src/pepin/timesync.py"
+            < "$HERE/../scripts/timesync.py"
         ;;
     status)
         ssh "root@$BOARD" "sh $BOARD_TOOL status" || echo "(no chrony on the board: ros/time.sh install)"
