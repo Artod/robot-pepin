@@ -5,10 +5,10 @@ load three JSON files, start the lidar reader, the ToF reader, the base link,
 the camera — and each copy drifted. :meth:`Robot.connect` does it once from
 ``config/robot.json`` (which feeds are enabled, which ports), and the control
 loop asks :meth:`Robot.observe` for one :class:`Observation` per tick: the
-board's odometry state plus a :class:`pepin.navigator.Sense` built from every
+board's odometry state plus a :class:`pepin.feeds.Sense` built from every
 feed's newest reading. Nothing in here waits on the network. A feed switched
 off in the config never appears; a required feed that goes quiet shows up as
-a large age and the navigator holds.
+a large age.
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ class RobotConfig:
 
 @dataclass(frozen=True)
 class Observation:
-    """One tick of the world as the laptop knows it: the board's state and the navigator's input."""
+    """One tick of the world as the laptop knows it: the board's state and every feed's reading."""
 
     state: BaseState
     sense: Sense

@@ -515,7 +515,7 @@ ros/           the ROS 2 side: pepin_bringup (base/ToF bridges, relocalizer, goa
                tools/, Dockerfile, and the shell scripts that drive the robot
 board/         Orange Pi: systemd units, ser2net, udev rules, ToF init
 config/        base geometry and speed caps, lidar and ToF mounts (JSON)
-scripts/       laptop entry points: drive, build_map, render_slam, replay_nav, health_check
+scripts/       laptop entry points: build_map, render_slam, dashboard, health_check, calibration
 tests/         unit (fast, no robot) and hardware (--hardware) tiers
 docs/          figures
 ```
