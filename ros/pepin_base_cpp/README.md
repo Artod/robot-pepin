@@ -55,7 +55,7 @@ and vyaw (`ros/params/ekf.yaml`) — and nothing at all otherwise. Parked on its
 bias-tracked gyro read -0.001; that input had been silent since the lidar tracker, its only
 publisher, stopped starting.
 
-Certainly still is three witnesses at once (`ZuptGate`, the twin of `pepin.zupt`): the wheels have
+Certainly still is three witnesses at once (`ZuptGate`): the wheels have
 witnessed rest for `zupt_settle_s` (default `imu_bias_s`, the rest the gyro's bias tracker
 trusts), no non-zero `/cmd_vel` is younger than `zupt_cmd_hold_s` (default `cmd_timeout_s`), and
 the bias-corrected yaw rate has stayed under `zupt_gyro_quiet_rad_s` for that same window, so a
@@ -90,21 +90,18 @@ not `ros/sync.sh`: only the Python package is mounted from the host.
 
 ## test/
 
-No ament test target: the board image is not built on a laptop, so these run by hand.
+No ament test target: the board image is not built on a laptop, so the contracts are stand-alone
+`main()`s, no ROS and no gtest, compiled and run by `tests/unit/test_base_cpp_contracts.py` (slow,
+skipped without a `c++`).
 
-- `test/gyro_bias_contract.cpp` — the table of
-  `tests/unit/test_gyro.py::test_gyro_bias_contract_the_cpp_bridge_mirrors`, replayed against
-  `gyro_bias.hpp`. One stand-alone `main()`, no ROS and no gtest; its own header comment has the
-  `c++` line, and `scratch/syntax_check_base_bridge.sh` runs it beside a type-check of the node.
-- `test/zupt_contract.cpp` — the table of `tests/unit/test_zupt.py::test_zupt_contract_the_cpp_bridge_mirrors`,
-  replayed against `zupt.hpp` the same way (`tests/unit/test_zupt.py` also holds that the C++ file
-  carries exactly that table, and the header the same verdict words and defaults).
+- `test/gyro_bias_contract.cpp` — the gyro bias tracker's table, replayed against `gyro_bias.hpp`;
+  its own header comment has the `c++` line.
+- `test/zupt_contract.cpp` — the zero-velocity update's table, replayed against `zupt.hpp` the same
+  way, verdict words and defaults included.
 - `test/protocol_samples.json` — lines from the running Python stack
   (`scratch/gen_protocol_samples.py`). A gtest would assert: `encode_twist`/`encode_stop` reproduce
   every `requests[].line` byte for byte, `parse_state` yields `states[].parsed` and nothing for
   `not_states[]`, `LineReader` the `reader[].objects`.
 
-The Python twins are the reference for both header classes with a contract test
-(`pepin.odometry.TwistFromPose`, `pepin.gyro.GyroBiasTracker`, `pepin.gyro.RestWitness`,
-`pepin.zupt.ZuptGate`): the maths
-changes in `src/pepin/` and `tests/unit/` first, and the header follows.
+`pepin.odometry.TwistFromPose` is the Python twin of the odometry header; the gyro and
+zero-velocity headers carry their own contracts above.

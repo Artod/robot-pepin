@@ -1,15 +1,14 @@
 // Copyright 2026 Artem Belousov. Licensed under the Apache License, Version 2.0.
 //
-// The contract of tests/unit/test_gyro.py::test_gyro_bias_contract_the_cpp_bridge_mirrors,
-// replayed row for row against gyro_bias.hpp. The package has no ament test target and the board
+// The contract of the gyro's bias tracker, replayed row for row against gyro_bias.hpp. The package has no ament test target and the board
 // image is not built on a laptop, so this is a stand-alone main() with no ROS and no gtest:
 //
 //     c++ -std=c++17 -Wall -Wextra -Wpedantic -O2 -I ros/pepin_base_cpp/include \
 //         ros/pepin_base_cpp/test/gyro_bias_contract.cpp -o /tmp/gyro_bias_contract && \
 //         /tmp/gyro_bias_contract
 //
-// It prints one line per row and exits non-zero on the first disagreement. Python is the
-// reference: a row changes there first, then here.
+// It prints one line per row and exits non-zero on the first disagreement;
+// tests/unit/test_base_cpp_contracts.py compiles and runs it.
 
 #include <cmath>
 #include <cstdio>
@@ -102,7 +101,7 @@ int main()
   check(std::fabs(tracker.age_s(26.0) - 5.0) < kTolerance, "age since the last block", 26.0);
   check(tracker.ready(), "ready after three blocks", 26.0);
 
-  // The wheels' witness: tests/unit/test_gyro.py's three veto tests and the silence one, in a
+  // The wheels' witness: the three vetoes and the silence, in a
   // table. The board's clock runs at 20 Hz state lines; the local clock is what the gyro uses.
   const WitnessRow witness_rows[] = {
     // stamp_s   at    moving twist_is_zero  since

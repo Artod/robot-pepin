@@ -1401,7 +1401,7 @@ back to the default with a warning instead of stopping the base.
 | `zupt_gyro_quiet_rad_s` | 0.005 | 1e-4..0.5 rad/s | a bias-corrected yaw rate at or above this is a turn (0.005 = 0.29 deg/s, 7.9 sigma of the parked chip's noise) |
 
 The reasons for each default and each range are in
-`ros/pepin_base_cpp/include/pepin_base_cpp/zupt.hpp` (and its Python reference, `pepin.zupt`).
+`ros/pepin_base_cpp/include/pepin_base_cpp/zupt.hpp` (its contract: `test/zupt_contract.cpp`).
 Two numbers stay fixed, because they are structural: the variance on the three velocities the
 update does not claim (1e6: `odom2` fuses none of them, so the EKF never reads it), and how old
 the newest gyro sample may be (1 s, the same gap that ends the wheels' witness; at 50 Hz a sample

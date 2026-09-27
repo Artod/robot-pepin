@@ -1698,13 +1698,12 @@ def test_a_sensor_is_muted_where_it_is_published_and_both_bridges_know_the_same_
 
 
 def test_the_board_bridge_publishes_the_rest_zupt_the_ekf_fuses_behind_a_live_switch() -> None:
-    """Parked on 2026-09-24 the EKF's heading crept ~5 deg/hour: odom2 fused /zupt, but under
-    PEPIN_LOCALIZER=rtabmap nothing published it (its one publisher was the tracker's slip
-    watch). The C++ bridge now does, from its own rest witness -- so the three ends of the wire
-    are held together here: the bridge advertises `zupt` as an Odometry built by pepin.zupt's
-    twin, the switch is declared on (CLAUDE.md rule 19) and named in the report line, and the
-    EKF's odom2 reads that topic as vx, vy and vyaw, which is exactly what the covariance
-    claims."""
+    """Parked on 2026-09-24 the EKF's heading crept ~5 deg/hour: odom2 fused /zupt, but beside
+    RTAB-Map nothing published it (its one publisher was the tracker's slip watch). The C++
+    bridge now does, from its own rest witness -- so the three ends of the wire are held together
+    here: the bridge advertises `zupt` as an Odometry built by zupt.hpp, the switch is declared
+    on (CLAUDE.md rule 19) and named in the report line, and the EKF's odom2 reads that topic as
+    vx, vy and vyaw, which is exactly what the covariance claims."""
     cpp = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
     assert 'create_publisher<nav_msgs::msg::Odometry>("zupt", 5)' in cpp
     assert '#include "pepin_base_cpp/zupt.hpp"' in cpp
@@ -1718,9 +1717,11 @@ def test_the_board_bridge_publishes_the_rest_zupt_the_ekf_fuses_behind_a_live_sw
     fused = [i for i, on in enumerate(params["odom2_config"]) if on]
     assert fused == [6, 7, 11], "vx, vy, vyaw: the three indices the update claims"
     assert params["odom2_differential"] is False
-    from pepin.zupt import REST_ZUPT_VARIANCE, rest_zupt_twist_covariance
-
-    claimed = [i for i in range(6) if rest_zupt_twist_covariance()[i * 6 + i] == REST_ZUPT_VARIANCE]
+    header = (REPO / "ros/pepin_base_cpp/include/pepin_base_cpp/zupt.hpp").read_text()
+    diagonal = re.search(r"std::array<double, 6> diagonal = \{([^}]*)\}", header)
+    assert diagonal, "rest_zupt_twist_covariance builds its diagonal in one literal"
+    terms = [term.strip() for term in diagonal.group(1).split(",")]
+    claimed = [i for i, term in enumerate(terms) if term in ("var_linear", "var_yaw")]
     assert [6 + i for i in claimed] == [6, 7, 11], "the covariance claims what odom2 fuses"
 
 
@@ -1728,13 +1729,15 @@ def test_every_zupt_tunable_of_the_bridge_is_a_live_range_checked_parameter() ->
     """Heading drift has many causes, and Artem tunes them on the robot, never in C++: every
     number that decides the zero-velocity update is a parameter of /base_bridge, set live with
     `ros2 param set` and in force at the next tick. Held here: each is declared through the one
-    helper that range-checks a launch value, with the default pepin.zupt names (the two windows
+    helper that range-checks a launch value, with the default zupt.hpp names (the two windows
     borrowing imu_bias_s and cmd_timeout_s without moving them); a set is refused outside
-    pepin.zupt.ZUPT_RANGES by the on-set callback and applied by the post-set one, which re-times
+    zupt.hpp's kZuptRanges by the on-set callback and applied by the post-set one, which re-times
     the timer for a new rate; nothing is looked up per tick; the status line prints every value
     in force; and ros/README.md documents each with its default and range."""
-    from pepin.zupt import ZUPT_RANGES
-
+    header = (REPO / "ros/pepin_base_cpp/include/pepin_base_cpp/zupt.hpp").read_text()
+    start = header.index("kZuptRanges = {{")
+    ranged = re.findall(r'\{"(zupt_\w+)",', header[start : header.index("}};", start)])
+    assert len(ranged) == 6, ranged
     cpp = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
     declared = dict(re.findall(r'declare_zupt_number\(\s*"(zupt_\w+)",\s*(.+?),\n', cpp))
     assert declared == {
@@ -1745,11 +1748,11 @@ def test_every_zupt_tunable_of_the_bridge_is_a_live_range_checked_parameter() ->
         "zupt_settle_s": 'zupt_clamped(*zupt_range("zupt_settle_s"), imu_bias_s_)',
         "zupt_cmd_hold_s": 'zupt_clamped(*zupt_range("zupt_cmd_hold_s"), cmd_timeout_s_)',
     }, declared
-    assert set(declared) == set(ZUPT_RANGES), "every live number has a range, every range a number"
+    assert set(declared) == set(ranged), "every live number has a range, every range a number"
     assert "descriptor.dynamic_typing = true" in cpp, "`ros2 param set ... 50` is not refused"
     assert "add_on_set_parameters_callback(" in cpp and "return check_zupt_settings(" in cpp
     assert "add_post_set_parameters_callback(" in cpp and "apply_zupt_settings(parameters)" in cpp
-    for name in ZUPT_RANGES:
+    for name in ranged:
         assert f'if (name == "{name}") {{return &' in cpp, f"{name}: applied live"
     assert "if (slot == &zupt_hz_) {\n        start_zupt_timer();" in cpp, "a new rate re-times"
     assert 'get_parameter("zupt_' not in cpp, "no parameter lookup per tick"
@@ -1761,7 +1764,7 @@ def test_every_zupt_tunable_of_the_bridge_is_a_live_range_checked_parameter() ->
     readme = (REPO / "ros/README.md").read_text()
     section = readme[readme.index("## The base bridge's zero-velocity update") :]
     section = section[: section.index("\n## ", 5)]
-    for name in (*ZUPT_RANGES, "zupt_publish"):
+    for name in (*ranged, "zupt_publish"):
         assert f"| `{name}` |" in section, f"ros/README.md documents {name}"
     assert "ros2 param set /base_bridge zupt_rate_hz 50" in section
     assert "ros2 param set /base_bridge zupt_var_yaw 1.0e-4" in section
