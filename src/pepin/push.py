@@ -398,9 +398,9 @@ def _classify(path: str) -> Refusal | str | None:
         return Refusal(
             path, "config is read at start by the launches and services", restart_hint(HALVES)
         )
-    if path in ("ros/run.sh",):
+    if path == "ros/run.sh":
         return Refusal(path, "the board container's own docker run", restart_hint(["board"]))
-    if path in ("ros/entrypoint.sh",):
+    if path == "ros/entrypoint.sh":
         return Refusal(path, "every container's entrypoint", restart_hint(HALVES))
     if _IMAGE.match(path):
         return Refusal(
@@ -408,7 +408,7 @@ def _classify(path: str) -> Refusal | str | None:
         )
     if path.startswith("ros/xfeat/"):
         return Refusal(path, "RTAB-Map loads its adapters once at start", "ros/laptop.sh vslam")
-    if path.startswith("ros/zenoh") or path.startswith("ros/zenoh-bridge"):
+    if path.startswith("ros/zenoh"):  # ros/zenoh/router.json5, ros/zenoh-bridge-*.json
         return Refusal(
             path,
             "transport configuration",
