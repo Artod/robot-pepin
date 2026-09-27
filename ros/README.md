@@ -36,18 +36,38 @@ Foxglove Studio                   docker: ldlidar_node -> laser_filters box filt
 | `ros/tools/npz_to_map.py` | Our occupancy grid -> map_server format |
 | `ros/calibrate.sh` | Checkerboard calibration of the neck camera, print to config (see below) |
 
-## Iterate without rebuilding
+## Deploying a change
 
-`ros/sync.sh` rsyncs `ros/` and `src/pepin` to the board and restarts the sensors container;
-`ros/nav.sh [MAP]` starts Nav2 inside it. The container mounts the code from the host (see
-`run.sh`), so Python nodes, launch files, params, maps and tools change in ~20 s. One node
-changes in seconds: `ros/sync.sh --no-restart && ros/thin.sh kick relocalizer` ends that process
-with SIGINT and the launch respawns it from the synced sources (`ros/laptop.sh kick depth_fusion`
-does the same in the laptop's containers; `ros/laptop.sh kick` and `ros/thin.sh kick` without a
-name list what each can reach). The laptop's SLAM container is its own: `ros/laptop.sh vslam`
-restarts it with the RTAB-Map database kept, `ros/laptop.sh vslam --fresh` deletes the database
-first and starts an empty map (in SLAM mode the session starts empty anyway: see below). Only a Dockerfile change (apt packages, the C++
-driver) needs a rebuilt image — `ros/build-image.sh` on the laptop, see **Building the image**.
+The containers mount the code from the host (`run.sh` on the board, `laptop.sh` here), so a
+Python change needs no image, only the processes that hold the old code restarted.
+
+| Change | Command | What restarts |
+| --- | --- | --- |
+| Python in `src/pepin` or `ros/pepin_bringup/pepin_bringup` | `ros/push.sh FILE...` | the running nodes that import it, on both halves |
+| a launch file, `ros/params`, `config/`, a module a launch file imports | `ros/restart.sh board --deploy`, `laptop` or `both --deploy` | the half's whole stack |
+| the whole tree, nothing restarted | `ros/sync.sh` (`--restart`: the board's stack too) | nothing |
+| one node by hand | `ros/thin.sh kick NODE`, `ros/laptop.sh kick NODE` (no name: the list) | that node |
+| the Dockerfiles, the C++ packages, rf2o's patch | `ros/build-image.sh`, `ros/laptop-build.sh` | see **Building the image** |
+
+`ros/push.sh` takes its plan from `pepin.push`: the nodes whose Python imports a changed module
+through any chain of imports (`uv run python -m pepin.push plan FILE` prints each chain). Whatever
+a kick cannot deliver is refused before anything is touched, with the restart that delivers it: a
+launch, params or unit file, config, a module a launch file imports, an image layer, a process of
+ours that the launch does not respawn (checked in its container: refused only while it runs), a
+laptop container that mounts another checkout. Otherwise the files go to the board by rsync —
+exactly those, never `--delete` — and the nodes of both halves are kicked at once, one line each:
+kicked at, ready at (UTC, the container's clock), seconds, the old and the new pid, the ready line.
+A node that is not running on its half (the other recorder, the goal server's other side, the
+tracker under RTAB-Map) is skipped. `--dry-run` or `PEPIN_PUSH_DRY=1` prints the plan and what
+would run, and touches nothing.
+
+A kick ends the node with SIGINT, the launch respawns it from the new sources two seconds later,
+and the kick waits for the new pid's own ready line (`ros/kick_ready.awk`). The node is gone for
+those seconds: push at rest, not mid-drive.
+
+The laptop's SLAM container is its own: `ros/laptop.sh vslam` restarts it with the RTAB-Map
+database kept, `ros/laptop.sh vslam --fresh` deletes the database first and starts an empty map
+(in SLAM mode the session starts empty anyway: see below).
 
 ## Restarting
 
