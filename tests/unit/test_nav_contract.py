@@ -2772,16 +2772,18 @@ def test_the_hook_checks_the_shell_scripts_and_the_board_s_books_come_home() -> 
 
 def test_one_node_can_be_kicked_without_a_container_restart() -> None:
     """laptop.sh kick / thin.sh kick: SIGINT to one process (never -9, never the container),
-    then the log is tailed for the line the node prints once up — a line its source really
-    contains. The names a kick knows are exactly the nodes the launches respawn, and an unknown
-    name is refused before any host is touched."""
+    then the log is read for the line the node prints once up — a line its source really
+    contains, from the new pid (ros/kick_ready.awk, tests/unit/test_kick.py). The names a kick
+    knows are exactly the nodes the launches respawn, and an unknown name is refused before any
+    host is touched."""
     import os
 
     known: dict[str, set[str]] = {}
     for script in ("laptop.sh", "thin.sh"):
         src = (REPO / "ros" / script).read_text()
         kick = src[src.index("    kick)") :].split("\n    *)")[0]
-        assert "pkill -INT -f" in kick and "pkill -9" not in kick, script
+        assert 'pgrep -f "pepin_bringup[./]$1"' in kick and "kill -INT" in kick, script
+        assert "kill -9" not in kick, script
         assert "docker restart" not in kick and "systemctl restart" not in kick, script
         table = re.search(r"^kick_(?:target|line)\(\) \{.*?^\}", src, re.M | re.S)
         assert table is not None, script
