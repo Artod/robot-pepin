@@ -938,7 +938,6 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `marks_audit` | `inscribed_counts` | bool | off | yes | the inflation's 99 band (costmap 253, INSCRIBED_INFLATED_OBSTACLE) is judged as a mark too; off, only the 100s a sensor actually wrote |
 | `marks_audit` | `phantom_cloud` | bool | on | yes | the camera-only cells are published as red points on /marks_audit/phantoms; off, only the counts go out |
 | `neck_state` | `neck_tf` | bool | on | yes | base_link -> camera_link is published live from the neck's encoders; the laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes publish that edge |
-| `neck_state` | `tf_republish` | bool | on | yes | base_link -> camera_link is republished at tf_hz between polls, carrying the last measured angles with a fresh stamp; with it off the edge is published only when a reading arrives, i.e. at poll_hz |
 | `places` | `publish_places` | bool | on | yes | the resolved places are published on /places whenever the graph moves; off, the book is still kept and marked but nothing is published and every consumer falls back to the coordinates beside the map |
 | `places` | `label_nodes` | bool | on | yes | a mark also sets RTAB-Map's own label on the node (set_label), which is what makes the place a thing in its tools and in its set_goal; off, only our own book records the node id and the offset |
 | `rtabmap_frame` | `registration_follows_snapshots` | bool | on | yes | RTAB-Map's Reg/Strategy follows what the snapshots carry (/sensor_pack/state): a scan in them means ICP (1), no scan means visual (0), switched live through the node's own parameter path on a change that has held for the hold the state carries. Off, the strategy stays whatever the launch table set and this node only reports what it would have asked for |
@@ -1385,11 +1384,6 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* on — the encoders are honest and their signs are checked by hand: the tilt reads 26 -> 103 degrees as the head goes down and the pan 0 -> -124 degrees to the left (config/neck.json's tilt_sign +1, pan_sign -1), 50 reads of a still head gave the same ticks every time, a read costs 9.7 ms, and the tick scale solved from the level frames is 1.067 true degrees per commanded degree, so 360/4096 stands (scratch/neck_tilt_scale.txt). At the reference pose the live transform equals the static one, so turning it on moves nothing until the head does
   - *On when:* whenever the head moves at all: with it off a turned head is a camera the map places where it is not
   - *Off when:* when the laptop broadcasts the static edge instead (camera_stream's static_camera_tf), or when the neck bus is suspect and a frozen edge is better than a wrong one
-- **`tf_republish`** — bool, default on
-  - *What:* base_link -> camera_link is republished at tf_hz between polls, carrying the last measured angles with a fresh stamp; with it off the edge is published only when a reading arrives, i.e. at poll_hz
-  - *Default:* on — a servo-bus read costs 13.5 ms of a core and the node polled at 10 Hz for 11 % of an A53 (top, 2026-09-14) to answer a question that does not change while the cart drives: the head is still. Polling at 2 Hz and republishing at 10 Hz keeps the stream RTAB-Map and the depth fusion look poses up in (a 2 Hz TF stream fails a lookup at a recent stamp) and leaves four fifths of the reads unmade
-  - *On when:* whenever the head is still or moves slowly: driving, mapping, everything but a commanded sweep
-  - *Off when:* while the head is being swept and every degree must be measured rather than held — then raise poll_hz to 10 in the same breath, which is the pre-2026-09-14 node
 
 #### `places`
 

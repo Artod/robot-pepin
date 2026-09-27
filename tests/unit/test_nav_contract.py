@@ -1362,12 +1362,12 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     assert "JsonLineLink" in sf.imported(node), "the reconnecting link, not a socket of its own"
     assert "super().__init__('neck_state')" in sf.unparsed(node, ast.Call)
     # The bus is polled at 2 Hz and the edge published at 10: a read costs 13.5 ms of a core and
-    # the head is still while the cart drives, so the last edge is republished with a fresh stamp
-    # (the live ``tf_republish``). A 2 Hz TF stream would fail lookups at recent stamps.
+    # the head is still while the cart drives, so the last edge is republished with a fresh stamp.
+    # A 2 Hz TF stream would fail lookups at recent stamps.
     assert ast.unparse(declared["'poll_hz'"]) == "2.0"
     assert ast.unparse(declared["'tf_hz'"]) == "_TF_HZ"
     assert sf.assignments(node)["_TF_HZ"] == "10.0"
-    assert "tf_republish" in neck_flags and neck_flags.flag("tf_republish").live
+    assert "_hold_tf" in {f.name for f in ast.walk(node) if isinstance(f, ast.FunctionDef)}
     # The switch defaults off while the model is unchecked against the hardware: the reference
     # ticks unread (every pose is then the static mount) or the servo signs unverified.
     from pepin.neck import NeckConfig
