@@ -480,8 +480,9 @@ uv run pytest && uv run mypy && uv run ruff check .
 
 # the robot
 ros/build.sh                            # sync ros/ + src/pepin to the board, build the image there
-ros/sync.sh                             # push code changes, restart the container (~20 s, no rebuild)
-ros/sync.sh --no-restart && ros/thin.sh kick relocalizer   # one node from the new sources (~10 s), the stack untouched
+ros/push.sh src/pepin/x.py              # a change to the running robot: rsync it, kick the nodes that import it (--dry-run: the plan)
+ros/sync.sh                             # the whole code tree to the board, nothing restarted (--restart: the stack too)
+ros/thin.sh kick relocalizer            # one board node from the synced sources (~10 s), the stack untouched
 ros/laptop.sh kick depth_fusion         # one laptop node from the mounted sources (~4 s), no container restart
 ros/laptop.sh vslam                     # camera SLAM on the laptop, the RTAB-Map database kept; --fresh starts an empty map
 ros/mode.sh nav /maps/<map>.yaml        # Nav2 + the tracker on a saved map

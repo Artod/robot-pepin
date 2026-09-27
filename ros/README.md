@@ -55,7 +55,8 @@ driver) needs a rebuilt image — `ros/build-image.sh` on the laptop, see **Buil
 one command, followed by every check we have learned to run afterwards.
 
 - **board** — `systemctl restart pepin-ros` over the multiplexed ssh, or the full deploy
-  (`ros/sync.sh`: code, library and config, then the restart and its census) with `--deploy`.
+  (`ros/sync.sh --restart`: code, library and config, then the restart and its census) with
+  `--deploy`.
   It then waits up to 90 s for the tracker's first report line.
 - **laptop** — `ros/laptop.sh start`, then `ros/laptop.sh vslam --neck --seed-map=<map>`, where
   the map is the one the board serves, read from its `/etc/default/pepin-ros` (`PEPIN_MAP`), never
@@ -239,7 +240,7 @@ over `pepin-net`, and the radio hop belongs to the routers alone. If a measureme
 session closing, the same file is passed to the containers as `ZENOH_SESSION_CONFIG_URI` — the
 mechanism is identical — but nothing has asked for it.
 
-**Deploying a change to `ros/zenoh/router.json5`**: `ros/sync.sh --no-restart`, then the routers
+**Deploying a change to `ros/zenoh/router.json5`**: `ros/sync.sh` (no restart), then the routers
 in the clean order (journal 2026-09-13): laptop half down, laptop router down, board router, board
 stack, laptop router, laptop half. A router restarted under a live peer has produced a one-way
 link before.
@@ -3006,7 +3007,7 @@ servers; Nav2 (`nav.launch.py`) is started on demand inside it. Build or rebuild
    is mounted upside down and the LD19 counts angles clockwise; the static transform (roll pi,
    yaw -87.5 degrees) is read from `config/lidar.json` by the board's launch and by the
    laptop's camera node alike — there is no launch argument for it. If the scan comes out
-   mirrored left/right, fix `roll_deg` in that file and `ros/sync.sh`.
+   mirrored left/right, fix `roll_deg` in that file and `ros/sync.sh --restart`.
 3. `nav.launch.py`: AMCL converges on the map after a few metres of teleop (or set the initial
    pose from Foxglove); then a goal.
 4. Memory: `free -m` on the board while navigating; the container must stay under ~700 MB.

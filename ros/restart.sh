@@ -6,8 +6,8 @@
 #
 #   board          `systemctl restart pepin-ros` over the multiplexed ssh, then wait for the
 #                  tracker's first report line (up to 90 s)
-#   --deploy       ros/sync.sh instead of the bare restart: code + the library + config to the
-#                  board, the restart, and its census tail
+#   --deploy       ros/sync.sh --restart instead of the bare restart: code + the library +
+#                  config to the board, the restart, and its census tail
 #   laptop         ros/laptop.sh start, then ros/laptop.sh vslam --neck. Nothing about the map is
 #                  passed any more: the database IS the map (World R), the launch reads whether it
 #                  exists and the board's tracker adopts whatever grid it publishes
@@ -143,7 +143,7 @@ wait_for() {  # WHAT TIMEOUT_S CONTAINER PATTERN: poll a container's log from no
 restart_board() {
     step "restarting the board"
     if [ "$DEPLOY" = true ]; then
-        "$HERE/sync.sh"   # code + params + restart + the census tail; a red census is information
+        "$HERE/sync.sh" --restart  # code + params + restart + the census tail; a red census is information
     else
         ssh "root@$BOARD" "systemctl restart pepin-ros && sleep 8 && systemctl is-active pepin-ros"
     fi

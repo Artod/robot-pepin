@@ -1,12 +1,25 @@
 #!/bin/bash
-# Push code changes to the robot without rebuilding the image: rsync ros/, src/pepin and
-# config/, then restart the sensors container (systemd unit). Nav2 must be started again
-# afterwards: ros/nav.sh
-# Usage: ros/sync.sh [--no-restart]
+# The whole checkout's code to the robot without rebuilding the image: rsync ros/, src/pepin and
+# config/ to the board. Usage:
+#   ros/sync.sh            the files only: the running stack keeps running, and each node picks
+#                          the new code up at its next start (ros/push.sh FILE... kicks exactly
+#                          the nodes a change reaches; ros/thin.sh kick NODE one of them)
+#   ros/sync.sh --restart  the files, then the board's stack (systemd unit pepin-ros): what a
+#                          launch, params or config change needs; ros/restart.sh board --deploy
+# A restart by default was a surprise more than once (journal 2026-09-22): a laptop-only change
+# restarted the board. --no-restart, the old way to say the default, is still accepted.
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
 HERE="$(cd "$(dirname "$0")" && pwd)"
+RESTART=false
+for arg in "$@"; do
+    case "$arg" in
+        --restart) RESTART=true ;;
+        --no-restart) ;;
+        *) echo "usage: ros/sync.sh [--restart]"; exit 2 ;;
+    esac
+done
 # maps/rec and logs are written BY the board and fetched to the laptop; pushing them back would ship
 # hundreds of MB of camera video over WiFi onto the SD card (it did, 2026-09-06: a 4-minute sync).
 # A database set aside in a SUBDIRECTORY of maps/ is not caught by 'maps/rtabmap*': on 2026-09-19 a
@@ -25,7 +38,7 @@ rsync -a --delete --exclude '__pycache__' "$HERE/../src/pepin/" "root@$BOARD:/ro
 # /root/pepin-ros/pepin_src as /ws/pepin_src and the launch reads them from there at start
 # (pepin.deployment.config_file) — the same files the laptop reads from its checkout.
 rsync -a --delete "$HERE/../config/" "root@$BOARD:/root/pepin-ros/pepin_src/config/"
-if [ "${1:-}" != "--no-restart" ]; then
+if [ "$RESTART" = true ]; then
     ssh "root@$BOARD" "systemctl restart pepin-ros && sleep 8 && systemctl is-active pepin-ros"
     # The last nodes wait for the bridge to forget the previous incarnation of their names
     # (pepin_bringup.ghost_wait) before they start: a census taken now would call them MISSING
