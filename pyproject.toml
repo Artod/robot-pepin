@@ -68,10 +68,11 @@ markers = [
 python_version = "3.12"
 # The ROS nodes are type-checked too: a node that referenced a field deleted in a refactor
 # only failed on the robot (2026-09-08), and mypy sees that without rclpy being installed.
-files = ["src/pepin", "ros/pepin_bringup/pepin_bringup", "ros/tools", "ros/xfeat"]
+files = ["src/pepin", "ros/pepin_bringup/pepin_bringup", "ros/tools", "ros/xfeat", "ros/sim"]
 strict = true
 ignore_missing_imports = true
-exclude = ["^src/pepin/vendor/"]
+# a launch file is launch_ros glue, as those of ros/pepin_bringup/launch (not checked either)
+exclude = ["^src/pepin/vendor/", "^ros/sim/.*\\.launch\\.py$"]
 
 # The ROS nodes are glue over an untyped rclpy: check them for real mistakes (a field that no
 # longer exists, a wrong assignment) without demanding generics on every ROS type.
@@ -83,12 +84,15 @@ module = [
     "bench_global_search",
     "call",
     "draw_snapshot",
+    "export_world",
     "goto_ros",
     "load_map",
     "npz_to_map",
     "relocalizer",
     "scan_latency",
+    "score",
     "session_logger",
+    "sim_world",
     "snapshot_ros",
     "tof_bridge",
     "topic_rate",

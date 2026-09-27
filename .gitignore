@@ -47,3 +47,6 @@ ros/maps/*.world.yaml
 # Model checkpoints: 40 MB of binary, fetched not committed (RAFT-Stereo's
 # download_models.sh; see src/pepin/vendor/raft_stereo/__init__.py)
 models/
+
+# the simulator's run directory: tapes, scores, the goal server's planner pick (ros/sim.sh)
+ros/sim/run/

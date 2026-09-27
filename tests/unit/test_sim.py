@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 import struct
 import zlib
@@ -321,3 +322,16 @@ def test_the_places_payload_reads_back_as_poses() -> None:
     payload = json.dumps({"home": {"x": -0.387, "y": 2.922, "yaw_deg": 96.1, "node": 661}})
     home = places_from_payload(payload)["home"]
     assert (home.x, home.y, math.degrees(home.theta)) == pytest.approx((-0.387, 2.922, 96.1))
+
+
+def test_the_sim_runs_the_stacks_own_nav2_on_a_loopback_of_its_own() -> None:
+    """ros/sim is judged only while it drives OUR Nav2: nav.launch.py included (not a copy of its
+    nodes) on the mounted ros/params, and it stays off every network (the live stack beside it)."""
+    launch = (REPO / "ros/sim/sim_nav.launch.py").read_text()
+    assert '"nav.launch.py"' in launch and "ComposableNode" not in launch
+    script = (REPO / "ros/sim.sh").read_text()
+    assert '-v "$HERE/params:/params:ro"' in script
+    assert '--name "$ROUTER" --network none' in script
+    assert script.count('--network "container:$ROUTER"') == 2
+    assert re.search(r"\s(-p|--publish)[ =]+\S*\d", script) is None, "no port is published"
+    assert "docker.sock" not in script
