@@ -96,7 +96,6 @@ refuses to begin while a navigation goal is running. The hang appeared on 4 of 7
 
 | # | laptop |
 |---|---|
-| 2.1 | `bridge_watch`'s last line: 10 topics carried, `dead routes 0`, `board routes without a reader 0` |
 | 2.2 | `depth_stream` over 5 frames/s, with a fitted law in its line |
 | 2.3 | `depth_fusion` over 5 frames/s, `at bound 0` |
 | 2.4 | `visual_odometry` over 5 poses/s from rtabmap |
@@ -172,7 +171,7 @@ With the cart parked where it can see the room, both halves up, and **no goal se
 6. `ros/board.sh census` — the board's CPU. The old tracker measured 60 % of a core standing
    still; this is where that shows as freed.
 
-## The zenoh routers (`PEPIN_RMW=zenoh`, the default)
+## The zenoh routers
 
 Under `rmw_zenoh_cpp` there is no bridge at all: one `rmw_zenohd` router per machine — the board's
 `pepin-zrouter` (a systemd unit, `board/pepin-zrouter.service`, `--network host`) and the laptop's
@@ -362,123 +361,15 @@ by `ros/laptop.sh` before a half starts (`ros/lib.sh`'s `pepin_time_source_check
    the laptop (`*` in `ros/time.sh status`) and that `timedatectl show -p NTPSynchronized` reads
    `yes` under chrony within the first minute after a reboot — the boot wait's premise.
 
-## The zenoh bridge
+## The retired zenoh bridge
 
-The board and the laptop are two ROS graphs joined by `zenoh-bridge-ros2dds` 1.7.0, a router on
-each side over one TCP link (board `-l tcp/0.0.0.0:7447`, laptop `-e tcp/<board>:7447`). Each
-bridge gets a one-way allow-list generated from `pepin.deployment.bridge_config(side, mode)` into
-`ros/zenoh-bridge-<side>[-<mode>].json`, and a test keeps the files equal to the generator: a
-topic allowed as a publisher on BOTH sides loops until nothing crosses.
-
-**The admin space is network-wide.** Either bridge answers `@/*/ros2/route/**`,
-`@/*/ros2/dds/**`, `@/*/ros2/node/**` and `@/*/ros2/config` for BOTH bridges — the two replies
-were byte-for-byte the same size on 2026-09-13 — with the owner in the key (`@/<zid>/...`). So a
-`topic/sub/depth_scan` on the laptop's admin is the BOARD's route seen from here, not a second
-crossing, and `@/*/ros2/dds/**` is `ros2 topic info -v` for both machines from one curl. Read it
-all in one command with `scratch/bridge_flow.py`.
-
-**DDS does not cross the WiFi.** Measured 2026-09-13: the board's bridge saw 11 DDS participants,
-the laptop's 10, and the two sets did not intersect. The laptop's containers are on a docker
-bridge network inside Docker Desktop's VM and their RTPS discovery never reaches the LAN; the
-board's (`--network host`) never reaches the Mac. Every crossing is the bridge's. `-d 7` and
-`ros_localhost_only: false` are therefore left as they are; the hardening for the day a ROS node
-runs natively on the Mac, or a second robot joins domain 7, is `ROS_AUTOMATIC_DISCOVERY_RANGE=
-LOCALHOST` in the board's two containers (both are `--network host`, so they still see each
-other) — not enabled, because nothing has ever been measured crossing.
-
-**A route's QoS is a race, and the race is the recurring failure.** A route is keyed by topic
-name alone and is created by whichever declaration arrives first — a local ROS endpoint, or the
-far bridge's announcement of its own. Its DDS endpoint takes that declaration's QoS, and
-`routes_mgr` never revises it when the other side shows up (1.7.0 `route_publisher.rs`: "those
-are either the QoS announced by a remote bridge on a Reader discovery, either the QoS adapted
-from a local discovered Writer"). Two sides that disagree therefore get an endpoint that matches
-one of them and starves the other, which is what "the route exists on both admins, the publisher
-is there, nothing arrives" has meant every time. It is not rare: in the bring-up of 2026-09-13
-22:43 the laptop bridge created 47 routes and 24 of them came from the far bridge's
-announcement, including every route re-created after the board's bridge restarted while the
-laptop's nodes stayed up (`scratch/bridge_state_184752_laptop_bridge.log`).
-
-So: **a bridged topic carries the same reliability and depth on both sides**, and the pairs that
-must agree live in `pepin.deployment.BRIDGED_QOS`, which `node_kit.bridged_qos_profile` hands to
-every subscription that reads one. The first entry is `/imu/data_raw`: the board's C++ bridge
-writes it RELIABLE, KEEP_LAST 10, the three laptop nodes read it through `node_kit.LeanFeed`, and
-while they asked for the sensor-data default (BEST_EFFORT, 5) the laptop saw 10-11 Hz of the
-board's 48 whenever the announcement won the race. Beside it: `/vo` (the laptop's visual
-odometry out to the board's EKF, which subscribes RELIABLE at its `odom1_queue_size` of 10) and
-`/odom` (the board's wheels in — `base_bridge.cpp` writes them RELIABLE ten deep, and the laptop
-now has two readers on that route, the visual odometry's rest watch and the flow probe below, so
-the pin is what keeps them from asking for different things). The DDS legs are inside one host — the
-wireless hop is zenoh's, not DDS's — so RELIABLE there costs a memcpy, not a retransmission.
-
-**A blocked reliable route kills the link, so nothing blocks any more.** The bridge's default
-`reliable_routes_blocking: true` pushes a RELIABLE DDS writer's samples to zenoh with
-`CongestionControl::Block`. On 2026-09-15 a five-second wireless stall on a 50 Hz reliable topic
-filled the board bridge's transmission queue, and it ended the link itself — `Unable to push non
-droppable network message to <zid>. Closing transport!` — then reconnected with the same zenoh id
-and pub routes that were never rebuilt: thirteen of them with an empty `dds_reader`, nothing
-crossing from the board at all (`scratch/bridge_logs_1927`, `scratch/zenoh_timeline.py`,
-`scratch/zenoh_route_census.py`). Both configs now carry `reliable_routes_blocking: false`: a
-sample that does not fit is dropped, which every consumer here already survives — the topics are
-periodic, and the next one is 50 ms behind.
-
-**...and the board offers the radio less than it used to.** `pub_max_frequencies` (the board's
-configs only — the plugin downsamples on the side that holds the publisher) caps `/tf`,
-`/imu/data_raw`, `/odom` and `/odometry/filtered` at 20 Hz. Measured at rest with a healthy link
-on 2026-09-15 the laptop received tf 51.6 Hz, imu 46.6, odometry/filtered 18.6, odom 16.2; in a
-drive that evening the link starved to tf 27.8, imu 19, scan 4 of 9.6, odom ~8, and the lidar's
-carry to a frame's stamp then failed on the odom TF for a whole drive. The two caps that really
-cut (tf, imu) are the two nobody here needs at that rate: everything reads `/tf` through tf2,
-which interpolates, and the gyro is read for the camera's lean alone (the EKF that integrates it
-runs on the board, on the local copy). The numbers and the reason for each are in
-`pepin.deployment.PUB_MAX_FREQUENCY_HZ`; `/tf_static` is deliberately not capped, and the
-anchored `^/tf$` in the generated regex is why (the plugin matches with `is_match`). This one has
-no live flag — no node of ours owns a bridge's config — so the way back is the generator: empty
-`PUB_MAX_FREQUENCY_HZ` (or set `reliable_routes_blocking` back to `True`), regenerate, deploy as
-below.
-
-**The watch verifies flow, not route counts** (`pepin_bringup.bridge_watch`, flags `flow_watch`,
-`flow_silence_s`, `bridge_restart`). It subscribes to every topic both bridges agree should
-arrive on this side — the far side has a publisher with a real node behind it, some node here is
-waiting — counts the messages, and prints one line a minute with the rate of each. It never
-subscribes to a topic nobody here reads: that subscription would create the route, pin its QoS
-to the watch's own, and pay for a topic to cross that nobody wants. When a topic that should
-flow carries nothing for `flow_silence_s`, the repair ladder is:
-
-1. **Restart the laptop's bridge container alone** (`POST /containers/pepin-zenoh/restart` on the
-   mounted docker socket). Every route is re-created; `pepin-vslam` keeps running, so the fusion
-   model and RTAB-Map's database survive. There is nothing gentler: the REST admin is read-only
-   (`permissions { read: true, write: false }`), so 1.7.0 has no config reload and no way to drop
-   one route. The container runs with `--init`, so that restart is a second and not the 30 s a
-   PID 1 that ignores every signal used to cost.
-2. **Ask the board to restart its own bridge** (flag `bridge_kick`), 20 s later, if the fault is
-   still there. One `std_msgs/String` on `/bridge/kick`; the board's `run_recorder` hosts the
-   handler (`pepin_bringup.bridge_kick`, its own `bridge_kick` flag), writes
-   `/run/pepin/bridge_kick`, and `pepin-bridge-kick.path` on the board turns that into
-   `systemctl restart pepin-bridge`. No ssh key in any container, and the only thing the laptop
-   can ask for is that one restart. **The order is the point**: of two bridges the one that
-   starts LAST gets working routes, so the board's is restarted after this side's — the same
-   order `ros/laptop.sh` has always used with ssh (`settle_bridge`). The board's bridge then
-   comes back with a new zenoh id, which the watch expects for two minutes and does not read as
-   a fault; a second kick is refused for five minutes here and two minutes on the board.
-3. **Restart this half** — the old action, kept behind `half_restart` (off): the watch exits with
-   code 3, the launch shuts down, the container's restart policy brings it back with fresh
-   subscriptions.
-
-**Both sides' routes are judged, not just ours.** The report line ends with `dead routes N` (this
-bridge's routes with no DDS endpoint of their own) and `board routes without a reader N` (the
-board's pub routes with publishers, a remote route naming this bridge, and an empty `dds_reader`
-— `pepin.deployment.far_dead_routes`, flag `board_routes`). The second number is what was missing
-on 2026-09-15: the watch printed `dead routes 0` for an hour while nothing at all crossed from the
-board. Both are read from the same network-wide admin reply the watch already fetches, and a route
-must stay dead for `flow_silence_s` before it counts, so a route caught between its creation and
-its endpoint is not a fault.
-
-Deploying a change to the bridge: `ros/sync.sh`, then `ros/thin.sh on|vision|slam` (the board's
-bridge unit restarts with its config), then `ros/laptop.sh start` — in that order, because
-`laptop.sh` waits for the board's bridge to answer and settles it before the laptop's containers
-start their subscriptions. The kick's board-side files are installed once, by hand: see
-`board/README.md` (`bridge_kick.sh` to `/usr/local/bin/`, the `.path` and `.service` to
-`/etc/systemd/system/`, `systemctl enable --now pepin-bridge-kick.path`).
+Until 2026-09-20 the two halves ran CycloneDDS joined by two `zenoh-bridge-ros2dds` sidecars with
+generated one-way allow-lists, a watch of the routes' flow and a kick that let the laptop restart
+the board's bridge. All of it is on the tag `alt/cyclone-bridges-2026-09-20`, whose message says
+how to bring it back. One thing of it stays: **a topic that crosses between the machines carries
+the same reliability and depth on both ends** (`pepin.deployment.BRIDGED_QOS`, handed to every
+reader by `node_kit.bridged_qos_profile`): `/imu/data_raw`, `/vo` and `/odom`, all RELIABLE ten
+deep. A reader and a writer that disagree on reliability do not match at all.
 
 ## A new room
 
@@ -984,13 +875,6 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | --- | --- | --- | --- | --- | --- |
 | `base_bridge` | `imu_publish` | bool | on | yes | the MPU6050's readings leave the bridge as /imu/data_raw, where the EKF fuses index 11 (the yaw rate) and nothing else; off, the chip is still read and its bias still estimated, but no message is published. THE PYTHON BRIDGE PUBLISHES NO IMU AT ALL — here the flag only exists so the node's table is the same table whichever bridge robot.launch.py started; the C++ bridge is the one that reads the chip |
 | `base_bridge` | `odom_publish` | bool | on | yes | the base server's state line leaves the bridge as /odom and, while publish_tf is on, as the odom -> base_link transform; off, the wheels are still read and still commanded, and both go silent together — a transform still broadcast from a silent /odom is a state no sensor failure produces |
-| `bridge_watch` | `flow_watch` | bool | on | yes | count the messages of every topic that should arrive on this side and repair a topic that carries nothing; off, this watch sees only the board bridge's identity and its route count, as before |
-| `bridge_watch` | `flow_silence_s` | number 5..300 | 20.0 | yes | seconds a topic both bridges say should flow may carry nothing before it counts as a dead route |
-| `bridge_watch` | `dead_routes` | bool | on | yes | a route wired at both ends and missing its own DDS endpoint — a pub route with local publishers and a remote route but no dds_reader, a sub route with local subscribers and a remote route but no dds_writer — is repaired without waiting for the silence to be counted; off, only the message counters of flow_watch can find it |
-| `bridge_watch` | `board_routes` | bool | off | yes | the BOARD's own routes are judged too: a pub route of the board's bridge with publishers, a remote route naming this bridge and no dds_reader carries nothing and is counted in the report line as 'board routes without a reader N'; off, only this side's routes are judged, as before |
-| `bridge_watch` | `bridge_kick` | bool | off | yes | when a fault survives the gentle repair, ask the BOARD to restart its own bridge (one String on /bridge/kick; the board's run recorder touches a flag file and a systemd path unit there does the restart); off, the ladder ends at the gentle repair and the log, as before |
-| `bridge_watch` | `bridge_restart` | bool | off | yes | repair a dead route, a starved topic or a board bridge that changed identity by restarting the laptop's bridge container alone (Docker Engine API over /var/run/docker.sock); off, the repair is the old one — this whole half restarts, which throws away the fusion model and RTAB-Map's working set |
-| `bridge_watch` | `half_restart` | bool | off | yes | when the gentle repair (the bridge alone) did not bring the routes back, end this process so the launch restarts the whole laptop half; off: say so in the log, keep everything alive, and retry the gentle repair after a cooldown |
 | `camera_stream` | `scale` | number 0..1 | 0.5 | yes | the published picture as a fraction of the camera's own 1280x720, its optics scaled with it; a change takes the next frame. THE MONO RIG's flag: a stereo head publishes at its calibration's own size (the size the remap tables were built for, the size a matcher's disparity is in pixels of), so the node pins this to 1.0 there and refuses any other value with that reason |
 | `camera_stream` | `undistort` | bool | off | yes | the published picture is rectified with the checkerboard calibration (config/camera.json's intrinsics) and its camera_info then says no distortion; a no-op while the camera is uncalibrated, since there is nothing to undo. Rectifying crops to the largest all-valid rectangle, so the field of view narrows. THE MONO RIG's flag: a stereo head is rectified by its own stereo calibration (both eyes onto one pinhole with the rows aligned, which is what a disparity means at all), so the node refuses this one there rather than straighten a picture twice |
 | `camera_stream` | `fold_mask` | bool | on | yes | stereo: rectified pixels past a fold of the calibration's undistortion map (the lens corners the board never reached) go out black, as no data, and the depth there is cut; off publishes the mirrored corners as before |
@@ -1116,7 +1000,6 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `rtabmap_frame` | `place_recognition` | choice: words, descriptor | words | yes | how RTAB-Map finds WHICH database node a picture is (its likelihood, before any registration): words — the ORB bag of words' TF-IDF (Kp/TfIdfLikelihoodUsed true, Rtabmap/VirtualPlaceLikelihoodRatio 0, RTAB-Map's defaults); descriptor — the dot product of the nodes' learned place descriptors as z-scores (false and 1; rtabmap Memory::computeLikelihood -> Signature::compareTo, Rtabmap::adjustLikelihood), which sensor_pack attaches to every snapshot. descriptor is sent ONLY when it cannot abort RTAB-Map: its core carries ros/patches/rtabmap-keep-global-descriptors.patch (the marker /opt/rtabmap_patches/keep-global-descriptors), the snapshots carry one each (/sensor_pack/place) and the database's census at this start (PEPIN_PLACE_CENSUS, taken by the launch before RTAB-Map opens the file) says every node carries exactly one of the same length — and only while the camera snapshots are described (descriptor_null_share); otherwise the words, and the report line says why. Live |
 | `rtabmap_frame` | `descriptor_null_share` | number 0..1 | 0.5 | yes | place_recognition descriptor falls back to the words while more than this share of the last 10 camera snapshots carried the null descriptor (the localisation service down, late or answering nonsense), and goes back once they are described again; 1.0 never falls back |
 | `rtabmap_frame` | `start_needs_placement` | bool | on | yes | what goes out on /localization/placement (latched) says this start of RTAB-Map is PLACED only once an update has recognised a node of the database it loaded, or an operator's seed (/rtabmap/initialpose) has been heard since its first update — or it loaded an empty database, whose start pose is the map's origin. The board's goal clients (ros/tools/goto_ros.py, pepin_bringup.goal_server) refuse a goal until then, saying to seed or to let the camera see a mapped place. Off, every start counts as placed: RTAB-Map's pose is taken as it is |
-| `run_recorder` | `bridge_kick` | bool | on | yes | the laptop's request to restart THIS board's zenoh bridge (/bridge/kick) is answered by touching /run/pepin/bridge_kick, which a systemd path unit on the board turns into `systemctl restart pepin-bridge`; off, the request is logged and ignored |
 | `run_recorder` | `planner_records` | bool | on | yes | what the PLANNER saw goes on the tape too: the global costmap (run-length encoded, at most one grid per new plan), the goal status of Nav2's three actions (navigate_to_pose, compute_path_to_pose, follow_path); off, the tape holds what it held before 2026-09-18 |
 | `run_recorder` | `loc_from` | choice: pose_topic, tf | pose_topic | yes | where the tape's `loc` rows come from: pose_topic, the goal server's /pose (it parses /tf for navigation anyway and republishes what it reads); tf, this node's own TF listener at 0.2 s, which is what it ran until 2026-09-22. The rows are identical either way — same fields, same 5 Hz, source 'tf' in both, because both are that same edge |
 | `sensor_pack` | `sensor_pack` | bool | on | yes | snapshots are published; off, the node subscribes and counts and RTAB-Map is fed nothing at all |
@@ -1153,44 +1036,6 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* on — on, because /odom is the only source of speed this filter has: odom0 fuses vx and vy at 0.001 (m/s)^2 and, since 2026-09-15, vyaw; ax and ay are off (a mount bias of -0.229 to +0.066 m/s^2 that no covariance can answer), so with /odom silent past the EKF's sensor_timeout of 0.5 s the filter has no velocity measurement left at all
   - *On when:* always, unless the run is about what the stack does with dead wheel odometry
   - *Off when:* to watch a consumer meet a silent odometry — the EKF's sensor_timeout, Nav2's TF lookups, the tracker's dead reckoning — without stopping the base server; unmute and /odom is back on the next state line (20 Hz)
-
-#### `bridge_watch`
-
-- **`flow_watch`** — bool, default on
-  - *What:* count the messages of every topic that should arrive on this side and repair a topic that carries nothing; off, this watch sees only the board bridge's identity and its route count, as before
-  - *Default:* on — a route count cannot see the failure that cost two evenings: /depth_scan (2026-09-12) and /imu/data_raw (2026-09-13) each had a route on both admins and a live publisher on the far side, and carried zero messages until a bridge was restarted by hand. The mechanism is read off the bridge's own source and its admin (pepin.deployment.BRIDGED_QOS): a route's DDS QoS is whatever the declaration that created it carried, and it is never revised. The subscriptions this flag adds are free — every one of them is on a topic some other node here already receives
-  - *On when:* always on a split or vision stack: it is the only thing that can tell a dead route from a quiet one
-  - *Off when:* while bisecting the bridge by hand, so the watch takes no action of its own
-- **`flow_silence_s`** — number 5..300, default 20.0
-  - *What:* seconds a topic both bridges say should flow may carry nothing before it counts as a dead route (5..300)
-  - *Default:* 20.0 — the topics watched here are the periodic ones — /scan at 10 Hz, /tf at 40, /imu at 48, /localization/sources at 1 — so twenty seconds is twenty missed messages of the slowest of them and four polls of this watch, while still shorter than a goal. A topic published on a change only (/pepin/run_status) is never starved: nothing publishes it between changes, and the watch only counts what both bridges call live. default by design, unmeasured
-  - *On when:* shorten it when a dead route must be caught inside a drive
-  - *Off when:* lengthen it on a congested link, where a ten-second stall is the wireless hop and not the bridge
-- **`dead_routes`** — bool, default on
-  - *What:* a route wired at both ends and missing its own DDS endpoint — a pub route with local publishers and a remote route but no dds_reader, a sub route with local subscribers and a remote route but no dds_writer — is repaired without waiting for the silence to be counted; off, only the message counters of flow_watch can find it
-  - *Default:* on — 2026-09-14, after the board's bridge changed identity: the laptop bridge's pub route for /vo had local_nodes ['/visual_odometry'] and a remote route and dds_reader "", while /depth_scan's route beside it had its reader and carried. The EKF got no visual odometry and nothing in the admin said so — the route count was right. The only cure was restarting the laptop's bridge alone, with every node alive. The endpoints are in the same REST reply this watch already fetches, so the test costs no query: a dead route is a fact about the JSON, not a twenty-second wait for a counter that will never move (a live dump on 2026-09-14 15:5x, 62 routes, had 0 dead)
-  - *On when:* always on a split stack: it is the earliest and cheapest signal there is
-  - *Off when:* while bisecting the bridge by hand, or if a bridge version ever built a route's endpoint lazily enough that a healthy route reads as dead
-- **`board_routes`** — bool, default off
-  - *What:* the BOARD's own routes are judged too: a pub route of the board's bridge with publishers, a remote route naming this bridge and no dds_reader carries nothing and is counted in the report line as 'board routes without a reader N'; off, only this side's routes are judged, as before
-  - *Default:* off — it cannot tell a broken route from a topic nobody here wants, and the second is a normal mode. On 2026-09-19 the cart drove camera-only: no node on the laptop subscribes to /scan then, so the board's pub route for it legitimately had no dds_reader, this watch called it a board route without a reader and kicked the board's bridge. The restart took the laptop's /tf subscription with it and RTAB-Map received no snapshot for 13 minutes — a repair that caused the outage it was watching for. It found a real fault once (2026-09-15, thirteen readerless pub routes while every topic was dead), so the reading stays in the report line; only the repair it triggers is off
-  - *On when:* while chasing a repeat of 2026-09-15 — every topic silent with the route count right — and only with every consumer of every board topic running, so a readerless route means what this rule assumes it means
-  - *Off when:* off by default, and always in a mode where the laptop deliberately does not read a board topic (camera-only, a muted sensor, a stack with half the nodes down)
-- **`bridge_kick`** — bool, default off
-  - *What:* when a fault survives the gentle repair, ask the BOARD to restart its own bridge (one String on /bridge/kick; the board's run recorder touches a flag file and a systemd path unit there does the restart); off, the ladder ends at the gentle repair and the log, as before
-  - *Default:* off — of two bridges the one that starts LAST gets working routes — a route's DDS endpoint is built when the route is created and only while the far bridge is already announcing — which is why ros/laptop.sh restarts the board's bridge over ssh (settle_bridge) right after the laptop's, and why restarting this side alone could not cure 2026-09-15: the readerless routes were the board's. This container has no ssh key and must not have one, so the request crosses as a topic and the board's own systemd does the restart. It is sent only after a restart of this side's bridge, so the order that works is the order that happens. default by design, unmeasured OFF BY DEFAULT since 2026-09-20: see bridge_restart — the ladder this is the last rung of fired on healthy links three times in two days and healed none of them
-  - *On when:* while watching a link that is known to die for real, with somebody reading the log: it is the only repair for the board's own routes that does not need a human
-  - *Off when:* on a board without the kick units installed (the message is then published into nothing), or while bisecting the bridge by hand
-- **`bridge_restart`** — bool, default off
-  - *What:* repair a dead route, a starved topic or a board bridge that changed identity by restarting the laptop's bridge container alone (Docker Engine API over /var/run/docker.sock); off, the repair is the old one — this whole half restarts, which throws away the fusion model and RTAB-Map's working set
-  - *Default:* off — the bridge offers nothing gentler: its REST admin is read-only in 1.7.0 (the running config prints permissions { read: true, write: false }), so there is no reload and no way to drop a single route. Restarting the container re-creates every route in a few seconds and leaves pepin-vslam alive. It falls back by itself when the docker socket is not mounted, and escalates to the whole half when the fault returns after a restart. It is also the answer to a board bridge that changed identity: on 2026-09-14 restarting this whole half on that event left the laptop bridge's /vo route without a DDS reader, and what cured it was a restart of the laptop's bridge alone with the nodes up. default by design, unmeasured OFF BY DEFAULT since 2026-09-20, measured: the repairs fired on links that were not broken and cured nothing that was. Camera-only, the tracker publishes /tracker_pose only when a word moves it; 20 s without one read as a dead route, the bridge was restarted, the laptop lost /tf and /scan with it, RTAB-Map received no snapshot, and legs 2 and 3 of that evening's camera-only tour (6 m) were driven on odometry alone (scratch/tour_who_held_the_pose.py: 0 graph words on tapes 0398 and 0399). The night before, a tracker left without a map was silent for an hour and the ladder restarted the bridges 20 times over it. The watch still measures and reports; with half_restart off as well, nothing is restarted
-  - *On when:* while watching a link that is known to die for real, with somebody reading the log — it is strictly less destructive than the fallback
-  - *Off when:* when the laptop's bridge must not be touched — bisecting it by hand, or running without the docker socket mounted
-- **`half_restart`** — bool, default off
-  - *What:* when the gentle repair (the bridge alone) did not bring the routes back, end this process so the launch restarts the whole laptop half; off: say so in the log, keep everything alive, and retry the gentle repair after a cooldown
-  - *Default:* off — off since 2026-09-15: after every board restart the escalation killed the whole half within minutes (RestartCount 3 -> 6 in 45 min: rgbd_odometry, the fusion model, Foxglove's channels and RTAB-Map's writes all died with it) because a restarted bridge does not always re-match the nodes' subscriptions (/scan silent). A half that keeps running with one silent topic beats one that dies whole; ros/restart.sh laptop is the hand repair
-  - *On when:* a half whose nodes cannot be kicked one by one and whose routes never come back
-  - *Off when:* always while the escalation costs more than the fault (today)
 
 #### `camera_stream`
 
@@ -1846,11 +1691,6 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 
 #### `run_recorder`
 
-- **`bridge_kick`** — bool, default on
-  - *What:* the laptop's request to restart THIS board's zenoh bridge (/bridge/kick) is answered by touching /run/pepin/bridge_kick, which a systemd path unit on the board turns into `systemctl restart pepin-bridge`; off, the request is logged and ignored
-  - *Default:* on — of two bridges the one that started LAST gets working routes: a route's DDS endpoint is built when the route is created and only while the far bridge is already announcing. On 2026-09-15 a 5 s wireless stall made the board's bridge close the transport and reconnect with the same zenoh id, and thirteen of its pub routes came back with an empty dds_reader — nothing crossed from the board until its bridge was restarted by hand. ros/laptop.sh cures that with ssh (settle_bridge); the laptop's watch has no ssh and must never have one, so it asks here and the board's own systemd does the restart. The handler costs this board one subscription to a topic that carries nothing on a healthy link
-  - *On when:* always on a split or vision stack: it is the only way the laptop can put the board's routes back without a human
-  - *Off when:* while bisecting the bridge by hand, so nothing restarts under you
 - **`planner_records`** — bool, default on
   - *What:* what the PLANNER saw goes on the tape too: the global costmap (run-length encoded, at most one grid per new plan), the goal status of Nav2's three actions (navigate_to_pose, compute_path_to_pose, follow_path); off, the tape holds what it held before 2026-09-18
   - *Default:* on — the tape was blind exactly where the failures were. On 2026-09-17 two legs piled up 78 and 90 recoveries in ~125 s with no path (ros/maps/rec/20260917_192935_goto.log, ..._201425_goto.log) and the tapes could not say why: they carry /plan and the LOCAL costmap, and the planner reads the GLOBAL one. The cart's own footprint was clear in every one of the 1740 taped local grids (scratch/footprint_in_costmap.py), so the answer was in the grid nobody recorded. Cost, measured on those tapes (scratch/costmap_rle_cost.py): the planner's grid is 239x215 = 51385 cells, 195 kB of raw JSON, and 16 kB run-length encoded over the four classes that decide whether the cart FITS (unknown / free / inflated / the 99-100 lethal band) — 12-fold, and the gradient it drops is cost, not feasibility. One grid per plan at the tapes' own 1.2 s plan cadence is 13 kB/s beside the 55 kB/s the scans already write, and one encode of 51k cells, 2.8 ms on the laptop's core. The status topics carry a message per transition and the graph's words arrive at 1 Hz
@@ -2114,7 +1954,6 @@ is the whole board.
 | `base_container` | base bridge (wheels, IMU, gyro-bias tracker), the IMU's static mount (nice -10, respawned) | real-time, hardware-attached | 15 % / 60 MB (to measure) | `pepin-ros.service` -> `robot.launch.py` |
 | `run_recorder` | every drive on disk: scans, odometry, pose, commands, camera | wifi-loss | 24 % / 93 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `tof_bridge` | the three VL53L1X ranges as ROS `Range` for the contact layer | real-time, hardware-attached | 20 % / 102 MB | `pepin-ros.service` -> `robot.launch.py` |
-| `zenoh_bridge` | the board's ROS graph over one TCP link to the laptop | real-time | 18 % / 78 MB | `pepin-bridge.service` |
 | `neck_state` | the neck's encoders, and `base_link -> camera_link` behind its flag | hardware-attached | 16 % / 99 MB | `pepin-ros.service` -> `robot.launch.py` |
 | `base_server` | wheels, odometry and the deadman next to the UART (TCP 3336) | real-time, wifi-loss, hardware-attached | 16 % / 27 MB | `pepin-base.service` |
 | `ekf_node` | wheels + gyro + the camera's odometry + the lidar's scan-to-scan odometry fused in the plane, owns `odom -> base_link`; runs on whichever of them are alive, the IMU included or not | real-time, wifi-loss | 14 % / 42 MB | `pepin-ros.service` -> `robot.launch.py` |

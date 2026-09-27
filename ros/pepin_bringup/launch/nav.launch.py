@@ -7,9 +7,7 @@ composes map_server, AMCL, planner, controller, behaviors, bt_navigator and the
 velocity smoother into one container at a lower CPU priority than the sensor
 nodes (see robot.launch.py), so a busy planner never starves the lidar.
 
-Arguments: ``map`` (default the flat's lap3 map), ``params_file``, ``bridge_admin`` (the REST
-admin of the bridge on this host, for the ghost waits; empty = by side, see
-pepin.deployment.bridge_admin_for) and ``side``:
+Arguments: ``map`` (default the flat's lap3 map), ``params_file`` and ``side``:
 ``all`` (default) is the whole stack on one machine, as before; ``board`` and ``laptop`` are the
 two halves of the thin-client split — the board keeps the reflexes (controller, behaviours, tree,
 map) and gets a link watch, the laptop takes the planner and the goal server. The split
@@ -27,11 +25,8 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     OpaqueFunction,
-    RegisterEventHandler,
     SetLaunchConfiguration,
-    Shutdown,
 )
-from launch.event_handlers import OnProcessExit
 from launch.launch_context import LaunchContext
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -42,30 +37,16 @@ from pepin.deployment import (
     CONTAINER_STOP_TIMEOUT_S,
     SIDES,
     autostart_for,
-    bridge_admin_for,
-    laptop_launch_nodes,
-    nav_container_nodes,
     nav_nodes,
-    rmw_is_zenoh,
     runs_here,
 )
 
 # Our own nodes come back by themselves after this pause: a code change costs one kicked process
 # (ros/thin.sh kick <node> on the board, ros/laptop.sh kick <node> here; SIGINT, what the launch
-# sends at shutdown) instead of a stack restart with the bridge and the laptop containers behind
-# it. A kicked node leaves DDS properly and the pause starts at its exit, so its successor never
-# meets its ghost in the bridge; a CRASHED node does (nothing disposed, the name outlives it by
-# the DDS lease, the bridge drops its routes when the ghost expires — the Nav2 container at
-# 2026-09-11 03:07), so every respawned command starts through a ghost wait of its own names
-# (``_after_ghost``). The watches are not respawned: their exit is the signal (bridge_watch ->
-# shutdown, ghost_wait -> start the nodes, link_watch cancels and keeps running).
+# sends at shutdown) instead of a stack restart with the laptop containers behind it. The link
+# watch is not respawned: it cancels and keeps running. (Under CycloneDDS every respawned command
+# started through a ghost wait of the bridge's admin; tag alt/cyclone-bridges-2026-09-20.)
 RESPAWN = {"respawn": True, "respawn_delay": 2.0}
-
-
-def _after_ghost(admin: str, *names: str) -> str:
-    """A command prefix that waits until the bridge at ``admin`` lists none of ``names`` and
-    then becomes the command (pepin_bringup.ghost_wait; an unreachable admin is not waited for)."""
-    return f"python3 -m pepin_bringup.ghost_wait {admin} {' '.join(names)} --"
 
 
 def nav_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
@@ -148,7 +129,6 @@ def nav_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
 
 def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     side = LaunchConfiguration("side").perform(context)
-    admin = LaunchConfiguration("bridge_admin").perform(context) or bridge_admin_for(side)
     params = LaunchConfiguration("params_file")
     # A crash of one Nav2 node takes the whole container with it (SIGABRT at a goal, 2026-09-10
     # 16:06: the board drove nothing until a stack restart). Respawned, the container is back in
@@ -159,9 +139,8 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     container, load = respawned_container(
         f"nav2_container_{side}" if side != "all" else "nav2_container",
         nav_parts,
-        # Planning yields to the sensor nodes (nice -10) under load; the ghost wait keeps the
-        # niceness through its exec.
-        f"nice -n 5 {_after_ghost(admin, *nav_container_nodes(side))}",
+        # Planning yields to the sensor nodes (nice -10) under load.
+        "nice -n 5",
         # The whole params file goes to the container process as well: the costmaps are
         # sub-nodes (/local_costmap/local_costmap) created inside controller/planner and
         # only see parameters given to the process, not the ones given to their parents.
@@ -187,7 +166,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 ExecuteProcess(
                     cmd=["python3", "-m", "pepin_bringup.bag_recorder"],
                     output="screen",
-                    prefix=_after_ghost(admin, "/bag_recorder"),
                     **RESPAWN,
                 )
             )
@@ -210,7 +188,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                         f"loc_from:={'pose_topic' if runs_here(side, 'goal_server') else 'tf'}",
                     ],
                     output="screen",
-                    prefix=_after_ghost(admin, "/run_recorder"),
                     **RESPAWN,
                 )
             )
@@ -226,40 +203,9 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 executable="goal_server",
                 output="screen",
                 parameters=[{"places": places, "side": side}],
-                prefix=_after_ghost(admin, "/goal_server"),
                 **RESPAWN,
             )
         )
-    if side == "laptop":
-        # The bridge keeps routes by node name: the nodes start only once it has forgotten the
-        # previous incarnation of this launch (pepin_bringup.ghost_wait), or their routes die
-        # with the ghost ten seconds after they were made (2026-09-10, RTAB-Map without /scan).
-        ghost_wait = ExecuteProcess(
-            cmd=["python3", "-m", "pepin_bringup.ghost_wait", admin, *laptop_launch_nodes("nav")],
-            output="screen",
-        )
-        actions = [
-            ghost_wait,
-            RegisterEventHandler(OnProcessExit(target_action=ghost_wait, on_exit=actions)),
-        ]
-        # A new board bridge means new subscriptions are needed: the watch exits, the launch
-        # shuts down, the container's restart policy brings this half back
-        # (pepin_bringup.bridge_watch). Under PEPIN_RMW=zenoh there is no bridge to watch: the
-        # watch would find no admin, exit, and take this launch down with it on every start.
-        if not rmw_is_zenoh():
-            actions.append(
-                ExecuteProcess(
-                    cmd=[
-                        "python3",
-                        "-m",
-                        "pepin_bringup.bridge_watch",
-                        LaunchConfiguration("board"),
-                        admin,  # this side's bridge: what the flow watch reads the allow-list from
-                    ],
-                    output="screen",
-                    on_exit=[Shutdown(reason="the board's bridge restarted")],
-                )
-            )
     if runs_here(side, "link_watch"):
         # As a module, not a console script: a new entry point needs an image rebuild, a module
         # on the mounted package path does not.
@@ -275,8 +221,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
 # every shutdown ended in SIGKILLs mid-write, and eight of them left ros/maps/rtabmap.db
 # malformed (2026-09-13). The window is the container's own stop window
 # (pepin.deployment.CONTAINER_STOP_TIMEOUT_S, ros/lib.sh, board/pepin-ros.service), so on a
-# `docker stop` nothing inside escalates before docker's SIGKILL at its end, and on a shutdown
-# from inside (the bridge watch's exit) the nodes get the same seconds.
+# `docker stop` nothing inside escalates before docker's SIGKILL at its end.
 SHUTDOWN = [
     SetLaunchConfiguration("sigterm_timeout", str(CONTAINER_STOP_TIMEOUT_S)),
     SetLaunchConfiguration("sigkill_timeout", "5"),
@@ -298,8 +243,6 @@ def generate_launch_description() -> LaunchDescription:
             # record` writes an MCAP bag instead and ros/tools/bag_to_tape.py makes the tape from
             # it on the laptop (ros/README.md, "Two recorders").
             DeclareLaunchArgument("recorder", default_value="jsonl", choices=["jsonl", "bag"]),
-            DeclareLaunchArgument("board", default_value="10.0.0.187"),
-            DeclareLaunchArgument("bridge_admin", default_value=""),  # empty: by side
             OpaqueFunction(function=_describe),
         ]
     )

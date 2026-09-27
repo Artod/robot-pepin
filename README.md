@@ -25,9 +25,9 @@ Everything that closes a loop runs on the robot: the board is an Orange Pi Zero 
 Cortex-A53 cores and 1.5 GB of RAM, and it carries ROS 2 Jazzy, the EKF, the scan-matching
 tracker, the local costmap, the controller and the behaviour tree. The laptop is never in the
 stop reflex, and every drive's tape is written on the board. The laptop reaches the robot over
-one TCP link (`zenoh-bridge-ros2dds`): it can take the planner with its global costmap and the
+one TCP link between two zenoh routers: it can take the planner with its global costmap and the
 goal server, or — the daily mode — leave the whole drive to the board and run the camera SLAM
-beside it, since a Nav2 action does not survive the bridge and a map can wait a second. Either
+beside it, since a map can wait a second and a drive cannot. Either
 way the operator watches through Foxglove and sends one line of JSON when the robot should go
 somewhere.
 
@@ -108,9 +108,6 @@ What made the camera-only mode work was mostly not the camera:
   grown along the odometry (2 % of the distance, 5 % of a turn, measured) and shrunk by every
   accepted word; a drive is cut when it passes 0.40 m. A cart parked facing a bookshelf, where the
   camera recognises nothing, used to refuse every goal while knowing its pose to 26 cm.
-- **The bridge watch reports and repairs nothing by default.** Its repairs fired on healthy links
-  (a camera-only tracker publishes its pose only when a word moves it) and cured none of the
-  broken ones.
 
 **Transport between the two machines.** Since 20 September 2026 the stack speaks `rmw_zenoh`
 natively: one `rmw_zenohd` router per machine, every node a peer of its own machine's router, and
@@ -121,9 +118,7 @@ load (13.5 % against 13.9 %); `map → odom` reaches the laptop at 20 Hz instead
 the start order of the halves stopped mattering; a restart of either half, of one node or of a
 router heals by itself — the laptop half was stopped six seconds into a leg, the cart finished
 alone, and the link came back without touching the board. The price is about 200 MB of board
-memory. The previous transport is kept whole behind one variable: `PEPIN_RMW=cyclone` in
-`/etc/default/pepin-ros` on the board and in the laptop's environment (`ros/lib.sh` tells the
-whole story).
+memory. The previous transport is kept whole on the tag `alt/cyclone-bridges-2026-09-20`.
 
 Honest limits: the mono depth network gives a noisy obstacle fan (10–20 recoveries per camera-only
 leg); after a laptop restart the first tie to the loaded graph needs the cart within 0.2 m of a

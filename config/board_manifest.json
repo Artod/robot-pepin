@@ -131,7 +131,7 @@
       "on_board_because": [
         "wifi-loss"
       ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn, ghost wait)",
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn)",
       "budget": {
         "cpu_percent": 24.0,
         "rss_mb": 93.0
@@ -146,7 +146,7 @@
       "on_board_because": [
         "wifi-loss"
       ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (recorder:=bag, respawn, ghost wait)",
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (recorder:=bag, respawn)",
       "budget": {
         "cpu_percent": 8.0,
         "rss_mb": 100.0
@@ -192,7 +192,7 @@
         "real-time",
         "wifi-loss"
       ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (laser_odom:=true, respawn, ghost wait, nice -5)",
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (laser_odom:=true, respawn, nice -5)",
       "budget": {
         "cpu_percent": 20.0,
         "rss_mb": 105.0
@@ -206,7 +206,7 @@
       "on_board_because": [
         "hardware-attached"
       ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (neck:=true, respawn, ghost wait)",
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (neck:=true, respawn)",
       "budget": {
         "cpu_percent": 16.0,
         "rss_mb": 99.0
@@ -235,7 +235,7 @@
       "on_board_because": [
         "wifi-loss"
       ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn, ghost wait)",
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn)",
       "budget": {
         "cpu_percent": 30.0,
         "rss_mb": 120.0
@@ -257,24 +257,9 @@
       "note": "Measured 7 % / 70 MB. One launch process for sensors and Nav2 together, on purpose: two cost ~110 MB of Python each."
     },
     {
-      "name": "zenoh_bridge",
-      "match": "zenoh-bridge-ros2dds -c|docker run .*--name zenoh-bridge",
-      "role": "The board's ROS graph over one TCP link to the laptop: only the topics the split needs cross.",
-      "on_board_because": [
-        "real-time"
-      ],
-      "owner": "pepin-bridge.service (docker run eclipse/zenoh-bridge-ros2dds, config ros/zenoh-bridge-board*.json)",
-      "when": "sometimes",
-      "budget": {
-        "cpu_percent": 18.0,
-        "rss_mb": 78.0
-      },
-      "note": "Measured 12 % / 52 MB for the pair: the bridge itself is 11 % / 23 MB and the `docker run` supervisor that holds it is ~1 % / 29 MB — the same regex claims both, because killing one kills the other. Runs only when PEPIN_SIDE=board or PEPIN_BRIDGE=on, but by then it is part of every drive, so it is expected whenever it is configured; a census with no bridge running is not red on its own (see `when`)."
-    },
-    {
       "name": "zenoh_router",
       "match": "rmw_zenohd|docker run .*--name pepin-zrouter",
-      "role": "The board's half of the rmw_zenoh transport (PEPIN_RMW=zenoh): the one process that carries this board's graph to the laptop's router. Board-internal traffic does NOT pass through it — every node here is a zenoh peer of every other over the host loopback (measured 0.0 % router CPU for a 10 Hz x 100 kB board-internal flow, against 1.4 % with the same two nodes as clients).",
+      "role": "The board's half of the rmw_zenoh transport: the one process that carries this board's graph to the laptop's router. Board-internal traffic does NOT pass through it — every node here is a zenoh peer of every other over the host loopback (measured 0.0 % router CPU for a 10 Hz x 100 kB board-internal flow, against 1.4 % with the same two nodes as clients).",
       "on_board_because": [
         "real-time",
         "wifi-loss"
@@ -363,7 +348,7 @@
     {
       "name": "docker",
       "match": "(^|/)(dockerd|containerd|containerd-shim-runc-v2)( |$)|(^|/)docker run ",
-      "role": "The container runtime and one supervisor per container: what keeps pepin-ros and the bridge alive across a crash.",
+      "role": "The container runtime and one supervisor per container: what keeps pepin-ros and the router alive across a crash.",
       "on_board_because": [
         "wifi-loss"
       ],
@@ -437,7 +422,7 @@
     {
       "name": "foxglove_bridge",
       "match": "foxglove_bridge",
-      "role": "The Foxglove websocket. Being removed: the laptop reads the board through the zenoh bridge, and a second serialiser of every topic is a luxury on four A53 cores.",
+      "role": "The Foxglove websocket. Being removed: the laptop reads the board through the zenoh routers, and a second serialiser of every topic is a luxury on four A53 cores.",
       "on_board_because": [],
       "owner": "a component of sensors_container behind foxglove:=true, which defaults to false since 2026-09-14 (ros/pepin_bringup/launch/robot.launch.py)",
       "expected": false,
@@ -445,7 +430,7 @@
         "cpu_percent": 0.0,
         "rss_mb": 0.0
       },
-      "note": "Not expected on the board any more: the laptop runs one Foxglove bridge and it sees the board through the zenoh bridge. If a process with this name appears, someone passed foxglove:=true. As a component inside sensors_container it is invisible to ps — the census cannot prove its absence, only catch it as a standalone process. Check the launch argument, not this line."
+      "note": "Not expected on the board any more: the laptop runs one Foxglove bridge and it sees the board through the zenoh routers. If a process with this name appears, someone passed foxglove:=true. As a component inside sensors_container it is invisible to ps — the census cannot prove its absence, only catch it as a standalone process. Check the launch argument, not this line."
     }
   ]
 }

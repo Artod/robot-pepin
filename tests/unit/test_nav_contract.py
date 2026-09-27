@@ -17,7 +17,6 @@ import pytest
 import source_facts as sf
 import yaml
 
-from pepin.deployment import rmw_is_zenoh
 from pepin.flags import load_table
 from pepin.watch import PAINT_SIGMA_M
 
@@ -38,17 +37,14 @@ def _node_named(launch: ast.Module, name: str) -> ast.Call:
     )
 
 
-def _started_after_ghost_wait(launch: ast.Module) -> set[str]:
-    """What the launch's ``OnProcessExit(target_action=ghost_wait, on_exit=...)`` starts: the
-    names of a list literal, or the one name that holds the list (nav: ``actions``)."""
-    handlers = sf.calls_to(launch, "OnProcessExit")
-    assert len(handlers) == 1
-    handler = sf.keywords(handlers[0])
-    assert ast.unparse(handler["target_action"]) == "ghost_wait"
-    started = handler["on_exit"]
-    if isinstance(started, ast.List):
-        return {ast.unparse(e) for e in started.elts}
-    return {ast.unparse(started)}
+def _started_by_describe(launch: ast.Module) -> set[str]:
+    """The names in the list the launch's ``_describe`` returns: what it starts."""
+    describe = next(
+        n for n in launch.body if isinstance(n, ast.FunctionDef) and n.name == "_describe"
+    )
+    returned = [n.value for n in ast.walk(describe) if isinstance(n, ast.Return)][-1]
+    assert isinstance(returned, ast.List)
+    return {ast.unparse(e) for e in returned.elts if isinstance(e, ast.Name)}
 
 
 def _rtabmap(table: str) -> dict[str, object]:
@@ -61,7 +57,7 @@ def _rtabmap(table: str) -> dict[str, object]:
 
 def _case_blocks(script: str) -> dict[str, str]:
     """A shell script's top-level ``case`` branches by label: ``on)`` up to the next label."""
-    labels = list(re.finditer(r"^    (\w+|\*)\)", script, re.M))
+    labels = list(re.finditer(r"^    ([\w|]+|\*)\)", script, re.M))
     ends = [m.start() for m in labels[1:]] + [len(script)]
     return {m.group(1): script[m.end() : end] for m, end in zip(labels, ends, strict=True)}
 
@@ -867,166 +863,29 @@ def test_the_camera_slam_owns_the_one_map_frame() -> None:
     assert _rtabmap("RTABMAP")["RGBD/LoopClosureIdentityGuess"] == "true"
 
 
-def test_the_bridge_routes_only_what_the_split_needs_and_only_one_way() -> None:
-    """Routing every node's parameter services wedged the link; routing a topic both ways looped
-    it (a bridge finds its own writer and calls it a publisher). Each side's config lists its own
-    publishers and the other side's subscribers, generated from pepin.deployment."""
-    from pepin.deployment import bridge_allow, bridge_config
-
-    for side in ("board", "laptop"):
-        written = json.loads((REPO / f"ros/zenoh-bridge-{side}.json").read_text())
-        assert written == bridge_config(side), f"regenerate ros/zenoh-bridge-{side}.json"
-    board, laptop = bridge_allow("board"), bridge_allow("laptop")
-    pub_b, sub_l = re.compile(board["publishers"][0]), re.compile(laptop["subscribers"][0])
-    for name in (
-        "/scan",
-        "/tf",
-        "/tf_static",
-        "/map_tracked",
-        "/odometry/filtered",
-        "/tof/front",
-        "/tracker_pose",
-        "/localization/sources",
-        "/pepin/run_status",
-    ):
-        assert pub_b.search(name) and sub_l.search(name), name
-        assert not re.compile(laptop["publishers"][0]).search(name), f"{name} would loop"
-    for name in (
-        "/plan",
-        "/pepin/run",
-        "/laptop/heartbeat",
-        "/planner_selector",
-        "/map",
-        "/rtabmap/mapGraph",
-        "/depth_scan",
-        "/depth_marks",
-        "/contact_scan",
-    ):
-        assert re.compile(laptop["publishers"][0]).search(name) and re.compile(
-            board["subscribers"][0]
-        ).search(name)
-        assert not pub_b.search(name), f"{name} would loop"
-    assert re.compile(board["action_servers"][0]).search("/navigate_to_pose")
-    assert re.compile(laptop["action_servers"][0]).search("/compute_path_to_pose")
-    assert re.compile(board["service_servers"][0]).search("/bt_navigator/change_state")
-    assert re.compile(laptop["service_servers"][0]).search(
-        "/global_costmap/clear_entirely_global_costmap"
-    )
-    for noise in ("/launch_ros_1/get_parameters", "/rosout", "/camera/image", "/ldlidar_node/scan"):
-        for block in (*board.values(), *laptop.values()):
-            assert not re.compile(block[0]).search(noise), noise
-    # Vision mode (the board drives, the laptop maps): the plan comes FROM the board and the
-    # laptop publishes none of it; each side's file is generated too, the board's unit reads
-    # the one ros/thin.sh names with the mode, laptop.sh picks its own by the board's side.
-    for side in ("board", "laptop"):
-        written = json.loads((REPO / f"ros/zenoh-bridge-{side}-vision.json").read_text())
-        assert written == bridge_config(side, "vision"), f"regenerate zenoh-bridge-{side}-vision"
-    vision_b, vision_l = bridge_allow("board", "vision"), bridge_allow("laptop", "vision")
-    for name in ("/plan", "/global_costmap/costmap", "/local_costmap/published_footprint"):
-        assert re.compile(vision_b["publishers"][0]).search(name), name
-        assert re.compile(vision_l["subscribers"][0]).search(name), name
-        assert not re.compile(vision_l["publishers"][0]).search(name), f"{name} would loop"
-    # The laptop's whole-map watchdog: its candidates cross to the board, and everything it
-    # needs to compute one (the scan, the map the board ACCEPTED, what the tracker believes)
-    # crosses to it. The pose it publishes beside them for Foxglove stays on the laptop, where
-    # Foxglove is. /map goes the other way: it is the laptop's own grid (World R).
-    for name in ("/scan", "/map_tracked", "/tracker_pose", "/localization_fit", "/tf_static"):
-        assert re.compile(vision_b["publishers"][0]).search(name), name
-        assert re.compile(vision_l["subscribers"][0]).search(name), name
-    assert re.compile(vision_l["publishers"][0]).search("/map")
-    assert re.compile(vision_b["subscribers"][0]).search("/map")
-    assert not re.compile(vision_b["publishers"][0]).search("/map"), "one map, one publisher"
-    assert re.compile(vision_l["publishers"][0]).search("/localization/candidate")
-    assert re.compile(vision_b["subscribers"][0]).search("/localization/candidate")
-    assert not re.compile(vision_b["publishers"][0]).search("/localization/candidate")
-    for block in (*vision_b.values(), *vision_l.values()):
-        assert not re.compile(block[0]).search("/localization/candidate_pose")
-    unit = (REPO / "board/pepin-bridge.service").read_text()
-    assert "Environment=PEPIN_BRIDGE_CONFIG=zenoh-bridge-board.json" in unit
-    assert "/root/pepin-ros/$PEPIN_BRIDGE_CONFIG:/config.json:ro" in unit
-    thin = (REPO / "ros/thin.sh").read_text()
-    vision = thin[thin.index("    vision)") : thin.index("    off)")]
-    assert "PEPIN_BRIDGE_CONFIG=zenoh-bridge-board-vision.json" in vision
-    assert "    slam)" not in thin, "the SLAM mode went with World R (2026-09-19)"
-    for other in ("    on)", "    off)"):
-        block = thin[thin.index(other) :].split("\n    ")[1]
-        assert "/^PEPIN_BRIDGE_CONFIG=/d" in thin and "board-vision" not in block, other
+def test_the_laptop_halves_restart_on_their_own_and_ask_the_board_only_at_start() -> None:
+    """The two node containers restart on their own, and a board that does not answer is fatal
+    and loud: the script sources lib.sh (a connect timeout, one ssh master) and never silently
+    ends on a failed command substitution (2026-09-10 20:02)."""
     laptop = (REPO / "ros/laptop.sh").read_text()
-    assert "CONFIG=zenoh-bridge-laptop.json" in laptop
-    assert "CONFIG=zenoh-bridge-laptop-vision.json" in laptop
-    assert laptop.index('[ "$SIDE" = board ]') < laptop.index("CONFIG=zenoh-bridge-laptop.json")
-
-
-def test_the_laptop_half_restarts_with_the_board_s_bridge() -> None:
-    """A subscription does not follow a bridge through its restart: both laptop launches carry
-    the bridge watch (exit -> launch shutdown -> container restart), the containers restart on
-    their own, and the board's bridge is settled BEFORE the containers start, never after."""
-    for launch in (NAV_LAUNCH, VSLAM_LAUNCH):
-        src = sf.tree(launch)
-        assert "pepin_bringup.bridge_watch" in sf.strings(src), launch
-        assert "Shutdown" in sf.calls(src), launch
-    laptop = (REPO / "ros/laptop.sh").read_text()
-    # The two NODE containers restart on their own. Named, not counted: under
-    # PEPIN_RMW=zenoh this side also runs a router container with the same policy, and a
-    # bare count would have read that as one of the halves.
     for container in ("pepin-vslam", "pepin-laptop"):
         line = next(ln for ln in laptop.splitlines() if f"docker run -d --name {container} " in ln)
         assert "--restart unless-stopped" in line, container
-    lines = laptop.splitlines()
-    settles = [i for i, line in enumerate(lines) if line.split("#")[0].strip() == "settle_bridge"]
-    starts = [i for i, line in enumerate(lines) if "docker run -d --name pepin-laptop" in line]
-    assert len(settles) == 1 and len(starts) == 1, "one settle, one navigation container"
-    assert settles[0] < starts[0], "the bridge settles BEFORE the container, never after"
-    # A settle that fails is fatal, and a board that does not answer is fatal and loud: the
-    # script sources lib.sh (a connect timeout, one ssh master) and never silently ends on a
-    # failed command substitution (2026-09-10 20:02).
     assert '. "$HERE/lib.sh"' in laptop and "SITE=" not in laptop
-    settle = laptop[laptop.index("settle_bridge() {") :].split("\n}")[0]
-    assert "return 1" in settle
     assert "cannot read the board's side over ssh" in laptop
     # The board is asked only on the start path: stop, logs, vslam and kick never ssh.
     subcommands = laptop[laptop.index('case "${1:-start}"') : laptop.index("esac")]
     assert "ssh " not in subcommands and "MAP=" not in subcommands
     assert laptop.index("MAP=") > laptop.index("esac")
-    # The bridge watch: a silent admin restarts the half (a minute: shorter and a WiFi hiccup
-    # restarts it, longer and a wedged bridge is tolerated), the settle threshold is measured
-    # against the previous bridge's count, never a fixed number.
-    watch = sf.tree(f"{NODES}/bridge_watch.py")
-    assert 30.0 <= ast.literal_eval(sf.assignments(watch)["SILENCE_S"]) <= 120.0
-    assert "BridgeIdentity(silence_s=SILENCE_S)" in sf.unparsed(watch, ast.Call)
-    settled = sf.calls_to(watch, "routes_settled")
-    assert settled and not any(isinstance(c.args[1], ast.Constant) for c in settled)
-    assert "self._identity.observe(zid, now)" in sf.unparsed(watch, ast.Call)
-    # ...and the watch verifies FLOW, not route counts: it counts the messages of every topic
-    # both bridges say should arrive here, and repairs the bridge container before this half
-    # (a route can exist, carry nothing, and look perfect on both admins — 2026-09-12/13).
-    calls = sf.unparsed(watch, ast.Call)
-    assert "FlowWatch()" in calls and "self._flow.starved(now)" in calls
-    assert "self._repair.restart()" in calls and "self._repair.available()" in calls
-    assert "topic_flows(routes, self._local_zid, self._allowed, watcher=WATCH_NODE)" in calls
-    mend = sf.unparsed(watch, ast.FunctionDef)
-    assert "self.restart_half" in next(m for m in mend if m.startswith("def mend")), (
-        "the whole half stays as the escalation"
-    )
-    # The board's unit fails itself when the REST admin stays silent, so Restart= fires.
-    unit = (REPO / "board/pepin-bridge.service").read_text()
-    post = next(line for line in unit.splitlines() if line.startswith("ExecStartPost="))
-    assert "127.0.0.1:8000/@/local/router" in post and "exit 1" in post and "seq 1 30" in post
-    assert "Restart=on-failure" in unit
 
 
-def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() -> None:
-    """The bridge keeps routes by node name: a half restarted within its predecessor's DDS lease
-    loses its routes when the ghost expires. Both laptop launches start their ROS nodes on the
-    ghost wait's exit, the names they wait for are the names they create, and laptop.sh lets a
-    container leave properly before replacing it."""
+def test_the_laptop_halves_create_the_names_flags_sh_looks_for() -> None:
+    """ros/flags.sh finds a node's container by its name (pepin.deployment.node_host): the names
+    the table lists are the names the launches create, and laptop.sh lets a container leave
+    properly before replacing it."""
     from pepin.deployment import laptop_launch_nodes
 
-    for launch, half in ((NAV_LAUNCH, "nav"), (VSLAM_LAUNCH, "slam")):
-        src = sf.tree(launch)
-        assert "pepin_bringup.ghost_wait" in sf.strings(src), launch
-        assert _started_after_ghost_wait(src), launch
-        assert f"laptop_launch_nodes('{half}')" in sf.unparsed(src, ast.Call), launch
+    assert _started_by_describe(sf.tree(VSLAM_LAUNCH))
     vslam = sf.tree(VSLAM_LAUNCH)
     assert ast.unparse(sf.keywords(_node_named(vslam, "rtabmap"))["namespace"]) == "'rtabmap'"
     assert _node_named(vslam, "foxglove_bridge") is not None
@@ -1060,72 +919,11 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
     assert "docker rm -f" not in acted and "docker stop" not in acted
     # `docker stop` sends the container's stop signal: SIGINT is the one the launch answers by
     # shutting its nodes down (SIGTERM it answers by cancelling itself and the nodes are
-    # SIGKILLed without a dispose — the ghost on every container stop). A run wrapped over
-    # several lines is read as one command.
+    # SIGKILLed mid-write). A run wrapped over several lines is read as one command.
     runs = [c for c in sf.shell_commands(laptop) if "docker run -d --name pepin-" in c]
-    assert len(runs) == 3, "the bridge, the navigation half, the SLAM half"
+    assert len(runs) == 2, "the navigation half, the SLAM half"
     for command in runs:
-        assert ("--stop-signal SIGINT" in command) == ("pepin-zenoh" not in command), command
-
-
-def test_every_respawned_node_waits_for_its_own_ghost_first() -> None:
-    """A crash disposes nothing: the name outlives the process by the DDS lease, the launch
-    respawns it in two seconds, and the bridge drops the name's routes when the ghost expires
-    (2026-09-11 03:07, the Nav2 container). Every respawned command in both launches starts
-    through a ghost wait of its own names (prefix; ghost_wait execs the command after), the
-    board's launch asks the bridge on its own host, and an unreachable admin is not waited for."""
-    from pepin.deployment import nav_container_nodes
-
-    for name in ("nav.launch.py", "vslam.launch.py", "robot.launch.py"):
-        src = sf.tree(f"ros/pepin_bringup/launch/{name}")
-        assert any(isinstance(n, ast.FunctionDef) and n.name == "_after_ghost" for n in src.body)
-        # the laptop halves also wait for their whole set once; the board's launch only prefixes
-        assert any("pepin_bringup.ghost_wait" in s for s in sf.strings(src)), name
-        for node, keywords in _launch_processes(name).items():
-            if keywords.get("respawn") is True:
-                assert "_after_ghost(" in str(keywords.get("prefix")), (name, node)
-    nav = sf.tree(NAV_LAUNCH)
-    container = sf.calls_to(nav, "respawned_container")[0]
-    assert (
-        ast.unparse(container.args[2])
-        == "f'nice -n 5 {_after_ghost(admin, *nav_container_nodes(side))}'"
-    )
-    by_side = [
-        n
-        for n in ast.walk(nav)
-        if isinstance(n, ast.BoolOp)
-        and isinstance(n.op, ast.Or)
-        and "bridge_admin_for(side)" in {ast.unparse(v) for v in n.values}
-    ]
-    assert by_side, "an empty bridge_admin argument is resolved by side"
-    admin = next(
-        c
-        for c in sf.calls_to(nav, "DeclareLaunchArgument")
-        if ast.unparse(c.args[0]) == "'bridge_admin'"
-    )
-    assert ast.unparse(sf.keywords(admin)["default_value"]) == "''"
-    assert "/nav2_container_board" in nav_container_nodes("board")
-    for node in ("run_recorder", "goal_server"):
-        assert f"_after_ghost(admin, '/{node}')" in sf.unparsed(nav, ast.Call), node
-    vslam = sf.tree(VSLAM_LAUNCH)
-    for node in (
-        "camera_stream",
-        "depth_stream",
-        "contact_scan",
-        "depth_fusion",
-        "rtabmap_frame",
-        "foxglove_bridge",
-    ):
-        assert f"_after_ghost('/{node}')" in sf.unparsed(vslam, ast.Call), node
-    robot = sf.tree(ROBOT_LAUNCH)
-    assert "_after_ghost('/neck_state')" in sf.unparsed(robot, ast.Call)
-    assert "bridge_admin_for('board')" in sf.unparsed(robot, ast.Call), "its own host's bridge"
-    wait = sf.tree(f"{NODES}/ghost_wait.py")
-    assert {"os.execvp(command[0], command)", "rest.index('--')"} <= sf.unparsed(wait, ast.Call)
-    assert any("not waiting" in s for s in sf.strings(wait))
-    # The board's container shares the host's network: 127.0.0.1:8000 is its bridge's admin.
-    run = (REPO / "ros/run.sh").read_text()
-    assert "--network host" in run
+        assert "--stop-signal SIGINT" in command, command
 
 
 def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
@@ -1144,7 +942,7 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
     )
     assert table["Grid/3D"] == "false", "the grid the board is handed is 2D"
     assert "Grid/MaxObstacleHeight" in table
-    assert {"camera", "depth", "pack", "rtabmap", "frame", "foxglove"} <= _started_after_ghost_wait(
+    assert {"camera", "depth", "pack", "rtabmap", "frame", "foxglove"} <= _started_by_describe(
         vslam
     )
     node = sf.tree(f"{NODES}/depth_stream.py")
@@ -1196,15 +994,11 @@ def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph(
     with the board's capture time; and the graph owns no frame of its own on this robot — its
     optimised map frame IS `map`, RTAB-Map broadcasts map -> odom itself, and rtabmap_frame
     publishes no transform at all."""
-    from pepin.deployment import LAPTOP_PUBLISHES
-
-    assert "depth_scan" in LAPTOP_PUBLISHES
     layer = _p("local_costmap")["camera_layer"]
     assert "depth_scan" in layer["observation_sources"].split()
     source = layer["depth_scan"]
     assert source["topic"] == "/depth_scan" and source["data_type"] == "LaserScan"
     assert source["inf_is_valid"] is True
-    assert "depth_marks" in LAPTOP_PUBLISHES, "and what that layer MARKS with, see below"
     node = sf.tree(f"{NODES}/depth_stream.py")
     assert "/depth_scan" in sf.strings(node) and "depth_to_scan" in sf.calls(node)
     camera = sf.tree(f"{NODES}/camera_stream.py")
@@ -1424,14 +1218,11 @@ def test_the_camera_layer_clears_from_a_frame_and_marks_from_the_volume() -> Non
         assert open_to["expected_update_rate"] == 0.0, "a silent source may not stall a costmap"
 
 
-def test_the_floor_s_edge_is_a_node_of_the_kit_and_crosses_the_bridge() -> None:
+def test_the_floor_s_edge_is_a_node_of_the_kit() -> None:
     """The contact scan runs where the depth network runs — on the laptop, off /camera/depth —
-    and reaches the board's costmap the way /depth_scan does: through the bridge's allow-list,
-    one way, in both bridge modes. The node is the kit's: a newest-wins worker, live switches
-    printed in its report line, the floor's geometry rebuilt only when the lean or the optics
-    move, and a launch entry that respawns it behind a wait for its own ghost."""
-    from pepin.deployment import LAPTOP_PUBLISHES, VISION_LAPTOP_PUBLISHES, bridge_allow
-
+    and reaches the board's costmap the way /depth_scan does. The node is the kit's: a
+    newest-wins worker, live switches printed in its report line, the floor's geometry rebuilt
+    only when the lean or the optics move, and a launch entry that respawns it."""
     node = sf.tree(f"{NODES}/contact_scan.py")
     assert "super().__init__('contact_scan')" in sf.unparsed(node, ast.Call)
     assert {"/contact_scan", "/camera/depth", "/camera/camera_info"} <= sf.strings(node)
@@ -1453,15 +1244,9 @@ def test_the_floor_s_edge_is_a_node_of_the_kit_and_crosses_the_bridge() -> None:
     # the plane is a cache with two keys: the lean and the optics
     assert "self._plane_up" in sf.unparsed(node, ast.Attribute)
     assert "self._plane_intr != intr" in sf.unparsed(node, ast.Compare)
-    assert "contact_scan" in LAPTOP_PUBLISHES and "contact_scan" in VISION_LAPTOP_PUBLISHES
-    for mode in ("split", "vision"):
-        laptop, board = bridge_allow("laptop", mode), bridge_allow("board", mode)
-        assert re.compile(laptop["publishers"][0]).search("/contact_scan"), mode
-        assert re.compile(board["subscribers"][0]).search("/contact_scan"), mode
-        assert not re.compile(board["publishers"][0]).search("/contact_scan"), "it would loop"
     vslam = sf.tree(VSLAM_LAUNCH)
     assert "pepin_bringup.contact_scan" in sf.strings(vslam)
-    assert "contact" in _started_after_ghost_wait(vslam)
+    assert "contact" in _started_by_describe(vslam)
 
 
 def test_the_drive_ends_on_position_and_the_goal_server_turns_to_the_heading() -> None:
@@ -1641,9 +1426,8 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     feature = (REPO / "ros/feature.sh").read_text()
     assert "neck) VAR=PEPIN_NECK ;;" in feature
     assert (
-        "PEPIN_(CPP_BRIDGE|IMU|EKF|TOF|NECK|SIDE|BRIDGE|BRIDGE_CONFIG|RECORDER)"
-        in (REPO / "ros/mode.sh").read_text()
-    ), "a mode change must not wipe the bridge the board was told to run"
+        "PEPIN_(CPP_BRIDGE|IMU|EKF|TOF|NECK|SIDE|RECORDER)" in (REPO / "ros/mode.sh").read_text()
+    ), "a mode change must not wipe the side and the features the board was told to run"
     laptop = (REPO / "ros/laptop.sh").read_text()
     assert "--neck) STATIC_CAMERA_TF=false ;;" in laptop, "a flag anywhere after the subcommand"
     assert any(
@@ -1654,12 +1438,12 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
 
 
 def test_the_frames_are_fused_into_one_surface_beside_rtabmap_s_cloud() -> None:
-    """The SLAM launch runs the fusion node after the ghost wait; the node loads the grid from
+    """The SLAM launch runs the fusion node; the node loads the grid from
     config/fusion.json and offers its switches as parameters; the 3D layout shows the fused
     surface and hides RTAB-Map's concatenated cloud by default (both stay available)."""
     vslam = sf.tree(VSLAM_LAUNCH)
     assert "pepin_bringup.depth_fusion" in sf.strings(vslam)
-    assert "fusion" in _started_after_ghost_wait(vslam)
+    assert "fusion" in _started_by_describe(vslam)
     node = sf.tree(f"{NODES}/depth_fusion.py")
     assert sf.assignments(node)["CONFIG"] == "'/ws/config/fusion.json'"
     # The four are flags of the node's table (node_kit.Switches over pepin.flags), so ros2
@@ -1785,20 +1569,15 @@ def test_the_graphs_bend_moves_the_volume_and_the_carts_recovery_never_does() ->
 
 
 def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
-    """One estimator (pepin.lean through the kit's LeanFeed, off /imu/data_raw — which crosses
-    the bridge in both modes, so a laptop node reads it directly and no /lean topic is needed),
+    """One estimator (pepin.lean through the kit's LeanFeed, off /imu/data_raw — which reaches
+    the laptop in both modes, so a laptop node reads it directly and no /lean topic is needed),
     one flag name and one meaning in every node that uses it — imu_lean switches the estimator
     in all three and the poser in the two that place a frame — off until it is measured on the
     robot, and the lean in each of their report lines. The tracker is deliberately not among
     them: it runs on the board and already refuses an IMU subscription for a number the EKF
     gives it."""
-    from pepin.deployment import BOARD_PUBLISHES, bridge_allow
     from pepin.lean import LEAN_QUALITY_FLOOR
 
-    assert "imu/data_raw" in BOARD_PUBLISHES
-    for mode in ("split", "vision"):
-        allowed = bridge_allow("laptop", mode)["subscribers"][0]
-        assert re.compile(allowed).search("/imu/data_raw"), mode
     kit = sf.tree(f"{NODES}/node_kit.py")
     assert "/imu/data_raw" in sf.strings(kit) and "LeanEstimator" in sf.imported(kit)
     # and it starts from what the level floor measured, not from a zero it learns again per run
@@ -2073,7 +1852,6 @@ def test_rtabmap_is_told_one_table_reading_one_snapshot_topic_and_owns_no_transf
     assert sf.assignments(vslam)["SENSOR_DATA_TOPIC"] == node["SENSOR_DATA_TOPIC"]
     assert "('sensor_data', SENSOR_DATA_TOPIC)" in sf.unparsed(vslam, ast.Tuple)
     assert "pepin_bringup.sensor_pack" in sf.strings(vslam)
-    assert "_after_ghost('/sensor_pack')" in sf.unparsed(vslam, ast.Call)
 
     # The arguments: the five ros/laptop.sh passes are all still declared, and every argument
     # that used to SELECT A MODE is gone (World R: one database, one grid, one arrangement).
@@ -2301,7 +2079,7 @@ def test_the_floor_anchors_the_depth_and_leans_with_the_imu() -> None:
 
 
 def test_the_laptop_mounts_the_library_live_not_a_copy() -> None:
-    """A copy of src/pepin went stale whenever the bridge watch restarted a container: the
+    """A copy of src/pepin went stale whenever anything but laptop.sh restarted a container: the
     laptop containers mount the library itself, like the ROS package."""
     laptop = (REPO / "ros/laptop.sh").read_text()
     assert '"$HERE/../src/pepin:/ws/pepin_src/pepin:ro"' in laptop
@@ -2366,9 +2144,7 @@ def _launch_processes(name: str) -> dict[str, dict[str, object]]:
             if isinstance(n, ast.Constant) and isinstance(n.value, str)
         ]
         modules = [s for s in strings if s.startswith("pepin_bringup.")]
-        # a node's ghost-wait prefix names the wait module too: the node is what the call runs
-        others = [m for m in modules if m != "pepin_bringup.ghost_wait"]
-        module = next(iter(others), next(iter(modules), None))
+        module = next(iter(modules), None)
         key = module.removeprefix("pepin_bringup.") if module else str(keywords["executable"])
         found[key] = keywords
     return found
@@ -2380,12 +2156,10 @@ def _respawning(launch: dict[str, dict[str, object]]) -> set[str]:
 
 def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
     """A code change is one kicked process, not a container restart: the launches respawn our
-    nodes (and Foxglove's bridge) two seconds after they exit. The watches must not: their exit
-    is the signal (bridge_watch -> Shutdown, ghost_wait -> OnProcessExit starts the nodes, and
-    respawned it would start every node twice). RTAB-Map stays out too: the graph is its state
-    and its crash must stay visible. Its database is never wiped by the launch (no ``-d``): the
-    bridge watch restarts the container whenever the board's bridge is new, and a launch that
-    wiped it lost the map each time; an empty start is ``ros/laptop.sh vslam --fresh``."""
+    nodes (and Foxglove's bridge) two seconds after they exit. The link watch must not: it
+    cancels and keeps running. RTAB-Map stays out too: the graph is its state and its crash must
+    stay visible. Its database is never wiped by the launch (no ``-d``): a launch that wiped it
+    lost the map each time; an empty start is ``ros/laptop.sh vslam --fresh``."""
     vslam_launch = sf.tree(VSLAM_LAUNCH)
     for callee in ("Node", "ExecuteProcess"):
         assert not any("arguments" in sf.keywords(c) for c in sf.calls_to(vslam_launch, callee))
@@ -2427,19 +2201,14 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
     robot = _launch_processes("robot.launch.py")
     # tof_bridge since 2026-09-21: it died once on the robot and stayed dead, and a near-field
     # sensor that silently never comes back is worse than one that was never on.
-    # ...and, since 2026-09-22, the lidar's own odometry: a third-party binary, respawned and
-    # ghost-waited like ours because the EKF reads its topic and a name left in the bridge by a
-    # crash takes the route with it when the lease expires.
+    # ...and, since 2026-09-22, the lidar's own odometry: a third-party binary, respawned like
+    # ours because the EKF reads its topic.
     assert _respawning(robot) == {"neck_state", "tof_bridge", "rf2o_laser_odometry_node"}
-    for launch in (vslam, nav):
-        for watch in ("ghost_wait", "bridge_watch"):
-            assert "respawn" not in launch[watch], watch
     for launch in (vslam, nav, robot):
         for name, keywords in launch.items():
             if keywords.get("respawn"):
                 assert 0.0 < float(str(keywords["respawn_delay"])) <= 5.0, name
     assert "respawn" not in nav["link_watch"] and "respawn" not in vslam["rtabmap"]
-    assert "on_exit" in vslam["bridge_watch"] and "on_exit" in nav["bridge_watch"]
 
 
 def test_the_laptop_image_provides_what_the_laptop_nodes_import() -> None:
@@ -2659,15 +2428,17 @@ def test_the_graphs_grid_is_the_one_map_and_rtabmap_owns_map_to_odom() -> None:
 
 def test_one_gesture_per_side_brings_the_stack_up_and_one_saves_the_map() -> None:
     """Two gestures, and neither of them names a mode any more (World R). ros/thin.sh puts the
-    board on a side and gives it a bridge; every branch of it deletes a stale PEPIN_SLAM line of
-    an older board, a switch that is gone.
+    board on a side; every branch of it deletes a stale PEPIN_SLAM line of an older board, a
+    switch that is gone.
     The laptop learns the board's side once, on the only path that talks to it, and records it
     (ros/.mode) for the subcommand that never does. ros/map.sh save freezes the grid into the pair
     map_server would read."""
     thin = _case_blocks((REPO / "ros/thin.sh").read_text())
     assert "slam" not in thin, "the SLAM mode went with World R (2026-09-19)"
-    for branch in ("on", "vision", "off"):
-        assert "/^PEPIN_SLAM=/d" in thin[branch], f"{branch} leaves the retired owner behind"
+    thin_text = (REPO / "ros/thin.sh").read_text()
+    assert "/^PEPIN_SLAM=/d" in thin_text, "the retired owner's line is deleted"
+    for branch in ("on", "vision|off"):
+        assert "$CLEAN" in thin[branch], f"{branch} leaves the retired lines behind"
         assert "board-slam" not in thin[branch], branch
     unit = (REPO / "board/pepin-ros.service").read_text()
     assert "Environment=PEPIN_SLAM_TOOLBOX=false" in unit
@@ -2676,7 +2447,7 @@ def test_one_gesture_per_side_brings_the_stack_up_and_one_saves_the_map() -> Non
     args = {ast.unparse(c.args[0]) for c in sf.calls_to(bringup, "DeclareLaunchArgument")}
     assert {"'slam_toolbox'", "'nav'"} <= args and "'slam'" not in args
     laptop = (REPO / "ros/laptop.sh").read_text()
-    assert "CONFIG=zenoh-bridge-laptop.json" in laptop and "laptop-slam" not in laptop
+    assert "MODE=split" in laptop and "laptop-slam" not in laptop
     assert 'printf \'%s\\n\' "$MODE" > "$HERE/.mode"' in laptop
     assert "ros/.mode" in (REPO / ".gitignore").read_text().splitlines()
     vslam_run = next(
@@ -2964,26 +2735,25 @@ def test_the_visual_odometry_reaches_the_ekf_without_being_able_to_move_the_odom
     from pepin.deployment import bridged_qos
 
     assert bridged_qos("/vo") == ("reliable", ekf["odom1_queue_size"]), (
-        "robot_localization subscribes RELIABLE at odom1_queue_size: the laptop's publisher and"
-        " the bridge route must agree, or the route's QoS is decided by a race"
+        "robot_localization subscribes RELIABLE at odom1_queue_size: the laptop's publisher"
+        " must agree, or the reader and the writer do not match"
     )
     assert bridged_qos("/odom") == ("reliable", 10), (
-        "the rest watch reads the board's wheels over the bridge, and base_bridge.cpp writes"
-        " /odom RELIABLE ten deep: a best-effort endpoint here would let the route's QoS be"
-        " decided by a race no one can see losing"
+        "the rest watch reads the board's wheels from the laptop, and base_bridge.cpp writes"
+        " /odom RELIABLE ten deep"
     )
     source = (REPO / "ros/pepin_bringup/pepin_bringup/visual_odometry.py").read_text()
     for topic in ("VO_TOPIC", "WHEELS_TOPIC"):
         assert f"bridged_qos_profile({topic})" in source, (
-            f"{topic} crosses the bridge: its endpoint takes the pinned QoS, not one of its own"
+            f"{topic} crosses the link: its endpoint takes the pinned QoS, not one of its own"
         )
 
 
 def test_the_visual_odometry_runs_on_the_laptop_behind_one_launch_switch() -> None:
     """CLAUDE.md rule 20: what consumes the camera lives on the laptop, and the board gets a
     finished measurement. Nothing new runs there — the EKF reads one more topic. On this side
-    both processes are one argument (``vo``), they start after the ghost wait like every other
-    node of this launch, rgbd_odometry publishes no transform (the EKF owns odom -> base_link)
+    both processes are one argument (``vo``), started like every other node of this launch,
+    rgbd_odometry publishes no transform (the EKF owns odom -> base_link)
     and takes no guess from TF (a visual odometry seeded with the filter's own answer is not a
     third opinion)."""
     vslam = sf.tree(VSLAM_LAUNCH)
@@ -3023,31 +2793,13 @@ def test_the_visual_odometry_runs_on_the_laptop_behind_one_launch_switch() -> No
         if "pepin_bringup.visual_odometry" in ast.unparse(c)
     )
     assert "LaunchConfiguration('vo')" in ast.unparse(sf.keywords(gate)["condition"])
-    started = _started_after_ghost_wait(vslam)
-    assert {"rgbd_odometry", "vo"} <= started, "both wait for the bridge to forget their ghosts"
+    started = _started_by_describe(vslam)
+    assert {"rgbd_odometry", "vo"} <= started, "both start with the launch"
     from pepin.deployment import LAPTOP_SLAM_NODES
 
     assert {"/rgbd_odometry", "/visual_odometry"} <= set(LAPTOP_SLAM_NODES), (
-        "a ghost of either would strand the next launch's routes"
+        "ros/flags.sh finds both in the SLAM container"
     )
-
-
-def test_the_camera_odometry_crosses_to_the_board_and_never_back() -> None:
-    """/vo is published on the laptop and subscribed on the board in every bridge mode; a topic
-    allowed as a publisher on both sides loops until nothing crosses at all."""
-    import re
-
-    from pepin.deployment import BRIDGE_MODES, bridge_allow
-
-    for mode in BRIDGE_MODES:
-        board, laptop = bridge_allow("board", mode), bridge_allow("laptop", mode)
-        assert re.compile(laptop["publishers"][0]).search("/vo"), mode
-        assert re.compile(board["subscribers"][0]).search("/vo"), mode
-        assert not re.compile(board["publishers"][0]).search("/vo"), f"{mode}: /vo would loop"
-        for block in (*board.values(), *laptop.values()):
-            assert not re.compile(block[0]).search("/vo/raw"), (
-                f"{mode}: rgbd_odometry's raw output stays on the laptop"
-            )
 
 
 def test_the_visual_memory_survives_a_kill_and_the_launches_wait_for_it_to_close() -> None:
@@ -3124,41 +2876,6 @@ def test_goto_s_cancel_cancels_a_goal_it_never_sent() -> None:
     assert "stop.sh" in " ".join(sf.strings(goto)), "the hard stop is named where cancel can fail"
 
 
-def test_rmw_switch_defaults_to_zenoh_and_cyclone_stays_reachable() -> None:
-    """NEW RULE (2026-09-20): PEPIN_RMW unset is rmw_zenoh — measured CPU-neutral on the board,
-    order-free at start and self-healing over restarts — and PEPIN_RMW=cyclone is the whole old
-    stack (CycloneDDS plus the two bridges), kept and startable. The default is the same in the
-    shell, in the three units and in Python, and every container is TOLD which one it is."""
-    assert rmw_is_zenoh({}), "no PEPIN_RMW means rmw_zenoh and the routers"
-    assert rmw_is_zenoh({"PEPIN_RMW": "zenoh"})
-    assert not rmw_is_zenoh({"PEPIN_RMW": "cyclone"}), "the bridges are one variable away"
-    lib = (REPO / "ros/lib.sh").read_text()
-    assert 'PEPIN_RMW="${PEPIN_RMW:-zenoh}"' in lib, "the shell default is zenoh too"
-    for name in ("pepin-ros.service", "pepin-zrouter.service", "pepin-bridge.service"):
-        unit = (REPO / "board" / name).read_text()
-        assert "Environment=PEPIN_RMW=zenoh" in unit, name
-        assert "EnvironmentFile=-/etc/default/pepin-ros" in unit, "the value survives a reboot"
-    run = (REPO / "ros/run.sh").read_text()
-    assert 'RMWENV="-e PEPIN_RMW=cyclone"' in run, "a cyclone container is told it is one"
-    laptop = (REPO / "ros/laptop.sh").read_text()
-    assert "-e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp -e PEPIN_RMW=cyclone" in laptop
-    for build in ("ros/build.sh", "ros/laptop-build.sh"):
-        assert ":zenoh" in (REPO / build).read_text(), "a rebuild keeps the default's tag current"
-
-
-def test_rmw_zenoh_swaps_the_image_and_cyclone_starts_the_old_one() -> None:
-    """ros/run.sh starts the image with rmw_zenoh in it by default, and the plain image under
-    cyclone, whose own ENV is rmw_cyclonedds_cpp."""
-    run = (REPO / "ros/run.sh").read_text()
-    assert 'IMAGE="${PEPIN_IMAGE:-pepin-ros}"' in run, "cyclone starts pepin-ros, as before"
-    assert 'IMAGE="${PEPIN_IMAGE:-pepin-ros:zenoh}"' in run, (
-        "zenoh starts the image with rmw_zenoh in it"
-    )
-    assert "RMW_IMPLEMENTATION=rmw_zenoh_cpp" in run
-    # Start order must not be able to kill a node: the router may not be up yet.
-    assert "ZENOH_ROUTER_CHECK_ATTEMPTS=0" in run
-
-
 def test_zenoh_router_starts_before_the_stack_and_outlives_its_restarts() -> None:
     """The board's router is its own unit: ordered before the stack, never dragged by it."""
     unit = (REPO / "board/pepin-zrouter.service").read_text()
@@ -3170,27 +2887,6 @@ def test_zenoh_router_starts_before_the_stack_and_outlives_its_restarts() -> Non
     assert "--network host" in unit, "the board's nodes reach it over the host loopback"
     assert "rmw_zenohd" in unit
     assert "WantedBy=multi-user.target" in unit, "it comes back on its own after a reboot"
-
-
-def test_zenoh_runs_no_bridge_anywhere() -> None:
-    """Under zenoh nothing bridge-shaped starts: not the sidecar, not the watch of it."""
-    bridge_unit = (REPO / "board/pepin-bridge.service").read_text()
-    assert bridge_unit.count('[ "$PEPIN_RMW" != zenoh ]') == 4, (
-        "every guard of the bridge unit — both ExecStartPre, ExecStart and ExecStartPost — "
-        "stands the unit down under zenoh"
-    )
-    laptop = (REPO / "ros/laptop.sh").read_text()
-    assert "zrouter_up" in laptop, "the laptop starts its own router instead of the bridge"
-    assert "if pepin_rmw_is_zenoh; then" in laptop
-    # The bridge path itself is untouched and still reachable under the default.
-    assert "settle_bridge" in laptop, "the cyclone path keeps its bridge choreography"
-    assert "eclipse/zenoh-bridge-ros2dds:1.7.0" in laptop
-    for launch in ("nav.launch.py", "vslam.launch.py"):
-        src = (REPO / "ros/pepin_bringup/launch" / launch).read_text()
-        assert "rmw_is_zenoh()" in src, (
-            f"{launch} must not start a watch of a bridge that is not there"
-        )
-        assert "pepin_bringup.bridge_watch" in src, f"{launch} keeps the watch for the cyclone path"
 
 
 def test_the_camera_rig_decides_who_measures_the_depth() -> None:

@@ -1,8 +1,7 @@
 """Pieces shared by the launch files (ros/pepin_bringup/launch/*.launch.py).
 
-The launch files import this module the way their process prefixes run
-``python3 -m pepin_bringup.ghost_wait``: the package is on the launch's path on both machines.
-Nothing here runs inside a node.
+The launch files import this module from the package, which is on the launch's path on both
+machines. Nothing here runs inside a node.
 """
 
 from collections.abc import Callable

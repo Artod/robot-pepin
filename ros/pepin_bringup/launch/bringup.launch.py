@@ -33,8 +33,7 @@ from pepin.deployment import CONTAINER_STOP_TIMEOUT_S
 # every shutdown ended in SIGKILLs mid-write, and eight of them left ros/maps/rtabmap.db
 # malformed (2026-09-13). The window is the container's own stop window
 # (pepin.deployment.CONTAINER_STOP_TIMEOUT_S, ros/lib.sh, board/pepin-ros.service), so on a
-# `docker stop` nothing inside escalates before docker's SIGKILL at its end, and on a shutdown
-# from inside (the bridge watch's exit) the nodes get the same seconds.
+# `docker stop` nothing inside escalates before docker's SIGKILL at its end.
 SHUTDOWN = [
     SetLaunchConfiguration("sigterm_timeout", str(CONTAINER_STOP_TIMEOUT_S)),
     SetLaunchConfiguration("sigkill_timeout", "5"),

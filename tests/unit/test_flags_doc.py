@@ -1,5 +1,5 @@
 """ros/tools/flags_doc.py: the nodes' flag tables read from the sources, the README section
-they render (kept current here, the way the zenoh bridge configs are), and the answers
+they render (kept current here), and the answers
 ros/flags.sh asks it for."""
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ DOC = _tool()
 
 def test_every_node_with_a_table_is_found_and_only_those() -> None:
     assert DOC.has_table(REPO / "ros/pepin_bringup/pepin_bringup/depth_fusion.py")
-    assert not DOC.has_table(REPO / "ros/pepin_bringup/pepin_bringup/ghost_wait.py")
+    assert not DOC.has_table(REPO / "ros/pepin_bringup/pepin_bringup/launch_kit.py")
     tables = DOC.tables()
     assert set(tables) >= {"depth_stream", "depth_fusion", "goal_server", "neck_state"}
     assert all(isinstance(t, FlagSet) and len(t) for t in tables.values())
@@ -133,7 +133,7 @@ def _main(argv: list[str], capsys: Any, stdin: str | None = None) -> tuple[int, 
 
 def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     code, out, _ = _main(["nodes"], capsys)
-    assert code == 0 and "depth_stream" in out.split() and "ghost_wait" not in out.split()
+    assert code == 0 and "depth_stream" in out.split() and "launch_kit" not in out.split()
     assert _main(["where", "depth_fusion"], capsys)[1].strip() == "laptop pepin-vslam"
     assert _main(["where", "/neck_state"], capsys)[1].strip() == "board pepin-ros"
     code, out, err = _main(["where", "nope"], capsys)

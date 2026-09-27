@@ -1,10 +1,10 @@
 #!/bin/bash
 # Flip the board between the whole stack and the reflex half. Usage:
-#   ros/thin.sh on      board runs side=board + the zenoh bridge; the laptop plans and takes goals
-#   ros/thin.sh vision  board runs the whole stack AND the bridge: the laptop only maps and watches
-#   ros/thin.sh off     board runs the whole stack, bridge stopped
+#   ros/thin.sh on      board runs side=board; the laptop plans and takes goals
+#   ros/thin.sh vision  board runs the whole stack: the laptop only maps and watches
+#   ros/thin.sh off     the same side as vision (the whole stack on the robot)
 #   ros/thin.sh kick NODE  restart one node of the board's stack from the synced sources (seconds)
-#   ros/thin.sh         show the current side and bridge
+#   ros/thin.sh         show the current side
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"
@@ -25,45 +25,28 @@ kick_line() {  # node name -> start-up line
         *) return 1 ;;
     esac
 }
+# Both routers are always up, so a side change is one line in /etc/default/pepin-ros and a stack
+# restart. The lines of the retired bridge (PEPIN_BRIDGE, PEPIN_BRIDGE_CONFIG) and of the retired
+# frame owner (PEPIN_SLAM) are deleted in the same breath, and a board that still has the bridge
+# units gets them disabled (tag alt/cyclone-bridges-2026-09-20). The state is printed, never
+# judged: `systemctl is-active` exits non-zero while a unit is activating.
+CLEAN="sed -i '/^PEPIN_SIDE=/d; /^PEPIN_BRIDGE=/d; /^PEPIN_BRIDGE_CONFIG=/d; /^PEPIN_SLAM=/d' /etc/default/pepin-ros; systemctl disable --now pepin-bridge pepin-bridge-kick.path >/dev/null 2>&1 || true"
 case "${1:-}" in
     on)
-        # The bridge is a systemd unit tied to the stack (board/pepin-bridge.service): it starts
-        # after the stack's last node is up and restarts with it. Started by hand before the stack
-        # it wedged silently (2026-09-09).
-        # The split's allow-list is the unit's default (zenoh-bridge-board.json): no
-        # PEPIN_BRIDGE_CONFIG line. The states are printed, never judged: `systemctl is-active`
-        # exits 3 while the bridge is still in its ExecStartPre (it waits for the tracker), and
-        # under set -e that ended this script with an error for a stack that was fine.
-        ssh "root@$BOARD" "sed -i '/^PEPIN_SIDE=/d; /^PEPIN_BRIDGE=/d; /^PEPIN_BRIDGE_CONFIG=/d; /^PEPIN_SLAM=/d' /etc/default/pepin-ros; echo PEPIN_SIDE=board >> /etc/default/pepin-ros;
-            systemctl enable pepin-bridge >/dev/null 2>&1; systemctl daemon-reload; systemctl restart pepin-ros && sleep 8; systemctl is-active pepin-ros pepin-bridge | tr '\\n' ' '; echo"
-        echo "board on side=board; the bridge follows the stack; now: ros/laptop.sh" ;;
-    vision)
-        # Every drive stays on the board (the proven stack); the bridge carries topics only, for
-        # RTAB-Map and the camera on the laptop. Actions over the bridge aborted the navigation
-        # container ("Failed to accept new goal", 2026-09-10 16:06); topics never failed.
-        # The bridge reads the vision allow-list (zenoh-bridge-board-vision.json, synced with
-        # ros/: the board publishes the plan and the costmaps too, the laptop the ONE map — its
-        # RTAB-Map grid on /map — and the camera's scans and words) through PEPIN_BRIDGE_CONFIG,
-        # written here together with the mode. A stale PEPIN_SLAM line of an older board is
-        # deleted in the same breath: that switch is gone (tag alt/tracker-2026-09-22).
-        ssh "root@$BOARD" "sed -i '/^PEPIN_SIDE=/d; /^PEPIN_BRIDGE=/d; /^PEPIN_BRIDGE_CONFIG=/d; /^PEPIN_SLAM=/d' /etc/default/pepin-ros; printf 'PEPIN_BRIDGE=on\\nPEPIN_BRIDGE_CONFIG=zenoh-bridge-board-vision.json\\n' >> /etc/default/pepin-ros;
-            test -f /root/pepin-ros/zenoh-bridge-board-vision.json || echo 'WARNING: no zenoh-bridge-board-vision.json on the board: ros/sync.sh first';
-            systemctl enable pepin-bridge >/dev/null 2>&1; systemctl daemon-reload; systemctl restart pepin-ros && sleep 8; systemctl is-active pepin-ros pepin-bridge | tr '\\n' ' '; echo"
-        echo "board on side=all with the bridge; now: ros/laptop.sh (bridge) and ros/laptop.sh vslam" ;;
-    off)
-        ssh "root@$BOARD" "sed -i '/^PEPIN_SIDE=/d; /^PEPIN_BRIDGE=/d; /^PEPIN_BRIDGE_CONFIG=/d; /^PEPIN_SLAM=/d' /etc/default/pepin-ros; systemctl disable --now pepin-bridge >/dev/null 2>&1; docker rm -f zenoh-bridge >/dev/null 2>&1; systemctl restart pepin-ros && sleep 8; systemctl is-active pepin-ros; true"
-        echo "board on side=all (whole stack on the robot)" ;;
+        ssh "root@$BOARD" "$CLEAN; echo PEPIN_SIDE=board >> /etc/default/pepin-ros;
+            systemctl restart pepin-ros && sleep 8; systemctl is-active pepin-ros | tr '\\n' ' '; echo"
+        echo "board on side=board; now: ros/laptop.sh" ;;
+    vision|off)
+        # Every drive stays on the board; the laptop maps and watches over the routers.
+        ssh "root@$BOARD" "$CLEAN; systemctl restart pepin-ros && sleep 8; systemctl is-active pepin-ros; true"
+        echo "board on side=all (whole stack on the robot); the laptop maps with ros/laptop.sh vslam" ;;
     kick)
         # One node of the stack, not the stack: `ros/sync.sh --no-restart` puts the sources on
-        # the board, this ends the node with SIGINT (what the launch sends at shutdown, so it
-        # leaves DDS properly and the bridge forgets its name at once) and the launch respawns
-        # it from those sources two seconds after its exit (RESPAWN in nav.launch.py). No ghost
-        # is possible: the successor starts only after the exit. A stack restart is the slow
-        # case because everything hangs on it — the bridge unit follows the stack, the laptop
-        # containers are restarted by their bridge watch, and their SIGKILLed nodes linger in
-        # the laptop's bridge for the DDS lease. Measured at a cold boot: the goal server prints
-        # its line 9 s after its start, the recorder 5 s; a kick is that plus the two-second
-        # pause. Kick at rest, never mid-drive.
+        # the board, this ends the node with SIGINT (what the launch sends at shutdown) and the
+        # launch respawns it from those sources two seconds after its exit (RESPAWN in
+        # nav.launch.py). Measured at a cold boot: the goal server prints its line 9 s after its
+        # start, the recorder 5 s; a kick is that plus the two-second pause. Kick at rest, never
+        # mid-drive.
         NAME="${2:-}"; LINE="$(kick_line "$NAME")" || { echo "usage: ros/thin.sh kick <node>; nodes: $KICKABLE"; exit 2; }
         ssh "root@$BOARD" bash -s -- "$NAME" "$LINE" <<'EOF'
 set -u
@@ -76,14 +59,6 @@ for _ in $(seq 1 240); do
     if [ -n "$SEEN" ]; then
         SEEN="${SEEN%%$'\n'*}"; DT=$(( $(date +%s%3N) - MS0 ))
         printf '%s back in %d.%d s: %s\n' "$NAME" $((DT / 1000)) $((DT % 1000 / 100)) "${SEEN#*]: }"
-        # The board's bridge (side=board or bridge=on) keys routes by node name: a ghost of the
-        # kicked node beside the new one means its routes drop when the ghost expires.
-        N=$(curl -s -m 3 'http://localhost:8000/@/local/ros2/node/**' | grep -o "/ros2/node/[^/\"]*/$NAME\"" | wc -l)
-        case "$N" in
-            1) echo "the bridge lists $NAME once: clean" ;;
-            0) ;;
-            *) echo "WARNING: the bridge lists $NAME beside a ghost of itself: its routes drop when the ghost expires; kick again in 10 s" ;;
-        esac
         exit 0
     fi
     sleep 0.5
@@ -94,5 +69,5 @@ EOF
     *)
         # Printed, not judged: is-active exits non-zero for anything but "active" (3 while
         # activating), and this is a report.
-        ssh "root@$BOARD" "grep -oE 'PEPIN_(SIDE|BRIDGE|BRIDGE_CONFIG|NAV|SLAM|SLAM_TOOLBOX|LOCALIZER)=.*' /etc/default/pepin-ros | tr '\\n' ' '; echo; systemctl is-active pepin-ros pepin-bridge | tr '\\n' ' '; echo" ;;
+        ssh "root@$BOARD" "grep -oE 'PEPIN_(SIDE|NAV|SLAM_TOOLBOX)=.*' /etc/default/pepin-ros | tr '\\n' ' '; echo; systemctl is-active pepin-ros pepin-zrouter | tr '\\n' ' '; echo" ;;
 esac

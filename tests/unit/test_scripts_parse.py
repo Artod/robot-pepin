@@ -523,8 +523,6 @@ RECORDER_LINE = (
 )
 VSLAM_LOG = "\n".join(
     (
-        "[bridge_watch-9] [INFO] [1.0] [bridge_watch]: bridge watch: 10 topics Hz [scan 9.7]; "
-        "flow_watch=on; dead routes 0; board routes without a reader 0",
         "[depth_stream-3] [INFO] [2.0] [depth_stream]: depth: 9.4 frames/s published (282 through "
         "the net, 0 dropped); lidar_anchor on [a 1.71 b +0.004 on 600 pairs], backend remote",
         "[depth_fusion-5] [INFO] [3.0] [depth_fusion]: fusion: 281 frames (9.3/s, 0 dropped, 0 "
@@ -590,8 +588,6 @@ python3}" ;;
     esac
     return 0
 }
-# pepin_rmw_is_zenoh is deliberately NOT faked: the real ros/lib.sh has it, and leaving it
-# undefined here is how these tests exercise the bridge-era branches of the checks.
 """
 FAKE_SUB = """#!/bin/bash
 printf '%s %s\\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
@@ -781,7 +777,6 @@ def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_
         "1.6",
         "1.7",
         "1.8",
-        "2.1",
         "2.8",
         "2.9",
         "3.1",
@@ -823,20 +818,18 @@ def test_the_operators_window_is_checked_and_the_app_is_reconnected_last(tmp_pat
 
 def test_every_check_runs_even_when_the_first_ones_fail_and_the_run_goes_red(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """A check that fails is one line and never the end of the run: the point of the script is
-    the whole picture. The three below are the three that cost us a session each."""
+    the whole picture. The two below are two that cost us a session each."""
     code, out, _ = _restart(
         tmp_path,
         "both",
         FAKE_GO_WHERE="connection refused",  # the goal server did not answer
         FAKE_TORQUE="arming: torque on",  # the wheels left armed
-        FAKE_VSLAM=VSLAM_LOG.replace("dead routes 0", "DEAD ROUTES 2 [/scan /odom]"),
     )
     assert code == 1, out
     assert "FAIL 1.3" in out and "did not answer" in out
     assert "FAIL 1.10" in out and "still armed" in out
-    assert "FAIL 2.1" in out and "DEAD ROUTES 2" in out
     assert "PASS 1.4" in out and "PASS 2.8" in out, "the checks after a failure still ran"
-    assert "red: 3 of " in out
+    assert "red: 2 of " in out
 
 
 @pytest.mark.slow
@@ -897,21 +890,6 @@ def test_a_pose_nobody_has_corrected_is_a_failure_once_the_grace_is_over(tmp_pat
     )
     assert code == 1, out
     assert "FAIL 1.13" in out and "identity" in out and "grace" in out
-
-
-def test_the_board_s_own_readerless_routes_fail_the_laptop_check(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """The fault of 2026-09-15 reads as "dead routes 0" on this side: check 2.1 must catch the
-    other half of the watch's line too, or a link that carries nothing passes the restart."""
-    code, out, _ = _restart(
-        tmp_path,
-        "laptop",
-        FAKE_VSLAM=VSLAM_LOG.replace(
-            "board routes without a reader 0",
-            "BOARD ROUTES WITHOUT A READER 13 [/scan /tf]",
-        ),
-    )
-    assert code == 1, out
-    assert "FAIL 2.1" in out and "WITHOUT A READER 13" in out
 
 
 @pytest.mark.parametrize(
@@ -1007,14 +985,10 @@ def test_there_is_one_way_to_stop_a_container_and_it_is_gentle() -> None:
         for verb in ("docker stop", "docker kill", "docker rm -f"):
             if verb not in code:
                 continue
-            assert script in {"lib.sh", "thin.sh"}, (
+            assert script == "lib.sh", (
                 f"ros/{script} runs `{verb}` itself; use pepin_stop_container /"
                 " pepin_remove_container from ros/lib.sh"
             )
-    # thin.sh's one `docker rm -f` is on the BOARD over ssh, after its unit's own gentle ExecStop,
-    # and the container it names is the bridge sidecar — nothing of ours writes a file in it.
-    thin = _uncommented("ros/thin.sh")
-    assert "systemctl disable --now pepin-bridge" in thin and "docker rm -f zenoh-bridge" in thin
 
 
 def test_the_board_s_containers_answer_sigint_and_the_unit_waits_for_them() -> None:

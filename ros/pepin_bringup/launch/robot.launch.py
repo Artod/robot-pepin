@@ -61,21 +61,13 @@ from pepin.deployment import (
     LASER_ODOM_HZ,
     LASER_ODOM_TOPIC,
     LASER_ODOM_TWIST_VARIANCE,
-    bridge_admin_for,
 )
 from pepin.footprint import hull_box
 from pepin.mounts import Mounts
 
 # Our own Python nodes come back by themselves after this pause (a code change is one kicked
-# process: ros/thin.sh kick <node>), through a ghost wait of their own name first, as in
-# nav.launch.py: a crashed node's name outlives it in the bridge by the DDS lease.
+# process: ros/thin.sh kick <node>).
 RESPAWN = {"respawn": True, "respawn_delay": 2.0}
-
-
-def _after_ghost(*names: str) -> str:
-    """A command prefix that waits until the bridge on this host lists none of ``names`` and
-    then becomes the command (pepin_bringup.ghost_wait; an unreachable admin is not waited for)."""
-    return f"python3 -m pepin_bringup.ghost_wait {bridge_admin_for('board')} {' '.join(names)} --"
 
 
 MOUNTS = Mounts.load()
@@ -343,7 +335,6 @@ def generate_launch_description() -> LaunchDescription:
         executable="tof_bridge",
         output="screen",
         condition=IfCondition(LaunchConfiguration("tof")),
-        prefix=_after_ghost("/tof_bridge"),
         **RESPAWN,
     )
     # LASER ODOMETRY: the cart's own motion from consecutive scans, scan to scan and with no map
@@ -364,7 +355,7 @@ def generate_launch_description() -> LaunchDescription:
         # ``__node:=`` remap and it would give both of them the same name. The names are the
         # patch's (ros/patches/rf2o-base-twist.patch renames the outer one); the parameters
         # reach them through launch_ros's ``/**`` wildcard, which needs no name either.
-        prefix=f"nice -n -5 {_after_ghost('/laser_odometry', '/CLaserOdometry2D')}",
+        prefix="nice -n -5",
         parameters=[
             {
                 "laser_scan_topic": "/scan",
@@ -398,7 +389,6 @@ def generate_launch_description() -> LaunchDescription:
     neck = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.neck_state"],
         output="screen",
-        prefix=_after_ghost("/neck_state"),
         condition=IfCondition(LaunchConfiguration("neck")),
         **RESPAWN,
     )

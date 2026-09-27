@@ -62,9 +62,7 @@ Arguments: ``board`` (the robot's address for the camera stream), ``camera_only`
 triple — this node does not start and RTAB-Map subscribes to the picture, the depth and the scan
 itself, :data:`TRIPLE_SUBSCRIPTIONS`), ``neighbor_refining`` (whether ICP refines the neighbour
 links and stiffens them with its own covariance — false, or no closure the graph finds survives
-RGBD/OptimizeMaxError), ``vo``, ``database`` (empty: :data:`DATABASE`), ``bridge_admin`` (the
-laptop bridge's REST admin, asked whether it still lists this launch's previous incarnation),
-``static_camera_tf``
+RGBD/OptimizeMaxError), ``vo``, ``database`` (empty: :data:`DATABASE`), ``static_camera_tf``
 (default true: the camera node broadcasts base_link -> camera_link from config/camera.json; false
 when the board's neck node publishes that edge live — ros/feature.sh neck on, ``ros/laptop.sh
 vslam --neck`` — since two publishers of one edge fight), ``camera`` (which rig of
@@ -83,12 +81,9 @@ from launch.actions import (
     ExecuteProcess,
     LogInfo,
     OpaqueFunction,
-    RegisterEventHandler,
     SetLaunchConfiguration,
-    Shutdown,
 )
 from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -96,8 +91,6 @@ from pepin.camera import CameraConfig, active_camera
 from pepin.deployment import (
     CONTAINER_STOP_TIMEOUT_S,
     config_file,
-    laptop_launch_nodes,
-    rmw_is_zenoh,
 )
 from pepin.global_descriptor import (
     CENSUS_ENV,
@@ -113,8 +106,7 @@ from pepin.global_descriptor import (
 # every shutdown ended in SIGKILLs mid-write, and eight of them left ros/maps/rtabmap.db
 # malformed (2026-09-13). The window is the container's own stop window
 # (pepin.deployment.CONTAINER_STOP_TIMEOUT_S, ros/lib.sh, board/pepin-ros.service), so on a
-# `docker stop` nothing inside escalates before docker's SIGKILL at its end, and on a shutdown
-# from inside (the bridge watch's exit) the nodes get the same seconds.
+# `docker stop` nothing inside escalates before docker's SIGKILL at its end.
 SHUTDOWN = [
     SetLaunchConfiguration("sigterm_timeout", str(CONTAINER_STOP_TIMEOUT_S)),
     SetLaunchConfiguration("sigkill_timeout", "5"),
@@ -529,9 +521,8 @@ TRIPLE_SUBSCRIPTIONS = {
     "odom_sensor_sync": False,
 }
 
-# The database is the map. Beside a known map it is kept across restarts (the bridge watch
-# restarts this container whenever the board's bridge is new, and a launch that wiped it lost
-# the map every time); a SLAM session starts empty by default and writes a file of its own, so
+# The database is the map. Beside a known map it is kept across restarts (a launch that wiped it
+# lost the map every time); a SLAM session starts empty by default and writes a file of its own, so
 # an evening of mapping can never delete the graph the known-map mode accumulated.
 # The camera as a third odometry (rtabmap_odom's rgbd_odometry, ros/params/ekf.yaml's odom1).
 # Measured on this laptop 2026-09-14 at rest, on /camera/image + /camera/depth + the camera's
@@ -580,11 +571,11 @@ VISUAL_ODOMETRY = {
     # blamed for. Caught live 2026-09-14 15:21 with both nodes running: BOTH published exactly
     # zero poses for three minutes, and the reason is rgbd_odometry's other warning — "Could not
     # find a connection between 'base_link' and 'camera_optical' ... Tf has two or more
-    # unconnected trees". The board's bridge had gone silent (bridge_watch: /odom, /scan and the
+    # unconnected trees". The board's bridge had gone silent (/odom, /scan and the
     # board's /tf all at 0.0 Hz), so base_link was not in the tree and no pair of any kind could
     # become a pose; the depth had also fallen to 3.3 frames/s against the picture's 11.5, which
-    # is when the approximation's guesses were worst (0.4-0.5 s off). Starvation is a bridge
-    # outage and belongs to bridge_watch; the mis-pairing is this table's business.
+    # is when the approximation's guesses were worst (0.4-0.5 s off). Starvation is a link
+    # outage; the mis-pairing is this table's business.
     "approx_sync": False,
     "sync_queue_size": 30,
     "topic_queue_size": 10,
@@ -597,8 +588,8 @@ VISUAL_ODOMETRY = {
 }
 
 # THE DATABASE IS THE MAP, and there is one of it (World R): the room's graph, its closures and
-# every node's local grid, kept across restarts — the bridge watch restarts this container whenever
-# the board's bridge is new, and a launch that wiped the file lost the room every time. An empty
+# every node's local grid, kept across restarts — a launch that wiped the file lost the room every
+# time it restarted. An empty
 # room is this file absent, which is what ros/laptop.sh vslam --fresh makes (and restart.sh moves
 # the volume of the old frame aside with it, since the volume is painted in the graph's frame).
 DATABASE = "/maps/rtabmap.db"
@@ -609,26 +600,10 @@ SENSOR_DATA_TOPIC = "/rtabmap/sensor_data"
 
 # A node that exits comes back by itself after this pause, so a code change costs one kicked
 # process (ros/laptop.sh kick <module>: SIGINT, the signal the launch itself sends at shutdown)
-# instead of a container restart. A kicked node leaves DDS properly (its main destroys the node
-# and the context, the participant is disposed, the bridge forgets the name at once) and the
-# pause starts at its exit, so the successor never overlaps a ghost. A CRASHED node does (nothing
-# disposed, the name outlives it by the DDS lease, the bridge drops its routes when the ghost
-# expires), so every respawned command starts through a ghost wait of its own name
-# (``_after_ghost``). A container is stopped with SIGINT (ros/laptop.sh, --stop-signal) so the
-# launch shuts its nodes down properly; the ghost wait at the top covers what still lingers.
-# The watches below are not respawned: their exit IS the signal (bridge_watch -> shutdown,
-# ghost_wait -> start the nodes).
+# instead of a container restart. A container is stopped with SIGINT (ros/laptop.sh,
+# --stop-signal) so the launch shuts its nodes down properly. (Under CycloneDDS every respawned
+# command started through a ghost wait of the bridge's admin; tag alt/cyclone-bridges-2026-09-20.)
 RESPAWN = {"respawn": True, "respawn_delay": 2.0}
-
-
-def _after_ghost(*names: str) -> list:  # type: ignore[type-arg]
-    """A command prefix that waits until the laptop's bridge lists none of ``names`` and then
-    becomes the command (pepin_bringup.ghost_wait; an unreachable admin is not waited for)."""
-    return [
-        "python3 -m pepin_bringup.ghost_wait ",
-        LaunchConfiguration("bridge_admin"),
-        f" {' '.join(names)} --",
-    ]
 
 
 def rtabmap_memory(loaded: bool) -> str:
@@ -748,19 +723,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # still decides (:func:`rtabmap_memory`): a file nobody has written cannot be localised in.
     loaded = Path(database).is_file()
     memory = rtabmap_memory(loaded)
-    # The bridge keeps routes by node name: the nodes start only once it has forgotten the
-    # previous incarnation of this launch (pepin_bringup.ghost_wait), or RTAB-Map's /scan and
-    # map routes die with the ghost ten seconds after they were made (2026-09-10).
-    ghost_wait = ExecuteProcess(
-        cmd=[
-            "python3",
-            "-m",
-            "pepin_bringup.ghost_wait",
-            LaunchConfiguration("bridge_admin"),
-            *laptop_launch_nodes("slam"),
-        ],
-        output="screen",
-    )
     depth = ExecuteProcess(
         cmd=[
             "python3",
@@ -774,7 +736,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             f"depth_source:={depth_source(rig)}",
         ],
         output="screen",
-        prefix=_after_ghost("/depth_stream"),
         **RESPAWN,
     )
     # The same depth read at the floor instead of above it (pepin_bringup.contact_scan): where
@@ -784,7 +745,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     contact = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.contact_scan"],
         output="screen",
-        prefix=_after_ghost("/contact_scan"),
         **RESPAWN,
     )
     # The room's vocabulary, kept current against a graph that bends (pepin_bringup.places): a
@@ -795,7 +755,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         # same /maps/rtabmap.db the launch falls back to (as for depth_fusion).
         cmd=["python3", "-m", "pepin_bringup.places"],
         output="screen",
-        prefix=_after_ghost("/places"),
         **RESPAWN,
     )
     # Who painted the lethal cells the controller refuses to drive through
@@ -806,7 +765,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     audit = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.marks_audit"],
         output="screen",
-        prefix=_after_ghost("/marks_audit"),
         condition=IfCondition(LaunchConfiguration("marks_audit")),
         **RESPAWN,
     )
@@ -821,7 +779,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         additional_env=census,
         cmd=["python3", "-m", "pepin_bringup.rtabmap_frame"],
         output="screen",
-        prefix=_after_ghost("/rtabmap_frame"),
         **RESPAWN,
     )
     # The operator's Foxglove connects here for the 3D view: the cloud stays on the laptop and
@@ -862,7 +819,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 ),
             }
         ],
-        prefix=_after_ghost("/foxglove_bridge"),
         **RESPAWN,
     )
     camera = ExecuteProcess(
@@ -881,7 +837,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             f"camera:={rig}",
         ],
         output="screen",
-        prefix=_after_ghost("/camera_stream"),
         **RESPAWN,
     )
     # The same frames fused into one surface (pepin_bringup.depth_fusion): RTAB-Map keeps the
@@ -905,7 +860,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             f"resume_volume:={'true' if resume_volume else 'false'}",
         ],
         output="screen",
-        prefix=_after_ghost("/depth_fusion"),
         **RESPAWN,
     )
     # The camera's own opinion of how the cart moved: rtabmap's rgbd_odometry on the same three
@@ -927,13 +881,11 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             ("odom", VO_RAW_TOPIC),
         ],
         condition=IfCondition(LaunchConfiguration("vo")),
-        prefix=_after_ghost("/rgbd_odometry"),
         **RESPAWN,
     )
     vo = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.visual_odometry"],
         output="screen",
-        prefix=_after_ghost("/visual_odometry"),
         condition=IfCondition(LaunchConfiguration("vo")),
         **RESPAWN,
     )
@@ -950,7 +902,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             f"sources:={'camera' if camera_only else 'camera,lidar'}",
         ],
         output="screen",
-        prefix=_after_ghost("/sensor_pack"),
         condition=IfCondition(LaunchConfiguration("sensor_pack")),
         **RESPAWN,
     )
@@ -1072,26 +1023,18 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     report += f"; {descriptors}; {census_note}"
     return [
         LogInfo(msg=report),
-        ghost_wait,
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=ghost_wait,
-                on_exit=[
-                    camera,
-                    depth,
-                    contact,
-                    fusion,
-                    pack,
-                    rtabmap,
-                    frame,
-                    places,
-                    audit,
-                    foxglove,
-                    rgbd_odometry,
-                    vo,
-                ],
-            )
-        ),
+        camera,
+        depth,
+        contact,
+        fusion,
+        pack,
+        rtabmap,
+        frame,
+        places,
+        audit,
+        foxglove,
+        rgbd_odometry,
+        vo,
     ]
 
 
@@ -1129,7 +1072,6 @@ def generate_launch_description() -> LaunchDescription:
             # node's own `marks_audit` flag switches it off live without a restart.
             DeclareLaunchArgument("marks_audit", default_value="true"),
             DeclareLaunchArgument("database", default_value=""),  # empty: DATABASE
-            DeclareLaunchArgument("bridge_admin", default_value="http://pepin-zenoh:8000"),
             DeclareLaunchArgument("static_camera_tf", default_value="true"),
             # WHICH CAMERA the head is, by the name of a block in config/camera.json ("overview",
             # the mono webcam; "stereo", the side-by-side module). Empty — the default — leaves it
@@ -1137,29 +1079,6 @@ def generate_launch_description() -> LaunchDescription:
             # own "active", so switching the rig is one word in one file and no launch argument at
             # all. A name no block answers to stops this launch at start.
             DeclareLaunchArgument("camera", default_value=""),
-            # A new board bridge means new subscriptions are needed: the watch exits, the launch
-            # shuts down, the container's restart policy brings this half back. Under
-            # PEPIN_RMW=zenoh there is no bridge to watch, and a watch that found no admin would
-            # exit at once and shut this launch down on every start.
-            *(
-                []
-                if rmw_is_zenoh()
-                else [
-                    ExecuteProcess(
-                        cmd=[
-                            "python3",
-                            "-m",
-                            "pepin_bringup.bridge_watch",
-                            LaunchConfiguration("board"),
-                            LaunchConfiguration(
-                                "bridge_admin"
-                            ),  # this side's bridge: the flow watch
-                        ],
-                        output="screen",
-                        on_exit=[Shutdown(reason="the board's bridge restarted")],
-                    )
-                ]
-            ),
             OpaqueFunction(function=_describe),
         ]
     )
