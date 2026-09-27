@@ -1,17 +1,13 @@
-"""Metric depth from one camera, with the lidar setting the law.
+"""Metric depth from the camera, with the lidar as its witness.
 
-A monocular depth network gives the shape of the scene but not its size, and the size it gets
-wrong is not one number: on our lens Depth Anything V2 (metric, indoor) put a coffee table one
-metre away at 2.1 m and the far wall further out still. The lidar knows distances exactly, but
-only in its own plane, whose height above the floor is ``config/lidar.json``'s mount and nothing
-else (:func:`pepin.mounts.load_lidar_mount`). Projected into the image,
-the scan's beams name the true depth at a few hundred pixels; those (network, true) pairs,
-pooled over minutes of frames so they span the room's depths, fit an affine law in inverse
-depth, 1 / z = a / D + b — what a relative-depth network is built to be right up to — and the
-law corrects the whole image (:class:`AffineScale`, :func:`fit_affine`, :func:`apply_affine`).
-One affine law is not enough for this camera: what it leaves behind tilts with range (+8.7 % at
-a metre, -3.3 % at two, 2026-09-14), so the same pairs are also read per bin of the network's
-own depth (:class:`RangeLaw`), which is the law the node ships live.
+The lidar knows distances exactly, but only in its own plane, whose height above the floor is
+``config/lidar.json``'s mount and nothing else (:func:`pepin.mounts.load_lidar_mount`). Projected
+into the image, the scan's beams name the true depth at a few hundred pixels; those (measured,
+true) pairs, pooled over minutes of frames so they span the room's depths, fit an affine law in
+inverse depth, 1 / z = a / D + b (:class:`AffineScale`, :func:`fit_affine`,
+:func:`apply_affine`). Under the metric stereo head the law watches: a 1.00 says the head is as
+calibrated. The monocular network's range law and frame law are on the tag
+``alt/mono-depth-2026-09-21``.
 Two more corrections act where they measure: pixels on an object's edge carry a depth blurred
 between the object and what is behind it and are dropped (:func:`edge_mask`); pixels within a
 few centimetres of the floor plane snap to it, the plane leaning with the cart
@@ -515,16 +511,14 @@ def beam_pairs(
 
 
 REF_SIGMA_INV = 0.005  # 1/m: the inverse-depth noise a weight of 1 stands for. It is a lidar
-# beam of 2 cm at 2 m, the unit the parallax pairs were already weighed in
-# (pepin.parallax.LIDAR_SIGMA_INV). Nothing depends on the value itself — a weighted fit is
-# invariant to a common factor — only on every ruler being weighed against the SAME one.
+# beam of 2 cm at 2 m. Nothing depends on the value itself — a weighted fit is invariant to a
+# common factor — only on every ruler being weighed against the SAME one.
 
 
 def pair_weight(sigma_inv: Array, cap: float | None = None) -> Array:
     """The weight a pair deserves in a fit from its own inverse-depth noise: ``1 / sigma^2``
     expressed against :data:`REF_SIGMA_INV`, so a pair as precise as a lidar beam at 2 m weighs
-    1 and one twice as noisy weighs a quarter. ``cap`` bounds it from above (the parallax
-    anchor caps at 1: no triangulated corner outweighs a beam).
+    1 and one twice as noisy weighs a quarter. ``cap`` bounds it from above.
 
     The fit lives in inverse depth, so this is where a ruler's noise belongs: a ruler with a
     constant noise in METRES is not equally good at every range there — a beam of 1.5 cm at
@@ -685,8 +679,7 @@ class AffineScale:
 def apply_affine(depth: Array, a: float | Array, b: float | Array) -> Array:
     """The network's depth corrected by 1 / z = a / D + b; pixels the law cannot place (a
     non-positive inverse depth) become NaN. ``a`` and ``b`` are one pair of numbers for the
-    whole image, or an image each — one law per pixel, which is what a scale field applies
-    (:class:`pepin.depth_pipeline.ScaleField`)."""
+    whole image, or an image each — one law per pixel."""
     d = np.asarray(depth, dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
         inv = a / d + b
@@ -695,445 +688,11 @@ def apply_affine(depth: Array, a: float | Array, b: float | Array) -> Array:
     return out
 
 
-# ---- the same pairs read one frame at a time --------------------------------------------------
-FRAME_MIN_PAIRS = 30  # beams in a frame before it may fit its own law
-FRAME_MIN_SPREAD = MIN_DEPTH_SPREAD  # this frame's own 95th / 5th of true depth before a shift.
-# The pool's gate, not a looser one: a frame's beams span a fraction of the room, and a shift
-# fitted on what looks like enough spread is noise. Measured on 2026-09-14
-# (scratch/frame_law_eval.py, the pairs of every frame split odd / even, odd fitting, even
-# judging): with the gate at 1.5 the per-frame law read -58 % on tape 0235, whose frames span
-# 1.2-2.5 m — spread enough to open the shift, not enough to identify it — while at 2.5 the same
-# frames read +0.9 %. On the frames that do span the room (run 0171's drive) the two gates are
-# a wash (7.8 % against 7.5 % of median |residual|), so the safe gate costs nothing.
-FRAME_HOLD_TAU_S = 2.0  # seconds over which a frame with no beams decays back to the pool's law
-IRLS_ROUNDS = 3  # re-weightings of the per-frame fit; the third moves the law by under 0.1 %
-IRLS_HUBER = 1.345  # sigmas past which a pair's weight falls off as 1 / |residual| (Huber's 95 %)
-
-
-def _irls(x: Array, y: Array, weight: Array | None = None) -> tuple[float, float]:
-    """(alpha, beta) of x = alpha * y + beta by iteratively reweighted least squares with
-    Huber's weights: the fit is repeated :data:`IRLS_ROUNDS` times, each pair counted the less
-    the further its residual sits past :data:`IRLS_HUBER` robust sigmas (the MAD's), so a beam
-    that grazed an edge or landed on a moving hand bends the law by a bounded amount instead of
-    by its whole residual. ``x`` is the noisy variable (the network's 1 / D), ``y`` the exact
-    one (the lidar's 1 / z); ``weight`` counts each pair that many times."""
-    base = np.ones_like(x) if weight is None else np.asarray(weight, dtype=float)
-    alpha, beta = np.polyfit(y, x, 1, w=np.sqrt(base))
-    for _ in range(IRLS_ROUNDS):
-        res = x - (alpha * y + beta)
-        sigma = 1.4826 * float(np.median(np.abs(res - np.median(res))))
-        if not math.isfinite(sigma) or sigma <= 0.0:
-            break
-        huber = np.minimum(1.0, IRLS_HUBER * sigma / np.maximum(np.abs(res), 1e-12))
-        alpha, beta = np.polyfit(y, x, 1, w=np.sqrt(base * huber))
-    return float(alpha), float(beta)
-
-
-def _finite(a: float, b: float) -> tuple[float, float] | None:
-    """``(a, b)`` when both are real numbers, ``None`` when either is not — "no law", which
-    every caller of a frame fit already handles (the frame is held, the field keeps the fit it
-    has). A law is NOT allowed to come back NaN: :func:`_bounded`'s last resort is a weighted
-    median of ``1 / z`` over ``1 / D``, which is NaN when more than half the pairs read a
-    non-positive corrected depth (the prior law turns those into NaN), and a NaN law reaches the
-    picture through a matrix product that does not skip a zero membership — one NaN node of nine
-    takes 100 % of the published pixels with it (scratch/_field_hazards.py, 2026-09-15)."""
-    return (a, b) if math.isfinite(a) and math.isfinite(b) else None
-
-
-def fit_frame(
-    d: Array,
-    z: Array,
-    weight: Array | None = None,
-    min_pairs: int = FRAME_MIN_PAIRS,
-    min_spread: float = FRAME_MIN_SPREAD,
-) -> tuple[float, float] | None:
-    """The law 1 / z = a / D + b of ONE frame's pairs, or ``None`` under ``min_pairs`` of them
-    and ``None`` when the fit does not come back finite (:func:`_finite`).
-    ``d`` is whatever depth the frame is to be corrected from — the raw network's, or a pool
-    law's output, in which case the numbers that come back are that law's residual.
-
-    This is what the field does with a metric monocular network: the Depth Anything V2 papers
-    report metric depth after a per-image scale-and-shift alignment against sparse truth, and a
-    robot with a real depth sensor aligns the monocular image against its points frame by
-    frame. The pool's law describes the camera over a minute of views; this one describes the
-    picture in hand, so a scene the pool never held (a corridor after a room, a new light) is
-    corrected by its own beams rather than by the average of the last 64 seconds.
-
-    The regression is the pool's — the noisy 1 / D on the exact 1 / z, inverted
-    (:func:`fit_affine`) — because a frame's pairs span little range and regressing the other
-    way collapses the slope towards zero exactly when the fit is weakest. The robustness is
-    heavier instead (:func:`_irls`), a frame having no other frames to outvote a bad beam. A
-    shift is fitted only when the frame's own depths span ``min_spread`` — the pool's own 2.5,
-    not a looser gate: one picture of one wall spans little, and a shift fitted on it is noise
-    (:data:`FRAME_MIN_SPREAD`) — otherwise the scale alone, the weighted median ratio. The
-    result is bounded like every other law (:func:`_bounded`).
-
-    ``weight`` is each pair's 1 / sigma^2 (:func:`pair_weight`) and is what lets two rulers
-    share one fit: the lidar's beams and the parallax anchor's corners land in the same pool and
-    the fit reads each by its own noise, so the beams write the law where they reach and the
-    corners carry it where they do not. The weights reach the robust fit as a multiplier on
-    Huber's own weight (:func:`_irls`), never as a replacement: a heavy pair that is wrong is
-    still cut down.
-
-    What the weights do NOT reach is the spread gate above: it reads the 5th and 95th
-    percentile of ``z`` by count, whoever measured them. A lidar-only pool is one row of one
-    room and usually stays under the gate, so the frame gets a scale and no shift; a pool with
-    parallax in it spans the corners of the whole picture and opens the shift far more often —
-    on a parallax-only frame, essentially always. That is the intended behaviour (the spread is
-    real, and a shift is what a spread identifies) but it means switching the anchor on changes
-    which TERM the frame law fits, not only its numbers."""
-    d = np.asarray(d, dtype=float)
-    z = np.asarray(z, dtype=float)
-    if d.size < min_pairs:
-        return None
-    x, y = 1.0 / d, 1.0 / z
-    lo, hi = np.percentile(z, (5, 95))
-    if not math.isfinite(hi / lo) or float(hi / lo) < min_spread:
-        return _finite(float(np.clip(weighted_median(y / x, weight), *a_bounds())), 0.0)
-    alpha, beta = _irls(x, y, weight)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        a, b = float(np.divide(1.0, alpha)), float(np.divide(-beta, alpha))
-    return _finite(*_bounded(a, b, x, y, weight))
-
-
-# ---- the same fit over one patch of the picture, held by what it knows already -----------------
-NO_PRIOR = (0.0, 0.0, 0.0, 0.0)  # the Tikhonov rows of :func:`_weighted_line`, carrying nothing
-
-
-def _weighted_line(
-    x: Array,
-    y: Array,
-    weight: Array,
-    shift: bool,
-    prior: tuple[float, float, float, float] = NO_PRIOR,
-) -> tuple[float, float]:
-    """(alpha, beta) of ``x = alpha * y + beta`` by weighted least squares in closed form —
-    ``beta`` forced to zero (a line through the origin) when ``shift`` is false. NaN in
-    ``alpha`` when the rows carry no weight or do not identify a line; two 2x2 sums instead of
-    :func:`numpy.polyfit`, because a scale field fits one of these per node per frame.
-
-    ``prior`` is ``(w_alpha, alpha0, w_beta, beta0)``: two TIKHONOV rows in PARAMETER space,
-    ``sqrt(w_alpha) * (alpha - alpha0) = 0`` and ``sqrt(w_beta) * (beta - beta0) = 0``, added to
-    the normal equations as ``w_alpha`` on the ``alpha`` diagonal and ``w_beta`` on the
-    ``beta`` one. A weight of zero is a prior that says nothing and leaves the sums untouched
-    to the bit, which is what every caller but :func:`fit_node` passes."""
-    w_alpha, alpha0, w_beta, beta0 = prior
-    syy = float(np.sum(weight * y * y)) + w_alpha
-    sxy = float(np.sum(weight * x * y)) + w_alpha * alpha0
-    scale_only = (sxy / syy, 0.0) if syy > 0.0 else (math.nan, 0.0)
-    if not shift:
-        return scale_only
-    s = float(np.sum(weight)) + w_beta
-    sy = float(np.sum(weight * y))
-    sx = float(np.sum(weight * x)) + w_beta * beta0
-    det = s * syy - sy * sy
-    if not math.isfinite(det) or abs(det) <= 1e-12 * max(abs(s * syy), 1.0):
-        return scale_only
-    alpha = (s * sxy - sy * sx) / det
-    return alpha, (sx - alpha * sy) / s
-
-
-def _huber_weights(x: Array, y: Array, weight: Array, shift: bool) -> Array:
-    """Each row's Huber multiplier, judged on a fit of THESE rows alone: the line is refitted
-    :data:`IRLS_ROUNDS` times and a row counts the less the further its residual sits past
-    :data:`IRLS_HUBER` robust sigmas (the MAD's), exactly as :func:`_irls` re-weights.
-
-    Their own line, not the line a prior pulls, because a pseudo-observation is not an outlier
-    and must not be allowed to make the data look like one: a node's pairs sitting perfectly on
-    a line a prior disagrees with would otherwise all be cut down as "outliers" and the prior
-    would win a fit it holds a twentieth of the weight in (scratch/_fit_node_probe.py,
-    2026-09-15: it read a scale of 1.16 where its 24 pairs said 1.10)."""
-    ones: Array = np.ones_like(x)
-    if x.size < 3:
-        return ones
-    alpha, beta = _weighted_line(x, y, weight, shift and x.size >= 2)
-    huber = ones
-    # A scatter under a billionth of the inverse depth itself is not scatter, it is the last
-    # bits of the arithmetic: rows lying exactly on their own line would otherwise be graded
-    # against each other's rounding and come back weighing 1e-5 (scratch/_fit_node_probe.py).
-    floor = 1e-9 * float(np.median(np.abs(x)))
-    for _ in range(IRLS_ROUNDS):
-        res = x - (alpha * y + beta)
-        sigma = 1.4826 * float(np.median(np.abs(res - np.median(res))))
-        if not math.isfinite(sigma) or sigma <= floor:
-            break
-        huber = np.minimum(1.0, IRLS_HUBER * sigma / np.maximum(np.abs(res), 1e-12))
-        alpha, beta = _weighted_line(x, y, weight * huber, shift and x.size >= 2)
-    return huber
-
-
-def node_unit(y: Array, weight: Array, fallback: float) -> float:
-    """How much information about the SLOPE one pair of weight 1 carries at this node: the
-    weight-mean of ``y^2`` over the node's own pairs (``y`` their true inverse depth),
-    ``fallback`` when the node has none — the frame's own such mean, handed down by the caller.
-
-    The derivation, in one line. The fit solves ``x = alpha * y + beta`` by weighted least
-    squares, so its information matrix is ``sum_i w_i * [[y_i^2, y_i], [y_i, 1]]``: a pair of
-    weight 1 at inverse depth ``y`` is worth ``y^2`` about ``alpha`` and 1 about ``beta``. The
-    node's mean ``y^2`` is therefore the exchange rate between "one pair" and "one unit of
-    slope information" AT THIS NODE — which is exactly what a prior in pairs has to be
-    multiplied by to mean the same thing near the camera and across the room."""
-    total = float(np.sum(weight))
-    if total <= 0.0 or y.size == 0:
-        return fallback
-    unit = float(np.sum(weight * y * y) / total)
-    return unit if math.isfinite(unit) and unit > 0.0 else fallback
-
-
-def fit_node(
-    d: Array,
-    z: Array,
-    weight: Array,
-    priors: Sequence[tuple[float, float, float]] = (),
-    unit: float = 1.0,
-    shift: bool = True,
-) -> tuple[float, float] | None:
-    """The law ``1 / z = a / D + b`` of ONE NODE of a scale field: the same regression as
-    :func:`fit_frame` on the pairs that belong to the node, held by a prior that says what the
-    node should be where its own pairs say little. ``None`` when nothing at all constrains it
-    (no pairs and no priors) and when the fit does not come back finite (:func:`_finite`) — a
-    NaN node poisons every pixel of the picture, not only its own.
-
-    ``priors`` are (a, b, weight) laws to be pulled toward — the frame's own global fit, and
-    the node's previous value decayed by the time since. Each enters as two TIKHONOV rows in
-    PARAMETER space, ``sqrt(w_alpha) * (alpha - alpha0) = 0`` and
-    ``sqrt(w_beta) * (beta - beta0) = 0`` about the prior's own
-    ``alpha0 = 1 / a``, ``beta0 = -b / a``, and NOT as pseudo-observations at two depths.
-    Its weight is read in PAIRS: ``weight = N`` means "as much information about that parameter
-    as N pairs of weight 1 would carry AT THIS NODE", which is ``w_alpha = N * unit`` and
-    ``w_beta = N`` — the exchange rate ``unit`` being the node's own mean ``y^2``
-    (:func:`node_unit`), because the fit's information matrix is
-    ``sum_i w_i * [[y_i^2, y_i], [y_i, 1]]``. So a node that saw no pair comes back as the
-    prior, a node that saw hundreds of beams follows them, and in between the two are averaged
-    the way two rulers of different noise always are — at the same exchange rate whether the
-    node looks at the far wall or at the cart's own bumper.
-
-    What it replaces, and why (scratch/_field_refutations.py, 2026-09-15). The pull used to be
-    two pseudo-observation ROWS on the prior's line at the two ends of the pairs' depth range,
-    ``0.5 * weight`` each. Rows at ``+-dy/2`` about the mean carry ``w * dy^2 / 4`` of slope
-    information against the data's ``W * s^2``, so their pull depended on how wide the FRAME's
-    span was and on where in it the node's pairs sat: one probe (ten pairs of weight 1 at one
-    depth, a prior of weight 1) measured an effective pull of 0.4 pairs with the cluster at
-    0.6 m and 36 pairs with it at 6 m, and a flat ~15 pairs once the shift was open. A field
-    whose top nodes hold a handful of weak parallax corners could therefore never leave the
-    global fit, whatever ``field_prior`` was set to. "One beam's worth" now means one beam's
-    worth everywhere.
-
-    A prior is not an outlier: the robust re-weighting is judged on the pairs' own line and
-    applied to their rows only (:func:`_huber_weights`) — the Tikhonov rows are not rows of the
-    design at all and can never be reweighted.
-
-    ``shift`` says whether the node may fit a shift at all, and belongs to the FRAME, not to
-    the node: a node holds a handful of beams over half a metre of depth, and a two-parameter
-    fit on that is noise. The caller passes what its own global fit decided
-    (:data:`FRAME_MIN_SPREAD`), so a field never opens a term the frame's gate refused. The
-    result is bounded like every other law (:func:`_bounded`), on the node's OWN pairs: when a
-    bound binds, the other parameter is refitted as a median residual, and a prior in parameter
-    space has no residual to take a median of. A node with no pairs is clipped instead."""
-    d = np.asarray(d, dtype=float)
-    z = np.asarray(z, dtype=float)
-    w = np.asarray(weight, dtype=float)
-    with np.errstate(divide="ignore", invalid="ignore"):  # a pair at depth 0 drops out below
-        x, y = 1.0 / d, 1.0 / z
-    ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(w) & (w > 0.0)
-    x, y, w = x[ok], y[ok], w[ok]
-    rate = node_unit(y, w, float(unit) if math.isfinite(unit) and unit > 0.0 else 1.0)
-    w_alpha, w_beta, num_alpha, num_beta = 0.0, 0.0, 0.0, 0.0
-    for a_prior, b_prior, pull in priors:
-        if pull <= 0.0 or not math.isfinite(a_prior) or a_prior == 0.0:
-            continue
-        if not math.isfinite(b_prior):
-            continue
-        w_alpha += pull * rate
-        num_alpha += pull * rate / a_prior
-        w_beta += pull
-        num_beta += pull * (-b_prior / a_prior)
-    if x.size == 0 and w_alpha <= 0.0:
-        return None  # nothing at all constrains this node
-    if x.size:
-        w = w * _huber_weights(x, y, w, shift)
-    prior = NO_PRIOR
-    if w_alpha > 0.0:
-        prior = (w_alpha, num_alpha / w_alpha, w_beta, num_beta / w_beta)
-    alpha, beta = _weighted_line(x, y, w, shift and (x.size >= 2 or w_beta > 0.0), prior)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        a, b = float(np.divide(1.0, alpha)), float(np.divide(-beta, alpha))
-    if x.size == 0:  # no pairs to take a residual median over: the prior, held to the bounds
-        return _finite(float(np.clip(a, *a_bounds())), float(np.clip(b, *B_BOUNDS)))
-    return _finite(*_bounded(a, b, x, y, w))
-
-
-# ---- the same pairs read as a curve over the network's range ----------------------------------
-RANGE_NEAR = 0.3  # network metres: the network places no scene point nearer than this
-RANGE_FAR = 12.0  # nor further out than this indoors; past it the pairs are reflections
-RANGE_BINS = 27  # log-spaced between the two: 15 % of range per bin
-RANGE_EDGES: Array = np.geomspace(RANGE_NEAR, RANGE_FAR, RANGE_BINS + 1, dtype=np.float64)
-# Log-spaced, not 0.25 m steps, because the correction is a ratio: a constant *relative* bin
-# width keeps the resolution constant in the quantity being fitted, and the network's depth is
-# itself stretched (1.6-2.0x), so 0.25 m of true range is 0.4-0.5 m of network depth near the
-# cart and more further out. Linear 0.25 m bins would leave the whole far half of the picture
-# empty and held from its nearest neighbour, which is the affine law again under another name.
-# 15 % a bin, not 24 %: at the measured 12 % of tilt per metre a 24 % bin leaves 1-2 % of tilt
-# inside itself and 2.3 % past the outermost centre, where the law holds flat
-# (scratch/range_law_bins.py); at 15 % that falls under 1 % and the pool still fills every bin
-# it reaches — at rest the 62 000 pooled pairs sit in a dozen of them, hundreds to thousands
-# each, against the 50 a bin needs.
-RANGE_MIN_PAIRS = 50  # pairs in a bin before its ratio is its own; fewer and the bin is empty
-RANGE_MIN_BINS = 2  # filled bins before the law says anything about range (one is a plain scale)
-
-
-def _rising(centres: list[float], ratios: list[float], counts: list[int]) -> list[int]:
-    """Which bins to keep so that the corrected depth grows with the network's depth: where two
-    neighbours disagree about that, the one resting on fewer pairs is dropped, and the check
-    runs again. Measured 2026-09-14 at home: the outermost bin (1 076 pairs against the next
-    one's 14 301) asked for 1.74 m where the bin before it asked for 1.85, and the published
-    depth came out 41 cm short over 2.0-2.5 m. A network's depth is a rising function of the
-    true one whatever it gets wrong about the size, so a bin that inverts that order is a bad
-    pairing — a panned head, a stale scan — not a lens."""
-    kept = list(range(len(centres)))
-    while len(kept) > 1:
-        depth = [centres[i] * ratios[i] for i in kept]
-        falls = [k for k in range(len(kept) - 1) if depth[k + 1] <= depth[k]]
-        if not falls:
-            break
-        k = falls[0]
-        kept.pop(k if counts[kept[k]] < counts[kept[k + 1]] else k + 1)
-    return kept
-
-
-def ratio_bounds() -> tuple[float, float]:
-    """What a bin's true / network ratio is allowed to be: the reciprocal of :func:`a_bounds`,
-    so the range law and the affine law are held to the same physics."""
-    a_lo, a_hi = a_bounds()
-    return 1.0 / a_hi, 1.0 / a_lo
-
-
-@dataclass(frozen=True, eq=False)
-class RangeLaw:
-    """The correction as a curve over the network's own depth: per bin of network depth, the
-    robust ratio true / network measured there.
-
-    One affine law in inverse depth cannot describe this camera. Fitted on a pool that spans
-    the room it leaves a residual that tilts with range — measured on 2026-09-14 at home
-    (scratch/depth_scale_by_range.py, 182 frames, 18 879 beams): the published depth ran +8.7 %
-    at 0.8-1.2 m, +5.2 % at 1.2-1.6 m and -3.3 % at 1.6-2.0 m, 12 % per metre, while the whole
-    pool's median ratio was a healthy 0.996. Which ranges the pool happens to hold then decides
-    the law: a drive brings 0.5 m and 4 m pairs, the shift term switches on, and the same camera
-    is described as a 1.75 b 0 standing and a 2.3 b -0.19 driving. The volume is painted under
-    one law and scored under the other.
-
-    This law asks the pairs the question they answer — how wrong is the network *here* — and
-    answers it per range: for every bin that held at least :data:`RANGE_MIN_PAIRS` pairs,
-    :attr:`ratios` is the weighted median of true / network inside it and :attr:`centres` the
-    median network depth of those same pairs — where the ratio was measured, not the bin's
-    nominal middle, which a pool that fills a bin unevenly would put it beside (2.8 % of
-    residual in the 1.2-1.6 m band on the synthetic tilt of tests/unit/test_depth.py) —
-    :attr:`counts` how many pairs each rests on. Between two filled centres the
-    ratio is linear in the network's depth; outside them it is held at the nearest filled
-    centre's, never extrapolated. Corrected depth = network depth x ratio(network depth), and
-    that corrected depth must rise from bin to bin (:func:`_rising`)."""
-
-    centres: Array
-    ratios: Array
-    counts: npt.NDArray[np.intp]
-
-    @classmethod
-    def fit(
-        cls,
-        d: Array,
-        z: Array,
-        weight: Array | None = None,
-        edges: Array = RANGE_EDGES,
-        min_pairs: int = RANGE_MIN_PAIRS,
-        min_bins: int = RANGE_MIN_BINS,
-    ) -> RangeLaw | None:
-        """The law over (network depth ``d``, true depth ``z``) pairs, each counting ``weight``
-        times, or ``None`` when under ``min_bins`` bins survive — a pool that sees one range
-        says nothing about range, and the affine law's fit over all of it is the better answer
-        there. A bin needs ``min_pairs`` pairs; its ratio is clipped to :func:`ratio_bounds`;
-        and a bin that puts the corrected depth below its nearer neighbour's is dropped
-        (:func:`_rising`)."""
-        d = np.asarray(d, dtype=float)
-        z = np.asarray(z, dtype=float)
-        ok = np.isfinite(d) & np.isfinite(z) & (d > NEAR_M) & (z > NEAR_M)
-        lo, hi = ratio_bounds()
-        index = np.digitize(d, edges) - 1
-        centres, ratios, counts = [], [], []
-        for b in range(edges.size - 1):
-            inside = ok & (index == b)
-            n = int(inside.sum())
-            if n < min_pairs:
-                continue
-            share = None if weight is None else np.asarray(weight, dtype=float)[inside]
-            centres.append(weighted_median(d[inside], share))
-            ratios.append(float(np.clip(weighted_median(z[inside] / d[inside], share), lo, hi)))
-            counts.append(n)
-        kept = _rising(centres, ratios, counts)
-        if len(kept) < min_bins:
-            return None
-        return cls(
-            np.asarray([centres[i] for i in kept]),
-            np.asarray([ratios[i] for i in kept]),
-            np.asarray([counts[i] for i in kept], dtype=np.intp),
-        )
-
-    def ratio(self, depth: Array) -> Array:
-        """The true / network ratio this law gives each pixel of ``depth``: interpolated
-        between the filled bins' centres, held flat beyond the outermost of them."""
-        out: Array = np.interp(np.asarray(depth, dtype=float), self.centres, self.ratios)
-        return out
-
-    def apply(self, depth: Array) -> Array:
-        """The network's depth in metres, each pixel scaled by the ratio measured at its own
-        range; pixels the law cannot place (non-finite, or non-positive) become NaN."""
-        d = np.asarray(depth, dtype=float)
-        with np.errstate(invalid="ignore"):
-            z = d * self.ratio(d)
-            out: Array = np.where(np.isfinite(z) & (z > 0.0), z, np.nan)
-        return out
-
-    def describe(self) -> str:
-        """The law for the report line: every filled bin as ``centre:ratio`` over the network's
-        depth, then the pairs behind each of them."""
-        bins = " ".join(f"D{c:.2f}:{r:.3f}" for c, r in zip(self.centres, self.ratios, strict=True))
-        return f"{bins} (n {'/'.join(str(int(n)) for n in self.counts)})"
-
-    def state(self) -> dict[str, Any]:
-        """The law as plain JSON values for :func:`save_law`."""
-        return {
-            "centres": [round(float(c), 4) for c in self.centres],
-            "ratios": [round(float(r), 5) for r in self.ratios],
-            "counts": [int(n) for n in self.counts],
-        }
-
-    @classmethod
-    def restore(cls, record: Any) -> RangeLaw | None:
-        """The law a past run saved (:meth:`state`), or ``None`` when the record is missing,
-        malformed, too short to say anything about range, or asks for a ratio outside
-        :func:`ratio_bounds` — a file is not a measurement until it passes the same gates."""
-        try:
-            centres = np.asarray([float(c) for c in record["centres"]])
-            ratios = np.asarray([float(r) for r in record["ratios"]])
-            counts = np.asarray([int(n) for n in record["counts"]], dtype=np.intp)
-        except (KeyError, TypeError, ValueError):
-            return None
-        if not (centres.size == ratios.size == counts.size) or centres.size < RANGE_MIN_BINS:
-            return None
-        lo, hi = ratio_bounds()
-        sane = (
-            bool(np.all(np.isfinite(centres)))
-            and bool(np.all(np.diff(centres) > 0.0))
-            and bool(np.all(np.isfinite(ratios)))
-            and bool(np.all((ratios >= lo) & (ratios <= hi)))
-            and bool(np.all(counts >= RANGE_MIN_PAIRS))
-        )
-        return cls(centres, ratios, counts) if sane else None
-
-
 LAW_VERSION = 3  # 1: the affine law alone; 2: the ray law's record beside it (retired 2026-09-15,
-# written by nobody since); 3: the range law's
-RETIRED_LAW_KEYS = ("ray",)  # records of laws that no longer exist, which a file written by an
-# older build still carries: read by nobody, and gone from the file at the first save
+# written by nobody since); 3: the range law's (retired with the mono chain)
+# Records of laws that no longer exist, which a file written by an older build still carries:
+# read by nobody, and gone from the file at the first save.
+RETIRED_LAW_KEYS = ("ray", "range")
 
 
 def save_law(
@@ -1142,14 +701,9 @@ def save_law(
     b: float,
     pooled: int,
     now: float,
-    range_law: dict[str, Any] | None = None,
 ) -> None:
     """Write the law next to the maps, atomically (a temp file, then ``os.replace``): a restart
-    begins from it instead of the raw network's depth. ``now`` is the wall clock in seconds.
-    ``range_law`` is the range-dependent law's record beside the affine one
-    (:meth:`RangeLaw.state`), in the same file under its own key so one law is
-    never read with another's map: a reader of version 1 sees the affine law it expects and
-    ignores the rest."""
+    begins from it. ``now`` is the wall clock in seconds."""
     tmp = path.with_name(path.name + ".tmp")
     record: dict[str, Any] = {
         "version": LAW_VERSION,
@@ -1158,25 +712,8 @@ def save_law(
         "pooled": pooled,
         "saved_at": now,
     }
-    if range_law is not None:
-        record["range"] = range_law
     tmp.write_text(json.dumps(record))
     os.replace(tmp, path)
-
-
-def load_range(path: Path, now: float, max_age_s: float = LAW_MAX_AGE_S) -> RangeLaw | None:
-    """The range law the last run saved when the file is there, holds one no older than
-    ``max_age_s`` and it passes :meth:`RangeLaw.restore`; ``None`` otherwise — a file written
-    before this law existed simply has none, and the affine law seeds the warm-up instead."""
-    try:
-        data = json.loads(path.read_text())
-        saved_at = float(data["saved_at"])
-        record = data.get("range")
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    if record is None or now - saved_at > max_age_s:
-        return None
-    return RangeLaw.restore(record)
 
 
 def retired_laws(path: Path) -> tuple[str, ...]:

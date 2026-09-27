@@ -2031,12 +2031,12 @@ def test_the_flags_script_reaches_a_node_where_it_runs_and_refuses_before_any_ho
         assert refused.returncode == 2, (args, refused.stdout, refused.stderr)
         assert reason in refused.stdout + refused.stderr, (args, refused.stdout, refused.stderr)
     # the reading verb: the whole entry from the table, no node asked, no container entered
-    told = flags_sh("flag", "depth_stream", "wall_anchor")
+    told = flags_sh("flag", "depth_stream", "edge_filter")
     assert told.returncode == 0, told.stderr
-    assert told.stdout.startswith("depth_stream/wall_anchor: bool, default on\n")
+    assert told.stdout.startswith("depth_stream/edge_filter: bool, default on\n")
     for label in ("What:", "Default:", "On when:", "Off when:"):
         assert f"\n{label}" in told.stdout, label
-    assert "19.1 -> 16.1 %" in told.stdout, "the measured reason, with its numbers"
+    assert "1.2-1.6 ms a frame" in told.stdout, "the measured reason, with its numbers"
     readme = (REPO / "ros/README.md").read_text()
     assert "ros/flags.sh" in readme[readme.index("## Feature flags") :]
 

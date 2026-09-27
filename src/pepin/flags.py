@@ -228,7 +228,7 @@ class Flag:
         return bool(self.why) and not self.why.lstrip().startswith(UNMEASURED)
 
     def headline(self, prefix: str = "") -> str:
-        """The flag's first line: ``depth_stream/floor_pairs: bool, default off`` (``prefix``
+        """The flag's first line: ``depth_stream/edge_filter: bool, default on`` (``prefix``
         is the node, empty for a bare flag), with ``(not live)`` when it is read at start."""
         where = f"{prefix}/{self.name}" if prefix else self.name
         live = "" if self.live else ", not live"
