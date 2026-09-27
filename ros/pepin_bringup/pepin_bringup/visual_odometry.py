@@ -21,8 +21,10 @@ The flags (:data:`FLAGS`, ``ros/flags.sh set visual_odometry <flag> <value>``): 
 (whether the measured odometry leaves this laptop at all — off, the EKF is exactly what it was
 before this node existed), ``vo_covariance`` (the constant or rtabmap's own), ``vo_sigma_m`` and
 ``vo_yaw_sigma_deg`` (the constant), ``vo_max_speed``, ``vo_max_turn``, ``vo_max_gap_s`` and
-``vo_reset_radius_m`` (the gate's ceilings), ``vo_continuous`` (whether the published pose is
-the sum of the admitted steps or rtabmap's own) and ``vo_publish_hz`` (how often it is published).
+``vo_reset_radius_m`` (the gate's ceilings) and ``vo_publish_hz`` (how often it is published).
+The published pose is the sum of the steps the gate admitted, never rtabmap's own: a refused jump
+re-anchors the gate, and a filter that differences the stream it receives would otherwise get
+the whole discontinuity in one frame time (2026-09-14, odom -> base_link 43 km out).
 """
 
 from __future__ import annotations
@@ -222,26 +224,6 @@ FLAGS = FlagSet(
         off_when="0 while comparing against the old behaviour on a tape",
     ),
     Flag(
-        "vo_continuous",
-        True,
-        description="what the published pose is: the sum of the steps this gate admitted (on) or"
-        " rtabmap's own pose passed through (off, the behaviour of 2026-09-14 and before)",
-        why="on, because the gate cannot protect a filter that differences the stream it"
-        " RECEIVES. A refused jump re-anchors the gate and nothing else: the board's EKF still"
-        " holds the pose from before the jump, and the next pose that passes hands it the whole"
-        " discontinuity divided by one frame time. That is what happened at 11:49 on 2026-09-14 —"
-        " with vo_publish on for seven minutes, odom -> base_link left the room and was 3.5 km"
-        " out by 11:51 (tape ros/maps/rec/0260_20260914_155145Z_home.jsonl, the wheels reporting"
-        " a hard zero at (-13.96, 3.21) throughout) and 43 km out at 12:10, still travelling at"
-        " 60 m/s a quarter of an hour after the topic went silent. It never stops because the"
-        " velocity it was given is vy, and ros/params/ekf.yaml has nothing that measures vy: the"
-        " wheels give vx, the gyro gives the yaw rate. With the steps summed, a tracking restart"
-        " costs one sample of motion",
-        on_when="it is the shipping value; the published pose is absolute, which is what makes"
-        " vo_publish_hz lossless",
-        off_when="only to reproduce the old behaviour on a tape, and never with vo_publish on",
-    ),
-    Flag(
         "vo_publish_hz",
         10.0,
         range=(0.0, 30.0),
@@ -255,7 +237,7 @@ FLAGS = FlagSet(
         " flowing at ~9 poses/s the"
         " EKF logged 'Failed to meet update rate' continuously — 56-94 ms of every 50 ms period"
         " at its 20 Hz — and Nav2's container sat at 200 % CPU (2026-09-14). The distance is the"
-        " same distance: the published pose is absolute (vo_continuous), so the filter"
+        " same distance: the published pose is absolute (the admitted steps summed), so the filter"
         " differences whatever two messages reached it and a skipped one only lengthens the gap."
         " What changes is the weight — robot_localization's differential path multiplies the"
         " summed pose covariance BY the gap, so a longer gap is a wider velocity sigma: at 3 Hz"
@@ -360,8 +342,7 @@ class VisualOdometry(Node):
             self._tally.count("skipped")
             self._hold = held
             return
-        if self._switches.on("vo_continuous"):
-            _write_planar_pose(msg, published)
+        _write_planar_pose(msg, published)
         mode = self._switches["vo_covariance"]
         if mode == "constant":
             msg.pose.covariance = planar_covariance(
