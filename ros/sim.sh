@@ -2,9 +2,10 @@
 # The kinematic simulator for Nav2, on this Mac (ros/sim/, ros/README.md "Simulation"): the
 # stack's own Nav2 launch (nav.launch.py side:=all, ros/params/nav2_params.yaml, the goal server,
 # the run recorder) driving a simulated cart in the room RTAB-Map saved. Usage:
-#   ros/sim.sh up [--rate N] [--world NAME] [--start PLACE]   router, world and Nav2 in throwaway
-#                                containers; --rate N runs the world's clock at N x the wall clock
-#                                (every node on use_sim_time), without it everything is wall time
+#   ros/sim.sh up [--rate N] [--world NAME] [--start PLACE] [--nav-first S]   router, world and
+#                                Nav2 in throwaway containers; --rate N runs the world's clock at N x
+#                                the wall clock (every node on use_sim_time), without it everything
+#                                is wall time; --nav-first S starts Nav2 S s before the world
 #   ros/sim.sh down              remove the three containers (the run directory stays)
 #   ros/sim.sh status            containers, Nav2's bring-up, the world's pose and odometer
 #   ros/sim.sh goal NAME | X Y [YAW_DEG]    drive through the goal server's socket, scored
@@ -93,12 +94,13 @@ wait_for() {  # CONTAINER TEXT SECONDS: seconds until TEXT shows in the log, or 
 }
 
 up() {
-    local rate=0 world=flat start=home sim_time=false img
+    local rate=0 world=flat start=home sim_time=false img nav_first=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --rate) rate="$2"; shift 2 ;;
             --world) world="$2"; shift 2 ;;
             --start) start="$2"; shift 2 ;;
+            --nav-first) nav_first="$2"; shift 2 ;;
             *) echo "up: unknown option $1" >&2; exit 2 ;;
         esac
     done
@@ -118,14 +120,34 @@ up() {
         -e "ZENOH_CONFIG_OVERRIDE=listen/endpoints=[\"tcp/127.0.0.1:$ZPORT\"]" \
         -v "$HERE/entrypoint.sh:/pepin_entrypoint.sh:ro" \
         "$img" /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd >/dev/null
-    docker run -d --name "$WORLD" --network "container:$ROUTER" "${MOUNTS[@]}" "${ENVS[@]}" "$img" \
-        python3 /sim/sim_world.py --world "/sim/worlds/$world.yaml" \
-        --places "/sim/worlds/$world.places.json" --start "$start" --rate "$rate" >/dev/null
-    wait_for "$WORLD" "sim world up" 60 >/dev/null
-    docker run -d --name "$NAV" --network "container:$ROUTER" "${MOUNTS[@]}" "${ENVS[@]}" "$img" \
-        ros2 launch /sim/sim_nav.launch.py "use_sim_time:=$sim_time" "map:=/sim/worlds/$world.yaml" >/dev/null
+    start_world() {
+        docker run -d --name "$WORLD" --network "container:$ROUTER" "${MOUNTS[@]}" "${ENVS[@]}" "$img" \
+            python3 /sim/sim_world.py --world "/sim/worlds/$world.yaml" \
+            --places "/sim/worlds/$world.places.json" --start "$start" --rate "$rate" >/dev/null
+        wait_for "$WORLD" "sim world up" 60 >/dev/null
+    }
+    start_nav() {
+        docker run -d --name "$NAV" --network "container:$ROUTER" "${MOUNTS[@]}" "${ENVS[@]}" "$img" \
+            ros2 launch /sim/sim_nav.launch.py "use_sim_time:=$sim_time" "map:=/sim/worlds/$world.yaml" >/dev/null
+    }
+    # --nav-first S: Nav2 up S seconds BEFORE the world, i.e. before anything publishes /map, TF
+    # or the placement word — the order of a `restart.sh both` whose board beats the laptop's
+    # RTAB-Map (journal 2026-09-25, "planner_server never activated"). Default: the world first.
+    if [ -n "$nav_first" ]; then
+        start_nav
+        echo "sim: Nav2 started with no world; the world follows in $nav_first s"
+        sleep "$nav_first"
+        start_world
+    else
+        start_world
+        start_nav
+    fi
     local active ready
-    active="$(wait_for "$NAV" "Managed nodes are active" 180)"
+    if ! active="$(wait_for "$NAV" "Managed nodes are active" 180)"; then
+        echo "sim up: Nav2 did NOT come up; its lifecycle manager said:"
+        docker logs "$NAV" 2>&1 | grep -E "lifecycle_manager|Timed out|Failed" | tail -8
+        return 1
+    fi
     ready="$(wait_for "$NAV" "goal server ready on port" 60)"
     echo "sim up: Nav2 active after ${active} s, goal server ready after ${ready} s more"
     status
@@ -151,5 +173,5 @@ case "${1:-}" in
     cancel) need_docker; in_world python3 -m pepin.goal_link --host 127.0.0.1 cancel ;;
     logs) need_docker; exec docker logs -f "pepin-sim-${2:-nav}" ;;
     map) cd "$REPO" && uv run python ros/sim/export_world.py ;;
-    *) sed -n '2,25p' "$0"; exit 2 ;;
+    *) sed -n '2,26p' "$0"; exit 2 ;;
 esac
