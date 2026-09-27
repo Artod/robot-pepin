@@ -2699,7 +2699,8 @@ The board's image carries Nav2 1.3.13, the laptop's 1.3.12; the sim runs the pla
 | tour: home -> printer | 113.7 s, 58 recoveries (twice: 115.9 s, 58) — the plan hugs the table block, RPP "collision ahead" 474x | 15-16 s (0485, 0491) |
 | tour: printer -> bookshelf | 15.2 s, 5 recoveries | 12 s, 5 (0492) |
 | tour: bookshelf -> home | 15.1 s, 5 recoveries | 28 s (0490); 133 s and 257 s (0493, 0498) |
-| shelf_pocket (3 rounds) | 99.8 s / 46 rec. / 10 contacts, 33.0 s / 21, 70.5 s / 40 | 133 s / 82, 257 s / 218 |
+| shelf_park: the 0492 arrival, grid only, -> home (2 rounds) | 25.2 s / 10 rec., 20.6 s / 8 | 28 s / 9 (0490) |
+| shelf_pocket: + the sides at 0.41 / 0.46 m (3 rounds) | 99.8 s / 46 rec. / 10 contacts, 33.0 s / 21, 70.5 s / 40 | 133 s / 82, 257 s / 218 (0493, 0498) |
 | corridor (control, 3 rounds) | 5.4 s and 11.1 s (median) | — |
 
 **Faster than the wall clock**: the world keeps any rate (`clock x` in its report line), Nav2 does
