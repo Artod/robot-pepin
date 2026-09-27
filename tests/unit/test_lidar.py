@@ -44,6 +44,14 @@ def test_mirror_and_yaw_offset_map_to_robot_frame() -> None:
     assert mount.to_robot_angle_rad(180.0) == pytest.approx(math.pi / 2)
 
 
+@pytest.mark.parametrize("mirror", [False, True])
+def test_a_robot_bearing_goes_back_to_the_sensor_angle_it_came_from(mirror: bool) -> None:
+    mount = LidarMount(mirror=mirror, yaw_offset_deg=87.5)
+    for sensor_deg in (0.0, 45.0, 192.0, 343.0, 359.5):
+        back = mount.to_sensor_angle_deg(mount.to_robot_angle_rad(sensor_deg))
+        assert back == pytest.approx(sensor_deg, abs=1e-9)
+
+
 def test_masked_sectors_wrap_around_zero() -> None:
     mount = LidarMount(masked_sectors_deg=((350.0, 10.0), (100.0, 120.0)))
     assert mount.is_masked(5.0) and mount.is_masked(355.0) and mount.is_masked(110.0)

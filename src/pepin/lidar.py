@@ -163,6 +163,12 @@ class LidarMount:
         deg = (360.0 - sensor_angle_deg) if self.mirror else sensor_angle_deg
         return math.radians((deg - self.yaw_offset_deg) % 360.0)
 
+    def to_sensor_angle_deg(self, robot_angle_rad: float) -> float:
+        """A robot-frame bearing back to sensor degrees in [0, 360): the inverse of
+        :meth:`to_robot_angle_rad`, so a bearing can be asked :meth:`is_masked`."""
+        deg = (math.degrees(robot_angle_rad) + self.yaw_offset_deg) % 360.0
+        return (360.0 - deg) % 360.0 if self.mirror else deg
+
 
 @dataclass(frozen=True)
 class LaserScan:
