@@ -1,0 +1,9 @@
+# RTAB-Map's saved grid (Admin.opt_map) of rtabmap.db, last written 2026-09-25T20:53:15; 169 graph nodes.
+# Written by ros/sim/export_world.py; re-export, do not edit.
+image: flat.pgm
+mode: trinary
+resolution: 0.050000
+origin: [-4.573492, -4.921875, 0.0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.25
