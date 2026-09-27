@@ -1,5 +1,5 @@
 """ros/tools/flags_doc.py: the nodes' flag tables read from the sources, the README section
-they render (kept current here, the way the zenoh bridge configs are), and the answers
+they render (kept current by `flags_doc.py --check` in .githooks/pre-push), and the answers
 ros/flags.sh asks it for."""
 
 from __future__ import annotations
@@ -36,22 +36,6 @@ def test_every_node_with_a_table_is_found_and_only_those() -> None:
     assert set(tables) >= {"depth_stream", "depth_fusion", "relocalizer", "neck_state"}
     assert all(isinstance(t, FlagSet) and len(t) for t in tables.values())
     assert list(tables) == sorted(tables), "file order: the README reads the same every time"
-
-
-def test_the_readme_s_feature_flags_section_is_current() -> None:
-    """Regenerate with ros/tools/flags_doc.py when a node's table changes."""
-    text = DOC.README.read_text()
-    assert DOC.readme_with(text, DOC.section()) == text, (
-        "ros/README.md: the Feature flags section is stale; run ros/tools/flags_doc.py"
-    )
-    assert text.count(DOC.HEADING) == 1
-    assert text.index(DOC.HEADING) < text.index("## Build and run")
-    assert DOC.HOW_TO_READ.splitlines()[0] in text, "how to read a flag, above the table"
-    for node, flags in DOC.tables().items():
-        assert f"#### `{node}`" in text, node
-        for flag in flags:
-            assert f"| `{node}` | `{flag.name}` |" in text, (node, flag.name)
-            assert flag.markdown() in text, f"{node}/{flag.name}: the paragraph under the table"
 
 
 def test_the_table_is_the_one_liner_and_the_paragraphs_come_under_it_by_node() -> None:
@@ -160,8 +144,6 @@ def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     code, out, _ = _main(["list", "depth_fusion"], capsys, stdin=dump)
     assert code == 0 and out.startswith("depth_fusion/enabled") and "  unset  " in out
     assert _main(["frob"], capsys)[0] == 2
-    code, out, _ = _main(["--check"], capsys)
-    assert code == 0 and out == ""
 
 
 @pytest.mark.slow
