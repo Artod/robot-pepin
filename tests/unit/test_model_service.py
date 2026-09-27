@@ -191,6 +191,7 @@ def test_a_request_goes_through_and_health_names_every_model(served: Any) -> Non
 
 
 @pytest.mark.slow
+@pytest.mark.serial  # wall time: parallel load erases the overlap it measures
 def test_the_gpu_lock_serialises_two_models_on_one_device(served: Any) -> None:
     """Measured by wall time: four 40 ms inferences on one device cannot finish in under 160 ms,
     while the same four split over two devices overlap and finish sooner."""

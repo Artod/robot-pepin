@@ -135,6 +135,7 @@ class ReplaySource:
 
 
 @pytest.mark.slow  # a 3 s wall-clock deadline: timing-flaky under load, and slow
+@pytest.mark.serial
 def test_lidar_client_drains_revolutions_and_reconnects_after_a_drop() -> None:
     import time
 

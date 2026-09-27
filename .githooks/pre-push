@@ -1,12 +1,17 @@
 #!/bin/bash
 # The whole suite before anything leaves the machine: slow simulations included, in parallel
 # (pytest-xdist: 6 workers, the Mac's performance cores; worksteal, so the long simulated drives
-# do not queue behind one worker), the coverage floor, and ros/README.md's generated Feature
-# flags section held against the nodes' FLAGS tables.
+# do not queue behind one worker), then the few `serial` tests (wall-clock assertions that
+# parallel load makes flaky) alone, the coverage floor over both runs, and ros/README.md's
+# generated Feature flags section held against the nodes' FLAGS tables.
 set -e
 cd "$(git rev-parse --show-toplevel)"
 echo "pre-push: ros/README.md Feature flags section (regenerate: uv run python ros/tools/flags_doc.py)"
 uv run python ros/tools/flags_doc.py --check
-echo "pre-push: unit tests, slow included, coverage floor ($(cat tests/coverage_floor.txt)%)"
-uv run pytest tests/unit -q --no-header -p no:cacheprovider -n 6 --dist worksteal \
-    --cov=src/pepin --cov-report=term:skip-covered --cov-fail-under="$(cat tests/coverage_floor.txt)"
+echo "pre-push: unit tests, slow included, in parallel"
+uv run pytest tests/unit -q --no-header -p no:cacheprovider -n 6 --dist worksteal -m "not serial" \
+    --cov=src/pepin --cov-report=
+echo "pre-push: the serial tests, then the coverage floor ($(cat tests/coverage_floor.txt)%)"
+uv run pytest tests/unit -q --no-header -p no:cacheprovider -m serial \
+    --cov=src/pepin --cov-append --cov-report=term:skip-covered \
+    --cov-fail-under="$(cat tests/coverage_floor.txt)"

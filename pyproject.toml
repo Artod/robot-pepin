@@ -63,6 +63,7 @@ addopts = "-q"
 markers = [
     "hardware: needs the live robot (run with --hardware)",
     "slow: over 0.3 s — simulated drives, sockets, timeouts, subprocesses (uv run pytest -m \"not slow\" skips them)",
+    "serial: asserts on wall-clock time, flaky under parallel load; the pre-push hook runs these alone, after the parallel run",
 ]
 
 [tool.mypy]
