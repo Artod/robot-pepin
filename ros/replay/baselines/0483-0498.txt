@@ -1,0 +1,21 @@
+ros/replay.sh 483-498 --jobs 1 --save ros/replay/baselines/0483-0498.json  (8c8e392, 2026-09-27T06:06:17Z)
+      run      goal  active_s  unseen_s   stuck_s  goal_max  goal_end  corr_p50  corr_max  cam_mean   cam_max       fid    wall_s      x_rt
+      483   printer      13.8       7.9       2.6        83        59     140.5       169     244.3       283      0.99      0.43        36
+      484      home      30.0       6.1       7.1       106        25     101.0       144     358.9       570      0.99      0.98        32
+      485   printer      13.0       5.6       0.8        59        59     123.5       164     336.8       430      1.00      0.37        40
+      486      home      11.8       5.8       0.6        45        45      93.0       100     389.9       655      0.98      0.35        38
+      487 bookshelf      22.8       5.5       0.9        64        63      73.5       155     365.6       496      1.00      0.69        35
+      488      home      75.1       6.1      14.4        44        38      87.0       154     438.6       651      0.98      2.26        34
+      489 bookshelf      21.7       6.2       3.9        53        34     103.0       174     339.1       604      0.99      0.56        42
+      490      home      23.3       5.0       5.1        43        43      90.5       126     327.7       601      0.99      0.57        44
+      491   printer      14.2       5.5       1.6        51        51     112.5       119     262.2       377      0.99      0.38        42
+      492 bookshelf       6.9       5.1       0.7        33        33     106.0       107     263.0       302      1.00      0.21        41
+      493      home     127.6       5.2      50.9        45        33     101.0       182     263.8       699      0.99      2.29        56
+      494   printer      58.2       5.2      12.7        79        51     138.0       181     357.2       497      1.00      1.20        50
+      495      home      11.5       4.9       0.6        44        42      91.5        95     469.9       788      0.98      0.31        43
+      496   printer     138.8       5.7      74.7        93        55     132.0       202     308.3       529      0.98      2.11        67
+      497 bookshelf      19.4       5.6       0.6        15        15      53.0        71     319.4       421      0.97      0.41        52
+      498      home     252.5       4.9      94.0        57        32     150.5       389     321.5       773      0.97      4.44        57
+      all        16     840.6      90.3     271.2       914       678    1696.5      2532    5366.2      8676      0.99     17.60        44
+16 drives, 841 s of goals replayed in 18.4 s wall (1 jobs); local 5 Hz, global 2 Hz; clears bt; params 5fe8f3dc7d (nav2_params.yaml, nav2_map_from_laptop.yaml)
+stand e3ba04a7 (rtabmap.db saved grid, rtabmap.places.json); goal_max floor, the map's own: bookshelf 1, home 2, printer 25
