@@ -3,8 +3,7 @@
 import math
 
 import numpy as np
-from synthetic import raycast_room
-from test_localization import PILLAR, furnished_room_map
+from synthetic import PILLAR, furnished_room_map, raycast_room
 
 from pepin.odometry import Pose2D, wrap_angle
 from pepin.scanmatch import CorrelativeMatcher, SearchWindow, apex

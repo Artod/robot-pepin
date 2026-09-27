@@ -301,7 +301,7 @@ FREE_TOPIC = "/depth_free"
 GRID_TOPIC = "/camera_grid"
 GRID_MAP_TOPIC = "/camera_grid_map"
 GRID_UPDATES_TOPIC = GRID_MAP_TOPIC + "_updates"
-MAP_TOPIC = "/map"  # the global static layer's map under PEPIN_LOCALIZER=rtabmap
+MAP_TOPIC = "/map"  # the global static layer's map (RTAB-Map's grid)
 GRID_TF_WAIT_S = 0.05  # map <- odom at the grid's stamp: a paint worker waits no longer
 GEOMETRY_SETTLE_S = 1.0  # a new full grid reaches the layer before any update in its geometry
 VOLUME = "volume"  # what marks_source chooses between: the model's surface...
@@ -1099,7 +1099,7 @@ class DepthFusion(Node):
             str(self.declare_parameter("lidar_config", LIDAR_CONFIG).value)
         )
         # The map whose lattice /camera_grid_map copies: the one the global costmap's static layer
-        # reads (/map under PEPIN_LOCALIZER=rtabmap, /map_tracked under tracker; the launch says).
+        # reads (/map; the launch says).
         self._grid_map_topic = str(self.declare_parameter("grid_map_topic", MAP_TOPIC).value)
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
         self._tally = Tally(STAGES)

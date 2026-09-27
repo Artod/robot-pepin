@@ -10,19 +10,15 @@ Wants=pepin-base.service pepin-tof.service
 # PEPIN_NAV=true in /etc/default/pepin-ros starts Nav2 at boot too (one launch process for both).
 EnvironmentFile=-/etc/default/pepin-ros
 Environment=PEPIN_NAV=false
-# Online SLAM: Nav2 on the map the laptop's RTAB-Map builds while the cart drives (implies
-# nav; no map_server, no tracker). ros/thin.sh slam writes it together with the bridge's
-# slam allow-list, because the two may not disagree about who publishes /map.
-Environment=PEPIN_SLAM=false
 # The old lidar-only mapper (slam_toolbox, ros/mode.sh slam_toolbox): builds a map to SAVE,
-# never drives on it. Never together with PEPIN_NAV or PEPIN_SLAM: two map -> odom publishers.
+# never drives on it. Never together with PEPIN_NAV: two map -> odom publishers.
 Environment=PEPIN_SLAM_TOOLBOX=false
 Environment=PEPIN_MAP=/maps/20260903_182653_lap3_loop.yaml
 Environment=PEPIN_CPP_BRIDGE=false
 Environment=PEPIN_IMU=false
 # The EKF (ros/params/ekf.yaml) fuses whatever odometry sources are alive and owns
 # odom -> base_link; it does NOT need the IMU, only the C++ bridge. Off, the bridge publishes
-# that transform from the wheels alone and there is no /odometry/filtered for the relocalizer.
+# that transform from the wheels alone and there is no /odometry/filtered.
 Environment=PEPIN_EKF=true
 # The lidar's own scan-to-scan odometry (rf2o) as a twist for that filter, odom3 in the same file
 # (ros/feature.sh laser_odom on|off). A source, not a precondition: off, the filter runs on the
@@ -44,12 +40,6 @@ Environment=PEPIN_RECORDER=jsonl
 # /etc/default/pepin-ros so it survives a reboot; ros/run.sh turns it into the container's image
 # and environment.
 Environment=PEPIN_RMW=zenoh
-# WHO OWNS map -> odom. rtabmap (the default since 2026-09-22): the laptop's RTAB-Map publishes
-# that transform and the board's lidar tracker (pepin_bringup.relocalizer) does not start here at
-# all. tracker: the stack of before, where the relocalizer owns the edge and republishes the grid
-# it adopted as /map_tracked. Set in /etc/default/pepin-ros so it survives a reboot; ros/run.sh
-# turns it into the container's environment, and ros/lib.sh holds the same default for the shell.
-Environment=PEPIN_LOCALIZER=rtabmap
 # One container per boot; --rm so a stale one never blocks the name. The image is built by ros/build.sh.
 # No RTC on this board: it boots with yesterday's clock and NTP jumps it hours forward a minute
 # later; every "seconds since the last reading" check in Nav2 then sees stale data and the first
@@ -66,7 +56,7 @@ ExecStartPre=-/bin/sh -c 'for i in $$(seq 1 90); do [ "$$(timedatectl show -p NT
 ExecStartPre=-/bin/sh -c 'mkdir -p /root/pepin-ros/logs && /usr/bin/docker logs pepin-ros > /root/pepin-ros/logs/$$(date +%%Y%%m%%d_%%H%%M%%S).log 2>&1'
 ExecStartPre=-/usr/bin/docker rm -f pepin-ros
 # run.sh mounts the code from /root/pepin-ros (see it): edits reach the robot via ros/sync.sh, no rebuild.
-ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam:=${PEPIN_SLAM} slam_toolbox:=${PEPIN_SLAM_TOOLBOX} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} ekf:=${PEPIN_EKF} laser_odom:=${PEPIN_LASER_ODOM} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK} side:=${PEPIN_SIDE} recorder:=${PEPIN_RECORDER}
+ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam_toolbox:=${PEPIN_SLAM_TOOLBOX} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} ekf:=${PEPIN_EKF} laser_odom:=${PEPIN_LASER_ODOM} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK} side:=${PEPIN_SIDE} recorder:=${PEPIN_RECORDER}
 # ros2 launch needs more than 5 s to bring a dozen nodes down on this board; a SIGKILL (137)
 # after the grace period is still a normal stop, not a failure.
 # The container's stop signal is SIGINT (ros/run.sh, ros/Dockerfile), which the launch answers by

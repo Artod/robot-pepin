@@ -5,16 +5,11 @@ board that also runs Nav2; this file includes robot.launch.py and, optionally,
 nav.launch.py so there is exactly one. Arguments are those of the two files
 (``map``, ``params_file``, ``laser_roll``, ``tof``, ...) plus:
 
-- ``nav``: Nav2 on the saved ``map``.
-- ``slam``: online SLAM (ros/thin.sh slam). Nav2 too — the cart must navigate the map it is
-  building — but without map_server and without the tracker: the map arrives from the laptop's
-  RTAB-Map as ``/map`` and its correction as ``map -> odom``. It implies ``nav``, so the board
-  needs one switch, not two that can disagree.
+- ``nav``: Nav2 on the laptop's map (RTAB-Map's grid on ``/map``, its ``map -> odom``).
 - ``recorder``: ``jsonl`` (default) or ``bag`` — who writes a drive down (ros/README.md,
   "Two recorders").
 - ``slam_toolbox``: the old lidar-only mapper (ros/mode.sh slam_toolbox), which builds a map to
-  SAVE and cannot navigate on it. Never together with ``nav`` or ``slam``: two map -> odom
-  publishers, and the reason this argument is not called ``slam`` any more.
+  SAVE and cannot navigate on it. Never together with ``nav``: two map -> odom publishers.
 """
 
 import os
@@ -28,7 +23,7 @@ from launch.actions import (
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import LaunchConfiguration
 
 from pepin.deployment import CONTAINER_STOP_TIMEOUT_S
 
@@ -59,23 +54,11 @@ def generate_launch_description() -> LaunchDescription:
             "neck": LaunchConfiguration("neck"),
         }.items(),
     )
-    # SLAM mode navigates: one switch on the board, so PEPIN_NAV and PEPIN_SLAM can never
-    # disagree about whether the cart may drive the map it is building.
-    driving = PythonExpression(
-        [
-            "'",
-            LaunchConfiguration("nav"),
-            "' == 'true' or '",
-            LaunchConfiguration("slam"),
-            "' == 'true'",
-        ]
-    )
     nav = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(launch_dir, "nav.launch.py")),
-        condition=IfCondition(driving),
+        condition=IfCondition(LaunchConfiguration("nav")),
         launch_arguments={
             "side": LaunchConfiguration("side"),
-            "slam": LaunchConfiguration("slam"),
             "recorder": LaunchConfiguration("recorder"),
         }.items(),
     )
@@ -88,8 +71,7 @@ def generate_launch_description() -> LaunchDescription:
             *SHUTDOWN,  # before the includes: a scoped include inherits what is set above it
             DeclareLaunchArgument("nav", default_value="false"),
             DeclareLaunchArgument("side", default_value="all"),  # all | board | laptop
-            DeclareLaunchArgument("slam", default_value="false"),  # online SLAM: implies nav
-            DeclareLaunchArgument("slam_toolbox", default_value="false"),  # never with nav/slam
+            DeclareLaunchArgument("slam_toolbox", default_value="false"),  # never with nav
             DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
             DeclareLaunchArgument("imu", default_value="false"),
             DeclareLaunchArgument("ekf", default_value="true"),

@@ -156,7 +156,7 @@ lidar is not supported yet.
                                          │ encoders ─► pepin-base ─────────────► /odom  16 Hz
                                          │ MPU6050 ─► base_bridge ──────► /imu/data_raw  44 Hz
                                          │ /odom + /imu ─► ekf_node ─► odom→base_link    20 Hz
-                                         │ /scan + map ─► relocalizer ─► map→odom        20 Hz
+                                         │ laptop RTAB-Map ─► map→odom (over the link)  20 Hz
                                          │ 3x VL53L1X ─► pepin-tof :3335 ─► tof_bridge
                                          │              ─► /tof/{front,left,right}       14 Hz
                                          │              ─► /tof/*/scan (the cone as a fan,
@@ -481,10 +481,10 @@ uv run pytest && uv run mypy && uv run ruff check .
 # the robot
 ros/build.sh                            # sync ros/ + src/pepin to the board, build the image there
 ros/sync.sh                             # push code changes, restart the container (~20 s, no rebuild)
-ros/sync.sh --no-restart && ros/thin.sh kick relocalizer   # one node from the new sources (~10 s), the stack untouched
+ros/sync.sh --no-restart && ros/thin.sh kick goal_server   # one node from the new sources (~10 s), the stack untouched
 ros/laptop.sh kick depth_fusion         # one laptop node from the mounted sources (~4 s), no container restart
 ros/laptop.sh vslam                     # camera SLAM on the laptop, the RTAB-Map database kept; --fresh starts an empty map
-ros/mode.sh nav /maps/<map>.yaml        # Nav2 + the tracker on a saved map
+ros/mode.sh nav                         # Nav2 on the map RTAB-Map's graph publishes
 ros/mode.sh sensors                     # lidar, base bridge, Foxglove — nothing that localises
 
 # driving
@@ -508,9 +508,9 @@ with `/map`, `/scan`, `/tf`, both costmaps and `/plan`.
 
 ```
 src/pepin/     the Python library: board servers (base, ToF), drivers and links, and the
-               algorithms — mapping, scanmatch, posegraph, slam, localization, timeline,
-               watch, slip, tof_horizon, dynamic, footprint, places, tape, deployment
-ros/           the ROS 2 side: pepin_bringup (base/ToF bridges, relocalizer, goal server,
+               algorithms — mapping, scanmatch, posegraph, slam, timeline,
+               watch, tof_horizon, dynamic, footprint, places, tape, deployment
+ros/           the ROS 2 side: pepin_bringup (base/ToF bridges, goal server,
                run recorder, link watch, launch files), pepin_base_cpp, params/, maps/,
                tools/, Dockerfile, and the shell scripts that drive the robot
 board/         Orange Pi: systemd units, ser2net, udev rules, ToF init

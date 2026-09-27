@@ -8,8 +8,7 @@
 // 5 deg an hour, while its yaw-rate sources said over 120 s: the gyro after the bias tracker
 // -0.001 deg/min, the wheels 0, the camera's VO -0.57, rf2o +1.5
 // (scratch/link_autopsy/rest_yaw_sources.py). ekf.yaml already fused a zero-velocity update, but
-// its only publisher was the lidar tracker's slip watch, which does not start under
-// PEPIN_LOCALIZER=rtabmap.
+// its only publisher was the lidar tracker's slip watch, which did not run beside RTAB-Map.
 //
 // THE PYTHON SIDE IS THE REFERENCE. tests/unit/test_zupt.py pins the contract this file
 // reproduces (test_zupt_contract_the_cpp_bridge_mirrors is written for exactly that purpose);

@@ -5,8 +5,7 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
-from synthetic import raycast_room
-from test_localization import PILLAR, furnished_room_map
+from synthetic import PILLAR, furnished_room_map, raycast_room
 
 from pepin.fusion import (
     BOUND_INFLATION,

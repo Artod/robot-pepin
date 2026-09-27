@@ -17,7 +17,7 @@ import ros_stubs
 ros_stubs.install()
 
 from sensor_msgs.msg import LaserScan  # noqa: E402
-from std_msgs.msg import Header, String  # noqa: E402
+from std_msgs.msg import Header  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 MEASUREMENT = (
@@ -57,29 +57,6 @@ def scan() -> LaserScan:
 def logger(tmp_path: Path) -> Any:
     """A recorder writing to a file of its own, with the camera scans off (the default)."""
     return module().SessionLogger(str(tmp_path / "run.jsonl"))
-
-
-def test_the_camera_s_word_is_taped_verbatim(logger: Any) -> None:
-    """The recorder parses nothing: a measurement is on the tape exactly as it arrived, so a
-    malformed message is evidence instead of a hole, and ``t`` is when it arrived here."""
-    logger.subs["/localization/measurement"][1](String(data=MEASUREMENT))
-    logger.subs["/localization/measurement"][1](String(data="not json at all"))
-    records = tape(logger)
-    assert [r["topic"] for r in records] == ["meas", "meas"]
-    assert json.loads(records[0]["json"])["source"] == "depth"
-    assert json.loads(records[0]["json"])["stamp"] == 100.25
-    assert records[1]["json"] == "not json at all"
-    assert records[0]["t"] > 1e9, "the arrival wall clock, beside the stamp inside the message"
-    assert logger.measurements == 2
-
-
-def test_the_tracker_s_account_of_each_update_is_taped(logger: Any) -> None:
-    """/localization/sources is what tells a replay who anchored, what was fused and what each
-    source claimed — including the self-check ratio."""
-    report = '{"anchor": "lidar", "fused": "lidar+camera", "sources": {"lidar": {"fit": 0.7}}}'
-    logger.subs["/localization/sources"][1](String(data=report))
-    record = tape(logger)[0]
-    assert record["topic"] == "srcs" and json.loads(record["json"])["anchor"] == "lidar"
 
 
 def test_the_camera_s_scans_are_off_unless_asked_for(logger: Any) -> None:

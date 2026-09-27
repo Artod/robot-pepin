@@ -72,19 +72,16 @@ MUTING = """\
 **Muting a sensor live.** A sensor is switched off where it is *published*, by a flag of the node
 that publishes it, so the message simply stops and every consumer meets what a dead sensor looks
 like — silence, an EKF's `sensor_timeout`, a transform that stops moving — with nothing
-restarted and no other live flag lost. `ros/sensor.sh mute imu|odom|vo|camera|graph|lidar` and
+restarted and no other live flag lost. `ros/sensor.sh mute imu|odom|vo|lidar` and
 `ros/sensor.sh unmute ...` do it in one command and print what to expect; `ros/sensor.sh status`
 lists each sensor's mute state. The flags behind them: `base_bridge` `imu_publish` and
 `odom_publish` (the board's bridge; `odom_publish` takes the `odom -> base_link` transform with
 it, because a transform still broadcast from a silent `/odom` is a state no sensor failure
-produces), `visual_odometry` `vo_publish`, `laptop_localizer` `camera_sources` (emptied: the
-camera's scans stop being matched and `/localization/measurement` stops, though the frames
-themselves keep flowing — `depth_stream` has no publish switch), `rtabmap_frame`
-`graph_measurement`. The lidar has none: our own node in its chain is `scan_filter`
-(laser_filters, external), and a relay on the board that could drop `/scan` is what CLAUDE.md
-rule 20 refuses — so `mute lidar` is the consumer set instead (the tracker's `sources` without
-`lidar`, `lidar_layer` off on both costmaps, which is `ros/sensor.sh lidar off`), and
-`ros/sensor.sh lidar off --hard` is the real absence of a scan. The old way — `ros/feature.sh
+produces), and `visual_odometry` `vo_publish`. The lidar has none: our own node in its chain is
+`scan_filter` (laser_filters, external), and a relay on the board that could drop `/scan` is
+what CLAUDE.md rule 20 refuses — so `mute lidar` is the consumer set instead (`lidar_layer` off
+on both costmaps, which is `ros/sensor.sh lidar off`), and `ros/sensor.sh lidar off --hard` is
+the real absence of a scan. The old way — `ros/feature.sh
 imu off` — restarts the board stack: a minute, and every live flag on it back to its default."""
 
 

@@ -30,7 +30,7 @@ amcl:
     robot_model_type: "nav2_amcl::DifferentialMotionModel"
     save_pose_rate: 0.5
     sigma_hit: 0.15
-    tf_broadcast: false  # the relocalizer's scan-matching tracker owns map -> odom
+    tf_broadcast: false  # RTAB-Map owns map -> odom (AMCL is not launched: ros/nav.launch.py)
     transform_tolerance: 0.5  # scans arrive within 0.03 s now; 2.0 let a stale pose pass as current
     update_min_a: 0.05  # correct with the laser every 3 degrees, not every 11
     update_min_d: 0.05  # and every 5 cm, not every 25: the wheels cannot be trusted for 25 cm
@@ -463,7 +463,7 @@ local_costmap:
       publish_frequency: 1.0
       transform_tolerance: 0.3  # a sensor stamped 'now' waits at most this long for odom->base_link
       # odom, not map (2026-09-22): the controller must not depend on a frame that crosses the
-      # WiFi. Under PEPIN_LOCALIZER=rtabmap the laptop's graph owns map -> odom and the board
+      # WiFi. The laptop's graph owns map -> odom and the board
       # receives it over a radio (uwe5622) whose ping averages 80-180 ms with spikes of
       # 0.4-1.2 s even with the stack stopped, so every spike left this grid without its own
       # frame: the costmap failed to activate, its message filters dropped the observations they
@@ -881,12 +881,10 @@ local_costmap:
           obstacle_min_range: 0.0
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
-        # /map_tracked, not /map: the relocalizer republishes the map it is TRACKING on (latched,
-        # once per adoption — pepin_bringup.relocalizer.TRACKED_MAP_TOPIC), so the planner's static
-        # map and the tracker's map are one thing by construction instead of two subscriptions to a
-        # third party that can disagree. With map_server gone from a known room (ros/nav.launch.py's
-        # map_server argument, off by default) nobody publishes /map on this board at all.
-        map_topic: /map_tracked
+        # /map: RTAB-Map's grid, relayed onto that name by pepin_bringup.rtabmap_frame (latched,
+        # transient-local). The board's map_server is off in a known room (ros/nav.launch.py's
+        # map_server argument), so this is the one publisher of /map.
+        map_topic: /map
         map_subscribe_transient_local: True
       # On False the full grid is published only when its origin moves, so a robot standing still
       # publishes nothing but incremental updates — exactly when a stall needs looking at, and the
@@ -1133,27 +1131,21 @@ global_costmap:
         input_sensor_type: ALL
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
-        # IT READS /map_tracked AND NOTHING ELSE: the grid the board's TRACKER adopted, which that
-        # node republishes latched on every adoption
-        # (pepin_bringup.relocalizer.TRACKED_MAP_TOPIC). So the planner's static map IS the map the
-        # pose is measured against, by construction rather than by two subscriptions to a third
-        # party that can disagree — and the fallback is the tracker's own, which is the board's map
-        # cache (pepin.mapcache): with the laptop down at startup this layer gets the last map the
-        # board adopted instead of nothing (CLAUDE.md rule 20). Nobody publishes /map on this board
-        # at all (ros/nav.launch.py's map_server argument, off by default).
+        # IT READS /map: RTAB-Map's grid, the map RTAB-Map's own map -> odom is measured against,
+        # relayed onto that name by pepin_bringup.rtabmap_frame. Nobody else publishes /map (the
+        # board's map_server is off by default, ros/nav.launch.py's map_server argument).
         # A LATCHED MAP REPUBLISHED ON CHANGE IS FINE HERE: this layer keeps a live subscription with
         # transient-local durability (hence the line below), so it takes the first map whenever it
         # appears — before or after this node started — and re-takes every later one.
-        # subscribe_to_updates stays at its default False: nobody publishes /map_tracked_updates and
-        # a partial update is not something this stack has ever needed.
+        # subscribe_to_updates stays at its default False: nobody publishes /map_updates and a
+        # partial update is not something this stack has ever needed.
         # WHAT IT COSTS, and it is paid on purpose: the live map is RTAB-Map's grid, re-rendered
         # whenever the graph grows a node or a closure bends it, so its size and its origin change.
         # A static map of another size makes the layered costmap resize itself, which matchSize()s
         # every other layer and throws away the marks the lidar, camera, contact and ToF layers had
-        # gathered. That is paid once per ADOPTION — at most one every map_refresh_s (2 s), and only
-        # when the cells really changed — which is the only moment it can be paid honestly: a
-        # planner cannot plan on a map the tracker is no longer on.
-        map_topic: /map_tracked
+        # gathered. That is paid once per new grid, which RTAB-Map publishes only when its set of
+        # nodes changes (map_always_update false, vslam.launch.py).
+        map_topic: /map
         map_subscribe_transient_local: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"

@@ -6,8 +6,8 @@ WHY, MEASURED. Parked on its charger on 2026-09-24 the EKF's heading crept ~0.08
 tracker -0.001 deg/min, the wheels 0, the camera's VO -0.57, rf2o +1.5
 (scratch/link_autopsy/rest_yaw_sources.py). The filter follows its inputs, and at rest one of
 them is wrong. ros/params/ekf.yaml already fuses a zero-velocity update (odom2, /zupt: vx, vy,
-vyaw), but its only publisher was the lidar tracker's slip watch, which does not start under
-PEPIN_LOCALIZER=rtabmap -- so nothing ever told the filter what the wheels and the gyro both
+vyaw), but its only publisher was the lidar tracker's slip watch, which did not run beside
+RTAB-Map -- so nothing ever told the filter what the wheels and the gyro both
 knew.
 
 THE CURE. The base bridge already knows when the cart stands still: the rest the WHEELS witness,

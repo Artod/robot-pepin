@@ -33,7 +33,7 @@ def test_every_node_with_a_table_is_found_and_only_those() -> None:
     assert DOC.has_table(REPO / "ros/pepin_bringup/pepin_bringup/depth_fusion.py")
     assert not DOC.has_table(REPO / "ros/pepin_bringup/pepin_bringup/ghost_wait.py")
     tables = DOC.tables()
-    assert set(tables) >= {"depth_stream", "depth_fusion", "relocalizer", "neck_state"}
+    assert set(tables) >= {"depth_stream", "depth_fusion", "goal_server", "neck_state"}
     assert all(isinstance(t, FlagSet) and len(t) for t in tables.values())
     assert list(tables) == sorted(tables), "file order: the README reads the same every time"
 
@@ -135,7 +135,7 @@ def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     code, out, _ = _main(["nodes"], capsys)
     assert code == 0 and "depth_stream" in out.split() and "ghost_wait" not in out.split()
     assert _main(["where", "depth_fusion"], capsys)[1].strip() == "laptop pepin-vslam"
-    assert _main(["where", "/relocalizer"], capsys)[1].strip() == "board pepin-ros"
+    assert _main(["where", "/neck_state"], capsys)[1].strip() == "board pepin-ros"
     code, out, err = _main(["where", "nope"], capsys)
     assert code == 2 and out == "" and err.startswith("nope: no node with a flags table")
     code, out, _ = _main(["flag", "neck_state", "neck_tf"], capsys)
@@ -189,8 +189,8 @@ def test_the_nodes_of_one_side_and_the_flags_that_are_not_their_default(capsys: 
         _main(["nodes", "board"], capsys)[1].split(),
         _main(["nodes", "laptop"], capsys)[1].split(),
     )
-    assert "relocalizer" in board and "depth_fusion" not in board
-    assert "depth_fusion" in laptop and "relocalizer" not in laptop
+    assert "neck_state" in board and "depth_fusion" not in board
+    assert "depth_fusion" in laptop and "neck_state" not in laptop
     assert sorted(board + laptop) == sorted(_main(["nodes"], capsys)[1].split())
     code, _, err = _main(["nodes", "orbit"], capsys)
     assert code == 2 and err.startswith("orbit: no such side")

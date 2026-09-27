@@ -248,7 +248,7 @@ def test_the_camera_grid_layer_ships_off_in_both_costmaps_and_draws_by_maximum()
     topics, the global one with Nav2's updates. use_maximum is costmap-wide and the static_layer
     reads it too, which changes nothing only while that layer is the FIRST of a costmap that does
     not track unknown space (it writes into a master reset to 0 and max(0, c) is c) — both held
-    here, and the laptop's overlay moves neither."""
+    here."""
     for costmap, topic, updates in (
         ("local_costmap", "/camera_grid", False),
         ("global_costmap", "/camera_grid_map", True),
@@ -265,10 +265,6 @@ def test_the_camera_grid_layer_ships_off_in_both_costmaps_and_draws_by_maximum()
         assert params.get("track_unknown_space", False) is False, costmap
     assert _p("global_costmap")["plugins"][0] == "static_layer"
     assert "static_layer" not in _p("local_costmap")["plugins"]
-    overlay = yaml.safe_load((REPO / "ros/params/nav2_map_from_laptop.yaml").read_text())
-    for costmap in ("local_costmap", "global_costmap"):
-        moved = overlay[costmap][costmap]["ros__parameters"]
-        assert set(moved) == {"static_layer"}, moved
 
 
 def test_the_tof_whiskers_serve_the_local_costmap_only() -> None:
@@ -311,7 +307,6 @@ def test_the_operator_scripts_parse_and_keep_their_safety_lines() -> None:
         "stop.sh",
         "goto.sh",
         "go.sh",
-        "tour.sh",
         "lib.sh",
         "mode.sh",
         "map.sh",
@@ -679,32 +674,18 @@ def test_the_board_half_does_not_autostart_and_the_laptop_knows_its_side() -> No
     assert "next_transition" in sf.calls(server) and "ChangeState" in sf.imported(server)
 
 
-def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publishes() -> None:
-    """In SLAM mode nothing publishes /localization_fit, and the goal server used to refuse
-    every goal with "the tracker is not up" (2026-09-13 14:05). The rule lives in
-    pepin.watch.GoalGate, the node only supplies the two readings — the tracker's fit, or the
-    age of map -> base_link — and the blind-drive watch, which reads a fit, is armed only where
-    a tracker publishes one."""
+def test_a_goal_is_judged_on_the_transform_rtabmap_s_correction_composes() -> None:
+    """The rule lives in pepin.watch.GoalGate; the node supplies one reading — the age of
+    map -> base_link — beside the placement word (test_one_localiser holds that rule)."""
     server = sf.tree(f"{NODES}/goal_server.py")
-    assert {"GoalGate", "Readiness", "TF_FRESH_S"} <= sf.imported(server), "the rule is pepin's"
+    assert {"GoalGate", "Readiness"} <= sf.imported(server), "the rule is pepin's"
     assert "TfLookup" in sf.imported(server) and "self._tf.transform" in sf.calls(server)
     assert sf.assignments(server)["MAP_FRAME"] == "'map'"
     assert sf.assignments(server)["BASE_FRAME"] == "'base_link'"
     assert "self._gate.verdict" in sf.calls(server)
-    armed = [
-        s for s in sf.unparsed(server, ast.IfExp) if s.startswith("BlindDriveWatch() if ready")
-    ]
-    assert armed and armed[0].endswith("else None"), "no fit to watch without a tracker"
-    # The fallback is a flag, so the old behaviour is one `ros/flags.sh set` away (rule 19).
-    # start_on_a_known_pose joined the table on 2026-09-19: with a sigma published, a goal is
-    # refused for the pose's sake only where nothing has ever corrected it.
     flags = load_table(REPO / NODES / "goal_server.py")
     assert flags.names == (
-        "tf_pose",
-        "correction_watch",
-        "sigma_gate",
         "places_from_the_file",
-        "start_on_a_known_pose",
         # jump_clear joined on 2026-09-22, default off: RTAB-Map owns map -> odom now, and the
         # clear of Nav2's local costmap on a step of that edge moved here from the lidar tracker.
         "jump_clear",
@@ -715,9 +696,9 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
         # controller joined on 2026-09-23, default mppi: what follows the plan, and the goal
         # checker that ends the drive with it.
         "controller",
-        # start_needs_placement the same night, default on: under PEPIN_LOCALIZER=rtabmap a goal
-        # waits for the laptop's word that RTAB-Map's start is placed; this is the board-side
-        # switch back, which goto_ros obeys too.
+        # start_needs_placement the same night, default on: a goal waits for the laptop's word
+        # that RTAB-Map's start is placed; this is the board-side switch back, which goto_ros
+        # obeys too.
         "start_needs_placement",
         # cancel_every_goal on 2026-09-25, default on: a cancel on the socket reaches every goal
         # on both navigators, goto_ros.py's included, so goto.sh cancels without a new process.
@@ -725,28 +706,6 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
     )
     assert all(flags.flag(name).live for name in flags.names)
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"
-
-
-def test_the_slam_drive_is_judged_on_the_correction_and_not_on_the_edge_it_feeds() -> None:
-    """A fresh map -> base_link proves nothing about the laptop: pepin_bringup.slam_frame
-    re-broadcasts the LAST correction at 10 Hz with a fresh stamp, so the edge stays
-    milliseconds old with the laptop shut down — the gate passed and Nav2, whose costmaps read
-    that same edge against a 0.3 s tolerance, never aborted either. So the goal server listens
-    to the correction itself, on the topic the board's frame node reads, and cuts the drive when
-    the pulse stops: the SLAM analogue of the blind-drive watch, which has no fit to read."""
-    server = sf.tree(f"{NODES}/goal_server.py")
-    assert sf.assignments(server)["CORRECTION_TOPIC"] == "'/map_odom'"
-    assert "self.create_subscription" in sf.calls(server)
-    assert "Correction" in sf.imported(server), "the rule is pepin.watch's, not the node's"
-    assert "self._correction" in sf.calls(server)
-    cut = [s for s in sf.unparsed(server, ast.Call) if ".stale(" in s]
-    assert cut, "the drive loop asks the same question the gate does"
-    assert "handle.cancel_goal_async" in sf.calls(server)
-    # The board's own node never stops broadcasting for a silence: Nav2 there would lose its
-    # global frame to a WiFi hiccup. It says so in the log, and the decision lives in the gate.
-    frame = sf.tree(f"{NODES}/slam_frame.py")
-    assert "self._report_silence" in sf.calls(frame)
-    assert "self._tf.sendTransform" in sf.calls(frame)
 
 
 def test_the_recorder_is_its_own_node_on_the_board_side() -> None:
@@ -788,22 +747,21 @@ def test_both_doors_to_a_goal_open_the_numbered_tape() -> None:
     assert "--no-tape" in script and "PEPIN_GOTO_TAPE" in script
 
 
-def test_the_static_layers_read_the_map_the_tracker_is_on_and_no_pgm_is_served() -> None:
-    """One map on the board (2026-09-18): the relocalizer republishes the grid it tracks on and both
-    costmaps' static layers read THAT, so the planner's static map cannot disagree with the
-    tracker's. The topic is written as a literal in both places and held equal here; the pgm leaves
-    the loop, reachable again with `map_server:=true`."""
+def test_the_static_layers_read_the_map_rtabmap_frame_relays_and_no_pgm_is_served() -> None:
+    """One map: rtabmap_frame relays RTAB-Map's grid onto /map and both costmaps' static layers
+    read THAT. The topic is written as a literal in both places and held equal here; the pgm
+    leaves the loop, reachable again with `map_server:=true`."""
     params = yaml.safe_load((REPO / "ros/params/nav2_params.yaml").read_text())
     layers = [
         params[costmap][costmap]["ros__parameters"]["static_layer"]
         for costmap in ("local_costmap", "global_costmap")
     ]
-    assert [layer["map_topic"] for layer in layers] == ["/map_tracked", "/map_tracked"]
+    assert [layer["map_topic"] for layer in layers] == ["/map", "/map"]
     assert all(layer["map_subscribe_transient_local"] for layer in layers), "latched, or it waits"
-    node = sf.tree("ros/pepin_bringup/pepin_bringup/relocalizer.py")
-    assert "/map_tracked" in {
+    node = sf.tree("ros/pepin_bringup/pepin_bringup/rtabmap_frame.py")
+    assert "/map" in {
         n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)
-    }, "the relocalizer must carry the same literal"
+    }, "rtabmap_frame must carry the same literal"
     launch = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
     assert 'DeclareLaunchArgument("map_server", default_value="false"' in launch
     assert 'if map_server and runs_here(side, "map_server"):' in launch
@@ -836,23 +794,19 @@ def test_ctrl_c_cancels_the_goal_before_it_can_do_anything_else() -> None:
     assert ast.unparse(guards[0].args[1]) == "nav.cancelTask", ast.unparse(guards[0])
 
 
-def test_goto_judges_online_slam_on_the_map_frame_not_on_a_fit() -> None:
-    """goto's localisation gate asked two services the board does not run in online SLAM
-    (/where_am_i, /relocalize — pepin.deployment.runs_here keeps the relocalizer off where there
-    is no saved map to match against), so it refused both goals of the 2026-09-14 20:00 session
-    after ten seconds of waiting for absent services, whatever the map was doing. In that mode
-    the evidence is the map frame itself: pepin_bringup.slam_frame broadcasts map -> odom at
-    10 Hz on the board, and a frame younger than a second is what a goal is judged on."""
+def test_goto_judges_a_goal_on_the_map_frame_and_the_placement_not_on_a_fit() -> None:
+    """goto's localisation gate once asked two services only the board tracker ran (/where_am_i,
+    /relocalize) and refused goals after ten seconds of waiting for them (2026-09-14 20:00). The
+    evidence is the map frame itself — RTAB-Map's map -> odom with the board's odometry, younger
+    than a second — and the placement word."""
     goto = sf.tree("ros/tools/goto_ros.py")
     defined = {f.name for f in ast.walk(goto) if isinstance(f, ast.FunctionDef)}
-    assert {"tracker_here", "map_frame_age_s"} <= defined, (
-        "the two halves of the gate: is there a tracker, and is the map frame fresh"
-    )
+    assert "map_frame_age_s" in defined and "tracker_here" not in defined
     gate = next(
         f for f in ast.walk(goto) if isinstance(f, ast.FunctionDef) and f.name == "ensure_localized"
     )
     body = ast.unparse(gate)
-    assert "tracker_here(nav)" in body, "ask whether a tracker exists BEFORE asking it anything"
+    assert "Preflight.placement" in body, "the placement word is asked"
     assert "map_frame_age_s(nav)" in body and "MAP_FRAME_FRESH_S" in body
     assert "map -> base_link" in " ".join(sf.strings(goto)), "the log must name what was judged"
 
@@ -861,21 +815,7 @@ def test_one_recorder_writes_a_drive_not_two() -> None:
     """ros/goto.sh started ros/tools/session_logger.py for every drive while the board's run
     recorder was already subscribed to the same topics: two rclpy processes turning the same
     10 Hz LaserScan into Python objects on four A53 cores (15 % of a core and ~140 MB for the
-    second one). The numbered tape carries the fusion's two String topics now — the only records
-    the session logger had to itself — so goto starts it only when there is no numbered tape."""
-    recorder = sf.tree(f"{NODES}/run_recorder.py")
-    assert {"/localization/measurement", "/localization/sources"} <= set(sf.strings(recorder)) or {
-        "measurement",
-        "sources",
-    } <= set(sf.strings(recorder)), "the tape carries what the session logger alone carried"
-    # The rows themselves are built in pepin.tape_rows, the one format the JSONL recorder and
-    # the bag converter (ros/tools/bag_to_tape.py) share, so the names may live in either file.
-    rows = sf.tree("src/pepin/tape_rows.py")
-    assert {"meas", "srcs"} <= set(sf.strings(recorder)) | set(sf.strings(rows)), (
-        "under the names camera_error.py reads"
-    )
-    flags = load_table(REPO / NODES / "run_recorder.py")
-    assert flags.flag("fusion_records").live and flags["fusion_records"] is True
+    second one). goto starts it only when there is no numbered tape."""
     script = (REPO / "ros/goto.sh").read_text()
     starter = next(ln for ln in script.splitlines() if "session_logger.py $REC" in ln)
     assert starter.startswith("    "), "the session logger is started inside a condition now"
@@ -907,15 +847,12 @@ def test_the_numbered_tape_says_which_clock_named_it() -> None:
     assert (REPO / "ros/maps/README.md").exists(), "the two clocks are written down beside rec/"
 
 
-def test_the_camera_slam_lives_beside_the_tracker_never_over_it() -> None:
-    """World R's one frame, owned by nobody here: RTAB-Map's map frame IS ``map`` and it publishes
-    no transform into it, because the board's tracker owns ``map -> odom`` and this graph's
-    correction travels as a measurement and as a grid. The camera is nominal until calibrated and
-    says so."""
+def test_the_camera_slam_owns_the_one_map_frame() -> None:
+    """World R's one frame: RTAB-Map's map frame IS ``map`` and RTAB-Map owns ``map -> odom``."""
     vslam = sf.tree(VSLAM_LAUNCH)
     params = sf.dict_items(vslam)
     assert params["publish_tf"] == {"False", "True"}, (
-        "RTAB-Map is in the tf tree in exactly one situation: PEPIN_LOCALIZER=rtabmap"
+        "the SLAM node broadcasts map -> odom; the visual odometry node does not"
     )
     assert _rtabmap("RTABMAP")["map_frame_id"] == "map", "one frame, since 2026-09-19"
     rtabmap = sf.keywords(_node_named(vslam, "rtabmap"))
@@ -1101,7 +1038,6 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
         "/depth_stream",
         "/contact_scan",
         "/depth_fusion",
-        "/laptop_localizer",
         "/sensor_pack",
         "/rtabmap/rtabmap",
         "/rtabmap_frame",
@@ -1169,7 +1105,7 @@ def test_every_respawned_node_waits_for_its_own_ghost_first() -> None:
     )
     assert ast.unparse(sf.keywords(admin)["default_value"]) == "''"
     assert "/nav2_container_board" in nav_container_nodes("board")
-    for node in ("relocalizer", "run_recorder", "goal_server"):
+    for node in ("run_recorder", "goal_server"):
         assert f"_after_ghost(admin, '/{node}')" in sf.unparsed(nav, ast.Call), node
     vslam = sf.tree(VSLAM_LAUNCH)
     for node in (
@@ -1258,8 +1194,8 @@ def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph(
     """The depth folded onto the plane goes to the board as /depth_scan and is wired into the
     local costmap's camera layer (which ships off, see the test below); the camera stamps frames
     with the board's capture time; and the graph owns no frame of its own on this robot — its
-    optimised map frame IS `map`, so the only edge rtabmap_frame ever publishes is SLAM's
-    map -> odom, as a message home."""
+    optimised map frame IS `map`, RTAB-Map broadcasts map -> odom itself, and rtabmap_frame
+    publishes no transform at all."""
     from pepin.deployment import LAPTOP_PUBLISHES
 
     assert "depth_scan" in LAPTOP_PUBLISHES
@@ -1278,9 +1214,8 @@ def test_the_camera_s_depth_reaches_the_costmap_and_its_frame_follows_the_graph(
     nav = sf.tree(NAV_LAUNCH)
     assert not any("odom_to_rtabmap" in s for s in sf.strings(nav) | sf.names(nav))
     frame = sf.tree(f"{NODES}/rtabmap_frame.py")
-    assert "/rtabmap/mapGraph" in sf.strings(frame), "read in SLAM, where it IS map -> odom"
-    tuples = sf.unparsed(frame, ast.Tuple)
-    assert "('map', 'odom')" in tuples and "('map', 'rtabmap')" not in tuples, "one frame"
+    assert "TransformBroadcaster" not in sf.imported(frame), "it broadcasts nothing"
+    assert "('map', 'rtabmap')" not in sf.unparsed(frame, ast.Tuple), "one frame"
     # RTAB-Map's odometry is the EKF's own, in every situation
     assert _rtabmap("RTABMAP")["odom_frame_id"] == "odom"
     room = json.loads((REPO / "ros/foxglove/pepin_3d.json").read_text())["configById"]["3D!room"]
@@ -1777,10 +1712,7 @@ def test_the_volume_is_open_loop_and_no_slice_of_it_is_published() -> None:
 
 
 def test_nothing_is_painted_at_a_pose_nobody_trusts() -> None:
-    """Both paint paths ask one predicate (pepin.watch.PaintTrust) before they write, and the
-    launch turns both gates ON in every session: a tracker always runs and always publishes a fit
-    (World R). They used to come off in SLAM, where none did, or the session fused nothing
-    (2026-09-13 14:05, the camera's own case)."""
+    """Both paint paths ask one predicate (pepin.watch.PaintTrust) before they write."""
     node = sf.tree(f"{NODES}/depth_fusion.py")
     assert "PaintTrust" in sf.imported(node), "the predicate is the watch's, not a local number"
     assert "self._paint_refusal" in sf.calls(node), "asked before anything is written"
@@ -1791,8 +1723,6 @@ def test_nothing_is_painted_at_a_pose_nobody_trusts() -> None:
     assert flags.flag("lidar_fit_gate").default is True, "a revolution is gated like a frame"
     assert flags.flag("paint_sigma_m").default == PAINT_SIGMA_M
     assert flags.flag("paint_sigma_m").range == (0.01, 2.0)
-    passed = sf.strings(sf.tree(VSLAM_LAUNCH))
-    assert "lidar_fit_gate:=true" in passed, "on in every session, like fit_gate"
 
 
 def test_the_graphs_bend_moves_the_volume_and_the_carts_recovery_never_does() -> None:
@@ -1852,22 +1782,6 @@ def test_the_graphs_bend_moves_the_volume_and_the_carts_recovery_never_does() ->
     assert law.choices == ("blend", "nearest") and law.live and law.default == "nearest"
     reads = sf.unparsed(follow, ast.Subscript)
     assert "self._switches['follow_correction_law']" in reads, "the move reads the law it uses"
-
-
-def test_the_paint_gates_are_on_in_every_session_now_that_a_tracker_always_runs() -> None:
-    """They were set by hand in the first world-map SLAM session (2026-09-13 14:05): the volume
-    fused 0 frames until fit_gate came off, because no tracker ran in SLAM and /localization_fit
-    never arrived. Under World R a tracker always runs and always publishes a fit, so both gates
-    are on in every session — and they stay live flags, so a session can still compare A against B
-    without a restart."""
-    vslam = sf.tree(VSLAM_LAUNCH)
-    passed = {s for s in sf.strings(vslam) if s.startswith(("fit_gate:=", "lidar_fit_gate:="))}
-    assert passed == {"fit_gate:=true", "lidar_fit_gate:=true"}, passed
-    assert not any("fit_gate" in s for s in sf.unparsed(vslam, ast.JoinedStr)), "no mode decides"
-    fusion = load_table(REPO / NODES / "depth_fusion.py")
-    assert fusion.flag("fit_gate").live and fusion.flag("fit_gate").default is True
-    node = sf.tree(f"{NODES}/depth_fusion.py")
-    assert "self._switches.on" in sf.calls(node), "the node reads the flag, not the mode"
 
 
 def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
@@ -1971,7 +1885,7 @@ def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_p
         assert not declared & set(flags.names), f"{path.name}: a flag declared twice"
         for flag in flags:
             assert flag.description, f"{path.name}: {flag.name} needs a sentence"
-    assert {"depth_stream", "depth_fusion", "relocalizer", "neck_state"} <= tables.keys()
+    assert {"depth_stream", "depth_fusion", "goal_server", "neck_state"} <= tables.keys()
 
 
 def test_a_sensor_is_muted_where_it_is_published_and_both_bridges_know_the_same_two_names() -> None:
@@ -2093,100 +2007,12 @@ def test_every_flag_says_why_its_default_is_what_it_is_and_when_to_move_it() -> 
     )
 
 
-def test_the_tracker_matches_the_lidar_here_and_takes_the_camera_as_a_measurement() -> None:
-    """The architecture of 2026-09-13, held as a contract. The lidar's revolutions reach the
-    tracker through one path (pepin.sources.SourceFeed: the anchor's scan released once the
-    odometry covers it, the others carried to its moment, Localizer.update_from matching them
-    all around one prediction). The camera's scans do NOT: they are matched on the laptop that
-    produces them and arrive here as pose measurements (pepin.measurements), carried to the
-    update that takes them by the same history and fused by information — because matching them
-    on this board took the tracker to 147 ms a revolution, 4.7 Hz and 50 cm p90 of live error
-    (scratch/drive_bisect.py, runs 0238-0241). The flags name the sources and the fusion; every
-    source's word goes out on /localization/sources and the feed's status is in the report
-    line."""
-    from pepin.deployment import LAPTOP_PUBLISHES, VISION_LAPTOP_PUBLISHES
-
-    node = sf.tree(f"{NODES}/relocalizer.py")
-    assert {"/localization/measurement", "/localization/sources"} <= sf.strings(node)
-    assert "/depth_scan" not in sf.strings(node), "the camera's scans are not matched here"
-    assert "/contact_scan" not in sf.strings(node)
-    assert {"SourceFeed", "SourceRegistry", "ScanObservation"} <= sf.imported(node)
-    assert {"MeasurementGate", "RemoteMeasurement"} <= sf.imported(node)
-    assert "ScanGate" not in sf.imported(node), "the feed is the gate: one trigger path"
-    calls = sf.calls(node)
-    assert {
-        "self._feed.offer",
-        "self._feed.take",
-        "self._feed.gather",
-        "self._feed.picture",
-        "self._feed.full_picture",
-        "self._feed.status",
-        "self._measurements.offer",
-        "self._measurements.take",
-        # With no scan source driving, the remote gates drive between them — the camera's word,
-        # the pose graph's — one update per call and never one per gate (pepin.measurements).
-        "remote_update",
-        "loc.update_from",
-        "loc.sources_report",
-        "target.switch",  # every flag is written to whichever object names it (``switches``)
-    } <= calls
-    assert "loc.update" not in calls and "self._gate.take" not in calls, "one path, not two"
-    assert len(sf.calls_to(node, "loc.update_from")) == 2, "the scan's update and the camera's"
-    flags = load_table(REPO / NODES / "relocalizer.py")
-    # since 2026-09-16 the graph is a source by default: without the lidar the pose rides the
-    # graph's words, not dead reckoning (Artem: "по умолчанию должно быть всё сразу")
-    assert flags["sources"] == ("lidar", "graph") and flags["fusion"] is True
-    assert flags.flag("sources").choices == ("lidar", "depth", "contact", "camera", "graph")
-    assert flags["measurement_max_age_s"] == 0.5
-    # The camera's scans still cross for the costmap; the pose it measures crosses beside them.
-    assert {"depth_scan", "contact_scan"} <= set(LAPTOP_PUBLISHES)
-    assert "localization/measurement" in VISION_LAPTOP_PUBLISHES
-
-
-def test_the_pose_graph_reaches_the_tracker_as_a_measurement_of_its_own() -> None:
-    """RTAB-Map's graph is the second localisation on this robot and it never owns a frame on
-    the board: its answer travels as one more measurement, on a topic of its own, into a gate of
-    its own named `graph` (the camera's gate fuses everything it holds into one word called
-    `camera`, so a graph word dropped in there would move the pose under the camera's name).
-    The route is pinned on both ends — a bridged topic whose two ends ask for different QoS gets
-    a route decided by a race — and the word is refused unless the sources flag names it."""
-    from pepin.deployment import VISION_LAPTOP_PUBLISHES, bridged_qos
-    from pepin.sources import DEFAULT_SOURCES, GRAPH
-
-    topic = "/localization/graph_measurement"
-    assert "localization/graph_measurement" in VISION_LAPTOP_PUBLISHES, "vision mode only"
-    assert bridged_qos(topic) == ("reliable", 5), "one QoS, both ends, no race"
-    board = sf.tree(f"{NODES}/relocalizer.py")
-    assert topic in sf.strings(board)
-    assert f"bridged_qos_profile({'GRAPH_MEASUREMENT_TOPIC'})" in sf.unparsed(board, ast.Call)
-    assert {"self._graph.offer", "self._graph.take", "self._graph.forget"} <= sf.calls(board)
-    assert "MeasurementGate" in sf.imported(board) and "GRAPH" in sf.imported(board)
-    graph = next(s for s in DEFAULT_SOURCES if s.name == GRAPH)
-    assert graph.remote, "no scan of it here: it is never matched and never anchors"
-    laptop = sf.tree(f"{NODES}/rtabmap_frame.py")
-    assert topic in sf.strings(laptop)
-    assert {"graph_measurement", "compose"} <= sf.imported(laptop)
-    # ONE FRAME: the graph's optimised map frame IS `map`, so the word is the localisation itself
-    # and there is nothing between the two to learn, fit or table.
-    assert "graph_anchor" not in sf.imported(laptop) and "Tie" not in sf.imported(laptop)
-    assert "/rtabmap/localization_pose" in sf.strings(laptop), "a localisation, not an integration"
-    flags = load_table(REPO / NODES / "rtabmap_frame.py")
-    assert flags["graph_measurement"] is True, (
-        "on since 2026-09-14: harmless beside the lidar (test A), the pose of a lidar-less cart"
-    )
-    gone = {"graph_odom", "graph_tie_from_pairs", "graph_word_from_nodes", "fresh_frame"}
-    assert gone.isdisjoint(set(flags.names)), (
-        "the tie and the node table are gone, and so are the flags that chose between them"
-    )
-
-
 def test_the_known_map_graph_rides_the_filter_s_own_odometry() -> None:
-    """CLAUDE.md's one odometry: RTAB-Map is built on the EKF's odom -> base_link, not on the
-    tracker's pose, which teleports when it relocalises and made every loop closure unacceptable
-    (a neighbour edge of 0.888 m against a 0.244 m sigma, error ratio 3.64 over
-    RGBD/OptimizeMaxError's 3.0, 2026-09-14). It owns no transform, in any situation, and the
-    table that used to put the graph back on the tracker's pose is gone with the argument that
-    selected it."""
+    """CLAUDE.md's one odometry: RTAB-Map is built on the EKF's odom -> base_link, not on a
+    localiser's pose, which teleports when it relocalises and made every loop closure
+    unacceptable (a neighbour edge of 0.888 m against a 0.244 m sigma, error ratio 3.64 over
+    RGBD/OptimizeMaxError's 3.0, 2026-09-14). The table that used to put the graph on the
+    tracker's pose is gone with the argument that selected it."""
     table = _rtabmap("RTABMAP")
     assert table["odom_frame_id"] == "odom"
     assert table["map_frame_id"] == "map", "World R's one frame"
@@ -2197,10 +2023,6 @@ def test_the_known_map_graph_rides_the_filter_s_own_odometry() -> None:
     vslam = sf.tree(VSLAM_LAUNCH)
     arguments = {ast.unparse(c.args[0]) for c in sf.calls_to(vslam, "DeclareLaunchArgument")}
     assert "'graph_odom'" not in arguments, "the switch between them is gone too"
-    assert "publish_tf" in sf.strings(vslam), "and RTAB-Map owns no transform in any of them"
-    frame = sf.tree(f"{NODES}/rtabmap_frame.py")
-    assert {"odom", "base_link"} <= sf.strings(frame), "the odometry a word is stamped by"
-    assert "self._lookup.transform" in sf.calls(frame)
 
 
 def _launch_dicts(launch: str) -> dict[str, dict[str, object]]:
@@ -2219,10 +2041,9 @@ def _launch_dicts(launch: str) -> dict[str, dict[str, object]]:
 def test_rtabmap_is_told_one_table_reading_one_snapshot_topic_and_owns_no_transform() -> None:
     """Stage one of World R, held as a contract. A "mode" was which sensors are alive, which is
     data: so there is exactly ONE RTAB-Map table, it reads ONE topic
-    (``subscribe_sensor_data``, mutually exclusive with every other subscription), and it
-    publishes no transform — the board's tracker owns map -> odom. The way back to the
-    synchronised triple is one launch argument, and it is the only other place a subscription is
-    named."""
+    (``subscribe_sensor_data``, mutually exclusive with every other subscription), and the
+    transform it publishes is RTAB-Map's own (publish_tf). The way back to the synchronised
+    triple is one launch argument, and it is the only other place a subscription is named."""
     vslam = sf.tree(VSLAM_LAUNCH)
     tables = _launch_dicts(VSLAM_LAUNCH)
     assert [name for name, t in tables.items() if any(k.startswith("Grid/") for k in t)] == [
@@ -2237,11 +2058,11 @@ def test_rtabmap_is_told_one_table_reading_one_snapshot_topic_and_owns_no_transf
     assert table["subscribe_sensor_data"] is True
     for name in ("subscribe_depth", "subscribe_rgb", "subscribe_scan", "subscribe_odom"):
         assert table[name] is False, f"{name}: rtabmap turns it off anyway; say it out loud"
-    # WHO OWNS map -> odom, and it is one switch: the two values of publish_tf in this file are
-    # the tracker's (False, the node's own parameter) and the localiser's (True, in
-    # PUBLISH_MAP_TO_ODOM, merged by rtabmap_parameters only under PEPIN_LOCALIZER=rtabmap). Never
-    # a broadcaster of our own: the transform is RTAB-Map's own or it is nobody's here.
+    # WHO OWNS map -> odom: RTAB-Map (True, PUBLISH_MAP_TO_ODOM, merged by rtabmap_parameters in
+    # every session); the only False is rgbd_odometry's (VISUAL_ODOMETRY). Never a broadcaster of
+    # our own.
     assert sf.dict_items(vslam)["publish_tf"] == {"False", "True"}
+    assert _rtabmap("VISUAL_ODOMETRY")["publish_tf"] is False
     assert _rtabmap("PUBLISH_MAP_TO_ODOM")["publish_tf"] is True
     assert not {"TransformBroadcaster", "StaticTransformBroadcaster"} & sf.imported(vslam)
 
@@ -2266,57 +2087,20 @@ def test_rtabmap_is_told_one_table_reading_one_snapshot_topic_and_owns_no_transf
     assert passed <= arguments, (
         f"ros/laptop.sh passes what this launch no longer declares: {passed - arguments}"
     )
-    assert "'sensor_pack'" in arguments and "'memory'" in arguments
-    for gone in ("'graph_odom'", "'slam'", "'resume'", "'world_map'", "'room'", "'map_source'"):
+    assert "'sensor_pack'" in arguments
+    for gone in (
+        "'graph_odom'",
+        "'slam'",
+        "'resume'",
+        "'world_map'",
+        "'room'",
+        "'map_source'",
+        "'memory'",
+    ):
         assert gone not in arguments, f"{gone} selected a mode that no longer exists"
     passes_sources = [s for s in sf.unparsed(vslam, ast.JoinedStr) if "sources:=" in s]
     assert len(passes_sources) == 1, "camera_only reaches exactly one node's sources flag"
     assert {"camera", "camera,lidar"} <= sf.strings(vslam), "the two rosters it picks between"
-
-
-def test_the_laptop_localizer_matches_the_camera_where_the_camera_is() -> None:
-    """The other half of the same rule, on the laptop: /depth_scan and /contact_scan are
-    subscribed LOCALLY (they are published on this machine — no bridge hop), matched in a small
-    window around the board's belief carried to the scan's stamp, and published as one JSON
-    measurement. BOTH HALVES MATCH ON ONE GRID — the map the board's tracker is on — because a fan
-    matched against a slice of the volume it helped paint is a loop with no gauge in it."""
-    node = sf.tree(f"{NODES}/laptop_localizer.py")
-    assert "super().__init__('laptop_localizer')" in sf.unparsed(node, ast.Call)
-    assert {"/depth_scan", "/contact_scan", "/localization/measurement"} <= sf.strings(node)
-    assert "/map_camera" not in sf.strings(node), "nothing localises against the volume"
-    assert "TRACKED_MAP_TOPIC" in sf.imported(node), "the grid the tracker itself adopted"
-    assert {"RemoteMeasurement", "Localizer", "OdomHistory"} <= sf.imported(node)
-    calls = sf.calls(node)
-    assert {"localizer.measure", "RemoteMeasurement.of", "remote.to_json"} <= calls
-    assert {"apply_motion", "relative_motion"} <= calls, "the belief is carried to the scan"
-    flags = load_table(REPO / NODES / "laptop_localizer.py")
-    assert flags["camera_sources"] == ("depth", "contact")
-    assert flags["camera_match_hz"] == 5.0 and flags["camera_min_fit"] == 0.25
-    assert flags["camera_window_m"] == 0.09 and flags["camera_window_deg"] == 9.0
-    assert flags["global_watch"] is True, "the watchdog half is untouched"
-
-
-def test_the_tracker_adopts_one_map_and_never_treats_a_new_picture_as_a_kidnap() -> None:
-    """ONE MAP ON ONE TOPIC (World R): RTAB-Map's loop-closed grid on /map, and there is no flag
-    left that chooses between pictures of the room because there is no second picture. What is
-    still a decision is WHEN a re-rendered grid is adopted, and that is pepin.mapping.MapChoice's,
-    not the node's."""
-    from pepin.mapping import MAP_TOPIC
-
-    tracker = load_table(REPO / NODES / "relocalizer.py")
-    assert "map_topic" not in dict(tracker.as_dict()), "one topic: nothing to choose"
-    assert MAP_TOPIC == "map", "and both ends spell it here"
-    assert tracker["map_refresh_s"] == 2.0, (
-        "a newer grid is adopted no faster than the board can afford: an adoption is ~65 ms on an"
-        " A53 and the rebuild duty budget allows one every 1.9 s (scratch/map_adoption_cost.py),"
-        " while RTAB-Map offers one a second (map_always_update at Rtabmap/DetectionRate 1.0)"
-    )
-    assert tracker["map_fallback_s"] == 10.0, "the patience before a cold boot takes its cache"
-    assert tracker["carry_pose_across_maps"] is True, "a new picture of the room is not a kidnap"
-    relocalizer = sf.tree(f"{NODES}/relocalizer.py")
-    assert "MapChoice" in sf.imported(relocalizer), "the decision lives in pepin, not in the node"
-    assert "map_shift" in sf.imported(relocalizer), "and so does what a bend did to the map"
-    assert "self._choice.offer" in sf.calls(relocalizer)
 
 
 def test_no_launch_argument_reaches_a_node_as_an_empty_parameter_override() -> None:
@@ -2544,7 +2328,7 @@ def test_a_crashed_navigation_container_comes_back_by_itself() -> None:
     assert not sf.calls_to(nav, "ComposableNodeContainer"), "only through respawned_container"
     container = sf.calls_to(nav, "respawned_container")[0]
     assert ast.unparse(container.args[1]) == "nav_parts"
-    assert ast.unparse(sf.keywords(container)["parameters"]) == "process_params"
+    assert ast.unparse(sf.keywords(container)["parameters"]) == "[params]"
     parts = next(n for n in nav.body if isinstance(n, ast.FunctionDef) and n.name == "nav_parts")
     assert sf.calls_to(parts, "ComposableNode"), "the descriptions are built inside the factory"
 
@@ -2616,7 +2400,6 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         "depth_stream",
         "contact_scan",
         "depth_fusion",
-        "laptop_localizer",
         # The one input RTAB-Map reads (2026-09-19). It keeps nothing across a restart but a
         # second of each source's stamps, which is what it takes to measure a period again.
         "sensor_pack",
@@ -2638,13 +2421,7 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
     # Two recorders, one of which the launch starts (nav.launch.py's ``recorder`` argument, the
     # board's PEPIN_RECORDER): the JSONL tape written here, or `ros2 bag record` under a node
     # that subscribes to nothing. Both respawn, and a kick reaches whichever is running.
-    assert _respawning(nav) == {
-        "relocalizer",
-        "run_recorder",
-        "bag_recorder",
-        "goal_server",
-        "slam_frame",
-    }
+    assert _respawning(nav) == {"run_recorder", "bag_recorder", "goal_server"}
     # The board's sensor launch runs one of our processes too: the neck node (ros/feature.sh
     # neck on). The drivers around it are ROS packages the container restarts with the launch.
     robot = _launch_processes("robot.launch.py")
@@ -2818,30 +2595,23 @@ def test_one_node_can_be_kicked_without_a_container_restart() -> None:
     }
 
 
-def test_the_graphs_grid_is_the_one_map_and_the_tracker_is_the_one_owner_of_map_to_odom() -> None:
-    """World R, as one arrangement. RTAB-Map on the laptop IS the map: the EKF's odometry under
-    it, its grid remapped onto /map unconditionally (transient local, which the board's tracker
-    adopts and republishes for the costmaps), ONE database that is never wiped here. It publishes
-    no transform in any situation — the board's tracker owns map -> odom, always — and the retired
-    owner of that edge (slam_frame, from /map_odom) is behind nav.launch.py's slam argument, off,
-    so the two can never both hold it."""
+def test_the_graphs_grid_is_the_one_map_and_rtabmap_owns_map_to_odom() -> None:
+    """World R with one localiser. RTAB-Map on the laptop IS the map: the EKF's odometry under
+    it, its grid relayed onto /map (transient local, read by both costmaps' static layers), ONE
+    database that is never wiped here, and the one publisher of map -> odom."""
     vslam = sf.tree(VSLAM_LAUNCH)
     table = _rtabmap("RTABMAP")
     assert table["odom_frame_id"] == "odom" and table["map_frame_id"] == "map"
-    # One owner, named by PEPIN_LOCALIZER: publish_tf False is the tracker's stack (the board
-    # owns the edge), True comes from PUBLISH_MAP_TO_ODOM under localizer rtabmap. Both are in
-    # this file, and rtabmap_parameters picks one.
+    # One owner: publish_tf True, from PUBLISH_MAP_TO_ODOM (the False is rgbd_odometry's).
     assert sf.dict_items(vslam)["publish_tf"] == {"False", "True"}
-    # The grid IS the map — once it is assembled from the graph RTAB-Map LOADED. It leaves RTAB-Map
-    # on its own topic and pepin_bringup.rtabmap_frame relays it onto /map (grid_needs_tie): before
-    # the first recognition the grid is one scan where the odometry puts the cart, and a tracker
-    # that adopts it matches itself (2026-09-19: fit 1.00, 1.26 m off).
+    # The grid IS the map. It leaves RTAB-Map on its own topic and pepin_bringup.rtabmap_frame
+    # relays it onto /map.
     assert "remappings.append(('map', '/rtabmap/grid'))" in sf.unparsed(vslam, ast.Call), (
         "unconditionally: there is no second map left for it to make way for"
     )
     assert "('map', '/map')" not in sf.unparsed(vslam, ast.Tuple), "/map has one publisher"
     frame = sf.tree(f"{NODES}/rtabmap_frame.py")
-    assert {"/rtabmap/grid", "/map", "grid_needs_tie"} <= set(sf.strings(frame))
+    assert {"/rtabmap/grid", "/map"} <= set(sf.strings(frame))
     assert not [
         n for n in ast.walk(vslam) if isinstance(n, ast.If) and "slam" in ast.unparse(n.test)
     ], "no mode decides anything in this launch any more"
@@ -2874,29 +2644,12 @@ def test_the_graphs_grid_is_the_one_map_and_the_tracker_is_the_one_owner_of_map_
         table
     )
     assert table["RGBD/OptimizeFromGraphEnd"] == "false", "the jump belongs in map -> odom"
-    # The RETIRED correction path, kept whole and reachable (CLAUDE.md rule 19): the laptop's
-    # message, the board's transform, one publisher each, and a route for it over the bridge.
-    board_frame = sf.tree(f"{NODES}/slam_frame.py")
-    assert "super().__init__('slam_frame')" in sf.unparsed(board_frame, ast.Call)
-    assert sf.assignments(board_frame)["FRAMES"] == "('map', 'odom')"
-    assert sf.assignments(board_frame)["CORRECTION_TOPIC"] == "'/map_odom'"
-    assert "TransformBroadcaster" in sf.imported(board_frame)
-    assert "MapGraph" not in sf.imported(board_frame), "the board's image carries no rtabmap_msgs"
-    from pepin.deployment import bridge_allow
-
-    assert re.compile(bridge_allow("laptop", "vision")["publishers"][0]).search("/map_odom")
-    # The board: the tracker always, the retired owner only behind the argument, Nav2 the same.
+    # The board: no tracker, no retired frame owner; a served pgm answers to its own argument.
     nav = sf.tree(NAV_LAUNCH)
     calls = sf.unparsed(nav, ast.Call)
-    assert "runs_here(side, 'map_server')" in calls, "a served pgm answers to its own argument"
-    assert "runs_here(side, 'relocalizer', slam_frame, owner)" in calls, (
-        "the tracker answers to BOTH switches: the retired slam_frame argument and the localiser"
-    )
-    assert "localizer()" in calls, "and the launch resolves PEPIN_LOCALIZER once, at the top"
-    assert "runs_here(side, 'slam_frame', slam_frame)" in calls
-    assert "pepin_bringup.slam_frame" in sf.strings(nav)
-    assert "_after_ghost(admin, '/slam_frame')" in calls
-    # The grid the board plans on: the static layer takes the tracker's own, latched, and every
+    assert "runs_here(side, 'map_server')" in calls
+    assert not {"pepin_bringup.slam_frame", "relocalizer"} & set(sf.strings(nav))
+    # The grid the board plans on: the static layer takes /map, latched, and every
     # planner may route through what nobody has looked at yet — a map that is still growing.
     assert _p("global_costmap")["static_layer"]["map_subscribe_transient_local"] is True
     planners = _p("planner_server")
@@ -2906,8 +2659,8 @@ def test_the_graphs_grid_is_the_one_map_and_the_tracker_is_the_one_owner_of_map_
 
 def test_one_gesture_per_side_brings_the_stack_up_and_one_saves_the_map() -> None:
     """Two gestures, and neither of them names a mode any more (World R). ros/thin.sh puts the
-    board on a side and gives it a bridge; every branch of it deletes PEPIN_SLAM, because the
-    retired frame owner is a line an operator writes by hand and never something a mode turns on.
+    board on a side and gives it a bridge; every branch of it deletes a stale PEPIN_SLAM line of
+    an older board, a switch that is gone.
     The laptop learns the board's side once, on the only path that talks to it, and records it
     (ros/.mode) for the subcommand that never does. ros/map.sh save freezes the grid into the pair
     map_server would read."""
@@ -2918,17 +2671,10 @@ def test_one_gesture_per_side_brings_the_stack_up_and_one_saves_the_map() -> Non
         assert "board-slam" not in thin[branch], branch
     unit = (REPO / "board/pepin-ros.service").read_text()
     assert "Environment=PEPIN_SLAM_TOOLBOX=false" in unit
-    assert "slam:=${PEPIN_SLAM} slam_toolbox:=${PEPIN_SLAM_TOOLBOX}" in unit, (
-        "the board's own way to the retired frame owner, by hand in /etc/default/pepin-ros"
-    )
+    assert "slam_toolbox:=${PEPIN_SLAM_TOOLBOX}" in unit and "slam:=${PEPIN_SLAM}" not in unit
     bringup = sf.tree("ros/pepin_bringup/launch/bringup.launch.py")
     args = {ast.unparse(c.args[0]) for c in sf.calls_to(bringup, "DeclareLaunchArgument")}
-    assert {"'slam'", "'slam_toolbox'", "'nav'"} <= args
-    includes = sf.dict_items(bringup)
-    assert "LaunchConfiguration('slam')" in includes["slam"]
-    # The bridge unit waits for the stack's last node: the tracker, or the retired owner.
-    bridge = (REPO / "board/pepin-bridge.service").read_text()
-    assert 'pgrep -f "pepin_bringup.(relocalizer|slam_frame)"' in bridge
+    assert {"'slam_toolbox'", "'nav'"} <= args and "'slam'" not in args
     laptop = (REPO / "ros/laptop.sh").read_text()
     assert "CONFIG=zenoh-bridge-laptop.json" in laptop and "laptop-slam" not in laptop
     assert 'printf \'%s\\n\' "$MODE" > "$HERE/.mode"' in laptop
@@ -3337,51 +3083,22 @@ def test_the_visual_memory_survives_a_kill_and_the_launches_wait_for_it_to_close
         assert first == "*SHUTDOWN", f"{path}: the budget must be set before anything it covers"
 
 
-def test_goto_judges_a_drive_on_the_fusion_s_sigma_and_never_on_one_sensor_s_fit() -> None:
-    """2026-09-15: goto cancelled its own camera-only drives — "localization lost for 19 s while
-    the wheels travelled 1.0 m" — because it read /localization_fit, the LIDAR's scan-to-map
-    metric, which is 0.00 wherever no lidar scan scored the pose. The rule it reads now is the
-    tracker's fused uncertainty (pepin.watch), the same one the goal server reads, and the
-    thresholds live there and nowhere else: this file may not grow a second copy of them."""
-    goto = sf.tree("ros/tools/goto_ros.py")
-    assert {"SIGMA_TOPIC", "Sigma", "Preflight", "BlindDriveWatch", "source_words"} <= sf.imported(
-        goto
-    ), "the readings and the rule both come from pepin.watch"
-    assert "0.15" not in sf.assignments(goto).values(), "the sigma thresholds live in pepin.watch"
-    assert "0.25" not in sf.assignments(goto).values()
-    assert "blind.observe" in sf.calls(goto) and "certainty.sigma" in sf.calls(goto)
-    # ...and the drive's own extra condition survives: a poor reading while the wheels stand
-    # still is a stuck cart, and the recoveries (odom frame) can still work it free.
-    armed = [line for line in sf.unparsed(goto, ast.IfExp) if "BlindDriveWatch(" in line]
-    assert armed and armed[0].endswith("else None"), (
-        "online SLAM publishes neither a sigma nor a fit: a watch that read that silence as 0.00"
-        " would cut every healthy drive of the mode, so it is not armed there at all"
-    )
-    assert sf.assignments(goto)["LOST_TRAVEL_M"] == "1.0"
-    assert sf.assignments(goto)["LOST_FOR_S"] == "15.0"
-    assert "travelled_while_lost" in sf.calls(goto)
-
-
 def test_goto_prints_a_preflight_before_it_sends_a_goal() -> None:
-    """Three checks, one line each, and a refusal names the reading behind it. The old gate
-    printed "localized: fit 0.78" or "not localized" — a verdict with no evidence in it, and on
-    a camera drive the number it came from was 0.00 by construction."""
+    """One line per check, and a refusal names the reading behind it. The old gate printed
+    "localized: fit 0.78" or "not localized" — a verdict with no evidence in it."""
     goto = sf.tree("ros/tools/goto_ros.py")
     defined = {f.name for f in ast.walk(goto) if isinstance(f, ast.FunctionDef)}
-    assert {"preflight", "cancel_all"} <= defined and "Certainty" in sf.names(goto)
+    assert {"ensure_localized", "cancel_all"} <= defined
     gate = next(
         f for f in ast.walk(goto) if isinstance(f, ast.FunctionDef) and f.name == "ensure_localized"
     )
     body = ast.unparse(gate)
-    assert "preflight(nav, certainty)" in body, "the tracker stack is judged by the preflight"
-    assert "tracker_here(nav)" in body, "...and online SLAM still by the map frame, as before"
-    flight = next(
-        f for f in ast.walk(goto) if isinstance(f, ast.FunctionDef) and f.name == "preflight"
-    )
-    printed = ast.unparse(flight)
-    assert "check.line()" in printed, "one line per check, whatever the verdict"
+    assert "placed.line()" in body, "the placement check prints its own line"
+    assert "preflight frame" in body, "and so does the frame's"
     script = (REPO / "ros/goto.sh").read_text()
-    assert "preflight certainty" in script, "the header shows the operator what to expect"
+    assert "preflight frame" in script and "preflight placement" in script, (
+        "the header shows the operator what to expect"
+    )
 
 
 def test_goto_s_cancel_cancels_a_goal_it_never_sent() -> None:

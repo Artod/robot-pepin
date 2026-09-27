@@ -1,32 +1,27 @@
 #!/bin/bash
 # One command per sensor, for the redundancy demo: the lidar and the camera go on and off while
-# the robot runs, in the two places that matter, together — what the tracker matches the map
-# against (the relocalizer's `sources` flag) and what writes into the costmaps (the per-sensor
-# layers of ros/params/nav2_params.yaml, on the local and the global costmap alike). The tracker
-# half needs that flag to exist: it arrives with the fusion wiring, and against a relocalizer
-# that has none this script applies the costmap half, says so, and exits 1. The tracker always
-# runs now (World R: it owns map -> odom in every situation), so there is no arrangement in which
-# only half of this switch exists.
-#   ros/sensor.sh status            what the tracker matches on, which layers are on, what is fresh
-#   ros/sensor.sh lidar on|off      the lidar as a tracker source and as lidar_layer
+# the robot runs, in what writes into the costmaps (the per-sensor layers of
+# ros/params/nav2_params.yaml, on the local and the global costmap alike). The board tracker's
+# `sources` half of this switch is on the tag alt/tracker-2026-09-22.
+#   ros/sensor.sh status            which layers are on, what is fresh
+#   ros/sensor.sh lidar on|off      the lidar as lidar_layer
 #   ros/sensor.sh lidar off --hard  ... and the driver deactivated: /scan stops, a real absence
 #                                   instead of an ignored scan; `lidar on` activates it again
-#   ros/sensor.sh camera on|off     the camera as the tracker's `camera` source (the poses the
-#                                   laptop measures from its scans) and as camera_layer and
-#                                   contact_layer — one camera, two readings of the same frames:
-#                                   the band 8 cm-1.3 m, and where the floor ends
+#   ros/sensor.sh camera on|off     the camera as camera_layer and contact_layer — one camera,
+#                                   two readings of the same frames: the band 8 cm-1.3 m, and
+#                                   where the floor ends
 #
-# MUTING, the other half, added 2026-09-15: `on|off` above is the CONSUMER end — the tracker and
-# the costmaps stop listening while the sensor keeps publishing. `mute` is the PUBLISHER end: the
+# MUTING, the other half, added 2026-09-15: `on|off` above is the CONSUMER end — the costmaps
+# stop listening while the sensor keeps publishing. `mute` is the PUBLISHER end: the
 # node that owns the sensor stops sending, and every consumer meets what a dead sensor really
 # looks like — silence, a sensor_timeout, a TF that stops moving — without a restart, without
 # losing the other live flags, and with the sensor itself still read.
-#   ros/sensor.sh mute|unmute SENSOR    imu odom vo camera graph lidar
+#   ros/sensor.sh mute|unmute SENSOR    imu odom vo lidar
 #   ros/sensor.sh status                ... also prints each sensor's mute state
 # Each sensor is one live flag of the node that publishes it (ros/flags.sh), except the lidar:
 # our own node in its chain is `scan_filter` (laser_filters, external) and it has no flag of
-# ours, so `mute lidar` is the documented consumer set instead — the tracker's `sources` without
-# `lidar` plus lidar_layer off on both costmaps, which is exactly `lidar off` above. A relay node
+# ours, so `mute lidar` is the documented consumer set instead — lidar_layer off on both costmaps,
+# which is exactly `lidar off` above. A relay node
 # on the board that could drop /scan is not the answer (CLAUDE.md rule 20: the board carries only
 # what is real-time critical); `lidar off --hard` is the real absence when one is wanted.
 # Idempotent: only what differs is set, and only what changed is printed. This script writes no
@@ -44,18 +39,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$HERE/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
 
-TRACKER=relocalizer
 LIDAR_DRIVER=/ldlidar_node
 LOCAL_COSTMAP=/local_costmap/local_costmap
 GLOBAL_COSTMAP=/global_costmap/global_costmap
 COSTMAPS="$LOCAL_COSTMAP $GLOBAL_COSTMAP"
-SOURCE_ORDER="lidar depth contact camera graph"  # pepin.sources' own order, two lists as text.
-# Only an ORDER: a name outside it is carried through, never dropped (normalize_sources), and
-# tests/unit/test_scripts_parse.py fails when it drifts from src/pepin/sources.py.
 LAYER_ORDER="lidar_layer camera_layer contact_layer"
-MUTE_ORDER="imu odom vo camera graph lidar"  # what `mute` knows, in the order status prints
-CAMERA_SCANS="depth,contact"  # laptop_localizer's camera_sources default: what unmute restores
-# (tests/unit/test_scripts_parse.py fails when it drifts from that node's FLAGS table)
+MUTE_ORDER="imu odom vo lidar"  # what `mute` knows, in the order status prints
 NAV_ACTIONS="navigate_to_pose navigate_through_poses"
 REPORT_WINDOW_S=90  # the nodes report every 30 s: three windows, so one missed line is not a verdict
 GUARD_TIMEOUT_S=30  # the navigation guard's whole rclpy pass (ros/tools/nav_goal_running.py):
@@ -67,7 +56,7 @@ FAILED=0   # something did not answer and was not applied: the exit status
 
 usage() {
     echo "usage: ros/sensor.sh [status | lidar on|off | lidar off --hard | camera on|off"
-    echo "                      | mute|unmute imu|odom|vo|camera|graph|lidar]"
+    echo "                      | mute|unmute imu|odom|vo|lidar]"
     exit 2
 }
 
@@ -116,13 +105,6 @@ layer_in_dump() {  # DUMP LAYER -> the layer's enabled value (true/false), empty
         }'
 }
 
-board_report() {  # PATTERN -> the board container's last matching log line in the window.
-    # Free: a node's own report line is already in the log, so nothing is asked of ROS. Grepped
-    # on the board, because 90 s of that log is hundreds of kilobytes over the wifi.
-    ssh "root@$BOARD" "docker logs --since ${REPORT_WINDOW_S}s pepin-ros 2>&1 | grep -aE $(printf '%q' "$1") | tail -1" \
-        2>/dev/null || true
-}
-
 vslam_log() {  # the laptop SLAM container's window of log, empty when it is not running
     docker logs --since "${REPORT_WINDOW_S}s" pepin-vslam 2>&1 || true
 }
@@ -131,56 +113,10 @@ last_line() {  # LOG PATTERN -> the last matching line of LOG
     printf '%s\n' "$1" | grep -aE "$2" | tail -1 || true
 }
 
-sensor_sources() {  # lidar|camera -> the tracker sources this sensor owns
-    case "$1" in
-        lidar) echo "lidar" ;;
-        # One tracker source since 2026-09-13: the laptop matches both camera scans (the
-        # band and the floor's end) and the board fuses the pose they measured.
-        camera) echo "camera" ;;
-        *) return 1 ;;
-    esac
-}
-
 sensor_layers() {  # lidar|camera -> the costmap layers this sensor owns
     case "$1" in
         lidar) echo "lidar_layer" ;;
         camera) echo "camera_layer contact_layer" ;;
-        *) return 1 ;;
-    esac
-}
-
-normalize_sources() {  # CSV -> the same sources, SOURCE_ORDER's first and in its order, then any
-    # name this script does not know, in the order it arrived. Nothing is ever dropped: the
-    # roster lives in src/pepin/sources.py, SOURCE_ORDER is only an order, and a source added
-    # there before this list hears of it must survive a switch of the other sensor untouched.
-    local csv="$1" seen="," out="" item
-    for item in $SOURCE_ORDER; do
-        case ",$csv," in *",$item,"*) out="$out,$item"; seen="$seen$item," ;; esac
-    done
-    for item in ${csv//,/ }; do
-        case "$seen" in *",$item,"*) ;; *) out="$out,$item"; seen="$seen$item," ;; esac
-    done
-    echo "${out#,}"
-}
-
-sources_after() {  # CSV SENSOR on|off -> the tracker's source list once SENSOR is that way: this
-    # sensor's own sources put in or taken out, every other name carried through as it was
-    local csv="$1" sensor="$2" state="$3" mine kept="" item
-    mine=" $(sensor_sources "$sensor") "
-    for item in ${csv//,/ }; do
-        case "$mine" in *" $item "*) ;; *) kept="$kept,$item" ;; esac
-    done
-    if [ "$state" = on ]; then
-        for item in $(sensor_sources "$sensor"); do kept="$kept,$item"; done
-    fi
-    normalize_sources "${kept#,}"
-}
-
-tracker_sources() {  # the tracker's sources flag as a comma list; exit 1 when it did not answer
-    local reply
-    reply="$(flags get "$TRACKER" sources 2>/dev/null)" || return 1
-    case "$reply" in
-        *"value is:"*) printf '%s' "$reply" | sed -n 's/^.*value is: *//p' | tr -d ' \n' ;;
         *) return 1 ;;
     esac
 }
@@ -229,42 +165,6 @@ refuse_if_navigating() {  # the lifecycle half never runs under a goal, nor unde
     done
 }
 
-apply_sources() {  # SENSOR on|off: the tracker's sources flag; prints what changed
-    local sensor="$1" state="$2" have want
-    # NO TRACKER, NO SOURCES (PEPIN_LOCALIZER=rtabmap, ros/lib.sh): the board runs no
-    # scan-matching tracker, so there is no `sources` flag anywhere and the demo's tracker half
-    # simply does not exist in this stack. The costmap half below still applies, and this is not
-    # a failure — it is the arrangement. PEPIN_LOCALIZER=tracker is where the whole switch lives.
-    if ! pepin_localizer_is_tracker; then
-        echo "  no tracker in this stack (PEPIN_LOCALIZER=$PEPIN_LOCALIZER): the pose is RTAB-Map's"
-        echo "  and has no per-sensor sources; only the costmap layers below move"
-        return 0
-    fi
-    have="$(tracker_sources)" || {
-        # Two ways to get here and the operator must not have to guess which: the node is down,
-        # or this build's tracker has no sources flag at all (it arrives with the fusion wiring)
-        # and the tracker half of the switch does not exist yet. Either way the costmaps still
-        # take their half, and the exit status says the switch was not applied whole.
-        echo "  $TRACKER did not answer about its sources: they are unchanged"
-        echo "  (no sources flag in this build, or the node is down: ros/flags.sh list $TRACKER)"
-        FAILED=1
-        return 0
-    }
-    have="$(normalize_sources "$have")"
-    want="$(sources_after "$have" "$sensor" "$state")"
-    [ "$have" = "$want" ] && return 0
-    flags set "$TRACKER" sources "$want" >/dev/null
-    echo "  $TRACKER sources ${have:-(none)} -> ${want:-(none)}"
-    CHANGED=$((CHANGED + 1))
-    case ",$want," in
-        *,lidar,*) ;;
-        ,,) echo "  no source left: the tracker dead reckons until one comes back" ;;
-        *) echo "  no lidar among the sources: against the lidar's own map the camera alone loses"
-           echo "  it within seconds (scratch/camera_only_localization.py) — the costmap half of"
-           echo "  the demo stands, the tracker half does not" ;;
-    esac
-}
-
 apply_layers() {  # SENSOR true|false: the sensor's layers on both costmaps; prints what changed
     local sensor="$1" want="$2" costmap dump layer now
     for costmap in $COSTMAPS; do
@@ -308,7 +208,7 @@ driver_wanted() {  # SENSOR on|off HARD -> activate, deactivate or nothing for t
     fi
 }
 
-switch() {  # SENSOR on|off [--hard]: the flag, the layers and, for the lidar, the driver
+switch() {  # SENSOR on|off [--hard]: the layers and, for the lidar, the driver
     local sensor="$1" state="$2" hard="${3:-}" want was
     [ "$state" = on ] || [ "$state" = off ] || usage
     case "$hard" in
@@ -316,8 +216,7 @@ switch() {  # SENSOR on|off [--hard]: the flag, the layers and, for the lidar, t
         --hard)
             [ "$sensor" = lidar ] || { echo "--hard belongs to the lidar only"; exit 2; }
             # "on --hard" reads as "on, and mean it"; it used to mean "on everywhere, then stop
-            # the driver" — the tracker and both costmaps told to use a lidar that no longer
-            # publishes. There is no deep half of an on, so the line is refused, not guessed.
+            # the driver" — both costmaps told to use a lidar that no longer publishes. There is no deep half of an on, so the line is refused, not guessed.
             [ "$state" = off ] || {
                 echo "--hard belongs to 'lidar off': it stops the driver, and 'lidar on' is what"
                 echo "starts it again"
@@ -363,7 +262,6 @@ switch() {  # SENSOR on|off [--hard]: the flag, the layers and, for the lidar, t
     fi
     # The guard runs before anything is applied: a half-applied switch is worse than a refusal.
     [ -z "$want" ] || refuse_if_navigating
-    apply_sources "$sensor" "$state"
     apply_layers "$sensor" "$([ "$state" = on ] && echo true || echo false)"
     [ -z "$want" ] || apply_driver "$want" "$was"
     if [ "$sensor" = camera ] && [ "$state" = on ]; then
@@ -385,8 +283,6 @@ sensor_node() {  # SENSOR -> the node that publishes it; exit 1 for a sensor wit
     case "$1" in
         imu | odom) echo base_bridge ;;
         vo) echo visual_odometry ;;
-        camera) echo laptop_localizer ;;
-        graph) echo rtabmap_frame ;;
         *) return 1 ;;
     esac
 }
@@ -396,16 +292,12 @@ sensor_flag() {  # SENSOR -> the flag of that node whose off value is this senso
         imu) echo imu_publish ;;
         odom) echo odom_publish ;;
         vo) echo vo_publish ;;
-        camera) echo camera_sources ;;
-        graph) echo graph_measurement ;;
         *) return 1 ;;
     esac
 }
 
-sensor_value() {  # SENSOR mute|unmute -> the value its flag takes (the camera's is a list)
+sensor_value() {  # SENSOR mute|unmute -> the value its flag takes
     case "$1:$2" in
-        camera:mute) echo "" ;;
-        camera:unmute) echo "$CAMERA_SCANS" ;;
         *:mute) echo false ;;
         *) echo true ;;
     esac
@@ -414,10 +306,6 @@ sensor_value() {  # SENSOR mute|unmute -> the value its flag takes (the camera's
 muted_by() {  # SENSOR VALUE -> yes, no or ? : whether that live value is this sensor's silence
     local value
     value="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
-    if [ "$1" = camera ]; then
-        case "$value" in "" | "(none)") echo yes ;; *) echo no ;; esac
-        return 0
-    fi
     case "$value" in
         false) echo yes ;;
         true) echo no ;;
@@ -440,9 +328,7 @@ consequence() {  # SENSOR mute|unmute: what a consumer should now see, in one or
             imu) echo "  /imu/data_raw is back within one IMU period (50 Hz)" ;;
             odom) echo "  /odom is back on the next state line (20 Hz), and the transform with it" ;;
             vo) echo "  /vo is back at about 9.4 poses/s and the EKF fuses it again" ;;
-            camera) echo "  the laptop matches both camera scans again and /localization/measurement resumes" ;;
-            graph) echo "  RTAB-Map's graph speaks to the fusion again, every time the graph moves" ;;
-            lidar) echo "  the tracker matches /scan again and lidar_layer feeds both costmaps" ;;
+            lidar) echo "  lidar_layer feeds both costmaps again" ;;
         esac
         return 0
     fi
@@ -455,18 +341,13 @@ consequence() {  # SENSOR mute|unmute: what a consumer should now see, in one or
               echo "  pose stops advancing while the gyro still turns it. The wheels still obey" ;;
         vo) echo "  /vo stops: the board's EKF is the wheels and the gyro, exactly as it was before"
             echo "  2026-09-14; the node still measures and still reports" ;;
-        camera) echo "  nothing is matched on the laptop: /localization/measurement stops and the"
-                echo "  tracker localises on the lidar alone. The frames themselves keep flowing —"
-                echo "  depth_stream has no publish switch (2026-09-15)" ;;
-        graph) echo "  the graph's answer stays on the laptop: no 'graph' word reaches the fusion,"
-               echo "  and the tracker keeps whatever its other sources give it" ;;
     esac
 }
 
 mute_lidar() {  # mute|unmute: the documented consumer set, because the lidar has no flag of ours
     echo "$1 lidar: our own node in the lidar's chain is scan_filter (laser_filters, external)"
-    echo "and it has no flag of ours; the mute is therefore the consumer set — the tracker's"
-    echo "sources without lidar, and lidar_layer off on both costmaps (ros/sensor.sh lidar off)."
+    echo "and it has no flag of ours; the mute is therefore the consumer set — lidar_layer off on"
+    echo "both costmaps (ros/sensor.sh lidar off)."
     echo "For a real absence of /scan: ros/sensor.sh lidar off --hard"
     switch lidar "$([ "$1" = mute ] && echo off || echo on)"
 }
@@ -503,7 +384,7 @@ mute_status() {  # every sensor's mute state, read from the live flags one by on
     echo "muted (the publisher's own flag; a muted sensor is read and not sent):"
     for sensor in $MUTE_ORDER; do
         if [ "$sensor" = lidar ]; then
-            echo "  lidar: see the tracker sources and lidar_layer above (no publisher flag of ours)"
+            echo "  lidar: see lidar_layer above (no publisher flag of ours)"
             continue
         fi
         node="$(sensor_node "$sensor")"
@@ -522,21 +403,9 @@ mute_status() {  # every sensor's mute state, read from the live flags one by on
     done
 }
 
-status() {  # what the tracker matches on, what the costmaps take, and what each node last said
-    local costmap dump layer line value tracker vslam depth contact sensor
+status() {  # what the costmaps take, and what each node last said
+    local costmap dump layer line value vslam depth contact sensor
     SIDE="$(board_side)"
-    tracker="$(board_report "$TRACKER\\]: tracker:")"
-    value="$(printf '%s' "$tracker" | sed -n 's/.*[ ,]sources=\([a-z,]*\).*/\1/p')"
-    if ! pepin_localizer_is_tracker; then
-        echo "tracker sources: none (PEPIN_LOCALIZER=$PEPIN_LOCALIZER: RTAB-Map on the laptop owns"
-        echo "                 map -> odom and no tracker runs on the board)"
-    elif [ -z "$tracker" ]; then
-        echo "tracker sources: ? ($TRACKER printed no report in ${REPORT_WINDOW_S} s; ros/watch.sh)"
-    elif [ -z "$value" ]; then
-        echo "tracker sources: ? (its report line carries no sources= flag; ros/flags.sh list $TRACKER)"
-    else
-        echo "tracker sources: $value"
-    fi
     for costmap in $COSTMAPS; do
         dump="$(param_dump "$costmap")"
         line=""
@@ -552,11 +421,11 @@ status() {  # what the tracker matches on, what the costmaps take, and what each
     depth="$(last_line "$vslam" ']: depth: ')"
     contact="$(last_line "$vslam" ']: contact: ')"
     echo "what each node last said (within ${REPORT_WINDOW_S} s; a silent one is a dead sensor):"
-    for line in "$tracker" "$depth" "$contact"; do
+    for line in "$depth" "$contact"; do
         printf '  %s\n' "${line:-(nothing)}"
     done
     for sensor in lidar camera; do
-        echo "$sensor owns: sources $(sensor_sources "$sensor" | tr ' ' ','), layers $(sensor_layers "$sensor" | tr ' ' ',')"
+        echo "$sensor owns: layers $(sensor_layers "$sensor" | tr ' ' ',')"
     done
     mute_status
 }

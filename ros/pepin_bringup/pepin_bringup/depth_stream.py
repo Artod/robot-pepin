@@ -679,8 +679,8 @@ FLAGS = FlagSet(
         " picture and refitted the law from those pairs — a went 1.65 -> 2.05 and the law file"
         " had to be thrown away (ros/maps/depth_law.json.corrupt-20260914). This cart's top"
         " speed is 0.3 m/s, so one metre per second is three times anything it can drive and"
-        " still far under what a runaway frame shows. The board's own guard"
-        " (relocalizer's odometry_guard) stops the pose; this one stops the law",
+        " still far under what a runaway frame shows. It stops the law, not"
+        " the pose",
         on_when="raise it only on a faster base",
         off_when="raise it to 20 to reproduce the old behaviour, where any carry was applied"
         " whatever it implied",

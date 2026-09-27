@@ -125,22 +125,6 @@
       "note": "Measured 5-6 % / 43-54 MB on 2026-09-24; split from sensors_container. Each process carries its own zenoh session (~40 MB)."
     },
     {
-      "name": "relocalizer",
-      "match": "pepin_bringup/relocalizer|pepin_bringup\\.relocalizer",
-      "role": "Scan-matching pose tracker and kidnapped-robot recovery, and the ONE owner of map -> odom in every situation: matches /scan against the map RTAB-Map's graph publishes (or, with nothing live, the board's own cache of it), republishes that map as /map_tracked for the costmaps, and searches the whole map when the fit dies.",
-      "on_board_because": [
-        "real-time",
-        "wifi-loss"
-      ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn, ghost wait)",
-      "when": "sometimes",
-      "budget": {
-        "cpu_percent": 90.0,
-        "rss_mb": 121.0
-      },
-      "note": "Measured 60 % / 80 MB standing still; a whole-map search is a burst well above that and short. 'sometimes' since 2026-09-22, when the board became odometry only and the map localiser a mode rather than the default: four A53 cores do not hold the tracker AND the laser odometry that replaces what it gave the EKF (90 % + 20 %), and 1.5 GB does not hold both either. Absent is IDLE now, not MISSING; running, it is measured against this budget exactly as before. Runs only under PEPIN_LOCALIZER=tracker (2026-09-22: RTAB-Map owns map -> odom by default, the tracker stays a startable mode)."
-    },
-    {
       "name": "run_recorder",
       "match": "pepin_bringup\\.run_recorder",
       "role": "Writes every drive to disk (scans, odometry, pose, cmd_vel, camera): any run may be the one worth showing.",
@@ -422,32 +406,17 @@
     {
       "name": "session_logger",
       "match": "session_logger\\.py",
-      "role": "The per-drive recorder started by ros/goto.sh, ros/tour.sh and ros/teleop.sh: scans, odometry, pose and commands into one jsonl for the post-drive plots.",
+      "role": "The per-drive recorder started by ros/goto.sh and ros/teleop.sh: scans, odometry, pose and commands into one jsonl for the post-drive plots.",
       "on_board_because": [
         "wifi-loss"
       ],
-      "owner": "started inside the pepin-ros container by ros/goto.sh:95, ros/tour.sh:26, ros/teleop.sh:32 (ros/tools/session_logger.py)",
+      "owner": "started inside the pepin-ros container by ros/goto.sh:95, ros/teleop.sh:32 (ros/tools/session_logger.py)",
       "when": "sometimes",
       "budget": {
         "cpu_percent": 25.0,
         "rss_mb": 90.0
       },
       "note": "A guess: it has never been measured on its own, and it only runs during a drive, which is when the board is busiest. Measure it on the next recorded drive and replace this number."
-    },
-    {
-      "name": "slam_frame",
-      "match": "pepin_bringup\\.slam_frame",
-      "role": "RETIRED (World R, 2026-09-19), off by default and kept reachable by CLAUDE.md rule 19: broadcasts the laptop's RTAB-Map correction as map -> odom instead of the tracker, from /map_odom.",
-      "on_board_because": [
-        "real-time"
-      ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (slam:=true, respawn)",
-      "when": "sometimes",
-      "budget": {
-        "cpu_percent": 20.0,
-        "rss_mb": 90.0
-      },
-      "note": "A guess from the other small rclpy nodes, and it will stay one: this node runs only with nav.launch.py's slam:=true (the board's PEPIN_SLAM), never together with the relocalizer, which owns map -> odom in every situation the stack ships with. No census has caught it."
     },
     {
       "name": "link_watch",

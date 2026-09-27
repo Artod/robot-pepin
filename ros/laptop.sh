@@ -128,13 +128,9 @@ if pepin_rmw_is_zenoh; then
     RMW_ENV=(-e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e PEPIN_RMW=zenoh -e ZENOH_ROUTER_CHECK_ATTEMPTS=0
              -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_session_override)")
 fi
-# WHO OWNS map -> odom, into every container here (ros/lib.sh has the whole story). Under
-# "rtabmap" this side's RTAB-Map publishes the transform and the words to the board's fusion stay
-# home; under "tracker" nothing here broadcasts a frame and the board's relocalizer owns it.
-RMW_ENV+=(-e "PEPIN_LOCALIZER=$PEPIN_LOCALIZER")
-# The one pairing that cannot work is refused BEFORE a container starts, not debugged on the
+# A clock the two halves disagree on is refused BEFORE a container starts, not debugged on the
 # robot — and only where one is started, so `stop` and `logs` still work on a misconfigured shell.
-start_check() { pepin_localizer_check || exit 1; pepin_time_source_check || exit 1; }
+start_check() { pepin_time_source_check || exit 1; }
 # One zenoh router per machine, and this is the laptop's. It is started before any node here and
 # left alone afterwards: a node's connect retry is infinite, so containers may come and go under
 # it, and it is the only process on this side that talks to the board. Started idempotently —
@@ -171,14 +167,13 @@ zrouter_up() {
 # The nodes a kick can reach here, the container each lives in and the line it prints once up
 # (the kick waits for that line): the Python modules of vslam.launch.py, and the goal server of
 # the navigation half (it runs here on side=board only; on side=all: ros/thin.sh kick goal_server).
-KICKABLE="camera_stream depth_stream contact_scan depth_fusion laptop_localizer rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server"
+KICKABLE="camera_stream depth_stream contact_scan depth_fusion rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server"
 kick_target() {  # node name -> "container|start-up line"
     case "$1" in
         camera_stream) echo "pepin-vslam|camera stream from " ;;
         depth_stream) echo "pepin-vslam|depth stream up" ;;
         contact_scan) echo "pepin-vslam|contact scan up" ;;
         depth_fusion) echo "pepin-vslam|fusion up: " ;;
-        laptop_localizer) echo "pepin-vslam|laptop localizer up: " ;;
         rtabmap_frame) echo "pepin-vslam|rtabmap frame up: " ;;
         sensor_pack) echo "pepin-vslam|sensor pack up" ;;
         places) echo "pepin-vslam|places up: " ;;
@@ -361,12 +356,7 @@ case "${1:-start}" in
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} ${CAMERA_ENV[@]+"${CAMERA_ENV[@]}"} \
             "$VSLAM_IMAGE" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null
-        if pepin_localizer_is_tracker; then
-            OWNER="the board's tracker adopts it and owns map -> odom"
-        else
-            OWNER="RTAB-Map here owns map -> odom (PEPIN_LOCALIZER=rtabmap: no tracker on the board)"
-        fi
-        echo "vslam up on $VSLAM_IMAGE (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and $OWNER; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
+        echo "vslam up on $VSLAM_IMAGE (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and RTAB-Map here owns map -> odom; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
         # The desktop app's socket died with the old container, and a Foxglove client never
         # re-attaches by itself: its panels stay on screen, empty, bound to channel ids this new
         # bridge does not have. So the app is told to reconnect (ros/foxglove.sh reopen waits for

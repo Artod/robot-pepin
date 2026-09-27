@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
 """Log the raw lidar scans and odometry to a jsonl session our offline SLAM can rebuild a map from.
 
-Also logs AMCL's pose as ``loc`` when Nav2 runs. Runs inside the container; writes to
+Also logs the cart's pose (``map -> base_link``) as ``loc``. Runs inside the container; writes to
 a host-mounted path, flushes every line
 and fsyncs every two seconds, so a power cut mid-drive costs at most the last
 two seconds — the file is the meteor-proof copy (a rosbag runs alongside it).
-
-Also logs, since 2026-09-13, what the fusion did with the camera: ``meas`` is every pose the
-laptop measured out of a camera scan (/localization/measurement, the JSON of
-`pepin.measurements.RemoteMeasurement` kept verbatim — the recorder parses nothing) and ``srcs``
-is the tracker's own account of each update (/localization/sources: who anchored, what was
-fused, what a fusion rejected, every source's fit, delta, sigma and self-check ratio). The two
-together answer offline what the day of 2026-09-13 could not answer live: how far the camera's
-word was from the lidar's truth, per source (`scratch/camera_error.py`).
 
 ``--camera-scans`` adds the camera's raw scans (/depth_scan, /depth_marks, /contact_scan) as
 ``depth_scan`` / ``depth_marks`` / ``contact_scan`` records, off by default: the first two are
@@ -41,15 +33,13 @@ import os
 import time
 
 import rclpy
-from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry, Path
 from pepin_bringup.node_kit import TfLookup
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String
 
-from pepin.deployment import localizer
 from pepin.recording import scan_record_from_ros
 
 FSYNC_EVERY_S = 2.0
@@ -84,28 +74,16 @@ class SessionLogger(Node):
         self._last_sync = time.monotonic()
         self.scans = 0
         self.poses = 0
-        self.measurements = 0  # camera poses measured on the laptop
         self.camera_scans = 0  # depth/contact scans, only with --camera-scans
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self.create_subscription(LaserScan, "/ldlidar_node/scan", self._on_scan, qos)
         self.create_subscription(Odometry, "/odom", self._on_odom, 20)
-        self.create_subscription(PoseWithCovarianceStamped, "/tracker_pose", self._on_amcl, 10)
-        # WHERE THE `loc` RECORDS COME FROM where no tracker runs (PEPIN_LOCALIZER=rtabmap):
-        # /tracker_pose has no publisher there, so the same pose is read from TF — the laptop's
-        # map -> odom composed with the board's odom -> base_link, which is what every consumer
-        # does in that arrangement — at the 5 Hz the tracker published at. The listener and its
-        # /tf subscription exist only in that role.
-        self._tf = None if localizer() == "tracker" else TfLookup(self)
-        if self._tf is not None:
-            self.create_timer(LOC_TF_PERIOD_S, self._loc_from_tf)
+        # The `loc` records: map -> base_link from TF — the laptop's map -> odom composed with the
+        # board's odom -> base_link, which is what every consumer does — at 5 Hz.
+        self._tf = TfLookup(self)
+        self.create_timer(LOC_TF_PERIOD_S, self._loc_from_tf)
         self.create_subscription(Path, "/plan", self._on_plan, 5)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd, 20)
-        # What the camera said and what the tracker did with it: two String topics this board
-        # already carries (the tracker subscribes to the first and publishes the second), so a
-        # second local subscriber costs a copy and no new route.
-        strings = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
-        self.create_subscription(String, "/localization/measurement", self._on_measurement, strings)
-        self.create_subscription(String, "/localization/sources", self._on_sources, strings)
         for topic, name in CAMERA_SCANS if camera_scans else ():
             self.create_subscription(
                 LaserScan, topic, lambda msg, name=name: self._on_camera_scan(msg, name), 5
@@ -165,19 +143,6 @@ class SessionLogger(Node):
             }
         )
 
-    def _on_measurement(self, msg: String) -> None:
-        """One pose the laptop measured out of a camera scan, kept verbatim: the recorder does
-        not parse it, so a malformed message is on the tape as evidence instead of lost. ``t``
-        is when it ARRIVED here; the moment it speaks for is ``stamp`` inside the JSON."""
-        self._write({"t": time.time(), "topic": "meas", "json": msg.data})
-        self.measurements += 1
-
-    def _on_sources(self, msg: String) -> None:
-        """The tracker's own account of one update (Localizer.sources_report), verbatim: who
-        anchored, what was fused, what was rejected, and every source's fit, delta, sigma and
-        self-check ratio."""
-        self._write({"t": time.time(), "topic": "srcs", "json": msg.data})
-
     def _on_camera_scan(self, msg: LaserScan, name: str) -> None:
         """One virtual scan of the camera (the depth band or the floor-contact line) as a
         compact record: the first angle, the step, and the ranges in millimetres with the
@@ -211,29 +176,9 @@ class SessionLogger(Node):
             }
         )
 
-    def _on_amcl(self, msg: PoseWithCovarianceStamped) -> None:
-        """The localizer's belief in the map frame; covariance trace as a stand-in confidence."""
-        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        q = msg.pose.pose.orientation
-        theta = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-        cov = msg.pose.covariance
-        self._write(
-            {
-                "t": stamp,
-                "topic": "loc",
-                "source": "tracker",
-                "x": round(msg.pose.pose.position.x, 4),
-                "y": round(msg.pose.pose.position.y, 4),
-                "theta": round(theta, 5),
-                "confidence": round(1.0 / (1.0 + cov[0] + cov[7] + cov[35]), 3),
-            }
-        )
-
     def _loc_from_tf(self) -> None:
-        """The same ``loc`` record read from ``map -> base_link``, where no tracker publishes a
-        pose. No ``confidence``: TF carries no covariance, and ``source`` says which wrote it."""
-        if self._tf is None:
-            return
+        """The ``loc`` record read from ``map -> base_link``. No ``confidence``: TF carries no
+        covariance, and ``source`` says which wrote it."""
         transform = self._tf.transform("map", "base_link", timeout_s=0.0)
         if transform is None:
             return
@@ -255,7 +200,7 @@ class SessionLogger(Node):
         )
 
 
-LOC_TF_PERIOD_S = 0.2  # 5 Hz: the rate the tracker published /tracker_pose at
+LOC_TF_PERIOD_S = 0.2  # 5 Hz
 
 
 MAX_SECONDS = 900.0  # a recording nobody stops is a bug, not a feature: two orphans wrote for
@@ -286,8 +231,7 @@ def main() -> None:
         pass
     finally:
         node.get_logger().info(
-            f"logged {node.scans} scans, {node.poses} poses, {node.measurements} camera "
-            f"measurements, {node.camera_scans} camera scans"
+            f"logged {node.scans} scans, {node.poses} poses, {node.camera_scans} camera scans"
         )
         node._file.flush()
         os.fsync(node._file.fileno())

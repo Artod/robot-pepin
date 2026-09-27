@@ -13,26 +13,14 @@ BOARD="${PEPIN_HOST:-10.0.0.187}"
 # neck on). Only one of the two recorders runs (PEPIN_RECORDER, ros/feature.sh recorder
 # jsonl|bag); a kick of the other one finds nothing and says so. The goal server is here on
 # side=all only (on side=board it lives on the laptop:
-# ros/laptop.sh kick goal_server). slam_frame is the retired owner of map -> odom and only runs
-# with PEPIN_SLAM=true (CLAUDE.md rule 19), but a kick still reaches it where it does.
-KICKABLE="relocalizer run_recorder bag_recorder goal_server neck_state slam_frame tof_bridge"
-# ...of which the relocalizer is launched only under PEPIN_LOCALIZER=tracker (ros/lib.sh): under
-# rtabmap the laptop's RTAB-Map owns map -> odom and no tracker process exists here, so a kick of
-# it is refused with that reason instead of the bare "no relocalizer process in pepin-ros".
-not_launched() {  # node name -> "" when it can be kicked, else why it cannot be
-    case "$1" in
-        relocalizer) pepin_localizer_is_tracker ||
-            echo "relocalizer is not launched under PEPIN_LOCALIZER=$PEPIN_LOCALIZER: RTAB-Map on the laptop owns map -> odom" ;;
-    esac
-}
+# ros/laptop.sh kick goal_server).
+KICKABLE="run_recorder bag_recorder goal_server neck_state tof_bridge"
 kick_line() {  # node name -> start-up line
     case "$1" in
-        relocalizer) echo "relocalizer up: " ;;
         run_recorder) echo "run recorder ready" ;;
         bag_recorder) echo "bag recorder ready" ;;
         goal_server) echo "goal server ready on port" ;;
         neck_state) echo "neck state up: " ;;
-        slam_frame) echo "slam frame up: " ;;
         tof_bridge) echo "tof ceilings: " ;;
         *) return 1 ;;
     esac
@@ -56,9 +44,8 @@ case "${1:-}" in
         # The bridge reads the vision allow-list (zenoh-bridge-board-vision.json, synced with
         # ros/: the board publishes the plan and the costmaps too, the laptop the ONE map — its
         # RTAB-Map grid on /map — and the camera's scans and words) through PEPIN_BRIDGE_CONFIG,
-        # written here together with the mode. PEPIN_SLAM is deleted in the same breath: there is
-        # no mode in which the board takes map -> odom from a message any more, and the tracker
-        # stands down only if somebody sets that line by hand (CLAUDE.md rule 19).
+        # written here together with the mode. A stale PEPIN_SLAM line of an older board is
+        # deleted in the same breath: that switch is gone (tag alt/tracker-2026-09-22).
         ssh "root@$BOARD" "sed -i '/^PEPIN_SIDE=/d; /^PEPIN_BRIDGE=/d; /^PEPIN_BRIDGE_CONFIG=/d; /^PEPIN_SLAM=/d' /etc/default/pepin-ros; printf 'PEPIN_BRIDGE=on\\nPEPIN_BRIDGE_CONFIG=zenoh-bridge-board-vision.json\\n' >> /etc/default/pepin-ros;
             test -f /root/pepin-ros/zenoh-bridge-board-vision.json || echo 'WARNING: no zenoh-bridge-board-vision.json on the board: ros/sync.sh first';
             systemctl enable pepin-bridge >/dev/null 2>&1; systemctl daemon-reload; systemctl restart pepin-ros && sleep 8; systemctl is-active pepin-ros pepin-bridge | tr '\\n' ' '; echo"
@@ -74,12 +61,10 @@ case "${1:-}" in
         # is possible: the successor starts only after the exit. A stack restart is the slow
         # case because everything hangs on it — the bridge unit follows the stack, the laptop
         # containers are restarted by their bridge watch, and their SIGKILLed nodes linger in
-        # the laptop's bridge for the DDS lease. Measured at a cold boot: the relocalizer prints
-        # its line 7 s after its start, the goal server 9 s, the recorder 5 s; a kick is that
-        # plus the two-second pause. The tracker is gone for those seconds (no map -> odom):
-        # kick it at rest, never mid-drive.
+        # the laptop's bridge for the DDS lease. Measured at a cold boot: the goal server prints
+        # its line 9 s after its start, the recorder 5 s; a kick is that plus the two-second
+        # pause. Kick at rest, never mid-drive.
         NAME="${2:-}"; LINE="$(kick_line "$NAME")" || { echo "usage: ros/thin.sh kick <node>; nodes: $KICKABLE"; exit 2; }
-        WHY="$(not_launched "$NAME")"; [ -z "$WHY" ] || { echo "$WHY"; exit 2; }
         ssh "root@$BOARD" bash -s -- "$NAME" "$LINE" <<'EOF'
 set -u
 NAME=$1; LINE=$2; T0=$(date -u +%FT%TZ); MS0=$(date +%s%3N)

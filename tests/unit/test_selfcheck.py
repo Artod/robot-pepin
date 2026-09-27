@@ -11,14 +11,12 @@ import math
 
 import numpy as np
 import pytest
-from test_localizer_sources import drive, tracker, whole
 
 from pepin import fusion
 from pepin.fusion import PoseMeasurement
-from pepin.localization import SWITCHES
 from pepin.odometry import Pose2D
 from pepin.selfcheck import MAX_GAP_S, MAX_INFLATION, SelfCheck
-from pepin.sources import CAMERA, DEPTH, LIDAR, ScanObservation
+from pepin.sources import CAMERA, DEPTH, LIDAR
 
 CLAIM_XY_M = 0.02  # what every measurement below claims: 2 cm and a degree
 CLAIM_YAW_DEG = 1.0
@@ -158,52 +156,6 @@ def test_one_source_never_reads_another_s_pose() -> None:
     # Bit for bit what each source's own run gives: neither record saw the other's pose.
     assert both.ratio(LIDAR) == lidar_only.ratio(LIDAR)
     assert both.ratio(CAMERA) == camera_only.ratio(CAMERA)
-
-
-def test_the_flag_is_the_tracker_s_and_reads_in_its_report_line() -> None:
-    """``self_check`` is a live switch of the tracker (``ros2 param set``) and its state and
-    every source's factor are in the line the node prints."""
-    assert "self_check" in SWITCHES
-    loc = tracker()
-    assert "self_check on" in loc.settings()
-    loc.switch("self_check", False)
-    assert loc.self_check is False
-    assert "self_check off" in loc.settings()
-
-
-@pytest.mark.parametrize("with_camera", [False, True])
-def test_the_tracker_s_lidar_is_never_judged_by_the_camera(with_camera: bool) -> None:
-    """Through the tracker's own update path: a clean lidar drive keeps its covariance, and a
-    camera measurement riding along — however wrong — leaves the lidar's ratio untouched."""
-    truth, odom = drive(steps=8)
-    loc = tracker()
-    for t, o in zip(truth, odom, strict=True):
-        extra = (
-            [measurement(Pose2D(t.x + 0.5, t.y - 0.5, t.theta), source=CAMERA, stamp=0.0)]
-            if with_camera
-            else []
-        )
-        loc.update_from(o, [ScanObservation(LIDAR, whole(t))], measurements=extra)
-    entry = loc.sources_report(0.0)["sources"][LIDAR]
-    assert entry["self_check"][1] == 1.0  # the lidar vouched for itself, nothing widened
-    assert loc.sources_report(0.0)["sources"][LIDAR]["self_check"][0] < 1.0
-
-
-def test_a_re_seed_is_not_the_sensor_scattering() -> None:
-    """``Localizer.adopt`` — the whole-map search's re-seed, the operator's /initialpose — moves
-    the belief metres; the next match is searched around the new place, so its distance from the
-    previous one is the seed and not the lidar. Unforgotten, a 2 m seed reads as a ratio of 2.0
-    and a 6 m one as 18.3, widening the one measurement this robot trusts for two seconds
-    (scratch/selfcheck_audit.py). The record starts over instead."""
-    truth, odom = drive(steps=10)
-    loc = tracker()
-    for t, o in zip(truth, odom, strict=True):
-        loc.update_from(o, [ScanObservation(LIDAR, whole(t))])
-    assert loc.sources_report(0.0)["sources"][LIDAR]["self_check"][0] < 1.0
-    loc.adopt(Pose2D(loc.pose.x + 6.0, loc.pose.y, loc.pose.theta), 0.8)
-    loc.update_from(odom[-1], [ScanObservation(LIDAR, whole(truth[-1]))])
-    entry = loc.sources_report(0.0)["sources"][LIDAR]
-    assert entry["self_check"] == [1.0, 1.0], "the first match after a seed is judged by nothing"
 
 
 def test_a_seed_that_moved_nothing_still_starts_the_record_over() -> None:

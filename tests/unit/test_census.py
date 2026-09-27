@@ -290,7 +290,6 @@ def test_the_shipped_manifest_parses_and_covers_the_stack() -> None:
         "nav2_container",
         "lidar_container",
         "base_container",
-        "relocalizer",
         "base_server",
         "docker",
     } <= names

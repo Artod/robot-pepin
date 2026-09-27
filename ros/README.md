@@ -41,7 +41,7 @@ Foxglove Studio                   docker: ldlidar_node -> laser_filters box filt
 `ros/sync.sh` rsyncs `ros/` and `src/pepin` to the board and restarts the sensors container;
 `ros/nav.sh [MAP]` starts Nav2 inside it. The container mounts the code from the host (see
 `run.sh`), so Python nodes, launch files, params, maps and tools change in ~20 s. One node
-changes in seconds: `ros/sync.sh --no-restart && ros/thin.sh kick relocalizer` ends that process
+changes in seconds: `ros/sync.sh --no-restart && ros/thin.sh kick goal_server` ends that process
 with SIGINT and the launch respawns it from the synced sources (`ros/laptop.sh kick depth_fusion`
 does the same in the laptop's containers; `ros/laptop.sh kick` and `ros/thin.sh kick` without a
 name list what each can reach). The laptop's SLAM container is its own: `ros/laptop.sh vslam`
@@ -56,7 +56,7 @@ one command, followed by every check we have learned to run afterwards.
 
 - **board** — `systemctl restart pepin-ros` over the multiplexed ssh, or the full deploy
   (`ros/sync.sh`: code, library and config, then the restart and its census) with `--deploy`.
-  It then waits up to 90 s for the tracker's first report line.
+  It then waits up to 90 s for the run recorder's ready line.
 - **laptop** — `ros/laptop.sh start`, then `ros/laptop.sh vslam --neck --seed-map=<map>`, where
   the map is the one the board serves, read from its `/etc/default/pepin-ros` (`PEPIN_MAP`), never
   guessed: the fused volume is snapped to the lattice of the map it is seeded with.
@@ -76,15 +76,14 @@ silence as good news. What is checked:
 | # | board |
 |---|---|
 | 1.1 | `ros/board.sh census`: every process accounted for, every budget kept |
-| 1.2 | the tracker's report line is there, with its `sources=`, its `map_topic=`, its fit and the map id. Under `PEPIN_LOCALIZER=rtabmap` no tracker is launched at all, so this is a `WARN` saying so and 1.13 asks the question that replaces it |
-| 1.3 | the pose: `ros/goto.sh where` answers (the tracker's own service). Under `PEPIN_LOCALIZER=rtabmap` it is `ros/go.sh where` instead — the goal server's socket, whose answer is composed from `map -> base_link` — and it must say `"pose": "tf"` |
+| 1.3 | the pose: `ros/go.sh where` — the goal server's socket, whose answer is composed from `map -> base_link` — answers and says `"pose": "tf"` |
 | 1.4 | no `Failed to meet update rate` in the last 60 s |
 | 1.5 | no `Extrapolation` / `out of map bounds` / `Off Grid` in the last 60 s |
 | 1.6, 1.7 | `/depth_scan` and `/vo` really reach the board (`ros/tools/topic_rate.py`, one 5 s measurement each — not `ros2 topic hz`, which costs ~4.5 s of A53 before it measures anything) |
 | 1.8 | `pepin-base` is active and no `torque on` is left standing in its journal |
 | 1.11 | Nav2 is **active**, not merely running: the lifecycle manager got `planner_server connected with bond`, and the log carries zero `Range sensor layer can't transform` lines. A `planner_server` that activated and never bonded is wedged inside its global costmap's first update — tf2's `canTransform` costs a whole `transform_tolerance` per untransformable Range and the three ToF layers deliver 15 Hz each, so the backlog outgrows the drain and the update never ends (`scratch/nav2_hang/wedge_gain.py`; the fix was to stop feeding that plugin — the whiskers are `ObstacleLayer`s now, which drop what they cannot place). Goals are then accepted and nothing is planned. A board that runs no Nav2 is a `WARN`, never a failure. Since 2026-09-21 no costmap lists a `RangeSensorLayer` at all (the whiskers arrive as scan fans, `tof_bridge`'s `range_as`), so one of those lines now means the board is running a `nav2_params.yaml` older than this checkout — still worth a `FAIL` |
-| 1.13 | **who is correcting the pose**, under `PEPIN_LOCALIZER=rtabmap`: `map -> odom` is in TF and read where its publisher is — one rclpy node in the laptop's own container (`ros/tools/map_odom.py`), never on the board, whose /tf would cost it ~100 messages a second (CLAUDE.md rule 20). Two readings: the transform is **fresh** (re-broadcast at 20 Hz, so seconds of silence is a publisher that is gone) and it is **not the identity** (a localiser that has recognised nothing publishes `map == odom`, and every pose composed from it is simply the odometry's). The identity is a `WARN` while the laptop half is under 60 s old and a `FAIL` after that. Under `PEPIN_LOCALIZER=tracker` it is a `WARN` pointing at 1.2 |
-| 1.12 | no thread of the Nav2 container is pegged: `ps -L` over ssh, the busiest thread's cumulative CPU time over the process's own lifetime. `range_sensor_layer.cpp:362-369` clamps its cell bounds and then walks them as `unsigned`, so a cone that falls off the grid's left or bottom edge runs ~4e9 iterations under the costmap mutex and writes **no log line at all** — one thread at 100 %, "Pose Goes Off Grid", services timing out, zero plans (reproduced 2026-09-21 with `ros/thin.sh kick relocalizer`: tid 191, 415 s of CPU in 700 s). `FAIL` above 0.90, `WARN` above 0.50 (nobody has yet measured what a healthy container's busiest thread costs — tighten it once a few restarts have printed theirs), `WARN` when the board could not be read |
+| 1.13 | **who is correcting the pose**: `map -> odom` is in TF and read where its publisher is — one rclpy node in the laptop's own container (`ros/tools/map_odom.py`), never on the board, whose /tf would cost it ~100 messages a second (CLAUDE.md rule 20). Two readings: the transform is **fresh** (re-broadcast at 20 Hz, so seconds of silence is a publisher that is gone) and it is **not the identity** (a localiser that has recognised nothing publishes `map == odom`, and every pose composed from it is simply the odometry's). The identity is a `WARN` while the laptop half is under 60 s old and a `FAIL` after that |
+| 1.12 | no thread of the Nav2 container is pegged: `ps -L` over ssh, the busiest thread's cumulative CPU time over the process's own lifetime. `range_sensor_layer.cpp:362-369` clamps its cell bounds and then walks them as `unsigned`, so a cone that falls off the grid's left or bottom edge runs ~4e9 iterations under the costmap mutex and writes **no log line at all** — one thread at 100 %, "Pose Goes Off Grid", services timing out, zero plans (reproduced 2026-09-21 with a kick of the board's old tracker: tid 191, 415 s of CPU in 700 s). `FAIL` above 0.90, `WARN` above 0.50 (nobody has yet measured what a healthy container's busiest thread costs — tighten it once a few restarts have printed theirs), `WARN` when the board could not be read |
 | 1.14 | `/odom_laser` is flowing (the EKF's `odom3`), measured the same way. Skipped with a `WARN` when `PEPIN_LASER_ODOM=false` on the board |
 | 1.15 | **informational (`PASS`/`WARN`, never fails, never a drive gate)**: the board's clock minus the laptop's — the Docker VM's, which every laptop ROS node stamps with — over NTP from the board to the laptop's time server (`ros/time.sh offset`: `src/pepin/timesync.py` piped into the board's `python3`, best of eight round trips). `WARN` over `PEPIN_CLOCK_WARN_MS` (100 ms), `WARN` "not measured" when the board cannot reach the server or `PEPIN_TIME_SOURCE=laptop` and no server runs here, `WARN` on a value that is neither `laptop` nor `pool`. Under `PEPIN_TIME_SOURCE=pool` (the default) with no server here it is a `PASS` "not measured, as configured": that is the configuration, not a fault. See "One clock" below |
 
@@ -101,9 +100,9 @@ refuses to begin while a navigation goal is running. The hang appeared on 4 of 7
 | 2.2 | `depth_stream` over 5 frames/s, with a fitted law in its line |
 | 2.3 | `depth_fusion` over 5 frames/s, `at bound 0` |
 | 2.4 | `visual_odometry` over 5 poses/s from rtabmap |
-| 2.5 | `laptop_localizer` hears the board's belief (`tracker fit` above 0) |
 | 2.6 | the rtabmap process is alive in `pepin-vslam` |
-| 2.7 | `rtabmap_frame` has an anchor (from file or learned) and `over N infos` with N > 0 — 0 means the graph's trust is deaf |
+| 2.7 | `sensor_pack` feeds RTAB-Map: its snapshots per second, over 0 |
+| 2.10 | `rtabmap_frame` hears RTAB-Map: `N updates` with N > 0 in its report line |
 | 2.8 | no `process has died` in the container since it started |
 | 2.9 | Foxglove: the bridge answers on `ws://localhost:8765` and advertises every topic the layout draws (`ros/foxglove.sh check`; its failing lines are indented under this one) |
 | 2.11 | **informational (`WARN`, never fails)**: `marks_audit`'s last line — the local costmap's lethal cells split into lidar-backed, camera-only and unexplained. There is no healthy value (a room with a table in it should show camera-only cells); it is printed so the split is in front of you before the first goal |
@@ -116,18 +115,13 @@ refuses to begin while a navigation goal is running. The hang appeared on 4 of 7
 
 ## One localiser
 
-`PEPIN_LOCALIZER` says who owns `map -> odom`, and exactly one thing does.
-
-- **`rtabmap`** (the default since 2026-09-22) — RTAB-Map on the laptop publishes the transform
-  itself (`publish_tf`, re-broadcast at 20 Hz, stamped 0.1 s ahead against Nav2's own 0.3 s
-  tolerance). The board's lidar tracker (`pepin_bringup.relocalizer`) **does not start**, nothing
-  there publishes that edge, and both costmaps' static layer reads `/map` instead of the
-  `/map_tracked` the tracker used to republish (`ros/params/nav2_map_from_laptop.yaml`, one
-  overlay file loaded by `nav.launch.py` under this switch — `nav2_params.yaml` itself does not
-  move). RTAB-Map starts **localising** on a loaded database.
-- **`tracker`** — the stack that ran until then, byte for byte: the tracker owns the edge, fuses
-  the laptop's words into it, republishes the grid it adopted, and `rtabmap_frame`'s
-  `graph_memory` moves RTAB-Map's memory mode live on trust in that tracker's pose.
+RTAB-Map on the laptop owns `map -> odom` (since 2026-09-22): it publishes the transform itself
+(`publish_tf`, re-broadcast at 20 Hz, stamped 0.5 s ahead) and every consumer on the board composes
+it with the board's own `odom -> base_link`. Both costmaps' static layer reads `/map`, RTAB-Map's
+grid relayed by `pepin_bringup.rtabmap_frame`. RTAB-Map starts **localising** on a loaded database.
+The board's scan-matching tracker that owned the edge before, its laptop-side watchdog and the
+message-path owner (`slam_frame`) are on the tag `alt/tracker-2026-09-22`, whose message says how
+to bring them back.
 
 **Why.** Two owners of the truth is a race, not a redundancy. On 2026-09-21/22 the tracker
 trusted its own whole-map search on a fragment grid (fit 0.96 on the wrong place), collapsed its
@@ -136,34 +130,20 @@ sigma and gated RTAB-Map's correct words out; the pose jumped 3.4 m. What belong
 WiFi loss and close a loop in milliseconds. `map -> odom` is a slow correction every consumer
 composes with `odom -> base_link`.
 
-**What the tracker took with it.** It was also the only publisher of the EKF's zero-velocity
-input (`/zupt`, `odom2` in `ros/params/ekf.yaml`), so under `rtabmap` a parked cart's filter heard
-nothing but its sources' own drift and its heading followed rf2o's +1.5 deg/min at rest: ~5 deg an
-hour (2026-09-24). The C++ base bridge now publishes that input itself, in either mode, while its
-own rest witness says the cart is certainly still — wheels at rest past `imu_bias_s`, no fresh
-`/cmd_vel`, the gyro quiet — and nothing otherwise (`base_bridge` `zupt_publish`, live, default on;
-every setting of it live too, "The base bridge's zero-velocity update" below). Under `tracker` the
-slip watch's update remains beside it; the two never speak at once, and both say zero.
+**The zero-velocity update.** The tracker was also the only publisher of the EKF's zero-velocity
+input (`/zupt`, `odom2` in `ros/params/ekf.yaml`), so a parked cart's filter heard nothing but its
+sources' own drift and its heading followed rf2o's +1.5 deg/min at rest: ~5 deg an hour
+(2026-09-24). The C++ base bridge now publishes that input itself while its own rest witness says
+the cart is certainly still — wheels at rest past `imu_bias_s`, no fresh `/cmd_vel`, the gyro
+quiet — and nothing otherwise (`base_bridge` `zupt_publish`, "The base bridge's zero-velocity
+update" below).
 
 **Why localising and not mapping.** A start in mapping mode opens a new session per restart, and
 the grid RTAB-Map publishes is the connected component of the *current node inside working
 memory* (`Rtabmap.cpp:3941/4111/5444`) — so seventeen sessions from one evening's restarts made
 the map the costmaps read change thirty times in 800 s. Localising writes nothing, so no restart
-can add a session. The price is that this role cannot extend a map; the memory settings that
-would let it are research the owner deferred, and `PEPIN_LOCALIZER=tracker` is where the live
-switching still lives.
-
-**It travels like `PEPIN_RMW`**: `ros/lib.sh` holds the shell default, `ros/run.sh` and
-`ros/laptop.sh` pass `-e PEPIN_LOCALIZER=` into every container, and the board reads it from
-`/etc/default/pepin-ros` through `board/pepin-ros.service`, so it survives a reboot.
-`pepin.deployment.localizer` is the same question from Python, and the launches ask it there.
-
-**One pairing is refused**, before a container starts: `PEPIN_LOCALIZER=rtabmap` needs
-`PEPIN_RMW=zenoh`. The cyclone `zenoh-bridge-ros2dds` sidecars carry `/tf` one way only
-(board → laptop), because a topic allowed as a publisher on both sides is looped back by each
-bridge until nothing crosses at all — and RTAB-Map's correction has to come back the other way.
-Under cyclone the way to give the graph the frame is the retired message path
-(`nav.launch.py slam:=true` with `pepin_bringup.slam_frame`, CLAUDE.md rule 19).
+can add a session. The price is that a loaded map is not extended; `ros/laptop.sh vslam --fresh`
+starts an empty one.
 
 **What the first seconds look like — UNVERIFIED.** Read from rtabmap_ros's sources rather than
 measured: `CoreWrapper` broadcasts `mapToOdom_`, which is initialised to the **identity** and
@@ -174,8 +154,7 @@ Check 1.13 and the procedure below are where it gets measured.
 
 ### Parked acceptance, 120 s
 
-With the cart parked where it can see the room, both halves up under `PEPIN_LOCALIZER=rtabmap`,
-and **no goal sent**:
+With the cart parked where it can see the room, both halves up, and **no goal sent**:
 
 1. `ros/restart.sh both` — 1.13 must end green (`corrected`, stamped well under 2 s ago). Note
    how long after the start it stopped saying `identity`: that is the answer to the paragraph
@@ -190,8 +169,8 @@ and **no goal sent**:
 5. `ros/restart.sh board` alone, then Nav2: `planner_server connected with bond` and no
    `Pose Goes Off Grid` — the board must come up and plan with the transform arriving from the
    other machine.
-6. `ros/board.sh census` — the board's CPU against the same reading under `PEPIN_LOCALIZER=tracker`.
-   The tracker measured 60 % of a core standing still, so this is where that comes back.
+6. `ros/board.sh census` — the board's CPU. The old tracker measured 60 % of a core standing
+   still; this is where that shows as freed.
 
 ## The zenoh routers (`PEPIN_RMW=zenoh`, the default)
 
@@ -501,98 +480,38 @@ start their subscriptions. The kick's board-side files are installed once, by ha
 `board/README.md` (`bridge_kick.sh` to `/usr/local/bin/`, the `.path` and `.service` to
 `/etc/systemd/system/`, `systemctl enable --now pepin-bridge-kick.path`).
 
-## Online SLAM
+## A new room
 
-The robot is put somewhere it has never been, builds **one** map while it drives, and navigates
-in it. RTAB-Map on the laptop is that map: the camera names the places (appearance-based loop
-closure), the lidar gives the geometry, and both go into one graph and one occupancy grid — there
-is no second map anywhere. The board keeps the reflexes and the wheels; it serves no saved map and
-runs no scan-matching tracker, because there is nothing yet to match against.
-
-Who owns what:
-
-| | known map (`ros/thin.sh vision`) | online SLAM (`ros/thin.sh slam`) |
-| --- | --- | --- |
-| `/map` | the board's `map_server`, from a file | the laptop's RTAB-Map, growing |
-| `map -> odom` | the board's `relocalizer` | the board's `slam_frame`, from the laptop |
-| RTAB-Map's odometry | the tracker's pose (`map`) | the EKF's `odom` |
-| RTAB-Map's map frame | `rtabmap`, beside the real one | `map` — it *is* the real one |
-| its database | kept (`ros/maps/rtabmap.db`) | empty each session (`rtabmap_slam.db`) |
-| what a goal is judged on | the tracker's fit ≥ 0.50 | `map -> base_link` younger than 1 s |
-
-(In SLAM mode `/map` can also come from the fused volume — `ros/laptop.sh vslam --world-map`,
-see [The world map](#the-world-map). Still exactly one publisher: the mode's owner and the
-launch's `world_map` must both say so, and the launch is what sets `map_source` accordingly.)
-
-`/tf` crosses the bridge board → laptop only (a topic allowed as a publisher on both sides loops
-until nothing crosses at all), so the correction RTAB-Map computes travels the other way as a
-message on `/map_odom` and becomes a transform on the board, where Nav2 and the behaviours look it
-up. One publisher of that edge, in either mode.
-
-### A session
+There is one arrangement (World R, one localiser): RTAB-Map on the laptop is the map and the owner
+of `map -> odom`, whether the room is known or new. A new room is an empty database:
 
 ```bash
-ros/sync.sh                      # the board gets the new launch, the bridge config and slam_frame
-ros/thin.sh slam                 # board: bridge on with the slam allow-list, Nav2 on, no map server
-ros/laptop.sh                    # laptop bridge; reads the board's mode and records it (ros/.mode)
-ros/laptop.sh vslam              # RTAB-Map as the SLAM (the recorded mode); --slam forces it
-ros/teleop.sh                    # or drive by goal, below — the map grows as the cart moves
-ros/map.sh save flat3_slam       # freeze the grid into ros/maps/flat3_slam.{yaml,pgm}
+ros/restart.sh laptop --fresh-graph   # empty RTAB-Map database, the old volume moved aside
+ros/teleop.sh                         # or drive by goal — the map grows as the cart moves
+ros/map.sh save flat3_new             # freeze the grid into ros/maps/flat3_new.{yaml,pgm}
 ```
 
 Goals work with no places book: `ros/go.sh -1.0 0.3 90` drives to map coordinates (recorded like
 any other drive), and a click in Foxglove (Publish → `/goal_pose`, frame `map`) does the same
-without a tape. There is no tracker here to ask "am I localised", so **the goal server takes the
-cart's pose from `map -> base_link`** — the edge `slam_frame` broadcasts from RTAB-Map's
-correction — and accepts a goal while that edge is younger than 1 second; older, or missing, the
-goal is refused with which of the two it was, and no whole-map search is attempted (there is
-nothing to search). `ros/go.sh where` says `"pose": "tf"` where that is what answered, and
-`ros/go.sh mark` fills the session's own book (`/maps/slam.places.yaml` on the board) on the same
-evidence, writing no `fit` at all rather than a `0.00`. The saved map's places are not offered:
-they are coordinates in a frame this new map does not share. The old behaviour — only ever ask
-the tracker — is `ros/flags.sh set goal_server tf_pose false`.
+without a tape. **The goal server takes the cart's pose from `map -> base_link`** and accepts a
+goal while that edge is younger than 1 second; older, or missing, the goal is refused with which
+of the two it was. `ros/go.sh where` says `"pose": "tf"`, and `ros/go.sh mark` fills the book on
+the same evidence.
 
-**A fresh edge is no evidence that the laptop is still there.** `slam_frame` re-broadcasts the
-LAST correction at 10 Hz with a fresh stamp, so with the laptop shut down `map -> base_link` is
-still 0.1 s old: the gate would pass, and Nav2 — whose costmaps read that same edge against a
-0.3 s tolerance — would not abort either, so the cart would follow its plan by dead reckoning
-across a map that stopped growing. The goal server therefore also listens to the correction
-itself (`/map_odom`, published at 10 Hz whether or not the graph moved): a goal is **refused**
-when it has been silent for 2 seconds or has never arrived, and a running drive is **cancelled**
-when it falls silent under it — this mode's answer to the blind-drive watch, which has no fit to
-read here. `ros/go.sh where` prints `correction_s`, the age of the last one, wherever one has
-ever landed; the board logs the silence when it starts (`nothing on /map_odom for ... s`) and
-keeps broadcasting the edge all the same, because Nav2 there must not lose its global frame to a
-wireless hiccup. Off: `ros/flags.sh set goal_server correction_watch false`.
+**A fresh edge is not a placed start.** RTAB-Map publishes `map -> odom` from the moment it
+starts, at the pose it saved at its last shutdown. The laptop's `rtabmap_frame` says on
+`/localization/placement` (latched) whether this start has recognised a node of the loaded map or
+been seeded (`ros/goto.sh seed X Y YAW`), and both goal paths — the goal server and
+`ros/tools/goto_ros.py` — refuse until it has, or when nothing is heard at all. The switch back
+works with the laptop's node down or older, because it lives on the goal server and goto_ros
+reads it from there: `ros/flags.sh set goal_server start_needs_placement false`.
 
-**A fresh edge is not a placed start either.** Under `PEPIN_LOCALIZER=rtabmap` RTAB-Map
-publishes `map -> odom` from the moment it starts, at the pose it saved at its last shutdown. The
-laptop's `rtabmap_frame` says on `/localization/placement` (latched) whether this start has
-recognised a node of the loaded map or been seeded (`ros/goto.sh seed X Y YAW`), and both goal
-paths — the goal server and `ros/tools/goto_ros.py` — refuse until it has, or when nothing is
-heard at all. A board deployed with this check needs a `pepin-vslam` that publishes the word, so
-`ros/laptop.sh vslam` goes in the same step as the board's deploy, and the `rtabmap frame` report
-line must show `start ...` before the first goal. The switch back works with the laptop's node
-down or older, because it lives on the goal server and goto_ros reads it from there:
-`ros/flags.sh set goal_server start_needs_placement false`.
+**The camera's costmap layers stay off for driving.** They marked within 2 cm of the hull and
+stalled two drives on 2026-09-13 (the contact ring at 1.2–1.5 m, the depth band beside the hull);
+`ros/sensor.sh camera off` before a goal, and `ros/sensor.sh status` to see where they stand.
 
-Two things this mode needs that are **not** the operator's to remember:
-
-- **The camera's costmap layers stay off for driving.** They marked within 2 cm of the hull and
-  stalled two drives on 2026-09-13 (the contact ring at 1.2–1.5 m, the depth band beside the
-  hull); `ros/sensor.sh camera off` before a goal, and `ros/sensor.sh status` to see where they
-  stand. In this mode `ros/sensor.sh` prints `tracker: none in slam mode` for its other half and
-  switches the costmaps alone — that is the whole switch here, not a failure.
-- **`fit_gate` is handled by the launch.** The fusion fuses only while `/localization_fit` is
-  healthy, and in SLAM mode nobody publishes that topic — with the gate on, the first session
-  fused 0 frames until it was switched off by hand. `vslam.launch.py` now passes
-  `fit_gate:=false` in SLAM mode (and `map_source:=volume` where the volume owns `/map`). Both
-  remain live flags: `ros/flags.sh set depth_fusion fit_gate true` puts the gate back.
-
-Watch the map grow with the `ros/foxglove/pepin_slam.json` layout at `ws://localhost:8765`: `/map` under the fused surface, the graph's path, the head camera.
-
-To go back to driving a saved map: `ros/thin.sh vision` (which leaves SLAM mode), then
-`ros/mode.sh nav /maps/flat3_slam.yaml`.
+Watch the map grow with the `ros/foxglove/pepin_slam.json` layout at `ws://localhost:8765`: `/map`
+under the fused surface, the graph's path, the head camera.
 
 ## Camera rigs
 
@@ -831,10 +750,9 @@ the camera-only grid is capped at 3 m.
   local costmap works in the `map` frame, which jumps at a loop closure. `track_unknown_space:
   false` means unmapped ground is planned through as free floor — which is what exploration needs
   and what a wrong correction would exploit.
-- The correction's path (laptop `mapGraph` → `/map_odom` → the board's `slam_frame`) adds a
-  wireless hop before the transform moves; the transform itself is re-stamped at 10 Hz on the
-  board, so only the *value* is late, never the lookup — which is why the freshness of the
-  lookup says nothing about the laptop, and the goal server watches the message instead.
+- The correction's path (RTAB-Map's `map -> odom`, broadcast on the laptop) adds a wireless hop
+  before the transform moves on the board; each broadcast is stamped 0.5 s ahead
+  (`tf_tolerance`), so a WiFi stall shorter than that is invisible to the lookups.
 - `Grid/RangeMax 8.0` for the lidar grid and the camera-only ground/obstacle heights are
   first guesses from the known-map profile, not measurements.
 
@@ -856,7 +774,7 @@ lidar writes its own layer into it and the volume IS the map (`src/pepin/worldma
   through the same volume, but inside that layer it may not repaint a cell the lidar has spoken
   for — the network's depth is scale-uncertain, the lidar's returns are metric truth.
 - **Slices.** A horizontal band of the volume reads out as an occupancy grid: `lidar_slice()` at
-  the lidar's plane (what the tracker matches and what goes out as `/map`), `camera_band_slice()`
+  the lidar's plane, `camera_band_slice()`
   over `camera_band_m` of `config/fusion.json` — the band `/depth_scan` marks in, where seats and
   tabletops the lidar's plane cannot see are. A column is occupied where the field comes within
   half a voxel of a surface, free where it stays a voxel away from anything, unknown between; a
@@ -875,17 +793,6 @@ lidar writes its own layer into it and the volume IS the map (`src/pepin/worldma
   untouched: a cell is in the volume from the first frame and simply does not appear in the
   matcher's slice until it is heavy. The report line says what that costs — the share of the
   band's occupied cells the threshold keeps.
-- **The lidar may localise on the volume too.** With `lidar_map` on, the same lidar slice that
-  would go out as `/map` also goes out as **`/map_lidar`**, a topic of its own that crosses to the
-  board, and the tracker's `map_topic` flag points it there instead of at the served file —
-  Nav2, the `map_server` and the owner rule above are not touched at all. The tracker adopts the
-  first map on the topic it is asked for and no other, unless `map_refresh_s` says how often it
-  may take a changed one: adopting rebuilds the matcher and the tracker and forgets the episode's
-  evidence, and `/map_lidar` is republished at `map_hz` (`pepin.mapping.MapChoice`). Two things
-  to know before pointing it there: the volume must have been **seeded** from the served map (an
-  unseeded live volume held 52 % of that map's walls; a seeded one IS it, cell for cell), and the
-  two grids have different sizes, so the map id differs and the laptop's candidates and camera
-  measurements are refused until that half moves too.
 - **`/map` has exactly one owner.** Two launch decisions, both told to the node, decide whether
   it may publish: `pepin.deployment.map_owner` per bridge mode — the board's `map_server` in
   `split` and `vision`, the laptop in `slam` — and `world_map:=true`, which is what keeps
@@ -948,9 +855,6 @@ ros/flags.sh set depth_fusion no_return_free true # beams with no return carve a
 ros/flags.sh set depth_fusion lidar_layer false  # the volume goes back to being the camera's alone
 ros/flags.sh set depth_fusion snapshot_s 30      # write ros/maps/world_live.npz twice a minute
 ros/laptop.sh vslam --seed-map=/maps/flat3_straight.yaml  # the volume starts as the served map
-ros/flags.sh set depth_fusion lidar_map true     # the lidar slice goes out on /map_lidar too
-ros/flags.sh set relocalizer map_topic map_lidar # ...and the board's tracker matches on it
-ros/flags.sh set relocalizer map_refresh_s 60    # it may take a changed one once a minute
 ```
 
 Offline, `WorldMap.export_pgm_yaml` writes the map_server pair every existing tool already reads
@@ -961,99 +865,6 @@ a file exactly like `ros/map.sh save`.
 graph correction leaves the old geometry standing. The cure is to replay the frames at their
 corrected poses, and the snapshot already carries the index for it — every integration's stamp,
 sensor and pose — while the measurements themselves stay in the run tape, where they already live.
-
-## The laptop's localizer: the whole-map watchdog, and the camera's own poses
-
-Two jobs the board has no CPU for, in one node (`pepin_bringup.laptop_localizer`) that shares a
-map, the board's belief and a report line: the whole-map search below, and the camera's scans
-matched where they are produced — see **Redundancy demo** for that half and why it moved here on
-2026-09-13.
-
-### The whole-map watchdog
-
-The board's tracker follows the cart in a 9 cm window around the odometry's prediction. When it
-loses the world it searches the whole map for itself — FFT correlation over every shift at 40
-headings, **3.7 s** of an A53 (2026-09-06) — but only after the fit has been poor for three
-checks in a row, and never while the cart is moving: a teleport mid-drive is worse than a poor
-fit. The laptop runs the very same search in **0.12 s** and has nothing else to do with it, so
-the laptop's localizer asks the question once a second, healthy or not, and sends the
-answer to the board as a *candidate*.
-
-| | the board alone | with the watchdog |
-| --- | --- | --- |
-| when "where am I really?" is asked | after 3 poor checks, standing still | every second, always |
-| what one answer costs | 3.7 s of the board's CPU | 0.12 s of the laptop's |
-| what the answer is compared with | a fit against a threshold | the tracked pose, place against place |
-| what moves the belief | two searches that agree | 3 candidates, from 3 different scans, that agree with each other and disagree with the tracker |
-
-A candidate is one self-contained JSON message on `/localization/candidate` (laptop → board in
-vision mode): the place, a 3x3 covariance read off the correlation peak's own shape, the fit
-there, how alike the runner-up explained the scan (`ambiguity`), the stamp and the identity of
-the revolution it was computed on, and the map's identity. The board first carries it from the
-moment of that revolution to now over its own odometry (`pepin.watchdog.carried`) — the search
-costs 0.12-0.25 s and the link a hop on top, and an uncarried answer is that quarter-second of
-driving installed as the pose now, always backwards along the drive — and then judges it against
-its own fresher pose (`pepin.watchdog.judge`) — **agree** (the everyday verdict), **disagree** (another place,
-clearly better, and the map is sure of it), **unknown_map** (nothing on this map fits, or two
-places fit alike), **nothing** — and `CandidateGate` turns three disagreements about one place
-into a re-seed through the same door the board's own search uses. The seed is not the candidate
-but the two weighed by their information, so a sure candidate against a lost tracker *is* the
-candidate, and a bounded one barely moves a healthy tracker.
-
-Measured offline on tape 0171 (`scratch/kidnap_recovery.py`, replayed through the very tracker
-the node builds; the cart is carried 1.0 m / 40 deg at t0+20 s while the odometry and the scans
-go on as they were):
-
-| | back under 10 cm |
-| --- | --- |
-| the tracker's local window alone | never (0.69 m after 39 s) |
-| the board's own fallback, as today | never — the cart is driving, so it may not search |
-| the same, told the cart had stopped | never — 4 searches found the truth and none was applied |
-| watchdog, acting on the first candidate | 0.8 s, 8 scans |
-| **watchdog + the streak of 3 (shipped)** | **2.9 s, 28 scans** |
-
-Why the board's own path fails here: a metre from the truth this flat still fits the map at
-**0.53**, just under the `lost_fit` of 0.55 — so the tracker hardly calls itself lost, and every
-time the fit reads over the threshold the watch drops the pending candidate before a second
-search can confirm it (`pepin.watch.LostWatch.observe`). Its four searches all found the right
-place (0.72–0.79 against the tracker's 0.50–0.60) and all four died as unconfirmed candidates. A
-fit against a threshold cannot see a wrong place that fits; two places compared can.
-
-Over the whole undisturbed tape the watchdog re-seeded **0 times** (with a streak of 1 as well
-as 3) and never moved the pose by a millimetre. Searched against another flat's map, 9 of 12
-candidates read `unknown_map` and the gate says "the map does not fit" — in the report line and
-on `/localization/sources`, never as an automatic mode switch.
-
-One scan is one opinion. The laptop never searches a revolution twice: a message repeating the
-stamp in hand is dropped, and a revolution nobody has replaced within `watch_max_scan_age_s`
-(counted from when it ARRIVED here, never from its stamp — the board's clock runs seconds ahead
-of the Mac's) stops being searched at all. Its id travels with the candidate, and the board
-refuses a candidate whose scan id is already in the run (`distinct_scans`): a frozen `/scan`
-publishes the same answer once a second, and three of those are one scan's evidence, not three
-seconds of it — the failure that rubber-stamped every candidate of the board's own two-search
-rule on 2026-09-09.
-
-Flags: `global_watch`, `watch_period_s` and `watch_max_scan_age_s` on the laptop's node,
-`accept_candidates`, `candidate_streak`, `carry_candidates` and `distinct_scans` on the tracker.
-All seven are live; with `global_watch` or `accept_candidates` off the stack is exactly what it
-was before, the board's own slow search and nothing else.
-
-### Not yet verified on the robot
-
-- Nothing here has run on the robot: the numbers above are a replay of a recorded tape.
-- The camera half of this node has not run on the robot either. Offline
-  (`scratch/laptop_localizer_replay.py`) the split path costs the same as the fused tracker did
-  at full rate; live, only the board's own report line can say whether its match time came back
-  to the lidar-only 45 ms and 9-10 Hz.
-- The link's own latency is modelled as 50 ms in the replay. The board carries every candidate
-  over the odometry between its scan and now, so that number sets how far the carry reaches,
-  not how wrong the seed is; a candidate older than the odometry history (5 s) is dropped as
-  `stale`, and the carry itself has never been measured on the robot.
-- 3 of 12 candidates computed against a *wrong* map still read `disagree` rather than
-  `unknown_map`: the fit floor (0.45) and the ambiguity ceiling (0.90) are the two numbers that
-  decide it, and they are tuned on one flat.
-- A re-seed while a goal is running is refused (`_navigating`); a re-seed while the cart is
-  merely driving is allowed, which no drive has tried yet.
 
 ## The marks audit: who painted the lethal cells, live
 
@@ -1089,7 +900,7 @@ CURRENT occupied columns — the same column rule as the fan — and a `camera_g
 | topic | type | frame | what |
 |---|---|---|---|
 | `/camera_grid` | `nav_msgs/OccupancyGrid` | the volume's (`odom`) | a 6 m square about the cart at 5 cm (`grid_size_m`, `grid_resolution_m`), corner snapped to 0.5 m; 100 occupied, 0 otherwise; latched, at most `grid_hz` (3 Hz), stamped with the observation; ~14.5 kB, ~43 kB/s to the board |
-| `/camera_grid_map` | `nav_msgs/OccupancyGrid` | `map` | EMPTY, on exactly the lattice of `grid_map_topic` (`/map` under `PEPIN_LOCALIZER=rtabmap`, `/map_tracked` under `tracker`); latched, once per map geometry; nothing until that map is heard |
+| `/camera_grid_map` | `nav_msgs/OccupancyGrid` | `map` | EMPTY, on exactly the lattice of `grid_map_topic` (`/map`); latched, once per map geometry; nothing until that map is heard |
 | `/camera_grid_map_updates` | `map_msgs/OccupancyGridUpdate` | `map` | the same cells drawn through this laptop's `map -> odom` at the grid's stamp, one rectangle covering the last window and this one, at `grid_hz`; held 1 s after a new geometry |
 
 Nav2 must load the new `nav2_params.yaml` once (the plugin list changed): restart the Nav2 halves.
@@ -1157,19 +968,16 @@ the camera's intrinsics, the fusion band) live in `config/*.json` and are read a
 **Muting a sensor live.** A sensor is switched off where it is *published*, by a flag of the node
 that publishes it, so the message simply stops and every consumer meets what a dead sensor looks
 like — silence, an EKF's `sensor_timeout`, a transform that stops moving — with nothing
-restarted and no other live flag lost. `ros/sensor.sh mute imu|odom|vo|camera|graph|lidar` and
+restarted and no other live flag lost. `ros/sensor.sh mute imu|odom|vo|lidar` and
 `ros/sensor.sh unmute ...` do it in one command and print what to expect; `ros/sensor.sh status`
 lists each sensor's mute state. The flags behind them: `base_bridge` `imu_publish` and
 `odom_publish` (the board's bridge; `odom_publish` takes the `odom -> base_link` transform with
 it, because a transform still broadcast from a silent `/odom` is a state no sensor failure
-produces), `visual_odometry` `vo_publish`, `laptop_localizer` `camera_sources` (emptied: the
-camera's scans stop being matched and `/localization/measurement` stops, though the frames
-themselves keep flowing — `depth_stream` has no publish switch), `rtabmap_frame`
-`graph_measurement`. The lidar has none: our own node in its chain is `scan_filter`
-(laser_filters, external), and a relay on the board that could drop `/scan` is what CLAUDE.md
-rule 20 refuses — so `mute lidar` is the consumer set instead (the tracker's `sources` without
-`lidar`, `lidar_layer` off on both costmaps, which is `ros/sensor.sh lidar off`), and
-`ros/sensor.sh lidar off --hard` is the real absence of a scan. The old way — `ros/feature.sh
+produces), and `visual_odometry` `vo_publish`. The lidar has none: our own node in its chain is
+`scan_filter` (laser_filters, external), and a relay on the board that could drop `/scan` is
+what CLAUDE.md rule 20 refuses — so `mute lidar` is the consumer set instead (`lidar_layer` off
+on both costmaps, which is `ros/sensor.sh lidar off`), and `ros/sensor.sh lidar off --hard` is
+the real absence of a scan. The old way — `ros/feature.sh
 imu off` — restarts the board stack: a minute, and every live flag on it back to its default.
 
 | node | flag | kind | default | live | description |
@@ -1281,33 +1089,12 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `depth_stream` | `depth_reach` | bool | on | yes | the PUBLISHED depth image is NaN past depth_reach_m: the camera answers for its own data and says nothing where it does not vouch for the range. /depth_scan is unaffected (it is capped at the same range already) and so is every law — the gate is applied to the image on its way out, after the pipeline |
 | `depth_stream` | `depth_reach_m` | number 0.3..12 | 3.0 | yes | metres past which the published depth is NaN; the same number /depth_scan is capped at |
 | `depth_stream` | `scan_hz` | number 0..30 | 5.0 | yes | the cap on how often /depth_scan is PUBLISHED, in hertz; 0 publishes one fan per frame, which is what this topic did until 2026-09-22. The cap is on the publisher alone: every frame still goes through the network and the whole pipeline, every law is still fitted from it, and the depth image on /camera/depth is not thinned at all |
-| `goal_server` | `tf_pose` | bool | on | yes | where no tracker answers, the cart's pose is read from TF (map -> base_link) and a goal is judged by how fresh that edge is; off, only the tracker is ever asked |
-| `goal_server` | `correction_watch` | bool | on | yes | where no tracker answers, the SLAM correction (/map_odom) must be arriving for a goal to start, and a drive is cut when it stops; off, the age of map -> base_link is the only evidence read |
-| `goal_server` | `sigma_gate` | bool | on | yes | a goal starts, and a running drive is cut, on the tracker's fused uncertainty (/localization/sigma); off, on its scan-to-map fit as before |
 | `goal_server` | `places_from_the_file` | bool | off | yes | before the graph's book of places has been heard, a name is answered from the yaml beside the map (coordinates of the frozen-grid era); off, a name is refused until the book arrives, with that reason |
-| `goal_server` | `start_on_a_known_pose` | bool | on | yes | where the tracker publishes a sigma, a goal is refused for the pose's sake only when there is NO pose — nothing has ever corrected it, or the sigma stopped arriving; off, a drive starts under 0.25 m and anything over it buys a whole-map search first, as before |
 | `goal_server` | `jump_clear` | bool | off | yes | map -> odom is read from TF five times a second and, when it STEPS further than 0.10 m, Nav2's local costmap is emptied ("/local_costmap/clear_entirely_local_costmap", asynchronously, at most once per 1 s): the marks in that grid were laid where the cart used to be. The step in that edge is the correction alone — the cart's own motion lives in odom -> base_link — whoever published it. Off, nothing reads the edge and no listener is started for it |
-| `goal_server` | `pose_topic` | bool | on | yes | the pose this node reads out of TF is republished as /pose (geometry_msgs/PoseStamped in map, 5 Hz, stamped with the transform's own stamp), so the other nodes on this board can have the pose without a TF listener of their own. Inert where a tracker runs (there /tracker_pose is that topic already) and on a split stack, where the reader is on the other machine and reads the edge itself. Off, nothing is published and this node's listener goes back to being started on the first ask |
+| `goal_server` | `pose_topic` | bool | on | yes | the pose this node reads out of TF is republished as /pose (geometry_msgs/PoseStamped in map, 5 Hz, stamped with the transform's own stamp), so the other nodes on this board can have the pose without a TF listener of their own. Inert on a split stack, where the reader is on the other machine and reads the edge itself. Off, nothing is published and this node's listener goes back to being started on the first ask |
 | `goal_server` | `controller` | choice: mppi, rpp, rpp_shim | rpp_shim | yes | what follows the plan: mppi is Nav2's MPPI controller for every planner, held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own Regulated Pure Pursuit from PLANNERS, ending on position alone as before 2026-09-23; rpp_shim is the reversing RPP inside Nav2's RotationShimController, which turns the cart to the mark's heading in place once it is inside the goal tolerance. Published latched on controller_selector and goal_checker_selector, so a change is read by the behaviour tree at its next tick |
-| `goal_server` | `start_needs_placement` | bool | on | yes | under PEPIN_LOCALIZER=rtabmap a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for this same flag before its own preflight. Off, a fresh map -> base_link is enough, as before 2026-09-23 |
+| `goal_server` | `start_needs_placement` | bool | on | yes | a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for this same flag before its own preflight. Off, a fresh map -> base_link is enough, as before 2026-09-23 |
 | `goal_server` | `cancel_every_goal` | bool | on | yes | a cancel on the socket also asks both navigators' own cancel services (navigate_to_pose and navigate_through_poses, <action>/_action/cancel_goal) for EVERY goal — a zero goal id, whoever sent it — and answers what each said (``navigators``); off, it cancels only the goal this node sent, as before 2026-09-25 |
-| `laptop_localizer` | `tf_belief` | bool | on | yes | when /tracker_pose has been silent for a second, the pose a camera scan is matched around is looked up from TF (map -> base_link at that scan's stamp) instead of carried from the last /tracker_pose; off, a silent board means no camera measurements at all |
-| `laptop_localizer` | `global_watch` | bool | on | yes | run the whole-map search once every watch_period_s and publish what it finds on /localization/candidate; off, this half of the node is a subscriber that costs nothing and the board is back to searching for itself only once it is already lost |
-| `laptop_localizer` | `watch_period_s` | number 0.2..60 | 1.0 | yes | seconds between searches |
-| `laptop_localizer` | `watch_max_scan_age_s` | number 0.1..3600 | 1.0 | yes | how long a revolution may sit in hand and still be searched, counted from when it ARRIVED here |
-| `laptop_localizer` | `camera_search` | bool | off | yes | search the WHOLE camera map for the cart on a camera fan, the way global_watch searches it on a lidar revolution, and publish what it finds on /localization/candidate with the fan's source named; off, the camera only ever refines a pose somebody else holds and a camera-only cart that loses its pose stays lost |
-| `laptop_localizer` | `camera_search_source` | choice: depth, contact | depth | yes | which camera fan the whole-map search runs on: the depth band or the floor-contact line |
-| `laptop_localizer` | `camera_search_period_s` | number 0.2..60 | 2.0 | yes | seconds between whole-map searches on a camera fan |
-| `laptop_localizer` | `camera_search_min_fit` | number 0..1 | 0.25 | yes | a camera candidate whose fit is below this is not published at all |
-| `laptop_localizer` | `camera_search_max_ambiguity` | number 0..1 | 0.8 | yes | a camera candidate whose runner-up explains the fan this well from another place is not published: the twin check (pepin.watchdog.ambiguity) read on the ranking measure the search itself uses |
-| `laptop_localizer` | `camera_sources` | list of: depth, contact | depth,contact | yes | which camera scans are matched here and sent to the board as pose measurements on /localization/measurement: the depth band, the floor-contact line; empty, nothing is matched and the board tracks on the lidar alone |
-| `laptop_localizer` | `camera_match_hz` | number 0.2..30 | 5.0 | yes | how often each camera source is matched and a measurement published |
-| `laptop_localizer` | `camera_window_m` | number 0.01..1 | 0.09 | yes | half-width of the window a camera scan is matched in, metres, around the board's belief carried to that scan's moment |
-| `laptop_localizer` | `camera_window_from_sigma` | bool | on | yes | the window a camera scan is matched in is widened to hold the peak wherever the board's own covariance, carried to the scan's stamp, says the truth may be further out than camera_window_m: sqrt(pepin.fusion.GATE) sigmas plus the camera's measured floor. Off, the two window flags are the whole width, as before |
-| `laptop_localizer` | `camera_window_deg` | number 0.5..90 | 9.0 | yes | half-width of the same window in heading, degrees |
-| `laptop_localizer` | `camera_min_fit` | number 0..1 | 0.25 | yes | a camera match whose fit is below this is not sent: it is counted as low fit and the board never hears about it |
-| `laptop_localizer` | `covariance` | choice: peak, fit | peak | yes | how sure a camera measurement says it is: peak — the spread of that match's own score peak at the camera matcher's temperature (config/matcher.json); fit — the fit-scaled second moment of the whole surface, with the source's trust in it, that shipped before it. It is the number the board's information filter weighs the fan by |
-| `laptop_localizer` | `explained_vote` | bool | on | yes | returns the map cannot explain (a person, a moved chair) do not score a camera match: the same vote the board's tracker takes on its own scans (relocalizer's explained_vote), taken here, on the grid the camera is matched against |
 | `marks_audit` | `marks_audit` | bool | on | yes | the audit runs; off, the node keeps its subscriptions and computes, publishes and reports nothing |
 | `marks_audit` | `radius_m` | number 0.2..3 | 2.0 | yes | how far around the cart a lethal cell is judged, metres |
 | `marks_audit` | `match_cells` | number 0.5..5 | 1.5 | yes | how near a beam must land to a cell, in costmap cells, to account for it |
@@ -1317,45 +1104,6 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `neck_state` | `tf_republish` | bool | on | yes | base_link -> camera_link is republished at tf_hz between polls, carrying the last measured angles with a fresh stamp; with it off the edge is published only when a reading arrives, i.e. at poll_hz |
 | `places` | `publish_places` | bool | on | yes | the resolved places are published on /places whenever the graph moves; off, the book is still kept and marked but nothing is published and every consumer falls back to the coordinates beside the map |
 | `places` | `label_nodes` | bool | on | yes | a mark also sets RTAB-Map's own label on the node (set_label), which is what makes the place a thing in its tools and in its set_goal; off, only our own book records the node id and the offset |
-| `places` | `mark_sigma_m` | number 0..2 | 0.25 | yes | the widest the tracker's own error bar may be, metres, for a mark to be taken: past it the mark is refused with the reading in the answer |
-| `relocalizer` | `rest_lock` | bool | on | yes | hold the pose while the cart stands still (wheels quiet 0.6 s and the gyro under 1.5 deg/s): a match's residual is blended in with a time constant instead of taken whole |
-| `relocalizer` | `explained_vote` | bool | on | yes | returns the static map cannot explain (a person, a moved chair) do not score the match |
-| `relocalizer` | `rest_tau_s` | number 0.1..60 | 6.0 | yes | the rest lock's time constant: seconds for a residual to die at rest |
-| `relocalizer` | `rest_gain` | number 0..1 | 0.05 | yes | the rest lock's share per match when no match cadence is known |
-| `relocalizer` | `sources` | list of: lidar, depth, contact, camera, graph | lidar,graph | yes | what corrects the pose: the lidar's revolution (/scan), matched here, and the camera (`camera`), whose scans the laptop matches and whose ANSWER arrives on /localization/measurement. The lidar drives the updates while it is fresh and the camera's word rides along, carried to its moment; a stale lidar hands the updates to the measurements. `depth` and `contact` name the camera's raw scans, which this node no longer subscribes to — enabling them changes nothing here. `graph` is RTAB-Map's pose graph on the laptop, whose answer arrives on /localization/graph_measurement with a gate of its own: it rides the lidar's update, and with no scan source driving it drives one of its own exactly as the camera's word does (pepin.measurements.remote_update) — so `graph` alone is a tracker on the graph alone, and `camera,graph` is one update between the two of them, never one each |
-| `relocalizer` | `measurement_max_age_s` | number 0.05..5 | 0.5 | yes | how old a pose measurement from the laptop may be, in seconds, at the moment of the update that would take it: past this it is dropped instead of carried. Read only while carry_stale_words is OFF |
-| `relocalizer` | `carry_stale_words` | bool | on | yes | a remote word the odometry trail can still reach is CARRIED to the update instead of being dropped for its age: what the carry costs is added to its covariance (pepin.fusion.odometry_covariance) and the trail's own reach is the only bound. Off, measurement_max_age_s decides as it did before 2026-09-18 |
-| `relocalizer` | `remote_floor_xy_m` | number 0..1 | 0.08 | yes | the least position sigma, metres, a measurement from the laptop is fused with, whatever its own peak claims; 0 takes the claim as it comes |
-| `relocalizer` | `remote_floor_yaw_deg` | number 0..90 | 5.0 | yes | the least heading sigma, degrees, a measurement from the laptop is fused with; 0 takes the claim |
-| `relocalizer` | `fusion` | bool | on | yes | fuse every enabled source's word by its information — a match made here, a measurement made on the laptop; off: the widest source corrects alone and the others only report |
-| `relocalizer` | `covariance` | choice: peak, fit | peak | yes | how sure a match says it is: peak — the spread of its own score peak at the matcher's calibrated temperature (config/matcher.json); fit — the fit-scaled second moment of the whole surface that shipped before it. Both the covariance the lidar's match is fused by and the one /tracker_pose carries |
-| `relocalizer` | `self_check` | bool | on | yes | every source vouches for itself: its covariance is widened by how far its answers fall from where its OWN previous answer, carried over the odometry, said they would (pepin.selfcheck). A source four times out in ALL THREE directions loses sixteen times its weight; the factor is that over-claim averaged over the three, so a source out in fewer of them loses proportionally less (a camera fan bound along a wall, four times out in the two directions it measures, is widened 9.7x not 16x — scratch/selfcheck_audit.py). One that is honest, or better, is not touched. Per source, never across sources: no lidar pose enters the camera's number and no camera pose the lidar's |
-| `relocalizer` | `local_fit` | bool | on | yes | a fit only counts where a scan of THIS machine measured it: with no scan here at all — the camera's or the graph's words driving the tracker alone — /localization_fit carries 0.0, the value it holds before the first match, the candidate gate is given that same 0.0 to judge a whole-map answer against, and the remote source's own fit rides /localization/sources per source; off, the remote fit is published and judged against as the tracker's own |
-| `relocalizer` | `map_grow` | number 0..1 | 0.15 | yes | how far a mapped obstacle's explanation reaches, metres: a return within this distance of an occupied cell of the served map is the map itself, anything farther is news (pepin.dynamic.StaticMask). It is what explained_vote silences and what tells a person beside the cart from a lost cart |
-| `relocalizer` | `fit_needs_a_source` | bool | off | yes | /localization_fit falls to 0.00 once no enabled source has spoken for source_patience_s — no lidar revolution, no camera measurement — instead of repeating the last fit measured; off, the fit stands until a source corrects it again |
-| `relocalizer` | `source_patience_s` | number 0.1..60 | 3.0 | yes | how long every enabled source may be silent at once, in seconds, before the published fit falls to 0.00 (fit_needs_a_source) |
-| `relocalizer` | `belief_yaw_per_turn` | number 0..1 | 0.05 | yes | the share of every reported turn the tracked pose's HEADING sigma grows by between corrections (pepin.watch.PoseSpread, accumulated step by step); the measurement carry's own term (pepin.fusion.carried, the fusion self-check) is not this number and stays at 0.70 |
-| `relocalizer` | `map_cache` | bool | on | yes | the map this tracker ADOPTS is written down beside the maps (/maps/map_cache.json: the cells run-length encoded, the id and the minted identity, the digest, the stamp and the topic it came from), atomically and only when the digest changes; at start, with nothing live inside map_fallback_s, that cache is what this node tracks on. Off, the node needs a map on a topic as before 2026-09-18 |
-| `relocalizer` | `verify_remote` | bool | on | yes | a correction made ENTIRELY of remote words — no local scan in the update, so nothing here can check them — must agree with the tracker's own belief within what the two covariances allow (pepin.fusion.GATE, the gate a fusion applies between two sources). One that does not leaves the pose where it was and the update reports that it measured nothing, so the spread grows and the drive gates read it; off, the word moves the pose as it did before 2026-09-18 |
-| `relocalizer` | `accept_candidates` | bool | on | yes | re-seed from the laptop watchdog's whole-map candidates (/localization/candidate, pepin.watchdog): a place that disagrees with the tracked pose candidate_streak times in a row, about the same place each time, is adopted through the path the board's own search uses |
-| `relocalizer` | `candidate_streak` | integer 1..10 | 3 | yes | how many candidates in a row must disagree with the tracker and agree with each other before one of them re-seeds it: the price of a teleport, in seconds |
-| `relocalizer` | `map_refresh_s` | number 0..600 | 2.0 | yes | the least time between two adoptions of /map: a newer grid is taken only after this many seconds AND only if its cells changed. 0 takes the first grid and no other, which is what a served file has always done |
-| `relocalizer` | `carry_pose_across_maps` | bool | on | yes | adopting a re-rendered map keeps the pose the tracker holds instead of starting again from the saved pose or the pose the odometry gives: it is the same room a moment later, so a new picture of it is no reason to forget where the cart is |
-| `relocalizer` | `frame_needs_a_pose` | bool | on | yes | on a KNOWN map — the disk holds a cached map and a pose saved on it — map -> odom is not broadcast until this tracker has a pose on a map; on a map being born (nothing on disk) the identity goes out from the first tick, as it always did |
-| `relocalizer` | `map_fallback_s` | number 0..600 | 10.0 | yes | how long this tracker waits for a live /map before it tracks on the map it wrote down itself (the map_cache flag, pepin.mapcache) — only while it has adopted nothing at all, and the live grid replaces the cache the moment it arrives. 0 waits for ever, which is what the tracker did before the cache existed |
-| `relocalizer` | `carry_candidates` | bool | on | yes | a candidate's pose is moved from the moment of its own scan to now over the odometry between the two stamps (pepin.watchdog.carried) before it is judged and fused, and one the odometry history no longer covers is dropped |
-| `relocalizer` | `odometry_guard` | bool | on | yes | an odometry sample whose step from the last trusted one is impossible (over 1.5 m/s, or over 0.5 m in one sample) while its twist cannot account for it — the wheels at rest, or a twist faster than this cart can drive — is refused: it never reaches the history, so the carry keeps the last pose that made sense; off, every sample is carried, as before. The same guard watches the HEADING: with the wheels at rest, a yaw step beyond what the twist's own rate could have turned in the interval (plus 5 deg) is refused the same way |
-| `relocalizer` | `distinct_scans` | bool | on | yes | a streak is counted in scans, not in messages: a candidate whose scan id is already in the run is a second opinion that heard the first one's scan, counted as replay and not lengthening the streak |
-| `relocalizer` | `graph_reseed_while_driving` | bool | on | yes | a candidate from the pose graph (source "graph") may re-seed the tracker WHILE a goal is running, but only when the lidar is not on the roster: with no scan source alive the graph is the only thing that knows the place, and a drive on a belief nobody can correct is worse than a teleport. With the lidar alive, and for every other source, the rule is unchanged: no re-seed mid-drive |
-| `relocalizer` | `clear_costmap_on_jump` | bool | on | yes | when an accepted word moves the published pose further than clear_costmap_jump_m, Nav2's local costmap is emptied ("/local_costmap/clear_entirely_local_costmap", asynchronously, and at most once per 1 s), so the obstacles it marked at the old pose do not stand beside the ones the live scans mark at the new one |
-| `relocalizer` | `clear_costmap_jump_m` | number 0..5 | 0.1 | yes | how far one accepted word must move the published pose before the local costmap is cleared — the step in map -> odom, which is the correction alone with the odometry's own motion taken out; 0 clears never |
-| `relocalizer` | `slip_watch` | bool | on | yes | while the wheels claim speed and the camera's own odometry shows the picture standing still, the wheels are muted at their source (base_bridge's odom_publish) so the EKF never fuses the metres they invent; off, the wheels are always heard and a slip enters the pose |
-| `rtabmap_frame` | `slam` | bool | off | at start | RTAB-Map is the map (online SLAM): its correction is map -> odom and goes to the board as a message on /map_odom, where pepin_bringup.slam_frame broadcasts it; off, the board's tracker owns map -> odom and this node broadcasts no transform at all |
-| `rtabmap_frame` | `graph_measurement` | bool | on | yes | publish where RTAB-Map's graph localised the cart as a measurement on /localization/graph_measurement (source "graph") once per RECOGNISED update, for the board's fusion to weigh like any other word; off, the graph's answer stays on this laptop and nothing reaches the pose |
-| `rtabmap_frame` | `graph_candidates` | bool | on | yes | a graph word the board's fusion cannot act on goes out as a whole-map CANDIDATE on /localization/candidate (source "graph", the same covariance, at most one per recognised update): a word refused as disagreeing with the tracker's belief past the fusion's own chi-square (11.34, 3 dof), and a word naming a DIFFERENT place while the tracker has no trusted source behind its pose (published fit below 0.3, or no belief for 3 s). Off, such a word is counted here and reaches nothing |
-| `rtabmap_frame` | `graph_memory` | choice: trust, map, localise | trust | yes | who decides whether RTAB-Map's database may LEARN beside a known map. trust: this node switches it live on the rule 'a sharp pose that does not come from the database itself' — the tracker's seating under graph_memory_sigma_m / graph_memory_sigma_deg, and a holder on /localization/sources that is not the graph — calling /rtabmap/rtabmap/set_mode_mapping / /rtabmap/rtabmap/set_mode_localization on a change of verdict that has held for the seating's own freshness window, and carrying RGBD/LinearUpdate / RGBD/AngularUpdate with it. map: always mapping. localise: always localising, whatever the pose is worth |
-| `rtabmap_frame` | `graph_memory_sigma_m` | number 0..1 | 0.03 | yes | the widest the tracker's own error bar may be, metres per position axis (the roots of the covariance /tracker_pose carries, which is the lidar's score peak), for that pose to be worth TEACHING the database from (graph_memory trust); a softer seating leaves RTAB-Map localising. 1.0 lets anything teach, which is the behaviour of before 2026-09-14 |
-| `rtabmap_frame` | `graph_memory_sigma_deg` | number 0..180 | 1.0 | yes | the same gate for heading, degrees: the database is taught only from a seating whose heading sigma is at most this |
 | `rtabmap_frame` | `registration_follows_snapshots` | bool | on | yes | RTAB-Map's Reg/Strategy follows what the snapshots carry (/sensor_pack/state): a scan in them means ICP (1), no scan means visual (0), switched live through the node's own parameter path on a change that has held for the hold the state carries. Off, the strategy stays whatever the launch table set and this node only reports what it would have asked for |
 | `rtabmap_frame` | `atomic_parameter_sets` | bool | on | yes | a parameter set this node hands RTAB-Map (a strategy with its visual features, a visual set alone, a memory mode's pair) goes as ONE /rtabmap/rtabmap/set_parameters_atomically request, which rtabmap_slam applies as one /parameter_events notification and one parseParameters. Off, it goes as one set_parameters request, which rclcpp applies one parameter at a time — each its own event and its own parseParameters — with RGBD/LoopClosureReextractFeatures ordered first when it turns off and last when it turns on |
 | `rtabmap_frame` | `visual_features` | choice: orb, xfeat | xfeat | yes | which features RTAB-Map's VISUAL registration (Reg/Strategy 0, the camera-only strategy) matches when it checks a node the words recognised. xfeat: XFeat keypoints matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure time (Vis/FeatureType 15, Vis/CorNNType 6, RGBD/LoopClosureReextractFeatures true); the database is only read. orb: the database's own GFTT/ORB words, the launch table's values. Sent with the strategy and changed live; under ICP, and unless RTAB-Map is certainly localising (told so and answered, no switch to mapping waiting), the set is always orb, and a switch to mapping waits until orb's set is in force. xfeat needs the pepin-laptop:xfeat image (/opt/xfeat/rtabmap_xfeat.py); in another image this node sends orb and the report line says why |
@@ -1367,13 +1115,10 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `rtabmap_frame` | `xfeat_top_k` | integer 256..8192 | 2048 | yes | the most XFeat keypoints a picture keeps, best score first, wherever XFeat runs; RTAB-Map applies no cap of its own to a Python detector |
 | `rtabmap_frame` | `place_recognition` | choice: words, descriptor | words | yes | how RTAB-Map finds WHICH database node a picture is (its likelihood, before any registration): words — the ORB bag of words' TF-IDF (Kp/TfIdfLikelihoodUsed true, Rtabmap/VirtualPlaceLikelihoodRatio 0, RTAB-Map's defaults); descriptor — the dot product of the nodes' learned place descriptors as z-scores (false and 1; rtabmap Memory::computeLikelihood -> Signature::compareTo, Rtabmap::adjustLikelihood), which sensor_pack attaches to every snapshot. descriptor is sent ONLY when it cannot abort RTAB-Map: its core carries ros/patches/rtabmap-keep-global-descriptors.patch (the marker /opt/rtabmap_patches/keep-global-descriptors), the snapshots carry one each (/sensor_pack/place) and the database's census at this start (PEPIN_PLACE_CENSUS, taken by the launch before RTAB-Map opens the file) says every node carries exactly one of the same length — and only while the camera snapshots are described (descriptor_null_share); otherwise the words, and the report line says why. Live |
 | `rtabmap_frame` | `descriptor_null_share` | number 0..1 | 0.5 | yes | place_recognition descriptor falls back to the words while more than this share of the last 10 camera snapshots carried the null descriptor (the localisation service down, late or answering nonsense), and goes back once they are described again; 1.0 never falls back |
-| `rtabmap_frame` | `word_at_picture_time` | bool | on | yes | a graph word is stamped with the moment its PICTURE was taken — the localisation's own stamp, the board's clock under the snapshots — and odom -> base_link is looked up at that moment; the board carries the word to its update over its odometry (relocalizer carry_stale_words). Off, the word is stamped with the newest odom -> base_link stamp heard, as it was until 2026-09-19 |
-| `rtabmap_frame` | `grid_needs_tie` | bool | on | yes | RTAB-Map's grid (/rtabmap/grid) is relayed onto /map — the one map the board's tracker adopts — only once this start has recognised a node of the database it LOADED (or loaded none), and only grids stamped after that recognition. Until then the board keeps the map it cached. Off, every grid is relayed as it comes |
-| `rtabmap_frame` | `start_needs_placement` | bool | on | yes | what goes out on /localization/placement (latched) says this start of RTAB-Map is PLACED only once an update has recognised a node of the database it loaded, or an operator's seed (/rtabmap/initialpose) has been heard since its first update — or it loaded an empty database, whose start pose is the map's origin. The board's goal clients (ros/tools/goto_ros.py, pepin_bringup.goal_server) refuse a goal under PEPIN_LOCALIZER=rtabmap until then, saying to seed or to let the camera see a mapped place. Off, every start counts as placed: RTAB-Map's pose is taken as it is |
-| `run_recorder` | `fusion_records` | bool | on | yes | the camera's measurements (/localization/measurement) and the tracker's account of each update (/localization/sources) go on the numbered tape as the 'meas' and 'srcs' records scratch/camera_error.py reads |
+| `rtabmap_frame` | `start_needs_placement` | bool | on | yes | what goes out on /localization/placement (latched) says this start of RTAB-Map is PLACED only once an update has recognised a node of the database it loaded, or an operator's seed (/rtabmap/initialpose) has been heard since its first update — or it loaded an empty database, whose start pose is the map's origin. The board's goal clients (ros/tools/goto_ros.py, pepin_bringup.goal_server) refuse a goal until then, saying to seed or to let the camera see a mapped place. Off, every start counts as placed: RTAB-Map's pose is taken as it is |
 | `run_recorder` | `bridge_kick` | bool | on | yes | the laptop's request to restart THIS board's zenoh bridge (/bridge/kick) is answered by touching /run/pepin/bridge_kick, which a systemd path unit on the board turns into `systemctl restart pepin-bridge`; off, the request is logged and ignored |
-| `run_recorder` | `planner_records` | bool | on | yes | what the PLANNER saw goes on the tape too: the global costmap (run-length encoded, at most one grid per new plan), the goal status of Nav2's three actions (navigate_to_pose, compute_path_to_pose, follow_path) and the pose graph's own words (/localization/graph_measurement) beside the camera's; off, the tape holds what it held before 2026-09-18 |
-| `run_recorder` | `loc_from` | choice: pose_topic, tf | pose_topic | yes | where the tape's `loc` rows come from where no tracker publishes one: pose_topic, the goal server's /pose (it parses /tf for navigation anyway and republishes what it reads); tf, this node's own TF listener at 0.2 s, which is what it ran until 2026-09-22. The rows are identical either way — same fields, same 5 Hz, source 'tf' in both, because both are that same edge. Inert where a tracker runs: there the rows come from /tracker_pose |
+| `run_recorder` | `planner_records` | bool | on | yes | what the PLANNER saw goes on the tape too: the global costmap (run-length encoded, at most one grid per new plan), the goal status of Nav2's three actions (navigate_to_pose, compute_path_to_pose, follow_path); off, the tape holds what it held before 2026-09-18 |
+| `run_recorder` | `loc_from` | choice: pose_topic, tf | pose_topic | yes | where the tape's `loc` rows come from: pose_topic, the goal server's /pose (it parses /tf for navigation anyway and republishes what it reads); tf, this node's own TF listener at 0.2 s, which is what it ran until 2026-09-22. The rows are identical either way — same fields, same 5 Hz, source 'tf' in both, because both are that same edge |
 | `sensor_pack` | `sensor_pack` | bool | on | yes | snapshots are published; off, the node subscribes and counts and RTAB-Map is fed nothing at all |
 | `sensor_pack` | `sources` | list of: camera, lidar | camera,lidar | yes | which sensors may enter a snapshot: the live A/B for camera-only and lidar-only mapping, with no restart and without muting a publisher |
 | `sensor_pack` | `pack_hz` | number 0.1..15 | 1.0 | yes | at most this many snapshots a second of SENSOR time (the stamps' own clock, not this laptop's) |
@@ -1750,7 +1495,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Off when:* 0 to reproduce today's behaviour, where every fit is applied whole
 - **`carry_max_speed_mps`** — number 0.1..20, default 1.0
   - *What:* metres per second the carry from the scan's moment to the frame's may imply before the frame's lidar beams are thrown away instead of anchoring the law; the frame still publishes its depth, it simply judges nothing (0.1..20)
-  - *Default:* 1.0 — 2026-09-14: with the EKF running away (43 km at 60 m/s) the carry moved the scan 1-2 m over the 0.02-0.03 s between the scan and the frame, dragged beams across the picture and refitted the law from those pairs — a went 1.65 -> 2.05 and the law file had to be thrown away (ros/maps/depth_law.json.corrupt-20260914). This cart's top speed is 0.3 m/s, so one metre per second is three times anything it can drive and still far under what a runaway frame shows. The board's own guard (relocalizer's odometry_guard) stops the pose; this one stops the law
+  - *Default:* 1.0 — 2026-09-14: with the EKF running away (43 km at 60 m/s) the carry moved the scan 1-2 m over the 0.02-0.03 s between the scan and the frame, dragged beams across the picture and refitted the law from those pairs — a went 1.65 -> 2.05 and the law file had to be thrown away (ros/maps/depth_law.json.corrupt-20260914). This cart's top speed is 0.3 m/s, so one metre per second is three times anything it can drive and still far under what a runaway frame shows. It stops the law, not the pose
   - *On when:* raise it only on a faster base
   - *Off when:* raise it to 20 to reproduce the old behaviour, where any carry was applied whatever it implied
 - **`imu_lean`** — bool, default on
@@ -1951,38 +1696,18 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 
 #### `goal_server`
 
-- **`tf_pose`** — bool, default on
-  - *What:* where no tracker answers, the cart's pose is read from TF (map -> base_link) and a goal is judged by how fresh that edge is; off, only the tracker is ever asked
-  - *Default:* on — off, this node refused every goal of the first online-SLAM session — 'the tracker is not up' (2026-09-13 14:05), the goals driven by publishing /goal_pose by hand, which is Nav2 without a run, a tape or a verdict. In SLAM mode there IS no tracker: RTAB-Map owns the pose and pepin_bringup.slam_frame re-broadcasts its correction as map -> odom at 10 Hz, so 1.0 s without a transform is ten missed broadcasts, not jitter. The known-map modes are untouched: there the tracker answers first and its fit decides, exactly as before
-  - *On when:* on in online SLAM, and anywhere else the pose is owned by something that publishes map -> base_link instead of a fit
-  - *Off when:* to have a stack without a tracker refuse goals outright again — the old behaviour, and the honest one where a fit is the only evidence trusted
-- **`correction_watch`** — bool, default on
-  - *What:* where no tracker answers, the SLAM correction (/map_odom) must be arriving for a goal to start, and a drive is cut when it stops; off, the age of map -> base_link is the only evidence read
-  - *Default:* on — map -> base_link is no evidence that the SLAM half is alive: slam_frame re-broadcasts the LAST correction at 10 Hz with a fresh stamp, so with the laptop shut down the edge is still 0.1 s old, the gate passes, and Nav2 — whose costmaps read that same edge against a 0.3 s tolerance — does not abort either. The cart would drive a map that stopped growing, on dead reckoning, with nothing to notice. The correction is a 10 Hz pulse whatever the graph does (pepin_bringup.rtabmap_frame publishes between optimisations too), so 2.0 s of silence is twenty missed messages over the bridge, not a hiccup
-  - *On when:* in online SLAM, where the pose is owned by a machine on the other side of the bridge
-  - *Off when:* when this node cannot hear /map_odom in a stack that is otherwise healthy — 'ros/go.sh where' prints 'correction_s' where one has ever landed, and prints none at all in that case; the drive then rests on the transform alone, as it did before
-- **`sigma_gate`** — bool, default on
-  - *What:* a goal starts, and a running drive is cut, on the tracker's fused uncertainty (/localization/sigma); off, on its scan-to-map fit as before
-  - *Default:* on — a fit is ONE SENSOR'S metric — the share of one lidar revolution's beams that landed on the map — and it says nothing about a pose the camera is holding. On a camera-only drive it is 0.00 by construction, and every rule built on it read a healthy tracker as lost (2026-09-15). The sigma comes out of the fusion itself, so 0.25 m to start and 0.40 m to cut mean the same thing whichever source spoke — and it goes on growing along the odometry when none does, which a fit never did
-  - *On when:* always on a stack whose tracker publishes the topic; a board that does not is judged by its fit by itself, with no flag to set
-  - *Off when:* to put the fit rules back for a comparison, or if a sigma ever refuses drives the cart is plainly fit for
 - **`places_from_the_file`** — bool, default off
   - *What:* before the graph's book of places has been heard, a name is answered from the yaml beside the map (coordinates of the frozen-grid era); off, a name is refused until the book arrives, with that reason
   - *Default:* off — that file holds coordinates of a frame that no longer exists, and the board keeps its own stale copy (the sync excludes it). Twice a name was answered from it and sent the cart at a point outside the map: `home` -> (-9.39, +2.53) on 2026-09-19, `printer` -> (-11.38, +0.77) on 2026-09-21, 2.1 s after RTAB-Map's first graph of a cold start of both halves — the planner said 'outside bounds', the behaviour tree ran 33 recoveries in 28 s and backed the cart into a sofa. A refusal costs a second try a minute later
   - *On when:* only on a robot driven without the laptop's graph at all, on the old frozen map
   - *Off when:* always under World R: a place rides a graph node, and only the graph can say where that node is now
-- **`start_on_a_known_pose`** — bool, default on
-  - *What:* where the tracker publishes a sigma, a goal is refused for the pose's sake only when there is NO pose — nothing has ever corrected it, or the sigma stopped arriving; off, a drive starts under 0.25 m and anything over it buys a whole-map search first, as before
-  - *Default:* on — 2026-09-19, camera-only at the bookshelf: parked close to it the camera recognises nothing (PnP 0 of 20 inliers), so no word arrives and the belief grows along the odometry — 0.26 m, a pose the cart plainly had. The old rule refused the goal and sent it to _find_myself, which is a whole-map LIDAR search judged by the fit, and with the lidar out of the tracker's sources that fit is 0.00 by construction: 'still lost (fit 0.00)', goal after goal, with nothing the cart could do to earn a drive. A sigma is evidence for stopping a drive that is already running (BlindDriveWatch, 0.40 m), where the readings keep coming and a cut costs a stop; it is not evidence for refusing to move at all
-  - *On when:* always where a sigma is published, and above all camera-only: it is the difference between a cart that drives on what it knows and one that waits for a sensor it does not have
-  - *Off when:* to put the 0.25 m start threshold back for a comparison, or where a drive must never begin on a pose looser than Nav2's own arrival tolerance
 - **`jump_clear`** — bool, default off
   - *What:* map -> odom is read from TF five times a second and, when it STEPS further than 0.10 m, Nav2's local costmap is emptied ("/local_costmap/clear_entirely_local_costmap", asynchronously, at most once per 1 s): the marks in that grid were laid where the cart used to be. The step in that edge is the correction alone — the cart's own motion lives in odom -> base_link — whoever published it. Off, nothing reads the edge and no listener is started for it
   - *Default:* off — OFF, AND SINCE 2026-09-22 ITS PREMISE IS GONE: the local costmap is built in the ODOM frame (ros/params/nav2_params.yaml), and a step in map -> odom does not move a grid that is not drawn in map — the marks stay exactly where the cart saw them. A clear would now throw away good evidence for nothing. The flag stays because the frame is one word away from being map again, and there it is the right behaviour: the lidar tracker did exactly this while it owned map -> odom (pepin.watch.JumpClear, written for the camera-only return of 2026-09-16, where the pose lagged 1.4 m behind the cart and Nav2 spent 29 recoveries fighting marks placed at the poses before each correction). Even then the other side of the trade was unmeasured: RTAB-Map corrects in centimetres at a loop closure, which the costmap absorbs, and the raytracing of the live scans re-clears a stranded mark within seconds anyway. The threshold and the gap are the tracker's measured ones, inherited unchanged
   - *On when:* only together with a local costmap put back into the map frame, and then when a drive is seen fighting a second copy of the room after a correction: recoveries at obstacles that are not there, the grid holding marks offset from the live scans by the size of the last jump
   - *Off when:* the shipped state, and the only sane one while that costmap is in odom: a clear there costs a controller its picture of the room and buys nothing
 - **`pose_topic`** — bool, default on
-  - *What:* the pose this node reads out of TF is republished as /pose (geometry_msgs/PoseStamped in map, 5 Hz, stamped with the transform's own stamp), so the other nodes on this board can have the pose without a TF listener of their own. Inert where a tracker runs (there /tracker_pose is that topic already) and on a split stack, where the reader is on the other machine and reads the edge itself. Off, nothing is published and this node's listener goes back to being started on the first ask
+  - *What:* the pose this node reads out of TF is republished as /pose (geometry_msgs/PoseStamped in map, 5 Hz, stamped with the transform's own stamp), so the other nodes on this board can have the pose without a TF listener of their own. Inert on a split stack, where the reader is on the other machine and reads the edge itself. Off, nothing is published and this node's listener goes back to being started on the first ask
   - *Default:* on — a TF listener is a subscription to the whole /tf stream — RTAB-Map's map -> odom at 20 Hz plus the board's odom -> base_link at 50 Hz plus the statics — deserialised in Python whatever the reader wanted out of it. Two of them ran on a 4-core A53 to read one pose now and then: this node's, for `where`, the preflight and the jump watch (~22 % of a core), and pepin_bringup.run_recorder's 5 Hz read for the tape's `loc` rows (~34 %), on a board measured at 252 % with the real-time loops starving (2026-09-22). This node owns navigation and the jump watch, so its listener is the one that stays and the tape reads the topic instead (run_recorder's loc_from)
   - *On when:* always where this node and the tape recorder share a machine: it is what lets every other node there read the pose for the price of a 5 Hz PoseStamped
   - *Off when:* to put the two independent listeners back for a comparison — turn this off here and run_recorder's loc_from to tf, or the tape loses its pose rows
@@ -1992,103 +1717,15 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *On when:* rpp_shim by default since the evening of 2026-09-23 (six legs: 21-33 s, 6-11 recoveries, 4-10 cm and 2-5 deg at the mark; MPPI on the same board crawled at a median 0.06 m/s); mppi where its sampling is wanted, rpp for the position-only drives of before
   - *Off when:* rpp for an A/B against the RPP drives of before, or if MPPI's cycle does not fit the board's control period (the controller server's 'Control loop missed its desired rate')
 - **`start_needs_placement`** — bool, default on
-  - *What:* under PEPIN_LOCALIZER=rtabmap a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for this same flag before its own preflight. Off, a fresh map -> base_link is enough, as before 2026-09-23
+  - *What:* a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for this same flag before its own preflight. Off, a fresh map -> base_link is enough, as before 2026-09-23
   - *Default:* on — on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the pose it SAVED at its last shutdown, and a fresh transform was taken for a localisation — 'at home' at the bookshelf with 0 of 198 updates recognised, then 76 cm off inside the table. The laptop's flag of the same name only changes what rtabmap_frame SAYS: it cannot lift a refusal of silence, from a node that is down, respawning or running code from before the word existed. This one is the board-side switch the refusal itself answers to
-  - *On when:* always under PEPIN_LOCALIZER=rtabmap: a pose nobody has vouched for since RTAB-Map's start is not a pose to drive on
+  - *On when:* always: a pose nobody has vouched for since RTAB-Map's start is not a pose to drive on
   - *Off when:* when the word cannot come and the cart is known to stand where RTAB-Map's pose says: pepin-vslam down or started before this build (ros/laptop.sh vslam restarts it on the checkout), or a dark room with no seed at hand
 - **`cancel_every_goal`** — bool, default on
   - *What:* a cancel on the socket also asks both navigators' own cancel services (navigate_to_pose and navigate_through_poses, <action>/_action/cancel_goal) for EVERY goal — a zero goal id, whoever sent it — and answers what each said (``navigators``); off, it cancels only the goal this node sent, as before 2026-09-25
   - *Default:* on — ros/goto.sh drives through ros/tools/goto_ros.py, a goal this node never sent, so this cancel reached nothing, and goto.sh's own cancel started goto_ros.py on the board mid-drive: a new ROS process is a new zenoh session, and each one stalled all laptop -> board delivery for 2.6-3.1 s about 1.5 s after it started (34 of 39 cases, journal 2026-09-25). Asked from this long-lived node the same cancel costs a socket write; one 3 s deadline is shared by both navigators, as in goto_ros.py
   - *On when:* always: the operator's cancel means every goal on the board, whichever client sent it
   - *Off when:* to put the old answer back for a comparison — pepin.goal_link then finds no navigators in the answer and ros/goto.sh cancel falls back to goto_ros.py
-
-#### `laptop_localizer`
-
-- **`tf_belief`** — bool, default on
-  - *What:* when /tracker_pose has been silent for a second, the pose a camera scan is matched around is looked up from TF (map -> base_link at that scan's stamp) instead of carried from the last /tracker_pose; off, a silent board means no camera measurements at all
-  - *Default:* on — it breaks a deadlock measured on 2026-09-13 night: with sources=camera the board publishes /tracker_pose only after an UPDATE, an update needs a measurement, and a measurement needs a belief — 413 camera scans were rejected with "no belief" in one evening and not one measurement was ever sent. TF has no such circle: the board broadcasts map -> odom 20 times a second whatever happens to the tracker (pepin_bringup.relocalizer, the 0.05 s timer) and odom -> base_link carries the motion, so map -> base_link at the scan's own stamp is the same belief the carry was reconstructing — without the carry, and without waiting for the board to speak
-  - *On when:* always where the board broadcasts map -> odom: the camera cannot start otherwise, and the belief is exact at the scan's stamp rather than carried to it
-  - *Off when:* where TF reaches this machine from somewhere else than the tracker that owns the pose — a second broadcaster of map -> odom — or to measure how much the camera depends on the board speaking at all
-- **`global_watch`** — bool, default on
-  - *What:* run the whole-map search once every watch_period_s and publish what it finds on /localization/candidate; off, this half of the node is a subscriber that costs nothing and the board is back to searching for itself only once it is already lost
-  - *Default:* on — measured on the kidnap tape (run 0171, where the odometry jumps 1 m and 40 deg while the scans do not): the tracker's own window never recovered — 0.69 m of error still there after 39 s — and the board's own slow search found the truth four times (fits 0.76/0.72/0.79/0.75 against the tracker's 0.50-0.60) and died unconfirmed every time, because at a metre off this flat still fits 0.53, just under the 0.55 that declares the cart lost. This search costs 125 ms median (p90 165, max 258) against the board's 3700 ms, and with the shipped streak of 3 it brought the cart back in 2.9 s with 0 false re-seeds over the undisturbed tape
-  - *On when:* whenever the map is a known one and the laptop is up
-  - *Off when:* in SLAM mode: the map is RTAB-Map's there and still being built, so a whole-map search searches a map that changes under it
-- **`watch_period_s`** — number 0.2..60, default 1.0
-  - *What:* seconds between searches (0.2..60)
-  - *Default:* 1.0 — it follows from the measured cost and the streak: one search is 125 ms median, 165 ms p90, 258 ms max of one core on this machine, so 1 Hz is 12-26 % of a core, and one candidate a second is what makes the shipped streak of 3 cost 2.9 s of recovery
-  - *On when:* shorten it when recovery must be faster than three seconds and the laptop has the core to spare
-  - *Off when:* lengthen it on a busy laptop, or on a map large enough that a search costs more than the measured 0.26 s
-- **`watch_max_scan_age_s`** — number 0.1..3600, default 1.0
-  - *What:* how long a revolution may sit in hand and still be searched, counted from when it ARRIVED here (0.1..3600)
-  - *Default:* 1.0 — default by design, unmeasured as a number; the rule behind it is measured. /scan arrives at 9.8-10.8 Hz, so a healthy revolution is about 0.1 s old and one second is ten missed ones. The age is taken on this machine's monotonic clock and never from the stamp, because the board's clock runs 2.3-2.8 s ahead of the Mac's: a stamp-based age would either never fire or switch the watch off for good
-  - *On when:* raise it when the bridge is slow but honest and candidates are being dropped as stale
-  - *Off when:* a huge value is the old behaviour, which searched whatever was held — including a frozen scan, publishing the same answer again as if it were news
-- **`camera_search`** — bool, default off
-  - *What:* search the WHOLE camera map for the cart on a camera fan, the way global_watch searches it on a lidar revolution, and publish what it finds on /localization/candidate with the fan's source named; off, the camera only ever refines a pose somebody else holds and a camera-only cart that loses its pose stays lost
-  - *Default:* off — OFF, and the measurement is why. The offline kidnap of 2026-09-14 (scratch/camera_kidnap_offline.py: fans raycast out of the volume's own camera band at 60 lidar-truth poses of the two goto tapes of 2026-09-13, searched from scratch with no belief) put the top place within 20 cm / 10 deg of the truth 5 times out of 60 on the heavy band (weight >= 20) and 1 of 60 on the lenient one; with 5 cm of range noise and 20 % dropout, 2 of 60 and 0 of 60. The truth was not merely ranked below a rival — it was not among the places the search returned at all in every miss, so this is the fan's geometry and not the ranking: +-40 degrees and 3 m of reach (pepin.depth.depth_to_scan) against a band holding 743 occupied cells over 14 x 12.5 m. The fit cannot tell the good answers from the bad either (1.00 at the true pose and 1.00 at a top place 4.5 m away), which is what camera_search_max_ambiguity is for. Re-run on the snapshot the deploy left on disk that same night — a band four times denser, 2912 occupied cells at weight >= 20 instead of 743 — the same 60 kidnaps found the cart 0 times, and the truth was still not among the places returned: density alone does not buy this fan a fix. Everything here is built and tested so the switch can be flipped the day the band can answer; nothing about it is fixed by tuning
-  - *On when:* when the kidnap script says the band can answer — it is the number to move, and a denser band on its own did not move it — or in a carry test where a wrong answer costs nothing and the report line is what is being read
-  - *Off when:* now, and until that number moves: a search that finds the cart 3-8 % of the time cannot recover a pose, and a streak of 3 makes its real recovery rate lower still
-- **`camera_search_source`** — choice: depth, contact, default depth
-  - *What:* which camera fan the whole-map search runs on: the depth band or the floor-contact line (one of: depth, contact)
-  - *Default:* depth — the depth fan, because it carries the room's surfaces while the contact line marks only where the floor meets an obstacle. Measured on the live tapes of 2026-09-13, then against the volume's own camera band (the slice this node no longer reads): depth 1.00 median (p10 0.78, 557 matches), contact 0.54 median (p10 0.35, 431 matches) — the contact line explains a map half as well, and a global fix is exactly where the weaker explanation cannot be afforded
-  - *On when:* depth, always, while this feature is off anyway
-  - *Off when:* contact to measure the floor line against the same grid, or where the depth network is the thing in doubt
-- **`camera_search_period_s`** — number 0.2..60, default 2.0
-  - *What:* seconds between whole-map searches on a camera fan (0.2..60)
-  - *Default:* 2.0 — one camera search costs 74-115 ms of a core on this laptop (median 85-100 over the 240 offline kidnaps of 2026-09-14), the same order as the lidar's 125 ms, and it only ever runs while the lidar is NOT answering — so its worth is measured in how fast a lost cart comes back, not in how current it is. Two seconds is half the lidar's rate: a streak of 3 is then 6 seconds of standing still, and the search shares one thread with the lidar's watchdog, which must never wait behind it
-  - *On when:* shorten it in a carry test, where the whole point is how fast a candidate streak forms
-  - *Off when:* lengthen it on a busy laptop; the camera's search is the one that can be late
-- **`camera_search_min_fit`** — number 0..1, default 0.25
-  - *What:* a camera candidate whose fit is below this is not published at all (0..1)
-  - *Default:* 0.25 — the tracker's own lost_below, the floor a camera MATCH is refused at (camera_min_fit) and pepin.watchdog.CAMERA_ADMIT_FIT, which is the floor the board reads a depth or contact candidate's fit against. It is deliberately NOT the lidar's 0.45 and it is deliberately not the judge: a fan is scored on the few beams the band can speak for, so its fit saturates — 1.00 median at the true pose AND 1.00 median at a top place 4.5 m away over the 240 offline kidnaps, with every one of the 232 wrong answers scoring above 0.50. This floor stops a fan with nothing judgeable in it from travelling; the twin check does the judging
-  - *On when:* raise it only with a measurement that says a higher fit means a better place for a fan — the 2026-09-14 numbers say it does not
-  - *Off when:* 0 lets the board's own gate do all the refusing
-- **`camera_search_max_ambiguity`** — number 0..1, default 0.8
-  - *What:* a camera candidate whose runner-up explains the fan this well from another place is not published: the twin check (pepin.watchdog.ambiguity) read on the ranking measure the search itself uses (0..1)
-  - *Default:* 0.8 — 0.80 and not the lidar's 0.90 (pepin.watchdog.AMBIGUITY_MAX), measured on the same 240 offline kidnaps: at 0.80 not ONE of the 232 wrong answers survived, in any of the four configurations, while 5 of the 8 true fixes did; at 0.90 between 1 and 6 wrong answers per configuration got through, and a wrong candidate is the one thing this whole path must never produce. It costs recall the camera does not have anyway
-  - *On when:* 0.90 to read the same numbers the lidar's candidates are read with, when what is being measured is how ambiguous the band is rather than where the cart is
-  - *Off when:* tighten it further (0.7) in a room of repeated furniture, where a fan's look-alikes are the rule
-- **`camera_sources`** — list of: depth, contact, default depth,contact
-  - *What:* which camera scans are matched here and sent to the board as pose measurements on /localization/measurement: the depth band, the floor-contact line; empty, nothing is matched and the board tracks on the lidar alone (any of: depth, contact, comma-separated)
-  - *Default:* depth,contact — both, because fused they are what stays within 0.7/1.6/5.7 cm of lidar-only over run 0171 while neither carries the map alone (the depth band alone loses it in 0.5 s, the contact line in 12 s: scratch/camera_only_localization.py). Matching them HERE is the day's verdict: on the board the same pair cost 147 ms a scan, 4.7 Hz and 50 cm p90 of live error (scratch/drive_bisect.py, runs 0238-0241), and on this machine a match is a few milliseconds of a core that has nothing else to do
-  - *On when:* whenever the camera is meant to help the pose — parked bumper to furniture, a blocked or dead lidar
-  - *Off when:* empty is the switch that takes the camera out of the tracker's pose without touching the costmap layers, and the state to leave it in while the camera's own numbers are in doubt
-- **`camera_match_hz`** — number 0.2..30, default 5.0
-  - *What:* how often each camera source is matched and a measurement published (0.2..30)
-  - *Default:* 5.0 — the cadence the offline replay fused at and the cadence the camera delivers: the depth pipeline runs at 9-11 fps and the contact scan beside it, and the replay that cost 0.7 cm fused every frame. 5 Hz per source is half of what arrives — two matches a frame period, a few ms each here — and it is what the board's own update rate can absorb without a measurement ever waiting longer than its carry is honest
-  - *On when:* raise it towards the camera's own rate when the pose must follow the camera closely and this machine is idle
-  - *Off when:* lower it on a busy laptop: the board fuses whatever arrives, and a measurement that comes at 2 Hz is still carried honestly to the update that takes it
-- **`camera_window_m`** — number 0.01..1, default 0.09
-  - *What:* half-width of the window a camera scan is matched in, metres, around the board's belief carried to that scan's moment (0.01..1)
-  - *Default:* 0.09 — 0.09 is the width the camera is ACCURATE in, measured and not inherited: the four tapes of 2026-09-14 (105644, 105747, 110103, 110529) re-matched at 0.09 / 0.20 / 0.30 / 0.50 m (scratch/camera_window_sweep.py, against the fused volume's camera band as it was then read) give a median error against the lidar truth of 9.0/9.7/19.6/23.2 cm at 0.09 and 42/55/63/49 cm at 0.50 — every tape monotonically worse the wider it may look, with the forward bias growing from +3.5...+11.8 cm to +14...+50 cm. The reason is on the same tapes: the lattice a fan is matched on is a plateau, a rival 6 cm away scoring 0.99 of the winner at every window, so the answer inside the window is a tie-break and the window is what keeps the tie-break beside the belief the lidar and the odometry hold. The 42 -82 % of matches that come back as bounds (``edge``) are that clipping, and it is the clipping that keeps the camera at 9 cm: widening to 0.50 m leaves 19-56 % of them bounds anyway
-  - *On when:* nothing measured asks for it. A wider window does not pull a poor belief back — it lets the fan walk away from it, and it costs: a 0.50 m window is 444-694 ms a match on this Mac against 8-12 ms at 0.09 (the same replay), which no camera cadence can pay. Wider than 0.09 belongs to somebody holding a measurement that the camera pins a pose it cannot see from the belief, and to a two-stage search (:meth:`pepin.localization.Localizer.coarse_measure`, 9-15 ms at 0.50 m)
-  - *Off when:* narrow it to make a camera match cheaper and safer still; below the odometry's own error over a fifth of a second it stops being able to correct anything
-- **`camera_window_from_sigma`** — bool, default on
-  - *What:* the window a camera scan is matched in is widened to hold the peak wherever the board's own covariance, carried to the scan's stamp, says the truth may be further out than camera_window_m: sqrt(pepin.fusion.GATE) sigmas plus the camera's measured floor. Off, the two window flags are the whole width, as before
-  - *Default:* on — measured by what the fixed window costs. On tape 0373 at rest the depth fan's winner came back ON the window's edge in 6089 of 6608 words — 92 % — because the +-0.08 m tracking window sits around a belief that is itself about 10 cm off, and pepin.fusion.BOUND_INFLATION then widens a 7 cm peak to 70 cm in the report: the fan's real error is 6.6/11.1 cm and 5.7 deg (n=321) and it CLAIMED 71.8/42.1 cm and 40.4 deg, NEES median 0.10 where 3 is honest (scratch/remote_word_nees.py). A source that under-claims tenfold is out-voted by a worse one, and camera-only that is the difference between having a second opinion on the graph and not having one. Neither number in the new width is chosen: sqrt(GATE) is the radius in sigmas this stack already accepts a 3-DOF measurement at, and the 0.111 m / 5.7 deg floor is that same measurement of the fan's own bias. The 0.09 m stays as the FLOOR, because the sweep that measured it (scratch/camera_window_sweep.py: 9.0-23.2 cm of error at 0.09 against 42-55 cm at 0.50) refuted a window that is always wide, not one that opens only when the belief is loose
-  - *On when:* on: it is what makes the camera's covariance worth reading at all
-  - *Off when:* to reproduce the fixed window for an A/B, or on a laptop where the coarse pass (9-15 ms at 0.5 m) cannot be afforded beside everything else
-- **`camera_window_deg`** — number 0.5..90, default 9.0
-  - *What:* half-width of the same window in heading, degrees (0.5..90)
-  - *Default:* 9.0 — 9 degrees for the same reason the 0.09 m stands, and measured with it on the tapes of 2026-09-14: the heading error against the lidar truth is -0.4...-4.8 degrees median in this window and -0.2...-20 degrees when the window is opened to 20, the fan's heading running away with its position. A fan of +-40 degrees does not pin a heading any better than it pins a place; the belief it starts from is never more than a degree or two out while the lidar is alive, and that is what it is there to refine
-  - *On when:* after a stretch on odometry alone, where the heading is what drifts — and only with the position window left alone, since the two were swept together and only their pair was measured
-  - *Off when:* narrow it where the cart turns little and every degree of search is cost
-- **`camera_min_fit`** — number 0..1, default 0.25
-  - *What:* a camera match whose fit is below this is not sent: it is counted as low fit and the board never hears about it (0..1)
-  - *Default:* 0.25 — 0.25 is the fit at which the tracker itself calls a scan weak (pepin.localization's lost_below): below it the scan explains nothing and its pose is the window's tie-break, not a measurement. It refuses only that much — the camera's fans sit at 0.5-0.6 against the lidar's map on run 0171, and the worst live camera-only fits of 2026-09-13 were 0.35-0.46. The covariance already widens a poor match a hundredfold at the bound; this floor is for what is not a match at all
-  - *On when:* raise it to send only matches the map really explains — a room the camera sees badly, a map that has moved on
-  - *Off when:* lower it to let the board's own disagreement gate do all the judging, which is what it is there for
-- **`covariance`** — choice: peak, fit, default peak
-  - *What:* how sure a camera measurement says it is: peak — the spread of that match's own score peak at the camera matcher's temperature (config/matcher.json); fit — the fit-scaled second moment of the whole surface, with the source's trust in it, that shipped before it. It is the number the board's information filter weighs the fan by (one of: peak, fit)
-  - *Default:* peak — the fan's covariance decides everything the camera is allowed to do to the pose, and the fit-scaled one was never held against an error. On the peak path the scale is calibrated (T = 0.016, mean NEES 2.99 over 10047 lidar matches of the four goto tapes of 2026-09-13: scratch/peak_temperature.py) and reads 0.9-1.2 cm at a good fit, so the number a fan sends means something. It does not by itself weigh the camera down: both covariances shrink about sixfold together, and on the real matcher's own lattices a +-40 deg fan 5 cm off the truth keeps its share of the across-wall information — 29.8 % on fit, 34.8 % here, pulling the fused pose 17.4 mm of the 5 cm against 15.9 (scratch/peak_skeptic_fuse.py). The camera's own temperature is PROVISIONAL, the lidar's number: no camera scan is on those tapes, and until an operator records /localization/measurement against /tracker_pose and runs scratch/peak_temperature.py --camera, the source's trust (0.5) keeps widening the fan on top of its peak
-  - *On when:* on: the board weighs the camera by a spread that means something
-  - *Off when:* fit is what every tape before 2026-09-13 was recorded with, for an A/B; and the switch to reach for if a calibrated fan ever misbehaves in the field. Flip it TOGETHER with relocalizer's flag of the same name: a laptop on peak against a board on fit hands the same fan 75 % of the across-wall information and 38.9 mm of a 5 cm pull instead of 34.8 % and 17.4 mm (scratch/peak_skeptic_fuse.py)
-- **`explained_vote`** — bool, default on
-  - *What:* returns the map cannot explain (a person, a moved chair) do not score a camera match: the same vote the board's tracker takes on its own scans (relocalizer's explained_vote), taken here, on the grid the camera is matched against
-  - *Default:* on — it is the board's own switch and it followed the match here: until 2026-09-13 these two fans were matched inside Localizer.update_from, which builds the vote from the static mask whenever explained_vote is on, and moving the matching to this machine took the vote off them silently. Measured on the furnished room with a person standing in the fan (scratch/camera_vote_probe.py): with 10 to 18 of the 41 beams on his legs, he moves the measured pose by 2.2 cm median and 2.5 cm at worst without the vote, and by 0.3 cm with it — a systematic pull that grows with how much of the fan he fills, replaced by a slide of a few mm. The worst voted case is 3.8 cm, a thinned fan sliding inside its own plateau, and the fan's sigma there is 8-11 cm, so the fusion already discounts it. The fans' floors are on the roster (vote_min_points 20): a mask that would leave a fan too thin to fix a pose is dropped and the whole scan votes
-  - *On when:* in a room with people and furniture that moves — the room this robot lives in
-  - *Off when:* to measure what the vote costs or buys the camera (A/B against the board's lidar-only pose), or in an empty room where every return should count
 
 #### `marks_audit`
 
@@ -2143,207 +1780,9 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* on — on, because the label costs one service call and is the only name RTAB-Map itself understands. It is NOT the storage and this node never reads it back as one: beside a loaded database nothing is written (Mem/IncrementalMemory false) and a label on a node in the working memory only flips a dirty bit (Signature.h:76), so a label set while localising never reaches the file. list_labels is still called with it off — it is the only way to learn which node RTAB-Map considers the current one
   - *On when:* always beside a database that may be written; it costs nothing where it cannot
   - *Off when:* on a database that must not be touched at all, even by a dirty bit
-- **`mark_sigma_m`** — number 0..2, default 0.25
-  - *What:* the widest the tracker's own error bar may be, metres, for a mark to be taken: past it the mark is refused with the reading in the answer (0..2)
-  - *Default:* 0.25 — 0.25, the same bar a DRIVE starts on (pepin.watch.DRIVE_SIGMA_M): a place marked while the cart does not know where it stands is a place nobody can drive to afterwards, and the two thresholds must be one number or a mark can be taken at a pose no goal would be sent from. Read from the tracker's covariance and not from the lidar's fit, which is 0.00 by construction on a camera-only stack and refused every mark there (2026-09-15)
-  - *On when:* always
-  - *Off when:* raise it only to mark a place in a corner where the pose is never sharp — and then read the sigma the answer prints before believing the place
-
-#### `relocalizer`
-
-- **`rest_lock`** — bool, default on
-  - *What:* hold the pose while the cart stands still (wheels quiet 0.6 s and the gyro under 1.5 deg/s): a match's residual is blended in with a time constant instead of taken whole
-  - *Default:* on — the best-measured switch in the tracker. On tape 0182 (6 s at rest, a full turn, 8 s at rest) the published pose's rest band goes from 8.34 deg with the lattice alone to 0.51 deg with the rest lock, and on the robot it reads 0.42 deg at sd 0.13; while driving (tape 0170) it took p90 |yaw rate - gyro| from 7.74 to 4.86 deg/s and the correction's sd from 0.45 to 0.29 deg. It costs +0.04-0.08 ms a scan. Flipped live in the demo: 9 deg to 0.3
-  - *On when:* always: a still cart whose pose wanders is the first thing a watcher sees
-  - *Off when:* to show what the raw match does (the demo's A/B), or where the cart is carried by hand and the wheels have no say in whether it stands still
-- **`explained_vote`** — bool, default on
-  - *What:* returns the static map cannot explain (a person, a moved chair) do not score the match
-  - *Default:* on — alone it took the rest band from 10.5 deg to 2.38, and with the rest lock and the sub-cell refinement to 0.51 (tape 0173). The mask is dropped when fewer than half the returns are explained or fewer than 60 come back, because a vote taken only on what already fits is mildly self-confirming
-  - *On when:* in a room with people and furniture that moves — the room this robot lives in
-  - *Off when:* in an empty room where every return should count, or to measure what a crowd costs the match
-- **`rest_tau_s`** — number 0.1..60, default 6.0
-  - *What:* the rest lock's time constant: seconds for a residual to die at rest (0.1..60)
-  - *Default:* 6.0 — 6 s against the 3 s first tried: at the node's roughly 1 Hz rest cadence 3 s let 2.5x more match noise through, and 6 s halves that while still converging a nudge in seconds — the rest band reads 0.37 deg at 6 s
-  - *On when:* lengthen it for a cart that stands for minutes and must not drift at all
-  - *Off when:* shorten it when a nudged cart has to take its new pose quickly — a demo where the cart is pushed by hand
-- **`rest_gain`** — number 0..1, default 0.05
-  - *What:* the rest lock's share per match when no match cadence is known (0..1)
-  - *Default:* 0.05 — default by design, unmeasured on its own: 0.05 against the driving gain of 0.5 was a guess, kept after the robot run because the rest bands it is inside of (0.42-0.51 deg) came out right. It has never been swept
-  - *On when:* raise it towards the driving gain when the rest lock is too slow to accept a real correction
-  - *Off when:* 0 lets no match move the pose while the cart stands: a hard hold, and a way to see how far the odometry alone wanders
-- **`sources`** — list of: lidar, depth, contact, camera, graph, default lidar,graph
-  - *What:* what corrects the pose: the lidar's revolution (/scan), matched here, and the camera (`camera`), whose scans the laptop matches and whose ANSWER arrives on /localization/measurement. The lidar drives the updates while it is fresh and the camera's word rides along, carried to its moment; a stale lidar hands the updates to the measurements. `depth` and `contact` name the camera's raw scans, which this node no longer subscribes to — enabling them changes nothing here. `graph` is RTAB-Map's pose graph on the laptop, whose answer arrives on /localization/graph_measurement with a gate of its own: it rides the lidar's update, and with no scan source driving it drives one of its own exactly as the camera's word does (pepin.measurements.remote_update) — so `graph` alone is a tracker on the graph alone, and `camera,graph` is one update between the two of them, never one each (any of: lidar, depth, contact, camera, graph, comma-separated)
-  - *Default:* lidar,graph — the lidar alone, because the camera cannot carry the map by itself: replayed on run 0171 against flat3 the depth band alone loses the map in 0.5 s (122 cm, 124 deg) and the contact line alone in 12 s (80 cm, 28 deg) — the camera's 0.15-1.3 m band is a different cross-section of the room than the lidar's 0.2 m map, so a look-alike place scores fit 0.90 at its own match and 0.12 at the truth. Fused with the lidar and gated on disagreement, all three together stay within 0.7/1.6/5.7 cm and 0.21/0.56/1.9 deg of lidar-only and never lose the map (scratch/camera_only_localization.py). `camera` is that same fusion with the matching moved to the laptop: on this board the raw scans took the tracker to 147 ms and 4.7 Hz and the live pose 50 cm p90 off the lidar's truth (scratch/drive_bisect.py, runs 0238-0241), while a measurement costs a matrix inverse
-  - *On when:* add `camera` where the lidar is blocked or blind — parked bumper to furniture, or a lidar that stopped: the fusion is measured and gated, and the board pays nothing for it. Add `graph` (e.g. lidar,graph) once the laptop's graph measurement has been watched beside /tracker_pose for a drive: a loop closure is the one correction nothing else on this robot can make
-  - *Off when:* drop a source the moment /localization/sources shows it disagreeing with the others; the lidar alone is the safe state, and it is what the board falls back to by itself when the link dies. `depth`/`contact` stay on the roster because the library still matches those scans where there is CPU for it — an offline replay (scratch/camera_only_localization.py), another robot — not because this board will
-- **`measurement_max_age_s`** — number 0.05..5, default 0.5
-  - *What:* how old a pose measurement from the laptop may be, in seconds, at the moment of the update that would take it: past this it is dropped instead of carried. Read only while carry_stale_words is OFF (0.05..5)
-  - *Default:* 0.5 — the number the day of 2026-09-13 asked for: the camera's word pulled the live pose 50 cm p90 off the truth while the board matched at 4.7 Hz with 147 ms per scan, and every one of those measurements was fused as if it spoke for the moment it was used at. On the new path a measurement is 0.1-0.3 s old when an update takes it (a camera frame at 5 Hz plus the link), so half a second is the slack around that, not a threshold anybody has hit; the failure it is against — a bridge that stalls and delivers a burst — is seconds
-  - *On when:* raise it only to see what a stale measurement does; the carry over odometry is honest for as long as the odometry is
-  - *Off when:* lower it towards the measurement's own age (0.3 s) where the cart drives fast and a carry over a tenth of a second is already a decimetre
-- **`carry_stale_words`** — bool, default on
-  - *What:* a remote word the odometry trail can still reach is CARRIED to the update instead of being dropped for its age: what the carry costs is added to its covariance (pepin.fusion.odometry_covariance) and the trail's own reach is the only bound. Off, measurement_max_age_s decides as it did before 2026-09-18
-  - *Default:* on — the age budget threw away a fifth of the camera's evidence for being late by less than one carry's worth of uncertainty. Measured on the tapes of 2026-09-17 (scratch/word_age.py): the camera's words arrive 272-364 ms old at the median, p90 607-802 ms, worst 1.9 s against a 500 ms budget, and 892 of 6037 `depth` and 916 of 5694 `contact` words on tape 0374 alone were already over it when they arrived. A carry of 0.8 s at the cart's 0.3 m/s is 24 cm of travel, and the odometry's own error over it is 0.5-2 cm by the model the carry already applies — an order under the 8 cm floor the word carries anyway. A word that arrives late is a WIDER word, not no word; that is what an information filter is for, and what the trail cannot reach is still refused (`uncovered`)
-  - *On when:* always: it removes a tunable rather than adding one
-  - *Off when:* to reproduce a tape recorded before 2026-09-18, or where the bridge delivers bursts minutes old and the trail is long enough to carry them
-- **`remote_floor_xy_m`** — number 0..1, default 0.08
-  - *What:* the least position sigma, metres, a measurement from the laptop is fused with, whatever its own peak claims; 0 takes the claim as it comes (0..1)
-  - *Default:* 0.08 — measured 2026-09-13 with the camera recorded but not fused (scratch/camera_error.py, tapes 221822 and 221909): against its own band of the volume the camera's word was 8.5-10.6 cm off the lidar's truth at the median and 12-14 cm at p90, on both legs and both sources (depth, contact). 8 cm is the median; the self-check still inflates a source that scatters beyond its claim on top of the floor
-  - *On when:* always while the camera's covariance is a peak at a provisional temperature: the floor is what its measured error says the word is worth
-  - *Off when:* 0, to fuse the laptop's claim untouched: only to measure what a calibrated camera temperature does on a tape
-- **`remote_floor_yaw_deg`** — number 0..90, default 5.0
-  - *What:* the least heading sigma, degrees, a measurement from the laptop is fused with; 0 takes the claim (0..90)
-  - *Default:* 5.0 — the same tapes: the camera's heading was 1.6-4.9 deg off at the median and 7-9 deg at p90, while a fan on one wall claimed 1.06 deg. Fused on that claim (22:08, sources lidar,camera) the pose spun 14-22 cm and 33-40 deg per update and the lidar's +-9 deg window could not find the truth back. 5 deg is the median of the worse source
-  - *On when:* always, for the reason above
-  - *Off when:* 0, only on a tape, never on the cart
-- **`fusion`** — bool, default on
-  - *What:* fuse every enabled source's word by its information — a match made here, a measurement made on the laptop; off: the widest source corrects alone and the others only report
-  - *Default:* on — with all three sources the fused pose stays within 0.7-5.7 cm of lidar-only and never loses the map. One defect was found and fixed on the way: an edge-bound lidar used to be out-voted by a blind fan's plateau, so the anchor's bound is now taken alone — a 12 cm slip at rest is carried by the second match instead of held for 2.5 s, and recovery while driving is 3.2 cm against lidar-only's 2.9
-  - *On when:* whenever more than one source is enabled
-  - *Off when:* to see which source is actually moving the pose: off, the others still report
-- **`covariance`** — choice: peak, fit, default peak
-  - *What:* how sure a match says it is: peak — the spread of its own score peak at the matcher's calibrated temperature (config/matcher.json); fit — the fit-scaled second moment of the whole surface that shipped before it. Both the covariance the lidar's match is fused by and the one /tracker_pose carries (one of: peak, fit)
-  - *Default:* peak — the fit-scaled numbers were never held against an error: the published sigma was a straight line from the inlier fraction (5 cm at a perfect fit, 35 cm at none). The peak's is calibrated — scratch/peak_temperature.py over the four goto tapes of 2026-09-13 (10047 matches off the window's edge, replayed against the lidar-only trace) solves T = 0.016 for a mean NEES of 3.00 (2.99 measured), and at that temperature a fit >= 0.7 match predicts 0.9/1.2 cm and 0.47 deg against an actual 0.72/0.77 cm and 0.40 deg. That, and only that, is the reason for the default: the sigma a match reports is the error it makes. It is NOT a reason to expect the camera to weigh less — both covariances shrink about sixfold together, and on the real matcher's own lattices (scratch/peak_skeptic_fuse.py, the furnished room of the unit tests) a +-40 deg fan 5 cm off the truth pulls the fused pose 17.4 mm here against 15.9 mm on fit, its share of the across-wall information going UP, 29.8 % to 34.8 %. The 0.24 mm of tests/unit/test_fusion.py is a synthetic lidar made 13 times sharper than the fan, where a real revolution is 3.5 times sharper. The balance is uneven too: position comes out 2-3x conservative and the heading optimistic (variance of error/sigma x 0.45, y 0.34, yaw 1.77)
-  - *On when:* on: the sigma a match reports is the error it makes, which is what an information filter needs to weigh the camera against the lidar
-  - *Off when:* fit puts back the numbers every tape before 2026-09-13 was recorded with — for an A/B against them, or if a calibrated covariance ever misbehaves in the field. Flip it TOGETHER with laptop_localizer's flag of the same name: the board weighs the laptop's fan against its own match, this path is about sixfold sharper in variance, and a board on fit with a laptop on peak hands the same fan 75 % of the across-wall information and 38.9 mm of a 5 cm pull instead of 34.8 % and 17.4 mm (scratch/peak_skeptic_fuse.py)
-- **`self_check`** — bool, default on
-  - *What:* every source vouches for itself: its covariance is widened by how far its answers fall from where its OWN previous answer, carried over the odometry, said they would (pepin.selfcheck). A source four times out in ALL THREE directions loses sixteen times its weight; the factor is that over-claim averaged over the three, so a source out in fewer of them loses proportionally less (a camera fan bound along a wall, four times out in the two directions it measures, is widened 9.7x not 16x — scratch/selfcheck_audit.py). One that is honest, or better, is not touched. Per source, never across sources: no lidar pose enters the camera's number and no camera pose the lidar's
-  - *Default:* on — 2026-09-13: the camera's measurements claimed 25 cm from a linear formula over the fit (pepin.fusion.sigma_from_fit: fit 0.34 -> 24.8 cm) while nobody had measured how far apart two of its own answers fall a tenth of a second apart. On that claim they took 20-45 % of the fused weight and pulled the board's pose 0.8-1.5 cm off the lidar's, whose real error at fit >= 0.7 is 0.5-0.6 cm median against the replay truth (tapes 20260913_190024/190422, scratch/drive_bisect.py). A covariance nobody measured is a claim; this makes every source pay for its weight with its own repeatability. The ratio is a chi-square of 3 dof averaged over the last 20 measurements, so 1.0 is an honest covariance and the factor is capped at 25. One number for the whole matrix: an over-claim in one direction of three arrives divided by three (a depth source jumping 24 cm at rest against a 4 cm claim is widened 6x, not 36x), so the check takes back the over-claim a source's whole covariance carries, never a single direction's. The prediction it judges against pays for the odometry that carried it (pepin.fusion.odometry_covariance: 2 mm + 2 % of the distance, 0.05 deg + 70 % of the turn). Without that term the peak covariance made the check accuse the lidar itself: replayed over tape 20260913_190024 (scratch/lidar_selfcheck_replay.py) the lidar's own ratio ran at a median of 1.97 and a p90 of 6.23 while the cart moved and it was widened on 172 of the 307 moving updates — a false inflation of the one measurement this robot trusts. With it the same replay reads 0.59 median / 0.97 p90 in motion and 0.30 / 0.44 at rest, inflated on 25 of 2271 updates by at most 1.9x (23 of those in motion, by at most 1.09x). The 70 % is measured, not chosen: that tape's odometry turned 604 deg against the lidar's 359 (scratch/tape_odometry_error.py), the per-carry error's RMS is 0.77 of the reported turn and 0.70 with the lidar's own noise taken out — the wheels' 40-60 % in-place slip on this carpet, which is the odometry the tracker is left holding when the IMU drops (that tape carries no ekf and no imu at all). With the gyro alive it is some 2.5x conservative: on tape 0240_20260913_204114, which does carry ekf and imu, the same measurement is 678 deg of odometry against 716 of lidar and a per-carry RMS of 0.28, and the check there goes from 48 of 895 updates widened (max 1.31x) to 18 (max 1.10x)
-  - *On when:* whenever more than one source is fused — it is the only thing standing between the fusion and a source whose covariance is a formula rather than a measurement
-  - *Off when:* to measure what the check is worth on a tape (the ratios are still measured and printed with it off, so the A/B is one parameter set apart), or if a source that is known good is ever inflated by a real correction the odometry could not predict — a push by hand, a wheel slipping while the flag says the step was trusted
-- **`local_fit`** — bool, default on
-  - *What:* a fit only counts where a scan of THIS machine measured it: with no scan here at all — the camera's or the graph's words driving the tracker alone — /localization_fit carries 0.0, the value it holds before the first match, the candidate gate is given that same 0.0 to judge a whole-map answer against, and the remote source's own fit rides /localization/sources per source; off, the remote fit is published and judged against as the tracker's own
-  - *Default:* on — the number is read as 'how well the cart's own scan sits on the map' by everything downstream, and a remote one is neither. The camera's fit is measured on the laptop (pepin_bringup.laptop_localizer), against the very grid the painting it gates writes into: published here, that fit would bless the painting of the map it was itself measured against, a circle no drift can break out of. The replay measures what such a fit cannot see: camera-only (split-no-lidar) sits 1.1 cm from lidar-only at the median, 25.1 at p90 and 43.4 at worst over run 0171, while the fits those same matches reported were 0.41 and 0.62 (scratch/laptop_localizer_replay.txt). 0.0 and not NaN because every gate downstream compares with `<` and NaN passes them all silently (pepin.watch.reported_fit). The candidate gate was the one consumer that read the tracker's raw fit instead of this one, and camera-only that fit is the GRAPH's own claim: on 2026-09-17 21:18-21:28Z the graph claimed 1.00, so every one of the 27 whole-map answers the laptop sent per window was judged 'nothing' — no lidar score can beat 1.00 + BEAT_MARGIN — while the pose those answers disagreed with was some 90 degrees off the room (ros/maps/rec/20260917_212759_goto_board.log). A candidate's score and the fit it is weighed against have to be measured on the same machine or the comparison is void
-  - *On when:* always on a cart that has a lidar: a fit nothing here measured stops the goal server and the volume rather than vouching for a pose
-  - *Off when:* to drive on the camera alone — a dead lidar, a lidar-less robot — where the laptop's fit is the only word there is; watch /localization/sources for the drift it cannot report
-- **`map_grow`** — number 0..1, default 0.15
-  - *What:* how far a mapped obstacle's explanation reaches, metres: a return within this distance of an occupied cell of the served map is the map itself, anything farther is news (pepin.dynamic.StaticMask). It is what explained_vote silences and what tells a person beside the cart from a lost cart (0..1)
-  - *Default:* 0.15 — 0.15 m has stood since the mask was written and every number explained_vote carries was measured at it (tape 0173: the rest band 10.5 -> 2.38 deg alone, 0.51 with the rest lock). It is not a measured optimum: it is about three costmap cells, the room a wall's returns wander in at this map's 5 cm resolution plus the pose error the tracker is allowed. The flag exists because the number matters in both directions and nobody had a knob for it
-  - *On when:* raise it where the map is coarse or the pose is loose and honest wall returns are being called news (watch `silenced` in the tracker's report climb)
-  - *Off when:* lower it to let the mask see smaller changes — a chair moved 10 cm is news at 0.05 and the map at 0.15. The floor is one cell: the mask always grows by at least one (0.05 m on this map), so anything below that, 0 included, is the mapped cell and its neighbours and nothing more
-- **`fit_needs_a_source`** — bool, default off
-  - *What:* /localization_fit falls to 0.00 once no enabled source has spoken for source_patience_s — no lidar revolution, no camera measurement — instead of repeating the last fit measured; off, the fit stands until a source corrects it again
-  - *Default:* off — off since 2026-09-19, because the rule it was written for is now enforced by a number that cannot be faked. It was added on 2026-09-14, when this node published fit 0.70 for 141 s with nothing correcting the pose and the goal server drove two goals on dead reckoning; the day after, /localization/sigma arrived (pepin.watch.PoseSpread), it grows along the odometry whenever no word lands, and every gate downstream reads it in front of the fit — so silence already shows as a widening pose. What zeroing the fit cost instead: camera-only there is no lidar to speak, the published 0.00 is then the NORMAL reading, and it fed a cascade of lidar-shaped refusals at the bookshelf on 2026-09-19 — a goal refused into a whole-map lidar search that had nothing to match
-  - *On when:* on a board that publishes no /localization/sigma at all (a build from before 2026-09-15), where the fit is the only number the gates have
-  - *Off when:* off wherever the sigma is published: the fit then means what it always meant, the last lidar revolution's inlier fraction, and no gate infers silence from it
-- **`source_patience_s`** — number 0.1..60, default 3.0
-  - *What:* how long every enabled source may be silent at once, in seconds, before the published fit falls to 0.00 (fit_needs_a_source) (0.1..60)
-  - *Default:* 3.0 — the lidar delivers 10 revolutions a second and each camera source 5 measurements, so 3 s is thirty missed revolutions — a dead sensor or a dead link, not a hiccup. A cart standing still is not silent: its lidar keeps turning while the motion filter spares the matcher, so rest costs nothing here. Below the goal server's own 4 s blind-drive patience on purpose: the fit must have fallen before that watch starts counting
-  - *On when:* raise it on a link that stutters for seconds at a time and a refused goal costs more than a drive on a stale pose
-  - *Off when:* lower it towards the sources' own stale_after_s (0.5 s lidar, 1.0 s camera) where a drive must stop the moment the sensors go quiet
-- **`belief_yaw_per_turn`** — number 0..1, default 0.05
-  - *What:* the share of every reported turn the tracked pose's HEADING sigma grows by between corrections (pepin.watch.PoseSpread, accumulated step by step); the measurement carry's own term (pepin.fusion.carried, the fusion self-check) is not this number and stays at 0.70 (0..1)
-  - *Default:* 0.05 — 0.05, measured: over three lidar-held drives of 2026-09-19 (tapes 0390/0391/0393, 539 scans matched on the evening's grid, scratch/ekf_heading_error_per_turn.py) the EKF heading's error against the lidar truth is 2.2 deg RMS over 30 deg of accumulated turn and 3.6 deg over 180 deg — it barely grows, so it is 2.2 deg of scan-matcher noise per window plus 0.016 of the turn, and 0.05 is three times that slope. The belief used the wheels-only 0.70 until then, which is what a differential drive's two encoders are worth on carpet and not what an EKF heading with a gyro in it is. On 2026-09-19 a camera-only cart read 28 deg of heading sigma after 18 in-place recoveries and a position sigma over the start gate, and its goals were refused; replayed through the model, 18 quarter turns and half a metre of driving from a graph word's own 0.20 m / 8 deg price at 0.42 m / 42 deg with 0.70 and 0.22 m / 9.1 deg with this number
-  - *On when:* raise it towards 0.70 on a cart driving with the IMU dead — there the heading IS the two wheels and the slip is real
-  - *Off when:* lower it only against a fresh measurement of the same kind: this number is what the tracker admits it does not know, and under the truth it is an overconfident pose that no gate can catch
-- **`map_cache`** — bool, default on
-  - *What:* the map this tracker ADOPTS is written down beside the maps (/maps/map_cache.json: the cells run-length encoded, the id and the minted identity, the digest, the stamp and the topic it came from), atomically and only when the digest changes; at start, with nothing live inside map_fallback_s, that cache is what this node tracks on. Off, the node needs a map on a topic as before 2026-09-18
-  - *Default:* on — the owner's rule is ONE map — the volume — and a board that cannot start without a pgm served from a file has two. This node already is the board's one holder of the map (it adopts, it rebuilds, it owns map -> odom), so it is the one that can keep it. THE CARD: one write per ADOPTION and only on a changed digest, so at map_refresh_s of 2 s the worst case is 16 kB every 2 s while the volume is actually changing (this flat's 51385 cells are 195 kB of raw JSON and 16 kB run-length encoded, scratch/costmap_rle_cost.py) — 8 kB/s against the 55 kB/s a drive's tape already writes, and in practice a handful of writes a drive because depth_fusion republishes only on change. A 32 GB card rated for ~500 write cycles takes that for years; the tape, not this, is what wears it. ATOMICALLY because the alternative is losing the only map to a power cut mid-write: temporary file, fsync, os.replace, fsync of the directory (pepin.mapcache.write_cache), so a reader sees the previous cache whole or the new one whole
-  - *On when:* always on the board: it is what makes a cold boot with the laptop down possible without a file in the loop
-  - *Off when:* while measuring what a boot without any cache does, or on a machine whose card must not be written at all
-- **`verify_remote`** — bool, default on
-  - *What:* a correction made ENTIRELY of remote words — no local scan in the update, so nothing here can check them — must agree with the tracker's own belief within what the two covariances allow (pepin.fusion.GATE, the gate a fusion applies between two sources). One that does not leaves the pose where it was and the update reports that it measured nothing, so the spread grows and the drive gates read it; off, the word moves the pose as it did before 2026-09-18
-  - *Default:* on — the gate inside pepin.fusion.fuse compares each measurement with the SUREST one, so it needs two, and the mode that needs it most has one. Camera-only on 2026-09-17 every update carried exactly the pose graph's word: the tapes read `fused 0, rejected 0` over 40 and 50 consecutive updates (0371, 0372) and no gate ran at all. Parked at home that evening the graph's words read (-9.38, +2.49, -45 deg) while the lidar-held pose was +55 deg and the room's own answer +51 to +57 deg (the board's search after today's reboot; scratch/home_twin_search.py on the tape's last scan); with the lidar muted at 00:48:39Z the tracker went over to the graph's heading by 01:18Z, some 90 degrees, while the cart moved 4 cm in the whole half hour. The same evening the graph's words agreed with the tracker to 0.2-0.9 cm in position (scratch/graph_word_vs_tracker.py), because the anchor had been re-learned FROM the tracker and between closures the word is the tracker's own odometry: the position agreement carried no information and the heading was never checked
-  - *On when:* always where a remote word can be the only source of an update — camera-only, or a lidar that drops out mid-drive
-  - *Off when:* to replay a tape recorded before 2026-09-18, or to measure how far a remote source would have taken the pose (it is still counted and reported when it is refused)
-- **`accept_candidates`** — bool, default on
-  - *What:* re-seed from the laptop watchdog's whole-map candidates (/localization/candidate, pepin.watchdog): a place that disagrees with the tracked pose candidate_streak times in a row, about the same place each time, is adopted through the path the board's own search uses
-  - *Default:* on — measured on the kidnap tape (run 0171: the odometry jumps 1 m and 40 deg while the scans do not) this is the difference between coming back in 2.9 s over 28 scans and never coming back — the tracker's own window still had 0.69 m of error after 39 s, and the board's own searches found the truth four times (fits 0.76/0.72/0.79/0.75 against the tracker's 0.50-0.60) and died unconfirmed each time, because at a metre off this flat still fits 0.53, just under the 0.55 that declares the cart lost. Over the undisturbed tape it re-seeded 0 times, and against another flat's map 9 of 12 candidates were called unknown_map
-  - *On when:* whenever the laptop's watchdog runs and the map is the right one
-  - *Off when:* where a teleport is more dangerous than being lost — under a live goal, or in a room the map does not cover: off, the candidates are still judged, counted and reported
-- **`candidate_streak`** — integer 1..10, default 3
-  - *What:* how many candidates in a row must disagree with the tracker and agree with each other before one of them re-seeds it: the price of a teleport, in seconds (1..10)
-  - *Default:* 3 — deliberate conservatism above a measurement that was neutral: on the kidnap tape a streak of 1 recovered in 0.8 s (8 scans) and this streak of 3 in 2.9 s (28 scans), and both re-seeded 0 times over the undisturbed tape, where the pose never left the reference by more than 0.000 m. Nothing measured prefers 3; the argument is that a look-alike keeps looking alike, so one agreement is not proof
-  - *On when:* raise it in a room of look-alike corners, where a wrong teleport costs more than three seconds of being lost
-  - *Off when:* 1 is the fastest recovery measured (0.8 s) and on that tape just as safe — the value to try when a demo has to show the cart coming back
-- **`map_refresh_s`** — number 0..600, default 2.0
-  - *What:* the least time between two adoptions of /map: a newer grid is taken only after this many seconds AND only if its cells changed. 0 takes the first grid and no other, which is what a served file has always done (0..600)
-  - *Default:* 2.0 — 2 s, and both halves of that number are measured rather than chosen. THE COST: an adoption rebuilds the grid, the correlative matcher, the static mask and the tracker, and the bill is paid on the first match after it, when the matcher's lattice is built — 15-16 ms on the laptop's core for this flat's 239x215 cells and a 280x250 grid alike, so about 65 ms on an A53 at the 4.5x the board's own report lines give for the same match (40-50 ms there against 8-12 ms here, scratch/map_adoption_cost.py). THE BUDGET: at 10 revolutions a second and 45 ms a match the tracker already owns 45 % of a core, and after a fifth for the rest of the node a tenth of what is left is 3.5 % — which allows one adoption every 1.9 s. THE PUBLISHER offers them FASTER than that: RTAB-Map republishes its grid at its detection rate, 1 Hz with map_always_update (rtabmap_util/MapsManager.cpp: the message is rebuilt whenever a node is added or a pose moves more than GridGlobal/UpdateError, 1 cm), so this flag is what stands between a driving cart and one matcher rebuild a second. The old default was 0 — 'adopt the first map and never another' — which under a live graph would freeze the tracker on the first blob the session published
-  - *On when:* raise it while a room is being mapped as it is driven, where the grid changes every second and a rebuild mid-drive costs more than a slightly stale map
-  - *Off when:* 0 to pin the tracker to the first grid it sees — a served pgm's own behaviour, and the way to hold one picture still while something else is measured
-- **`carry_pose_across_maps`** — bool, default on
-  - *What:* adopting a re-rendered map keeps the pose the tracker holds instead of starting again from the saved pose or the pose the odometry gives: it is the same room a moment later, so a new picture of it is no reason to forget where the cart is
-  - *Default:* on — measured by its absence. On 2026-09-14 18:13 a live map swap with the cart at home restarted the tracker at (0, 0, 0) — the saved-pose file is keyed by map id and the new grid has another one — and the very next measurement-driven update published map -> odom for that origin pose: Nav2 logged 'global_costmap: Sensor origin at (0.01, -0.00) is out of map bounds' 110 times, the local costmap stopped following the cart, and no goal succeeded until the board's stack was restarted. Under World R that swap is no longer rare: every loop closure that moves a pose by a centimetre re-renders the whole grid with a new origin, a new size and a new id, and each one arrives here as an adoption. The evidence IS dropped at a switch (candidates, measurements, the graph's word, the LostWatch); the POSE is not evidence about the map, it is where the cart is
-  - *On when:* always, while a new grid is the same room bent by its own graph
-  - *Off when:* a map of a DIFFERENT place arriving on the same topic, where a carried pose would be a lie: off makes the tracker find itself again before it publishes anything
-- **`frame_needs_a_pose`** — bool, default on
-  - *What:* on a KNOWN map — the disk holds a cached map and a pose saved on it — map -> odom is not broadcast until this tracker has a pose on a map; on a map being born (nothing on disk) the identity goes out from the first tick, as it always did
-  - *Default:* on — a default is a refusal, never (0, 0). The identity is the truth only in a map born under the cart (World R: that map's frame IS the odometry's). On a known map it is a lie for as long as the tracker waits for its map: on 2026-09-21 it was broadcast for 9.5 s after every start and then jumped to the saved pose 2.9 m away (the base no longer sat at the map's origin) — and a jump of the pose is what sends Nav2's RangeSensorLayer into a ~4e9-iteration loop under the costmap mutex. Every consumer already treats a missing map -> odom honestly (the ToF bridge's gate stays shut, Nav2's costmaps wait up to their initial_transform_timeout of 60 s, and the cache seats the tracker in ~10 s)
-  - *On when:* always
-  - *Off when:* to reproduce a start from before this gate
-- **`map_fallback_s`** — number 0..600, default 10.0
-  - *What:* how long this tracker waits for a live /map before it tracks on the map it wrote down itself (the map_cache flag, pepin.mapcache) — only while it has adopted nothing at all, and the live grid replaces the cache the moment it arrives. 0 waits for ever, which is what the tracker did before the cache existed (0..600)
-  - *Default:* 10.0 — the board must know where it is without the laptop (CLAUDE.md rule 20), and under World R the map comes FROM the laptop: with the wifi down nothing will ever publish it, and the cache is the whole of the board's independence. Ten seconds because a latched grid arrives in the first second once the bridge's routes are up (RTAB-Map publishes it transient-local, depth 1, reliable — rtabmap_util/MapsManager.cpp) and a cache is a colder start that must not be taken while the live one is merely on its way. A map already in use needs no fallback at all: it is a grid in memory, and losing its publisher mid-drive changes nothing, which is why this only ever fires before the first adoption
-  - *On when:* always: it is the patience before a cold boot falls back to its own cache
-  - *Off when:* 0 to see a bring-up wait for the live grid and nothing else — where a silent /map must be visible as silence rather than papered over by yesterday's map
-- **`carry_candidates`** — bool, default on
-  - *What:* a candidate's pose is moved from the moment of its own scan to now over the odometry between the two stamps (pepin.watchdog.carried) before it is judged and fused, and one the odometry history no longer covers is dropped
-  - *Default:* on — by argument from a measured latency, not by a measured gain: a whole-map search takes 0.12-0.25 s plus a wireless hop, so at 0.8 m/s an uncarried pose is installed about 20 cm backwards along the drive every time — a bias, not noise. On the kidnap tape the carry changes nothing measurable (2.9 s, 28 scans, 0 false re-seeds either way), because that cart was barely moving when it was lost
-  - *On when:* whenever the cart may re-seed while driving
-  - *Off when:* only to reproduce the old behaviour, where the pose the laptop measured a search and a hop ago is installed as the pose now
-- **`odometry_guard`** — bool, default on
-  - *What:* an odometry sample whose step from the last trusted one is impossible (over 1.5 m/s, or over 0.5 m in one sample) while its twist cannot account for it — the wheels at rest, or a twist faster than this cart can drive — is refused: it never reaches the history, so the carry keeps the last pose that made sense; off, every sample is carried, as before. The same guard watches the HEADING: with the wheels at rest, a yaw step beyond what the twist's own rate could have turned in the interval (plus 5 deg) is refused the same way
-  - *Default:* on — 2026-09-14: a bad /vo input sent the board's EKF to 43 km from the flat at 60 m/s, and everything downstream followed — two costmaps chased the pose at 200 % CPU and the depth pipeline carried its scans metres across 25 ms and refitted the depth law from the wreckage (a 1.65 -> 2.05, the law file corrupted). The thresholds are from the tape of that evening (ros/maps/rec/0260_20260914_155145Z_home.jsonl, 146 ekf records over 7.3 s): the frame sat at x 3493.7 m with |vx| never over 0.031 m/s, and its worst single step was 0.045 m in 55 ms — 0.83 m/s, still under the 1.5 m/s limit, which is itself five times this cart's 0.3 m/s top speed. Nothing a drive does comes near it. The heading arm is from the same day, 14:48-14:50: the EKF turned odom -> base_link by about 90 deg with the cart standing on its charger (x, y never left the origin) and the tracker, refusing corrections under occlusion, went round with it. At rest the gyro reads 0.3 deg/s on average and 1 deg/s at worst, so 5 deg between two samples 20-50 ms apart is already a hundred times the noise
-  - *On when:* always: the cart cannot move that fast or turn that quickly, so a step that says it did is the filter, not the robot
-  - *Off when:* when the odometry frame legitimately jumps — a fresh EKF whose frame starts somewhere else while this node keeps running. The guard holds the last trusted pose until the frame comes back to somewhere reachable from it, or until this node restarts
-- **`distinct_scans`** — bool, default on
-  - *What:* a streak is counted in scans, not in messages: a candidate whose scan id is already in the run is a second opinion that heard the first one's scan, counted as replay and not lengthening the streak
-  - *Default:* on — the failure it answers is real: a frozen /scan on the laptop published the same search answer once a second and the board counted three of them as three seconds of evidence — the same replay that fooled the board's own two-search rule on 2026-09-09. On the kidnap tape it costs nothing (2.9 s, 28 scans unchanged). A sender that names no scan says id 0, and a repeated 0 reads as replay too
-  - *On when:* wherever the candidates cross a bridge that can freeze — which is this robot's
-  - *Off when:* only to reproduce the old counting, where one scan's answer repeated could re-seed the tracker
-- **`graph_reseed_while_driving`** — bool, default on
-  - *What:* a candidate from the pose graph (source "graph") may re-seed the tracker WHILE a goal is running, but only when the lidar is not on the roster: with no scan source alive the graph is the only thing that knows the place, and a drive on a belief nobody can correct is worse than a teleport. With the lidar alive, and for every other source, the rule is unchanged: no re-seed mid-drive
-  - *Default:* on — the carry test of 2026-09-14 21:12: with the lidar off the cart drove 64 s on a belief 2 m wrong, the graph recognising the place the whole way and every candidate refused for the single reason that a goal was running. The teleport this allows is bounded by everything else in the gate — the candidate is still carried to now, still judged against this tracker's pose, fit and map, and still needs its re-seed streak
-  - *On when:* always on a cart that can lose its lidar mid-drive, which is this one
-  - *Off when:* to reproduce the old rule (no re-seed of any source while navigating), or when the graph itself is suspect — a fresh database, an anchor learned off a soft seating: then a graph candidate is a confident wrong room and the drive's own watches are the better judge
-- **`clear_costmap_on_jump`** — bool, default on
-  - *What:* when an accepted word moves the published pose further than clear_costmap_jump_m, Nav2's local costmap is emptied ("/local_costmap/clear_entirely_local_costmap", asynchronously, and at most once per 1 s), so the obstacles it marked at the old pose do not stand beside the ones the live scans mark at the new one
-  - *Default:* on — the camera-only return of 2026-09-16 13:15: the graph-held pose lagged 1.4 m behind the cart and Nav2 spent 29 recoveries fighting marks the camera had placed at the poses before each correction. Nothing takes them back — the camera layer clears only inside its own 80 deg fan and camera-only there is no lidar layer to scrub the rest — so every correction leaves a copy of the room offset by the jump and the controller spins between the copies. A cleared local costmap is marked again from the next scans within a control cycle. The behaviour tree already forgets that grid, but on a timer (RateController 0.2 Hz around ForgetStaleObstacles) and only while a goal runs: up to 5 s of driving on a stranded picture, and nothing at all between goals. This ties the clear to the correction that stranded it
-  - *On when:* whenever a source that corrects in jumps is on the roster — the graph, a re-seeding watchdog — and above all camera-only, where no clearing lidar layer scrubs the grid outside the fan
-  - *Off when:* when the marks must survive a correction: a run that reads the local costmap as a memory of what the cart drove past, or a debug of the marking itself
-- **`clear_costmap_jump_m`** — number 0..5, default 0.1
-  - *What:* how far one accepted word must move the published pose before the local costmap is cleared — the step in map -> odom, which is the correction alone with the odometry's own motion taken out; 0 clears never (0..5)
-  - *Default:* 0.1 — 0.10 m is the step the fix of 2026-09-16 was written against, and it sits between the two sizes of correction this tracker makes: a scan match moves the pose by a centimetre or two, the graph's words by 0.1-0.3 m, and only the second kind strands marks worth a clear
-  - *On when:* raise it when a clear is paid for a correction the costmap could absorb
-  - *Off when:* 0 stops the clearing with the flag still on, for a run that wants the jumps counted without the calls
-- **`slip_watch`** — bool, default on
-  - *What:* while the wheels claim speed and the camera's own odometry shows the picture standing still, the wheels are muted at their source (base_bridge's odom_publish) so the EKF never fuses the metres they invent; off, the wheels are always heard and a slip enters the pose
-  - *Default:* on — MEASURED 2026-09-16 with the cart held by hand: the wheels reported 36 cm in 2.4 s, the EKF followed them to 34 cm, the lidar measured 3 cm. The filter's own Mahalanobis gate (odom0_twist_rejection_threshold 5.0) cannot see this — it judges each wheel sample against a prediction the wheel samples before it built. The camera can: standing still its odometry walks 0.2 cm in 42 s (worst 0.6 cm in 2 s, same day), some 0.3 cm/s of noise against the 13 cm/s the wheels were claiming, a ratio of forty (pepin.slip.PictureSlip, ratio 0.5 held for 0.4 s)
-  - *On when:* always on a cart whose camera half is alive: a slip is the one odometry error nothing else on board can see
-  - *Off when:* while measuring the raw wheels, or when the camera's odometry is itself under suspicion — with no picture the watch already stands down by itself
 
 #### `rtabmap_frame`
 
-- **`slam`** — bool, default off, not live
-  - *What:* RTAB-Map is the map (online SLAM): its correction is map -> odom and goes to the board as a message on /map_odom, where pepin_bringup.slam_frame broadcasts it; off, the board's tracker owns map -> odom and this node broadcasts no transform at all (not live: set at the next start)
-  - *Default:* off — default by design, unmeasured: this says which edge is published — a mode, not a tunable — and the two modes are two different graphs of frames, which is also why it is not live. What the mode is worth was measured in the first session: from an empty database a room came up as a 341x341 map over 21 and then 55 graph nodes, a 1 m goal with a 90 degree turn landed within 2.8 cm and home within 6.6 cm after about 4 m of driving, one loop-closure hypothesis was rejected by the scan check (5 % against the 10 % it needs) and none was accepted
-  - *On when:* in an unknown room, launched as one mode end to end (ros/thin.sh slam on the board, ros/laptop.sh vslam --slam): set at start, never mid-run
-  - *Off when:* in every known-map mode, where the board's tracker owns map -> odom: the two publishers must never both run
-- **`graph_measurement`** — bool, default on
-  - *What:* publish where RTAB-Map's graph localised the cart as a measurement on /localization/graph_measurement (source "graph") once per RECOGNISED update, for the board's fusion to weigh like any other word; off, the graph's answer stays on this laptop and nothing reaches the pose
-  - *Default:* on — on since 2026-09-14 16:20: with the lidar driving (sources=lidar,graph, tapes 0275/0276) the tracker took 5 of 27 words and sat 0.7-0.8 cm from the lidar truth, and at rest the word stays 0-8 cm from the tracker; the word is what a lidar-less cart localises on (test C). Before: OFF, because on the stack as it stands the correction never moves at all: over 3 h on 2026-09-14 every closure RTAB-Map found was thrown away by RGBD/OptimizeMaxError (5 links an iteration, rejected on a NEIGHBOUR edge 28042->28043 whose residual is 0.888 m against a 0.244 m sigma, ratio 3.64 over the 3.0 the parameter allows), so there is not yet one accepted correction to judge this word on
-  - *On when:* always beside a known map: the graph's loop-closed answer is the one thing in the stack that can undo accumulated drift
-  - *Off when:* to watch a session's words in the report line and on the recorded topic before they are allowed to move the pose
-- **`graph_candidates`** — bool, default on
-  - *What:* a graph word the board's fusion cannot act on goes out as a whole-map CANDIDATE on /localization/candidate (source "graph", the same covariance, at most one per recognised update): a word refused as disagreeing with the tracker's belief past the fusion's own chi-square (11.34, 3 dof), and a word naming a DIFFERENT place while the tracker has no trusted source behind its pose (published fit below 0.3, or no belief for 3 s). Off, such a word is counted here and reaches nothing
-  - *Default:* on — on, because without it the graph cannot undo a carry at all — by construction, not by measurement: a measurement past the disagreement gate is refused in this node, and one that passes is gated again on the board by the information filter's chi-square (the same 11.34), so the word that is RIGHT after the cart is carried — the one the graph produces the moment it recognises the place — is exactly the word both gates throw away (2026-09-14: the carry test could not work by construction). The candidate channel is the door the lidar's own whole-map search uses for this, and the board guards it with the same rules for every source: three agreeing candidates from one sensor, no re-seed while a goal runs, and no re-seed at all from a source that is not the lidar while the lidar is alive
-  - *On when:* always on a known map, and above all in a carry test: it is the graph's only path to a pose that is not merely inaccurate but in the wrong room
-  - *Off when:* if a graph candidate is ever seen breaking the lidar's own re-seed streak (the board's gate holds one run, and candidates of two sources alternating end each other's)
-- **`graph_memory`** — choice: trust, map, localise, default trust
-  - *What:* who decides whether RTAB-Map's database may LEARN beside a known map. trust: this node switches it live on the rule 'a sharp pose that does not come from the database itself' — the tracker's seating under graph_memory_sigma_m / graph_memory_sigma_deg, and a holder on /localization/sources that is not the graph — calling /rtabmap/rtabmap/set_mode_mapping / /rtabmap/rtabmap/set_mode_localization on a change of verdict that has held for the seating's own freshness window, and carrying RGBD/LinearUpdate / RGBD/AngularUpdate with it. map: always mapping. localise: always localising, whatever the pose is worth (one of: trust, map, localise)
-  - *Default:* trust — trust, because both alternatives were measured and both are wrong. ALWAYS MAPPING is what ran until 2026-09-18: the database grew a new session every launch, the sessions sit 1.6 m and 129 deg apart (scratch/graph_tie_fit.py), RTAB-Map then rejected its own correct recognitions on RGBD/OptimizeMaxError (hypothesis 0.978 with 328 visual inliers, error ratio 5.03 against 3.0), and parked it kept a node a second — 250 junk nodes in one evening. ALWAYS LOCALISING can never learn a new room. The rule is the same one the volume's painting follows: teach only from a pose worth teaching from, and never from the pupil — a mono camera-only pose held by graph words sits at a sigma around 20 cm and fails the seating test by itself, with nothing naming it, while a lidar-held seating passes at 1-2 cm
-  - *On when:* trust always, beside a known map: it is what lets one launch both wake up in a known room and extend the map when the lidar is there to teach it
-  - *Off when:* map while deliberately extending a database by hand with the lidar known good; localise to freeze a database completely (a session where the file must not change)
-- **`graph_memory_sigma_m`** — number 0..1, default 0.03
-  - *What:* the widest the tracker's own error bar may be, metres per position axis (the roots of the covariance /tracker_pose carries, which is the lidar's score peak), for that pose to be worth TEACHING the database from (graph_memory trust); a softer seating leaves RTAB-Map localising. 1.0 lets anything teach, which is the behaviour of before 2026-09-14 (0..1)
-  - *Default:* 0.03 — 0.03, because a fit is not an error bar: at home (the charger, along a sofa) the lidar's seatings spread up to 55 cm in y within minutes at fit 0.67-0.79 — the scan is pinned in one axis there — and a database taught from one of those carries that error into every word it later says. 3 cm is where the gate starts to be a gate: over tapes 0293-0298 the worse of the two position sigmas has a median of 1.50 cm and a p90 of 3.18 cm, so this refuses the worst 11 % of seatings, while 1 cm would refuse 79 % and the database would never learn a thing
-  - *On when:* always: what the database is taught is baked into every word it says afterwards
-  - *Off when:* raise it (to 1.0) only to extend a database in a room where no seating is ever sharp — and then read the sigmas the report line prints before believing a word
-- **`graph_memory_sigma_deg`** — number 0..180, default 1.0
-  - *What:* the same gate for heading, degrees: the database is taught only from a seating whose heading sigma is at most this (0..180)
-  - *Default:* 1.0 — 1.0, because a heading error rotates the whole graph about the cart: over tapes 0293-0298 the lidar's heading sigma at a sharp seating is 0.06-1.14 deg (median 0.4), so this is the loose end of what the peak reports when it is pinned at all, and one degree over the 4 m of the flat is 7 cm at the far wall
-  - *On when:* always, with graph_memory_sigma_m: a seating sharp in x and y and free in heading is a cart that knows where it stands and not which way it faces
-  - *Off when:* raise it only with graph_memory_sigma_m, and for the same reasons
 - **`registration_follows_snapshots`** — bool, default on
   - *What:* RTAB-Map's Reg/Strategy follows what the snapshots carry (/sensor_pack/state): a scan in them means ICP (1), no scan means visual (0), switched live through the node's own parameter path on a change that has held for the hold the state carries. Off, the strategy stays whatever the launch table set and this node only reports what it would have asked for
   - *Default:* on — on, because under ICP a camera-only cart cannot localise AT ALL, and that is measured rather than reasoned: in a minute of camera-only snapshots on 2026-09-18 RTAB-Map logged 28 'Missing visual features or missing raw data to compute them' and 56 'Requested laser scan data, but the sensor data doesn't have laser scan', and not one update named a node. The strategy is one object for the process (the pipeline is deleted and re-created when the parsed value differs from the one in hand, rtabmap/core/Memory.cpp:721-731), so one table cannot serve a node with a scan and a node without one — and which a node has is now data, not config. What is NOT measured yet is that strategy 0 makes a camera-only link on THIS database: that is the live check
@@ -2399,41 +1838,26 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* 0.5 — 0.5: a snapshot whose descriptor is null scores 0.5 against EVERY node (pepin.global_descriptor), Rtabmap::adjustLikelihood's z-scores are then all zero and no hypothesis forms — descriptor mode goes blind where the words would still recognise the place. Half of 10 at a snapshot a second: a service that dies costs at most five blind updates, and one late answer never flips the likelihood
   - *On when:* lower it to fall back sooner
   - *Off when:* 1.0 to keep the descriptor whatever the service does (a measurement of the descriptor alone)
-- **`word_at_picture_time`** — bool, default on
-  - *What:* a graph word is stamped with the moment its PICTURE was taken — the localisation's own stamp, the board's clock under the snapshots — and odom -> base_link is looked up at that moment; the board carries the word to its update over its odometry (relocalizer carry_stale_words). Off, the word is stamped with the newest odom -> base_link stamp heard, as it was until 2026-09-19
-  - *Default:* on — on, measured 2026-09-19. A localisation is published 0.13-1.35 s after its picture (median 0.93 s, scratch/word_stamp_vs_board_now.py: the depth network and RTAB-Map's update), on the board's clock. Stamped 'now', every word taken in a turn was behind the truth by the turn rate times that age: tape 0388 -30.4 and -35.5 deg at +22 and +26 deg/s, tape 0386 nine of nine turning words with the sign of minus the turn rate (+20 deg at -25 deg/s ... -24 deg at +22 deg/s) and under 2 deg on the straights (scratch/tape_0388_word_stamp_latency.py). The camera's own stamp is good to 0.05 s against the gyro (scratch/camera_stamp_vs_gyro_lag.py), so the age is this pipeline's and nothing else's. The fusion took the -30 deg word (sigma 8 deg on both sides of the gate) and camera-only tape 0388 drove 0.5-0.7 m off its pose into a mapped obstacle
-  - *On when:* always under the snapshots (sensor_pack), where the picture's stamp is the board's
-  - *Off when:* only in an arrangement whose localisations are NOT on the board's clock (sensor_pack:=false with laptop-stamped pictures): there the stamped lookup finds no odometry, the report counts the words as 'without odometry', and this switch is the way back to the old stamp
-- **`grid_needs_tie`** — bool, default on
-  - *What:* RTAB-Map's grid (/rtabmap/grid) is relayed onto /map — the one map the board's tracker adopts — only once this start has recognised a node of the database it LOADED (or loaded none), and only grids stamped after that recognition. Until then the board keeps the map it cached. Off, every grid is relayed as it comes
-  - *Default:* on — on, measured 2026-09-19: before its first recognition RTAB-Map's graph is the current node ALONE (1 node against 254 loaded) and its grid is that node's one scan drawn where the ODOMETRY puts the cart. The tracker adopted it, matched the live scan on a picture of itself (fit 1.00, the whole-map search agreeing) and stood 1.26 m from where the graph and RTAB-Map's own scan registration put the cart; its cache kept the picture across restarts (scratch/scan_at_two_poses.py, scratch/grid_alone.py). After the first recognition the grid came back as the room (216x152), the tracker re-seated on it at fit 0.89 and RTAB-Map's word landed 1 cm from it
-  - *On when:* always: a grid that is not tied to the loaded graph is not the map, whatever frame id it carries
-  - *Off when:* to reproduce the self-matching tracker of 2026-09-19, or to watch the raw grid reach the board while debugging the bridge
 - **`start_needs_placement`** — bool, default on
-  - *What:* what goes out on /localization/placement (latched) says this start of RTAB-Map is PLACED only once an update has recognised a node of the database it loaded, or an operator's seed (/rtabmap/initialpose) has been heard since its first update — or it loaded an empty database, whose start pose is the map's origin. The board's goal clients (ros/tools/goto_ros.py, pepin_bringup.goal_server) refuse a goal under PEPIN_LOCALIZER=rtabmap until then, saying to seed or to let the camera see a mapped place. Off, every start counts as placed: RTAB-Map's pose is taken as it is
+  - *What:* what goes out on /localization/placement (latched) says this start of RTAB-Map is PLACED only once an update has recognised a node of the database it loaded, or an operator's seed (/rtabmap/initialpose) has been heard since its first update — or it loaded an empty database, whose start pose is the map's origin. The board's goal clients (ros/tools/goto_ros.py, pepin_bringup.goal_server) refuse a goal until then, saying to seed or to let the camera see a mapped place. Off, every start counts as placed: RTAB-Map's pose is taken as it is
   - *Default:* on — on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the pose it SAVED at its last shutdown, before recognising anything, and the preflight took that fresh transform for a localisation — the cart was 'at home' while standing at the bookshelf (0 recognised a node in 130-198 updates, hypothesis 0.07), and after the next restart 76 cm off, inside the table, where Hybrid refused 'Start occupied' and the recoveries ran 93 times in 81 s (the journal, 19:05 and 20:57). It is the startup-zero trap a third time
-  - *On when:* always under PEPIN_LOCALIZER=rtabmap: a pose nobody has vouched for since the start is not a pose to drive on
+  - *On when:* always: a pose nobody has vouched for since the start is not a pose to drive on
   - *Off when:* to drive on the saved start pose anyway — a cart known to stand exactly where RTAB-Map last shut down, with the camera unable to recognise anything (darkness) and no seed at hand. A refusal of SILENCE (this node down, respawning, or older than this flag) is lifted by the goal server's flag of the same name, which both goal clients obey
 
 #### `run_recorder`
 
-- **`fusion_records`** — bool, default on
-  - *What:* the camera's measurements (/localization/measurement) and the tracker's account of each update (/localization/sources) go on the numbered tape as the 'meas' and 'srcs' records scratch/camera_error.py reads
-  - *Default:* on — they were recorded only by ros/tools/session_logger.py, a second recorder that ros/goto.sh started for every drive: another rclpy process on a 4-core A53, 15 % of a core and ~140 MB, deserialising the same 10 Hz lidar stream this node already deserialises. Two JSON strings a revolution cost this node almost nothing, and one tape then holds a whole drive
-  - *On when:* always: without them a camera measurement cannot be compared to the lidar's truth after the fact
-  - *Off when:* when the fusion is off anyway and the tape should stay small
 - **`bridge_kick`** — bool, default on
   - *What:* the laptop's request to restart THIS board's zenoh bridge (/bridge/kick) is answered by touching /run/pepin/bridge_kick, which a systemd path unit on the board turns into `systemctl restart pepin-bridge`; off, the request is logged and ignored
   - *Default:* on — of two bridges the one that started LAST gets working routes: a route's DDS endpoint is built when the route is created and only while the far bridge is already announcing. On 2026-09-15 a 5 s wireless stall made the board's bridge close the transport and reconnect with the same zenoh id, and thirteen of its pub routes came back with an empty dds_reader — nothing crossed from the board until its bridge was restarted by hand. ros/laptop.sh cures that with ssh (settle_bridge); the laptop's watch has no ssh and must never have one, so it asks here and the board's own systemd does the restart. The handler costs this board one subscription to a topic that carries nothing on a healthy link
   - *On when:* always on a split or vision stack: it is the only way the laptop can put the board's routes back without a human
   - *Off when:* while bisecting the bridge by hand, so nothing restarts under you
 - **`planner_records`** — bool, default on
-  - *What:* what the PLANNER saw goes on the tape too: the global costmap (run-length encoded, at most one grid per new plan), the goal status of Nav2's three actions (navigate_to_pose, compute_path_to_pose, follow_path) and the pose graph's own words (/localization/graph_measurement) beside the camera's; off, the tape holds what it held before 2026-09-18
+  - *What:* what the PLANNER saw goes on the tape too: the global costmap (run-length encoded, at most one grid per new plan), the goal status of Nav2's three actions (navigate_to_pose, compute_path_to_pose, follow_path); off, the tape holds what it held before 2026-09-18
   - *Default:* on — the tape was blind exactly where the failures were. On 2026-09-17 two legs piled up 78 and 90 recoveries in ~125 s with no path (ros/maps/rec/20260917_192935_goto.log, ..._201425_goto.log) and the tapes could not say why: they carry /plan and the LOCAL costmap, and the planner reads the GLOBAL one. The cart's own footprint was clear in every one of the 1740 taped local grids (scratch/footprint_in_costmap.py), so the answer was in the grid nobody recorded. Cost, measured on those tapes (scratch/costmap_rle_cost.py): the planner's grid is 239x215 = 51385 cells, 195 kB of raw JSON, and 16 kB run-length encoded over the four classes that decide whether the cart FITS (unknown / free / inflated / the 99-100 lethal band) — 12-fold, and the gradient it drops is cost, not feasibility. One grid per plan at the tapes' own 1.2 s plan cadence is 13 kB/s beside the 55 kB/s the scans already write, and one encode of 51k cells, 2.8 ms on the laptop's core. The status topics carry a message per transition and the graph's words arrive at 1 Hz
   - *On when:* always while Nav2 is the thing being debugged
   - *Off when:* on a long autonomy run where the tape must stay small, or to reproduce a tape recorded before 2026-09-18
 - **`loc_from`** — choice: pose_topic, tf, default pose_topic
-  - *What:* where the tape's `loc` rows come from where no tracker publishes one: pose_topic, the goal server's /pose (it parses /tf for navigation anyway and republishes what it reads); tf, this node's own TF listener at 0.2 s, which is what it ran until 2026-09-22. The rows are identical either way — same fields, same 5 Hz, source 'tf' in both, because both are that same edge. Inert where a tracker runs: there the rows come from /tracker_pose (one of: pose_topic, tf)
+  - *What:* where the tape's `loc` rows come from: pose_topic, the goal server's /pose (it parses /tf for navigation anyway and republishes what it reads); tf, this node's own TF listener at 0.2 s, which is what it ran until 2026-09-22. The rows are identical either way — same fields, same 5 Hz, source 'tf' in both, because both are that same edge (one of: pose_topic, tf)
   - *Default:* pose_topic — an rclpy TF listener deserialises the WHOLE /tf stream — RTAB-Map's map -> odom at 20 Hz, the board's odom -> base_link at 50 Hz, the statics — to read one pose five times a second, and it cost this node ~34 % of a core on a board measured at 252 % with the real-time loops starving (2026-09-22). The goal server owns navigation and the jump watch, so its listener is the one that stays; a 5 Hz PoseStamped costs this node what any other small topic costs it
   - *On when:* wherever the goal server shares this machine (side all), which is where nav.launch.py sets it: one listener for the pose, and that node's pose_topic flag is the other half of the switch
   - *Off when:* tf where this node must read the edge itself: a SPLIT stack, where the goal server is the laptop's and a tape whose pose rows crossed the WiFi is what this recorder is on the board to prevent (nav.launch.py passes it there), or a tape that has to be compared against one written before 2026-09-22. The listener is then started on the next tick and is NOT stopped again by switching back: that costs a restart
@@ -2686,7 +2110,6 @@ is the whole board.
 | process | what it is | why on the board | budget | owner |
 | --- | --- | --- | --- | --- |
 | `nav2_container` | Nav2 in one process: map server, planner, controller, behaviours, tree, smoother (nice 5) | real-time, wifi-loss | 120 % / 152 MB | `pepin-ros.service` -> `nav.launch.py` |
-| `relocalizer` | scan matching against the map, owns `map -> odom`, kidnap recovery (`sometimes` since 2026-09-22: a mode, not the default) | real-time, wifi-loss | 90 % / 121 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `lidar_container` | LD19 driver, hull filter, its static mount, the driver's lifecycle manager (nice -10, respawned) | real-time, hardware-attached | 22 % / 70 MB (to measure) | `pepin-ros.service` -> `robot.launch.py` |
 | `base_container` | base bridge (wheels, IMU, gyro-bias tracker), the IMU's static mount (nice -10, respawned) | real-time, hardware-attached | 15 % / 60 MB (to measure) | `pepin-ros.service` -> `robot.launch.py` |
 | `run_recorder` | every drive on disk: scans, odometry, pose, commands, camera | wifi-loss | 24 % / 93 MB | `pepin-ros.service` -> `nav.launch.py` |
@@ -2702,10 +2125,9 @@ is the whole board.
 | `ser2net` | servo bus and lidar as TCP ports 3333/3334 | hardware-attached | 6 % / 5 MB | `ser2net.service` |
 | `ustreamer` | the overview camera as MJPEG on 8080 — frames copied, never decoded | hardware-attached | 3 % / 19 MB | `pepin-camera.service` |
 | `docker` | dockerd, containerd and one supervisor per container | wifi-loss | 3 % / 225 MB | `docker.service`, `containerd.service` |
-| `session_logger` | the per-drive jsonl recorder (`sometimes`) | wifi-loss | 25 % / 90 MB | `ros/goto.sh`, `ros/tour.sh`, `ros/teleop.sh` |
+| `session_logger` | the per-drive jsonl recorder (`sometimes`) | wifi-loss | 25 % / 90 MB | `ros/goto.sh`, `ros/teleop.sh` |
 | `bag_record` | `ros2 bag record` writing one run's MCAP bag, `PEPIN_RECORDER=bag` only (`sometimes`, an estimate) | wifi-loss | 30 % / 120 MB | `pepin_bringup.bag_recorder` (a subprocess per run) |
 | `bag_recorder` | the node that starts and stops it and subscribes to nothing, `PEPIN_RECORDER=bag` only (`sometimes`, an estimate) | wifi-loss | 8 % / 60 MB | `pepin-ros.service` -> `nav.launch.py` |
-| `slam_frame` | the laptop's correction as `map -> odom`, SLAM mode only (`sometimes`) | real-time | 20 % / 90 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `link_watch` | stops the cart when the laptop half goes away, `side=board` only (`sometimes`) | real-time, wifi-loss | 15 % / 90 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `reap_ros2_cli` | kills ros2 CLI tools older than 90 s, once a minute (`sometimes`) | real-time | 5 % / 10 MB | `pepin-reap.timer` |
 | `foxglove_bridge` | **not expected**: the websocket is being removed, the laptop reads the board through zenoh | - | 0 % | was a component of `sensors_container` |
@@ -3013,24 +2435,18 @@ servers; Nav2 (`nav.launch.py`) is started on demand inside it. Build or rebuild
 
 ## Redundancy demo
 
-Both sensors see the room; either one alone is a mode the robot can be driven in, switched while
-it runs. `ros/sensor.sh` is one command per sensor, because a sensor has two ends and they must
-move together: what the tracker matches against the map (the relocalizer's `sources` flag) and
-what writes into the costmaps (`lidar_layer`, `camera_layer`, `contact_layer`, on the local
-**and** the global costmap). Half a switch — the layer off, the tracker still matching on it —
-is not a mode, it is a bug that looks like one.
+Both sensors see the room, and either one alone can feed the costmaps, switched while the robot
+runs. `ros/sensor.sh` is one command per sensor: what writes into the costmaps (`lidar_layer`,
+`camera_layer`, `contact_layer`, on the local **and** the global costmap). Localisation is
+RTAB-Map's either way (its snapshots carry whatever sensor is alive: `sensor_pack`'s `sources`).
+The board tracker's half of this switch — its `sources` flag — is on the tag
+`alt/tracker-2026-09-22`.
 
-| mode | command | tracker sources | costmap layers |
-| --- | --- | --- | --- |
-| fused | `ros/sensor.sh lidar on` + `ros/sensor.sh camera on` | `lidar,camera` | `lidar_layer`, `camera_layer`, `contact_layer` |
-| lidar only | `ros/sensor.sh camera off` | `lidar` | `lidar_layer` |
-| camera only | `ros/sensor.sh lidar off` (`--hard` to stop the driver) | `camera` | `camera_layer`, `contact_layer` |
-
-The tracker column needs the relocalizer's `sources` flag, which arrives with the fusion wiring;
-the generated **Feature flags** table above is the authority on whether this build carries it
-(`ros/flags.sh list relocalizer` says the same about the running node). Until it does, every
-`ros/sensor.sh lidar|camera on|off` applies the costmap half, reports that the tracker's sources
-are unchanged and exits 1 — so the costmap column is what holds, and the modes are half modes.
+| mode | command | costmap layers |
+| --- | --- | --- |
+| fused | `ros/sensor.sh lidar on` + `ros/sensor.sh camera on` | `lidar_layer`, `camera_layer`, `contact_layer` |
+| lidar only | `ros/sensor.sh camera off` | `lidar_layer` |
+| camera only | `ros/sensor.sh lidar off` (`--hard` to stop the driver) | `camera_layer`, `contact_layer` |
 
 The camera is one sensor read twice from the same frames: `depth_scan` is the band 8 cm-1.3 m
 above the floor (table tops, seats, a hand) and `contact_scan` is where the floor ends (chair
@@ -3045,30 +2461,10 @@ now only clears, and a second source marks: `/depth_marks`, the fused volume's o
 one `/fusion/surface` draws, at `depth_fusion`'s `min_weight` — sliced around the cart over the
 whole turn (`pepin.volume_scan`, published at the rate the volume is integrated). `ros/flags.sh
 set depth_fusion marks_source frame` relays the frame's own fan onto `/depth_marks` instead and
-is the pre-2026-09-21 costmap, live, for an A/B. In the tracker it is ONE
-source, `camera`, and the difference is where the matching happens. **The camera's scans are
-matched on the laptop**, where the depth network already runs (`pepin_bringup.laptop_localizer`):
-each scan is matched in a small window around the pose the board believes in, carried to that
-scan's own moment, and what crosses the link is the pose it measured with its covariance
-(`/localization/measurement`, `pepin.measurements`). The board carries that pose to its next
-update and fuses it by information beside the lidar's match, which costs it a 3x3 inverse.
-
-That is the day's verdict, measured on the robot (2026-09-13, `scratch/drive_bisect.py`, runs
-0238-0241): with the camera's scans matched ON THE BOARD the tracker took 147 ms per revolution
-instead of 45, kept only every second revolution (4.7 Hz), and the camera's word — measured on a
-scan that was a fifth of a second old by the time it was used — pulled the live pose 50 cm p90
-and 78 cm max off the lidar-only truth over one drive. The same fusion offline, at full rate,
-costs 0.7 cm. The arithmetic was never the problem; the Orange Pi was.
-
-**No WiFi, no camera measurements.** The board then tracks on the lidar exactly as before — the
-same code path, one source instead of two — and `ros/sensor.sh status` shows `camera` stale in
-the tracker's roster. That is the redundancy the split buys: the link may die, and the robot
-keeps its pose; the lidar may die, and the camera's measurements drive the updates by themselves
-(the board's own report line says `fused camera` and the watch goes off, because a +-40 degree
-fan cannot say "lost").
+is the pre-2026-09-21 costmap, live, for an A/B. 
 
 ```bash
-ros/sensor.sh status            # what the tracker matches on, which layers are on, what each node last said
+ros/sensor.sh status            # which layers are on, what each camera node last said
 ros/sensor.sh camera off        # lidar only
 ros/sensor.sh lidar off         # camera only: /scan still arrives, nothing reads it
 ros/sensor.sh lidar off --hard  # camera only, for real: the driver is deactivated and /scan stops
@@ -3105,84 +2501,12 @@ Open `ros/foxglove/pepin_nav.json` in Foxglove Studio:
   marks with: the volume's surface, yellow) beside `/local_costmap/costmap` and
   `/global_costmap/costmap` — switching a layer changes the grid within a costmap cycle, and the
   marks that remain tell you which sensor drew them;
-- `/localization/sigma` in a Raw Messages panel (JSON: `sigma_xy` metres, `sigma_yaw` degrees,
-  `stamp`, `word_age_s` — the seconds since a source's word last corrected the pose) — **the one
-  number a drive is judged by**, on the board, in `goto` and in `depth_fusion`. It is the
-  covariance that comes out of the tracker's information filter after each update, so it means the
-  same thing whichever source spoke into it, and it grows along the odometry between corrections
-  (`pepin.watch.PoseSpread`: this cart's own 2 % per metre and 0.7 of every reported turn, so
-  fourteen metres of dead reckoning refuses a goal and twenty-two cut one). A goal starts under
-  0.25 m and a running drive is cut over 0.40 m (`pepin.watch`: the footprint is 0.55 m wide, Nav2
-  calls 0.10 m arrived, and since 2026-09-16 the ladder has to admit the pose graph, whose own
-  measured word is worth 0.20 m). Before the first word it reads 0.45 m — not localised. `goto`
-  judges on a 2 s MEDIAN of this topic and never on one sample (`pepin.watch.SigmaWindow`): in a
-  nook the lidar's match flickers 0.01 ↔ 0.31 m between revolutions. The goal server still reads
-  the newest sample;
-- the `scan-to-map fit` plot (`/localization_fit`, 0..1) — the tracker's own score of the scan it
-  matched, and a DIAGNOSTIC of the lidar, not a verdict on the pose: with no scan of the board's
-  own at all (the camera's measurements driving alone) the plot reads 0.0 by design, because a fit
-  the laptop measured against the camera's own band of the volume is not this board's word about
-  `/map` (`local_fit`) — the camera's fit is in `/localization/sources`, per source. Judging a
-  drive by it cancelled healthy camera-only drives on 2026-09-15, which is what the sigma above
-  replaced;
-- the Log panel (filtered to `relocalizer`, `controller_server`, `planner_server`, ...).
+- the Log panel (filtered to `controller_server`, `planner_server`, ...).
 
-The report lines say the same in words, every 30 s, and `ros/sensor.sh status` prints all three:
+The report lines say the same in words, every 30 s, and `ros/sensor.sh status` prints them:
 
-- `relocalizer` on the board: `tracker: ... flags: rest_lock=on explained_vote=on ...`, with
-  `sources=lidar,camera` among those flags (`ros/sensor.sh status` prints the sources from this
-  line, and says so plainly when the line has none), and `measurements N (received N, taken N)`
-  with every reason a camera pose was refused — stale, uncovered by the odometry, from another
-  map
-- `laptop_localizer` in the laptop's SLAM container: `measurements: depth N at fit 0.62,
-  contact N at fit 0.55 (against /map), ... rejected: no belief 0, stale belief 0, ...` beside
-  the whole-map watchdog's own candidates, and `ms median/max` for both
-- `depth_stream` in the same container: `depth: 3.1 frames/s published ...`
+- `depth_stream` in the laptop's SLAM container: `depth: 3.1 frames/s published ...`
 - `contact_scan` in the same container: `contact: 2.9 scans/s published ...`
-
-### What the numbers already say
-
-Camera-only localisation on the **lidar's** map does not work, and was measured before it was
-demonstrated (`scratch/camera_only_localization.py`, run 0171 replayed offline against
-`ros/maps/flat3_straight.yaml`; the same modes replayed through the new split path in
-`scratch/laptop_localizer_replay.py`):
-
-| tracker sources | error vs lidar-only (median / p90 / max) | verdict |
-| --- | --- | --- |
-| `depth` | 122 cm / 124 deg at the loss | loses the map after 0.5 s |
-| `contact` | 80 cm / 28 deg at the loss | loses the map after 12 s |
-| `depth,contact` | 29 / 52 / 90 cm | loses the map |
-| `lidar,depth,contact` | 0.7 / 1.6 / 5.7 cm, 0.21 / 0.56 / 1.9 deg | never lost |
-
-And the split path against the same stick, on the same tape
-(`scratch/laptop_localizer_replay.py`, 2026-09-13: 5 Hz per camera source, a 50 ms uplink for
-the board's pose and a 100 ms link for the measurement, the shipped 0.5 s age gate):
-
-| where the camera is matched | error vs lidar-only (median / p90 / max) | matches per board update |
-| --- | --- | --- |
-| on the board (`lidar,depth,contact`) | 0.8 / 1.9 / 7.5 cm | 2.91 |
-| **on the laptop (`lidar,camera`)** | **0.7 / 1.5 / 3.1 cm** | **1.00** |
-| on the laptop, lidar off at t+25 s | 1.1 / 25.1 / 43.4 cm | 0.70 |
-
-The accuracy is the fused tracker's — slightly better at the tail, because a measurement is
-carried to the update that uses it instead of being matched from a scan that was carried — at
-the lidar-only cost on the board. One camera match costs 12.7 ms median on the laptop, and the
-link carried 348 measurements over the 45 s run with none refused as stale. Live on the board,
-where it was the other way round, the recorded pose of run 0238 sits 2.5 / 50.5 / 78.7 cm from
-the same truth; that is the number this split exists to remove, and only the robot can confirm
-it did.
-
-The camera's band is a different cross-section of the room than the lidar's own plane:
-sofa cushions and table clutter fit "some wall" well (fit 0.90 at the wrong pose, 0.12 at the
-true one), and parked bumper-to-furniture the camera sees nothing of the floor below ~1.2 m.
-Camera-only localisation needs a camera-built map, not the lidar's slice — which is what
-`/map_camera` is for: where the world volume is the map (`pepin_bringup.depth_fusion`,
-`map_source=volume`), the camera's own band of it goes out on that topic and the laptop matches
-the camera's scans against THAT instead of against the lidar's plane. So the honest demo is:
-**the costmap half survives either sensor alone; the tracker half needs the lidar** — and fusing
-the camera in costs 0.7 cm of median agreement, which is free *as long as nobody asks the board
-to do the matching*. `ros/sensor.sh lidar off` prints that warning itself when it takes the last
-lidar out of the tracker's sources.
 
 ## Frames and conventions
 

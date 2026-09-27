@@ -26,7 +26,7 @@ def test_the_reflexes_stay_on_the_board_and_the_planner_leaves() -> None:
     for reflex in ("controller_server", "behavior_server", "bt_navigator", "velocity_smoother"):
         assert runs_here("board", reflex) and not runs_here("laptop", reflex)
     assert runs_here("laptop", "planner_server") and not runs_here("board", "planner_server")
-    assert runs_here("board", "relocalizer") and runs_here("board", "map_server")
+    assert runs_here("board", "map_server")
     assert runs_here("laptop", "goal_server") and not runs_here("board", "goal_server")
     assert runs_here("board", "link_watch") and not runs_here("all", "link_watch")
     assert not runs_here("board", "goal_server"), "the heartbeat rides with the goal server"
@@ -351,25 +351,6 @@ def test_the_written_bridge_configs_are_the_ones_the_table_generates() -> None:
             assert written == bridge_config(side, mode), f"regenerate ros/{name}"
     assert not list((REPO / "ros").glob("zenoh-bridge-*-slam.json")), "the SLAM mode is gone"
     assert len(list((REPO / "ros").glob("zenoh-bridge-*.json"))) == 4
-
-
-def test_the_tracker_always_runs_and_the_retired_frame_owner_takes_its_seat_or_nothing() -> None:
-    """runs_here is the whole split. The tracker owns map -> odom in every situation, so it runs
-    wherever the reflexes do; the retired owner (slam_frame) is the one thing that stands it
-    down, because two publishers of one edge fight."""
-    from pepin.deployment import runs_here
-
-    for node in ("map_server", "relocalizer"):
-        assert runs_here("board", node) and runs_here("all", node), node
-        assert not runs_here("laptop", node), node
-    assert runs_here("board", "relocalizer") and not runs_here("board", "relocalizer", True)
-    assert runs_here("board", "map_server", True), "a served pgm is orthogonal to who owns the edge"
-    assert runs_here("board", "slam_frame", True) and runs_here("all", "slam_frame", True)
-    assert not runs_here("board", "slam_frame"), "off by default: the tracker owns that edge"
-    assert not runs_here("laptop", "slam_frame", True), "the frame lives where the drive is"
-    # Everything else is untouched by it: the reflexes and the recorder stay put.
-    for node in ("controller_server", "bt_navigator", "run_recorder", "goal_server"):
-        assert runs_here("board", node, True) == runs_here("board", node), node
 
 
 # ---- the bridge's routes, and whether they carry anything --------------------------------------

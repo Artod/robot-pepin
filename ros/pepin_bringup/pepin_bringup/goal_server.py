@@ -21,27 +21,11 @@ asks them, so a drive ``ros/goto.sh`` started through goto_ros.py is stopped fro
 socket write from the laptop (pepin.goal_link) instead of a fresh ROS process on the board, whose
 new zenoh session stalls every laptop -> board stream for about three seconds.
 
-WHERE THE POSE COMES FROM. On a saved map the scan-matching tracker is the answer to both "where
-am I" and "may I drive": it serves ``/where_am_i`` and publishes ``/localization_fit``. In online
-SLAM that node does not run at all — RTAB-Map owns the pose on the laptop and the board's
-slam_frame only broadcasts its correction — so this node reads ``map -> base_link`` from TF
-instead and judges the goal by how fresh that edge is (:class:`pepin.watch.GoalGate`). The
-``tf_pose`` flag is that fallback: off, the node is the old one, which asked the tracker and
-refused every goal in SLAM mode with "the tracker is not up" (2026-09-13 14:05).
-
-SINCE 2026-09-22 THAT FALLBACK IS THE SHIPPED PATH. ``PEPIN_LOCALIZER=rtabmap`` (the ``localizer``
-parameter, from pepin.deployment.localizer) means the laptop's RTAB-Map owns ``map -> odom`` and no
-tracker runs anywhere: there is nobody to ask for a pose, no fit and no sigma, so ``where`` answers
-``"pose": "tf"`` with no ``fit`` in it and a goal is judged by how fresh ``map -> base_link`` is.
-``PEPIN_LOCALIZER=tracker`` is the stack described below, unchanged.
-
-WHAT SAYS THE SLAM HALF IS STILL THERE. Not that transform: slam_frame re-broadcasts the LAST
-correction at 10 Hz with a fresh stamp, so ``map -> base_link`` stays milliseconds old with the
-laptop shut down — the gate would pass and Nav2, whose costmaps read the same fresh edge, would
-never time out either. The correction itself is the pulse (``/map_odom``, published between
-graphs too), so this node listens to it, refuses a goal when it has stopped and cuts a running
-drive when it stops mid-way: the SLAM analogue of the blind-drive watch, under the
-``correction_watch`` flag.
+WHERE THE POSE COMES FROM. The laptop's RTAB-Map owns ``map -> odom`` (one localiser,
+2026-09-22), so this node reads ``map -> base_link`` from TF and judges a goal by how fresh that
+edge is (:class:`pepin.watch.GoalGate`) and by whether this start of RTAB-Map is placed at all
+(``start_needs_placement``). ``where`` answers ``"pose": "tf"``. The board tracker that answered
+``/where_am_i`` with a fit before is on the tag alt/tracker-2026-09-22.
 
 WHO WATCHES THE CORRECTION ITSELF. When ``map -> odom`` steps, the marks in Nav2's local costmap
 were laid where the cart used to be, and nothing else takes them back. The lidar tracker used to
@@ -57,9 +41,8 @@ wanted out of it, and two of them ran on a 4-core A53: this one and the tape rec
 node republishes the pose it reads as ``/pose`` (PoseStamped in ``map``, 5 Hz, stamped with the
 transform's own stamp) under the ``pose_topic`` flag, and pepin_bringup.run_recorder subscribes to
 that instead of running a listener of its own (its ``loc_from`` flag). The topic is not published
-at all where a tracker runs — ``/tracker_pose`` is that topic with a covariance on it — nor on a
-split stack, where this node is the laptop's and the recorder is the board's: a pose that crossed
-the WiFi to be written to a tape is what putting that recorder on the board prevents.
+on a split stack, where this node is the laptop's and the recorder is the board's: a pose that
+crossed the WiFi to be written to a tape is what putting that recorder on the board prevents.
 """
 
 from __future__ import annotations
@@ -70,26 +53,23 @@ import math
 import socket
 import threading
 import time
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import rclpy
 from action_msgs.srv import CancelGoal
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from geometry_msgs.msg import PoseStamped
 from lifecycle_msgs.srv import ChangeState, GetState
 from nav2_msgs.action import NavigateToPose, Spin
 from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from std_msgs.msg import Float32, Header, String
-from std_srvs.srv import Trigger
+from std_msgs.msg import Header, String
 
 from pepin.deployment import (
     BOARD_NAV_NODES,
-    DEFAULT_LOCALIZER,
     HEARTBEAT_HZ,
     HEARTBEAT_TOPIC,
     next_transition,
@@ -108,27 +88,17 @@ from pepin.runlink import (
 )
 from pepin.watch import (
     BY_PLACEMENT,
-    CORRECTION_FRESH_S,
-    DRIVE_FIT,
-    DRIVE_SIGMA_M,
-    LOST_SIGMA_M,
     PLACEMENT_TOPIC,
-    SIGMA_TOPIC,
-    TF_FRESH_S,
-    BlindDriveWatch,
-    Correction,
     GoalGate,
     JumpClear,
     Placement,
     Preflight,
     Readiness,
-    Sigma,
 )
 from pepin_bringup.msgs import stamp_seconds, yaw_of
 from pepin_bringup.node_kit import Switches, TfLookup, spin_main
 
 PORT = 3337
-GOOD_FIT = DRIVE_FIT  # below this the robot is told to find itself before it drives (pepin.watch)
 # The planner to select, and the controller that follows it. One controller now: the lattice
 # planner no longer expands in reverse, so there is nothing a reversing controller would add.
 PIVOT_TOLERANCE_DEG = 11.5  # the goal checker's 0.20 rad: below this the heading is met
@@ -141,12 +111,10 @@ BRINGUP_ROUND_S = 10.0  # a lifecycle query or transition that has not answered 
 MAP_FRAME = "map"
 BASE_FRAME = "base_link"
 ODOM_FRAME = "odom"
-CORRECTION_TOPIC = "/map_odom"  # the SLAM half's pulse; the board's slam_frame reads it too
 # Nav2's own service for emptying the grid the controller steers on, and the watch's rules over it
-# (pepin.watch.JumpClear). The relocalizer holds the same two names for the same call: it made it
-# while IT owned map -> odom, and under World R that edge is RTAB-Map's, so the call moved here to
-# the one node on the board that is awake between goals. Spelled out rather than imported from
-# that module: a node does not import another node.
+# (pepin.watch.JumpClear). The board tracker made this call while IT owned map -> odom; that edge
+# is RTAB-Map's now, so the call lives here, in the one node on the board that is awake between
+# goals.
 CLEAR_LOCAL_COSTMAP = "/local_costmap/clear_entirely_local_costmap"
 CLEAR_MIN_GAP_S = 1.0
 JUMP_WATCH_HZ = 5.0  # how often map -> odom is read for a step: twice Nav2's own control period
@@ -158,64 +126,9 @@ POSE_TOPIC = "/pose"
 POSE_HZ = 5.0
 TF_WAIT_S = 0.3  # how long a pose lookup waits for the edge: the drive thread asks, not a callback
 TF_FIRST_WAIT_S = 2.0  # ...and the first one waits for the listener's buffer to fill at all
-TRACKER_WAIT_S = 1.0  # the one probe for "is there a tracker at all" — its relocalise service
 
 # The live flags (CLAUDE.md rule 19); their state is printed in the node's start line.
 FLAGS = FlagSet(
-    Flag(
-        "tf_pose",
-        True,
-        description="where no tracker answers, the cart's pose is read from TF (map ->"
-        " base_link) and a goal is judged by how fresh that edge is; off, only the tracker is"
-        " ever asked",
-        why="off, this node refused every goal of the first online-SLAM session — 'the tracker"
-        " is not up' (2026-09-13 14:05), the goals driven by publishing /goal_pose by hand,"
-        " which is Nav2 without a run, a tape or a verdict. In SLAM mode there IS no tracker:"
-        " RTAB-Map owns the pose and pepin_bringup.slam_frame re-broadcasts its correction as"
-        f" map -> odom at 10 Hz, so {TF_FRESH_S:.1f} s without a transform is ten missed"
-        " broadcasts, not jitter. The known-map modes are untouched: there the tracker answers"
-        " first and its fit decides, exactly as before",
-        on_when="on in online SLAM, and anywhere else the pose is owned by something that"
-        " publishes map -> base_link instead of a fit",
-        off_when="to have a stack without a tracker refuse goals outright again — the old"
-        " behaviour, and the honest one where a fit is the only evidence trusted",
-    ),
-    Flag(
-        "correction_watch",
-        True,
-        description="where no tracker answers, the SLAM correction (/map_odom) must be arriving"
-        " for a goal to start, and a drive is cut when it stops; off, the age of map ->"
-        " base_link is the only evidence read",
-        why="map -> base_link is no evidence that the SLAM half is alive: slam_frame"
-        " re-broadcasts the LAST correction at 10 Hz with a fresh stamp, so with the laptop shut"
-        " down the edge is still 0.1 s old, the gate passes, and Nav2 — whose costmaps read that"
-        " same edge against a 0.3 s tolerance — does not abort either. The cart would drive a"
-        " map that stopped growing, on dead reckoning, with nothing to notice. The correction is"
-        " a 10 Hz pulse whatever the graph does (pepin_bringup.rtabmap_frame publishes between"
-        f" optimisations too), so {CORRECTION_FRESH_S:.1f} s of silence is twenty missed messages"
-        " over the bridge, not a hiccup",
-        on_when="in online SLAM, where the pose is owned by a machine on the other side of the"
-        " bridge",
-        off_when="when this node cannot hear /map_odom in a stack that is otherwise healthy —"
-        " 'ros/go.sh where' prints 'correction_s' where one has ever landed, and prints none at"
-        " all in that case; the drive then rests on the transform alone, as it did before",
-    ),
-    Flag(
-        "sigma_gate",
-        True,
-        description="a goal starts, and a running drive is cut, on the tracker's fused"
-        " uncertainty (/localization/sigma); off, on its scan-to-map fit as before",
-        why="a fit is ONE SENSOR'S metric — the share of one lidar revolution's beams that landed"
-        " on the map — and it says nothing about a pose the camera is holding. On a camera-only"
-        " drive it is 0.00 by construction, and every rule built on it read a healthy tracker as"
-        f" lost (2026-09-15). The sigma comes out of the fusion itself, so {DRIVE_SIGMA_M:.2f} m"
-        f" to start and {LOST_SIGMA_M:.2f} m to cut mean the same thing whichever source spoke —"
-        " and it goes on growing along the odometry when none does, which a fit never did",
-        on_when="always on a stack whose tracker publishes the topic; a board that does not is"
-        " judged by its fit by itself, with no flag to set",
-        off_when="to put the fit rules back for a comparison, or if a sigma ever refuses drives"
-        " the cart is plainly fit for",
-    ),
     Flag(
         "places_from_the_file",
         False,
@@ -231,28 +144,6 @@ FLAGS = FlagSet(
         on_when="only on a robot driven without the laptop's graph at all, on the old frozen map",
         off_when="always under World R: a place rides a graph node, and only the graph can say"
         " where that node is now",
-    ),
-    Flag(
-        "start_on_a_known_pose",
-        True,
-        description="where the tracker publishes a sigma, a goal is refused for the pose's sake"
-        " only when there is NO pose — nothing has ever corrected it, or the sigma stopped"
-        f" arriving; off, a drive starts under {DRIVE_SIGMA_M:.2f} m and anything over it buys a"
-        " whole-map search first, as before",
-        why="2026-09-19, camera-only at the bookshelf: parked close to it the camera recognises"
-        " nothing (PnP 0 of 20 inliers), so no word arrives and the belief grows along the"
-        " odometry — 0.26 m, a pose the cart plainly had. The old rule refused the goal and sent"
-        " it to _find_myself, which is a whole-map LIDAR search judged by the fit, and with the"
-        " lidar out of the tracker's sources that fit is 0.00 by construction: 'still lost (fit"
-        " 0.00)', goal after goal, with nothing the cart could do to earn a drive. A sigma is"
-        " evidence for stopping a drive that is already running (BlindDriveWatch,"
-        f" {LOST_SIGMA_M:.2f} m), where the readings keep coming and a cut costs a stop; it is"
-        " not evidence for refusing to move at all",
-        on_when="always where a sigma is published, and above all camera-only: it is the"
-        " difference between a cart that drives on what it knows and one that waits for a sensor"
-        " it does not have",
-        off_when="to put the 0.25 m start threshold back for a comparison, or where a drive must"
-        " never begin on a pose looser than Nav2's own arrival tolerance",
     ),
     Flag(
         "jump_clear",
@@ -288,10 +179,9 @@ FLAGS = FlagSet(
         description=f"the pose this node reads out of TF is republished as {POSE_TOPIC}"
         f" (geometry_msgs/PoseStamped in {MAP_FRAME}, {POSE_HZ:.0f} Hz, stamped with the"
         " transform's own stamp), so the other nodes on this board can have the pose without a"
-        " TF listener of their own. Inert where a tracker runs (there /tracker_pose is that topic"
-        " already) and on a split stack, where the reader is on the other machine and reads the"
-        " edge itself. Off, nothing is published and this node's listener goes back to being"
-        " started on the first ask",
+        " TF listener of their own. Inert on a split stack, where the reader is on the other"
+        " machine and reads the edge itself. Off, nothing is published and this node's"
+        " listener goes back to being started on the first ask",
         why="a TF listener is a subscription to the whole /tf stream — RTAB-Map's map -> odom at"
         " 20 Hz plus the board's odom -> base_link at 50 Hz plus the statics — deserialised in"
         " Python whatever the reader wanted out of it. Two of them ran on a 4-core A53 to read"
@@ -332,7 +222,7 @@ FLAGS = FlagSet(
     Flag(
         "start_needs_placement",
         True,
-        description="under PEPIN_LOCALIZER=rtabmap a goal or a mark waits for the laptop's word"
+        description="a goal or a mark waits for the laptop's word"
         f" on {PLACEMENT_TOPIC} (pepin_bringup.rtabmap_frame, latched) that this start of"
         " RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and"
         " nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for"
@@ -345,7 +235,7 @@ FLAGS = FlagSet(
         " it cannot lift a refusal of silence, from a node that is down, respawning or running"
         " code from before the word existed. This one is the board-side switch the refusal"
         " itself answers to",
-        on_when="always under PEPIN_LOCALIZER=rtabmap: a pose nobody has vouched for since"
+        on_when="always: a pose nobody has vouched for since"
         " RTAB-Map's start is not a pose to drive on",
         off_when="when the word cannot come and the cart is known to stand where RTAB-Map's pose"
         " says: pepin-vslam down or started before this build (ros/laptop.sh vslam restarts it"
@@ -409,36 +299,16 @@ class GoalServer(Node):
         self._port = int(self.declare_parameter("port", PORT).value)
         self._client = ActionClient(self, NavigateToPose, "navigate_to_pose")
         self._spin = ActionClient(self, Spin, "spin")
-        self._relocalize = self.create_client(Trigger, "relocalize")
-        self._where = self.create_client(Trigger, "where_am_i")
         # Every goal on either navigator, whoever sent it (flag cancel_every_goal): the action
         # servers' own cancel services, made once here so a cancel never waits for discovery.
         self._cancel_clients = {
             action: self.create_client(CancelGoal, f"/{action}/_action/cancel_goal")
             for action in NAV_ACTIONS
         }
-        self.fit = 0.0
-        self._fit_heard = False  # a tracker has spoken here at least once
-        self._tracker_probed = False  # ...or its service was waited for, once (_tracker_here)
-        self.create_subscription(Float32, "localization_fit", self._on_fit, 10)
-        # ...and the number that outranks it: how sure the tracker's FUSION is, whichever
-        # source spoke into it (pepin_bringup.relocalizer, pepin.watch.Sigma). x is the
-        # position sigma in metres, y the heading sigma in degrees, z the seconds since
-        # the last accepted word.
-        self._heard_sigma: Sigma | None = None
-        self._sigma_at: float | None = None  # when it landed HERE: the age a gate reads
-        self.create_subscription(String, SIGMA_TOPIC, self._on_sigma, 10)
-        # The pose's other source: map -> base_link, which the tracker owns on a saved map and
-        # pepin_bringup.slam_frame owns in SLAM mode. Read only when no tracker answers, and the
-        # listener behind it is not started until then (_tf_pose).
+        # The cart's pose: map -> base_link, RTAB-Map's correction composed with the board's own
+        # odometry. The listener behind it is started on the first ask (_tf_pose) or by the pose
+        # topic below, whichever comes first.
         self._tf: TfLookup | None = None
-        # The SLAM half's pulse. RTAB-Map's correction is published at 10 Hz whether or not the
-        # graph moved, so its ARRIVAL is what says the machine that owns the pose is still there;
-        # the transform composed from it says nothing, because slam_frame re-broadcasts the last
-        # one for ever (pepin.watch.Correction). Only the arrival time is kept: the correction
-        # itself belongs to slam_frame, which is the one publisher of the edge.
-        self._correction_at: float | None = None
-        self.create_subscription(TransformStamped, CORRECTION_TOPIC, self._on_correction, 5)
         self._gate = GoalGate()
         # THE ROOM'S PLACES, FROM THE GRAPH (World R). The laptop's places node republishes every
         # named place as a pose in `map`, recomputed whenever the graph bends (latched, so the last
@@ -454,8 +324,8 @@ class GoalServer(Node):
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
         # WHETHER RTAB-MAP'S START IS PLACED (pepin.watch.Placement, from the laptop's
-        # rtabmap_frame, latched): under PEPIN_LOCALIZER=rtabmap a fresh map -> base_link is not
-        # a pose until this start of RTAB-Map has recognised the loaded map or been seeded.
+        # rtabmap_frame, latched): a fresh map -> base_link is not a pose until this start of
+        # RTAB-Map has recognised the loaded map or been seeded.
         # None until heard, which _ready refuses as "nobody said" (flag start_needs_placement).
         self._placement: Placement | None = None
         self.create_subscription(
@@ -515,16 +385,6 @@ class GoalServer(Node):
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
         self._lock = threading.Lock()
-        # WHO OWNS map -> odom in this stack (PEPIN_LOCALIZER, pepin.deployment.localizer; the
-        # launch passes the resolved word). "tracker": the board's relocalizer answers
-        # /where_am_i, publishes the fit and the sigma, and pepin_bringup.slam_frame is the one
-        # thing that could put a pulse on /map_odom — everything below is as it has always been.
-        # "rtabmap": there is no tracker to ask, and no /map_odom either, because the laptop's
-        # RTAB-Map broadcasts map -> odom straight into TF. So the pose is read from
-        # map -> base_link (the `tf_pose` path, which was written for exactly this) and the
-        # correction watch is not consulted: it would refuse every goal with "no SLAM correction
-        # has ever arrived" on a stack where no message-shaped correction exists to arrive.
-        self._localizer = str(self.declare_parameter("localizer", DEFAULT_LOCALIZER).value)
         # Last, after every other declare_parameter: rclpy runs the switches' callback on
         # declarations too, and a name outside the table is refused there (node_kit.Switches).
         self._switches = Switches(self, FLAGS, on_change=self._on_switch)
@@ -539,24 +399,11 @@ class GoalServer(Node):
         self._start_pose_topic()  # /pose, the board's one pose topic (flag pose_topic)
         threading.Thread(target=self._serve, daemon=True).start()
         self.get_logger().info(
-            f"goal server ready on port {self._port}; localizer {self._localizer}"
-            f" ({self._pose_source_note()}); {self._pose_topic_note()};"
+            f"goal server ready on port {self._port} (pose: map -> base_link from TF);"
+            f" {self._pose_topic_note()};"
             f" {self._switches.state()}"
         )
         self._up = True  # last: everything above exists, the timers may run
-
-    def _pose_source_note(self) -> str:
-        """Where this node will look for the cart's pose, in one phrase for the report line."""
-        if self._localizer == "tracker":
-            return "the board's tracker answers /where_am_i, its fit and sigma gate a goal"
-        return "no tracker: map -> base_link from TF, no /map_odom pulse to watch"
-
-    def _watching_correction(self) -> bool:
-        """Whether the SLAM half's ``/map_odom`` pulse is evidence here at all: only where a
-        message-shaped correction exists, which is the ``tracker`` stack with
-        pepin_bringup.slam_frame. Under ``rtabmap`` RTAB-Map broadcasts the transform itself and
-        nothing publishes that topic, so a watch of it would refuse every goal."""
-        return self._switches.on("correction_watch") and self._localizer == "tracker"
 
     def _heartbeat(self) -> None:
         self._beat.publish(Header(stamp=self.get_clock().now().to_msg(), frame_id="laptop"))
@@ -621,42 +468,9 @@ class GoalServer(Node):
             )
         self._bringup_busy = False
 
-    def _on_fit(self, msg: Float32) -> None:
-        self.fit = float(msg.data)
-        self._fit_heard = True
-
-    def _on_sigma(self, msg: String) -> None:
-        """The tracker's fused uncertainty landed: the JSON of pepin.watch.Sigma, and when it
-        arrived. A message that does not parse is dropped, not obeyed."""
-        heard = Sigma.from_json(msg.data, 0.0)
-        if heard is None:
-            return
-        self._heard_sigma, self._sigma_at = heard, self._clock_s()
-        self._fit_heard = True  # a sigma is a tracker speaking, exactly as a fit is
-
-    def _sigma(self) -> Sigma | None:
-        """How sure the pose is and how old that word is — ``None`` where the board publishes no
-        sigma at all (a build from before 2026-09-15) or the flag is off, and the fit rules
-        answer instead."""
-        if not self._switches.on("sigma_gate") or self._heard_sigma is None:
-            return None
-        landed = self._clock_s() - (self._sigma_at or 0.0)
-        return replace(self._heard_sigma, age_s=max(0.0, landed))
-
-    def _on_correction(self, _msg: TransformStamped) -> None:
-        """The SLAM correction landed here; only when it did is kept."""
-        self._correction_at = self._clock_s()
-
     def _clock_s(self) -> float:
         """The node's clock in seconds."""
         return float(self.get_clock().now().nanoseconds) * 1e-9
-
-    def _correction(self) -> Correction:
-        """How long ago the SLAM correction last landed here (inside: ``None`` when none ever
-        has) — the evidence a goal without a tracker is judged on beside the transform."""
-        if self._correction_at is None:
-            return Correction(None)
-        return Correction(max(0.0, self._clock_s() - self._correction_at))
 
     @staticmethod
     def _wait(future: Any, timeout: float) -> Any:
@@ -757,25 +571,12 @@ class GoalServer(Node):
             self._send(connection, {"event": "places", "places": self.places()})
         elif command == "where":
             pose = self._pose_now()
-            # Which of the two spoke, said outright: a fit of 0.00 beside a pose read from TF
-            # is not a lost robot, it is a stack with no tracker in it.
-            source = "tracker" if "fit" in pose else "tf" if pose else "none"
-            # ...and how long ago the SLAM correction last landed, where one ever has: the one
-            # reading that tells a live SLAM half from a dead one before a goal is sent.
-            correction = self._correction().age_s
-            # The fit is the TRACKER's number and nobody else's. Printed beside a pose read from
-            # TF it is a standing 0.00 that reads as a lost robot (a stack with no tracker has no
-            # fit, it does not have a bad one), so where no tracker speaks the key is not there.
-            fit = {"fit": self.fit} if source == "tracker" else {}
             self._send(
                 connection,
                 {
                     "event": "where",
-                    **fit,
                     "planner": self.planner,
-                    "pose": source,
-                    "localizer": self._localizer,
-                    **({} if correction is None else {"correction_s": round(correction, 2)}),
+                    "pose": "tf" if pose else "none",
                     **pose,
                 },
             )
@@ -847,47 +648,18 @@ class GoalServer(Node):
         return f"no such place: {name!r}"
 
     def _pose_now(self) -> dict[str, float]:
-        """Where the cart stands: the tracker's own pose where a tracker answers, else the TF
-        the SLAM correction feeds. Empty when neither does; ``fit`` is in it only from a tracker
-        and ``age_s`` only from TF, so a reader can tell which one spoke.
-
-        Where no tracker runs the service is not asked at all: /where_am_i has no server there,
-        and the probe for it cost a full second of standing still per read — four per goal, two
-        of them between arrival and the corrective pivot.
-        """
-        if self._switches.on("tf_pose") and not self._tracker_here():
-            return self._tf_pose()
-        pose = self._tracker_pose()
-        if pose or not self._switches.on("tf_pose"):
-            return pose
+        """Where the cart stands: ``map -> base_link`` with the age of that edge (``age_s``);
+        empty when nobody publishes it."""
         return self._tf_pose()
 
-    def _tracker_pose(self) -> dict[str, float]:
-        """The tracker's pose, asked over its own service (empty when it does not answer)."""
-        if not self._where.wait_for_service(timeout_sec=1.0):
-            return {}
-        result = self._wait(self._where.call_async(Trigger.Request()), 5.0)
-        if result is None:
-            return {}
-        text = result.message
-        try:
-            return {
-                "x": float(text.split("x ")[1].split(" m")[0]),
-                "y": float(text.split("y ")[1].split(" m")[0]),
-                "yaw_deg": float(text.split("yaw ")[1].split(" deg")[0]),
-                "fit": float(text.split("fit ")[1].split(" ")[0]),
-            }
-        except (IndexError, ValueError):
-            return {}
-
     def _tf_pose(self) -> dict[str, float]:
-        """The cart's pose from ``map -> base_link`` alone, with the age of that edge in seconds
-        (``age_s``): what SLAM mode has instead of a tracker. Empty when nobody publishes it."""
+        """The cart's pose from ``map -> base_link``, with the age of that edge in seconds
+        (``age_s``). Empty when nobody publishes it."""
         wait = TF_WAIT_S
         if self._tf is None:
-            # Started on the first ask and never before: a TF listener is a subscription to /tf,
-            # sixty messages a second on the board, and where the tracker answers nothing here
-            # ever reads it. Its buffer starts empty, so this one lookup waits longer.
+            # Started on the first ask when the pose topic did not start it: a TF listener is a
+            # subscription to /tf, sixty messages a second on the board. Its buffer starts
+            # empty, so this one lookup waits longer.
             self._tf, wait = TfLookup(self), TF_FIRST_WAIT_S
         transform = self._tf.transform(MAP_FRAME, BASE_FRAME, timeout_s=wait)
         if transform is None:
@@ -900,52 +672,23 @@ class GoalServer(Node):
             "age_s": max(0.0, now - stamp_seconds(transform.header.stamp)),
         }
 
-    def _tracker_here(self) -> bool:
-        """Whether a scan-matching tracker runs beside this node at all: it publishes the fit
-        and serves the whole-map search. In SLAM mode neither exists.
-
-        The waiting probe is paid ONCE per process: afterwards the answer comes from the graph
-        (``service_is_ready``) and from the fit, so a tracker that comes up late is still found,
-        while a stack that has none stops paying a second for every pose read. Under
-        ``PEPIN_LOCALIZER=rtabmap`` even that one second is not paid: the launch does not start a
-        tracker, so the answer is known before the first ask.
-        """
-        if self._localizer != "tracker":
-            return False
-        if self._fit_heard:
-            return True
-        if not self._tracker_probed:
-            self._tracker_probed = True
-            return bool(self._relocalize.wait_for_service(timeout_sec=TRACKER_WAIT_S))
-        return bool(self._relocalize.service_is_ready())
-
     def _ready(self, pose: dict[str, float] | None = None) -> Readiness:
-        """May a goal start now (:class:`pepin.watch.GoalGate`): the tracker's sigma where it
-        publishes one and its fit where it does not; where no tracker runs, the age of
-        map -> base_link AND the age of the SLAM correction, which is the only one of the two a
-        dead laptop stops; under ``rtabmap`` also whether this start of RTAB-Map is placed
-        (flag ``start_needs_placement``). ``pose`` is a reading already taken by the caller
-        (mark's), so the edge is not looked up twice. The gate is kept in step with its live flag
-        here rather than at the switch, so one reading and one rule answer every caller."""
-        self._gate = replace(
-            self._gate, start_on_a_known_pose=self._switches.on("start_on_a_known_pose")
-        )
-        if self._switches.on("tf_pose") and not self._tracker_here():
-            edge = self._tf_pose() if pose is None else pose
-            watched = self._correction() if self._watching_correction() else None
-            ready = self._gate.verdict(None, edge.get("age_s"), watched)
-            if ready.ready and self._localizer == "rtabmap":
-                placed = Preflight.placement(
-                    self._placement_standing(), asked=self._switches.on("start_needs_placement")
-                )
-                if not placed.ok:
-                    return Readiness(False, tracker=False, rule=BY_PLACEMENT, reason=placed.detail)
-            return ready
-        return self._gate.verdict(self.fit, None, sigma=self._sigma())
+        """May a goal start now (:class:`pepin.watch.GoalGate`): the age of map -> base_link, and
+        whether this start of RTAB-Map is placed (flag ``start_needs_placement``). ``pose`` is a
+        reading already taken by the caller (mark's), so the edge is not looked up twice."""
+        edge = self._tf_pose() if pose is None else pose
+        ready = self._gate.verdict(None, edge.get("age_s"))
+        if ready.ready:
+            placed = Preflight.placement(
+                self._placement_standing(), asked=self._switches.on("start_needs_placement")
+            )
+            if not placed.ok:
+                return Readiness(False, tracker=False, rule=BY_PLACEMENT, reason=placed.detail)
+        return ready
 
     def mark(self, name: str) -> dict[str, Any]:
         """Remember where the robot stands as ``name``; refused on the same evidence a goal is
-        — a weak fit where a tracker speaks, a stale transform where none does."""
+        — a stale transform, or a start of RTAB-Map nobody has placed."""
         pose = self._pose_now()
         if not name or not pose:
             return {"event": "error", "detail": "no name, or nothing answered about the pose"}
@@ -953,11 +696,7 @@ class GoalServer(Node):
         if not ready.ready:
             return {"event": "error", "detail": ready.reason}
         places = self.places()
-        # The fit is written only when a tracker gave one: a place marked in SLAM mode carries
-        # no fit at all rather than a 0.00 that would read as "marked while lost".
-        places[name] = {k: round(pose[k], 3) for k in ("x", "y", "yaw_deg")} | (
-            {"fit": round(pose["fit"], 2)} if "fit" in pose else {}
-        )
+        places[name] = {k: round(pose[k], 3) for k in ("x", "y", "yaw_deg")}
         self._places_path.write_text(json.dumps(places, indent=2, sort_keys=True) + "\n")
         return {"event": "marked", "name": name, **places[name]}
 
@@ -991,10 +730,9 @@ class GoalServer(Node):
     def cancel(self, send: bool = True) -> bool:
         """Stop the running drive, if any; True when there was one.
 
-        Clears ``_driving`` as well as the handle: during the lost -> relocalise -> resume window
-        there is no handle to cancel, and the flag is what stops the resume from re-sending the
-        goal the operator just cancelled. ``send=False`` lets the handle go without cancelling
-        it: the caller cancels every goal on the navigator itself (:meth:`cancel_every_goal`).
+        Clears ``_driving`` as well as the handle. ``send=False`` lets the handle go without
+        cancelling it: the caller cancels every goal on the navigator itself
+        (:meth:`cancel_every_goal`).
         """
         with self._lock:
             handle, self._goal_handle = self._goal_handle, None
@@ -1039,19 +777,8 @@ class GoalServer(Node):
         )
         return {action: said[action] for action in self._cancel_clients}
 
-    def _go(
-        self,
-        request: dict[str, Any],
-        connection: socket.socket,
-        resume: bool = True,
-        record: Path | None = None,
-    ) -> None:
-        """Send one goal and stream its progress until it ends or the caller hangs up.
-
-        ``resume``: a drive stopped for being lost is sent again after a relocalisation, once —
-        as a continuation of the same drive: ``record`` is the tape already open, so the resumed
-        leg keeps the run's number and file instead of becoming a second run.
-        """
+    def _go(self, request: dict[str, Any], connection: socket.socket) -> None:
+        """Send one goal and stream its progress until it ends or the caller hangs up."""
         target = self._target_of(request)
         if target is None:
             detail = self._why_no_place(str(request.get("place", "")))
@@ -1060,12 +787,9 @@ class GoalServer(Node):
         x, y, yaw_deg, name = target
         ready = self._ready()
         if not ready.ready:
-            if not ready.search:  # nothing to search with: no tracker, no fresh transform
-                self._send(connection, {"event": "error", "detail": ready.reason})
-                self.get_logger().warning(f"goal refused: {ready.reason}")
-                return
-            if not self._find_myself(connection):
-                return
+            self._send(connection, {"event": "error", "detail": ready.reason})
+            self.get_logger().warning(f"goal refused: {ready.reason}")
+            return
         if not self._client.wait_for_server(timeout_sec=5.0):
             self._send(connection, {"event": "error", "detail": "Nav2 is not up"})
             return
@@ -1074,18 +798,16 @@ class GoalServer(Node):
         started = time.monotonic()
         feedback: dict[str, Any] = {}
         with self._lock:
-            if self._driving and record is None:
+            if self._driving:
                 self._send(
                     connection, {"event": "error", "detail": "already driving: cancel first"}
                 )
                 return
             self._driving = True
-        if record is None:
-            record = self.start_recording(name or f"{x:.0f}_{y:.0f}")
+        record = self.start_recording(name or f"{x:.0f}_{y:.0f}")
         self.get_logger().info(
             f"run {self._runs.run}: planner {PLANNERS[self.planner][0]} "
-            f"-> {name or 'coordinates'} ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg),"
-            f" pose from {'the tracker' if ready.tracker else 'TF (no tracker here)'}"
+            f"-> {name or 'coordinates'} ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg)"
         )
         try:
             send = self._client.send_goal_async(
@@ -1107,7 +829,7 @@ class GoalServer(Node):
                     "event": "accepted",
                     "run": self._runs.run,
                     "planner": PLANNERS[self.planner][0],
-                    "pose": "tracker" if ready.tracker else "tf",
+                    "pose": "tf",
                     # early: a drive that never reaches "done" is still fetched
                     "recording": None if record is None else str(record),
                     "place": name,
@@ -1119,54 +841,9 @@ class GoalServer(Node):
             )
             result_future = handle.get_result_async()
             last = 0.0
-            # The blind-drive watch reads the tracker's fit: where no tracker publishes one it is
-            # not armed at all (it would read the standing 0.0 as lost four seconds in).
-            blind = BlindDriveWatch() if ready.tracker else None
-            # Its SLAM analogue. Nav2 is NOT the backstop here: slam_frame keeps broadcasting
-            # map -> odom from the last correction, so the costmaps keep a fresh map ->
-            # base_link and nothing times out — the cart would follow its plan by dead reckoning
-            # across a map that stopped growing. The correction's arrival is what stops it.
-            pulse = not ready.tracker and self._watching_correction()
-            stopped_lost = False
-            cut = ""
             while rclpy.ok() and not result_future.done():
                 time.sleep(0.05)  # the node's own spin serves the action; this thread only reports
                 now = time.monotonic()
-                # blind: stop, don't finish. The sigma where the tracker publishes one — a
-                # camera-only drive has no fit of its own to read — the fit where it does not.
-                if blind is not None and blind.observe(self.fit, now, sigma=self._sigma()):
-                    stopped_lost = True
-                    self._send(
-                        connection,
-                        {
-                            "event": "lost",
-                            "rule": blind.rule,
-                            "reading": blind.phrase(),
-                            "fit": self.fit,
-                            "t": round(now - started, 1),
-                        },
-                    )
-                    self.get_logger().warning(
-                        f"lost mid-drive ({blind.phrase()}, judged by the {blind.rule}):"
-                        " stopping to relocalise"
-                    )
-                    handle.cancel_goal_async()
-                    break
-                if pulse and (correction := self._correction()).stale(
-                    self._gate.correction_fresh_s
-                ):
-                    cut = correction.phrase()  # no tracker, nothing to search with: stop, period
-                    self._send(
-                        connection,
-                        {
-                            "event": "lost",
-                            "correction_s": correction.age_s,
-                            "t": round(now - started, 1),
-                        },
-                    )
-                    self.get_logger().warning(f"{cut}: stopping the drive, the map is not growing")
-                    handle.cancel_goal_async()
-                    break
                 if feedback and now - last > 1.0:
                     last = now
                     self._send(
@@ -1174,23 +851,9 @@ class GoalServer(Node):
                     )
             with self._lock:
                 self._goal_handle = None
-            if stopped_lost:
-                # Stopped on purpose: find ourselves standing still, then the same goal, once.
-                self._wait(result_future, 10.0)
-                with self._lock:
-                    still_wanted = self._driving
-                if still_wanted and self._find_myself(connection) and resume:
-                    self._send(connection, {"event": "resuming", "fit": self.fit})
-                    self.get_logger().info(
-                        f"resuming the goal after relocalising (fit {self.fit:.2f})"
-                    )
-                    self._go(request, connection, resume=False)
-                return
-            if cut:  # let the cancel land before the tape is closed
-                self._wait(result_future, 10.0)
             outcome = result_future.result()
             status = getattr(outcome, "status", 0) if outcome else 0
-            if status == 4 and not cut:  # position met: now the heading, on the tape still
+            if status == 4:  # position met: now the heading, on the tape still
                 self._pivot_to(yaw_deg, connection)
             self.stop_recording()  # closed before the answer: the caller fetches it on reading
             self._send(
@@ -1203,16 +866,12 @@ class GoalServer(Node):
                     "seconds": round(time.monotonic() - started, 1),
                     "arrival": self._pose_now(),
                     "recording": None if record is None else str(record),
-                    **({"detail": cut} if cut else {}),
                 },
             )
         finally:  # a refused goal or a broken connection must not leave a recorder running
-            if (
-                resume
-            ):  # the outermost call owns the tape and the flag; a resumed leg is the same drive
-                self.stop_recording()
-                with self._lock:
-                    self._driving = False
+            self.stop_recording()
+            with self._lock:
+                self._driving = False
 
     def _pivot_to(self, yaw_deg: float, connection: socket.socket) -> None:
         """Turn in place to the mark's heading once the drive has met the position.
@@ -1262,49 +921,22 @@ class GoalServer(Node):
             )
         return None
 
-    def _find_myself(self, connection: socket.socket) -> bool:
-        """A weak fit before (or during) a drive buys one whole-map search; blind driving is never
-        allowed. The tracker may already be searching on its own — then its answer is awaited
-        rather than asked for twice — and its fit is published once a second, so the verdict
-        waits for a fresh reading instead of reading a stale one (run 0054: relocalised at 0.61,
-        judged "still lost" at the 0.31 published a moment earlier, never resumed)."""
-        self._send(connection, {"event": "searching", "fit": self.fit})
-        self.get_logger().info(f"searching the whole map (fit {self.fit:.2f})")
-        if not self._relocalize.wait_for_service(timeout_sec=2.0):
-            self._send(connection, {"event": "error", "detail": "the tracker is not up"})
-            return False
-        result = self._wait(self._relocalize.call_async(Trigger.Request()), 60.0)
-        detail = result.message if result else "no answer"
-        deadline = time.monotonic() + 15.0  # an episode is two whole-map searches, 4-7 s each here
-        while self.fit < GOOD_FIT and time.monotonic() < deadline:
-            time.sleep(0.2)
-        self._send(connection, {"event": "searched", "detail": detail, "fit": self.fit})
-        if self.fit >= GOOD_FIT:
-            self.get_logger().info(f"found myself: fit {self.fit:.2f}")
-            return True
-        self.get_logger().warning(f"still lost after the search: fit {self.fit:.2f}")
-        self._send(connection, {"event": "error", "detail": f"still lost (fit {self.fit:.2f})"})
-        return False
-
     # ---- the board's one pose topic (flag pose_topic) -----------------------------------------
     def _start_pose_topic(self) -> None:
         """Wire ``/pose``: the cart's pose in ``map``, five times a second, out of the TF
         listener this node already owns.
 
-        Only where no tracker runs, and only where the reader is on this machine. Under
-        ``tracker`` the board's relocalizer publishes ``/tracker_pose``, which is this topic with
-        a covariance on it, and a second opinion on one pose is what CLAUDE.md's one-localiser
-        rule exists to forbid. On a SPLIT stack this node is the laptop's while the tape recorder
-        is the board's, and a pose that crossed the WiFi to be written to the tape is exactly
-        what putting that recorder on the board is meant to prevent — so there it reads the edge
-        itself (its ``loc_from`` tf) and nothing is published here. Either way the timer is not
-        created and the flag is inert; the start line says which it is.
+        Only where the reader is on this machine. On a SPLIT stack this node is the laptop's
+        while the tape recorder is the board's, and a pose that crossed the WiFi to be written to
+        the tape is exactly what putting that recorder on the board is meant to prevent — so there
+        it reads the edge itself (its ``loc_from`` tf) and nothing is published here: the timer
+        is not created and the flag is inert; the start line says so.
 
         The listener is built HERE, in the constructor, rather than on the first ask: this timer
         wants it from the first tick, and it is the one listener the board keeps (the flag's
         ``why``). It starts a spin thread for this node, which is why ``_up`` guards the tick.
         """
-        if self._localizer == "tracker" or not runs_here(self._side, "run_recorder"):
+        if not runs_here(self._side, "run_recorder"):
             return
         self._pose_pub = self.create_publisher(PoseStamped, POSE_TOPIC, 5)
         if self._tf is None:
@@ -1313,8 +945,6 @@ class GoalServer(Node):
 
     def _pose_topic_note(self) -> str:
         """Where the rest of the board gets the pose from, in one phrase for the start line."""
-        if self._localizer == "tracker":
-            return f"{POSE_TOPIC} not published: the tracker's own /tracker_pose is that topic"
         if not runs_here(self._side, "run_recorder"):
             return (
                 f"{POSE_TOPIC} not published: its reader is on the other machine (side"
