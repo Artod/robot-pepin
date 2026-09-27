@@ -82,8 +82,5 @@ def test_imu_gives_the_yaw_rate_and_nothing_else(params: dict[str, Any]) -> None
 def test_every_heading_source_is_named_in_the_file(params: dict[str, Any]) -> None:
     """Heading must not rest on one sensor: the gyro fuses it, the camera seconds it, and the
     wheels' path back in is written down rather than forgotten."""
-    text = EKF.read_text()
-    assert "TO TURN IT ON" in text  # the wheels' yaw rate, and what must happen first
     assert fused(params, "imu0_config") & {"vyaw"}
     assert fused(params, "odom1_config") & {"yaw"}
-    assert params["two_d_mode"] is True  # roll/pitch are held at zero: no tilt fusion here

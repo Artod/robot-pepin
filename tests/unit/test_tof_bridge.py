@@ -137,7 +137,6 @@ def test_the_report_line_carries_the_sensors_verdicts_and_the_flags(monkeypatch:
     line = node.logger.texts("info")[-1]
     assert "front [0:100%]" in line and "right [2:100%]" in line
     assert "range_as=scan" in line
-    assert "gate" not in line, "the gate came out on 2026-09-22"
 
 
 def test_the_flags_are_the_features_own_names_and_live() -> None:

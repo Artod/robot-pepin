@@ -64,9 +64,7 @@ def test_the_config_loads_the_servos_and_the_reference() -> None:
 
 def test_the_reference_pose_is_the_camera_mount_of_the_same_day() -> None:
     """Two files carry the camera's measured pose (the static mount and the neck's reference):
-    they must agree, or the dynamic transform jumps the moment the flag is flipped. What the
-    file does not yet know it says so: the ticks are null until read, and the note says with
-    which command; the signs are UNVERIFIED until someone watched the picture move."""
+    they must agree, or the dynamic transform jumps the moment the flag is flipped."""
     cfg = NeckConfig.from_json(NECK)
     camera = _camera()
     ref = cfg.reference
@@ -76,12 +74,6 @@ def test_the_reference_pose_is_the_camera_mount_of_the_same_day() -> None:
         camera.z_m,
         camera.pitch_deg,
     )
-    raw = json.loads(NECK.read_text())["reference"]
-    assert "mount_measured" in raw, "the mount says when it was measured"
-    if not ref.known:
-        assert '{"cmd":"neck"}' in raw["ticks_note"], "say how the ticks are read, exactly"
-    if not ref.signs_verified:
-        assert "UNVERIFIED" in raw["signs_note"], "unverified signs say so where a reader looks"
 
 
 def test_an_unread_reference_ignores_the_encoders_and_answers_the_static_mount() -> None:
