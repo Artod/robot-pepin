@@ -5,7 +5,11 @@ anything is touched; a dry run prints the plan and touches nothing."""
 from __future__ import annotations
 
 import ast
+import os
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -305,3 +309,129 @@ def test_the_line_scanner_finds_every_edge_ast_finds(graph: ImportGraph) -> None
                 seen |= {f"{base}.{a.name}" for a in node.names}
         ours = {s for s in seen if s in graph.files and s != module}
         assert ours <= graph.edges[name], (name, ours - graph.edges[name])
+
+
+# ---- ros/push.sh against fakes -------------------------------------------------------------------
+
+FAKE_TOOL = """#!/bin/bash
+printf '%s %s\\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
+case "$(basename "$0") $1" in
+    "ssh "*) exit "${FAKE_SSH_RC:-1}" ;;
+    "docker inspect") [ -n "${FAKE_MOUNT:-}" ] || exit 1; echo "$FAKE_MOUNT" ;;
+    "docker exec") exit 1 ;;
+esac
+"""
+# The planner the script calls (`uv run -q python -m pepin.push ...`), on this interpreter.
+FAKE_UV = f"""#!/bin/bash
+shift 3
+exec {sys.executable} "$@"
+"""
+
+
+def _push(tmp_path: Path, *args: str, **env: str) -> tuple[int, str, str]:
+    """ros/push.sh ARGS in the miniature checkout, ssh/rsync/docker faked; (exit, output, calls)."""
+    root = _repo(tmp_path / "repo")
+    for script in ("push.sh", "lib.sh"):
+        shutil.copy(REPO / "ros" / script, root / "ros" / script)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in (
+        ("ssh", FAKE_TOOL),
+        ("rsync", FAKE_TOOL),
+        ("docker", FAKE_TOOL),
+        ("uv", FAKE_UV),
+    ):
+        (bin_dir / name).write_text(body)
+        (bin_dir / name).chmod(0o755)
+    log = tmp_path / "log"
+    log.write_text("")
+    run = subprocess.run(
+        ["bash", str(root / "ros/push.sh"), *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=root,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "PYTHONPATH": str(REPO / "src"),
+            "FAKE_LOG": str(log),
+            **env,
+        },
+    )
+    return run.returncode, run.stdout + run.stderr, log.read_text()
+
+
+@pytest.mark.slow  # ~0.3 s each below: bash, the planner twice, the fakes
+def test_a_dry_run_prints_the_plan_and_what_would_run_and_touches_nothing(tmp_path: Path) -> None:
+    code, out, calls = _push(tmp_path, "--dry-run", "src/pepin/b.py")
+    assert code == 0, out
+    assert calls == "", "a dry run asks nobody anything"
+    assert out.startswith("push plan: 1 file(s) to the board, 3 kick(s)\n")
+    tail = out[out.index("would check: base_bridge") :]
+    assert tail == (
+        "would check: base_bridge in pepin-ros on the board (runs -> refused,"
+        " ros/restart.sh board --deploy)\n"
+        "would run: (cd src && rsync -a --relative pepin/b.py"
+        " root@10.0.0.187:/root/pepin-ros/pepin_src/)\n"
+        "would run: ros/thin.sh kick rec\n"
+        "would run: ros/thin.sh kick goal\n"
+        "would run: ros/laptop.sh kick goal\n"
+        "dry run: nothing was touched\n"
+    )
+    assert "would check: pepin-vslam and pepin-laptop mount" in out
+    same = _push(tmp_path / "env", "src/pepin/b.py", PEPIN_PUSH_DRY="1")
+    assert same[0] == 0 and same[2] == "" and same[1].endswith("dry run: nothing was touched\n")
+
+
+@pytest.mark.slow
+def test_a_refused_push_touches_nothing(tmp_path: Path) -> None:
+    code, out, calls = _push(tmp_path, "ros/params/ekf.yaml", "src/pepin/b.py")
+    assert code == 2 and calls == ""
+    assert "ros/params/ekf.yaml: parameters are read once at start" in out
+
+
+@pytest.mark.slow
+def test_a_push_rsyncs_exactly_its_files_and_kicks_exactly_its_nodes(tmp_path: Path) -> None:
+    code, out, calls = _push(tmp_path, "src/pepin/b.py", "ros/pepin_bringup/pepin_bringup/goal.py")
+    assert code == 0, out
+    rsyncs = [c for c in calls.splitlines() if c.startswith("rsync")]
+    assert rsyncs == [
+        "rsync -a --relative pepin_bringup/pepin_bringup/goal.py root@10.0.0.187:/root/pepin-ros/",
+        "rsync -a --relative pepin/b.py root@10.0.0.187:/root/pepin-ros/pepin_src/",
+    ]
+    assert "--delete" not in calls, "the board writes files of its own beside ours"
+    kicks = sorted(c for c in calls.splitlines() if " kick " in c)
+    assert kicks == ["laptop.sh kick goal", "thin.sh kick goal", "thin.sh kick rec"]
+    assert (
+        "board  rec kicked at 10:00:05.1, ready at 10:00:07.3 UTC, 2.2 s, pid 47 -> 836: rec up"
+        in out
+    )
+    assert "push: 3 node(s) back, 0 not running, 0 failed" in out
+
+
+@pytest.mark.slow
+def test_a_running_held_process_refuses_before_the_rsync(tmp_path: Path) -> None:
+    code, out, calls = _push(tmp_path, "src/pepin/b.py", FAKE_SSH_RC="0")
+    assert code == 2, out
+    assert "base_bridge runs in pepin-ros on the board and no kick restarts it" in out
+    assert "rsync" not in calls and " kick " not in calls
+    code, out, calls = _push(tmp_path / "unreachable", "src/pepin/b.py", FAKE_SSH_RC="255")
+    assert code == 2 and "could not ask pepin-ros on the board" in out and "rsync" not in calls
+
+
+@pytest.mark.slow
+def test_a_node_not_running_is_skipped_and_a_stuck_one_fails_the_push(tmp_path: Path) -> None:
+    code, out, _ = _push(tmp_path, "src/pepin/c.py", FAKE_KICK="missing")
+    assert code == 0, out
+    assert "laptop fusion skipped: no fusion process in pepin-ros" in out
+    code, out, _ = _push(tmp_path / "stuck", "src/pepin/c.py", FAKE_KICK="stuck")
+    assert code == 1 and "laptop fusion FAILED (exit 4)" in out
+
+
+@pytest.mark.slow
+def test_laptop_containers_on_another_checkout_refuse_the_push(tmp_path: Path) -> None:
+    code, out, calls = _push(tmp_path, "src/pepin/c.py", FAKE_MOUNT=str(tmp_path))
+    assert code == 2, out
+    assert "mounts" in out and "not this checkout's src/pepin" in out
+    assert "rsync" not in calls
