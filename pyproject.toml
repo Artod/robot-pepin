@@ -64,6 +64,11 @@ markers = [
     "slow: seconds, not milliseconds — simulated drives; not in the pre-commit hook (uv run pytest -m slow)",
 ]
 
+# The pre-push floor (.githooks/pre-push, --cov=src/pepin) measures this project's code: the
+# vendored upstream source is excluded here as it is from ruff and mypy.
+[tool.coverage.run]
+omit = ["src/pepin/vendor/*"]
+
 [tool.mypy]
 python_version = "3.12"
 # The ROS nodes are type-checked too: a node that referenced a field deleted in a refactor
