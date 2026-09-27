@@ -467,8 +467,9 @@ imports it back. It holds the board servers, the algorithms (scan matching, occu
 pose graph, localisation, the timeline, slip detection, ToF horizon, the hull, what the map
 cannot explain, places) and the tape. Every
 decision that can be pure is pure, which is why it can be tested without a robot: the unit tests
-need no hardware and run on every commit. `ruff`, `mypy --strict` and a pre-commit hook with an 86% coverage floor
-run on every commit; hardware tests live in `tests/hardware` behind `--hardware`.
+need no hardware. A pre-commit hook runs `bash -n`, `ruff` and `mypy --strict` in seconds; a
+pre-push hook runs the whole unit suite in parallel with an 86% coverage floor; hardware tests
+live in `tests/hardware` behind `--hardware`.
 
 ## Quick start
 
