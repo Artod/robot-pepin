@@ -58,15 +58,13 @@ from rtabmap_msgs.msg import Info
 from std_msgs.msg import String
 from std_srvs.srv import Empty
 
-from pepin.flags import Flag, FlagSet
+from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.global_descriptor import (
     CENSUS_ENV,
     DESCRIPTOR_PARAMETERS,
-    MAX_NULL_SHARE,
     PLACE_DESCRIPTOR,
     PLACE_TOPIC,
     PLACE_WORDS,
-    RECENT_CAMERA_SNAPSHOTS,
     TFIDF,
     Census,
     SnapshotPlace,
@@ -82,7 +80,6 @@ from pepin.graphmode import (
     FEATURES_XFEAT,
     LOCALISING,
     PNP_REPROJ_PX,
-    PNP_REPROJ_RANGE_PX,
     PROXIMITY_STOCK,
     STRATEGY_ICP,
     XFEAT_DETECTOR_PATH,
@@ -250,32 +247,6 @@ FLAGS = FlagSet(
         " Python adapters alone, not what RTAB-Map pays",
     ),
     Flag(
-        "pnp_reproj_px",
-        PNP_REPROJ_PX,
-        range=PNP_REPROJ_RANGE_PX,
-        description="Vis/PnPReprojError: how far, in pixels, a database point may reproject from"
-        " its match in the current picture and still count as an inlier of the visual"
-        " registration (20 inliers accept it, Vis/MinInliers). Sent with the strategy's"
-        " parameters and changed live",
-        why="2, RTAB-Map's own default (Parameters.h:684), and measured against 4 in RTAB-Map's"
-        " own registration on the same 219 evening frames (scratch/xfeat/probe/probe_report.py,"
-        " xfeat, Vis/Iterations 300, the node nearest the truth): 4 px recognises 207 (95 %)"
-        " where 2 px recognises 197 (90 %), but judged against the lidar's truth 29 of its 167"
-        " recognitions are off by 0.30 m or 10 deg (17.4 %) against 18 of 157 (11.5 %) at 2 px,"
-        " and its error is wider (p90 0.36 m / 11.4 deg against 0.30 m / 9.2 deg) — the 10 extra"
-        " recognitions bring 11 extra wrong ones (scratch/xfeat_critic/rtabmap_own_figures.py)."
-        " A wrong word moves map -> odom when RTAB-Map owns it, so the tighter gate is the"
-        " default. The Python emulation agrees (scratch/xfeat/xfeat_bench.py: 209 against 167"
-        " recognised, 22 of 168 against 6 of 133 wrong), and against WRONG nodes — 336 evening"
-        " frames paired with nodes 2.5 m away or looking elsewhere — it let none through at 2 px"
-        " (at most 19 inliers) and 5 (1.5 %) at 4 px (scratch/xfeat/impostors.py; emulation only,"
-        " not rerun inside RTAB-Map)",
-        on_when="2 by default; 4 when the recognitions a camera-only drive needs do not come at 2"
-        " and the words that do come sit close to the truth",
-        off_when="back to 2 the moment a 4 px word is seen far from where the cart stands: a wider"
-        " gate admits more wrong matches as inliers",
-    ),
-    Flag(
         "visual_confirm",
         CONFIRM_AGGRESSIVE,
         choices=tuple(CONFIRM_PARAMETERS),
@@ -351,35 +322,6 @@ FLAGS = FlagSet(
         " GPU is wanted elsewhere",
     ),
     Flag(
-        "registration_timeout_s",
-        RegistrationSettings.timeout_s,
-        range=(0.05, 5.0),
-        description="how long RTAB-Map's adapters wait for one answer of the localisation service"
-        " before it counts as none (auto then computes it locally, and the service is left alone"
-        " for 10 s)",
-        why="1.0, measured 2026-09-24 from inside a container: the slowest endpoint, /match,"
-        " answers in about 105 ms median and 120 ms p90 with 2048 keypoints a side"
-        " (scratch/models/endpoint_bench.py), but a GPU model's first answer after two seconds"
-        " idle takes 200-460 ms, and 1.5 s after minutes (scratch/models/gpu_idle_probe.py: the"
-        " laptop swaps), which is how RTAB-Map's registrations arrive — in bursts. One slow answer"
-        " costs its call a local computation (auto); three in a row leave the service alone for"
-        " 10 s",
-        on_when="raise it when the adapters' line counts fallbacks while the service is healthy",
-        off_when="lower it when a sick service makes registrations late",
-    ),
-    Flag(
-        "xfeat_top_k",
-        RegistrationSettings.top_k,
-        range=(256, 8192),
-        description="the most XFeat keypoints a picture keeps, best score first, wherever XFeat"
-        " runs; RTAB-Map applies no cap of its own to a Python detector",
-        why="2048, the cap the offline benchmark measured the evening recognitions with"
-        " (scratch/xfeat/xfeat_bench.py); XFeat's own examples use 2048-4096",
-        on_when="raise it where a scene is sparse and registrations fail on too few inliers",
-        off_when="lower it when LighterGlue's time per pair (quadratic in the keypoints) is too"
-        " much for the laptop",
-    ),
-    Flag(
         "place_recognition",
         PLACE_WORDS,
         choices=(PLACE_WORDS, PLACE_DESCRIPTOR),
@@ -417,23 +359,6 @@ FLAGS = FlagSet(
         " descriptor naming the wrong node; an unpatched core, a database not backfilled,"
         " snapshots without descriptors or a service that is not describing keep the words by"
         " themselves",
-    ),
-    Flag(
-        "descriptor_null_share",
-        MAX_NULL_SHARE,
-        range=(0.0, 1.0),
-        description="place_recognition descriptor falls back to the words while more than this"
-        f" share of the last {RECENT_CAMERA_SNAPSHOTS} camera snapshots carried the null"
-        " descriptor (the localisation service down, late or answering nonsense), and goes back"
-        " once they are described again; 1.0 never falls back",
-        why=f"{MAX_NULL_SHARE}: a snapshot whose descriptor is null scores 0.5 against EVERY node"
-        " (pepin.global_descriptor), Rtabmap::adjustLikelihood's z-scores are then all zero and no"
-        " hypothesis forms — descriptor mode goes blind where the words would still recognise the"
-        f" place. Half of {RECENT_CAMERA_SNAPSHOTS} at a snapshot a second: a service that dies"
-        " costs at most five blind updates, and one late answer never flips the likelihood",
-        on_when="lower it to fall back sooner",
-        off_when="1.0 to keep the descriptor whatever the service does (a measurement of the"
-        " descriptor alone)",
     ),
     Flag(
         "start_needs_placement",
@@ -500,7 +425,7 @@ class RtabmapFrame(Node):
 
     def __init__(self) -> None:
         super().__init__("rtabmap_frame")
-        self._switches = Switches(self, FLAGS)
+        self._switches = Switches(self, with_knobs(FLAGS, load_knobs("rtabmap_frame")))
         # RTAB-Map's memory mode, pinned to localising (pepin.graphmode.ModeRule): a restart in
         # mapping mode opens a session per start, and the published grid is then the current
         # node's component of working memory (vslam.launch.py's rtabmap_memory).

@@ -28,11 +28,11 @@ difference is +1 cm and 3 % of the marks are false; below 1.25 m the picture's b
 looks 1.02 m ahead, so the scan reports the foot of whatever stands behind the near overhang and
 the lidar owns that metre.
 
-The flags (:data:`FLAGS`, all live, ``ros/flags.sh set contact_scan <name> <value>``):
-``contact_scan`` (publish or not), ``shadow`` (take the band's own width back off the range),
-``imu_lean`` (the floor plane follows the gyro too, not the accelerometer alone) and
-``max_range``; their state and the last frame's :class:`pepin.contact.ContactVerdict` are printed
-in every report line.
+The flags and knobs (:data:`FLAGS` and config/knobs.json, all live, ``ros/flags.sh set contact_scan
+<name> <value>``): ``contact_scan`` (publish or not), ``shadow`` (take the band's own width back off
+the range), ``imu_lean`` (the floor plane follows the gyro too, not the accelerometer alone) and
+``max_range``; their state and the last frame's :class:`pepin.contact.ContactVerdict` are printed in
+every report line.
 """
 
 from __future__ import annotations
@@ -46,14 +46,13 @@ from sensor_msgs.msg import CameraInfo, Image, LaserScan
 
 from pepin.camera import CameraConfig, mount_transform
 from pepin.contact import (
-    CONTACT_MAX_RANGE,
     N_BINS,
     ContactVerdict,
     FloorPlane,
     contact_scan,
 )
 from pepin.depth import SCAN_HALF_FOV, SCAN_STEP, Array, CameraPose, Intrinsics
-from pepin.flags import Flag, FlagSet
+from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin_bringup.msgs import array_from_image, scan_from_ranges
 from pepin_bringup.node_kit import LeanFeed, Switches, Tally, Worker, spin_main
 
@@ -115,26 +114,6 @@ FLAGS = FlagSet(
         " sample",
         off_when="wherever the reported lean disagrees with the cart's visible attitude",
     ),
-    Flag(
-        "max_range",
-        CONTACT_MAX_RANGE,
-        description="metres past which a column is called clear instead of ended; the costmap's"
-        " contact_layer.obstacle_max_range must match it",
-        why="where the floor stops being the floor, not where the optics run out: on 22"
-        " open-floor frames of run 0171 the network's floor sits at 1.01 of the geometric plane"
-        " at 1.0-1.5 m, 0.96 at 1.5-2.0, 0.89 at 2.0-2.5 and 0.80 at 2.5-3.0 — and 0.89 of the"
-        " plane is 13 cm of height, the width of the band itself, so past 2 m the floor leaves"
-        " the band on its own and the column ends on nothing. The marks agree: 3 % false below"
-        " 1.75 m, 44 % beyond it, and without the cap every mark past 2 m is false"
-        " (scratch/contact_vs_lidar.py). Measured 2026-09-11 on the old geometry (lidar 0.20 m,"
-        " camera 1.23 m at 26 deg, hfov 78), all three since corrected — the cap has not been"
-        " re-measured",
-        on_when="raise it only after the floor ratio is re-measured on the corrected geometry,"
-        " and raise the costmap's obstacle_max_range with it",
-        off_when="lower it where the floor is patterned, wet or dark, which shortens the range"
-        " the network's floor stays flat over",
-        range=(RANGE_MIN_M, RANGE_CEILING_M),
-    ),
 )
 
 
@@ -149,7 +128,9 @@ class ContactScan(Node):
         self._camera = CameraPose(x, y, z, pitch)
         # Declared after every other parameter: rclpy runs the switches' callback on
         # declarations too, and it refuses everything that is not a flag.
-        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
+        self._switches = Switches(
+            self, with_knobs(FLAGS, load_knobs("contact_scan")), on_change=self._on_switch
+        )
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         newest = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(LaserScan, "/contact_scan", reliable)

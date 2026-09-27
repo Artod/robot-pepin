@@ -75,6 +75,7 @@ from pepin.depth_pipeline import (  # noqa: E402
     FrameContext,
     LidarAnchor,
 )
+from pepin.flags import load_knobs  # noqa: E402
 from pepin.mounts import load_lidar_mount, rotation_from_rpy  # noqa: E402
 from pepin.stereo_depth import StereoMatcher  # noqa: E402
 from pepin.tsdf import RigidPose  # noqa: E402
@@ -906,7 +907,7 @@ def test_the_reach_is_one_number_for_the_image_and_for_the_scan() -> None:
     the same constant: two literals would drift, and the costmap's obstacle_max_range of 2.5 m has
     to stay under both."""
     assert DEPTH_REACH_M == 3.0
-    assert FLAGS["depth_reach_m"] == 3.0
+    assert load_knobs("depth_stream")["depth_reach_m"] == 3.0
     assert FLAGS["depth_reach"] is True
     assert SCAN_MAX_RANGE == DEPTH_REACH_M, "this file's own reference uses the node's default"
 
@@ -947,7 +948,7 @@ def test_the_published_depth_is_nan_past_the_reach_and_the_scan_is_untouched(
     line = on.logger.texts("info")[-1]
     share = int(beyond.sum()) / (HEIGHT * WIDTH) * 100.0
     assert f"published NaN past 3.0 m over {share:.1f}% of the pixels" in line
-    assert "depth_reach=on depth_reach_m=3.0" in line
+    assert "depth_reach=on " in line and "depth_reach_m=3.0" in line
     off._report()
     assert "published NaN past" not in off.logger.texts("info")[-1]
 

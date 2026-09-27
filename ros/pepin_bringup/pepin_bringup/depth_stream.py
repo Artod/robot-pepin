@@ -74,14 +74,14 @@ composes into the scan's carry and the camera's place, so a body tipped over a s
 place its frame as if it stood level. A lean gravity did not vote for (``lean_min_quality``,
 the signature of a drifting gyro rather than of a tipping body) is treated as no lean at all.
 
-The flags (:data:`FLAGS`, ``ros/flags.sh set depth_stream <flag> <value>``): one per stage of
-the pipeline — ``edge_filter``, ``lidar_anchor``, ``affine_law``, ``floor_anchor`` — plus
-``depth_backend``, ``stereo_matcher``, ``scale_ceiling``, the largest 1 / scale the law may be
-fitted to, ``law_slew``, how fast that law may move between fits,
+The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set depth_stream <flag>
+<value>``): one per stage of the pipeline — ``edge_filter``, ``lidar_anchor``, ``affine_law``,
+``floor_anchor`` — plus ``depth_backend``, ``stereo_matcher``, ``scale_ceiling``, the largest 1 /
+scale the law may be fitted to, ``law_slew``, how fast that law may move between fits,
 ``tf_dead_s``, how stale a TF edge may be before no frame waits for it, ``imu_lean``,
-``lean_min_quality`` and ``scan_hz``, the cap on how often ``/depth_scan`` is published (5 Hz,
-the board's local costmap's own ``update_frequency`` — every frame is still processed, the cap
-is on the publisher); their state is printed in every report line.
+``lean_min_quality`` and ``scan_hz``, the cap on how often ``/depth_scan`` is published (5 Hz, the
+board's local costmap's own ``update_frequency`` — every frame is still processed, the cap is on the
+publisher); their state is printed in every report line.
 """
 
 from __future__ import annotations
@@ -115,7 +115,6 @@ from pepin.contact import (
 from pepin.depth import (
     MIN_SAMPLES,
     POOL_MIN_SAMPLES,
-    SCALE_CEILING,
     SCAN_MIN_Z_M,
     SCAN_WINDOW_S,
     Array,
@@ -136,7 +135,6 @@ from pepin.depth import (
     to_base,
 )
 from pepin.depth_pipeline import (
-    LIDAR_SIGMA_M,
     AffineLaw,
     FrameContext,
     LidarAnchor,
@@ -151,9 +149,8 @@ from pepin.depth_service import (
     LazyDepth,
     RemoteDepth,
 )
-from pepin.flags import Flag, FlagSet
+from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.frame_pose import FramePoser
-from pepin.lean import LEAN_QUALITY_FLOOR
 from pepin.stereo_depth import (
     MATCHERS as STEREO_MATCHERS,
 )
@@ -343,24 +340,6 @@ FLAGS = FlagSet(
         env="PEPIN_STEREO_MATCHER",
     ),
     Flag(
-        "scale_ceiling",
-        SCALE_CEILING,
-        description="the largest 1 / scale the law may be fitted to (the upper half of"
-        " pepin.depth.A_BOUNDS); a law that lands on a bound prints AT BOUND",
-        why="at 3.0 the law was a clipped constant once the lidar's plane was measured at its true"
-        " 0.383 m — the fit saturated at a 3.00 with b pinned at -0.200 and stopped being a fit"
-        " (scratch/lidar_height_fix_report.txt). Opened to 5.0 the same run fits a 2.80 in a, and"
-        " the COLMAP control at 0.50-0.80 m reads 1.14 [0.90..1.24] against the clipped law's 1.32"
-        " [1.08..1.43]; the clipped law's tighter band against the beams (3.8 against 5.2 cm"
-        " median) is luck, not fit. b still sits on its own bound, -0.200: the next one to"
-        " question",
-        on_when="raise it above 5.0 only when a law reports AT BOUND in a and the mount height and"
-        " the lens behind that law have been checked first",
-        off_when="set it back to 3.0 to reproduce the clipped law in the field, side by side, with"
-        " no restart",
-        range=(0.5, 20.0),
-    ),
-    Flag(
         "law_watch",
         False,
         description="the affine law is fitted on the lidar's pairs and printed, and the depth is"
@@ -376,47 +355,6 @@ FLAGS = FlagSet(
         on_when="the source is metric (stereo) and the lidar is a witness, not a ruler",
         off_when="the depth needs the lidar's scale (the mono network), or as an A/B of what the"
         " law would do to a stereo depth",
-    ),
-    Flag(
-        "law_slew",
-        0.0,
-        range=(0.0, 1.0),
-        description="how fast the affine law may move, as the largest relative change of the"
-        " published inverse depth over the pool's own depth range, per second; 0 applies every"
-        " fit whole, as the node always did. A law still walking to its fit says so in the"
-        " report line (slewing to a X b Y)",
-        why="2026-09-14: standing at home the law reads a 1.74 b 0.000 on 62 000 pairs; 30 s of"
-        " driving takes it to a 2.33 b -0.200 and back. Neither the camera nor the room changed:"
-        " the pool is 600 frames, which at 9.4 frames/s is 64 s, so half a minute replaces half"
-        " of it, and the drive's wider depth range opens the shift term"
-        " (pepin.depth.MIN_DEPTH_SPREAD 2.5 — standing, the beams span 0.8-2.0 m, a ratio of"
-        " 2.05). The same resting beams fitted with a free shift give a 2.26 b -0.183"
-        " (scratch/depth_scale_by_range.py), which is the drive's law: one set of pairs, two"
-        " descriptions, 11 % apart in metres at 1 m. The volume is painted with whichever was in"
-        " force, and the next frame no longer fits it — 220-270 frames per 30 s refused at the"
-        " alignment bound, a pure 5 % scale mismatch being enough to pin that search at its edge"
-        " (scratch/align_vs_scale.py)",
-        on_when="0.005 (30 % a minute) to let the law follow the room but not one drive's worth"
-        " of pairs; raise it only after a drive has been read with it on",
-        off_when="0 to reproduce today's behaviour, where every fit is applied whole",
-    ),
-    Flag(
-        "carry_max_speed_mps",
-        1.0,
-        range=(0.1, 20.0),
-        description="metres per second the carry from the scan's moment to the frame's may imply"
-        " before the frame's lidar beams are thrown away instead of anchoring the law; the frame"
-        " still publishes its depth, it simply judges nothing",
-        why="2026-09-14: with the EKF running away (43 km at 60 m/s) the carry moved the scan"
-        " 1-2 m over the 0.02-0.03 s between the scan and the frame, dragged beams across the"
-        " picture and refitted the law from those pairs — a went 1.65 -> 2.05 and the law file"
-        " had to be thrown away (ros/maps/depth_law.json.corrupt-20260914). This cart's top"
-        " speed is 0.3 m/s, so one metre per second is three times anything it can drive and"
-        " still far under what a runaway frame shows. It stops the law, not"
-        " the pose",
-        on_when="raise it only on a faster base",
-        off_when="raise it to 20 to reproduce the old behaviour, where any carry was applied"
-        " whatever it implied",
     ),
     Flag(
         "imu_lean",
@@ -436,25 +374,6 @@ FLAGS = FlagSet(
         " attitude",
     ),
     Flag(
-        "lean_min_quality",
-        LEAN_QUALITY_FLOOR,
-        description="how much of the lean gravity must have voted for (pepin.lean's quality,"
-        " printed beside the lean in this line) before a frame is placed by it: below it the lean"
-        " is treated as unknown and the frame is placed level",
-        why="chosen on a simulation, not on the robot: in scratch/lean_quality_floor_probe.py a"
-        " 0.2 deg/s gyro bias reports 3.0 degrees of tip on a level floor at quality 0.02 or less,"
-        " nothing past 0.13 degrees of it survives a floor of 0.5, and a real 6 degree threshold"
-        " climb keeps quality 1.00 throughout — so the floor costs the feature nothing. The 0.2"
-        " deg/s is hypothetical: this chip's worst measured axis is 0.074 deg/s (config/imu.json's"
-        " level block). The same floor is declared in depth_fusion, so the pose and the scan gate"
-        " make one decision",
-        on_when="raise it towards 1.0 on a robot that only ever leans when something real pushes"
-        " it",
-        off_when="0 believes every lean, as before the floor existed: an A/B of the gyro's own"
-        " drift",
-        range=(0.0, 1.0),
-    ),
-    Flag(
         "camera_tf_latest",
         True,
         description="take the newest base_link <- camera_optical edge TF holds (at most"
@@ -467,47 +386,6 @@ FLAGS = FlagSet(
         on_when="always while the head does not move during a frame (it does not: neck moves"
         " are refused while the wheels turn)",
         off_when="a head that pans while driving, where a 1 s old edge would be a wrong pose",
-    ),
-    Flag(
-        "tf_dead_s",
-        TF_DEAD_S,
-        range=(0.0, 600.0),
-        description="how far behind a frame's stamp TF's newest edge may be before that edge is"
-        " taken for dead and no lookup on the frame's path waits for it: the camera pose falls"
-        " to config/camera.json's mount and the lidar's scan passes uncarried, both at once and"
-        " both counted. 0 turns the guard off — every lookup waits CARRY_WAIT_S again",
-        why="2026-09-16: the board's TF route died, base_link <- camera_optical stopped 344 s"
-        " back, and every frame still spent the whole 0.2 s wait on a lookup no publisher was"
-        " going to answer — pose 212/226 ms in the report line, the stream down to 0.9-3"
-        " frames/s. Three seconds is three missed republishes of the neck at 10 Hz and well over"
-        " any WiFi hiccup, so a route that is merely stuttering still gets its wait",
-        on_when="always: a wait that cannot succeed costs the frame and buys nothing",
-        off_when="0 to reproduce the old behaviour, or raise it on a link whose TF genuinely"
-        " arrives in bursts longer than three seconds",
-    ),
-    Flag(
-        "lidar_sigma_m",
-        LIDAR_SIGMA_M,
-        description="what one lidar beam's range is trusted to, in metres. 0 (the default) gives"
-        " every beam the flat weight of 1, the reference pair. Above 0, a beam's weight is"
-        " 1 / sigma^2 in inverse depth, sigma_m / z^2, which reads as a weight proportional to z^4",
-        why="0 because weighing the beams by range was measured and it is worse. On the four"
-        " errands of 2026-09-14 (scratch/parallax_ruler_recheck.txt, 112 frames, the odd beams"
-        " fitting and the even ones judging) sigma_m 1.5 cm took the LIDAR-ONLY frame law from"
-        " 7.4 % to 11.4 % of median |residual| overall and from 6.4 % to 18.3 % over 1.0-1.5 m,"
-        " while 3-12 m improved 10.5 % -> 4.4 %: at z^4 a beam at 8 m counts 256 beams at 2 m,"
-        " so the far beams fit themselves and the near field — everything the cart parks against"
-        " — pays for it. The maths behind that: the fit minimises the residual of the NETWORK's"
-        " 1 / D, whose own noise (0.02-0.10 of inverse depth) is far above a beam's"
-        " (0.0002-0.023) at every range, so a beam's sigma is not the residual's sigma and"
-        " 1 / sigma_beam^2 is not that pair's share of this fit. The ratio between two DIFFERENT"
-        " rulers (a 7-10 cm corner against a beam) is a different question and is what"
-        " pepin.depth.pair_weight is still used for",
-        on_when="only with a measurement that beats the flat weight on the near bands — e.g."
-        " after the network's own per-pair noise enters the weight (1 / (sigma_net^2 +"
-        " a^2 sigma_ruler^2)), which is the fit this knob is a crude stand-in for",
-        off_when="0 is the shipped default; leave it there",
-        range=(0.0, 0.2),
     ),
     Flag(
         "fan_floor_gate",
@@ -578,48 +456,6 @@ FLAGS = FlagSet(
         " lidar — which is every mode since 2026-09-19",
         off_when="to measure the network past its reach (a range-law session that wants the far"
         " bins), and to reproduce a volume or a costmap from before this gate",
-    ),
-    Flag(
-        "depth_reach_m",
-        DEPTH_REACH_M,
-        description="metres past which the published depth is NaN; the same number /depth_scan is"
-        " capped at",
-        why=f"{DEPTH_REACH_M:.1f} is the reach this stack already stands on in two places: the"
-        " scan's own cap (scan_max_range, which the costmap's obstacle_max_range of 2.5 m must"
-        " stay under — 2026-09-11 05:25, or an inf ray marks a lethal ring) and the camera-only"
-        " grid's Grid/RangeMax. What the range law measured across it: after the law 0.8-1.2 m"
-        " reads +0.1 %, 1.2-1.6 +0.4 %, 1.6-2.0 -0.5 %, and 2.0-2.5 m stays -20 % under any law"
-        " z = f(d) at one neck pitch because the network SATURATES there (true 1.75 and 2.2 m"
-        " arrive at the same network depth ~3.1, 2026-09-15 15:30) — softened the next day to a"
-        " place fact, with the frame law reading +2.7 % over 2.5-6 m on a drive. So the honest"
-        " statement is that the last metre before 3 m is worth a fifth of itself at worst and"
-        " nothing is claimed past it",
-        on_when="raise it only with a wall-truth measurement at the new range on the current"
-        " geometry, and raise Grid/RangeMax's camera half nowhere — it is the lidar's",
-        off_when="lower it where the network is known to be worse: a dark room, a patterned floor,"
-        " a head pitched far down (the saturation moves with the pitch)",
-        range=(0.3, 12.0),
-    ),
-    Flag(
-        "scan_hz",
-        5.0,
-        description="the cap on how often /depth_scan is PUBLISHED, in hertz; 0 publishes one fan"
-        " per frame, which is what this topic did until 2026-09-22. The cap is on the publisher"
-        " alone: every frame still goes through the network and the whole pipeline, every law is"
-        " still fitted from it, and the depth image on /camera/depth is not thinned at all",
-        why="the consumers of this topic are the board's two costmaps, which read it at their own"
-        " update_frequency — 5.0 local, 2.0 global (ros/params/nav2_params.yaml) — and"
-        " pepin_bringup.depth_fusion, which uses it to CLEAR. This node publishes at the"
-        " camera's rate, ~9 Hz, so roughly four of every nine fans crossed the zenoh routers to"
-        " the board to be overwritten in the layer before it was next read. The stop reflex is"
-        " bounded by the costmap tick and not by this publisher, so nothing about how fast the"
-        " cart stops changes",
-        on_when="raise it with the local costmap's own update_frequency, never above the"
-        " camera's frame rate (a cap above the source publishes every frame and nothing more)",
-        off_when="0 is the pre-2026-09-22 behaviour, one fan per frame: what a bench test on one"
-        " machine (no routers in the path) may as well use, and the A/B for whether a mark the"
-        " costmap failed to clear is the cap's fault",
-        range=(0.0, 30.0),
     ),
 )
 FLOOR_STAGES = ("floor_anchor",)  # the stages that read the IMU's up vector
@@ -886,7 +722,11 @@ class DepthStream(Node):
             self.declare_parameter("stereo_host_timeout_s", 2.0).value
         )
         self._stereo_matcher_settings = self._matcher_settings()
-        self._switches = Switches(self, flags_for(source_name), on_change=self._on_switch)
+        self._switches = Switches(
+            self,
+            with_knobs(flags_for(source_name), load_knobs("depth_stream")),
+            on_change=self._on_switch,
+        )
         self._law.watching = bool(self._switches["law_watch"])
         for name in self._pipeline.names:  # a launch override reaches the stage it names
             self._pipeline.set(name, self._switches.on(name))

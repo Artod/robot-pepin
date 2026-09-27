@@ -9,8 +9,9 @@
 #   ros/flags.sh drift [NODE|board|laptop]   only what has been moved: every flag whose live value
 #                                     differs from its table default, one per line, nothing at all
 #                                     when every node is as it shipped (ros/restart.sh reads this)
-# Each node declares its flags once, in the FLAGS table of ros/pepin_bringup/pepin_bringup/NODE.py
-# (pepin.flags; ros/README.md lists them). ros/tools/flags_doc.py reads the tables, and
+# Each node declares its flags once, in the FLAGS table of ros/pepin_bringup/pepin_bringup/NODE.py,
+# and its numbers in config/knobs.json; FLAG below is either (pepin.flags; ros/README.md lists
+# them). ros/tools/flags_doc.py reads both, and
 # pepin.deployment says where a node runs: the laptop's SLAM or navigation container (docker
 # exec) or the board's pepin-ros (ssh, then docker exec). The ros2 CLI runs inside that
 # container, on the node's own DDS domain. A change lives until the node restarts; a default

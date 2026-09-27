@@ -17,7 +17,7 @@ import pytest
 import source_facts as sf
 import yaml
 
-from pepin.flags import load_table
+from pepin.flags import FlagSet, load_knobs, load_table, with_knobs
 from pepin.watch import PAINT_SIGMA_M
 
 REPO = Path(__file__).resolve().parents[2]
@@ -35,6 +35,11 @@ def _node_named(launch: ast.Module, name: str) -> ast.Call:
         for c in sf.calls_to(launch, "Node")
         if ast.unparse(sf.keywords(c).get("name", ast.Constant(None))) == repr(name)
     )
+
+
+def _live_table(node: str) -> FlagSet:
+    """A node's whole live table: its FLAGS, then its config knobs (config/knobs.json)."""
+    return with_knobs(load_table(REPO / NODES / f"{node}.py"), load_knobs(node))
 
 
 def _started_by_describe(launch: ast.Module) -> set[str]:
@@ -1133,7 +1138,7 @@ def test_the_contact_scan_only_marks_and_stays_off_until_it_is_measured() -> Non
         assert source["obstacle_max_range"] == CONTACT_MAX_RANGE
     # The node's own cap is the same number, and its scan's range_max with it: a mark the layer
     # would have to discard is a mark nobody sees.
-    assert load_table(REPO / NODES / "contact_scan.py")["max_range"] == CONTACT_MAX_RANGE
+    assert load_knobs("contact_scan")["max_range"] == CONTACT_MAX_RANGE
     # The camera's two scans keep the rule that separates clearing from marking: depth_scan
     # clears with inf, so the node's range_max must stay above the layer's obstacle range.
     camera = _p("local_costmap")["camera_layer"]["depth_scan"]
@@ -1152,7 +1157,7 @@ def test_the_contact_scan_only_marks_and_stays_off_until_it_is_measured() -> Non
     assert camera["inf_is_valid"] is True and camera["obstacle_max_range"] < scan_max_range, (
         "an inf ray clears to range_max: below that, every one of them marks instead"
     )
-    assert load_table(REPO / NODES / "depth_stream.py")["depth_reach_m"] == scan_max_range
+    assert load_knobs("depth_stream")["depth_reach_m"] == scan_max_range
 
 
 def test_the_camera_layer_clears_from_a_frame_and_marks_from_the_volume() -> None:
@@ -1236,7 +1241,7 @@ def test_the_floor_s_edge_is_a_node_of_the_kit() -> None:
     assert {"Worker", "Switches", "Tally", "spin_main"} <= sf.imported(node)
     assert "self._switches.state" in sf.calls(node) and "self._worker.stop" in sf.calls(node)
     # the live flags (CLAUDE.md rule 19), the feature's own name first
-    flags = load_table(REPO / NODES / "contact_scan.py")
+    flags = _live_table("contact_scan")
     assert flags.names == ("contact_scan", "shadow", "imu_lean", "max_range")
     assert flags["imu_lean"] is True, "on since the gyro's sign was verified by hand (2026-09-13)"
     assert flags["contact_scan"] is True and flags["shadow"] is True
@@ -1448,7 +1453,7 @@ def test_the_frames_are_fused_into_one_surface_beside_rtabmap_s_cloud() -> None:
     assert sf.assignments(node)["CONFIG"] == "'/ws/config/fusion.json'"
     # The four are flags of the node's table (node_kit.Switches over pepin.flags), so ros2
     # param set reaches them and their state is printed in the report line (CLAUDE.md rule 19).
-    fusion_flags = load_table(REPO / NODES / "depth_fusion.py")
+    fusion_flags = _live_table("depth_fusion")
     assert {"enabled", "align", "min_weight", "surface_hz"} <= set(fusion_flags.names)
     assert fusion_flags.flag("surface_hz").range is not None, "a rate is bounded"
     assert not fusion_flags.flag("resume_volume").live, "a start-up choice, not a live switch"
@@ -1503,7 +1508,7 @@ def test_nothing_is_painted_at_a_pose_nobody_trusts() -> None:
     asked = (REPO / NODES / "depth_fusion.py").read_text().count("self._paint_refusal(")
     assert asked == 2, "both paint paths ask it: the camera's frame and the lidar's revolution"
     assert "/localization/sigma" in sf.strings(node), "the tracker's own sigma, where it speaks"
-    flags = load_table(REPO / NODES / "depth_fusion.py")
+    flags = _live_table("depth_fusion")
     assert flags.flag("lidar_fit_gate").default is True, "a revolution is gated like a frame"
     assert flags.flag("paint_sigma_m").default == PAINT_SIGMA_M
     assert flags.flag("paint_sigma_m").range == (0.01, 2.0)
@@ -1552,7 +1557,7 @@ def test_the_graphs_bend_moves_the_volume_and_the_carts_recovery_never_does() ->
         assert all(any(isinstance(b, ast.Return) for b in guard.body) for guard in guards), (
             f"{path} returns when the volume owes the graph a move"
         )
-    flags = load_table(REPO / NODES / "depth_fusion.py")
+    flags = _live_table("depth_fusion")
     assert flags.flag("follow_correction").default is True
     for name in ("follow_correction_min_m", "follow_correction_min_deg", "follow_correction_min_s"):
         assert flags.flag(name).range is not None, f"{name}: a threshold is bounded"
@@ -1617,13 +1622,13 @@ def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
     # both and the paint path picks a frame instead of threading a frame name through every lookup.
     assert "poser.base_in_map" in sf.calls(fusion), "the scan's pose is the poser's"
     assert "self._poser_now" in sf.unparsed(fusion, ast.Attribute), "one poser per volume_frame"
-    gate = load_table(REPO / NODES / "depth_fusion.py").flag("lean_gate_deg")
+    gate = _live_table("depth_fusion").flag("lean_gate_deg")
     assert gate.live and gate.default == 3.0 and gate.range == (0.0, 90.0)
     assert "leaned_out" in sf.strings(fusion), "the report line counts what the gate dropped"
     # and a lean gravity never voted for is no lean: one floor, in both nodes that place a
     # measurement, read by the poser so the gate and the pose make the same decision
     for name in ("depth_fusion", "depth_stream"):
-        floor = load_table(REPO / NODES / f"{name}.py").flag("lean_min_quality")
+        floor = _live_table(name).flag("lean_min_quality")
         assert floor.live and floor.default == LEAN_QUALITY_FLOOR, name
         assert floor.range == (0.0, 1.0), name
         attributes = sf.unparsed(sf.tree(f"{NODES}/{name}.py"), ast.Attribute)
@@ -1648,11 +1653,13 @@ def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_p
         tables[path.stem] = flags
         assert "self._switches.state" in sf.calls(node), f"{path.name}: the report line"
         switches = sf.calls_to(node, "Switches")
-        # FLAGS itself, or flags_for(...): the same table with a depth source's own defaults
+        # FLAGS itself, or flags_for(...): the same table with a depth source's own defaults;
+        # with the node's config knobs (config/knobs.json) after it when the node has any
         table = ast.unparse(switches[0].args[1])
-        assert len(switches) == 1 and (table == "FLAGS" or table.startswith("flags_for(")), (
-            path.name
-        )
+        knobs = load_knobs(path.stem)
+        own = "FLAGS" if path.stem != "depth_stream" else "flags_for(source_name)"
+        expected = f"with_knobs({own}, load_knobs('{path.stem}'))" if len(knobs) else own
+        assert len(switches) == 1 and table == expected, (path.name, table)
         assert "self.add_on_set_parameters_callback" not in sf.calls(node), path.name
         # A name built per sensor (tof_bridge's f"{name}_x") is not a literal and cannot be
         # compared with a flag's name here; every literal one is.
@@ -1662,6 +1669,7 @@ def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_p
             if isinstance(c.args[0], ast.Constant)
         }
         assert not declared & set(flags.names), f"{path.name}: a flag declared twice"
+        assert not declared & set(knobs.names), f"{path.name}: a knob declared by hand"
         for flag in flags:
             assert flag.description, f"{path.name}: {flag.name} needs a sentence"
     assert {"depth_stream", "depth_fusion", "goal_server", "neck_state"} <= tables.keys()

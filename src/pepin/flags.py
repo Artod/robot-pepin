@@ -23,12 +23,18 @@ measured reason the default is what it is (the numbers and the file they were me
 :data:`UNMEASURED` when nobody has measured it), ``on_when`` and ``off_when`` say what a person
 in front of the robot should see before moving the switch. :meth:`Flag.paragraph` prints all
 four for a terminal (``ros/flags.sh flag NODE FLAG``) and :meth:`Flag.markdown` for the README.
+
+Config knobs are numbers, not switches: they live in ``config/knobs.json`` by node name with a
+default, a range and one line of note, and :func:`load_knobs` turns a node's block into number
+flags, so the adapter declares them as live parameters beside the node's ``FLAGS`` and
+``ros/flags.sh get|set`` reaches them the same way.
 """
 
 from __future__ import annotations
 
 import ast
 import importlib
+import json
 import textwrap
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -42,6 +48,7 @@ OFF_WORDS = ("false", "off", "0", "no")
 COLUMNS = ("flag", "kind", "default", "live", "description")
 UNMEASURED = "default by design, unmeasured"
 WIDTH = 96
+KNOBS_FILE = "knobs.json"  # config/knobs.json: {node: {knob: {default, range, note}}}
 
 
 @dataclass(frozen=True)
@@ -451,3 +458,47 @@ def load_table(path: Path | str, name: str = "FLAGS") -> FlagSet:
     if not isinstance(flags, FlagSet):
         raise ValueError(f"{path}: {name} is a {type(flags).__name__}, not a FlagSet")
     return flags
+
+
+def knob(name: str, spec: Mapping[str, Any]) -> Flag:
+    """One config knob as a live number flag: ``spec`` is its block in config/knobs.json —
+    ``default`` (an int counts, a float measures), ``range`` ``[lo, hi]`` and a one-line
+    ``note``; ``ValueError`` naming the knob when the block is not that."""
+    try:
+        default = spec["default"]
+        lo, hi = spec["range"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"{name}: a knob needs a default and a [lo, hi] range") from exc
+    if isinstance(default, bool) or not isinstance(default, (int, float)):
+        raise ValueError(f"{name}: a knob is a number, not {default!r}")
+    return Flag(name, default, description=str(spec.get("note", "")), range=(lo, hi))
+
+
+def knobs_of(blocks: Mapping[str, Any], node: str) -> FlagSet:
+    """``node``'s knobs from the whole knobs mapping (empty when the node has none), in the
+    file's order."""
+    block = blocks.get(node, {})
+    if not isinstance(block, Mapping):
+        raise ValueError(f"{node}: its knobs are a mapping of name to block")
+    return FlagSet(*(knob(name, spec) for name, spec in block.items()))
+
+
+def read_knobs(path: Path | None = None) -> dict[str, Any]:
+    """The whole knobs file as a mapping (``config/knobs.json`` wherever this library runs,
+    :func:`pepin.deployment.config_file`), keys starting with ``_`` left out."""
+    from pepin.deployment import config_file  # lazy: the table half stays import-light
+
+    source = path if path is not None else config_file(KNOBS_FILE)
+    data = json.loads(Path(source).read_text())
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
+def load_knobs(node: str, path: Path | None = None) -> FlagSet:
+    """``node``'s config knobs as number flags, read from config/knobs.json at start."""
+    return knobs_of(read_knobs(path), node)
+
+
+def with_knobs(flags: FlagSet, knobs: FlagSet) -> FlagSet:
+    """A node's whole live table: its feature flags, then its knobs; a name in both is a
+    ``ValueError``."""
+    return FlagSet(*flags, *knobs)

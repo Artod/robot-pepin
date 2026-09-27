@@ -150,19 +150,17 @@ the window's centre the box slides onto the cart and what leaves it is forgotten
 depended on the frame the volume was painted in. ``volume_frame`` map is the whole of the old
 behaviour, byte for byte.
 
-The flags (:data:`FLAGS`, ``ros/flags.sh set depth_fusion <flag> <value>``): ``enabled``,
-``volume_frame``,
-``fit_gate``, ``lidar_fit_gate``, ``paint_sigma_m``, ``imu_lean``, ``lean_gate_deg``,
-``lean_min_quality``, ``self_heal``, ``align``, ``min_weight``, ``marks_source``,
-``marks_min_z``, ``marks_hz``, ``marks_clear``, ``grid_out``, ``grid_hz``, ``grid_size_m``,
-``grid_resolution_m``, ``surface_hz``,
-``band_half_z``, ``lidar_layer``, ``no_return_free``, ``no_depth_free``, ``no_depth_weight``,
-``no_depth_reach_m``, ``colour_fallback``, ``view_gate``, ``snapshot_s``,
-``resume_volume``, ``follow_correction``, ``follow_correction_min_m``,
-``follow_correction_min_deg``, ``follow_correction_min_s``, ``follow_correction_law``; their
-state is printed in every report line, beside the band itself and the source of the plane it is
-centred on.
-``/fusion/reset`` (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
+The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set depth_fusion <flag>
+<value>``): ``enabled``, ``volume_frame``, ``fit_gate``, ``lidar_fit_gate``, ``paint_sigma_m``,
+``imu_lean``, ``lean_gate_deg``, ``lean_min_quality``, ``self_heal``, ``align``, ``min_weight``,
+``marks_source``, ``marks_min_z``, ``marks_hz``, ``marks_clear``, ``grid_out``, ``grid_hz``,
+``grid_size_m``, ``grid_resolution_m``, ``surface_hz``, ``band_half_z``, ``lidar_layer``,
+``no_return_free``, ``no_depth_free``, ``no_depth_weight``, ``no_depth_reach_m``,
+``colour_fallback``, ``view_gate``, ``snapshot_s``, ``resume_volume``, ``follow_correction``,
+``follow_correction_min_m``, ``follow_correction_min_deg``, ``follow_correction_min_s``,
+``follow_correction_law``; their state is printed in every report line, beside the band itself and
+the source of the plane it is centred on. ``/fusion/reset`` (std_srvs/Trigger) empties the model,
+the pairing queues and the tallies.
 
 THE CAMERA GRIDS (``grid_out``, off as shipped, 2026-09-24). ``/depth_marks`` is accumulated by
 each costmap's camera_layer into a grid of its own — two more copies of this memory, the global
@@ -195,8 +193,6 @@ from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
 from pepin.camera_grid import (
-    GRID_RESOLUTION_M,
-    GRID_SIZE_M,
     OCCUPIED,
     GridWindow,
     MapCanvas,
@@ -205,10 +201,10 @@ from pepin.camera_grid import (
     to_map_xy,
 )
 from pepin.depth import Intrinsics, rotation_matrix
-from pepin.flags import Flag, FlagSet
+from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.frame_pose import BASE_FRAME, MAP_FRAME, ODOM_FRAME, FramePoser
 from pepin.graphbend import GraphBend
-from pepin.lean import LEAN_QUALITY_FLOOR, SCAN_LEAN_GATE_DEG, LeanGate
+from pepin.lean import LeanGate
 from pepin.mounts import LASER_FRAME, load_lidar_mount
 from pepin.tsdf import (
     YAW_SEARCH,
@@ -225,7 +221,6 @@ from pepin.tsdf import (
 from pepin.volume_scan import (
     MARKS_ANGLE_MIN,
     MARKS_MIN_RANGE_M,
-    MARKS_MIN_Z_M,
     MARKS_RANGE_M,
     MARKS_STEP,
     MarksLaw,
@@ -236,7 +231,7 @@ from pepin.volume_scan import (
     marks_ranges,
     marks_window,
 )
-from pepin.watch import DRIVE_FIT, PAINT_SIGMA_M, SOURCE_PATIENCE_S, PaintTrust
+from pepin.watch import DRIVE_FIT, SOURCE_PATIENCE_S, PaintTrust
 from pepin.worldmap import (
     CorrectionFollower,
     LidarLaw,
@@ -424,24 +419,6 @@ FLAGS = FlagSet(
         " reproduce the old behaviour for a comparison, on a volume nobody will navigate on",
     ),
     Flag(
-        "paint_sigma_m",
-        PAINT_SIGMA_M,
-        description="how sure of itself the tracker must be, in metres of sigma_xy, before this"
-        " node paints with its pose — read from /localization/sigma, and ignored entirely while"
-        " nothing publishes that topic (the fit gate stands on its own until it exists)",
-        why="default by design, unmeasured, and chosen against the voxel: the grid is 5 cm, so"
-        " 10 cm of standard deviation puts a wall within two voxels of where it stands and the"
-        " surface averages that out, while half a metre writes it into the room. The fit says"
-        " how well the last scan matched, the sigma says how well the tracker knows where it is"
-        " after fusing everything it has — a lidar-starved tracker riding the odometry can hold"
-        " a good fit for a while and a sigma that grows the whole time",
-        on_when="raise it in a room where the tracker is honestly less sure and the volume is"
-        " being built anyway (an unmapped corner, a first pass)",
-        off_when="lower it for a mapping run whose product must be exact: fewer frames, all of"
-        " them from a pose the tracker was certain of",
-        range=(0.01, 2.0),
-    ),
-    Flag(
         "imu_lean",
         True,
         description="the cart's lean (pepin.lean, from /imu/data_raw) is followed with the gyro"
@@ -458,43 +435,6 @@ FLAGS = FlagSet(
         " right way and returning to zero",
         off_when="wherever the lean in the report line disagrees with the cart's visible"
         " attitude; off, the lean is still estimated and reported, only not applied",
-    ),
-    Flag(
-        "lean_gate_deg",
-        SCAN_LEAN_GATE_DEG,
-        description="a scan taken while the cart leans more than this many degrees is not"
-        " integrated into the map; only with imu_lean on, which is where the lean is known at all",
-        why="default by design, unmeasured: chosen, not fitted. The stake is arithmetic: a beam"
-        " at 5 m lands r sin(lean) off the sensor's plane — 26 cm at this 3 degrees, 44 cm at 5 —"
-        " so a tipped revolution is looking at another slice of the room. The one replay that"
-        " exists (a synthetic 5 degree bump over run 0171, scratch/lidar_lean_effect.txt) has the"
-        " gate refusing 21 of 81 revolutions and keeping fewer walls than simply walking the"
-        " beams as 3D rays (66.7 % against 74.9 % at the top of the bump, 89.2 % against 92.0 %"
-        " six seconds later): there, it cost more than it bought",
-        on_when="lower it where the map must stay clean and revolutions are plentiful",
-        off_when="90 admits every revolution again, as before the gate existed, and the report"
-        " line's leaned_out count says what would have been dropped",
-        range=(0.0, 90.0),
-    ),
-    Flag(
-        "lean_min_quality",
-        LEAN_QUALITY_FLOOR,
-        description="how much of the lean gravity must have voted for (pepin.lean's quality,"
-        " printed beside the lean in this line) before a frame or a scan is placed by it: below"
-        " it the lean is treated as unknown — the measurement is placed level and the scan gate"
-        " admits it",
-        why="chosen on a simulation, not on the robot: in scratch/lean_quality_floor_probe.py a"
-        " 0.2 deg/s gyro bias reports 3.0 degrees of tip on a level floor at quality 0.02 or"
-        " less, nothing past 0.13 degrees of it survives a floor of 0.5, and a real 6 degree"
-        " threshold climb keeps quality 1.00 throughout — so the floor costs the feature nothing."
-        " The 0.2 deg/s is hypothetical: this chip's worst measured axis is 0.074 deg/s"
-        " (config/imu.json's level block). A drifting gyro that reported 3 degrees would"
-        " otherwise sit exactly on lean_gate_deg and refuse every revolution",
-        on_when="raise it towards 1.0 on a robot that only ever leans when something real pushes"
-        " it",
-        off_when="0 believes every lean, as before the floor existed: an A/B of the gyro's own"
-        " drift",
-        range=(0.0, 1.0),
     ),
     Flag(
         "self_heal",
@@ -532,23 +472,6 @@ FLAGS = FlagSet(
         " turned and none is refused",
     ),
     Flag(
-        "min_weight",
-        4.0,
-        description="observations a voxel needs before it is shown in /fusion/surface and read"
-        " out as /depth_marks, the two things this node publishes about the room",
-        why="4.0 since 2026-09-22 (Artem's call, half a second of frames): at 2 a herringbone"
-        " parquet's SGBM floor lift painted lethal cells 0.12-0.30 m past the bumper that lived"
-        " one or two frames and stopped the cart four times in 23 s (scratch/one_localiser/"
-        "tape_0430_lethal_source.py); the map slice measured 905 walls at 2 and 817 at 6"
-        " (scratch/worldmap_from_tape.txt). For the cloud itself nothing was measured; it is the"
-        " same number so the picture and the volume's own report agree",
-        on_when="raise it to show only what several frames agree on",
-        off_when="0 shows every voxel ever touched, noise included — a look at what one pass"
-        " sees; SINCE 2026-09-21 IT DOES CHANGE WHAT THE CART DRIVES ON: the same number decides"
-        " what /depth_marks marks the camera layer with",
-        range=(0.0, 100.0),
-    ),
-    Flag(
         "marks_source",
         VOLUME,
         choices=(VOLUME, FRAME),
@@ -574,45 +497,6 @@ FLAGS = FlagSet(
         off_when="frame reproduces the pre-2026-09-21 costmap exactly (the fan itself, marks and"
         " all) without a restart: the A/B for whether a missing mark is the volume's fault, and"
         " the way back if the volume is ever seen to hold a ghost",
-    ),
-    Flag(
-        "marks_min_z",
-        MARKS_MIN_Z_M,
-        description="the floor of the height band /depth_marks reads the volume in, metres above"
-        " the cart's own floor plane; the band's top is the volume's own camera band"
-        " (config/fusion.json's camera_band_m)",
-        why="default by design, unmeasured as a marks floor: it is pepin.depth's SCAN_MIN_Z_M,"
-        " the height /depth_scan has always marked from and the floor of config/fusion.json's"
-        " camera_band_m, so the two scans of one layer speak about one band. RAISING IT IS NOT"
-        " THE CURE FOR A FLOOR THAT MARKS ITSELF — that is a floor-specific heuristic, and the"
-        " thing this topic exists to avoid; what keeps the parquet out of the marks is that a"
-        " blob one frame invented is not a surface in the volume",
-        on_when="raise it only to measure what a band costs — how much of a real low obstacle"
-        " (a plinth, a box) leaves the marks with it",
-        off_when="lower it toward the floor to see what the volume itself holds down there,"
-        " never to chase a false mark",
-        range=(0.0, 1.0),
-    ),
-    Flag(
-        "marks_hz",
-        5.0,
-        description="the cap on how often /depth_marks is PUBLISHED, in hertz; 0 publishes every"
-        " frame, which is what this topic did until 2026-09-22. Only the publication is thinned:"
-        " every frame and every revolution is still fused into the volume, and a slice that is"
-        " not published is not computed either (the gate is read before the crossing search)",
-        why="the one consumer of this topic is the board's LOCAL costmap, whose"
-        " update_frequency is 5.0 (ros/params/nav2_params.yaml, 'the stop reflex's slowest link:"
-        " a mark waits for this tick'). The topic was published at the rate the volume is"
-        " integrated — the camera's 9-9.5 fps plus ~10 Hz of revolutions — so between two and"
-        " four of every five fans crossed the zenoh routers to the board only to be overwritten"
-        " in the layer before it was next read. The stop reflex is bounded by the costmap tick"
-        " and not by this publisher, so nothing about how fast the cart stops changes",
-        on_when="raise it only with the costmap's own update_frequency, and only after measuring"
-        " what the board does with the extra fans",
-        off_when="0 is the pre-2026-09-22 behaviour, one fan per fused frame: the A/B for"
-        " whether a missing mark is the cap's fault, and what a bench test on one machine (no"
-        " routers in the path) may as well use",
-        range=(0.0, 30.0),
     ),
     Flag(
         "marks_clear",
@@ -657,73 +541,6 @@ FLAGS = FlagSet(
         " ros/camera_grid.sh on",
         off_when="ros/camera_grid.sh off, back to /depth_marks alone; turning it off publishes"
         " one empty grid on each topic so a layer left on holds nothing stale",
-    ),
-    Flag(
-        "grid_hz",
-        3.0,
-        description="the cap on how often the camera grids are published, hertz",
-        why="between the costmaps' update_frequency 2.0 (global) and 5.0 (local); one tick costs"
-        " the paint worker 3.3 ms on the live 280x250x34 grid (a marks slice 2.9), 10 ms/s and"
-        " 43 kB/s of /camera_grid to the board at 3 Hz (scratch/camera_grid/grid_cost.py,"
-        " journal 2026-09-24)",
-        on_when="raise it toward 5 if a camera obstacle reaches the local costmap too late",
-        off_when="lower it if the grids cost the link or the costmaps too much",
-        range=(0.5, 10.0),
-    ),
-    Flag(
-        "grid_size_m",
-        GRID_SIZE_M,
-        description="the side of /camera_grid's square about the cart, metres",
-        why="default by design: twice the fan's 3 m reach, so the local costmap's 3 m window"
-        " always sits inside it (journal 2026-09-24)",
-        on_when="raise it with the local costmap's own window",
-        off_when="lower it to save the link: the cells grow with its square",
-        range=(1.0, 20.0),
-    ),
-    Flag(
-        "grid_resolution_m",
-        GRID_RESOLUTION_M,
-        description="the cell of /camera_grid, metres; /camera_grid_map always takes the map's",
-        why="default by design: the volume's own voxel and the costmaps' own cell"
-        " (journal 2026-09-24)",
-        on_when="coarser only to save the link",
-        off_when="finer than the voxel draws no more detail",
-        range=(0.02, 0.5),
-    ),
-    Flag(
-        "surface_hz",
-        1.0,
-        description="how often /fusion/surface is published (the crossing search costs a fraction"
-        " of a second)",
-        why="default by design, unmeasured; what is measured is the cost it protects — the"
-        " surface build took 45 ms a second and stalled the node's executor until it was moved"
-        " onto a snapshot taken outside the model lock",
-        on_when="raise it for a demo where the surface must follow the head, watching the stage"
-        " timings in the report line",
-        off_when="lower it towards 0.1 on a busy machine, or where the model matters and the"
-        " picture does not",
-        range=(0.1, 10.0),
-    ),
-    Flag(
-        "band_half_z",
-        band_half_z_m(),
-        description="half the height band around the lidar's plane a frame is seated on, metres"
-        " (config/fusion.json's band_half_z_m is the default); the band's centre is the plane the"
-        " published base_link -> laser edge names, and both are printed in the report line",
-        why="default by design, unmeasured as a width: the centre the band sits on is measured,"
-        " this half-width is not. The lidar's plane is 0.383 m by tape (2026-09-12), where beams"
-        " and vertical walls read the network's scale 3 % apart against 18 % at the 0.200 m that"
-        " had been assumed, and moving the band there took the fused band's distance to the lidar"
-        " from 12.9 cm to 3.8-5.2 cm. The 0.125 m is the width the band has always had (0.10-0.35"
-        " m around the assumed plane) and has never been swept. For scale: the band is the best"
-        " layer the camera has — median 9.2 cm against the beams, against 15.7/39.4/46.7 cm for"
-        " the slices above it — and a 5 degree lean moves a beam's world height by up to 55.7 cm,"
-        " wider than the band itself",
-        on_when="widen it when frames are refused for want of band points (the count is in the"
-        " report line): a narrow band on a leaning cart has nothing to seat on",
-        off_when="narrow it to keep only the rows the beams truly anchor, at the price of fewer"
-        " points to align on",
-        range=(0.02, 0.5),
     ),
     Flag(
         "lidar_layer",
@@ -791,43 +608,6 @@ FLAGS = FlagSet(
         " of the defence and no_depth_weight is where to turn it down",
     ),
     Flag(
-        "no_depth_weight",
-        0.5,
-        description="what a depthless ray's carve weighs, as a share of what a measurement AT"
-        " the source's reach weighs (0.67 at the stereo rig's own 2.44 m, so 0.34 by default);"
-        " 0 carves nothing, 1 makes a NaN as convincing as a measurement",
-        why="a NaN is not evidence of emptiness: the matcher refuses a textureless wall, a"
-        " rectification margin and an over-exposed window with the same silence, and at full"
-        " weight those rays would eat a real surface. Half of the weakest honest reading of the"
-        " ray is 0.34, which at max_weight 20 clears a saturated phantom in 17 frames by the"
-        " integration law and 18 measured (2.8 s at the tape's 6.4 fps,"
-        " scratch/one_localiser/volume_ab.py) while a measured surface re-marks itself at"
-        " 1.0-4.0 a frame",
-        on_when="raise it toward 1 where phantoms outlive their 3 s and the walls are all"
-        " lidar-backed anyway",
-        off_when="lower it where a near wall the matcher cannot texture is seen to thin; 0 is"
-        " no_depth_free off",
-        range=(0.0, 2.0),
-    ),
-    Flag(
-        "no_depth_reach_m",
-        0.0,
-        description="the reach a depthless ray carves to, metres, when it must be stated; 0 (the"
-        " default) MEASURES it from the frames themselves — the largest finite depth seen in the"
-        " last 60 — and the report line prints what it found",
-        why="the reach is the SOURCE's, and nothing publishes it: depth_stream's"
-        " depth_reach_m is a looser gate (3.0 m) than the stereo rig itself (2.46 m by its own"
-        " error model, DEPTH_SIGMA_M), and carving to 3.0 m would carve through half a metre the"
-        " camera never looked at. The published depth is NaN above the reach by construction, so"
-        " the largest finite metre in a frame cannot exceed it and equals it whenever anything far"
-        " is in view: 2.54 m over the 374 taped frames of 2026-09-22"
-        " (scratch/one_localiser/volume_ab.py), which is the number the carve used",
-        on_when="state it to pin the carve where a measurement says it belongs — another rig,"
-        " or a source whose far pixels are all NaN for another reason",
-        off_when="0 leaves it measured, which is what follows a rig change by itself",
-        range=(0.0, 12.0),
-    ),
-    Flag(
         "colour_fallback",
         True,
         description="a surface point whose nearer voxel was never painted by a camera takes the"
@@ -848,17 +628,6 @@ FLAGS = FlagSet(
         " camera really wrote into that voxel",
         off_when="off to see exactly which points only the lidar holds — the black IS that"
         " measurement, and it is how the 1532 were found",
-    ),
-    Flag(
-        "snapshot_s",
-        60.0,
-        description="how often the volume is written to world_path (0: only at shutdown)",
-        why="default by design, unmeasured: the write holds the model lock for about half a"
-        " second on a grid of noise and less on a real one, which at the node's 9.0-9.5 fps is"
-        " four or five frames dropped once a minute",
-        on_when="shorten it for a long mapping run nobody will be there to shut down cleanly",
-        off_when="0 writes only at shutdown — the setting for a demo where no frame may be dropped",
-        range=(0.0, 3600.0),
     ),
     Flag(
         "resume_volume",
@@ -939,56 +708,6 @@ FLAGS = FlagSet(
         " closure can land, and a map left behind the graph never comes back",
         off_when="to see the old behaviour under the same graph — the graph and the pose move,"
         " the voxels stay — or if a closure is ever seen to smear the map instead of moving it",
-    ),
-    Flag(
-        "follow_correction_min_m",
-        0.05,
-        description="how far the graph must have bent before the volume is resampled; smaller"
-        " bends are kept against the same anchor and move it together when they add up",
-        why="one voxel of the grid (5 cm): below it a move cannot change which cell a wall is"
-        " in, and the move is not free — 108 ms on this laptop for the live 280x250x34 grid"
-        " under the default law, and 9 % of its occupied cells thinned away per move"
-        " (scratch/volume_shift_cost.py, 2026-09-14). A smaller threshold spends both to move"
-        " the map within the cell it is already in",
-        on_when="raise it if graph noise moves the volume more often than the drive needs",
-        off_when="lower it toward zero only to watch the mechanism work on tiny corrections; the"
-        " map thins at every move",
-        range=(0.0, 5.0),
-    ),
-    Flag(
-        "follow_correction_min_deg",
-        1.0,
-        description="how far the graph's bend must have TURNED before the volume is resampled: the"
-        " other half of the threshold, because a turn moves the far end of the flat metres while"
-        " the origin stands still",
-        why="1 degree is 1.7 cm at a metre (a third of a voxel, where the cart is) and 9 cm at"
-        " the 5 m end of the flat — the whole +-9 cm window the laptop's matcher searches. Below"
-        " it a turn cannot move a near wall out of its cell; above it a far wall leaves the"
-        " matcher's window, and the move costs the measured 108 ms"
-        " (scratch/volume_shift_cost.py, 2026-09-14)",
-        on_when="raise it with a graph that jitters in heading without closing anything",
-        off_when="lower it when a closure's turn must reach the map before its translation does",
-        range=(0.0, 180.0),
-    ),
-    Flag(
-        "follow_correction_min_s",
-        2.0,
-        description="the shortest time between two moves of the volume: a burst of graph"
-        " optimisations costs one resample, not one each. The correction is not lost (it is owed"
-        " against the same anchor and applied at the next move) — but the frames and"
-        " revolutions of that window are not painted, because a volume that owes a move is not"
-        " the map they were placed in",
-        why="a move costs 108 ms of the worker thread on the live grid"
-        " (scratch/volume_shift_cost.py, 2026-09-14), so one every 2 s holds the resample under"
-        " 6 % of that thread however hard RTAB-Map optimises. Its price is the observations of"
-        " that window: painting them into a volume still standing in the old correction and then"
-        " moving the lot puts them past the truth by the whole move — a 30 cm closure left a"
-        " freshly painted wall 20 cm beyond where the graph says it is"
-        " (scratch/follow_refute.py, 2026-09-14) — so they are refused instead, and two seconds"
-        " of a drive is the cheap half of that trade",
-        on_when="raise it if a mapping run is ever seen to spend its frames on resampling",
-        off_when="0 applies every correction that clears the thresholds, at once",
-        range=(0.0, 60.0),
     ),
     Flag(
         "follow_correction_law",
@@ -1101,7 +820,9 @@ class DepthFusion(Node):
         # The map whose lattice /camera_grid_map copies: the one the global costmap's static layer
         # reads (/map; the launch says).
         self._grid_map_topic = str(self.declare_parameter("grid_map_topic", MAP_TOPIC).value)
-        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
+        self._switches = Switches(
+            self, with_knobs(FLAGS, load_knobs("depth_fusion")), on_change=self._on_switch
+        )
         self._tally = Tally(STAGES)
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(PointCloud2, "/fusion/surface", reliable)

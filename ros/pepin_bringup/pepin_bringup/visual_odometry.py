@@ -17,14 +17,14 @@ reporting zero the cart stands still, and every centimetre the visual odometry w
 minute is its own drift (:class:`pepin.visual_odometry.RestWatch`, fed from the board's
 ``/odom``). It is printed in every report line beside the rates and the drops.
 
-The flags (:data:`FLAGS`, ``ros/flags.sh set visual_odometry <flag> <value>``): ``vo_publish``
-(whether the measured odometry leaves this laptop at all — off, the EKF is exactly what it was
-before this node existed), ``vo_covariance`` (the constant or rtabmap's own), ``vo_sigma_m`` and
-``vo_yaw_sigma_deg`` (the constant), ``vo_max_speed``, ``vo_max_turn``, ``vo_max_gap_s`` and
-``vo_reset_radius_m`` (the gate's ceilings) and ``vo_publish_hz`` (how often it is published).
-The published pose is the sum of the steps the gate admitted, never rtabmap's own: a refused jump
-re-anchors the gate, and a filter that differences the stream it receives would otherwise get
-the whole discontinuity in one frame time (2026-09-14, odom -> base_link 43 km out).
+The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set visual_odometry <flag>
+<value>``): ``vo_publish`` (whether the measured odometry leaves this laptop at all — off, the EKF
+is exactly what it was before this node existed), ``vo_covariance`` (the constant or rtabmap's own),
+``vo_sigma_m`` and ``vo_yaw_sigma_deg`` (the constant), ``vo_max_speed``, ``vo_max_turn``,
+``vo_max_gap_s`` and ``vo_reset_radius_m`` (the gate's ceilings) and ``vo_publish_hz`` (how often it
+is published). The published pose is the sum of the steps the gate admitted, never rtabmap's own: a
+refused jump re-anchors the gate, and a filter that differences the stream it receives would
+otherwise get the whole discontinuity in one frame time (2026-09-14, odom -> base_link 43 km out).
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-from pepin.flags import Flag, FlagSet
+from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.visual_odometry import (
     PublishCap,
     RestWatch,
@@ -112,141 +112,6 @@ FLAGS = FlagSet(
         off_when="'constant' is the shipping value; leave it there unless a session is about the"
         " covariance itself",
     ),
-    Flag(
-        "vo_sigma_m",
-        0.07,
-        range=(0.001, 1.0),
-        description="the constant position sigma of one visual-odometry pose, in metres; the EKF"
-        " differences two of them into a velocity and the covariance rides along — as"
-        " (this pose's + the previous pose's) TIMES the gap, so what the filter actually weighs"
-        " is a velocity variance of 2 * sigma^2 * dt",
-        why="7 cm is not a claim about the registration — it is the sigma at which the wheels"
-        " stay dominant once robot_localization has done its arithmetic, which is the shape this"
-        " source was designed to have. That arithmetic is not the obvious one: the differential"
-        " path multiplies the summed pose covariance BY the gap (ros_filter.cpp 3249-3257,"
-        " jazzy-devel) instead of dividing by its square, so at 9.4 poses/s a 2 cm pose sigma"
-        " becomes a velocity sigma of 0.9 cm/s — against the wheels' own 3.2 cm/s"
-        " (pepin_base_cpp/protocol.hpp, 0.001 m^2/s^2 on vx) that is 11.8x their certainty per"
-        " sample and 5.5x their information per second, i.e. the camera would BE the odometry"
-        " (scratch/vo_weight.py). At 7 cm the same conversion gives 3.2 cm/s: one camera sample"
-        " is worth one wheel sample and, at 9.4 Hz against 20 Hz, the camera carries 45 % of the"
-        " wheels' information — a third opinion that can pull the filter when a wheel slips, on"
-        " top of a distance the wheels are honest about to 3 % (2026-09-06). Tighten it only"
-        " against a drive where a lidar-measured distance says who was right",
-        on_when="not a switch: raise it when the visual odometry argues with the wheels on a"
-        " drive where the wheels were right, lower it when it was right and was not heard",
-        off_when="not a switch",
-    ),
-    Flag(
-        "vo_yaw_sigma_deg",
-        5.0,
-        range=(0.1, 180.0),
-        description="the constant yaw sigma of one visual-odometry pose, in degrees; since"
-        " 2026-09-15 the board's EKF fuses this yaw differentially (ekf.yaml odom1_config index"
-        " 5), so this number is what sizes a second heading source against the gyro",
-        why="5 degrees is a deliberately weak claim, and it is the claim that keeps this source"
-        " a second opinion instead of a rival: through robot_localization's differential"
-        " arithmetic (2 * sigma^2 * dt) it is a yaw-rate variance of 1.6e-3 (rad/s)^2 at 9.4"
-        " poses/s against the gyro's 4.0e-4, a quarter of the gyro's weight per sample and ~5 %"
-        " of its information per second. rtabmap's own per-frame yaw std is 0.02-0.04 rad"
-        " (1.1-2.3 deg): tightening this toward that makes the camera a rival to the gyro, which"
-        " is a decision to take with a drive, not a default. The gyro still owns heading — with"
-        " it the EKF's turn error is ~5 % against the wheels' 40-70 % (2026-09-13)",
-        on_when="widen it toward 180 to make the camera's heading count for nothing while"
-        " leaving its x/y fused",
-        off_when="the whole source goes with vo_publish; there is no separate yaw switch",
-    ),
-    Flag(
-        "vo_max_speed",
-        1.0,
-        range=(0.05, 10.0),
-        description="a step between two visual-odometry poses faster than this, in m/s, is"
-        " dropped: rtabmap restarting its tracking moves the pose without moving the cart",
-        why="1.0 m/s is over three times the fastest this cart can go — the base's own cap is"
-        " 0.30 m/s (pepin.deployment's BASE_MAX_LINEAR_M_S) and the C++ bridge clamps /cmd_vel"
-        " at 0.25 — and 26 times the largest step this source took at rest, where 85 s of poses"
-        " were at most 4.2 mm apart over ~0.11 s, a median of 1.0 mm (2026-09-14,"
-        " scratch/vo_probe.py). So it cannot refuse a real motion and still refuses the"
-        " metre-scale jump a re-initialised visual odometry publishes — which, differenced into"
-        " a velocity, is the one thing that could move the odom frame",
-        on_when="not a switch: lower it towards 0.4 m/s on a tape where the camera argued with"
-        " the wheels about the speed itself",
-        off_when="not a switch",
-    ),
-    Flag(
-        "vo_max_gap_s",
-        1.0,
-        range=(0.1, 60.0),
-        description="a pose that arrives more than this many seconds after the previous one is"
-        " dropped and becomes the new anchor: across a gap the speed and turn ceilings are"
-        " ratios and measure nothing",
-        why="one second is nine missed frames of a source measured at 9.4-9.7 poses/s"
-        " (2026-09-14), so nothing short of a stall reaches it — and a stall is exactly when the"
-        " other two ceilings stop working. rgbd_odometry is respawned two seconds after a crash"
-        " (vslam.launch.py RESPAWN) and comes back with its pose at the origin, metres from"
-        " where it left off: at vo_max_speed 1.0 m/s a jump of X metres passes whenever the gap"
-        " exceeds X seconds, so a 0.5 m jump after a 4 s restart would have been fused as"
-        " 0.125 m/s of motion the cart never made — a third of its top speed, and inside the"
-        " EKF's own 3-sigma rejection",
-        on_when="not a switch: lengthen it only for a session that must keep its anchor across a"
-        " known camera stall, and then knowing a restart inside that stall passes as motion",
-        off_when="not a switch",
-    ),
-    Flag(
-        "vo_max_turn",
-        180.0,
-        range=(5.0, 720.0),
-        description="a turn between two visual-odometry poses faster than this, in deg/s, is"
-        " dropped, for the same reason as vo_max_speed",
-        why="180 deg/s is three times the base's own angular cap of 1.0 rad/s = 57 deg/s"
-        " (pepin.deployment's BASE_MAX_ANGULAR_RAD_S) and some two thousand times what this"
-        " source turned at rest (0.075 deg over 85 s, 2026-09-14, scratch/vo_probe.py): it"
-        " catches a tracking restart and nothing a cart could do",
-        on_when="not a switch",
-        off_when="not a switch",
-    ),
-    Flag(
-        "vo_reset_radius_m",
-        0.05,
-        range=(0.0, 1.0),
-        description="a pose that lands this close to rtabmap's own origin while the previous one"
-        " was farther out is its re-initialisation, not a drive, and is dropped; 0 turns the"
-        " check off",
-        why="Odom/ResetCountdown=1 (vslam.launch.py) puts a lost tracking back at its origin, and"
-        " the speed ceiling only catches that when the cart is far enough from it: at"
-        " vo_max_speed 1.0 m/s and the source's 0.11 s between poses, a reset inside 11 cm of the"
-        " origin passes as motion. 5 cm is the radius at which no drive can be mistaken for a"
-        " reset — the largest step this source took at rest was 4.2 mm and the median 1.0 mm"
-        " (2026-09-14, scratch/vo_probe.py), so a cart would have to park within 5 cm of where"
-        " rgbd_odometry started",
-        on_when="not a switch: widen it only if a reset is ever seen landing farther out than"
-        " this, which would mean rtabmap re-initialises somewhere other than its origin",
-        off_when="0 while comparing against the old behaviour on a tape",
-    ),
-    Flag(
-        "vo_publish_hz",
-        10.0,
-        range=(0.0, 30.0),
-        description="how often a gated pose may leave for the board's EKF, in hertz; 0 publishes"
-        " every one of them",
-        why="10 Hz (no cap in practice, rtabmap answers ~9.5/s) since 2026-09-14 13:40: with vy"
-        " observable in ekf.yaml and origin resets refused, the board's EKF took the full rate"
-        " with 0"
-        " misses at rest and 2 in 3 min of driving. The 3 Hz of the morning was chosen while the"
-        " EKF state was running away: 3 Hz because the board could not carry nine. With /vo"
-        " flowing at ~9 poses/s the"
-        " EKF logged 'Failed to meet update rate' continuously — 56-94 ms of every 50 ms period"
-        " at its 20 Hz — and Nav2's container sat at 200 % CPU (2026-09-14). The distance is the"
-        " same distance: the published pose is absolute (the admitted steps summed), so the filter"
-        " differences whatever two messages reached it and a skipped one only lengthens the gap."
-        " What changes is the weight — robot_localization's differential path multiplies the"
-        " summed pose covariance BY the gap, so a longer gap is a wider velocity sigma: at 3 Hz"
-        " the shipped 7 cm sigma becomes 5.7 cm/s against 3.2 cm/s at 9.4 Hz, which is a third"
-        " opinion that costs the board three updates a second instead of nine",
-        on_when="raise it towards 9 only on a board that is measurably keeping its 20 Hz with"
-        " Nav2 running, and read the EKF's update-rate warnings after",
-        off_when="lower it further if the EKF still misses its rate",
-    ),
 )
 
 
@@ -255,7 +120,9 @@ class VisualOdometry(Node):
 
     def __init__(self) -> None:
         super().__init__("visual_odometry")
-        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
+        self._switches = Switches(
+            self, with_knobs(FLAGS, load_knobs("visual_odometry")), on_change=self._on_switch
+        )
         self._gate = VoGate(
             max_speed_m_s=float(self._switches["vo_max_speed"]),
             max_turn_deg_s=float(self._switches["vo_max_turn"]),

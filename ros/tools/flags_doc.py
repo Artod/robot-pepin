@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""The nodes' feature-flag tables (pepin.flags) rendered for people and for ros/flags.sh.
+"""The nodes' feature flags and config knobs (pepin.flags) rendered for people and ros/flags.sh.
 
 A node with live switches declares them once, in the module-level ``FLAGS`` table of
-ros/pepin_bringup/pepin_bringup/<node>.py; this tool reads those tables from the sources
-(:func:`pepin.flags.load_table`: no ROS, no robot) and answers:
+ros/pepin_bringup/pepin_bringup/<node>.py, and its numbers in config/knobs.json under its name;
+this tool reads both from the sources (:func:`pepin.flags.load_table`,
+:func:`pepin.flags.load_knobs`: no ROS, no robot) and answers — a knob wherever a flag is asked
+for:
 
     ros/tools/flags_doc.py                 rewrite the "Feature flags" section of ros/README.md
     ros/tools/flags_doc.py --check         exit 1 when that section is stale (the unit test)
@@ -42,13 +44,16 @@ from pathlib import Path
 import yaml
 
 from pepin.deployment import node_host
-from pepin.flags import COLUMNS, Flag, FlagSet, load_table, markdown_table
+from pepin.flags import COLUMNS, Flag, FlagSet, knobs_of, load_table, markdown_table, read_knobs
 
 REPO = Path(__file__).resolve().parents[2]
 NODES_DIR = REPO / "ros/pepin_bringup/pepin_bringup"
 README = REPO / "ros/README.md"
+KNOBS = REPO / "config/knobs.json"
 HEADING = "## Feature flags"
 DETAILS = "### The flags one by one"
+KNOBS_HEADING = "### Config knobs"
+KNOB_COLUMNS = ("node", "knob", "kind", "default", "note")
 INTRO = """\
 Every behaviour that can be switched is a live parameter of the node that owns it, declared
 once in that node's `FLAGS` table (`pepin.flags`, declared to ROS by
@@ -67,7 +72,15 @@ the whole entry below: what it does, why the default is what it is, when to turn
 to turn it off. The *Default* line carries the measurement the default rests on and the file it
 was measured in, or says `default by design, unmeasured` when there is none — a flag never
 argues from taste. Switches live here; the numbers that are not switches (the lidar's mount,
-the camera's intrinsics, the fusion band) live in `config/*.json` and are read at start."""
+the camera's intrinsics) live in `config/*.json` and are read at start; the numbers a person
+tunes live are the config knobs below."""
+KNOBS_INTRO = """\
+A knob is a number, not a switch: its default, its range and one line of note live in
+`config/knobs.json` under the node's name, the node declares it as a live parameter beside its
+flags, and `ros/flags.sh get|set NODE KNOB` reaches it like a flag (a value outside the range is
+refused with the reason). A default moves by editing that file; a change made live lasts until
+the node restarts. Where the code already names the number, a unit test holds the two equal
+(tests/unit/test_knobs.py)."""
 MUTING = """\
 **Muting a sensor live.** A sensor is switched off where it is *published*, by a flag of the node
 that publishes it, so the message simply stops and every consumer meets what a dead sensor looks
@@ -96,19 +109,46 @@ def has_table(path: Path, name: str = "FLAGS") -> bool:
 
 
 def tables() -> dict[str, FlagSet]:
-    """Every node's table by node name, in file order."""
+    """Every node's feature-flag table by node name, in file order."""
     return {
         path.stem: load_table(path) for path in sorted(NODES_DIR.glob("*.py")) if has_table(path)
     }
 
 
+def knob_tables() -> dict[str, FlagSet]:
+    """Every node's config knobs by node name (config/knobs.json), in the file's order."""
+    blocks = read_knobs(KNOBS)
+    return {node: knobs_of(blocks, node) for node in blocks}
+
+
+def everything() -> dict[str, FlagSet]:
+    """Every node's whole live table — its flags, then its knobs — by node name, sorted: what
+    ros/flags.sh reaches."""
+    flags, knobs = tables(), knob_tables()
+    return {
+        node: FlagSet(*flags.get(node, FlagSet()), *knobs.get(node, FlagSet()))
+        for node in sorted(set(flags) | set(knobs))
+    }
+
+
+def knob_rows(knobs: dict[str, FlagSet]) -> list[list[str]]:
+    """One row per knob: node, name, kind with its range, default, note."""
+    return [
+        [f"`{node}`", f"`{k.name}`", k.kind_text(), k.render(k.default), k.description]
+        for node, table in knobs.items()
+        for k in table
+    ]
+
+
 def section() -> str:
     """The README section: the heading, the introduction, how to read a flag, one table over
-    every node, and under it every flag in full, grouped by the node that owns it."""
+    every node's flags, every flag in full grouped by the node that owns it, and the knobs'
+    table (a knob carries one line, not four)."""
     nodes = tables()
     rows = [[f"`{node}`", *row] for node, flags in nodes.items() for row in flags.rows()]
     parts = [HEADING, INTRO, HOW_TO_READ, MUTING, markdown_table(("node", *COLUMNS), rows), DETAILS]
     parts += [f"#### `{node}`\n\n{flags.details()}" for node, flags in nodes.items()]
+    parts += [KNOBS_HEADING, KNOBS_INTRO, markdown_table(KNOB_COLUMNS, knob_rows(knob_tables()))]
     return "\n\n".join(parts) + "\n"
 
 
@@ -198,7 +238,7 @@ def _refuse(reason: str) -> None:
 
 
 def _node(name: str) -> tuple[str, FlagSet]:
-    known = tables()
+    known = everything()
     node = name.lstrip("/")
     if node not in known:
         _refuse(f"{node}: no node with a flags table; the nodes are {', '.join(known)}")
@@ -224,7 +264,9 @@ def main(argv: list[str]) -> int:
         if side is not None and side not in ("board", "laptop"):
             _refuse(f"{side}: no such side; the sides are board, laptop")
         print(
-            "\n".join(n for n in tables() if side is None or node_host(n, split=split())[0] == side)
+            "\n".join(
+                n for n in everything() if side is None or node_host(n, split=split())[0] == side
+            )
         )
         return 0
     if verb == "where" and len(argv) == 2:

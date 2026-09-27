@@ -40,10 +40,11 @@ is worth one number a second), ``/marks_audit/phantoms``, a ``sensor_msgs/PointC
 camera-only cells as RED points in the grid's frame — drop it into the 3D panel beside the costmap
 and the phantoms are the cells that light up — and one report line every 10 s in the log.
 
-The flags (:data:`FLAGS`, all live, ``ros/flags.sh set marks_audit <name> <value>``):
-``marks_audit`` (the whole node: off, it subscribes and computes nothing), ``radius_m``,
-``match_cells``, ``inscribed_counts`` (judge the inflation's 99 band too) and ``phantom_cloud``
-(publish the red points); their state is in the start line and in every report line.
+The flags and knobs (:data:`FLAGS` and config/knobs.json, all live, ``ros/flags.sh set marks_audit
+<name> <value>``): ``marks_audit`` (the whole node: off, it subscribes and computes nothing),
+``radius_m``, ``match_cells``, ``inscribed_counts`` (judge the inflation's 99 band too) and
+``phantom_cloud`` (publish the red points); their state is in the start line and in every report
+line.
 """
 
 from __future__ import annotations
@@ -59,10 +60,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import String
 
-from pepin.flags import Flag, FlagSet
+from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.marks_audit import (
-    MATCH_CELLS,
-    RADIUS_M,
     MarksVerdict,
     audit_marks,
     scan_points,
@@ -104,33 +103,6 @@ FLAGS = FlagSet(
         " lethal cells had no lidar behind them",
         on_when="always, and especially on any drive where the camera layer is marking",
         off_when="to take this laptop's last percent back for a profile of something else",
-    ),
-    Flag(
-        "radius_m",
-        RADIUS_M,
-        description="how far around the cart a lethal cell is judged, metres",
-        why="2.0 m is the lidar layer's own obstacle_max_range (ros/params/nav2_params.yaml): past"
-        " it the lidar does not mark at all, so every cell out there would be unbacked by"
-        " construction and the classification would say nothing. It is also about where the"
-        " controller's collision checks bite",
-        on_when="raise it to watch the camera's marks out to its own 2.5 m obstacle_max_range,"
-        " knowing that the band between 2.0 and 2.5 m is camera-or-nothing by construction",
-        off_when="lower it to the cart's immediate surroundings when only the cells that block a"
-        " recovery matter",
-        range=(0.2, 3.0),
-    ),
-    Flag(
-        "match_cells",
-        MATCH_CELLS,
-        description="how near a beam must land to a cell, in costmap cells, to account for it",
-        why="1.5 cells is what the tape analysis used (scratch/one_localiser/tape_0431_phantoms.py,"
-        " BACK_CELLS): at 5 cm that is 7.5 cm, which covers a cell's own half-diagonal (3.5 cm)"
-        " plus the pose error between the scan's stamp and the grid's. Tighter blames the camera"
-        " for the lidar's own marks; looser lets the lidar explain a phantom standing beside it",
-        on_when="raise it when the two sensors are known to disagree in time (a laggy link) and"
-        " the unexplained count is climbing with no obstacle to show for it",
-        off_when="lower it to see how tightly the lidar's returns really sit on its own marks",
-        range=(0.5, 5.0),
     ),
     Flag(
         "inscribed_counts",
@@ -175,7 +147,7 @@ class MarksAudit(Node):
         # AttributeError of 2026-09-22, which killed the executor and silenced the marks). Until
         # the last line of __init__ every callback drops what it is handed.
         self._up = False
-        self._switches = Switches(self, FLAGS)
+        self._switches = Switches(self, with_knobs(FLAGS, load_knobs("marks_audit")))
         self._tally = Tally(STAGES)
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         self._audit_pub = self.create_publisher(String, AUDIT_TOPIC, reliable)
