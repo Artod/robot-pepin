@@ -269,6 +269,18 @@ def test_a_scenario_written_from_the_carts_seat_resolves_into_the_map() -> None:
         Target(place="kitchen").resolve(places)
 
 
+def test_every_scenario_in_the_repo_parses() -> None:
+    files = sorted((REPO / "ros/sim/scenarios").glob("*.yaml"))
+    assert files, "ros/sim/scenarios holds the drives the sim is judged on"
+    places = places_from_payload((REPO / "ros/sim/worlds/flat.places.json").read_text())
+    for path in files:
+        scenario = Scenario.load(path)
+        start = scenario.start_pose(places)
+        for leg in scenario.legs:
+            leg.resolve(places, start)
+        scenario.resolved_boxes(places)
+
+
 def test_a_leg_is_scored_on_the_odometers_truth() -> None:
     before = {
         "t": 100.0,
