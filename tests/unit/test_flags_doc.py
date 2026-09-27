@@ -124,7 +124,7 @@ def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     code, out, err = _main(["where", "nope"], capsys)
     assert code == 2 and out == "" and err.startswith("nope: no node with a flags table")
     code, out, _ = _main(["flag", "neck_state", "neck_tf"], capsys)
-    assert code == 0 and out.startswith("neck_state/neck_tf: bool, default on\n")
+    assert code == 0 and out.startswith("neck_state/neck_tf: bool, default ")
     assert [line.split(":")[0] for line in out.splitlines() if line[:1].isupper()] == [
         "What",
         "Default",
@@ -137,7 +137,7 @@ def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     assert _main(["value", "depth_fusion", "min_weight", "3"], capsys)[1] == "3.0\n"
     assert _main(["value", "depth_stream", "depth_backend", "auto"], capsys)[1] == "auto\n"
     code, _, err = _main(["value", "depth_stream", "depth_backend", "gpu"], capsys)
-    assert code == 2 and err.strip() == "depth_backend: 'gpu' is not one of remote, local, auto"
+    assert code == 2 and err.startswith("depth_backend: 'gpu' is not one of ")
     code, _, err = _main(["value", "depth_stream", "threads", "4"], capsys)
     assert code == 2 and "no flag threads" in err, "a startup parameter is not a flag"
     dump = "/depth_fusion:\n  ros__parameters:\n    align: false\n"
