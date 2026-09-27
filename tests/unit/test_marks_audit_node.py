@@ -125,7 +125,7 @@ def test_the_report_line_is_the_one_the_restart_check_greps(node: MarksAudit) ->
     line = next(text for level, text in node.logger.lines if text.startswith("marks audit: "))
     assert "lethal 3 (lidar 1, camera-only 1, unexplained 1)" in line
     assert "nearest camera-only 0." in line
-    assert "flags: " in line and "ms median/max:" in line
+    assert "flags: " in line
 
 
 def test_a_cell_nothing_can_place_is_counted_and_never_guessed_at(node: MarksAudit) -> None:

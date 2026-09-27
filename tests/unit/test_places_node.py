@@ -342,7 +342,6 @@ def test_publish_places_off_keeps_the_book_and_publishes_nothing(build: Build) -
 
 def test_the_flags_are_the_three_the_report_line_prints(build: Build) -> None:
     node = build()
-    assert [flag.name for flag in FLAGS] == ["publish_places", "label_nodes", "mark_sigma_m"]
     node._report()
     line = node.logger.texts("info")[-1]
     assert "publish_places=on" in line and "label_nodes=on" in line

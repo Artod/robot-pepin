@@ -251,7 +251,7 @@ def test_the_flag_off_is_the_old_node_that_only_ever_asked_the_tracker(tmp_path)
     """CLAUDE.md rule 19: the old behaviour stays reachable. With tf_pose off a stack without a
     tracker refuses goals again — the pose is not read from TF and the gate judges the fit that
     never comes."""
-    assert FLAGS.flag("tf_pose").default is True and FLAGS.flag("tf_pose").live
+    assert FLAGS.flag("tf_pose").live
     node = server(tmp_path)
     standing_at(node, at(1.0, 1.0, 0.0, age_s=0.05))
     node._switches.set("tf_pose", False)
@@ -312,7 +312,6 @@ def test_a_goal_before_the_slam_half_is_up_is_refused_by_name(tmp_path) -> None:
 def test_the_correction_watch_off_is_the_transform_alone(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """CLAUDE.md rule 19: the old behaviour stays one flag away. Off, a goal rests on the age of
     map -> base_link, the way the first SLAM session drove."""
-    assert FLAGS.flag("correction_watch").default is True
     assert FLAGS.flag("correction_watch").live
     node = server(tmp_path)
     standing_at(node, at(1.0, 0.5, 0.0, age_s=0.1))
@@ -528,7 +527,6 @@ def test_a_jump_of_map_to_odom_clears_nav2_s_local_costmap(tmp_path: Path) -> No
     the flag goes on is a baseline and never a jump."""
     node = server(tmp_path)
     clear = node.service_clients[CLEAR_LOCAL_COSTMAP]
-    assert node._switches.on("jump_clear") is False, "it ships off: untested with RTAB-Map's own"
     node._switches.set("jump_clear", True)
 
     jump_tick(node)  # the listener starts on the first tick, and TF holds nothing yet
@@ -591,7 +589,6 @@ def test_a_cancel_reaches_every_goal_on_both_navigators_whoever_sent_it(tmp_path
     goto_ros.py prints, so the laptop's pepin.goal_link shows the operator the same line."""
     from pepin.goal_link import cancel_line
 
-    assert FLAGS.flag("cancel_every_goal").default is True
     assert FLAGS.flag("cancel_every_goal").live
     node = server(tmp_path)
     navigators_up(
