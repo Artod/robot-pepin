@@ -513,16 +513,22 @@ class Odometer:
     turn_rad: float = 0.0
     contacts: int = 0
     blocked_s: float = 0.0
+    touched: dict[str, int] = field(default_factory=dict)  # contacts by what the hull met
     _was_blocked: bool = False
 
-    def add(self, motion: Motion, dt: float) -> None:
-        """Count one step; a contact is the first refused step of a run of them."""
+    def add(
+        self, motion: Motion, dt: float, touching: Callable[[], list[str]] | None = None
+    ) -> None:
+        """Count one step; a contact is the first refused step of a run of them, and
+        ``touching`` names what the hull met there (box names, "grid")."""
         self.path_m += motion.travel_m
         self.turn_rad += motion.turn_rad
         if motion.blocked:
             self.blocked_s += dt
             if not self._was_blocked:
                 self.contacts += 1
+                for name in touching() if touching is not None else ["?"]:
+                    self.touched[name] = self.touched.get(name, 0) + 1
         self._was_blocked = motion.blocked
 
 
@@ -548,6 +554,7 @@ class SimWorld:
         self.boxes: tuple[Box, ...] = tuple(boxes)
         self.odometer = Odometer()
         self._samples = hull_samples(hull)
+        self._refused: Pose2D | None = None
         self._twist: tuple[float, float] = (0.0, 0.0)
 
     @property
@@ -567,13 +574,26 @@ class SimWorld:
     def _blocked(self, old: Pose2D, new: Pose2D) -> bool:
         """A step is refused when it puts more of the hull into something than there was: a cart
         that starts touching the grid's noise may still drive out of it, never deeper."""
-        return self.overlap(new) > self.overlap(old)
+        refused = self.overlap(new) > self.overlap(old)
+        if refused:
+            self._refused = new
+        return refused
+
+    def touching(self, pose: Pose2D | None = None) -> list[str]:
+        """What the hull at ``pose`` (default: the last refused step) is in: box names, and
+        "grid" for an occupied cell of the grid."""
+        at = pose or self._refused or self.pose
+        c, s = math.cos(at.theta), math.sin(at.theta)
+        xs = at.x + c * self._samples[:, 0] - s * self._samples[:, 1]
+        ys = at.y + s * self._samples[:, 0] + c * self._samples[:, 1]
+        names = [box.name for box in self.boxes if box.contains(xs, ys).any()]
+        return names + (["grid"] if self.grid.occupied_at(xs, ys).any() else [])
 
     def step(self, dt: float, now: float) -> Motion:
         """Advance the base ``dt`` seconds at ``now`` and count it."""
         motion = self.base.step(dt, now, self._blocked)
         self._twist = (motion.linear, motion.angular)
-        self.odometer.add(motion, dt)
+        self.odometer.add(motion, dt, self.touching)
         return motion
 
     def scan(self) -> NDArray[np.float64]:
@@ -597,6 +617,7 @@ class SimWorld:
             "path_m": round(self.odometer.path_m, 4),
             "turn_deg": round(math.degrees(self.odometer.turn_rad), 1),
             "contacts": self.odometer.contacts,
+            "touched": dict(self.odometer.touched),
             "blocked_s": round(self.odometer.blocked_s, 2),
             "overlap": self.overlap(),
             "boxes": [box.name for box in self.boxes],
@@ -750,6 +771,7 @@ class LegScore:
     blocked_s: float
     error_m: float
     heading_error_deg: float
+    touched: Mapping[str, int] = field(default_factory=dict)
 
     @property
     def detour(self) -> float:
@@ -763,9 +785,15 @@ class LegScore:
             f"SCORE {self.goal}: {self.status} in {self.seconds:.1f} s,"
             f" recoveries {self.recoveries},"
             f" path {self.path_m:.2f} m vs straight {self.straight_m:.2f} m (x{self.detour:.2f}),"
-            f" contacts {self.contacts} ({self.blocked_s:.1f} s blocked), arrival"
+            f" contacts {self.contacts} ({self.blocked_s:.1f} s blocked{self._what()}), arrival"
             f" {self.error_m:.2f} m / {self.heading_error_deg:+.0f} deg off"
         )
+
+    def _what(self) -> str:
+        """``: cabinet 3, grid 1`` — what the contacts met, or nothing."""
+        if not self.touched:
+            return ""
+        return ": " + ", ".join(f"{name} {n}" for name, n in sorted(self.touched.items()))
 
     def to_dict(self) -> dict[str, Any]:
         """The score as a JSON record."""
@@ -778,6 +806,7 @@ class LegScore:
             "straight_m": round(self.straight_m, 3),
             "detour": None if math.isnan(self.detour) else round(self.detour, 3),
             "contacts": self.contacts,
+            "touched": dict(self.touched),
             "blocked_s": round(self.blocked_s, 2),
             "error_m": round(self.error_m, 3),
             "heading_error_deg": round(self.heading_error_deg, 1),
@@ -805,6 +834,11 @@ def score_leg(
         path_m=float(after["path_m"]) - float(before["path_m"]),
         straight_m=straight,
         contacts=int(after["contacts"]) - int(before["contacts"]),
+        touched={
+            name: n - int(before.get("touched", {}).get(name, 0))
+            for name, n in after.get("touched", {}).items()
+            if n > int(before.get("touched", {}).get(name, 0))
+        },
         blocked_s=float(after["blocked_s"]) - float(before["blocked_s"]),
         error_m=error,
         heading_error_deg=heading,

@@ -104,6 +104,7 @@ def test_a_cart_driven_into_a_box_stops_there_and_counts_one_contact() -> None:
         sim.step(0.02, t)
     assert 0.08 <= sim.pose.x <= 0.10 + 1e-9, "stopped with the nose at the face, not through it"
     assert sim.odometer.contacts == 1  # one run of refused steps is one contact
+    assert sim.odometer.touched == {"wall": 1}  # ...and it says what the hull met
     assert sim.odometer.blocked_s > 0.5
     sim.base.command(-0.2, 0.0, t)
     assert not sim.step(0.1, t).blocked  # backing off is never refused
@@ -294,7 +295,11 @@ def test_a_leg_is_scored_on_the_odometers_truth() -> None:
     }
     after = {"t": 130.5, "x": 2.95, "y": 0.1, "yaw_deg": 178.0, "path_m": 4.5, "contacts": 3,
              "blocked_s": 1.5}  # fmt: skip
+    before["touched"] = {"cabinet": 1}
+    after["touched"] = {"cabinet": 2, "grid": 1}
     score = score_leg("far", Pose2D(3.0, 0.0, math.radians(-179.0)), before, after, "SUCCEEDED", 7)
+    assert score.touched == {"cabinet": 1, "grid": 1}
+    assert "(1.0 s blocked: cabinet 1, grid 1)" in score.line()
     assert score.seconds == pytest.approx(30.5)
     assert (score.path_m, score.straight_m, score.detour) == pytest.approx((3.5, 3.0, 3.5 / 3.0))
     assert (score.contacts, score.blocked_s) == (1, pytest.approx(1.0))
