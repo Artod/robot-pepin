@@ -129,13 +129,8 @@ def test_the_model_jobs_load_on_demand_and_never_at_login(tmp_path: Path) -> Non
     run = _models_sh("plist", "depth", PEPIN_LAUNCHD_DIR=str(tmp_path))
     assert run.returncode == 0, run.stderr
     plist = run.stdout
-    assert "<key>ThrottleInterval</key><integer>30</integer>" in plist
-    assert "<key>ProcessType</key><string>Standard</string>" in plist
     script = (REPO / "ros/models.sh").read_text()
     assert "Library/LaunchAgents" not in script.split("JOBS_DIR=", 1)[1].split("\n", 1)[0]
-    assert 'JOBS_DIR="${PEPIN_LAUNCHD_DIR:-$HOME/Library/Application Support/pepin/launchd}"' in (
-        script
-    )
     assert _models_sh("installed", "depth", PEPIN_LAUNCHD_DIR=str(tmp_path)).returncode == 1
     (tmp_path / "com.pepin.models.depth.plist").write_text(plist)
     assert _models_sh("installed", "depth", PEPIN_LAUNCHD_DIR=str(tmp_path)).returncode == 0

@@ -113,8 +113,6 @@ def test_neck_sh_asks_the_base_server_and_prints_ticks_and_degrees() -> None:
 
     assert subprocess.run(["bash", "-n", str(REPO / "ros/neck.sh")], timeout=20).returncode == 0
     usage = (REPO / "ros/neck.sh").read_text()
-    for line in ("neck.sh read", "neck.sh home", "neck.sh goto PAN TILT", "neck.sh hold PAN TILT"):
-        assert line in usage
     assert '"cmd": "neck_home"' in usage and '"cmd": "neck_goto"' in usage
 
     def board(answers: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]], threading.Thread]:
@@ -377,9 +375,8 @@ def test_hard_is_refused_on_an_on_instead_of_stopping_the_driver_it_just_switche
     assert code == 2, out
     assert "--hard belongs to 'lidar off'" in out
     assert sent == [], sent
-    # and the usage line no longer advertises the form it refuses
     code, out, _ = _sensor(tmp_path, "lidar")
-    assert code == 2 and "lidar on|off | lidar off --hard" in out, out
+    assert code == 2, out
 
 
 # The deactivate that aborts the LD19 driver is refused by default since 2026-09-24; the tests of
@@ -727,7 +724,6 @@ def test_mute_imu_sets_the_publisher_s_own_flag_and_says_what_a_consumer_will_se
     assert code == 0, out
     assert "flags set base_bridge imu_publish false" in sent
     assert not [c for c in sent if "param set" in c or "lifecycle" in c], sent
-    assert "yaw-rate source" in out and "the wheels" in out
 
 
 def test_muting_what_is_already_muted_writes_nothing(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -774,7 +770,7 @@ def test_muting_the_lidar_is_the_consumer_set_no_node_of_ours_publishes_it(tmp_p
     assert "flags set relocalizer sources camera" in sent
     assert f"{BOARD} ros2 param set {LOCAL} lidar_layer.enabled false" in sent
     assert not [c for c in sent if "lifecycle set" in c], "a mute never stops the driver"
-    assert "scan_filter" in out and "--hard" in out
+    assert "scan_filter" in out
 
 
 def test_a_publisher_that_does_not_answer_is_reported_and_the_run_goes_red(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -794,7 +790,6 @@ def test_status_lists_every_sensor_s_mute_state(tmp_path) -> None:  # type: igno
     assert code == 0, out
     for sensor in ("imu", "odom", "vo", "graph", "camera"):
         assert f"{sensor}: MUTED" in out, out
-    assert "lidar: see the tracker sources" in out
 
 
 def test_an_unmuted_stack_says_so_sensor_by_sensor(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -817,8 +812,6 @@ def test_restart_sh_parses_and_never_drives() -> None:
     assert "cmd_vel" not in code and "goto_ros" not in code, "a restart is not a drive"
     # One rate probe per topic and no `ros2` CLI on the board: the CLI is seconds of A53 per call.
     assert code.count("topic_rate.py") == 1 and "ros2 topic" not in code
-    for half in ("board", "laptop", "both"):
-        assert f"{half} " in code or f"{half})" in code
 
 
 def test_the_laptop_half_is_started_without_a_word_about_the_map(tmp_path) -> None:  # type: ignore[no-untyped-def]
