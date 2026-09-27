@@ -163,32 +163,6 @@ def pose_with_covariance(
     return msg
 
 
-def pose_with_matrix(
-    x: float,
-    y: float,
-    yaw: float,
-    covariance: Any,
-    stamp: Any,
-    frame_id: str,
-) -> Any:
-    """A planar pose as ``geometry_msgs/PoseWithCovarianceStamped`` with a FULL planar
-    covariance: the 3x3 over x, y, yaw (metres and radians) written into the 6x6's x/y/yaw
-    block, everything else zero. What :func:`pose_with_covariance` cannot say — that the pose
-    is pinned across a corridor and loose along it, and that heading and position lean on each
-    other — and what a score peak measures (:func:`pepin.fusion.peak_covariance`)."""
-    msg = PoseWithCovarianceStamped()
-    msg.header.stamp, msg.header.frame_id = stamp, frame_id
-    msg.pose.pose.position.x, msg.pose.pose.position.y = float(x), float(y)
-    _set_quaternion(msg.pose.pose.orientation, (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0)))
-    cov = [0.0] * 36
-    planar = (0, 1, 5)  # x, y, yaw in the 6x6's order (x y z roll pitch yaw)
-    for row, source_row in enumerate(planar):
-        for col, source_col in enumerate(planar):
-            cov[source_row * 6 + source_col] = float(covariance[row][col])
-    msg.pose.covariance = cov
-    return msg
-
-
 # ---- maps ------------------------------------------------------------------------------------
 # A nav_msgs occupancy grid in our log-odds: map_server's trinary is 100 occupied, 0 free, -1
 # unknown, and unknown must stay at zero — a matcher scores unknown space silently, and calling
@@ -213,17 +187,6 @@ def grid_from_msg(msg: Any) -> OccupancyGrid:
     )
     grid.version += 1
     return grid
-
-
-def map_digest(msg: Any) -> str:
-    """A map's identity and the CRC of its cells (``239x215@-18.53,-4.38#1a2b3c4d``): what tells
-    a republished map from a changed one without keeping a copy of the old one. Cheap enough to
-    take on every arrival — a CRC over 70000 cells is well under a millisecond."""
-    import zlib
-
-    data = msg.data
-    raw = data.tobytes() if hasattr(data, "tobytes") else np.asarray(data, dtype=np.int8).tobytes()
-    return f"{map_id(msg)}#{zlib.crc32(raw) & 0xFFFFFFFF:08x}"
 
 
 def map_id(msg: Any) -> str:
