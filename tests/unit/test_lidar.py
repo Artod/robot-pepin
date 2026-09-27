@@ -150,7 +150,11 @@ def test_lidar_client_drains_revolutions_and_reconnects_after_a_drop() -> None:
     client = LidarClient("unused", LidarMount(), source_factory=factory, retry_s=0.01).start()
     scans = []
     deadline = time.monotonic() + 3.0
-    while time.monotonic() < deadline and (len(scans) < 5 or client.reconnects < 1):
+    # The client counts a reconnect when the stream drops and builds the next source only after
+    # retry_s: wait for that second source too, or a loaded machine ends the loop in between.
+    while time.monotonic() < deadline and (
+        len(scans) < 5 or client.reconnects < 1 or len(sources) < 2
+    ):
         scans.extend(client.drain())
         time.sleep(0.01)
     client.close()
