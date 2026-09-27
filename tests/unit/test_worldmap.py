@@ -152,6 +152,7 @@ def test_a_beam_past_the_sensor_reach_carves_free_space_and_marks_nothing() -> N
     assert not np.any(view.values == OCCUPIED)
 
 
+@pytest.mark.slow
 def test_a_beam_with_no_return_writes_nothing_until_the_flag_opens_the_door() -> None:
     """What the lidar really delivers for an open door is NaN, not a long range: everything
     past ``range_max`` comes back as no return at all. Off by default it writes nothing (a
@@ -448,6 +449,7 @@ def test_the_matchers_band_holds_only_cells_many_frames_agree_on() -> None:
     assert wall_at(world.camera_band_slice(SliceLaw(min_weight=20.0)), 1.0, 0.0)
 
 
+@pytest.mark.slow
 def test_a_depthless_ray_carves_the_cameras_band_and_never_the_lidars_layer() -> None:
     """``no_depth_free`` lets a pixel with NO depth carve its own ray, which is the only thing
     that can clear a phantom standing in front of something beyond the rig's reach (2026-09-22).
@@ -639,6 +641,7 @@ def test_a_snapshot_of_another_version_is_refused(tmp_path: Path) -> None:
         WorldMap.load(path)
 
 
+@pytest.mark.slow
 def test_a_saved_map_seeds_the_layer_as_the_starting_state() -> None:
     """A known room is a loaded map written into the volume — after that nothing in the stack
     can tell it from a room the cart discovered itself."""

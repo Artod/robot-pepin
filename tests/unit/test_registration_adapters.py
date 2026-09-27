@@ -139,6 +139,7 @@ def _set(world: dict[str, Any], **values: Any) -> None:
     world["settings"].write(RegistrationSettings(**values).to_json())
 
 
+@pytest.mark.slow
 def test_auto_asks_the_service_and_never_builds_the_local_model(world: dict[str, Any]) -> None:
     detector = world["adapter"]("rtabmap_xfeat")
     detector.init(0)
@@ -148,6 +149,7 @@ def test_auto_asks_the_service_and_never_builds_the_local_model(world: dict[str,
     assert world["built"]["xfeat"] == 0, "torch is never imported while the service answers"
 
 
+@pytest.mark.slow
 def test_the_switch_is_read_on_every_call_and_moves_live(world: dict[str, Any]) -> None:
     detector = world["adapter"]("rtabmap_xfeat")
     detector.init(0)
@@ -158,6 +160,7 @@ def test_the_switch_is_read_on_every_call_and_moves_live(world: dict[str, Any]) 
     assert world["built"]["xfeat"] == 1, "the local model is built once, on its first use"
 
 
+@pytest.mark.slow
 def test_a_service_that_goes_away_falls_back_in_auto_and_is_nothing_in_service(
     world: dict[str, Any],
 ) -> None:
@@ -174,6 +177,7 @@ def test_a_service_that_goes_away_falls_back_in_auto_and_is_nothing_in_service(
     assert detector._switch.line().startswith("service 0, local 0, fallback 1, failed 1")
 
 
+@pytest.mark.slow
 def test_the_matcher_sends_the_confidence_floor_and_answers_int32_pairs(
     world: dict[str, Any],
 ) -> None:
@@ -189,6 +193,7 @@ def test_the_matcher_sends_the_confidence_floor_and_answers_int32_pairs(
     assert world["built"]["glue"] == 1
 
 
+@pytest.mark.slow
 def test_the_counters_reach_the_status_file_once_a_minute(world: dict[str, Any]) -> None:
     detector = world["adapter"]("rtabmap_xfeat")
     detector.init(0)

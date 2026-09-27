@@ -18,6 +18,7 @@ BENCH = {"jog.py", "calibrate_neck.py", "scan_bus.py", "setup_motor_id.py"}
 SCRIPTS = sorted(p.name for p in (REPO / "scripts").glob("*.py") if p.name not in BENCH)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("script", SCRIPTS)
 def test_script_answers_help(script: str) -> None:
     result = subprocess.run(
@@ -859,6 +860,7 @@ def test_fresh_graph_is_refused_on_the_board_half_that_owns_neither(tmp_path) ->
     assert sent == [], "refused before a host is touched"
 
 
+@pytest.mark.slow
 def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_it(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -892,6 +894,7 @@ def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_
     assert "green: " in out and "none failed" in out
 
 
+@pytest.mark.slow
 def test_the_operators_window_is_checked_and_the_app_is_reconnected_last(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """A restart kills the bridge and with it the desktop app's socket: the panels stay on screen,
     empty, until a client re-attaches. So `ros/foxglove.sh check` is check 2.9 and `reopen` is the
@@ -921,6 +924,7 @@ def test_the_operators_window_is_checked_and_the_app_is_reconnected_last(tmp_pat
     assert not [c for c in sent if c.startswith("foxglove.sh")]
 
 
+@pytest.mark.slow
 def test_every_check_runs_even_when_the_first_ones_fail_and_the_run_goes_red(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """A check that fails is one line and never the end of the run: the point of the script is
     the whole picture. The three below are the three that cost us a session each."""
@@ -970,6 +974,7 @@ def test_the_clock_check_passes_the_default_and_warns_where_a_look_is_needed(tmp
     assert code == 0 and f"PASS 1.15 clock: {within}" in out, out
 
 
+@pytest.mark.slow
 def test_without_a_tracker_the_checks_move_to_the_edge_the_laptop_owns(tmp_path) -> None:
     """PEPIN_LOCALIZER=rtabmap: no tracker is launched on the board, so its report line, its
     /where_am_i and its /map_tracked are not evidence and must not fail the restart. What
@@ -987,6 +992,7 @@ def test_without_a_tracker_the_checks_move_to_the_edge_the_laptop_owns(tmp_path)
     assert "WARN 2.5  laptop localizer: n/a under PEPIN_LOCALIZER=rtabmap" in out, out
 
 
+@pytest.mark.slow
 def test_the_map_is_asked_for_its_latched_copy_not_a_rate(tmp_path) -> None:
     """RTAB-Map's /map is latched and, while it localises, published once a start: five seconds
     of counting found 0 messages on a board whose static layer held the grid (2026-09-24)."""
@@ -1001,6 +1007,7 @@ def test_the_map_is_asked_for_its_latched_copy_not_a_rate(tmp_path) -> None:
     assert code == 1 and "FAIL 1.6  /map does not reach the board: /map: no latched copy" in out
 
 
+@pytest.mark.slow
 def test_a_pose_nobody_has_corrected_is_a_failure_once_the_grace_is_over(tmp_path) -> None:
     """A localiser that has recognised nothing publishes map == odom, and every pose composed
     from it is simply the odometry's. Correct for the first seconds of a start, a fault after —
@@ -1017,6 +1024,7 @@ def test_a_pose_nobody_has_corrected_is_a_failure_once_the_grace_is_over(tmp_pat
     assert "FAIL 1.13" in out and "identity" in out and "grace" in out
 
 
+@pytest.mark.slow
 def test_the_board_s_own_readerless_routes_fail_the_laptop_check(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """The fault of 2026-09-15 reads as "dead routes 0" on this side: check 2.1 must catch the
     other half of the watch's line too, or a link that carries nothing passes the restart."""
@@ -1032,6 +1040,7 @@ def test_the_board_s_own_readerless_routes_fail_the_laptop_check(tmp_path) -> No
     assert "FAIL 2.1" in out and "WITHOUT A READER 13" in out
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     ("broken", "number", "why"),
     [
@@ -1051,6 +1060,7 @@ def test_each_known_failure_is_named_on_its_own_line(tmp_path, broken, number, w
     assert f"FAIL {number}" in out and why in out, out
 
 
+@pytest.mark.slow
 def test_a_thin_report_line_fails_the_node_it_belongs_to_not_the_run(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Rates and counters are read from the nodes' own report lines; a number below the floor is
     that node's failure, with the number in the line so it can be read at a glance."""
@@ -1067,6 +1077,7 @@ def test_a_thin_report_line_fails_the_node_it_belongs_to_not_the_run(tmp_path) -
     assert "FAIL 2.10" in out and "0 updates" in out
 
 
+@pytest.mark.slow
 def test_a_camera_half_that_cannot_run_xfeat_fails_unless_orb_is_meant(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """visual_features defaults to xfeat and only an image with the Python adapters can run it; a
     restart on any other image used to register with ORB (0 of 630 camera-only updates accepted
@@ -1084,6 +1095,7 @@ def test_a_camera_half_that_cannot_run_xfeat_fails_unless_orb_is_meant(tmp_path)
     assert "PASS 2.12" in out and "ORB is meant" in out
 
 
+@pytest.mark.slow
 def test_a_flag_off_its_default_is_seen_but_never_fails_the_run(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """A restart puts every flag back to its default, so a flag that is NOT its default was set
     on purpose — legitimate, and the one thing a restart silently throws away. It is shown, and

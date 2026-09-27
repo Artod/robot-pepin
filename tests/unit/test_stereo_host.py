@@ -197,6 +197,7 @@ def host() -> Iterator[tuple[str, FakeRaft, DepthServer]]:
         server.server_close()
 
 
+@pytest.mark.slow
 def test_a_pair_goes_through_the_host_and_comes_back_as_a_disparity(
     host: tuple[str, FakeRaft, DepthServer],
 ) -> None:
@@ -216,6 +217,7 @@ def test_a_pair_goes_through_the_host_and_comes_back_as_a_disparity(
     client.close()
 
 
+@pytest.mark.slow
 def test_a_host_with_no_stereo_model_refuses_the_endpoint_and_says_which_verb_starts_it() -> None:
     """``ros/depth_host.sh start`` and ``stereo`` are the same process; a build that somehow has
     no matcher must say so rather than time out."""
@@ -230,6 +232,7 @@ def test_a_host_with_no_stereo_model_refuses_the_endpoint_and_says_which_verb_st
         server.server_close()
 
 
+@pytest.mark.slow
 def test_a_refused_pair_is_counted_against_the_stereo_model(
     host: tuple[str, FakeRaft, DepthServer],
 ) -> None:
@@ -248,6 +251,7 @@ def test_a_refused_pair_is_counted_against_the_stereo_model(
 
 
 # ---------------------------------------------------------------- the matcher the node holds
+@pytest.mark.slow
 def test_the_matcher_sends_grey_eyes_and_answers_what_the_host_says(
     host: tuple[str, FakeRaft, DepthServer],
 ) -> None:
@@ -310,6 +314,7 @@ def test_the_flag_names_the_engine_and_an_unknown_name_is_refused() -> None:
         build_matcher("raft")
 
 
+@pytest.mark.slow
 def test_the_source_reads_its_near_end_from_whichever_engine_is_in_front(
     host: tuple[str, FakeRaft, DepthServer],
 ) -> None:

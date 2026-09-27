@@ -443,6 +443,7 @@ def test_close_stops_the_pump_from_inside_a_blocked_read(build: Build) -> None:
     assert node.logger.texts("warning")[-1:] != ["the camera pump is still in the stream"]
 
 
+@pytest.mark.slow
 def test_close_falls_back_to_closing_a_stream_with_no_socket_under_it(build: Build) -> None:
     """Nothing to shut down (not a urllib response): close() is all there is, and the pump
     still leaves — on the read's own timeout, which is what STREAM_TIMEOUT_S costs when the

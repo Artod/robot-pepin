@@ -131,6 +131,7 @@ def _main(argv: list[str], capsys: Any, stdin: str | None = None) -> tuple[int, 
     return code, out, err
 
 
+@pytest.mark.slow
 def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     code, out, _ = _main(["nodes"], capsys)
     assert code == 0 and "depth_stream" in out.split() and "ghost_wait" not in out.split()
@@ -163,6 +164,7 @@ def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     assert code == 0 and out == ""
 
 
+@pytest.mark.slow
 def test_the_goal_server_is_reached_where_the_board_s_side_puts_it(
     capsys: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -181,6 +183,7 @@ def test_the_goal_server_is_reached_where_the_board_s_side_puts_it(
     assert _main(["where", "depth_fusion"], capsys)[1].strip() == "laptop pepin-vslam"
 
 
+@pytest.mark.slow
 def test_the_nodes_of_one_side_and_the_flags_that_are_not_their_default(capsys: Any) -> None:
     """What ros/restart.sh asks after a restart: the nodes of the half it restarted, and, per
     node, only the flags that are NOT what the table declares — a restart puts every flag back

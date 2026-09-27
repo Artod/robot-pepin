@@ -2432,6 +2432,7 @@ def test_a_cpu_model_that_cannot_be_built_ends_the_node_in_local_mode() -> None:
     assert "self._fatal.leaving" in sf.unparsed(node, ast.Attribute), "no frames on the way out"
 
 
+@pytest.mark.slow
 def test_the_flags_script_reaches_a_node_where_it_runs_and_refuses_before_any_host() -> None:
     """ros/flags.sh runs the ros2 CLI inside the container a node lives in (the laptop's by
     docker exec, the board's over ssh), one parameter dump per node for a listing, and asks
