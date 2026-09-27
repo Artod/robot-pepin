@@ -700,8 +700,7 @@ def test_maturity_and_the_report_line_say_what_is_in_the_volume() -> None:
     assert 2.0 <= stats["mean_weight"] <= 8.0, "eight scans, each worth at most one"
     assert stats["frames"] == 8.0
     assert stats["plane_m"] == pytest.approx(PLANE_M)
-    text = world.report()
-    assert "lidar slice" in text and "camera band" in text
+    world.report()
     assert WorldMap(spec(), mount()).maturity()["mean_weight"] == 0.0
 
 

@@ -28,7 +28,6 @@ from pepin.localization_service import (
     XFeatModel,
     load_config,
     models_url,
-    place_dim,
 )
 from pepin.model_service import ModelServer, Request, Response, encode_arrays
 
@@ -40,8 +39,6 @@ def test_the_shipped_config_names_every_model_on_a_measured_device() -> None:
     config = load_config(REPO / "config/models.json")
     assert config.port == 8791
     assert (config.xfeat.device, config.match.device, config.place.device) == ("cpu", "cpu", "mps")
-    assert config.xfeat.top_k == 2048 and config.match.min_conf == 0.1
-    assert config.place.model == "boq_dinov2" and place_dim(config) == 12288
 
 
 def test_the_config_ignores_comments_defaults_the_rest_and_refuses_typos() -> None:

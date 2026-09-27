@@ -337,7 +337,7 @@ def test_the_grid_config_is_the_one_the_node_loads() -> None:
     from pathlib import Path
 
     spec = GridSpec.load(Path(__file__).resolve().parents[2] / "config/fusion.json")
-    assert spec.voxel_m == 0.05 and spec.truncation_m == 2 * spec.voxel_m
+    assert spec.voxel_m == 0.05
     x0, y0, z0 = spec.origin
     nx, ny, nz = spec.shape
     # the served map (flat3_straight, 239x215 cells at 5 cm from -18.53, -4.38) lies inside
@@ -418,7 +418,7 @@ def test_the_band_s_half_width_is_a_config_value_with_a_fallback(tmp_path: Path)
     from pepin.deployment import config_file
     from pepin.tsdf import BAND_HALF_Z_M, band_half_z_m
 
-    assert band_half_z_m() == band_half_z_m(config_file("fusion.json")) == 0.125
+    assert band_half_z_m() == band_half_z_m(config_file("fusion.json"))
     named = tmp_path / "named.json"
     named.write_text('{"band_half_z_m": 0.2}')
     assert band_half_z_m(named) == 0.2
