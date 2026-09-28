@@ -91,7 +91,7 @@ class BridgeKick:
             node.get_logger().warning(
                 f"bridge kick: {self._flag.parent} is not mounted from the board, so a kick"
                 " would be written into this container and seen by nobody — redeploy the board"
-                " (ros/sync.sh, which brings ros/run.sh with the mount, then a stack restart)"
+                " (ros/sync.sh --restart: ros/run.sh with the mount, then a stack restart)"
             )
 
     def _on_kick(self, msg: String) -> None:

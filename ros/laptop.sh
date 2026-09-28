@@ -188,7 +188,6 @@ kick_target() {  # node name -> "container|start-up line"
         *) return 1 ;;
     esac
 }
-now_ms() { perl -MTime::HiRes=time -e 'printf "%.0f", time*1000'; }
 # Whether the depth network runs on this laptop's GPU (ros/depth_host.sh) beside the container:
 # PEPIN_DEPTH_HOST=1 or 0 decides outright; otherwise torch's Metal backend is asked (~2 s: the
 # import), the same question the service itself answers before it falls back to the CPU.
@@ -237,15 +236,22 @@ case "${1:-start}" in
         # respawn pause: camera/fusion/frame 0.3 s, depth 2.1 s (the network), so a kick is
         # 3-5 s here. A crashed node (no dispose) is the one case a respawn meets a ghost: the
         # count below says so, and a second kick after the lease clears it.
+        #   The wait proves the ready line is the NEW process's (ros/kick_ready.awk, the same
+        # matcher as ros/thin.sh kick): the exit line of the signalled pid, the successor's start
+        # under the same launch tag, then its ready line. The times are the container's clock
+        # (the VM's on this Mac, whose timestamps are the log's): its `date` before the SIGINT.
         NAME="${2:-}"; TARGET="$(kick_target "$NAME")" || { echo "usage: ros/laptop.sh kick <node>; nodes: $KICKABLE"; exit 2; }
-        C="${TARGET%%|*}"; LINE="${TARGET#*|}"
-        T0="$(date -u +%FT%TZ)"; MS0="$(now_ms)"
-        docker exec "$C" pkill -INT -f "pepin_bringup[./]$NAME" || { echo "no $NAME process in $C (ros/laptop.sh logs ${C#pepin-})"; exit 3; }
+        C="${TARGET%%|*}"; LINE="${TARGET#*|}"; TAB="$(printf '\t')"
+        OUT="$(docker exec "$C" sh -c 'date -u +%FT%T.%NZ; pgrep -f "pepin_bringup[./]$1"' sh "$NAME" 2>/dev/null)" || true
+        KICKED="${OUT%%$'\n'*}"; OLD="$(printf '%s\n' "$OUT" | sed 1d | tr '\n' ' ')"
+        [ -n "${OLD// /}" ] || { echo "no $NAME process in $C (ros/laptop.sh logs ${C#pepin-})"; exit 3; }
+        # shellcheck disable=SC2086
+        docker exec "$C" sh -c 'kill -INT "$@"' sh $OLD
+        R="wait${TAB}nothing read from the log yet"
         for _ in $(seq 1 240); do
-            SEEN="$(docker logs --since "$T0" "$C" 2>&1 | grep -F "$LINE" || true)"
-            if [ -n "$SEEN" ]; then
-                SEEN="${SEEN%%$'\n'*}"; DT=$(( $(now_ms) - MS0 ))
-                printf '%s back in %d.%d s: %s\n' "$NAME" $((DT / 1000)) $((DT % 1000 / 100)) "${SEEN#*]: }"
+            R="$(docker logs -t --since "$KICKED" "$C" 2>&1 | awk -v name="$NAME" -v old="$OLD" -v line="$LINE" -v kicked="$KICKED" -f "$HERE/kick_ready.awk")"
+            if [ "${R%%"$TAB"*}" = ready ]; then
+                echo "${R#*"$TAB"}"
                 case "$(bridge_count http://localhost:8001 "$NAME")" in
                     1) echo "the bridge lists $NAME once: clean" ;;
                     0) ;;  # no bridge admin to ask, or a name it does not list
@@ -255,7 +261,7 @@ case "${1:-start}" in
             fi
             sleep 0.5
         done
-        echo "$NAME did not print '$LINE' within 120 s: ros/laptop.sh logs ${C#pepin-}"; exit 4 ;;
+        echo "$NAME not ready within 120 s: ${R#*"$TAB"} (ros/laptop.sh logs ${C#pepin-})"; exit 4 ;;
     vslam)
         # Camera + lidar mapping beside the navigation half (ros/pepin_bringup/launch/vslam.launch.py),
         # and there is one arrangement of it (World R): the database is the map, it is kept across

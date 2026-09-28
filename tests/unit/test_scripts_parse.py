@@ -1372,3 +1372,57 @@ def test_camera_grid_status_reads_the_flag_the_layers_and_the_report(tmp_path) -
     assert f"costmap {LOCAL}:  camera_layer=on  camera_grid_layer=on" in out
     assert "last report: grid: 90 on /camera_grid" in out
     assert not _sets(sent), "status sets nothing"
+
+
+# ---- ros/sync.sh: the files, and a restart only when asked (2026-09-27) ------------------------
+
+FAKE_SYNC_LIB = r"""#!/bin/bash
+ssh() { printf 'ssh %s\n' "$*" >> "$FAKE_LOG"; }
+rsync() { printf 'rsync %s\n' "$*" >> "$FAKE_LOG"; }
+sleep() { :; }
+"""
+
+
+def _sync(tmp_path: Path, *args: str) -> tuple[int, str, list[str]]:
+    """Run ros/sync.sh against a faked board; (exit status, output, commands)."""
+    import os
+
+    here = tmp_path / "ros"
+    here.mkdir(parents=True)
+    (here / "lib.sh").write_text(FAKE_SYNC_LIB)
+    (here / "board.sh").write_text(FAKE_SUB)
+    (here / "board.sh").chmod(0o755)
+    (here / "sync.sh").write_text((REPO / "ros/sync.sh").read_text())
+    log = tmp_path / "log"
+    log.write_text("")
+    run = subprocess.run(
+        ["bash", str(here / "sync.sh"), *args],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env={**os.environ, "FAKE_LOG": str(log)},
+    )
+    return run.returncode, run.stdout + run.stderr, log.read_text().splitlines()
+
+
+@pytest.mark.slow  # four runs of the script, ~0.8 s
+def test_sync_puts_the_code_on_the_board_and_restarts_only_when_asked(tmp_path: Path) -> None:
+    """A restart by default restarted the board for a laptop-only change (journal 2026-09-22);
+    ros/push.sh kicks the nodes a change reaches instead. --no-restart, the old spelling of the
+    default, still works; restart.sh --deploy asks for the restart by name."""
+    for name, args in (("plain", ()), ("old", ("--no-restart",))):
+        code, out, sent = _sync(tmp_path / name, *args)
+        assert code == 0, out
+        assert sum(c.startswith("rsync -a --delete") for c in sent) == 3
+        assert not any("restart" in c for c in sent), sent
+        assert "board.sh census" in sent
+    code, out, sent = _sync(tmp_path / "restart", "--restart")
+    assert code == 0, out
+    assert any("systemctl restart pepin-ros" in c for c in sent)
+    assert sent.index("board.sh census") > max(i for i, c in enumerate(sent) if "restart" in c)
+    assert _sync(tmp_path / "bad", "--bogus")[0] == 2
+
+
+def test_a_board_deploy_restarts_through_sync_s_own_flag(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    code, out, sent = _restart(tmp_path, "board", "--deploy", "--no-check")
+    assert "sync.sh --restart" in sent, (code, out)

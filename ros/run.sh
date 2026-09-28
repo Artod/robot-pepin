@@ -4,8 +4,9 @@
 #   ros/run.sh ros2 launch pepin_bringup robot.launch.py
 # Development mounts: the Python package, launch files, tools, params, maps and our pepin
 # library come from /root/pepin-ros on the host, over the paths baked into the image — so an
-# edit needs `ros/sync.sh` (rsync + container restart, ~20 s), not an image rebuild. The image
-# is rebuilt (ros/build.sh, container stopped) only when the Dockerfile changes.
+# edit needs `ros/push.sh FILE` (rsync + a kick of the nodes it reaches) or `ros/sync.sh
+# --restart` (rsync + container restart), not an image rebuild. The image is rebuilt
+# (ros/build.sh, container stopped) only when the Dockerfile changes.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LIDAR="$(readlink -f /dev/lidar 2>/dev/null || echo /dev/ttyUSB0)"
