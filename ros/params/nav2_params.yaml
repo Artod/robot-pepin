@@ -462,6 +462,10 @@ local_costmap:
       update_frequency: 5.0  # the stop reflex's slowest link: a mark waits for this tick
       publish_frequency: 1.0
       transform_tolerance: 0.3  # a sensor stamped 'now' waits at most this long for odom->base_link
+      # Activation waits for odom -> base_link (the board's own EKF) instead of failing after
+      # Nav2's default 60 s: the lifecycle manager never retries a failed bring-up (the
+      # global_costmap's note below).
+      initial_transform_timeout: 86400.0
       # odom, not map (2026-09-22): the controller must not depend on a frame that crosses the
       # WiFi. Under PEPIN_LOCALIZER=rtabmap the laptop's graph owns map -> odom and the board
       # receives it over a radio (uwe5622) whose ping averages 80-180 ms with spikes of
@@ -899,6 +903,12 @@ global_costmap:
       update_frequency: 2.0  # a person walking in: 0.5 Hz left the plan through them for 2 s
       publish_frequency: 1.0
       transform_tolerance: 1.0
+      # How long activation waits for base_link -> map, i.e. for the laptop's RTAB-Map. Nav2's
+      # default 60 s FAILS the activation and its lifecycle manager never retries: a board whose
+      # Nav2 came up more than a minute before the laptop planned nothing until a restart (the
+      # start-order race, journal 2026-09-25; the sim: --nav-first 70 never came up). A day =
+      # wait for the laptop however late it comes; ros/restart.sh proves the planner after.
+      initial_transform_timeout: 86400.0
       global_frame: map
       robot_base_frame: base_link
       # The true polygon, NOT a 0.30 m disc. The disc was tried on 2026-09-08 to stop NavFn
@@ -1181,10 +1191,11 @@ global_costmap:
         # 3 at 50 cm, so plans run along the furniture and the footprint check alone keeps them off it.
         cost_scaling_factor: 10.0
         inflation_radius: 0.55
-      # False: the map is 239x215 cells, so publishing it whole at 0.5 Hz spends 50 kB/s on a
-      # board whose control loop already drops to 3 Hz. Turn it on when a refused plan needs
-      # looking at. The local one stays on — 3600 cells is genuinely free.
-      always_send_full_costmap: False
+      # True (2026-09-28): the planner's live map in Foxglove (/global_costmap/costmap), the whole
+      # grid each publish — ~141x216 cells, ~30 kB at publish_frequency 1 Hz. On False a still
+      # robot published only incremental updates, the panel stayed blank, and a relay outside
+      # ros/ (costmap_live) had to rebuild the grid; ros/restart.sh's planner proof reads it too.
+      always_send_full_costmap: True
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.
 # If you'd rather set it in the yaml, remove the default "map" value in the tb3_simulation_launch.py
