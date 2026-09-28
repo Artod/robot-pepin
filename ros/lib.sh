@@ -124,6 +124,14 @@ PEPIN_ZROUTER_LOG="${PEPIN_ZROUTER_LOG:-info,zenoh::net::runtime::orchestrator=d
 # between, which is safe: a router's workers guard its own sessions only.
 PEPIN_ZROUTER_RX_WORKERS="${PEPIN_ZROUTER_RX_WORKERS:-32}"
 pepin_rmw_is_zenoh() { [ "$PEPIN_RMW" = zenoh ]; }
+# THE board stack restart (ros/restart.sh, ros/sync.sh --restart): its zenoh router goes with it.
+# The router degrades with every stack restart — fresh nodes saw static TF after 9.5 s,
+# "DeclareFinal Timeout" and aborted Nav2 bring-ups — and a router restart brings it back
+# (2026-09-23). The stack stops FIRST, so no board node sees its router go; the laptop's router
+# re-dials by itself. Prints the two states (router, stack) and fails unless both are active.
+pepin_board_restart() {
+    ssh "root@$BOARD" "systemctl stop pepin-ros; systemctl restart pepin-zrouter && systemctl start pepin-ros && sleep 8 && systemctl is-active pepin-zrouter pepin-ros"
+}
 # This checkout's ros/, wherever the sourcing script lives (the container configs are under it).
 PEPIN_ROS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
