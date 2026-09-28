@@ -71,28 +71,28 @@ database kept, `ros/laptop.sh vslam --fresh` deletes the database first and star
 
 ## Restarting
 
-`ros/restart.sh board|laptop|both [--deploy] [--fresh-graph] [--no-check]` is the whole restart in
-one command, followed by every check we have learned to run afterwards.
-
-- **board** — `systemctl restart pepin-ros` over the multiplexed ssh, or the full deploy
-  (`ros/sync.sh --restart`: code, library and config, then the restart and its census) with
-  `--deploy`.
-  It then waits up to 90 s for the tracker's first report line.
-- **laptop** — `ros/laptop.sh start`, then `ros/laptop.sh vslam --neck --seed-map=<map>`, where
-  the map is the one the board serves, read from its `/etc/default/pepin-ros` (`PEPIN_MAP`), never
-  guessed: the fused volume is snapped to the lattice of the map it is seeded with.
-- **both** — the board first, then the laptop; nothing is checked until both are up, because
-  `/depth_scan` and `/vo` are fed by the laptop.
-- **`--fresh-graph`** — the camera half starts on an empty RTAB-Map database *and* the graph
-  anchor of the served map is deleted (`ros/maps/<map id>.graph_anchor.json`). The anchor is a
-  property of the map ↔ database PAIR (`pepin.anchors`); an empty database beside a kept anchor
-  speaks in the previous database's frame.
-- **`--no-check`** — restart only. `PEPIN_RESTART_WAIT_S` / `PEPIN_RESTART_POLL_S` change how long
-  a half is given to come back and how often it is looked at.
+`ros/restart.sh board|laptop|both [--deploy] [--fresh-graph] [--no-check] [--dry-run]` brings the
+robot up working in one command and ends on one line — `green: N checks, none failed`, or `red:`
+with the failing lines above it — and that line is all the operator reads. It restarts the board's
+stack together with its zenoh router (stack stopped, router restarted, stack started; `--deploy`
+does it through `ros/sync.sh --restart`), then the laptop: board first, always, because a board
+restart re-zeroes the odometry RTAB-Map runs on (`board` alone restarts only the laptop's vslam, and
+only if that half is up). Then it proves the planner plans (4.1) and repairs it when it does not —
+the Nav2 container alone, then the board half once more — before it fails; a planner that answers
+"no path" in every direction is reported, never restarted. The board's Nav2 waits for the laptop's
+map however late it comes (`initial_transform_timeout`), so the start order is no longer a race.
+`--dry-run` prints the order and touches nothing, `--no-check` restarts only, `--fresh-graph` starts
+the camera half on an empty RTAB-Map database and moves the old frame's volume aside;
+`PEPIN_RESTART_WAIT_S`, `PEPIN_RESTART_POLL_S` and `PEPIN_PLANNER_WAIT_S` change how long a half
+and the planner are waited for.
 
 Every check is one `PASS`/`FAIL` line with its number, a `WARN` is shown but never fails the run,
 and the script exits 1 if anything failed. A check that cannot be answered says so; it never reads
 silence as good news. What is checked:
+
+| # | the planner |
+|---|---|
+| 4.1 | from `pepin-vslam`, `ros/tools/planner_check.py`: `/global_costmap/costmap` (or its updates) delivers something new within 10 s — its latched copy proves nothing — and one `ComputePathToPose` from the cart's pose to 0.5 m ahead (then behind, left, right) returns a path: a plan, never motion. Asked again for up to 180 s while Nav2 comes up, repaired before it fails (above). "No path" in every direction on a corrected pose (`ros/tools/map_odom.py`) fails with no restart: the cart is boxed in or the costmap is full of marks. With the laptop half down it fails: there is no map to plan on |
 
 | # | board |
 |---|---|

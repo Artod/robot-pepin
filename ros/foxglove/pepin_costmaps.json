@@ -62,7 +62,7 @@
           "lineWidth": 0.03,
           "color": "#2979ff"
         },
-        "/global_costmap/costmap_live": {
+        "/global_costmap/costmap": {
           "visible": true,
           "colorMode": "costmap",
           "alpha": 0.9

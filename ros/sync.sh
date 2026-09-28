@@ -39,7 +39,7 @@ rsync -a --delete --exclude '__pycache__' "$HERE/../src/pepin/" "root@$BOARD:/ro
 # (pepin.deployment.config_file) — the same files the laptop reads from its checkout.
 rsync -a --delete "$HERE/../config/" "root@$BOARD:/root/pepin-ros/pepin_src/config/"
 if [ "$RESTART" = true ]; then
-    ssh "root@$BOARD" "systemctl restart pepin-ros && sleep 8 && systemctl is-active pepin-ros"
+    pepin_board_restart  # ros/lib.sh: the stack and its router, the router first
     # The last nodes wait for the bridge to forget the previous incarnation of their names
     # (pepin_bringup.ghost_wait) before they start: a census taken now would call them MISSING
     # and read every CPU number as the start-up burst it is.

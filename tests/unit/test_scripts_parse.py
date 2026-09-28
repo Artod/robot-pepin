@@ -5,6 +5,7 @@ lerobot, which pulls torch; they are left out to keep the unit tier fast.
 """
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -636,12 +637,25 @@ ssh() {
         *"is-active pepin-base"*)
             printf '%s\n%s\n' "${FAKE_BASE-active}" "${FAKE_TORQUE-idle: parked, torque off}" ;;
         *"restart pepin-ros"*) printf 'active\n' ;;
+        *"restart pepin-zrouter"*) printf 'active\nactive\n' ;;
     esac
     return 0
 }
 docker() {
     log "docker $*"
     case "$*" in
+        # The planner's proof (ros/tools/planner_check.py): FAKE_PLANNER_SEQ is a file of
+        # "exit|line" answers, one popped per call; empty or unset, the planner plans.
+        *planner_check.py*)
+            if [ -n "${FAKE_PLANNER_SEQ-}" ] && [ -s "$FAKE_PLANNER_SEQ" ]; then
+                local answer
+                answer="$(head -n 1 "$FAKE_PLANNER_SEQ")"
+                tail -n +2 "$FAKE_PLANNER_SEQ" > "$FAKE_PLANNER_SEQ.rest"
+                mv "$FAKE_PLANNER_SEQ.rest" "$FAKE_PLANNER_SEQ"
+                printf '%s\n' "${answer#*|}"
+                return "${answer%%|*}"
+            fi
+            printf '%s\n' "$PLANNER_OK_LINE" ;;
         *Config.Image*pepin-vslam*) printf '%s\n' "${FAKE_VSLAM_IMAGE-pepin-laptop:xfeat}" ;;
         *"test -f /opt/xfeat/"*) [ -z "${FAKE_NO_XFEAT-}" ] || return 1 ;;
         *inspect*) [ -n "${FAKE_VSLAM-x}" ] && printf '2026-09-14T19:00:00Z\n' || return 1 ;;
@@ -662,7 +676,17 @@ PEPIN_LOCALIZER="${FAKE_LOCALIZER:-tracker}"
 pepin_localizer_is_tracker() { [ "$PEPIN_LOCALIZER" = tracker ]; }
 # pepin_rmw_is_zenoh is deliberately NOT faked: the real ros/lib.sh has it, and leaving it
 # undefined here is how these tests exercise the bridge-era branches of the checks.
+PLANNER_OK_LINE="planner: OK — path of 9 poses to 0.50 m ahead (GridBased) in 0.1 s"
 """
+
+
+def _lib_function(name: str) -> str:
+    """One function of ros/lib.sh, verbatim: a fake lib that must send the real command."""
+    found = re.search(rf"^{name}\(\) {{\n.*?^}}\n", (REPO / "ros/lib.sh").read_text(), re.M | re.S)
+    assert found is not None, name
+    return found.group(0)
+
+
 FAKE_SUB = """#!/bin/bash
 printf '%s %s\\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
 case "$(basename "$0")$*" in
@@ -686,7 +710,7 @@ def _restart(tmp_path, *args, **env):  # type: ignore[no-untyped-def]
 
     here = tmp_path / "ros"
     here.mkdir(exist_ok=True)
-    (here / "lib.sh").write_text(FAKE_RESTART_LIB)
+    (here / "lib.sh").write_text(FAKE_RESTART_LIB + _lib_function("pepin_board_restart"))
     for name in ("sync.sh", "board.sh", "goto.sh", "go.sh", "laptop.sh", "flags.sh", "foxglove.sh"):
         (here / name).write_text(FAKE_SUB)
         (here / name).chmod(0o755)
@@ -831,8 +855,8 @@ def test_the_laptop_half_is_started_without_a_word_about_the_map(tmp_path) -> No
     assert "laptop.sh vslam --neck" in sent
     assert not [c for c in sent if "--room=" in c], "the room entity went with World R"
     assert not [c for c in sent if "--fresh" in c], "no --fresh without --fresh-graph"
-    assert not [c for c in sent if c.startswith("ssh") and "restart pepin-ros" in c], sent
-    assert "checks skipped" in out
+    assert not [c for c in sent if c.startswith("ssh") and "pepin-ros" in c], sent
+    assert "no proof and no checks" in out
 
 
 def test_fresh_graph_empties_the_database_and_moves_the_volume_of_its_frame_aside(
@@ -859,6 +883,119 @@ def test_fresh_graph_is_refused_on_the_board_half_that_owns_neither(tmp_path) ->
     assert sent == [], "refused before a host is touched"
 
 
+# ---- one command that comes up working: the router, the order, the planner's proof (2026-09-28) --
+
+BROKEN_LINE = "1|planner: BROKEN — /global_costmap/costmap sent nothing in 10 s (costmap 0 grid(s))"
+BOXED_LINE = "3|planner: BOXED — it answers, but no path 0.50 m around: ahead goal occupied"
+OK_LINE = "0|planner: OK — path of 9 poses to 0.50 m ahead (GridBased) in 0.1 s"
+
+
+def _planner_answers(tmp_path: Path, *answers: str) -> str:
+    """A FAKE_PLANNER_SEQ file: the planner check's answers, in the order they are asked."""
+    seq = tmp_path / "planner_seq"
+    seq.write_text("".join(f"{a}\n" for a in answers))
+    return str(seq)
+
+
+@pytest.mark.parametrize(
+    ("args", "first", "absent"),
+    [
+        (("both",), "board: stop pepin-ros, restart pepin-zrouter, start pepin-ros", "sync.sh"),
+        (("board", "--deploy"), "ros/sync.sh --restart: the checkout to", "laptop.sh start"),
+        (
+            ("laptop", "--fresh-graph"),
+            "laptop: ros/laptop.sh start, then ros/laptop.sh vslam --neck --fresh",
+            "the board's first report line",
+        ),
+        (("both", "--no-check"), "board: stop pepin-ros", "the proof"),
+    ],
+)
+def test_a_dry_run_prints_the_order_and_touches_nothing(tmp_path, args, first, absent) -> None:  # type: ignore[no-untyped-def]
+    world = tmp_path / "ros/maps/rtabmap.world.npz"
+    world.parent.mkdir(parents=True, exist_ok=True)
+    world.write_bytes(b"kept")
+    code, out, sent = _restart(tmp_path, *args, "--dry-run")
+    assert code == 0, out
+    assert sent == [], "a dry run asks no host anything and restarts nothing"
+    assert world.read_bytes() == b"kept", "--fresh-graph moves nothing aside in a dry run"
+    steps = [line for line in out.splitlines() if line[:3].strip().rstrip(".").isdigit()]
+    assert steps[0].split(". ", 1)[1].startswith(first), out
+    assert absent not in out, out
+    if "--no-check" not in args:
+        assert any("repair 1: SIGINT to the Nav2 container" in s for s in steps), out
+        assert any("still broken -> FAIL 4.1, loudly" in s for s in steps), out
+
+
+@pytest.mark.slow  # the whole restart against fakes: 0.4-1.1 s
+def test_a_board_restart_restarts_the_laptop_s_vslam_after_it_and_proves_the_planner(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """RTAB-Map follows the board's new odometry only from a fresh start (journal 2026-09-22), so
+    with the laptop half up a board restart takes its vslam with it — never `laptop.sh start` —
+    and then proves the planner plans."""
+    _code, out, sent = _restart(tmp_path, "board", FAKE_LOCALIZER="rtabmap")
+    board = next(i for i, c in enumerate(sent) if "restart pepin-zrouter" in c)
+    vslam = sent.index("laptop.sh vslam --neck")
+    proof = next(i for i, c in enumerate(sent) if "planner_check.py" in c)
+    assert board < vslam < proof, sent
+    assert "laptop.sh start" not in sent
+    assert "PASS 4.1  OK — path of 9 poses" in out, out
+    assert not [c for c in sent if "pkill" in c], "a planner that plans is not repaired"
+
+
+@pytest.mark.slow  # the whole restart against fakes: 0.4-1.1 s
+def test_a_board_restart_with_the_laptop_down_says_so_and_fails_the_planner(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    code, out, sent = _restart(tmp_path, "board", FAKE_CONTAINERS="")
+    assert code == 1, out
+    assert not [c for c in sent if c.startswith("laptop.sh")], sent
+    assert not [c for c in sent if "planner_check.py" in c], "nothing to prove it from"
+    assert "the laptop half is down" in out
+    assert "FAIL 4.1  planner: not proven — the laptop half is down" in out, out
+
+
+@pytest.mark.slow  # the whole restart against fakes: 0.4-1.1 s
+def test_a_broken_planner_is_repaired_by_a_nav2_respawn_before_anything_bigger(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    seq = _planner_answers(tmp_path, BROKEN_LINE, OK_LINE)
+    _code, out, sent = _restart(tmp_path, "both", FAKE_PLANNER_SEQ=seq, FAKE_LOCALIZER="rtabmap")
+    respawn = [c for c in sent if "pkill -INT -f '__node:=nav2_container'" in c]
+    assert len(respawn) == 1 and respawn[0].startswith("ssh root@"), sent
+    assert sum("restart pepin-zrouter" in c for c in sent) == 1, "the board is not restarted again"
+    assert "repair 1: the Nav2 container alone" in out
+    assert (
+        "PASS 4.1  OK — path of 9 poses to 0.50 m ahead (GridBased) in 0.1 s — after a Nav2 respawn"
+        in out
+    ), out
+
+
+@pytest.mark.slow  # the whole restart against fakes: 0.4-1.1 s
+def test_a_planner_still_broken_restarts_the_board_once_more_then_fails_loudly(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    seq = _planner_answers(tmp_path, BROKEN_LINE, BROKEN_LINE, BROKEN_LINE, OK_LINE)
+    code, out, sent = _restart(
+        tmp_path, "both", "--deploy", FAKE_PLANNER_SEQ=seq, FAKE_LOCALIZER="rtabmap"
+    )
+    assert code == 1, out
+    assert sent.count("sync.sh --restart") == 1, "the code goes out once; the repair only restarts"
+    assert sum("restart pepin-zrouter" in c for c in sent) == 1, "repair 2 restarts with the router"
+    assert sent.count("laptop.sh vslam --neck") == 2 and sent.count("laptop.sh start") == 1, sent
+    repair = next(i for i, c in enumerate(sent) if "restart pepin-zrouter" in c)
+    assert repair < [i for i, c in enumerate(sent) if c == "laptop.sh vslam --neck"][1]
+    assert "repair 2: the board half once more" in out
+    assert "FAIL 4.1  BROKEN — /global_costmap/costmap sent nothing in 10 s" in out, out
+    assert "STILL BROKEN after a Nav2 respawn and a board restart" in out, out
+    assert "red: " in out
+
+
+@pytest.mark.slow  # the whole restart against fakes: 0.4-1.1 s
+def test_a_cart_boxed_in_on_a_corrected_pose_is_reported_and_never_restarted(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    seq = _planner_answers(tmp_path, BOXED_LINE)
+    code, out, sent = _restart(tmp_path, "both", FAKE_PLANNER_SEQ=seq, FAKE_LOCALIZER="rtabmap")
+    assert code == 1, out
+    assert not [c for c in sent if "pkill" in c], "no restart moves furniture"
+    assert sum("restart pepin-zrouter" in c for c in sent) == 1
+    assert "FAIL 4.1  BOXED — it answers, but no path 0.50 m around" in out, out
+    assert "no restart can help" in out
+
+
 def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_it(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
@@ -867,8 +1004,13 @@ def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_
     checks by construction."""
     code, out, sent = _restart(tmp_path, "both")
     assert code == 0, out
-    order = [i for i, c in enumerate(sent) if "restart pepin-ros" in c or c.startswith("laptop.sh")]
-    assert sent[order[0]].endswith("restart pepin-ros && sleep 8 && systemctl is-active pepin-ros")
+    order = [
+        i for i, c in enumerate(sent) if "restart pepin-zrouter" in c or c.startswith("laptop.sh")
+    ]
+    assert sent[order[0]].endswith(
+        "systemctl stop pepin-ros; systemctl restart pepin-zrouter && systemctl start pepin-ros"
+        " && sleep 8 && systemctl is-active pepin-zrouter pepin-ros"
+    ), "the board's stack with its router, the stack stopped before the router goes"
     assert sent[order[1]] == "laptop.sh start"
     first_rate = next(i for i, c in enumerate(sent) if "topic_rate.py" in c)
     assert first_rate > order[-1], "the board is asked about the laptop's topics after it is up"
@@ -885,6 +1027,7 @@ def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_
         "2.8",
         "2.9",
         "3.1",
+        "4.1",
     ):
         assert f"PASS {number}" in out, out
     # ...and the one line that is never a verdict: who painted the local costmap's lethal cells.
@@ -1389,7 +1532,7 @@ def _sync(tmp_path: Path, *args: str) -> tuple[int, str, list[str]]:
 
     here = tmp_path / "ros"
     here.mkdir(parents=True)
-    (here / "lib.sh").write_text(FAKE_SYNC_LIB)
+    (here / "lib.sh").write_text(FAKE_SYNC_LIB + _lib_function("pepin_board_restart"))
     (here / "board.sh").write_text(FAKE_SUB)
     (here / "board.sh").chmod(0o755)
     (here / "sync.sh").write_text((REPO / "ros/sync.sh").read_text())
@@ -1418,7 +1561,7 @@ def test_sync_puts_the_code_on_the_board_and_restarts_only_when_asked(tmp_path: 
         assert "board.sh census" in sent
     code, out, sent = _sync(tmp_path / "restart", "--restart")
     assert code == 0, out
-    assert any("systemctl restart pepin-ros" in c for c in sent)
+    assert any("restart pepin-zrouter && systemctl start pepin-ros" in c for c in sent), sent
     assert sent.index("board.sh census") > max(i for i, c in enumerate(sent) if "restart" in c)
     assert _sync(tmp_path / "bad", "--bogus")[0] == 2
 
