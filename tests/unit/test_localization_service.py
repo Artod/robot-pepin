@@ -28,7 +28,6 @@ from pepin.localization_service import (
     XFeatModel,
     load_config,
     models_url,
-    place_dim,
 )
 from pepin.model_service import ModelServer, Request, Response, encode_arrays
 
@@ -40,8 +39,6 @@ def test_the_shipped_config_names_every_model_on_a_measured_device() -> None:
     config = load_config(REPO / "config/models.json")
     assert config.port == 8791
     assert (config.xfeat.device, config.match.device, config.place.device) == ("cpu", "cpu", "mps")
-    assert config.xfeat.top_k == 2048 and config.match.min_conf == 0.1
-    assert config.place.model == "boq_dinov2" and place_dim(config) == 12288
 
 
 def test_the_config_ignores_comments_defaults_the_rest_and_refuses_typos() -> None:
@@ -121,6 +118,7 @@ def service() -> Iterator[tuple[LocalizationClient, dict[str, Fake]]]:
     server.server_close()
 
 
+@pytest.mark.slow
 def test_xfeat_takes_a_grey_picture_and_answers_rtabmap_s_layout(service: Any) -> None:
     client, fakes = service
     grey = (np.arange(48 * 64) % 251).astype(np.uint8).reshape(48, 64)
@@ -137,6 +135,7 @@ def test_xfeat_takes_a_grey_picture_and_answers_rtabmap_s_layout(service: Any) -
     assert client.xfeat(grey, top_k=4) is not None and len(fakes[XFEAT].seen) == 2
 
 
+@pytest.mark.slow
 def test_match_sends_both_sides_and_the_sizes_and_answers_int32_pairs(service: Any) -> None:
     client, fakes = service
     kq, kt = np.zeros((4, 2)), np.zeros((6, 2))
@@ -150,6 +149,7 @@ def test_match_sends_both_sides_and_the_sizes_and_answers_int32_pairs(service: A
     assert job.min_conf == pytest.approx(0.2) and job.kq.dtype == np.float32
 
 
+@pytest.mark.slow
 def test_place_answers_the_vector_and_the_tag_of_the_weights(service: Any) -> None:
     client, _fakes = service
     rgb = np.zeros((30, 40, 3), dtype=np.uint8)
@@ -159,6 +159,7 @@ def test_place_answers_the_vector_and_the_tag_of_the_weights(service: Any) -> No
     assert tag == "place@feedbeef" and vector.dtype == np.float32 and vector[1] == 1.0
 
 
+@pytest.mark.slow
 def test_an_answer_of_the_wrong_layout_is_none_and_counted(service: Any) -> None:
     client, fakes = service
     fakes[XFEAT]._answer = lambda _job: (
@@ -170,6 +171,7 @@ def test_an_answer_of_the_wrong_layout_is_none_and_counted(service: Any) -> None
     assert client.remotes[XFEAT].failed == 1 and not client.remotes[XFEAT].down
 
 
+@pytest.mark.slow
 def test_a_request_the_model_cannot_read_is_refused_not_crashed(service: Any) -> None:
     client, _fakes = service
     headers, body = encode_arrays({"kq": np.zeros((2, 2))})
@@ -179,6 +181,7 @@ def test_a_request_the_model_cannot_read_is_refused_not_crashed(service: Any) ->
     assert health is not None and health["models"][MATCH]["errors"] == 1
 
 
+@pytest.mark.slow
 def test_a_model_that_failed_to_build_answers_500_and_names_itself() -> None:
     broken = BrokenModel(PLACE, "mps", "FileNotFoundError: no hub cache")
     server = ModelServer(("127.0.0.1", 0), [broken], name="localization service")

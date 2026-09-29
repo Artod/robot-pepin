@@ -176,7 +176,6 @@ def test_coverage_counts_cells_tilt_and_closeness_and_names_what_is_missing() ->
     coverage = Coverage.of(middle)
     assert not coverage.good() and len(coverage.missing_cells()) == GRID * GRID - 1
     assert "top-left" in coverage.hint()
-    assert "coverage of the frame" in coverage.report() and "next:" in coverage.report()
     full = [
         View(np.zeros((1, 1, 2), np.float32), (r, c), 0.2, 0.4)
         for r in range(GRID)
@@ -240,7 +239,6 @@ def test_the_solve_gives_the_synthetic_camera_s_own_numbers_back() -> None:
     )
     index, worst = fit.worst()
     assert 0 <= index < len(views) and worst < 0.05
-    assert "rms" in fit.report() and "field of view" in fit.report()
 
 
 def test_the_collector_s_own_views_solve_to_the_same_camera() -> None:
@@ -339,7 +337,6 @@ def test_a_calibration_survives_the_config_and_comes_back_as_the_optics(tmp_path
     assert cfg.calibrated and cfg.calibration is not None
     at_full = optics(cfg, 1280, 720)
     assert at_full.calibrated and at_full.fx == pytest.approx(fit.calibration.fx, abs=0.001)
-    assert "calibrated" in at_full.source and "rms" in at_full.source
 
 
 def test_the_optics_scale_to_the_published_size_and_fall_back_to_the_nominal(

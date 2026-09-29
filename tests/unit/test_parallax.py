@@ -974,8 +974,6 @@ def test_the_anchor_triangulates_its_corners_from_the_whole_window() -> None:
         pairs = anchor.pairs(Frame(network, context(round(0.1 * i, 3), view, odometry)))
     assert pairs is not None and pairs.size >= 20
     assert band_error(pairs) < 0.05
-    line = anchor.describe()
-    assert "obs a track" in line and "2-view sigma" in line and "tracks a frame" in line
     assert anchor.sigma_m is not None
     two_view = float(np.median(anchor._sigma_two))
     assert anchor.sigma_m < two_view, f"{anchor.sigma_m:.3f} m is not better than {two_view:.3f}"

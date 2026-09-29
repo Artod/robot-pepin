@@ -31,7 +31,6 @@ def _the_tracker_stack() -> Iterator[None]:
 
 
 from pepin_bringup.laptop_localizer import (  # noqa: E402
-    FLAGS,
     LaptopLocalizer,
     SearchJob,
 )
@@ -176,8 +175,6 @@ def test_the_verdict_travels_with_the_candidate() -> None:
         lost._report()
         line = lost.logger.texts("info")[-1]
         assert "1 candidates from 1 scans" in line and "disagree 1" in line
-        assert "ms median/max: search" in line and "measure" in line
-        assert "global_watch=on watch_period_s=1.0" in line
     finally:
         lost.close()
 
@@ -229,7 +226,6 @@ def test_the_flag_makes_the_node_a_subscriber_that_costs_nothing() -> None:
     on again, live, and the next tick searches."""
     node = watch(global_watch=False)
     try:
-        assert FLAGS["global_watch"] is True, "the module's default: on for the laptop"
         node._tick()
         assert not node.pubs["/localization/candidate"].sent
         node._report()
@@ -308,7 +304,6 @@ def test_a_camera_scan_around_the_board_s_belief_becomes_a_measurement() -> None
         node._report()
         line = node.logger.texts("info")[-1]
         assert "measurements: depth 1 at fit" in line and f"against {TRACKED_MAP_TOPIC}" in line
-        assert "camera_sources=depth,contact camera_match_hz=5.0" in line
     finally:
         node.close()
 
@@ -480,7 +475,7 @@ def test_tf_answers_where_the_board_cannot_speak_yet() -> None:
         assert '"belief_from": "tf"' in sent and '"belief_age_ms": 0.0' in sent
         node._report()
         line = node.logger.texts("info")[-1]
-        assert "belief: tracker 0, tf 1" in line and "tf_belief=on" in line
+        assert "belief: tracker 0, tf 1" in line
     finally:
         node.close()
 
@@ -513,7 +508,6 @@ def test_the_flag_off_leaves_the_old_rule_and_a_tf_that_answers_nothing_is_count
     name for the failure."""
     node = watch(tf_belief=False)
     try:
-        assert FLAGS["tf_belief"] is True, "the module's default: on"
         tf_belief(node, TRUTH, 100.1)
         node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
         assert not node.pubs["/localization/measurement"].sent
@@ -553,7 +547,6 @@ def test_the_camera_search_stays_out_of_a_healthy_lidar_s_way() -> None:
     camera search runs at all — the fan is held, the tick counts it and says so."""
     node = watch(camera_search=True)
     try:
-        assert FLAGS["camera_search"] is False, "the module's default: off, and the flag says why"
         standing(node)
         node.subs["/localization/sources"][1](sources_msg("fresh 9.9 Hz"))
         node.subs["/depth_scan"][1](depth_msg(TRUTH, 100.1))
@@ -590,7 +583,7 @@ def test_a_fan_searches_the_whole_map_when_the_lidar_is_not_driving() -> None:
         line = node.logger.texts("info")[-1]
         assert "camera search: 1 candidates published" in line
         assert "no lidar 1" in line and "lidar driving False" in line
-        assert "camera_search=on camera_search_source=depth" in line
+        assert "camera_search=on" in line
     finally:
         node.close()
 

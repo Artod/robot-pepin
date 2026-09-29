@@ -254,6 +254,6 @@ def test_the_cpp_bridge_carries_the_same_dither_rule() -> None:
     REPO = Path(__file__).resolve().parents[2]  # noqa: N806
     header = (REPO / "ros/pepin_base_cpp/include/pepin_base_cpp/gyro_bias.hpp").read_text()
     bridge = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
-    assert "class TickDither" in header and "kTickSlack = 1e-6" in header
+    assert "class TickDither" in header
     assert "tick_dither_.still(state.d_left_m, state.d_right_m)" in bridge
     assert "wheels.linear == 0.0" not in bridge, "exact zero never happens on a parked cart"

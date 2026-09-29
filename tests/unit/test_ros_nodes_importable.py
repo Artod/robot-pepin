@@ -8,6 +8,7 @@ robot, and holds the line on how much undecidable logic a node may carry.
 import ast
 from pathlib import Path
 
+import pytest
 import source_facts as sf
 
 ROS_PYTHON = sorted(
@@ -65,6 +66,7 @@ def _self_names(tree: ast.Module) -> dict[str, tuple[set[str], set[str]]]:
     return found
 
 
+@pytest.mark.slow
 def test_every_node_has_the_private_members_it_uses() -> None:
     """`self._open_run(...)` with no `def _open_run` reached the robot twice this week.
 

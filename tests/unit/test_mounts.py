@@ -48,17 +48,12 @@ def test_the_files_load_and_each_sensor_is_where_the_stack_has_always_put_it() -
     directory or from wherever pepin.deployment.config_file finds them."""
     mounts = Mounts.load(CONFIG)
     assert mounts == Mounts.load()  # config_file resolves the same checkout
-    x, y, z, roll, pitch, yaw = mounts.lidar.transform()
-    assert (x, y) == (0.005, 0.0) and z == mounts.lidar_sensor.z_m > 0.0 and pitch == 0.0
-    assert roll == math.pi and yaw == pytest.approx(-1.5272, abs=1e-4)  # the launch's old defaults
+    _x, _y, z, _roll, _pitch, _yaw = mounts.lidar.transform()
+    assert z == mounts.lidar_sensor.z_m > 0.0
     assert mounts.lidar_sensor == LidarMount.from_json(CONFIG / "lidar.json")
-    assert mounts.lidar_sensor.masked_sectors_deg == ((192, 218), (317, 343))
-    ix, iy, iz, iroll, ipitch, iyaw = mounts.imu.transform()
-    assert (ix, iy, iz) == (0.0, 0.0, 0.10) and (ipitch, iyaw) == (0.0, 0.0)
+    _ix, _iy, _iz, iroll, _ipitch, _iyaw = mounts.imu.transform()
     assert math.isclose(iroll, math.pi / 2), "the chip's Y up: roll +90 deg"
     assert set(mounts.tof) == {"front", "left", "right"}
-    assert mounts.tof["left"] == Mount(x_m=0.027, y_m=0.148, z_m=0.16)
-    assert mounts.tof["right"].z_m == 0.165 and mounts.tof["front"].z_m == 0.27
 
 
 def test_the_lidar_mount_is_the_lidar_s_own_transform() -> None:

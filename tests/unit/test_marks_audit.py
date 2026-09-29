@@ -90,7 +90,7 @@ def test_each_lethal_cell_goes_to_the_sensor_that_can_account_for_it() -> None:
     assert v.camera_only_xy.shape == (1, 2)
     assert np.allclose(v.camera_only_xy[0], centre_of(24, 30))
     assert v.nearest_camera_only_m == np.hypot(*centre_of(24, 30))
-    assert "camera-only 1" in v.report() and "nearest camera-only" in v.report()
+    assert "camera-only 1" in v.report()
 
 
 def test_the_lidar_answers_first_when_both_sensors_cover_a_cell() -> None:

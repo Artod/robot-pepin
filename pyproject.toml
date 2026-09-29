@@ -16,6 +16,7 @@ dev = [
     "mypy>=1.11",
     "pytest>=8",
     "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.6",
 ]
 macos = [
@@ -61,7 +62,8 @@ testpaths = ["tests"]
 addopts = "-q"
 markers = [
     "hardware: needs the live robot (run with --hardware)",
-    "slow: seconds, not milliseconds — simulated drives; not in the pre-commit hook (uv run pytest -m slow)",
+    "slow: over 0.3 s — simulated drives, sockets, timeouts, subprocesses (uv run pytest -m \"not slow\" skips them)",
+    "serial: asserts on wall-clock time, flaky under parallel load; the pre-push hook runs these alone, after the parallel run",
 ]
 
 [tool.mypy]

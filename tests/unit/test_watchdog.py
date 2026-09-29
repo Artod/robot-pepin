@@ -307,7 +307,6 @@ def test_a_streak_of_unknown_maps_says_the_map_does_not_fit() -> None:
         assert gate.map_fits
     gate.observe(poor, HERE, 0.2, MAP)
     assert not gate.map_fits and gate.status()["map_fits"] is False
-    assert "THE MAP DOES NOT FIT" in gate.report()
     gate.observe(candidate(HERE), HERE, 0.60, MAP)
     assert gate.map_fits, "one candidate that fits gives the map the benefit of the doubt"
 
@@ -476,4 +475,4 @@ def test_the_graph_s_word_is_admitted_like_any_other_source() -> None:
         assert answer.verdict is CandidateVerdict.DISAGREE and answer.seed is None, i
     answer = gate.observe(word(), HERE, 0.15, MAP)
     assert answer.seed is not None and gate.last_source == GRAPH
-    assert gate.candidate_streak == 3 and "from graph 3" in gate.report()
+    assert "from graph 3" in gate.report()

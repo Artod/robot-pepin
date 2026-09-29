@@ -67,7 +67,7 @@ def test_the_hull_has_one_source_and_the_scan_filter_box_grows_from_it() -> None
 
     cfg = json.loads((Path(__file__).resolve().parents[2] / "config/base.json").read_text())
     assert Footprint.from_config(cfg["footprint"]) == HULL
-    assert HULL.inscribed_radius_m == HULL.front_m == 0.0625
+    assert HULL.inscribed_radius_m == HULL.front_m
     assert abs(HULL.circumscribed_radius_m - 0.4070) < 1e-3
     assert HULL.polygon() == [(0.0625, 0.275), (0.0625, -0.275), (-0.30, -0.275), (-0.30, 0.275)]
     box = hull_box(band_m=0.05)

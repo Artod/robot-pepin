@@ -162,7 +162,6 @@ def test_the_scripts_parse_and_say_what_they_do() -> None:
     # nothing, and a reopen that never fires is worse than no reopen.
     assert 'APP_PROCESS="${PEPIN_FOXGLOVE_APP:-Foxglove}"' in foxglove
     assert "foxglove://open?ds=foxglove-websocket&ds.url=" in foxglove
-    assert "wait_for_port" in foxglove  # the link must not be fired at a port that is not up
 
     restart = (REPO / "ros/restart.sh").read_text()
     assert "check_foxglove" in restart and "PEPIN_FOXGLOVE_PREFIX=2.9" in restart

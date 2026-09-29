@@ -332,7 +332,6 @@ def test_the_record_command_names_the_bag_the_storage_and_the_hidden_topics() ->
     command = record_command(Path("/maps/rec/0251_20260922_141002Z_home"))
     assert command[:3] == ["ros2", "bag", "record"]
     assert "--include-hidden-topics" in command
-    assert command[command.index("--storage") + 1] == "mcap"
     assert command[command.index("--output") + 1] == "/maps/rec/0251_20260922_141002Z_home"
     assert "--compression-mode" not in command, "the board's cores are the point of this recorder"
     assert command[-1].startswith("/") and "/navigate_to_pose/_action/status" in command

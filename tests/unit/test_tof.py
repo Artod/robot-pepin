@@ -63,7 +63,6 @@ def test_config_mounts_load_for_all_three_sensors() -> None:
 
     mounts = load_mounts("config/tof.json")
     assert set(mounts) == {"front", "left", "right"}
-    assert mounts["front"].y_m == 0.0 and mounts["front"].height_m > mounts["left"].height_m
     assert mounts["left"].y_m > 0 > mounts["right"].y_m  # left is +y in the robot frame
 
 

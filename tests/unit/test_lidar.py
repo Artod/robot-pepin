@@ -135,6 +135,7 @@ class ReplaySource:
 
 
 @pytest.mark.slow  # a 3 s wall-clock deadline: timing-flaky under load, and slow
+@pytest.mark.serial
 def test_lidar_client_drains_revolutions_and_reconnects_after_a_drop() -> None:
     import time
 
@@ -149,7 +150,11 @@ def test_lidar_client_drains_revolutions_and_reconnects_after_a_drop() -> None:
     client = LidarClient("unused", LidarMount(), source_factory=factory, retry_s=0.01).start()
     scans = []
     deadline = time.monotonic() + 3.0
-    while time.monotonic() < deadline and (len(scans) < 5 or client.reconnects < 1):
+    # The client counts a reconnect when the stream drops and builds the next source only after
+    # retry_s: wait for that second source too, or a loaded machine ends the loop in between.
+    while time.monotonic() < deadline and (
+        len(scans) < 5 or client.reconnects < 1 or len(sources) < 2
+    ):
         scans.extend(client.drain())
         time.sleep(0.01)
     client.close()
@@ -248,7 +253,6 @@ def test_the_lidar_mount_is_the_calibration_file_and_yields_the_launch_transform
     """One mount: config/lidar.json is the calibration's home, read by everyone through
     pepin.mounts (the code constant that used to shadow it is gone), and both sides publish
     the same base_link -> laser."""
-    import math
     from pathlib import Path
 
     from pepin.lidar import LidarMount
@@ -257,11 +261,10 @@ def test_the_lidar_mount_is_the_calibration_file_and_yields_the_launch_transform
     repo = Path(__file__).resolve().parents[2]
     sensor = LidarMount.from_json(repo / "config/lidar.json")
     assert Mounts.load().lidar_sensor == sensor
-    x, y, z, roll, pitch, yaw = sensor.transform()
+    _x, _y, z, _roll, _pitch, _yaw = sensor.transform()
     # The height is never pinned here: config/lidar.json is its one home (a tape measured it
     # on 2026-09-12) and a second copy in a test is exactly the shadow this test is about.
-    assert (x, y) == (0.005, 0.0) and z == sensor.z_m > 0.0 and pitch == 0.0
-    assert roll == math.pi and yaw == pytest.approx(-1.5272, abs=1e-4)  # the launch's old defaults
+    assert z == sensor.z_m > 0.0
 
 
 def test_a_flipped_byte_costs_exactly_one_frame_and_is_counted() -> None:

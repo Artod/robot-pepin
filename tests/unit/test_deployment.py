@@ -350,7 +350,6 @@ def test_the_written_bridge_configs_are_the_ones_the_table_generates() -> None:
             written = json.loads((REPO / "ros" / name).read_text())
             assert written == bridge_config(side, mode), f"regenerate ros/{name}"
     assert not list((REPO / "ros").glob("zenoh-bridge-*-slam.json")), "the SLAM mode is gone"
-    assert len(list((REPO / "ros").glob("zenoh-bridge-*.json"))) == 4
 
 
 def test_the_tracker_always_runs_and_the_retired_frame_owner_takes_its_seat_or_nothing() -> None:

@@ -119,6 +119,7 @@ def goto() -> Any:
     return load_goto()
 
 
+@pytest.mark.slow
 def test_the_cancel_goes_out_before_the_note_and_the_tape(goto: Any) -> None:
     """The order IS the safety: whatever else fails, the board is told to stop first."""
     nav, tape = FakeNavigator(), FakeTape()
@@ -151,6 +152,7 @@ def test_a_cancel_that_fails_says_so_loudly(goto: Any, capsys: Any) -> None:
     assert tape.closed == 1
 
 
+@pytest.mark.slow
 def test_the_note_publisher_is_made_once_and_kept_on_the_node(goto: Any) -> None:
     """The interrupt path creates nothing it can avoid creating: the publisher is made on the first
     note of the drive and reused after that."""

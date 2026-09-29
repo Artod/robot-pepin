@@ -113,6 +113,7 @@ def service() -> Iterator[tuple[str, FakeNet, DepthServer]]:
         server.server_close()
 
 
+@pytest.mark.slow
 def test_a_frame_goes_through_the_service_and_comes_back_at_its_own_size(
     service: tuple[str, FakeNet, DepthServer],
 ) -> None:
@@ -134,6 +135,7 @@ def test_a_frame_goes_through_the_service_and_comes_back_at_its_own_size(
     assert "fake/Net" in server.report() or "Net on test" in server.report()
 
 
+@pytest.mark.slow
 def test_the_native_size_is_resized_by_the_client(
     service: tuple[str, FakeNet, DepthServer],
 ) -> None:
@@ -146,6 +148,7 @@ def test_the_native_size_is_resized_by_the_client(
     assert depth[1, 0] == pytest.approx(0.75) and depth[2, 0] == pytest.approx(1.25)
 
 
+@pytest.mark.slow
 def test_a_refused_request_is_an_error_the_client_recovers_from(
     service: tuple[str, FakeNet, DepthServer],
 ) -> None:
@@ -166,6 +169,7 @@ def test_a_refused_request_is_an_error_the_client_recovers_from(
     assert client(frame).shape == (4, 4)  # the client's own connection is unaffected
 
 
+@pytest.mark.slow
 def test_a_network_that_raises_is_a_500_and_the_connection_survives() -> None:
     """A frame the network itself chokes on (out of memory, a Metal fault) must come back as an
     answer the client can fall back on, not as a dropped connection with a traceback."""
@@ -186,6 +190,7 @@ def test_a_network_that_raises_is_a_500_and_the_connection_survives() -> None:
         server.server_close()
 
 
+@pytest.mark.slow
 def test_no_service_and_a_slow_service_are_errors_within_the_timeout() -> None:
     with pytest.raises(DepthServiceError):
         RemoteDepth("http://127.0.0.1:9", timeout_s=0.5, encoding="raw")(_frame(4, 4))
