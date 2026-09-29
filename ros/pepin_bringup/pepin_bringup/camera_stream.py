@@ -97,6 +97,11 @@ RETRY_S = 3.0  # between reconnections, waited on the stop event so a kick does 
 # ROS's stereo convention (image_pipeline's left/right namespaces), and nothing is published on
 # them while the head has no calibration.
 RIGHT_IMAGE_TOPIC = "/camera/right/image"
+# The right eye goes out grey. RAFT-Stereo's own loaders copy a grey eye into three channels,
+# and with both eyes in colour the depth fell from 5-6 to 3 frames a second (2026-09-28) for a
+# gain the literature calls slight. True publishes bgr8, and the matcher then sends the pair
+# in colour by itself (pepin.stereo_depth.RaftMatcher, pepin.stereo_host's X-Channels).
+RIGHT_EYE_COLOUR = False
 RIGHT_INFO_TOPIC = "/camera/right/camera_info"
 # What a stereo frame is made of, in the order it happens; every one is timed into the tally and
 # printed in the report line as median/p95 milliseconds.
@@ -650,8 +655,9 @@ class CameraStream(Node):
         rectifier = published.rectifier
         if rectifier is not None and right is not None:
             with self._tally.measure("rectify"):
-                grey = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
-                left, right = rectifier.rectify(left, grey)
+                if not RIGHT_EYE_COLOUR:
+                    right = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
+                left, right = rectifier.rectify(left, right)
             self._tally.count("rectified")
         with self._tally.measure("publish"):
             published.info.header.stamp = stamp
@@ -665,7 +671,12 @@ class CameraStream(Node):
             ):
                 published.right.header.stamp = stamp
                 self._right_image_pub.publish(
-                    image_from_array(right, "mono8", stamp, self._cfg.optical_frame)
+                    image_from_array(
+                        right,
+                        "bgr8" if RIGHT_EYE_COLOUR else "mono8",
+                        stamp,
+                        self._cfg.optical_frame,
+                    )
                 )
                 self._right_info_pub.publish(published.right)
         self._tally.count("frames")

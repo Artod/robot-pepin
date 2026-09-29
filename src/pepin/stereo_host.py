@@ -89,7 +89,8 @@ from pepin.telemetry import LatencyTracker
 
 log = logging.getLogger("pepin.stereo_host")
 
-CONTENT_PAIR = "application/x-pepin-pair8"  # two rectified grey eyes, left then right
+CONTENT_PAIR = "application/x-pepin-pair8"  # two rectified eyes, left then right; X-Channels
+# 1 (grey, the default) or 3 (RGB)
 CONTENT_DISPARITY = "application/x-pepin-disparity16"
 DISPARITY_PATH = "/disparity"
 DEFAULT_WEIGHTS = "models/raftstereo-realtime.pth"  # relative to the repo root; see .gitignore
@@ -245,7 +246,11 @@ class RaftNet:
         if left.shape != right.shape:
             raise PairError(f"the eyes are {left.shape} and {right.shape}: not one rig")
         tensors = [
-            torch.from_numpy(np.repeat(np.ascontiguousarray(eye)[:, :, None], 3, axis=2))
+            torch.from_numpy(
+                np.ascontiguousarray(eye)
+                if eye.ndim == 3  # RGB as it came; a grey eye is copied into three channels
+                else np.repeat(np.ascontiguousarray(eye)[:, :, None], 3, axis=2)
+            )
             .permute(2, 0, 1)
             .float()[None]
             .to(self.device)
@@ -272,28 +277,42 @@ class RaftNet:
 
 # ---------------------------------------------------------------- codec: pairs and disparities
 def encode_pair(left: Array, right: Array) -> tuple[dict[str, str], bytes]:
-    """One rectified grey pair as request headers and body: the size is ONE eye's, the body is
-    the left eye's bytes followed by the right eye's."""
+    """One rectified pair, grey (H x W) or RGB (H x W x 3), as request headers and body: the size
+    is ONE eye's, the body is the left eye's bytes followed by the right eye's."""
     a, b = np.ascontiguousarray(left, dtype=np.uint8), np.ascontiguousarray(right, dtype=np.uint8)
-    if a.shape != b.shape or a.ndim != 2:
-        raise PairError(f"a pair is two grey pictures of one size, not {a.shape} and {b.shape}")
+    if a.shape != b.shape or a.ndim not in (2, 3) or (a.ndim == 3 and a.shape[2] != 3):
+        raise PairError(
+            f"a pair is two grey or two RGB pictures of one size, not {a.shape} and {b.shape}"
+        )
     h, w = int(a.shape[0]), int(a.shape[1])
-    headers = {"Content-Type": CONTENT_PAIR, "X-Height": str(h), "X-Width": str(w)}
+    headers = {
+        "Content-Type": CONTENT_PAIR,
+        "X-Height": str(h),
+        "X-Width": str(w),
+        "X-Channels": "3" if a.ndim == 3 else "1",
+    }
     return headers, a.tobytes() + b.tobytes()
 
 
 def decode_pair(headers: Mapping[str, str], body: bytes) -> tuple[Array, Array]:
-    """The two grey eyes a request carries; :class:`PairError` when it carries something else."""
+    """The two eyes a request carries, grey (H x W) or RGB (H x W x 3) by its X-Channels;
+    :class:`PairError` when it carries something else."""
     h = {str(k).lower(): str(v) for k, v in headers.items()}
     if h.get("content-type", "") != CONTENT_PAIR:
         raise PairError(f"unknown content type {h.get('content-type', '')!r}")
     try:
         height, width = int(h["x-height"]), int(h["x-width"])
+        channels = int(h.get("x-channels", "1"))
     except (KeyError, ValueError) as exc:
         raise PairError("a pair needs X-Height and X-Width") from exc
-    if height <= 0 or width <= 0 or len(body) != 2 * height * width:
-        raise PairError(f"{len(body)} bytes is not two {height}x{width} grey eyes")
-    both = np.frombuffer(body, dtype=np.uint8).reshape(2, height, width)
+    if channels not in (1, 3):
+        raise PairError(f"X-Channels {channels}: a pair is grey (1) or RGB (3)")
+    if height <= 0 or width <= 0 or len(body) != 2 * height * width * channels:
+        raise PairError(
+            f"{len(body)} bytes is not two {height}x{width} eyes of {channels} channel(s)"
+        )
+    shape = (2, height, width) if channels == 1 else (2, height, width, 3)
+    both = np.frombuffer(body, dtype=np.uint8).reshape(shape)
     return np.ascontiguousarray(both[0]), np.ascontiguousarray(both[1])
 
 

@@ -473,8 +473,15 @@ class RaftMatcher:
             if self.on_host:
                 self._last_try = self._clock()
                 try:
+                    # The network gets the eyes as they came: in colour when both are (it
+                    # was trained on colour pairs), grey otherwise. SGBM below is grey's.
+                    colour = np.ndim(left) == 3 and np.ndim(right) == 3
                     with self.timing["host"].measure():
-                        disparity = self.host(grey_left, grey_right)
+                        disparity = (
+                            self.host(np.asarray(left), np.asarray(right))
+                            if colour
+                            else self.host(grey_left, grey_right)
+                        )
                 except StereoHostError as exc:
                     self._failed(exc)
                 else:
