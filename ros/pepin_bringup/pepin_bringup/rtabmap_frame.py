@@ -175,7 +175,7 @@ from pepin.measurements import (
 )
 from pepin.odometry import Pose2D
 from pepin.snapshot import SnapshotState
-from pepin.sources import GRAPH, LIDAR
+from pepin.sources import CAMERA, GRAPH, LIDAR
 from pepin.tsdf import RigidPose
 from pepin.watch import PLACEMENT_TOPIC, SIGMA_TOPIC, Placement, Preflight, Sigma, source_words
 from pepin.watchdog import GlobalCandidate, same_place
@@ -423,7 +423,8 @@ FLAGS = FlagSet(
         "registration_follows_snapshots",
         True,
         description="RTAB-Map's Reg/Strategy follows what the snapshots carry"
-        f" ({SNAPSHOT_STATE_TOPIC}): a scan in them means ICP (1), no scan means visual (0),"
+        f" ({SNAPSHOT_STATE_TOPIC}): a scan and a picture mean visual then ICP (2), a scan alone"
+        " means ICP (1), no scan means visual (0),"
         " switched live through the node's own parameter path on a change that has held for the"
         " hold the state carries. Off, the strategy stays whatever the launch table set and this"
         " node only reports what it would have asked for",
@@ -471,13 +472,14 @@ FLAGS = FlagSet(
         FEATURES_XFEAT,
         choices=(FEATURES_ORB, FEATURES_XFEAT),
         description="which features RTAB-Map's VISUAL registration (Reg/Strategy 0, the camera-only"
-        " strategy) matches when it checks a node the words recognised. xfeat: XFeat keypoints"
-        " matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure"
-        " time (Vis/FeatureType 15, Vis/CorNNType 6, RGBD/LoopClosureReextractFeatures true);"
-        " the database is only read. orb: the database's own GFTT/ORB words, the launch table's"
-        " values. Sent with the strategy and changed live; under ICP, and unless RTAB-Map is"
-        " certainly localising (told so and answered, no switch to mapping waiting), the set is"
-        " always orb, and a switch to mapping waits until orb's set is in force. xfeat"
+        " strategy, and the visual half of 2) matches when it checks a node the words recognised."
+        " xfeat: XFeat keypoints matched by LighterGlue, re-extracted from both nodes' stored"
+        " pictures at loop-closure time (Vis/FeatureType 15, Vis/CorNNType 6,"
+        " RGBD/LoopClosureReextractFeatures true); the database is only read. orb: the database's"
+        " own GFTT/ORB words, the launch table's values. Sent with the strategy and changed live;"
+        " under ICP alone, and unless RTAB-Map is certainly localising (told so and answered, no"
+        " switch to mapping waiting), the set is always orb, and a switch to mapping waits until"
+        " orb's set is in force. xfeat"
         f" needs the pepin-laptop:xfeat image ({XFEAT_DETECTOR_PATH}); in another image this"
         " node sends orb and the report line says why",
         why="xfeat, measured 2026-09-24 in RTAB-Map's OWN registration: RegistrationVis of"
@@ -644,7 +646,7 @@ FLAGS = FlagSet(
     ),
     Flag(
         "place_recognition",
-        PLACE_WORDS,
+        PLACE_DESCRIPTOR,  # the default since 2026-09-28: shown by the drives of 09-25/26 and 09-28
         choices=(PLACE_WORDS, PLACE_DESCRIPTOR),
         description="how RTAB-Map finds WHICH database node a picture is (its likelihood, before"
         " any registration): words — the ORB bag of words' TF-IDF (Kp/TfIdfLikelihoodUsed true,"
@@ -1827,6 +1829,7 @@ class RtabmapFrame(Node):
                 state.refresh_s if state is not None else 0.0,
                 state.carries(LIDAR) if (state is not None and fresh) else None,
                 state.kind if state is not None else "",
+                picture=state is not None and fresh and state.carries(CAMERA),
             )
         if verdict is None:
             self._strategy_held = False

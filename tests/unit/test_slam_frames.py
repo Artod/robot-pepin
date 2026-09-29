@@ -729,7 +729,8 @@ def test_camera_only_snapshots_switch_the_registration_to_visual() -> None:
     assert "Reg/Strategy 0" in node.logger.texts("info")[-1]
 
 
-def test_the_scan_coming_back_switches_it_back_to_icp() -> None:
+def test_the_scan_coming_back_switches_it_to_visual_then_icp_and_the_camera_going_to_icp() -> None:
+    """Camera only -> 0, camera+lidar -> 2 (the tuned "F+G2" set), lidar only -> 1."""
     node = rtabmap_frame.RtabmapFrame()
     tuner, _ = _tuner_ready(node)
     for seconds in (10.0, 10.6):
@@ -740,7 +741,32 @@ def test_the_scan_coming_back_switches_it_back_to_icp() -> None:
         node.clock.seconds = seconds
         _snapshots(node, ("camera", "lidar"), "full")
         node.timers[0][1]()
-    assert _strategies(tuner) == ["0", "1"]
+    for seconds in (12.0, 12.6):
+        node.clock.seconds = seconds
+        _snapshots(node, ("lidar",), "lidar-only")
+        node.timers[0][1]()
+    assert _strategies(tuner) == ["0", "2", "1"]
+
+
+def test_camera_and_lidar_from_the_start_switch_to_visual_then_icp_with_xfeat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A fresh start with both sensors needs no script: the launch's 1 becomes 2 once the
+    composition has held, with the feature flag's set while localising (xfeat, as the tuned
+    set_visicp_inner.sh ran it) and the stock confirmation and proximity search."""
+    _adapters(monkeypatch, tmp_path, present=True)
+    node = rtabmap_frame.RtabmapFrame()
+    _localising(node)
+    tuner, _ = _tuner_ready(node)
+    for seconds in (10.0, 10.6):
+        node.clock.seconds = seconds
+        _snapshots(node, ("camera", "lidar"), "full")
+        node.timers[0][1]()
+    (sent,) = [s for s in _sent(tuner) if "Reg/Strategy" in s]
+    assert sent["Reg/Strategy"] == "2" and sent["Vis/FeatureType"] == "15"
+    assert sent["RGBD/LoopClosureReextractFeatures"] == "true"
+    assert sent["RGBD/ProximityBySpace"] == "true" and sent["Rtabmap/LoopThr"] == "0.11"
+    assert "rtabmap registration: visual then ICP" in node.logger.texts("info")[-1]
 
 
 def test_the_launch_s_own_strategy_is_never_re_sent() -> None:
@@ -750,7 +776,7 @@ def test_the_launch_s_own_strategy_is_never_re_sent() -> None:
     tuner, _ = _tuner_ready(node)
     for seconds in (10.0, 11.0, 12.0, 20.0):
         node.clock.seconds = seconds
-        _snapshots(node, ("camera", "lidar"), "full")
+        _snapshots(node, ("lidar",), "lidar-only")
         node.timers[0][1]()
     assert not _strategies(tuner)
 
@@ -982,7 +1008,7 @@ def test_under_icp_the_feature_flag_sends_nothing(
     tuner, _ = _tuner_ready(node)
     for seconds in (10.0, 11.0):
         node.clock.seconds = seconds
-        _snapshots(node, ("camera", "lidar"), "full")
+        _snapshots(node, ("lidar",), "lidar-only")
         node.timers[0][1]()
     node._switches.set("visual_features", "orb")
     node.timers[0][1]()
@@ -1002,7 +1028,7 @@ def test_the_scan_coming_back_takes_orb_back_with_icp(
     assert _sent(tuner)[-1]["Vis/FeatureType"] == "15"
     for seconds in (11.0, 11.6):
         node.clock.seconds = seconds
-        _snapshots(node, ("camera", "lidar"), "full")
+        _snapshots(node, ("lidar",), "lidar-only")
         node.timers[0][1]()
     back = _sent(tuner)[-1]
     assert back["Reg/Strategy"] == "1" and back["Vis/FeatureType"] == "8"
@@ -1131,9 +1157,9 @@ def test_a_set_lands_whole_and_one_parameter_at_a_time_is_a_flag_away(
     _go_visual(node)
     assert _sent(atomic)[-1]["Vis/FeatureType"] == "15" and not one_by_one.calls
     node._switches.set("atomic_parameter_sets", False)
-    for seconds in (11.0, 11.6):  # the scan comes back: ICP with ORB's set
+    for seconds in (11.0, 11.6):  # the lidar alone: ICP with ORB's set
         node.clock.seconds = seconds
-        _snapshots(node, ("camera", "lidar"), "full")
+        _snapshots(node, ("lidar",), "lidar-only")
         node.timers[0][1]()
     (back,) = one_by_one.calls
     names = [p.name for p in back.parameters]

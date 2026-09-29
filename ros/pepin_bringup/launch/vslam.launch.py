@@ -172,6 +172,9 @@ RTABMAP = {
     # therefore still carries its words and its depth, is still recognised by appearance, and
     # still gets its neighbour link from the odometry — but contributes no metric closure. That is
     # the honest limit of one table, and the live check for it is named in the report.
+    #   This is the START value, safe for any composition: pepin_bringup.rtabmap_frame
+    # (registration_follows_snapshots) then switches it live by what the snapshots carry — 2 for
+    # camera+lidar, 1 for lidar only, 0 for camera only (pepin.graphmode.registration_verdict).
     "Reg/Strategy": "1",
     "Reg/Force3DoF": "true",
     "Icp/VoxelSize": "0.05",
@@ -193,7 +196,10 @@ RTABMAP = {
     # ``!guess.isNull() && !isImageRequired()`` (Memory.cpp:2929), and with the guess null it
     # would instead ask its private RegistrationVis for a seed (Memory.cpp:2964-2970) — the very
     # visual step that has never succeeded on this camera.
-    "RGBD/LoopClosureIdentityGuess": "true",
+    #   FALSE since 2026-09-28: camera+lidar now runs Reg/Strategy 2, whose visual half gives the
+    # seed (the tuned "F+G2" set, scratch/pose_jumps/set_config_fg2.sh); a lidar-only node has no
+    # words and so no appearance hypothesis for the guess to serve.
+    "RGBD/LoopClosureIdentityGuess": "false",
     # Proximity detection by space also by MERGING the close scans of a path, not only one to one.
     # It has to be said here now, and that is a real consequence of the new input: rtabmap_slam's
     # wrapper inserts this 10 itself, but only ``if(this->isSubscribedToScan2d() || ...)`` and only
@@ -202,13 +208,23 @@ RTABMAP = {
     # default 0 — which DISABLES one-to-many proximity detection, the path most of this graph's
     # proximity links come from. Same value the wrapper used to insert, so the graph is unchanged.
     "RGBD/ProximityPathMaxNeighbors": "10",
-    # RTAB-Map's own defaults, named so they can be set live (CoreWrapper sees only the table's
-    # names): the parked A/B of 2026-09-25 against the node-to-node yaw flicker of the
-    # descriptor's localisations (scratch/pose_jumps/, journal 2026-09-25).
-    "RGBD/ProximityGlobalScanMap": "false",
-    "RGBD/MaxLoopClosureDistance": "0.0",
-    "RGBD/ProximityOdomGuess": "false",
-    "RGBD/ProximityMergedScanCovFactor": "100.0",
+    # The parked A/B of 2026-09-25 against the node-to-node yaw flicker of the descriptor's
+    # localisations ("F+G2", scratch/pose_jumps/set_config_fg2.sh, journal 2026-09-25): ICP against
+    # the whole assembled scan map, merged-scan links 10x stronger than a single node's, far
+    # localisations refused, the odometry as the one-to-one proximity guess. The pose's per-second
+    # steps p90 1.2 cm / 0.88 deg -> 0.6 cm / 0.23 deg, 72 big steps in 220 s -> 0. RTAB-Map's own
+    # defaults were false, 0.0, false, 100.0.
+    "RGBD/ProximityGlobalScanMap": "true",
+    "RGBD/MaxLoopClosureDistance": "1.0",
+    "RGBD/ProximityOdomGuess": "true",
+    "RGBD/ProximityMergedScanCovFactor": "0.1",
+    # How many matched points the visual registration needs to accept a pose: RTAB-Map's own
+    # default, named here so it can be set live. 12 was tried on 2026-09-28 (evening, camera
+    # only, a database recorded by day): at 20 the cart recognised almost nothing and lost its
+    # pose (drive 0536), at 12 it recognised and the accepted poses were 10-20 cm and 3-12 deg
+    # apart — map -> odom stepped 117 times in 481 s and the path jumped under the cart (drive
+    # 0552; scratch/failover/, journal 2026-09-28). With the lidar the value does not matter.
+    "Vis/MinInliers": "20",
     # A node with NO PICTURE — which is what a lidar-only snapshot makes — is a "bad signature":
     # isBadSignature() is exactly "no visual words" (rtabmap/core/Signature.cpp:341-344). This
     # false is what KEEPS it: Memory::cleanup() moves the last signature to the trash only when

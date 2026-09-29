@@ -9,7 +9,11 @@
 # (ros/build.sh, container stopped) only when the Dockerfile changes.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-LIDAR="$(readlink -f /dev/lidar 2>/dev/null || echo /dev/ttyUSB0)"
+# The lidar's port comes and goes (unplugged, re-plugged, enumerated late at boot): the host's /dev
+# is mounted whole and the container may open any USB serial port (char major 188), so a port that
+# appears AFTER the container was created is there for the driver — docker's --device list is
+# fixed at creation, and a stack started without the lidar never saw it again (2026-09-28).
+LIDAR_DEVICE=(-v /dev:/dev --device-cgroup-rule "c 188:* rmw")
 SITE=/ws/install/pepin_bringup/lib/python3.12/site-packages/pepin_bringup
 TTY=""
 [ -t 0 ] && TTY="-it"  # a terminal when run by hand; none under systemd
@@ -59,7 +63,7 @@ LOCENV="-e PEPIN_LOCALIZER=${PEPIN_LOCALIZER:-rtabmap}"
 exec docker run $TTY \
     --network host --ipc host --cap-add SYS_NICE \
     --stop-signal SIGINT \
-    --device "$LIDAR:/dev/lidar" $I2C \
+    "${LIDAR_DEVICE[@]}" $I2C \
     -v "$HERE/pepin_bringup/pepin_bringup:$SITE:ro" \
     -v "$HERE/pepin_bringup/launch:/ws/install/pepin_bringup/share/pepin_bringup/launch:ro" \
     -v "$HERE/tools:/tools:ro" \

@@ -722,6 +722,7 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
         # cancel_every_goal on 2026-09-25, default on: a cancel on the socket reaches every goal
         # on both navigators, goto_ros.py's included, so goto.sh cancels without a new process.
         "cancel_every_goal",
+        "lidar_watch",
     )
     assert all(flags.flag(name).live for name in flags.names)
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"
@@ -926,8 +927,24 @@ def test_the_camera_slam_lives_beside_the_tracker_never_over_it() -> None:
     assert "pepin_bringup.camera_stream" in sf.strings(vslam)
     laptop = (REPO / "ros/laptop.sh").read_text()
     assert "vslam.launch.py" in laptop and "config:/ws/config" in laptop
-    # a mono camera cannot seed a loop-closure transform: ICP from identity does
-    assert _rtabmap("RTABMAP")["RGBD/LoopClosureIdentityGuess"] == "true"
+    # the tuned camera+lidar set ("F+G2", 2026-09-25) is the table's own since 2026-09-28: the
+    # visual half of Reg/Strategy 2 seeds the closure, and the proximity search is the parked A/B's
+    table = _rtabmap("RTABMAP")
+    assert table["RGBD/LoopClosureIdentityGuess"] == "false"
+    assert {
+        k: table[k]
+        for k in (
+            "RGBD/ProximityGlobalScanMap",
+            "RGBD/ProximityMergedScanCovFactor",
+            "RGBD/MaxLoopClosureDistance",
+            "RGBD/ProximityOdomGuess",
+        )
+    } == {
+        "RGBD/ProximityGlobalScanMap": "true",
+        "RGBD/ProximityMergedScanCovFactor": "0.1",
+        "RGBD/MaxLoopClosureDistance": "1.0",
+        "RGBD/ProximityOdomGuess": "true",
+    }
 
 
 def test_the_bridge_routes_only_what_the_split_needs_and_only_one_way() -> None:

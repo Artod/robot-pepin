@@ -90,7 +90,7 @@ def test_the_adapters_counters_are_in_the_report_line() -> None:
     node._report()
     line = node.logger.texts("info")[-1]
     assert "adapters (auto) xfeat auto: service 118, local 0, fallback 2, failed 0, 41.0 ms" in line
-    assert "registration_backend=auto" in line and "place_recognition=words" in line
+    assert "registration_backend=auto" in line and "place_recognition=descriptor" in line
     assert "descriptor_null_share=0.5" in line
 
 
@@ -101,6 +101,7 @@ def test_the_first_decision_is_always_sent_then_only_a_change(
     """This node may be a respawn beside an RTAB-Map still holding the descriptor likelihood an
     earlier incarnation sent: the words are SENT once at start, not assumed, then only changes."""
     node = _node(UNIFORM, monkeypatch)
+    node._switches.set("place_recognition", "words")
     _say(node, SnapshotPlace(True, "service", DIM, TAG))
     _tick(node)
     assert _likelihoods(node) == ["true"] and node._recognition_why == "words"
@@ -208,7 +209,7 @@ def test_the_new_flags_are_declared_with_their_kinds() -> None:
     assert flags.flag("registration_backend").env == "PEPIN_REGISTRATION_BACKEND"
     assert flags["registration_timeout_s"] == 1.0 and flags["xfeat_top_k"] == 2048
     assert flags.flag("place_recognition").choices == ("words", "descriptor")
-    assert flags["place_recognition"] == "words", "a default flips after a drive, not before"
+    assert flags["place_recognition"] == "descriptor", "flipped 2026-09-28, after the drives"
     assert flags["descriptor_null_share"] == 0.5
     assert flags.flag("descriptor_null_share").range == (0.0, 1.0)
     names = ("registration_backend", "place_recognition", "descriptor_null_share")

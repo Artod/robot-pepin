@@ -67,7 +67,9 @@ from __future__ import annotations
 import contextlib
 import json
 import math
+import os
 import socket
+import subprocess
 import threading
 import time
 from dataclasses import replace
@@ -83,7 +85,8 @@ from nav2_msgs.action import NavigateToPose, Spin
 from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float32, Header, String
 from std_srvs.srv import Trigger
 
@@ -97,6 +100,7 @@ from pepin.deployment import (
 )
 from pepin.flags import Flag, FlagSet
 from pepin.goal_link import CANCEL_CONFIRM_S, NAV_ACTIONS, cancel_outcome
+from pepin.lidar_watch import LidarWatch
 from pepin.places import PLACES_TOPIC, heading_residual_deg, places_from_json
 from pepin.runlink import (
     RUN_COMMAND_TOPIC,
@@ -369,6 +373,17 @@ FLAGS = FlagSet(
         off_when="to put the old answer back for a comparison — pepin.goal_link then finds no"
         " navigators in the answer and ros/goto.sh cancel falls back to goto_ros.py",
     ),
+    Flag(
+        "lidar_watch",
+        True,
+        description="the lidar's driver is restarted when its port is there and no scan has"
+        " come for 5 s, and once per absence of the port so it respawns idle instead of spinning"
+        " a core (pepin.lidar_watch); `where` says `lidar` either way",
+        why="the driver opens its port once: a lidar re-plugged or plugged in after the start"
+        " stayed dead until a stack restart (journal 2026-09-28)",
+        on_when="always",
+        off_when="while the lidar is deliberately held silent with its port present",
+    ),
 )
 
 PLANNERS = {
@@ -384,6 +399,11 @@ PLANNERS = {
 # took. "mppi" is one controller for every planner, and it turns to the heading itself, so the
 # tree holds it to the heading as well.
 RPP_GOAL_CHECKER = "xy_only_goal_checker"
+# The lidar the watch looks after: its scan, its port as udev names it, and its driver's process
+# (the component container of robot.launch.py).
+LIDAR_SCAN_TOPIC = "/scan"
+LIDAR_PORT = "/dev/lidar"
+LIDAR_PROCESS = "__node:=lidar_container"
 FOLLOWERS = {
     "mppi": ("FollowPathMPPI", "general_goal_checker"),
     # The reversing RPP inside Nav2's RotationShimController: RPP's pace, and the shim turns the
@@ -484,6 +504,13 @@ class GoalServer(Node):
         # stops. Harmless on one machine, where nothing listens.
         self._beat = self.create_publisher(Header, HEARTBEAT_TOPIC, 10)
         self.create_timer(1.0 / HEARTBEAT_HZ, self._heartbeat)
+        # The lidar's driver, brought back when its port is there and it says nothing. The scan
+        # is taken raw: only its arrival matters here, and a parsed one costs a core's percent.
+        self._lidar = LidarWatch(started_at=time.monotonic())
+        self.create_subscription(
+            LaserScan, LIDAR_SCAN_TOPIC, self._on_scan, qos_profile_sensor_data, raw=True
+        )
+        self.create_timer(1.0, self._watch_lidar)
         # The laptop half brings the board's Nav2 up (pepin.deployment.next_transition): the
         # board's tree cannot load before this side's costmap service exists, and the board's
         # own manager gives up after one failure. Every few seconds: read the four states, send
@@ -557,6 +584,28 @@ class GoalServer(Node):
         pepin_bringup.slam_frame. Under ``rtabmap`` RTAB-Map broadcasts the transform itself and
         nothing publishes that topic, so a watch of it would refuse every goal."""
         return self._switches.on("correction_watch") and self._localizer == "tracker"
+
+    def _on_scan(self, _raw: bytes) -> None:
+        """A scan arrived (unparsed): the lidar is alive."""
+        self._lidar.scan(time.monotonic())
+
+    def _watch_lidar(self) -> None:
+        """Once a second: end the driver's process when the watch says so; the launch respawns
+        it within two seconds on the port that is there now."""
+        if not self._switches.on("lidar_watch"):
+            return
+        now, port = time.monotonic(), os.path.exists(LIDAR_PORT)
+        if self._lidar.due(now, port):
+            rule = (
+                "port present: respawn it on the port"
+                if port
+                else "port lost: respawn it without one, to idle (once per absence)"
+            )
+            self.get_logger().warning(
+                f"lidar {self._lidar.status(now, port)}: ending its driver ({LIDAR_PROCESS}),"
+                f" kick {self._lidar.kicks}, rule {rule}"
+            )
+            subprocess.run(["pkill", "-INT", "-f", LIDAR_PROCESS], check=False, timeout=5)
 
     def _heartbeat(self) -> None:
         self._beat.publish(Header(stamp=self.get_clock().now().to_msg(), frame_id="laptop"))
@@ -775,6 +824,7 @@ class GoalServer(Node):
                     "planner": self.planner,
                     "pose": source,
                     "localizer": self._localizer,
+                    "lidar": self._lidar.status(time.monotonic(), os.path.exists(LIDAR_PORT)),
                     **({} if correction is None else {"correction_s": round(correction, 2)}),
                     **pose,
                 },

@@ -25,8 +25,9 @@ single strategy serves every node:
   words on ours (Vis/EstimationType 1, PnP), which is what a database built with depth holds. What
   it can never link is a node with no picture, which is what a LIDAR-only snapshot makes.
 
-So the rule is the one sentence the two halves leave: scans in the snapshots -> 1, no scan -> 0.
-Nothing else in the parameter table moves with it. The old SLAM_CAMERA_ONLY table
+So the rule is the one sentence the two halves leave, with the third strategy for the snapshots
+that carry both: a scan and a picture -> 2 (VisIcp: visual, then ICP refines it), a scan alone -> 1,
+no scan -> 0. Nothing else in the parameter table moves with it. The old SLAM_CAMERA_ONLY table
 (``git show e1d3b65:ros/pepin_bringup/launch/vslam.launch.py``) differed from the lidar one in six
 entries, and five of them — ``subscribe_scan``, ``Grid/Sensor``, ``Grid/3D``, ``Grid/RangeMax``,
 ``Grid/RayTracing`` — are about the INPUT and the GRID, which World R settled once for every node.
@@ -108,6 +109,7 @@ __all__ = [
     "SHARP_SIGMA_M",
     "STRATEGY_ICP",
     "STRATEGY_VIS",
+    "STRATEGY_VISICP",
     "XFEAT_DETECTOR_PATH",
     "XFEAT_MATCHER_PATH",
     "ModeRule",
@@ -121,11 +123,18 @@ __all__ = [
 ]
 
 # ``Reg/Strategy``'s own values, as Parameters.h:677 names them ("0=Vis, 1=Icp, 2=VisIcp"). 2 is
-# not on offer: RegistrationVis with RegistrationIcp as its CHILD, and a child's answer REPLACES
-# the parent's (Registration.cpp:207-220), so a pair Vis registers and ICP has no scan for comes
-# out null — and the pipeline still requires an image, so a lidar-only node never reaches it.
-STRATEGY_VIS, STRATEGY_ICP = "0", "1"
-STRATEGY_NAMES = {STRATEGY_VIS: "visual", STRATEGY_ICP: "ICP on the scans"}
+# RegistrationVis with RegistrationIcp as its CHILD, and a child's answer REPLACES the parent's
+# (Registration.cpp:207-220), so a pair Vis registers and ICP has no scan for comes out null — and
+# the pipeline requires an image, so a lidar-only node never reaches it. Hence 2 ONLY while the
+# snapshots carry both: the owner's tuned camera+lidar configuration of 2026-09-25 ("F+G2",
+# scratch/pose_jumps/set_config_fg2.sh: the pose's per-second steps p90 1.2 cm / 0.88 deg -> 0.6
+# cm / 0.23 deg parked, 72 big steps in 220 s -> 0).
+STRATEGY_VIS, STRATEGY_ICP, STRATEGY_VISICP = "0", "1", "2"
+STRATEGY_NAMES = {
+    STRATEGY_VIS: "visual",
+    STRATEGY_ICP: "ICP on the scans",
+    STRATEGY_VISICP: "visual then ICP",
+}
 # Everything that travels with the strategy, as strings because that is how rtabmap declares every
 # one of its parameters (CoreWrapper.cpp:364). ONE entry each: the rest of what the old
 # SLAM_CAMERA_ONLY table changed was the input and the grid, which World R settled once for every
@@ -190,6 +199,10 @@ REGISTRATION_PARAMETERS = {
         # link carries the odometry's own honest uncertainty, which is what that check compares to.
         "RGBD/NeighborLinkRefining": "false",
     },
+    STRATEGY_VISICP: {
+        "Reg/Strategy": STRATEGY_VISICP,
+        "RGBD/NeighborLinkRefining": "false",  # as under ICP, for the same measured reason
+    },
 }
 
 # WHICH FEATURES THE VISUAL REGISTRATION MATCHES — the third thing that travels with the strategy,
@@ -209,11 +222,12 @@ REGISTRATION_PARAMETERS = {
 # not count as a guess at :1012). The ORB words stay the vocabulary that FINDS the node (Kp/*,
 # untouched); XFeat only decides whether it is really there, and where.
 #
-# ONLY WITH THE VISUAL STRATEGY AND ONLY WHILE LOCALISING, because the same flag changes what a
-# NEW node stores: with it on, createSignature keeps no word descriptors and no 3D
-# (Memory.cpp:6126), and a node mapped that way could later be registered by re-extraction only.
-# The strategy that maps is ICP (the lidar teaches the database), and under it the set is always
-# ORB's — the launch table's own values; a visual strategy that is also MAPPING (graph_memory map,
+# ONLY WITH A VISUAL STRATEGY (0, or 2 whose first half is visual — the tuned camera+lidar set of
+# scratch/link_autopsy/set_visicp_inner.sh ran xfeat) AND ONLY WHILE LOCALISING, because the same
+# flag changes what a NEW node stores: with it on, createSignature keeps no word descriptors and
+# no 3D (Memory.cpp:6126), and a node mapped that way could later be registered by re-extraction
+# only. Under ICP alone the set is always ORB's — the launch table's own values; a visual strategy
+# that is also MAPPING (graph_memory map,
 # or one day a holder that is not the graph) gets ORB's too, so the database is never written
 # differently from how it was built.
 FEATURES_ORB, FEATURES_XFEAT = "orb", "xfeat"
@@ -288,11 +302,12 @@ def visual_parameters(
 ) -> dict[str, str]:
     """The feature set, PnP gate, localisation confirmation and proximity search RTAB-Map's
     registration should run under ``strategy``, as the strings rtabmap wants: the flags' values
-    under the visual strategy while the database only localises, ORB's set and the stock
-    confirmation and proximity under ICP or while mapping whatever the flags say (the module
-    comments above say why)."""
+    under the visual strategy while the database only localises (the feature set under visual
+    then ICP too, whose visual half it is), ORB's set and the stock confirmation and proximity
+    under ICP or while mapping whatever the flags say (the module comments above say why)."""
     visual = strategy == STRATEGY_VIS and not mapping
-    chosen = features if visual else FEATURES_ORB
+    matched = strategy in (STRATEGY_VIS, STRATEGY_VISICP) and not mapping
+    chosen = features if matched else FEATURES_ORB
     if chosen not in FEATURE_PARAMETERS:
         raise ValueError(f"unknown feature set {chosen!r}; sets: {sorted(FEATURE_PARAMETERS)}")
     if confirm not in CONFIRM_PARAMETERS:
@@ -500,16 +515,19 @@ class StrategyVerdict:
         return f"{self.name}: {self.why}"
 
 
-def registration_verdict(scan: bool, kind: str = "") -> StrategyVerdict:
+def registration_verdict(scan: bool, kind: str = "", picture: bool = False) -> StrategyVerdict:
     """Which registration the snapshots being packed RIGHT NOW need, with no clock and no memory.
 
-    ``scan`` is whether a scan is in them at all (:meth:`pepin.snapshot.SnapshotState.carries`);
-    ``kind`` is the last snapshot's own word for the report line. The whole rule: a pair of nodes
-    with scans is registered by ICP and a pair without one cannot be, while a pair of nodes with
-    pictures is registered visually and a node with no picture cannot be — so the strategy is
-    chosen by what the current snapshots carry, and the module docstring holds the file:line.
+    ``scan`` and ``picture`` are whether a scan and a camera picture are in them at all
+    (:meth:`pepin.snapshot.SnapshotState.carries`); ``kind`` is the last snapshot's own word for
+    the report line. The whole rule: a pair of nodes with scans is registered by ICP and a pair
+    without one cannot be, while a pair of nodes with pictures is registered visually and a node
+    with no picture cannot be — so both -> visual then ICP (2), a scan alone -> ICP (1), no scan ->
+    visual (0), and the module docstring holds the file:line.
     """
     said = f" (snapshots {kind})" if kind else ""
+    if scan and picture:
+        return StrategyVerdict(STRATEGY_VISICP, f"the snapshots carry a scan and a picture{said}")
     if scan:
         return StrategyVerdict(STRATEGY_ICP, f"the snapshots carry a scan{said}")
     return StrategyVerdict(STRATEGY_VIS, f"the snapshots carry no scan{said}")
@@ -554,14 +572,15 @@ class StrategyRule:
         return self._wanted
 
     def update(
-        self, now: float, hold_s: float, scan: bool | None, kind: str = ""
+        self, now: float, hold_s: float, scan: bool | None, kind: str = "", picture: bool = False
     ) -> StrategyVerdict | None:
         """One instant in; the verdict to ACT on, or ``None``.
 
         ``scan`` ``None`` is "the packer has not said" — no snapshot state has arrived, or the one
         that did is older than its own refresh — and then nothing is asked for: an absent report is
         not evidence that the lidar is gone, and rebuilding the pipeline on silence is how a node
-        that merely lost its state topic would stop linking scans. A verdict returned is recorded
+        that merely lost its state topic would stop linking scans. ``picture`` is whether a camera
+        picture is in them (with a scan: visual then ICP). A verdict returned is recorded
         as applied; a caller whose set did not go out hands it back with :meth:`withdraw`.
         """
         self._before = []
@@ -569,7 +588,7 @@ class StrategyRule:
             self._wanted = None
             self._since = now
             return None
-        verdict = registration_verdict(scan, kind)
+        verdict = registration_verdict(scan, kind, picture)
         if self._wanted is None or verdict.strategy != self._wanted.strategy:
             self._since = now
         self._wanted = verdict

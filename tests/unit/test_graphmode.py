@@ -16,6 +16,7 @@ from pepin.graphmode import (
     REGISTRATION_PARAMETERS,
     STRATEGY_ICP,
     STRATEGY_VIS,
+    STRATEGY_VISICP,
     ModeRule,
     StrategyRule,
     describe_sigma,
@@ -125,8 +126,12 @@ def test_the_mode_can_be_pinned_either_way() -> None:
 
 # ---- the registration follows the snapshot ----------------------------------------------------
 def test_the_strategy_is_chosen_by_what_the_snapshots_carry() -> None:
-    """The whole rule, as a pure function: a scan in the snapshots means ICP, no scan means
-    visual. The values are RTAB-Map's own (Parameters.h:677, "0=Vis, 1=Icp, 2=VisIcp")."""
+    """The whole rule, as a pure function: a scan and a picture mean visual then ICP, a scan alone
+    ICP, no scan visual. The values are RTAB-Map's own (Parameters.h:677, "0=Vis, 1=Icp,
+    2=VisIcp")."""
+    assert registration_verdict(scan=True, picture=True).strategy == "2" == STRATEGY_VISICP
+    assert registration_verdict(scan=True, picture=True).name == "visual then ICP"
+    assert registration_verdict(scan=False, picture=True).strategy == STRATEGY_VIS
     assert registration_verdict(scan=True).strategy == "1" == STRATEGY_ICP
     assert registration_verdict(scan=False).strategy == "0" == STRATEGY_VIS
     assert registration_verdict(scan=True).name == "ICP on the scans"
@@ -152,7 +157,11 @@ def test_only_reg_strategy_travels_with_the_verdict() -> None:
         "Reg/Strategy": "1",
         "RGBD/NeighborLinkRefining": "false",
     }
-    assert set(REGISTRATION_PARAMETERS) == {"0", "1"}, "VisIcp (2) is never asked for"
+    assert registration_verdict(scan=True, picture=True).parameters == {
+        "Reg/Strategy": "2",
+        "RGBD/NeighborLinkRefining": "false",
+    }
+    assert set(REGISTRATION_PARAMETERS) == {"0", "1", "2"}, "2 only with a scan and a picture"
     for table in REGISTRATION_PARAMETERS.values():
         assert all(isinstance(value, str) for value in table.values()), (
             "rtabmap declares every parameter as a string and reads it back with as_string()"

@@ -729,7 +729,9 @@ class Node:
         self.pubs[topic] = Publisher(msg_type, topic, qos)
         return self.pubs[topic]
 
-    def create_subscription(self, msg_type: Any, topic: str, callback: Any, qos: Any) -> None:
+    def create_subscription(
+        self, msg_type: Any, topic: str, callback: Any, qos: Any, raw: bool = False
+    ) -> None:
         self.subs[topic] = (msg_type, callback)
 
     def create_service(self, srv_type: Any, name: str, callback: Any) -> None:
