@@ -174,6 +174,7 @@ def _ask(client: RemoteModel, x: np.ndarray) -> np.ndarray | None:
     return None if answer is None else decode_arrays(*answer)["y"]
 
 
+@pytest.mark.slow
 def test_a_request_goes_through_and_health_names_every_model(served: Any) -> None:
     server, url = served(Doubler(), Doubler(name="other", device="cpu"))
     client = RemoteModel(url, "double")
@@ -189,6 +190,8 @@ def test_a_request_goes_through_and_health_names_every_model(served: Any) -> Non
     assert "double (double@0123abcd on mps)" in server.report()
 
 
+@pytest.mark.slow
+@pytest.mark.serial  # wall time: parallel load erases the overlap it measures
 def test_the_gpu_lock_serialises_two_models_on_one_device(served: Any) -> None:
     """Measured by wall time: four 40 ms inferences on one device cannot finish in under 160 ms,
     while the same four split over two devices overlap and finish sooner."""
@@ -216,6 +219,7 @@ def test_the_gpu_lock_serialises_two_models_on_one_device(served: Any) -> None:
     assert run(two) < serial - 0.03, "two devices overlap (loose: a loaded machine slows both)"
 
 
+@pytest.mark.slow
 def test_an_answer_named_by_a_cache_key_is_served_again_without_the_network(served: Any) -> None:
     model = Doubler(cache_size=2)
     server, url = served(model)
@@ -227,6 +231,7 @@ def test_an_answer_named_by_a_cache_key_is_served_again_without_the_network(serv
     assert server.health()["models"]["double"]["cache_hits"] == 1
 
 
+@pytest.mark.slow
 def test_a_bad_request_is_400_a_failed_network_500_and_both_are_counted(served: Any) -> None:
     server, url = served(Doubler(), Doubler(name="broken", fail=True))
     client = RemoteModel(url, "double")
@@ -250,6 +255,7 @@ class Clock:
         return self.now
 
 
+@pytest.mark.slow
 def test_a_slow_service_costs_its_timeouts_and_three_in_a_row_back_off(served: Any) -> None:
     model = Doubler(sleep_s=0.3)
     _server, url = served(model)
@@ -270,6 +276,7 @@ def test_a_slow_service_costs_its_timeouts_and_three_in_a_row_back_off(served: A
     assert not client.down and "ok 1, failed 3, skipped 1" in client.status()
 
 
+@pytest.mark.slow
 def test_a_timeout_between_answers_does_not_count_towards_the_back_off(served: Any) -> None:
     model = Doubler()
     _server, url = served(model)
@@ -390,6 +397,7 @@ def test_a_dropped_kept_alive_connection_is_tried_once_more_fresh_and_nothing_ba
         server.close()
 
 
+@pytest.mark.slow
 def test_a_client_that_left_is_counted_not_printed(
     served: Any, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
 ) -> None:

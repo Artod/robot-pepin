@@ -49,7 +49,6 @@ from pepin.runlink import (
 )
 from pepin.tape import MAX_RUN_S, next_run_number
 from pepin.tape_rows import TOPIC_RECORDS
-from pepin_bringup.bridge_kick import BridgeKick
 from pepin_bringup.camera_clip import CameraClip
 from pepin_bringup.node_kit import spin_main
 
@@ -122,11 +121,6 @@ class BagRecorderNode(Node):
         self._record_dir = Path(str(self.declare_parameter("record_dir", "/maps/rec").value))
         overrides = Path(str(self.declare_parameter("qos_overrides", QOS_OVERRIDES).value))
         self._qos_overrides = overrides if overrides.is_file() else None
-        # The laptop's one way to restart this board's zenoh bridge without an ssh key: the JSONL
-        # recorder hosts the same handler, and one of the two is always the process that runs on
-        # the board in every mode. Always on here — this node has no flag table, and the A/B for
-        # it is the recorder switch itself (PEPIN_RECORDER=jsonl brings the flagged one back).
-        self._kick = BridgeKick(self, enabled=lambda: True)
         self._clip = CameraClip(self.get_logger())
         self._process: subprocess.Popen[bytes] | None = None
         self._bag: Path | None = None

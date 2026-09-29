@@ -2,10 +2,10 @@
 
 A :class:`Feed` starts a background reader, keeps the newest reading, says how
 old it is, and can be closed. The control loop composes feeds into one
-:class:`pepin.navigator.Sense` per tick without ever blocking on the network;
-a feed that has nothing to say shows up as a large ``age_s``, which the
-navigator's hold rules turn into "stand still" or "carry on without it"
-depending on the sensor. Adding a sensor means adding a Feed and one field to
+:class:`Sense` per tick without ever blocking on the network;
+a feed that has nothing to say shows up as a large ``age_s``, which a
+reader of it turns into "stand still" or "carry on without it" depending on
+the sensor. Adding a sensor means adding a Feed and one field to
 ``Sense``; switching one off is a flag in ``config/robot.json``.
 """
 

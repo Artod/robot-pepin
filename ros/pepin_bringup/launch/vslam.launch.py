@@ -4,17 +4,13 @@ WORLD R, the decision this launch now carries. RTAB-Map's loop-closed graph is t
 truth about the room. There is ONE frame: RTAB-Map's map frame IS ``map`` (``map_frame_id: map``,
 in every situation).
 
-WHO PUBLISHES ``map -> odom`` is ``PEPIN_LOCALIZER`` (pepin.deployment.localizer, 2026-09-22), and
-it is one boolean here. Under ``rtabmap`` — the default on this branch — THIS graph broadcasts the
-transform (:data:`PUBLISH_MAP_TO_ODOM`) and no tracker runs on the board; under ``tracker``
-``publish_tf`` stays false exactly as below and the correction reaches the board as a MEASUREMENT
-and as its occupancy grid. Two publishers of one edge fight, so it is never both. And RTAB-Map's
-odometry stays the EKF's
-``odom -> base_link`` over the bridge (``odom_frame_id: odom``), never the tracker's pose: that
-pose teleports when it relocalises, a neighbour edge between two nodes one second apart then
-carried 0.888 m against its 0.244 m sigma, and on that 3.64 error ratio RTAB-Map rejected EVERY
-loop closure it found for three hours (2026-09-10..14; the argument that used to put it back,
-``graph_odom``, is gone with the table it selected).
+WHO PUBLISHES ``map -> odom``: THIS graph (:data:`PUBLISH_MAP_TO_ODOM`, one localiser since
+2026-09-22; the board tracker that owned it before is on the tag alt/tracker-2026-09-22). And
+RTAB-Map's odometry stays the EKF's ``odom -> base_link`` over the transport (``odom_frame_id:
+odom``), never a localiser's pose: a pose teleports when it relocalises, a neighbour edge between
+two nodes one second apart then carried 0.888 m against its 0.244 m sigma, and on that 3.64 error
+ratio RTAB-Map rejected EVERY loop closure it found for three hours (2026-09-10..14; the argument
+that used to put it back, ``graph_odom``, is gone with the table it selected).
 
 ONE INPUT, ONE TABLE. RTAB-Map used to subscribe to a synchronised triple — picture, depth, scan —
 and to carry THREE parameter tables by mode: the grid from the scan and the depth beside a known
@@ -45,9 +41,9 @@ the camera's costmap marks were behind it with un-gated depth (2026-09-11).
 THERE IS NO SLAM MODE ANY MORE (World R, 2026-09-19). Mapping a new room and driving a known one
 were never two arrangements of this launch: they are one database that is either empty or full. So
 there is ONE database (:data:`DATABASE`), it is never wiped by this launch (only by
-``ros/laptop.sh vslam --fresh``), its grid always goes to ``/map`` — the one map, which the board's
-tracker adopts and republishes for the costmaps — and the session decides one word: a database that
-does not exist yet starts in mapping mode, because ``Mem/IncrementalMemory false`` on an empty
+``ros/laptop.sh vslam --fresh``), its grid always goes to ``/map`` — the one map, which both
+costmaps' static layers read — and the session decides one word: a database that does not exist
+yet starts in mapping mode, because ``Mem/IncrementalMemory false`` on an empty
 database is mapping with the mapping switched off (:func:`rtabmap_memory`). ``camera_only:=true`` is
 what it always meant: sensor_pack's ``sources`` is the camera alone, so the nodes carry no scan and
 the grid comes from the depth — the honest test of the camera as the primary sense, and the one case
@@ -66,10 +62,7 @@ Arguments: ``board`` (the robot's address for the camera stream), ``camera_only`
 triple — this node does not start and RTAB-Map subscribes to the picture, the depth and the scan
 itself, :data:`TRIPLE_SUBSCRIPTIONS`), ``neighbor_refining`` (whether ICP refines the neighbour
 links and stiffens them with its own covariance — false, or no closure the graph finds survives
-RGBD/OptimizeMaxError), ``memory`` (beside a LOADED database: ``trust`` — start LOCALISING and let
-pepin_bringup.rtabmap_frame move the mode live on trust in the pose — ``map``, or ``localise``),
-``vo``, ``database`` (empty: :data:`DATABASE`), ``bridge_admin`` (the laptop bridge's REST
-admin, asked whether it still lists this launch's previous incarnation), ``static_camera_tf``
+RGBD/OptimizeMaxError), ``vo``, ``database`` (empty: :data:`DATABASE`), ``static_camera_tf``
 (default true: the camera node broadcasts base_link -> camera_link from config/camera.json; false
 when the board's neck node publishes that edge live — ros/feature.sh neck on, ``ros/laptop.sh
 vslam --neck`` — since two publishers of one edge fight), ``camera`` (which rig of
@@ -88,12 +81,9 @@ from launch.actions import (
     ExecuteProcess,
     LogInfo,
     OpaqueFunction,
-    RegisterEventHandler,
     SetLaunchConfiguration,
-    Shutdown,
 )
 from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -101,9 +91,6 @@ from pepin.camera import CameraConfig, active_camera
 from pepin.deployment import (
     CONTAINER_STOP_TIMEOUT_S,
     config_file,
-    laptop_launch_nodes,
-    localizer,
-    rmw_is_zenoh,
 )
 from pepin.global_descriptor import (
     CENSUS_ENV,
@@ -119,8 +106,7 @@ from pepin.global_descriptor import (
 # every shutdown ended in SIGKILLs mid-write, and eight of them left ros/maps/rtabmap.db
 # malformed (2026-09-13). The window is the container's own stop window
 # (pepin.deployment.CONTAINER_STOP_TIMEOUT_S, ros/lib.sh, board/pepin-ros.service), so on a
-# `docker stop` nothing inside escalates before docker's SIGKILL at its end, and on a shutdown
-# from inside (the bridge watch's exit) the nodes get the same seconds.
+# `docker stop` nothing inside escalates before docker's SIGKILL at its end.
 SHUTDOWN = [
     SetLaunchConfiguration("sigterm_timeout", str(CONTAINER_STOP_TIMEOUT_S)),
     SetLaunchConfiguration("sigkill_timeout", "5"),
@@ -149,12 +135,12 @@ RTABMAP = {
     # another shape (CommonDataSubscriberSensorData.cpp:70-112: with both false there is no
     # synchroniser at all, just a plain subscription).
     "subscribe_odom": False,
-    # ---- the frames: World R's one frame, owned by nobody here --------------------------------
-    # RTAB-Map's own map frame IS map, and it publishes no transform into it: the board's tracker
-    # owns map -> odom and this graph's correction travels as a measurement and as a grid.
+    # ---- the frames: World R's one frame ------------------------------------------------------
+    # RTAB-Map's own map frame IS map, and this graph publishes map -> odom into it
+    # (PUBLISH_MAP_TO_ODOM, added by rtabmap_parameters).
     "map_frame_id": "map",
-    # The EKF's odom -> base_link over the bridge — the same continuous odometry every other
-    # consumer rides, and never the tracker's pose (see the module docstring, 2026-09-14).
+    # The EKF's odom -> base_link over the transport — the same continuous odometry every other
+    # consumer rides, and never a localiser's pose (see the module docstring, 2026-09-14).
     "odom_frame_id": "odom",
     # registration: ICP on the 2D scans in the plane; the camera only says "I have been here".
     # WHY 1 (Icp) AND NOT 2 (VisIcp), read in the sources rather than guessed. Strategy 2 is
@@ -492,18 +478,16 @@ TF_ODOMETRY_VARIANCE = {
     "odom_tf_angular_variance": 0.0001,
 }
 
-# ONE LOCALISER (PEPIN_LOCALIZER=rtabmap, the default since 2026-09-22): this graph owns
-# ``map -> odom`` and broadcasts it itself. Everything else about the frames is unchanged and was
-# already right for it — ``map_frame_id`` is ``map``, ``odom_frame_id`` is ``odom``, and the
-# odometry keeps arriving as the board's EKF ``odom -> base_link`` over the transport
-# (``subscribe_odom`` false: rtabmap_slam reads that edge from TF, which is why nothing here has
-# to change to feed it). What changes is one boolean, and the tracker on the board stands down.
+# ONE LOCALISER (since 2026-09-22): this graph owns ``map -> odom`` and broadcasts it itself.
+# ``map_frame_id`` is ``map``, ``odom_frame_id`` is ``odom``, and the odometry arrives as the
+# board's EKF ``odom -> base_link`` over the transport (``subscribe_odom`` false: rtabmap_slam
+# reads that edge from TF).
 #
 # The two delays are said out loud rather than left to rtabmap_slam's defaults, because they are
 # what the board's consumers of this edge live on: ``tf_delay`` 0.05 is the 20 Hz the re-broadcast
-# runs at — the same rate the relocalizer published this edge at, so no consumer's expectation
-# moves — and ``tf_tolerance`` is how far into the future each broadcast is stamped, which is how
-# long the last correction is allowed to stand as current on the far side of the WiFi.
+# runs at — the rate the board's consumers of this edge were built for — and ``tf_tolerance`` is
+# how far into the future each broadcast is stamped, which is how long the last correction is
+# allowed to stand as current on the far side of the WiFi.
 #
 # 0.5 s since 2026-09-22, and it was 0.1 s (measured: the board's radio, uwe5622 at -35..-42 dBm,
 # pings 80-180 ms with spikes of 0.4-1.2 s even with the stack stopped). A broadcast stamped
@@ -527,13 +511,13 @@ TF_ODOMETRY_VARIANCE = {
 # the sources as read here it publishes ``mapToOdom_``, which is initialised to the identity and
 # only replaced when a localisation or a graph optimisation lands — so the first broadcasts are
 # expected to be the IDENTITY (map == odom), not the last saved correction, until RTAB-Map
-# recognises a node. That is the same shape of start-up lie the board's own tracker was fixed for
+# recognises a node. That is the same shape of start-up lie the board's old tracker was fixed for
 # on 2026-09-21 (it broadcast the identity for 9.5 s and then jumped 2.9 m), and it has NOT been
 # measured on this stack. The parked acceptance procedure in ros/README.md is where it gets
 # measured; until it is, treat the first seconds of a start as "the pose is the odometry's".
 PUBLISH_MAP_TO_ODOM = {
     "publish_tf": True,
-    "tf_delay": 0.05,  # 20 Hz, the rate the board's relocalizer published this edge at
+    "tf_delay": 0.05,  # 20 Hz, the rate the board's consumers of this edge were built for
     "tf_tolerance": 0.5,  # ...and how far ahead each broadcast is stamped: one WiFi stall
 }
 TF_DELAY_S = float(PUBLISH_MAP_TO_ODOM["tf_delay"])  # for the report line, from the table itself
@@ -553,9 +537,8 @@ TRIPLE_SUBSCRIPTIONS = {
     "odom_sensor_sync": False,
 }
 
-# The database is the map. Beside a known map it is kept across restarts (the bridge watch
-# restarts this container whenever the board's bridge is new, and a launch that wiped it lost
-# the map every time); a SLAM session starts empty by default and writes a file of its own, so
+# The database is the map. Beside a known map it is kept across restarts (a launch that wiped it
+# lost the map every time); a SLAM session starts empty by default and writes a file of its own, so
 # an evening of mapping can never delete the graph the known-map mode accumulated.
 # The camera as a third odometry (rtabmap_odom's rgbd_odometry, ros/params/ekf.yaml's odom1).
 # Measured on this laptop 2026-09-14 at rest, on /camera/image + /camera/depth + the camera's
@@ -604,11 +587,11 @@ VISUAL_ODOMETRY = {
     # blamed for. Caught live 2026-09-14 15:21 with both nodes running: BOTH published exactly
     # zero poses for three minutes, and the reason is rgbd_odometry's other warning — "Could not
     # find a connection between 'base_link' and 'camera_optical' ... Tf has two or more
-    # unconnected trees". The board's bridge had gone silent (bridge_watch: /odom, /scan and the
+    # unconnected trees". The board's bridge had gone silent (/odom, /scan and the
     # board's /tf all at 0.0 Hz), so base_link was not in the tree and no pair of any kind could
     # become a pose; the depth had also fallen to 3.3 frames/s against the picture's 11.5, which
-    # is when the approximation's guesses were worst (0.4-0.5 s off). Starvation is a bridge
-    # outage and belongs to bridge_watch; the mis-pairing is this table's business.
+    # is when the approximation's guesses were worst (0.4-0.5 s off). Starvation is a link
+    # outage; the mis-pairing is this table's business.
     "approx_sync": False,
     "sync_queue_size": 30,
     "topic_queue_size": 10,
@@ -621,8 +604,8 @@ VISUAL_ODOMETRY = {
 }
 
 # THE DATABASE IS THE MAP, and there is one of it (World R): the room's graph, its closures and
-# every node's local grid, kept across restarts — the bridge watch restarts this container whenever
-# the board's bridge is new, and a launch that wiped the file lost the room every time. An empty
+# every node's local grid, kept across restarts — a launch that wiped the file lost the room every
+# time it restarted. An empty
 # room is this file absent, which is what ros/laptop.sh vslam --fresh makes (and restart.sh moves
 # the volume of the old frame aside with it, since the volume is painted in the graph's frame).
 DATABASE = "/maps/rtabmap.db"
@@ -633,58 +616,35 @@ SENSOR_DATA_TOPIC = "/rtabmap/sensor_data"
 
 # A node that exits comes back by itself after this pause, so a code change costs one kicked
 # process (ros/laptop.sh kick <module>: SIGINT, the signal the launch itself sends at shutdown)
-# instead of a container restart. A kicked node leaves DDS properly (its main destroys the node
-# and the context, the participant is disposed, the bridge forgets the name at once) and the
-# pause starts at its exit, so the successor never overlaps a ghost. A CRASHED node does (nothing
-# disposed, the name outlives it by the DDS lease, the bridge drops its routes when the ghost
-# expires), so every respawned command starts through a ghost wait of its own name
-# (``_after_ghost``). A container is stopped with SIGINT (ros/laptop.sh, --stop-signal) so the
-# launch shuts its nodes down properly; the ghost wait at the top covers what still lingers.
-# The watches below are not respawned: their exit IS the signal (bridge_watch -> shutdown,
-# ghost_wait -> start the nodes).
+# instead of a container restart. A container is stopped with SIGINT (ros/laptop.sh,
+# --stop-signal) so the launch shuts its nodes down properly. (Under CycloneDDS every respawned
+# command started through a ghost wait of the bridge's admin; tag alt/cyclone-bridges-2026-09-20.)
 RESPAWN = {"respawn": True, "respawn_delay": 2.0}
 
 
-def _after_ghost(*names: str) -> list:  # type: ignore[type-arg]
-    """A command prefix that waits until the laptop's bridge lists none of ``names`` and then
-    becomes the command (pepin_bringup.ghost_wait; an unreachable admin is not waited for)."""
-    return [
-        "python3 -m pepin_bringup.ghost_wait ",
-        LaunchConfiguration("bridge_admin"),
-        f" {' '.join(names)} --",
-    ]
+def rtabmap_memory(loaded: bool) -> str:
+    """Which memory mode a session starts in: ``localise`` beside a database that EXISTS, and
+    ``map`` beside one that does not.
 
-
-def rtabmap_memory(memory: str, loaded: bool, localizer_name: str = "tracker") -> str:
-    """Which memory mode a session starts in: the ``memory`` argument beside a database that
-    EXISTS, and always ``map`` beside one that does not.
-
-    Under ``localizer_name`` ``"rtabmap"`` a LOADED database is pinned to ``localise`` whatever
-    the argument says, and the trust-driven switching stays with the tracker. The reason is the
-    one the journal recorded on 2026-09-22: a start in mapping mode opens a NEW session per
-    restart, the published grid is the connected component of the current node inside working
-    memory (Rtabmap.cpp:3941/4111/5444), and seventeen sessions from one evening's restarts made
-    that component — and therefore the map the costmaps read — change thirty times in 800 s.
+    A loaded database is pinned to localising (pepin_bringup.rtabmap_frame keeps it there). The
+    reason is the one the journal recorded on 2026-09-22: a start in mapping mode opens a NEW
+    session per restart, the published grid is the connected component of the current node inside
+    working memory (Rtabmap.cpp:3941/4111/5444), and seventeen sessions from one evening's restarts
+    made that component — and therefore the map the costmaps read — change thirty times in 800 s.
     Localising writes nothing, so no restart can add a session. What it costs is that this stack
-    cannot extend a map while it owns the frame; the memory settings that would let it (working
-    memory size, retrieval) are research the owner deferred, and ``PEPIN_LOCALIZER=tracker`` is
-    where the live switching still lives.
+    cannot extend a map while it owns the frame (ros/laptop.sh vslam --fresh builds a new one).
 
     A database born in this same second has nothing in it to be recognised, and
     ``Mem/IncrementalMemory false`` there would mean a session that never writes a node — mapping
-    with the mapping switched off. This is the one place a session still decides a parameter, it
-    decides one word rather than a table, and it decides it from a fact on disk rather than from a
-    mode somebody had to remember to pass."""
-    if not loaded:
-        return "map"
-    return "localise" if localizer_name == "rtabmap" else memory
+    with the mapping switched off. This decides it from a fact on disk rather than from a mode
+    somebody had to remember to pass."""
+    return "localise" if loaded else "map"
 
 
 def rtabmap_parameters(
     neighbor_refining: bool = False,
-    memory: str = "trust",
+    memory: str = "localise",
     sensor_pack: bool = True,
-    localizer_name: str = "tracker",
     descriptors: bool = False,
 ) -> dict[str, object]:
     """Everything RTAB-Map is told, for every situation: :data:`RTABMAP` under the odometry links'
@@ -694,24 +654,17 @@ def rtabmap_parameters(
     loop closure survives the error-ratio check (see :data:`RTABMAP`); ``sensor_pack`` false is the
     way back to the three subscriptions (:data:`TRIPLE_SUBSCRIPTIONS`).
 
-    ``memory`` is the INITIAL mode and nothing more (already resolved by :func:`rtabmap_memory`
-    when this is called): anything but ``map`` starts RTAB-Map localising (:data:`LOCALIZE`),
-    because that is what a wake-up in a known room needs and because a database that is not written
-    to cannot grow a new piece. From there pepin_bringup.rtabmap_frame owns the switch and moves it
-    live on trust in the pose (``graph_memory``), calling RTAB-Map's own set_mode services — so this
-    decides where a session begins, not where it stays.
-
-    ``localizer_name`` is who owns ``map -> odom`` (``PEPIN_LOCALIZER``): ``"rtabmap"`` adds
-    :data:`PUBLISH_MAP_TO_ODOM` and this node broadcasts the transform, ``"tracker"`` leaves
-    ``publish_tf`` false as it has always been, because two publishers of one edge fight.
+    ``memory`` is the session's mode (:func:`rtabmap_memory`): anything but ``map`` starts
+    RTAB-Map localising (:data:`LOCALIZE`), because that is what a wake-up in a known room needs
+    and because a database that is not written to cannot grow a new piece. The table always
+    carries :data:`PUBLISH_MAP_TO_ODOM`: this graph owns ``map -> odom``.
 
     ``descriptors`` is whether the snapshots carry place descriptors (sensor_pack's
     global_descriptor on this core): :data:`DESCRIPTOR_REHEARSAL` then puts the rehearsal's
     threshold on the descriptor's scale."""
     table: dict[str, object] = dict(RTABMAP)
     table.update(TF_ODOMETRY_VARIANCE)
-    if localizer_name == "rtabmap":
-        table.update(PUBLISH_MAP_TO_ODOM)
+    table.update(PUBLISH_MAP_TO_ODOM)
     if neighbor_refining:
         table["RGBD/NeighborLinkRefining"] = "true"
     if memory != "map":
@@ -785,26 +738,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # An empty room is a database that is not there yet, and that is the only thing the session
     # still decides (:func:`rtabmap_memory`): a file nobody has written cannot be localised in.
     loaded = Path(database).is_file()
-    # Who owns map -> odom in this stack (PEPIN_LOCALIZER, pepin.deployment.localizer): under
-    # "rtabmap" this launch publishes the transform and pins the session to localising; under
-    # "tracker" nothing here broadcasts a frame and the board's relocalizer owns it.
-    owner = localizer()
-    memory = rtabmap_memory(
-        LaunchConfiguration("memory").perform(context).strip().lower(), loaded, owner
-    )
-    # The bridge keeps routes by node name: the nodes start only once it has forgotten the
-    # previous incarnation of this launch (pepin_bringup.ghost_wait), or RTAB-Map's /scan and
-    # map routes die with the ghost ten seconds after they were made (2026-09-10).
-    ghost_wait = ExecuteProcess(
-        cmd=[
-            "python3",
-            "-m",
-            "pepin_bringup.ghost_wait",
-            LaunchConfiguration("bridge_admin"),
-            *laptop_launch_nodes("slam"),
-        ],
-        output="screen",
-    )
+    memory = rtabmap_memory(loaded)
     depth = ExecuteProcess(
         cmd=[
             "python3",
@@ -818,7 +752,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             f"depth_source:={depth_source(rig)}",
         ],
         output="screen",
-        prefix=_after_ghost("/depth_stream"),
         **RESPAWN,
     )
     # The same depth read at the floor instead of above it (pepin_bringup.contact_scan): where
@@ -828,39 +761,8 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     contact = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.contact_scan"],
         output="screen",
-        prefix=_after_ghost("/contact_scan"),
         **RESPAWN,
     )
-    # The map matching the board cannot afford, run here (pepin_bringup.laptop_localizer): the
-    # whole-map search once a second on the board's /scan against the board's /map, whose answer
-    # goes back over the bridge as a candidate the tracker judges (pepin.watchdog), and the
-    # camera's own scans matched around the board's belief, whose answer goes back as a pose
-    # measurement the tracker fuses (pepin.measurements). A tenth of a second here, a few seconds
-    # on the board — which is why the board only ever asked once it was already lost — and a few
-    # milliseconds against the 147 ms a camera scan cost the board's tracker.
-    # The search runs in every session now: there is one map, the board's tracker is always on it,
-    # and a room still being mapped is exactly where a second opinion about the place is worth
-    # having. It stays live: ros/flags.sh set laptop_localizer global_watch off.
-    watch = ExecuteProcess(
-        cmd=[
-            "python3",
-            "-m",
-            "pepin_bringup.laptop_localizer",
-            "--ros-args",
-            # Under "rtabmap" there is no tracker to propose a place to or measure a pose for:
-            # the node keeps watching and reporting, and publishes neither candidate nor
-            # measurement. Under "tracker" it is the second opinion it has always been.
-            "-p",
-            f"localizer:={owner}",
-        ],
-        output="screen",
-        prefix=_after_ghost("/laptop_localizer"),
-        **RESPAWN,
-    )
-    # What RTAB-Map's graph says about the cart's place (pepin_bringup.rtabmap_frame): one more
-    # measurement for the tracker's fusion, in every session — the board's tracker owns map -> odom
-    # and this is a word it weighs, never a correction it obeys. One switch is passed: which memory
-    # mode the session begins in (the same word RTAB-Map itself is given).
     # The room's vocabulary, kept current against a graph that bends (pepin_bringup.places): a
     # place is the cart's pose relative to a labelled RTAB-Map node, so it rides the node when a
     # loop closes. The book lives beside the database whose ids it uses.
@@ -869,7 +771,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         # same /maps/rtabmap.db the launch falls back to (as for depth_fusion).
         cmd=["python3", "-m", "pepin_bringup.places"],
         output="screen",
-        prefix=_after_ghost("/places"),
         **RESPAWN,
     )
     # Who painted the lethal cells the controller refuses to drive through
@@ -880,7 +781,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     audit = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.marks_audit"],
         output="screen",
-        prefix=_after_ghost("/marks_audit"),
         condition=IfCondition(LaunchConfiguration("marks_audit")),
         **RESPAWN,
     )
@@ -889,24 +789,12 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # descriptor only when it says every node carries exactly one (a node without one compared
     # with one that has one aborts RTAB-Map, which is not respawned).
     census, census_note = census_env(database)
+    # RTAB-Map's side of the one map (pepin_bringup.rtabmap_frame): its grid relayed onto /map,
+    # its memory mode, its registration, and the word that says whether this start is placed.
     frame = ExecuteProcess(
         additional_env=census,
-        cmd=[
-            "python3",
-            "-m",
-            "pepin_bringup.rtabmap_frame",
-            "--ros-args",
-            "-p",
-            f"graph_memory:={memory}",
-            # Which role that node is in: under "rtabmap" it relays the grid onto /map and sends
-            # the board no words at all (nobody fuses them there), under "tracker" it is the
-            # graph's voice into the board's fusion exactly as before. Passed rather than read
-            # from the environment inside the node so a launch test can pin it.
-            "-p",
-            f"localizer:={owner}",
-        ],
+        cmd=["python3", "-m", "pepin_bringup.rtabmap_frame"],
         output="screen",
-        prefix=_after_ghost("/rtabmap_frame"),
         **RESPAWN,
     )
     # The operator's Foxglove connects here for the 3D view: the cloud stays on the laptop and
@@ -947,7 +835,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 ),
             }
         ],
-        prefix=_after_ghost("/foxglove_bridge"),
         **RESPAWN,
     )
     camera = ExecuteProcess(
@@ -966,7 +853,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             f"camera:={rig}",
         ],
         output="screen",
-        prefix=_after_ghost("/camera_stream"),
         **RESPAWN,
     )
     # The same frames fused into one surface (pepin_bringup.depth_fusion): RTAB-Map keeps the
@@ -984,26 +870,12 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             "-m",
             "pepin_bringup.depth_fusion",
             "--ros-args",
-            # A tracker always publishes a fit now, so both paint gates are on in every session
-            # (they used to come up off in SLAM, where nothing published one and a gate waiting for
-            # it fused 0 frames of the first session, 2026-09-13 14:05). They stay live:
-            # ros/flags.sh set depth_fusion fit_gate false, and lidar_fit_gate beside it.
-            "-p",
-            "fit_gate:=true",
-            "-p",
-            "lidar_fit_gate:=true",
             # The volume resumes its OWN snapshot and reads the saved pair only when there is no
             # snapshot yet. --fresh passes this false, which is the whole of "an unknown room".
             "-p",
             f"resume_volume:={'true' if resume_volume else 'false'}",
-            # /camera_grid_map copies the lattice of the map the global costmap's static layer
-            # reads: /map_tracked under the tracker (nav2_params.yaml), /map under rtabmap
-            # (nav2_map_from_laptop.yaml). Read only under the node's grid_out flag.
-            "-p",
-            f"grid_map_topic:={'/map_tracked' if owner == 'tracker' else '/map'}",
         ],
         output="screen",
-        prefix=_after_ghost("/depth_fusion"),
         **RESPAWN,
     )
     # The camera's own opinion of how the cart moved: rtabmap's rgbd_odometry on the same three
@@ -1025,13 +897,11 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             ("odom", VO_RAW_TOPIC),
         ],
         condition=IfCondition(LaunchConfiguration("vo")),
-        prefix=_after_ghost("/rgbd_odometry"),
         **RESPAWN,
     )
     vo = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.visual_odometry"],
         output="screen",
-        prefix=_after_ghost("/visual_odometry"),
         condition=IfCondition(LaunchConfiguration("vo")),
         **RESPAWN,
     )
@@ -1048,7 +918,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             f"sources:={'camera' if camera_only else 'camera,lidar'}",
         ],
         output="screen",
-        prefix=_after_ghost("/sensor_pack"),
         condition=IfCondition(LaunchConfiguration("sensor_pack")),
         **RESPAWN,
     )
@@ -1067,19 +936,15 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # THE GRID IS THE MAP (World R): rtabmap's own "map" publisher, remapped onto /map in every
     # session. It is transient-local, depth 1, reliable (rtabmap_util/MapsManager.cpp: latch, true
     # by default), so whoever subscribes late is handed the current grid at once; it crosses the
-    # bridge to the board's tracker, which adopts it and republishes it for the costmaps. Nothing
+    # transport to the board, where both costmaps' static layers read it. Nothing
     # else publishes /map — the board's map_server is off (ros/nav.launch.py) — so the two
     # publishers of one /map that broke 2026-09-10 cannot happen.
     #   RTAB-Map builds the grid ONLY while something subscribes to it (MapsManager's
     # get_subscription_count gate, and map_cleanup drops the per-node grid cache when the last
-    # subscriber goes): the board's tracker and the operator's Foxglove are what keep it alive, and
-    # a bridge with no route for /map means a laptop that assembles no map at all.
+    # subscriber goes): pepin_bringup.rtabmap_frame's relay is what keeps it alive.
     #   Since 2026-09-19 the grid reaches /map THROUGH pepin_bringup.rtabmap_frame (GRID_TOPIC ->
-    # MAP_TOPIC, flag grid_needs_tie): before this start has recognised a node of the database it
-    # loaded, RTAB-Map's graph is the current node alone and its grid is one scan drawn where the
-    # odometry puts the cart — the tracker adopted that, matched the scan on a picture of itself
-    # at fit 1.00 and stood 1.26 m off. /map still has ONE publisher, and that node's subscription
-    # is what keeps the grid being built.
+    # MAP_TOPIC). /map has ONE publisher, and that node's subscription is what keeps the grid
+    # being built.
     remappings.append(("map", "/rtabmap/grid"))
     rtabmap = Node(
         package="rtabmap_slam",
@@ -1095,12 +960,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         parameters=[
             {
                 "frame_id": "base_link",
-                # ONE OWNER of map -> odom, and PEPIN_LOCALIZER says which: this is the value
-                # for "tracker" (the board's relocalizer owns the edge and this graph's word
-                # reaches it as a measurement), and rtabmap_parameters below replaces it with
-                # :data:`PUBLISH_MAP_TO_ODOM` under "rtabmap". Written out here so a reader of
-                # this table sees the default rather than only the override.
-                "publish_tf": False,
                 "database_path": database,
                 # Never here: the one database is wiped by ros/laptop.sh vslam --fresh, before this
                 # process starts, so that "an empty room" is a fact on disk this launch can read
@@ -1132,7 +991,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 # grids rebuild in seconds at start; True is the way back.
                 "use_saved_map": False,
                 **rtabmap_parameters(
-                    neighbor_refining, memory, packing, owner, place_descriptors(packing)
+                    neighbor_refining, memory, packing, place_descriptors(packing)
                 ),
             }
         ],
@@ -1154,23 +1013,14 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         else "the old synchronised triple straight off /camera/image, /camera/depth and /scan"
         " (sensor_pack:=false): RTAB-Map starves when the camera stops"
     )
-    words = (
-        "the laptop localizer proposes a place once a second and measures the camera's pose at"
-        " 5 Hz for the board's tracker"
-        if owner == "tracker"
-        else "no words go to the board (PEPIN_LOCALIZER=rtabmap: nothing there fuses them)"
-    )
     session = (
         f"{'the loaded' if loaded else 'a NEW, empty'} database {database}, memory {memory}"
         f"{'' if loaded else ' (nothing to recognise in a database born now)'}; its grid is the one"
-        f" map, published latched on /map; {words}"
+        " map, published latched on /map"
     )
-    # WHO OWNS map -> odom, named in the first line of the half that owns it or does not.
     frame_note = (
         f"map_frame_id map and publish_tf ON at {1.0 / TF_DELAY_S:.0f} Hz: THIS graph owns"
-        " map -> odom and the board runs no tracker (PEPIN_LOCALIZER=rtabmap)"
-        if owner == "rtabmap"
-        else "map_frame_id map and publish_tf off (the board's tracker owns map -> odom)"
+        " map -> odom"
     )
     report = (
         f"vslam up: {session}; camera rig: {rig} (config/camera.json's active, or PEPIN_CAMERA,"
@@ -1189,27 +1039,18 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     report += f"; {descriptors}; {census_note}"
     return [
         LogInfo(msg=report),
-        ghost_wait,
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=ghost_wait,
-                on_exit=[
-                    camera,
-                    depth,
-                    contact,
-                    fusion,
-                    watch,
-                    pack,
-                    rtabmap,
-                    frame,
-                    places,
-                    audit,
-                    foxglove,
-                    rgbd_odometry,
-                    vo,
-                ],
-            )
-        ),
+        camera,
+        depth,
+        contact,
+        fusion,
+        pack,
+        rtabmap,
+        frame,
+        places,
+        audit,
+        foxglove,
+        rgbd_odometry,
+        vo,
     ]
 
 
@@ -1231,16 +1072,6 @@ def generate_launch_description() -> LaunchDescription:
             # links are stiffer than the odometry they replace and RGBD/OptimizeMaxError then
             # rejects every closure the graph finds.
             DeclareLaunchArgument("neighbor_refining", default_value="false"),
-            # Whether the database may LEARN, read beside a LOADED one (a SLAM session is always
-            # "map": see rtabmap_memory). "trust" (the default) starts RTAB-Map LOCALISING —
-            # nothing written, the whole database in working memory, a parked cart recognised
-            # (LOCALIZE) — and hands the switch to pepin_bringup.rtabmap_frame, which moves it live
-            # on trust in the pose: the database may learn only while a sharp pose that is NOT held
-            # by the graph exists. "map" starts and stays in mapping mode (the arrangement of
-            # before 2026-09-18); "localise" freezes the database for the session. The same word is
-            # passed to rtabmap_frame's graph_memory flag, so one argument sets the initial mode
-            # and who decides after it.
-            DeclareLaunchArgument("memory", default_value="trust"),
             # The volume resumes the database's own snapshot (pepin.worldmap.world_path_for names
             # it after the database, since it is painted in that graph's frame). False is
             # ros/laptop.sh vslam --fresh: a room built from nothing whatever is on disk.
@@ -1257,7 +1088,6 @@ def generate_launch_description() -> LaunchDescription:
             # node's own `marks_audit` flag switches it off live without a restart.
             DeclareLaunchArgument("marks_audit", default_value="true"),
             DeclareLaunchArgument("database", default_value=""),  # empty: DATABASE
-            DeclareLaunchArgument("bridge_admin", default_value="http://pepin-zenoh:8000"),
             DeclareLaunchArgument("static_camera_tf", default_value="true"),
             # WHICH CAMERA the head is, by the name of a block in config/camera.json ("overview",
             # the mono webcam; "stereo", the side-by-side module). Empty — the default — leaves it
@@ -1265,29 +1095,6 @@ def generate_launch_description() -> LaunchDescription:
             # own "active", so switching the rig is one word in one file and no launch argument at
             # all. A name no block answers to stops this launch at start.
             DeclareLaunchArgument("camera", default_value=""),
-            # A new board bridge means new subscriptions are needed: the watch exits, the launch
-            # shuts down, the container's restart policy brings this half back. Under
-            # PEPIN_RMW=zenoh there is no bridge to watch, and a watch that found no admin would
-            # exit at once and shut this launch down on every start.
-            *(
-                []
-                if rmw_is_zenoh()
-                else [
-                    ExecuteProcess(
-                        cmd=[
-                            "python3",
-                            "-m",
-                            "pepin_bringup.bridge_watch",
-                            LaunchConfiguration("board"),
-                            LaunchConfiguration(
-                                "bridge_admin"
-                            ),  # this side's bridge: the flow watch
-                        ],
-                        output="screen",
-                        on_exit=[Shutdown(reason="the board's bridge restarted")],
-                    )
-                ]
-            ),
             OpaqueFunction(function=_describe),
         ]
     )

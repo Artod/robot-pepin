@@ -1,0 +1,623 @@
+{
+ "created": "2026-09-27T06:06:17Z",
+ "git": "8c8e392",
+ "params": [
+  "ros/params/nav2_params.yaml",
+  "ros/params/nav2_map_from_laptop.yaml"
+ ],
+ "params_hash": "5fe8f3dc7d",
+ "sets": [],
+ "clears": "bt",
+ "local_hz": 5.0,
+ "global_hz": 2.0,
+ "total_wall_s": 18.4,
+ "jobs": 1,
+ "stand": {
+  "source": "rtabmap.db saved grid, rtabmap.places.json",
+  "origin": [
+   -4.573492050170898,
+   -4.921875476837158
+  ],
+  "resolution": 0.05000000074505806,
+  "shape": [
+   216,
+   141
+  ],
+  "grid_zlib_b64": "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",
+  "goals": {
+   "bookshelf": [
+    0.8046241745010475,
+    0.17226995926135602,
+    0.0612199468503215
+   ],
+   "home": [
+    -0.3872898501335926,
+    2.9220586733442757,
+    1.6765016745378811
+   ],
+   "printer": [
+    -1.0636795050262793,
+    0.32545935482926214,
+    3.1713409888902633
+   ]
+  }
+ },
+ "rows": [
+  {
+   "run": 483,
+   "goal": "printer",
+   "active_s": 13.8,
+   "unseen_s": 7.9,
+   "stuck_s": 2.6,
+   "goal_max": 83,
+   "goal_end": 59,
+   "corr_p50": 140.5,
+   "corr_max": 169,
+   "cam_mean": 244.3,
+   "cam_max": 283,
+   "fid": 0.99,
+   "wall_s": 0.43,
+   "x_rt": 35.5,
+   "_engine": {
+    "messages": 1611,
+    "delivered": 968,
+    "waited_for_tf": 346,
+    "dropped_tf_timeout": 30,
+    "unrouted": 0,
+    "updates": 104,
+    "clears": 5,
+    "wall_s": 0.129502
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.24,
+    "score_s": 0.19
+   },
+   "_goal_xy": [
+    -1.0636795050262793,
+    0.32545935482926214,
+    3.1713409888902633
+   ]
+  },
+  {
+   "run": 484,
+   "goal": "home",
+   "active_s": 30.0,
+   "unseen_s": 6.1,
+   "stuck_s": 7.1,
+   "goal_max": 106,
+   "goal_end": 25,
+   "corr_p50": 101.0,
+   "corr_max": 144,
+   "cam_mean": 358.9,
+   "cam_max": 570,
+   "fid": 0.99,
+   "wall_s": 0.98,
+   "x_rt": 32.3,
+   "_engine": {
+    "messages": 3290,
+    "delivered": 2030,
+    "waited_for_tf": 685,
+    "dropped_tf_timeout": 14,
+    "unrouted": 0,
+    "updates": 219,
+    "clears": 12,
+    "wall_s": 0.220349
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.32,
+    "score_s": 0.67
+   },
+   "_goal_xy": [
+    -0.3872898501335926,
+    2.9220586733442757,
+    1.6765016745378811
+   ]
+  },
+  {
+   "run": 485,
+   "goal": "printer",
+   "active_s": 13.0,
+   "unseen_s": 5.6,
+   "stuck_s": 0.8,
+   "goal_max": 59,
+   "goal_end": 59,
+   "corr_p50": 123.5,
+   "corr_max": 164,
+   "cam_mean": 336.8,
+   "cam_max": 430,
+   "fid": 1.0,
+   "wall_s": 0.37,
+   "x_rt": 39.5,
+   "_engine": {
+    "messages": 1535,
+    "delivered": 949,
+    "waited_for_tf": 317,
+    "dropped_tf_timeout": 17,
+    "unrouted": 0,
+    "updates": 100,
+    "clears": 3,
+    "wall_s": 0.150167
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.25,
+    "score_s": 0.12
+   },
+   "_goal_xy": [
+    -1.0636795050262793,
+    0.32545935482926214,
+    3.1713409888902633
+   ]
+  },
+  {
+   "run": 486,
+   "goal": "home",
+   "active_s": 11.8,
+   "unseen_s": 5.8,
+   "stuck_s": 0.6,
+   "goal_max": 45,
+   "goal_end": 45,
+   "corr_p50": 93.0,
+   "corr_max": 100,
+   "cam_mean": 389.9,
+   "cam_max": 655,
+   "fid": 0.98,
+   "wall_s": 0.35,
+   "x_rt": 38.4,
+   "_engine": {
+    "messages": 1383,
+    "delivered": 841,
+    "waited_for_tf": 288,
+    "dropped_tf_timeout": 19,
+    "unrouted": 0,
+    "updates": 91,
+    "clears": 3,
+    "wall_s": 0.120371
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.21,
+    "score_s": 0.14
+   },
+   "_goal_xy": [
+    -0.3872898501335926,
+    2.9220586733442757,
+    1.6765016745378811
+   ]
+  },
+  {
+   "run": 487,
+   "goal": "bookshelf",
+   "active_s": 22.8,
+   "unseen_s": 5.5,
+   "stuck_s": 0.9,
+   "goal_max": 64,
+   "goal_end": 63,
+   "corr_p50": 73.5,
+   "corr_max": 155,
+   "cam_mean": 365.6,
+   "cam_max": 496,
+   "fid": 1.0,
+   "wall_s": 0.69,
+   "x_rt": 35.2,
+   "_engine": {
+    "messages": 2542,
+    "delivered": 1572,
+    "waited_for_tf": 513,
+    "dropped_tf_timeout": 14,
+    "unrouted": 0,
+    "updates": 167,
+    "clears": 6,
+    "wall_s": 0.226905
+   },
+   "_times": {
+    "prepare_s": 0.01,
+    "replay_s": 0.32,
+    "score_s": 0.37
+   },
+   "_goal_xy": [
+    0.8046241745010475,
+    0.17226995926135602,
+    0.0612199468503215
+   ]
+  },
+  {
+   "run": 488,
+   "goal": "home",
+   "active_s": 75.1,
+   "unseen_s": 6.1,
+   "stuck_s": 14.4,
+   "goal_max": 44,
+   "goal_end": 38,
+   "corr_p50": 87.0,
+   "corr_max": 154,
+   "cam_mean": 438.6,
+   "cam_max": 651,
+   "fid": 0.98,
+   "wall_s": 2.26,
+   "x_rt": 34.0,
+   "_engine": {
+    "messages": 8014,
+    "delivered": 4969,
+    "waited_for_tf": 1672,
+    "dropped_tf_timeout": 17,
+    "unrouted": 0,
+    "updates": 535,
+    "clears": 26,
+    "wall_s": 0.444472
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.58,
+    "score_s": 1.68
+   },
+   "_goal_xy": [
+    -0.3872898501335926,
+    2.9220586733442757,
+    1.6765016745378811
+   ]
+  },
+  {
+   "run": 489,
+   "goal": "bookshelf",
+   "active_s": 21.7,
+   "unseen_s": 6.2,
+   "stuck_s": 3.9,
+   "goal_max": 53,
+   "goal_end": 34,
+   "corr_p50": 103.0,
+   "corr_max": 174,
+   "cam_mean": 339.1,
+   "cam_max": 604,
+   "fid": 0.99,
+   "wall_s": 0.56,
+   "x_rt": 41.5,
+   "_engine": {
+    "messages": 2424,
+    "delivered": 1493,
+    "waited_for_tf": 512,
+    "dropped_tf_timeout": 22,
+    "unrouted": 0,
+    "updates": 159,
+    "clears": 8,
+    "wall_s": 0.178007
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.27,
+    "score_s": 0.29
+   },
+   "_goal_xy": [
+    0.8046241745010475,
+    0.17226995926135602,
+    0.0612199468503215
+   ]
+  },
+  {
+   "run": 490,
+   "goal": "home",
+   "active_s": 23.3,
+   "unseen_s": 5.0,
+   "stuck_s": 5.1,
+   "goal_max": 43,
+   "goal_end": 43,
+   "corr_p50": 90.5,
+   "corr_max": 126,
+   "cam_mean": 327.7,
+   "cam_max": 601,
+   "fid": 0.99,
+   "wall_s": 0.57,
+   "x_rt": 43.7,
+   "_engine": {
+    "messages": 2588,
+    "delivered": 1600,
+    "waited_for_tf": 521,
+    "dropped_tf_timeout": 18,
+    "unrouted": 0,
+    "updates": 169,
+    "clears": 6,
+    "wall_s": 0.186366
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.3,
+    "score_s": 0.27
+   },
+   "_goal_xy": [
+    -0.3872898501335926,
+    2.9220586733442757,
+    1.6765016745378811
+   ]
+  },
+  {
+   "run": 491,
+   "goal": "printer",
+   "active_s": 14.2,
+   "unseen_s": 5.5,
+   "stuck_s": 1.6,
+   "goal_max": 51,
+   "goal_end": 51,
+   "corr_p50": 112.5,
+   "corr_max": 119,
+   "cam_mean": 262.2,
+   "cam_max": 377,
+   "fid": 0.99,
+   "wall_s": 0.38,
+   "x_rt": 41.7,
+   "_engine": {
+    "messages": 1644,
+    "delivered": 997,
+    "waited_for_tf": 373,
+    "dropped_tf_timeout": 36,
+    "unrouted": 0,
+    "updates": 105,
+    "clears": 3,
+    "wall_s": 0.120272
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.26,
+    "score_s": 0.12
+   },
+   "_goal_xy": [
+    -1.0636795050262793,
+    0.32545935482926214,
+    3.1713409888902633
+   ]
+  },
+  {
+   "run": 492,
+   "goal": "bookshelf",
+   "active_s": 6.9,
+   "unseen_s": 5.1,
+   "stuck_s": 0.7,
+   "goal_max": 33,
+   "goal_end": 33,
+   "corr_p50": 106.0,
+   "corr_max": 107,
+   "cam_mean": 263.0,
+   "cam_max": 302,
+   "fid": 1.0,
+   "wall_s": 0.21,
+   "x_rt": 40.6,
+   "_engine": {
+    "messages": 849,
+    "delivered": 484,
+    "waited_for_tf": 205,
+    "dropped_tf_timeout": 45,
+    "unrouted": 0,
+    "updates": 55,
+    "clears": 2,
+    "wall_s": 0.0988083
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.19,
+    "score_s": 0.02
+   },
+   "_goal_xy": [
+    0.8046241745010475,
+    0.17226995926135602,
+    0.0612199468503215
+   ]
+  },
+  {
+   "run": 493,
+   "goal": "home",
+   "active_s": 127.6,
+   "unseen_s": 5.2,
+   "stuck_s": 50.9,
+   "goal_max": 45,
+   "goal_end": 33,
+   "corr_p50": 101.0,
+   "corr_max": 182,
+   "cam_mean": 263.8,
+   "cam_max": 699,
+   "fid": 0.99,
+   "wall_s": 2.29,
+   "x_rt": 56.5,
+   "_engine": {
+    "messages": 13621,
+    "delivered": 8467,
+    "waited_for_tf": 2784,
+    "dropped_tf_timeout": 29,
+    "unrouted": 0,
+    "updates": 904,
+    "clears": 52,
+    "wall_s": 0.719899
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.83,
+    "score_s": 1.47
+   },
+   "_goal_xy": [
+    -0.3872898501335926,
+    2.9220586733442757,
+    1.6765016745378811
+   ]
+  },
+  {
+   "run": 494,
+   "goal": "printer",
+   "active_s": 58.2,
+   "unseen_s": 5.2,
+   "stuck_s": 12.7,
+   "goal_max": 79,
+   "goal_end": 51,
+   "corr_p50": 138.0,
+   "corr_max": 181,
+   "cam_mean": 357.2,
+   "cam_max": 497,
+   "fid": 1.0,
+   "wall_s": 1.2,
+   "x_rt": 49.9,
+   "_engine": {
+    "messages": 6257,
+    "delivered": 3841,
+    "waited_for_tf": 1313,
+    "dropped_tf_timeout": 50,
+    "unrouted": 0,
+    "updates": 417,
+    "clears": 20,
+    "wall_s": 0.368115
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.46,
+    "score_s": 0.74
+   },
+   "_goal_xy": [
+    -1.0636795050262793,
+    0.32545935482926214,
+    3.1713409888902633
+   ]
+  },
+  {
+   "run": 495,
+   "goal": "home",
+   "active_s": 11.5,
+   "unseen_s": 4.9,
+   "stuck_s": 0.6,
+   "goal_max": 44,
+   "goal_end": 42,
+   "corr_p50": 91.5,
+   "corr_max": 95,
+   "cam_mean": 469.9,
+   "cam_max": 788,
+   "fid": 0.98,
+   "wall_s": 0.31,
+   "x_rt": 42.6,
+   "_engine": {
+    "messages": 1357,
+    "delivered": 810,
+    "waited_for_tf": 290,
+    "dropped_tf_timeout": 27,
+    "unrouted": 0,
+    "updates": 89,
+    "clears": 3,
+    "wall_s": 0.114388
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.2,
+    "score_s": 0.11
+   },
+   "_goal_xy": [
+    -0.3872898501335926,
+    2.9220586733442757,
+    1.6765016745378811
+   ]
+  },
+  {
+   "run": 496,
+   "goal": "printer",
+   "active_s": 138.8,
+   "unseen_s": 5.7,
+   "stuck_s": 74.7,
+   "goal_max": 93,
+   "goal_end": 55,
+   "corr_p50": 132.0,
+   "corr_max": 202,
+   "cam_mean": 308.3,
+   "cam_max": 529,
+   "fid": 0.98,
+   "wall_s": 2.11,
+   "x_rt": 66.6,
+   "_engine": {
+    "messages": 9676,
+    "delivered": 4087,
+    "waited_for_tf": 2792,
+    "dropped_tf_timeout": 18,
+    "unrouted": 0,
+    "updates": 979,
+    "clears": 59,
+    "wall_s": 0.691941
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.78,
+    "score_s": 1.33
+   },
+   "_goal_xy": [
+    -1.0636795050262793,
+    0.32545935482926214,
+    3.1713409888902633
+   ]
+  },
+  {
+   "run": 497,
+   "goal": "bookshelf",
+   "active_s": 19.4,
+   "unseen_s": 5.6,
+   "stuck_s": 0.6,
+   "goal_max": 15,
+   "goal_end": 15,
+   "corr_p50": 53.0,
+   "corr_max": 71,
+   "cam_mean": 319.4,
+   "cam_max": 421,
+   "fid": 0.97,
+   "wall_s": 0.41,
+   "x_rt": 51.5,
+   "_engine": {
+    "messages": 1453,
+    "delivered": 627,
+    "waited_for_tf": 411,
+    "dropped_tf_timeout": 6,
+    "unrouted": 0,
+    "updates": 143,
+    "clears": 5,
+    "wall_s": 0.148249
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 0.23,
+    "score_s": 0.17
+   },
+   "_goal_xy": [
+    0.8046241745010475,
+    0.17226995926135602,
+    0.0612199468503215
+   ]
+  },
+  {
+   "run": 498,
+   "goal": "home",
+   "active_s": 252.5,
+   "unseen_s": 4.9,
+   "stuck_s": 94.0,
+   "goal_max": 57,
+   "goal_end": 32,
+   "corr_p50": 150.5,
+   "corr_max": 389,
+   "cam_mean": 321.5,
+   "cam_max": 773,
+   "fid": 0.97,
+   "wall_s": 4.44,
+   "x_rt": 57.3,
+   "_engine": {
+    "messages": 17727,
+    "delivered": 7662,
+    "waited_for_tf": 5033,
+    "dropped_tf_timeout": 6,
+    "unrouted": 0,
+    "updates": 1778,
+    "clears": 113,
+    "wall_s": 1.26346
+   },
+   "_times": {
+    "prepare_s": 0.0,
+    "replay_s": 1.35,
+    "score_s": 3.09
+   },
+   "_goal_xy": [
+    -0.3872898501335926,
+    2.9220586733442757,
+    1.6765016745378811
+   ]
+  }
+ ]
+}

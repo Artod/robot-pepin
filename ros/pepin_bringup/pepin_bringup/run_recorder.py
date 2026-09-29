@@ -4,20 +4,13 @@ The node that owns the goal owns the tape, so a run's file opens the moment the 
 closes with it — and, because the tape always holds the last seconds, it opens with the seconds
 *before* the goal on it. The decisions live in `pepin.tape`; this file only converts messages.
 
-Topics: the raw lidar scan, wheel odometry, the tracker's pose, Nav2's plan, the commanded
+Topics: the raw lidar scan, wheel odometry, the cart's pose, Nav2's plan, the commanded
 twist, the three ToF ranges and the local costmap — what `scripts/build_map.py` and the replays
 read, plus the proof of what the robot itself believed: which cells it held for occupied when it
 refused to move (a question a run could not answer before, and the one every stall raises).
 
-Since 2026-09-14 also the fusion's two String topics (``fusion_records``): every pose the laptop
-measured out of a camera scan (``meas``, /localization/measurement) and the tracker's own account
-of each update (``srcs``, /localization/sources). They were ros/tools/session_logger.py's alone,
-and that second recorder cost the board a whole rclpy process — 15 % of a core and ~140 MB —
-deserialising the same lidar stream this node already deserialises. One tape now holds the lot,
-so ros/goto.sh no longer starts the session logger when the numbered tape is being written.
-
-THE POSE ARRIVES AS A TOPIC (2026-09-22, the ``loc_from`` flag). Where no tracker runs the `loc`
-rows are ``map -> base_link``, which used to be read here by a TF listener of this node's own —
+THE POSE ARRIVES AS A TOPIC (2026-09-22, the ``loc_from`` flag). The `loc` rows are
+``map -> base_link``, which used to be read here by a TF listener of this node's own —
 and an rclpy listener deserialises the whole /tf stream (map -> odom at 20 Hz, odom -> base_link
 at 50 Hz, the statics) to answer one pose five times a second, ~34 % of an A53 core on a board
 measured at 252 %. The goal server parses that stream for navigation anyway, so it republishes
@@ -35,7 +28,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from action_msgs.msg import GoalStatusArray
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from nav_msgs.msg import Path as PathMsg
 from rclpy.node import Node
@@ -43,7 +36,6 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profi
 from sensor_msgs.msg import Imu, LaserScan, Range
 from std_msgs.msg import String
 
-from pepin.deployment import DEFAULT_LOCALIZER
 from pepin.flags import Flag, FlagSet
 from pepin.mounts import Mounts
 from pepin.recording import imu_record, scan_record_from_ros
@@ -68,22 +60,18 @@ from pepin.tape_rows import (
     feasibility_classes,
     gcostmap_row,
     laser_odom_row,
-    loc_row,
     loc_row_from_pose,
     loc_row_from_transform,
-    meas_row,
     nav_row,
     plan_row,
     pose_row,
-    srcs_row,
     stamp,
     tof_row,
 )
-from pepin_bringup.bridge_kick import BridgeKick
 from pepin_bringup.camera_clip import CameraClip
 from pepin_bringup.node_kit import Switches, TfLookup, spin_main
 
-# WHERE THE POSE COMES FROM where no tracker publishes one (the ``loc_from`` flag). The topic is
+# WHERE THE POSE COMES FROM (the ``loc_from`` flag). The topic is
 # the goal server's — spelled out here rather than imported, because a node does not import
 # another node (pepin_bringup.goal_server's POSE_TOPIC is the same string, and its ``pose_topic``
 # flag is the publisher's half of this switch).
@@ -95,47 +83,12 @@ LOC_HZ = 5.0  # how often a `loc` row is written in either path: the rate the ta
 # The live flags (CLAUDE.md rule 19); their state is printed in the node's ready line.
 FLAGS = FlagSet(
     Flag(
-        "fusion_records",
-        True,
-        description="the camera's measurements (/localization/measurement) and the tracker's"
-        " account of each update (/localization/sources) go on the numbered tape as the"
-        " 'meas' and 'srcs' records scratch/camera_error.py reads",
-        why="they were recorded only by ros/tools/session_logger.py, a second recorder that"
-        " ros/goto.sh started for every drive: another rclpy process on a 4-core A53, 15 % of a"
-        " core and ~140 MB, deserialising the same 10 Hz lidar stream this node already"
-        " deserialises. Two JSON strings a revolution cost this node almost nothing, and one"
-        " tape then holds a whole drive",
-        on_when="always: without them a camera measurement cannot be compared to the lidar's"
-        " truth after the fact",
-        off_when="when the fusion is off anyway and the tape should stay small",
-    ),
-    Flag(
-        "bridge_kick",
-        True,
-        description="the laptop's request to restart THIS board's zenoh bridge (/bridge/kick)"
-        " is answered by touching /run/pepin/bridge_kick, which a systemd path unit on the board"
-        " turns into `systemctl restart pepin-bridge`; off, the request is logged and ignored",
-        why="of two bridges the one that started LAST gets working routes: a route's DDS"
-        " endpoint is built when the route is created and only while the far bridge is already"
-        " announcing. On 2026-09-15 a 5 s wireless stall made the board's bridge close the"
-        " transport and reconnect with the same zenoh id, and thirteen of its pub routes came"
-        " back with an empty dds_reader — nothing crossed from the board until its bridge was"
-        " restarted by hand. ros/laptop.sh cures that with ssh (settle_bridge); the laptop's"
-        " watch has no ssh and must never have one, so it asks here and the board's own systemd"
-        " does the restart. The handler costs this board one subscription to a topic that"
-        " carries nothing on a healthy link",
-        on_when="always on a split or vision stack: it is the only way the laptop can put the"
-        " board's routes back without a human",
-        off_when="while bisecting the bridge by hand, so nothing restarts under you",
-    ),
-    Flag(
         "planner_records",
         True,
         description="what the PLANNER saw goes on the tape too: the global costmap (run-length"
         " encoded, at most one grid per new plan), the goal status of Nav2's three actions"
-        " (navigate_to_pose, compute_path_to_pose, follow_path) and the pose graph's own words"
-        " (/localization/graph_measurement) beside the camera's; off, the tape holds what it held"
-        " before 2026-09-18",
+        " (navigate_to_pose, compute_path_to_pose, follow_path); off, the tape holds what it"
+        " held before 2026-09-18",
         why="the tape was blind exactly where the failures were. On 2026-09-17 two legs piled up"
         " 78 and 90 recoveries in ~125 s with no path (ros/maps/rec/20260917_192935_goto.log,"
         " ..._201425_goto.log) and the tapes could not say why: they carry /plan and the LOCAL"
@@ -157,12 +110,12 @@ FLAGS = FlagSet(
         "loc_from",
         POSE_TOPIC_SOURCE,
         choices=(POSE_TOPIC_SOURCE, TF_SOURCE),
-        description=f"where the tape's `loc` rows come from where no tracker publishes one:"
+        description=f"where the tape's `loc` rows come from:"
         f" {POSE_TOPIC_SOURCE}, the goal server's {POSE_TOPIC} (it parses /tf for navigation"
         f" anyway and republishes what it reads); {TF_SOURCE}, this node's own TF listener at"
         f" {1.0 / LOC_HZ:.1f} s, which is what it ran until 2026-09-22. The rows are identical"
         " either way — same fields, same 5 Hz, source 'tf' in both, because both are that same"
-        " edge. Inert where a tracker runs: there the rows come from /tracker_pose",
+        " edge",
         why="an rclpy TF listener deserialises the WHOLE /tf stream — RTAB-Map's map -> odom at"
         " 20 Hz, the board's odom -> base_link at 50 Hz, the statics — to read one pose five"
         " times a second, and it cost this node ~34 % of a core on a board measured at 252 %"
@@ -205,9 +158,8 @@ class RunRecorder:
     # 40% of a core on this board (measured 2026-09-08, load average 9 with the controller loop
     # down to 3 Hz), and a prelude does not need 10 Hz. During a run nothing is thinned.
     IDLE_PERIOD_S: ClassVar[dict[str, float]] = {"pose": 0.2, "loc": 0.2}
-    # How often map -> base_link is read into the tape where no tracker publishes a pose: the
-    # same 5 Hz the tracker's own records are thinned to above, so a tape looks the same either
-    # way and a replay does not have to know which stack wrote it.
+    # How often map -> base_link is read into the tape: the same 5 Hz the `loc` records are
+    # thinned to above.
     LOC_TF_PERIOD_S: ClassVar[float] = 1.0 / LOC_HZ
 
     def __init__(
@@ -215,13 +167,10 @@ class RunRecorder:
         node: Node,
         directory: Path,
         tape: RunTape | None = None,
-        fusion_records: Callable[[], bool] = lambda: True,
         planner_records: Callable[[], bool] = lambda: True,
-        no_tracker_pose: bool = False,
         loc_from: Callable[[], str] = lambda: POSE_TOPIC_SOURCE,
     ) -> None:
         self._node = node
-        self._fusion_records = fusion_records
         self._planner_records = planner_records  # the ``planner_records`` flag, read per record
         self._loc_from = loc_from  # the ``loc_from`` flag, read per record
         self._plan_seq = 0  # how many plans this run has seen: the global costmap's throttle...
@@ -240,22 +189,17 @@ class RunRecorder:
         self._scan_qos = scan_qos
         # Always on: small messages, and they are what the prelude is made of.
         node.create_subscription(Odometry, "/odom", self._on_odom, 20)
-        node.create_subscription(PoseWithCovarianceStamped, "/tracker_pose", self._on_loc, 10)
         node.create_subscription(Twist, "/cmd_vel", self._on_cmd, 20)
-        # WHERE THE `loc` RECORDS COME FROM when no tracker runs (PEPIN_LOCALIZER=rtabmap):
-        # /tracker_pose has no publisher there, and a tape with no pose in it is a drive nobody
-        # can replay. It is the same edge every other consumer composes — the laptop's
-        # map -> odom over the transport with the board's own odom -> base_link — and since
-        # 2026-09-22 it arrives as a TOPIC: the goal server parses /tf for navigation anyway and
-        # republishes the pose it reads (its ``pose_topic`` flag). Nothing is wired at all in a
-        # stack with a tracker, so it pays neither the subscription nor the timer.
+        # WHERE THE `loc` RECORDS COME FROM: map -> odom (RTAB-Map's, over the transport)
+        # composed with the board's own odom -> base_link, which since 2026-09-22 arrives as a
+        # TOPIC: the goal server parses /tf for navigation anyway and republishes the pose it
+        # reads (its ``pose_topic`` flag).
         self._tf: TfLookup | None = None
-        if no_tracker_pose:
-            node.create_subscription(PoseStamped, POSE_TOPIC, self._on_pose, 5)
-            # The old path stays one flag away (``loc_from`` tf). Its listener is built on the
-            # first tick that asks for it — from the timer, which runs where the executor runs —
-            # and never in this constructor, so the switch costs nothing while it is off.
-            node.create_timer(self.LOC_TF_PERIOD_S, self._loc_from_tf)
+        node.create_subscription(PoseStamped, POSE_TOPIC, self._on_pose, 5)
+        # The old path stays one flag away (``loc_from`` tf). Its listener is built on the first
+        # tick that asks for it — from the timer, which runs where the executor runs — and never
+        # in this constructor, so the switch costs nothing while it is off.
+        node.create_timer(self.LOC_TF_PERIOD_S, self._loc_from_tf)
         # Only while a run is open: rclpy turns every LaserScan into Python objects BEFORE our
         # callback can decline it, and that deserialisation alone cost 38% of a core between
         # goals on this board (measured 2026-09-08, load average 8.4). A drive gets them from
@@ -299,7 +243,6 @@ class RunRecorder:
         """
         want = "listen" if self._tape.recording else "deafen"
         if want == "listen" and not self._during_run:
-            strings = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
             # The global costmap is published whole ONCE and then only as updates, so a plain
             # subscription started mid-drive hears nothing at all: it has to be latched.
             latched = QoSProfile(
@@ -312,8 +255,8 @@ class RunRecorder:
                     LaserScan, "/ldlidar_node/scan", self._on_scan, self._scan_qos
                 ),
                 self._node.create_subscription(PathMsg, "/plan", self._on_plan, 5),
-                # What the tracker pairs scans with, and the gyro it is built from: without
-                # them a wobble of map -> odom cannot be told from wheel slip after the fact.
+                # The EKF's odometry, and the gyro it is built from: without them a wobble of
+                # map -> odom cannot be told from wheel slip after the fact.
                 self._node.create_subscription(Odometry, "/odometry/filtered", self._on_ekf, 20),
                 # The lidar's own scan-to-scan twist (rf2o), the EKF's odom3: its sign and lag
                 # against the gyro are judged from the tape, never from a hand-turned cart.
@@ -332,18 +275,6 @@ class RunRecorder:
                         Range, f"/tof/{sensor}", lambda msg, s=sensor: self._on_tof(s, msg), 10
                     )
                     for sensor in ("front", "left", "right")
-                ),
-                # What the camera measured and what the tracker did with it: two String topics
-                # this board already carries, so a subscriber here costs a copy and no new route.
-                *(
-                    self._node.create_subscription(
-                        String, f"/localization/{topic}", handler, strings
-                    )
-                    for topic, handler in (
-                        ("measurement", self._on_measurement),
-                        ("graph_measurement", self._on_measurement),
-                        ("sources", self._on_sources),
-                    )
                 ),
                 # ...and what the PLANNER saw, which is not the local grid the controller reads:
                 # the global costmap (latched, so this subscription gets the full grid at once and
@@ -416,7 +347,7 @@ class RunRecorder:
         self._tape.add(laser_odom_row(msg, time.time()))
 
     def _on_ekf(self, msg: Odometry) -> None:
-        """The fused odometry (odom -> base_link) the tracker pairs scans with, pose and rates."""
+        """The fused odometry (odom -> base_link), pose and rates."""
         if not self._keep("ekf"):
             return
         self._tape.add(ekf_row(msg, time.time()))
@@ -489,38 +420,13 @@ class RunRecorder:
             return
         self._tape.add(nav_row(action, msg, time.time()))
 
-    def _on_measurement(self, msg: String) -> None:
-        """One pose the laptop measured out of a camera scan OR out of the pose graph, kept
-        verbatim: nothing here parses it, so a malformed message is on the tape as evidence instead
-        of lost. ``t`` is when it ARRIVED; the moment it speaks for is ``stamp`` inside the JSON,
-        and the two together are the age the board's gate charges it
-        (scratch/word_age.py; until 2026-09-18 the graph's own words were not taped at all, so that
-        age could not be read off a tape for the one source a camera-only drive runs on)."""
-        if not self._fusion_records():
-            return
-        self._tape.add(meas_row(msg.data, time.time()))
-
-    def _on_sources(self, msg: String) -> None:
-        """The tracker's own account of one update (Localizer.sources_report), verbatim: who
-        anchored, what was fused, what was rejected, and every source's fit, delta, sigma and
-        self-check ratio."""
-        if not self._fusion_records():
-            return
-        self._tape.add(srcs_row(msg.data, time.time()))
-
     def _on_cmd(self, msg: Twist) -> None:
         """What the controller asked the wheels for: the only record of the command side."""
         self._tape.add(cmd_row(msg, time.time()))
 
-    def _on_loc(self, msg: PoseWithCovarianceStamped) -> None:
-        """The tracker's belief in the map frame; covariance trace as a stand-in confidence."""
-        if not self._keep("loc"):
-            return
-        self._tape.add(loc_row(msg, time.time()))
-
     def _on_pose(self, msg: PoseStamped) -> None:
         """The goal server's republished ``map -> base_link`` (``/pose``, 5 Hz): the tape's
-        `loc` row where no tracker publishes one and ``loc_from`` is ``pose_topic``.
+        `loc` row while ``loc_from`` is ``pose_topic``.
         """
         if self._loc_from() != POSE_TOPIC_SOURCE or not self._keep("loc"):
             return
@@ -557,26 +463,13 @@ class RunRecorderNode(Node):
     def __init__(self) -> None:
         super().__init__("run_recorder")
         self._record_dir = Path(str(self.declare_parameter("record_dir", "/maps/rec").value))
-        # WHO OWNS map -> odom (PEPIN_LOCALIZER, pepin.deployment.localizer; the launch passes
-        # the resolved word). Declared BEFORE the switches: rclpy runs their callback on
-        # declarations too and refuses a name outside the flags table (node_kit.Switches).
-        # Under "rtabmap" nothing publishes /tracker_pose, so the tape's `loc` records are read
-        # from TF instead; under "tracker" the tape is exactly what it has always been.
-        self._localizer = str(self.declare_parameter("localizer", DEFAULT_LOCALIZER).value)
         self._switches = Switches(self, FLAGS)
         self._recorder = RunRecorder(
             self,
             self._record_dir,
-            fusion_records=lambda: self._switches.on("fusion_records"),
             planner_records=lambda: self._switches.on("planner_records"),
-            no_tracker_pose=self._localizer != "tracker",
             loc_from=lambda: str(self._switches["loc_from"]),
         )
-        # The laptop's one way to restart the board's zenoh bridge without an ssh key
-        # (pepin_bringup.bridge_kick): this node hosts the handler because it is the only one
-        # of ours that runs on the board in every mode, and the handler is three lines and a
-        # file write.
-        self._kick = BridgeKick(self, enabled=lambda: self._switches.on("bridge_kick"))
         self._clip = CameraClip(self.get_logger())  # curl copying the head camera's stream
         latched = QoSProfile(
             depth=1,
@@ -587,14 +480,12 @@ class RunRecorderNode(Node):
         self.create_subscription(String, RUN_COMMAND_TOPIC, self._on_command, 10)
         self._say(RunStatus(IDLE))
         self.get_logger().info(
-            f"run recorder ready: tapes in {self._record_dir}; localizer {self._localizer}"
+            f"run recorder ready: tapes in {self._record_dir}"
             f" (loc from {self._loc_source_note()}); flags: {self._switches.state()}"
         )
 
     def _loc_source_note(self) -> str:
         """Which topic or edge writes the tape's `loc` rows right now, for the ready line."""
-        if self._localizer == "tracker":
-            return "/tracker_pose"
         if str(self._switches["loc_from"]) == POSE_TOPIC_SOURCE:
             return f"{POSE_TOPIC}, the goal server's read of map -> base_link"
         return "TF map -> base_link, this node's own listener"

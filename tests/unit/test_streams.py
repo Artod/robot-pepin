@@ -3,6 +3,8 @@
 import time
 from typing import Any
 
+import pytest
+
 from pepin.streams import JsonLinesClient
 
 
@@ -108,6 +110,7 @@ def test_server_inbox_broadcast_and_farewell_over_localhost() -> None:
     server.close()
 
 
+@pytest.mark.slow
 def test_the_farewell_follows_the_last_driver_not_the_last_client() -> None:
     """With driving commands named, a client that only asks is an observer: its leaving queues
     no farewell, and its staying does not hide the driver's departure."""

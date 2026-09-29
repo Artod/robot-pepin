@@ -151,11 +151,10 @@ def test_an_imu_reading_becomes_two_vectors() -> None:
     assert accel.tolist() == [0.1, 9.8, 0.2] and gyro.tolist() == [0.0, 0.0, 0.5]
 
 
-def test_a_world_slice_becomes_the_map_the_tracker_rebuilds_on() -> None:
-    """The whole point of the world map: the volume's lidar layer, packed as a nav_msgs map,
-    is exactly the grid the tracker builds from /map today — so the tracker needs no change
-    when the volume starts publishing it (pepin_bringup.relocalizer.grid_from_msg)."""
-    from pepin_bringup.relocalizer import grid_from_msg
+def test_a_world_slice_round_trips_through_a_nav_msgs_map() -> None:
+    """The volume's lidar layer, packed as a nav_msgs map and read back
+    (pepin_bringup.msgs.grid_from_msg), is the grid it was packed from."""
+    from pepin_bringup.msgs import grid_from_msg
 
     from pepin.tsdf import GridSpec
     from pepin.worldmap import PlanarMount, WorldMap

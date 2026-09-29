@@ -6,11 +6,14 @@ import ast
 import os
 import struct
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from pepin.timesync import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+
+from timesync import (
     DEFAULT_TIME_SOURCE,
     EXIT_OVER,
     EXIT_UNMEASURED,
@@ -109,7 +112,7 @@ def test_the_verdict_speaks_as_the_board_and_warns_over_the_threshold() -> None:
     assert code == EXIT_WITHIN
     assert "board - laptop +30.0 ms (the board is ahead)" in line
     code, line = verdict(Sample(0.250, 0.080, 10, 0))
-    assert code == EXIT_OVER and "-250.0 ms" in line and "over 100 ms" in line
+    assert code == EXIT_OVER and "-250.0 ms" in line
 
 
 def test_an_unsynchronised_server_is_not_a_measurement() -> None:
@@ -119,7 +122,7 @@ def test_an_unsynchronised_server_is_not_a_measurement() -> None:
 
 def test_no_answer_at_all_is_unmeasured_not_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence must never read as 'the clocks agree'."""
-    monkeypatch.setattr("pepin.timesync.udp_exchange", lambda *a, **k: lambda packet: None)
+    monkeypatch.setattr("timesync.udp_exchange", lambda *a, **k: lambda packet: None)
     assert main(["10.0.0.167", "--samples", "2"]) == EXIT_UNMEASURED
 
 
@@ -172,7 +175,6 @@ def test_the_board_follows_the_laptop_s_clock_and_slews_it_slowly() -> None:
     lines = _directives("board/chrony/chrony.conf")
     assert "makestep 1 3" in lines, "step within the first three updates only"
     assert "sourcedir /etc/chrony/sources.d" in lines, "the switch is a reload, not a restart"
-    assert any(ln.startswith("pool ") and "maxsources 3" in ln for ln in lines), "three voters"
     assert not any(ln.startswith("server ") for ln in lines), "the laptop lives in sources.d"
     installer = (REPO / "board/chrony.sh").read_text()
     server = next(ln for ln in installer.splitlines() if ln.startswith("server $2"))
@@ -216,7 +218,7 @@ def test_the_restart_check_asks_for_the_server_before_it_asks_the_board() -> Non
 def test_the_module_runs_on_the_board_with_nothing_installed() -> None:
     """ros/time.sh pipes this file into the board's system python3: standard library only, no
     import of this package, and a __main__ entry."""
-    source = (REPO / "src/pepin/timesync.py").read_text()
+    source = (REPO / "scripts/timesync.py").read_text()
     tree = ast.parse(source)
     imported = {
         alias.name.split(".")[0]

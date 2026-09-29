@@ -13,13 +13,12 @@ ticks the transform equals the static one, so flipping the switch moves nothing.
 
 Parameters: ``host``/``port`` (the base server, 127.0.0.1:3336), ``poll_hz`` (2 since
 2026-09-14), ``tf_hz`` (10), ``config`` (config/neck.json beside the library,
-pepin.deployment.config_file); the flags ``neck_tf`` and ``tf_republish`` (:data:`FLAGS`, live).
+pepin.deployment.config_file); the flag ``neck_tf`` (:data:`FLAGS`, live).
 
 The bus is polled at ``poll_hz`` and the edge is published at ``tf_hz``: a servo-bus read costs
 13.5 ms of an A53 core, and the head does not move while the cart drives, so the last measured
-edge is republished with a fresh stamp between polls (``tf_republish``). Consumers see the same
-dense TF stream they saw at 10 Hz polling; the bus sees a fifth of the reads. ``poll_hz:=10``
-with ``tf_republish`` off is exactly the old behaviour.
+edge is republished with a fresh stamp between polls. Consumers see the same dense TF stream they
+saw at 10 Hz polling; the bus sees a fifth of the reads.
 
 ``neck_tf`` defaults on because the model is checked against the hardware: the reference ticks
 in config/neck.json were read at the measured mount pose and both servo signs were verified by
@@ -76,22 +75,6 @@ FLAGS = FlagSet(
         off_when="when the laptop broadcasts the static edge instead (camera_stream's"
         " static_camera_tf), or when the neck bus is suspect and a frozen edge is better than a"
         " wrong one",
-    ),
-    Flag(
-        "tf_republish",
-        True,
-        description="base_link -> camera_link is republished at tf_hz between polls, carrying the"
-        " last measured angles with a fresh stamp; with it off the edge is published only when a"
-        " reading arrives, i.e. at poll_hz",
-        why="a servo-bus read costs 13.5 ms of a core and the node polled at 10 Hz for 11 % of an"
-        " A53 (top, 2026-09-14) to answer a question that does not change while the cart drives:"
-        " the head is still. Polling at 2 Hz and republishing at 10 Hz keeps the stream RTAB-Map"
-        " and the depth fusion look poses up in (a 2 Hz TF stream fails a lookup at a recent"
-        " stamp) and leaves four fifths of the reads unmade",
-        on_when="whenever the head is still or moves slowly: driving, mapping, everything but"
-        " a commanded sweep",
-        off_when="while the head is being swept and every degree must be measured rather than"
-        " held — then raise poll_hz to 10 in the same breath, which is the pre-2026-09-14 node",
     ),
 )
 
@@ -204,7 +187,7 @@ class NeckState(Node):
         """Republish the last measured edge with a fresh stamp, so the TF stream stays dense
         while the bus is polled slowly; silent for longer than ``_TF_HOLD_S`` of silence."""
         edge = self._last_edge
-        if edge is None or not self._switches.on("tf_republish"):
+        if edge is None:
             return
         if not self._switches.on("neck_tf"):
             return

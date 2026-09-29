@@ -1,7 +1,8 @@
 """Shared pytest configuration.
 
 Test tiers:
-- ``tests/unit``      pure logic, milliseconds, run by the pre-commit hook;
+- ``tests/unit``      pure logic, milliseconds (``slow`` marks the rest), run by the pre-push
+  hook with pytest-xdist and the coverage floor;
 - ``tests/hardware``  need the live robot (``pepin.local`` reachable); marked
   ``hardware`` and skipped unless ``--hardware`` is passed.
 """

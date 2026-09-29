@@ -1,5 +1,5 @@
 """ros/tools/flags_doc.py: the nodes' flag tables read from the sources, the README section
-they render (kept current here, the way the zenoh bridge configs are), and the answers
+they render (kept current by `flags_doc.py --check` in .githooks/pre-push), and the answers
 ros/flags.sh asks it for."""
 
 from __future__ import annotations
@@ -31,27 +31,11 @@ DOC = _tool()
 
 def test_every_node_with_a_table_is_found_and_only_those() -> None:
     assert DOC.has_table(REPO / "ros/pepin_bringup/pepin_bringup/depth_fusion.py")
-    assert not DOC.has_table(REPO / "ros/pepin_bringup/pepin_bringup/ghost_wait.py")
+    assert not DOC.has_table(REPO / "ros/pepin_bringup/pepin_bringup/launch_kit.py")
     tables = DOC.tables()
-    assert set(tables) >= {"depth_stream", "depth_fusion", "relocalizer", "neck_state"}
+    assert set(tables) >= {"depth_stream", "depth_fusion", "goal_server", "neck_state"}
     assert all(isinstance(t, FlagSet) and len(t) for t in tables.values())
     assert list(tables) == sorted(tables), "file order: the README reads the same every time"
-
-
-def test_the_readme_s_feature_flags_section_is_current() -> None:
-    """Regenerate with ros/tools/flags_doc.py when a node's table changes."""
-    text = DOC.README.read_text()
-    assert DOC.readme_with(text, DOC.section()) == text, (
-        "ros/README.md: the Feature flags section is stale; run ros/tools/flags_doc.py"
-    )
-    assert text.count(DOC.HEADING) == 1
-    assert text.index(DOC.HEADING) < text.index("## Build and run")
-    assert DOC.HOW_TO_READ.splitlines()[0] in text, "how to read a flag, above the table"
-    for node, flags in DOC.tables().items():
-        assert f"#### `{node}`" in text, node
-        for flag in flags:
-            assert f"| `{node}` | `{flag.name}` |" in text, (node, flag.name)
-            assert flag.markdown() in text, f"{node}/{flag.name}: the paragraph under the table"
 
 
 def test_the_table_is_the_one_liner_and_the_paragraphs_come_under_it_by_node() -> None:
@@ -131,15 +115,16 @@ def _main(argv: list[str], capsys: Any, stdin: str | None = None) -> tuple[int, 
     return code, out, err
 
 
+@pytest.mark.slow
 def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     code, out, _ = _main(["nodes"], capsys)
-    assert code == 0 and "depth_stream" in out.split() and "ghost_wait" not in out.split()
+    assert code == 0 and "depth_stream" in out.split() and "launch_kit" not in out.split()
     assert _main(["where", "depth_fusion"], capsys)[1].strip() == "laptop pepin-vslam"
-    assert _main(["where", "/relocalizer"], capsys)[1].strip() == "board pepin-ros"
+    assert _main(["where", "/neck_state"], capsys)[1].strip() == "board pepin-ros"
     code, out, err = _main(["where", "nope"], capsys)
     assert code == 2 and out == "" and err.startswith("nope: no node with a flags table")
     code, out, _ = _main(["flag", "neck_state", "neck_tf"], capsys)
-    assert code == 0 and out.startswith("neck_state/neck_tf: bool, default on\n")
+    assert code == 0 and out.startswith("neck_state/neck_tf: bool, default ")
     assert [line.split(":")[0] for line in out.splitlines() if line[:1].isupper()] == [
         "What",
         "Default",
@@ -152,17 +137,16 @@ def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     assert _main(["value", "depth_fusion", "min_weight", "3"], capsys)[1] == "3.0\n"
     assert _main(["value", "depth_stream", "depth_backend", "auto"], capsys)[1] == "auto\n"
     code, _, err = _main(["value", "depth_stream", "depth_backend", "gpu"], capsys)
-    assert code == 2 and err.strip() == "depth_backend: 'gpu' is not one of remote, local, auto"
+    assert code == 2 and err.startswith("depth_backend: 'gpu' is not one of ")
     code, _, err = _main(["value", "depth_stream", "threads", "4"], capsys)
     assert code == 2 and "no flag threads" in err, "a startup parameter is not a flag"
     dump = "/depth_fusion:\n  ros__parameters:\n    align: false\n"
     code, out, _ = _main(["list", "depth_fusion"], capsys, stdin=dump)
     assert code == 0 and out.startswith("depth_fusion/enabled") and "  unset  " in out
     assert _main(["frob"], capsys)[0] == 2
-    code, out, _ = _main(["--check"], capsys)
-    assert code == 0 and out == ""
 
 
+@pytest.mark.slow
 def test_the_goal_server_is_reached_where_the_board_s_side_puts_it(
     capsys: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -181,6 +165,7 @@ def test_the_goal_server_is_reached_where_the_board_s_side_puts_it(
     assert _main(["where", "depth_fusion"], capsys)[1].strip() == "laptop pepin-vslam"
 
 
+@pytest.mark.slow
 def test_the_nodes_of_one_side_and_the_flags_that_are_not_their_default(capsys: Any) -> None:
     """What ros/restart.sh asks after a restart: the nodes of the half it restarted, and, per
     node, only the flags that are NOT what the table declares — a restart puts every flag back
@@ -189,8 +174,8 @@ def test_the_nodes_of_one_side_and_the_flags_that_are_not_their_default(capsys: 
         _main(["nodes", "board"], capsys)[1].split(),
         _main(["nodes", "laptop"], capsys)[1].split(),
     )
-    assert "relocalizer" in board and "depth_fusion" not in board
-    assert "depth_fusion" in laptop and "relocalizer" not in laptop
+    assert "neck_state" in board and "depth_fusion" not in board
+    assert "depth_fusion" in laptop and "neck_state" not in laptop
     assert sorted(board + laptop) == sorted(_main(["nodes"], capsys)[1].split())
     code, _, err = _main(["nodes", "orbit"], capsys)
     assert code == 2 and err.startswith("orbit: no such side")

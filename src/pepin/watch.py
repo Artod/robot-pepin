@@ -142,7 +142,7 @@ BY_FIT = "fit"
 BY_TF = "tf"
 BY_PLACEMENT = "placement"
 
-# WHETHER RTAB-MAP'S POSE RESTS ON ANYTHING SINCE ITS START. Under PEPIN_LOCALIZER=rtabmap RTAB-Map
+# WHETHER RTAB-MAP'S POSE RESTS ON ANYTHING SINCE ITS START. RTAB-Map
 # owns map -> odom and publishes it from the moment it starts: the pose it SAVED at its last
 # shutdown, before it has recognised anything. That transform is milliseconds fresh and says
 # nothing about where the cart is — on 2026-09-23 it put the cart "at home" while it stood at the

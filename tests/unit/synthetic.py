@@ -4,6 +4,7 @@ import math
 
 import numpy as np
 
+from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.odometry import Pose2D
 
 ROOM_W, ROOM_H = 6.0, 4.0
@@ -36,3 +37,24 @@ def raycast_room(pose: Pose2D, beams: int = 180, pillar: Box | None = None) -> n
         r = min(ts)
         pts.append((r * math.cos(a - pose.theta), r * math.sin(a - pose.theta)))
     return np.array(pts)
+
+
+SPEC = GridSpec(0.05, -4, -3, 8, 6)
+MAPPING_POSES = (Pose2D(0, 0, 0), Pose2D(1, 0.5, 0.7), Pose2D(-1, -0.5, -2.0), Pose2D(0.5, -1, 2.5))
+PILLAR = (-2.0, 1.0, -1.6, 1.4)  # a box in one corner: the furnished room has no 180-degree twin
+
+
+def room_map() -> OccupancyGrid:
+    """The empty rectangle: identical to itself turned by 180 degrees."""
+    grid = OccupancyGrid(SPEC)
+    for pose in MAPPING_POSES:
+        grid.integrate(pose, raycast_room(pose))
+    return grid
+
+
+def furnished_room_map() -> OccupancyGrid:
+    """The rectangle with a box in one corner, so a scan fits exactly one place."""
+    grid = OccupancyGrid(SPEC)
+    for pose in MAPPING_POSES:
+        grid.integrate(pose, raycast_room(pose, pillar=PILLAR))
+    return grid

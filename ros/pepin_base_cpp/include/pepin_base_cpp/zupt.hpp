@@ -1,20 +1,17 @@
 // Copyright 2026 Artem Belousov. Licensed under the Apache License, Version 2.0.
 //
 // The zero-velocity update of a parked cart: when the bridge may tell the EKF that the cart is not
-// moving (/zupt, ekf.yaml's odom2), and how much that claim weighs — the C++ twin of pepin.zupt
-// (src/pepin/zupt.py). Same vetoes in the same order, same verdict words, same covariance.
+// moving (/zupt, ekf.yaml's odom2), and how much that claim weighs.
 //
 // WHY, MEASURED. Parked on its charger on 2026-09-24 the EKF's heading crept ~0.08 deg/min, about
 // 5 deg an hour, while its yaw-rate sources said over 120 s: the gyro after the bias tracker
 // -0.001 deg/min, the wheels 0, the camera's VO -0.57, rf2o +1.5
 // (scratch/link_autopsy/rest_yaw_sources.py). ekf.yaml already fused a zero-velocity update, but
-// its only publisher was the lidar tracker's slip watch, which does not start under
-// PEPIN_LOCALIZER=rtabmap.
+// its only publisher was the lidar tracker's slip watch, which did not run beside RTAB-Map.
 //
-// THE PYTHON SIDE IS THE REFERENCE. tests/unit/test_zupt.py pins the contract this file
-// reproduces (test_zupt_contract_the_cpp_bridge_mirrors is written for exactly that purpose);
-// test/zupt_contract.cpp replays the same table against this header and compiles with one c++
-// line, without ROS or ament. Anything changed here changes there first.
+// THE CONTRACT is test/zupt_contract.cpp: a table of rows replayed against this header, compiled
+// with one c++ line without ROS or ament, and run by tests/unit/test_base_cpp_contracts.py.
+// Anything changed here changes there in the same commit.
 
 #ifndef PEPIN_BASE_CPP__ZUPT_HPP_
 #define PEPIN_BASE_CPP__ZUPT_HPP_
@@ -72,7 +69,7 @@ struct ZuptRange
   double high;
 };
 
-// The sane range of each live setting — pepin.zupt.ZUPT_RANGES. The bridge refuses a value outside
+// The sane range of each live setting. The bridge refuses a value outside
 // it (and a NaN) with a logged warning and keeps the one in force. Ranges, not recommendations:
 //   zupt_rate_hz           1..100 Hz: under 1 Hz the filter coasts a second between updates; the
 //                          gyro that witnesses rest samples at 50 Hz, so past 100 nothing is new.
@@ -132,7 +129,7 @@ enum class ZuptVerdict
   kGyroTurning,  ///< the newest gyro sample, or one within the settle window, is a turn
 };
 
-/// The verdict in the words the report line prints — pepin.zupt.ZuptVerdict's values.
+/// The verdict in the words the report line prints.
 inline const char * describe(ZuptVerdict verdict)
 {
   switch (verdict) {

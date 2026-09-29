@@ -3,10 +3,10 @@
 
 Panels: the lidar scan around the robot (optionally over a saved map), the
 overview camera, ToF ranges and lidar rate over time, board vitals, and a
-text log. Read-only — it never commands the servo bus. It can run next to
-drive.py or navigate.py: when a drive already holds the lidar bridge the
-dashboard leaves it alone (ser2net would otherwise hand the lidar to the
-newcomer and blind the driver) and shows camera, ToF and vitals only.
+text log. Read-only — it never commands the servo bus. When another client
+already holds the lidar bridge the dashboard leaves it alone (ser2net would
+otherwise hand the lidar to the newcomer and blind the first one) and shows
+camera, ToF and vitals only.
 Battery voltage and heading have no sensor yet and are shown as such.
 
 Usage:

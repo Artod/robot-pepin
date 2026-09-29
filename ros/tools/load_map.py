@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Swap the map under a running Nav2 without restarting anything.
 
-Calls map_server's LoadMap service; AMCL, both costmaps' static layers and the
-relocalizer all subscribe to /map and pick the new one up. The frame stays the
-same (all our maps start at the base), so the pose estimate carries over and
-the relocalizer re-checks the fit on its next tick.
+Calls map_server's LoadMap service; both costmaps' static layers subscribe to /map and
+pick the new one up. The frame stays the same (all our maps start at the base).
 
     python3 /tools/load_map.py /maps/flat3.yaml
 """

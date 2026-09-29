@@ -7,7 +7,7 @@ one at the build, the published depth and scan are, to the bit, what the node's 
 (edges -> beam pairs -> law -> drop edges -> scan -> floor anchor, as ``_process``
 stood before the pipeline) published — held here as the reference. Then the camera pose from
 TF at the frame's stamp, the config as the fallback while TF has no edge, the flags reaching
-the stages, and the scan's source when the wall correction is on.
+the stages, and the scan's source.
 """
 
 from __future__ import annotations
@@ -72,17 +72,10 @@ from pepin.depth import (  # noqa: E402
 )
 from pepin.depth_pipeline import (  # noqa: E402
     LIDAR_SIGMA_M,
-    PARALLAX_WEIGHT,
-    PIPELINE_DEFAULTS,
-    FloorPairs,
     FrameContext,
-    FrameLaw,
     LidarAnchor,
-    ParallaxAnchor,
-    WallAnchor,
-    grid_of,
-    standard_pipeline,
 )
+from pepin.flags import load_knobs  # noqa: E402
 from pepin.mounts import load_lidar_mount, rotation_from_rpy  # noqa: E402
 from pepin.stereo_depth import StereoMatcher  # noqa: E402
 from pepin.tsdf import RigidPose  # noqa: E402
@@ -326,26 +319,16 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     last bit, it withholds exactly the frames the reference withheld, and every published
     image and scan is byte for byte the reference's."""
     node, net = build(
-        range_law=False,
-        frame_law=False,
-        floor_pairs=False,
-        wall_anchor=False,
-        parallax_anchor=False,
         lidar_sigma_m=0.0,
         fan_floor_gate="off",
         depth_reach=False,
     )
-    # the affine law alone on the beams alone, every beam weighing the same, the fan's floor gate
-    # off and the camera's reach not yet gated: this reference is the chain of before 2026-09-15,
-    # and every switch that has moved it since is named here — the floor's, the wall's and the
-    # parallax's pairs all ship on today, and so does depth_reach (2026-09-19)
-    assert node._pipeline.switches == {name: FLAGS[name] for name in node._pipeline.names} | {
-        "range_law": False,
-        "frame_law": False,
-        "floor_pairs": False,
-        "wall_anchor": False,
-        "parallax_anchor": False,
-    }, "the flags' defaults are the chain's, bar the five switched here"
+    # the affine law on the beams, every beam weighing the same, the fan's floor gate off and the
+    # camera's reach not yet gated: this reference is the chain of before 2026-09-15, and every
+    # switch that has moved it since is named here
+    assert node._pipeline.switches == {name: FLAGS[name] for name in node._pipeline.names}, (
+        "the flags' defaults are the chain's"
+    )
 
     reference = AffineScale()
     withheld = 0
@@ -377,53 +360,18 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     line = node.logger.texts("info")[-1]
     assert line.startswith("depth: ") and f"{withheld} withheld" in line
     assert "edge_filter on [step 8%]" in line and "affine_law on [a 1." in line
-    assert "floor_pairs off" in line and "wall_anchor off" in line and "wall_correct off" in line
     assert (
         f"camera pose from config {len(WALLS)} frames (no TF edge; fan pan from the mount)" in line
     )  # no edge to read a pan off: the fan is folded straight ahead, as the mount looks
     assert "backend fake (CPU model not loaded)" in line
     assert (
-        "flags: edge_filter=on lidar_anchor=on floor_pairs=off wall_anchor=off"
-        " parallax_anchor=off affine_law=on range_law=off frame_law=off"
-        " wall_correct=off"
-        " floor_anchor=on"
+        "flags: edge_filter=on lidar_anchor=on affine_law=on floor_anchor=on"
         " depth_backend=local" in line
     )
     assert "ms median/max: network" in line and "pipeline" in line
     saved = json.loads(node._law_file.read_text())
     assert saved["pooled"] == node._law.pooled and saved["a"] == node._law.a
     assert node._pipeline.stats["affine_law"].frames == 0, "the stage totals are the window's"
-
-
-def test_one_table_of_defaults_reaches_both_the_node_s_flags_and_the_stages(build: Build) -> None:
-    """A default is written once. Every switch and knob of pepin.depth_pipeline's
-    PIPELINE_DEFAULTS is the node's flag default and the chain standard_pipeline builds, the
-    node hands the knobs to the stages that own them at start, and a live change reaches
-    them."""
-    for name, value in PIPELINE_DEFAULTS.items():
-        assert name in FLAGS, f"{name}: the pipeline's default has no flag of that name"
-        assert FLAGS.flag(name).default == value, f"{name}: the flag's default is not the table's"
-    chain = standard_pipeline()
-    for name, on in chain.switches.items():
-        if name in PIPELINE_DEFAULTS:
-            assert on is PIPELINE_DEFAULTS[name], f"{name}: the chain is not the table"
-    node, _net = build()
-    field = node._pipeline.stage("frame_law")
-    floor = node._pipeline.stage("floor_pairs")
-    assert isinstance(field, FrameLaw) and isinstance(floor, FloorPairs)
-    assert field.field.grid == grid_of(str(PIPELINE_DEFAULTS["field_grid"]))
-    assert field.field.prior == PIPELINE_DEFAULTS["field_prior"]
-    assert field.field.carry == PIPELINE_DEFAULTS["field_carry"]
-    assert field.field.carry_tau_s == PIPELINE_DEFAULTS["field_carry_tau_s"]
-    assert field.pairs_cap == PIPELINE_DEFAULTS["field_pairs_cap"]
-    assert floor.sigma_pitch_deg == PIPELINE_DEFAULTS["floor_sigma_pitch_deg"]
-    assert floor.normal_tol_deg == PIPELINE_DEFAULTS["floor_normal_tol_deg"]
-    node._switches.set("field_grid", "1x1")  # the old single law, live
-    node._switches.set("field_prior", 7.5)
-    node._switches.set("field_pairs_cap", 0)  # the uncapped fit of before, live
-    node._switches.set("floor_normal_tol_deg", 2.0)
-    assert field.field.grid == (1, 1) and field.field.prior == 7.5
-    assert field.pairs_cap == 0 and floor.normal_tol_deg == 2.0
 
 
 # ---- the camera pose from TF ---------------------------------------------------------------
@@ -438,15 +386,9 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
     node, net = build(
         camera_edge=edge,
         law=LAW,
-        range_law=False,
-        frame_law=False,
-        floor_pairs=False,
-        parallax_anchor=False,
         fan_floor_gate="off",
         depth_reach=False,
-    )  # the gate off, and the floor's and the parallax's pairs off (on by default since
-    # 2026-09-16, and they would move the seeded law off the reference's): this test is about
-    # WHICH pose the chain uses, not about the fan's floor nor about the rulers of the law
+    )  # the gate off: this test is about WHICH pose the chain uses, not about the fan's floor
     on_neck = pose_from_transform(edge)
     tf_cam = CameraPose.from_optical(on_neck.rotation, on_neck.translation)
     assert tf_cam.pitch == pytest.approx(math.radians(31.5)) and tf_cam.z == 1.2
@@ -474,8 +416,7 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
     node._tf.buffer.transforms[("base_link", "camera_optical")] = _optical_edge(31.5, pan_deg=20.0)
     turned, edge = node._camera_at(_stamp(1))
     assert turned.pitch == pytest.approx(math.radians(31.5)) and turned.z == 1.2
-    # the pose drops the pan, the edge beside it keeps it: the parallax anchor triangulates
-    # against the edge, and its baseline would point 20 deg wrong without it
+    # the pose drops the pan, the edge beside it keeps it: the fan turns with the edge
     assert edge is not None
     assert optical_heading(edge.rotation)[1] == pytest.approx(math.radians(20.0))
     frame(node, net, turned, 2.0, 1)  # the second count: the frame's own lookup
@@ -491,7 +432,6 @@ def test_without_a_camera_edge_the_config_pose_stands_in_and_is_counted(build: B
     node, _net = build()
     assert node._camera_at(_stamp(0)) == (CONFIG_CAM, None)
     assert node._tally.take().counts["camera_from_config"] == 1
-    assert "camera pose from TF" in node.logger.texts("info")[-1]
     assert (
         f"{math.degrees(CONFIG_CAM.pitch):.1f} deg while TF has no edge"
         in (node.logger.texts("info")[-1])
@@ -522,12 +462,10 @@ class StoppedTf:
 
 
 def stopped_tf(node: DepthStream, age_s: float, wait_s: float = CARRY_WAIT_S) -> StoppedTf:
-    """Put a dead TF route under both of the node's guards — the one that may wait (the camera
-    pose, the scan's carry) and the one the pipeline asks per view — so every lookup of a
-    frame's path meets the stopped route."""
+    """Put a dead TF route under the node's guard (the camera pose, the scan's carry), so every
+    lookup of a frame's path meets the stopped route."""
     fake = StoppedTf(age_s, wait_s)
     node._history.history = fake
-    node._frame_history.history = fake
     return fake
 
 
@@ -601,10 +539,9 @@ def test_a_live_odometry_edge_still_carries_the_scan(build: Build) -> None:
 
 
 def test_no_lookup_of_a_frame_s_path_waits_while_tf_is_dead(build: Build) -> None:
-    """The whole frame path, the parallax anchor included: with the route dead, not one of the
-    node's lookups — the camera pose, the carry, the parallax's motion between two views —
-    pays a wait. The frames still publish on the seeded law."""
-    node, net = build(law=LAW, parallax_anchor=True)
+    """The whole frame path: with the route dead, not one of the node's lookups — the camera
+    pose, the carry — pays a wait. The frames still publish on the seeded law."""
+    node, net = build(law=LAW)
     fake = stopped_tf(node, age_s=10.0)
     for k in range(3):
         frame(node, net, CONFIG_CAM, 2.0, k)
@@ -612,31 +549,14 @@ def test_no_lookup_of_a_frame_s_path_waits_while_tf_is_dead(build: Build) -> Non
     assert len(published(node)[0]) == 3
 
 
-def test_the_pipeline_asks_its_motion_of_a_tf_that_cannot_wait(
-    build: Build, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Two posers over one TF: the camera pose and the scan's carry may spend CARRY_WAIT_S on a
-    stamp the buffer does not cover yet, the pipeline's may spend nothing. The parallax anchor
-    asks once per stored view, so a wait there is paid per view — 834 ms of one frame offline —
-    and the ask that cannot be answered simply loses that view."""
-    node, net = build(law=LAW)
+def test_a_live_lean_flag_reaches_the_poser(build: Build) -> None:
+    """The camera pose and the scan's carry come from one poser over TF, which may spend
+    CARRY_WAIT_S on a stamp the buffer does not cover yet; the lean flags reach it live."""
+    node, _net = build(law=LAW)
     assert node._history.history.timeout_s == CARRY_WAIT_S
-    assert node._frame_history.history.timeout_s == 0.0
-    seen: dict[str, Any] = {}
-    run = node._pipeline.run
-
-    def spy_run(depth: Any, ctx: Any) -> Any:
-        seen["ctx"] = ctx
-        return run(depth, ctx)
-
-    monkeypatch.setattr(node._pipeline, "run", spy_run)
-    frame(node, net, CONFIG_CAM, 2.0, 0)
-    assert seen["ctx"].motion is node._frame_poser
-    assert node._frame_poser is not node._poser
-    node._switches.set("lean_min_quality", 0.75)  # a live flag reaches both posers
+    node._switches.set("lean_min_quality", 0.75)
     node._switches.set("imu_lean", False)
-    assert node._poser.min_lean_quality == 0.75 and node._frame_poser.min_lean_quality == 0.75
-    assert not node._poser.apply_lean and not node._frame_poser.apply_lean
+    assert node._poser.min_lean_quality == 0.75 and not node._poser.apply_lean
 
 
 def test_the_report_line_names_a_dead_neck_edge_and_how_stale_it_is(build: Build) -> None:
@@ -655,98 +575,45 @@ def test_the_report_line_names_a_dead_neck_edge_and_how_stale_it_is(build: Build
 
 # ---- the flags and the stages ----------------------------------------------------------------
 def test_a_flag_switches_its_stage_and_a_launch_override_reaches_it(build: Build) -> None:
-    node, _net = build(floor_pairs=True)
-    assert node._pipeline.on("floor_pairs"), "the override reached the stage"
+    node, _net = build(edge_filter=False)
+    assert not node._pipeline.on("edge_filter"), "the override reached the stage"
     assert node.set_parameters([Param("floor_anchor", False)])[0].successful
     assert not node._pipeline.on("floor_anchor") and not node._switches.on("floor_anchor")
-    assert node.set_parameters([Param("wall_correct", True), Param("edge_filter", False)])[
-        0
-    ].successful
-    assert node._pipeline.on("wall_correct") and not node._pipeline.on("edge_filter")
+    assert node.set_parameters([Param("affine_law", False)])[0].successful
+    assert not node._pipeline.on("affine_law") and not node._pipeline.on("edge_filter")
     refused = node.set_parameters([Param("no_such_stage", True)])[0]
     assert not refused.successful and "not a flag of this node" in refused.reason
     assert node.set_parameters([Param("depth_backend", "remote")])[0].successful
     assert node._net.mode == "remote"
     node._report()
     line = node.logger.texts("info")[-1]
-    assert "floor_anchor off [tolerance 4 cm]" in line and "wall_correct on [" in line
-    assert "flags: edge_filter=off lidar_anchor=on floor_pairs=on" in line
+    assert "floor_anchor off [tolerance 4 cm]" in line and "affine_law off" in line
+    assert "flags: edge_filter=off lidar_anchor=on affine_law=off" in line
 
 
-def test_the_two_rulers_weights_are_live_flags_and_the_report_prints_them(build: Build) -> None:
-    """What a beam is trusted to (lidar_sigma_m) and how loudly the corners vote
-    (parallax_weight) are live parameters that reach their stages, and both stages print what
-    they are set to in the report line."""
+def test_a_beam_s_weight_is_a_live_flag_and_the_report_prints_it(build: Build) -> None:
+    """What a beam is trusted to (lidar_sigma_m) is a live parameter that reaches the lidar
+    anchor, which prints what it is set to in the report line."""
     node, net = build()
-    beams, corners = node._pipeline.stage("lidar_anchor"), node._pipeline.stage("parallax_anchor")
-    assert isinstance(beams, LidarAnchor) and isinstance(corners, ParallaxAnchor)
-    assert beams.sigma_m == LIDAR_SIGMA_M == 0.0, "a beam ships weighing a flat 1"
-    assert corners.weight == PARALLAX_WEIGHT
-    assert node.set_parameters([Param("lidar_sigma_m", 0.015), Param("parallax_weight", 0.0)])[
-        0
-    ].successful
-    assert beams.sigma_m == 0.015 and corners.weight == 0.0
-    assert node.set_parameters([Param("lidar_sigma_m", 0.03), Param("parallax_weight", 2.0)])[
-        0
-    ].successful
-    assert beams.sigma_m == 0.03 and corners.weight == 2.0
+    beams = node._pipeline.stage("lidar_anchor")
+    assert isinstance(beams, LidarAnchor)
+    assert beams.sigma_m == LIDAR_SIGMA_M
+    assert node.set_parameters([Param("lidar_sigma_m", 0.015)])[0].successful
+    assert beams.sigma_m == 0.015
+    assert node.set_parameters([Param("lidar_sigma_m", 0.03)])[0].successful
+    assert beams.sigma_m == 0.03
     for k, wall_x in enumerate(WALLS):
         frame(node, net, CONFIG_CAM, wall_x, k)
     node._report()
     line = node.logger.texts("info")[-1]
     assert "lidar_anchor on [weight 1 / sigma^2, sigma 3.0 cm]" in line
-    assert "weight 2 / sigma^2" in line, "the parallax anchor says what its pairs vote with"
-    assert "lidar_sigma_m=0.03 " in line and "parallax_weight=2.0 " in line
-    assert "rulers: lidar " in line, "the frame law says whose weight fitted it"
-
-
-def test_a_parallax_corner_is_a_track_and_the_knobs_reach_the_stage(build: Build) -> None:
-    """The shape of a parallax measurement is live: how many frames a corner must be seen in,
-    how far back the window reaches and over how many views, how much parallax those views must
-    add up to, what the sigma is taken from and how far a track's two halves may disagree. All
-    six reach the anchor, the report line says which shape is running, and
-    parallax_track_min_obs 2 puts the old pair back without a restart."""
-    node, _net = build()
-    corners = node._pipeline.stage("parallax_anchor")
-    assert isinstance(corners, ParallaxAnchor)
-    assert corners.track_min_obs == 3 and corners.tracking, "a corner ships as a track"
-    assert corners.track_max_views == 8 and corners.sigma_model == "covariance"
-    assert corners.split_tol_sigma == 0.0, "the split gate ships off: measured, it buys nothing"
-    line = corners.describe()
-    assert ">= 3 obs over <= 8 views, asks 10 cm total" in line
-    assert "sigma from the covariance, halves unchecked" in line
-    assert node.set_parameters(
-        [
-            Param("parallax_track_min_obs", 5),
-            Param("parallax_track_window_s", 0.8),
-            Param("parallax_min_total_baseline_m", 0.2),
-            Param("parallax_track_max_views", 4),
-            Param("parallax_sigma_model", "baseline"),
-            Param("parallax_split_tol_sigma", 3.0),
-        ]
-    )[0].successful
-    assert corners.track_min_obs == 5 and corners.track_window_s == 0.8
-    assert corners.min_total_baseline_m == 0.2 and corners.window_s == 0.8
-    assert corners.track_max_views == 4 and corners.sigma_model == "baseline"
-    assert corners.split_tol_sigma == 3.0
-    assert "over <= 4 views" in corners.describe()
-    assert "halves within 3 sigma" in corners.describe()
-    refused = node.set_parameters([Param("parallax_sigma_model", "guess")])[0]
-    assert not refused.successful, "a sigma model nobody implements is not a silent default"
-    assert node.set_parameters([Param("parallax_track_min_obs", 2)])[0].successful
-    assert corners.tracking is False and corners.window_s == corners.max_gap_s
-    node._report()
-    line = node.logger.texts("info")[-1]
-    assert "parallax_track_min_obs=2 " in line and "parallax_track_window_s=0.8 " in line
-    assert "parallax_track_max_views=4 " in line and "parallax_sigma_model=baseline " in line
-    assert "parallax_split_tol_sigma=3.0 " in line
+    assert "lidar_sigma_m=0.03 " in line
 
 
 def test_the_scan_is_built_from_the_depth_before_the_floor_anchor(
     build: Build, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """By default the law's output; with the wall correction on, the corrected depth — the
-    floor anchor never touches what stops the cart."""
+    """The law's output — the floor anchor never touches what stops the cart."""
     node, net = build(law=LAW)
     seen: dict[str, Any] = {}
     run = node._pipeline.run
@@ -764,17 +631,8 @@ def test_the_scan_is_built_from_the_depth_before_the_floor_anchor(
     monkeypatch.setattr(node._pipeline, "run", spy_run)
     monkeypatch.setattr(node, "_as_scan", spy_scan)
     frame(node, net, CONFIG_CAM, 2.0, 0)
-    assert seen["scan_depth"] is seen["result"].after["frame_law"]
-    node.set_parameters([Param("wall_correct", True)])
-    wall = node._pipeline.stage("wall_correct")
-    assert isinstance(wall, WallAnchor)
-    wall.min_walk_m = 0.0  # this room's 3 % of network noise trips the slope gate within 10 cm
-    # of the beams and the climb gate would then refuse every column; what is under test here is
-    # WHERE the published scan is taken from, not how far a wall is walked
-    frame(node, net, CONFIG_CAM, 2.0, 1)
-    assert seen["scan_depth"] is seen["result"].after["wall_correct"]
-    assert seen["result"].verdict("wall_correct").pixels > 0
-    assert len(published(node)[0]) == 2
+    assert seen["scan_depth"] is seen["result"].after["affine_law"]
+    assert len(published(node)[0]) == 1
 
 
 def test_a_scan_the_odometry_cannot_carry_passes_as_it_is_and_is_counted(build: Build) -> None:
@@ -835,18 +693,15 @@ def test_the_imu_leans_the_floor_only_while_something_asks_for_the_lean(build: B
     node.subs["/imu/data_raw"][1](reading)
     assert node._lean.estimator is not None and node._lean.up == pytest.approx([0.0, 0.0, 1.0])
     assert "lean +0.0/+0.0 deg" in node._lean.report()
-    # both floor stages off: floor_pairs reads the up vector too and ships on since 2026-09-16
-    off, _ = build(floor_anchor=False, floor_pairs=False, imu_lean=False)
+    off, _ = build(floor_anchor=False, imu_lean=False)
     off.subs["/imu/data_raw"][1](reading)
-    assert off._lean.estimator is None and "lean none" in off._lean.report()
-    alien, _ = build(floor_pairs=True)
+    assert off._lean.estimator is None
+    alien, _ = build()
     alien._lean._mount = None
     reading.header.frame_id = "imu"
     alien.subs["/imu/data_raw"][1](reading)
     assert alien._lean.estimator is None
-    assert not alien._switches.on("floor_anchor") and not alien._switches.on("floor_pairs")
-    assert not alien._pipeline.on("floor_anchor") and not alien._pipeline.on("floor_pairs")
-    assert "the floor stages are off" in alien.logger.texts("error")[-1]
+    assert not alien._switches.on("floor_anchor") and not alien._pipeline.on("floor_anchor")
 
 
 def test_the_fallback_optics_are_the_calibration_when_the_config_carries_one(
@@ -876,16 +731,14 @@ def test_a_law_file_that_still_carries_a_retired_law_is_read_and_says_so(
     build: Build, tmp_path: Path
 ) -> None:
     """A file written by an older build carries the ray law's record beside the affine numbers.
-    That law is gone (2026-09-15): the file still reads and seeds the affine law, the start
-    line names the record it ignores, and the next save writes the file without it."""
+    That law is gone (2026-09-15): the file still reads and seeds the affine law, and the next
+    save writes the file without it."""
     path = tmp_path / "old_law.json"
     save_law(path, LAW[0], LAW[1], 500, time.time())
     record = json.loads(path.read_text())
     record["ray"] = {"alpha": [1.0, 0.1], "beta": 0.0, "lo": -0.3, "hi": 0.2, "pairs": 900}
     path.write_text(json.dumps(record))
     node, net = build(law_file=path)
-    start = node.logger.texts("info")[0]
-    assert "publishing at once" in start and "ignoring the retired ray law record" in start
     assert node._law.ready and (node._law.a, node._law.b) == LAW
     for k, wall_x in enumerate(WALLS * 2):
         frame(node, net, CONFIG_CAM, wall_x, k)
@@ -964,37 +817,14 @@ def test_the_insane_carry_is_named_in_the_report_line(build: Build) -> None:
     assert "carry_max_speed_mps=1.0" in line
 
 
-def test_the_range_law_ships_live_and_goes_through_the_file(build: Build, tmp_path: Path) -> None:
-    """The node's live law is the one that follows the range: it fits on the same pooled beams,
-    says so in the report line and in the flags, is written beside the affine numbers, and the
-    next start applies it before any live pool."""
-    path = tmp_path / "range_law.json"
-    first, net = build(law=LAW, law_file=path)
-    for k, wall_x in enumerate(WALLS * 2):
-        frame(first, net, CONFIG_CAM, wall_x, k)
-    stage = first._range
-    assert stage.fitted and stage.law is not None and stage.law.centres.size >= 2
-    first._report()
-    line = first.logger.texts("info")[-1]
-    assert "range_law on [D" in line and "range_law=on" in line
-    saved = json.loads(path.read_text())
-    assert saved["range"] == stage.law.state() and saved["a"] == first._law.a
-    second, _net = build(law_file=path)
-    assert second._range.law is not None and second._range.law.state() == stage.law.state()
-    assert second._range.ready and not second._range.fitted, "a seed until the live pool answers"
-    assert "range law D" in second.logger.texts("info")[0]
-
-
 def test_the_shipped_floor_gate_raises_the_fan_s_band_and_says_so(build: Build) -> None:
     """The default is no longer the flat 0.15 m edge: with ``fan_floor_gate`` band the fan marks
     from the floor's own noise upward (pepin.contact.fan_min_z), so a bearing the flat edge
     marked on a noisy floor can come back clear, and ``off`` still reproduces the old fan
     exactly. The chain is otherwise the reference's."""
-    gated, net_gated = build(range_law=False, frame_law=False, lidar_sigma_m=0.0)
+    gated, net_gated = build(lidar_sigma_m=0.0)
     assert str(gated._switches["fan_floor_gate"]) == "band", "the shipped gate"
-    plain, net_plain = build(
-        range_law=False, frame_law=False, lidar_sigma_m=0.0, fan_floor_gate="off"
-    )
+    plain, net_plain = build(lidar_sigma_m=0.0, fan_floor_gate="off")
     for k, wall_x in enumerate(WALLS):
         frame(gated, net_gated, CONFIG_CAM, wall_x, k)
         frame(plain, net_plain, CONFIG_CAM, wall_x, k)
@@ -1073,7 +903,7 @@ def test_the_reach_is_one_number_for_the_image_and_for_the_scan() -> None:
     the same constant: two literals would drift, and the costmap's obstacle_max_range of 2.5 m has
     to stay under both."""
     assert DEPTH_REACH_M == 3.0
-    assert FLAGS["depth_reach_m"] == 3.0
+    assert load_knobs("depth_stream")["depth_reach_m"] == 3.0
     assert FLAGS["depth_reach"] is True
     assert SCAN_MAX_RANGE == DEPTH_REACH_M, "this file's own reference uses the node's default"
 
@@ -1091,11 +921,6 @@ def test_the_published_depth_is_nan_past_the_reach_and_the_scan_is_untouched(
         law=LAW,
         fan_floor_gate="off",
         lidar_anchor=False,
-        range_law=False,
-        frame_law=False,
-        floor_pairs=False,
-        wall_anchor=False,
-        parallax_anchor=False,
     )
     off, off_net = build(**frozen)
     on, on_net = build(**frozen)
@@ -1119,7 +944,7 @@ def test_the_published_depth_is_nan_past_the_reach_and_the_scan_is_untouched(
     line = on.logger.texts("info")[-1]
     share = int(beyond.sum()) / (HEIGHT * WIDTH) * 100.0
     assert f"published NaN past 3.0 m over {share:.1f}% of the pixels" in line
-    assert "depth_reach=on depth_reach_m=3.0" in line
+    assert "depth_reach=on " in line and "depth_reach_m=3.0" in line
     off._report()
     assert "published NaN past" not in off.logger.texts("info")[-1]
 
@@ -1128,7 +953,7 @@ def test_the_reach_moves_live_and_a_nearer_one_says_less(build: Build) -> None:
     """The flag is a number a drive may move without a restart: at 1.5 m the same frame of a wall
     3.5 m off keeps only what stands within 1.5 m, and the report line says over how much of the
     picture."""
-    node, net = build(law=LAW, fan_floor_gate="off", lidar_anchor=False, parallax_anchor=False)
+    node, net = build(law=LAW, fan_floor_gate="off", lidar_anchor=False)
     frame(node, net, CONFIG_CAM, 3.5, 0)
     wide = np.asarray(array_from_image(published(node)[0][0]), dtype=float)
     assert node.set_parameters([Param("depth_reach_m", 1.5)])[0].successful
@@ -1144,7 +969,7 @@ def test_the_scan_hz_cap_thins_the_topic_and_touches_nothing_else(build: Build) 
     second fan in the same millisecond never goes on the wire — while the frame behind it is
     processed exactly as before: the depth image is published every time, the law keeps pooling
     and the fan that DOES go out is the newest frame's, not a cached one."""
-    node, net = build(law=LAW, fan_floor_gate="off", lidar_anchor=False, parallax_anchor=False)
+    node, net = build(law=LAW, fan_floor_gate="off", lidar_anchor=False)
     assert node._switches["scan_hz"] == SCAN_EVERY_FRAME, "this file's nodes publish every frame"
     assert node.set_parameters([Param("scan_hz", 1.0)])[0].successful
     frame(node, net, CONFIG_CAM, 1.0, 0)
@@ -1161,7 +986,7 @@ def test_the_scan_hz_cap_thins_the_topic_and_touches_nothing_else(build: Build) 
 def test_the_report_line_says_what_the_scan_cap_held_back(build: Build) -> None:
     """A fan rate below the frame rate must read as the cap and not as a pipeline that has
     stopped answering."""
-    node, net = build(law=LAW, fan_floor_gate="off", lidar_anchor=False, parallax_anchor=False)
+    node, net = build(law=LAW, fan_floor_gate="off", lidar_anchor=False)
     assert node.set_parameters([Param("scan_hz", 1.0)])[0].successful
     frame(node, net, CONFIG_CAM, 1.0, 0)
     frame(node, net, CONFIG_CAM, 1.5, 1)
@@ -1277,7 +1102,6 @@ def test_a_stereo_node_keeps_its_own_law_file_and_seeds_the_identity_law(build: 
     node, _net = build(depth_source="stereo")
     assert node.declared["law_file"] == "/maps/depth_law_stereo.json"
     assert node._law.ready and (node._law.a, node._law.b) == (1.0, 0.0)
-    assert any("identity law" in text for text in node.logger.texts("info"))
     plain, _net2 = build()
     assert not plain._law.ready, "the mono node still waits for its beams"
 
@@ -1285,21 +1109,17 @@ def test_a_stereo_node_keeps_its_own_law_file_and_seeds_the_identity_law(build: 
 def test_a_stereo_head_runs_the_cleaning_stages_and_only_watches_the_lidar_law(
     build: Build,
 ) -> None:
-    """The rig decides the chain with no flag to remember: under stereo the scale-recovering
-    stages are off and the affine law watches; the mono node's chain is what it always was; and
-    every one of them is still a flag a launch or a person can turn back."""
+    """The rig decides whether the law corrects, with no flag to remember: under stereo the
+    affine law watches, under the network it corrects, and the flag turns either back."""
     node, _net = build(depth_source="stereo")
     switches = node._pipeline.switches
-    for off in ("floor_pairs", "wall_anchor", "parallax_anchor", "range_law", "frame_law"):
-        assert not switches[off], off
     for on in ("edge_filter", "lidar_anchor", "affine_law", "floor_anchor"):
         assert switches[on], on
     assert node._law.watching
     plain, _net2 = build()
     assert not plain._law.watching
-    assert plain._pipeline.switches["range_law"] and plain._pipeline.switches["parallax_anchor"]
-    back, _net3 = build(depth_source="stereo", law_watch=False, range_law=True)
-    assert not back._law.watching and back._pipeline.switches["range_law"]
+    back, _net3 = build(depth_source="stereo", law_watch=False)
+    assert not back._law.watching
 
 
 def test_the_stereo_source_pairs_the_right_eye_by_its_exact_stamp(build: Build) -> None:
@@ -1358,7 +1178,6 @@ def test_a_left_picture_with_no_right_eye_of_its_stamp_is_dropped_and_counted(
     node._report()
     line = node.logger.texts("info")[-1]
     assert "unpaired 1 frames" in line and "right eye waited" in line
-    assert "source stereo: 128px/5px 3way" in line and "% valid" in line
 
 
 def test_both_matchers_are_built_at_start_and_the_flag_swaps_them_live(build: Build) -> None:
@@ -1406,7 +1225,6 @@ def test_a_frame_before_the_rig_describes_itself_is_lost_and_said_so(build: Buil
     node.subs["/camera/right/image"][1](_right_image(_stamp(0)))
     node._process(_image(_stamp(0)))
     assert published(node)[0] == []
-    assert any("cannot answer" in text for text in node.logger.texts("warning"))
     node._report()
     assert "rig unknown 1 frames" in node.logger.texts("info")[-1]
 

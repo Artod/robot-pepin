@@ -5,7 +5,7 @@ Runs inside the container (rclpy + nav2_simple_commander):
 
     goto_ros.py X Y [YAW_DEG]     drive to map coordinates and print feedback until done
     goto_ros.py home              drive to the map origin, facing +x (the marked start spot)
-    goto_ros.py seed X Y [YAW]    tell the localiser (tracker or RTAB-Map) where the robot stands
+    goto_ros.py seed X Y [YAW]    tell RTAB-Map where the robot stands
     goto_ros.py cancel            cancel the current navigation task
     goto_ros.py mark NAME         remember where the robot stands now as place NAME
     goto_ros.py NAME              drive to a remembered place
@@ -29,14 +29,9 @@ A goal pose published once on /goal_pose can be lost to discovery timing and giv
 no feedback; the action client here waits for Nav2, watches the task and prints
 distance remaining, recoveries and the final result.
 
-Before any goal is sent, three checks are printed, one line each, and any failure refuses the
-drive with the reading behind it (:class:`pepin.watch.Preflight`): has any source spoken to the
-tracker at all, is the pose sure enough to drive on (the fusion's own sigma —
-/localization/sigma — not the lidar's fit, which is 0.00 on a camera-only drive), and, where no
-lidar is holding the pose, does RTAB-Map's graph recognise the room and agree with the tracker
-about the place in it. Where RTAB-Map owns map -> odom (PEPIN_LOCALIZER=rtabmap) no tracker runs,
-and the question is whether this start of RTAB-Map has been PLACED — a node of the loaded map
-recognised, or an operator's seed — rather than still publishing the pose it saved at its last
+Before any goal is sent, two checks are printed: whether ``map -> base_link`` is fresh (RTAB-Map
+owns ``map -> odom``), and whether this start of RTAB-Map has been PLACED — a node of the loaded
+map recognised, or an operator's seed — rather than still publishing the pose it saved at its last
 shutdown (:meth:`pepin.watch.Preflight.placement`, latched on /localization/placement).
 """
 
@@ -54,14 +49,11 @@ import rclpy
 from action_msgs.srv import CancelGoal
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
-from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
-from std_msgs.msg import Float32, String
-from std_srvs.srv import Trigger
+from std_msgs.msg import String
 
-from pepin.deployment import localizer
 from pepin.places import (
     MARK_TOPIC,
     MARKED_TOPIC,
@@ -77,41 +69,14 @@ from pepin.runlink import (
     start_command,
     stop_command,
 )
-from pepin.watch import (
-    ADMIT_FIT,
-    BLIND_FIT,
-    DRIVE_SIGMA_M,
-    PLACEMENT_TOPIC,
-    SIGMA_MEDIAN_S,
-    SIGMA_TOPIC,
-    BlindDriveWatch,
-    Placement,
-    Preflight,
-    Sigma,
-    SigmaWindow,
-    SourceWord,
-    source_words,
-)
+from pepin.watch import PLACEMENT_TOPIC, Placement, Preflight
 
-# How long the tracker's service is given to appear before this client decides the board is in
-# online SLAM and runs no tracker at all (pepin.deployment.runs_here). The same 5 s every other
-# service wait here uses: over the bridge a client that gives up sooner gives up on a live board.
-TRACKER_PATIENCE_S = 5.0
-# ...and how old the map frame may be there. pepin_bringup.slam_frame re-stamps the correction at
-# 10 Hz, so anything past a tenth of a second means that node is not running; 1 s is Nav2's own
-# order of patience for the frame it plans in.
+# How old the map frame may be: RTAB-Map re-broadcasts map -> odom at 20 Hz, so anything past a
+# second means its correction or the board's odometry is not arriving; 1 s is Nav2's own order of
+# patience for the frame it plans in.
 MAP_FRAME_FRESH_S = 1.0
-
-# The drive's own watch: the pose uncertain past pepin.watch.LOST_SIGMA_M (or, on a board that
-# publishes no sigma, the fit under BLIND_FIT) for this long...
-LOST_FOR_S = 15.0
-LOST_TRAVEL_M = 1.0  # ...while the wheels carried it this far: that is driving blind. Spinning on a
-# stuck wheel with a lost reading is not — the recoveries (odom frame) can still work it free.
-# How long the preflight waits for the board's first word about the pose. The tracker publishes
-# its sigma every check period (1 s) whatever the sensors do and its per-source report on every
-# update, so three seconds of nothing is the tracker itself being absent — which is a refusal
-# with a reason, not a reason to wait longer.
-CERTAINTY_WAIT_S = 3.0
+# How long the latched placement word is given to arrive over the transport.
+PLACEMENT_WAIT_S = 3.0
 # A cancel must be confirmed inside the patience ros/goto.sh gives it (timeout 5): the operator
 # who typed "cancel" is watching the cart move. It is the budget for the WHOLE cancel, every
 # navigator in it: spent per action it was 9 s (a discovery wait plus a spin, twice) under a
@@ -214,122 +179,6 @@ class Tape:
         )
 
 
-class Certainty:
-    """What the board says about the pose, for the preflight and for the drive's own watch.
-
-    Three topics, in the order they are trusted. ``/localization/sigma`` is how sure the
-    tracker's FUSION is — the one number a drive is judged on, whichever source spoke into it
-    (:class:`pepin.watch.Sigma`). ``/localization/sources`` is who is holding the pose: every
-    source's health and the word it put in, which is what tells a camera-only drive apart from a
-    lidar one. ``/localization_fit`` is the lidar's own scan-to-map metric, kept as the fallback
-    for a board whose build predates the sigma — and never trusted over it, because it is 0.00
-    by construction wherever no lidar scan scored the pose.
-
-    The sigma is read as a 2 s MEDIAN and never as one sample (:class:`pepin.watch.SigmaWindow`):
-    in a nook the lidar's match flickers between hypotheses and the published sigma with it, so
-    both the preflight and the drive's own watch would otherwise be decided by which revolution
-    happened to land last.
-    """
-
-    def __init__(self, nav: BasicNavigator) -> None:
-        self._nav = nav
-        self.fit: float | None = None
-        self._sigma: SigmaWindow = SigmaWindow()
-        self._report: dict[str, object] | None = None
-        nav.create_subscription(Float32, "/localization_fit", self._on_fit, 10)
-        nav.create_subscription(String, SIGMA_TOPIC, self._on_sigma, 10)
-        nav.create_subscription(String, "/localization/sources", self._on_sources, 5)
-
-    def _on_fit(self, msg: Float32) -> None:
-        self.fit = float(msg.data)
-
-    def _on_sigma(self, msg: String) -> None:
-        heard = Sigma.from_json(msg.data, 0.0)
-        if heard is not None:  # a message that does not parse says nothing about the pose
-            self._sigma.add(heard, time.monotonic())
-
-    def _on_sources(self, msg: String) -> None:
-        try:
-            heard = json.loads(msg.data)
-        except ValueError:
-            return  # a message that does not parse is counted by the tracker, not obeyed here
-        if isinstance(heard, dict):
-            self._report = heard
-
-    def wait(self, seconds: float = CERTAINTY_WAIT_S) -> None:
-        """Spin until both words have arrived and the sigma's window has filled, or the patience
-        runs out. Neither word is a heartbeat this client can ask for: the sigma comes every check
-        period and the source report on every update, so what is not here within the patience is
-        not coming. The window's own 2 s is spent AFTER the first word rather than taken out of
-        the patience — a median of one sample is that one sample, which is the flicker this
-        client exists not to be decided by."""
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline and not (self.sigma() and self._report):
-            rclpy.spin_once(self._nav, timeout_sec=0.1)
-        filled = time.monotonic() + SIGMA_MEDIAN_S
-        while time.monotonic() < filled and self._sigma.span() < SIGMA_MEDIAN_S:
-            rclpy.spin_once(self._nav, timeout_sec=0.1)
-
-    def refresh(self, seconds: float = SIGMA_MEDIAN_S) -> None:
-        """Spin for ``seconds`` whatever has already arrived. After a whole-map search the
-        numbers held here are the ones from BEFORE it until the board's next publications land,
-        and a plain sleep processes no callback at all. The sigma's window is dropped first: the
-        search seeded a different pose, and a median across the seam describes neither."""
-        self._sigma.clear()
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            rclpy.spin_once(self._nav, timeout_sec=0.1)
-
-    def sigma(self) -> Sigma | None:
-        """The fused uncertainty over the last 2 s — the median of the samples, aged by the
-        NEWEST of them — or ``None`` where this board publishes none at all, and the fit rules
-        answer instead."""
-        return self._sigma.median(time.monotonic())
-
-    def words(self) -> list[SourceWord]:
-        """Every source's line of the tracker's last report; empty when none has arrived."""
-        return [] if self._report is None else source_words(self._report)
-
-    def heard(self) -> bool:
-        """Whether this board says anything at all about how sure the pose is. False in online
-        SLAM, where no tracker runs: there is nothing there for a drive's watch to read, and a
-        watch that took the silence for 0.00 would cut every healthy drive of that mode."""
-        return self.sigma() is not None or self.fit is not None
-
-
-def preflight(nav: BasicNavigator, certainty: Certainty) -> bool:
-    """Print one line per check and answer whether the goal may be sent.
-
-    A refusal always names the reading that caused it. The one refusal that buys something first
-    is a pose that is simply not sure enough: standing still, that is exactly what a whole-map
-    search fixes, so the search is run once (the tracker's own /relocalize, as before) and the
-    three checks are asked again — after which a refusal is final.
-    """
-    certainty.wait()
-    checks = Preflight().checks(certainty.words(), certainty.sigma(), certainty.fit)
-    for check in checks:
-        print(check.line(), flush=True)
-    if Preflight.passed(checks):
-        return True
-    if not all(check.ok for check in checks if check.name != "certainty"):
-        print("not driving: the refusals above are not something a search can fix", flush=True)
-        return False
-    print("an unsure pose buys one whole-map search: asking the tracker...", flush=True)
-    client = nav.create_client(Trigger, "/relocalize")
-    if not client.wait_for_service(timeout_sec=5.0):
-        print("no /relocalize on this board: nothing to search with", flush=True)
-        return False
-    future = client.call_async(Trigger.Request())
-    rclpy.spin_until_future_complete(nav, future, timeout_sec=60.0)
-    result = future.result()
-    print(result.message if result else "no answer from /relocalize", flush=True)
-    certainty.refresh()  # the search's own seed lands at the very end of it
-    checks = Preflight().checks(certainty.words(), certainty.sigma(), certainty.fit)
-    for check in checks:
-        print(check.line(), flush=True)
-    return Preflight.passed(checks)
-
-
 def cancel_all(node: Node) -> str:
     """Cancel every goal on the board's navigators and say what came of it.
 
@@ -381,22 +230,9 @@ def pose(nav: BasicNavigator, x: float, y: float, yaw_deg: float) -> PoseStamped
     return p
 
 
-def note(nav: BasicNavigator, text: str) -> None:
-    """Say it here and on /pepin/note, which the relocalizer copies into the board log.
-
-    The publisher is made once, on the first note, and kept on the node: creating one needs a live
-    rcl context, and the one path that must never need anything is the interrupt path — on
-    2026-09-17 a note here was the FIRST statement after Ctrl-C, it raised "rcl node's context is
-    invalid", and the ``nav.cancelTask()`` on the next line never ran (both legs,
-    ros/maps/rec/20260917_192935_goto.log and ..._201425_goto.log).
-    """
+def note(text: str) -> None:
+    """Say it here, flushed: the operator's terminal and ros/goto.sh's log are the record."""
     print(text, flush=True)
-    pub = getattr(nav, "_pepin_note_pub", None)
-    if pub is None:
-        pub = nav.create_publisher(String, "/pepin/note", 1)
-        nav._pepin_note_pub = pub
-    pub.publish(String(data=text))
-    time.sleep(0.2)  # let the message leave before a cancel or an exit
 
 
 def guarded(what: str, step: Callable[[], Any]) -> bool:
@@ -427,7 +263,7 @@ def interrupted(nav: BasicNavigator, tape: Tape | None) -> None:
     cancelled = guarded("cancelling the goal", nav.cancelTask)
     if tape is not None:
         guarded("closing the tape", tape.close)
-    guarded("the note", lambda: note(nav, "goto: interrupted by the operator, cancelling the goal"))
+    guarded("the note", lambda: note("goto: interrupted by the operator, cancelling the goal"))
     if not cancelled:
         print("cancel NOT sent — run ros/stop.sh NOW", flush=True)
         return
@@ -440,27 +276,6 @@ def interrupted(nav: BasicNavigator, tape: Tape | None) -> None:
             print(f"!! cannot confirm the cancel: {exc.__class__.__name__}: {exc}", flush=True)
             break
     print("cancelled" if done else "cancel NOT confirmed — use ros/stop.sh", flush=True)
-
-
-def where_am_i(nav: BasicNavigator) -> tuple[float, float, float, float] | None:
-    """The tracker's pose (x, y, yaw_deg) and its scan-to-map fit; None when it does not answer."""
-    client = nav.create_client(Trigger, "/where_am_i")
-    if not client.wait_for_service(timeout_sec=5.0):
-        return None
-    future = client.call_async(Trigger.Request())
-    rclpy.spin_until_future_complete(nav, future, timeout_sec=10.0)
-    result = future.result()
-    if result is None:
-        return None
-    text = result.message  # "x +1.23 m, y -0.45 m, yaw +12 deg; scan-to-map fit 0.57 (...)"
-    try:
-        px = float(text.split("x ")[1].split(" m")[0])
-        py = float(text.split("y ")[1].split(" m")[0])
-        pyaw = float(text.split("yaw ")[1].split(" deg")[0])
-        fit = float(text.split("fit ")[1].split(" ")[0])
-    except (IndexError, ValueError):
-        return None
-    return px, py, pyaw, fit
 
 
 def load_places(path: Path) -> dict[str, dict[str, float]]:
@@ -592,45 +407,7 @@ def ask_mark(nav: BasicNavigator, name: str, timeout_s: float = MARK_WAIT_S) -> 
     )
 
 
-def mark_place(nav: BasicNavigator, path: Path, name: str, certainty: Certainty) -> str:
-    """Store the robot's current tracked pose under ``name``, on the same evidence a drive
-    starts on: the fused sigma where the tracker publishes one, its fit where it does not.
-
-    A place marked while the cart does not know where it stands is a place nobody can drive to
-    afterwards, which is why this refuses at all — and the fit alone refused every mark on a
-    camera-only stack, where no lidar scan scores the pose (2026-09-15).
-    """
-    pose = where_am_i(nav)
-    if pose is None:
-        return "cannot mark: the relocalizer is not answering"
-    px, py, pyaw, fit = pose
-    certainty.wait()
-    sigma = certainty.sigma()
-    if sigma is not None:
-        if sigma.xy_m > DRIVE_SIGMA_M:
-            return (
-                f"NOT marked: the pose here is known to {sigma.phrase()}, over the"
-                f" {DRIVE_SIGMA_M:.2f} m a mark needs; stand still 2 s, or run relocalize first"
-            )
-    elif fit < ADMIT_FIT:
-        return (
-            f"NOT marked: the fit here is only {fit:.2f}; stand still 2 s, or run relocalize first"
-        )
-    places = load_places(path)
-    places[name] = {
-        "x": round(px, 3),
-        "y": round(py, 3),
-        "yaw_deg": round(pyaw, 1),
-        "fit": round(fit, 2),
-    }
-    path.write_text(json.dumps(places, indent=2, sort_keys=True) + "\n")
-    return (
-        f"marked {name!r} at x {px:+.2f} m, y {py:+.2f} m, yaw {pyaw:+.0f} deg "
-        f"(fit {fit:.2f}" + ("" if sigma is None else f", sigma {sigma.phrase()}") + f") in {path}"
-    )
-
-
-def placement_now(nav: BasicNavigator, wait_s: float = CERTAINTY_WAIT_S) -> Placement | None:
+def placement_now(nav: BasicNavigator, wait_s: float = PLACEMENT_WAIT_S) -> Placement | None:
     """What this start of RTAB-Map is placed by, as pepin_bringup.rtabmap_frame says it on the
     latched :data:`pepin.watch.PLACEMENT_TOPIC`; ``None`` when nothing arrived within ``wait_s``
     or it did not parse. Latched, so the laptop's last word is in the first callback once the two
@@ -673,21 +450,9 @@ def goal_server_flag(nav: BasicNavigator, name: str, wait_s: float = FLAG_WAIT_S
     return bool(values[0].bool_value)
 
 
-def tracker_here(nav: BasicNavigator, timeout_s: float = TRACKER_PATIENCE_S) -> bool:
-    """Whether the board runs the scan-matching tracker (``/where_am_i`` answers within
-    ``timeout_s``). False in online SLAM: there is no saved map to match a scan against, so
-    pepin.deployment.runs_here keeps the relocalizer off and neither of its services exists."""
-    return bool(nav.create_client(Trigger, "/where_am_i").wait_for_service(timeout_sec=timeout_s))
-
-
 def map_frame_age_s(nav: BasicNavigator, wait_s: float = 5.0) -> float | None:
-    """Age in seconds of the newest ``map -> base_link`` transform, None while there is none.
-
-    This is the whole localisation evidence online SLAM has: no tracker runs, so no fit is
-    published, and what says the cart has a place in the map is that the frame exists at all —
-    pepin_bringup.slam_frame broadcasts it on the board at 10 Hz from the laptop's correction
-    (identity until RTAB-Map's first graph, which is the truth at the start of a session).
-    """
+    """Age in seconds of the newest ``map -> base_link`` transform, None while there is none:
+    RTAB-Map's map -> odom composed with the board's own odometry."""
     from rclpy.time import Time
     from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -708,75 +473,36 @@ def map_frame_age_s(nav: BasicNavigator, wait_s: float = 5.0) -> float | None:
     return age
 
 
-def ensure_localized(nav: BasicNavigator, certainty: Certainty) -> str | None:
+def ensure_localized(nav: BasicNavigator) -> str | None:
     """The preflight: may this goal be sent at all. ``None`` when it may; otherwise the hint to
     print under the refusal (empty when the refusing line already says what to do).
 
-    Where a tracker runs, three checks are printed and any failure refuses the drive
-    (:func:`preflight`). The old rule this replaces read ``/localization_fit`` alone — the
-    LIDAR's scan-to-map fit — and so refused every camera-only drive out of hand, because
-    nothing there scores a scan against the map and the number is 0.00 by construction.
-
-    Where no tracker runs, the map frame's own freshness is judged (:func:`map_frame_age_s`).
-    In online SLAM that is all there is: ``/where_am_i`` and ``/relocalize`` do not exist, and
-    this check used to refuse every goal of the mode after ten seconds of waiting for two absent
-    services ("fit nan: searching the whole map first..." then "not localized", 2026-09-14 20:03
-    and 20:04); a drive whose correction then goes stale is cut by the goal server's own watch.
-    Under ``PEPIN_LOCALIZER=rtabmap`` a fresh frame is not enough: RTAB-Map publishes one from
-    the moment it starts, at the pose it saved at its last shutdown, so this start must also be
-    PLACED — recognised or seeded (:meth:`pepin.watch.Preflight.placement`; 2026-09-23, the cart
-    "at home" at the bookshelf, then 76 cm off inside the table) — unless the goal server's flag
-    ``start_needs_placement`` is off (:func:`goal_server_flag`).
+    Two checks. The map frame's own freshness (:func:`map_frame_age_s`). And, because RTAB-Map
+    publishes a frame from the moment it starts, at the pose it saved at its last shutdown, that
+    this start is PLACED — recognised or seeded (:meth:`pepin.watch.Preflight.placement`;
+    2026-09-23, the cart "at home" at the bookshelf, then 76 cm off inside the table) — unless the
+    goal server's flag ``start_needs_placement`` is off (:func:`goal_server_flag`).
     """
-    if tracker_here(nav):
-        if preflight(nav, certainty):
-            return None
-        return "Stand the cart still and run ros/goto.sh relocalize, or ros/goto.sh where."
-    owner = localizer()
     age = map_frame_age_s(nav)
     if age is None:
         print(
-            "no /where_am_i and no map -> base_link: neither the tracker (a known map) nor"
-            + (
-                " RTAB-Map's map -> odom (ros/laptop.sh vslam)"
-                if owner == "rtabmap"
-                else " the SLAM frame (ros/thin.sh slam)"
-            )
-            + " is up",
+            "no map -> base_link: RTAB-Map's map -> odom (ros/laptop.sh vslam) is not up",
             flush=True,
         )
         return ""
-    if owner == "rtabmap":
-        if age > MAP_FRAME_FRESH_S:
-            print(
-                f"preflight frame     REFUSED  map -> base_link is {age:.1f} s old (over"
-                f" {MAP_FRAME_FRESH_S:.1f} s): RTAB-Map's map -> odom or the board's odometry"
-                " is not arriving",
-                flush=True,
-            )
-            return ""
-        print(
-            f"preflight frame     ok       map -> base_link {age * 1e3:.0f} ms old (RTAB-Map"
-            " owns map -> odom, no tracker on the board)",
-            flush=True,
-        )
-        asked = goal_server_flag(nav, PLACEMENT_FLAG)
-        placed = Preflight.placement(placement_now(nav), asked=asked is not False)
-        print(placed.line(), flush=True)
-        return None if placed.ok else ""
     if age > MAP_FRAME_FRESH_S:
         print(
-            f"online SLAM: map -> base_link is {age:.1f} s old (over {MAP_FRAME_FRESH_S:.1f}"
-            " s): the board's slam_frame is not broadcasting",
+            f"preflight frame     REFUSED  map -> base_link is {age:.1f} s old (over"
+            f" {MAP_FRAME_FRESH_S:.1f} s): RTAB-Map's map -> odom or the board's odometry"
+            " is not arriving",
             flush=True,
         )
         return ""
-    print(
-        f"preflight slam      ok       online SLAM, map -> base_link {age * 1e3:.0f} ms old"
-        " (no tracker here: nothing matches a scan against a map still being built)",
-        flush=True,
-    )
-    return None
+    print(f"preflight frame     ok       map -> base_link {age * 1e3:.0f} ms old", flush=True)
+    asked = goal_server_flag(nav, PLACEMENT_FLAG)
+    placed = Preflight.placement(placement_now(nav), asked=asked is not False)
+    print(placed.line(), flush=True)
+    return None if placed.ok else ""
 
 
 def describe(x: float, y: float, yaw_deg: float, home: dict[str, float] | None = None) -> str:
@@ -802,23 +528,13 @@ def describe(x: float, y: float, yaw_deg: float, home: dict[str, float] | None =
     return f"goal in words: {where}, {facing} (left/right as seen from the start heading)"
 
 
-def arrival(nav: BasicNavigator, x: float, y: float, yaw_deg: float) -> str:
-    """Where the tracker says the robot ended, against the goal; in online SLAM, where no tracker
-    runs, the map frame's own word (map -> base_link) with no fit beside it."""
-    if not tracker_here(nav, timeout_s=1.0):
-        age = map_frame_age_s(nav, wait_s=2.0)
-        return "arrival: online SLAM, no tracker to ask" + (
-            f"; map -> base_link {age * 1e3:.0f} ms old" if age is not None else "; no map frame"
-        )
-    pose = where_am_i(nav)
-    if pose is None:
-        return "arrival: the relocalizer is not answering"
-    px, py, pyaw, fit = pose
-    off = math.hypot(px - x, py - y)
-    turn = (pyaw - yaw_deg + 180.0) % 360.0 - 180.0
-    return (
-        f"arrival: x {px:+.2f} m, y {py:+.2f} m, yaw {pyaw:+.0f} deg, fit {fit:.2f}\n"
-        f"         {off:.2f} m from the goal, heading off by {turn:+.0f} deg"
+def arrival(nav: BasicNavigator) -> str:
+    """How fresh the pose is at the end of the drive; ros/go.sh where prints the pose itself."""
+    age = map_frame_age_s(nav, wait_s=2.0)
+    return "arrival: " + (
+        f"map -> base_link {age * 1e3:.0f} ms old (the pose: ros/go.sh where)"
+        if age is not None
+        else "no map frame"
     )
 
 
@@ -888,12 +604,10 @@ def main() -> None:
             x, y = float(args[1]), float(args[2])
             yaw = float(args[3]) if len(args) > 3 else 0.0
             seed = pose(nav, x, y, yaw)
-            nav.setInitialPose(seed)  # /initialpose: the board's tracker, where one runs
-            # ...and RTAB-Map, which listens in its own namespace. Under PEPIN_LOCALIZER=rtabmap it
-            # owns map -> odom and nothing else hears /initialpose: on 2026-09-23 a restart with
-            # the cart at the bookshelf left it "at home" (0 places recognised in 198 updates)
-            # and the only cure at hand was a full restart. Sent a few times over ~3 s: a fresh
-            # publisher is matched over the transport in seconds, and a repeated seed is harmless.
+            # RTAB-Map listens in its own namespace; it owns map -> odom (on 2026-09-23 a restart
+            # with the cart at the bookshelf left it "at home", 0 places recognised in 198
+            # updates, and a seed is the cure). Sent a few times over ~3 s: a fresh publisher is
+            # matched over the transport in seconds, and a repeated seed is harmless.
             rtab = PoseWithCovarianceStamped()
             rtab.header = seed.header
             rtab.pose.pose = seed.pose
@@ -904,16 +618,12 @@ def main() -> None:
                 rtab.header.stamp = nav.get_clock().now().to_msg()
                 to_rtabmap.publish(rtab)
                 time.sleep(0.5)
+            print(f"seeded at ({x:.2f}, {y:.2f}) yaw {yaw:.0f} deg on {RTABMAP_INITIAL_POSE}")
+            heard = placement_now(nav)  # the seed is what places this start: say whether it did
             print(
-                f"seeded at ({x:.2f}, {y:.2f}) yaw {yaw:.0f} deg: /initialpose (tracker) and"
-                f" {RTABMAP_INITIAL_POSE} (RTAB-Map)"
+                "RTAB-Map's start, as rtabmap_frame says it: "
+                + (heard.how() if heard else f"nothing on {PLACEMENT_TOPIC}")
             )
-            if localizer() == "rtabmap":  # the seed is what places this start: say whether it did
-                heard = placement_now(nav)
-                print(
-                    "RTAB-Map's start, as rtabmap_frame says it: "
-                    + (heard.how() if heard else f"nothing on {PLACEMENT_TOPIC}")
-                )
             return
         name = None
         # The graph's own book first, the file beside the map second (:class:`Vocabulary`): a
@@ -950,14 +660,11 @@ def main() -> None:
         else:
             x, y = float(args[0]), float(args[1])
             yaw = float(args[2]) if len(args) > 2 else 0.0
-        nav.waitUntilNav2Active(
-            localizer="robot_localization"
-        )  # no AMCL, the tracker owns the frame
+        nav.waitUntilNav2Active(localizer="robot_localization")  # no AMCL: RTAB-Map owns the frame
         print(f"startup: Nav2 answered at +{time.monotonic() - startup:.1f} s", flush=True)
         print(describe(x, y, yaw, home), flush=True)
         checked = time.monotonic()
-        certainty = Certainty(nav)
-        refused = ensure_localized(nav, certainty)
+        refused = ensure_localized(nav)
         if refused is not None:
             print("not driving: the preflight refused above." + (f" {refused}" if refused else ""))
             sys.exit(1)
@@ -966,26 +673,6 @@ def main() -> None:
             f"{time.monotonic() - startup:.1f} s since this client began",
             flush=True,
         )
-        # The drive's own watch, on the same rule the goal server uses (pepin.watch): the fused
-        # sigma where the board publishes one, the lidar's fit where it does not — plus this
-        # client's extra condition, that the wheels actually carried the cart while it was lost.
-        blind = (
-            BlindDriveWatch(lost_fit=BLIND_FIT, patience_s=LOST_FOR_S)
-            if certainty.heard()
-            else None  # online SLAM: no tracker speaks here, and the goal server watches instead
-        )
-        odom_xy: list[tuple[float, float] | None] = [None]
-        lost_at_xy: list[tuple[float, float] | None] = [None]
-
-        def on_odom(msg: Odometry) -> None:
-            odom_xy[0] = (msg.pose.pose.position.x, msg.pose.pose.position.y)
-
-        def travelled_while_lost() -> float:
-            if lost_at_xy[0] is None or odom_xy[0] is None:
-                return 0.0
-            return math.hypot(odom_xy[0][0] - lost_at_xy[0][0], odom_xy[0][1] - lost_at_xy[0][1])
-
-        nav.create_subscription(Odometry, "/odom", on_odom, 10)
         # The numbered tape, the one the replays and the reports are named by: opened before the
         # goal so its prelude holds the seconds before the cart moves, closed in `finally`.
         if taping:
@@ -1001,22 +688,6 @@ def main() -> None:
         while not nav.isTaskComplete():
             fb = nav.getFeedback()
             now = time.monotonic()
-            lost = blind is not None and blind.observe(
-                certainty.fit or 0.0, now, sigma=certainty.sigma()
-            )
-            if blind is not None and blind.lost_since is None:
-                lost_at_xy[0] = None  # the pose is healthy again: the clock starts over
-            elif blind is not None and lost_at_xy[0] is None:
-                lost_at_xy[0] = odom_xy[0]  # where the wheels were when it first went bad
-            if lost and blind is not None and travelled_while_lost() > LOST_TRAVEL_M:
-                note(
-                    nav,
-                    f"goto: the pose has been uncertain for {now - (blind.lost_since or now):.0f}"
-                    f" s ({blind.phrase()}, judged by the {blind.rule}) while the wheels"
-                    f" travelled {travelled_while_lost():.1f} m: cancelling, not driving blind",
-                )
-                nav.cancelTask()
-                break
             if fb is not None and now - last >= 2.0:
                 last = now
                 print(
@@ -1030,7 +701,7 @@ def main() -> None:
             result, "FAILED"
         )
         print(f"result: {name} after {time.monotonic() - started:.0f} s")
-        print(arrival(nav, x, y, yaw), flush=True)
+        print(arrival(nav), flush=True)
     except KeyboardInterrupt:
         interrupted(nav, tape)
         tape = None  # its stop word went out above; `finally` must not send a second one

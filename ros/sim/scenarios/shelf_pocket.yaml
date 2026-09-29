@@ -1,0 +1,22 @@
+# The shelf pocket: leaving a nose-in park with furniture along both sides, inside the circle the
+# rear corners sweep in a turn in place (0.41 m). On the robot: bookshelf -> home, 133 s and 82
+# recoveries (tape 0493), 257 s and 218 (tape 0498), against 12-36 s for a leg that starts clear.
+#
+# The start is the cart's own arrival at the bookshelf (tape 0492: 0.765, 0.213, -2.3 deg) moved
+# 0.13 m back, so the nose (x 0.0625) is 0.40 m from the shelf; the shelf is in the grid there
+# and is repeated as a box so the pocket does not depend on the grid's noise. The sides are the
+# journal's 0.41-0.46 m (tape 0498: "lidar 0.41-0.46 m on the right, swing radius 0.41 m ->
+# every rotation a collision"); both sit outside the scan filter's contact band (|y| 0.355 m), so
+# the lidar sees them from the start. The goal is 2.5 m behind-left, facing away from the shelf.
+# Boxes and the goal are written in the start pose's frame: x forward, y left, metres.
+name: shelf_pocket
+world: flat
+start: {x: 0.635, y: 0.213, yaw_deg: -2.3}
+boxes:
+  - {name: shelf, frame: start, x: 0.6125, y: 0.0, length: 0.30, width: 0.90}
+  - {name: table_left, frame: start, x: 0.0, y: 0.56, length: 0.80, width: 0.30}
+  - {name: cabinet_right, frame: start, x: 0.0, y: -0.61, length: 0.80, width: 0.30}
+legs:
+  - {frame: start, x: -1.768, y: 1.768, yaw_deg: 135.0}
+slow_s: 60
+timeout_s: 300

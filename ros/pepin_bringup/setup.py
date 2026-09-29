@@ -25,11 +25,9 @@ setup(
         "console_scripts": [
             "base_bridge = pepin_bringup.base_bridge:main",
             "tof_bridge = pepin_bringup.tof_bridge:main",
-            "relocalizer = pepin_bringup.relocalizer:main",
             "goal_server = pepin_bringup.goal_server:main",
             "run_recorder = pepin_bringup.run_recorder:main",
             "bag_recorder = pepin_bringup.bag_recorder:main",
-            "slam_frame = pepin_bringup.slam_frame:main",
             "teleop_keys = pepin_bringup.teleop_keys:main",
         ],
     },

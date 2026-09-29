@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>pepin_replay</name>
+  <version>0.1.0</version>
+  <description>
+    costmap_replay: Nav2's own local and global costmaps (nav2_costmap_2d, the board's build)
+    stepped through a recorded drive at the live update rates in bag time, as fast as the CPU
+    allows and deterministically. Built and run only in a throwaway container by ros/replay.sh;
+    never part of the board or laptop images.
+  </description>
+  <maintainer email="gartod@gmail.com">Artem Belousov</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rosbag2_cpp</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>tf2_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,7 +1,7 @@
 #!/bin/bash
 # The laptop half of the thin-client split: the planner (with the global costmap) and the goal
 # server run here, the board keeps the reflexes. Usage:
-#   ros/laptop.sh            start (or restart) the bridge and the laptop-side Nav2 launch
+#   ros/laptop.sh            start (or restart) the router and the laptop-side Nav2 launch
 #   ros/laptop.sh stop       stop both
 #   ros/laptop.sh logs       follow the launch's output
 #   ros/laptop.sh vslam      start (or restart) the camera mapping container beside them: RTAB-Map
@@ -42,46 +42,26 @@
 #                            stop stops the models again
 # Only `start` talks to the board (its side and its map); stop, logs, vslam and kick never do.
 # Prerequisites: the image built here (ros/laptop-build.sh) and the board on side=board
-# (ros/thin.sh on). A Docker container on macOS lives behind the VM's NAT, so DDS discovery
-# cannot cross to the LAN; zenoh-bridge-ros2dds does the crossing over one TCP connection to
-# the board's bridge sidecar (started by ros/thin.sh), and the graph appears here whole.
+# (ros/thin.sh on). A Docker container on macOS lives behind the VM's NAT; this machine's zenoh
+# router holds the one TCP link to the board's router, and the graph appears here whole.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$HERE/lib.sh"  # one multiplexed ssh with a connect timeout: a frozen board fails fast, not silently
 NET=pepin-net
 # The library is mounted live, like the ROS package: a copy went stale whenever a container was
-# restarted by the bridge watch rather than by this script (the depth node died on an import of a
-# function that existed in src/ but not in the copy, 2026-09-11).
-# The board's bridge is restarted once this side's bridge is up and BEFORE this side's containers
-# start: a subscription made against one bridge does not follow it through a restart (a costmap
-# kept a deaf transform listener for 139 s, run 0148), and a bridge restarted after the
-# containers breaks exactly those subscriptions. Later restarts of the board's bridge are handled
-# by pepin_bringup.bridge_watch inside each container, which asks for this same restart over a topic
-# (/bridge/kick, answered by the board's own systemd) because it has no ssh key and must not have
-# one. The order below is the invariant: of two bridges the one that starts LAST gets working routes.
-settle_bridge() {
-    ssh "root@$BOARD" "systemctl restart pepin-bridge" 2>/dev/null
-    for _ in $(seq 1 30); do
-        curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' && return 0
-        sleep 3
-    done
-    echo "the board's bridge did not come back after its restart (ssh root@$BOARD journalctl -u pepin-bridge)"
-    return 1
-}
+# restarted by anything but this script (the depth node died on an import of a function that
+# existed in src/ but not in the copy, 2026-09-11).
 # A container's nodes get the time to leave DDS properly (RTAB-Map closes its database): the
 # containers run with --stop-signal SIGINT, the signal the launch answers by shutting its nodes
-# down (SIGTERM it answers by cancelling itself, and the nodes were SIGKILLed without a dispose:
-# their names lingered in the bridge for the DDS lease on every stop). The launch's ghost wait
-# (pepin_bringup.ghost_wait) still covers whatever a crash left behind. The window and the
-# signal are ros/lib.sh's, the same ones board/pepin-ros.service and the launches use; the 15 s
+# down (SIGTERM it answers by cancelling itself, and the nodes were SIGKILLed mid-write). The
+# window and the signal are ros/lib.sh's, the same ones board/pepin-ros.service and the launches use; the 15 s
 # this used to spend was under RTAB-Map's own close of a 20 GB database.
-# The laptop image (ros/laptop-build.sh) carries RTAB-Map on top of the board's image. Under
-# PEPIN_RMW=zenoh the same image with rmw_zenoh_cpp in it: PEPIN_IMAGE overrides either.
+# The laptop image (ros/laptop-build.sh) carries RTAB-Map and rmw_zenoh_cpp on top of the
+# board's image: PEPIN_IMAGE overrides it.
 image() {
     if [ -n "${PEPIN_IMAGE:-}" ]; then echo "$PEPIN_IMAGE"; return; fi
-    if pepin_rmw_is_zenoh; then echo pepin-laptop:zenoh; return; fi
-    docker image inspect pepin-laptop:latest >/dev/null 2>&1 && echo pepin-laptop || echo pepin-ros
+    echo pepin-laptop:zenoh
 }
 # The camera mapping container's image. pepin-laptop:xfeat BY DEFAULT — rtabmap_frame's
 # visual_features defaults to xfeat, which only that image can run, and a restart that forgot an
@@ -119,28 +99,19 @@ xfeat_built_on() {  # BASE: whether pepin-laptop:xfeat's layers begin with BASE'
     xfeat_layers="$(docker image inspect -f '{{join .RootFS.Layers " "}}' pepin-laptop:xfeat 2>/dev/null)" || return 1
     [ -n "$base_layers" ] && [ "${xfeat_layers#"$base_layers"}" != "$xfeat_layers" ]
 }
-# The middleware flags every node container here is given. Under cyclone this is the one flag
-# it has always had; under zenoh it is the session (a peer of THIS machine's router) plus
-# ZENOH_ROUTER_CHECK_ATTEMPTS=0, so a container started before the router survives and joins
-# when it appears instead of dying on the start order.
-RMW_ENV=(-e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp -e PEPIN_RMW=cyclone)
-if pepin_rmw_is_zenoh; then
-    RMW_ENV=(-e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e PEPIN_RMW=zenoh -e ZENOH_ROUTER_CHECK_ATTEMPTS=0
-             -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_session_override)")
-fi
-# WHO OWNS map -> odom, into every container here (ros/lib.sh has the whole story). Under
-# "rtabmap" this side's RTAB-Map publishes the transform and the words to the board's fusion stay
-# home; under "tracker" nothing here broadcasts a frame and the board's relocalizer owns it.
-RMW_ENV+=(-e "PEPIN_LOCALIZER=$PEPIN_LOCALIZER")
-# The one pairing that cannot work is refused BEFORE a container starts, not debugged on the
+# The middleware flags every node container here is given: the session (a peer of THIS
+# machine's router) plus ZENOH_ROUTER_CHECK_ATTEMPTS=0, so a container started before the router
+# survives and joins when it appears instead of dying on the start order.
+RMW_ENV=(-e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e PEPIN_RMW=zenoh -e ZENOH_ROUTER_CHECK_ATTEMPTS=0
+         -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_session_override)")
+# A clock the two halves disagree on is refused BEFORE a container starts, not debugged on the
 # robot — and only where one is started, so `stop` and `logs` still work on a misconfigured shell.
-start_check() { pepin_localizer_check || exit 1; pepin_time_source_check || exit 1; }
+start_check() { pepin_time_source_check || exit 1; }
 # One zenoh router per machine, and this is the laptop's. It is started before any node here and
 # left alone afterwards: a node's connect retry is infinite, so containers may come and go under
 # it, and it is the only process on this side that talks to the board. Started idempotently —
 # `ros/laptop.sh start` and `ros/laptop.sh vslam` both need it and either may come first.
 zrouter_up() {
-    pepin_rmw_is_zenoh || return 0
     docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
     if docker ps --format '{{.Names}}' | grep -qx "$PEPIN_ZROUTER_LAPTOP"; then
         echo "laptop zenoh router already up ($PEPIN_ZROUTER_LAPTOP); left alone"; return 0
@@ -171,14 +142,13 @@ zrouter_up() {
 # The nodes a kick can reach here, the container each lives in and the line it prints once up
 # (the kick waits for that line): the Python modules of vslam.launch.py, and the goal server of
 # the navigation half (it runs here on side=board only; on side=all: ros/thin.sh kick goal_server).
-KICKABLE="camera_stream depth_stream contact_scan depth_fusion laptop_localizer rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server"
+KICKABLE="camera_stream depth_stream contact_scan depth_fusion rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server"
 kick_target() {  # node name -> "container|start-up line"
     case "$1" in
         camera_stream) echo "pepin-vslam|camera stream from " ;;
         depth_stream) echo "pepin-vslam|depth stream up" ;;
         contact_scan) echo "pepin-vslam|contact scan up" ;;
         depth_fusion) echo "pepin-vslam|fusion up: " ;;
-        laptop_localizer) echo "pepin-vslam|laptop localizer up: " ;;
         rtabmap_frame) echo "pepin-vslam|rtabmap frame up: " ;;
         sensor_pack) echo "pepin-vslam|sensor pack up" ;;
         places) echo "pepin-vslam|places up: " ;;
@@ -195,27 +165,17 @@ depth_host_wanted() {
     case "${PEPIN_DEPTH_HOST:-}" in 1) return 0 ;; 0) return 1 ;; esac
     (cd "$HERE/.." && uv run --group depth python -c 'import torch; print(torch.backends.mps.is_available())' 2>/dev/null) | grep -qx True
 }
-# How many participants the bridge admin at $1 lists under node name $2 (its keys read
-# @/<zid>/ros2/node/<participant>/<name>): 1 is the live node alone, 2 is the node beside its ghost.
-bridge_count() { curl -s -m 3 "$1/@/local/ros2/node/**" | grep -o "/ros2/node/[^/\"]*/$2\"" | wc -l | tr -d ' '; }
 MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/python3.12/site-packages/pepin_bringup:ro"
         -v "$HERE/pepin_bringup/launch:/ws/install/pepin_bringup/share/pepin_bringup/launch:ro"
         -v "$HERE/tools:/tools:ro" -v "$HERE/entrypoint.sh:/pepin_entrypoint.sh:ro"
         -v "$HERE/../src/pepin:/ws/pepin_src/pepin:ro" -v "$HERE/params:/params:ro" -v "$HERE/maps:/maps"
-        -v "$HERE/../config:/ws/config:ro"
-        # pepin_bringup.bridge_watch restarts the bridge container alone when a route goes dead
-        # (Docker Engine API, POST /containers/pepin-zenoh/restart); without this mount it falls
-        # back to restarting the whole half, which throws the fusion model away.
-        -v /var/run/docker.sock:/var/run/docker.sock)
+        -v "$HERE/../config:/ws/config:ro")
 case "${1:-start}" in
     stop)
-        # The router is this side's own, so a stop takes it too — but only under zenoh, so that
-        # a stop under cyclone touches exactly the three containers it always has. The time
-        # server (pepin-chrony) is left running: it is the board's clock, not a part of this
+        # The router is this side's own, so a stop takes it too. The time server (pepin-chrony) is left running: it is the board's clock, not a part of this
         # half, and a board that lost it would change source at every stop (ros/time.sh server
         # stop takes it down on purpose).
-        pepin_remove_container pepin-laptop pepin-vslam pepin-zenoh
-        if pepin_rmw_is_zenoh; then pepin_remove_container "$PEPIN_ZROUTER_LAPTOP"; fi
+        pepin_remove_container pepin-laptop pepin-vslam "$PEPIN_ZROUTER_LAPTOP"
         [ "${PEPIN_DEPTH_HOST:-}" = 0 ] || "$HERE/depth_host.sh" stop
         # The localisation models leave with the session, as the depth host does: ~1 GB of this
         # laptop's memory that nothing else uses (ros/models.sh start localization brings them).
@@ -225,17 +185,10 @@ case "${1:-start}" in
         exec docker logs -f "pepin-${2:-laptop}" ;;
     kick)
         # One node, not its container. SIGINT is what the launch itself sends at shutdown: the
-        # node's main destroys the node and the context, its DDS participant is disposed and the
-        # bridge forgets the name at once; the launch respawns the module from the mounted
-        # sources two seconds after the EXIT (RESPAWN in the launch files), so the successor
-        # never overlaps a ghost of its name. A replaced container is the slow case for exactly
-        # that reason: `docker stop` sends SIGTERM, the launch answers it by cancelling itself,
-        # the namespace SIGKILLs the nodes without a dispose, and the bridge keeps their names
-        # for the DDS lease — the 7-9 s the ghost wait sits through on every container start,
-        # before the depth network loads and RTAB-Map starts. Measured start-ups after the
-        # respawn pause: camera/fusion/frame 0.3 s, depth 2.1 s (the network), so a kick is
-        # 3-5 s here. A crashed node (no dispose) is the one case a respawn meets a ghost: the
-        # count below says so, and a second kick after the lease clears it.
+        # node's main destroys the node and the context; the launch respawns the module from the
+        # mounted sources two seconds after the EXIT (RESPAWN in the launch files). Measured
+        # start-ups after the respawn pause: camera/fusion/frame 0.3 s, depth 2.1 s (the
+        # network), so a kick is 3-5 s here.
         #   The wait proves the ready line is the NEW process's (ros/kick_ready.awk, the same
         # matcher as ros/thin.sh kick): the exit line of the signalled pid, the successor's start
         # under the same launch tag, then its ready line. The times are the container's clock
@@ -252,11 +205,6 @@ case "${1:-start}" in
             R="$(docker logs -t --since "$KICKED" "$C" 2>&1 | awk -v name="$NAME" -v old="$OLD" -v line="$LINE" -v kicked="$KICKED" -f "$HERE/kick_ready.awk")"
             if [ "${R%%"$TAB"*}" = ready ]; then
                 echo "${R#*"$TAB"}"
-                case "$(bridge_count http://localhost:8001 "$NAME")" in
-                    1) echo "the bridge lists $NAME once: clean" ;;
-                    0) ;;  # no bridge admin to ask, or a name it does not list
-                    *) echo "WARNING: the bridge lists $NAME beside a ghost of itself: its routes over the bridge drop when the ghost expires; kick again in 10 s" ;;
-                esac
                 exit 0
             fi
             sleep 0.5
@@ -303,7 +251,7 @@ case "${1:-start}" in
         fi
         VSLAM_IMAGE="$(vslam_image)" || exit 2
         pepin_remove_container pepin-vslam
-        zrouter_up  # under zenoh this half has no bridge to wait for, only its own router
+        zrouter_up  # this half's own router
         pepin_timeserver_up  # the clock the board follows (ros/lib.sh; PEPIN_TIME_SOURCE=pool: none)
         # The depth network on the laptop's GPU (ros/depth_host.sh): 20 ms a frame on Metal
         # against 170 ms on the CPU in the container (2026-09-11), so it is on wherever it can
@@ -367,12 +315,7 @@ case "${1:-start}" in
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} ${CAMERA_ENV[@]+"${CAMERA_ENV[@]}"} \
             "$VSLAM_IMAGE" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null
-        if pepin_localizer_is_tracker; then
-            OWNER="the board's tracker adopts it and owns map -> odom"
-        else
-            OWNER="RTAB-Map here owns map -> odom (PEPIN_LOCALIZER=rtabmap: no tracker on the board)"
-        fi
-        echo "vslam up on $VSLAM_IMAGE (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and $OWNER; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
+        echo "vslam up on $VSLAM_IMAGE (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and RTAB-Map here owns map -> odom; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
         # The desktop app's socket died with the old container, and a Foxglove client never
         # re-attaches by itself: its panels stay on screen, empty, bound to channel ids this new
         # bridge does not have. So the app is told to reconnect (ros/foxglove.sh reopen waits for
@@ -388,64 +331,36 @@ case "${1:-start}" in
     *) echo "usage: ros/laptop.sh [start | stop | logs [vslam] | vslam [--fresh] [--camera-only] [--neck] [--no-vo] | kick NODE]"; exit 2 ;;
 esac
 # Which half the board expects: on side=all (ros/thin.sh vision) the board drives by itself and
-# this side starts only the bridge — RTAB-Map and the camera come with "ros/laptop.sh vslam".
+# this side starts only the router — RTAB-Map and the camera come with "ros/laptop.sh vslam".
 # A board that does not answer is fatal here, loudly: with pipefail a failed ssh in a command
-# substitution once ended this script silently, before the bridge was touched (2026-09-10 20:02).
+# substitution once ended this script silently (2026-09-10 20:02).
 # No PEPIN_SIDE line in the board's file is side=all (ros/thin.sh vision and off delete it).
 SIDE="$(ssh "root@$BOARD" "grep -oE '^PEPIN_SIDE=.*' /etc/default/pepin-ros || echo PEPIN_SIDE=all" 2>/dev/null | cut -d= -f2 || true)"
 [ -n "$SIDE" ] || { echo "cannot read the board's side over ssh (root@$BOARD, /etc/default/pepin-ros): is it up?"; exit 1; }
-# Which bridge allow-list this side needs, and it is one question: where Nav2's planner lives. The
-# map always comes FROM here (RTAB-Map's grid on /map) in both.
+# Where Nav2's planner lives: on side=board (the split) this side plans and takes goals; on
+# side=all the board drives by itself and this side only maps. The map always comes FROM here
+# (RTAB-Map's grid on /map).
 if [ "$SIDE" = board ]; then
     # The map here chooses the places book, so it must be the board's map, not merely a valid one.
     MAP="${PEPIN_MAP:-$(ssh "root@$BOARD" "grep -oE '^PEPIN_MAP=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2 || true)}"
     [ -n "$MAP" ] || { echo "the board does not say which map it runs (ros/mode.sh nav MAP first)"; exit 1; }
-    CONFIG=zenoh-bridge-laptop.json  # the split: this side publishes the plan and takes goals
     MODE=split
 else
-    CONFIG=zenoh-bridge-laptop-vision.json  # the board publishes the plan too; this side maps only
     MODE=vision
 fi
 # The mode the board is in, recorded for anyone who needs it without an ssh of its own.
 printf '%s\n' "$MODE" > "$HERE/.mode"
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
-pepin_remove_container pepin-laptop pepin-zenoh
-pepin_timeserver_up  # the clock the board follows, under either transport (ros/lib.sh)
-if pepin_rmw_is_zenoh; then
-    # No bridge on either side: this half's nodes are peers of this machine's router, and that
-    # router holds the one link to the board's. So none of the bridge choreography below applies
-    # — no waiting for the board's REST admin, no allow-list, and above all no settle_bridge:
-    # the ordering it exists to fix (of two bridges the one that starts LAST gets working routes)
-    # is a zenoh-bridge-ros2dds property, not a zenoh one. A restart of either router is
-    # recovered from by the nodes' own infinite connect retry.
-    zrouter_up
-else
-# The board's bridge must be alive before this side connects: its REST admin answers when its
-# zenoh runtime does (a wedged bridge stays "Up" and answers nothing — 2026-09-09).
-for _ in $(seq 1 30); do
-    curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' && break
-    sleep 2
-done
-curl -s -m 3 "http://$BOARD:8000/@/local/router" | grep -q '"ros2dds"' || { echo "the board's bridge does not answer on :8000 (ros/thin.sh on, then wait for it)"; exit 1; }
-# ROS_DISTRO matters: without it the bridge assumes Iron. Router mode on both sides, this one
-# connecting to the board's: the pairing measured to pass samples (peer and client here did not).
-# The allow-lists (pepin.deployment.bridge_config) are one-way by side AND by mode: a topic
-# allowed as a publisher on both sides loops.
-echo "laptop bridge: restarting with $CONFIG (board on side=$SIDE, mode $MODE)"
-# --init: the bridge binary is PID 1 in this container and installs no signal handlers, and PID 1
-# ignores every signal it has no handler for — so `docker stop` (and the bridge watch's repair
-# through the daemon) waited out the whole 30 s stop window and then SIGKILLed it, on every
-# restart. With tini as PID 1 the bridge is an ordinary child, SIGTERM's default action applies
-# and the stop is immediate. The window itself is unchanged; this is what makes it a ceiling.
-docker run -d --name pepin-zenoh --init --network "$NET" -p 8001:8000 -v "$HERE/$CONFIG:/config.json:ro" \
-    -e ROS_DISTRO=jazzy eclipse/zenoh-bridge-ros2dds:1.7.0 -c /config.json \
-    -e "tcp/$BOARD:7447" -d 7 --rest-http-port 8000 >/dev/null
-settle_bridge  # BEFORE the containers: their subscriptions must be made against the bridge they will live with
-fi
+pepin_remove_container pepin-laptop
+pepin_timeserver_up  # the clock the board follows (ros/lib.sh)
+# This half's nodes are peers of this machine's router, and that router holds the one link to
+# the board's. A restart of either router is recovered from by the nodes' own infinite connect
+# retry, so no start order is enforced here.
+zrouter_up
 if [ "$SIDE" != board ]; then
-    echo "board on side=$SIDE, mode $MODE: it drives by itself; bridge up for the laptop's mapping (ros/laptop.sh vslam)"; exit 0
+    echo "board on side=$SIDE, mode $MODE: it drives by itself; router up for the laptop's mapping (ros/laptop.sh vslam)"; exit 0
 fi
 docker run -d --name pepin-laptop --network "$NET" -p 3337:3337 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
     -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" \
-    "$(image)" ros2 launch pepin_bringup nav.launch.py side:=laptop "map:=$MAP" "board:=$BOARD" >/dev/null
-echo "laptop side up: planner + goal server (port 3337 here), bridged to $BOARD; ros/laptop.sh logs"
+    "$(image)" ros2 launch pepin_bringup nav.launch.py side:=laptop "map:=$MAP" >/dev/null
+echo "laptop side up: planner + goal server (port 3337 here), linked to $BOARD; ros/laptop.sh logs"

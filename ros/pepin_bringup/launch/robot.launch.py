@@ -61,21 +61,13 @@ from pepin.deployment import (
     LASER_ODOM_HZ,
     LASER_ODOM_TOPIC,
     LASER_ODOM_TWIST_VARIANCE,
-    bridge_admin_for,
 )
 from pepin.footprint import hull_box
 from pepin.mounts import Mounts
 
 # Our own Python nodes come back by themselves after this pause (a code change is one kicked
-# process: ros/thin.sh kick <node>), through a ghost wait of their own name first, as in
-# nav.launch.py: a crashed node's name outlives it in the bridge by the DDS lease.
+# process: ros/thin.sh kick <node>).
 RESPAWN = {"respawn": True, "respawn_delay": 2.0}
-
-
-def _after_ghost(*names: str) -> str:
-    """A command prefix that waits until the bridge on this host lists none of ``names`` and
-    then becomes the command (pepin_bringup.ghost_wait; an unreachable admin is not waited for)."""
-    return f"python3 -m pepin_bringup.ghost_wait {bridge_admin_for('board')} {' '.join(names)} --"
 
 
 MOUNTS = Mounts.load()
@@ -238,7 +230,8 @@ def base_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 # The transform follows the FILTER, not the IMU (2026-09-15): with the EKF up it
                 # owns odom -> base_link and the bridge publishes /odom only, whether or not the
                 # gyro is there to be fused. Keyed on the IMU, `imu off` left the stack with no
-                # /odometry/filtered at all — the relocalizer reads that topic and never localised.
+                # /odometry/filtered at all — the tracker of the day read that topic and never
+                # localised.
                 # The speed caps are the base's own, not the bridge's defaults (0.25 m/s).
                 parameters=[
                     {
@@ -309,8 +302,7 @@ def generate_launch_description() -> LaunchDescription:
     base = base_bridge("pepin_bringup", UnlessCondition(use_cpp), [{"publish_tf": True}])
     # Wheels, gyro and the camera's odometry fused in the plane (ros/params/ekf.yaml): the wheels
     # over-report rotation on carpet, the gyro does not; the filter publishes odom -> base_link
-    # instead of the bridge, and /odometry/filtered, which is the odometry the relocalizer and the
-    # recorder read.
+    # instead of the bridge, and /odometry/filtered, which is the odometry the recorder reads.
     #
     # THE ONLY PRECONDITION IS THE C++ BRIDGE, NOT THE IMU (2026-09-15). The Python bridge has no
     # ``publish_tf`` to hand over, so there both would broadcast the same edge. The IMU is one of
@@ -318,8 +310,9 @@ def generate_launch_description() -> LaunchDescription:
     # first measurement of ANY configured source and then publishes at ``frequency`` forever, a
     # silent imu0 costing nothing but its own weight. Gated on ``imu`` instead, `ros/feature.sh imu
     # off` took the whole filter down with the gyro: /odometry/filtered went to zero messages, the
-    # relocalizer carried its scans on an odometry that never arrived and goto refused with "not
-    # localized". Without the gyro the heading comes off the wheels (ekf.yaml's odom0 index 11).
+    # tracker of the day carried its scans on an odometry that never arrived and goto refused
+    # with "not localized". Without the gyro the heading comes off the wheels (ekf.yaml's odom0
+    # index 11).
     ekf = Node(
         package="robot_localization",
         executable="ekf_node",
@@ -342,7 +335,6 @@ def generate_launch_description() -> LaunchDescription:
         executable="tof_bridge",
         output="screen",
         condition=IfCondition(LaunchConfiguration("tof")),
-        prefix=_after_ghost("/tof_bridge"),
         **RESPAWN,
     )
     # LASER ODOMETRY: the cart's own motion from consecutive scans, scan to scan and with no map
@@ -363,7 +355,7 @@ def generate_launch_description() -> LaunchDescription:
         # ``__node:=`` remap and it would give both of them the same name. The names are the
         # patch's (ros/patches/rf2o-base-twist.patch renames the outer one); the parameters
         # reach them through launch_ros's ``/**`` wildcard, which needs no name either.
-        prefix=f"nice -n -5 {_after_ghost('/laser_odometry', '/CLaserOdometry2D')}",
+        prefix="nice -n -5",
         parameters=[
             {
                 "laser_scan_topic": "/scan",
@@ -397,7 +389,6 @@ def generate_launch_description() -> LaunchDescription:
     neck = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.neck_state"],
         output="screen",
-        prefix=_after_ghost("/neck_state"),
         condition=IfCondition(LaunchConfiguration("neck")),
         **RESPAWN,
     )

@@ -21,19 +21,10 @@ export RSYNC_RSH="ssh $PEPIN_SSH_OPTS"
 # database is also configured to survive a kill (DbSqlite3/JournalMode in vslam.launch.py).
 PEPIN_STOP_TIMEOUT_S="${PEPIN_STOP_TIMEOUT_S:-30}"  # = pepin.deployment.CONTAINER_STOP_TIMEOUT_S
 
-# Which middleware the stack speaks. zenoh (the default since 2026-09-20) is rmw_zenoh_cpp with
-# one rmw_zenohd router per machine and no bridge at all; cyclone is CycloneDDS with the two
-# zenoh-bridge-ros2dds sidecars that carry the graph across the Mac's NAT — the stack that ran
-# until then, kept whole and reachable with PEPIN_RMW=cyclone. Nothing but this variable changes
-# between them. The board reads it from /etc/default/pepin-ros (board/pepin-ros.service's
-# EnvironmentFile), so it survives a reboot; the laptop reads it from the environment.
-#   Why the default moved, measured on the robot on 2026-09-20: start order stopped mattering and
-# a restart of either half, of a single node or of a router heals by itself (under the bridges a
-# restarted tracker left Nav2 deaf to map -> odom and a restarted bridge took /tf from the laptop);
-# map -> odom reaches the laptop at 20 Hz instead of the bridge's capped 7.7 Hz; the board's CPU is
-# the same parked (idle 41.6 % against 42.2 %) and under a drive-like load (13.5 % against 13.9 %);
-# ten legs in three sensor modes reached with no transport error. The price is about 200 MB of
-# board memory (roughly 40 MB a process).
+# The middleware is rmw_zenoh_cpp with one rmw_zenohd router per machine and no bridge at all
+# (the default since 2026-09-20: start order stopped mattering, a restart of either half heals by
+# itself, map -> odom reaches the laptop at 20 Hz; about 200 MB of board memory is the price).
+# CycloneDDS with the two zenoh-bridge-ros2dds sidecars is on the tag alt/cyclone-bridges-2026-09-20.
 #
 # The topology under zenoh, and why it is this one: rmw_zenoh's SHIPPED session default is
 # mode "peer", connect tcp/localhost:7447, listen tcp/localhost:0 — "accept incoming
@@ -44,45 +35,7 @@ PEPIN_STOP_TIMEOUT_S="${PEPIN_STOP_TIMEOUT_S:-30}"  # = pepin.deployment.CONTAIN
 # nodes are clients. So the board needs NO session config at all. The Mac's containers do not
 # share a loopback, so its nodes are told to gossip-connect to routers only and reach each
 # other through the Mac's own router — which never sends that traffic over the WiFi.
-PEPIN_RMW="${PEPIN_RMW:-zenoh}"
 
-# WHO OWNS map -> odom, and it travels exactly as PEPIN_RMW does: this default for the shell,
-# `-e PEPIN_LOCALIZER=` into both containers (ros/run.sh, ros/laptop.sh), and
-# /etc/default/pepin-ros on the board (board/pepin-ros.service's EnvironmentFile) so it survives
-# a reboot. src/pepin/deployment.py's `localizer` is the same question asked from Python, and
-# the launches ask it there.
-#   rtabmap (the default since 2026-09-22): RTAB-Map on the laptop publishes the transform
-# itself and the board's lidar tracker does not start. tracker: the stack that ran until then,
-# byte for byte — the relocalizer owns the edge, fuses the laptop's words into it and
-# republishes the grid it adopted as /map_tracked for the costmaps.
-#   WHY the default moved: two owners of the truth is a race, not a redundancy. The tracker
-# trusted its own whole-map search on a fragment grid (fit 0.96 on the wrong place), collapsed
-# its sigma and gated RTAB-Map's correct words out; the pose jumped 3.4 m (journal 2026-09-21/22).
-# What stays on the board is ODOMETRY — wheels, gyro, visual odometry, laser odometry — which is
-# the part that must survive a WiFi loss and close a loop in milliseconds; map -> odom is a slow
-# correction every consumer composes with odom -> base_link.
-PEPIN_LOCALIZER="${PEPIN_LOCALIZER:-rtabmap}"
-pepin_localizer_is_tracker() { [ "$PEPIN_LOCALIZER" = tracker ]; }
-# The one pairing that cannot work, said out loud before a half is started rather than debugged
-# on the robot: under cyclone the two zenoh-bridge-ros2dds sidecars carry /tf one way only
-# (board -> laptop), because a topic allowed as a publisher on BOTH sides is looped back by each
-# bridge until nothing crosses at all (scan and tf died that way on 2026-09-09). RTAB-Map's
-# map -> odom would have to come back the other way. Under zenoh every topic crosses and the
-# pairing is free. Returns 1 so a caller can refuse; the way to give the graph the frame under
-# cyclone is the retired message path (ros/nav.launch.py slam:=true, pepin_bringup.slam_frame).
-pepin_localizer_check() {
-    case "$PEPIN_LOCALIZER" in
-        rtabmap | tracker) ;;
-        *) echo "PEPIN_LOCALIZER=$PEPIN_LOCALIZER: it is rtabmap or tracker"; return 1 ;;
-    esac
-    if [ "$PEPIN_LOCALIZER" = rtabmap ] && ! pepin_rmw_is_zenoh; then
-        echo "PEPIN_LOCALIZER=rtabmap needs PEPIN_RMW=zenoh: the cyclone bridges carry /tf one way"
-        echo "  only, so RTAB-Map's map -> odom cannot reach the board. Use PEPIN_LOCALIZER=tracker,"
-        echo "  or the retired message path (ros/nav.launch.py slam:=true)."
-        return 1
-    fi
-    return 0
-}
 PEPIN_ZROUTER_PORT="${PEPIN_ZROUTER_PORT:-7447}"
 PEPIN_ZROUTER_BOARD=pepin-zrouter          # the board's router container (host network)
 PEPIN_ZROUTER_LAPTOP=pepin-zrouter-laptop  # the laptop's router container (on pepin-net)
@@ -123,7 +76,6 @@ PEPIN_ZROUTER_LOG="${PEPIN_ZROUTER_LOG:-info,zenoh::net::runtime::orchestrator=d
 # is copied and the router restarted (ros/README.md). The two may run different values in
 # between, which is safe: a router's workers guard its own sessions only.
 PEPIN_ZROUTER_RX_WORKERS="${PEPIN_ZROUTER_RX_WORKERS:-32}"
-pepin_rmw_is_zenoh() { [ "$PEPIN_RMW" = zenoh ]; }
 # THE board stack restart (ros/restart.sh, ros/sync.sh --restart): its zenoh router goes with it.
 # The router degrades with every stack restart — fresh nodes saw static TF after 9.5 s,
 # "DeclareFinal Timeout" and aborted Nav2 bring-ups — and a router restart brings it back
@@ -135,7 +87,7 @@ pepin_board_restart() {
 # This checkout's ros/, wherever the sourcing script lives (the container configs are under it).
 PEPIN_ROS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ONE CLOCK FOR THE ROBOT (src/pepin/timesync.py has the whole story): where the board takes its
+# ONE CLOCK FOR THE ROBOT (scripts/timesync.py has the whole story): where the board takes its
 # time from. laptop: this laptop serves its Docker VM's clock — the one every ROS node here stamps
 # with — from the pepin-chrony container on udp/123, and the board's chrony prefers it over the
 # internet pool (board/chrony.sh) — the DEFAULT since the deploy of 2026-09-24: chrony selected
@@ -283,7 +235,7 @@ pepin_remove_container() {  # NAME...: stop gently, keep the log, then remove �
 # What the robot is thinking, printed inline while a script drives it: goals, planner and
 # controller verdicts, recoveries (spin/backup/wait), AMCL and relocalizer lines, local time.
 # watch_start once before driving, watch_stop at the end (ros/watch.sh is the same view alone).
-PEPIN_WATCH_KEEP='bt_navigator|behavior_server|controller_server|planner_server|amcl\]|relocalizer\]|velocity_smoother'
+PEPIN_WATCH_KEEP='bt_navigator|behavior_server|controller_server|planner_server|velocity_smoother'
 PEPIN_WATCH_DROP='Passing new path|foxglove|Message Filter|bond|Load Library|Found class|Instantiate class|launch_ros|lifecycle node launched|: Creating|: Configuring|: Activating|: Cleaning|Original Node|Setting|\]: $'
 pepin_render() {  # "[proc] [LEVEL] [epoch] [node]: text" -> "HH:MM:SS LEVEL node: text"; repeats folded; \r\n so a pty next door cannot stair-step it
     perl -MPOSIX=strftime -ne '

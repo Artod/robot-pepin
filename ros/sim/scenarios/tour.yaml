@@ -1,0 +1,12 @@
+# Three goals on the recorded map, between the places of its book: home -> printer -> bookshelf
+# -> home, the evening legs of 2026-09-26 (0485-0497: 12-36 s each when the cart starts and ends
+# clear). No furniture beyond the grid.
+name: tour
+world: flat
+start: home
+legs:
+  - printer
+  - bookshelf
+  - home
+slow_s: 60
+timeout_s: 240

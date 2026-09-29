@@ -1,15 +1,11 @@
 // Copyright 2026 Artem Belousov. Licensed under the Apache License, Version 2.0.
 //
-// The MPU6050's zero, re-measured from every block of rest the wheels witness — the C++ twin of
-// pepin.gyro.GyroBiasTracker (src/pepin/gyro.py:32). Same settle window, same block size, same
-// replacement by a block mean, same "not known to be still" sentinel, so the two bridges subtract
-// the same number from the same wheel evidence.
+// The MPU6050's zero, re-measured from every block of rest the wheels witness: a settle window,
+// blocks of samples, replacement by a block mean, and a "not known to be still" sentinel.
 //
-// THE PYTHON SIDE IS THE REFERENCE. tests/unit/test_gyro.py pins the contract this file
-// reproduces (test_gyro_bias_contract_the_cpp_bridge_mirrors is written for exactly that
-// purpose); anything changed here changes there first. test/gyro_bias_contract.cpp replays the
-// same table against this header and can be compiled with one clang++ line (its own comment says
-// which) without ROS or ament.
+// THE CONTRACT is test/gyro_bias_contract.cpp: a table of rows replayed against this header,
+// compiled with one c++ line (its own comment says which) without ROS or ament, and run by
+// tests/unit/test_base_cpp_contracts.py. Anything changed here changes there in the same commit.
 
 #ifndef PEPIN_BASE_CPP__GYRO_BIAS_HPP_
 #define PEPIN_BASE_CPP__GYRO_BIAS_HPP_
@@ -29,11 +25,11 @@ struct GyroBias
   double z = 0.0;
 };
 
-/// Float slack on "within one tick": pepin.gyro.TICK_SLACK.
+/// Float slack on "within one tick".
 constexpr double kTickSlack = 1e-6;
 
 /// Whether the wheels have stayed within ONE encoder tick of where they came to rest — the twin
-/// of pepin.gyro.TickDither. A parked cart does not read zero: live on 2026-09-19 the right
+/// of a tick's dither. A parked cart does not read zero: live on 2026-09-19 the right
 /// encoder flipped by one tick on every state line (dr -9.587e-05, +9.587e-05, ... m), so "the
 /// measured twist is exactly zero" was never true and the rest block never came. One tick is the
 /// encoder's quantisation unit, not a tuned tolerance; a creep of one tick a line in one direction
@@ -67,7 +63,7 @@ private:
 
 /// The wheels' word on whether the cart is standing still, boiled down to one timestamp.
 ///
-/// The twin of pepin.gyro.RestWitness (src/pepin/gyro.py:37). Fed one wheel state line at a time,
+/// The wheels' rest witness. Fed one wheel state line at a time,
 /// it answers with the time since which rest has been witnessed without a break — which is the
 /// time of the last motion when there is none, and 0 when the question cannot be answered at all.
 /// A consumer on another thread needs nothing but that number and rest_witnessed().

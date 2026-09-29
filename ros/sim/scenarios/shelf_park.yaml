@@ -1,0 +1,13 @@
+# The bookshelf park as the lidar saw it on arrival (tape 0492, the last scan at rest): the grid
+# holds the shelf 0.34 m ahead of the lidar and the furniture on the right at 0.44-0.48 m; the
+# one return the grid does not explain is 0.44 m to the left (robot -0.008, +0.443), kept here
+# as a leg. Nothing behind within 0.9 m. Then the real leg: home, 2.9 m behind-left.
+name: shelf_park
+world: flat
+start: {x: 0.765, y: 0.213, yaw_deg: -2.3}
+boxes:
+  - {name: leg_left, frame: start, x: -0.008, y: 0.468, length: 0.05, width: 0.05}
+legs:
+  - home
+slow_s: 60
+timeout_s: 300
