@@ -36,42 +36,63 @@ Foxglove Studio                   docker: ldlidar_node -> laser_filters box filt
 | `ros/tools/npz_to_map.py` | Our occupancy grid -> map_server format |
 | `ros/calibrate.sh` | Checkerboard calibration of the neck camera, print to config (see below) |
 
-## Iterate without rebuilding
+## Deploying a change
 
-`ros/sync.sh` rsyncs `ros/` and `src/pepin` to the board and restarts the sensors container;
-`ros/nav.sh [MAP]` starts Nav2 inside it. The container mounts the code from the host (see
-`run.sh`), so Python nodes, launch files, params, maps and tools change in ~20 s. One node
-changes in seconds: `ros/sync.sh --no-restart && ros/thin.sh kick relocalizer` ends that process
-with SIGINT and the launch respawns it from the synced sources (`ros/laptop.sh kick depth_fusion`
-does the same in the laptop's containers; `ros/laptop.sh kick` and `ros/thin.sh kick` without a
-name list what each can reach). The laptop's SLAM container is its own: `ros/laptop.sh vslam`
-restarts it with the RTAB-Map database kept, `ros/laptop.sh vslam --fresh` deletes the database
-first and starts an empty map (in SLAM mode the session starts empty anyway: see below). Only a Dockerfile change (apt packages, the C++
-driver) needs a rebuilt image — `ros/build-image.sh` on the laptop, see **Building the image**.
+The containers mount the code from the host (`run.sh` on the board, `laptop.sh` here), so a
+Python change needs no image, only the processes that hold the old code restarted.
+
+| Change | Command | What restarts |
+| --- | --- | --- |
+| Python in `src/pepin` or `ros/pepin_bringup/pepin_bringup` | `ros/push.sh FILE...` | the running nodes that import it, on both halves |
+| a launch file, `ros/params`, `config/`, a module a launch file imports | `ros/restart.sh board --deploy`, `laptop` or `both --deploy` | the half's whole stack |
+| the whole tree, nothing restarted | `ros/sync.sh` (`--restart`: the board's stack too) | nothing |
+| one node by hand | `ros/thin.sh kick NODE`, `ros/laptop.sh kick NODE` (no name: the list) | that node |
+| the Dockerfiles, the C++ packages, rf2o's patch | `ros/build-image.sh`, `ros/laptop-build.sh` | see **Building the image** |
+
+`ros/push.sh` takes its plan from `pepin.push`: the nodes whose Python imports a changed module
+through any chain of imports (`uv run python -m pepin.push plan FILE` prints each chain). Whatever
+a kick cannot deliver is refused before anything is touched, with the restart that delivers it: a
+launch, params or unit file, config, a module a launch file imports, an image layer, a process of
+ours that the launch does not respawn (checked in its container: refused only while it runs), a
+laptop container that mounts another checkout. Otherwise the files go to the board by rsync —
+exactly those, never `--delete` — and the nodes of both halves are kicked at once, one line each:
+kicked at, ready at (UTC, the container's clock), seconds, the old and the new pid, the ready line.
+A node that is not running on its half (the other recorder, the goal server's other side, the
+tracker under RTAB-Map) is skipped. `--dry-run` or `PEPIN_PUSH_DRY=1` prints the plan and what
+would run, and touches nothing.
+
+A kick ends the node with SIGINT, the launch respawns it from the new sources two seconds later,
+and the kick waits for the new pid's own ready line (`ros/kick_ready.awk`). The node is gone for
+those seconds: push at rest, not mid-drive.
+
+The laptop's SLAM container is its own: `ros/laptop.sh vslam` restarts it with the RTAB-Map
+database kept, `ros/laptop.sh vslam --fresh` deletes the database first and starts an empty map
+(in SLAM mode the session starts empty anyway: see below).
 
 ## Restarting
 
-`ros/restart.sh board|laptop|both [--deploy] [--fresh-graph] [--no-check]` is the whole restart in
-one command, followed by every check we have learned to run afterwards.
-
-- **board** — `systemctl restart pepin-ros` over the multiplexed ssh, or the full deploy
-  (`ros/sync.sh`: code, library and config, then the restart and its census) with `--deploy`.
-  It then waits up to 90 s for the tracker's first report line.
-- **laptop** — `ros/laptop.sh start`, then `ros/laptop.sh vslam --neck --seed-map=<map>`, where
-  the map is the one the board serves, read from its `/etc/default/pepin-ros` (`PEPIN_MAP`), never
-  guessed: the fused volume is snapped to the lattice of the map it is seeded with.
-- **both** — the board first, then the laptop; nothing is checked until both are up, because
-  `/depth_scan` and `/vo` are fed by the laptop.
-- **`--fresh-graph`** — the camera half starts on an empty RTAB-Map database *and* the graph
-  anchor of the served map is deleted (`ros/maps/<map id>.graph_anchor.json`). The anchor is a
-  property of the map ↔ database PAIR (`pepin.anchors`); an empty database beside a kept anchor
-  speaks in the previous database's frame.
-- **`--no-check`** — restart only. `PEPIN_RESTART_WAIT_S` / `PEPIN_RESTART_POLL_S` change how long
-  a half is given to come back and how often it is looked at.
+`ros/restart.sh board|laptop|both [--deploy] [--fresh-graph] [--no-check] [--dry-run]` brings the
+robot up working in one command and ends on one line — `green: N checks, none failed`, or `red:`
+with the failing lines above it — and that line is all the operator reads. It restarts the board's
+stack together with its zenoh router (stack stopped, router restarted, stack started; `--deploy`
+does it through `ros/sync.sh --restart`), then the laptop: board first, always, because a board
+restart re-zeroes the odometry RTAB-Map runs on (`board` alone restarts only the laptop's vslam, and
+only if that half is up). Then it proves the planner plans (4.1) and repairs it when it does not —
+the Nav2 container alone, then the board half once more — before it fails; a planner that answers
+"no path" in every direction is reported, never restarted. The board's Nav2 waits for the laptop's
+map however late it comes (`initial_transform_timeout`), so the start order is no longer a race.
+`--dry-run` prints the order and touches nothing, `--no-check` restarts only, `--fresh-graph` starts
+the camera half on an empty RTAB-Map database and moves the old frame's volume aside;
+`PEPIN_RESTART_WAIT_S`, `PEPIN_RESTART_POLL_S` and `PEPIN_PLANNER_WAIT_S` change how long a half
+and the planner are waited for.
 
 Every check is one `PASS`/`FAIL` line with its number, a `WARN` is shown but never fails the run,
 and the script exits 1 if anything failed. A check that cannot be answered says so; it never reads
 silence as good news. What is checked:
+
+| # | the planner |
+|---|---|
+| 4.1 | from `pepin-vslam`, `ros/tools/planner_check.py`: `/global_costmap/costmap` (or its updates) delivers something new within 10 s — its latched copy proves nothing — and one `ComputePathToPose` from the cart's pose to 0.5 m ahead (then behind, left, right) returns a path: a plan, never motion. Asked again for up to 180 s while Nav2 comes up, repaired before it fails (above). "No path" in every direction on a corrected pose (`ros/tools/map_odom.py`) fails with no restart: the cart is boxed in or the costmap is full of marks. With the laptop half down it fails: there is no map to plan on |
 
 | # | board |
 |---|---|
@@ -86,6 +107,7 @@ silence as good news. What is checked:
 | 1.13 | **who is correcting the pose**, under `PEPIN_LOCALIZER=rtabmap`: `map -> odom` is in TF and read where its publisher is — one rclpy node in the laptop's own container (`ros/tools/map_odom.py`), never on the board, whose /tf would cost it ~100 messages a second (CLAUDE.md rule 20). Two readings: the transform is **fresh** (re-broadcast at 20 Hz, so seconds of silence is a publisher that is gone) and it is **not the identity** (a localiser that has recognised nothing publishes `map == odom`, and every pose composed from it is simply the odometry's). The identity is a `WARN` while the laptop half is under 60 s old and a `FAIL` after that. Under `PEPIN_LOCALIZER=tracker` it is a `WARN` pointing at 1.2 |
 | 1.12 | no thread of the Nav2 container is pegged: `ps -L` over ssh, the busiest thread's cumulative CPU time over the process's own lifetime. `range_sensor_layer.cpp:362-369` clamps its cell bounds and then walks them as `unsigned`, so a cone that falls off the grid's left or bottom edge runs ~4e9 iterations under the costmap mutex and writes **no log line at all** — one thread at 100 %, "Pose Goes Off Grid", services timing out, zero plans (reproduced 2026-09-21 with `ros/thin.sh kick relocalizer`: tid 191, 415 s of CPU in 700 s). `FAIL` above 0.90, `WARN` above 0.50 (nobody has yet measured what a healthy container's busiest thread costs — tighten it once a few restarts have printed theirs), `WARN` when the board could not be read |
 | 1.14 | `/odom_laser` is flowing (the EKF's `odom3`), measured the same way. Skipped with a `WARN` when `PEPIN_LASER_ODOM=false` on the board |
+| 1.15 | **informational (`PASS`/`WARN`, never fails, never a drive gate)**: the board's clock minus the laptop's — the Docker VM's, which every laptop ROS node stamps with — over NTP from the board to the laptop's time server (`ros/time.sh offset`: `src/pepin/timesync.py` piped into the board's `python3`, best of eight round trips). `WARN` over `PEPIN_CLOCK_WARN_MS` (100 ms), `WARN` "not measured" when the board cannot reach the server or `PEPIN_TIME_SOURCE=laptop` and no server runs here, `WARN` on a value that is neither `laptop` nor `pool`. Under `PEPIN_TIME_SOURCE=pool` (the default) with no server here it is a `PASS` "not measured, as configured": that is the configuration, not a fault. See "One clock" below |
 
 `ros/tools/coldstart_soak.sh [N]` is the acceptance test behind checks 1.11 and 1.12: N cold starts of the
 board half (10 by default), each timed from `Activating planner_server` to the bond, with the
@@ -106,6 +128,8 @@ refuses to begin while a navigation goal is running. The hang appeared on 4 of 7
 | 2.8 | no `process has died` in the container since it started |
 | 2.9 | Foxglove: the bridge answers on `ws://localhost:8765` and advertises every topic the layout draws (`ros/foxglove.sh check`; its failing lines are indented under this one) |
 | 2.11 | **informational (`WARN`, never fails)**: `marks_audit`'s last line — the local costmap's lethal cells split into lidar-backed, camera-only and unexplained. There is no healthy value (a room with a table in it should show camera-only cells); it is printed so the split is in front of you before the first goal |
+| 2.12 | `pepin-vslam` carries the XFeat adapters (`/opt/xfeat/rtabmap_xfeat.py`), so `rtabmap_frame`'s `visual_features` default can run; on any other image the visual registration is ORB's. Passes on such an image only under `PEPIN_XFEAT=0`, which says ORB is meant (see "The XFeat image") |
+| 2.13 | the localisation service answers `/health` on `:8791` with `xfeat`, `match` and `place`, none of them `failed: ...` (see "The model services"). Down is a `WARN` (RTAB-Map's adapters compute in its own process and the snapshots carry null place descriptors), said loudly under `place_recognition descriptor`, which is then back on the words until the service describes again, and a `FAIL` only under `registration_backend service`, where a registration it does not answer finds no features |
 
 | # | flags |
 |---|---|
@@ -132,6 +156,15 @@ sigma and gated RTAB-Map's correct words out; the pose jumped 3.4 m. What belong
 **odometry** — wheels, gyro, visual odometry, laser odometry — because that is what must survive a
 WiFi loss and close a loop in milliseconds. `map -> odom` is a slow correction every consumer
 composes with `odom -> base_link`.
+
+**What the tracker took with it.** It was also the only publisher of the EKF's zero-velocity
+input (`/zupt`, `odom2` in `ros/params/ekf.yaml`), so under `rtabmap` a parked cart's filter heard
+nothing but its sources' own drift and its heading followed rf2o's +1.5 deg/min at rest: ~5 deg an
+hour (2026-09-24). The C++ base bridge now publishes that input itself, in either mode, while its
+own rest witness says the cart is certainly still — wheels at rest past `imu_bias_s`, no fresh
+`/cmd_vel`, the gyro quiet — and nothing otherwise (`base_bridge` `zupt_publish`, live, default on;
+every setting of it live too, "The base bridge's zero-velocity update" below). Under `tracker` the
+slip watch's update remains beside it; the two never speak at once, and both say zero.
 
 **Why localising and not mapping.** A start in mapping mode opens a new session per restart, and
 the grid RTAB-Map publishes is the connected component of the *current node inside working
@@ -203,7 +236,7 @@ all under `transport/link/tx`:
 
 | key | shipped | ours | what it does |
 | --- | --- | --- | --- |
-| `queue/congestion_control/block/wait_before_close` | 5 s | **20 s** | how long a RELIABLE push waits for a free batch before killing the session. This is the one that stops the closures; 4x the worst measured stall. A peer that is truly gone is still buried by the 60 s lease. |
+| `queue/congestion_control/block/wait_before_close` | 5 s | **20 s** | how long a RELIABLE push waits for a free batch before killing the session. This is the one that stops the closures; 4x the worst measured stall. A peer that is truly gone is buried by the close it triggers — provided the router has an RX worker free to run that close (see "A frozen peer" below). |
 | `queue/congestion_control/drop/wait_before_drop` | 1 ms | **50 ms** | how long a BEST_EFFORT sample waits before being dropped. 50 ms is the period of the fastest thing that crosses, so a sample is never held past its own successor. |
 | `keep_alive` | 2 | **4** | keep-alives per `lease` (60 s, unchanged): every 15 s instead of 30, which is what zenoh's own note asks for on a link that loses packets. |
 
@@ -227,10 +260,149 @@ over `pepin-net`, and the radio hop belongs to the routers alone. If a measureme
 session closing, the same file is passed to the containers as `ZENOH_SESSION_CONFIG_URI` — the
 mechanism is identical — but nothing has asked for it.
 
-**Deploying a change to `ros/zenoh/router.json5`**: `ros/sync.sh --no-restart`, then the routers
+**Deploying a change to `ros/zenoh/router.json5`**: `ros/sync.sh` (no restart), then the routers
 in the clean order (journal 2026-09-13): laptop half down, laptop router down, board router, board
 stack, laptop router, laptop half. A router restarted under a live peer has produced a one-way
 link before.
+
+**Every container's log outlives its restart** (`PEPIN_LOG_ARCHIVE`, `on` by default, `off` keeps
+nothing as before). On the board, `pepin-ros` and `pepin-zrouter` are started without `--rm`, and
+each unit's next start copies the previous container's log to `/root/pepin-ros/logs/`
+(`<local time>.log` for the stack, `zrouter_<local time>.log` for the router, `docker logs -t`;
+`ros/sync.sh` never deletes `logs/`); the router's output does not reach the journal. On the
+laptop every removal goes through `ros/lib.sh`'s `pepin_remove_container`, which stops the
+container, copies `docker logs -t` to `logs/containers/<UTC>_<name>.log` in this checkout
+(`PEPIN_LOG_DIR`), and only then removes it — `ros/laptop.sh stop`, a `vslam` restart and a
+router re-creation used to take the laptop router's and `pepin-vslam`'s logs with them. Docker's
+own receive stamps are kept on purpose: after a Mac wake the VM clock's step is visible in them.
+The unit change reaches the board by `scp board/pepin-zrouter.service root@<board>:/etc/systemd/system/`
+and `systemctl daemon-reload`; it takes effect at the router's next restart.
+
+**A frozen peer, and the 2026-09-23 wake** (`PEPIN_ZROUTER_RX_WORKERS`, `PEPIN_ZROUTER_LOG`). The
+Mac idle-slept at 20:31Z with the stack up and woke three times for maintenance before the user
+woke it at 21:27Z. Each sleep, the board router logged `Unable to push non droppable network
+message to <laptop router>. Closing transport!` every 20 s for ~7 min, and the board's own nodes'
+sessions timed out on their router; after each dark wake the link was back within seconds, after
+the user wake it never came back (0 board samples reached the laptop router, all 89 board topics
+left the laptop's graph 13 s after the wake and none returned in 28 min, while the camera's own
+TCP connection through the same Docker VM kept delivering; `scratch/link_autopsy/wake_nonrecovery.py`).
+The clock was not the cause: the dark wakes carried data under a 898-s VM lag. Neither router
+wrote a line after the wake, so which end refused the new session is not in the saved logs.
+What IS established, from zenoh 2687c51's source and reproduced in statics
+(`scratch/link_autopsy/wedge_repro.py`: two routers, four RELIABLE publishers, the far router
+`docker pause`d): a session's RX task routes its messages on zenoh's RX runtime, a push to a peer
+that stopped reading waits `wait_before_close` (20 s) *on that worker* holding the priority
+queue's mutex, and the `close()` that the failure schedules is spawned on the same runtime. With
+zenoh's default of 2 RX workers both sat in 20-s pushes and the close started only when something
+else broke the loop — 620 s after the first closure in one run (33 closures, the publishers' own
+sessions dropped 24 times: the board router's log of that night line for line), 130 s in another
+(at the thaw; 7 closures, 4 drops). With 8 workers the close started 9 ms after the first closure,
+the dead transport was gone 35 s later and no local session dropped; 16 behaved the same (2 ms,
+2 closures, recovery 0.3 s after the thaw) at 21 threads and 6.4 MB against 7 and 5.7 MB. The
+count is set by the sessions: each one pushing toward the frozen peer holds a worker and the close
+needs one more — four publishers wedged 4 workers (the close only at the thaw, 4 drops) and not
+5, 6 or 32 (`scratch/link_autopsy/wedge_threshold.py`; one run per count). So each router runs
+more RX workers than the sessions its census counted (2026-09-24, TCP sessions on 7447): the
+board's `ZENOH_RUNTIME=(rx: (worker_threads: 16))` for its 10 nodes and the laptop's link, the
+laptop's 32 for `pepin-vslam`'s 14 sessions, the link, and `pepin-laptop`'s nodes and the tools on
+top (`PEPIN_ZROUTER_RX_WORKERS=2` is zenoh's default and the old behaviour), and both log the
+transport lifecycle and the connector at
+debug (`PEPIN_ZROUTER_LOG`; `info` is the old level): the next wake names the refusing end in one
+line, at 19-28 lines a router per statics freeze-and-thaw. Not fixed and not claimed: the non-recovery
+itself was not reproduced in statics (every thaw there recovered within 7 s, including one 25 s
+after the last closure, as the user wake was), so a Mac wake with the stack up stays a case to
+watch — the heal that worked on the night is the clean-order router restart above. **When each
+side takes it:** the laptop router at its next re-creation (`ros/laptop.sh stop`, then `start` or
+`vslam`; a running router is left alone), the board's once `board/pepin-zrouter.service` is
+copied (above) and the router restarted. In between the two routers run different worker counts
+and log levels, which is safe — a router's workers guard only its own sessions — but a wake then
+is logged at debug on the laptop's side only.
+
+## One clock (`PEPIN_TIME_SOURCE`, chrony)
+
+Every ROS stamp on the laptop is the **Docker VM's** clock (all its containers share one kernel);
+every stamp on the board is the board's. Scans, transforms and maps cross between the two, so the
+robot runs on one time base:
+
+- **the laptop serves its VM's clock**: the `pepin-chrony` container (`ros/chrony/`: alpine,
+  `chronyd -d -x`, no sources, `local stratum 10`), published on `udp/123`, started by
+  `ros/time.sh install|server` (and idempotently by `ros/laptop.sh` beside the zenoh router under
+  `PEPIN_TIME_SOURCE=laptop`), `--restart unless-stopped`, left running across `ros/laptop.sh stop`.
+  Measured in statics on 2026-09-23: the image builds in 12 s, chronyd 4.5 answers from the first
+  second (stratum 10, leap normal, 1 MB of memory), 8 of 8 SNTP exchanges at a 1 ms round trip both
+  on `127.0.0.1` and on the Mac's own LAN address — both stay inside the Mac, neither is the WiFi —
+  through Docker Desktop 4.79's port publishing (Docker Engine 29.5.3; no sudo; the macOS firewall
+  is off), and the VM's clock read 15 ms behind the Mac's. The path the design rests on, the board
+  to the Mac's `udp/123` over the WiFi, measured on 2026-09-24 04:00Z with a throwaway server of the
+  same image and `laptop.conf` (on the board `python3 - 10.0.0.167 < src/pepin/timesync.py`, which
+  changes nothing there): 8 of 8 answers in each of three runs, best round trip 5-6 ms, board minus
+  laptop +20.7 to +21.1 ms with the board still on systemd-timesyncd. chronyd logged all 32 queries
+  (the Mac's 8, the board's 24) as coming from one address, 151.101.138.132, neither the Mac's nor
+  the board's: the port proxy rewrites the source, which is why `laptop.conf` allows any;
+- **the board follows it**: chrony instead of systemd-timesyncd (`board/chrony.sh`,
+  `board/chrony/chrony.conf`), the laptop as a `prefer` source polled every 4-16 s, the internet
+  pool (the servers timesyncd used) beside it — the fallback when the laptop is away and a vote
+  against a laptop clock that is wrong. `makestep 1 3`: the clock is stepped only within the
+  first three updates after chronyd starts (normally the boot, before `pepin-ros`'s wait ends) and
+  slewed afterwards; a board that syncs only after that 90-s wait, or a chronyd restart (an apt
+  upgrade, a re-run of `ros/time.sh install`), can still step it once under a running stack;
+- **the board learns the laptop's address from the laptop**: `ros/time.sh` asks this Mac for the
+  address of the interface that routes to the board (`ros/lib.sh`'s `pepin_laptop_ip`) and writes
+  it to the board's `/etc/default/pepin-ros` (`PEPIN_LAPTOP_HOST`) and to
+  `/etc/chrony/sources.d/pepin-laptop.sources`. Nothing on the board ever had the laptop's address
+  before (the laptop dials the board, never the reverse); if DHCP moves the Mac, `ros/time.sh
+  point` re-points it and check 1.15 says "not measured" until then.
+
+**Why the laptop's server does not discipline the VM clock** (no `CAP_SYS_TIME`). The VM's clock
+stops while the Mac sleeps and resumes where it stopped, minutes behind, and Docker Desktop steps
+it back to the Mac's clock by itself 10-26 s after each wake (measured 2026-09-23 on four wakes:
++26, +10, +22, +19 s). Through three 15-minute-lag windows that day the link and RTAB-Map kept
+working (data under replaced zenoh timestamps, RTAB-Map at `delay=-898 s`); what left the link
+dead after the fourth wake was the router-to-router zenoh session, not the clock
+(`scratch/link_autopsy/wake_chain.py`). A second agent stepping the one kernel clock every
+container shares would race Docker's resync and could step every laptop node's time backwards.
+The window is the board's to survive instead: a laptop sample minutes off is a falseticker
+against the pool's three servers, and `prefer` (never `trust`) lets the vote win. What it costs:
+with the internet down AND the Mac just awake, the board has only the laptop to believe for those
+seconds (`maxupdateskew 100` still keeps a source with a jumping frequency estimate from moving
+the clock).
+
+**The boot wait holds under chrony unchanged.** `board/pepin-ros.service` waits up to 90 s for
+`NTPSynchronized`, which timedated reads from the kernel (`adjtimex().maxerror < 16 s`, systemd
+257); chronyd writes its real error bound there at every update and 16 s while unsynchronised, and
+its first update after boot is the `makestep` step itself. That holds when the sync comes within
+the 90 s: a board with no network at boot starts the stack anyway and takes the step later, under
+it — no worse than systemd-timesyncd, which steps at any update over 0.4 s.
+
+**The switch** (CLAUDE.md rule 19): `ros/time.sh source pool` puts the board on the pool alone —
+live, a `chronyc reload sources`, no restart and no step — and `ros/time.sh source laptop` is the
+way back. On the laptop the variable only decides whether `ros/laptop.sh` (re)starts the server;
+its default is `pool` — what the board runs today under systemd-timesyncd — until the deploy
+below has measured the laptop source on the robot, and then it flips to `laptop` in `ros/lib.sh`
+and `src/pepin/timesync.py` together. `ros/time.sh uninstall` puts the board on
+systemd-timesyncd exactly as before (the package's `.deb` is kept at install, so it works with
+apt offline; our sources file and the Debian config backup go with chrony). Check 1.15 answers at
+once while no server runs here (`PASS` "not measured, as configured" under `pool`), so an
+undeployed laptop costs a restart nothing. A value that is neither `laptop` nor `pool` is refused
+by `ros/laptop.sh` before a half starts (`ros/lib.sh`'s `pepin_time_source_check`).
+
+**Deploy (not done yet; a parked robot, the owner's go):**
+
+1. `ros/time.sh install` — builds the `pepin-chrony` image on first use (alpine from Docker Hub),
+   starts the server, copies `board/chrony.sh` and its config to the board and runs `install`
+   there: `apt-get install chrony` (about a minute of the board's CPU; Debian removes
+   systemd-timesyncd with it), our `chrony.conf`, the laptop's source, `systemctl restart chrony`.
+   No sudo on the Mac; root on the board through the existing key. The stack is not restarted.
+   The clock is adjusted once by up to the current board-laptop difference (a step only if it
+   exceeds 1 s, which it has not since the boot waits); do it parked.
+2. `ros/time.sh status` — the laptop's source marked `*` (selected), the pool `+`/`-`.
+3. `ros/time.sh offset` — under 100 ms; then `ros/board.sh census` for chronyd's real cost
+   (`config/board_manifest.json` carries a guess).
+4. With the offset measured: `PEPIN_TIME_SOURCE` defaults to `laptop` in `ros/lib.sh` and
+   `DEFAULT_TIME_SOURCE` in `src/pepin/timesync.py` (and its test), one commit with the numbers.
+5. Not verified from the laptop alone (the board is the client): that the board's chrony selects
+   the laptop (`*` in `ros/time.sh status`) and that `timedatectl show -p NTPSynchronized` reads
+   `yes` under chrony within the first minute after a reboot — the boot wait's premise.
 
 ## The zenoh bridge
 
@@ -413,6 +585,17 @@ read here. `ros/go.sh where` prints `correction_s`, the age of the last one, whe
 ever landed; the board logs the silence when it starts (`nothing on /map_odom for ... s`) and
 keeps broadcasting the edge all the same, because Nav2 there must not lose its global frame to a
 wireless hiccup. Off: `ros/flags.sh set goal_server correction_watch false`.
+
+**A fresh edge is not a placed start either.** Under `PEPIN_LOCALIZER=rtabmap` RTAB-Map
+publishes `map -> odom` from the moment it starts, at the pose it saved at its last shutdown. The
+laptop's `rtabmap_frame` says on `/localization/placement` (latched) whether this start has
+recognised a node of the loaded map or been seeded (`ros/goto.sh seed X Y YAW`), and both goal
+paths — the goal server and `ros/tools/goto_ros.py` — refuse until it has, or when nothing is
+heard at all. A board deployed with this check needs a `pepin-vslam` that publishes the word, so
+`ros/laptop.sh vslam` goes in the same step as the board's deploy, and the `rtabmap frame` report
+line must show `start ...` before the first goal. The switch back works with the laptop's node
+down or older, because it lives on the goal server and goto_ros reads it from there:
+`ros/flags.sh set goal_server start_needs_placement false`.
 
 Two things this mode needs that are **not** the operator's to remember:
 
@@ -915,6 +1098,62 @@ beside the costmap, plus a report line every 10 s: `marks audit: lethal 214 (lid
 laptop a few milliseconds of numpy a second — brute-force distances over a 60x60 grid, no scipy in
 the image — and the board nothing at all.
 
+## Camera grid A/B (2026-09-24)
+
+Today the camera reaches Nav2 as the `/depth_marks` fan, and each costmap's `camera_layer` (an
+`ObstacleLayer`) accumulates it into a grid of its own: the global one is smeared by every
+`map -> odom` jump and both are wiped by the behaviour tree's clears (scratch/costmap_split). The
+alternative, behind switches that all ship off: `depth_fusion`'s `grid_out` publishes the volume's
+CURRENT occupied columns — the same column rule as the fan — and a `camera_grid_layer`
+(`nav2_costmap_2d::StaticLayer`) in each costmap only draws the latest grid (`pepin.camera_grid`).
+
+| topic | type | frame | what |
+|---|---|---|---|
+| `/camera_grid` | `nav_msgs/OccupancyGrid` | the volume's (`odom`) | a 6 m square about the cart at 5 cm (`grid_size_m`, `grid_resolution_m`), corner snapped to 0.5 m; 100 occupied, 0 otherwise; latched, at most `grid_hz` (3 Hz), stamped with the observation; ~14.5 kB, ~43 kB/s to the board |
+| `/camera_grid_map` | `nav_msgs/OccupancyGrid` | `map` | EMPTY, on exactly the lattice of `grid_map_topic` (`/map` under `PEPIN_LOCALIZER=rtabmap`, `/map_tracked` under `tracker`); latched, once per map geometry; nothing until that map is heard |
+| `/camera_grid_map_updates` | `map_msgs/OccupancyGridUpdate` | `map` | the same cells drawn through this laptop's `map -> odom` at the grid's stamp, one rectangle covering the last window and this one, at `grid_hz`; held 1 s after a new geometry |
+
+Nav2 must load the new `nav2_params.yaml` once (the plugin list changed): restart the Nav2 halves.
+After that the A/B is live and reversible:
+
+```bash
+ros/camera_grid.sh on       # grid_out, then per costmap: camera_grid_layer on, camera_layer off
+ros/camera_grid.sh status   # the flag, both costmaps' two layers, the fusion's last "grid:" report
+ros/camera_grid.sh off      # camera_layer on, camera_grid_layer off, then grid_out off
+```
+
+By hand, the same switches (the global costmap is the laptop's `pepin-laptop` under the split,
+`PEPIN_SIDE=board`, and the board's `pepin-ros` otherwise):
+
+```bash
+ros/flags.sh set depth_fusion grid_out true
+ssh root@10.0.0.187 docker exec pepin-ros /pepin_entrypoint.sh ros2 param set /local_costmap/local_costmap camera_grid_layer.enabled true
+ssh root@10.0.0.187 docker exec pepin-ros /pepin_entrypoint.sh ros2 param set /local_costmap/local_costmap camera_layer.enabled false
+docker exec pepin-laptop /pepin_entrypoint.sh ros2 param set /global_costmap/global_costmap camera_grid_layer.enabled true
+docker exec pepin-laptop /pepin_entrypoint.sh ros2 param set /global_costmap/global_costmap camera_layer.enabled false
+```
+
+and back with the four `enabled` values swapped and `grid_out false`. What guards what:
+
+- **A layer enabled before its first grid is never current**, and the controller and the planner
+  then answer "Costmap timed out waiting for update". `camera_grid.sh on` enables a layer only
+  after reading its latched grid back from the topic, and leaves `camera_layer` on where it could
+  not. A disabled layer, or one whose topic is silent, never blocks activation.
+- **The last grid stays when the fusion stops** — killed, kicked, crashed or cut off by the link
+  (a StaticLayer has no timeout, the tree's `ClearEntireCostmap` resets a StaticLayer without
+  erasing its cells, and after a SIGINT rclpy can no longer publish). Only `grid_out false` (so
+  `camera_grid.sh off`) sends empty grids first. With the laptop gone the board-side switch is
+  the way out: `ros2 param set /local_costmap/local_costmap camera_grid_layer.enabled false` on
+  `pepin-ros`. The cells stay where they were in `odom`; what is lost is their clearing.
+- **The global costmap resizes for a map of another geometry**, dropping every layer's marks. The
+  map grid copies `grid_map_topic`'s origin, size and resolution exactly (Nav2's own 1e-5
+  tolerance), so it resizes nothing the map itself does not. An update is always inside the
+  geometry it was drawn for; the one unguarded case is an update already in flight when the map
+  SHRINKS — switch the grid off before swapping databases.
+- `use_maximum: True` on both costmaps is what lets the grid's zeros leave the other layers alone;
+  for the global `static_layer` it is a no-op (first plugin, `track_unknown_space: false`), which a
+  contract test holds.
+
 ## Feature flags
 
 Every behaviour that can be switched is a live parameter of the node that owns it, declared
@@ -967,6 +1206,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `bridge_watch` | `half_restart` | bool | off | yes | when the gentle repair (the bridge alone) did not bring the routes back, end this process so the launch restarts the whole laptop half; off: say so in the log, keep everything alive, and retry the gentle repair after a cooldown |
 | `camera_stream` | `scale` | number 0..1 | 0.5 | yes | the published picture as a fraction of the camera's own 1280x720, its optics scaled with it; a change takes the next frame. THE MONO RIG's flag: a stereo head publishes at its calibration's own size (the size the remap tables were built for, the size a matcher's disparity is in pixels of), so the node pins this to 1.0 there and refuses any other value with that reason |
 | `camera_stream` | `undistort` | bool | off | yes | the published picture is rectified with the checkerboard calibration (config/camera.json's intrinsics) and its camera_info then says no distortion; a no-op while the camera is uncalibrated, since there is nothing to undo. Rectifying crops to the largest all-valid rectangle, so the field of view narrows. THE MONO RIG's flag: a stereo head is rectified by its own stereo calibration (both eyes onto one pinhole with the rows aligned, which is what a disparity means at all), so the node refuses this one there rather than straighten a picture twice |
+| `camera_stream` | `fold_mask` | bool | on | yes | stereo: rectified pixels past a fold of the calibration's undistortion map (the lens corners the board never reached) go out black, as no data, and the depth there is cut; off publishes the mirrored corners as before |
 | `camera_stream` | `static_camera_tf` | bool | on | at start | base_link -> camera_link is broadcast from here; it goes off (ros/laptop.sh vslam --neck) when the board's neck node publishes that edge live from the servo encoders (neck_state, flag neck_tf), because two publishers of one edge fight |
 | `contact_scan` | `contact_scan` | bool | on | yes | the contact line is published; off, the node is a subscriber that costs nothing — the costmap's own contact_layer.enabled is the other end of the same demo switch, and either one alone takes the camera's floor line out |
 | `contact_scan` | `shadow` | bool | on | yes | the last floor pixel on a face stands a band's width UP that face, so its ray lands past the foot: on, that width is taken back off the range (pepin.contact.band_shadow); off is the raw boundary ray |
@@ -987,6 +1227,10 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `depth_fusion` | `marks_min_z` | number 0..1 | 0.15 | yes | the floor of the height band /depth_marks reads the volume in, metres above the cart's own floor plane; the band's top is the volume's own camera band (config/fusion.json's camera_band_m) |
 | `depth_fusion` | `marks_hz` | number 0..30 | 5.0 | yes | the cap on how often /depth_marks is PUBLISHED, in hertz; 0 publishes every frame, which is what this topic did until 2026-09-22. Only the publication is thinned: every frame and every revolution is still fused into the volume, and a slice that is not published is not computed either (the gate is read before the crossing search) |
 | `depth_fusion` | `marks_clear` | bool | off | yes | the fan also says where the volume is KNOWN OPEN: a second, clearing-only scan on /depth_free carrying, per bearing, the range of the last column the volume has observed FREE before the first column it has not (pepin.volume_scan.free_ranges). A bearing the volume cannot vouch for stays NaN, which clears nothing. Off, the topic is silent and the camera layer clears from the single frame alone, as it has since 2026-09-21 |
+| `depth_fusion` | `grid_out` | bool | off | yes | publish the volume's current occupied columns (the /depth_marks rule) as grids the costmaps' camera_grid_layer only draws: /camera_grid, a square about the cart in the volume's frame, and /camera_grid_map with its _updates on the lattice of grid_map_topic; off, all three are silent |
+| `depth_fusion` | `grid_hz` | number 0.5..10 | 3.0 | yes | the cap on how often the camera grids are published, hertz |
+| `depth_fusion` | `grid_size_m` | number 1..20 | 6.0 | yes | the side of /camera_grid's square about the cart, metres |
+| `depth_fusion` | `grid_resolution_m` | number 0.02..0.5 | 0.05 | yes | the cell of /camera_grid, metres; /camera_grid_map always takes the map's |
 | `depth_fusion` | `surface_hz` | number 0.1..10 | 1.0 | yes | how often /fusion/surface is published (the crossing search costs a fraction of a second) |
 | `depth_fusion` | `band_half_z` | number 0.02..0.5 | 0.125 | yes | half the height band around the lidar's plane a frame is seated on, metres (config/fusion.json's band_half_z_m is the default); the band's centre is the plane the published base_link -> laser edge names, and both are printed in the report line |
 | `depth_fusion` | `lidar_layer` | bool | on | yes | /scan is integrated into the volume at the lidar's plane (rays carve free space, returns mark a surface); off, the volume is the camera's alone, as it was |
@@ -1066,6 +1310,9 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `goal_server` | `jump_clear` | bool | off | yes | map -> odom is read from TF five times a second and, when it STEPS further than 0.10 m, Nav2's local costmap is emptied ("/local_costmap/clear_entirely_local_costmap", asynchronously, at most once per 1 s): the marks in that grid were laid where the cart used to be. The step in that edge is the correction alone — the cart's own motion lives in odom -> base_link — whoever published it. Off, nothing reads the edge and no listener is started for it |
 | `goal_server` | `pose_topic` | bool | on | yes | the pose this node reads out of TF is republished as /pose (geometry_msgs/PoseStamped in map, 5 Hz, stamped with the transform's own stamp), so the other nodes on this board can have the pose without a TF listener of their own. Inert where a tracker runs (there /tracker_pose is that topic already) and on a split stack, where the reader is on the other machine and reads the edge itself. Off, nothing is published and this node's listener goes back to being started on the first ask |
 | `goal_server` | `controller` | choice: mppi, rpp, rpp_shim | rpp_shim | yes | what follows the plan: mppi is Nav2's MPPI controller for every planner, held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own Regulated Pure Pursuit from PLANNERS, ending on position alone as before 2026-09-23; rpp_shim is the reversing RPP inside Nav2's RotationShimController, which turns the cart to the mark's heading in place once it is inside the goal tolerance. Published latched on controller_selector and goal_checker_selector, so a change is read by the behaviour tree at its next tick |
+| `goal_server` | `start_needs_placement` | bool | on | yes | under PEPIN_LOCALIZER=rtabmap a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for this same flag before its own preflight. Off, a fresh map -> base_link is enough, as before 2026-09-23 |
+| `goal_server` | `cancel_every_goal` | bool | on | yes | a cancel on the socket also asks both navigators' own cancel services (navigate_to_pose and navigate_through_poses, <action>/_action/cancel_goal) for EVERY goal — a zero goal id, whoever sent it — and answers what each said (``navigators``); off, it cancels only the goal this node sent, as before 2026-09-25 |
+| `goal_server` | `lidar_watch` | bool | on | yes | the lidar's driver is restarted when its port is there and no scan has come for 5 s, and once per absence of the port so it respawns idle instead of spinning a core (pepin.lidar_watch); `where` says `lidar` either way |
 | `laptop_localizer` | `tf_belief` | bool | on | yes | when /tracker_pose has been silent for a second, the pose a camera scan is matched around is looked up from TF (map -> base_link at that scan's stamp) instead of carried from the last /tracker_pose; off, a silent board means no camera measurements at all |
 | `laptop_localizer` | `global_watch` | bool | on | yes | run the whole-map search once every watch_period_s and publish what it finds on /localization/candidate; off, this half of the node is a subscriber that costs nothing and the board is back to searching for itself only once it is already lost |
 | `laptop_localizer` | `watch_period_s` | number 0.2..60 | 1.0 | yes | seconds between searches |
@@ -1131,9 +1378,20 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `rtabmap_frame` | `graph_memory` | choice: trust, map, localise | trust | yes | who decides whether RTAB-Map's database may LEARN beside a known map. trust: this node switches it live on the rule 'a sharp pose that does not come from the database itself' — the tracker's seating under graph_memory_sigma_m / graph_memory_sigma_deg, and a holder on /localization/sources that is not the graph — calling /rtabmap/rtabmap/set_mode_mapping / /rtabmap/rtabmap/set_mode_localization on a change of verdict that has held for the seating's own freshness window, and carrying RGBD/LinearUpdate / RGBD/AngularUpdate with it. map: always mapping. localise: always localising, whatever the pose is worth |
 | `rtabmap_frame` | `graph_memory_sigma_m` | number 0..1 | 0.03 | yes | the widest the tracker's own error bar may be, metres per position axis (the roots of the covariance /tracker_pose carries, which is the lidar's score peak), for that pose to be worth TEACHING the database from (graph_memory trust); a softer seating leaves RTAB-Map localising. 1.0 lets anything teach, which is the behaviour of before 2026-09-14 |
 | `rtabmap_frame` | `graph_memory_sigma_deg` | number 0..180 | 1.0 | yes | the same gate for heading, degrees: the database is taught only from a seating whose heading sigma is at most this |
-| `rtabmap_frame` | `registration_follows_snapshots` | bool | on | yes | RTAB-Map's Reg/Strategy follows what the snapshots carry (/sensor_pack/state): a scan in them means ICP (1), no scan means visual (0), switched live through the node's own parameter path on a change that has held for the hold the state carries. Off, the strategy stays whatever the launch table set and this node only reports what it would have asked for |
+| `rtabmap_frame` | `registration_follows_snapshots` | bool | on | yes | RTAB-Map's Reg/Strategy follows what the snapshots carry (/sensor_pack/state): a scan and a picture mean visual then ICP (2), a scan alone means ICP (1), no scan means visual (0), switched live through the node's own parameter path on a change that has held for the hold the state carries. Off, the strategy stays whatever the launch table set and this node only reports what it would have asked for |
+| `rtabmap_frame` | `atomic_parameter_sets` | bool | on | yes | a parameter set this node hands RTAB-Map (a strategy with its visual features, a visual set alone, a memory mode's pair) goes as ONE /rtabmap/rtabmap/set_parameters_atomically request, which rtabmap_slam applies as one /parameter_events notification and one parseParameters. Off, it goes as one set_parameters request, which rclcpp applies one parameter at a time — each its own event and its own parseParameters — with RGBD/LoopClosureReextractFeatures ordered first when it turns off and last when it turns on |
+| `rtabmap_frame` | `visual_features` | choice: orb, xfeat | xfeat | yes | which features RTAB-Map's VISUAL registration (Reg/Strategy 0, the camera-only strategy, and the visual half of 2) matches when it checks a node the words recognised. xfeat: XFeat keypoints matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure time (Vis/FeatureType 15, Vis/CorNNType 6, RGBD/LoopClosureReextractFeatures true); the database is only read. orb: the database's own GFTT/ORB words, the launch table's values. Sent with the strategy and changed live; under ICP alone, and unless RTAB-Map is certainly localising (told so and answered, no switch to mapping waiting), the set is always orb, and a switch to mapping waits until orb's set is in force. xfeat needs the pepin-laptop:xfeat image (/opt/xfeat/rtabmap_xfeat.py); in another image this node sends orb and the report line says why |
+| `rtabmap_frame` | `pnp_reproj_px` | number 1..4 | 2.0 | yes | Vis/PnPReprojError: how far, in pixels, a database point may reproject from its match in the current picture and still count as an inlier of the visual registration (20 inliers accept it, Vis/MinInliers). Sent with the strategy's parameters and changed live |
+| `rtabmap_frame` | `visual_confirm` | choice: rtabmap, aggressive, single | aggressive | yes | how RTAB-Map CONFIRMS a localisation while the camera registers alone: RTAB-Map 0.22 delays a first good localisation into its odometry cache and accepts it only with a second one inside RGBD/MaxOdomCacheSize updates, and that second try has to reach Rtabmap/LoopThr. rtabmap: its stock 0.11 and 10. aggressive: Rtabmap/LoopThr 0.05, the threshold the first try already used, so the second comes on the next update; the confirmation stays. single: RGBD/MaxOdomCacheSize 0, the first good localisation is accepted. Sent with the visual strategy while the database localises and changed live; under ICP and while it maps, always rtabmap |
+| `rtabmap_frame` | `visual_proximity` | bool | on | yes | whether a localised camera also registers every update against the database nodes near its pose (RGBD/ProximityBySpace), each an XFeat re-extraction and a LighterGlue match; off, only the words' own hypothesis is registered, one at most per update. Sent with the visual strategy while the database localises and changed live; under ICP and while it maps, always on (the lidar's proximity links are cheap and most of the graph's) |
+| `rtabmap_frame` | `registration_backend` | choice: service, local, auto | auto (env PEPIN_REGISTRATION_BACKEND) | yes | where RTAB-Map's XFeat keypoints and LighterGlue matches are computed (the xfeat visual features): service — the localisation service on the laptop's GPU (pepin.localization_service, PEPIN_MODELS_URL), no features when it does not answer; local — in RTAB-Map's own process on the Docker VM's CPU, as before 2026-09-24; auto — the service, and a call it does not answer computed locally. Written to /tmp/pepin/registration.json, which RTAB-Map's adapters read on every call (one stat): live, no restart of RTAB-Map |
+| `rtabmap_frame` | `registration_timeout_s` | number 0.05..5 | 1.0 | yes | how long RTAB-Map's adapters wait for one answer of the localisation service before it counts as none (auto then computes it locally, and the service is left alone for 10 s) |
+| `rtabmap_frame` | `xfeat_top_k` | integer 256..8192 | 2048 | yes | the most XFeat keypoints a picture keeps, best score first, wherever XFeat runs; RTAB-Map applies no cap of its own to a Python detector |
+| `rtabmap_frame` | `place_recognition` | choice: words, descriptor | descriptor | yes | how RTAB-Map finds WHICH database node a picture is (its likelihood, before any registration): words — the ORB bag of words' TF-IDF (Kp/TfIdfLikelihoodUsed true, Rtabmap/VirtualPlaceLikelihoodRatio 0, RTAB-Map's defaults); descriptor — the dot product of the nodes' learned place descriptors as z-scores (false and 1; rtabmap Memory::computeLikelihood -> Signature::compareTo, Rtabmap::adjustLikelihood), which sensor_pack attaches to every snapshot. descriptor is sent ONLY when it cannot abort RTAB-Map: its core carries ros/patches/rtabmap-keep-global-descriptors.patch (the marker /opt/rtabmap_patches/keep-global-descriptors), the snapshots carry one each (/sensor_pack/place) and the database's census at this start (PEPIN_PLACE_CENSUS, taken by the launch before RTAB-Map opens the file) says every node carries exactly one of the same length — and only while the camera snapshots are described (descriptor_null_share); otherwise the words, and the report line says why. Live |
+| `rtabmap_frame` | `descriptor_null_share` | number 0..1 | 0.5 | yes | place_recognition descriptor falls back to the words while more than this share of the last 10 camera snapshots carried the null descriptor (the localisation service down, late or answering nonsense), and goes back once they are described again; 1.0 never falls back |
 | `rtabmap_frame` | `word_at_picture_time` | bool | on | yes | a graph word is stamped with the moment its PICTURE was taken — the localisation's own stamp, the board's clock under the snapshots — and odom -> base_link is looked up at that moment; the board carries the word to its update over its odometry (relocalizer carry_stale_words). Off, the word is stamped with the newest odom -> base_link stamp heard, as it was until 2026-09-19 |
 | `rtabmap_frame` | `grid_needs_tie` | bool | on | yes | RTAB-Map's grid (/rtabmap/grid) is relayed onto /map — the one map the board's tracker adopts — only once this start has recognised a node of the database it LOADED (or loaded none), and only grids stamped after that recognition. Until then the board keeps the map it cached. Off, every grid is relayed as it comes |
+| `rtabmap_frame` | `start_needs_placement` | bool | on | yes | what goes out on /localization/placement (latched) says this start of RTAB-Map is PLACED only once an update has recognised a node of the database it loaded, or an operator's seed (/rtabmap/initialpose) has been heard since its first update — or it loaded an empty database, whose start pose is the map's origin. The board's goal clients (ros/tools/goto_ros.py, pepin_bringup.goal_server) refuse a goal under PEPIN_LOCALIZER=rtabmap until then, saying to seed or to let the camera see a mapped place. Off, every start counts as placed: RTAB-Map's pose is taken as it is |
 | `run_recorder` | `fusion_records` | bool | on | yes | the camera's measurements (/localization/measurement) and the tracker's account of each update (/localization/sources) go on the numbered tape as the 'meas' and 'srcs' records scratch/camera_error.py reads |
 | `run_recorder` | `bridge_kick` | bool | on | yes | the laptop's request to restart THIS board's zenoh bridge (/bridge/kick) is answered by touching /run/pepin/bridge_kick, which a systemd path unit on the board turns into `systemctl restart pepin-bridge`; off, the request is logged and ignored |
 | `run_recorder` | `planner_records` | bool | on | yes | what the PLANNER saw goes on the tape too: the global costmap (run-length encoded, at most one grid per new plan), the goal status of Nav2's three actions (navigate_to_pose, compute_path_to_pose, follow_path) and the pose graph's own words (/localization/graph_measurement) beside the camera's; off, the tape holds what it held before 2026-09-18 |
@@ -1143,6 +1401,9 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `sensor_pack` | `pack_hz` | number 0.1..15 | 1.0 | yes | at most this many snapshots a second of SENSOR time (the stamps' own clock, not this laptop's) |
 | `sensor_pack` | `pair_periods` | number 0.5..10 | 1.5 | yes | how many of its OWN measured periods a source's message may be from the snapshot's stamp and still be paired with it (pepin.snapshot) |
 | `sensor_pack` | `tf_retry` | bool | on | yes | a member whose transform TF cannot answer for yet does not cost the snapshot: the moment is put back and offered again on the next arrival, until it has left that member's own pairing patience (pair_periods of its measured period). Off, the member is dropped at once and the snapshot goes out without it — the behaviour of before 2026-09-19 |
+| `sensor_pack` | `global_descriptor` | choice: auto, on, off | auto (env PEPIN_GLOBAL_DESCRIPTOR) | at start | whether every snapshot carries exactly one rtabmap_msgs/GlobalDescriptor (type 1): the place vector of its picture (place_descriptor), or the null descriptor (zeros) when it has no picture or no vector came in place_timeout_s; said latched on /sensor_pack/place. auto: exactly when this image's RTAB-Map keeps a node's descriptor across the reload of its data (the marker /opt/rtabmap_patches/keep-global-descriptors, ros/xfeat/patch_rtabmap.sh); on: always; off: never, the snapshots of before 2026-09-24 |
+| `sensor_pack` | `place_descriptor` | bool | on | yes | a camera snapshot's descriptor is the localisation service's /place vector of its picture (pepin.localization_service, BoQ on the laptop's GPU); off, every snapshot carries the null descriptor and the service is not asked |
+| `sensor_pack` | `place_timeout_s` | number 0.05..0.95 | 0.5 | yes | the most a snapshot waits for its place vector, from the moment it is packed — its wait in the worker's queue included — before it goes out with the null descriptor |
 | `tof_bridge` | `range_as` | choice: scan, range | scan | yes | what Nav2 is fed with: scan also publishes each cone on /tof/<name>/scan as a small LaserScan fan for an ObstacleLayer; range publishes nothing there, which is the node before 2026-09-21 and needs the three RangeSensorLayer blocks back in the local costmap's plugins list. The sensor_msgs/Range topics are published either way |
 | `visual_odometry` | `vo_publish` | bool | on | yes | the gated visual odometry leaves this laptop as /vo, where the board's EKF fuses it as a third input beside the wheels and the gyro; off, the node still measures and reports and the EKF is exactly what it was without it |
 | `visual_odometry` | `vo_covariance` | choice: dynamic, constant, rtabmap | dynamic | yes | whose covariance rides on the published pose: `dynamic`, the registration's own sigma and the depth scale's share of the step just taken added in quadrature (pepin.visual_odometry.scaled_covariance); the documented constant (vo_sigma_m, vo_yaw_sigma_deg); or the one rtabmap's registration computed, untouched |
@@ -1220,6 +1481,11 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* off — default by design, unmeasured: the camera is calibrated (45 views, rms 0.230 px, fx 724.1, fy 726.8, cx 652.0, cy 374.0, k1 -0.150, k2 -0.129, k3 +0.092, HFOV 82.9 deg, 2026-09-13), but the straightened picture has never been compared with the raw one on the robot, and nobody has measured what the crop costs in field of view
   - *On when:* when a consumer needs straight lines — a checkerboard, a marker, a recogniser that assumes a pinhole
   - *Off when:* wherever a consumer was measured in the raw picture's optics (the depth pipeline's law was fitted there), and wherever the field of view matters more than straight lines
+- **`fold_mask`** — bool, default on
+  - *What:* stereo: rectified pixels past a fold of the calibration's undistortion map (the lens corners the board never reached) go out black, as no data, and the depth there is cut; off publishes the mirrored corners as before
+  - *Default:* on — measured 2026-09-24 (scratch/stereo/fold_check.py): the left eye's map folds back in both bottom corners, 0.4 % of the picture, the 'crack' Artem saw, and camera phantoms lined up along it
+  - *On when:* always on a stereo head calibrated without the corners
+  - *Off when:* a calibration that covers the corners (fold_check.py finds no fold)
 - **`static_camera_tf`** — bool, default on, not live
   - *What:* base_link -> camera_link is broadcast from here; it goes off (ros/laptop.sh vslam --neck) when the board's neck node publishes that edge live from the servo encoders (neck_state, flag neck_tf), because two publishers of one edge fight (not live: set at the next start)
   - *Default:* on — default by design, unmeasured: an ownership rule rather than a tuning — one edge, one publisher. Not live because a static transform cannot be withdrawn once it is sent, so the choice is made at start
@@ -1326,6 +1592,26 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* off — OFF, because the measurement that would justify it says it would do almost nothing. The case FOR it is real: the fan marks over the whole turn while /depth_scan clears only the head's forward 83 deg, so on run 0434's turn unbacked lethal cells were born at 109/s against 27/s standing, 52 % of them BEHIND the cart where nothing can ever raytrace them away, and the count climbed 24 -> 904 in 38 s (scratch/one_localiser/tape_0434_turn.py). But a clearing ray stops at the first column that is not open, and on the parked cart of 2026-09-23 the volume held an occupied column on 717 of 720 bearings: where the camera's own frame shares a bearing with a mark it AGREES with it within 0.20 m 96 % of the time and sees past it 3 % (scratch/one_localiser/live_fan_vs_lidar.py), and on the saved room volume the walk could vouch for 87 bearings of 720. The marks are not stale memory the volume has already carved — they are what the volume currently holds, and clearing cannot remove what the model still believes
   - *On when:* after the near marks themselves are answered: with the volume no longer holding a shell at 0.5-0.75 m on every bearing, the walk reaches past it and this is what stops the ratchet behind the cart. Turn it on together with the yaml's depth_free source and watch 'clear' in the report line rise off its floor
   - *Off when:* as shipped, and whenever a cell must not be erased by the camera's own memory: silent topic, and the layer clears from /depth_scan as it did before
+- **`grid_out`** — bool, default off
+  - *What:* publish the volume's current occupied columns (the /depth_marks rule) as grids the costmaps' camera_grid_layer only draws: /camera_grid, a square about the cart in the volume's frame, and /camera_grid_map with its _updates on the lattice of grid_map_topic; off, all three are silent
+  - *Default:* off — off until a drive has measured it: the nvblox pattern against camera_layer's own copies of the memory, smeared by map -> odom jumps and wiped by the tree's clears (journal 2026-09-24, scratch/costmap_split)
+  - *On when:* with camera_grid_layer on and camera_layer off in both costmaps: ros/camera_grid.sh on
+  - *Off when:* ros/camera_grid.sh off, back to /depth_marks alone; turning it off publishes one empty grid on each topic so a layer left on holds nothing stale
+- **`grid_hz`** — number 0.5..10, default 3.0
+  - *What:* the cap on how often the camera grids are published, hertz (0.5..10)
+  - *Default:* 3.0 — between the costmaps' update_frequency 2.0 (global) and 5.0 (local); one tick costs the paint worker 3.3 ms on the live 280x250x34 grid (a marks slice 2.9), 10 ms/s and 43 kB/s of /camera_grid to the board at 3 Hz (scratch/camera_grid/grid_cost.py, journal 2026-09-24)
+  - *On when:* raise it toward 5 if a camera obstacle reaches the local costmap too late
+  - *Off when:* lower it if the grids cost the link or the costmaps too much
+- **`grid_size_m`** — number 1..20, default 6.0
+  - *What:* the side of /camera_grid's square about the cart, metres (1..20)
+  - *Default:* 6.0 — default by design: twice the fan's 3 m reach, so the local costmap's 3 m window always sits inside it (journal 2026-09-24)
+  - *On when:* raise it with the local costmap's own window
+  - *Off when:* lower it to save the link: the cells grow with its square
+- **`grid_resolution_m`** — number 0.02..0.5, default 0.05
+  - *What:* the cell of /camera_grid, metres; /camera_grid_map always takes the map's (0.02..0.5)
+  - *Default:* 0.05 — default by design: the volume's own voxel and the costmaps' own cell (journal 2026-09-24)
+  - *On when:* coarser only to save the link
+  - *Off when:* finer than the voxel draws no more detail
 - **`surface_hz`** — number 0.1..10, default 1.0
   - *What:* how often /fusion/surface is published (the crossing search costs a fraction of a second) (0.1..10)
   - *Default:* 1.0 — default by design, unmeasured; what is measured is the cost it protects — the surface build took 45 ms a second and stalled the node's executor until it was moved onto a snapshot taken outside the model lock
@@ -1727,6 +2013,21 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* rpp_shim — the six legs of 2026-09-23 all stopped 12-60 deg short of the mark's heading: the reversing RPP cannot rotate in place, the tree ended the drive on position (xy_only_goal_checker), and the pivot that finishes the heading lives here in _pivot_to, which drives sent through goto_ros.py never reach. Each leg also ran 5-9 recoveries, which is what an RPP answers a refused arc with; MPPI samples another trajectory instead
   - *On when:* rpp_shim by default since the evening of 2026-09-23 (six legs: 21-33 s, 6-11 recoveries, 4-10 cm and 2-5 deg at the mark; MPPI on the same board crawled at a median 0.06 m/s); mppi where its sampling is wanted, rpp for the position-only drives of before
   - *Off when:* rpp for an A/B against the RPP drives of before, or if MPPI's cycle does not fit the board's control period (the controller server's 'Control loop missed its desired rate')
+- **`start_needs_placement`** — bool, default on
+  - *What:* under PEPIN_LOCALIZER=rtabmap a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for this same flag before its own preflight. Off, a fresh map -> base_link is enough, as before 2026-09-23
+  - *Default:* on — on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the pose it SAVED at its last shutdown, and a fresh transform was taken for a localisation — 'at home' at the bookshelf with 0 of 198 updates recognised, then 76 cm off inside the table. The laptop's flag of the same name only changes what rtabmap_frame SAYS: it cannot lift a refusal of silence, from a node that is down, respawning or running code from before the word existed. This one is the board-side switch the refusal itself answers to
+  - *On when:* always under PEPIN_LOCALIZER=rtabmap: a pose nobody has vouched for since RTAB-Map's start is not a pose to drive on
+  - *Off when:* when the word cannot come and the cart is known to stand where RTAB-Map's pose says: pepin-vslam down or started before this build (ros/laptop.sh vslam restarts it on the checkout), or a dark room with no seed at hand
+- **`cancel_every_goal`** — bool, default on
+  - *What:* a cancel on the socket also asks both navigators' own cancel services (navigate_to_pose and navigate_through_poses, <action>/_action/cancel_goal) for EVERY goal — a zero goal id, whoever sent it — and answers what each said (``navigators``); off, it cancels only the goal this node sent, as before 2026-09-25
+  - *Default:* on — ros/goto.sh drives through ros/tools/goto_ros.py, a goal this node never sent, so this cancel reached nothing, and goto.sh's own cancel started goto_ros.py on the board mid-drive: a new ROS process is a new zenoh session, and each one stalled all laptop -> board delivery for 2.6-3.1 s about 1.5 s after it started (34 of 39 cases, journal 2026-09-25). Asked from this long-lived node the same cancel costs a socket write; one 30 s deadline is shared by both navigators, as in goto_ros.py
+  - *On when:* always: the operator's cancel means every goal on the board, whichever client sent it
+  - *Off when:* to put the old answer back for a comparison — pepin.goal_link then finds no navigators in the answer and ros/goto.sh cancel falls back to goto_ros.py
+- **`lidar_watch`** — bool, default on
+  - *What:* the lidar's driver is restarted when its port is there and no scan has come for 5 s, and once per absence of the port so it respawns idle instead of spinning a core (pepin.lidar_watch); `where` says `lidar` either way
+  - *Default:* on — the driver opens its port once: a lidar re-plugged or plugged in after the start stayed dead until a stack restart (journal 2026-09-28)
+  - *On when:* always
+  - *Off when:* while the lidar is deliberately held silent with its port present
 
 #### `laptop_localizer`
 
@@ -2071,10 +2372,60 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *On when:* always, with graph_memory_sigma_m: a seating sharp in x and y and free in heading is a cart that knows where it stands and not which way it faces
   - *Off when:* raise it only with graph_memory_sigma_m, and for the same reasons
 - **`registration_follows_snapshots`** — bool, default on
-  - *What:* RTAB-Map's Reg/Strategy follows what the snapshots carry (/sensor_pack/state): a scan in them means ICP (1), no scan means visual (0), switched live through the node's own parameter path on a change that has held for the hold the state carries. Off, the strategy stays whatever the launch table set and this node only reports what it would have asked for
+  - *What:* RTAB-Map's Reg/Strategy follows what the snapshots carry (/sensor_pack/state): a scan and a picture mean visual then ICP (2), a scan alone means ICP (1), no scan means visual (0), switched live through the node's own parameter path on a change that has held for the hold the state carries. Off, the strategy stays whatever the launch table set and this node only reports what it would have asked for
   - *Default:* on — on, because under ICP a camera-only cart cannot localise AT ALL, and that is measured rather than reasoned: in a minute of camera-only snapshots on 2026-09-18 RTAB-Map logged 28 'Missing visual features or missing raw data to compute them' and 56 'Requested laser scan data, but the sensor data doesn't have laser scan', and not one update named a node. The strategy is one object for the process (the pipeline is deleted and re-created when the parsed value differs from the one in hand, rtabmap/core/Memory.cpp:721-731), so one table cannot serve a node with a scan and a node without one — and which a node has is now data, not config. What is NOT measured yet is that strategy 0 makes a camera-only link on THIS database: that is the live check
   - *On when:* always beside a known map, and above all in a camera-only test — it is the whole difference between a camera that recognises a place and one that can act on it
   - *Off when:* to reproduce the stage-1 behaviour (ICP throughout) under the same snapshots, or if a live switch is ever seen to cost RTAB-Map its working memory
+- **`atomic_parameter_sets`** — bool, default on
+  - *What:* a parameter set this node hands RTAB-Map (a strategy with its visual features, a visual set alone, a memory mode's pair) goes as ONE /rtabmap/rtabmap/set_parameters_atomically request, which rtabmap_slam applies as one /parameter_events notification and one parseParameters. Off, it goes as one set_parameters request, which rclcpp applies one parameter at a time — each its own event and its own parseParameters — with RGBD/LoopClosureReextractFeatures ordered first when it turns off and last when it turns on
+  - *Default:* on — on, measured 2026-09-24 in a throwaway container of pepin-laptop:xfeat (scratch/xfeat_critic/atomic_set.sh: the node on an empty database, its own ROS domain, no network). rtabmap_slam applies every parameter event it hears on its own node (CoreWrapper.cpp:907-970). Five parameters in one SetParameters request (Reg/Strategy 0 and the xfeat set) arrived as 5 events and 5 parseParameters over 61 ms, Reg/Strategy first and re-extraction fourth, with 49 ms after Vis/FeatureType 15 alone while its detector was built; the same five in one SetParametersAtomically request arrived as 1 event and 1 parseParameters. One by one, leaving xfeat for ICP passes through ICP with re-extraction still on, and every intermediate state is a registration nobody chose
+  - *On when:* always: every parameter this node sets is declared by rtabmap_slam (CoreWrapper.cpp:362-364), so an atomic set is refused only as a whole
+  - *Off when:* to reproduce the behaviour before 2026-09-24, or if RTAB-Map's node is ever seen to refuse an atomic set (one unknown name fails the WHOLE request, where set_parameters fails that parameter alone)
+- **`visual_features`** — choice: orb, xfeat, default xfeat
+  - *What:* which features RTAB-Map's VISUAL registration (Reg/Strategy 0, the camera-only strategy, and the visual half of 2) matches when it checks a node the words recognised. xfeat: XFeat keypoints matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure time (Vis/FeatureType 15, Vis/CorNNType 6, RGBD/LoopClosureReextractFeatures true); the database is only read. orb: the database's own GFTT/ORB words, the launch table's values. Sent with the strategy and changed live; under ICP alone, and unless RTAB-Map is certainly localising (told so and answered, no switch to mapping waiting), the set is always orb, and a switch to mapping waits until orb's set is in force. xfeat needs the pepin-laptop:xfeat image (/opt/xfeat/rtabmap_xfeat.py); in another image this node sends orb and the report line says why (one of: orb, xfeat)
+  - *Default:* xfeat — xfeat, measured 2026-09-24 in RTAB-Map's OWN registration: RegistrationVis of pepin-laptop:xfeat on evening frames of runs 0455-0465, each against the daylight database's node nearest the lidar-held truth (scratch/xfeat/probe/probe_report.py; Vis/Iterations 300, 2 px, 20 inliers; judged while turning slower than 0.35 rad/s, right within 0.30 m and 10 deg). Of 219 frames ORB recognised 7 (3 %), xfeat 197 (90 %): 139 right and 18 wrong — 11.5 % of the 157 judged — median error 0.12 m / 3.1 deg, p90 0.30 m / 9.2 deg (scratch/xfeat_critic/rtabmap_own_figures.py). On the camera-only run 0466, against the nodes RTAB-Map itself proposed, ORB recognised 0 of 136 frames and xfeat 133. The whole node replaying 0455-0465 with the stock table (scratch/xfeat/rtabmap_replay.py, replay_summary.py) accepted 27 of 425 updates — 8 loop closures, 19 proximity links — and 19 of the 21 judged were right; the 2 wrong are loop closures on node 641 (the bookshelf), all five of whose accepts sit at 0.24-0.31 m / 7-11 deg. In the rtabmap role an accepted wrong registration moves map -> odom (RGBD/OptimizeMaxError 0 there: the graph's error rejects nothing), so the 11.5 % is the number to watch on a drive. Secondary, the Python emulation over the 3 nearest nodes (scratch/xfeat/xfeat_bench.py): ORB 10 (5 %), xfeat 167 (76 %), 6 of 133 judged wrong, four of them node 492/493 where the daylight picture's rocking chair had moved by the evening (scratch/xfeat/node_consistency.py); on 0466 its 93 recognitions with an EKF sample gave a map -> odom within 4.0 cm / 0.45 deg of a running median (scratch/xfeat/bench_analyse.py)
+  - *On when:* xfeat whenever the camera has to localise alone on a map built in other light — the evening, lamps on, a daylight database
+  - *Off when:* orb to reproduce RTAB-Map's stock registration (0 of 630 camera-only updates accepted on 2026-09-23 evening), in an image without the adapters, when a drive shows the wrong recognitions (map -> odom jumping by 0.3 m or 10 deg on one word), or if the laptop's CPU cannot spare a registration: 0.67-0.70 s median inside RTAB-Map on the Docker VM once torch is imported with RTLD_DEEPBIND, 1.70 s before (scratch/xfeat/data/probe/out/probe_xfeat_2px_300_6_*.csv), per loop-closure or proximity candidate; in the stock-table replay, run before that fix, an update that registered took 2.5 s median, p90 5.1 s. The benchmark's 75 + 75 + 167 ms is the Python adapters alone, not what RTAB-Map pays
+- **`pnp_reproj_px`** — number 1..4, default 2.0
+  - *What:* Vis/PnPReprojError: how far, in pixels, a database point may reproject from its match in the current picture and still count as an inlier of the visual registration (20 inliers accept it, Vis/MinInliers). Sent with the strategy's parameters and changed live (1..4)
+  - *Default:* 2.0 — 2, RTAB-Map's own default (Parameters.h:684), and measured against 4 in RTAB-Map's own registration on the same 219 evening frames (scratch/xfeat/probe/probe_report.py, xfeat, Vis/Iterations 300, the node nearest the truth): 4 px recognises 207 (95 %) where 2 px recognises 197 (90 %), but judged against the lidar's truth 29 of its 167 recognitions are off by 0.30 m or 10 deg (17.4 %) against 18 of 157 (11.5 %) at 2 px, and its error is wider (p90 0.36 m / 11.4 deg against 0.30 m / 9.2 deg) — the 10 extra recognitions bring 11 extra wrong ones (scratch/xfeat_critic/rtabmap_own_figures.py). A wrong word moves map -> odom when RTAB-Map owns it, so the tighter gate is the default. The Python emulation agrees (scratch/xfeat/xfeat_bench.py: 209 against 167 recognised, 22 of 168 against 6 of 133 wrong), and against WRONG nodes — 336 evening frames paired with nodes 2.5 m away or looking elsewhere — it let none through at 2 px (at most 19 inliers) and 5 (1.5 %) at 4 px (scratch/xfeat/impostors.py; emulation only, not rerun inside RTAB-Map)
+  - *On when:* 2 by default; 4 when the recognitions a camera-only drive needs do not come at 2 and the words that do come sit close to the truth
+  - *Off when:* back to 2 the moment a 4 px word is seen far from where the cart stands: a wider gate admits more wrong matches as inliers
+- **`visual_confirm`** — choice: rtabmap, aggressive, single, default aggressive
+  - *What:* how RTAB-Map CONFIRMS a localisation while the camera registers alone: RTAB-Map 0.22 delays a first good localisation into its odometry cache and accepts it only with a second one inside RGBD/MaxOdomCacheSize updates, and that second try has to reach Rtabmap/LoopThr. rtabmap: its stock 0.11 and 10. aggressive: Rtabmap/LoopThr 0.05, the threshold the first try already used, so the second comes on the next update; the confirmation stays. single: RGBD/MaxOdomCacheSize 0, the first good localisation is accepted. Sent with the visual strategy while the database localises and changed live; under ICP and while it maps, always rtabmap (one of: rtabmap, aggressive, single)
+  - *Default:* aggressive — measured 2026-09-24 parked at the base under the evening lamps, camera only, xfeat (scratch/link_autopsy/confirm_ab.sh, 240 s each): rtabmap accepted 0 of 244 updates — XFeat registered with 83-118 inliers once every 11 updates, the night's ORB hypotheses (0.05-0.07) never reach 0.11 for the confirming try and the cache rolls the first one out (scratch/link_autopsy/localisation_cadence.py); aggressive accepted 41 of 42 and single 44 of 44, all within 7 cm of the seed and within 1.2 deg of the yaw at which the lidar's scan fits the map (scratch/link_autopsy/lidar_yaw_truth.py). aggressive keeps RTAB-Map's own two-localisation rule
+  - *On when:* aggressive whenever the camera has to localise alone in other light than the database's; single if a drive shows aggressive still waiting between localisations
+  - *Off when:* rtabmap to reproduce RTAB-Map's stock confirmation, or if the extra registrations (one per update with a hypothesis over 0.05) cost the laptop more than it can spare
+- **`visual_proximity`** — bool, default on
+  - *What:* whether a localised camera also registers every update against the database nodes near its pose (RGBD/ProximityBySpace), each an XFeat re-extraction and a LighterGlue match; off, only the words' own hypothesis is registered, one at most per update. Sent with the visual strategy while the database localises and changed live; under ICP and while it maps, always on (the lidar's proximity links are cheap and most of the graph's)
+  - *Default:* on — on, measured 2026-09-24. RTAB-Map in pepin-laptop:xfeat on the evening drives with the lidar-held truth (runs 0455-0465, 425 updates, LoopThr 0.05, scratch/xfeat/REPORT_replay.txt): on accepted 213 (50 %), 51 wrong at 0.25 m / 5 deg, median 0.12 m / 3.0 deg, p90 0.30 m / 8.6 deg, 775 / 1877 ms an update; off accepted 160 (38 %), the same 51 wrong, median 0.10 m / 3.9 deg, p90 0.31 m / 11.0 deg, 551 / 826 ms, and a cluster of parked accepts 49-57 deg off in 0458. Parked at the base on: 137 accepted in 300 s within +0.2..+0.8 deg of the lidar's yaw; off: the accepts walked together to 93 deg (+3.4) within minutes, each node pulling its own bias
+  - *On when:* always while its cost fits the laptop: every update then localises, a hypothesis the words miss is still caught by the pose, and the per-node biases average out
+  - *Off when:* when the camera's localisations arrive seconds late, or the laptop's CPU is short under a camera-only drive
+- **`registration_backend`** — choice: service, local, auto, default auto
+  - *What:* where RTAB-Map's XFeat keypoints and LighterGlue matches are computed (the xfeat visual features): service — the localisation service on the laptop's GPU (pepin.localization_service, PEPIN_MODELS_URL), no features when it does not answer; local — in RTAB-Map's own process on the Docker VM's CPU, as before 2026-09-24; auto — the service, and a call it does not answer computed locally. Written to /tmp/pepin/registration.json, which RTAB-Map's adapters read on every call (one stat): live, no restart of RTAB-Map (one of: service, local, auto) (PEPIN_REGISTRATION_BACKEND overrides the default at start)
+  - *Default:* auto — auto, measured 2026-09-24 in RTAB-Map itself against the NIGHT branch's in-process adapters under the same conditions (scratch/models/backend_control.sh and .py: the replay of camera-only run 0466, words at LoopThr 0.05, four runs back to back, the live stack beside them): the registration of a localised update took 571 ms median through the service against 1896 and 2326 ms for the night's adapters in the runs before and after it (3.3-4.1x), 2428 ms for this branch's local fallback (the night's path, within that drift), 18 localised updates of 20 in each — one run, no truth, so a speed, not a recognition result; the 0.67 s of 2026-09-23 was a quieter laptop. From inside a container XFeat answers an 800x600 picture in 41 ms, a node picture already seen in 1.5 ms, LighterGlue a pair in 129 ms (scratch/models/endpoint_bench.py). auto keeps the old path as the answer to a service that is down
+  - *On when:* service to measure the service alone (a registration it cannot answer then finds no features, which shows as no recognition), auto always otherwise
+  - *Off when:* local to reproduce the registration of before 2026-09-24, or when the laptop's GPU is wanted elsewhere
+- **`registration_timeout_s`** — number 0.05..5, default 1.0
+  - *What:* how long RTAB-Map's adapters wait for one answer of the localisation service before it counts as none (auto then computes it locally, and the service is left alone for 10 s) (0.05..5)
+  - *Default:* 1.0 — 1.0, measured 2026-09-24 from inside a container: the slowest endpoint, /match, answers in about 105 ms median and 120 ms p90 with 2048 keypoints a side (scratch/models/endpoint_bench.py), but a GPU model's first answer after two seconds idle takes 200-460 ms, and 1.5 s after minutes (scratch/models/gpu_idle_probe.py: the laptop swaps), which is how RTAB-Map's registrations arrive — in bursts. One slow answer costs its call a local computation (auto); three in a row leave the service alone for 10 s
+  - *On when:* raise it when the adapters' line counts fallbacks while the service is healthy
+  - *Off when:* lower it when a sick service makes registrations late
+- **`xfeat_top_k`** — integer 256..8192, default 2048
+  - *What:* the most XFeat keypoints a picture keeps, best score first, wherever XFeat runs; RTAB-Map applies no cap of its own to a Python detector (256..8192)
+  - *Default:* 2048 — 2048, the cap the offline benchmark measured the evening recognitions with (scratch/xfeat/xfeat_bench.py); XFeat's own examples use 2048-4096
+  - *On when:* raise it where a scene is sparse and registrations fail on too few inliers
+  - *Off when:* lower it when LighterGlue's time per pair (quadratic in the keypoints) is too much for the laptop
+- **`place_recognition`** — choice: words, descriptor, default descriptor
+  - *What:* how RTAB-Map finds WHICH database node a picture is (its likelihood, before any registration): words — the ORB bag of words' TF-IDF (Kp/TfIdfLikelihoodUsed true, Rtabmap/VirtualPlaceLikelihoodRatio 0, RTAB-Map's defaults); descriptor — the dot product of the nodes' learned place descriptors as z-scores (false and 1; rtabmap Memory::computeLikelihood -> Signature::compareTo, Rtabmap::adjustLikelihood), which sensor_pack attaches to every snapshot. descriptor is sent ONLY when it cannot abort RTAB-Map: its core carries ros/patches/rtabmap-keep-global-descriptors.patch (the marker /opt/rtabmap_patches/keep-global-descriptors), the snapshots carry one each (/sensor_pack/place) and the database's census at this start (PEPIN_PLACE_CENSUS, taken by the launch before RTAB-Map opens the file) says every node carries exactly one of the same length — and only while the camera snapshots are described (descriptor_null_share); otherwise the words, and the report line says why. Live (one of: words, descriptor)
+  - *Default:* descriptor — words until a drive has shown the descriptor on the robot (a default flips after a drive). Measured 2026-09-24 in RTAB-Map itself on the replay of the evening runs against the backfilled daylight database (scratch/models/replay_place.py, replay_matrix.sh, matrix_report.py; xfeat, 2 px, proximity on, a lidar-only snapshot every fourth). Words at the stock Rtabmap/LoopThr 0.11: hypotheses 0.05-0.09, 0 camera updates localised on 0457, 0460 and the camera-only 0466; words at 0.05 (visual_confirm aggressive, this node's default): 9 of 23 (9 of 9 judged right), 3 of 17 (0 of 1) and 53 of 55. Descriptor with the ratio 1 at 0.11: hypotheses 0.42-0.88 (median), 16 of 23 (15 of 15 right), 14 of 17 (11 of 11) and 54 of 55; at 0.05 two of 0460's eleven judged were WRONG — so the descriptor goes with visual_confirm rtabmap, and the report line says so when it does not. Judged counts are 16 or fewer a run and 0466 has no truth. With the ratio 0 the descriptor's hypotheses read 0.01 and nothing localised. The retrieval behind it: BoQ-DINOv2 R@1 0.986 on 219 evening frames (scratch/models/place_parity.py). Without the patch RTAB-Map 0.22.1 aborted at the first comparison after a registration (Signature.cpp:252), which is why the patch is a gate
+  - *On when:* descriptor on a backfilled database (ros/tools/place_backfill.py) and a patched core, together with visual_confirm rtabmap: the descriptor's hypotheses reach 0.11 by themselves, and aggressive's 0.05 let the two wrong ones of 0460 through
+  - *Off when:* words to reproduce RTAB-Map's stock place recognition, or when a drive shows the descriptor naming the wrong node; an unpatched core, a database not backfilled, snapshots without descriptors or a service that is not describing keep the words by themselves
+- **`descriptor_null_share`** — number 0..1, default 0.5
+  - *What:* place_recognition descriptor falls back to the words while more than this share of the last 10 camera snapshots carried the null descriptor (the localisation service down, late or answering nonsense), and goes back once they are described again; 1.0 never falls back (0..1)
+  - *Default:* 0.5 — 0.5: a snapshot whose descriptor is null scores 0.5 against EVERY node (pepin.global_descriptor), Rtabmap::adjustLikelihood's z-scores are then all zero and no hypothesis forms — descriptor mode goes blind where the words would still recognise the place. Half of 10 at a snapshot a second: a service that dies costs at most five blind updates, and one late answer never flips the likelihood
+  - *On when:* lower it to fall back sooner
+  - *Off when:* 1.0 to keep the descriptor whatever the service does (a measurement of the descriptor alone)
 - **`word_at_picture_time`** — bool, default on
   - *What:* a graph word is stamped with the moment its PICTURE was taken — the localisation's own stamp, the board's clock under the snapshots — and odom -> base_link is looked up at that moment; the board carries the word to its update over its odometry (relocalizer carry_stale_words). Off, the word is stamped with the newest odom -> base_link stamp heard, as it was until 2026-09-19
   - *Default:* on — on, measured 2026-09-19. A localisation is published 0.13-1.35 s after its picture (median 0.93 s, scratch/word_stamp_vs_board_now.py: the depth network and RTAB-Map's update), on the board's clock. Stamped 'now', every word taken in a turn was behind the truth by the turn rate times that age: tape 0388 -30.4 and -35.5 deg at +22 and +26 deg/s, tape 0386 nine of nine turning words with the sign of minus the turn rate (+20 deg at -25 deg/s ... -24 deg at +22 deg/s) and under 2 deg on the straights (scratch/tape_0388_word_stamp_latency.py). The camera's own stamp is good to 0.05 s against the gyro (scratch/camera_stamp_vs_gyro_lag.py), so the age is this pipeline's and nothing else's. The fusion took the -30 deg word (sigma 8 deg on both sides of the gate) and camera-only tape 0388 drove 0.5-0.7 m off its pose into a mapped obstacle
@@ -2085,6 +2436,11 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* on — on, measured 2026-09-19: before its first recognition RTAB-Map's graph is the current node ALONE (1 node against 254 loaded) and its grid is that node's one scan drawn where the ODOMETRY puts the cart. The tracker adopted it, matched the live scan on a picture of itself (fit 1.00, the whole-map search agreeing) and stood 1.26 m from where the graph and RTAB-Map's own scan registration put the cart; its cache kept the picture across restarts (scratch/scan_at_two_poses.py, scratch/grid_alone.py). After the first recognition the grid came back as the room (216x152), the tracker re-seated on it at fit 0.89 and RTAB-Map's word landed 1 cm from it
   - *On when:* always: a grid that is not tied to the loaded graph is not the map, whatever frame id it carries
   - *Off when:* to reproduce the self-matching tracker of 2026-09-19, or to watch the raw grid reach the board while debugging the bridge
+- **`start_needs_placement`** — bool, default on
+  - *What:* what goes out on /localization/placement (latched) says this start of RTAB-Map is PLACED only once an update has recognised a node of the database it loaded, or an operator's seed (/rtabmap/initialpose) has been heard since its first update — or it loaded an empty database, whose start pose is the map's origin. The board's goal clients (ros/tools/goto_ros.py, pepin_bringup.goal_server) refuse a goal under PEPIN_LOCALIZER=rtabmap until then, saying to seed or to let the camera see a mapped place. Off, every start counts as placed: RTAB-Map's pose is taken as it is
+  - *Default:* on — on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the pose it SAVED at its last shutdown, before recognising anything, and the preflight took that fresh transform for a localisation — the cart was 'at home' while standing at the bookshelf (0 recognised a node in 130-198 updates, hypothesis 0.07), and after the next restart 76 cm off, inside the table, where Hybrid refused 'Start occupied' and the recoveries ran 93 times in 81 s (the journal, 19:05 and 20:57). It is the startup-zero trap a third time
+  - *On when:* always under PEPIN_LOCALIZER=rtabmap: a pose nobody has vouched for since the start is not a pose to drive on
+  - *Off when:* to drive on the saved start pose anyway — a cart known to stand exactly where RTAB-Map last shut down, with the camera unable to recognise anything (darkness) and no seed at hand. A refusal of SILENCE (this node down, respawning, or older than this flag) is lifted by the goal server's flag of the same name, which both goal clients obey
 
 #### `run_recorder`
 
@@ -2136,6 +2492,21 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* on — about 5 % of camera frames answered 'base_link<-camera_optical: Lookup would require extrapolation into the future' and became lidar-only snapshots (measured live 2026-09-18): the neck's dynamic edge is published on the board and arrives over the bridge tens of milliseconds behind the frame it belongs to. The old answer was a 0.2 s BLOCKING wait inside the subscription callback, which both stalled the executor on every late frame — no picture, no depth and no revolution read while it waited — and still dropped those 5 %. A retry costs nothing and waits longer: arrivals come eighteen a second, so the patience is spent on the bridge rather than on this thread. The bound is the pairing bound itself and not a new number (176 ms for the camera at 8.5 Hz)
   - *On when:* always: a camera frame is the only thing in a snapshot that can recognise a place, and it is the one whose transform is late
   - *Off when:* to measure what the retry is worth — the report line's 'tf waits' against its 'frames TF could not place' is the same comparison with it on
+- **`global_descriptor`** — choice: auto, on, off, default auto, not live
+  - *What:* whether every snapshot carries exactly one rtabmap_msgs/GlobalDescriptor (type 1): the place vector of its picture (place_descriptor), or the null descriptor (zeros) when it has no picture or no vector came in place_timeout_s; said latched on /sensor_pack/place. auto: exactly when this image's RTAB-Map keeps a node's descriptor across the reload of its data (the marker /opt/rtabmap_patches/keep-global-descriptors, ros/xfeat/patch_rtabmap.sh); on: always; off: never, the snapshots of before 2026-09-24 (one of: auto, on, off) (PEPIN_GLOBAL_DESCRIPTOR overrides the default at start) (not live: set at the next start)
+  - *Default:* auto — auto, because a descriptor is safe only on the patched core. RTAB-Map compares two nodes' descriptors only when BOTH carry one and ABORTS on a node with one against a node without (UASSERT, rtabmap Signature.cpp:252), and the unpatched 0.22.1 drops a node's descriptor whenever it reloads the node's data for a registration (Memory.cpp:2902, 2908) — also under the words, because mapping's rehearsal compares the last node with the next (Memory.cpp:3784-3834), and a rehearsal merge at rest makes the last node a saved one, whose data is reloaded (Memory.cpp:2763, 3958): the core aborts and RTAB-Map is not respawned. Measured 2026-09-24 (scratch/models/unpatched_mapping_control.sh, camera-only run 0466 mapping under the words): with descriptors the unpatched core died on the THIRD update — a rehearsal at similarity 0.97 merged the new node into the last, a proximity registration reloaded it, Signature.cpp:252 — and without them it ran all 17 clean; the patched core (the image's patch layer, rebuilt the same day) ran the same 17 with descriptors clean, every one merged at 0.96-0.98 and 15 loop closures. Not live: switched mid-run, the next node would differ from the last. With descriptors on board the launch raises Mem/RehearsalSimilarity to 0.92 (DESCRIPTOR_REHEARSAL in vslam.launch.py: the descriptor's scale, measured)
+  - *On when:* on only for a control against an unpatched core (it can abort RTAB-Map); auto otherwise — before place_recognition descriptor, whose gate refuses a core without the patch and a database whose census is not whole
+  - *Off when:* off against a database WITHOUT descriptors to reproduce the snapshots of before 2026-09-24 (PEPIN_GLOBAL_DESCRIPTOR=off ros/laptop.sh vslam); never against a backfilled database while RTAB-Map maps
+- **`place_descriptor`** — bool, default on
+  - *What:* a camera snapshot's descriptor is the localisation service's /place vector of its picture (pepin.localization_service, BoQ on the laptop's GPU); off, every snapshot carries the null descriptor and the service is not asked
+  - *Default:* on — on, measured 2026-09-24: through the service the fixed set (scratch/vpr, 147 daylight nodes, 219 evening frames of runs 0455-0465) recognises evening R@1 0.986, R@3 1.000 against the daylight gallery, JPEG as sent here the same as lossless (scratch/models/place_parity.py), where the ORB words' hypotheses read 0.05-0.07 under the evening lamps. The call costs this node nothing: it runs on a worker thread
+  - *On when:* whenever place_recognition descriptor is used, or its vectors are to be stored in the database while it maps
+  - *Off when:* to take the service out of the loop without breaking the one-descriptor invariant (a sick service, a measurement of the words alone); RTAB-Map then sees every place as equally likely by descriptor, so the words should be in force
+- **`place_timeout_s`** — number 0.05..0.95, default 0.5
+  - *What:* the most a snapshot waits for its place vector, from the moment it is packed — its wait in the worker's queue included — before it goes out with the null descriptor (0.05..0.95)
+  - *Default:* 0.5 — 0.5, measured 2026-09-24 from inside a container: /place answers an 800x600 picture in 55 ms median, 79 ms p90 while asked once a second (scratch/models/endpoint_bench.py, BoQ-DINOv2 on MPS beside RAFT-Stereo), but its first answer after two seconds idle takes 200-460 ms and after minutes 1.5 s (scratch/models/gpu_idle_probe.py: the laptop swaps, and an idle model's pages go first). Half the one-second snapshot period covers the warm answers and most cold ones, and a slow answer never holds up the next snapshot
+  - *On when:* raise it if the report line counts 'late' or 'no answer' nulls while the service is healthy
+  - *Off when:* lower it when RTAB-Map's own timing shows the snapshots arriving late
 
 #### `tof_bridge`
 
@@ -2197,6 +2568,66 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* 10.0 — 10 Hz (no cap in practice, rtabmap answers ~9.5/s) since 2026-09-14 13:40: with vy observable in ekf.yaml and origin resets refused, the board's EKF took the full rate with 0 misses at rest and 2 in 3 min of driving. The 3 Hz of the morning was chosen while the EKF state was running away: 3 Hz because the board could not carry nine. With /vo flowing at ~9 poses/s the EKF logged 'Failed to meet update rate' continuously — 56-94 ms of every 50 ms period at its 20 Hz — and Nav2's container sat at 200 % CPU (2026-09-14). The distance is the same distance: the published pose is absolute (vo_continuous), so the filter differences whatever two messages reached it and a skipped one only lengthens the gap. What changes is the weight — robot_localization's differential path multiplies the summed pose covariance BY the gap, so a longer gap is a wider velocity sigma: at 3 Hz the shipped 7 cm sigma becomes 5.7 cm/s against 3.2 cm/s at 9.4 Hz, which is a third opinion that costs the board three updates a second instead of nine
   - *On when:* raise it towards 9 only on a board that is measurably keeping its 20 Hz with Nav2 running, and read the EKF's update-rate warnings after
   - *Off when:* lower it further if the EKF still misses its rate
+
+## The base bridge's zero-velocity update
+
+The C++ base bridge's own switches, beside `imu_publish` and `odom_publish` above; they live here
+because the table above is generated from the Python nodes, and the Python bridge has no gyro and
+no update. While the cart is certainly standing still the bridge publishes `/zupt` — a twist of
+exactly zero, the EKF's `odom2` (vx, vy, vyaw; `ros/params/ekf.yaml`) — and nothing otherwise.
+Certainly still is three witnesses at once: the wheels at rest for `zupt_settle_s`, no non-zero
+`/cmd_vel` younger than `zupt_cmd_hold_s`, and the bias-corrected gyro under
+`zupt_gyro_quiet_rad_s` for that same window. The first moving sample of any of them stops the
+update within one period. Why it exists: parked, the EKF's heading crept ~5 deg an hour, pulled
+by rf2o's +1.5 deg/min at rest while the gyro read -0.001 (2026-09-24).
+
+**Every tunable is live.** `ros2 param set /base_bridge <name> <value>` takes effect at the next
+tick, with no restart and no rebuild; a new `zupt_rate_hz` re-times the timer at once. A value
+outside its range, or not a number, is refused: `ros2 param set` prints the reason, the bridge
+logs it as a warning, and the value in force stays. The CLI's own quirks are absorbed: `50`
+arrives as an integer and `1e-4` as a string (YAML 1.1 wants `1.0e-4`), and both are taken as the
+numbers they are. The same range check applies to a value given in a launch file, which falls
+back to the default with a warning instead of stopping the base.
+
+| name | default | range | what it does |
+| --- | --- | --- | --- |
+| `zupt_publish` | true | bool | the update at all; false is the bridge before 2026-09-24: nothing on `/zupt` |
+| `zupt_rate_hz` | 10 | 1..100 Hz | how often the update is published while the cart is at rest |
+| `zupt_var_linear` | 1e-6 | 1e-9..1 (m/s)^2 | the variance claimed on vx and vy |
+| `zupt_var_yaw` | 1e-6 | 1e-9..1 (rad/s)^2 | the variance claimed on vyaw (the gyro's is 4e-4, rf2o's 2.5e-3) |
+| `zupt_settle_s` | `imu_bias_s` (2.0) | 0..60 s | witnessed rest before the update, and the hold after a gyro turn; the bias tracker's own window stays `imu_bias_s` |
+| `zupt_cmd_hold_s` | `cmd_timeout_s` (0.5) | 0..10 s | how long a non-zero `/cmd_vel` holds the update off; the command's own timeout is not moved |
+| `zupt_gyro_quiet_rad_s` | 0.005 | 1e-4..0.5 rad/s | a bias-corrected yaw rate at or above this is a turn (0.005 = 0.29 deg/s, 7.9 sigma of the parked chip's noise) |
+
+The reasons for each default and each range are in
+`ros/pepin_base_cpp/include/pepin_base_cpp/zupt.hpp` (and its Python reference, `pepin.zupt`).
+Two numbers stay fixed, because they are structural: the variance on the three velocities the
+update does not claim (1e6: `odom2` fuses none of them, so the EKF never reads it), and how old
+the newest gyro sample may be (1 s, the same gap that ends the wheels' witness; at 50 Hz a sample
+is that old only after ~50 failed reads in a row).
+
+**What the bridge says.** Each change is one log line (`zupt: zupt_rate_hz 10 -> 50, in force at
+the next tick`), each refusal a warning with its reason, and each start or stop of the update a
+line with the reason it stopped. The link-up line and the once-a-minute gyro line end with the
+update's state and every setting in force:
+
+    zupt publishing for 312 s, 3121 sent [rate 10 Hz, var 1e-06 xy 1e-06 yaw, settle 2 s,
+    cmd hold 0.5 s, gyro quiet 0.005 rad/s]
+
+**Parked A/B, one variable at a time** (read the heading creep between each, e.g.
+`scratch/link_autopsy/rest_yaw_sources.py`; the simulation in `scratch/zupt/zupt_variance_sim.py`
+says the rate matters more than the variance past 1e-5):
+
+```bash
+ros2 param set /base_bridge zupt_publish false        # the filter as it was: the baseline creep
+ros2 param set /base_bridge zupt_publish true
+ros2 param set /base_bridge zupt_rate_hz 10.0         # the default, phase-locked to rf2o's scans
+ros2 param set /base_bridge zupt_rate_hz 50           # every gyro sample's worth
+ros2 param set /base_bridge zupt_var_yaw 1.0e-6       # the default claim on vyaw
+ros2 param set /base_bridge zupt_var_yaw 1.0e-4       # a hundred times looser
+ros2 param set /base_bridge zupt_var_linear 1.0e-4    # ...and on vx, vy
+ros2 param get /base_bridge zupt_rate_hz              # what is in force
+```
 
 ## Two recorders
 
@@ -2283,7 +2714,8 @@ is the whole board.
 | --- | --- | --- | --- | --- |
 | `nav2_container` | Nav2 in one process: map server, planner, controller, behaviours, tree, smoother (nice 5) | real-time, wifi-loss | 120 % / 152 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `relocalizer` | scan matching against the map, owns `map -> odom`, kidnap recovery (`sometimes` since 2026-09-22: a mode, not the default) | real-time, wifi-loss | 90 % / 121 MB | `pepin-ros.service` -> `nav.launch.py` |
-| `sensors_container` | LD19 driver, hull filter, base bridge, static sensor transforms (nice -10) | real-time, hardware-attached | 32 % / 90 MB | `pepin-ros.service` -> `robot.launch.py` |
+| `lidar_container` | LD19 driver, hull filter, its static mount, the driver's lifecycle manager (nice -10, respawned) | real-time, hardware-attached | 22 % / 70 MB (to measure) | `pepin-ros.service` -> `robot.launch.py` |
+| `base_container` | base bridge (wheels, IMU, gyro-bias tracker), the IMU's static mount (nice -10, respawned) | real-time, hardware-attached | 15 % / 60 MB (to measure) | `pepin-ros.service` -> `robot.launch.py` |
 | `run_recorder` | every drive on disk: scans, odometry, pose, commands, camera | wifi-loss | 24 % / 93 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `tof_bridge` | the three VL53L1X ranges as ROS `Range` for the contact layer | real-time, hardware-attached | 20 % / 102 MB | `pepin-ros.service` -> `robot.launch.py` |
 | `zenoh_bridge` | the board's ROS graph over one TCP link to the laptop | real-time | 18 % / 78 MB | `pepin-bridge.service` |
@@ -2371,6 +2803,182 @@ an unchanged layer is reused, so a rebuild after a change to `pepin_bringup` doe
 rf2o. `PEPIN_BUILD_CACHE=<dir>` additionally exports the build cache to a directory (this needs
 a `docker-container` builder, which the script creates as `pepin-arm64`).
 
+## The XFeat image
+
+`pepin-laptop:xfeat` is the laptop image with RTAB-Map able to run `rtabmap_frame`'s
+`visual_features` default: XFeat keypoints matched by LighterGlue in the visual registration.
+It is `pepin-laptop:zenoh` plus RTAB-Map 0.22.1 and the rtabmap_ros packages that link it,
+rebuilt from their pinned upstream commits with Python (the apt build has none, and
+`Vis/FeatureType 15` / `Vis/CorNNType 6` are compiled out of it), XFeat and LighterGlue at a pinned
+commit with their weights inside, and the two adapters RTAB-Map loads by path in `/opt/xfeat`
+(`ros/xfeat/`). Everything runs on the CPU; a registration costs 0.67-0.70 s inside RTAB-Map.
+
+**Build.** `ros/laptop-build.sh xfeat` — about an hour (`ros/Dockerfile.xfeat`,
+`ros/xfeat/build_rtabmap.sh`). The Docker VM also runs the live stack, and on 2026-09-24 nine
+parallel compiles filled its 16 GB and the OOM killer took the stack's processes instead of the
+compilers. So the build runs 2 jobs per phase (`PEPIN_CORE_JOBS`, `PEPIN_ROS_JOBS`) and is cancelled
+once more than 75 % of the VM's memory is in use (`PEPIN_BUILD_MAX_USED_PCT`); `PEPIN_XFEAT_BASE`
+names another base. It fails, rather than producing a different RTAB-Map, when the rebuilt core
+lacks an optional library the apt one had (GTSAM, g2o, libpointmatcher and octomap decide defaults
+the launch table does not name, such as `Optimizer/Strategy` and `Icp/Strategy`), or when a second
+core is left anywhere under `/opt/ros/jazzy`.
+
+**Run.** `ros/laptop.sh vslam` (and so `ros/restart.sh laptop`) starts `pepin-vslam` on
+`pepin-laptop:xfeat` whenever that image exists and was built on the current laptop image. Its
+layers must begin with that image's layers, so a laptop image rebuilt since is not traded for an
+older one. Otherwise the usual image runs, `visual_features` falls back to ORB, and the script says
+so on stderr. Restart check 2.12 fails a camera half without the adapters.
+
+| setting | image | visual registration |
+|---|---|---|
+| unset | `pepin-laptop:xfeat` if built on the current base, else the base with a stderr line | xfeat, else ORB |
+| `PEPIN_XFEAT=0` | the base (`pepin-laptop:zenoh`), the rollback | ORB, and check 2.12 passes |
+| `PEPIN_XFEAT=1` | `pepin-laptop:xfeat`, or the command refuses | xfeat |
+| `PEPIN_IMAGE=<tag>` | that tag, whatever the above | xfeat if the tag carries `/opt/xfeat` |
+
+Inside the running node the switch is live (`visual_features orb`, `pnp_reproj_px`), with no
+restart. The image tags kept for a rollback are `pepin-laptop:zenoh` (stock RTAB-Map) and
+`pepin-laptop:xfeat-refblas`. `xfeat-refblas` is the xfeat image from before the adapters imported
+torch with `RTLD_DEEPBIND`: there torch's matrix products bind to the reference BLAS RTAB-Map loads
+first, and a registration costs 1.70 s instead of 0.67 s (`PEPIN_IMAGE=pepin-laptop:xfeat-refblas
+ros/laptop.sh vslam`).
+
+**Known broken in this image.** The GUI parts were not rebuilt, because this build leaves out Qt:
+`rtabmap_viz`, `librtabmap_rviz_plugins.so`, and the `rtabmap` / `rtabmap-databaseViewer`
+desktop tools. They still link apt's `librtabmap_gui` 0.22.1, which was compiled against the core's
+old class layout (Python support adds a member to `rtabmap::Rtabmap`), so they must not be run
+from this image. Nothing in `vslam.launch.py` starts them; Foxglove is the window. Open a database
+with the tools of `pepin-laptop:zenoh`.
+
+## The model services
+
+Docker on macOS has no GPU, so a learned model in a container runs on the Docker VM's CPU. The
+models run on the laptop instead, as two host processes — two failure domains, so one crashing or
+hanging never takes the other with it — which the containers reach as
+`http://host.docker.internal:<port>` (bound to 127.0.0.1, nothing open on the LAN):
+
+| job | process | port | models (device from `config/models.json`) |
+|---|---|---|---|
+| `depth` | `pepin.depth_service` | 8790 | the depth network, RAFT-Stereo (as `ros/depth_host.sh`) |
+| `localization` | `pepin.localization_service` | 8791 | XFeat (`/xfeat`, cpu), LighterGlue (`/match`, cpu), BoQ-DINOv2 place descriptors (`/place`, mps) |
+
+Both are launchd jobs run from the repository's uv environment, loaded ON DEMAND: their plists
+live in `~/Library/Application Support/pepin/launchd` (`PEPIN_LAUNCHD_DIR`), not in
+`~/Library/LaunchAgents`, so nothing loads them at login — together they hold about 2 GB of
+models. While a job is loaded launchd starts it and restarts it when it dies (KeepAlive,
+`ThrottleInterval` 30 s, `ProcessType Standard`); `ros/laptop.sh vslam` starts both (as it started
+the depth host before) and `ros/laptop.sh stop` stops them.
+
+| command | what it does |
+|---|---|
+| `ros/models.sh install [depth\|localization\|all]` | write the job's plist and start it; waits for `/health` |
+| `ros/models.sh start\|stop [...]` | load the job and wait for `/health` / unload it: the process ends and stays down until the next start |
+| `ros/models.sh restart [...]` | kill it and let launchd start it again |
+| `ros/models.sh status [...]` | launchd's word and each `/health` as one line: every model's tag (its weights' hash), device, requests and ms |
+| `ros/models.sh installed depth\|localization` | exit 0 when the job is installed (what `laptop.sh` and `depth_host.sh` ask) |
+| `ros/models.sh logs [depth\|localization]` | follow `logs/models_<job>.out` (moved to `.out.1` past 10 MB at a start) |
+| `ros/models.sh plist [...]` | print the plist `install` would write |
+| `ros/models.sh fetch-xfeat` | clone XFeat at the commit the image pins into `models/accelerated_features` |
+| `ros/models.sh uninstall [...]` | stop and remove |
+
+The localization job takes an XFeat checkout only at the commit `ros/Dockerfile.xfeat` pins
+(`ARG XFEAT_SHA`, read from its git HEAD or a copy's `COMMIT` file), because `auto` registration
+mixes the service's features with the image's local fallback (`PEPIN_XFEAT_UNPINNED=1` takes
+another anyway). The service checks its port before it loads a model, so a job whose port is taken
+exits in a second instead of reloading torch every restart. `ros/depth_host.sh` keeps working for
+a depth host not installed here, and hands an installed one to `ros/models.sh start|stop depth`.
+A model that fails to build does not take its process down: its endpoint answers 500 with the
+reason and `/health` names it (`failed: ...`); restart check 2.13 reads it. A place vector that is
+not a finite unit vector is a 500 too (one NaN aborts RTAB-Map). A client whose kept-alive
+connection the service dropped (a restart, a sleep) is sent once more on a fresh connection before
+anything counts as down.
+
+**Measured through the service** (2026-09-24, 800x600 pictures, beside the live stack, whose depth
+host keeps the GPU 80 % busy with RAFT-Stereo; `scratch/models/endpoint_bench.py`,
+`load_probe.py`): XFeat 46 ms median, 54 ms p90 on the CPU against 41-81 ms and up to 241 ms p90 on
+MPS — so the CPU — and 1-2 ms for a picture seen before (its LRU: RTAB-Map re-extracts the same
+stored node pictures); LighterGlue 109-129 ms on the CPU against 518 ms on MPS; BoQ-DINOv2 57 ms on
+MPS against 167 ms on the CPU. The container's round trip adds about 2 ms for a picture and 11 ms
+for a LighterGlue pair. A registration inside RTAB-Map (the replay of run 0466, words at 0.05):
+454 ms through the service against 1879 ms in RTAB-Map's own process on the VM's CPU, the update
+492 ms against 1900 ms median; against the NIGHT branch's in-process adapters under the same
+conditions, back to back (`scratch/models/backend_control.sh`, `.py`), 571 ms against 1896 and
+2326 ms in the night runs before and after it, and 2428 ms for this branch's local fallback —
+within that drift, so the fallback is the night's path, and the 0.67 s of 2026-09-23 was a quieter
+laptop. One run, 18 localised updates each: a speed, not a recognition result. While RTAB-Map drove it (2.3 XFeat, 1.1 LighterGlue and 0.4 place
+requests a second) the service used a core at its p90 and nothing at its median. **This laptop
+swaps** (15 of 15 GB of swap in use on 2026-09-24): an idle model's pages go first, and a GPU
+model's first answer after 2 s idle takes 200-460 ms, 1.5 s after minutes
+(`scratch/models/gpu_idle_probe.py`); the clients' timeouts are sized for it and a single slow
+answer does not back a client off.
+
+**RTAB-Map's XFeat adapters** (`ros/xfeat`) are the service's clients: `rtabmap_frame`'s
+`registration_backend` (`service`, `local`, `auto`) is written to `/tmp/pepin/registration.json`
+in the container, which the adapters read on every call; `auto` falls back to the old in-process
+computation (torch loaded on its first use) and leaves a dead service alone for 10 s at a time.
+`ros/laptop.sh vslam` mounts the checkout's two adapter files over the xfeat image's, so an
+adapter change needs a vslam restart and no rebuild (`PEPIN_ADAPTERS_MOUNT=0`: the image's).
+
+**Place descriptors.** RTAB-Map can find which node a picture is by the dot product of learned
+global descriptors instead of its ORB words (`rtabmap_frame`'s `place_recognition`), and it
+compares two nodes' descriptors only when both carry one: a node with one against a node without
+ABORTS it (`Signature.cpp:252`). So every node carries exactly one:
+
+1. `sensor_pack` attaches one to every snapshot (`global_descriptor`, `auto`: only on an RTAB-Map
+   built with the patch below — the unpatched core aborts even under the words, because mapping's
+   rehearsal compares nodes too: on the replay of 0466 mapping it died on the third update with
+   descriptors and ran 17 clean without, and the patched core ran the same 17 with descriptors
+   clean, `scratch/models/unpatched_mapping_control.sh`): the service's `/place` vector for a camera snapshot, the null
+   descriptor (zeros, which RTAB-Map scores as neither like nor unlike anything) for a lidar-only
+   one, a picture the service did not describe in `place_timeout_s`, or any failure on the way
+   (a worker that raised is never a worker that stopped);
+2. `ros/tools/place_backfill.py ros/maps/rtabmap.db` writes one into every node the database
+   already holds (the service up, the vslam stopped; a timestamped backup first, one transaction,
+   a re-run replaces, a vector that is not a finite unit vector refused), and `--check` prints the
+   census (of a copy, when a container holds the file);
+3. `vslam.launch.py` takes that census itself on EVERY start, of the file RTAB-Map is given and
+   before RTAB-Map opens it, and hands it to `rtabmap_frame` as `PEPIN_PLACE_CENSUS`;
+   `rtabmap_frame` sends the descriptor likelihood only when the census, the snapshots and the
+   RTAB-Map build all say nothing can abort it, and only while the recent camera snapshots were
+   described (`descriptor_null_share`: a null query scores every node alike, so a service that is
+   down hands the places back to the words); the words otherwise, with the reason in its report
+   line. `place_recognition` stays `words` by default until a drive has shown the descriptor.
+4. With descriptors on board the launch raises `Mem/RehearsalSimilarity` from 0.30 to 0.92: mapping's
+   rehearsal compares consecutive nodes by descriptor whenever both carry one, on a scale where
+   no two BoQ vectors score under ~0.57 and a null one scores 0.5; 0.92 calls as many of 121
+   consecutive daylight pairs the same place as the words did at 0.30
+   (`scratch/models/rehearsal_calibration.py`).
+
+A known limit: RTAB-Map scores places only for a frame with ORB words (`Rtabmap.cpp:1971`), so a
+frame too dark for a single GFTT corner is not recognised by descriptor either; the descriptor
+replaces the words' score, not the words.
+
+RTAB-Map 0.22.1 itself drops a node's descriptor the first time it registers against it (it
+reloads the node's data from the database without the descriptor table, `Memory.cpp:2896-2909`)
+and then aborts on the next descriptor comparison: `ros/patches/rtabmap-keep-global-descriptors.patch`
+keeps them, and `ros/laptop-build.sh xfeat` applies it (`ros/xfeat/patch_rtabmap.sh`, a layer of
+its own after the long builds: minutes, not the hour) and leaves the marker
+`/opt/rtabmap_patches/keep-global-descriptors` that `rtabmap_frame` requires before it sends the
+descriptor likelihood. The descriptor's scores are dense, so it travels with
+`Rtabmap/VirtualPlaceLikelihoodRatio 1` (RTAB-Map's z-score normalisation).
+
+**Measured in RTAB-Map itself** (2026-09-24, the evening runs replayed against the backfilled
+daylight database, xfeat, 2 px, proximity on, a lidar-only snapshot every fourth frame;
+`scratch/models/matrix_report.py`), camera updates localised and, where the lidar holds the truth,
+judged right within 0.30 m / 10 deg:
+
+| place recognition | run 0457 | run 0460 | camera-only 0466 | highest hypothesis |
+|---|---|---|---|---|
+| words, `LoopThr` 0.11 (stock) | 0 of 23 | 0 of 17 | 0 of 55 | 0.05-0.09 |
+| words, `LoopThr` 0.05 (`visual_confirm aggressive`) | 9 (9 of 9 right) | 3 (0 of 1) | 53 | 0.05-0.09 |
+| descriptor, ratio 1, `LoopThr` 0.11 | 16 (15 of 15) | 14 (11 of 11) | 54 | median 0.42-0.88 |
+| descriptor, ratio 1, `LoopThr` 0.05 | 17 (16 of 16) | 14 (9 of 11) | 54 | median 0.42-0.88 |
+| descriptor, ratio 0 | 0 | 0 | 0 | 0.01 |
+
+With the descriptor in force `visual_confirm rtabmap` is the pairing: its hypotheses reach 0.11
+by themselves, and aggressive's 0.05 let two wrong ones through on 0460. The unpatched core
+aborted on the first update after a registration, exactly as read in the source.
+
 ## Build and run (on the board)
 
 ```bash
@@ -2425,7 +3033,7 @@ servers; Nav2 (`nav.launch.py`) is started on demand inside it. Build or rebuild
    is mounted upside down and the LD19 counts angles clockwise; the static transform (roll pi,
    yaw -87.5 degrees) is read from `config/lidar.json` by the board's launch and by the
    laptop's camera node alike — there is no launch argument for it. If the scan comes out
-   mirrored left/right, fix `roll_deg` in that file and `ros/sync.sh`.
+   mirrored left/right, fix `roll_deg` in that file and `ros/sync.sh --restart`.
 3. `nav.launch.py`: AMCL converges on the map after a few metres of teleop (or set the initial
    pose from Foxglove); then a goal.
 4. Memory: `free -m` on the board while navigating; the container must stay under ~700 MB.

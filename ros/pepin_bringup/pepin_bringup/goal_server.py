@@ -15,6 +15,12 @@ and answers with one JSON line per event: accepted, feedback, arrival, done. It 
 run's recording: it starts one when a goal starts and closes it when the goal ends, so a
 recording can no longer outlive its run.
 
+A CANCEL MEANS EVERY GOAL ON THE BOARD, not only this node's own (flag ``cancel_every_goal``):
+both navigators' cancel services are asked with a zero goal id, exactly as ``goto_ros.py cancel``
+asks them, so a drive ``ros/goto.sh`` started through goto_ros.py is stopped from here too — by a
+socket write from the laptop (pepin.goal_link) instead of a fresh ROS process on the board, whose
+new zenoh session stalls every laptop -> board stream for about three seconds.
+
 WHERE THE POSE COMES FROM. On a saved map the scan-matching tracker is the answer to both "where
 am I" and "may I drive": it serves ``/where_am_i`` and publishes ``/localization_fit``. In online
 SLAM that node does not run at all — RTAB-Map owns the pose on the laptop and the board's
@@ -61,7 +67,9 @@ from __future__ import annotations
 import contextlib
 import json
 import math
+import os
 import socket
+import subprocess
 import threading
 import time
 from dataclasses import replace
@@ -69,6 +77,7 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
+from action_msgs.srv import CancelGoal
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from lifecycle_msgs.srv import ChangeState, GetState
@@ -76,7 +85,8 @@ from nav2_msgs.action import NavigateToPose, Spin
 from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float32, Header, String
 from std_srvs.srv import Trigger
 
@@ -89,6 +99,8 @@ from pepin.deployment import (
     runs_here,
 )
 from pepin.flags import Flag, FlagSet
+from pepin.goal_link import CANCEL_CONFIRM_S, NAV_ACTIONS, cancel_outcome
+from pepin.lidar_watch import LidarWatch
 from pepin.places import PLACES_TOPIC, heading_residual_deg, places_from_json
 from pepin.runlink import (
     RUN_COMMAND_TOPIC,
@@ -99,21 +111,25 @@ from pepin.runlink import (
     stop_command,
 )
 from pepin.watch import (
+    BY_PLACEMENT,
     CORRECTION_FRESH_S,
     DRIVE_FIT,
     DRIVE_SIGMA_M,
     LOST_SIGMA_M,
+    PLACEMENT_TOPIC,
     SIGMA_TOPIC,
     TF_FRESH_S,
     BlindDriveWatch,
     Correction,
     GoalGate,
     JumpClear,
+    Placement,
+    Preflight,
     Readiness,
     Sigma,
 )
 from pepin_bringup.msgs import stamp_seconds, yaw_of
-from pepin_bringup.node_kit import Switches, TfLookup
+from pepin_bringup.node_kit import Switches, TfLookup, spin_main
 
 PORT = 3337
 GOOD_FIT = DRIVE_FIT  # below this the robot is told to find itself before it drives (pepin.watch)
@@ -317,6 +333,57 @@ FLAGS = FlagSet(
         " fit the board's control period (the controller server's 'Control loop missed its"
         " desired rate')",
     ),
+    Flag(
+        "start_needs_placement",
+        True,
+        description="under PEPIN_LOCALIZER=rtabmap a goal or a mark waits for the laptop's word"
+        f" on {PLACEMENT_TOPIC} (pepin_bringup.rtabmap_frame, latched) that this start of"
+        " RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and"
+        " nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for"
+        " this same flag before its own preflight. Off, a fresh map -> base_link is enough, as"
+        " before 2026-09-23",
+        why="on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the"
+        " pose it SAVED at its last shutdown, and a fresh transform was taken for a localisation"
+        " — 'at home' at the bookshelf with 0 of 198 updates recognised, then 76 cm off inside"
+        " the table. The laptop's flag of the same name only changes what rtabmap_frame SAYS:"
+        " it cannot lift a refusal of silence, from a node that is down, respawning or running"
+        " code from before the word existed. This one is the board-side switch the refusal"
+        " itself answers to",
+        on_when="always under PEPIN_LOCALIZER=rtabmap: a pose nobody has vouched for since"
+        " RTAB-Map's start is not a pose to drive on",
+        off_when="when the word cannot come and the cart is known to stand where RTAB-Map's pose"
+        " says: pepin-vslam down or started before this build (ros/laptop.sh vslam restarts it"
+        " on the checkout), or a dark room with no seed at hand",
+    ),
+    Flag(
+        "cancel_every_goal",
+        True,
+        description="a cancel on the socket also asks both navigators' own cancel services"
+        f" ({' and '.join(NAV_ACTIONS)}, <action>/_action/cancel_goal) for EVERY goal — a zero"
+        " goal id, whoever sent it — and answers what each said (``navigators``); off, it"
+        " cancels only the goal this node sent, as before 2026-09-25",
+        why="ros/goto.sh drives through ros/tools/goto_ros.py, a goal this node never sent, so"
+        " this cancel reached nothing, and goto.sh's own cancel started goto_ros.py on the board"
+        " mid-drive: a new ROS process is a new zenoh session, and each one stalled all laptop ->"
+        " board delivery for 2.6-3.1 s about 1.5 s after it started (34 of 39 cases, journal"
+        " 2026-09-25). Asked from this long-lived node the same cancel costs a socket write;"
+        f" one {CANCEL_CONFIRM_S:.0f} s deadline is shared by both navigators, as in goto_ros.py",
+        on_when="always: the operator's cancel means every goal on the board, whichever client"
+        " sent it",
+        off_when="to put the old answer back for a comparison — pepin.goal_link then finds no"
+        " navigators in the answer and ros/goto.sh cancel falls back to goto_ros.py",
+    ),
+    Flag(
+        "lidar_watch",
+        True,
+        description="the lidar's driver is restarted when its port is there and no scan has"
+        " come for 5 s, and once per absence of the port so it respawns idle instead of spinning"
+        " a core (pepin.lidar_watch); `where` says `lidar` either way",
+        why="the driver opens its port once: a lidar re-plugged or plugged in after the start"
+        " stayed dead until a stack restart (journal 2026-09-28)",
+        on_when="always",
+        off_when="while the lidar is deliberately held silent with its port present",
+    ),
 )
 
 PLANNERS = {
@@ -332,6 +399,11 @@ PLANNERS = {
 # took. "mppi" is one controller for every planner, and it turns to the heading itself, so the
 # tree holds it to the heading as well.
 RPP_GOAL_CHECKER = "xy_only_goal_checker"
+# The lidar the watch looks after: its scan, its port as udev names it, and its driver's process
+# (the component container of robot.launch.py).
+LIDAR_SCAN_TOPIC = "/scan"
+LIDAR_PORT = "/dev/lidar"
+LIDAR_PROCESS = "__node:=lidar_container"
 FOLLOWERS = {
     "mppi": ("FollowPathMPPI", "general_goal_checker"),
     # The reversing RPP inside Nav2's RotationShimController: RPP's pace, and the shim turns the
@@ -359,6 +431,12 @@ class GoalServer(Node):
         self._spin = ActionClient(self, Spin, "spin")
         self._relocalize = self.create_client(Trigger, "relocalize")
         self._where = self.create_client(Trigger, "where_am_i")
+        # Every goal on either navigator, whoever sent it (flag cancel_every_goal): the action
+        # servers' own cancel services, made once here so a cancel never waits for discovery.
+        self._cancel_clients = {
+            action: self.create_client(CancelGoal, f"/{action}/_action/cancel_goal")
+            for action in NAV_ACTIONS
+        }
         self.fit = 0.0
         self._fit_heard = False  # a tracker has spoken here at least once
         self._tracker_probed = False  # ...or its service was waited for, once (_tracker_here)
@@ -395,6 +473,17 @@ class GoalServer(Node):
             self._on_places,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
+        # WHETHER RTAB-MAP'S START IS PLACED (pepin.watch.Placement, from the laptop's
+        # rtabmap_frame, latched): under PEPIN_LOCALIZER=rtabmap a fresh map -> base_link is not
+        # a pose until this start of RTAB-Map has recognised the loaded map or been seeded.
+        # None until heard, which _ready refuses as "nobody said" (flag start_needs_placement).
+        self._placement: Placement | None = None
+        self.create_subscription(
+            String,
+            PLACEMENT_TOPIC,
+            self._on_placement,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
         # Latched: the behaviour tree reads its selector once, whenever it next ticks.
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._planner_pick = self.create_publisher(String, "planner_selector", latched)
@@ -415,6 +504,13 @@ class GoalServer(Node):
         # stops. Harmless on one machine, where nothing listens.
         self._beat = self.create_publisher(Header, HEARTBEAT_TOPIC, 10)
         self.create_timer(1.0 / HEARTBEAT_HZ, self._heartbeat)
+        # The lidar's driver, brought back when its port is there and it says nothing. The scan
+        # is taken raw: only its arrival matters here, and a parsed one costs a core's percent.
+        self._lidar = LidarWatch(started_at=time.monotonic())
+        self.create_subscription(
+            LaserScan, LIDAR_SCAN_TOPIC, self._on_scan, qos_profile_sensor_data, raw=True
+        )
+        self.create_timer(1.0, self._watch_lidar)
         # The laptop half brings the board's Nav2 up (pepin.deployment.next_transition): the
         # board's tree cannot load before this side's costmap service exists, and the board's
         # own manager gives up after one failure. Every few seconds: read the four states, send
@@ -488,6 +584,28 @@ class GoalServer(Node):
         pepin_bringup.slam_frame. Under ``rtabmap`` RTAB-Map broadcasts the transform itself and
         nothing publishes that topic, so a watch of it would refuse every goal."""
         return self._switches.on("correction_watch") and self._localizer == "tracker"
+
+    def _on_scan(self, _raw: bytes) -> None:
+        """A scan arrived (unparsed): the lidar is alive."""
+        self._lidar.scan(time.monotonic())
+
+    def _watch_lidar(self) -> None:
+        """Once a second: end the driver's process when the watch says so; the launch respawns
+        it within two seconds on the port that is there now."""
+        if not self._switches.on("lidar_watch"):
+            return
+        now, port = time.monotonic(), os.path.exists(LIDAR_PORT)
+        if self._lidar.due(now, port):
+            rule = (
+                "port present: respawn it on the port"
+                if port
+                else "port lost: respawn it without one, to idle (once per absence)"
+            )
+            self.get_logger().warning(
+                f"lidar {self._lidar.status(now, port)}: ending its driver ({LIDAR_PROCESS}),"
+                f" kick {self._lidar.kicks}, rule {rule}"
+            )
+            subprocess.run(["pkill", "-INT", "-f", LIDAR_PROCESS], check=False, timeout=5)
 
     def _heartbeat(self) -> None:
         self._beat.publish(Header(stamp=self.get_clock().now().to_msg(), frame_id="laptop"))
@@ -636,6 +754,10 @@ class GoalServer(Node):
         self.get_logger().info(f"run {self._runs.run}: recording {path}")
         return path
 
+    def close(self) -> None:
+        """Before the node goes (node_kit.spin_main's order): close a tape still open."""
+        self.stop_recording()
+
     def stop_recording(self) -> None:
         """Close the run's tape (the recorder flushes and syncs it); harmless when none is open."""
         if self._runs.stopped():
@@ -702,6 +824,7 @@ class GoalServer(Node):
                     "planner": self.planner,
                     "pose": source,
                     "localizer": self._localizer,
+                    "lidar": self._lidar.status(time.monotonic(), os.path.exists(LIDAR_PORT)),
                     **({} if correction is None else {"correction_s": round(correction, 2)}),
                     **pose,
                 },
@@ -711,11 +834,34 @@ class GoalServer(Node):
         elif command == "planner":
             self._send(connection, self.pick_planner(str(request.get("name", ""))))
         elif command == "cancel":
-            self._send(connection, {"event": "cancelled", "had_goal": self.cancel()})
+            # Under cancel_every_goal this node's own goal is one of "every": its handle is only
+            # let go here, so the navigators' answer counts it once instead of rejecting a goal
+            # a second request had already put into canceling.
+            every = self._switches.on("cancel_every_goal")
+            answer: dict[str, Any] = {"event": "cancelled", "had_goal": self.cancel(send=not every)}
+            if every:
+                answer["navigators"] = self.cancel_every_goal()
+            self._send(connection, answer)
         elif command == "go":
             self._go(request, connection)
         else:
             self._send(connection, {"event": "error", "detail": f"unknown command {command!r}"})
+
+    def _on_placement(self, msg: String) -> None:
+        """rtabmap_frame's word on what RTAB-Map's present start rests on; a message that does
+        not parse leaves the last one standing."""
+        heard = Placement.from_json(msg.data)
+        if heard is not None:
+            self._placement = heard
+
+    def _placement_standing(self) -> Placement | None:
+        """rtabmap_frame's last word while an rtabmap_frame is there to stand behind it; ``None``
+        with no publisher left on the topic. A latched word outlives its node here: the laptop's
+        vslam restarting would otherwise leave the OLD start's "placed" in force until the new
+        node's first word, over a map -> odom already fresh at the new start's saved pose."""
+        if self.count_publishers(PLACEMENT_TOPIC) == 0:
+            return None
+        return self._placement
 
     def _on_places(self, msg: String) -> None:
         """The graph's book, as the places node last published it."""
@@ -827,16 +973,24 @@ class GoalServer(Node):
         """May a goal start now (:class:`pepin.watch.GoalGate`): the tracker's sigma where it
         publishes one and its fit where it does not; where no tracker runs, the age of
         map -> base_link AND the age of the SLAM correction, which is the only one of the two a
-        dead laptop stops. ``pose`` is a reading already taken by the caller (mark's), so the
-        edge is not looked up twice. The gate is kept in step with its live flag here rather
-        than at the switch, so one reading and one rule answer every caller."""
+        dead laptop stops; under ``rtabmap`` also whether this start of RTAB-Map is placed
+        (flag ``start_needs_placement``). ``pose`` is a reading already taken by the caller
+        (mark's), so the edge is not looked up twice. The gate is kept in step with its live flag
+        here rather than at the switch, so one reading and one rule answer every caller."""
         self._gate = replace(
             self._gate, start_on_a_known_pose=self._switches.on("start_on_a_known_pose")
         )
         if self._switches.on("tf_pose") and not self._tracker_here():
             edge = self._tf_pose() if pose is None else pose
             watched = self._correction() if self._watching_correction() else None
-            return self._gate.verdict(None, edge.get("age_s"), watched)
+            ready = self._gate.verdict(None, edge.get("age_s"), watched)
+            if ready.ready and self._localizer == "rtabmap":
+                placed = Preflight.placement(
+                    self._placement_standing(), asked=self._switches.on("start_needs_placement")
+                )
+                if not placed.ok:
+                    return Readiness(False, tracker=False, rule=BY_PLACEMENT, reason=placed.detail)
+            return ready
         return self._gate.verdict(self.fit, None, sigma=self._sigma())
 
     def mark(self, name: str) -> dict[str, Any]:
@@ -884,19 +1038,56 @@ class GoalServer(Node):
         if name == "controller" and new != old:
             self.pick_planner(self.planner)
 
-    def cancel(self) -> bool:
+    def cancel(self, send: bool = True) -> bool:
         """Stop the running drive, if any; True when there was one.
 
         Clears ``_driving`` as well as the handle: during the lost -> relocalise -> resume window
         there is no handle to cancel, and the flag is what stops the resume from re-sending the
-        goal the operator just cancelled.
+        goal the operator just cancelled. ``send=False`` lets the handle go without cancelling
+        it: the caller cancels every goal on the navigator itself (:meth:`cancel_every_goal`).
         """
         with self._lock:
             handle, self._goal_handle = self._goal_handle, None
             was_driving, self._driving = self._driving, False
-        if handle is not None:
+        if handle is not None and send:
             handle.cancel_goal_async()
         return was_driving
+
+    def cancel_every_goal(self) -> dict[str, dict[str, Any]]:
+        """Cancel every goal on both navigators, whoever sent it; what each said, per action.
+
+        A zero goal id and stamp in ``CancelGoal`` means all goals (goto_ros.py's ``cancel_all``,
+        asked from here). Both requests go out before either answer is awaited, and one
+        :data:`CANCEL_CONFIRM_S` deadline covers the whole cancel. Each entry is ``outcome`` in
+        goto_ros.py's words, plus ``cancelling`` (how many goals) when the navigator answered.
+        """
+        deadline = time.monotonic() + CANCEL_CONFIRM_S
+        said: dict[str, dict[str, Any]] = {}
+        pending: dict[str, Any] = {}
+        for index, (action, client) in enumerate(self._cancel_clients.items()):
+            share = max(deadline - time.monotonic(), 0.0) / (len(self._cancel_clients) - index)
+            if not client.service_is_ready() and not client.wait_for_service(
+                timeout_sec=share / 2.0
+            ):
+                said[action] = {"outcome": "no server answered"}
+                continue
+            pending[action] = client.call_async(CancelGoal.Request())
+        for action, future in pending.items():
+            answer = self._wait(future, max(deadline - time.monotonic(), 0.0))
+            if answer is None:
+                said[action] = {
+                    "outcome": f"NOT confirmed in {CANCEL_CONFIRM_S:.0f} s — use ros/stop.sh"
+                }
+                continue
+            said[action] = {
+                "outcome": cancel_outcome(int(answer.return_code)),
+                "cancelling": len(answer.goals_canceling),
+            }
+        self.get_logger().info(
+            "cancel every goal: "
+            + "; ".join(f"{action} {said[action]['outcome']}" for action in self._cancel_clients)
+        )
+        return {action: said[action] for action in self._cancel_clients}
 
     def _go(
         self,
@@ -1277,17 +1468,10 @@ class GoalServer(Node):
 
 
 def main() -> None:
-    rclpy.init()
-    node = GoalServer()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.stop_recording()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    # Through node_kit.spin_main like the other nodes: close() (the tape) first, then the TF
+    # listener's non-daemon thread — with its own spin this node never exited on SIGINT — and
+    # kill -USR2 prints its stacks (its main thread burns 43-46 % of an A53 core, 2026-09-24).
+    spin_main(GoalServer)
 
 
 if __name__ == "__main__":

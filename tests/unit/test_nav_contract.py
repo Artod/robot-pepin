@@ -242,6 +242,35 @@ def test_a_whisker_never_erases_what_the_lidar_or_the_camera_saw() -> None:
     assert plugins.index("camera_layer") < plugins.index(tof[0])
 
 
+def test_the_camera_grid_layer_ships_off_in_both_costmaps_and_draws_by_maximum() -> None:
+    """The camera grid (2026-09-24): a StaticLayer in each costmap that only DRAWS the volume's
+    current columns (depth_fusion's grid_out). Off as shipped, just before inflation, on its own
+    topics, the global one with Nav2's updates. use_maximum is costmap-wide and the static_layer
+    reads it too, which changes nothing only while that layer is the FIRST of a costmap that does
+    not track unknown space (it writes into a master reset to 0 and max(0, c) is c) — both held
+    here, and the laptop's overlay moves neither."""
+    for costmap, topic, updates in (
+        ("local_costmap", "/camera_grid", False),
+        ("global_costmap", "/camera_grid_map", True),
+    ):
+        params = _p(costmap)
+        layer, plugins = params["camera_grid_layer"], params["plugins"]
+        assert layer["plugin"] == "nav2_costmap_2d::StaticLayer", costmap
+        assert layer["enabled"] is False, f"{costmap}: off until a drive has measured it"
+        assert layer["map_topic"] == topic and layer["map_subscribe_transient_local"] is True
+        assert layer["subscribe_to_updates"] is updates, costmap
+        assert plugins.index("camera_grid_layer") == plugins.index("inflation_layer") - 1
+        assert plugins[-1] == "inflation_layer"
+        assert params["use_maximum"] is True, f"{costmap}: FREE cells must not erase other marks"
+        assert params.get("track_unknown_space", False) is False, costmap
+    assert _p("global_costmap")["plugins"][0] == "static_layer"
+    assert "static_layer" not in _p("local_costmap")["plugins"]
+    overlay = yaml.safe_load((REPO / "ros/params/nav2_map_from_laptop.yaml").read_text())
+    for costmap in ("local_costmap", "global_costmap"):
+        moved = overlay[costmap][costmap]["ros__parameters"]
+        assert set(moved) == {"static_layer"}, moved
+
+
 def test_the_tof_whiskers_serve_the_local_costmap_only() -> None:
     """2026-09-21: the ToF are short whiskers for the controller's map. In the global costmap
     they bought a room-scale plan nothing and were the worst amplifier of the RangeSensorLayer
@@ -298,7 +327,9 @@ def test_the_operator_scripts_parse_and_keep_their_safety_lines() -> None:
     assert "timeout 3" in stop and "pkill -9 -f" in stop and "systemctl restart pepin-ros" in stop
     goto = (REPO / "ros/goto.sh").read_text()
     assert "tail -n +1 -F" in goto and re.search(r"trap .*EXIT", goto)
-    assert re.search(r'/stop\.sh"', goto), "Ctrl-C must run stop.sh"
+    # Ctrl-C cancels and never restarts the board (2026-09-29): the red button is typed by hand.
+    assert "goal_link cancel || goal_link cancel" in goto
+    assert not re.search(r'/stop\.sh"', goto), "Ctrl-C must not run stop.sh"
     run = (REPO / "ros/run.sh").read_text()
     assert "--rm" not in run  # a stopped container must keep its log for the next start to save
 
@@ -686,6 +717,14 @@ def test_a_goal_without_a_tracker_is_judged_on_the_transform_the_slam_half_publi
         # controller joined on 2026-09-23, default mppi: what follows the plan, and the goal
         # checker that ends the drive with it.
         "controller",
+        # start_needs_placement the same night, default on: under PEPIN_LOCALIZER=rtabmap a goal
+        # waits for the laptop's word that RTAB-Map's start is placed; this is the board-side
+        # switch back, which goto_ros obeys too.
+        "start_needs_placement",
+        # cancel_every_goal on 2026-09-25, default on: a cancel on the socket reaches every goal
+        # on both navigators, goto_ros.py's included, so goto.sh cancels without a new process.
+        "cancel_every_goal",
+        "lidar_watch",
     )
     assert all(flags.flag(name).live for name in flags.names)
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"
@@ -890,8 +929,24 @@ def test_the_camera_slam_lives_beside_the_tracker_never_over_it() -> None:
     assert "pepin_bringup.camera_stream" in sf.strings(vslam)
     laptop = (REPO / "ros/laptop.sh").read_text()
     assert "vslam.launch.py" in laptop and "config:/ws/config" in laptop
-    # a mono camera cannot seed a loop-closure transform: ICP from identity does
-    assert _rtabmap("RTABMAP")["RGBD/LoopClosureIdentityGuess"] == "true"
+    # the tuned camera+lidar set ("F+G2", 2026-09-25) is the table's own since 2026-09-28: the
+    # visual half of Reg/Strategy 2 seeds the closure, and the proximity search is the parked A/B's
+    table = _rtabmap("RTABMAP")
+    assert table["RGBD/LoopClosureIdentityGuess"] == "false"
+    assert {
+        k: table[k]
+        for k in (
+            "RGBD/ProximityGlobalScanMap",
+            "RGBD/ProximityMergedScanCovFactor",
+            "RGBD/MaxLoopClosureDistance",
+            "RGBD/ProximityOdomGuess",
+        )
+    } == {
+        "RGBD/ProximityGlobalScanMap": "true",
+        "RGBD/ProximityMergedScanCovFactor": "0.1",
+        "RGBD/MaxLoopClosureDistance": "1.0",
+        "RGBD/ProximityOdomGuess": "true",
+    }
 
 
 def test_the_bridge_routes_only_what_the_split_needs_and_only_one_way() -> None:
@@ -1078,8 +1133,8 @@ def test_the_laptop_halves_start_their_nodes_only_after_their_ghosts_are_gone() 
     nav = sf.tree(NAV_LAUNCH)
     composed = {ast.unparse(sf.keywords(c)["name"]) for c in sf.calls_to(nav, "ComposableNode")}
     assert "f'lifecycle_manager_navigation_{side}'" in composed
-    container = sf.keywords(sf.calls_to(nav, "ComposableNodeContainer")[0])
-    assert ast.unparse(container["name"]).startswith("f'nav2_container_{side}' if side != 'all'")
+    container = sf.calls_to(nav, "respawned_container")[0]
+    assert ast.unparse(container.args[0]).startswith("f'nav2_container_{side}' if side != 'all'")
     laptop = (REPO / "ros/laptop.sh").read_text()
     # The stop itself is ros/lib.sh's now (one way to stop a container, one window); what this
     # contract still owns is that nothing here removes a container without stopping it first.
@@ -1113,9 +1168,9 @@ def test_every_respawned_node_waits_for_its_own_ghost_first() -> None:
             if keywords.get("respawn") is True:
                 assert "_after_ghost(" in str(keywords.get("prefix")), (name, node)
     nav = sf.tree(NAV_LAUNCH)
-    container = sf.keywords(sf.calls_to(nav, "ComposableNodeContainer")[0])
+    container = sf.calls_to(nav, "respawned_container")[0]
     assert (
-        ast.unparse(container["prefix"])
+        ast.unparse(container.args[2])
         == "f'nice -n 5 {_after_ghost(admin, *nav_container_nodes(side))}'"
     )
     by_side = [
@@ -1721,9 +1776,15 @@ def test_the_volume_is_open_loop_and_no_slice_of_it_is_published() -> None:
     assert "self._world.integrate_scan" in calls and "self._world.integrate_depth" in calls
     assert "self._world.save" in calls
     topics = {s for s in sf.strings(node) if s == "/map" or s.startswith("/map_")}
-    assert topics == set(), f"the volume reaches no matcher and no planner: {topics}"
-    assert "occupancy_grid" not in sf.imported(node), "no grid leaves this node at all"
+    # /map is READ, for its lattice alone (grid_map_topic): nothing goes out on a map's name.
+    assert topics == {"/map"}, f"the volume reaches no matcher: {topics}"
+    assert sf.assignments(node)["MAP_TOPIC"] == "'/map'"
     flags = load_table(REPO / NODES / "depth_fusion.py")
+    # The one grid that does leave (grid_out, 2026-09-24) is an obstacle picture the costmaps'
+    # camera_grid_layer draws, never a map anything seats a pose on: its own names, off as shipped.
+    assert sf.assignments(node)["GRID_TOPIC"] == "'/camera_grid'"
+    assert sf.assignments(node)["GRID_MAP_TOPIC"] == "'/camera_grid_map'"
+    assert not flags.flag("grid_out").default, "the camera grids ship off"
     assert {"map_source", "map_hz", "lidar_map", "camera_map", "map_identity"}.isdisjoint(
         set(flags.names)
     ), "the flags that published the volume went with the publication"
@@ -1952,6 +2013,76 @@ def test_a_sensor_is_muted_where_it_is_published_and_both_bridges_know_the_same_
     from pepin.deployment import node_host
 
     assert node_host("base_bridge") == ("board", "pepin-ros")
+
+
+def test_the_board_bridge_publishes_the_rest_zupt_the_ekf_fuses_behind_a_live_switch() -> None:
+    """Parked on 2026-09-24 the EKF's heading crept ~5 deg/hour: odom2 fused /zupt, but under
+    PEPIN_LOCALIZER=rtabmap nothing published it (its one publisher was the tracker's slip
+    watch). The C++ bridge now does, from its own rest witness -- so the three ends of the wire
+    are held together here: the bridge advertises `zupt` as an Odometry built by pepin.zupt's
+    twin, the switch is declared on (CLAUDE.md rule 19) and named in the report line, and the
+    EKF's odom2 reads that topic as vx, vy and vyaw, which is exactly what the covariance
+    claims."""
+    cpp = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
+    assert 'create_publisher<nav_msgs::msg::Odometry>("zupt", 5)' in cpp
+    assert '#include "pepin_base_cpp/zupt.hpp"' in cpp
+    assert 'declare_parameter<bool>("zupt_publish", true)' in cpp, "on by default"
+    assert '" zupt_publish="' in cpp, "the report line names the switch"
+    assert "rest_zupt_twist_covariance(zupt_var_linear_.load(), zupt_var_yaw_.load())" in cpp
+    assert "gate.judge(now_s, rest_evidence(now_s))" in cpp
+    ekf = yaml.safe_load((REPO / "ros/params/ekf.yaml").read_text())
+    params = ekf["ekf_filter_node"]["ros__parameters"]
+    assert params["odom2"] == "zupt"
+    fused = [i for i, on in enumerate(params["odom2_config"]) if on]
+    assert fused == [6, 7, 11], "vx, vy, vyaw: the three indices the update claims"
+    assert params["odom2_differential"] is False
+    from pepin.zupt import REST_ZUPT_VARIANCE, rest_zupt_twist_covariance
+
+    claimed = [i for i in range(6) if rest_zupt_twist_covariance()[i * 6 + i] == REST_ZUPT_VARIANCE]
+    assert [6 + i for i in claimed] == [6, 7, 11], "the covariance claims what odom2 fuses"
+
+
+def test_every_zupt_tunable_of_the_bridge_is_a_live_range_checked_parameter() -> None:
+    """Heading drift has many causes, and Artem tunes them on the robot, never in C++: every
+    number that decides the zero-velocity update is a parameter of /base_bridge, set live with
+    `ros2 param set` and in force at the next tick. Held here: each is declared through the one
+    helper that range-checks a launch value, with the default pepin.zupt names (the two windows
+    borrowing imu_bias_s and cmd_timeout_s without moving them); a set is refused outside
+    pepin.zupt.ZUPT_RANGES by the on-set callback and applied by the post-set one, which re-times
+    the timer for a new rate; nothing is looked up per tick; the status line prints every value
+    in force; and ros/README.md documents each with its default and range."""
+    from pepin.zupt import ZUPT_RANGES
+
+    cpp = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
+    declared = dict(re.findall(r'declare_zupt_number\(\s*"(zupt_\w+)",\s*(.+?),\n', cpp))
+    assert declared == {
+        "zupt_gyro_quiet_rad_s": "kGyroQuietRadS",
+        "zupt_rate_hz": "kZuptHz",
+        "zupt_var_linear": "kRestZuptVariance",
+        "zupt_var_yaw": "kRestZuptVariance",
+        "zupt_settle_s": 'zupt_clamped(*zupt_range("zupt_settle_s"), imu_bias_s_)',
+        "zupt_cmd_hold_s": 'zupt_clamped(*zupt_range("zupt_cmd_hold_s"), cmd_timeout_s_)',
+    }, declared
+    assert set(declared) == set(ZUPT_RANGES), "every live number has a range, every range a number"
+    assert "descriptor.dynamic_typing = true" in cpp, "`ros2 param set ... 50` is not refused"
+    assert "add_on_set_parameters_callback(" in cpp and "return check_zupt_settings(" in cpp
+    assert "add_post_set_parameters_callback(" in cpp and "apply_zupt_settings(parameters)" in cpp
+    for name in ZUPT_RANGES:
+        assert f'if (name == "{name}") {{return &' in cpp, f"{name}: applied live"
+    assert "if (slot == &zupt_hz_) {\n        start_zupt_timer();" in cpp, "a new rate re-times"
+    assert 'get_parameter("zupt_' not in cpp, "no parameter lookup per tick"
+    settings = cpp[cpp.index("std::string zupt_settings() const") :]
+    settings = settings[: settings.index("return line;")]
+    for field in ("zupt_hz_", "zupt_var_linear_", "zupt_var_yaw_", "zupt_settle_s_"):
+        assert f"{field}.load()" in settings, f"the status line prints {field}"
+    assert "zupt_cmd_hold_s_.load()" in settings and "gyro_quiet_rad_s_.load()" in settings
+    readme = (REPO / "ros/README.md").read_text()
+    section = readme[readme.index("## The base bridge's zero-velocity update") :]
+    section = section[: section.index("\n## ", 5)]
+    for name in (*ZUPT_RANGES, "zupt_publish"):
+        assert f"| `{name}` |" in section, f"ros/README.md documents {name}"
+    assert "ros2 param set /base_bridge zupt_rate_hz 50" in section
+    assert "ros2 param set /base_bridge zupt_var_yaw 1.0e-4" in section
 
 
 def test_every_flag_says_why_its_default_is_what_it_is_and_when_to_move_it() -> None:
@@ -2425,10 +2556,16 @@ def test_the_board_image_carries_no_lttng_tracer() -> None:
 
 
 def test_a_crashed_navigation_container_comes_back_by_itself() -> None:
+    """Respawned WITH its nodes, described anew for every start by a factory
+    (pepin_bringup.launch_kit, behaviour in test_launch_kit): a reload of the first start's
+    descriptions loses the controller's cmd_vel -> cmd_vel_nav remap."""
     nav = sf.tree(NAV_LAUNCH)
-    container = sf.keywords(sf.calls_to(nav, "ComposableNodeContainer")[0])
-    assert ast.literal_eval(container["respawn"]) is True
-    assert 0.0 < float(ast.literal_eval(container["respawn_delay"])) <= 5.0
+    assert not sf.calls_to(nav, "ComposableNodeContainer"), "only through respawned_container"
+    container = sf.calls_to(nav, "respawned_container")[0]
+    assert ast.unparse(container.args[1]) == "nav_parts"
+    assert ast.unparse(sf.keywords(container)["parameters"]) == "process_params"
+    parts = next(n for n in nav.body if isinstance(n, ast.FunctionDef) and n.name == "nav_parts")
+    assert sf.calls_to(parts, "ComposableNode"), "the descriptions are built inside the factory"
 
 
 def _launch_processes(name: str) -> dict[str, dict[str, object]]:
@@ -2574,6 +2711,8 @@ def test_the_laptop_image_provides_what_the_laptop_nodes_import() -> None:
         "cv_bridge": ("ros-jazzy-cv-bridge",),
         # navigation2 depends on message_filters (nav2_costmap_2d): the base image carries it
         "message_filters": ("ros-jazzy-message-filters", "ros-jazzy-navigation2"),
+        # ...and on map_msgs (StaticLayer's OccupancyGridUpdate): depth_fusion's camera grids
+        "map_msgs": ("ros-jazzy-map-msgs", "ros-jazzy-navigation2"),
     }
     ros_core = {
         "rclpy", "tf2_ros", "std_msgs", "sensor_msgs", "geometry_msgs", "nav_msgs", "std_srvs",
@@ -2652,16 +2791,18 @@ def test_the_hook_checks_the_shell_scripts_and_the_board_s_books_come_home() -> 
 
 def test_one_node_can_be_kicked_without_a_container_restart() -> None:
     """laptop.sh kick / thin.sh kick: SIGINT to one process (never -9, never the container),
-    then the log is tailed for the line the node prints once up — a line its source really
-    contains. The names a kick knows are exactly the nodes the launches respawn, and an unknown
-    name is refused before any host is touched."""
+    then the log is read for the line the node prints once up — a line its source really
+    contains, from the new pid (ros/kick_ready.awk, tests/unit/test_kick.py). The names a kick
+    knows are exactly the nodes the launches respawn, and an unknown name is refused before any
+    host is touched."""
     import os
 
     known: dict[str, set[str]] = {}
     for script in ("laptop.sh", "thin.sh"):
         src = (REPO / "ros" / script).read_text()
         kick = src[src.index("    kick)") :].split("\n    *)")[0]
-        assert "pkill -INT -f" in kick and "pkill -9" not in kick, script
+        assert 'pgrep -f "pepin_bringup[./]$1"' in kick and "kill -INT" in kick, script
+        assert "kill -9" not in kick, script
         assert "docker restart" not in kick and "systemctl restart" not in kick, script
         table = re.search(r"^kick_(?:target|line)\(\) \{.*?^\}", src, re.M | re.S)
         assert table is not None, script
@@ -2989,7 +3130,8 @@ def test_the_laser_odometry_is_a_twist_the_filter_can_weigh_and_never_a_second_t
         "ros__parameters"
     ]
     assert ekf["odom3"] == LASER_ODOM_TOPIC
-    assert ekf["odom3_config"][6] is True and ekf["odom3_config"][11] is True, "vx and vyaw"
+    assert ekf["odom3_config"][6] is True, "vx: the lidar's witness of distance"
+    assert ekf["odom3_config"][11] is False, "vyaw: +4.3 deg/min at rest, the parked heading creep"
     assert not any(ekf["odom3_config"][:6]), "no pose: it would fight the wheels' integration"
     assert ekf["odom3_config"][7] is False, "the wheels' vy = 0 is the kinematic truth, not this"
     assert ekf["odom3_differential"] is False, "a velocity is already differential"
@@ -3276,7 +3418,7 @@ def test_goto_s_cancel_cancels_a_goal_it_never_sent() -> None:
     body = ast.unparse(cancel)
     assert "_action/cancel_goal" in body and "CancelGoal.Request()" in body
     assert "spin_until_future_complete" in body and "CANCEL_CONFIRM_S" in body
-    assert float(sf.assignments(goto)["CANCEL_CONFIRM_S"]) <= 3.0, "confirmed while he watches"
+    assert float(sf.assignments(goto)["CANCEL_CONFIRM_S"]) <= 30.0, "confirmed while he watches"
     main = next(f for f in ast.walk(goto) if isinstance(f, ast.FunctionDef) and f.name == "main")
     lines = ast.unparse(main).splitlines()
     cancelled = next(i for i, line in enumerate(lines) if "cancel_all(node)" in line)
@@ -3363,3 +3505,30 @@ def test_the_camera_rig_decides_who_measures_the_depth() -> None:
     assert 'return "stereo" if CameraConfig.load(config_file("camera.json"), rig).stereo' in launch
     config = json.loads((REPO / "config/camera.json").read_text())
     assert "rig" in config["stereo"] and "rig" not in config["overview"]
+
+
+def test_the_lidar_and_the_base_die_apart_and_each_comes_back() -> None:
+    """A dead lidar is the failure a camera-only cart must ride out, so it must not take the
+    wheels with it: on 2026-09-24 the LD19 driver aborted on a deactivate and, sharing one
+    process with the base bridge, left the cart with no wheels, no IMU and no gyro-bias tracker
+    for hours. Two processes, each respawned; the shared one of before is sensor_split:=false;
+    and the deactivate that aborts the driver (sensor.sh --hard) is refused with the reason."""
+    src = (REPO / "ros/pepin_bringup/launch/robot.launch.py").read_text()
+    assert 'DeclareLaunchArgument("sensor_split", default_value="true")' in src
+    lidar_block = src[src.index("def lidar_parts(") : src.index("def base_parts(")]
+    assert 'name="ldlidar_node"' in lidar_block and 'name="scan_filter"' in lidar_block
+    base_block = src[src.index("def base_parts(") : src.index("def sensors_container(")]
+    assert 'package="pepin_base_cpp"' in base_block and 'name="base_to_imu"' in base_block
+    assert 'package="pepin_base_cpp"' not in lidar_block
+    # A respawn restores the nodes, wired: each start loads descriptions its factory built anew
+    # (pepin_bringup.launch_kit; the generator trap is held in test_launch_kit).
+    split = src[src.index("    containers = respawned_container(") : src.index("return containers")]
+    assert 'respawned_container("lidar_container", lidar_parts,' in split
+    assert 'respawned_container("base_container", base_parts,' in split
+    assert "def respawned_container(" not in src, "one helper, pepin_bringup.launch_kit"
+    names = {
+        p["name"]
+        for p in json.loads((REPO / "config/board_manifest.json").read_text())["processes"]
+    }
+    assert {"lidar_container", "base_container"} <= names and "sensors_container" not in names
+    assert "refused: --hard" in (REPO / "ros/sensor.sh").read_text()

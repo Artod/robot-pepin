@@ -2337,7 +2337,7 @@ class DepthStream(Node):
                 for held, msg in reversed(self._right):
                     if held == key:
                         right = array_from_image(msg)
-                        return None if right is None or right.ndim != 2 else right
+                        return None if right is None or right.ndim not in (2, 3) else right
                 left = deadline - time.monotonic()
                 if left <= 0.0:
                     return None
@@ -2366,10 +2366,10 @@ class DepthStream(Node):
                 throttle_duration_sec=30,
             )
             return None
-        if right.shape != rgb.shape[:2]:
+        if right.shape[:2] != rgb.shape[:2]:  # the size; the right eye is grey or colour
             self._tally.count("unpaired")
             self.get_logger().warning(
-                f"the right eye is {right.shape} and the left {rgb.shape[:2]}: not one rig",
+                f"the right eye is {right.shape[:2]} and the left {rgb.shape[:2]}: not one rig",
                 throttle_duration_sec=30,
             )
             return None

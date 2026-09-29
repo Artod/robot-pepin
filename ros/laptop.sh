@@ -18,6 +18,14 @@
 #   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
 #                            neck on): the camera node here keeps its static edge off
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
+#   ros/laptop.sh vslam      runs the camera mapping container on pepin-laptop:xfeat whenever that
+#                            image exists and was built on the laptop image below
+#                            (ros/laptop-build.sh xfeat): RTAB-Map built with Python, so
+#                            rtabmap_frame's visual_features default (xfeat) can run XFeat +
+#                            LighterGlue in the visual registration. Without it the usual image
+#                            runs, that flag falls back to ORB, and this says so on stderr.
+#                            PEPIN_XFEAT=0 is the rollback (the usual image, ORB only);
+#                            PEPIN_XFEAT=1 refuses to start without an up-to-date xfeat image
 #   PEPIN_CAMERA=overview ros/laptop.sh vslam   run the OTHER camera rig for one container:
 #                            config/camera.json's "active" is the standing answer (see the
 #                            "Camera rigs" section of ros/README.md), this overrides it
@@ -25,6 +33,13 @@
 #                            and tells the node to use it, when torch's Metal backend is there;
 #                            PEPIN_DEPTH_HOST=0 keeps the network on the CPU in the container,
 #                            PEPIN_DEPTH_HOST=1 insists on the service (it falls back to the CPU)
+#   ros/laptop.sh vslam      starts the localisation models when they are installed
+#                            (ros/models.sh: XFeat, LighterGlue, place descriptors, a launchd job
+#                            loaded on demand), tells the container where they are
+#                            (PEPIN_MODELS_URL), mounts the checkout's two RTAB-Map adapters over
+#                            the xfeat image's (PEPIN_ADAPTERS_MOUNT=0: the image's) and passes
+#                            PEPIN_GLOBAL_DESCRIPTOR / PEPIN_REGISTRATION_BACKEND through when set;
+#                            stop stops the models again
 # Only `start` talks to the board (its side and its map); stop, logs, vslam and kick never do.
 # Prerequisites: the image built here (ros/laptop-build.sh) and the board on side=board
 # (ros/thin.sh on). A Docker container on macOS lives behind the VM's NAT, so DDS discovery
@@ -68,6 +83,42 @@ image() {
     if pepin_rmw_is_zenoh; then echo pepin-laptop:zenoh; return; fi
     docker image inspect pepin-laptop:latest >/dev/null 2>&1 && echo pepin-laptop || echo pepin-ros
 }
+# The camera mapping container's image. pepin-laptop:xfeat BY DEFAULT — rtabmap_frame's
+# visual_features defaults to xfeat, which only that image can run, and a restart that forgot an
+# environment variable used to bring RTAB-Map up on ORB with nothing but a clause in a report line
+# to say so (ORB accepted 0 of 630 camera-only updates on 2026-09-23). Only an xfeat image BUILT ON
+# the image above counts: an image built from another carries its layers first, so a laptop image
+# rebuilt since is not silently traded for an older one. PEPIN_XFEAT=0 is the rollback (the image
+# above, ORB only); PEPIN_XFEAT=1 refuses to start without an up-to-date xfeat image; PEPIN_IMAGE
+# (an explicit image) wins over both. ros/restart.sh's check 2.12 reads which image came up.
+vslam_image() {
+    local base why=""
+    base="$(image)"
+    if [ -n "${PEPIN_IMAGE:-}" ] || [ "${PEPIN_XFEAT:-}" = 0 ]; then echo "$base"; return; fi
+    if [ -n "${PEPIN_XFEAT:-}" ] && [ "$PEPIN_XFEAT" != 1 ]; then
+        echo "PEPIN_XFEAT=$PEPIN_XFEAT: 0 (the usual image), 1 (xfeat or nothing) or unset" >&2
+        return 1
+    fi
+    if ! docker image inspect pepin-laptop:xfeat >/dev/null 2>&1; then
+        why="there is no pepin-laptop:xfeat image"
+    elif ! xfeat_built_on "$base"; then
+        why="pepin-laptop:xfeat was not built on $base (rebuilt since?)"
+    fi
+    if [ -z "$why" ]; then echo pepin-laptop:xfeat; return; fi
+    if [ "${PEPIN_XFEAT:-}" = 1 ]; then
+        echo "PEPIN_XFEAT=1 but $why: ros/laptop-build.sh xfeat" >&2
+        return 1
+    fi
+    echo "laptop: $why — vslam runs $base and visual_features falls back to orb" \
+        "(ros/laptop-build.sh xfeat, about an hour; PEPIN_XFEAT=0 says this is meant)" >&2
+    echo "$base"
+}
+xfeat_built_on() {  # BASE: whether pepin-laptop:xfeat's layers begin with BASE's (built FROM it)
+    local base_layers xfeat_layers
+    base_layers="$(docker image inspect -f '{{join .RootFS.Layers " "}}' "$1" 2>/dev/null)" || return 1
+    xfeat_layers="$(docker image inspect -f '{{join .RootFS.Layers " "}}' pepin-laptop:xfeat 2>/dev/null)" || return 1
+    [ -n "$base_layers" ] && [ "${xfeat_layers#"$base_layers"}" != "$xfeat_layers" ]
+}
 # The middleware flags every node container here is given. Under cyclone this is the one flag
 # it has always had; under zenoh it is the session (a peer of THIS machine's router) plus
 # ZENOH_ROUTER_CHECK_ATTEMPTS=0, so a container started before the router survives and joins
@@ -83,7 +134,7 @@ fi
 RMW_ENV+=(-e "PEPIN_LOCALIZER=$PEPIN_LOCALIZER")
 # The one pairing that cannot work is refused BEFORE a container starts, not debugged on the
 # robot — and only where one is started, so `stop` and `logs` still work on a misconfigured shell.
-start_check() { pepin_localizer_check || exit 1; }
+start_check() { pepin_localizer_check || exit 1; pepin_time_source_check || exit 1; }
 # One zenoh router per machine, and this is the laptop's. It is started before any node here and
 # left alone afterwards: a node's connect retry is infinite, so containers may come and go under
 # it, and it is the only process on this side that talks to the board. Started idempotently —
@@ -105,8 +156,13 @@ zrouter_up() {
         ZCONFIG=(-v "${PEPIN_ZROUTER_CONFIG:-$HERE/zenoh/router.json5}:/zenoh/router.json5:ro"
                  -e ZENOH_ROUTER_CONFIG_URI=/zenoh/router.json5)
     fi
+    # RUST_LOG: the transport lifecycle and the re-dials at debug (ros/lib.sh's PEPIN_ZROUTER_LOG).
+    # ZENOH_RUNTIME: enough RX workers that a frozen board cannot starve this router's own
+    # sessions and its close of the dead link (ros/lib.sh's PEPIN_ZROUTER_RX_WORKERS says why).
     docker run -d --name "$PEPIN_ZROUTER_LAPTOP" --network "$NET" --restart unless-stopped \
         -e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-7}" \
+        -e "RUST_LOG=$PEPIN_ZROUTER_LOG" \
+        -e "ZENOH_RUNTIME=(rx: (worker_threads: $PEPIN_ZROUTER_RX_WORKERS))" \
         -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_router_override "$BOARD")" \
         ${ZCONFIG[@]+"${ZCONFIG[@]}"} \
         "$(image)" /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd >/dev/null
@@ -132,7 +188,6 @@ kick_target() {  # node name -> "container|start-up line"
         *) return 1 ;;
     esac
 }
-now_ms() { perl -MTime::HiRes=time -e 'printf "%.0f", time*1000'; }
 # Whether the depth network runs on this laptop's GPU (ros/depth_host.sh) beside the container:
 # PEPIN_DEPTH_HOST=1 or 0 decides outright; otherwise torch's Metal backend is asked (~2 s: the
 # import), the same question the service itself answers before it falls back to the CPU.
@@ -155,10 +210,16 @@ MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/pyth
 case "${1:-start}" in
     stop)
         # The router is this side's own, so a stop takes it too — but only under zenoh, so that
-        # a stop under cyclone touches exactly the three containers it always has.
+        # a stop under cyclone touches exactly the three containers it always has. The time
+        # server (pepin-chrony) is left running: it is the board's clock, not a part of this
+        # half, and a board that lost it would change source at every stop (ros/time.sh server
+        # stop takes it down on purpose).
         pepin_remove_container pepin-laptop pepin-vslam pepin-zenoh
         if pepin_rmw_is_zenoh; then pepin_remove_container "$PEPIN_ZROUTER_LAPTOP"; fi
         [ "${PEPIN_DEPTH_HOST:-}" = 0 ] || "$HERE/depth_host.sh" stop
+        # The localisation models leave with the session, as the depth host does: ~1 GB of this
+        # laptop's memory that nothing else uses (ros/models.sh start localization brings them).
+        if "$HERE/models.sh" installed localization; then "$HERE/models.sh" stop localization; fi
         echo "laptop side stopped"; exit 0 ;;
     logs)
         exec docker logs -f "pepin-${2:-laptop}" ;;
@@ -175,15 +236,22 @@ case "${1:-start}" in
         # respawn pause: camera/fusion/frame 0.3 s, depth 2.1 s (the network), so a kick is
         # 3-5 s here. A crashed node (no dispose) is the one case a respawn meets a ghost: the
         # count below says so, and a second kick after the lease clears it.
+        #   The wait proves the ready line is the NEW process's (ros/kick_ready.awk, the same
+        # matcher as ros/thin.sh kick): the exit line of the signalled pid, the successor's start
+        # under the same launch tag, then its ready line. The times are the container's clock
+        # (the VM's on this Mac, whose timestamps are the log's): its `date` before the SIGINT.
         NAME="${2:-}"; TARGET="$(kick_target "$NAME")" || { echo "usage: ros/laptop.sh kick <node>; nodes: $KICKABLE"; exit 2; }
-        C="${TARGET%%|*}"; LINE="${TARGET#*|}"
-        T0="$(date -u +%FT%TZ)"; MS0="$(now_ms)"
-        docker exec "$C" pkill -INT -f "pepin_bringup[./]$NAME" || { echo "no $NAME process in $C (ros/laptop.sh logs ${C#pepin-})"; exit 3; }
+        C="${TARGET%%|*}"; LINE="${TARGET#*|}"; TAB="$(printf '\t')"
+        OUT="$(docker exec "$C" sh -c 'date -u +%FT%T.%NZ; pgrep -f "pepin_bringup[./]$1"' sh "$NAME" 2>/dev/null)" || true
+        KICKED="${OUT%%$'\n'*}"; OLD="$(printf '%s\n' "$OUT" | sed 1d | tr '\n' ' ')"
+        [ -n "${OLD// /}" ] || { echo "no $NAME process in $C (ros/laptop.sh logs ${C#pepin-})"; exit 3; }
+        # shellcheck disable=SC2086
+        docker exec "$C" sh -c 'kill -INT "$@"' sh $OLD
+        R="wait${TAB}nothing read from the log yet"
         for _ in $(seq 1 240); do
-            SEEN="$(docker logs --since "$T0" "$C" 2>&1 | grep -F "$LINE" || true)"
-            if [ -n "$SEEN" ]; then
-                SEEN="${SEEN%%$'\n'*}"; DT=$(( $(now_ms) - MS0 ))
-                printf '%s back in %d.%d s: %s\n' "$NAME" $((DT / 1000)) $((DT % 1000 / 100)) "${SEEN#*]: }"
+            R="$(docker logs -t --since "$KICKED" "$C" 2>&1 | awk -v name="$NAME" -v old="$OLD" -v line="$LINE" -v kicked="$KICKED" -f "$HERE/kick_ready.awk")"
+            if [ "${R%%"$TAB"*}" = ready ]; then
+                echo "${R#*"$TAB"}"
                 case "$(bridge_count http://localhost:8001 "$NAME")" in
                     1) echo "the bridge lists $NAME once: clean" ;;
                     0) ;;  # no bridge admin to ask, or a name it does not list
@@ -193,7 +261,7 @@ case "${1:-start}" in
             fi
             sleep 0.5
         done
-        echo "$NAME did not print '$LINE' within 120 s: ros/laptop.sh logs ${C#pepin-}"; exit 4 ;;
+        echo "$NAME not ready within 120 s: ${R#*"$TAB"} (ros/laptop.sh logs ${C#pepin-})"; exit 4 ;;
     vslam)
         # Camera + lidar mapping beside the navigation half (ros/pepin_bringup/launch/vslam.launch.py),
         # and there is one arrangement of it (World R): the database is the map, it is kept across
@@ -233,8 +301,10 @@ case "${1:-start}" in
             echo "               the volume is born empty under the cart; the existing"
             echo "               ros/maps/*.world.npz are left untouched until it saves"
         fi
+        VSLAM_IMAGE="$(vslam_image)" || exit 2
         pepin_remove_container pepin-vslam
         zrouter_up  # under zenoh this half has no bridge to wait for, only its own router
+        pepin_timeserver_up  # the clock the board follows (ros/lib.sh; PEPIN_TIME_SOURCE=pool: none)
         # The depth network on the laptop's GPU (ros/depth_host.sh): 20 ms a frame on Metal
         # against 170 ms on the CPU in the container (2026-09-11), so it is on wherever it can
         # run (depth_host_wanted). The node reads PEPIN_DEPTH_BACKEND (auto: the service, the
@@ -252,21 +322,57 @@ case "${1:-start}" in
         fi
         DEPTH_ENV=()
         if depth_host_wanted; then
-            "$HERE/depth_host.sh" start
+            "$HERE/depth_host.sh" start  # an installed launchd job is started by ros/models.sh
             DEPTH_ENV=(-e PEPIN_DEPTH_BACKEND=auto -e "PEPIN_DEPTH_URL=http://host.docker.internal:${PEPIN_DEPTH_PORT:-8790}")
         else
             echo "depth network on the CPU in the container (PEPIN_DEPTH_HOST=1 for the GPU service)"
         fi
+        # THE LOCALISATION MODELS on this laptop's GPU (ros/models.sh): RTAB-Map's XFeat / LighterGlue
+        # adapters and sensor_pack's place descriptors call it at PEPIN_MODELS_URL. Started here
+        # when installed (a launchd job loaded on demand, restarted by launchd if it dies, stopped
+        # by `stop`) and waited for, so RTAB-Map's first registrations find it rather than loading
+        # torch into its own process. Down or not installed: the adapters compute in RTAB-Map's
+        # process (registration_backend auto) and the snapshots carry null descriptors.
+        MODELS_ENV=(-e "PEPIN_MODELS_URL=http://host.docker.internal:${PEPIN_MODELS_PORT:-8791}")
+        if "$HERE/models.sh" installed localization; then
+            "$HERE/models.sh" start localization \
+                || echo "localization service not answering (ros/models.sh logs localization): the adapters compute locally"
+        else
+            echo "localization service not installed (ros/models.sh install localization): the adapters compute locally"
+        fi
+        # Two flags read at start from the environment, passed through when this shell sets them:
+        # sensor_pack's global_descriptor (auto|on|off; the launch reads it too) and rtabmap_frame's
+        # registration_backend (service|local|auto; live afterwards through ros/flags.sh).
+        FLAG_ENV=()
+        for var in PEPIN_GLOBAL_DESCRIPTOR PEPIN_REGISTRATION_BACKEND; do
+            if [ -n "${!var:-}" ]; then FLAG_ENV+=(-e "$var=${!var}"); echo "$var=${!var}"; fi
+        done
+        # THE ADAPTERS FROM THE CHECKOUT, not the image: the two files RTAB-Map loads by path are
+        # mounted over the image's copies, so an adapter change needs a vslam restart and no
+        # rebuild (RTAB-Map imports them once, so a restart is needed either way). The files and
+        # not ros/xfeat as a whole: the directory would hide the image's XFeat checkout
+        # (/opt/xfeat/accelerated_features), whose weights the local fallback loads. Only onto the
+        # xfeat image — mounted into another, they would make rtabmap_frame believe RTAB-Map can
+        # run Python. PEPIN_ADAPTERS_MOUNT=0 runs the adapters baked into the image.
+        ADAPTER_MOUNTS=()
+        if [ "$VSLAM_IMAGE" = pepin-laptop:xfeat ] && [ "${PEPIN_ADAPTERS_MOUNT:-1}" != 0 ]; then
+            ADAPTER_MOUNTS=(-v "$HERE/xfeat/rtabmap_xfeat.py:/opt/xfeat/rtabmap_xfeat.py:ro"
+                            -v "$HERE/xfeat/rtabmap_lighterglue.py:/opt/xfeat/rtabmap_lighterglue.py:ro")
+        fi
+        # The database's place-descriptor census is taken INSIDE the container by the launch, on
+        # every start, of the file RTAB-Map is given (vslam.launch.py census_env): a census taken
+        # here once would outlive a restart of the container after the file changed.
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
+            ${ADAPTER_MOUNTS[@]+"${ADAPTER_MOUNTS[@]}"} "${MODELS_ENV[@]}" ${FLAG_ENV[@]+"${FLAG_ENV[@]}"} \
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} ${CAMERA_ENV[@]+"${CAMERA_ENV[@]}"} \
-            "$(image)" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
+            "$VSLAM_IMAGE" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null
         if pepin_localizer_is_tracker; then
             OWNER="the board's tracker adopts it and owns map -> odom"
         else
             OWNER="RTAB-Map here owns map -> odom (PEPIN_LOCALIZER=rtabmap: no tracker on the board)"
         fi
-        echo "vslam up (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and $OWNER; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
+        echo "vslam up on $VSLAM_IMAGE (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and $OWNER; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
         # The desktop app's socket died with the old container, and a Foxglove client never
         # re-attaches by itself: its panels stay on screen, empty, bound to channel ids this new
         # bridge does not have. So the app is told to reconnect (ros/foxglove.sh reopen waits for
@@ -304,6 +410,7 @@ fi
 printf '%s\n' "$MODE" > "$HERE/.mode"
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 pepin_remove_container pepin-laptop pepin-zenoh
+pepin_timeserver_up  # the clock the board follows, under either transport (ros/lib.sh)
 if pepin_rmw_is_zenoh; then
     # No bridge on either side: this half's nodes are peers of this machine's router, and that
     # router holds the one link to the board's. So none of the bridge choreography below applies

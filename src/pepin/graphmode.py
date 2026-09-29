@@ -25,8 +25,9 @@ single strategy serves every node:
   words on ours (Vis/EstimationType 1, PnP), which is what a database built with depth holds. What
   it can never link is a node with no picture, which is what a LIDAR-only snapshot makes.
 
-So the rule is the one sentence the two halves leave: scans in the snapshots -> 1, no scan -> 0.
-Nothing else in the parameter table moves with it. The old SLAM_CAMERA_ONLY table
+So the rule is the one sentence the two halves leave, with the third strategy for the snapshots
+that carry both: a scan and a picture -> 2 (VisIcp: visual, then ICP refines it), a scan alone -> 1,
+no scan -> 0. Nothing else in the parameter table moves with it. The old SLAM_CAMERA_ONLY table
 (``git show e1d3b65:ros/pepin_bringup/launch/vslam.launch.py``) differed from the lidar one in six
 entries, and five of them — ``subscribe_scan``, ``Grid/Sensor``, ``Grid/3D``, ``Grid/RangeMax``,
 ``Grid/RayTracing`` — are about the INPUT and the GRID, which World R settled once for every node.
@@ -38,14 +39,22 @@ rtabmap's parameter map from the node's ROS parameters and hands the WHOLE map t
 to ``Memory::parseParameters`` (Rtabmap.cpp:719,751); there the strategy of the pipeline in hand is
 INFERRED from what it requires (Memory.cpp:700-715) and, when the new value differs, the pipeline
 object is deleted and re-created from the accumulated map (Memory.cpp:721-731). The stale path is
-the ``else`` at :744-746, which calls ``Registration::parseParameters`` — and that re-reads only
-``Reg/RepeatOnce`` and ``Reg/Force3DoF`` (Registration.cpp:79-88), so it could never change a
-strategy. TWO CONDITIONS carry the whole thing: the value must be set as a STRING (every rtabmap
-parameter is declared as one, CoreWrapper.cpp:364, and read back with ``as_string()`` at :3112), and
-the name must be one the LAUNCH already overrode — ``uInsert(parameters_, ...)`` fires only for keys
-present in the overrides (CoreWrapper.cpp:362-379), so a parameter never named in the launch table
-accepts ``ros2 param set`` and is then never looked at. ``Reg/Strategy`` is in that table
+the ``else`` at :744-746, which calls the pipeline's own ``parseParameters`` — whose base part
+re-reads only ``Reg/RepeatOnce`` and ``Reg/Force3DoF`` (Registration.cpp:79-88), so it could never
+change a strategy; a RegistrationVis re-reads its ``Vis/*`` there too and rebuilds its detectors
+(the method is virtual, RegistrationVis.cpp:125-293), which is the path the visual feature set of
+:func:`visual_parameters` rides while the strategy stays. TWO CONDITIONS carry the whole thing: the
+value must be set as a STRING (every rtabmap parameter is declared as one, CoreWrapper.cpp:364,
+and read back with ``as_string()`` at :3112), and the name must be one the LAUNCH already overrode
+— ``uInsert(parameters_, ...)`` fires only for keys present in the overrides
+(CoreWrapper.cpp:362-379), so a parameter never named in the launch table accepts ``ros2 param
+set`` and is then never looked at. ``Reg/Strategy`` is in that table
 (ros/pepin_bringup/launch/vslam.launch.py), which is what makes this switch possible at all.
+rtabmap_slam ALSO applies every change it hears on its own ``/parameter_events`` as it arrives
+(CoreWrapper.cpp:907-970, the same launch-table filter): a ``set_parameters`` request of five names
+lands as five notifications and five ``parseParameters``, a ``set_parameters_atomically`` request
+as one (measured 2026-09-24, scratch/xfeat_critic/atomic_set.sh) — so a set that must land whole
+goes atomically (``atomic_parameter_sets`` in pepin_bringup.rtabmap_frame).
 
 THE MEMORY. RTAB-Map has two memories. In MAPPING mode every update may become a node in the
 database; in LOCALISATION mode nothing is written and the graph only recognises what it already
@@ -83,13 +92,26 @@ __all__ = [
     "ALWAYS_LOCALISE",
     "ALWAYS_MAP",
     "BY_TRUST",
+    "CONFIRM_AGGRESSIVE",
+    "CONFIRM_PARAMETERS",
+    "CONFIRM_SINGLE",
+    "CONFIRM_STOCK",
+    "FEATURES_ORB",
+    "FEATURES_XFEAT",
+    "FEATURE_PARAMETERS",
     "LOCALISING",
     "MAPPING",
+    "PNP_REPROJ_PX",
+    "PNP_REPROJ_RANGE_PX",
+    "PROXIMITY_STOCK",
     "REGISTRATION_PARAMETERS",
     "SHARP_SIGMA_DEG",
     "SHARP_SIGMA_M",
     "STRATEGY_ICP",
     "STRATEGY_VIS",
+    "STRATEGY_VISICP",
+    "XFEAT_DETECTOR_PATH",
+    "XFEAT_MATCHER_PATH",
     "ModeRule",
     "ModeVerdict",
     "StrategyRule",
@@ -97,14 +119,22 @@ __all__ = [
     "describe_sigma",
     "registration_verdict",
     "seating_refusal",
+    "visual_parameters",
 ]
 
 # ``Reg/Strategy``'s own values, as Parameters.h:677 names them ("0=Vis, 1=Icp, 2=VisIcp"). 2 is
-# not on offer: RegistrationVis with RegistrationIcp as its CHILD, and a child's answer REPLACES
-# the parent's (Registration.cpp:207-220), so a pair Vis registers and ICP has no scan for comes
-# out null — and the pipeline still requires an image, so a lidar-only node never reaches it.
-STRATEGY_VIS, STRATEGY_ICP = "0", "1"
-STRATEGY_NAMES = {STRATEGY_VIS: "visual", STRATEGY_ICP: "ICP on the scans"}
+# RegistrationVis with RegistrationIcp as its CHILD, and a child's answer REPLACES the parent's
+# (Registration.cpp:207-220), so a pair Vis registers and ICP has no scan for comes out null — and
+# the pipeline requires an image, so a lidar-only node never reaches it. Hence 2 ONLY while the
+# snapshots carry both: the owner's tuned camera+lidar configuration of 2026-09-25 ("F+G2",
+# scratch/pose_jumps/set_config_fg2.sh: the pose's per-second steps p90 1.2 cm / 0.88 deg -> 0.6
+# cm / 0.23 deg parked, 72 big steps in 220 s -> 0).
+STRATEGY_VIS, STRATEGY_ICP, STRATEGY_VISICP = "0", "1", "2"
+STRATEGY_NAMES = {
+    STRATEGY_VIS: "visual",
+    STRATEGY_ICP: "ICP on the scans",
+    STRATEGY_VISICP: "visual then ICP",
+}
 # Everything that travels with the strategy, as strings because that is how rtabmap declares every
 # one of its parameters (CoreWrapper.cpp:364). ONE entry each: the rest of what the old
 # SLAM_CAMERA_ONLY table changed was the input and the grid, which World R settled once for every
@@ -169,7 +199,126 @@ REGISTRATION_PARAMETERS = {
         # link carries the odometry's own honest uncertainty, which is what that check compares to.
         "RGBD/NeighborLinkRefining": "false",
     },
+    STRATEGY_VISICP: {
+        "Reg/Strategy": STRATEGY_VISICP,
+        "RGBD/NeighborLinkRefining": "false",  # as under ICP, for the same measured reason
+    },
 }
+
+# WHICH FEATURES THE VISUAL REGISTRATION MATCHES — the third thing that travels with the strategy,
+# chosen by an operator's flag and not by the snapshots. The database's words are GFTT/ORB
+# (Kp/DetectorStrategy 8), and against them an evening picture registers with 0-11 PnP inliers
+# where RTAB-Map asks for 20: the day map against the lamps, measured 2026-09-23
+# (scratch/link_autopsy/feature_ab.py, 630 camera-only updates, 0 recognitions). XFeat keypoints
+# matched by LighterGlue register the same day/evening pairs (scratch/xfeat/xfeat_bench.py).
+#
+# THE DATABASE IS NOT RE-PROCESSED. RGBD/LoopClosureReextractFeatures makes
+# Memory::computeTransform load both nodes' stored picture and depth (getNodeData, a read,
+# rtabmap/core/Memory.cpp:2902) and drop their stored words (:2950), so RegistrationVis detects
+# afresh with its OWN detector — Vis/FeatureType 15, the Python detector
+# (ros/xfeat/rtabmap_xfeat.py) — and matches with its own matcher — Vis/CorNNType 6, the Python
+# matcher (ros/xfeat/rtabmap_lighterglue.py), which is the path of a loop closure's identity guess
+# (RegistrationVis.cpp:1381-1411; Rtabmap.cpp:3057 passes the identity, which RegistrationVis does
+# not count as a guess at :1012). The ORB words stay the vocabulary that FINDS the node (Kp/*,
+# untouched); XFeat only decides whether it is really there, and where.
+#
+# ONLY WITH A VISUAL STRATEGY (0, or 2 whose first half is visual — the tuned camera+lidar set of
+# scratch/link_autopsy/set_visicp_inner.sh ran xfeat) AND ONLY WHILE LOCALISING, because the same
+# flag changes what a NEW node stores: with it on, createSignature keeps no word descriptors and
+# no 3D (Memory.cpp:6126), and a node mapped that way could later be registered by re-extraction
+# only. Under ICP alone the set is always ORB's — the launch table's own values; a visual strategy
+# that is also MAPPING (graph_memory map,
+# or one day a holder that is not the graph) gets ORB's too, so the database is never written
+# differently from how it was built.
+FEATURES_ORB, FEATURES_XFEAT = "orb", "xfeat"
+# Where the image built by ros/Dockerfile.xfeat puts the two adapters RTAB-Map loads by path. An
+# image without them (the apt build, no Python in RTAB-Map) cannot run the xfeat set at all.
+XFEAT_DETECTOR_PATH = "/opt/xfeat/rtabmap_xfeat.py"
+XFEAT_MATCHER_PATH = "/opt/xfeat/rtabmap_lighterglue.py"
+FEATURE_PARAMETERS = {
+    FEATURES_ORB: {
+        "Vis/FeatureType": "8",  # GFTT/ORB, RTAB-Map's default and the database's own words
+        "Vis/CorNNType": "1",  # FLANN kd-tree with NNDR, RTAB-Map's default
+        "RGBD/LoopClosureReextractFeatures": "false",
+    },
+    FEATURES_XFEAT: {
+        "Vis/FeatureType": "15",  # PyDetector
+        "Vis/CorNNType": "6",  # PyMatcher
+        "RGBD/LoopClosureReextractFeatures": "true",
+    },
+}
+# Vis/PnPReprojError, RTAB-Map's default (Parameters.h:684), and the widest the flag allows: a
+# day-built depth seen from an evening frame lands its 3D points a pixel or two off, and 4 px
+# roughly doubles the inliers (scratch/xfeat/xfeat_bench.py has both gates side by side).
+PNP_REPROJ_PX = 2.0
+PNP_REPROJ_RANGE_PX = (1.0, 4.0)
+
+# HOW A LOCALISATION IS CONFIRMED — the fourth thing that travels with the visual strategy while
+# localising. RTAB-Map 0.22.1 does not accept a first good localisation: it DELAYS it into the
+# odometry cache (RGBD/MaxOdomCacheSize updates, Rtabmap.cpp:3650/3772) and accepts both once a
+# second one lands inside that window. The first try only has to reach RGBD/AggressiveLoopThr
+# (0.05) while the cache holds no localisation; the second must reach Rtabmap/LoopThr (0.11)
+# (:2141-2162). Against a daylight database under the evening lamps the ORB words' hypotheses read
+# 0.05-0.07, so the second try never comes: parked at the base, XFeat registered with 83-118
+# inliers once every 11 updates — the cache's 10 plus the retry — and 0 of 244 updates were
+# accepted (2026-09-24, scratch/link_autopsy/localisation_cadence.py; the same on the replay of
+# run 0466: 21 of 22 registered, 0 accepted). Two ways out, both RTAB-Map's own parameters:
+# ``aggressive`` keeps the second try at the aggressive threshold (the confirmation stays), and
+# ``single`` sets the cache to 0 (the first good localisation is accepted; RGBD/OptimizeMaxError
+# is already 0 while localising, so the cache's deformation check was not running anyway).
+# Measured live at the base (scratch/link_autopsy/confirm_ab.sh, 240 s each): aggressive 41 of 42
+# updates accepted, single 44 of 44, all within 7 cm of the seed and within 1.2 deg of the yaw at
+# which the lidar's scan fits the map (scratch/link_autopsy/lidar_yaw_truth.py). Under ICP, and
+# while the database maps, the set is always the stock one: the lidar's hypotheses reach 0.11 and
+# its ICP from the identity guess is not a registration to try on every weak hypothesis.
+CONFIRM_STOCK, CONFIRM_AGGRESSIVE, CONFIRM_SINGLE = "rtabmap", "aggressive", "single"
+CONFIRM_PARAMETERS = {
+    CONFIRM_STOCK: {"Rtabmap/LoopThr": "0.11", "RGBD/MaxOdomCacheSize": "10"},
+    CONFIRM_AGGRESSIVE: {"Rtabmap/LoopThr": "0.05", "RGBD/MaxOdomCacheSize": "10"},
+    CONFIRM_SINGLE: {"Rtabmap/LoopThr": "0.11", "RGBD/MaxOdomCacheSize": "0"},
+}
+
+
+# WHICH NODES A LOCALISED CAMERA REGISTERS AGAINST — the fifth thing that travels with the visual
+# strategy while localising. With RGBD/ProximityBySpace true (the launch table's, and the lidar's
+# path to most of this graph's links) a localised cart ALSO registers every update against the
+# nodes near its pose; under ICP that is a few milliseconds of scan matching, under the visual
+# strategy it is an XFeat re-extraction and a LighterGlue match per candidate. Measured
+# 2026-09-24: parked at the base, a localised update cost a median 5.0-5.2 s on the reference
+# BLAS and 1.77 s after RTLD_DEEPBIND, almost all of it Timing/Proximity_by_space_visual; on the
+# replay of camera-only run 0466 (LoopThr 0.05) turning it off took an update from 5.3 s to
+# 0.55 s and still accepted 50 of 55, map -> odom within 0.6 cm / 0.12 deg of its running median.
+# Off, only the words' own hypothesis is registered (one per update at most).
+PROXIMITY_STOCK = True
+
+
+def visual_parameters(
+    strategy: str,
+    features: str,
+    pnp_reproj_px: float,
+    mapping: bool = False,
+    confirm: str = CONFIRM_STOCK,
+    proximity: bool = PROXIMITY_STOCK,
+) -> dict[str, str]:
+    """The feature set, PnP gate, localisation confirmation and proximity search RTAB-Map's
+    registration should run under ``strategy``, as the strings rtabmap wants: the flags' values
+    under the visual strategy while the database only localises (the feature set under visual
+    then ICP too, whose visual half it is), ORB's set and the stock confirmation and proximity
+    under ICP or while mapping whatever the flags say (the module comments above say why)."""
+    visual = strategy == STRATEGY_VIS and not mapping
+    matched = strategy in (STRATEGY_VIS, STRATEGY_VISICP) and not mapping
+    chosen = features if matched else FEATURES_ORB
+    if chosen not in FEATURE_PARAMETERS:
+        raise ValueError(f"unknown feature set {chosen!r}; sets: {sorted(FEATURE_PARAMETERS)}")
+    if confirm not in CONFIRM_PARAMETERS:
+        raise ValueError(f"unknown confirmation {confirm!r}; sets: {sorted(CONFIRM_PARAMETERS)}")
+    return {
+        **FEATURE_PARAMETERS[chosen],
+        "Vis/PnPReprojError": f"{pnp_reproj_px:g}",
+        **CONFIRM_PARAMETERS[confirm if visual else CONFIRM_STOCK],
+        "RGBD/ProximityBySpace": "true" if (proximity if visual else PROXIMITY_STOCK) else "false",
+    }
+
 
 # What a seating must be worth for the database to be taught from it. The peak's own covariance is
 # the error bar (/tracker_pose, covariance=peak, NEES-calibrated), so the test waits for a seating
@@ -258,10 +407,14 @@ class ModeRule:
         self._wanted: ModeVerdict | None = None  # ...and the one the rule has been asking for
         self._since = 0.0  # since when, on the caller's clock
         self._switches = 0
+        # What _applied was before the verdict update() last returned, for withdraw(); a list so
+        # "nothing to hand back" (empty) differs from "the mode before was unknown" ([None]).
+        self._before: list[bool | None] = []
 
     @property
     def mode(self) -> str:
-        """The mode this rule has asked for, or ``unknown`` before it has asked for anything."""
+        """The mode this rule has asked for and the caller did not hand back (:meth:`withdraw`) —
+        the one RTAB-Map was told — or ``unknown`` before anything went out."""
         return "unknown" if self._applied is None else (MAPPING if self._applied else LOCALISING)
 
     @property
@@ -298,22 +451,33 @@ class ModeRule:
 
         A verdict is returned only when it differs from the mode already asked for AND has been the
         answer for :attr:`hold_s` without a break — except the very first one, which is the initial
-        mode and is asked for at once. Returning it counts a switch and records it as applied, so a
-        caller whose service call fails must ask again by feeding the rule the next instant.
+        mode and is asked for at once. Returning it counts a switch and records it as applied; a
+        caller whose call did not go out hands it back with :meth:`withdraw`, and the next instant
+        with the same evidence returns it again.
         """
         verdict = self.verdict(refusal, holder, seating)
         if self._wanted is None or verdict.mapping != self._wanted.mapping:
             self._since = now
         self._wanted = verdict
-        if self._applied is None:
-            self._applied = verdict.mapping
-            self._switches += 1
-            return verdict
-        if verdict.mapping == self._applied or now - self._since < self.hold_s:
+        self._before = []
+        if self._applied is not None and (
+            verdict.mapping == self._applied or now - self._since < self.hold_s
+        ):
             return None
+        self._before = [self._applied]
         self._applied = verdict.mapping
         self._switches += 1
         return verdict
+
+    def withdraw(self) -> None:
+        """Hand back the verdict :meth:`update` has just returned, because the switch did not go
+        out (the service was busy or not up): the rule's mode is again the one RTAB-Map still has,
+        the switch is not counted, and the hold already served is not served twice — the next
+        :meth:`update` with the same evidence returns the verdict at once."""
+        if not self._before:
+            raise RuntimeError("withdraw() without a verdict just returned by update()")
+        self._applied = self._before.pop()
+        self._switches -= 1
 
     def text(self) -> str:
         """The mode, who decided it and why, for a report line: ``localising (the pose is held by
@@ -351,16 +515,19 @@ class StrategyVerdict:
         return f"{self.name}: {self.why}"
 
 
-def registration_verdict(scan: bool, kind: str = "") -> StrategyVerdict:
+def registration_verdict(scan: bool, kind: str = "", picture: bool = False) -> StrategyVerdict:
     """Which registration the snapshots being packed RIGHT NOW need, with no clock and no memory.
 
-    ``scan`` is whether a scan is in them at all (:meth:`pepin.snapshot.SnapshotState.carries`);
-    ``kind`` is the last snapshot's own word for the report line. The whole rule: a pair of nodes
-    with scans is registered by ICP and a pair without one cannot be, while a pair of nodes with
-    pictures is registered visually and a node with no picture cannot be — so the strategy is
-    chosen by what the current snapshots carry, and the module docstring holds the file:line.
+    ``scan`` and ``picture`` are whether a scan and a camera picture are in them at all
+    (:meth:`pepin.snapshot.SnapshotState.carries`); ``kind`` is the last snapshot's own word for
+    the report line. The whole rule: a pair of nodes with scans is registered by ICP and a pair
+    without one cannot be, while a pair of nodes with pictures is registered visually and a node
+    with no picture cannot be — so both -> visual then ICP (2), a scan alone -> ICP (1), no scan ->
+    visual (0), and the module docstring holds the file:line.
     """
     said = f" (snapshots {kind})" if kind else ""
+    if scan and picture:
+        return StrategyVerdict(STRATEGY_VISICP, f"the snapshots carry a scan and a picture{said}")
     if scan:
         return StrategyVerdict(STRATEGY_ICP, f"the snapshots carry a scan{said}")
     return StrategyVerdict(STRATEGY_VIS, f"the snapshots carry no scan{said}")
@@ -386,10 +553,12 @@ class StrategyRule:
         self._wanted: StrategyVerdict | None = None
         self._since = 0.0
         self._switches = 0
+        self._before: list[str] = []  # the strategy before the verdict just returned (withdraw)
 
     @property
     def strategy(self) -> str:
-        """``Reg/Strategy``'s value as this rule last asked for it."""
+        """``Reg/Strategy``'s value as this rule last asked for it and the caller did not hand back
+        (:meth:`withdraw`): the strategy RTAB-Map was sent."""
         return self._applied
 
     @property
@@ -403,28 +572,41 @@ class StrategyRule:
         return self._wanted
 
     def update(
-        self, now: float, hold_s: float, scan: bool | None, kind: str = ""
+        self, now: float, hold_s: float, scan: bool | None, kind: str = "", picture: bool = False
     ) -> StrategyVerdict | None:
         """One instant in; the verdict to ACT on, or ``None``.
 
         ``scan`` ``None`` is "the packer has not said" — no snapshot state has arrived, or the one
         that did is older than its own refresh — and then nothing is asked for: an absent report is
         not evidence that the lidar is gone, and rebuilding the pipeline on silence is how a node
-        that merely lost its state topic would stop linking scans.
+        that merely lost its state topic would stop linking scans. ``picture`` is whether a camera
+        picture is in them (with a scan: visual then ICP). A verdict returned is recorded
+        as applied; a caller whose set did not go out hands it back with :meth:`withdraw`.
         """
+        self._before = []
         if scan is None:
             self._wanted = None
             self._since = now
             return None
-        verdict = registration_verdict(scan, kind)
+        verdict = registration_verdict(scan, kind, picture)
         if self._wanted is None or verdict.strategy != self._wanted.strategy:
             self._since = now
         self._wanted = verdict
         if verdict.strategy == self._applied or now - self._since < hold_s:
             return None
+        self._before = [self._applied]
         self._applied = verdict.strategy
         self._switches += 1
         return verdict
+
+    def withdraw(self) -> None:
+        """Hand back the verdict :meth:`update` has just returned, because its parameter set did
+        not go out: :attr:`strategy` is again the one RTAB-Map still runs, the switch is not
+        counted, and the next :meth:`update` with the same evidence asks for it again at once."""
+        if not self._before:
+            raise RuntimeError("withdraw() without a verdict just returned by update()")
+        self._applied = self._before.pop()
+        self._switches -= 1
 
     def text(self) -> str:
         """The strategy, why it is that, and what is being asked for, for a report line:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,10 @@ class Entry:
     when: str = "always"  # "always" (missing is red) or "sometimes" (a drive, a timer, a mode)
     expected: bool = True
     note: str = ""
+    # Entries that stand in for one another (the two recorders: the launch starts one of them). One
+    # running satisfies the group: the others are IDLE, not MISSING, and the promise counts the
+    # group once, at its dearest member. None of them running is MISSING, as for one entry.
+    group: str = ""
 
     def matches(self, process: Process) -> bool:
         """True when this entry's regex is found anywhere in the process's command line."""
@@ -106,13 +111,26 @@ class Manifest:
 
     @property
     def promised_cpu_percent(self) -> float:
-        """The sum of the budgets of everything expected to run always, in percent of one core."""
-        return sum(e.budget.cpu_percent for e in self.entries if e.expected and e.when == "always")
+        """The sum of the budgets of everything expected to run always, in percent of one core
+        (a group of stand-ins counted once, at its dearest member)."""
+        return self._promised(lambda e: e.budget.cpu_percent)
 
     @property
     def promised_rss_mb(self) -> float:
-        """The sum of the memory budgets of everything expected to run always."""
-        return sum(e.budget.rss_mb for e in self.entries if e.expected and e.when == "always")
+        """The sum of the memory budgets of everything expected to run always (a group once)."""
+        return self._promised(lambda e: e.budget.rss_mb)
+
+    def _promised(self, cost: Callable[[Entry], float]) -> float:
+        """``cost`` summed over the always-expected entries, each group at its dearest member."""
+        total, groups = 0.0, dict[str, float]()
+        for entry in self.entries:
+            if not (entry.expected and entry.when == "always"):
+                continue
+            if entry.group:
+                groups[entry.group] = max(groups.get(entry.group, 0.0), cost(entry))
+            else:
+                total += cost(entry)
+        return total + sum(groups.values())
 
 
 @dataclass(frozen=True)
@@ -279,6 +297,7 @@ def manifest_from_dict(data: dict[str, Any]) -> Manifest:
             when=item.get("when", "always"),
             expected=bool(item.get("expected", True)),
             note=item.get("note", ""),
+            group=item.get("group", ""),
         )
         for item in data["processes"]
     )
@@ -307,11 +326,20 @@ def take_census(manifest: Manifest, ps_text: str, load_text: str) -> Census:
     zombies = sum(1 for p in processes if p.zombie)
     alive = [p for p in processes if not p.zombie and not manifest.ignored(p)]
     taken: set[int] = set()
-    measured = []
+    matched = []
     for entry in manifest.entries:
         mine = tuple(p for p in alive if p.pid not in taken and entry.matches(p))
         taken.update(p.pid for p in mine)
-        measured.append(Measured(entry=entry, status=_status(entry, mine), processes=mine))
+        matched.append((entry, mine))
+    running_groups = {entry.group for entry, mine in matched if entry.group and mine}
+    measured = [
+        Measured(
+            entry=entry,
+            status=_status(entry, mine, stood_in=entry.group in running_groups),
+            processes=mine,
+        )
+        for entry, mine in matched
+    ]
     unlisted = tuple(
         p for p in alive if p.pid not in taken and p.cpu_percent >= manifest.unlisted_cpu_percent
     )
@@ -324,10 +352,12 @@ def take_census(manifest: Manifest, ps_text: str, load_text: str) -> Census:
     )
 
 
-def _status(entry: Entry, processes: tuple[Process, ...]) -> str:
-    """The verdict on one entry: OK, OVER, MISSING, IDLE or FORBIDDEN."""
+def _status(entry: Entry, processes: tuple[Process, ...], stood_in: bool = False) -> str:
+    """The verdict on one entry: OK, OVER, MISSING, IDLE or FORBIDDEN; ``stood_in`` when another
+    member of its group runs in its place."""
     if not processes:
-        return IDLE if (entry.when == "sometimes" or not entry.expected) else MISSING
+        idle = entry.when == "sometimes" or not entry.expected or stood_in
+        return IDLE if idle else MISSING
     if not entry.expected:
         return FORBIDDEN
     cpu = sum(p.cpu_percent for p in processes)

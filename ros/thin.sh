@@ -7,7 +7,8 @@
 #   ros/thin.sh         show the current side and bridge
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
-. "$(dirname "$0")/lib.sh"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/lib.sh"
 # The nodes a kick can reach on the board and the line each prints once up (the kick waits for
 # it): our own processes of nav.launch.py, and the neck node of robot.launch.py (ros/feature.sh
 # neck on). Only one of the two recorders runs (PEPIN_RECORDER, ros/feature.sh recorder
@@ -67,30 +68,40 @@ case "${1:-}" in
         ssh "root@$BOARD" "sed -i '/^PEPIN_SIDE=/d; /^PEPIN_BRIDGE=/d; /^PEPIN_BRIDGE_CONFIG=/d; /^PEPIN_SLAM=/d' /etc/default/pepin-ros; systemctl disable --now pepin-bridge >/dev/null 2>&1; docker rm -f zenoh-bridge >/dev/null 2>&1; systemctl restart pepin-ros && sleep 8; systemctl is-active pepin-ros; true"
         echo "board on side=all (whole stack on the robot)" ;;
     kick)
-        # One node of the stack, not the stack: `ros/sync.sh --no-restart` puts the sources on
-        # the board, this ends the node with SIGINT (what the launch sends at shutdown, so it
-        # leaves DDS properly and the bridge forgets its name at once) and the launch respawns
-        # it from those sources two seconds after its exit (RESPAWN in nav.launch.py). No ghost
-        # is possible: the successor starts only after the exit. A stack restart is the slow
-        # case because everything hangs on it — the bridge unit follows the stack, the laptop
-        # containers are restarted by their bridge watch, and their SIGKILLed nodes linger in
-        # the laptop's bridge for the DDS lease. Measured at a cold boot: the relocalizer prints
-        # its line 7 s after its start, the goal server 9 s, the recorder 5 s; a kick is that
-        # plus the two-second pause. The tracker is gone for those seconds (no map -> odom):
+        # One node of the stack, not the stack: `ros/sync.sh` (or ros/push.sh) puts the sources
+        # on the board, this ends the node with SIGINT (what the launch sends at shutdown, so it
+        # leaves the middleware properly and a bridge forgets its name at once) and the launch
+        # respawns it from those sources two seconds after its exit (RESPAWN in nav.launch.py).
+        # No ghost is possible: the successor starts only after the exit. A stack restart is the
+        # slow case because everything hangs on it. Measured at a cold boot: the relocalizer
+        # prints its line 7 s after its start, the goal server 9 s, the recorder 5 s; a kick is
+        # that plus the two-second pause. The tracker is gone for those seconds (no map -> odom):
         # kick it at rest, never mid-drive.
+        #   The wait proves the ready line is the NEW process's (ros/kick_ready.awk): the launch's
+        # exit line for the signalled pid names the process's tag, the successor's start line
+        # under that tag gives the new pid, and only a ready line under that tag after it counts
+        # — never a `--since` grep, which returned the old process's line (2026-09-20). The times
+        # are the container's clock: the kick's own `date` and the log's timestamps. The
+        # arguments reach the board quoted (ssh joins its arguments into one command line:
+        # unquoted, the ready line was cut at its first space) and the matcher travels with them,
+        # so a board that has not been synced since it changed still waits the same way.
         NAME="${2:-}"; LINE="$(kick_line "$NAME")" || { echo "usage: ros/thin.sh kick <node>; nodes: $KICKABLE"; exit 2; }
         WHY="$(not_launched "$NAME")"; [ -z "$WHY" ] || { echo "$WHY"; exit 2; }
-        ssh "root@$BOARD" bash -s -- "$NAME" "$LINE" <<'EOF'
+        { printf 'AWK=%q\n' "$(cat "$HERE/kick_ready.awk")"; cat <<'EOF'; } | ssh "root@$BOARD" "bash -s -- $(printf '%q ' "$NAME" "$LINE")"
 set -u
-NAME=$1; LINE=$2; T0=$(date -u +%FT%TZ); MS0=$(date +%s%3N)
-# The console scripts run as pepin_bringup/<name>, the modules as pepin_bringup.<name>.
-docker exec pepin-ros pkill -INT -f "pepin_bringup[./]$NAME" \
-    || { echo "no $NAME process in pepin-ros ($(grep -oE 'PEPIN_SIDE=.*' /etc/default/pepin-ros || echo side=all))"; exit 3; }
+NAME=$1; LINE=$2; TAB=$(printf '\t')
+# The console scripts run as pepin_bringup/<name>, the modules as pepin_bringup.<name>. One exec
+# reads the container's clock and the pids to signal.
+OUT=$(docker exec pepin-ros sh -c 'date -u +%FT%T.%NZ; pgrep -f "pepin_bringup[./]$1"' sh "$NAME" 2>/dev/null) || true
+KICKED=${OUT%%$'\n'*}; OLD=$(printf '%s\n' "$OUT" | sed 1d | tr '\n' ' ')
+[ -n "${OLD// /}" ] || { echo "no $NAME process in pepin-ros ($(grep -oE 'PEPIN_SIDE=.*' /etc/default/pepin-ros || echo side=all))"; exit 3; }
+# shellcheck disable=SC2086
+docker exec pepin-ros sh -c 'kill -INT "$@"' sh $OLD
+R="wait${TAB}nothing read from the log yet"
 for _ in $(seq 1 240); do
-    SEEN=$(docker logs --since "$T0" pepin-ros 2>&1 | grep -F "$LINE" || true)
-    if [ -n "$SEEN" ]; then
-        SEEN="${SEEN%%$'\n'*}"; DT=$(( $(date +%s%3N) - MS0 ))
-        printf '%s back in %d.%d s: %s\n' "$NAME" $((DT / 1000)) $((DT % 1000 / 100)) "${SEEN#*]: }"
+    R=$(docker logs -t --since "$KICKED" pepin-ros 2>&1 | awk -v name="$NAME" -v old="$OLD" -v line="$LINE" -v kicked="$KICKED" "$AWK")
+    if [ "${R%%"$TAB"*}" = ready ]; then
+        echo "${R#*"$TAB"}"
         # The board's bridge (side=board or bridge=on) keys routes by node name: a ghost of the
         # kicked node beside the new one means its routes drop when the ghost expires.
         N=$(curl -s -m 3 'http://localhost:8000/@/local/ros2/node/**' | grep -o "/ros2/node/[^/\"]*/$NAME\"" | wc -l)
@@ -103,7 +114,7 @@ for _ in $(seq 1 240); do
     fi
     sleep 0.5
 done
-echo "$NAME did not print '$LINE' within 120 s: ros/watch.sh"; exit 4
+echo "$NAME not ready within 120 s: ${R#*"$TAB"} (ros/watch.sh)"; exit 4
 EOF
         ;;
     *)

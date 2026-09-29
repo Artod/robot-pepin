@@ -16,13 +16,17 @@ node does; a node composes these and keeps its own logic.
 
 from __future__ import annotations
 
+import faulthandler
 import os
+import signal
+import sys
 import threading
 import time
 import traceback
+import weakref
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -381,6 +385,27 @@ def tf_failure_kind(exc: BaseException) -> str:
     return type(exc).__name__.removesuffix("Exception") or "Unknown"
 
 
+# WHERE A TfLookup's LISTENER LIVES. tf2_ros's TransformListener(buffer, node, spin_thread=True)
+# puts the /tf subscription on OUR node, in a reentrant group, and adds OUR WHOLE NODE to its own
+# executor (transform_listener.py:96-114): every /tf message (tens a second: the EKF, RTAB-Map's
+# map -> odom, the neck) then wakes both executors, and the main one rebuilds its wait set in
+# Python each time — goal_server burnt 43-46 % of an A53 core at rest, 14 of 30 stack samples in
+# rclpy's wait-set and take machinery and none in its own code (2026-09-24,
+# scratch/link_autopsy/goal_server_profile.sh). It also ran our node's callbacks on the
+# listener's thread before its constructor had finished (depth_fusion, 2026-09-18). "own" (the
+# default) hands tf2_ros node=None: the listener makes a node of its own and spins only that;
+# PEPIN_TF_LISTENER_NODE=shared is the way back.
+TF_LISTENER_NODE = os.environ.get("PEPIN_TF_LISTENER_NODE", "own")
+
+# Every TfLookup whose listener thread is still running. tf2_ros starts that thread NON-daemon
+# (transform_listener.py:114, ``Thread(target=run_func)``), so a node that never closes its lookup
+# leaves the interpreter waiting on it forever after SIGINT: on 2026-09-24 `ros/laptop.sh kick
+# rtabmap_frame` ended the spin (the report lines stopped) and the process never exited until a
+# SIGTERM — and five nodes carry a TfLookup with no close() of their own. spin_main closes what
+# is still open here, after the node's own close().
+_OPEN_LOOKUPS: weakref.WeakSet[TfLookup] = weakref.WeakSet()
+
+
 class TfLookup:
     """A TF buffer, fed by a listener on its own thread unless a buffer is handed in, and
     lookups that answer ``None`` instead of raising: the failure goes to ``on_failure`` as
@@ -394,10 +419,16 @@ class TfLookup:
         on_failure: Callable[[str, str], None] | None = None,
     ) -> None:
         self.buffer = buffer if buffer is not None else Buffer()
+        listener_node = None if TF_LISTENER_NODE == "own" else node
+        self._owns_listener_node = listener_node is None
         self._listener = (
-            None if buffer is not None else TransformListener(self.buffer, node, spin_thread=True)
+            None
+            if buffer is not None
+            else TransformListener(self.buffer, listener_node, spin_thread=True)
         )
         self._on_failure = on_failure
+        if self._listener is not None:
+            _OPEN_LOOKUPS.add(self)
 
     def transform(
         self, target: str, source: str, stamp: Any = None, timeout_s: float = 0.0
@@ -441,12 +472,17 @@ class TfLookup:
         return None if transform is None else pose_from_transform(transform)
 
     def close(self) -> None:
-        """Stop the listener's thread, before the node is destroyed under it."""
+        """Stop the listener's thread, before the node is destroyed under it; a second call does
+        nothing."""
+        _OPEN_LOOKUPS.discard(self)
         listener = self._listener
         if listener is None or getattr(listener, "executor", None) is None:
             return
         listener.executor.shutdown()
         listener.dedicated_listener_thread.join(timeout=STOP_PATIENCE_S)
+        own = getattr(listener, "node", None) if self._owns_listener_node else None
+        if own is not None:
+            own.destroy_node()  # the node tf2_ros made for the listener (TF_LISTENER_NODE own)
 
     def _call(self, lookup: Callable[[], Any], what: str) -> Any | None:
         try:
@@ -674,28 +710,95 @@ def spin_main(factory: Callable[[], Any], args: list[str] | None = None) -> None
     """A node's ``main``: init, build the node, spin, and leave cleanly on SIGINT — the signal
     the launch sends at shutdown and ``ros/laptop.sh kick`` sends by hand.
 
+    ``kill -USR2`` prints every thread's stack to stderr and changes nothing
+    (:func:`listen_for_stack_dumps`).
+
     rclpy's handler shuts the context down and the spin ends with ``KeyboardInterrupt`` or
-    ``ExternalShutdownException`` (whichever lands first); both are the normal end. The loud
-    end is a :class:`Fatal`: ``SystemExit`` with the reason, exit code 1, through the same
+    ``ExternalShutdownException`` (whichever lands first); both are the normal end. So is ANY
+    exception that finds the context already down: the handler shuts it from a thread of its
+    own, and when that lands between the executor's check and its wait set the spin raises
+    rcl's "failed to initialize wait set: the given context is not valid" instead — measured
+    with the real rclpy (scratch/bag_recorder_sigint.sh: 1 of 16 SIGINTs, exit code 1 before
+    this), and a SIGINT during the constructor fails the node's creation the same way. One line
+    on stderr names it; with the context still up the exception is real and propagates. The
+    loud end is a :class:`Fatal`: ``SystemExit`` with the reason, exit code 1, through the same
     order. Then, in this order: the node's ``close()`` if it has one (its worker threads and
-    TF listener are stopped and JOINED), ``destroy_node`` (the DDS participant is disposed, so
+    TF listener are stopped and JOINED), every :class:`TfLookup` still open
+    (:func:`close_open_lookups`: tf2_ros's listener thread is not a daemon, and a node with no
+    close of its own never exited), ``destroy_node`` (the DDS participant is disposed, so
     the bridge forgets the name at once and the respawn meets no ghost), and the context's
-    shutdown. The join is the fix for the depth node's SIGABRT: a daemon thread still inside
-    the network's C++ when the interpreter finalised was ended with ``pthread_exit``, which
-    unwinds through ``noexcept`` frames into ``std::terminate`` ("terminate called without an
-    active exception", CPython 3.12, gh-87135). A joined thread has no frames to unwind.
+    shutdown (:func:`end_context`, race-proof too). The join is the fix for the depth node's
+    SIGABRT: a daemon thread still inside the network's C++ when the interpreter finalised was
+    ended with ``pthread_exit``, which unwinds through ``noexcept`` frames into
+    ``std::terminate`` ("terminate called without an active exception", CPython 3.12,
+    gh-87135). A joined thread has no frames to unwind.
     """
     rclpy.init(args=args)
+    listen_for_stack_dumps()
     node: Any = None
     try:
         node = factory()
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except Exception as exc:
+        if rclpy.ok():
+            raise
+        print(
+            f"{type(exc).__name__} after the context was shut down, taken as the normal end"
+            f" (SIGINT's handler got there first): {exc}",
+            file=sys.stderr,
+        )
     finally:
         if node is not None:
             close = getattr(node, "close", None)
             if close is not None:
                 close()
+            close_open_lookups()
             node.destroy_node()
+        end_context()
+
+
+# The signal that prints every thread's Python stack to the node's stderr (the launch log): a
+# sampling profiler with nothing to install. The board's container has no gdb and no py-spy, and
+# goal_server burnt 43-46 % of an A53 core in its main thread with no callback to blame
+# (2026-09-23/24); `kill -USR2 <pid>` a few times shows where that thread is.
+STACK_DUMP_SIGNAL = signal.SIGUSR2
+
+
+def listen_for_stack_dumps() -> None:
+    """Make :data:`STACK_DUMP_SIGNAL` print every thread's stack to stderr and carry on (the
+    process keeps running; without this the signal would end it). Where stderr has no file
+    descriptor (a test's captured stream) or the platform has no such signal, nothing is
+    registered and the node runs as before."""
+    # io.UnsupportedOperation (a stream with no fileno) is both an OSError and a ValueError
+    with suppress(OSError, ValueError, RuntimeError):
+        faulthandler.register(STACK_DUMP_SIGNAL, all_threads=True, chain=False)
+
+
+def close_open_lookups() -> int:
+    """Close every :class:`TfLookup` whose listener thread still runs; how many there were. The
+    thread is not a daemon, so one left open keeps the process alive after its spin has ended."""
+    lookups = list(_OPEN_LOOKUPS)
+    for lookup in lookups:
+        lookup.close()
+    return len(lookups)
+
+
+def end_context() -> None:
+    """Shut rclpy's default context down unless something already has.
+
+    rclpy's SIGINT handler shuts the context down TOO, from a thread of its own, so between a
+    check that finds the context up and the shutdown that check guards, the handler can get there
+    first — rclpy's own ``try_shutdown`` included, whose check and shutdown are two calls the
+    handler does not wait for. The bag recorder died on exactly that on 2026-09-23 ("failed to
+    shutdown: rcl_shutdown already called on the given context", exit code 1 in the launch's
+    log, after ``if rclpy.ok(): rclpy.shutdown()``). A shutdown that fails with the context down
+    afterwards IS that race, and the job is done; one that fails with the context still up is a
+    real failure and is raised.
+    """
+    try:
         rclpy.try_shutdown()
+    except Exception:
+        if rclpy.ok():
+            raise

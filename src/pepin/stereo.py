@@ -38,6 +38,36 @@ CALIBRATION_FILE = "stereo_calibration.json"
 # A disparity under this many pixels is "infinitely far" for a 6 cm baseline: the depth it would
 # give is tens of metres with an error as large as itself, so it is reported as unknown (NaN).
 MIN_DISPARITY_PX = 0.5
+# How far inside a fold of the undistortion map the rectified picture is still thrown away: the
+# fold itself is where the lens model turns back on itself, and a few pixels on the near side of
+# it are already the model's extrapolation (journal 2026-09-24, scratch/stereo/fold_check.py).
+FOLD_MARGIN_PX = 6
+
+
+def fold_free(
+    map_x: Array, map_y: Array, width: int, height: int, margin_px: int = FOLD_MARGIN_PX
+) -> Array:
+    """Pixels of a rectified picture whose remap source is real and unfolded: inside the eye's
+    frame, the map's orientation kept (its Jacobian stays positive) and connected to the centre,
+    shrunk by ``margin_px``. A calibration fitted where the board went fails at the corners it
+    never reached: there the map turns back and the picture beyond the fold is a mirror of the
+    edge (the 'crack' of 2026-09-24). Boolean ``(height, width)``."""
+    import cv2
+
+    # The float error of an exact pixel: an identity rectification puts column 0 at -5.6e-14.
+    tol = 1e-3
+    inside = (map_x >= -tol) & (map_x <= width - 1 + tol) & (map_y >= -tol)
+    inside &= map_y <= height - 1 + tol
+    det = np.gradient(map_x, axis=1) * np.gradient(map_y, axis=0) - np.gradient(
+        map_x, axis=0
+    ) * np.gradient(map_y, axis=1)
+    good = (inside & (det > 0)).astype(np.uint8)
+    _, labels = cv2.connectedComponents(good, connectivity=4)
+    good = (labels == labels[height // 2, width // 2]).astype(np.uint8)
+    if margin_px > 0:
+        good = cv2.erode(good, np.ones((2 * margin_px + 1, 2 * margin_px + 1), np.uint8))
+    out: Array = good.astype(bool)
+    return out
 
 
 @dataclass(frozen=True)
@@ -157,9 +187,13 @@ class Rectifier:
     right_maps: tuple[Array, Array]
 
     @classmethod
-    def from_calibration(cls, calibration: StereoCalibration, alpha: float = 0.0) -> Rectifier:
+    def from_calibration(
+        cls, calibration: StereoCalibration, alpha: float = 0.0, mask_folds: bool = False
+    ) -> Rectifier:
         """Rectify for horizontal epipolar lines and zero disparity at infinity. ``alpha`` 0 keeps
-        only valid pixels (no black borders), 1 keeps every source pixel."""
+        only valid pixels (no black borders), 1 keeps every source pixel. ``mask_folds`` sends the
+        pixels :func:`fold_free` rejects to no source at all, so they come out black (no data)
+        instead of a mirror of the lens's edge."""
         import cv2
 
         size = (calibration.width, calibration.height)
@@ -175,6 +209,11 @@ class Rectifier:
         )  # fmt: skip
         left = cv2.initUndistortRectifyMap(k_left, d_left, r1, p1, size, cv2.CV_32FC1)
         right = cv2.initUndistortRectifyMap(k_right, d_right, r2, p2, size, cv2.CV_32FC1)
+        if mask_folds:
+            for mx, my in (left, right):
+                bad = ~fold_free(mx, my, calibration.width, calibration.height)
+                mx[bad] = -1.0
+                my[bad] = -1.0
         return cls(
             width=calibration.width,
             height=calibration.height,

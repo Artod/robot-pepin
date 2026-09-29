@@ -64,7 +64,7 @@
           "color": "#ffd500"
         },
         "/rtabmap/cloud_map": {
-          "visible": false,
+          "visible": true,
           "pointSize": 6,
           "colorMode": "rgb"
         },
@@ -81,7 +81,7 @@
           "flatColor": "#4fc3f7"
         },
         "/depth_scan": {
-          "visible": false,
+          "visible": true,
           "pointSize": 4,
           "colorMode": "flat",
           "flatColor": "#ff3b3b"
@@ -99,7 +99,7 @@
           "flatColor": "#00e5ff40"
         },
         "/contact_scan": {
-          "visible": false,
+          "visible": true,
           "pointSize": 4,
           "colorMode": "flat",
           "flatColor": "#b388ff"
@@ -150,7 +150,7 @@
           "color": "#00e676"
         },
         "/local_plan": {
-          "visible": false,
+          "visible": true,
           "lineWidth": 0.03,
           "color": "#ffea00"
         },
@@ -158,6 +158,42 @@
           "visible": true,
           "type": "arrow",
           "color": "#00e5ff"
+        },
+        "/local_costmap/camera_layer": {
+          "visible": true,
+          "colorMode": "custom",
+          "minColor": "#00000000",
+          "maxColor": "#ff00ffcc",
+          "unknownColor": "#00000000",
+          "invalidColor": "#00000000",
+          "frameLocked": true
+        },
+        "/local_costmap/lidar_layer": {
+          "visible": true,
+          "colorMode": "custom",
+          "minColor": "#00000000",
+          "maxColor": "#00e5ffcc",
+          "unknownColor": "#00000000",
+          "invalidColor": "#00000000",
+          "frameLocked": true
+        },
+        "/global_costmap/camera_layer": {
+          "visible": true,
+          "colorMode": "custom",
+          "minColor": "#00000000",
+          "maxColor": "#ff00ff66",
+          "unknownColor": "#00000000",
+          "invalidColor": "#00000000",
+          "frameLocked": true
+        },
+        "/global_costmap/lidar_layer": {
+          "visible": true,
+          "colorMode": "custom",
+          "minColor": "#00000000",
+          "maxColor": "#00e5ff66",
+          "unknownColor": "#00000000",
+          "invalidColor": "#00000000",
+          "frameLocked": true
         }
       },
       "layers": {

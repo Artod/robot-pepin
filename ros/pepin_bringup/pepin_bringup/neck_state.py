@@ -35,10 +35,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import rclpy
 from geometry_msgs.msg import TransformStamped
 from rclpy.duration import Duration
-from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster
@@ -48,7 +46,7 @@ from pepin.deployment import config_file
 from pepin.flags import Flag, FlagSet
 from pepin.neck import JOINT_NAMES, NeckConfig, camera_pose, joint_angles, parse_neck
 from pepin_bringup.link import JsonLineLink
-from pepin_bringup.node_kit import Switches
+from pepin_bringup.node_kit import Switches, spin_main
 
 _NECK_REQUEST = b'{"cmd":"neck"}\n'
 _REPORT_S = 30.0
@@ -139,6 +137,10 @@ class NeckState(Node):
                 "the reference ticks are unread (config/neck.json): every pose answered is the"
                 " static mount, the encoders are only reported — read them and fill them in"
             )
+
+    def close(self) -> None:
+        """Before the node goes (node_kit.spin_main's order): what :meth:`shutdown` does."""
+        self.shutdown()
 
     def shutdown(self) -> None:
         """Close the link to the base server, on the way out."""
@@ -246,18 +248,9 @@ class NeckState(Node):
 
 
 def main(args: list[str] | None = None) -> None:
-    """Entry point: spin the node until it is interrupted."""
-    rclpy.init(args=args)
-    node = NeckState()
-    try:
-        rclpy.spin(node)
-    except (KeyboardInterrupt, ExternalShutdownException):
-        pass  # Ctrl-C, or the SIGTERM of a docker stop
-    finally:
-        node.shutdown()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    """Entry point: spin the node until it is interrupted (node_kit.spin_main: close() first, then
+    the node and the context; kill -USR2 prints its stacks)."""
+    spin_main(NeckState, args)
 
 
 if __name__ == "__main__":

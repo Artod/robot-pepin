@@ -77,3 +77,25 @@ def test_ideal_eyes_come_out_of_the_rectifier_as_they_went_in() -> None:
         np.abs(out_left[50:550, 50:750].astype(int) - left[50:550, 50:750].astype(int)).max() <= 1
     )
     assert np.array_equal(out_left, out_right)
+
+
+def test_fold_free_drops_the_folded_corner_and_keeps_the_rest() -> None:
+    """A map that runs back on itself past column 30 in the bottom rows loses those pixels (and
+    the margin); the rest of the picture is kept whole, up to its own border."""
+    from pepin.stereo import fold_free
+
+    h, w = 60, 80
+    map_y, map_x = np.mgrid[0:h, 0:w].astype(np.float32)
+    corner = (np.arange(h)[:, None] >= 40) & (np.arange(w)[None, :] < 30)
+    map_x[corner] = 60.0 - map_x[corner]  # the columns run backwards: a fold
+    good = fold_free(map_x, map_y, w, h, margin_px=2)
+    assert not good[55, 5]
+    assert good[10, 40] and good[0, 0] and good[h - 1, w - 1]
+
+
+def test_mask_folds_changes_nothing_on_a_calibration_without_folds() -> None:
+    """A mild lens has no fold: the masked tables equal the plain ones."""
+    plain = Rectifier.from_calibration(_calibration())
+    masked = Rectifier.from_calibration(_calibration(), mask_folds=True)
+    assert np.array_equal(plain.left_maps[0], masked.left_maps[0])
+    assert np.array_equal(plain.right_maps[1], masked.right_maps[1])

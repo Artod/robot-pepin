@@ -34,6 +34,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
@@ -50,6 +51,7 @@ from pepin.tape import MAX_RUN_S, next_run_number
 from pepin.tape_rows import TOPIC_RECORDS
 from pepin_bringup.bridge_kick import BridgeKick
 from pepin_bringup.camera_clip import CameraClip
+from pepin_bringup.node_kit import spin_main
 
 # What a run is made of, on the wire: every topic the JSONL recorder subscribes to, plus the two
 # the ``loc`` records are composed from where no tracker publishes a pose (/tf, /tf_static). The
@@ -65,12 +67,21 @@ RAW_SCAN_TOPIC = "/ldlidar_node/scan"
 # cell with no lidar return beside it could not be pinned on a camera voxel after the fact (the
 # "hill" on the carpet at the base, tape 0458). bag_to_tape skips them too.
 CAMERA_MARK_TOPICS = ("/depth_marks", "/depth_free")
+# ...and every odometry the board's EKF fuses (ros/params/ekf.yaml) that the tape has no row for.
+# The tape keeps the wheels' own /odom (odom0, published raw by the base bridge), the lidar's
+# /odom_laser (odom3), the gyro (imu0) and the filter's output — but not the camera's visual
+# odometry (/vo, odom1: pepin_bringup.visual_odometry on the laptop, the gated rgbd_odometry) nor
+# the zero-velocity update (/zupt, odom2: the base bridge's at rest, the tracker's on a slip), so a
+# fused pose that went wrong could not be taken apart into what each source said while it happened.
+# bag_to_tape skips them.
+ODOMETRY_TOPICS = ("/vo", "/zupt")
 BAG_TOPICS: tuple[str, ...] = (
     *sorted(TOPIC_RECORDS),
     "/tf",
     "/tf_static",
     RAW_SCAN_TOPIC,
     *CAMERA_MARK_TOPICS,
+    *ODOMETRY_TOPICS,
 )
 # MCAP, no compression: the storage rosbag2 ships with in Jazzy, read by rosbag2_py on the laptop
 # and by every MCAP tool. Compression would cost this board's cores exactly what we are taking
@@ -137,7 +148,19 @@ class BagRecorderNode(Node):
         )
 
     def _say(self, status: RunStatus) -> None:
-        self._status_pub.publish(String(data=status.to_json()))
+        """The recorder's state on the latched status topic. On the way out rclpy's SIGINT
+        handler may already have shut the context down from its own thread: the last word then
+        has nobody left to reach and is dropped rather than raised over the bag it follows."""
+        try:
+            self._status_pub.publish(String(data=status.to_json()))
+        except Exception:
+            if rclpy.ok():
+                raise
+
+    def close(self) -> None:
+        """On the node's way out (:func:`pepin_bringup.node_kit.spin_main`): a run still open is
+        ended exactly as a goal's stop ends it — the bag closed on SIGINT, the clip stopped."""
+        self.stop()
 
     @property
     def recording(self) -> bool:
@@ -225,19 +248,10 @@ class BagRecorderNode(Node):
 
 
 def main() -> None:
-    import rclpy
-
-    rclpy.init()
-    node = BagRecorderNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.stop()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    """The node's life through the kit's one exit path: SIGINT (the launch's stop) ends the spin,
+    ``close`` ends a run still open, and the context is shut down once, whoever gets there first
+    (:func:`pepin_bringup.node_kit.end_context`)."""
+    spin_main(BagRecorderNode)
 
 
 if __name__ == "__main__":

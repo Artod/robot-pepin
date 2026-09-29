@@ -117,11 +117,28 @@ there are eighteen a second, until it has left that member's own pairing patienc
 that the snapshot goes out with whatever could be placed, exactly as before, and the report line
 counts both the waits and the give-ups.
 
+ONE PLACE DESCRIPTOR ON EVERY SNAPSHOT (``global_descriptor``, since 2026-09-24). RTAB-Map can tell
+which database node a picture is by a learned global descriptor instead of its ORB words
+(pepin_bringup.rtabmap_frame's ``place_recognition``), and it compares two nodes' descriptors only
+when BOTH carry one — a node with one against a node without ABORTS it (Signature.cpp:252). So
+every snapshot carries exactly one ``rtabmap_msgs/GlobalDescriptor`` (type 1): a camera snapshot
+the localisation service's ``/place`` vector (``place_descriptor``), and a lidar-only snapshot, or
+one whose picture the service did not describe within ``place_timeout_s``, the NULL descriptor
+(pepin.global_descriptor: zeros, which RTAB-Map scores as neither like nor unlike anything). The
+service is asked on a worker thread and the snapshots leave in the order they were packed
+(pepin.place_stamp), so the packer never waits for it. What the snapshots carry is said latched on
+:data:`PLACE_TOPIC` for rtabmap_frame, which compares by descriptor only while it is true and
+while the recent camera snapshots were described. ``global_descriptor auto`` (the default)
+attaches descriptors only on an RTAB-Map built with the patch that keeps them across a reload of a
+node's data: the unpatched core would drop one and abort at the next comparison, even under the
+words (mapping's rehearsal compares nodes too).
+
 THE REPORT LINE says what went into the last snapshot, every source's measured cadence and the
-counts of full, lidar-only and camera-only snapshots; the flags (:data:`FLAGS`, ``ros/flags.sh
-set sensor_pack <flag> <value>``) are ``sensor_pack``, ``sources``, ``pack_hz``,
-``pair_periods`` and ``tf_retry``. The arrangement of before this node — RTAB-Map on its own
-synchronised triple — is one launch argument away: ``ros/laptop.sh vslam`` passing
+counts of full, lidar-only and camera-only snapshots, and the place descriptors (described, null
+and why); the flags (:data:`FLAGS`, ``ros/flags.sh set sensor_pack <flag> <value>``) are
+``sensor_pack``, ``sources``, ``pack_hz``, ``pair_periods``, ``tf_retry``, ``global_descriptor``,
+``place_descriptor`` and ``place_timeout_s``. The arrangement of before this node — RTAB-Map on
+its own synchronised triple — is one launch argument away: ``ros/laptop.sh vslam`` passing
 ``sensor_pack:=false`` does not start this node and puts ``subscribe_depth`` and ``subscribe_scan``
 back on RTAB-Map.
 """
@@ -134,11 +151,25 @@ from typing import Any
 import numpy as np
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from rtabmap_msgs.msg import SensorData
+from rtabmap_msgs.msg import GlobalDescriptor, SensorData
 from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, PointField
 from std_msgs.msg import String
 
 from pepin.flags import Flag, FlagSet
+from pepin.global_descriptor import (
+    ATTACH_AUTO,
+    ATTACH_CHOICES,
+    GLOBAL_DESCRIPTOR_ENV,
+    PLACE_TOPIC,
+    PlaceDescriptor,
+    SnapshotPlace,
+    descriptors_attached,
+    rtabmap_keeps_descriptors,
+    to_ros,
+)
+from pepin.localization_service import LocalizationClient, place_dim
+from pepin.place_models import DEFAULT_PLACE_MODEL, place_spec
+from pepin.place_stamp import PlaceStamper, rgb_of
 from pepin.snapshot import (
     LIVE_PERIODS,
     PAIR_PERIODS,
@@ -179,6 +210,14 @@ TF_WAIT_S = 0.0
 # Rtabmap/DetectionRate in vslam.launch.py's table: RTAB-Map adds at most one node a second and
 # drops the rest, so a faster snapshot is megabytes of DDS traffic for a message nobody reads.
 DETECTION_RATE_HZ = 1.0
+# How long a snapshot may wait for its place descriptor before it goes out with the null one. The
+# service answers an 800x600 picture in 55 ms median, 79 ms p90 from inside a container while it is
+# asked once a second (scratch/models/endpoint_bench.py, 2026-09-24, BoQ-DINOv2 on MPS beside
+# RAFT-Stereo), but after two seconds idle its first answer takes 200-460 ms, and 1.5 s after
+# minutes (scratch/models/gpu_idle_probe.py: the laptop swaps, and an idle model's pages go first).
+# Half the snapshot period covers the warm answers and most cold ones; a later one costs that one
+# snapshot the null descriptor, never the next snapshot its turn.
+PLACE_TIMEOUT_S = 0.5
 
 FLAGS = FlagSet(
     Flag(
@@ -265,6 +304,76 @@ FLAGS = FlagSet(
         " and it is the one whose transform is late",
         off_when="to measure what the retry is worth — the report line's 'tf waits' against its"
         " 'frames TF could not place' is the same comparison with it on",
+    ),
+    Flag(
+        "global_descriptor",
+        ATTACH_AUTO,
+        choices=ATTACH_CHOICES,
+        env=GLOBAL_DESCRIPTOR_ENV,
+        live=False,
+        description="whether every snapshot carries exactly one rtabmap_msgs/GlobalDescriptor"
+        " (type 1): the place vector of its picture (place_descriptor), or the null descriptor"
+        " (zeros) when it has no picture or no vector came in place_timeout_s; said latched on"
+        f" {PLACE_TOPIC}. auto: exactly when this image's RTAB-Map keeps a node's descriptor"
+        " across the reload of its data (the marker /opt/rtabmap_patches/keep-global-descriptors,"
+        " ros/xfeat/patch_rtabmap.sh); on: always; off: never, the snapshots of before 2026-09-24",
+        why="auto, because a descriptor is safe only on the patched core. RTAB-Map compares two"
+        " nodes' descriptors only when BOTH carry one and ABORTS on a node with one against a node"
+        " without (UASSERT, rtabmap Signature.cpp:252), and the unpatched 0.22.1 drops a node's"
+        " descriptor whenever it reloads the node's data for a registration (Memory.cpp:2902,"
+        " 2908) — also under the words, because mapping's rehearsal compares the last node with"
+        " the next (Memory.cpp:3784-3834), and a rehearsal merge at rest makes the last node a"
+        " saved one, whose data is reloaded (Memory.cpp:2763, 3958): the core aborts and RTAB-Map"
+        " is not respawned. Measured 2026-09-24 (scratch/models/unpatched_mapping_control.sh,"
+        " camera-only run 0466 mapping under the words): with descriptors the unpatched core"
+        " died on the THIRD update — a rehearsal at similarity 0.97 merged the new node into the"
+        " last, a proximity registration reloaded it, Signature.cpp:252 — and without them it ran"
+        " all 17 clean; the patched core (the image's patch layer, rebuilt the same day) ran the"
+        " same 17 with descriptors clean, every one merged at 0.96-0.98 and 15 loop closures."
+        " Not live: switched mid-run, the next node would differ from the last."
+        " With descriptors on board the launch raises Mem/RehearsalSimilarity to 0.92"
+        " (DESCRIPTOR_REHEARSAL in vslam.launch.py: the descriptor's scale, measured)",
+        on_when="on only for a control against an unpatched core (it can abort RTAB-Map); auto"
+        " otherwise — before place_recognition descriptor, whose gate refuses a core without the"
+        " patch and a database whose census is not whole",
+        off_when="off against a database WITHOUT descriptors to reproduce the snapshots of before"
+        " 2026-09-24 (PEPIN_GLOBAL_DESCRIPTOR=off ros/laptop.sh vslam); never against a backfilled"
+        " database while RTAB-Map maps",
+    ),
+    Flag(
+        "place_descriptor",
+        True,
+        description="a camera snapshot's descriptor is the localisation service's /place vector"
+        " of its picture (pepin.localization_service, BoQ on the laptop's GPU); off, every"
+        " snapshot carries the null descriptor and the service is not asked",
+        why="on, measured 2026-09-24: through the service the fixed set (scratch/vpr, 147"
+        " daylight nodes, 219 evening frames of runs 0455-0465) recognises evening R@1 0.986, R@3"
+        " 1.000 against the daylight gallery, JPEG as sent here the same as lossless"
+        " (scratch/models/place_parity.py), where the ORB words' hypotheses read 0.05-0.07 under"
+        " the evening lamps. The call costs this node nothing: it runs on a worker thread",
+        on_when="whenever place_recognition descriptor is used, or its vectors are to be stored"
+        " in the database while it maps",
+        off_when="to take the service out of the loop without breaking the one-descriptor"
+        " invariant (a sick service, a measurement of the words alone); RTAB-Map then sees"
+        " every place as equally likely by descriptor, so the words should be in force",
+    ),
+    Flag(
+        "place_timeout_s",
+        PLACE_TIMEOUT_S,
+        range=(0.05, 0.95),
+        description="the most a snapshot waits for its place vector, from the moment it is packed"
+        " — its wait in the worker's queue included — before it goes out with the null"
+        " descriptor",
+        why=f"{PLACE_TIMEOUT_S}, measured 2026-09-24 from inside a container: /place answers an"
+        " 800x600 picture in 55 ms median, 79 ms p90 while asked once a second"
+        " (scratch/models/endpoint_bench.py, BoQ-DINOv2 on MPS beside RAFT-Stereo), but its first"
+        " answer after two seconds idle takes 200-460 ms and after minutes 1.5 s"
+        " (scratch/models/gpu_idle_probe.py: the laptop swaps, and an idle model's pages go"
+        " first). Half the one-second snapshot period covers the warm answers and most cold ones,"
+        " and a slow answer never holds up the next snapshot",
+        on_when="raise it if the report line counts 'late' or 'no answer' nulls while the service"
+        " is healthy",
+        off_when="lower it when RTAB-Map's own timing shows the snapshots arriving late",
     ),
 )
 
@@ -353,8 +462,20 @@ def xy_cloud(scan: Any) -> Any:
     )
 
 
+def configured_place_dim() -> int:
+    """The length of every snapshot's descriptor: the configured place model's
+    (config/models.json), else the default model's when the config cannot be read."""
+    try:
+        return place_dim()
+    except (OSError, ValueError):
+        return place_spec(DEFAULT_PLACE_MODEL).dim
+
+
 class SensorPack(Node):
     """Publishes one ``rtabmap_msgs/SensorData`` per moment out of whatever sensor is alive."""
+
+    # The place descriptors are asked for on a worker thread; the tests handle them inline.
+    PLACE_THREAD = True
 
     def __init__(self) -> None:
         super().__init__("sensor_pack")
@@ -388,6 +509,35 @@ class SensorPack(Node):
             ),
         )
         self._state: SnapshotState | None = None  # ...as it was last published
+        # ONE PLACE DESCRIPTOR ON EVERY SNAPSHOT (global_descriptor): the service is asked on the
+        # stamper's worker thread, which also publishes, in the packing order.
+        self._place_pub = self.create_publisher(
+            String,
+            PLACE_TOPIC,
+            QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            ),
+        )
+        self._place_said: str | None = None
+        self._places = LocalizationClient(timeout_s=float(self._switches["place_timeout_s"]))
+        self._stamper: PlaceStamper | None = None
+        # auto follows the core: descriptors only where RTAB-Map keeps them (see the flag's why)
+        self._rtabmap_keeps = rtabmap_keeps_descriptors()
+        if descriptors_attached(str(self._switches["global_descriptor"]), self._rtabmap_keeps):
+            self._stamper = PlaceStamper(
+                configured_place_dim(),
+                lambda rgb, timeout: self._places.place(rgb, "jpeg", timeout),
+                self._attach_descriptor,
+                self._pub.publish,
+                threaded=self.PLACE_THREAD,
+                on_error=lambda text: self.get_logger().error(
+                    f"place descriptor: {text} (the snapshot went out with the null descriptor)",
+                    throttle_duration_sec=30,
+                ),
+            )
+        self._say_place()
         self.create_subscription(CameraInfo, CAMERA_INFO_TOPIC, self._on_info, reliable)
         self.create_subscription(Image, IMAGE_TOPIC, self._on_image, pair)
         self.create_subscription(Image, DEPTH_TOPIC, self._on_depth, pair)
@@ -406,7 +556,10 @@ class SensorPack(Node):
         )
 
     def close(self) -> None:
-        """Stop the TF listener's thread before the node is destroyed under it."""
+        """Publish the snapshots still waiting for a descriptor and stop the stamper's worker,
+        then stop the TF listener's thread before the node is destroyed under it."""
+        if self._stamper is not None:
+            self._stamper.close()
         self._tf.close()
 
     # ---- inputs ------------------------------------------------------------------------------
@@ -419,6 +572,8 @@ class SensorPack(Node):
             self._packer.enable(tuple(new))  # type: ignore[arg-type]
         elif name == "pair_periods":
             self._packer.set_pair_periods(float(new))  # type: ignore[arg-type]
+        elif name == "place_descriptor":
+            self._say_place()
 
     def _on_info(self, msg: CameraInfo) -> None:
         self._info = msg
@@ -503,7 +658,15 @@ class SensorPack(Node):
         if packed.msg is None:
             return
         with self._tally.measure("publish"):
-            self._pub.publish(packed.msg)
+            if self._stamper is None:
+                self._pub.publish(packed.msg)
+            else:
+                self._stamper.submit(
+                    packed.msg,
+                    self._picture_of(packed.msg),
+                    self._switches.on("place_descriptor"),
+                    float(self._switches["place_timeout_s"]),
+                )
         self._last = snapshot
         self._tally.count("packs")
         self._tally.count(f"kind {snapshot.kind}")
@@ -615,6 +778,53 @@ class SensorPack(Node):
         msg.laser_scan_local_transform = local.transform
         return True, False
 
+    # ---- the place descriptor ----------------------------------------------------------------
+    @staticmethod
+    def _picture_of(msg: Any) -> Any:
+        """What builds the snapshot's RGB picture on the stamper's thread, or ``None`` when the
+        snapshot has none (the camera member went in only with its optics, _camera_into)."""
+        if not msg.left_camera_info:
+            return None
+        image = msg.left
+        return lambda: rgb_of(image)
+
+    @staticmethod
+    def _attach_descriptor(msg: Any, descriptor: PlaceDescriptor) -> None:
+        """The snapshot's one descriptor, in rtabmap_msgs' bytes (pepin.global_descriptor)."""
+        msg.global_descriptors = [to_ros(descriptor, GlobalDescriptor, msg.header)]
+
+    def _say_place(self) -> None:
+        """What the snapshots carry, latched on :data:`PLACE_TOPIC` whenever it changes: whether
+        each carries a descriptor, where a camera snapshot's comes from, their length, the
+        weights of the last vector the service answered, and how many of the last camera
+        snapshots went out with the null descriptor (rtabmap_frame's words fallback)."""
+        stamper = self._stamper
+        recent, recent_null = stamper.recent() if stamper is not None else (0, 0)
+        state = SnapshotPlace(
+            attached=stamper is not None,
+            source="service" if self._switches.on("place_descriptor") else "null",
+            dim=stamper.dim if stamper is not None else 0,
+            tag=stamper.tag if stamper is not None else "",
+            recent=recent,
+            recent_null=recent_null,
+        )
+        text = state.to_json()
+        if text != self._place_said:
+            self._place_pub.publish(String(data=text))
+            self._place_said = text
+
+    def _place_text(self) -> str:
+        """The report line's clause: the descriptors described and the nulls, and the service."""
+        if self._stamper is None:
+            setting = self._switches["global_descriptor"]
+            core = "keeps them" if self._rtabmap_keeps else "drops them on a reload: unpatched"
+            return f"place descriptors off (global_descriptor {setting}; this RTAB-Map {core})"
+        remote = self._places.remotes["place"]
+        return (
+            f"place descriptors {self._stamper.line()}, {self._stamper.waiting} waiting;"
+            f" service {self._places.url}: {remote.status()}"
+        )
+
     # ---- what the snapshots carry ------------------------------------------------------------
     def _publish_state(self, on_change: bool = False) -> None:
         """Say what the snapshots carry on :data:`STATE_TOPIC`, latched: on every change (from
@@ -622,7 +832,10 @@ class SensorPack(Node):
         stopped moving from one that simply has not changed.
 
         ``on_change`` publishes only when the sources or the kind actually differ, which is what
-        keeps the packing path from serialising a message per snapshot."""
+        keeps the packing path from serialising a message per snapshot. The place descriptors'
+        state rides the once-a-second call (:meth:`_say_place`: published on a change only)."""
+        if not on_change:
+            self._say_place()
         state = self._packer.state(self._last.kind if self._last is not None else "none yet")
         last = self._state
         if (
@@ -659,7 +872,7 @@ class SensorPack(Node):
             f" {c['frames']} camera frames ({kinds or 'none'});"
             f" {self._packer.report()}; {self._last_note()}{self._losses(w)};"
             f" carrying {state.text() if state is not None else 'nothing said yet'}"
-            f" on {STATE_TOPIC};"
+            f" on {STATE_TOPIC}; {self._place_text()};"
             f" flags: {self._switches.state()}; ms median/max: {w.stages()}"
         )
         if self._switches.on("sensor_pack") and c["packs"] == 0:

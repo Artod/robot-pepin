@@ -462,6 +462,10 @@ local_costmap:
       update_frequency: 5.0  # the stop reflex's slowest link: a mark waits for this tick
       publish_frequency: 1.0
       transform_tolerance: 0.3  # a sensor stamped 'now' waits at most this long for odom->base_link
+      # Activation waits for odom -> base_link (the board's own EKF) instead of failing after
+      # Nav2's default 60 s: the lifecycle manager never retries a failed bring-up (the
+      # global_costmap's note below).
+      initial_transform_timeout: 86400.0
       # odom, not map (2026-09-22): the controller must not depend on a frame that crosses the
       # WiFi. Under PEPIN_LOCALIZER=rtabmap the laptop's graph owns map -> odom and the board
       # receives it over a radio (uwe5622) whose ping averages 80-180 ms with spikes of
@@ -492,7 +496,12 @@ local_costmap:
       footprint_padding: 0.0
       resolution: 0.05
       footprint: "[[0.0625, 0.275], [0.0625, -0.275], [-0.30, -0.275], [-0.30, 0.275]]"
-      plugins: ["lidar_layer", "camera_layer", "contact_layer", "tof_front_scan_layer", "tof_left_scan_layer", "tof_right_scan_layer", "inflation_layer"]
+      plugins: ["lidar_layer", "camera_layer", "contact_layer", "tof_front_scan_layer", "tof_left_scan_layer", "tof_right_scan_layer", "camera_grid_layer", "inflation_layer"]
+      # THE CAMERA GRID writes by maximum (camera_grid_layer below): a StaticLayer reads this
+      # costmap-level switch, and without it the grid's FREE cells would overwrite what the lidar
+      # and the whiskers marked. No other StaticLayer is listed in this costmap, so nothing else
+      # reads it (Jazzy static_layer.cpp: only StaticLayer::getParameters asks for use_maximum).
+      use_maximum: True
       # The three VL53L1X at bumper height (tof_bridge): they see the rocking chair's rails, a box
       # on the floor, a carpet roll — everything under the lidar plane.
       # ONE LAYER PER SENSOR, on purpose: a single layer fed by all three shares one grid, so the
@@ -821,6 +830,22 @@ local_costmap:
           # inf would clear to range_max on every bearing the volume knows nothing about, which
           # is the one thing this source must never do.
           inf_is_valid: False
+      # THE CAMERA GRID (2026-09-24), OFF as shipped: the volume's CURRENT occupied columns as a
+      # grid this layer only DRAWS (pepin_bringup.depth_fusion's grid_out, pepin.camera_grid) —
+      # the nvblox arrangement, where camera_layer above accumulates /depth_marks into a copy of
+      # its own that the tree's clears wipe (scratch/costmap_split). /camera_grid is a 6 m square
+      # about the cart in odom, latched, ~3 Hz; the rolling window reads the cells under it and
+      # combines them by maximum (use_maximum above). A disabled layer or a silent topic costs
+      # nothing and never blocks activation; ENABLED BEFORE ITS FIRST GRID it is not current and
+      # the controller times out, so ros/camera_grid.sh turns grid_out on first and waits for it.
+      # A grid is kept until the next one, a dead laptop's last one included: the way out is
+      # `ros2 param set /local_costmap/local_costmap camera_grid_layer.enabled false` (board-side).
+      camera_grid_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        enabled: False
+        map_topic: /camera_grid
+        map_subscribe_transient_local: True
+        subscribe_to_updates: False
       contact_layer:
         # Where the floor ENDS, read off the same depth frames (pepin.contact, published by
         # pepin_bringup.contact_scan): the feet of chairs, a low box, a plinth — what neither the
@@ -878,6 +903,12 @@ global_costmap:
       update_frequency: 2.0  # a person walking in: 0.5 Hz left the plan through them for 2 s
       publish_frequency: 1.0
       transform_tolerance: 1.0
+      # How long activation waits for base_link -> map, i.e. for the laptop's RTAB-Map. Nav2's
+      # default 60 s FAILS the activation and its lifecycle manager never retries: a board whose
+      # Nav2 came up more than a minute before the laptop planned nothing until a restart (the
+      # start-order race, journal 2026-09-25; the sim: --nav-first 70 never came up). A day =
+      # wait for the laptop however late it comes; ros/restart.sh proves the planner after.
+      initial_transform_timeout: 86400.0
       global_frame: map
       robot_base_frame: base_link
       # The true polygon, NOT a 0.30 m disc. The disc was tried on 2026-09-08 to stop NavFn
@@ -917,7 +948,15 @@ global_costmap:
       # the local costmap runs now (tof_*_scan_layer there), never as a RangeSensorLayer: this
       # grid does not roll, so the unbounded loop of range_sensor_layer.cpp:362-369 fires here
       # every time the pose jumps off the edge of a map that is bigger than the window.
-      plugins: ["static_layer", "lidar_layer", "camera_layer", "contact_layer", "inflation_layer"]
+      plugins: ["static_layer", "lidar_layer", "camera_layer", "contact_layer", "camera_grid_layer", "inflation_layer"]
+      # THE CAMERA GRID writes by maximum (camera_grid_layer below), and this is the one line of
+      # it that touches the static_layer: a StaticLayer reads this costmap-level switch. It
+      # changes nothing for the static_layer — it is the FIRST plugin, so it writes into a master
+      # just reset to FREE (track_unknown_space false: LayeredCostmap's default value 0), and its
+      # own cells are never NO_INFORMATION (interpretValue maps unknown to FREE here), so max(0, c)
+      # IS c, cell for cell, and updateWithMax writes what updateWithTrueOverwrite wrote
+      # (costmap_layer.cpp, layered_costmap.cpp, Jazzy). A contract test holds both premises.
+      use_maximum: True
       # ONE LAYER PER SENSOR, like the three ToF below and for the same reason: separate layers
       # cannot erase each other's evidence, and each is switched on its own while the robot runs
       # (`ros2 param set /global_costmap/global_costmap camera_layer.enabled true`) — which is how a
@@ -1007,6 +1046,19 @@ global_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 0.0  # this source never marks
           inf_is_valid: False
+      # THE CAMERA GRID (2026-09-24), OFF as shipped — see the local costmap's copy. Here it reads
+      # /camera_grid_map: the same cells drawn by the laptop on the lattice of the map the
+      # static_layer reads (origin, size and resolution EXACTLY, so this layer never resizes the
+      # costmap), through its own map -> odom at the grid's stamp, and redrawn whole at every tick
+      # through /camera_grid_map_updates — a jump of map -> odom moves the cells with the next
+      # update instead of smearing old marks, and the tree's clears (ClearEntireCostmap resets a
+      # StaticLayer without touching its cells) cannot wipe what the volume still holds.
+      camera_grid_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        enabled: False
+        map_topic: /camera_grid_map
+        map_subscribe_transient_local: True
+        subscribe_to_updates: True
       contact_layer:
         # Where the floor ENDS, read off the same depth frames (pepin.contact, published by
         # pepin_bringup.contact_scan): the feet of chairs, a low box, a plinth — what neither the
@@ -1139,10 +1191,11 @@ global_costmap:
         # 3 at 50 cm, so plans run along the furniture and the footprint check alone keeps them off it.
         cost_scaling_factor: 10.0
         inflation_radius: 0.55
-      # False: the map is 239x215 cells, so publishing it whole at 0.5 Hz spends 50 kB/s on a
-      # board whose control loop already drops to 3 Hz. Turn it on when a refused plan needs
-      # looking at. The local one stays on — 3600 cells is genuinely free.
-      always_send_full_costmap: False
+      # True (2026-09-28): the planner's live map in Foxglove (/global_costmap/costmap), the whole
+      # grid each publish — ~141x216 cells, ~30 kB at publish_frequency 1 Hz. On False a still
+      # robot published only incremental updates, the panel stayed blank, and a relay outside
+      # ros/ (costmap_live) had to rebuild the grid; ros/restart.sh's planner proof reads it too.
+      always_send_full_costmap: True
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.
 # If you'd rather set it in the yaml, remove the default "map" value in the tb3_simulation_launch.py

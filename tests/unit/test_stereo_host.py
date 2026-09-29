@@ -84,13 +84,13 @@ def test_a_nan_disparity_stays_a_nan() -> None:
 
 def test_what_the_host_refuses_and_what_the_client_refuses() -> None:
     headers, body = encode_pair(_eye(4, 4), _eye(4, 4))
-    with pytest.raises(PairError, match="not two 4x4 grey eyes"):
+    with pytest.raises(PairError, match="not two 4x4 eyes of 1 channel"):
         decode_pair(headers, body[:-1])
     with pytest.raises(PairError, match="X-Height"):
         decode_pair({"content-type": CONTENT_PAIR}, body)
     with pytest.raises(PairError, match="unknown content type"):
         decode_pair({"content-type": "image/jpeg"}, body)
-    with pytest.raises(PairError, match="two grey pictures of one size"):
+    with pytest.raises(PairError, match="two grey or two RGB pictures of one size"):
         encode_pair(_eye(4, 4), _eye(4, 5))
     with pytest.raises(StereoHostError, match="not a disparity"):
         unpack_disparity({"content-type": "text/plain"}, b"no")
@@ -242,7 +242,7 @@ def test_a_refused_pair_is_counted_against_the_stereo_model(
     conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=2.0)
     conn.request("POST", "/disparity", body=body[:-1], headers=headers)
     response = conn.getresponse()
-    assert response.status == 400 and b"not two 4x4 grey eyes" in response.read()
+    assert response.status == 400 and b"not two 4x4 eyes of 1 channel" in response.read()
     conn.close()
     assert server.stereo is not None and server.stereo.errors == 1 and server.errors == 0
 
@@ -325,3 +325,16 @@ def test_the_source_reads_its_near_end_from_whichever_engine_is_in_front(
     source(_eye(6, 9), _eye(6, 9))
     assert source.near == pytest.approx(373.0 * 0.063 / 9, rel=1e-6)
     assert "raft fake/7 on mps" in source.describe() and "% valid" in source.describe()
+
+
+def test_a_colour_pair_survives_the_codec() -> None:
+    """Two RGB eyes go through the codec as they are, and say so in X-Channels."""
+    rng = np.random.default_rng(3)
+    left = rng.integers(0, 255, (4, 6, 3), dtype=np.uint8)
+    right = rng.integers(0, 255, (4, 6, 3), dtype=np.uint8)
+    headers, body = encode_pair(left, right)
+    assert headers["X-Channels"] == "3" and len(body) == 2 * 4 * 6 * 3
+    back_left, back_right = decode_pair(headers, body)
+    assert np.array_equal(back_left, left) and np.array_equal(back_right, right)
+    with pytest.raises(PairError):
+        encode_pair(left, right[:, :, 0])

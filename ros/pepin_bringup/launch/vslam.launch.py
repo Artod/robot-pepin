@@ -79,6 +79,7 @@ names it).
 """
 
 import json
+import os
 from pathlib import Path
 
 from launch import LaunchContext, LaunchDescription
@@ -103,6 +104,13 @@ from pepin.deployment import (
     laptop_launch_nodes,
     localizer,
     rmw_is_zenoh,
+)
+from pepin.global_descriptor import (
+    CENSUS_ENV,
+    database_census,
+    descriptors_attached,
+    global_descriptor_setting,
+    rtabmap_keeps_descriptors,
 )
 
 # How long a node of this launch is given to end on SIGINT before the launch escalates to
@@ -164,6 +172,9 @@ RTABMAP = {
     # therefore still carries its words and its depth, is still recognised by appearance, and
     # still gets its neighbour link from the odometry — but contributes no metric closure. That is
     # the honest limit of one table, and the live check for it is named in the report.
+    #   This is the START value, safe for any composition: pepin_bringup.rtabmap_frame
+    # (registration_follows_snapshots) then switches it live by what the snapshots carry — 2 for
+    # camera+lidar, 1 for lidar only, 0 for camera only (pepin.graphmode.registration_verdict).
     "Reg/Strategy": "1",
     "Reg/Force3DoF": "true",
     "Icp/VoxelSize": "0.05",
@@ -185,7 +196,10 @@ RTABMAP = {
     # ``!guess.isNull() && !isImageRequired()`` (Memory.cpp:2929), and with the guess null it
     # would instead ask its private RegistrationVis for a seed (Memory.cpp:2964-2970) — the very
     # visual step that has never succeeded on this camera.
-    "RGBD/LoopClosureIdentityGuess": "true",
+    #   FALSE since 2026-09-28: camera+lidar now runs Reg/Strategy 2, whose visual half gives the
+    # seed (the tuned "F+G2" set, scratch/pose_jumps/set_config_fg2.sh); a lidar-only node has no
+    # words and so no appearance hypothesis for the guess to serve.
+    "RGBD/LoopClosureIdentityGuess": "false",
     # Proximity detection by space also by MERGING the close scans of a path, not only one to one.
     # It has to be said here now, and that is a real consequence of the new input: rtabmap_slam's
     # wrapper inserts this 10 itself, but only ``if(this->isSubscribedToScan2d() || ...)`` and only
@@ -194,6 +208,23 @@ RTABMAP = {
     # default 0 — which DISABLES one-to-many proximity detection, the path most of this graph's
     # proximity links come from. Same value the wrapper used to insert, so the graph is unchanged.
     "RGBD/ProximityPathMaxNeighbors": "10",
+    # The parked A/B of 2026-09-25 against the node-to-node yaw flicker of the descriptor's
+    # localisations ("F+G2", scratch/pose_jumps/set_config_fg2.sh, journal 2026-09-25): ICP against
+    # the whole assembled scan map, merged-scan links 10x stronger than a single node's, far
+    # localisations refused, the odometry as the one-to-one proximity guess. The pose's per-second
+    # steps p90 1.2 cm / 0.88 deg -> 0.6 cm / 0.23 deg, 72 big steps in 220 s -> 0. RTAB-Map's own
+    # defaults were false, 0.0, false, 100.0.
+    "RGBD/ProximityGlobalScanMap": "true",
+    "RGBD/MaxLoopClosureDistance": "1.0",
+    "RGBD/ProximityOdomGuess": "true",
+    "RGBD/ProximityMergedScanCovFactor": "0.1",
+    # How many matched points the visual registration needs to accept a pose: RTAB-Map's own
+    # default, named here so it can be set live. 12 was tried on 2026-09-28 (evening, camera
+    # only, a database recorded by day): at 20 the cart recognised almost nothing and lost its
+    # pose (drive 0536), at 12 it recognised and the accepted poses were 10-20 cm and 3-12 deg
+    # apart — map -> odom stepped 117 times in 481 s and the path jumped under the cart (drive
+    # 0552; scratch/failover/, journal 2026-09-28). With the lidar the value does not matter.
+    "Vis/MinInliers": "20",
     # A node with NO PICTURE — which is what a lidar-only snapshot makes — is a "bad signature":
     # isBadSignature() is exactly "no visual words" (rtabmap/core/Signature.cpp:341-344). This
     # false is what KEEPS it: Memory::cleanup() moves the last signature to the trash only when
@@ -238,9 +269,58 @@ RTABMAP = {
     # links made RGBD/OptimizeMaxError reject 87 closures on the first real drive.
     "RGBD/NeighborLinkRefining": "false",
     "Rtabmap/DetectionRate": "1.0",
+    # HOW A LOCALISATION IS CONFIRMED (RTAB-Map 0.22.1, Rtabmap.cpp:2141-2162 and 3650-3775). A
+    # first good localisation is only DELAYED ("waiting for another one to be more accurate") and
+    # kept in the odometry cache of RGBD/MaxOdomCacheSize updates; a second one inside that window
+    # accepts both. While the cache holds no localisation the hypothesis only has to reach
+    # RGBD/AggressiveLoopThr (0.05); once it holds the delayed one, Rtabmap/LoopThr (0.11) again.
+    # Parked under the evening lamps against this daylight database the ORB words' hypotheses read
+    # 0.05-0.07 (2026-09-24 05:10Z): XFeat registered with 83-118 inliers once every 11 updates —
+    # the first try past the aggressive threshold, delayed, no second try under 0.11, the cache
+    # rolled over at 10 and the threshold dropped again — 0 of 244 updates accepted
+    # (scratch/link_autopsy/localisation_cadence.py). Both are RTAB-Map's own defaults, said out
+    # loud so the confirmation can be set live (CoreWrapper.cpp:362-379).
+    "Rtabmap/LoopThr": "0.11",
+    "RGBD/MaxOdomCacheSize": "10",
+    # What the cache does with the confirmed localisations: RTAB-Map's default adjusts the stored
+    # localisation constraints to the optimised cache poses after every optimisation. Measured
+    # parked, camera only, xfeat, aggressive, proximity on, the lidar fitting the map at 89.6 deg
+    # (2026-09-24, scratch/link_autopsy/smoothing_ab.sh, 300 s each): on, 137 accepted within
+    # +0.2..+0.8 deg of the lidar, slope -0.07 deg/min; off, 142 within -4.6..+2.4 deg. The walk to
+    # 93 deg seen before it was proximity OFF (loop closures alone, each node its own bias), not
+    # this. Said out loud so it can be set live.
+    "RGBD/LocalizationSmoothing": "true",
     # appearance: GFTT/ORB words, a few hundred per image
     "Kp/DetectorStrategy": "8",
     "Kp/MaxFeatures": "400",
+    # HOW A PLACE IS FOUND: the words' TF-IDF (true, RTAB-Map's own default, Parameters.h) or the
+    # dot product of the nodes' global descriptors (false: Memory::computeLikelihood ->
+    # Signature::compareTo), which pepin_bringup.sensor_pack attaches to every snapshot.
+    # rtabmap_frame's place_recognition flag sets it live, and only when the descriptors cannot
+    # abort RTAB-Map (pepin.global_descriptor.recognition_parameters). Said out loud because a live
+    # set is only seen for a name this table overrides (CoreWrapper.cpp:362-379).
+    "Kp/TfIdfLikelihoodUsed": "true",
+    # ...and how the likelihoods become a hypothesis: 0, RTAB-Map's default, fits the words' sparse
+    # scores; the descriptor's dense ones need 1 (pepin.global_descriptor.VIRTUAL_PLACE_RATIO says
+    # why), and it travels with place_recognition the same way.
+    "Rtabmap/VirtualPlaceLikelihoodRatio": "0",
+    # WHICH FEATURES THE VISUAL REGISTRATION MATCHES (pepin.graphmode.FEATURE_PARAMETERS): the
+    # START values are ORB's — RTAB-Map's own defaults, Vis/FeatureType 8, Vis/CorNNType 1, no
+    # re-extraction, Vis/PnPReprojError 2 — said out loud because rtabmap_frame's
+    # ``visual_features`` and ``pnp_reproj_px`` flags change them live with the visual strategy,
+    # and a live set is only seen for a name this table overrides (CoreWrapper.cpp:362-379).
+    "Vis/FeatureType": "8",
+    "Vis/CorNNType": "1",
+    "RGBD/LoopClosureReextractFeatures": "false",
+    "Vis/PnPReprojError": "2",
+    # The xfeat set's two Python adapters (ros/xfeat, baked into pepin-laptop:xfeat by
+    # ros/Dockerfile.xfeat; pepin.graphmode.XFEAT_DETECTOR_PATH / XFEAT_MATCHER_PATH) and
+    # LighterGlue's confidence floor, 0.1 as in XFeat's own match_lighterglue and the offline
+    # benchmark (RTAB-Map's default 0.2 is SuperGlue's). Read only while Vis/FeatureType is 15 and
+    # Vis/CorNNType 6; in an image without the adapters nothing reads them.
+    "PyDetector/Path": "/opt/xfeat/rtabmap_xfeat.py",
+    "PyMatcher/Path": "/opt/xfeat/rtabmap_lighterglue.py",
+    "PyMatcher/Threshold": "0.1",
     # ONE FRAME ACROSS SESSIONS. Without this, every time the memory goes (back) to mapping beside
     # a loaded database RTAB-Map opens a NEW map rooted at the odometry's pose, unlinked to the old
     # one until some later closure: /rtabmap/mapGraph then carries that one new node, the grid is
@@ -386,6 +466,19 @@ LOCALIZE = {
     "RGBD/AngularUpdate": "0",
     "RGBD/OptimizeMaxError": "0",
 }
+
+# REHEARSAL ON THE DESCRIPTOR'S SCALE, whenever the snapshots carry place descriptors
+# (sensor_pack's global_descriptor; pepin.global_descriptor.descriptors_attached). Memory::rehearsal
+# compares each new node with the last one while MAPPING (Memory.cpp:3784-3834) by
+# Signature::compareTo, which reads the descriptors whenever both carry one: (a . b + 1) / 2, never
+# under ~0.57 for two BoQ vectors and exactly 0.5 against a null one — so the table's 0.30, a ratio
+# of shared ORB words, would call every pair the same place (a merge at rest, a transfer of weight
+# while moving), a camera node against a lidar-only one included (0 before: no words). Measured on
+# the backfilled daylight database (scratch/models/rehearsal_calibration.py, 2026-09-24): of 121
+# consecutive camera pairs the words at 0.30 called 11 the same place (9.1 %); the descriptor
+# scores them 0.57-0.98 (median 0.82) and reaches the same share at 0.925. 0.92 calls 14, and a
+# null pair (0.5) never.
+DESCRIPTOR_REHEARSAL = {"Mem/RehearsalSimilarity": "0.92"}
 
 # RTAB-Map reads its odometry from TF here (odom_frame_id above), and TF carries no covariance,
 # so rtabmap_slam gives every odometry link a constant one from these two — which is what the
@@ -592,6 +685,7 @@ def rtabmap_parameters(
     memory: str = "trust",
     sensor_pack: bool = True,
     localizer_name: str = "tracker",
+    descriptors: bool = False,
 ) -> dict[str, object]:
     """Everything RTAB-Map is told, for every situation: :data:`RTABMAP` under the odometry links'
     covariance, and at most two overlays that are not modes.
@@ -609,7 +703,11 @@ def rtabmap_parameters(
 
     ``localizer_name`` is who owns ``map -> odom`` (``PEPIN_LOCALIZER``): ``"rtabmap"`` adds
     :data:`PUBLISH_MAP_TO_ODOM` and this node broadcasts the transform, ``"tracker"`` leaves
-    ``publish_tf`` false as it has always been, because two publishers of one edge fight."""
+    ``publish_tf`` false as it has always been, because two publishers of one edge fight.
+
+    ``descriptors`` is whether the snapshots carry place descriptors (sensor_pack's
+    global_descriptor on this core): :data:`DESCRIPTOR_REHEARSAL` then puts the rehearsal's
+    threshold on the descriptor's scale."""
     table: dict[str, object] = dict(RTABMAP)
     table.update(TF_ODOMETRY_VARIANCE)
     if localizer_name == "rtabmap":
@@ -620,7 +718,32 @@ def rtabmap_parameters(
         table.update(LOCALIZE)
     if not sensor_pack:
         table.update(TRIPLE_SUBSCRIPTIONS)
+    elif descriptors:
+        table.update(DESCRIPTOR_REHEARSAL)
     return table
+
+
+def place_descriptors(packing: bool) -> bool:
+    """Whether this start's snapshots carry place descriptors: sensor_pack runs (``packing``) and
+    its global_descriptor, read from this environment exactly as the node reads it, attaches them
+    on this image's RTAB-Map (pepin.global_descriptor.descriptors_attached)."""
+    return packing and descriptors_attached(
+        global_descriptor_setting(os.environ), rtabmap_keeps_descriptors()
+    )
+
+
+def census_env(database: str) -> tuple[dict[str, str], str]:
+    """rtabmap_frame's :data:`pepin.global_descriptor.CENSUS_ENV` from a census of ``database``
+    taken NOW — every start of this launch, before RTAB-Map opens the file — and the phrase for
+    the launch's report. An unreadable database is no census (rtabmap_frame keeps the words)."""
+    try:
+        census = database_census(database)
+    except Exception as exc:  # sqlite3.Error, OSError: whatever it is, no census
+        return {}, f"no census of {database} ({type(exc).__name__}: {exc}): the words"
+    why = census.refusal()
+    return {CENSUS_ENV: census.to_json()}, (
+        f"census of {database}: {census.text()}; {why or 'every node carries one'}"
+    )
 
 
 def _flag(context: LaunchContext, name: str) -> bool:
@@ -761,7 +884,13 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         condition=IfCondition(LaunchConfiguration("marks_audit")),
         **RESPAWN,
     )
+    # THE DATABASE'S PLACE-DESCRIPTOR CENSUS, taken here on every start of this launch of the very
+    # file RTAB-Map is given, before RTAB-Map opens it: rtabmap_frame compares places by
+    # descriptor only when it says every node carries exactly one (a node without one compared
+    # with one that has one aborts RTAB-Map, which is not respawned).
+    census, census_note = census_env(database)
     frame = ExecuteProcess(
+        additional_env=census,
         cmd=[
             "python3",
             "-m",
@@ -806,6 +935,16 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 "send_buffer_limit": 100_000_000,
                 "topic_whitelist": [".*"],
                 "max_qos_depth": 25,
+                # No parameter capabilities: with them the bridge opens a parameter client to
+                # every node it ever sees and never closes it (877 of the graph's 1960 entities
+                # on 2026-09-25, half of them to dead nodes), and every new session must learn
+                # them all. PEPIN_FOXGLOVE_PARAMETERS=1 brings the Parameters panel back.
+                "capabilities": ["clientPublish", "services", "connectionGraph", "assets"]
+                + (
+                    ["parameters", "parametersSubscribe"]
+                    if os.environ.get("PEPIN_FOXGLOVE_PARAMETERS") == "1"
+                    else []
+                ),
             }
         ],
         prefix=_after_ghost("/foxglove_bridge"),
@@ -857,6 +996,11 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             # snapshot yet. --fresh passes this false, which is the whole of "an unknown room".
             "-p",
             f"resume_volume:={'true' if resume_volume else 'false'}",
+            # /camera_grid_map copies the lattice of the map the global costmap's static layer
+            # reads: /map_tracked under the tracker (nav2_params.yaml), /map under rtabmap
+            # (nav2_map_from_laptop.yaml). Read only under the node's grid_out flag.
+            "-p",
+            f"grid_map_topic:={'/map_tracked' if owner == 'tracker' else '/map'}",
         ],
         output="screen",
         prefix=_after_ghost("/depth_fusion"),
@@ -987,7 +1131,9 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 # grid painted through a stale map -> odom (217 x 247 m on 2026-09-22). The 169 node
                 # grids rebuild in seconds at start; True is the way back.
                 "use_saved_map": False,
-                **rtabmap_parameters(neighbor_refining, memory, packing, owner),
+                **rtabmap_parameters(
+                    neighbor_refining, memory, packing, owner, place_descriptors(packing)
+                ),
             }
         ],
         remappings=remappings,
@@ -1033,6 +1179,14 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         f" neighbor_refining={'on' if neighbor_refining else 'off'} (off: the neighbour links"
         " carry the odometry's own covariance, so a loop closure has somewhere to go);" + vo_note
     )
+    # What the snapshots carry for place recognition, and what the database carries.
+    descriptors = (
+        "the snapshots carry place descriptors (rehearsal"
+        f" {DESCRIPTOR_REHEARSAL['Mem/RehearsalSimilarity']})"
+        if place_descriptors(packing)
+        else "the snapshots carry no place descriptor (sensor_pack's global_descriptor)"
+    )
+    report += f"; {descriptors}; {census_note}"
     return [
         LogInfo(msg=report),
         ghost_wait,

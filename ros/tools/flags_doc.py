@@ -24,12 +24,18 @@ ros/pepin_bringup/pepin_bringup/<node>.py; this tool reads those tables from the
                                            ``ros2 param set`` reads it (a double as 3.0, a
                                            string safe from YAML); exit 2 with the reason
 
+``where`` and ``nodes SIDE`` depend on how the stack is split: the planner and the goal server
+run in the laptop's ``pepin-laptop`` only when the board says ``PEPIN_SIDE=board``, and on the
+board otherwise (:func:`pepin.deployment.node_host`). ros/flags.sh reads the board's side once
+and hands it over as ``PEPIN_BOARD_SIDE``; unset or empty is a whole board, as on the board itself.
+
 Runs on the laptop from the repository's environment (``uv run``), never inside a container.
 """
 
 from __future__ import annotations
 
 import ast
+import os
 import sys
 from pathlib import Path
 
@@ -181,6 +187,13 @@ def yaml_literal(flag: Flag, value: object) -> str:
     return text if yaml.safe_load(text) == text else f"!!str {text}"
 
 
+def split() -> bool:
+    """Whether the board runs the split stack (``PEPIN_BOARD_SIDE=board``, handed over by
+    ros/flags.sh from the board's /etc/default/pepin-ros): where the planner and the goal server
+    live."""
+    return os.environ.get("PEPIN_BOARD_SIDE", "") == "board"
+
+
 def _refuse(reason: str) -> None:
     """A request this tool cannot honour: the reason on stderr, exit status 2."""
     print(reason, file=sys.stderr)
@@ -213,11 +226,13 @@ def main(argv: list[str]) -> int:
         side = argv[1] if len(argv) == 2 else None
         if side is not None and side not in ("board", "laptop"):
             _refuse(f"{side}: no such side; the sides are board, laptop")
-        print("\n".join(n for n in tables() if side is None or node_host(n)[0] == side))
+        print(
+            "\n".join(n for n in tables() if side is None or node_host(n, split=split())[0] == side)
+        )
         return 0
     if verb == "where" and len(argv) == 2:
         node, _ = _node(argv[1])
-        print(*node_host(node))
+        print(*node_host(node, split=split()))
         return 0
     if verb == "flag" and len(argv) == 3:
         node, flags = _node(argv[1])

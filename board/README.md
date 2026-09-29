@@ -93,6 +93,11 @@ Notes that cost an evening each:
   be powered minutes after the board, and a crash loop is not a state.
 - `tof_init.sh` documents the pinctrl quirk: a released GPIO line keeps its last
   driven level, so XSHUT must be driven high explicitly.
+- `tof_init.sh` verifies its work: 0x30, 0x31 and 0x32 must each answer with the
+  VL53L1X model id, else the XSHUT sequence runs again (`TOF_INIT_ATTEMPTS`,
+  default 3). The outcome is one line in the journal and in `/var/log/tof_init.log`,
+  because the stack's own logging rotates the 20 MB journal within hours (the
+  day all three read status 255, nothing of that morning's tof-init was left).
 - The wifi power-save flag and the wifi chip's runtime power management are both
   switched off; latency spikes of 300–600 ms remain on this radio and are the
   reason the wheel loop lives on the board.

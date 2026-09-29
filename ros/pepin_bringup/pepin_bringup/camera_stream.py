@@ -97,6 +97,11 @@ RETRY_S = 3.0  # between reconnections, waited on the stop event so a kick does 
 # ROS's stereo convention (image_pipeline's left/right namespaces), and nothing is published on
 # them while the head has no calibration.
 RIGHT_IMAGE_TOPIC = "/camera/right/image"
+# The right eye goes out grey. RAFT-Stereo's own loaders copy a grey eye into three channels,
+# and with both eyes in colour the depth fell from 5-6 to 3 frames a second (2026-09-28) for a
+# gain the literature calls slight. True publishes bgr8, and the matcher then sends the pair
+# in colour by itself (pepin.stereo_depth.RaftMatcher, pepin.stereo_host's X-Channels).
+RIGHT_EYE_COLOUR = False
 RIGHT_INFO_TOPIC = "/camera/right/camera_info"
 # What a stereo frame is made of, in the order it happens; every one is timed into the tally and
 # printed in the report line as median/p95 milliseconds.
@@ -149,6 +154,18 @@ FLAGS = FlagSet(
         off_when="wherever a consumer was measured in the raw picture's optics (the depth"
         " pipeline's law was fitted there), and wherever the field of view matters more than"
         " straight lines",
+    ),
+    Flag(
+        "fold_mask",
+        True,
+        description="stereo: rectified pixels past a fold of the calibration's undistortion map"
+        " (the lens corners the board never reached) go out black, as no data, and the depth there"
+        " is cut; off publishes the mirrored corners as before",
+        why="measured 2026-09-24 (scratch/stereo/fold_check.py): the left eye's map folds back in"
+        " both bottom corners, 0.4 % of the picture, the 'crack' Artem saw, and camera phantoms"
+        " lined up along it",
+        on_when="always on a stereo head calibrated without the corners",
+        off_when="a calibration that covers the corners (fold_check.py finds no fold)",
     ),
     Flag(
         "static_camera_tf",
@@ -334,7 +351,9 @@ class CameraStream(Node):
         try:
             mtime = file.stat().st_mtime
             calibration = StereoCalibration.load(file)
-            rectifier = Rectifier.from_calibration(calibration)
+            rectifier = Rectifier.from_calibration(
+                calibration, mask_folds=self._switches.on("fold_mask")
+            )
         except FileNotFoundError:
             self._calibration_mtime, self._calibration_source = None, f"no {file.name} yet"
             return None
@@ -512,6 +531,10 @@ class CameraStream(Node):
         ``static_camera_tf`` never reaches here — it is declared ``live=False`` and the kit
         refuses the change with that reason, because the transforms went out at start and a
         static one cannot be withdrawn."""
+        if name == "fold_mask":
+            self._calibration_mtime = None  # the next calibration check rebuilds the tables
+            self._calibration_checked = 0.0
+            return
         if name == "scale":
             if float(new) <= 0.0:
                 raise ValueError("scale is a fraction of the camera's picture, not zero")
@@ -632,8 +655,9 @@ class CameraStream(Node):
         rectifier = published.rectifier
         if rectifier is not None and right is not None:
             with self._tally.measure("rectify"):
-                grey = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
-                left, right = rectifier.rectify(left, grey)
+                if not RIGHT_EYE_COLOUR:
+                    right = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
+                left, right = rectifier.rectify(left, right)
             self._tally.count("rectified")
         with self._tally.measure("publish"):
             published.info.header.stamp = stamp
@@ -647,7 +671,12 @@ class CameraStream(Node):
             ):
                 published.right.header.stamp = stamp
                 self._right_image_pub.publish(
-                    image_from_array(right, "mono8", stamp, self._cfg.optical_frame)
+                    image_from_array(
+                        right,
+                        "bgr8" if RIGHT_EYE_COLOUR else "mono8",
+                        stamp,
+                        self._cfg.optical_frame,
+                    )
                 )
                 self._right_info_pub.publish(published.right)
         self._tally.count("frames")

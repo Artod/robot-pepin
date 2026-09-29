@@ -18,7 +18,9 @@ absence of the tracker in SLAM mode is written down.
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
+import tempfile
 import types
 from collections.abc import Iterator
 from pathlib import Path
@@ -119,6 +121,11 @@ Imu = _msg(
 # ARRAY beside them, and the laser scan with its own four fields. The fields this node never
 # writes (the compressed halves, the features, the grid, the IMU, the GPS, the landmarks) are
 # left out on purpose: a node that started writing one would fail here as it would on the robot.
+# The one exception is global_descriptors, which it writes since 2026-09-24: an array of
+# rtabmap_msgs/GlobalDescriptor, field for field as GlobalDescriptor.msg in the laptop image — the
+# header, the type (1 is the PyDescriptor, the one type Signature::compareTo reads) and the two
+# rtabmap::compressData blobs.
+GlobalDescriptor = _msg("GlobalDescriptor", header=Header, type=0, info=bytes, data=bytes)
 SensorData = _msg(
     "SensorData",
     header=Header,
@@ -132,6 +139,7 @@ SensorData = _msg(
     laser_scan_max_range=0.0,
     laser_scan_format=0,
     laser_scan_local_transform=Transform,
+    global_descriptors=list,
 )
 # rtabmap_msgs/MapGraph as the laptop's nodes read it, field for field as
 # /opt/ros/jazzy/share/rtabmap_msgs/msg/MapGraph.msg lists them: the map -> odom transform, the node
@@ -187,6 +195,11 @@ PoseArray = _msg("PoseArray", header=Header, poses=list)
 Path_ = _msg("Path", header=Header, poses=list)
 MapMetaData = _msg("MapMetaData", resolution=0.0, width=0, height=0, origin=Pose)
 OccupancyGrid = _msg("OccupancyGrid", header=Header, info=MapMetaData, data=list)
+# map_msgs/OccupancyGridUpdate: a rectangle of a grid, what Nav2's StaticLayer reads on
+# <map_topic>_updates (pepin_bringup.depth_fusion's /camera_grid_map_updates).
+OccupancyGridUpdate = _msg(
+    "OccupancyGridUpdate", header=Header, x=0, y=0, width=0, height=0, data=list
+)
 Bool = _msg("Bool", data=False)
 Float32 = _msg("Float32", data=0.0)
 String = _msg("String", data="")
@@ -204,6 +217,13 @@ class Trigger:
 
     Request = _msg("Trigger_Request")
     Response = _msg("Trigger_Response", success=False, message="")
+
+
+class CancelGoal:
+    """action_msgs/CancelGoal: an empty request is every goal; the answer a code and the goals."""
+
+    Request = _msg("CancelGoal_Request")
+    Response = _msg("CancelGoal_Response", return_code=0, goals_canceling=list)
 
 
 class Empty:
@@ -227,6 +247,22 @@ class SetParameters:
 
     Request = _msg("SetParameters_Request", parameters=list)
     Response = _msg("SetParameters_Response", results=list)
+
+
+class GetParameters:
+    """rcl_interfaces/GetParameters: names in, one ParameterValue each back (type 0, NOT_SET,
+    for a name the node never declared)."""
+
+    Request = _msg("GetParameters_Request", names=list)
+    Response = _msg("GetParameters_Response", values=list)
+
+
+class SetParametersAtomically:
+    """rcl_interfaces/SetParametersAtomically: a list of parameters in, ONE result back — all of
+    them set or none."""
+
+    Request = _msg("SetParametersAtomically_Request", parameters=list)
+    Response = _msg("SetParametersAtomically_Response", result=SetParametersResult)
 
 
 class SetLabel:
@@ -659,6 +695,8 @@ class Node:
         self.subs: dict[str, tuple[Any, Any]] = {}  # topic -> (message type, callback)
         self.services: dict[str, tuple[Any, Any]] = {}  # name -> (service type, callback)
         self.service_clients: dict[str, Client] = {}  # name -> the client this node created
+        self.destroyed_clients: list[str] = []  # the names of the clients it destroyed
+        self.publisher_counts: dict[str, int] = {}  # topic -> publishers, where not one
         self.timers: list[tuple[float, Any]] = []
         self.parameter_callbacks: list[Any] = []
         self.clock = Clock()
@@ -691,7 +729,9 @@ class Node:
         self.pubs[topic] = Publisher(msg_type, topic, qos)
         return self.pubs[topic]
 
-    def create_subscription(self, msg_type: Any, topic: str, callback: Any, qos: Any) -> None:
+    def create_subscription(
+        self, msg_type: Any, topic: str, callback: Any, qos: Any, raw: bool = False
+    ) -> None:
         self.subs[topic] = (msg_type, callback)
 
     def create_service(self, srv_type: Any, name: str, callback: Any) -> None:
@@ -702,9 +742,18 @@ class Node:
         self.service_clients[name] = Client(srv_type, name)
         return self.service_clients[name]
 
+    def destroy_client(self, client: Client) -> None:
+        """Forget a client, as rclpy does; the test keeps what it asked in ``destroyed_clients``."""
+        self.destroyed_clients.append(client.srv_name)
+
     def create_timer(self, period_s: float, callback: Any) -> Timer:
         self.timers.append((period_s, callback))
         return Timer(period_s, callback)
+
+    def count_publishers(self, topic: str) -> int:
+        """How many publishers the graph shows on ``topic``: one, unless a test set
+        ``publisher_counts`` (0 is a node on the other end gone)."""
+        return self.publisher_counts.get(topic, 1)
 
     def get_clock(self) -> Clock:
         return self.clock
@@ -747,6 +796,12 @@ class Rclpy(types.ModuleType):
         if self.on_spin is not None:
             self.on_spin()
 
+    def spin_until_future_complete(
+        self, node: Any, future: Any, timeout_sec: float | None = None
+    ) -> None:
+        """A stub future is finished when it is made: nothing to spin."""
+        self.log.append("spin_until_future_complete")
+
     def try_shutdown(self) -> None:
         self.log.append("try_shutdown")
 
@@ -766,6 +821,11 @@ def install() -> Any:
     fake ``rclpy`` module (its ``on_spin`` and ``log`` drive :func:`spin_main` tests)."""
     if "rclpy" in sys.modules and isinstance(sys.modules["rclpy"], Rclpy):
         return sys.modules["rclpy"]
+    # The files rtabmap_frame hands RTAB-Map's adapters (pepin.live_settings) go to a directory of
+    # this test run, never to the machine's /tmp/pepin.
+    scratch = tempfile.mkdtemp(prefix="pepin_stubs_")
+    os.environ.setdefault("PEPIN_REGISTRATION_FILE", os.path.join(scratch, "registration.json"))
+    os.environ.setdefault("PEPIN_REGISTRATION_STATUS", os.path.join(scratch, "status.json"))
     rclpy = Rclpy()
     modules = {
         "rclpy": rclpy,
@@ -798,7 +858,12 @@ def install() -> Any:
             Parameter=ParameterMsg,
             ParameterValue=ParameterValueMsg,
         ),
-        "rcl_interfaces.srv": _module("rcl_interfaces.srv", SetParameters=SetParameters),
+        "rcl_interfaces.srv": _module(
+            "rcl_interfaces.srv",
+            SetParameters=SetParameters,
+            GetParameters=GetParameters,
+            SetParametersAtomically=SetParametersAtomically,
+        ),
         "builtin_interfaces": _module("builtin_interfaces"),
         "builtin_interfaces.msg": _module(
             "builtin_interfaces.msg", Time=Time, Duration=DurationMsg
@@ -827,6 +892,8 @@ def install() -> Any:
             Twist=Twist,
             TwistStamped=TwistStamped,
         ),
+        "map_msgs": _module("map_msgs"),
+        "map_msgs.msg": _module("map_msgs.msg", OccupancyGridUpdate=OccupancyGridUpdate),
         "nav_msgs": _module("nav_msgs"),
         "nav_msgs.msg": _module(
             "nav_msgs.msg", OccupancyGrid=OccupancyGrid, Odometry=Odometry, Path=Path_
@@ -835,6 +902,7 @@ def install() -> Any:
         "rtabmap_msgs.msg": _module(
             "rtabmap_msgs.msg",
             SensorData=SensorData,
+            GlobalDescriptor=GlobalDescriptor,
             MapGraph=MapGraph,
             Info=Info,
             Link=Link_,
@@ -853,6 +921,7 @@ def install() -> Any:
         "action_msgs.msg": _module(
             "action_msgs.msg", GoalStatus=GoalStatus, GoalStatusArray=GoalStatusArray
         ),
+        "action_msgs.srv": _module("action_msgs.srv", CancelGoal=CancelGoal),
         "std_srvs": _module("std_srvs"),
         "std_srvs.srv": _module("std_srvs.srv", Trigger=Trigger, Empty=Empty),
         "tf2_msgs": _module("tf2_msgs"),

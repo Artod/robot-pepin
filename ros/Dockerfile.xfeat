@@ -1,0 +1,59 @@
+# The laptop image with RTAB-Map able to register a loop closure on XFeat keypoints matched by
+# LighterGlue (verlab/accelerated_features, Apache-2.0; LighterGlue runs on kornia's LightGlue,
+# Apache-2.0). Built by ros/laptop-build.sh xfeat into pepin-laptop:xfeat; the laptop's vslam
+# container runs it under PEPIN_XFEAT=1 ros/laptop.sh vslam, and the plain :zenoh tag stays what
+# it was.
+#
+# What changes against the base image, and nothing else:
+# * RTAB-Map 0.22.1 and the rtabmap_ros packages that link it, rebuilt from their upstream tags
+#   with Python support (ros/xfeat/build_rtabmap.sh says why the wrapper comes along, and why the
+#   core is the 0.22.1 tag rather than the jazzy branch the apt package was cut from). The build
+#   fails if the new core lacks an optional library the apt one had (features_kept there): GTSAM
+#   and libpointmatcher decide Optimizer/Strategy and Icp/Strategy, which the launch table does
+#   not name;
+# * XFeat and LighterGlue at a pinned commit, their weights inside the image (the repository
+#   carries both), kornia pinned — nothing is fetched when a container starts;
+# * the two adapters RTAB-Map loads by path (PyDetector/Path, PyMatcher/Path): ros/xfeat/*.py.
+# Everything runs on the CPU: Docker Desktop on this Mac has no GPU.
+ARG BASE=pepin-laptop:zenoh
+FROM ${BASE}
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+        git build-essential cmake pybind11-dev python3-dev python3-numpy \
+    && rm -rf /var/lib/apt/lists/*
+COPY xfeat/build_rtabmap.sh /opt/xfeat/build_rtabmap.sh
+# Few jobs on purpose: the Docker VM also runs the live stack, and the build's compilers are the
+# last thing its OOM killer picks (build_rtabmap.sh has the measurement).
+ARG CORE_JOBS=2
+ARG ROS_JOBS=2
+RUN CORE_JOBS=$CORE_JOBS bash /opt/xfeat/build_rtabmap.sh core
+RUN ROS_JOBS=$ROS_JOBS bash /opt/xfeat/build_rtabmap.sh ros
+# Our patches to RTAB-Map's core, as a layer of their own AFTER the two long ones so a rebuild
+# keeps their cached layers (this one is 6 minutes): today one, which keeps a node's global
+# descriptor across the reload of its data — without it RTAB-Map aborts at the first place
+# comparison after a registration (ros/xfeat/patch_rtabmap.sh has the measurement). It leaves
+# /opt/rtabmap_patches/keep-global-descriptors, which pepin_bringup.rtabmap_frame requires before it
+# lets RTAB-Map compare places by descriptor.
+COPY patches/rtabmap-keep-global-descriptors.patch /opt/xfeat/patches/
+COPY xfeat/patch_rtabmap.sh /opt/xfeat/patch_rtabmap.sh
+RUN CORE_JOBS=$CORE_JOBS bash /opt/xfeat/patch_rtabmap.sh
+# XFeat by commit, not by torch.hub at run time: hub fetches main, and a model that changes under
+# a map is a regression nobody asked for. The repository ships xfeat.pt and xfeat-lighterglue.pt.
+ARG XFEAT_SHA=e92685f57f8318b18725c5c8c0bd28c7fe188d9a
+ARG KORNIA_VERSION=0.8.3
+RUN git clone -q https://github.com/verlab/accelerated_features.git /opt/xfeat/accelerated_features \
+    && git -C /opt/xfeat/accelerated_features checkout -q "$XFEAT_SHA" \
+    && rm -rf /opt/xfeat/accelerated_features/.git /opt/xfeat/accelerated_features/assets \
+        /opt/xfeat/accelerated_features/figs /opt/xfeat/accelerated_features/notebooks \
+    && test -s /opt/xfeat/accelerated_features/weights/xfeat.pt \
+    && test -s /opt/xfeat/accelerated_features/weights/xfeat-lighterglue.pt \
+    && python3 -m pip install -q --break-system-packages --no-cache-dir "kornia==$KORNIA_VERSION"
+ENV PEPIN_XFEAT_DIR=/opt/xfeat/accelerated_features
+# The adapters import the library (pepin.xfeat_models is the one XFeat/LighterGlue implementation
+# they share with the host's localisation service), so the image carries the library as it is at
+# this build: ros/laptop-build.sh xfeat copies src/pepin into ros/pepin_src first, as
+# ros/build-image.sh does for the base. A running container mounts the live library over it.
+COPY pepin_src /ws/pepin_src
+COPY xfeat/rtabmap_xfeat.py xfeat/rtabmap_lighterglue.py /opt/xfeat/
+# The adapters load and answer once here (their local path: no service at build time), so a
+# broken model fails the build and not a drive.
+RUN cd /opt/xfeat && python3 rtabmap_xfeat.py && python3 rtabmap_lighterglue.py

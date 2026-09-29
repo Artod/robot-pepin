@@ -81,7 +81,7 @@ from pepin.tape_rows import (
 )
 from pepin_bringup.bridge_kick import BridgeKick
 from pepin_bringup.camera_clip import CameraClip
-from pepin_bringup.node_kit import Switches, TfLookup
+from pepin_bringup.node_kit import Switches, TfLookup, spin_main
 
 # WHERE THE POSE COMES FROM where no tracker publishes one (the ``loc_from`` flag). The topic is
 # the goal server's — spelled out here rather than imported, because a node does not import
@@ -618,6 +618,10 @@ class RunRecorderNode(Node):
         else:
             self.stop()
 
+    def close(self) -> None:
+        """Before the node goes (node_kit.spin_main's order): close a tape still open."""
+        self.stop()
+
     def stop(self) -> None:
         """Close the tape (flushed and synced) and the clip; harmless when no run is open."""
         was = self._recorder.recording
@@ -629,19 +633,9 @@ class RunRecorderNode(Node):
 
 
 def main() -> None:
-    import rclpy
-
-    rclpy.init()
-    node = RunRecorderNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.stop()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    # node_kit.spin_main: close() (the tape) first, then the TF listener's non-daemon thread —
+    # with its own spin this node never exited on SIGINT — and kill -USR2 prints its stacks.
+    spin_main(RunRecorderNode)
 
 
 if __name__ == "__main__":

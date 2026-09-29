@@ -1,0 +1,24 @@
+{
+  "_note": "The learned models that run on the laptop's own GPU, beside the containers (pepin.localization_service, ros/models.sh). Docker on macOS has no GPU, so a network in a container runs on the Docker VM's CPU. 'device' is per model and is a measurement: scratch/models/endpoint_bench.py (2026-09-24) timed each endpoint through the service on both devices.",
+  "localization": {
+    "_note": "One process, one failure domain: XFeat, LighterGlue and the place model. The depth network is the other process (ros/depth_host.sh, port 8790).",
+    "port": 8791,
+    "cpu_threads": 4,
+    "xfeat": {
+      "_note": "cpu: through the service (scratch/models/endpoint_bench.py, 2026-09-24, 800x600) XFeat answers in 46 ms median, 54 ms p90 on the CPU against 41-81 ms median and 55-241 ms p90 on MPS, which the depth host's RAFT-Stereo keeps 80 % busy (scratch/models/load_probe.py) and which goes cold within 2 s of idle on this swapping laptop (scratch/models/gpu_idle_probe.py): the CPU is as fast and predictable, and leaves the GPU to RAFT and the place model. cache: the answers kept by the picture's bytes, because RTAB-Map re-extracts the same stored node pictures on every registration (a hit answers in 1-2 ms).",
+      "device": "cpu",
+      "top_k": 2048,
+      "cache": 64
+    },
+    "match": {
+      "_note": "cpu: LighterGlue matches 2048 keypoints a side in 109-129 ms on the CPU and 518 ms on MPS (scratch/models/endpoint_bench.py, 2026-09-24). min_conf 0.1 is XFeat's own match_lighterglue floor.",
+      "device": "cpu",
+      "min_conf": 0.1
+    },
+    "place": {
+      "_note": "boq_dinov2 on mps: R@1 0.986 evening against the daylight database through the service (scratch/models/place_parity.py), 57 ms on MPS against 167 ms on the CPU (scratch/models/endpoint_bench.py). boq_r50 is the lighter alternative (R@1 0.98, 24 ms, a quarter of the weights, scratch/vpr). A change of model changes every vector's length and meaning: the database's descriptors must be written again (ros/tools/place_backfill.py) before RTAB-Map compares by descriptor.",
+      "model": "boq_dinov2",
+      "device": "mps"
+    }
+  }
+}

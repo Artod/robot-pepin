@@ -322,7 +322,24 @@ switch() {  # SENSOR on|off [--hard]: the flag, the layers and, for the lidar, t
                 echo "--hard belongs to 'lidar off': it stops the driver, and 'lidar on' is what"
                 echo "starts it again"
                 exit 2
-            } ;;
+            }
+            # REFUSED since 2026-09-24: deactivating the LD19 driver ABORTS its process ("*** bit
+            # out of range 0 - FD_SETSIZE on fd_set ***", exit -6, a select() on the descriptor its
+            # own close invalidated). In the shared sensors_container of before that took the wheels
+            # and the IMU down for hours; in the split one (sensor_split) the lidar process simply
+            # respawns 2 s later and the driver is active again, so a hard off can hold neither way.
+            # A camera-only cart is 'lidar off' (the layers) plus sensor_pack sources=camera; a dead
+            # lidar is simulated by killing the lidar_container process (it respawns).
+            # PEPIN_LIDAR_HARD=allow keeps the old path reachable (CLAUDE.md rule 19) for a driver
+            # that survives its own deactivate.
+            if [ "${PEPIN_LIDAR_HARD:-refuse}" != allow ]; then
+                echo "refused: --hard deactivates the LD19 driver, which aborts its whole process (2026-09-24)."
+                echo "  Camera-only: ros/sensor.sh lidar off, then sensor_pack sources=camera on the laptop."
+                echo "  A dead lidar: kill the lidar_container process on the board (it respawns in 2 s)."
+                echo "  The old path, knowingly: PEPIN_LIDAR_HARD=allow ros/sensor.sh lidar off --hard"
+                exit 2
+            fi
+            ;;
         *) usage ;;
     esac
     echo "$sensor $state${hard:+ (hard)}:"

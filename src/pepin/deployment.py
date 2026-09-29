@@ -325,6 +325,11 @@ LAPTOP_PUBLISHES = (
     # shipped, so the route normally carries nothing): how far each bearing is KNOWN OPEN, for the
     # camera layer's own clearing source. A fan is 720 floats, capped at marks_hz 5: ~15 kB/s.
     "depth_free",
+    # ...and behind depth_fusion's `grid_out` (off as shipped): the volume's occupied columns as
+    # the grid the LOCAL costmap's camera_grid_layer draws, 120x120 int8 at grid_hz 3, ~43 kB/s
+    # (scratch/camera_grid/grid_cost.py). Its map-lattice twin stays here with the global
+    # costmap, which the split puts on the laptop.
+    "camera_grid",
     "contact_scan",  # the same depth read at the floor: where bodies touch it (pepin.contact)
     VO_TOPIC,  # the camera's own odometry, gated here, fused by the board's EKF as odom1
     BRIDGE_KICK_TOPIC,  # "restart your bridge after mine": the watch's last repair, not a drive
@@ -394,6 +399,11 @@ VISION_LAPTOP_PUBLISHES = (
     "depth_scan",
     "depth_marks",  # see LAPTOP_PUBLISHES: the volume's marks for the board's camera layer
     "depth_free",  # ...and its clearing half, silent unless depth_fusion's marks_clear is on
+    # ...and behind grid_out, the grids both costmaps' camera_grid_layer draw: here the global
+    # costmap is the board's too, so the map-lattice grid and its updates cross as well.
+    "camera_grid",
+    "camera_grid_map",
+    "camera_grid_map_updates",
     "contact_scan",
     # The laptop's whole-map watchdog (pepin_bringup.laptop_localizer) proposing a place to the
     # board's tracker, once a second, as JSON. Vision mode only: this is where the laptop sees
@@ -881,6 +891,11 @@ ON_DEMAND_TOPICS: frozenset[str] = frozenset(
         # ...and its clearing half, which is silent by default: `marks_clear` ships off, so this
         # route normally carries nothing at all and its silence is the shipped arrangement.
         "/depth_free",
+        # The camera grids: silent unless depth_fusion's `grid_out` is on, the full map grid
+        # latched and sent once per map geometry.
+        "/camera_grid",
+        "/camera_grid_map",
+        "/camera_grid_map_updates",
         f"/{BRIDGE_KICK_TOPIC}",  # one message per repair, and none at all on a healthy link
     }
 )
@@ -1072,14 +1087,20 @@ def lingering_nodes(admin_json: str, names: tuple[str, ...]) -> set[str]:
     return set(names) & seen
 
 
-def node_host(node: str) -> tuple[str, str]:
-    """Where a node's process lives in the split stack, as ``(side, container)``: the laptop's
-    SLAM container for the camera nodes, its navigation container for the planner and the goal
-    server, the board's ``pepin-ros`` for everything else (the sensors, the tracker, the
-    reflexes) — what ros/flags.sh execs into to reach the node's parameters."""
+def node_host(node: str, split: bool = False) -> tuple[str, str]:
+    """Where a node's process lives, as ``(side, container)``: what ros/flags.sh execs into to
+    reach the node's parameters.
+
+    The camera nodes are always in the laptop's SLAM container (``pepin-vslam``). The planner and
+    the goal server follow the board's ``PEPIN_SIDE``: ``split`` (``PEPIN_SIDE=board``) puts them
+    in the laptop's navigation container (``pepin-laptop``), which ros/laptop.sh starts in that
+    mode ONLY; a whole board (no ``PEPIN_SIDE`` line, ros/thin.sh vision) runs them itself, and
+    there is no ``pepin-laptop`` to exec into (2026-09-23: ``ros/flags.sh set goal_server ...``
+    failed on "No such container"). Everything else — the sensors, the reflexes, the tracker —
+    is the board's ``pepin-ros``."""
     name = f"/{node.lstrip('/')}"
     if name in laptop_launch_nodes("slam"):
         return "laptop", "pepin-vslam"
-    if name in laptop_launch_nodes("nav"):
+    if split and name in laptop_launch_nodes("nav"):
         return "laptop", "pepin-laptop"
     return "board", "pepin-ros"
