@@ -70,7 +70,7 @@ markers = [
 python_version = "3.12"
 # The ROS nodes are type-checked too: a node that referenced a field deleted in a refactor
 # only failed on the robot (2026-09-08), and mypy sees that without rclpy being installed.
-files = ["src/pepin", "ros/pepin_bringup/pepin_bringup", "ros/tools", "ros/xfeat"]
+files = ["src/pepin", "ros/pepin_bringup/pepin_bringup", "ros/tools", "ros/xfeat", "ros/replay"]
 strict = true
 ignore_missing_imports = true
 exclude = ["^src/pepin/vendor/"]

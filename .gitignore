@@ -44,6 +44,9 @@ ros/maps/*.world.npz
 ros/maps/*.world.pgm
 ros/maps/*.world.yaml
 
+# The replay stand's engine build, prepared drives and snapshots (ros/replay.sh)
+ros/replay/.cache/
+
 # Model checkpoints: 40 MB of binary, fetched not committed (RAFT-Stereo's
 # download_models.sh; see src/pepin/vendor/raft_stereo/__init__.py)
 models/

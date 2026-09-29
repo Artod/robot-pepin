@@ -35,6 +35,7 @@ Foxglove Studio                   docker: ldlidar_node -> laser_filters box filt
 | `ros/maps/` | Converted maps (`<name>.pgm` + `<name>.yaml`) |
 | `ros/tools/npz_to_map.py` | Our occupancy grid -> map_server format |
 | `ros/calibrate.sh` | Checkerboard calibration of the neck camera, print to config (see below) |
+| `ros/replay.sh`, `ros/replay/` | The recorded drives through Nav2's own costmaps with candidate parameters, one score per drive (see "Replay") |
 
 ## Deploying a change
 
@@ -2674,6 +2675,57 @@ estimates, marked as such, and a census during a bag drive is what replaces them
 carry `ros-jazzy-ros2bag` and `ros-jazzy-rosbag2-storage-mcap` ([`ros/Dockerfile`](Dockerfile));
 an image built before they were added logs `ros2 bag record` as not found at the first goal and
 the drive goes on unrecorded.
+
+## Replay
+
+A costmap change is judged on the recorded drives before it is driven. `ros/replay.sh` runs every
+board bag (`ros/maps/rec/NNNN_*/`, MCAP, since 2026-09-23) through the stock `nav2_costmap_2d`
+local and global costmaps of the board's own image, configured from `ros/params/nav2_params.yaml`
+(+ `nav2_map_from_laptop.yaml`) and whatever is layered on top, and prints one row per drive.
+
+```bash
+ros/replay.sh 483-498                                       # the parameters as they are
+ros/replay.sh 483-498 --set both.camera_layer.enabled=false \
+    --against ros/replay/baselines/0483-0498.json           # candidate minus baseline, per drive
+ros/replay.sh 483-498 --params scratch/candidate.yaml       # a params file layered last
+ros/replay.sh 483-498 --save ros/replay/baselines/NAME.json # a new baseline (+ NAME.txt)
+```
+
+It runs in a throwaway `pepin-ros` container with `--network none` (nothing reaches the robot or
+the live containers); a worktree points `PEPIN_REPLAY_REC` / `PEPIN_REPLAY_MAPS` at the main
+checkout's `ros/maps/rec` and `ros/maps`. 16 drives, 841 s of goals: 18 s wall on one job, ~9 s
+on six (preparing the bags the first time: +6 s; building the engine: ~10 s once).
+
+**How.** `ros2 bag play --rate N` into the stock nodes does not work: `Costmap2DROS` paces
+`updateMap()` with a `WallRate`, so at N times real time each update folds N times more scans and
+the result depends on the rate and the scheduler. `ros/replay/engine` (C++, `costmap_replay`) is
+the costmaps' clock and loop instead: bag time is their ROS time, `/tf` goes straight into their
+buffers, each observation into its ObstacleLayer source's buffer through the layer's own callback
+as soon as TF places it (dropped after `transform_tolerance`, as the MessageFilter does), and
+`updateMap()` runs at the live 5 Hz / 2 Hz in bag time. Same input, same output, bit for bit.
+`ros/replay/prepare.py` rebuilds what the costmaps were fed from what the bag keeps: `/scan` from
+the raw LD19 scan through the hull box, the ToF fans from the Ranges (`tof_bridge.fan_scan`),
+`/map` from RTAB-Map's saved grid (the bag has none), and the tree's `ClearEntireCostmap` calls
+from the action status topics (every 5 s / 10 s from the goal and from each pipeline restart, one
+per controller or planner failure).
+
+**Score** (`ros/replay/score.py`), while the goal is active, after a 2 s warm-up per bag:
+
+| column | what |
+| --- | --- |
+| `stuck_s` | seconds the recorded `/cmd_vel` held zero (or went silent > 0.5 s): ground truth, no parameter moves it |
+| `goal_max`, `goal_end` | lethal cells of the global costmap within 0.35 m of the goal: worst snapshot, last one (the map's own floor: printer 25, home 2, bookshelf 1) |
+| `corr_p50`, `corr_max` | lethal + inscribed cells of the global costmap within 0.45 m of each recorded `/plan` |
+| `cam_mean`, `cam_max` | lethal cells of the local costmap within 2 m with no `/scan` return within 1.5 cells (`pepin.marks_audit`) |
+| `fid` | F1 of the replayed local costmap's lethal cells against the recorded `/local_costmap/costmap`: 0.98 on the baseline; for a candidate, how far it moved the costmap |
+| `unseen_s` | seconds of the goal before the bag began (the recorder starts late): not scored |
+
+**What it cannot replay.** The camera volume is not re-fused: `/depth_marks` is replayed as
+recorded (no camera frames in the board bag), so depth, stereo and depth_fusion changes are out
+of scope. `/depth_scan`, the camera's per-frame clearing, is not in these bags: the camera layer
+clears only by the tree's clears (the replay passes it through when a bag has it). The loop is
+open: the recorded plan and motion, no planner or controller run. The clears are reconstructed;
+a pipeline that failed with nothing running to cancel leaves no trace.
 
 ## What runs on the board
 

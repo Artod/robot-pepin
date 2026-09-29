@@ -158,6 +158,31 @@ def _status_key(item: tuple[int | None, int]) -> tuple[int, int]:
     return (1, 0) if status is None else (0, status)
 
 
+def fan_geometry(ceiling_m: float) -> tuple[float, float, int]:
+    """A cone whose ceiling is ``ceiling_m`` as a fan: ``(angle_min_rad, angle_increment_rad,
+    beams)``, symmetric about the sensor's own x axis and spanning the whole field of view."""
+    beams = cone_beams(ceiling_m, _FIELD_OF_VIEW_RAD, _COSTMAP_CELL_M)
+    return -_FIELD_OF_VIEW_RAD / 2.0, _FIELD_OF_VIEW_RAD / (beams - 1), beams
+
+
+def fan_scan(value_m: float, ceiling_m: float, stamp: Any, frame_id: str) -> Any:
+    """One verdict of a sensor whose ceiling is ``ceiling_m`` as the LaserScan fan Nav2 is fed
+    (see :meth:`TofBridge._publish_scan`): every beam NaN for "I do not know" (below the contact
+    band), +inf for nothing within the ceiling, the return itself otherwise. A recorded
+    sensor_msgs/Range carries the verdict and the ceiling (``range``, ``max_range``), so
+    ros/replay rebuilds from a bag the very fans the costmap was given."""
+    angle_min, increment, beams = fan_geometry(ceiling_m)
+    if value_m < _MIN_RANGE_M:
+        beam = math.nan
+    elif value_m >= ceiling_m:
+        beam = math.inf
+    else:
+        beam = value_m
+    return scan_from_ranges(
+        [beam] * beams, angle_min, increment, stamp, frame_id, _MIN_RANGE_M, ceiling_m
+    )
+
+
 class TofBridge(Node):
     """Bridges the ToF server to ROS: /tof/front, /tof/left, /tof/right, the scan fan of each
     (/tof/<name>/scan, with ``range_as`` at ``scan``) and the three sensor frames."""
@@ -243,8 +268,7 @@ class TofBridge(Node):
     def _fan_for(self, name: str) -> tuple[float, float, int]:
         """Sensor ``name``'s cone as a fan: ``(angle_min_rad, angle_increment_rad, beams)``,
         symmetric about the sensor's own x axis and spanning the whole field of view."""
-        beams = cone_beams(self._ceiling[name], _FIELD_OF_VIEW_RAD, _COSTMAP_CELL_M)
-        return -_FIELD_OF_VIEW_RAD / 2.0, _FIELD_OF_VIEW_RAD / (beams - 1), beams
+        return fan_geometry(self._ceiling[name])
 
     def _resolve_mount(self, name: str, measured: Mount) -> tuple[float, float, float, float]:
         """The mount of sensor ``name`` as ``(x_m, y_m, z_m, yaw_rad)``: what config/tof.json
@@ -390,24 +414,8 @@ class TofBridge(Node):
         beam is NaN, which the projector drops — neither a mark nor a clear, the silence the
         Range's ``-1.0`` has always meant.
         """
-        angle_min, increment, beams = self._fan[name]
-        ceiling = self._ceiling[name]
-        if value < _MIN_RANGE_M:
-            beam = math.nan
-        elif value >= ceiling:
-            beam = math.inf
-        else:
-            beam = value
         self._scan_pubs[name].publish(
-            scan_from_ranges(
-                [beam] * beams,
-                angle_min,
-                increment,
-                stamp,
-                TOF_FRAME.format(name=name),
-                _MIN_RANGE_M,
-                ceiling,
-            )
+            fan_scan(value, self._ceiling[name], stamp, TOF_FRAME.format(name=name))
         )
 
     def _warn_if_silent(self, name: str) -> None:
