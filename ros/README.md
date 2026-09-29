@@ -36,6 +36,7 @@ Foxglove Studio                   docker: ldlidar_node -> laser_filters box filt
 | `ros/tools/npz_to_map.py` | Our occupancy grid -> map_server format |
 | `ros/calibrate.sh` | Checkerboard calibration of the neck camera, print to config (see below) |
 | `ros/replay.sh`, `ros/replay/` | The recorded drives through Nav2's own costmaps with candidate parameters, one score per drive (see "Replay") |
+| `ros/sim.sh`, `ros/sim/` | The kinematic simulator: our Nav2 on a simulated cart in RTAB-Map's saved room ("Simulation") |
 
 ## Deploying a change
 
@@ -2726,6 +2727,75 @@ of scope. `/depth_scan`, the camera's per-frame clearing, is not in these bags: 
 clears only by the tree's clears (the replay passes it through when a bag has it). The loop is
 open: the recorded plan and motion, no planner or controller run. The clears are reconstructed;
 a pipeline that failed with nothing running to cancel leaves no trace.
+
+## Simulation
+
+A kinematic simulator for Nav2's behaviour, on the Mac: `ros/sim.sh`. It runs **our** Nav2 —
+`nav.launch.py side:=all` included whole (`ros/sim/sim_nav.launch.py`), `ros/params/nav2_params.yaml`
+with the `PEPIN_LOCALIZER=rtabmap` overlay, the goal server with its saved planner pick, the run
+recorder — in the board's own image, against a simulated cart in the room RTAB-Map saved. Goals go
+through the goal server's socket with the client `ros/goto.sh` uses (`pepin.goal_link`), and every
+goal is taped like a drive.
+
+```bash
+ros/sim.sh up                 # ~10 s to "Managed nodes are active"; the cart starts at home
+ros/sim.sh goal printer       # or X Y [YAW_DEG]; prints goto's lines, then a SCORE line
+ros/sim.sh scenario tour.yaml # ros/sim/scenarios: place, furnish, drive each leg, score it
+ros/sim.sh stuck --repeat 3   # the shelf pocket (shelf_pocket.yaml)
+ros/sim.sh place bookshelf    # teleport, standing still; both costmaps are emptied
+ros/sim.sh up --rate 2        # the world's clock at 2x the wall, every node on use_sim_time
+ros/sim.sh up --nav-first 20  # Nav2 up 20 s before anything publishes /map or TF
+ros/sim.sh down               # gentle stop, logs kept in logs/containers
+ros/sim.sh map                # re-export ros/sim/worlds/flat from ros/maps/rtabmap.db
+```
+
+**What it models** (`pepin.sim`, `ros/sim/sim_world.py`): RTAB-Map's saved grid (`Admin.opt_map`)
+latched on `/map`, the places resolved on the saved graph on `/places`, the placement word,
+`map -> odom` as identity (the sim's pose is the truth), `odom -> base_link` and `/odom` at 20 Hz;
+the base as a unicycle at `config/base.json`'s limits (0.30 m/s, 1.0 rad/s) behind the base
+bridge's 0.5 s deadman, refused any step that puts more of the hull into the grid or a box
+(a contact, counted); `/scan` at 10 Hz raycast (exact DDA) from the grid and the boxes through the
+LD19's own mount (`config/lidar.json`: upside down, 87.5 deg), its 455 bins, the posts' masked
+sectors and the hull-box scan filter. Scenario boxes are furniture the grid does not hold: only
+the lidar sees them. A score is the world's truth: time, recoveries, the hull's path against the
+straight line, contacts, the arrival error. Isolation: the three containers share one network
+namespace with no interface but loopback, no port published, `ROS_DOMAIN_ID` 42.
+
+**What it does not model**: wheel slip and odometry drift, localisation error (no RTAB-Map, no
+`map -> odom` steps), lidar noise and dropouts (dark or glossy surfaces), the camera (no depth
+marks, no phantoms, no camera grid) and the ToF sensors, WiFi and zenoh stalls, the board's CPU
+(Nav2 runs on the Mac at 10 Hz), light. The lidar sees the grid: where RTAB-Map's grid holds
+something the LD19 looks under or past from where the cart stands, the simulated lidar sees a
+wall (at the printer park the real scan runs 2 m through a block the grid has at 0.46 m;
+`scratch/ros_sim/sim_vs_tape.py`), which makes the controller stricter there than on the robot.
+The board's image carries Nav2 1.3.13, the laptop's 1.3.12; the sim runs the planner in the former.
+
+**Measured 2026-09-27** (today's params: Hybrid + FollowPathShim; scores in
+`ros/sim/run/maps/rec/sim_scores.jsonl`, the analyses in `scratch/ros_sim/`):
+
+| scenario | sim (wall clock) | the robot |
+| --- | --- | --- |
+| tour: home -> printer | 113.7 s, 58 recoveries (twice: 115.9 s, 58) — the plan hugs the table block, RPP "collision ahead" 474x | 15-16 s (0485, 0491) |
+| tour: printer -> bookshelf | 15.2 s, 5 recoveries | 12 s, 5 (0492) |
+| tour: bookshelf -> home | 15.1 s, 5 recoveries | 28 s (0490); 133 s and 257 s (0493, 0498) |
+| shelf_park: the 0492 arrival, grid only, -> home (2 rounds) | 25.2 s / 10 rec., 20.6 s / 8 | 28 s / 9 (0490) |
+| shelf_pocket: + the sides at 0.41 / 0.46 m (3 rounds) | 99.8 s / 46 rec. / 10 contacts, 33.0 s / 21, 70.5 s / 40 | 133 s / 82, 257 s / 218 (0493, 0498) |
+| corridor (control, 3 rounds) | 5.4 s and 11.1 s (median) | — |
+
+**Faster than the wall clock**: the world keeps any rate (`clock x` in its report line), Nav2 does
+not — it paces its controller, costmap and tree loops on the wall clock. On the corridor (sim
+seconds, median of 3): x1 5.1 / 15.4 s (the wall clock's 5.4 / 11.1 within its spread), x2 6.1 /
+18.8 s, x4 9.3 / 27.4 s with longer paths. Timing claims at x1; x2 screens pass/fail at twice the
+speed; x4 is a different robot. Past x5 the velocity smoother's 10 Hz (wall) would also cross the
+0.5 s deadman between two commands.
+
+**Start order** (`--nav-first S`, journal 2026-09-25's "planner_server never activated"): with the
+world 30 s late Nav2 waits and is active 1 s after the first TF, and drives; 70 s late, the
+local costmap gives up on `odom` at 63 s ("Failed to activate local_costmap because transform
+from base_link to odom did not become available before timeout"), the lifecycle manager aborts
+the bring-up and never retries — the world arrived 6 s later and Nav2 stayed down until a restart.
+**Cancel** (`ros/sim.sh cancel`, the goal server's socket): the goal ends CANCELED and the cart,
+at 0.30 m/s, stands still at the first read 0.43 s after the cancel returned.
 
 ## What runs on the board
 
